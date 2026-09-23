@@ -1986,6 +1986,40 @@ void http_request_free(HttpRequest* req) {
 }
 
 // Response building
+/* Set *slot to `text`, reusing the string already there when `text` fits in
+ * it (#1739).
+ *
+ * #1739's allocation census found response headers costing two strdups
+ * apiece on every request -- eleven allocations a request, most of them
+ * rebuilding text that was already sitting in the response from the last
+ * one. Putting a header's name and value in a single block would halve
+ * that, and was rejected: each of these strings being its own allocation
+ * is a convention C outside the library relies on --
+ * tests/integration/http_external_ptr frees `header_keys[i]` and
+ * `header_values[i]` one by one -- and changing it would be the same kind
+ * of ABI break as #2169, which removed symbols C consumers linked against.
+ *
+ * Reusing the allocation keeps that convention whole: the slot is still one
+ * malloc'd string that free() releases. An overwrite that is no longer
+ * than what is there -- a handler's `Content-Type: text/plain` over the
+ * default `text/html; charset=utf-8`, and every default a reused response
+ * starts with -- costs no allocation at all.
+ *
+ * Returns 0 only when a longer string was needed and could not be had; the
+ * slot then keeps its old contents, which is what the callers want. */
+static int http_str_assign(char** slot, const char* text) {
+    size_t n = strlen(text);
+    if (*slot && strlen(*slot) >= n) {
+        memmove(*slot, text, n + 1);
+        return 1;
+    }
+    char* d = strdup(text);
+    if (!d) return 0;
+    free(*slot);
+    *slot = d;
+    return 1;
+}
+
 HttpServerResponse* http_response_create(void) {
     HttpServerResponse* res = (HttpServerResponse*)calloc(1, sizeof(HttpServerResponse));
     if (!res) return NULL;
@@ -2024,7 +2058,11 @@ HttpServerResponse* http_response_create(void) {
 void http_response_reset(HttpServerResponse* res) {
     if (!res) return;
 
-    for (int i = 0; i < res->header_count; i++) {
+    /* Slots 0 and 1 are about to be the two defaults again, so their strings
+     * are kept for http_str_assign below to overwrite; everything the request
+     * added past them goes. (#1739) */
+    int reusable = res->header_count < 2 ? res->header_count : 2;
+    for (int i = reusable; i < res->header_count; i++) {
         free(res->header_keys[i]);
         free(res->header_values[i]);
         res->header_keys[i] = NULL;
@@ -2045,12 +2083,38 @@ void http_response_reset(HttpServerResponse* res) {
     res->takeover_conn = NULL;
     res->takeover_taken = 0;
 
-    free(res->status_text);
-    res->status_text = strdup("OK");
+    /* "OK" fits in whatever status text the last request left, so this is
+     * a copy, not a free and an allocation. */
+    if (!http_str_assign(&res->status_text, "OK")) {
+        free(res->status_text);
+        res->status_text = NULL;
+    }
     res->status_code = 200;
 
-    http_response_set_header(res, "Content-Type", "text/html; charset=utf-8");
-    http_response_set_header(res, "Server", "Aether/1.0");
+    /* The defaults, written into the strings the kept slots already hold.
+     * A slot that cannot be reused -- none kept, or a longer text that could
+     * not be allocated -- is released and the default added the ordinary
+     * way, so a failure costs the reuse, never a header. */
+    static const char* const default_key[2] = { "Content-Type", "Server" };
+    static const char* const default_val[2] = {
+        "text/html; charset=utf-8", "Aether/1.0"
+    };
+    for (int i = 0; i < 2; i++) {
+        if (i < reusable &&
+            http_str_assign(&res->header_keys[i], default_key[i]) &&
+            http_str_assign(&res->header_values[i], default_val[i])) {
+            res->header_count = i + 1;
+            continue;
+        }
+        for (int j = i; j < reusable; j++) {
+            free(res->header_keys[j]);
+            free(res->header_values[j]);
+            res->header_keys[j] = NULL;
+            res->header_values[j] = NULL;
+        }
+        reusable = i;
+        http_response_set_header(res, default_key[i], default_val[i]);
+    }
 }
 
 void http_response_set_status(HttpServerResponse* res, int code) {
@@ -2102,13 +2166,11 @@ void http_response_set_header(HttpServerResponse* res, const char* key, const ch
         if (!res->header_keys || !res->header_values) return;
     }
 
-    // Check if header exists, update it
+    // Check if header exists, update it -- in place when the new value fits,
+    // and keeping the existing value if a longer one cannot be allocated.
     for (int i = 0; i < res->header_count; i++) {
         if (strcasecmp(res->header_keys[i], key) == 0) {
-            char* vd = strdup(value);
-            if (!vd) return;  // keep the existing value rather than free-to-NULL
-            free(res->header_values[i]);
-            res->header_values[i] = vd;
+            (void)http_str_assign(&res->header_values[i], value);
             return;
         }
     }

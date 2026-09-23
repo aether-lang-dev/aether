@@ -38,6 +38,24 @@ typedef struct {
      * meaning "block indefinitely", and a socket set to block forever must not
      * be confused with one never configured. */
     int64_t applied_timeout_ns;
+    /* The receive buffer this connection's last response was read into, kept
+     * for the next one (#2160), or NULL.
+     *
+     * The blocking client path read every response into a buffer that
+     * started at nothing and grew to at least 16 KiB, then freed it when the
+     * request ended -- so a pooled connection serving thousands of requests
+     * allocated and freed 16 KiB each time, even for a 200-byte response.
+     * Under #1739's census that was 5.3 MiB over 300 proxied requests, the
+     * largest byte figure by an order of magnitude.
+     *
+     * It lives HERE, rather than beside the pool entry, because a Transport
+     * is exactly what the pool stores and returns whole, and exactly what
+     * every disposal path already hands to transport_close -- so the buffer
+     * rides with the connection into and out of the pool, and is freed on
+     * every path that retires one, without a single new ownership rule.
+     * Accounted through aether_caps (#461): `rxcap` is the size to free. */
+    char*   rxbuf;
+    size_t  rxcap;
 #ifdef AETHER_HAS_OPENSSL
     SSL* ssl;
     /* A per-request SSL_CTX, owned by this transport, or NULL when the

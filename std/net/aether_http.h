@@ -131,6 +131,7 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
                                            int64_t idle_ns);
 void http_client_pool_clear_raw(void);
 int  http_client_pool_idle_count_raw(void);
+long long http_client_rx_buffer_allocs_raw(void);
 
 int http_response_status(HttpResponse* response);
 // Returns an OWNED, retained AetherString (cast to const char*). Unlike the

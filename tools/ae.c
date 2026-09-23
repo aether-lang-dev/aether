@@ -782,7 +782,41 @@ int run_cmd_quiet(const char* cmd) {
 #endif
 }
 
-/* Where a compile step's stdout is parked so a failure can print it. */
+/* The shared-library extension for a build TARGET -- not the host. (#1648)
+ *
+ * NULL or "native" answers for the host. A cross target is classified by its
+ * CANONICAL triple from cross_target_to_zig -- the same mapping the build
+ * itself links with -- so an alias (`arm64-macos`, `amd64-linux`) cannot be
+ * named one way and linked another. `wasm` (the Emscripten target) has no zig
+ * triple and is its own case. Everything else is an ELF platform. */
+static const char* shared_lib_ext_for(const char* target) {
+    if (!target || strcmp(target, "native") == 0) {
+#ifdef __APPLE__
+        return ".dylib";
+#elif defined(_WIN32)
+        return ".dll";
+#else
+        return ".so";
+#endif
+    }
+    const char* z = cross_target_to_zig(target);
+    const char* t = z ? z : target;
+    if (strstr(t, "windows")) return ".dll";
+    if (cross_target_is_apple(t) || strstr(t, "macos")) return ".dylib";
+    if (strstr(t, "wasm"))    return ".wasm";
+    return ".so";
+}
+
+/* The executable extension for a build TARGET: `.exe` for Windows, nothing
+ * anywhere else. EXE_EXT is the HOST's, and a Linux binary cross-built on
+ * Windows used to come out named `app.exe` from it. */
+static const char* exe_ext_for(const char* target) {
+    if (!target || strcmp(target, "native") == 0) return EXE_EXT;
+    const char* z = cross_target_to_zig(target);
+    const char* t = z ? z : target;
+    return strstr(t, "windows") ? ".exe" : "";
+}
+
 /* Say when the compile step did not exit normally.
  *
  * A compiler that rejects the program exits 1 and has already explained
@@ -818,6 +852,7 @@ static const char* exit_status_note(char* buf, size_t size, int rc) {
     return buf;
 }
 
+/* Where a compile step's stdout is parked so a failure can print it. */
 static const char* compile_log_path(char* buf, size_t size) {
     snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
     return buf;
@@ -2464,6 +2499,41 @@ const char* get_aether_source_files(const char* c_file) {
 // generated C includes the header by the name the module wrote, so the file
 // stays portable; these say where that name resolves. Empty when no module
 // in the closure asked for one, which is the common case.
+/* Does the generated C define an entry point? codegen says so in the header
+ * with `// aether-entry: main`, the way it reports link, source and include
+ * requirements (see emit_entry_point).
+ *
+ * An executable link of a program with no main() fails in the LINKER, as
+ * `undefined reference to WinMain` from MinGW or `undefined symbol: main`
+ * from ld.lld -- a message about the C runtime that names nothing the user
+ * wrote. The compiler cannot refuse such a file, because libraries, objects,
+ * emitted C and every inspect-the-codegen test legitimately have no main;
+ * only the executable link needs one, so this is where it is checked. */
+static int c_file_has_entry(const char* c_file) {
+    FILE* f = fopen(c_file, "r");
+    if (!f) return 1;   /* nothing to judge by; let the link speak */
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "//", 2) != 0) break;
+        if (strncmp(line, "// aether-entry: main", 21) == 0) { found = 1; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Refuse to link an executable with no entry point, saying why. Returns 1
+ * when the build may go on. */
+static int require_entry_point(const char* c_file, const char* source) {
+    if (c_file_has_entry(c_file)) return 1;
+    fprintf(stderr,
+        "Error: %s has no main(), so there is no executable to build.\n"
+        "       To build it as a library, use --emit=lib (or --emit=obj for an\n"
+        "       object file). --emit=both builds an executable as well, so it\n"
+        "       needs a main() too.\n", source);
+    return 0;
+}
+
 const char* get_aether_include_flags(const char* c_file) {
     static char flags[4096];
     flags[0] = '\0';
@@ -4565,6 +4635,10 @@ static int cmd_run(int argc, char** argv) {
     // toml [[bin]] extra_sources were already merged into extra_files above
     // (before the cache check), so no further reading is needed here.
     const char* run_extra = extra_files[0] ? extra_files : NULL;
+    if (!require_entry_point(c_file, file)) {
+        remove(c_file);
+        return 1;
+    }
     build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, false, run_extra);
     // Show stderr (gcc warnings like -Wformat) even in non-verbose mode
     char glog[1024];
@@ -6520,28 +6594,30 @@ static int cmd_build(int argc, char** argv) {
                  * the exe's exit code is returned so the user sees
                  * the precise error.
                  *
-                 * Because it re-dispatches, --emit=both never reaches the
-                 * is_cross guard further down with g_emit_lib set: under
-                 * --target the exe pass runs first and dies at the cross
-                 * LINKER with "undefined symbol: main" on a library-shaped
-                 * source. Reject it here instead, where the flag is still
-                 * visible, so the user gets the same up-front diagnostic as
-                 * --emit=lib rather than an ld.lld error naming a symbol they
-                 * never wrote.
+                 * This works under --target too (#1648). It used to be
+                 * rejected there on the grounds that "the cross path links
+                 * once and cannot produce both artifacts from one
+                 * invocation" -- but this path never asks it to. It runs
+                 * cmd_build TWICE, each pass an ordinary --emit=exe or
+                 * --emit=lib build with its own link, and both of those
+                 * work cross. The rejection was answering a design this
+                 * code does not have.
                  *
-                 * --emit=lib itself now works under --target (#1648); it is
-                 * only the COMBINATION that this rejects, because the cross
-                 * path links once and cannot produce both artifacts from one
-                 * invocation. Two runs do the job. */
+                 * What cross does change is the library's NAME. The
+                 * extension below used to come from #ifdef __APPLE__ /
+                 * _WIN32 -- the HOST -- so a Linux .so built from Windows
+                 * would have been called NAME.dll. It follows the target
+                 * now, which is also what the lib pass itself does when it
+                 * names a DLL. */
+                /* Both spellings cmd_build accepts: `--target=X` and
+                 * `--target X`. Reading only the first named a library built
+                 * with the second after the host. */
+                const char* both_target = NULL;
                 for (int j = 0; j < argc; j++) {
-                    if (strncmp(argv[j], "--target=", 9) == 0 &&
-                        strcmp(argv[j] + 9, "native") != 0) {
-                        fprintf(stderr,
-                            "Error: cross-compilation (%s) cannot do --emit=both "
-                            "in one invocation; run it twice, once with "
-                            "--emit=exe and once with --emit=lib.\n", argv[j]);
-                        return 1;
-                    }
+                    const char* tv = NULL;
+                    if (strncmp(argv[j], "--target=", 9) == 0) tv = argv[j] + 9;
+                    else if (strcmp(argv[j], "--target") == 0 && j + 1 < argc) tv = argv[j + 1];
+                    if (tv && strcmp(tv, "native") != 0) both_target = tv;
                 }
                 int o_idx = -1;
                 for (int j = 0; j < argc - 1; j++) {
@@ -6550,15 +6626,28 @@ static int cmd_build(int argc, char** argv) {
                 char lib_out_buf[1024] = {0};
                 char* lib_out_override = NULL;
                 if (o_idx > 0) {
-#ifdef __APPLE__
-                    const char* lib_ext = ".dylib";
-#elif defined(_WIN32)
-                    const char* lib_ext = ".dll";
-#else
-                    const char* lib_ext = ".so";
-#endif
-                    snprintf(lib_out_buf, sizeof(lib_out_buf), "%s%s",
-                             argv[o_idx], lib_ext);
+                    const char* lib_ext = shared_lib_ext_for(both_target);
+                    /* The two passes must never write the same path. For
+                     * every target but one, NAME<libext> is already distinct
+                     * from anything the exe pass writes. The exception is the
+                     * Emscripten `wasm` target, where the executable AND the
+                     * library are each a .js + .wasm pair named from the
+                     * stem: NAME.wasm for the library would overwrite the
+                     * module the executable's NAME.js loads. There the
+                     * library gets the stem libNAME -- the `lib` prefix every
+                     * unnamed library already takes -- and emits libNAME.js
+                     * + libNAME.wasm beside NAME.js + NAME.wasm. */
+                    if (both_target && strcmp(both_target, "wasm") == 0) {
+                        const char* o = argv[o_idx];
+                        const char* sep = o;
+                        for (const char* q = o; *q; q++)
+                            if (*q == '/' || *q == '\\') sep = q + 1;
+                        snprintf(lib_out_buf, sizeof(lib_out_buf), "%.*slib%s",
+                                 (int)(sep - o), o, sep);
+                    } else {
+                        snprintf(lib_out_buf, sizeof(lib_out_buf), "%s%s",
+                                 argv[o_idx], lib_ext);
+                    }
                     lib_out_override = lib_out_buf;
                 }
                 char** dup_exe = (char**)malloc(sizeof(char*) * (size_t)argc);
@@ -6783,6 +6872,12 @@ static int cmd_build(int argc, char** argv) {
     const char* base = get_basename(file);
     char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
 
+    /* The executable extension for THIS build's target. EXE_EXT is the
+     * host's, so on a Windows host a Linux binary built with --target came
+     * out as `app.exe`: named for the machine that built it rather than the
+     * one it runs on. (#1648) */
+    const char* exe_ext = exe_ext_for(is_cross ? target : NULL);
+
     if (output_name) {
         // Explicit -o: use the path as-is
         snprintf(c_file, sizeof(c_file), "%s.c", output_name);
@@ -6797,7 +6892,7 @@ static int cmd_build(int argc, char** argv) {
          *
          * EXE_EXT is "" on POSIX, so ext_len is 0, the guard is skipped and
          * this stays byte-for-byte the old behaviour everywhere else. */
-        const size_t ext_len = sizeof(EXE_EXT) - 1;
+        const size_t ext_len = strlen(exe_ext);
         const size_t out_len = strlen(output_name);
         if (g_emit_lib && !g_emit_exe) {
             /* A library, an object or emitted C is not an executable: the
@@ -6817,10 +6912,10 @@ static int cmd_build(int argc, char** argv) {
             }
 #endif
         } else if (ext_len > 0 && out_len >= ext_len &&
-            strcasecmp(output_name + out_len - ext_len, EXE_EXT) == 0) {
+            strcasecmp(output_name + out_len - ext_len, exe_ext) == 0) {
             snprintf(exe_file, sizeof(exe_file), "%s", output_name);
         } else {
-            snprintf(exe_file, sizeof(exe_file), "%s" EXE_EXT, output_name);
+            snprintf(exe_file, sizeof(exe_file), "%s%s", output_name, exe_ext);
         }
         /* datastar#9: create the parent directory, as `cc -o`, `go build -o`
          * and `cargo --target-dir` all effectively do. Without this,
@@ -6843,13 +6938,13 @@ static int cmd_build(int argc, char** argv) {
         // Project mode: output to target/
         mkdirs("target");
         snprintf(c_file, sizeof(c_file), "target/%s.c", base);
-        snprintf(exe_file, sizeof(exe_file), "target/%s" EXE_EXT, base);
+        snprintf(exe_file, sizeof(exe_file), "target/%s%s", base, exe_ext);
     } else if (tc.dev_mode) {
         snprintf(c_file, sizeof(c_file), "%s/build/%s.c", tc.root, base);
-        snprintf(exe_file, sizeof(exe_file), "%s/build/%s" EXE_EXT, tc.root, base);
+        snprintf(exe_file, sizeof(exe_file), "%s/build/%s%s", tc.root, base, exe_ext);
     } else {
         snprintf(c_file, sizeof(c_file), "%s.c", base);
-        snprintf(exe_file, sizeof(exe_file), "%s" EXE_EXT, base);
+        snprintf(exe_file, sizeof(exe_file), "%s%s", base, exe_ext);
     }
 
     // Override output extension for wasm target
@@ -6860,6 +6955,20 @@ static int cmd_build(int argc, char** argv) {
             strcpy(dot, ".js");
         } else {
             strncat(exe_file, ".js", sizeof(exe_file) - strlen(exe_file) - 1);
+        }
+        /* An unnamed Emscripten LIBRARY is lib<base>.js + lib<base>.wasm, as
+         * an unnamed library is lib<base><ext> on every other target (#1648).
+         * Named <base>.js it was the executable's name exactly, so
+         * `--emit=both` with no -o wrote the library over the executable. */
+        if (g_emit_lib && !g_emit_exe && !output_name && !g_emit_obj &&
+            !g_emit_csrc && !g_emit_staticlib) {
+            char* sep = exe_file;
+            for (char* q = exe_file; *q; q++)
+                if (*q == '/' || *q == '\\') sep = q + 1;
+            char renamed[2048];
+            snprintf(renamed, sizeof(renamed), "%.*slib%s",
+                     (int)(sep - exe_file), exe_file, sep);
+            snprintf(exe_file, sizeof(exe_file), "%s", renamed);
         }
     }
 
@@ -6876,8 +6985,15 @@ static int cmd_build(int argc, char** argv) {
     /* ...but a cross --emit=lib for Windows is a DLL, not an executable
      * (#1648): appending .exe there produced `foo.dll.exe`, a valid PE
      * DLL under a name nothing will load. Give it .dll when the caller
-     * has not already named it. */
-    if (ztriple && strstr(ztriple, "windows") && g_emit_lib && !g_emit_exe) {
+     * has not already named it.
+     *
+     * Only for the SHARED library. --emit=staticlib and --emit=obj reuse
+     * the lib codegen, so they set g_emit_lib too, and this used to fire
+     * for them: `--emit=staticlib -o libgreet.a` for a Windows target
+     * wrote a correct `!<arch>` archive named `libgreet.a.dll`, which no
+     * linker looks for and which the caller's own `-o` did not ask for. */
+    if (ztriple && strstr(ztriple, "windows") && g_emit_lib && !g_emit_exe &&
+        !g_emit_staticlib && !g_emit_obj && !g_emit_csrc) {
         size_t el = strlen(exe_file);
         if (el < 4 || strcasecmp(exe_file + el - 4, ".dll") != 0) {
             strncat(exe_file, ".dll", sizeof(exe_file) - el - 1);
@@ -6894,13 +7010,7 @@ static int cmd_build(int argc, char** argv) {
          * overrides the host-conditional shared-library extension below —
          * which describes the HOST, and would name a cross-built iOS archive
          * after whatever machine happened to build it. */
-#ifdef __APPLE__
-        const char* lib_ext = ".dylib";
-#elif defined(_WIN32)
-        const char* lib_ext = ".dll";
-#else
-        const char* lib_ext = ".so";
-#endif
+        const char* lib_ext = shared_lib_ext_for(is_cross ? target : NULL);
         if (g_emit_staticlib) lib_ext = ".a";
         // Find the basename portion in exe_file and insert "lib" prefix.
         // Strategy: walk back from the end to the last separator, copy the
@@ -6914,17 +7024,14 @@ static int cmd_build(int argc, char** argv) {
         if (prefix_len >= sizeof(buf)) prefix_len = sizeof(buf) - 1;
         memcpy(buf, exe_file, prefix_len);
         buf[prefix_len] = '\0';
-        // Strip EXE_EXT (empty on POSIX) from the basename before adding lib_ext.
+        /* The library's name is lib<stem><ext>, from the SOURCE's stem --
+         * not from exe_file's basename, which the executable rules above may
+         * already have given an `.exe` (host) or a `.dll` (Windows target):
+         * editing that produced `libapp.dll.so` for a Windows library built
+         * on Linux. */
         char basename_noext[512];
-        strncpy(basename_noext, last_sep, sizeof(basename_noext) - 1);
+        strncpy(basename_noext, base, sizeof(basename_noext) - 1);
         basename_noext[sizeof(basename_noext) - 1] = '\0';
-        if (EXE_EXT[0]) {
-            size_t elen = strlen(EXE_EXT);
-            size_t blen = strlen(basename_noext);
-            if (blen >= elen && strcmp(basename_noext + blen - elen, EXE_EXT) == 0) {
-                basename_noext[blen - elen] = '\0';
-            }
-        }
         // Stage through a wider scratch buffer so gcc -Wformat-truncation
         // sees enough room for the worst-case prefix + "lib" + basename +
         // lib_ext concatenation; we then copy back into exe_file's
@@ -7021,16 +7128,9 @@ static int cmd_build(int argc, char** argv) {
          * increment. Apple (#1385) and wasm (#1676) got there first with
          * their own link flags; ELF and PE now use -shared -fPIC.
          *
-         * --emit=both stays rejected: it wants an exe AND a lib from one
-         * invocation, and the cross path links once. Two invocations with
-         * different --emit modes do the job today. */
-        if (g_emit_exe && g_emit_lib && !g_emit_csrc && !g_emit_obj) {
-            fprintf(stderr,
-                "Error: cross-compilation (--target=%s) cannot do --emit=both "
-                "in one invocation; run it twice, once with --emit=exe and "
-                "once with --emit=lib.\n", target);
-            return 1;
-        }
+         * --emit=both never arrives here with both flags set: the argument
+         * parser re-dispatches it as one --emit=exe build and one
+         * --emit=lib build, each of which is an ordinary cross build. */
         /* --emit=csrc never invokes the cross toolchain at all: it emits
          * portable C and stops, so requiring zig (or Xcode) would invent a
          * dependency the build does not have — and would block the very case
@@ -7299,6 +7399,13 @@ static int cmd_build(int argc, char** argv) {
     // Step 2: .c to executable (or wasm) with runtime.
     // toml [[bin]] extra_sources were already merged into extra_files
     // above (before the cache check), so no further reading is needed.
+    //
+    // An executable needs an entry point, and saying so here beats the
+    // linker's `undefined reference to WinMain`. Library modes never get
+    // here with g_emit_exe set; --emit=both reaches it on its exe pass.
+    if (g_emit_exe && !g_emit_lib && !require_entry_point(c_file, file)) {
+        return 1;
+    }
     // Cross builds run a multi-step compile/archive/link sequence that
     // surfaces its own errors, so they bypass the shared command run.
     int build_ret;

@@ -72,7 +72,13 @@ def tree_modules(root):
 
 def check(root, fix):
     doc_path = os.path.join(root, DOC)
-    doc = open(doc_path, encoding="utf-8").read()
+    # Read and write untranslated, keeping the file's own line endings. A
+    # text-mode write turns every LF into CRLF on Windows, so a fix that
+    # changed one count used to rewrite every line of the reference.
+    with open(doc_path, encoding="utf-8", newline="") as f:
+        doc = f.read()
+    newline = "\r\n" if "\r\n" in doc else "\n"
+    doc = doc.replace("\r\n", "\n")
     rows = {m.group(1): (m.group(2), int(m.group(3)), m.span())
             for m in ROW.finditer(doc)}
     tree = tree_modules(root)
@@ -112,7 +118,8 @@ def check(root, fix):
             line = doc[start:end]
             doc = doc[:start] + re.sub(r"\| \d+ \|", f"| {now} |", line) + doc[end:]
         doc = HEADING.sub(f"## Module index ({len(rows)} modules)", doc, count=1)
-        open(doc_path, "w", encoding="utf-8").write(doc)
+        with open(doc_path, "w", encoding="utf-8", newline="") as f:
+            f.write(doc.replace("\n", newline))
         print(f"stdlib index: updated {len(stale)} count(s)"
               + (" and the heading" if heading_wrong else ""))
         stale, heading_wrong = [], False

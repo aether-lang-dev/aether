@@ -13,9 +13,9 @@
 #   - the emitted C is target-NEUTRAL: byte-identical across triples and to
 #     the native emit, since platform selection stays in #if and is resolved
 #     by the consumer's compiler
-#   - --emit=both under --target is still rejected up front, with a
-#     diagnostic naming the two-invocation workaround (--emit=lib itself
-#     now works — see tests/integration/cross_emit_lib/)
+#   - --emit=both of a source with no main() fails up front, naming the
+#     file and --emit=lib, before the linker is ever reached (--emit=both
+#     and --emit=lib both work cross -- see tests/integration/cross_emit_lib/)
 
 set -e
 
@@ -157,23 +157,43 @@ else
     echo "  [skip] wasm32-wasi checks: zig not on PATH"
 fi
 
-# --- 4. --emit=both is still rejected, up front ---
-# Up front matters: --emit=both re-dispatches as exe, and without an explicit
-# check it reaches the cross LINKER and dies with "undefined symbol: main" on
-# a source that has no main by design.
+# --- 4. --emit=both on a source with no main() fails clearly, up front ---
+# --emit=both under --target used to be rejected outright. Part of the reason
+# was real: on a source with no main() by design, like this one, the exe pass
+# reached the cross LINKER and died with "undefined symbol: main". But the
+# native path died the same way (MinGW: "undefined reference to WinMain"), so
+# the rejection only hid a defect every target had. The driver now reads the
+# generated C's `// aether-entry: main` line and refuses to link an executable
+# without one, naming the file and what to build instead -- on every target.
+# (--emit=both itself works cross now; tests/integration/cross_emit_lib.)
 #
-# --emit=lib is no longer in this list: it produces a real shared library for
-# every target now (#1648), covered by tests/integration/cross_emit_lib/.
-# --emit=both stays rejected because it wants an executable AND a library from
-# one invocation and the cross path links once, so the diagnostic has to name
-# the workaround rather than claim the mode is unsupported.
-if "$AE" build --target=aarch64-linux --emit=both "$SRC" -o "$TMP/x" \
-        >"$TMP/err" 2>&1; then
-    fail "--emit=both under --target should be rejected but succeeded"
+# Asserted on the NATIVE build, which needs no cross toolchain and so runs on
+# every machine: the check is the driver's, not the target's. Without zig a
+# cross build stops earlier, at "could not start 'zig'", which is the right
+# answer to a different question.
+no_main_says_so() {
+    grep -q 'has no main()' "$1" \
+        || fail "$2: a no-main source did not say so: $(head -1 "$1")"
+    grep -q 'emit=lib' "$1" \
+        || fail "$2: the no-main diagnostic did not name --emit=lib"
+    if grep -qiE 'undefined (reference|symbol)' "$1"; then
+        fail "$2: the no-main case still reached the linker"
+    fi
+}
+if "$AE" build --emit=both "$SRC" -o "$TMP/xn" >"$TMP/errn" 2>&1; then
+    fail "native --emit=both of a source with no main() should fail but succeeded"
 fi
-grep -q 'cannot do --emit=both' "$TMP/err" \
-    || fail "--emit=both gave the wrong diagnostic: $(head -1 "$TMP/err")"
-grep -q 'run it twice' "$TMP/err" \
-    || fail "--emit=both rejected without naming the workaround"
+no_main_says_so "$TMP/errn" "native --emit=both"
 
-echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); --emit=both still rejected"
+# ...and on the cross build the rejection used to hide, where zig is there.
+if command -v zig >/dev/null 2>&1; then
+    if "$AE" build --target=aarch64-linux --emit=both "$SRC" -o "$TMP/x" \
+            >"$TMP/err" 2>&1; then
+        fail "--emit=both of a source with no main() should fail but succeeded"
+    fi
+    no_main_says_so "$TMP/err" "cross --emit=both"
+else
+    echo "  [skip] cross no-main check: zig not on PATH (the native one above ran)"
+fi
+
+echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); a no-main --emit=both says so before the linker"

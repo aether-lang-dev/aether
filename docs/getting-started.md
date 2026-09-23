@@ -411,7 +411,7 @@ Aether includes a standard library with the following modules:
 | `std.io` | Console I/O, environment variables |
 | `std.os` | Shell execution, command output capture |
 
-See [stdlib-api.md](stdlib-api.md) for the full API reference.
+See the [Standard Library Reference](stdlib-reference.md) for every module and its API.
 
 > When you read a file or get data from stdlib functions, the result is a
 > regular string, you can `print()` it, use it in `"${interpolation}"`, or pass it in messages

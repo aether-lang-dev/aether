@@ -109,9 +109,6 @@ and is undefined there, exactly as in C.
 `set_float32`, `get_float64`, `set_float64`, `get_ptr`, `set_ptr`; the
 endian pairs `get_u16_le` through `set_u64_be`; `bits_of_float`,
 `float_from_bits`, `clz32`, `clz64`, `udiv64_32`; `copy`, `move`, `compare`,
-`set`, `copy_at`, `move_at`, `fill_at`, `compare_at`.
-
-`mem.ptr_to_long` and `mem.long_to_ptr` are defined and callable but are
-**missing from the module's `exports(...)` list**. They work today because a
-whole-module import resolves them anyway; treat that as an oversight to be
-fixed rather than a guarantee.
+`set`, `copy_at`, `move_at`, `fill_at`, `compare_at`; `get_byte_sz`,
+`set_byte_sz`; `ptr_to_long`, `long_to_ptr`; `call_fn3_int`, `call_fn3_void`,
+`call_fn2_void`.

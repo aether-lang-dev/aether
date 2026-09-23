@@ -77,6 +77,68 @@ TEST(http_server_response_building) {
     http_server_response_free(resp);
 }
 
+/* #1739: a response reused across requests, and a header overwritten with a
+ * value that fits, cost no allocation -- while every header string stays
+ * its own allocation, because C outside the library frees them one by one
+ * (tests/integration/http_external_ptr). Reuse is asserted by pointer
+ * identity: the same string coming back means nothing was allocated. */
+TEST(http_server_response_header_reuse) {
+    HttpServerResponse* resp = http_response_create();
+    ASSERT_NOT_NULL(resp);
+    ASSERT_EQ(2, resp->header_count);
+
+    /* A shorter value overwrites the default in place. */
+    char* ct_before = resp->header_values[0];
+    http_response_set_header(resp, "Content-Type", "text/plain");
+    ASSERT_TRUE(resp->header_values[0] == ct_before);
+    ASSERT_STREQ("text/plain", resp->header_values[0]);
+
+    /* A longer one needs its own string, and gets the right text. */
+    http_response_set_header(resp, "Content-Type",
+                             "application/vnd.example+json; charset=utf-8");
+    ASSERT_STREQ("application/vnd.example+json; charset=utf-8", resp->header_values[0]);
+
+    /* What a request adds past the defaults... */
+    http_response_set_header(resp, "Content-Length", "12");
+    http_response_set_header(resp, "Connection", "keep-alive");
+    ASSERT_EQ(4, resp->header_count);
+    http_response_set_status(resp, 404);
+
+    /* ...is released by reset, and the defaults come back in the strings
+     * already there -- identical keys, the long Content-Type value reused
+     * for the shorter default, the status text for "OK". */
+    char* k0 = resp->header_keys[0];
+    char* v0 = resp->header_values[0];
+    char* k1 = resp->header_keys[1];
+    char* v1 = resp->header_values[1];
+    char* st = resp->status_text;
+    http_response_reset(resp);
+
+    ASSERT_EQ(2, resp->header_count);
+    ASSERT_EQ(200, resp->status_code);
+    ASSERT_STREQ("Content-Type", resp->header_keys[0]);
+    ASSERT_STREQ("text/html; charset=utf-8", resp->header_values[0]);
+    ASSERT_STREQ("Server", resp->header_keys[1]);
+    ASSERT_STREQ("Aether/1.0", resp->header_values[1]);
+    ASSERT_STREQ("OK", resp->status_text);
+    ASSERT_TRUE(resp->header_keys[0] == k0);
+    ASSERT_TRUE(resp->header_values[0] == v0);
+    ASSERT_TRUE(resp->header_keys[1] == k1);
+    ASSERT_TRUE(resp->header_values[1] == v1);
+    ASSERT_TRUE(resp->status_text == st);
+
+    /* The ownership convention is intact: each string is freed by itself,
+     * exactly as an external caller does it. */
+    for (int i = 0; i < resp->header_count; i++) {
+        free(resp->header_keys[i]);
+        free(resp->header_values[i]);
+        resp->header_keys[i] = NULL;
+        resp->header_values[i] = NULL;
+    }
+    resp->header_count = 0;
+    http_server_response_free(resp);
+}
+
 TEST(http_server_json_response) {
     HttpServerResponse* resp = http_response_create();
     ASSERT_NOT_NULL(resp);

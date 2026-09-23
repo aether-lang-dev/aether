@@ -67,14 +67,25 @@
 // is why the worker waits briefly for a follow-up request before parking, and
 // only while another worker is free to take other work.
 //
-// DEVELOPMENT DIRECTIONS (in rough order of value):
-//   1. Reduce per-request overhead on the hot path (the picker mutates shared
-//      state under a lock/atomics; profile it under load).
-//   2. For throughput-critical deployments, aeo can ORCHESTRATE haproxy instead of
-//      this LB (same load_balancer(){} grammar, haproxy.cfg rendered by the driver)
-//      keep this lib as the zero-dependency, works-anywhere default; use haproxy
-//      when raw rps matters. (haproxy is a standalone daemon, not an embeddable
-//      library, so it is RUN, not linked.)
+// WHERE THE PER-REQUEST COST IS (#1739):
+//   The picker is not it. pick_round_robin is one atomic_fetch_add on the
+//   cursor plus atomic loads in upstream_eligible, and its only mutex
+//   (u->rl_lock) is skipped entirely unless rate limiting is configured. The
+//   pthread_mutex time a profile shows on this path is the client's idle pool
+//   and the worker queue. The cost #1739's allocation census found was header
+//   storage and the client's receive buffer, and all of it is addressed: one
+//   allocation per outbound header with an O(1) append, an arena-backed
+//   request parse with header arrays reused across a connection, the upstream
+//   authority computed once at registration, the receive buffer kept with its
+//   pooled connection (#2160), and response headers rebuilt in place when a
+//   response is reused.
+//
+// FOR THROUGHPUT-CRITICAL DEPLOYMENTS:
+//   aeo can ORCHESTRATE haproxy instead of this LB (same load_balancer(){}
+//   grammar, haproxy.cfg rendered by the driver). This lib stays the
+//   zero-dependency, works-anywhere default; haproxy is for when raw rps
+//   matters. (haproxy is a standalone daemon, not an embeddable library, so
+//   it is RUN, not linked.)
 //
 // Harness: benchmarks/http/run_lb_reuse.sh (committed). Re-run on a dedicated
 // (non-co-located) box for absolute numbers.

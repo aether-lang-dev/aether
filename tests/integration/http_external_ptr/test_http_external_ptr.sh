@@ -6,10 +6,10 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_http_external_ptr on Windows"; exit 0 ;;
-esac
+# This used to skip on Windows, with no reason recorded, and it passes
+# there. It is also what guards the ownership convention #1739's header
+# reuse had to preserve -- each header string is its own allocation,
+# freed one by one by C like shim.c -- so it runs everywhere now.
 
 TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
 

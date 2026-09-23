@@ -36,7 +36,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 158 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 163 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 165 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
@@ -52,7 +52,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 102 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 108 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -107,23 +107,49 @@ When a target lacks a capability, the stub implementations in each stdlib module
 
 ## Using the Standard Library
 
-Import modules with the `import` statement and call functions with namespace syntax:
+Import a module and call its functions through its name: `import std.file`
+makes `file.read`, `file.write` and the rest of the module available. Three
+conventions hold across every module in this reference.
 
-```aether
-import std.string
+**Errors are values.** A call that can fail returns its result together with
+an error string, and `""` means it worked. There is nothing to catch; the
+check is an `if`, next to the call.
+
+**The C layer is exported too.** Most modules also export the C functions
+their wrappers sit on, named with a `_raw` suffix or an `aether_` prefix, which
+return C's null or status int instead of an error string. They are there for
+handing a pointer straight to C; the wrapper is the API.
+
+**You release what you create.** A list, a map, a buffer, a parsed document
+or an open handle has a `free` or `close` in its module, and `defer` keeps the
+release next to the allocation it pairs with.
+
+```aether,run
 import std.file
+import std.list
 
 main() {
-    // Namespace-style calls
-    s = string.new("hello");
-    len = string.length(s);
-
-    if (file.exists("data.txt") == 1) {
-        print("File exists!\n");
+    // A call that can fail returns its result AND an error string.
+    // "" means it worked; anything else says what went wrong.
+    text, err = file.read("no-such-file.txt")
+    if err != "" {
+        println("read failed: ${err}")
+    } else {
+        println(text)
     }
 
-    string.release(s);
+    // Whatever you create, you release. `defer` runs at scope exit,
+    // so the release sits next to the allocation it pairs with.
+    names = list.new()
+    defer list.free(names)
+    _a = list.add(names, "ada")
+    _b = list.add(names, "grace")
+    println("${list.size(names)} names")
 }
+```
+```output
+read failed: cannot open file
+2 names
 ```
 
 ---
@@ -533,6 +559,58 @@ the array and the accessors see them (and vice versa). `v[i]` lowers to the
 same load `floatarr_get_unchecked` inlines to, so the readable spelling
 costs nothing. It borrows: valid until the handle is freed, and bounds are
 yours to respect, exactly as for the unchecked accessors.
+
+### Fixed-size long array (`std.longarr`)
+
+The 64-bit twin of `std.intarr`, for values that overflow 32 bits --
+nanosecond timestamps, offsets into large files, 64-bit hashes. The checked
+`get`/`set` return an error for an index out of range; for a hot loop,
+`longarr.array(a)` is a typed view over the same buffer, where `v[i]` is a
+plain load.
+
+```aether,run
+import std.longarr
+
+main() {
+    // A fixed-size packed buffer of 64-bit integers: the long twin of
+    // std.intarr, for values that overflow 32 bits -- nanosecond
+    // timestamps, byte offsets in large files, 64-bit hashes.
+    n = 4
+    a = longarr.longarr_new_raw(n)
+
+    // The checked accessors return an error for an index out of range.
+    serr = longarr.set(a, 0, 9000000000)
+    if serr != "" { println("set: ${serr}"); return }
+    v, gerr = longarr.get(a, 0)
+    println("checked: ${v} '${gerr}'")
+    _v, oob = longarr.get(a, 99)
+    println("out of range: ${oob}")
+
+    // For a hot loop, a typed view: v[i] is a plain load.
+    view = longarr.array(a)
+    i = 1
+    while i < n {
+        view[i] = view[i - 1] * 2
+        i = i + 1
+    }
+    println("doubling: ${view[1]} ${view[2]} ${view[3]}")
+
+    longarr.longarr_free(a)
+}
+```
+```output
+checked: 9000000000 ''
+out of range: index out of range
+doubling: 18000000000 36000000000 72000000000
+```
+
+**Functions:**
+- `longarr.new(n)` / `new_filled(n, v)` → `(ptr, string)` - The error names a negative size or a failed allocation
+- `longarr.longarr_new_raw(n)` / `longarr_new_filled_raw(n, v)` → `ptr` (null on failure), `longarr_free(a)`
+- `longarr.get(a, i)` → `(long, string)`, `longarr.set(a, i, v)` → `string` - Bounds-checked
+- `longarr.longarr_get_unchecked(a, i)` / `longarr_set_unchecked(a, i, v)` - Unchecked, inlined
+- `longarr.array(a)` → `long[]` - A typed view: `v[i]` reads and writes the array itself
+- `longarr.longarr_size(a)` → `int`, `longarr.longarr_fill(a, v)`
 
 ### Mutable byte buffer (`std.bytes`)
 
@@ -1533,17 +1611,32 @@ Coming from Go's `json.Unmarshal`, Java's Jackson, Python's `json.load` + datacl
 
 ### Other structured-data formats
 
-Beyond JSON, the stdlib has **no built-in support** for:
+Each of these has its own section below:
 
-- **YAML**, no parser. Configuration files for Aether projects use TOML (read by the build tool internally, not a user-facing stdlib module) or hand-rolled formats.
-- **XML**, `std.xml` provides a pull/SAX reader and an escaping builder (see the XML section above). It deliberately omits XSD, XPath, namespaces, and DTD validation; for those a host-language tool is still the answer.
-- **TOML**, there's a parser at `tools/apkg/toml_parser.c` used internally by the `ae` CLI to read `aether.toml` project files. It's not exposed as `std.toml`. If a project needs TOML, copying that parser or shelling out to a host-language tool are the options today.
-- **INI**, no parser. Trivial to implement on top of `string.split` if needed.
-- **Java-style `.properties`**, no parser. Same shape as INI without sections; same advice.
-- **CSV**, no parser. `string.split(line, ",")` covers the no-quoting / no-embedded-commas case; anything more needs a real CSV parser, which isn't shipped.
-- **Protocol Buffers / MessagePack / CBOR / Avro / Thrift**, no codecs. Same reflection-gap reasoning as struct ↔ JSON: without struct introspection there's no automatic encode/decode.
+- **MessagePack** ([`std.msgpack`](#messagepack-stdmsgpack)) and **CBOR**
+  ([`std.cbor`](#cbor-stdcbor)), binary encodings of the same value model
+  JSON has.
+- **YAML** ([`std.yaml`](#yaml-stdyaml)), YAML 1.2 parsing and emitting.
+- **XML** ([`std.xml`](#xml-stdxml)), a pull reader and an escaping builder.
+  XSD, XPath, namespaces and DTD validation are outside it.
+- **CSV** ([`std.encoding`](#encodings-stdencoding)), `csv_split` splits one
+  record on a separator you choose and trims a `\r\n` line ending. It does
+  not interpret quotes, so a field holding the separator inside quotes
+  splits there.
 
-This isn't a hidden roadmap, these are absent because no downstream user has driven the need yet. If you're starting a project that needs YAML config, expect to write a parser, ship a contrib module, or shell out. Structured-data thinking in the stdlib is currently JSON-shaped and HTTP-adjacent; broader format coverage is open territory.
+What every one of them shares with `std.json`: values are built and walked
+by hand. Aether has no runtime reflection, so no codec maps a struct to an
+encoding and back automatically.
+
+These have no stdlib module:
+
+- **TOML.** `ae` reads `aether.toml` with its own parser
+  (`tools/apkg/toml_parser.c`), which is part of the build tool rather than
+  something a program imports.
+- **INI** and **Java `.properties`**: line-oriented enough that
+  `string.split` on newlines and then on `=` reads them.
+- **Protocol Buffers, Avro, Thrift**: schema-driven formats, which need code
+  generated from the schema; nothing in the toolchain generates it.
 
 ---
 
@@ -2069,6 +2162,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 - `http.client_pool_disable()` - Turn reuse off and close what is held.
 - `http.client_pool_clear()` - Close every idle connection, keeping reuse on. Worth calling before a measurement, or after a change that makes held connections invalid (a new CA, a rotated proxy).
 - `http.client_pool_idle_count()` → `int` - How many idle connections are held right now.
+- `http.client_rx_buffer_allocs()` → `long` - How many response buffers the client has allocated from nothing, over the life of the process. A pooled connection keeps the buffer its last response was read into and lends it to the next, so a run of requests over one kept connection allocates once, not once per request: ten requests over one connection read `1`, and `10` with pooling off. A buffer that grew past 64 KiB is not kept, so the idle pool cannot pin an outsized body. This is how to check the reuse rather than assume it.
 
 **Response accessors (used with raw externs):**
 - `http.response_status(response)` - Read HTTP status code (0 on transport failure)
@@ -2414,6 +2508,72 @@ tags: 2, first go
 - `url.query_get(list, name)` → `string` - The first value for `name`, `""` when absent
 - `url.query_get_all(list, name)` → `ptr` - Every value for a repeated key, as a fresh `string_list`
 
+### HTTP/1.1 response reader (`std.http1`)
+
+A pure-Aether RFC 9112 response reader. `feed` takes bytes from wherever
+they came from -- a socket, a file, a test -- in whatever chunks they
+arrive, and a header or chunk boundary can land anywhere in one; it
+accumulates them and parses once a complete response is there, returning
+`"incomplete"` until then. `read_response_conn` does the reading too, from a
+connection of the pure-Aether TLS client (`std.cryptography.tls13_client`). Content-Length, chunked, and
+close-delimited bodies are all framed.
+
+```aether,run
+import std.http1
+import std.bytes
+import std.string
+
+// Raw bytes as a transport delivers them.
+wire_bytes(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    _w = bytes.copy_from_string(b, 0, s, n)
+    return b
+}
+
+main() {
+    // A transport hands over bytes in whatever chunks it likes; a header or
+    // body boundary can land anywhere in one. feed() accumulates them and
+    // parses once the response is complete -- "incomplete" until then.
+    r = http1.response_new()
+    part1 = wire_bytes("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Le")
+    part2 = wire_bytes("ngth: 11\r\n\r\nhello world")
+    println("after part 1: ${http1.feed(r, part1, bytes.length(part1), 0)}")
+    err = http1.feed(r, part2, bytes.length(part2), 0)
+    println("after part 2: '${err}'")
+
+    println("status ${http1.status_code(r)}")
+    println("content-type ${http1.header(r, "content-type")}")
+    println("body ${bytes.to_string(http1.body_ptr(r), http1.body_len(r))}")
+    http1.response_free(r)
+    bytes.free(part1)
+    bytes.free(part2)
+
+    // Chunked transfer-encoding is decoded the same way.
+    c = http1.response_new()
+    ch = wire_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
+    _e = http1.feed(c, ch, bytes.length(ch), 0)
+    println("chunked body ${bytes.to_string(http1.body_ptr(c), http1.body_len(c))}")
+    http1.response_free(c)
+    bytes.free(ch)
+}
+```
+```output
+after part 1: incomplete
+after part 2: ''
+status 200
+content-type text/plain
+body hello world
+chunked body Wikipedia
+```
+
+**Functions:**
+- `http1.response_new()` → `ptr`, `http1.response_free(r)`
+- `http1.feed(r, bytes, len, is_eof)` → `string` - Add bytes; `""` once a response is complete, `"incomplete"` before
+- `http1.read_response_conn(r, conn)` → `string` - Read a whole response from a `tls13_client` connection
+- `http1.status_code(r)` → `int`, `status_reason(r)` → `ptr` (a C string), `header(r, name)` → `string` (case-insensitive), `header_count(r)` → `int`
+- `http1.body_ptr(r)` → `ptr`, `body_len(r)` → `int`
+
 ### TCP (`std.tcp`)
 
 > **Note:** `send` and `receive` are reserved actor keywords in Aether, so
@@ -2529,6 +2689,73 @@ numbers.
 
 ---
 
+## Command-line arguments (`std.clapae`)
+
+A command-line parser in the shape of Rust's clap: a builder DSL, arguments
+typed and validated at the boundary, subcommands, and generated help. The
+library never exits for you -- `parse` returns `RESULT_OK`, `RESULT_HELP` or
+`RESULT_ERROR`, and the program decides what to print and whether to stop.
+
+`parse` reads the process's own arguments; `parse_list` takes an explicit
+list, which is what a test wants.
+
+```aether,run
+import std.clapae
+import std.list
+
+main() {
+    cmd = clapae.command("imgtool") {
+        clapae.about("Resize images")
+        clapae.arg("width") { clapae.long_("width"); clapae.short(119); clapae.int_arg(); clapae.help("target width") }
+        clapae.arg("verbose") { clapae.long_("verbose"); clapae.short(118); clapae.flag() }
+        clapae.arg("input") { clapae.positional(); clapae.required() }
+    }
+
+    // parse() reads the process's own argv; parse_list takes an explicit
+    // one, which is what a test -- or this example -- wants.
+    argv = list.new()
+    list.add(argv, "photo.png")
+    list.add(argv, "--width")
+    list.add(argv, "800")
+    list.add(argv, "-v")
+
+    res, matches, err = clapae.parse_list(cmd, argv)
+    if res != clapae.RESULT_OK { println("parse: ${err}"); return }
+
+    // Typed at the boundary: --width was validated as an int while parsing.
+    w, _werr = clapae.get_int(matches, "width")
+    println("input ${clapae.get_string(matches, "input")}")
+    println("width ${w}")
+    println("verbose ${clapae.get_flag(matches, "verbose")}")
+
+    // A value of the wrong kind is refused with a message, not coerced.
+    bad = list.new()
+    list.add(bad, "photo.png")
+    list.add(bad, "--width")
+    list.add(bad, "wide")
+    res2, _m, _err2 = clapae.parse_list(cmd, bad)
+    println("bad width refused: ${res2 == clapae.RESULT_ERROR}")
+
+    clapae.free_matches(matches)
+    clapae.free_command(cmd)
+}
+```
+```output
+input photo.png
+width 800
+verbose 1
+bad width refused: true
+```
+
+**Functions:**
+- `clapae.command(name) { ... }` → `*Command`, with `about`, `arg(name) { ... }` and `subcommand(name) { ... }` inside
+- Inside `arg`: `long_(name)`, `short(char)`, `help(text)`, `required()`, `positional()`, and one kind -- `flag()`, `string_arg()` (the default) or `int_arg()`
+- `clapae.parse(cmd)` / `parse_list(cmd, argv)` → `(int, ptr, string)` - Result, matches, error
+- `clapae.get_string(m, name)` → `string`, `get_int(m, name)` → `(int, string)`, `get_flag(m, name)` → `int`
+- `clapae.subcommand_name(m)` → `string` - Which subcommand was chosen, or `""`
+- `clapae.subcommand_matches(m, name)` → `*ArgMatches` - That subcommand's own matches, or null unless `name` is the one chosen
+- `clapae.print_help(cmd)`, `free_command(cmd)`, `free_matches(m)`
+
 ## Logging (`std.log`)
 
 Structured logging with levels.
@@ -2643,6 +2870,249 @@ main() {
 ```
 
 ---
+
+### Running programs
+
+`os.system` and `os.exec` hand a command line to the shell (`/bin/sh -c`,
+`cmd.exe /c` on Windows), so quoting, globbing and `$VAR` expansion happen
+before the child sees it. The calls below skip the shell: on POSIX the
+program and its arguments go to the operating system as a list, so a path
+with spaces or an argument holding `$` or `;` arrives exactly as written.
+
+- `argv` is a `std.list` of the arguments **after** the program. The child
+  still sees the program itself as its `argv[0]`.
+- `env` is a list of `"KEY=VALUE"` strings, or `null` to inherit this
+  process's environment.
+- On POSIX, a program named without a `/` is looked up on `PATH`.
+
+**Windows is different in two ways that matter for untrusted input.** A
+Windows process receives one command line, not a list; `std.os` quotes each
+argument by the rules the C runtime uses to split it back apart, so an
+ordinary program sees exactly the arguments you passed. But the program
+itself is found by `CreateProcessW`, which searches the application's
+directory and the current directory **before** `PATH`, and a `.bat` or
+`.cmd` it finds runs under `cmd.exe`, which reads the command line by its
+own rules and not the C runtime's. So on Windows, name the program by its
+full path, and do not pass user input to a batch file.
+
+A child that ran and failed and a child that never started are told apart.
+`err` is non-empty only when the child could not be started; `grep` finding
+nothing or `diff` finding a difference comes back with `err == ""` and its
+exit status. A child killed by a signal reports 128 plus the signal number,
+the shell's convention. One platform difference: on POSIX a program that is
+not there fails inside the child after the fork, so it reads as status 127
+with no error, while on Windows it fails before any child exists and comes
+back as status -1 with `err` set.
+
+Process execution is native on Windows (`CreateProcessW` and Job Objects),
+with two exceptions. `os_execv` does not exist there and returns -1, and the
+`std.ipc` back-channel is POSIX-only: `os.run_pipe` spawns the child without
+it, and `os.run_pipe_drain_and_wait` returns `"unsupported on Windows"`.
+
+```aether,run
+import std.os
+import std.list
+import std.string
+
+// The child is this same program, re-run with a flag, so the example
+// needs no other binary and behaves the same on every OS.
+main() {
+    if os.args_count() > 1 && string.equals(os.args_get(1), "--child") == 1 {
+        println("child says hi")
+        exit(3)
+    }
+    if os.args_count() > 1 && string.equals(os.args_get(1), "--quiet") == 1 {
+        exit(5)
+    }
+
+    // argv holds the arguments AFTER the program: the child sees
+    // argv[0] = the program, argv[1] = "--child".
+    argv = list.new()
+    _a = list.add(argv, "--child")
+
+    out, code, err = os.run_capture(os.argv0(), argv, null)
+    if err != "" {
+        println("could not start: ${err}")
+        return
+    }
+    println("captured: ${string.trim(out)}")
+    println("exit code: ${code}")
+
+    // Non-blocking: start it, do other work, then reap the token.
+    // This child writes nothing: it shares our stdout, so its output
+    // would interleave with ours.
+    quiet = list.new()
+    _q = list.add(quiet, "--quiet")
+    token, serr = os.spawn_proc(os.argv0(), quiet, null)
+    if serr != "" {
+        println("could not start: ${serr}")
+        return
+    }
+    status, werr = os.wait(token)
+    println("spawned child exited ${status}${werr}")
+    list.free(argv)
+    list.free(quiet)
+}
+```
+```output
+captured: child says hi
+exit code: 3
+spawned child exited 5
+```
+
+**Functions:**
+- `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error
+- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin
+- `os_run(prog, argv, env)` → `int` - Run to completion with this process's stdio; the exit status, or -1 when it could not start
+- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table index on Windows, so pass it back to the calls below rather than treating it as a pid
+- `os.wait(token)` → `(int, string)` - Wait for one child: exit status, error
+- `os.wait_any(tokens)` → `(int, int, string)` - Wait for whichever of a list finishes first: its token, exit status, error. Box each token into the list with `mem.long_to_ptr(token)`
+- `os.wait_any_timeout(tokens, secs)` → `(int, int, int, string)` - The same with a deadline: token, status, `timed_out`, error. On a timeout the children keep running; `secs <= 0` waits indefinitely
+- `os.kill(pid, sig)` → `int` - Send a signal (numbers from [`std.signal`](#signal-numbers-stdsignal)); 0 on success. A negative pid signals the whole process group, and `sig == 0` only checks that the process exists. Windows has no catchable signals: any non-zero `sig` terminates, and there is no group form
+- `os.wait_pid_timeout(pid, secs)` → `(int, int, string)` - Wait at most `secs` for one child: status, `timed_out`, error. A child that times out is left running
+- `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`
+- `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only)
+- `os_execv(prog, argv_list)` → `int` - Replace this process (POSIX only); listed with the argv accessors above
+- `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
+- `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`
+
+### Child-to-parent reports (`std.ipc`)
+
+A child process started with `os.run_pipe` or `os.run_pipe_drain_and_wait`
+inherits a back-channel to its parent, and `std.ipc` writes a structured
+report to it -- "passed=44, failed=3" -- rather than the parent having to
+parse whatever the child printed.
+
+**POSIX only.** On Windows `parent_channel()` returns -1 and the parent-side
+spawn reports `unsupported on Windows`, so this example is compile-checked
+rather than run: its output depends on the platform by design.
+
+```aether
+import std.ipc
+import std.os
+import std.list
+import std.string
+
+// Run as a child with `--report`, this writes a structured result to its
+// parent over the inherited back-channel. Run with no arguments, it spawns
+// itself that way and reads what the child sent.
+main() {
+    if os.args_count() > 1 && string.equals(os.args_get(1), "--report") == 1 {
+        ch = ipc.parent_channel()
+        if ch < 0 {
+            println("not spawned with a back-channel")
+            return
+        }
+        err = ipc.write_close(ch, "passed=44\nfailed=3\n")
+        if string.length(err) > 0 { println("write failed: ${err}") }
+        return
+    }
+
+    argv = list.new()
+    list.add(argv, "--report")
+    payload, code, err = os.run_pipe_drain_and_wait(os.argv0(), argv, null)
+    if string.length(err) > 0 { println("spawn failed: ${err}"); return }
+    println("child exited ${code} and reported:")
+    println(payload)
+}
+```
+
+**Functions:**
+- `ipc.parent_channel()` → `int` - The inherited back-channel descriptor, or -1 when there is none
+- `ipc.write(fd, bytes)` → `string` - Write; `""` or an error
+- `ipc.write_close(fd, bytes)` → `string` - Write and close, for the common one-report-at-exit shape
+
+### Signal numbers (`std.signal`)
+
+The POSIX signal numbers that are the same on every Unix, so a program names
+the signal it means instead of hard-coding 15. The job-control and real-time
+signals (`SIGUSR1`, `SIGCHLD`, `SIGSTOP`, ...) are deliberately absent: their
+numbers differ between Linux, macOS and the BSDs, and a constant that is
+right on one and wrong on another is worse than none.
+
+```aether,run
+import std.signal
+
+main() {
+    // The POSIX signal numbers that are the same on every Unix, so a
+    // program can name the signal it means instead of hard-coding 15.
+    println("SIGINT  ${signal.SIGINT()}")
+    println("SIGTERM ${signal.SIGTERM()}")
+    println("SIGKILL ${signal.SIGKILL()}")
+    println("SIGHUP  ${signal.SIGHUP()}")
+
+    // Pair them with std.os's process control, e.g.
+    //     os.kill(pid, signal.SIGTERM())
+}
+```
+```output
+SIGINT  2
+SIGTERM 15
+SIGKILL 9
+SIGHUP  1
+```
+
+**Functions** (zero-argument, each returning the number): `SIGHUP`, `SIGINT`,
+`SIGQUIT`, `SIGILL`, `SIGABRT`, `SIGFPE`, `SIGKILL`, `SIGSEGV`, `SIGPIPE`,
+`SIGALRM`, `SIGTERM`.
+
+### Loading shared libraries (`std.dl`)
+
+`dlopen`/`dlsym` on POSIX and `LoadLibrary`/`GetProcAddress` on Windows,
+behind one API. It does **not** guess a suffix: `.so`, `.dylib` or `.dll` is
+the caller's choice, made here at compile time with `when target.os`. A
+library or symbol that is not there is an ordinary error value.
+
+```aether,run
+import std.dl
+import std.string
+
+main() {
+    // The C library, under the name each platform gives it: a library's
+    // file name is the platform's business, which is why std.dl never
+    // guesses one. These are macOS, Windows, FreeBSD and glibc Linux.
+    lib = ""
+    when target.os == "darwin" {
+        lib = "/usr/lib/libSystem.B.dylib"
+    } else when target.os == "windows" {
+        lib = "msvcrt.dll"
+    } else when target.os == "freebsd" {
+        lib = "libc.so.7"
+    } else {
+        lib = "libc.so.6"
+    }
+
+    handle, err = dl.open(lib)
+    if string.length(err) > 0 { println("could not open the C library: ${err}"); return }
+    println("opened the C library")
+
+    sym, serr = dl.symbol(handle, "strlen")
+    println("found strlen: ${string.length(serr) == 0 && sym != null}")
+
+    // A name that is not there is an ordinary error value, not a crash.
+    _missing, merr = dl.symbol(handle, "no_such_function_anywhere")
+    println("missing symbol reported: ${string.length(merr) > 0}")
+
+    cerr = dl.close(handle)
+    println("closed: ${string.length(cerr) == 0}")
+
+    _h, oerr = dl.open("definitely-not-a-library-xyz")
+    println("missing library reported: ${string.length(oerr) > 0}")
+}
+```
+```output
+opened the C library
+found strlen: true
+missing symbol reported: true
+closed: true
+missing library reported: true
+```
+
+**Functions:**
+- `dl.open(path)` → `(ptr, string)` - Load a library
+- `dl.symbol(handle, name)` → `(ptr, string)` - Look up a symbol
+- `dl.close(handle)` → `string` - Unload; `""` on success
+- `dl.last_error()` → `string` - The calling thread's last loader error
 
 ## Dates and times (`std.time`)
 
@@ -3034,6 +3504,214 @@ Raw externs: `io_read_file_raw`, `io_write_file_raw`, `io_append_file_raw`, `io_
 
 ---
 
+## Audio (`std.audio`)
+
+Audio playback in the shape of Go's beep: a *source* is the unit of playback,
+and play, pause, seek and volume operate on it. Version 1 decodes WAV and
+raw PCM over a **null backend** -- silent and deterministic -- so everything
+the transport does works headlessly and can be tested without a sound card;
+a real device backend slots in behind the same API. Loading is fallible,
+and positions are in milliseconds.
+
+```aether,run
+import std.audio
+import std.bytes
+
+main() {
+    if !audio.open() { println("no audio: ${audio.last_error()}"); return }
+
+    // Half a second of 16-bit stereo silence at 8 kHz: 4000 frames of
+    // 2 channels x 2 bytes. A source can come from a WAV file (load_wav) or,
+    // as here, from raw PCM the program already has.
+    frames = 4000
+    n = frames * 2 * 2
+    pcm = bytes.new(n)
+    data = bytes.finish(pcm, n)
+    src, err = audio.load_pcm(data, n, 8000, 2, audio.FORMAT_S16)
+    if err != "" { println("load: ${err}"); return }
+
+    println("duration ${audio.duration_ms(src)} ms")
+    println("channels ${audio.channels(src)}, rate ${audio.sample_rate(src)} Hz")
+
+    _v = audio.volume(src, 1.5)                 // clamped to [0, 1]
+    println("volume ${audio.get_volume(src)}")
+
+    _p = audio.play(src)
+    println("playing ${audio.is_playing(src)}")
+    _s = audio.stop(src)                         // halts and rewinds
+    println("after stop: playing ${audio.is_playing(src)}, at ${audio.position_ms(src)} ms")
+
+    audio.unload(src)
+    audio.close()
+}
+```
+```output
+duration 500 ms
+channels 2, rate 8000 Hz
+volume 1
+playing true
+after stop: playing false, at 0 ms
+```
+
+**Functions:**
+- `audio.open()` → `bool`, `audio.close()`, `audio.is_null_backend()` → `bool`
+- `audio.load_wav(data, len)` → `ptr!`, `audio.load_pcm(data, len, rate, channels, format)` → `ptr!` - Fallible: handle the error with `or` or `try`; `format` is one of `FORMAT_U8`, `FORMAT_S16`, `FORMAT_S24`, `FORMAT_S32`, `FORMAT_F32`
+- `audio.play(src)` / `pause` / `stop` → `bool`, `audio.is_playing(src)` → `bool` - `stop` also rewinds
+- `audio.volume(src, v)` → `bool` (clamped to 0-1), `audio.get_volume(src)` → `float`
+- `audio.seek_ms(src, ms)` → `bool`, `position_ms(src)` / `duration_ms(src)` → `long`, `channels(src)` / `sample_rate(src)` → `int`
+- `audio.unload(src)`, `audio.last_error()` → `string`
+
+## Sandboxing
+
+What the sandbox decided, and the operating-system containment FreeBSD
+adds beneath it.
+
+### Sandbox audit trail (`std.audit`)
+
+Every permission check Aether's in-process sandbox makes -- allowed and
+denied -- goes into a ring buffer of the most recent 256, and `std.audit`
+reads it back: to count denials, assert an access pattern in a test, or
+explain why something was blocked. `AETHER_SANDBOX_AUDIT=stderr` prints the
+same checks live with no code at all.
+
+```aether,run
+import std.list
+import std.os
+import std.audit
+
+run_sandboxed(perms: ptr, code: fn) {
+    sandbox_push(perms)
+    sandbox_install()
+    call(code, perms)
+    sandbox_uninstall()
+    sandbox_pop()
+}
+
+main() {
+    // Grant exactly one environment variable.
+    perms = list.new()
+    list.add(perms, "env")
+    list.add(perms, "HOME")
+
+    audit.clear()                      // scope the query to what follows
+    worker = | _ctx: ptr | {
+        os_getenv("HOME")              // granted
+        os_getenv("AWS_SECRET_KEY")    // not granted
+        os_getenv("DATABASE_URL")      // not granted
+    }
+    run_sandboxed(perms, worker)
+
+    // Every check the sandbox made, allowed or denied, in order.
+    n = audit.count()
+    for (i = 0; i < n; i = i + 1) {
+        cat, res, allowed = audit.entry(i)
+        verdict = "deny "
+        if allowed == 1 { verdict = "allow" }
+        println("${verdict} ${cat} ${res}")
+    }
+    println("denied ${audit.denied_count()} of ${n}")
+}
+```
+```output
+allow env HOME
+deny  env AWS_SECRET_KEY
+deny  env DATABASE_URL
+denied 2 of 3
+```
+
+**Functions:**
+- `audit.count()` → `int` - Checks in the buffer
+- `audit.entry(i)` → `(string, string, int)` - Category, resource, and 1 if allowed
+- `audit.denied_count()` → `int`
+- `audit.clear()` - Empty the buffer, to scope a query to one operation
+
+### FreeBSD capability mode (`std.capsicum`)
+
+Capsicum is FreeBSD's kernel-enforced sandbox. After `enter()` a process can
+reach no global namespace -- no new paths, no sockets bound, no PID lookups
+-- only the descriptors it already holds, each narrowed with
+`rights_limit`. Unlike Aether's in-process sandbox, it cannot be escaped
+from userspace. `enter()` is **irreversible** and inherited by children.
+
+**FreeBSD only.** Everywhere else every call returns `CAP_UNSUPPORTED` and
+`available()` is 0, so portable code asks first -- and this example is
+compile-checked rather than run, because what it prints depends on the OS.
+
+```aether
+import std.capsicum
+import std.fs
+
+main() {
+    // Portable code asks first: off FreeBSD every call is CAP_UNSUPPORTED.
+    if capsicum.available() == 0 {
+        println("capsicum: not on this platform; running unconfined")
+        return
+    }
+
+    // Open what the program will need BEFORE entering capability mode:
+    // afterwards the kernel refuses any new path, socket or PID lookup.
+    log, err = fs.open("/var/log/myapp.log", "a")
+    if err != "" { println("open: ${err}"); return }
+
+    // Irreversible, and inherited by children. From here on the process
+    // can act only on the descriptors it already holds.
+    if capsicum.enter() != capsicum.CAP_OK {
+        println("could not enter capability mode")
+        return
+    }
+    println("in capability mode: ${capsicum.in_mode()}")
+    fs.file_close(log)
+}
+```
+
+**Functions:**
+- `capsicum.available()` → `int`, `capsicum.enter()` → `int`, `capsicum.in_mode()` → `int`
+- `capsicum.rights_limit(fd, rights)` / `fcntls_limit(fd, mask)` → `int` - Narrow a descriptor before entering
+- Return codes: `CAP_OK`, `CAP_ERR`, `CAP_UNSUPPORTED`
+- Rights bits for `rights_limit` (`R_READ`, `R_WRITE`, `R_SEEK`, `R_FSTAT`, `R_MMAP`, `R_ACCEPT`, `R_CONNECT`, `R_RECV`, `R_SEND`, ...) and fcntl bits for `fcntls_limit` (`F_GETFL`, `F_SETFL`, `F_GETOWN`, `F_SETOWN`)
+
+### FreeBSD service delegation (`std.casper`)
+
+Inside capability mode a process can no longer resolve a hostname, read
+`/etc/passwd` or query a sysctl. Casper performs those for it, over service
+channels opened **before** the process locks itself down -- the ordering is
+the whole model. FreeBSD only, and compile-checked for the same reason as
+`std.capsicum`.
+
+```aether
+import std.capsicum
+import std.casper
+import std.string
+
+main() {
+    if casper.available() == 0 {
+        println("casper: not on this platform")
+        return
+    }
+
+    // 1. While still unconfined, open the service channels needed later.
+    c = casper.init()
+    net = casper.service(c, "system.net")
+    casper.close(c)                    // keep `net`, drop the parent handle
+
+    // 2. Lock the process down.
+    if capsicum.enter() != capsicum.CAP_OK { println("enter failed"); return }
+
+    // 3. DNS is a global namespace capability mode forbids -- the casper
+    //    daemon performs it on the sandboxed process's behalf.
+    ip, err = casper.dns_resolve(net, "example.com")
+    if string.length(err) > 0 { println("resolve: ${err}"); return }
+    println("example.com is ${ip}")
+    casper.close(net)
+}
+```
+
+**Functions:**
+- `casper.available()` → `int`, `casper.init()` → `ptr`, `casper.service(c, name)` → `ptr`, `casper.close(chan)`
+- `casper.dns_resolve(net, host)` → `(string, string)` - Over a `"system.net"` channel
+- `casper.pwd_uid(pwd, user)` → `int`, `casper.pwd_home(pwd, user)` → `(string, string)` - Over `"system.pwd"`
+- `casper.sysctl(chan, name)` → `(string, string)` - Over `"system.sysctl"`
+
 ## Concurrency
 
 ### Built-in Functions
@@ -3119,6 +3797,223 @@ main() {
 
 Arenas don't track AetherString refcounts, strings allocated through the regular stdlib still need `release()` (or `defer release(...)`); the arena is for bulk raw allocations that the user controls themselves. Avoid handing arena-allocated pointers to functions that retain them past the next `arena.reset()` or `arena.destroy()`.
 
+### Raw memory access (`std.mem`)
+
+Reads and writes a buffer someone else allocated -- a C library's struct, a
+network packet, a memory-mapped file -- at **byte offsets**. `std.bytes` is
+for building up bytes Aether owns; this is for the pointer you were handed.
+There is no bounds check: the caller knows the size, exactly as with POSIX
+`read`/`write`. A null pointer is defended against; an out-of-range offset is
+the caller's to avoid.
+
+Offsets are in bytes, where `std.lanes`' loads take an element index -- the
+two conventions meet whenever a buffer is reached both ways.
+
+```aether,run
+import std.mem
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+main() {
+    // std.mem reads and writes a buffer someone else allocated -- a C
+    // library's struct, a network packet, a memory-mapped file -- at BYTE
+    // offsets. There is no bounds check: the caller knows the size.
+    buf = malloc(16)
+    mem.fill_at(buf, 0, 0, 16)
+
+    mem.set_u32_le(buf, 0, 3405691582)     // 0xCAFEBABE, little-endian
+    mem.set_u16_be(buf, 4, 258)            // 0x0102, big-endian
+    mem.set_byte(buf, 6, 255)
+
+    println("le32 ${mem.get_u32_le(buf, 0)}")
+    println("be16 ${mem.get_u16_be(buf, 4)} first byte ${mem.get_uint8(buf, 4)}")
+    println("byte ${mem.get_uint8(buf, 6)}")
+
+    free(buf)
+}
+```
+```output
+le32 3405691582
+be16 258 first byte 1
+byte 255
+```
+
+**Functions** (the `get_` / `set_` families take the pointer, then a byte offset):
+- `mem.get_byte` / `set_byte`, `get_int8` / `get_uint8` / `get_int16` / `get_uint16` / `get_uint32`, and their `set_` twins - Native-endian scalars
+- `mem.get_byte_sz` / `set_byte_sz` - `get_byte` / `set_byte` with a `size_t` offset, for an index that is already one
+- `mem.get_int` / `get_long` / `get_ptr` / `get_float32` / `get_float64`, and their `set_` twins
+- `mem.get_u16_le` / `get_u16_be` / `get_u32_le` / `get_u32_be` / `get_u64_le` / `get_u64_be`, and their `set_` twins - Explicit byte order, for wire formats
+- `mem.copy(dst, src, n)` / `move(dst, src, n)` / `compare(a, b, n)` / `set(dst, value, n)` - `memcpy`, `memmove`, `memcmp`, `memset`
+- `mem.copy_at` / `move_at` / `fill_at` / `compare_at` - The same with a byte offset on each buffer
+- `mem.bits_of_float` / `float_from_bits`, `mem.clz32` / `clz64`, `mem.udiv64_32` - Bit-level helpers
+- `mem.ptr_to_long(p)` / `long_to_ptr(addr)` - A pointer as a 64-bit address and back, for tagged-pointer arithmetic or storing an integer in a pointer slot
+- `mem.call_fn3_int` / `call_fn3_void` / `call_fn2_void` - Call a C function pointer, for callbacks a C library hands over
+
+### Allocators (`std.alloc`)
+
+An allocator is a value you pass in, so a function that takes one does not
+decide where its memory comes from -- its caller does. The system allocator,
+an arena, and a tracking wrapper around either all fit the same shape, and a
+block is released with the size it was allocated at, which is what lets an
+arena or a size-class allocator skip a header per block.
+
+```aether,run
+import std.alloc
+import std.tracking
+import std.mem
+
+main() {
+    // An allocator is a value you pass in, so a function that takes one
+    // does not decide where its memory comes from -- its caller does.
+    sys = alloc.system()
+
+    // Wrap it to count what is still live: the leak check for a test.
+    t = tracking.wrap(sys)
+
+    a = alloc.raw(t, 64)
+    b = alloc.raw(t, 32)
+    mem.set_byte(a, 0, 7)
+    a = alloc.resize(t, a, 64, 128)
+    println("live ${tracking.count(t)} blocks, ${tracking.bytes(t)} bytes")
+    println("kept the byte across resize: ${mem.get_uint8(a, 0)}")
+
+    alloc.release(t, a, 128)
+    println("after one release: ${tracking.count(t)} live")
+    alloc.release(t, b, 32)
+    println("after both: ${tracking.count(t)} live, ${tracking.bytes(t)} bytes")
+
+    tracking.destroy(t)
+}
+```
+```output
+live 2 blocks, 160 bytes
+kept the byte across resize: 7
+after one release: 1 live
+after both: 0 live, 0 bytes
+```
+
+**Functions:**
+- `alloc.system()` → `ptr` - The process allocator
+- `alloc.of_arena(arena)` → `ptr` - An allocator over a `std.arena` arena; release it with `alloc.arena_free`
+- `alloc.raw(a, size)` → `ptr` - Allocate `size` bytes
+- `alloc.resize(a, block, old_size, new_size)` → `ptr` - Grow or shrink, keeping the contents
+- `alloc.release(a, block, size)` - Free, with the size it was allocated at
+
+### Leak tracking (`std.tracking`)
+
+Wraps any allocator and remembers every live block, so a test can say
+exactly what code under test left behind. Pass the wrapper wherever the code
+takes an allocator; at the end, `report` lists each live allocation on
+stderr and returns how many there are -- zero means nothing leaked.
+
+```aether,run
+import std.alloc
+import std.tracking
+
+// Code that takes an allocator can be handed a tracking one in a test, and
+// the test then knows exactly what was left behind.
+build_cache(a: ptr) -> ptr {
+    header = alloc.raw(a, 16)
+    scratch = alloc.raw(a, 256)
+    alloc.release(a, scratch, 256)      // freed...
+    return header                        // ...but the caller owns this one
+}
+
+main() {
+    t = tracking.wrap(alloc.system())
+    cache = build_cache(t)
+
+    // report() lists every live allocation on stderr and returns how many
+    // there are -- zero means nothing leaked.
+    live = tracking.report(t)
+    println("live after build: ${live} (${tracking.bytes(t)} bytes)")
+
+    alloc.release(t, cache, 16)
+    println("live after release: ${tracking.report(t)}")
+    tracking.destroy(t)
+}
+```
+```output
+live after build: 1 (16 bytes)
+live after release: 0
+```
+
+**Functions:**
+- `tracking.wrap(inner)` → `ptr` - A tracking allocator over `inner` (the system allocator when `inner` is null)
+- `tracking.count(t)` → `int`, `tracking.bytes(t)` → `long` - Live blocks and bytes right now
+- `tracking.report(t)` → `int` - List live allocations on stderr; returns their count
+- `tracking.destroy(t)` - Release the tracker itself (not the blocks it saw)
+
+### Copy-on-write cells (`std.snapshot`)
+
+One atomic pointer to an immutable value, for data read on every request and
+rebuilt rarely -- configuration, routing tables, feature flags. Readers take
+the current value with a **lock-free** load: no lock, no spinning, no
+coordination with the writer. A writer publishes a freshly built replacement.
+
+The part that is easy to get wrong: **the cell never owns what it holds.**
+`store` and `cas` hand back the displaced value, and freeing it is the
+writer's job -- but only once no reader can still be looking at it. The
+example frees it at once because nothing else is reading; a server would
+wait for its readers to move on.
+
+```aether,run
+import std.snapshot
+import std.mem
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+// The published value is an immutable block; here, a routing-table version.
+box(version: int) -> ptr {
+    p = malloc(4)
+    mem.set_int(p, 0, version)
+    return p
+}
+
+main() {
+    v1 = box(1)
+    cell = snapshot.new(v1)
+
+    // Readers take the current value with a lock-free load: no lock, no
+    // spinning, no coordination with the writer.
+    println("readers see version ${mem.get_int(snapshot.load(cell), 0)}")
+
+    // The writer publishes a replacement and gets the displaced value back.
+    // The cell never frees what it holds -- reclaiming the old value, once
+    // no reader can still be looking at it, is the writer's job.
+    v2 = box(2)
+    old = snapshot.store(cell, v2)
+    println("published version 2, displaced ${mem.get_int(old, 0)}")
+
+    // Compare-and-swap publishes only if the value is still the expected one.
+    v3 = box(3)
+    println("cas against a stale value: ${snapshot.cas(cell, old, v3)}")
+    println("cas against the current value: ${snapshot.cas(cell, v2, v3)}")
+    free(old)
+    free(v2)
+    println("readers see version ${mem.get_int(snapshot.load(cell), 0)}")
+
+    free(snapshot.load(cell))
+    snapshot.free(cell)
+}
+```
+```output
+readers see version 1
+published version 2, displaced 1
+cas against a stale value: 0
+cas against the current value: 1
+readers see version 3
+```
+
+**Functions:**
+- `snapshot.new(initial)` → `ptr` - A cell holding `initial`
+- `snapshot.load(cell)` → `ptr` - The current value, lock-free
+- `snapshot.store(cell, value)` → `ptr` - Publish `value`; returns the displaced one
+- `snapshot.cas(cell, expected, value)` → `int` - Publish only if the current value is `expected`; 1 on success
+- `snapshot.free(cell)` - Free the cell, not the values
+
 ### Content-addressed store (`std.cas`)
 
 A small content-addressed store keyed by the hex sha256 of file contents. Useful for sharing built artifacts (`.so` files from `--emit=lib`, signed configs, anything content-addressable) between machines and runs. Puts go through write-tmp + atomic rename so partial writes never appear under the final name; gets re-hash before delivering so a corrupted store entry can't quietly hand back wrong bytes.
@@ -3196,6 +4091,264 @@ v7 version nibble: 7
 The version nibble at index 14 says which generator produced an id, so a
 stored value can always be told apart.
 
+### ULIDs (`std.ulid`)
+
+26 characters of Crockford base32: a 48-bit millisecond timestamp, then
+80 random bits. The timestamp comes first, so ids made later sort later -- as
+plain strings, with no parsing. Two made in the **same** millisecond differ
+only in their random bits and can compare either way, which is why the
+example waits a moment between them.
+
+```aether,run
+import std.ulid
+import std.string
+
+main() {
+    a, err = ulid.generate()
+    if string.length(err) > 0 { println("no entropy: ${err}"); return }
+    // A different millisecond, so the order below is the timestamp's:
+    // two ids made in the SAME millisecond differ only in random bits
+    // and can compare either way.
+    sleep(2)
+    b, _e = ulid.generate()
+
+    // 26 characters of Crockford base32: 48 bits of millisecond timestamp,
+    // then 80 random bits. The timestamp comes first, so ids made later
+    // sort later -- as strings, with no parsing.
+    println("length ${string.length(a)}")
+    println("later sorts later: ${string.compare(a, b) <= 0}")
+}
+```
+```output
+length 26
+later sorts later: true
+```
+
+**Functions:**
+- `ulid.generate()` → `(string, string)` - A new id; the error is non-empty only when the system entropy source fails
+
+### KSUIDs (`std.ksuid`)
+
+27 base62 characters: a 32-bit timestamp in seconds, then 128 random bits.
+Sorts by creation second; within one second, ids are unique but unordered.
+
+```aether,run
+import std.ksuid
+import std.string
+
+main() {
+    a, err = ksuid.generate()
+    if string.length(err) > 0 { println("no entropy: ${err}"); return }
+    b, _e = ksuid.generate()
+
+    // 27 base62 characters: a 32-bit second-resolution timestamp, then 128
+    // random bits. Sorts by creation second; within one second, ids are
+    // unordered but still unique.
+    println("length ${string.length(a)}")
+    println("distinct: ${string.equals(a, b) == 0}")
+}
+```
+```output
+length 27
+distinct: true
+```
+
+**Functions:**
+- `ksuid.generate()` → `(string, string)` - A new id; the error is non-empty only when the system entropy source fails
+
+### TSIDs (`std.tsid`)
+
+13 Crockford base32 characters encoding one 64-bit value -- 42 bits of
+milliseconds since 2020, then randomness -- so it fits a database `BIGINT`
+and sorts by creation time.
+
+```aether,run
+import std.tsid
+import std.string
+
+main() {
+    a, err = tsid.generate()
+    if string.length(err) > 0 { println("no entropy: ${err}"); return }
+    // A different millisecond, so the order below is the timestamp's:
+    // two ids made in the SAME millisecond differ only in random bits
+    // and can compare either way.
+    sleep(2)
+    b, _e = tsid.generate()
+
+    // 13 Crockford base32 characters encoding one 64-bit value: 42 bits of
+    // milliseconds since 2020, then randomness. Fits a database BIGINT, and
+    // sorts by creation time.
+    println("length ${string.length(a)}")
+    println("later sorts later: ${string.compare(a, b) <= 0}")
+}
+```
+```output
+length 13
+later sorts later: true
+```
+
+**Functions:**
+- `tsid.generate()` → `(string, string)` - A new id; the error is non-empty only when the system entropy source fails
+
+### NanoIDs (`std.nanoid`)
+
+21 URL-safe characters (126 random bits): as collision-resistant as a
+UUID v4, shorter, and needing no escaping in a URL. No timestamp, so no
+ordering -- and nothing about when it was made leaks from it.
+
+```aether,run
+import std.nanoid
+import std.string
+
+main() {
+    id, err = nanoid.generate()
+    if string.length(err) > 0 { println("no entropy: ${err}"); return }
+
+    // 21 URL-safe characters (A-Z a-z 0-9 _ -), 126 random bits: as
+    // collision-resistant as a UUID v4, shorter, and needs no escaping in a
+    // URL. No timestamp, so no ordering and nothing to leak.
+    println("default length ${string.length(id)}")
+
+    short, _e = nanoid.generate_n(10)
+    println("custom length ${string.length(short)}")
+}
+```
+```output
+default length 21
+custom length 10
+```
+
+**Functions:**
+- `nanoid.generate()` → `(string, string)` - A new id; the error is non-empty only when the system entropy source fails
+- `nanoid.generate_n(n)` → `(string, string)` - An id of `n` characters
+
+## Internationalisation
+
+Plural rules, message formatting and language-tag matching, following the
+Unicode CLDR and ICU conventions so an application's behaviour matches
+what translators and other platforms expect.
+
+### Plural categories (`std.plural`)
+
+CLDR plural rules: which form of a word a number takes in a given language.
+English has two forms; Russian has four, and "21" takes the same form as
+"1" -- the rules are not guessable, which is why they are data here rather
+than an `if n == 1`.
+
+```aether,run
+import std.plural
+
+main() {
+    // CLDR plural categories: which form of a word a number takes. English
+    // has two; many languages have more, and the rules are not guessable.
+    println("en 1: ${plural.plural_category("en", 1)}")
+    println("en 2: ${plural.plural_category("en", 2)}")
+    println("ru 1: ${plural.plural_category("ru", 1)}")
+    println("ru 3: ${plural.plural_category("ru", 3)}")
+    println("ru 5: ${plural.plural_category("ru", 5)}")
+    println("ru 21: ${plural.plural_category("ru", 21)}")
+    println("ja 7: ${plural.plural_category("ja", 7)}")
+}
+```
+```output
+en 1: one
+en 2: other
+ru 1: one
+ru 3: few
+ru 5: many
+ru 21: one
+ja 7: other
+```
+
+**Functions:**
+- `plural.plural_category(lang, n)` → `string` - `"zero"`, `"one"`, `"two"`, `"few"`, `"many"` or `"other"`
+- `plural.plural_category_decimal(lang, n, i, v, w, f, t)` → `string` - The same for a decimal, given CLDR's operands
+
+### Message formatting (`std.message`)
+
+ICU MessageFormat, with arguments by name and a `plural` that picks the form
+the locale's CLDR rules call for, plus a catalog for the messages an
+application ships. `message` is a keyword -- it names an actor message -- so
+the functions are imported by name rather than called through `message.`.
+
+```aether,run
+// `message` is a keyword, so the module's functions are imported by name
+// rather than called through `message.`.
+import std.message(format)
+import std.map
+
+main() {
+    args = map.new()
+    map.put(args, "name", "Ana")
+    map.put(args, "count", "3")
+
+    // ICU MessageFormat: arguments by name, and a plural that picks the
+    // form the locale's CLDR rules call for.
+    msg = "{name} has {count, plural, one {# file} other {# files}}."
+    println(format("en", msg, args))
+
+    map.put(args, "count", "1")
+    println(format("en", msg, args))
+
+    map.free(args)
+}
+```
+```output
+Ana has 3 files.
+Ana has 1 file.
+```
+
+**Functions:**
+- `format(locale, msg, args)` → `string` - Format a message; `args` is a `std.map` of name to value
+- `parse(msg)` → `(ptr, string)`, `format_pattern(locale, pattern, args)` → `string`, `pattern_free(pattern)` - Parse once, format many times
+- `catalog_new(locale)` → `ptr`, `catalog_add(cat, id, msg)`, `catalog_format(cat, id, args)` → `string`, `catalog_free(cat)` - A message catalog
+
+### Language tags (`std.language`)
+
+BCP 47 tags, parsed and normalised -- `pt-br` and `PT-BR` are the same tag --
+and matched against what an application actually supports. A region the
+application lacks falls back to its base language; nothing usable falls back
+to the first supported tag.
+
+```aether,run
+import std.language
+import std.string
+
+main() {
+    // BCP 47 tags, normalised: "pt-br" and "PT-BR" are the same tag.
+    raw, err = language.parse("pt-br")
+    if err != "" { println("bad tag: ${err}"); return }
+    tag = raw as language.Tag
+    println("normalised ${raw}")
+    println("language ${language.language(tag)}, region ${language.region(tag)}")
+
+    // Match what a user prefers -- an Accept-Language list, best first --
+    // against what the application actually ships. A region the app lacks
+    // falls back to the base language; nothing usable falls back to the
+    // first supported tag.
+    let supported: *StringSeq = ["en-US", "fr", "pt-BR"]
+    m = language.matcher_create(supported)
+    println("de, fr-CA -> ${language.match_strings(m, "de, fr-CA")}")
+    println("pt-br     -> ${language.match_strings(m, "pt-br")}")
+    println("ja        -> ${language.match_strings(m, "ja")}")
+    language.matcher_free(m)
+    string.seq_free(supported)
+}
+```
+```output
+normalised pt-BR
+language pt, region BR
+de, fr-CA -> fr
+pt-br     -> pt-BR
+ja        -> en-US
+```
+
+**Functions:**
+- `language.parse(s)` → `(string, string)` - Normalise a tag; the error names an invalid one
+- `language.language(tag)` / `script(tag)` / `region(tag)` → `string`, `language.base(tag)` → `Tag` - Its parts (`Tag` is a distinct `string`)
+- `language.matcher_create(supported)` → `*Matcher`, `language.matcher_free(m)` - The tags an application supports, best first
+- `language.match_strings(m, preferred)` → `string` - Best match for an `Accept-Language`-style list; `match_tags(m, seq)` for a sequence
+
 ## Process state
 
 Aether deliberately rejects mutable assignment to module-level identifiers, the design philosophy is "if state is mutable, it lives inside an actor or a runtime registry." Two stdlib modules give you the **set-during-init, read-everywhere** shape that BEAM achieves with `persistent_term` and `register/whereis`, without spawning a long-lived actor or paying message round-trip on the read path.
@@ -3267,9 +4420,48 @@ Models BEAM's `erlang:register` / `whereis`. The registry doesn't track actor li
 
 ---
 
+## Embedding in a host (`std.host`)
+
+An Aether script built with `ae build --emit=lib` is a library another
+application loads, and every exported function is a C entry point it calls.
+`std.host` is the script's side of that seam: `notify` sends an event back
+to the host -- only a name and an id cross, the "claim check" pattern, and
+a host that wants detail calls back in through the exports -- and the
+`caller_*` functions read what the host said about the current call.
+
+This block is a library, so it has no `main()`: the host application is
+the program.
+
+```aether,nolink
+import std.host
+
+// Built with `ae build --emit=lib`, this is a library the HOST application
+// loads; every exported function becomes a C entry point it can call.
+export process_order(order_id: long) -> int {
+    // The host describes each call: who is making it, and with what
+    // attributes. A script can refuse work its caller may not ask for.
+    if host.caller_attribute("role") != "fulfilment" {
+        return -1
+    }
+
+    // ... validate and apply the order ...
+
+    // Tell the host something happened. Only an event name and an id cross
+    // the boundary -- the "claim check" pattern: a host that wants detail
+    // calls back in through the exports. Returns 1 if a handler ran, 0 if
+    // the host registered none for this event.
+    return host.notify("order.processed", order_id)
+}
+```
+
+**Functions:**
+- `host.notify(event, id)` → `int` - 1 if the host had a handler for `event`, 0 if not
+- `host.caller_identity()` → `string`, `host.caller_attribute(key)` → `string`, `host.caller_deadline_ms()` → `long` - `""` / 0 outside a host call
+- `host.describe`, `host.input`, `host.event`, `host.bindings`, and the per-language `java` / `python` / `ruby` / `go` helpers - The manifest DSL a namespace's `manifest.ae` uses to describe its ABI
+
 ## See Also
 
 - [Getting Started](getting-started.md)
 - [Tutorial](tutorial.md)
 - [Module System Design](module-system-design.md)
-- [Standard Library API](stdlib-api.md)
+- [Standard Library Guide](stdlib-api.md), where to start by task

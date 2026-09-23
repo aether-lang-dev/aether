@@ -2119,6 +2119,46 @@ static int is_winapi_reserved_name(const char* name) {
     return 0;
 }
 
+/* Object-like macros, and library objects reached through a macro, that the
+ * headers every generated TU includes put at file scope. A local, parameter
+ * or field spelled like one is rewritten by the preprocessor before the C
+ * compiler sees it: `EOF = 1` becomes `(-1) = 1` everywhere, `errno = 5`
+ * becomes an assignment to a function call, and under the Windows UCRT
+ * `stdout = x` becomes `(__acrt_iob_func(1)) = x`. The program type-checked,
+ * and the C compile fails with errors pointing into generated code. glibc
+ * happens to define `stdout` as itself, so that one built on Linux and broke
+ * only on Windows. Mangled on every platform, as the Windows SDK names are,
+ * so a program behaves the same everywhere. Curated to the standard headers
+ * the prelude includes -- <stdio.h>, <stdlib.h>, <stdint.h>, <time.h>, and
+ * <errno.h> through the runtime headers -- plus `environ`, which the UCRT
+ * defines as a macro. */
+static int is_c_header_macro_name(const char* name) {
+    if (!name) return 0;
+    static const char* macros[] = {
+        // <stdio.h>
+        "stdin", "stdout", "stderr", "EOF", "BUFSIZ", "FILENAME_MAX",
+        "FOPEN_MAX", "TMP_MAX", "L_tmpnam", "SEEK_SET", "SEEK_CUR", "SEEK_END",
+        // <stdlib.h>
+        "EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX", "environ",
+        // <errno.h>
+        "errno",
+        // <time.h>
+        "CLOCKS_PER_SEC",
+        // <stdint.h> limits
+        "INT8_MIN", "INT8_MAX", "INT16_MIN", "INT16_MAX",
+        "INT32_MIN", "INT32_MAX", "INT64_MIN", "INT64_MAX",
+        "UINT8_MAX", "UINT16_MAX", "UINT32_MAX", "UINT64_MAX",
+        "INTPTR_MIN", "INTPTR_MAX", "UINTPTR_MAX",
+        "INTMAX_MIN", "INTMAX_MAX", "UINTMAX_MAX",
+        "SIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX",
+        NULL
+    };
+    for (int i = 0; macros[i]; i++) {
+        if (strcmp(name, macros[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 // #976: mangle a value/variable identifier that is a C keyword to a valid C
 // identifier. Non-keywords pass through unchanged, so normal code is emitted
 // verbatim and only the (previously broken) keyword names are rewritten. The
@@ -4102,6 +4142,10 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
 // #976: a value identifier that is a C reserved keyword (`short`, `int`,
 // `char`, `default`, …) is a valid Aether identifier but an invalid C one, so
 // emitting it verbatim breaks the C compile even though `ae check` passed.
+// The same holds for a Windows SDK name and for a macro the prelude's headers
+// define (`stdout`, `errno`, `EOF`), which the preprocessor rewrites; all
+// three are renamed here, except a name the program deliberately imports
+// from C with `extern const ... @c_import`.
 // Rather than thread the mangler through the ~100 codegen sites that emit a
 // variable's name (declarations, references, params, and derived temporaries
 // like `_heap_<name>` / `_seqheap_<name>` / `<name>_len`), rewrite the name
@@ -4129,7 +4173,24 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
 // and method calls are folded to AST_FUNCTION_CALL during parsing, so by
 // codegen an AST_MEMBER_ACCESS is a genuine field read (its non-keyword
 // property accessors — durations, optionals — never match is_c_keyword).
-static void mangle_keyword_value_idents(ASTNode* node) {
+/* Does the program import `name` from C with `extern const NAME: T @c_import`?
+ * Such a name is the C macro itself, emitted verbatim at every use, so it
+ * must keep its C spelling even when it is on one of the lists the pass
+ * below renames: `extern const EOF: int @c_import` reads <stdio.h>'s EOF. */
+static int declares_c_import_const(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    if (node->type == AST_CONST_DECLARATION && node->annotation &&
+        strcmp(node->annotation, "c_import_const") == 0 &&
+        node->value && strcmp(node->value, name) == 0) {
+        return 1;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (declares_c_import_const(node->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
     if (!node) return;
     switch (node->type) {
         case AST_IDENTIFIER:
@@ -4143,7 +4204,9 @@ static void mangle_keyword_value_idents(ASTNode* node) {
         case AST_MEMBER_ACCESS:
         case AST_CONST_DECLARATION:
             if (node->value && (is_c_keyword(node->value) ||
-                                is_winapi_reserved_name(node->value))) {
+                                is_winapi_reserved_name(node->value) ||
+                                is_c_header_macro_name(node->value)) &&
+                !declares_c_import_const(program, node->value)) {
                 char safe[280];
                 snprintf(safe, sizeof(safe), "ae_%s", node->value);
                 char* dup = strdup(safe);
@@ -4158,8 +4221,12 @@ static void mangle_keyword_value_idents(ASTNode* node) {
     }
     if (node->type == AST_SUM_TYPE_DEF) return;  // children are type names
     for (int i = 0; i < node->child_count; i++) {
-        mangle_keyword_value_idents(node->children[i]);
+        mangle_value_idents_in(node->children[i], program);
     }
+}
+
+static void mangle_keyword_value_idents(ASTNode* program) {
+    mangle_value_idents_in(program, program);
 }
 
 static int stdlib_symbol_cmp(const void* key, const void* elem) {
@@ -4631,6 +4698,35 @@ static void emit_source_requirements(CodeGenerator* gen, ASTNode* program) {
     }
 }
 
+/* `// aether-entry: main` when the program defines main(), nothing otherwise.
+ *
+ * Reported the way link, source and include requirements are: as a fact the
+ * driver reads from the generated file's header. `ae` needs it before it
+ * links an executable, because a program with no main() compiles cleanly and
+ * then dies in the LINKER, as `undefined reference to WinMain` from MinGW,
+ * `undefined symbol: main` from ld.lld -- a message about the C runtime that
+ * names nothing the user wrote. `--emit=both` under `--target` used to be
+ * rejected outright partly to avoid exactly that, which only hid it for one
+ * mode on one path. With this, every executable build can say what is wrong.
+ *
+ * Decided here rather than refused by the compiler, because the compiler is
+ * right to compile such a file: a library, an object, emitted C, a
+ * documentation block whose main lives in a host, and every test that runs
+ * `aetherc x.ae out.c` to inspect codegen all legitimately have none. Only
+ * the executable LINK needs one. */
+static void emit_entry_point(CodeGenerator* gen, ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if (c->type == AST_MAIN_FUNCTION ||
+            (c->type == AST_FUNCTION_DEFINITION && c->value &&
+             strcmp(c->value, "main") == 0)) {
+            fputs("// aether-entry: main\n", gen->output);
+            return;
+        }
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -4641,6 +4737,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     emit_link_requirements(gen, program);
     emit_source_requirements(gen, program);
     emit_c_include_dirs(gen, program);
+    emit_entry_point(gen, program);
     // #976: rewrite C-keyword value identifiers to a valid C spelling before
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).

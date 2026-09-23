@@ -100,8 +100,12 @@ fn pattern_free(pat_ptr: ptr) {
 }
 
 fn parse_literal(p: *MessageParser) -> *Node {
+    // The builder is consumed by strbuilder.finish on this function's one
+    // exit. It used to carry a `defer catch strbuilder.free(b)` as well,
+    // which can never run -- the function cannot fail -- and which every
+    // program calling std.message got as a compiler warning pointing into
+    // the standard library.
     b = strbuilder.new(32)
-    defer catch strbuilder.free(b)
 
     while p.pos < p.len {
         c = string_char_at(p.msg, p.pos)
@@ -415,8 +419,9 @@ fn parse(msg: string) -> (ptr, string) {
 }
 
 fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> string {
+    // Consumed by strbuilder.finish on the one exit, as in parse_literal;
+    // the `defer catch` that was here could never run.
     sb = strbuilder.new(64)
-    defer catch strbuilder.free(sb)
 
     sz = list_size(nodes)
     i = 0
