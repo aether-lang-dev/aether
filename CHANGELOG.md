@@ -14,6 +14,90 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.711.0]
+
+### Added
+
+- **`v[i]` on a packed array, through a typed view (#2041).**
+  `intarr.intarr_array(a)` returns an `int[]` over the same buffer (and the
+  `floatarr` / `longarr` twins a `float[]` / `long[]`), so an array-heavy
+  loop reads `v[3] = 42` instead of
+  `intarr.intarr_set_unchecked(a, 3, 42)`. The view **is** the buffer, not
+  a copy: writes through it are writes to the array, and the accessors see
+  them in both directions.
+
+  The issue recorded this as blocked — `[]` on the handle cannot dispatch,
+  because the handle is a bare `ptr` with no element type, and the general
+  fix was taken to be a distinct handle type threaded through three module
+  APIs and every existing caller. It is not needed. A view is typed, so
+  `[]` already works on one, and `std.strarr` has had exactly this shape
+  since it was written (`strarr.array` feeding `sort.strings_by`).
+
+  `v[i]` lowers to the same load `*_get_unchecked` inlines to after #1986,
+  so the readable spelling costs nothing — a point the test asserts, since
+  a view accessor that became an out-of-line call would still "work" while
+  giving back everything that change bought. The view borrows: valid until
+  the handle is freed, with bounds the caller's to respect, exactly as for
+  the unchecked accessors.
+
+- **Worked examples for the six Format-tier `std` modules (#1523):**
+  `bits`, `hash`, `bignum`, `msgpack`, `cbor` and `yaml`. Five are
+  compiling, running programs whose output the doc gate checks; `yaml`'s is
+  compile-checked instead, because the module needs libfyaml at build time
+  and its output depends on how the toolchain was built — the section says
+  so rather than shipping an example that fails for a reason the reader
+  cannot see.
+
+  Each section states what is easy to get wrong rather than only listing
+  functions: that `std.bits` exists because Aether's `int` is signed, so
+  `>>` propagates the sign bit; that a `std.hash` function other than
+  SipHash has no secret, so an attacker who knows which one you use can
+  pick keys that all land in one bucket; that every `std.bignum` operation
+  returns a **new** handle needing its own `free`, and that its
+  public-key set is correct but not constant-time; and that `cbor.stringify`
+  is an alias for `encode` and returns bytes, while `diagnose` is the
+  readable form.
+
+  With the Common tier (#2161), that is 14 of the 37 modules the issue
+  listed. Systems and Niche remain.
+
+### Changed
+
+- **The `[]`-on-a-bare-`ptr` diagnostic now names the view first.** It told
+  the reader to call `intarr.intarr_get_unchecked(a, i)` — correct, but it
+  sent someone who wrote `a[i]` to a function call when `v[i]` was
+  available all along. It now says to take a typed view and index that,
+  and offers the accessor for a single access. The `asks/` reply that
+  deferred this ask carries an update saying so: its reasoning that `[]`
+  cannot work on the *handle* was right, and its conclusion that a distinct
+  handle type was therefore needed was wrong, because the handle is not the
+  only thing you can index. The original text is left as written, because
+  what it got wrong is worth seeing.
+
+### Fixed
+
+- **An interrupted `fmt_gate` run no longer poisons the tree for every run
+  after it.** Its IR tier copies each sampled file to a sibling *inside the
+  source tree* — it has to, because imports resolve relative to the source
+  file's directory — and removed it on the normal path and on the explicit
+  failure paths, but not when the script is killed. A sweep that times out
+  or is interrupted does exactly that, leaving a stray `.ae` under `tests/`
+  that the next run samples and `ae fmt` then reports as unformatted. Found
+  as a real leftover, not hypothetically. The cleanup now covers the
+  signals a kill actually sends rather than `EXIT` alone, and a tree
+  already carrying leftovers heals itself at startup, loudly, instead of
+  failing the gate for a file nobody wrote.
+
+- **`std.longarr`'s element type is `int64_t`, not `long long`.** Aether's
+  `long` lowers to `int64_t`, which on LP64 (every Linux and macOS target)
+  is `long` — and `long long*` and `long*` are *different* pointer types
+  there even though both are 64 bits. The packed-array header declared the
+  buffer as `long long*`, so the view accessor added for #2041 returned one
+  type while the generated C expected the other: a warning on gcc ≤ 13 and
+  a hard error on gcc 14 and Ubuntu 24.04. Windows hid it entirely, where
+  `long` is 32-bit and `int64_t` is `long long`. The header, the `.c` and
+  the collections header now all say `int64_t`.
+
 ## [0.710.0]
 
 ### Added
