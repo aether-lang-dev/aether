@@ -8197,12 +8197,21 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 // compiler. A typed pointer (`*T`, element_type populated),
                 // an array, and a string all index legitimately and are left
                 // alone. The packed-buffer handles (std.intarr / floatarr /
-                // longarr) are bare `ptr`, so `a[i]` on one lands here; steer
-                // the caller to the accessor rather than emitting raw C.
+                // longarr) are bare `ptr`, so `a[i]` on one lands here.
+                //
+                // The advice names the VIEW first (#2041). `[]` cannot work
+                // on the handle -- that is what this diagnostic is about --
+                // but it works on a typed view over the same buffer, so the
+                // reader who wrote `a[i]` can have very nearly what they
+                // wrote rather than being sent to a function call. The
+                // accessors follow, because they are still the right answer
+                // for a single access.
                 if (arr_type && arr_type->kind == TYPE_PTR && !arr_type->element_type) {
                     type_error("`[]` indexing is not defined for `ptr`; a bare "
                                "pointer has no element type. For std.intarr / "
-                               "floatarr / longarr use the accessor, e.g. "
+                               "floatarr / longarr take a typed view and index "
+                               "that: `v = intarr.intarr_array(a)` then `v[i]`. "
+                               "For a single access the accessor is simpler: "
                                "`intarr.intarr_get_unchecked(a, i)` / "
                                "`intarr.intarr_set_unchecked(a, i, v)`",
                                expr->line, expr->column);

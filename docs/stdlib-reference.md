@@ -32,13 +32,13 @@ header comment is the authoritative description.
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
-| `std.floatarr` | Fixed-size packed-double buffer. | 13 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
+| `std.floatarr` | Fixed-size packed-double buffer. | 16 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 158 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 163 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
-| `std.intarr` | Fixed-size packed-int buffer. | 13 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
+| `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 54 | [full section](#json-stdjson) |
@@ -48,7 +48,7 @@ header comment is the authoritative description.
 | `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 44 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
-| `std.longarr` | Fixed-size packed-long buffer. | 13 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
+| `std.longarr` | Fixed-size packed-long buffer. | 16 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
@@ -460,6 +460,24 @@ main() {
 - `intarr_get_raw(arr, i)` / `intarr_set_raw(arr, i, v)` - Safe on OOB (returns 0 / no-op), no error report
 - `intarr_get_unchecked(arr, i)` / `intarr_set_unchecked(arr, i, v)` - Undefined behaviour on OOB, for inner loops
 
+
+**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work —
+the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
+**view** is typed, and does:
+
+```aether,fragment
+a = intarr.intarr_new_raw(n)
+v = intarr.intarr_array(a)      // a `int[]` over the same buffer
+v[3] = 42
+total = total + v[3]
+```
+
+The view *is* the buffer, not a copy, so writes through it are writes to
+the array and the accessors see them (and vice versa). `v[i]` lowers to the
+same load `intarr_get_unchecked` inlines to, so the readable spelling
+costs nothing. It borrows: valid until the handle is freed, and bounds are
+yours to respect, exactly as for the unchecked accessors.
+
 ### Fixed-size float array (`std.floatarr`)
 
 Packed double buffer, the float twin of `std.intarr`. Aether's `float`
@@ -497,6 +515,24 @@ main() {
 **Hot-path (caller-validated) variants, no bounds check:**
 - `floatarr_get_raw(arr, i)` / `floatarr_set_raw(arr, i, v)` - Safe on OOB (returns 0.0 / no-op), no error report
 - `floatarr_get_unchecked(arr, i)` / `floatarr_set_unchecked(arr, i, v)` - Undefined behaviour on OOB, for inner loops
+
+
+**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work —
+the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
+**view** is typed, and does:
+
+```aether,fragment
+a = floatarr.floatarr_new_raw(n)
+v = floatarr.floatarr_array(a)      // a `float[]` over the same buffer
+v[3] = 1.5
+total = total + v[3]
+```
+
+The view *is* the buffer, not a copy, so writes through it are writes to
+the array and the accessors see them (and vice versa). `v[i]` lowers to the
+same load `floatarr_get_unchecked` inlines to, so the readable spelling
+costs nothing. It borrows: valid until the handle is freed, and bounds are
+yours to respect, exactly as for the unchecked accessors.
 
 ### Mutable byte buffer (`std.bytes`)
 
@@ -1511,6 +1547,160 @@ This isn't a hidden roadmap, these are absent because no downstream user has dri
 
 ---
 
+## MessagePack (`std.msgpack`)
+
+A compact binary encoding of the JSON value model. Build a value, `pack` it
+to bytes, `unpack` bytes back into one. Values are handles: freeing a
+container frees what it holds, so one `free` at the top is enough.
+
+```aether,run
+import std.msgpack
+import std.string
+
+main() {
+    // Build a value, pack it to bytes, read it back.
+    m = msgpack.map()
+    defer msgpack.free(m)
+    _r = msgpack.map_set(m, "id", msgpack.from_int(42))
+    _r = msgpack.map_set(m, "name", msgpack.str("widget"))
+
+    packed = msgpack.pack(m)
+    println("packed ${string.length(packed)} bytes")
+
+    back, err = msgpack.unpack(packed)
+    if string.length(err) > 0 { println("bad payload: ${err}"); return }
+    defer msgpack.free(back)
+
+    println("id ${msgpack.get_int(msgpack.map_get(back, "id"))}")
+    println("name ${msgpack.get_string(msgpack.map_get(back, "name"))}")
+    println("keys ${msgpack.map_size(back)}")
+}
+```
+```output
+packed 17 bytes
+id 42
+name widget
+keys 2
+```
+
+**Functions:**
+- `msgpack.nil_value()` / `boolean(b)` / `from_int(n)` / `num(f)` / `str(s)` / `bin(s, len)` → `ptr` - Scalars
+- `msgpack.arr()` / `msgpack.map()` → `ptr`, `msgpack.ext(type, data, len)` → `ptr` - Containers
+- `msgpack.array_add(a, v)`, `msgpack.map_set(m, key, v)` - Build
+- `msgpack.array_size(a)` / `array_get(a, i)`, `msgpack.map_size(m)` / `map_get(m, key)` / `map_get_key(m, i)` / `map_get_value(m, i)` - Read
+- `msgpack.get_type(v)` → `int`, and `get_bool` / `get_int` / `get_float` / `get_string` / `get_bin` - Unwrap
+- `msgpack.pack(v)` → `string`, `msgpack.unpack(bytes)` → `(ptr, string)`
+- `msgpack.free(v)` - Release a value and everything under it
+
+`TYPE_NIL`, `TYPE_BOOL`, `TYPE_INT`, `TYPE_FLOAT`, `TYPE_STR`, `TYPE_BIN`,
+`TYPE_ARRAY`, `TYPE_MAP` and `TYPE_EXT` are what `get_type` returns.
+
+## CBOR (`std.cbor`)
+
+RFC 8949 — the binary shape JSON has, with the same value model, a compact
+encoding, and tags for types JSON cannot express. It is what COSE, WebAuthn
+and a good deal of IoT protocol traffic are built on.
+
+`diagnose` is the one to know about: it renders a value in RFC 8949
+diagnostic notation, which is how to see what an encoding actually contains
+when it is not what you expected. (`stringify` is an alias for `encode` and
+returns bytes, not text.)
+
+```aether,run
+import std.cbor
+import std.string
+
+main() {
+    // CBOR (RFC 8949) is the binary shape JSON has: the same value model,
+    // a compact encoding, and a canonical form suitable for signing.
+    o = cbor.obj()
+    defer cbor.free(o)
+    _e = cbor.set(o, "id", cbor.from_int(42))
+    _e = cbor.set(o, "name", cbor.str("widget"))
+
+    encoded, eerr = cbor.encode(o)
+    if string.length(eerr) > 0 { println("encode: ${eerr}"); return }
+    println("encoded ${string.length(encoded)} bytes")
+
+    back, perr = cbor.parse(encoded)
+    if string.length(perr) > 0 { println("parse: ${perr}"); return }
+    defer cbor.free(back)
+
+    id, _ierr = cbor.object_get(back, "id")
+    println("id ${cbor.get_int(id)}")
+
+    // diagnose() gives RFC 8949 diagnostic notation -- the readable form
+    // to reach for when an encoding is not what you expected. (stringify()
+    // is an alias for encode(), and returns the bytes.)
+    d, _derr = cbor.diagnose(back)
+    println("diag ${d}")
+}
+```
+```output
+encoded 18 bytes
+id 42
+diag {"id": 42, "name": "widget"}
+```
+
+**Functions:**
+- `cbor.from_int(n)` / `num(f)` / `str(s)` / `bytes(s, len)` / `boolean(b)` / `null_value()` / `undefined_value()` → `ptr` - Scalars
+- `cbor.obj()` / `cbor.arr()` → `ptr`, `cbor.tag(n, child)` → `ptr` - Containers and tags
+- `cbor.set(o, key, v)` / `object_set` / `map_set`, `cbor.push(a, v)` / `array_add` - Build
+- `cbor.object_get(o, key)` → `(ptr, string)`, `cbor.map_get`, `cbor.object_size` / `array_size` / `object_entry` - Read
+- `cbor.type(v)` → `int`, `cbor.is_null(v)` / `is_undefined(v)`, and `get_bool` / `get_int` / `get_long` / `get_float` / `get_string` / `get_bytes` / `get_tag_val` / `get_tag_child` - Unwrap
+- `cbor.encode(v)` → `(string, string)`, `cbor.parse(bytes)` → `(ptr, string)`
+- `cbor.diagnose(v)` → `(string, string)` - Diagnostic notation
+- `cbor.free(v)` - Release a value and everything under it
+
+`CBOR_INT`, `CBOR_BYTES`, `CBOR_TEXT`, `CBOR_ARRAY`, `CBOR_MAP`,
+`CBOR_TAG`, `CBOR_SIMPLE` and `CBOR_FLOAT` are what `type` returns.
+
+## YAML (`std.yaml`)
+
+Read-only YAML parsing plus emission, over libfyaml. A document is a handle
+you free; nodes inside it are borrowed from the document and must not
+outlive it.
+
+**This module needs libfyaml at build time.** Where the library is absent
+every entry point returns the error `std.yaml unavailable: this build has
+no libfyaml`, rather than failing to link — so a program that imports it
+still builds, and says so at runtime. That is also why the example below is
+compile-checked rather than run: its output depends on how the toolchain
+was built.
+
+```aether
+import std.yaml
+import std.string
+
+main() {
+    doc, err = yaml.parse("name: widget\nports:\n  - 8080\n  - 8443\n")
+    if string.length(err) > 0 { println("bad yaml: ${err}"); return }
+    defer yaml.free(doc)
+
+    r = yaml.root(doc)
+    println("root is a mapping: ${yaml.type(r) == yaml.YAML_MAPPING}")
+
+    name, _nerr = yaml.get_scalar(yaml.mapping_lookup(r, "name"))
+    println("name ${name}")
+
+    ports = yaml.mapping_lookup(r, "ports")
+    println("ports ${yaml.sequence_size(ports)}")
+    first, _ferr = yaml.get_scalar(yaml.sequence_get(ports, 0))
+    println("first ${first}")
+}
+```
+
+**Functions:**
+- `yaml.parse(s)` → `(ptr, string)` - Parse a document; free it with `yaml.free`
+- `yaml.root(doc)` → `ptr` - The document's root node
+- `yaml.type(node)` → `int` - `YAML_SCALAR`, `YAML_SEQUENCE` or `YAML_MAPPING`
+- `yaml.get_scalar(node)` → `(string, string)` - A scalar's text
+- `yaml.sequence_size(node)` → `int`, `yaml.sequence_get(node, i)` → `ptr`
+- `yaml.mapping_size(node)` → `int`, `yaml.mapping_get_key(node, i)` / `mapping_get_value(node, i)` → `ptr`
+- `yaml.mapping_lookup(node, key)` → `ptr` - Value for a key, `null` when absent
+- `yaml.emit_node(node)` / `yaml.emit_document(doc)` → `(string, string)` - Back to YAML text
+- `yaml.free(doc)` - Release a document
+
 ## XML (`std.xml`)
 
 A deliberately small XML surface: a **pull/SAX reader** and an
@@ -2498,6 +2688,165 @@ seconds between: 2592000
 
 Duration is measured in whole seconds; sub-second precision is a later
 extension.
+
+## Unsigned bit operations (`std.bits`)
+
+Aether's `int` is signed, so `>>` propagates the sign bit and `/` rounds
+toward zero on a negative value. `std.bits` is the unsigned view of the
+same bit patterns, for code that is manipulating bits rather than counting
+with them — hashes, codecs, checksums, anything ported from a language
+with a `uint`.
+
+```aether,run
+import std.bits
+
+main() {
+    // Aether's `int` is signed, so `>>` propagates the sign bit. These are
+    // the UNSIGNED operations, for code that is working with bit patterns
+    // rather than with numbers.
+    x = -1
+    println("lsr32 ${bits.lsr32(x, 28)}")
+    println("rotl32 ${bits.rotl32(1, 1)} rotr32 ${bits.rotr32(1, 1)}")
+    println("popcount ${bits.popcount32(255)} ${bits.popcount64(255)}")
+    println("clz32 ${bits.clz32(1)}")
+
+    // Unsigned division and comparison, where the same bits mean a large
+    // positive value rather than a negative one.
+    println("udiv32 ${bits.udiv32(-2, 3)}")
+    println("wrapping ${bits.wrapping_add64(9223372036854775807, 1)}")
+}
+```
+```output
+lsr32 15
+rotl32 2 rotr32 -2147483648
+popcount 8 8
+clz32 31
+udiv32 1431655764
+wrapping -9223372036854775808
+```
+
+**Functions:**
+- `bits.lsr32(x, n)` / `bits.lsr64(x, n)` → `int` - Logical (zero-filling) right shift
+- `bits.rotr32` / `rotl32` / `rotr64` / `rotl64` `(x, n)` → `int` - Rotate
+- `bits.popcount32(x)` / `bits.popcount64(x)` → `int` - Number of set bits
+- `bits.clz32(x)` / `bits.clz64(x)` → `int` - Leading zero count
+- `bits.udiv32` / `urem32` / `udiv64` / `urem64` `(a, b)` → `int` - Unsigned division and remainder
+- `bits.ucmp64(a, b)` → `int` - Unsigned comparison
+- `bits.wrapping_add64(a, b)` / `bits.wrapping_mul64(a, b)` → `int` - Arithmetic that wraps instead of overflowing
+
+The `aether_bits_*` raw externs are the same entry points under their C
+names.
+
+## Hashing (`std.hash`)
+
+Non-cryptographic hashes for hash tables, checksums and sharding. All are
+deterministic across runs and platforms — the same bytes give the same
+number — and all take an explicit length, so they are binary-safe.
+
+Reach for **SipHash-2-4** whenever the input is attacker-controlled. The
+others have no secret, so an attacker who knows which one you use can pick
+keys that all land in one bucket and turn a hash table into a list; that is
+a denial-of-service, and it is why `siphash24` takes a key.
+
+```aether,run
+import std.hash
+import std.string
+
+main() {
+    key = "cache-key-42"
+    n = string.length(key)
+
+    // Non-cryptographic, for hash tables and checksums. Same input, same
+    // output, every run and every platform.
+    println("fnv32 ${hash.fnv32(key, n)}")
+    println("fnv64 ${hash.fnv64(key, n)}")
+    println("murmur3 ${hash.murmur3_32(key, n, 0)}")
+
+    // SipHash-2-4 takes a 128-bit key, and is the one to reach for when
+    // the input is attacker-controlled: without a secret key, an attacker
+    // can pick inputs that all land in one bucket.
+    println("siphash ${hash.siphash24(key, n, 0, 0)}")
+}
+```
+```output
+fnv32 193060292
+fnv64 6601642739325170724
+murmur3 306734394
+siphash -3624809858559077013
+```
+
+**Functions:**
+- `hash.fnv32(data, length)` → `long`, `hash.fnv64(data, length)` → `long` - FNV-1a, fast and simple
+- `hash.murmur3_32(data, length, seed)` → `long` - MurmurHash3, better distribution
+- `hash.siphash24(data, length, k0, k1)` → `long` - SipHash-2-4 under a 128-bit key
+
+None of these is a cryptographic hash: for integrity or signatures use
+`std.cryptography`.
+
+## Arbitrary-precision integers (`std.bignum`)
+
+Integers with no width limit, as a handle you allocate and free. Every
+operation returns a **new** handle rather than mutating its operands, so
+each result needs its own `free` — `defer bignum.free(x)` at the point of
+creation is the habit that keeps that straight.
+
+```aether,run
+import std.bignum
+import std.string
+
+main() {
+    // Arbitrary-precision integers, as a handle you own and free.
+    a, err = bignum.from_decimal("170141183460469231731687303715884105727")
+    if string.length(err) > 0 { println("bad number: ${err}"); return }
+    defer bignum.free(a)
+
+    b = bignum.from_int(1000003)
+    defer bignum.free(b)
+
+    sum = bignum.add(a, b)
+    defer bignum.free(sum)
+    println(bignum.to_decimal(sum))
+
+    product = bignum.multiply(a, b)
+    defer bignum.free(product)
+    println("digits ${string.length(bignum.to_decimal(product))}")
+
+    // Modular exponentiation, the operation public-key arithmetic is
+    // built on: computed without ever forming base^exp.
+    base = bignum.from_int(7)
+    exp = bignum.from_int(1000)
+    m = bignum.from_int(13)
+    defer bignum.free(base)
+    defer bignum.free(exp)
+    defer bignum.free(m)
+    r = bignum.mod_pow(base, exp, m)
+    defer bignum.free(r)
+    println("7^1000 mod 13 = ${bignum.to_decimal(r)}")
+
+    println("compare ${bignum.compare(a, b)} sign ${bignum.sign(a)} bits ${bignum.bit_length(a)}")
+}
+```
+```output
+170141183460469231731687303715885105730
+digits 45
+7^1000 mod 13 = 9
+compare 1 sign 1 bits 127
+```
+
+**Functions:**
+- `bignum.from_int(n)` → `ptr`, `bignum.from_decimal(s)` → `(ptr, string)`, `bignum.from_bytes(s, len)` / `from_bytes_unsigned` → `ptr` - Construct
+- `bignum.to_decimal(n)` → `string`, `bignum.to_hex(n)` → `string`, `bignum.to_bytes(n)` / `to_bytes_unsigned` → `string` - Render
+- `bignum.add` / `subtract` / `multiply` / `divide` / `remainder` / `mod` `(a, b)` → `ptr` - Arithmetic
+- `bignum.negate(a)` / `bignum.abs(a)` → `ptr`, `bignum.shift_left(a, n)` / `shift_right(a, n)` → `ptr`
+- `bignum.compare(a, b)` → `int`, `bignum.is_zero(a)` / `bignum.sign(a)` / `bignum.bit_length(a)` → `int`
+- `bignum.mod_pow(base, exp, m)` → `ptr` - Modular exponentiation, without forming `base^exp`
+- `bignum.gcd(a, b)` / `bignum.mod_inverse(a, m)` → `ptr`, `bignum.is_probable_prime(n, rounds)` → `int`
+- `bignum.free(n)` - Release a handle
+
+`mod_pow`, `mod_inverse` and `is_probable_prime` are the public-key
+arithmetic set. They are correct, not hardened: they are not written to be
+constant-time, so do not build a production cryptosystem on them —
+`std.cryptography` is where that belongs.
 
 ## Math (`std.math`)
 

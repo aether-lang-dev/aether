@@ -28,7 +28,40 @@ if [ ! -x "$AE" ] || [ ! -x "$AETHERC" ]; then
 fi
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+
+# The IR tier copies each sampled file to a sibling NEXT TO IT, inside the
+# source tree, because imports resolve relative to the source file's
+# directory (the reason is at the copy). That sibling was removed on the
+# normal path and on the explicit failure paths -- but not when the script
+# is KILLED, and a sweep that times out or is interrupted does exactly
+# that. What it leaves behind is a stray `.ae` inside tests/, which the
+# next run then samples and `ae fmt` then reports as unformatted: one
+# interrupted run poisons the tree for every run after it. (Found as a
+# real leftover: tests/integration/extern_tuple_var_passthrough/
+# ._fmt_gate_tmp_964.ae.)
+#
+# So the trap takes the sibling too, and covers the signals a kill
+# actually sends rather than EXIT alone.
+SIBLING=""
+fmt_gate_cleanup() {
+    rm -rf "$TMPDIR"
+    [ -n "$SIBLING" ] && rm -f "$SIBLING"
+    return 0
+}
+# EXIT cleans up. The signals clean up AND EXIT: a trap handler that just
+# returns resumes the script, so on the sweep's SIGTERM this would have
+# carried on with its scratch directory already deleted, skipped the rest
+# in silence and reported [PASS]. A killed run that says it passed is worse
+# than the leftover the trap was added for. 128+N is the shell's own
+# convention for "died of signal N".
+trap 'fmt_gate_cleanup' EXIT
+trap 'fmt_gate_cleanup; exit 129' HUP
+trap 'fmt_gate_cleanup; exit 130' INT
+trap 'fmt_gate_cleanup; exit 143' TERM
+
+# ... and a tree already poisoned by an earlier interrupted run heals
+# itself here, loudly, rather than failing the gate for a file nobody
+# wrote.
 
 # Print the first differing lines of two files with line numbers,
 # then a byte-level hex first-difference. awk/od-based because the
@@ -78,6 +111,16 @@ fmt_gate_ir_sum() {
 
 cd "$ROOT" || exit 1
 
+# A tree poisoned by an earlier interrupted run heals itself here, loudly,
+# rather than failing the gate for a file nobody wrote. After the cd, so the
+# relative paths mean what they say whatever the caller's directory was.
+stale="$(find std examples tests -name '._fmt_gate_tmp_*.ae' 2>/dev/null || true)"
+if [ -n "$stale" ]; then
+    echo "  [note] fmt_gate: removing leftovers from an interrupted run:"
+    printf '%s\n' "$stale" | sed 's/^/           /'
+    printf '%s\n' "$stale" | while read -r leftover; do rm -f "$leftover"; done
+fi
+
 # Tier 1: canonical formatting.
 if ! "$AE" fmt --check std examples tests > "$TMPDIR/check.txt" 2>&1; then
     echo "  [FAIL] fmt_gate: files are not canonically formatted (run: ae fmt std examples tests)"
@@ -117,6 +160,7 @@ while IFS= read -r f; do
     # fixtures for the wrong reason. Deliberate-reject fixtures don't
     # compile; skip them for this tier (they still passed tiers 1+2).
     sibling="$(dirname "$f")/._fmt_gate_tmp_$$.ae"
+    SIBLING="$sibling"   # so a kill between here and the rm below still cleans up
     cp "$f" "$sibling"
     if "$AETHERC" "$sibling" "$base.orig.c" >/dev/null 2>&1; then
         # Compile the UNFORMATTED sibling a second time first: if two
@@ -175,6 +219,7 @@ while IFS= read -r f; do
         IR_CHECKED=$((IR_CHECKED + 1))
     fi
     rm -f "$sibling" "$base.once.ae" "$base.twice.ae" "$base.orig.c" "$base.orig2.c" "$base.fmt.c"
+    SIBLING=""
 done < "$TMPDIR/sample.txt"
 
 echo "  [PASS] fmt_gate: tree canonical; idempotent on $TOTAL sampled files; IR-preserving on $IR_CHECKED"

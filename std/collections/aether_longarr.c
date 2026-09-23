@@ -6,9 +6,9 @@
  * (hash state words, crypto round buffers, wide DP tables) where going
  * through std.list's void*-boxed items would cost an allocation per
  * entry and chase an extra pointer. Aether's `long` lowers to C
- * `long long`, so the element type is `long long` end-to-end.
+ * `int64_t`, so the element type is `int64_t` end-to-end.
  *
- * Shape is as minimal as it gets: heap-allocate size*long long, store a
+ * Shape is as minimal as it gets: heap-allocate size*int64_t, store a
  * size next to it, expose direct index ops plus a bulk-fill. No
  * amortised growth, no capacity-beyond-size. Callers that need resize
  * on write use std.list. */
@@ -21,7 +21,7 @@
 LongArray* longarr_new_raw(int size) {
     if (size < 0) return NULL;
     /* #463: cap-aware. The struct is sizeof(LongArray); the data
-     * array is size×sizeof(long long). Both byte counts are recoverable
+     * array is size×sizeof(int64_t). Both byte counts are recoverable
      * at free time from `arr->size`. */
     LongArray* arr = (LongArray*)aether_caps_malloc(sizeof(*arr));
     if (!arr) return NULL;
@@ -30,12 +30,12 @@ LongArray* longarr_new_raw(int size) {
         arr->data = NULL;   // legal empty array; longarr_free still OK
         return arr;
     }
-    arr->data = (long long*)aether_caps_calloc((size_t)size, sizeof(long long));
+    arr->data = (int64_t*)aether_caps_calloc((size_t)size, sizeof(int64_t));
     if (!arr->data) { aether_caps_free(arr, sizeof(*arr)); return NULL; }
     return arr;
 }
 
-LongArray* longarr_new_filled_raw(int size, long long init) {
+LongArray* longarr_new_filled_raw(int size, int64_t init) {
     LongArray* arr = longarr_new_raw(size);
     if (!arr) return NULL;
     for (int i = 0; i < size; i++) arr->data[i] = init;
@@ -46,12 +46,12 @@ int longarr_size(LongArray* arr) {
     return arr ? arr->size : -1;
 }
 
-long long longarr_get_raw(LongArray* arr, int i) {
+int64_t longarr_get_raw(LongArray* arr, int i) {
     if (!arr || i < 0 || i >= arr->size) return 0;
     return arr->data[i];
 }
 
-void longarr_set_raw(LongArray* arr, int i, long long value) {
+void longarr_set_raw(LongArray* arr, int i, int64_t value) {
     if (!arr || i < 0 || i >= arr->size) return;
     arr->data[i] = value;
 }
@@ -60,15 +60,15 @@ void longarr_set_raw(LongArray* arr, int i, long long value) {
  * aether_collections.h (#1986), for the same reason as the int and float
  * twins: the definition must be visible where the indexing happens. */
 
-void longarr_fill(LongArray* arr, long long value) {
+void longarr_fill(LongArray* arr, int64_t value) {
     if (!arr || arr->size == 0) return;
     for (int i = 0; i < arr->size; i++) arr->data[i] = value;
 }
 
 void longarr_free(LongArray* arr) {
     if (!arr) return;
-    /* data was calloc'd size×sizeof(long long) (NULL for the empty
+    /* data was calloc'd size×sizeof(int64_t) (NULL for the empty
      * array, where caps_free is a no-op). */
-    aether_caps_free(arr->data, (size_t)arr->size * sizeof(long long));
+    aether_caps_free(arr->data, (size_t)arr->size * sizeof(int64_t));
     aether_caps_free(arr, sizeof(*arr));
 }
