@@ -450,6 +450,27 @@ main() {
         }
     }
 
+    // A float binding holds what Ruby's Float#to_s writes, and reads back as
+    // the same number in arithmetic.
+    spec.describe(fw, "liquid: float bindings") {
+        spec.it(fw, "prints and computes floats as Liquid does") callback {
+            t, _ = liquid.parse_string("{{ a }}|{{ b }}|{{ b | times: 2 }}|{{ a | plus: 1 }}")
+            ctx = liquid.context_new()
+            liquid.context_put_float(ctx, "a", 3.0)
+            liquid.context_put_float(ctx, "b", 1.0e20)
+            out, _e = liquid.render(t, ctx)
+            liquid.context_free(ctx)
+            spec.assert_str_eq(out, "3.0|1.0e+20|2.0e+20|4.0", "f1 float spelling and arithmetic")
+        }
+
+        spec.it(fw, "prints a result past a double's range as Infinity") callback {
+            big = "1"
+            k = 0
+            while k < 320 { big = string.concat(big, "0"); k = k + 1 }
+            spec.assert_str_eq(render_x("{{ x | times: 10.0 }}", big), "Infinity", "f3 overflow")
+        }
+    }
+
     spec.describe(fw, "liquid: html and slicing filters") {
         spec.it(fw, "drops tags but keeps their text") callback {
             spec.assert_str_eq(render_x("{{ x | strip_html }}", "a<b>bold</b>c<br/>d"),

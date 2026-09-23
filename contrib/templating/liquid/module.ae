@@ -29,6 +29,7 @@ import std.encoding
 import std.fs
 import std.path
 import std.mem
+import std.bignum
 
 exports (
     parse_string, parse_file,
@@ -310,6 +311,22 @@ count_lines_to(src: string, n: int, end: int) -> int {
 
 // `loc_suffix` builds " at line N" — appended to lex error messages so
 // users can find the unterminated delimiter in long templates.
+// Does a tag or output body contain a control character other than tab,
+// CR or LF? No Liquid syntax uses one, and refusing them at the lexer keeps
+// every name a template can bind or read printable -- which is what makes
+// the context's internal keys (partial_cache_key) unreachable from a
+// template, for writes (assign, capture, for, ...) as well as reads.
+has_control_char(s: string) -> int {
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if c < 32 && c != 9 && c != 10 && c != 13 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
 loc_suffix(src: string, n: int, off: int) -> string {
     return string.concat(" at line ", string.from_int(count_lines_to(src, n, off) + 1))
 }
@@ -361,6 +378,12 @@ lex(src: string) -> (ptr, string) {
                     return toks, string.concat("unterminated `{{`", loc_suffix(src, n, open_at))
                 }
                 raw_body = string.substring_n(src, n, open_at + 2, close_at)
+                if has_control_char(raw_body) == 1 {
+                    toks = list_new()
+                    list_add_raw(toks, kinds)
+                    list_add_raw(toks, contents)
+                    return toks, string.concat("control character inside a tag", loc_suffix(src, n, open_at))
+                }
                 body, ls = peel_left_dash(raw_body)
                 body, rs = peel_right_dash(body)
                 body = trim(body)
@@ -382,6 +405,12 @@ lex(src: string) -> (ptr, string) {
                     return toks, string.concat("unterminated `{%`", loc_suffix(src, n, open_at))
                 }
                 raw_body = string.substring_n(src, n, open_at + 2, close_at)
+                if has_control_char(raw_body) == 1 {
+                    toks = list_new()
+                    list_add_raw(toks, kinds)
+                    list_add_raw(toks, contents)
+                    return toks, string.concat("control character inside a tag", loc_suffix(src, n, open_at))
+                }
                 body, ls = peel_left_dash(raw_body)
                 body, rs = peel_right_dash(body)
                 body = trim(body)
@@ -1224,12 +1253,7 @@ int_text(neg: int, idigits: string) -> string {
 // one fraction digit kept ("3.10" -> "3.1", "4." -> "4.0"), the sign kept
 // even on zero ("-0.0"), as Ruby does.
 float_text(neg: int, idigits: string, fdigits: string) -> string {
-    frac = fdigits
-    if string_length(frac) == 0 { frac = "0" }
-    body = string.concat(string.concat(idigits, "."), frac)
-    if neg == 1 { body = string.concat("-", body) }
-    d, _derr = string.to_double(body)
-    return ruby_float_text(d)
+    return ddecimal_out(neg, dstrip(string.concat(idigits, fdigits)), string_length(fdigits))
 }
 
 // Is any fraction digit non-zero?
@@ -1279,9 +1303,9 @@ filter_round(val: string, places: int) -> string {
 // Liquid's arithmetic runs on Ruby numbers: Integers are unbounded, a
 // decimal operand makes a BigDecimal, and a BigDecimal result is printed
 // through Float (`to_f`). So the math filters work here on exact decimals
-// held as digit strings -- a sign, an unsigned mantissa without leading
-// zeros, and a scale (digits after the point) -- and print a decimal result
-// the way Ruby prints the Float nearest to it (ruby_float_text).
+// -- a sign, an unsigned mantissa (decimal digits, arithmetic by std.bignum)
+// and a scale (digits after the point) -- and print a decimal result the
+// way Ruby prints the Float nearest to it (ruby_float_text).
 
 // Strip leading zeros from a digit string, keeping one ("007" -> "7").
 dstrip(d: string) -> string {
@@ -1294,76 +1318,39 @@ dstrip(d: string) -> string {
 
 // Compare two stripped digit strings as magnitudes: -1, 0 or 1.
 dcmp(a: string, b: string) -> int {
-    an = string_length(a)
-    bn = string_length(b)
-    if an != bn {
-        if an < bn { return -1 }
-        return 1
-    }
-    i = 0
-    while i < an {
-        ca = string.char_at_n(a, an, i)
-        cb = string.char_at_n(b, bn, i)
-        if ca != cb {
-            if ca < cb { return -1 }
-            return 1
-        }
-        i = i + 1
-    }
+    x, _xe = bignum.from_decimal(a)
+    y, _ye = bignum.from_decimal(b)
+    c = bignum.compare(x, y)
+    bignum.free(x)
+    bignum.free(y)
+    if c < 0 { return -1 }
+    if c > 0 { return 1 }
     return 0
 }
 
-// Reverse a string (the digit arithmetic below builds results backwards).
-drev(r: string) -> string {
-    rn = string_length(r)
-    sb = strbuilder.new(rn + 1)
-    j = rn - 1
-    while j >= 0 {
-        strbuilder.append(sb, string.from_char(string.char_at_n(r, rn, j)))
-        j = j - 1
-    }
-    return strbuilder.finish(sb)
-}
 
 // a + b for digit strings.
 dadd(a: string, b: string) -> string {
-    an = string_length(a)
-    bn = string_length(b)
-    rev = strbuilder.new(an + bn + 2)
-    i = an - 1
-    j = bn - 1
-    carry = 0
-    while i >= 0 || j >= 0 || carry > 0 {
-        sum = carry
-        if i >= 0 { sum = sum + string.char_at_n(a, an, i) - 48 }
-        if j >= 0 { sum = sum + string.char_at_n(b, bn, j) - 48 }
-        carry = 0
-        if sum >= 10 { sum = sum - 10; carry = 1 }
-        strbuilder.append(rev, string.from_char(sum + 48))
-        i = i - 1
-        j = j - 1
-    }
-    return dstrip(drev(strbuilder.finish(rev)))
+    x, _xe = bignum.from_decimal(a)
+    y, _ye = bignum.from_decimal(b)
+    r = bignum.add(x, y)
+    out = bignum.to_decimal(r)
+    bignum.free(x)
+    bignum.free(y)
+    bignum.free(r)
+    return out
 }
 
 // a - b for digit strings, a >= b.
 dsub(a: string, b: string) -> string {
-    an = string_length(a)
-    bn = string_length(b)
-    rev = strbuilder.new(an + 1)
-    i = an - 1
-    j = bn - 1
-    borrow = 0
-    while i >= 0 {
-        diff = string.char_at_n(a, an, i) - 48 - borrow
-        if j >= 0 { diff = diff - (string.char_at_n(b, bn, j) - 48) }
-        borrow = 0
-        if diff < 0 { diff = diff + 10; borrow = 1 }
-        strbuilder.append(rev, string.from_char(diff + 48))
-        i = i - 1
-        j = j - 1
-    }
-    return dstrip(drev(strbuilder.finish(rev)))
+    x, _xe = bignum.from_decimal(a)
+    y, _ye = bignum.from_decimal(b)
+    r = bignum.subtract(x, y)
+    out = bignum.to_decimal(r)
+    bignum.free(x)
+    bignum.free(y)
+    bignum.free(r)
+    return out
 }
 
 // `d` followed by `k` zeros (d * 10^k).
@@ -1376,36 +1363,33 @@ dshift(d: string, k: int) -> string {
     return strbuilder.finish(sb)
 }
 
-// a * b for digit strings (schoolbook: one scaled partial sum per digit).
+// a * b for digit strings.
 dmul(a: string, b: string) -> string {
-    if string.equals(a, "0") == 1 || string.equals(b, "0") == 1 { return "0" }
-    bn = string_length(b)
-    total = "0"
-    j = 0
-    while j < bn {
-        digit = string.char_at_n(b, bn, j) - 48
-        total = dshift(total, 1)
-        k = 0
-        while k < digit { total = dadd(total, a); k = k + 1 }
-        j = j + 1
-    }
-    return total
+    x, _xe = bignum.from_decimal(a)
+    y, _ye = bignum.from_decimal(b)
+    r = bignum.multiply(x, y)
+    out = bignum.to_decimal(r)
+    bignum.free(x)
+    bignum.free(y)
+    bignum.free(r)
+    return out
 }
 
-// (a / b, a mod b) for digit strings, b != "0" (long division).
+// (a / b, a mod b) for digit strings, b != "0".
 ddivmod(a: string, b: string) -> (string, string) {
-    an = string_length(a)
-    qb = strbuilder.new(an + 1)
-    r = "0"
-    i = 0
-    while i < an {
-        r = dstrip(string.concat(r, string.from_char(string.char_at_n(a, an, i))))
-        q = 0
-        while dcmp(r, b) >= 0 { r = dsub(r, b); q = q + 1 }
-        strbuilder.append(qb, string.from_char(q + 48))
-        i = i + 1
-    }
-    return dstrip(strbuilder.finish(qb)), r
+    // Both operands are magnitudes, so bignum's truncating division is the
+    // floor the callers need.
+    x, _xe = bignum.from_decimal(a)
+    y, _ye = bignum.from_decimal(b)
+    q = bignum.divide(x, y)
+    r = bignum.remainder(x, y)
+    qs = bignum.to_decimal(q)
+    rs = bignum.to_decimal(r)
+    bignum.free(x)
+    bignum.free(y)
+    bignum.free(q)
+    bignum.free(r)
+    return qs, rs
 }
 
 // Signed a + b where both have the same scale: (negative, mantissa).
@@ -1417,13 +1401,53 @@ dsigned_add(an: int, am: string, bn: int, bm: string) -> (int, string) {
     return bn, dsub(bm, am)
 }
 
+// The exponent of a Float's scientific spelling, `-?d.d+e[+-]d+` (what
+// ruby_float_text writes past the fixed range, and so what a float binding
+// holds): (1, exponent) when `v` is exactly that shape, else (0, 0).
+float_exponent(v: string) -> (int, int) {
+    t = trim(v)
+    n = string_length(t)
+    e = string.index_of_from_n(t, n, "e", 0)
+    if e < 0 { return 0, 0 }
+    mant = string.substring_n(t, n, 0, e)
+    is_dec, _neg, _i, _f = number_parts(mant)
+    if is_dec == 0 { return 0, 0 }
+    etext = string.substring_n(t, n, e + 1, n)
+    en = string_length(etext)
+    if en < 2 { return 0, 0 }
+    c0 = string.char_at_n(etext, en, 0)
+    if c0 != 43 && c0 != 45 { return 0, 0 }
+    k = 1
+    while k < en {
+        c = string.char_at_n(etext, en, k)
+        if c < 48 || c > 57 { return 0, 0 }
+        k = k + 1
+    }
+    ev, eerr = string.to_int(string.substring_n(etext, en, 1, en))
+    if eerr != "" { return 0, 0 }
+    if c0 == 45 { ev = 0 - ev }
+    return 1, ev
+}
+
 // A number as (is_decimal, negative, mantissa, scale), read as Liquid reads
-// it (number_parts).
+// it (number_parts), plus a Float's exponent spelling (float_exponent): a
+// float binding holds `1.0e+20`, and that is the number 1e20, not 1.
 dparse(v: string) -> (int, int, string, int) {
-    is_dec, neg, idigits, fdigits = number_parts(v)
+    has_exp, ev = float_exponent(v)
+    text = v
+    if has_exp == 1 {
+        tt = trim(v)
+        text = string.substring_n(tt, string_length(tt), 0, string.index_of_from_n(tt, string_length(tt), "e", 0))
+    }
+    is_dec, neg, idigits, fdigits = number_parts(text)
     m = dstrip(string.concat(idigits, fdigits))
+    scale = string_length(fdigits) - ev
+    if scale < 0 {
+        m = dshift(m, 0 - scale)
+        scale = 0
+    }
     if string.equals(m, "0") == 1 { neg = 0 }
-    return is_dec, neg, m, string_length(fdigits)
+    return is_dec, neg, m, scale
 }
 
 // Decimal text for (negative, mantissa, scale): "-12.340".
@@ -1549,7 +1573,17 @@ ruby_float_text(v: float) -> string {
 
 // A decimal result, printed through Float as Liquid prints it.
 ddecimal_out(neg: int, m: string, scale: int) -> string {
-    d, _derr = string.to_double(dtext(neg, m, scale))
+    d, derr = string.to_double(dtext(neg, m, scale))
+    if derr != "" {
+        // Beyond a double's range: Ruby's to_f gives Infinity for a value
+        // too large and zero for one too small, each with its sign.
+        if string_length(m) - scale > 0 {
+            if neg == 1 { return "-Infinity" }
+            return "Infinity"
+        }
+        if neg == 1 { return "-0.0" }
+        return "0.0"
+    }
     return ruby_float_text(d)
 }
 
@@ -3622,7 +3656,10 @@ render_include_tag(outer_ctx: ptr, rest: string, strict: int) -> (string, string
         // Walk past the closing quote of the name, then expect optional
         // `, k: v, ...` pairs.
         args_ctx, aerr = parse_render_args(outer_ctx, rest, close_q + 1)
-        if aerr != "" { return "", aerr }
+        if aerr != "" {
+            if owned == 1 { template_free(t) }
+            return "", aerr
+        }
         child = args_ctx
         // Carry the include-root through so `render` inside `render`
         // works without forcing the caller to set it twice -- and the
@@ -3862,8 +3899,21 @@ render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
     return strbuilder.finish(sb), ""
 }
 
-// Free the layout parents a render parsed without a partial cache.
-free_layout_parents(owned: ptr) {
+// Free what a layout chain holds: its lists, each level's block map, and
+// the parents it parsed without a partial cache (a cached parent belongs to
+// the cache, and level 0 is the caller's template).
+free_layout_chain(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
+                  seen: ptr, owned: ptr) {
+    nb = list_size(chain_blocks)
+    i = 0
+    while i < nb {
+        map_free(list_get_raw(chain_blocks, i))
+        i = i + 1
+    }
+    list_free(chain_blocks)
+    list_free(chain_kinds)
+    list_free(chain_contents)
+    string_list_free(seen)
     n = list_size(owned)
     i = 0
     while i < n {
@@ -3904,22 +3954,31 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
     levels = 0
     while cur_lay >= 0 {
         if depth + levels >= MAX_INCLUDE_DEPTH {
+            free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", "layout: recursion depth limit (100) exceeded"
         }
         // This level's blocks, from after its layout tag.
         blocks, cerr = collect_child_blocks(cur_kinds, cur_contents, cur_lay + 1, cur_n)
-        if cerr != "" { return "", cerr }
+        if cerr != "" {
+            map_free(blocks)
+            free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
+            return "", cerr
+        }
         list_add_raw(chain_kinds, cur_kinds)
         list_add_raw(chain_contents, cur_contents)
         list_add_raw(chain_blocks, blocks)
         levels = levels + 1
 
         resolved, perr = resolve_partial_path(root, cur_parent)
-        if perr != "" { return "", perr }
+        if perr != "" {
+            free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
+            return "", perr
+        }
         k = 0
         ns = string_list_size(seen)
         while k < ns {
             if string.equals(string_list_get(seen, k), resolved) == 1 {
+                free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
                 return "", string.concat("layout: cycle through ", cur_parent)
             }
             k = k + 1
@@ -3927,15 +3986,15 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
         string_list_add(seen, resolved)
         parent_t, ferr, terr, owned = load_partial(ctx, resolved)
         if ferr != "" {
-            free_layout_parents(owned_parents)
+            free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", string.concat("layout: cannot read parent: ", cur_parent)
         }
         if owned == 1 { list_add_raw(owned_parents, parent_t) }
         if terr != "" {
-            free_layout_parents(owned_parents)
             msg = string.concat("layout parse error in ", cur_parent)
             msg = string.concat(msg, ": ")
             msg = string.concat(msg, terr)
+            free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", msg
         }
         cur_kinds = list_get_raw(parent_t, 0)
@@ -3943,6 +4002,7 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
         cur_n = string_list_size(cur_kinds)
         next_lay, next_name, lerr = layout_target(cur_kinds, cur_contents, cur_n)
         if lerr != "" {
+            free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", string.concat(string.concat(string.concat("layout ", cur_parent), ": "), lerr)
         }
         cur_lay = next_lay
@@ -3957,7 +4017,7 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
     out, rerr = render_base_with_chain(cur_kinds, cur_contents, cur_n,
                                        chain_kinds, chain_contents, chain_blocks, levels, ctx)
     map_put(ctx, KEY_INCLUDE_DEPTH, string.from_int(depth))
-    free_layout_parents(owned_parents)
+    free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
     if rerr != "" {
         msg = string.concat("layout render of ", cur_parent)
         msg = string.concat(msg, " failed: ")
@@ -4055,8 +4115,12 @@ value_int(i: int) -> string {
     return string.concat("i:", string.from_int(i))
 }
 
+// A float is kept as Ruby writes it (ruby_float_text): every digit that
+// round-trips, `3.0` rather than `3`, `1.0e+20` past the fixed range --
+// which is also what `{{ x }}` prints, as in Liquid. (It was `%g`: six
+// significant digits, and a whole float printed as an integer.)
 value_float(f: float) -> string {
-    return string.concat("f:", string.from_float(f))
+    return string.concat("f:", ruby_float_text(f))
 }
 
 value_str(s: string) -> string {

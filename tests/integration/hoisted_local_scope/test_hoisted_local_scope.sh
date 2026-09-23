@@ -3,10 +3,14 @@
 # is readable after the block in every function, not only in main, and
 # exactly where codegen hoists it.
 #
-# Codegen hoists such a local to the enclosing scope (hoist_if_branch_vars
-# for the arms of a function body's top-level ifs, hoist_loop_vars for a
-# while body). The typechecker gave every block its own scope, so the read
-# after it resolved only through names the early inference pass had left in
+# Codegen hoists such a local to an enclosing scope by three rules, now
+# defined once in compiler/analysis/hoist.c and used by both codegen and the
+# typechecker: the arm locals of a function body's top-level ifs that a
+# top-level statement reads (hoist_if_branch_vars), the names both arms of an
+# if/else declare (hoist_if_else_common_vars), and a while body's locals,
+# nested ones included (hoist_loop_vars). The typechecker gave every block
+# its own scope, so the read after it resolved only through names the early
+# inference pass had left in
 # the program table -- which it did for main, whose locals it never popped,
 # and never for any other function:
 #
@@ -62,6 +66,19 @@ count_to(n: int) -> int {
     return last + seen_one
 }
 
+// An if/else nested in a while body: both arms bind the name, so it is
+// declared before the loop and readable inside it after the if.
+labels() -> string {
+    out = ""
+    i = 0
+    while i < 3 {
+        if i == 0 { label = "a" } else { label = "b" }
+        out = "${out}${label}"
+        i = i + 1
+    }
+    return out
+}
+
 // Bound in both arms with different numeric kinds: the read after the if
 // sees the joined type, as codegen's hoisted declaration has it.
 widen(c: int) -> float {
@@ -77,6 +94,7 @@ main() {
     if pick(1) != "A" || pick(2) != "B" { println("FAIL pick"); exit(1) }
     if count_to(3) != 3 { println("FAIL count_to: ${count_to(3)}"); exit(1) }
     if widen(2) != 2.5 { println("FAIL widen: ${widen(2)}"); exit(1) }
+    if labels() != "abb" { println("FAIL labels: ${labels()}"); exit(1) }
     println("PASS")
 }
 AE
@@ -105,5 +123,24 @@ if "$AE" build "$WORK/nested.ae" -o "$WORK/nested" > "$WORK/nested.log" 2>&1; th
 fi
 grep -q "Undefined variable 'deep'" "$WORK/nested.log" \
     || { sed 's/^/    /' "$WORK/nested.log" | head -10; fail "expected the typechecker's Undefined variable 'deep'"; }
+
+# An arm local read only inside a later if's body is not hoisted by codegen
+# (no top-level statement reads it), so the read is the typechecker's error
+# too -- not a C compiler's "'x' undeclared".
+cat > "$WORK/later_if.ae" <<'AE'
+f(a: int, b: int) {
+    if a == 1 { x = 5 }
+    if b == 1 { println("${x}") }
+}
+
+main() {
+    f(1, 1)
+}
+AE
+if "$AE" build "$WORK/later_if.ae" -o "$WORK/later_if" > "$WORK/later_if.log" 2>&1; then
+    fail "a read the C cannot make compiled"
+fi
+grep -q "Undefined variable 'x'" "$WORK/later_if.log" \
+    || { sed 's/^/    /' "$WORK/later_if.log" | head -10; fail "expected the typechecker's Undefined variable 'x', not a C error"; }
 
 echo "  [PASS] hoisted_local_scope: branch and loop locals readable after their block wherever codegen hoists them"

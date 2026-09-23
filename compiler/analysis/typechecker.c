@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "typechecker.h"
+#include "hoist.h"
 #include "type_inference.h"
 #include "../aether_strmap.h"
 #include "actor_reply.h"
@@ -3452,10 +3453,10 @@ static ASTNode* g_enum_program = NULL;
 // pointer, never freed here.
 static Type* g_tc_return_type = NULL;
 
-/* #2186: the body of the function (or main) being checked. An `if` whose
- * arms' locals codegen hoists is a direct child of it (hoist_if_branch_vars
- * works on the function body's top-level statements only). */
+/* #2186: the body of the function (or main) being checked -- codegen's
+ * hoist_scope_body, over which a hoisted local's type is joined. */
 static ASTNode* g_tc_fn_body = NULL;
+static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table);
 
 
 static int is_enum_type_name(const char* name) {
@@ -4553,9 +4554,14 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             return 1;
         }
         case AST_MAIN_FUNCTION: {
+            /* main's own scope, under the program table, like a function's,
+             * so the locals codegen hoists to main's top have one (#2186). */
             ASTNode* saved_fn_body = g_tc_fn_body;
             g_tc_fn_body = node->child_count > 0 ? node->children[0] : NULL;
-            int ok = typecheck_statement(node, table);
+            SymbolTable* main_table = create_symbol_table(table);
+            if (g_tc_fn_body) declare_if_branch_hoists(g_tc_fn_body, main_table);
+            int ok = typecheck_statement(node, main_table);
+            free_symbol_table(main_table);
             g_tc_fn_body = saved_fn_body;
             return ok;
         }
@@ -5712,6 +5718,7 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     g_tc_return_type = func->node_type;
     ASTNode* saved_fn_body = g_tc_fn_body;
     g_tc_fn_body = body;
+    declare_if_branch_hoists(body, func_table);   /* #2186 */
     typecheck_statement(body, func_table);
     g_tc_fn_body = saved_fn_body;
     g_tc_return_type = saved_ret;
@@ -5787,58 +5794,60 @@ static int bound_in_local_scope(SymbolTable* table, const char* name) {
     return 0;
 }
 
-/* Bind `d`, a declaration first made inside an `if` arm or loop body, in
- * `table`, the scope codegen hoists it to, so it can be read after the
- * block as the C code can. A name already bound there joins the numeric
- * type the way codegen's hoisted declaration does (#2124). */
-static void bind_hoisted_local(ASTNode* d, SymbolTable* table) {
-    if (!d || d->type != AST_VARIABLE_DECLARATION || !d->value) return;
-    if (strcmp(d->value, "_") == 0) return;
-    if (!d->node_type || d->node_type->kind == TYPE_UNKNOWN) return;
-    Symbol* own = lookup_symbol_local(table, d->value);
-    if (own) {
-        if (own->branch_hoisted && own->type) {
-            Type* joined = numeric_join_type(own->type, d->node_type);
-            if (joined) { free_type(own->type); own->type = joined; }
-        }
-        return;
-    }
-    if (bound_in_local_scope(table, d->value) || !table->parent) return;
-    add_symbol(table, d->value, clone_type(d->node_type), 0, 0, 0);
-    Symbol* s = lookup_symbol_local(table, d->value);
+/* #2186: declare `name` in `table` where codegen declares it -- the rules
+ * are hoist.h's, shared with codegen, so a read the C allows is a read the
+ * checker allows, and no other. Typed as codegen types the hoisted
+ * declaration: `decl`'s type (the early inference pass's), joined over the
+ * function body. Skipped, as codegen skips it, when the name is already a
+ * local here or a program-level variable. */
+static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t) {
+    if (!table || !table->parent || !name || !t) return;
+    if (bound_in_local_scope(table, name)) return;
+    SymbolTable* root = table;
+    while (root->parent) root = root->parent;
+    Symbol* g = lookup_symbol_local(root, name);
+    if (g && !g->is_function && !g->is_module_alias) return;
+    Type* joined = hoist_join_type(g_tc_fn_body, name, t);
+    add_symbol(table, name, joined ? joined : clone_type(t), 0, 0, 0);
+    Symbol* s = lookup_symbol_local(table, name);
     if (s) s->branch_hoisted = 1;
 }
 
-/* The locals codegen hoists out of a while body: its direct declarations
- * and, recursively, those of the ifs and loops nested in it
- * (hoist_loop_vars). */
-static void bind_loop_body_locals(ASTNode* body, SymbolTable* table) {
-    if (!body) return;
-    for (int i = 0; i < body->child_count; i++) {
-        ASTNode* c = body->children[i];
-        if (!c) continue;
-        if (c->type == AST_VARIABLE_DECLARATION) bind_hoisted_local(c, table);
-        if (c->type == AST_IF_STATEMENT || c->type == AST_WHILE_LOOP ||
-            c->type == AST_FOR_LOOP) {
-            for (int j = 0; j < c->child_count; j++) bind_loop_body_locals(c->children[j], table);
-        }
+/* Function (or main) entry: hoist_if_branch_vars's names. */
+static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table) {
+    const char* names[HOIST_MAX_NAMES];
+    int n = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
+    for (int i = 0; i < n; i++) {
+        declare_hoisted_local(table, names[i],
+                              hoist_decl_type(hoist_if_branch_first_decl(body, names[i])));
     }
 }
 
-/* The locals codegen hoists out of a top-level if: the direct declarations
- * of its then / else blocks (hoist_if_branch_vars). */
-static void bind_if_arm_locals(ASTNode* ifs, SymbolTable* table) {
-    if (!ifs || !g_tc_fn_body) return;
-    int top = 0;
-    for (int i = 0; i < g_tc_fn_body->child_count; i++) {
-        if (g_tc_fn_body->children[i] == ifs) { top = 1; break; }
+/* Before an if/else: hoist_if_else_common_vars's names (both arms declare
+ * them), typed from the then arm, else from the else arm. */
+static void declare_if_else_hoists(ASTNode* ifs, SymbolTable* table) {
+    if (!ifs || ifs->child_count < 3) return;
+    ASTNode* then_body = ifs->children[1];
+    ASTNode* else_body = ifs->children[2];
+    const char* then_names[HOIST_MAX_NAMES];
+    int tc = hoist_direct_decl_names(then_body, then_names, 0, HOIST_MAX_NAMES);
+    const char* else_names[HOIST_MAX_NAMES];
+    int ec = hoist_direct_decl_names(else_body, else_names, 0, HOIST_MAX_NAMES);
+    for (int i = 0; i < tc; i++) {
+        int in_else = 0;
+        for (int j = 0; j < ec; j++) {
+            if (strcmp(then_names[i], else_names[j]) == 0) { in_else = 1; break; }
+        }
+        if (!in_else) continue;
+        Type* t = hoist_decl_type(hoist_find_decl(then_body, then_names[i]));
+        if (!t) t = hoist_decl_type(hoist_find_decl(else_body, then_names[i]));
+        declare_hoisted_local(table, then_names[i], t);
     }
-    if (!top) return;
-    for (int j = 1; j < ifs->child_count && j < 3; j++) {
-        ASTNode* arm = ifs->children[j];
-        if (!arm || arm->type != AST_BLOCK) continue;
-        for (int k = 0; k < arm->child_count; k++) bind_hoisted_local(arm->children[k], table);
-    }
+}
+
+/* Before a while: hoist_loop_vars's names. */
+static void declare_loop_hoist(ASTNode* decl, void* user) {
+    declare_hoisted_local((SymbolTable*)user, decl->value, hoist_decl_type(decl));
 }
 
 /* #893: enclosing loop labels, for validating `break label` / `continue
@@ -6871,6 +6880,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
         }
 
         case AST_IF_STATEMENT: {
+            /* #2186: names both arms declare are declared before the if,
+             * where codegen declares them (hoist_if_else_common_vars). */
+            declare_if_else_hoists(stmt, table);
             ASTNode* narrow_var = NULL;
             int narrow_then = 1;
             if (stmt->child_count >= 1) {
@@ -6909,7 +6921,6 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     typecheck_statement(branch, table);
                 }
             }
-            bind_if_arm_locals(stmt, table);   /* #2186 */
             return 1;
         }
         
@@ -6952,6 +6963,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
         }
         
         case AST_WHILE_LOOP: {
+            /* #2186: the body's locals are declared before the loop, where
+             * codegen declares them (hoist_loop_vars). */
+            if (stmt->child_count > 1) hoist_loop_decls(stmt->children[1], declare_loop_hoist, table);
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
                 typecheck_expression(condition, table);
@@ -6972,9 +6986,6 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_statement(stmt->children[i], table);
             }
             tc_pop_loop_label();
-            /* #2186: the locals codegen hoists out of the body
-             * (hoist_loop_vars) can be read after the loop. */
-            if (stmt->child_count > 1) bind_loop_body_locals(stmt->children[1], table);
             return 1;
         }
 
