@@ -288,8 +288,8 @@ exec(cmd: string) -> {
 //             non-empty only when the child couldn't be started. On
 //             POSIX a missing program is found by exec inside the
 //             forked child, so the parent sees status 127 with no err;
-//             on Windows CreateProcessW fails in the parent, so it is
-//             (-1, "spawn failed").
+//             on Windows the program is looked up in the parent, so it is
+//             (-1, "program not found").
 //
 // Argv-based — no shell, no quoting issues. The status slot lets
 // callers distinguish "ran cleanly" (status == 0) from "ran but

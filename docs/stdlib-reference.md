@@ -2884,17 +2884,21 @@ with spaces or an argument holding `$` or `;` arrives exactly as written.
   still sees the program itself as its `argv[0]`.
 - `env` is a list of `"KEY=VALUE"` strings, or `null` to inherit this
   process's environment.
-- On POSIX, a program named without a `/` is looked up on `PATH`.
+- A program named without a path separator is looked up on `PATH`, and
+  only there. On Windows a name without an extension is tried with each of
+  `PATHEXT`'s (`.exe`, `.bat`, ...). The current directory is not searched
+  on any platform, so a `git.exe` someone left where the program runs is
+  never the `git` it meant.
 
-**Windows is different in two ways that matter for untrusted input.** A
-Windows process receives one command line, not a list; `std.os` quotes each
-argument by the rules the C runtime uses to split it back apart, so an
-ordinary program sees exactly the arguments you passed. But the program
-itself is found by `CreateProcessW`, which searches the application's
-directory and the current directory **before** `PATH`, and a `.bat` or
-`.cmd` it finds runs under `cmd.exe`, which reads the command line by its
-own rules and not the C runtime's. So on Windows, name the program by its
-full path, and do not pass user input to a batch file.
+A Windows process receives one command line, not a list. `std.os` quotes
+each argument by the rules the C runtime uses to split it back apart, so an
+ordinary program sees exactly the arguments passed. A `.bat` or `.cmd` is
+different: it runs under `cmd.exe`, which reads the line by its own rules.
+`std.os` launches it through the system `cmd.exe` with every argument
+quoted for cmd, so `a & b` arrives as the one argument `"a & b"`. An
+argument holding a `"`, a `%` or a line break is refused: cmd still acts on
+those inside quotes, and no quoting makes them safe. The call returns the
+error `argument cannot be passed to a batch file safely`, and nothing runs.
 
 A child that ran and failed and a child that never started are told apart.
 `err` is non-empty only when the child could not be started; `grep` finding
@@ -2903,7 +2907,7 @@ exit status. A child killed by a signal reports 128 plus the signal number,
 the shell's convention. One platform difference: on POSIX a program that is
 not there fails inside the child after the fork, so it reads as status 127
 with no error, while on Windows it fails before any child exists and comes
-back as status -1 with `err` set.
+back as status -1 with `err` set to `program not found`.
 
 Process execution is native on Windows (`CreateProcessW` and Job Objects),
 with two exceptions. `os_execv` does not exist there and returns -1, and the
