@@ -289,6 +289,76 @@ main() {
         }
     }
 
+    // abs / ceil / floor / round follow the reference implementation's
+    // Utils.to_number: `-?digits.digits` is a decimal (a BigDecimal there),
+    // anything else is read as Ruby's to_i reads it. Rounding is decimal,
+    // half away from zero, so 1.005 rounds to 1.01 as in Liquid, not to
+    // 1.0 as binary floating point would.
+    spec.describe(fw, "liquid: rounding and absolute value") {
+        spec.it(fw, "floors and ceils to an integer") callback {
+            spec.assert_str_eq(render_x("{{ x | floor }}", "3.7"), "3", "1 floor")
+            spec.assert_str_eq(render_x("{{ x | ceil }}", "3.2"), "4", "2 ceil")
+            spec.assert_str_eq(render_x("{{ x | floor }}", "-3.2"), "-4", "3 floor negative")
+            spec.assert_str_eq(render_x("{{ x | ceil }}", "-3.7"), "-3", "4 ceil negative")
+            spec.assert_str_eq(render_x("{{ x | ceil }}", "-0.5"), "0", "5 ceil to zero has no sign")
+            spec.assert_str_eq(render_x("{{ x | floor }}", "7"), "7", "6 floor of an integer")
+            spec.assert_str_eq(render_x("{{ x | ceil }}", "4.000"), "4", "7 ceil of a whole decimal")
+        }
+
+        spec.it(fw, "rounds half away from zero") callback {
+            spec.assert_str_eq(render_x("{{ x | round }}", "3.5"), "4", "8 round half up")
+            spec.assert_str_eq(render_x("{{ x | round }}", "2.4"), "2", "9 round down")
+            spec.assert_str_eq(render_x("{{ x | round }}", "-2.5"), "-3", "10 round negative half")
+            spec.assert_str_eq(render_x("{{ x | round }}", "-0.4"), "0", "11 round to zero has no sign")
+            spec.assert_str_eq(render_x("{{ x | round }}", "9.5"), "10", "12 round carries")
+        }
+
+        spec.it(fw, "rounds to N places in decimal, not binary") callback {
+            spec.assert_str_eq(render_x("{{ x | round: 2 }}", "3.14159"), "3.14", "13 round: 2")
+            spec.assert_str_eq(render_x("{{ x | round: 2 }}", "1.005"), "1.01", "14 decimal half")
+            spec.assert_str_eq(render_x("{{ x | round: 2 }}", "9.999"), "10.0", "15 carry through the point")
+            spec.assert_str_eq(render_x("{{ x | round: 2 }}", "3.1"), "3.1", "16 no padding zeros")
+            spec.assert_str_eq(render_x("{{ x | round: 1 }}", "99.95"), "100.0", "17 carry to a new digit")
+            spec.assert_str_eq(render_x("{{ x | round: 2 }}", "-0.004"), "-0.0", "18 negative zero, as Ruby prints it")
+            spec.assert_str_eq(render_x("{{ x | round: 2 }}", "5"), "5", "19 an integer stays an integer")
+            spec.assert_str_eq(render_x("{{ x | round: \"2\" }}", "2.675"), "2.68", "20 quoted places")
+        }
+
+        spec.it(fw, "refuses a negative number of places") callback {
+            spec.assert_not_eq(string.length(render_x_err("{{ x | round: -1 }}", "3.7")), 0,
+                "21 round: -1: expected error")
+        }
+
+        spec.it(fw, "takes the magnitude in the input's own shape") callback {
+            spec.assert_str_eq(render_x("{{ x | abs }}", "-5"), "5", "22 abs integer")
+            spec.assert_str_eq(render_x("{{ x | abs }}", "-5.50"), "5.5", "23 abs decimal prints as a float")
+            spec.assert_str_eq(render_x("{{ x | abs }}", "4"), "4", "24 abs identity")
+        }
+
+        spec.it(fw, "reads non-numeric text as Ruby's to_i does") callback {
+            spec.assert_str_eq(render_x("{{ x | abs }}", "abc"), "0", "25 no digits is 0")
+            spec.assert_str_eq(render_x("{{ x | floor }}", "12px"), "12", "26 leading digits")
+            spec.assert_str_eq(render_x("{{ x | round }}", " 7 "), "7", "27 surrounding space")
+        }
+    }
+
+    // Numeric arguments are written bare in Liquid (`plus: 3`), and a number
+    // literal is a literal wherever a value goes, negative and decimal ones
+    // included.
+    spec.describe(fw, "liquid: number literals") {
+        spec.it(fw, "accepts bare numeric filter arguments") callback {
+            spec.assert_str_eq(render_x("{{ x | plus: 3 }}", "10"), "13", "28 plus: 3")
+            spec.assert_str_eq(render_x("{{ x | times: -2 }}", "7"), "-14", "29 times: -2")
+        }
+
+        spec.it(fw, "renders decimal and negative literals") callback {
+            spec.assert_str_eq(render_x("{{ 3.7 }}", ""), "3.7", "30 decimal literal")
+            spec.assert_str_eq(render_x("{{ 3.7 | floor }}", ""), "3", "31 decimal literal through a filter")
+            spec.assert_str_eq(render_x("a {{ -5 }} b", ""), "a -5 b", "32 a minus sign is not a trim marker")
+            spec.assert_str_eq(render_x("a {{- -5 }} b", ""), "a-5 b", "33 the trim marker still trims")
+        }
+    }
+
     spec.describe(fw, "liquid: html and slicing filters") {
         spec.it(fw, "drops tags but keeps their text") callback {
             spec.assert_str_eq(render_x("{{ x | strip_html }}", "a<b>bold</b>c<br/>d"),

@@ -1,0 +1,18 @@
+// Regression: `fn` spells every top-level function, `main` included.
+//
+// `fn name(...)` is recognised by shape -- `fn`, an identifier, `(` -- and
+// `main` is a keyword token rather than an identifier, so `fn main()` was the
+// one function the spelling could not declare: "Unexpected identifier at top
+// level". This file is its own test: it only compiles if `fn main()` does.
+
+fn helper(x: int) -> int {
+    return x + 1
+}
+
+fn main() {
+    if helper(1) != 2 {
+        println("FAIL: helper(1) = ${helper(1)}")
+        exit(1)
+    }
+    println("PASS")
+}

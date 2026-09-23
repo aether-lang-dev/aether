@@ -6903,6 +6903,19 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         break;
                     }
                 }
+                /* `fn main()`: `main` is a keyword token, not an identifier,
+                 * so the shape above never matched it and `fn main()` was the
+                 * one function `fn` could not spell ("unexpected identifier
+                 * at top level"). */
+                if (token->value && strcmp(token->value, "fn") == 0 &&
+                    next && next->type == TOKEN_MAIN) {
+                    Token* after = peek_ahead(parser, 2);
+                    if (after && after->type == TOKEN_LEFT_PAREN) {
+                        advance_token(parser);  // consume `fn`
+                        node = parse_main_function(parser);
+                        break;
+                    }
+                }
                 if (next && next->type == TOKEN_LEFT_PAREN) {
                     // Function without 'func' keyword
                     node = parse_function_definition(parser);

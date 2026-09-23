@@ -53,8 +53,9 @@ All of the following have integration tests in
   context.
 - `{{ "literal string" }}` — string literals (single or double quotes).
 - `{{ 42 }}` — integer literals.
-- `{{ x | filter | filter2:arg | filter3:'a','b' }}` — filter chains
-  with positional args.
+- `{{ 3.7 }}`, `{{ -5 }}` — decimal and negative number literals.
+- `{{ x | filter | filter2: 2 | filter3: 'a', 'b' }}` — filter chains
+  with positional args: quoted strings or bare numbers.
 
 ### Tags
 
@@ -113,12 +114,17 @@ md5  sha1  sha256  base64_encode  base64_decode
 escape_xml  json_escape
 ```
 
-`abs` preserves the input shape (`5` → `5`, `5.5` → `5.5`); `ceil`,
-`floor`, and `round` (no-arg) always emit an integer string
-(`{{ 3.7 | floor }}` → `"3"`). `round:N` (fixed-precision float) is
-deferred until std.string grows a printf-style formatter —
-`string.from_float` uses `%g` which drops trailing zeros, breaking
-the `round:N` contract.
+The numeric filters read their input as Liquid does: text that is exactly
+`-?digits.digits` is a decimal, anything else is read as Ruby's `to_i`
+reads it (`"12px"` is 12, `"abc"` is 0). `ceil`, `floor` and `round` give an
+integer (`{{ 3.7 | floor }}` is `3`, `{{ -2.5 | round }}` is `-3`: halves
+round away from zero). `round: N` rounds a decimal to N places and prints it
+as Liquid does, without padding zeros but with at least one fraction digit
+(`{{ 3.14159 | round: 2 }}` is `3.14`, `{{ 9.999 | round: 2 }}` is `10.0`),
+and it rounds in decimal, so `{{ 1.005 | round: 2 }}` is `1.01`. `abs` keeps
+the input's shape (`-5` is `5`, `-5.50` is `5.5`). The integer arithmetic
+filters (`plus` .. `at_most`) stay in integers: `10 | divided_by: 3` is
+`3`.
 
 Unknown filter names pass the input through unchanged (Shopify
 behaviour, not an error). `divided_by:"0"` and `modulo:"0"` raise
@@ -142,11 +148,8 @@ stringified for `{{ x }}` interpolation via the canonical
 `value_to_string`. A typed binding shadows a same-name legacy
 `context_put_string` regardless of bind order.
 
-**Array and object setters (`context_put_array` / `_object`) plus
-dotted-and-bracketed path access (`items[0]`, `user.name`,
-`.size`/`.first`/`.last`) are deferred to Phase 2** — they need a
-heap-retention story for the std.list / std.map backing storage that
-survives the encoding round-trip. See `TODO.md` for the punch list.
+Arrays and objects in the context are not available yet (#2177), and
+so neither is path access into them (#2178).
 
 ### Lexer / parse errors
 
@@ -207,27 +210,25 @@ is in scope. Without `--with=fs`, the build fails with the standard
 capability-empty error. Verified by
 `tests/integration/liquid_sandbox_gate/`.
 
-## What's NOT supported
+## What's not supported yet
 
-- `for x in array_var` over a non-range iterable (Phase 2; ranges
-  `(0..9)` work today).
-- Dotted attribute access `{{ user.name }}` (Phase 2).
-- Bracket index `{{ items[0] }}` (Phase 2).
-- `.size` / `.first` / `.last` on bindings (Phase 2 — only on the
-  Phase-1 typed surface via direct `value_*` calls).
-- Array filters: `sort`, `uniq`, `map:"prop"`, `where`,
-  `compact`, `concat:array2`, `split:":"` (→ array). All require
-  the Phase-2 typed-array surface.
-- `round` / `ceil` / `floor` / `abs` — need float-aware value model
-  (Phase 2).
-- `date` — currently identity. Real strftime needs a clock + format
-  parser; out of scope until a real downstream user asks.
-- Multi-level `{% layout %}` chain (child → middle → base). We have
-  single-level.
-- Partial caching: each `{% include %}` re-reads from disk.
+Each has its own issue.
 
-See `TODO.md` "`contrib.templating.liquid`" section for the full
-deferred list.
+- Arrays and objects in the render context: the value model the next
+  three need (#2177).
+- Path access: `{{ user.name }}`, `{{ items[0] }}`, `.size` / `.first` /
+  `.last` (#2178).
+- `{% for x in items %}` over a bound array; ranges `(1..5)` work
+  today (#2179).
+- Array filters: `split`, `join`, `first`, `last`, `sort`, `uniq`, `map`,
+  `where`, `compact`, `concat` (#2180). Until then, as unknown filters,
+  they pass their input through unchanged.
+- `date`: passes its input through unchanged (#2181).
+- A filter argument that names a variable, `{{ price | times: qty }}`:
+  rejected at render (#2182).
+- Layout inheritance deeper than one level (#2183).
+- Caching parsed partials: each `{% include %}` reads and parses its file
+  again (#2184).
 
 ## Performance notes
 
@@ -236,9 +237,9 @@ deferred list.
 - Strings are `std.string` (refcounted heap strings); the renderer
   uses `std.strbuilder` for output accumulation so output assembly
   is O(N).
-- Includes are uncached — partials are re-read and re-parsed per
-  render. For a static-site generator that uses 100 partials, this
-  is the long-pole cost. (Caching is a Phase-2 follow-up.)
+- Includes are uncached: partials are read and parsed again at every
+  use. For a static-site generator that uses 100 partials, this is the
+  long-pole cost (#2184).
 
 ## Testing
 
