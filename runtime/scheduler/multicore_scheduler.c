@@ -198,9 +198,27 @@ static inline void aether_step_safe(ActorBase* actor) {
         }
     }
 
-    // Release step_lock so the dead-actor check in future iterations can
-    // proceed without contention. (step_lock is a TAS lock; we clear it.)
-    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+    /* step_lock is NOT released here (#2163). This function does not
+     * acquire it -- all seven call sites take it before calling and clear
+     * it after -- so clearing it on the panic path handed the lock away
+     * while the caller still believed it held it:
+     *
+     *   1. this clears the flag;
+     *   2. another thread acquires it and starts stepping the same actor;
+     *   3. the caller clears it again on its way out, releasing a lock it
+     *      no longer owns;
+     *   4. a third thread enters, and two are now stepping one actor.
+     *
+     * Two threads in one actor's step is heap corruption -- it showed up
+     * as `free(): invalid pointer` in the #2083 regression test. Four of
+     * the call sites also step in a loop under a single acquisition, so
+     * the lock was being dropped mid-loop.
+     *
+     * The comment this replaces justified the clear as letting "the
+     * dead-actor check in future iterations proceed without contention".
+     * That check is the atomic_load(&actor->dead) at the top of this
+     * function, which returns before touching the lock at all, so it
+     * never needed the lock released to make progress. */
     aether_fire_death_hook(actor->id, reason);
 }
 

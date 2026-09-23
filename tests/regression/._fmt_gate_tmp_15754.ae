@@ -1,0 +1,60 @@
+// Regression: #1044 enum-indexed arrays. `[E]T` is a fixed array with one slot
+// per member of enum E, indexed by an E value (not a raw int). Sized to the
+// enum's member range at compile time; a plain C array, zero runtime cost.
+//   let labels: [Dir]string = ["n", "e", "s", "w"]   // one value per member
+//   labels[Dir.North]                                 // indexed by the enum
+// Compile-error paths (wrong value count, non-enum index type, raw-int index)
+// are checked out-of-band. Local vars and top-level `const` with positional
+// init are supported; array-typed parameters and empty `[]` init share the
+// pre-existing fixed-size-array limitations and are not exercised here.
+import std.io
+
+enum Dir { N, E, S, W }
+enum Level { Low = 1, Mid = 5, High = 9 } // explicit, sparse values
+
+// top-level const lookup table
+const LABELS: [Dir] string = ["north", "east", "south", "west"]
+
+check_str(got: string, want: string, lbl: string) -> int {
+    if got != want { println("FAIL ${lbl}: got ${got} want ${want}"); return 1 }
+    return 0
+}
+check_int(got: int, want: int, lbl: string) -> int {
+    if got != want { println("FAIL ${lbl}: ${got} != ${want}"); return 1 }
+    return 0
+}
+
+main() {
+    var fails = 0
+
+    // read a const lookup table by enum member
+    fails = fails + check_str(LABELS[Dir.N], "north", "const N")
+    fails = fails + check_str(LABELS[Dir.W], "west", "const W")
+
+    // local table, indexed by an enum-typed variable
+    let labels: [Dir] string = ["n", "e", "s", "w"]
+    let d = Dir.S
+    fails = fails + check_str(labels[d], "s", "var index")
+
+    // element assignment
+    var t: [Dir] string = ["n", "e", "s", "w"]
+    t[Dir.N] = "NORTH"
+    fails = fails + check_str(t[Dir.N], "NORTH", "assign N")
+    fails = fails + check_str(t[Dir.E], "e", "unchanged E")
+
+    // sparse explicit values: the array spans 0..max member value (High = 9),
+    // so it has 10 slots; indexing by the members lands on the right ones
+    var scores: [Level] int = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    scores[Level.Low] = 10
+    scores[Level.High] = 90
+    fails = fails + check_int(scores[Level.Low], 10, "Low")
+    fails = fails + check_int(scores[Level.High], 90, "High")
+    fails = fails + check_int(scores[Level.Mid], 0, "Mid untouched")
+
+    if fails == 0 {
+        println("PASS: enum_indexed_array")
+    } else {
+        println("FAILED: ${fails}")
+        exit(1)
+    }
+}

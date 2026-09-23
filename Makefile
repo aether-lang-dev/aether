@@ -2554,7 +2554,9 @@ help:
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
-	@echo "  make check-changelog  - Catch a CHANGELOG release-fold before pushing"
+	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
+	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
+	@echo "  make collect-changelogs - Fold settled fragments into CHANGELOG.md"
 	@echo "  make test-fast      - Run C tests (monolithic build)"
 	@echo "  make test-install   - Install smoke test (init + run)"
 	@echo "  make test-valgrind  - Run tests with Valgrind"
@@ -2811,10 +2813,48 @@ CONTRIB_HOST_STRICT ?= 0
 # module. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
 # README that is labelled complete, and asserts the ones labelled `fails`
 # still fail.
-.PHONY: check-docs check-changelog check-tests
+.PHONY: check-docs check-changelog check-tests add-changelog collect-changelogs
 
 check-changelog:
 	@sh tests/scripts/check_changelog_fold.sh
+	@py=""; \
+	for cand in python3 python "py -3"; do \
+	    if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
+	done; \
+	if [ -n "$$py" ]; then \
+	    $$py tests/scripts/collect_changelogs.py --check; \
+	else \
+	    echo "changelog fragments: no python3, skipped"; \
+	fi
+
+# Write a changelog fragment (#2002). A PR drops a file of its own in
+# new_changelogs/ instead of editing the shared `## [current]` lines, which
+# is exactly what a release renames out from under every open branch.
+#
+#   make add-changelog SECTION=fixed SLUG=2162-struct-collision
+add-changelog:
+	@if [ -z "$(SLUG)" ]; then \
+	    echo "usage: make add-changelog SECTION=<added|changed|fixed|removed|security|performance> SLUG=<issue-and-words>"; \
+	    exit 1; \
+	fi
+	@mkdir -p new_changelogs
+	@f="new_changelogs/$$(date -u +%Y%m%dT%H%M%SZ)-$(or $(SECTION),fixed)-$(SLUG).md"; \
+	printf -- '- **Say what changed, and why it mattered.**\n' > "$$f"; \
+	echo "wrote $$f"
+
+# Fold settled fragments into CHANGELOG.md. This is what the daily job runs;
+# a release runs it with --all, because cutting a release must not leave a
+# merged change unrecorded.
+collect-changelogs:
+	@py=""; \
+	for cand in python3 python "py -3"; do \
+	    if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
+	done; \
+	if [ -n "$$py" ]; then \
+	    $$py tests/scripts/collect_changelogs.py ; \
+	else \
+	    echo "changelog fragments: no python3, skipped"; \
+	fi
 
 check-docs: compiler ae stdlib
 	@echo "==================================="

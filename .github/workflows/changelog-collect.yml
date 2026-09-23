@@ -1,0 +1,106 @@
+# Fold settled changelog fragments into CHANGELOG.md (#2002).
+#
+# A PR drops a file in new_changelogs/ rather than editing the shared
+# `## [current]` lines, because those lines are what a release renames --
+# which is how an open branch's entry silently ends up inside an
+# already-released section. This job is the other half: once a fragment has
+# sat for the cooling-off window, it moves into CHANGELOG.md and the
+# fragment is removed.
+#
+# The commit carries [skip actions] so it does not start a release. That
+# token belongs in THIS job's own commit message and never in a PR title,
+# per the release-pipeline rule.
+name: Collect changelog fragments
+
+on:
+  schedule:
+    # 04:10 UTC, a quiet hour, and not on the hour where every scheduled
+    # job on GitHub queues at once.
+    - cron: '10 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report what would be folded, change nothing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never two of these at once: both would rewrite the same section.
+  group: changelog-collect
+  cancel-in-progress: false
+
+# This job and the release both fold fragments. The release takes everything
+# pending (--all) onto its own branch, and those fragments stay on main until
+# that PR merges -- so if this job ran in that window it would fold the same
+# entries into main's [current], and the release PR would arrive with either a
+# conflict or the same bullet twice. It stands down instead; the next run
+# picks up whatever is left.
+
+jobs:
+  collect:
+    name: Fold settled fragments
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # The collector reads each fragment's commit time to decide whether
+        # it has settled, so it needs the history, not a shallow clone.
+        fetch-depth: 0
+
+    # A release in flight owns the pending fragments (see the note above).
+    - name: Stand down if a release is open
+      id: guard
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        open=$(gh pr list --state open --json headRefName \
+                 --jq '[.[] | select(.headRefName | startswith("release/"))] | length')
+        if [ "$open" != "0" ]; then
+          echo "A release PR is open; the release folds the pending fragments itself."
+          echo "skip=1" >> "$GITHUB_OUTPUT"
+        else
+          echo "skip=0" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Fold
+      id: fold
+      if: steps.guard.outputs.skip == '0'
+      run: |
+        # pipefail matters here: without it `tee` supplies the exit status,
+        # so a rejected fragment or a missing [current] would leave this job
+        # green having folded nothing, silently, every night.
+        set -euo pipefail
+        if [ "${{ inputs.dry_run }}" = "true" ]; then
+          python3 tests/scripts/collect_changelogs.py --dry-run
+          exit 0
+        fi
+        python3 tests/scripts/collect_changelogs.py | tee /tmp/fold.log
+        if git diff --quiet && git diff --cached --quiet; then
+          echo "changed=0" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=1" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Commit
+      if: steps.fold.outputs.changed == '1'
+      run: |
+        set -eu
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -A CHANGELOG.md new_changelogs
+        folded=$(grep -c '^folded: ' /tmp/fold.log || echo 0)
+        git commit -m "chore: fold $folded settled changelog fragment(s) [skip actions]" \
+                   -m "$(grep '^folded: ' /tmp/fold.log || true)"
+        # A push can lose a race with a merge landing at the same moment;
+        # rebase onto whatever arrived and try again rather than failing a
+        # job whose work is already done.
+        for attempt in 1 2 3; do
+          if git push origin HEAD:main; then exit 0; fi
+          git pull --rebase origin main
+        done
+        echo "::error::could not push the folded changelog after 3 attempts"
+        exit 1

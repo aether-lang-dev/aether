@@ -229,6 +229,29 @@ jobs:
           exit 0
         fi
 
+        # A fragment in new_changelogs/ is the preferred way to record a
+        # change (#2002): it is a file of this PR's own, so two PRs never
+        # touch the same line and a release cannot fold an entry that is
+        # not in CHANGELOG.md yet.
+        # --diff-filter=AM: ADDED or MODIFIED only. A plain --name-only
+        # lists deletions too, and the daily fold removes fragments from
+        # main as it folds them -- so a PR that merged main after a fold
+        # would "touch" a fragment while recording nothing of its own.
+        frags=$(git diff --diff-filter=AM --name-only "$BASE_SHA" "$HEAD_SHA" \
+                | grep -E '^new_changelogs/.+\.md$' \
+                | grep -v '^new_changelogs/README\.md$' || true)
+        if [ -n "$frags" ]; then
+          echo "Changelog fragment(s) added:"
+          printf '%s\n' "$frags" | sed 's/^/  /'
+          python3 tests/scripts/collect_changelogs.py --check || exit 1
+          # A PR may do both; if it also edited CHANGELOG.md, that edit is
+          # still held to the fold check below.
+          if printf '%s\n' "$changed" | grep -q '^CHANGELOG\.md$'; then
+            sh tests/scripts/check_changelog_fold.sh || exit 1
+          fi
+          exit 0
+        fi
+
         if printf '%s\n' "$changed" | grep -q '^CHANGELOG\.md$'; then
           echo "CHANGELOG.md is updated."
 
@@ -251,13 +274,17 @@ jobs:
           exit 0
         fi
 
-        echo "::error::This PR changes shipped code but does not touch CHANGELOG.md."
+        echo "::error::This PR changes shipped code but records nothing."
         echo ""
         echo "The release workflow renames a '## [current]' section into the"
         echo "version heading. With no entry there is nothing to rename, which"
         echo "is how 0.506.0 through 0.509.0 shipped with no CHANGELOG at all."
         echo ""
-        echo "Add your entry under '## [current]', or put [skip changelog] in"
+        echo "Run 'make add-changelog SECTION=fixed SLUG=<issue-and-words>' and"
+        echo "write the bullet in the file it creates — that is a file of your"
+        echo "own, so it cannot collide with another PR or be folded into an"
+        echo "already-released section. Editing '## [current]' directly still"
+        echo "works. Or put [skip changelog] in"
         echo "the PR title if this genuinely needs no user-visible note."
         echo ""
         echo "Code files changed:"
