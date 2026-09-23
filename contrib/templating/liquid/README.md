@@ -186,7 +186,38 @@ context_free(ctx: ptr)
 
 render(t: ptr, ctx: ptr)                       -> (string, string)
 render_to_strbuilder(t: ptr, ctx: ptr, sb: ptr) -> string  // (error)
+template_free(t: ptr)                          // release a parsed template
+
+partial_cache_new()                            -> ptr
+context_set_partial_cache(ctx: ptr, cache: ptr)
+partial_cache_free(cache: ptr)
+partial_loads()                                -> int     // reads + parses so far
 ```
+
+### Partial cache
+
+Without a cache, every `{% include %}`, `{% render %}` and layout parent is
+read from disk and parsed at every use. A cache parses each once, keyed by
+its resolved path. The include root is still checked at every use, and
+`{% render %}`'s fresh context shares the cache:
+
+```aether
+cache = liquid.partial_cache_new()
+// for each page:
+ctx = liquid.context_new()
+liquid.context_set_include_root(ctx, "partials")
+liquid.context_set_partial_cache(ctx, cache)
+out, err = liquid.render(t, ctx)
+liquid.context_free(ctx)
+// once no context uses it:
+liquid.partial_cache_free(cache)
+```
+
+A cache holds what it read. A partial edited on disk after being cached is
+not re-read; use a new cache for that. `partial_loads()` counts reads and
+parses, so the saving can be measured. A page including one partial 200
+times, rendered 20 times, loads it 4,000 times without a cache and once
+with one (162 ms against 39 ms on a Windows laptop).
 
 Value constructors / inspectors (mostly for downstream code that
 builds packed values directly):
@@ -237,8 +268,6 @@ Each has its own issue.
   `where`, `compact`, `concat` (#2180). Until then, as unknown filters,
   they pass their input through unchanged.
 - `date`: passes its input through unchanged (#2181).
-- Caching parsed partials: each `{% include %}` reads and parses its file
-  again (#2184).
 
 ## Performance notes
 
@@ -247,9 +276,8 @@ Each has its own issue.
 - Strings are `std.string` (refcounted heap strings); the renderer
   uses `std.strbuilder` for output accumulation so output assembly
   is O(N).
-- Includes are uncached: partials are read and parsed again at every
-  use. For a static-site generator that uses 100 partials, this is the
-  long-pole cost (#2184).
+- Includes read and parse their partial at every use unless the context
+  has a partial cache (above), which parses each once.
 
 ## Testing
 

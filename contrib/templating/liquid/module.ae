@@ -39,7 +39,10 @@ exports (
     value_nil, value_bool, value_int, value_float, value_str,
     value_kind, value_payload, value_to_string,
     value_get_int, value_get_float,
-    render, render_to_strbuilder
+    render, render_to_strbuilder,
+    // Parsed templates and the partial cache (#2184)
+    template_free, partial_cache_new, partial_cache_free,
+    context_set_partial_cache, partial_loads
 )
 
 // ---------------------------------------------------------------------------
@@ -2122,6 +2125,104 @@ parse_file(path: string) -> (ptr, string) {
     return t, ""
 }
 
+// Release a template `parse_string` or `parse_file` returned. A template
+// handed to a partial cache belongs to the cache.
+template_free(t: ptr) {
+    if t == null { return }
+    string_list_free(list_get_raw(t, 0))
+    string_list_free(list_get_raw(t, 1))
+    list_free(t)
+}
+
+// ---- Partial cache (#2184) ------------------------------------------------
+//
+// Every `{% include %}`, `{% render %}` and layout parent used to be read
+// from disk and parsed again at every use -- 100 includes of one header,
+// 100 reads and parses -- and the parsed copy was never freed. A cache
+// attached to the context keeps each partial parsed once, keyed by its
+// resolved path; the path is still resolved and checked against the
+// include root at every use, cached or not.
+
+struct PartialCache {
+    by_path: ptr     // resolved path -> parsed template
+    owned: ptr       // every template the cache holds, for freeing
+}
+
+// Partials read and parsed since the program started, cached or not: what
+// a cache saves is the difference.
+var g_partial_loads: int = 0
+
+// Reads + parses of a partial or layout so far (see above).
+partial_loads() -> int {
+    return g_partial_loads
+}
+
+// A new, empty cache. Attach it with context_set_partial_cache; free it
+// with partial_cache_free once no context uses it.
+partial_cache_new() -> ptr {
+    c = heap.new(PartialCache)
+    c.by_path = map_new()
+    c.owned = list_new()
+    return c as ptr
+}
+
+// Free the cache and every template in it.
+partial_cache_free(cache: ptr) {
+    if cache == null { return }
+    c = cache as *PartialCache
+    n = list_size(c.owned)
+    i = 0
+    while i < n {
+        template_free(list_get_raw(c.owned, i))
+        i = i + 1
+    }
+    list_free(c.owned)
+    map_free(c.by_path)
+    heap.free(c)
+}
+
+// The context key the cache lives under. It starts with a control
+// character, which no Liquid name can contain, so a template can never
+// read it (lookup refuses such names).
+partial_cache_key() -> string {
+    return string.concat(string.from_char(1), "partial_cache")
+}
+
+// Render with `cache`: every include, render and layout parent the context
+// reaches is parsed once and reused, including through `{% render %}`'s
+// fresh contexts.
+context_set_partial_cache(ctx: ptr, cache: ptr) {
+    map_put(ctx, partial_cache_key(), cache)
+}
+
+// The parsed partial or layout at `resolved` (already checked against the
+// include root). Returns (template, read_error, parse_error, owned): owned
+// is 1 when the caller must template_free it after use (no cache), 0 when
+// the context's cache keeps it.
+load_partial(ctx: ptr, resolved: string) -> (ptr, string, string, int) {
+    key = partial_cache_key()
+    cache = null
+    if map_has(ctx, key) == 1 { cache = map_get_raw(ctx, key) }
+    if cache != null {
+        c = cache as *PartialCache
+        if map_has(c.by_path, resolved) == 1 {
+            return map_get_raw(c.by_path, resolved), "", "", 0
+        }
+    }
+    src, ferr = fs.read(resolved)
+    if ferr != "" { return null, ferr, "", 0 }
+    g_partial_loads = g_partial_loads + 1
+    t, terr = parse_string(src)
+    if terr != "" { return null, "", terr, 0 }
+    if cache != null {
+        c2 = cache as *PartialCache
+        map_put(c2.by_path, resolved, t)
+        list_add_raw(c2.owned, t)
+        return t, "", "", 0
+    }
+    return t, "", "", 1
+}
+
 // Build a fresh string→string context.
 context_new() -> ptr {
     return map_new()
@@ -2156,6 +2257,9 @@ context_free(ctx: ptr) {
 // string return — see a consistent stringified form whether the
 // binding was set via `context_put_string` or the typed setters.
 lookup(ctx: ptr, name: string) -> string {
+    // An internal key (the partial cache's) is not a Liquid name.
+    nn = string_length(name)
+    if nn > 0 && string.char_at_n(name, nn, 0) < 32 { return "" }
     typed_key = string.concat("v:", name)
     if map_has(ctx, typed_key) == 1 {
         return value_to_string(map_get_raw(ctx, typed_key))
@@ -3503,11 +3607,10 @@ render_include_tag(outer_ctx: ptr, rest: string, strict: int) -> (string, string
 
     resolved, perr = resolve_partial_path(root, name)
     if perr != "" { return "", perr }
-    source, ferr = fs.read(resolved)
+    t, ferr, terr, owned = load_partial(outer_ctx, resolved)
     if ferr != "" {
         return "", string.concat(string.concat(tag_name, ": cannot read partial: "), name)
     }
-    t, terr = parse_string(source)
     if terr != "" {
         return "", string.concat(string.concat(tag_name, " parse error in "), string.concat(name, string.concat(": ", terr)))
     }
@@ -3522,13 +3625,17 @@ render_include_tag(outer_ctx: ptr, rest: string, strict: int) -> (string, string
         if aerr != "" { return "", aerr }
         child = args_ctx
         // Carry the include-root through so `render` inside `render`
-        // works without forcing the caller to set it twice.
+        // works without forcing the caller to set it twice -- and the
+        // partial cache, so the fresh context shares it.
         map_put(child, KEY_INCLUDE_ROOT, root)
+        pkey = partial_cache_key()
+        if map_has(outer_ctx, pkey) == 1 { map_put(child, pkey, map_get_raw(outer_ctx, pkey)) }
     }
     // Bump depth on the child ctx for both forms.
     map_put(child, KEY_INCLUDE_DEPTH, string.from_int(depth + 1))
 
     out, rerr = render(t, child)
+    if owned == 1 { template_free(t) }
 
     // Restore outer_ctx's depth (only needed for `include`, since
     // child==outer_ctx there). For `render` the child ctx is dropped.
@@ -3755,6 +3862,17 @@ render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
     return strbuilder.finish(sb), ""
 }
 
+// Free the layout parents a render parsed without a partial cache.
+free_layout_parents(owned: ptr) {
+    n = list_size(owned)
+    i = 0
+    while i < n {
+        template_free(list_get_raw(owned, i))
+        i = i + 1
+    }
+    list_free(owned)
+}
+
 // Render a template whose first tag is `{% layout 'parent' %}`
 // (`lay_idx`, `parent_name`), through every level of its layout chain
 // (#2183): the parent may itself declare a layout, and so on, up to a
@@ -3776,6 +3894,8 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
     chain_contents = list_new()
     chain_blocks = list_new()
     seen = string_list_new()
+    // Parents this render parsed itself (no partial cache): freed after.
+    owned_parents = list_new()
     cur_kinds = child_kinds
     cur_contents = child_contents
     cur_n = child_n
@@ -3805,12 +3925,14 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
             k = k + 1
         }
         string_list_add(seen, resolved)
-        src, ferr = fs.read(resolved)
+        parent_t, ferr, terr, owned = load_partial(ctx, resolved)
         if ferr != "" {
+            free_layout_parents(owned_parents)
             return "", string.concat("layout: cannot read parent: ", cur_parent)
         }
-        parent_t, terr = parse_string(src)
+        if owned == 1 { list_add_raw(owned_parents, parent_t) }
         if terr != "" {
+            free_layout_parents(owned_parents)
             msg = string.concat("layout parse error in ", cur_parent)
             msg = string.concat(msg, ": ")
             msg = string.concat(msg, terr)
@@ -3835,6 +3957,7 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
     out, rerr = render_base_with_chain(cur_kinds, cur_contents, cur_n,
                                        chain_kinds, chain_contents, chain_blocks, levels, ctx)
     map_put(ctx, KEY_INCLUDE_DEPTH, string.from_int(depth))
+    free_layout_parents(owned_parents)
     if rerr != "" {
         msg = string.concat("layout render of ", cur_parent)
         msg = string.concat(msg, " failed: ")

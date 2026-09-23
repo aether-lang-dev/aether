@@ -370,6 +370,83 @@ main() {
         }
     }
 
+    // A partial cache parses each partial and layout once (#2184).
+    // liquid.partial_loads() counts every read + parse, cached or not.
+    spec.describe(fw, "liquid: partial cache") {
+        page = "{% include 'greeting' %}{% include 'greeting' %}{% include 'greeting' %}{% include 'greeting' %}{% include 'greeting' %}"
+
+        spec.it(fw, "reads and parses a partial at every use without a cache") callback {
+            t, _ = liquid.parse_string(page)
+            before = liquid.partial_loads()
+            r = 0
+            while r < 2 {
+                ctx = liquid.context_new()
+                liquid.context_set_include_root(ctx, inc)
+                liquid.context_put_string(ctx, "name", "ann")
+                _o, _e = liquid.render(t, ctx)
+                liquid.context_free(ctx)
+                r = r + 1
+            }
+            spec.assert_eq(liquid.partial_loads() - before, 10, "c1 five includes x two renders = 10 loads")
+            liquid.template_free(t)
+        }
+
+        spec.it(fw, "loads a partial once with a cache, across renders") callback {
+            t, _ = liquid.parse_string(page)
+            cache = liquid.partial_cache_new()
+            before = liquid.partial_loads()
+            out = ""
+            r = 0
+            while r < 2 {
+                ctx = liquid.context_new()
+                liquid.context_set_include_root(ctx, inc)
+                liquid.context_set_partial_cache(ctx, cache)
+                liquid.context_put_string(ctx, "name", "ann")
+                out, _e = liquid.render(t, ctx)
+                liquid.context_free(ctx)
+                r = r + 1
+            }
+            spec.assert_eq(liquid.partial_loads() - before, 1, "c2 one load for ten uses")
+            spec.assert_str_eq(out, "Hello ann!Hello ann!Hello ann!Hello ann!Hello ann!", "c3 same output")
+            liquid.partial_cache_free(cache)
+            liquid.template_free(t)
+        }
+
+        spec.it(fw, "shares the cache with render's fresh context") callback {
+            t, _ = liquid.parse_string("{% render 'pair', a: 1, b: 2 %}{% render 'pair', a: 3, b: 4 %}")
+            cache = liquid.partial_cache_new()
+            ctx = liquid.context_new()
+            liquid.context_set_include_root(ctx, inc)
+            liquid.context_set_partial_cache(ctx, cache)
+            before = liquid.partial_loads()
+            out, _e = liquid.render(t, ctx)
+            spec.assert_str_eq(out, "a=1|b=2a=3|b=4", "c4 render output")
+            spec.assert_eq(liquid.partial_loads() - before, 1, "c5 render shares the cache")
+            liquid.context_free(ctx)
+            liquid.partial_cache_free(cache)
+            liquid.template_free(t)
+        }
+
+        spec.it(fw, "caches a layout chain's parents") callback {
+            chain_root = string.concat(root, "/multi_level")
+            t, _ = liquid.parse_string("{% layout 'sub' %}{% block title %}T{% endblock %}")
+            cache = liquid.partial_cache_new()
+            before = liquid.partial_loads()
+            r = 0
+            while r < 3 {
+                ctx = liquid.context_new()
+                liquid.context_set_include_root(ctx, chain_root)
+                liquid.context_set_partial_cache(ctx, cache)
+                _o, _e = liquid.render(t, ctx)
+                liquid.context_free(ctx)
+                r = r + 1
+            }
+            spec.assert_eq(liquid.partial_loads() - before, 3, "c6 sub, mid, base2 once each over three renders")
+            liquid.partial_cache_free(cache)
+            liquid.template_free(t)
+        }
+    }
+
     spec.describe(fw, "liquid: extends and block.super") {
         spec.it(fw, "accepts extends as an alias for layout") callback {
             spec.assert_str_eq(
