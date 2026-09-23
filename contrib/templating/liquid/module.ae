@@ -631,7 +631,7 @@ is_number_literal(a: string) -> int {
 // A filter argument's value: a quoted string without its quotes, or a
 // number literal as written (`round: 2`, `plus: -3`), which is how Liquid
 // writes numeric arguments. Returns (value, "") or ("", error). An argument
-// naming a variable is not resolved here (#2182).
+// naming a variable arrives here already resolved (apply_filter_in).
 unquote_arg(a: string) -> (string, string) {
     n = string_length(a)
     if is_number_literal(a) == 1 { return a, "" }
@@ -1634,10 +1634,52 @@ filter_arith(name: string, lhs_text: string, rhs_text: string) -> (string, strin
     return int_text(rn, r), ""
 }
 
-// Apply one filter stage to the current value. Returns (new_value, "")
-// or ("", error).
-apply_filter(val: string, name: string, args: string) -> (string, string) {
-    arg_list = split_commas(args)
+// Does a filter argument name a variable (`qty`, `line.price`) rather
+// than being a quoted string, a number, or a `key: value` option?
+names_variable(a: string) -> int {
+    n = string_length(a)
+    if n == 0 { return 0 }
+    c0 = string.char_at_n(a, n, 0)
+    if c0 == 34 || c0 == 39 { return 0 }
+    if is_number_literal(a) == 1 { return 0 }
+    i = 0
+    while i < n {
+        c = string.char_at_n(a, n, i)
+        ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 46 ||
+             (i > 0 && c >= 48 && c <= 57)
+        if ok == false { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Apply one filter stage in the render context: an argument that names a
+// variable is resolved first, the way a condition's operands are
+// (resolve_atom), so `{{ price | times: qty }}` multiplies by qty's value
+// (#2182). The value is passed on quoted; unquote_arg strips just the
+// outer pair, so any quote inside the value is kept.
+apply_filter_in(ctx: ptr, val: string, name: string, args: string) -> (string, string) {
+    raw = split_commas(args)
+    n = string_list_size(raw)
+    resolved = string_list_new()
+    i = 0
+    while i < n {
+        a = string_list_get(raw, i)
+        if names_variable(a) == 1 {
+            v, _t, rerr = resolve_atom(ctx, a)
+            if rerr != "" { return "", rerr }
+            string_list_add(resolved, string.concat(string.concat("\"", v), "\""))
+        } else {
+            string_list_add(resolved, a)
+        }
+        i = i + 1
+    }
+    return apply_filter_args(val, name, resolved)
+}
+
+// Apply one filter stage to the current value, its arguments already split.
+// Returns (new_value, "") or ("", error).
+apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) {
     argc = string_list_size(arg_list)
 
     if string.equals(name, "upcase") == 1 {
@@ -1934,7 +1976,7 @@ render_output(ctx: ptr, body: string) -> (string, string) {
     i = 1
     while i < sn {
         name, args = split_name_args(string_list_get(stages, i))
-        v2, err = apply_filter(val, name, args)
+        v2, err = apply_filter_in(ctx, val, name, args)
         if err != "" { return "", err }
         val = v2
         i = i + 1
@@ -2010,7 +2052,7 @@ exec_assign(ctx: ptr, rest: string) -> string {
                 k = 0
                 while k < rn {
                     fname, fargs = split_name_args(string_list_get(rest_stages, k))
-                    v2, ferr = apply_filter(val, fname, fargs)
+                    v2, ferr = apply_filter_in(ctx, val, fname, fargs)
                     if ferr != "" { return ferr }
                     val = v2
                     k = k + 1
@@ -2839,7 +2881,6 @@ render_case_block(kinds: ptr, contents: ptr, start: int, end: int,
                 take = 1
             } else {
                 // Compare subject against each alternative.
-                cn = string_length(cur_alts)
                 alts = split_commas(cur_alts)
                 ac = string_list_size(alts)
                 k = 0

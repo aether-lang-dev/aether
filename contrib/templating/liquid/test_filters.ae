@@ -22,6 +22,18 @@ render_with(src: string, key: string, val: string) -> string {
     return out
 }
 
+// Render with two string bindings, for filters whose argument is a name.
+render_two(src: string, k1: string, v1: string, k2: string, v2: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_put_string(ctx, k1, v1)
+    liquid.context_put_string(ctx, k2, v2)
+    out, e = liquid.render(t, ctx)
+    liquid.context_free(ctx)
+    if e != "" { return string.concat("ERR ", e) }
+    return out
+}
+
 render_x(src: string, val: string) -> string {
     return render_with(src, "x", val)
 }
@@ -407,6 +419,34 @@ main() {
                 "9999999999800000000001", "d17 past 64 bits")
             spec.assert_str_eq(render_x("{{ x | plus: 1 }}", "9223372036854775807"),
                 "9223372036854775808", "d18 past int64")
+        }
+    }
+
+    // An argument may name a variable, resolved in the render context the
+    // way a condition's operands are (#2182).
+    spec.describe(fw, "liquid: variable filter arguments") {
+        spec.it(fw, "resolves a name to its value") callback {
+            spec.assert_str_eq(render_two("{{ price | times: qty }}", "price", "2.5", "qty", "4"),
+                "10.0", "v1 numeric argument")
+            spec.assert_str_eq(render_two("{{ a | append: b }}", "a", "x", "b", "y"),
+                "xy", "v2 string argument")
+        }
+
+        spec.it(fw, "keeps a quote inside the value") callback {
+            spec.assert_str_eq(render_two("{{ a | append: b }}", "a", "x", "b", "say \"hi\""),
+                "xsay \"hi\"", "v3 quote in the value")
+        }
+
+        spec.it(fw, "reads an unbound name as empty") callback {
+            spec.assert_str_eq(render_two("{{ a | append: nobody }}", "a", "x", "b", ""),
+                "x", "v4 unbound name")
+            spec.assert_str_eq(render_two("{{ nobody | default: b }}", "a", "", "b", "fb"),
+                "fb", "v5 default from a variable")
+        }
+
+        spec.it(fw, "resolves arguments in an assign's filter chain") callback {
+            spec.assert_str_eq(render_two("{% assign t = a | plus: b %}{{ t }}", "a", "2", "b", "3"),
+                "5", "v6 assign")
         }
     }
 

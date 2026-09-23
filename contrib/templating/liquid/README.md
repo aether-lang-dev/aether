@@ -54,8 +54,9 @@ All of the following have integration tests in
 - `{{ "literal string" }}` — string literals (single or double quotes).
 - `{{ 42 }}` — integer literals.
 - `{{ 3.7 }}`, `{{ -5 }}` — decimal and negative number literals.
-- `{{ x | filter | filter2: 2 | filter3: 'a', 'b' }}` — filter chains
-  with positional args: quoted strings or bare numbers.
+- `{{ x | filter | filter2: 2 | filter3: 'a', qty }}` — filter chains
+  with positional args: quoted strings, bare numbers, or names resolved in
+  the render context.
 
 ### Tags
 
@@ -233,8 +234,6 @@ Each has its own issue.
   `where`, `compact`, `concat` (#2180). Until then, as unknown filters,
   they pass their input through unchanged.
 - `date`: passes its input through unchanged (#2181).
-- A filter argument that names a variable, `{{ price | times: qty }}`:
-  rejected at render (#2182).
 - Layout inheritance deeper than one level (#2183).
 - Caching parsed partials: each `{% include %}` reads and parses its file
   again (#2184).
