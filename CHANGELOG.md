@@ -14,6 +14,77 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.710.0]
+
+### Added
+
+- **Changelog fragments in `new_changelogs/` (#2002).** A PR drops a file of
+  its own instead of editing the shared `## [current]` lines. Those lines
+  are what a release *renames*, so merging a new `main` into any open branch
+  folded that branch's entry into the released section — with no conflict,
+  because the headings merge cleanly and only the bullets land in the wrong
+  place. It had already hit four PRs in a row across 0.661–0.664, three more
+  since, and twice in one day the batch that wrote this. With a file per
+  change, two PRs cannot touch the same line and a release cannot fold an
+  entry that is not in `CHANGELOG.md` yet.
+
+  `make add-changelog SECTION=fixed SLUG=...` writes one;
+  `make collect-changelogs` folds what has settled, which a daily
+  `[skip actions]` job runs; a release folds everything pending, because a
+  change merged minutes before one must not be missing from it. The CI gate
+  accepts a fragment or a direct `CHANGELOG.md` edit, and still rejects
+  shipped-code changes with neither.
+
+  Two decisions the issue left open, both answered here and both a constant
+  at the top of `tests/scripts/collect_changelogs.py`: the cooling-off
+  window is 4 hours as proposed, and a fragment's age comes from its
+  **commit** time rather than its filename. The issue proposed the filename
+  with a reset on every push; the commit time is the same intent by a route
+  that needs no hook installed on anyone's machine, cannot be set by the
+  author, and cannot mistake "written yesterday on a branch that just
+  merged" for "landed an hour ago".
+
+  Every git call the collector makes unsets any inherited `GIT_DIR` /
+  `GIT_WORK_TREE` first: `git -C <dir>` does **not** override those, so a
+  caller that had one set would have every fragment answered about the
+  wrong repository, read as uncommitted, and held back for ever. A
+  fragment that is tracked yet has no commit date now says so on stderr
+  rather than waiting silently, because a changelog entry that never
+  appears is the exact failure this mechanism exists to prevent.
+
+### Fixed
+
+- **A module's own struct no longer collides with a type the runtime injects
+  (#2162).** `@c_include` put `std/collections/aether_arr_inline.h` into the
+  translation unit of every program importing `std.intarr` / `std.floatarr`
+  / `std.longarr`, so that element access inlines — and that header declared
+  bare `struct IntArray`, `FloatArray` and `LongArray`. Common names, now
+  claimed inside someone else's program: aephysics had carried its own
+  `struct IntArray` since its first layer, and on 0.708.0 every program
+  importing both stopped compiling with a C error naming neither module. A
+  header the runtime injects declares only `Aether`-prefixed names now;
+  `aether_collections.h` keeps the short aliases, because C includes that one
+  deliberately rather than having it imposed.
+  `tests/integration/module_struct_name_collision` builds a module's own
+  `IntArray` beside `std.intarr`, and checks the rule against the header so
+  a name added later is caught before it reaches anyone's program.
+
+- **An actor's `step_lock` is released only by whoever took it (#2163).**
+  `aether_step_safe` cleared it on its panic path, but it never acquired it
+  — all seven call sites take it before calling and clear it after. So a
+  panicking actor handed the lock away while its caller still believed it
+  held it: another thread could acquire it and start stepping the same
+  actor, the caller then cleared a lock it no longer owned, and a third
+  could enter. Two threads inside one actor's step corrupt the heap, which
+  is how this surfaced — `free(): invalid pointer` from the #2083
+  regression test on CI. Four of the call sites step in a loop under a
+  single acquisition, so the lock was being dropped mid-loop.
+  `tests/integration/actor_panic_step_lock` pins the ownership rule by
+  reading the source (a race cannot be disproved by running a program, but
+  a rule about who owns a lock can be checked by reading) and exercises the
+  path with an actor that panics while two worker threads and the main
+  thread send to it.
+
 ## [0.709.0]
 
 ### Added
