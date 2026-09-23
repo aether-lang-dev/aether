@@ -3,6 +3,7 @@
 #include "aether_strmap.h"
 #include "parser/lexer.h"
 #include "parser/parser.h"
+#include "analysis/typechecker.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -397,6 +398,8 @@ int module_is_exported(AetherModule* module, const char* symbol) {
     return 0;
 }
 
+static const char* module_last_segment(const char* path);
+
 /* #2172: does `module` make `name` reachable as `<leaf>.name`? Either it
  * exports `name` itself, or it exports the prefixed C-style spelling
  * `<leaf>_name` that a qualified call resolves to: std.math lists
@@ -406,10 +409,9 @@ int module_exports_symbol(AetherModule* module, const char* name) {
     if (!module || !name) return 0;
     if (module_is_exported(module, name)) return 1;
     if (!module->name) return 0;
-    const char* dot = strrchr(module->name, '.');
-    const char* leaf = dot ? dot + 1 : module->name;
     char prefixed[512];
-    int n = snprintf(prefixed, sizeof(prefixed), "%s_%s", leaf, name);
+    int n = snprintf(prefixed, sizeof(prefixed), "%s_%s",
+                     module_last_segment(module->name), name);
     if (n < 0 || (size_t)n >= sizeof(prefixed)) return 0;
     return module_is_exported(module, prefixed);
 }
@@ -1352,8 +1354,13 @@ static int check_selective_import_exports(ASTNode* import_child,
         char msg[512];
         snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'",
                  sel->value, import_child->value);
-        const char* hint = "a selective import can only name what the module "
-                           "lists in its exports(...)";
+        /* `import std.io (println)`: the name is a builtin, which no
+         * module exports and nothing needs to import. Say that, rather
+         * than send the reader to std.io's export list. */
+        const char* hint = is_builtin_function_name(sel->value)
+            ? "it is a builtin: call it without importing it"
+            : "a selective import can only name what the module lists in "
+              "its exports(...)";
         int line = sel->line ? sel->line : import_child->line;
         int col = sel->line ? sel->column : import_child->column;
         /* importer_path names the importing module's file; NULL is the entry

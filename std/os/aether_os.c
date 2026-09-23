@@ -2438,13 +2438,19 @@ static wchar_t* build_environ_block(void* env_list) {
  * C runtime's that append_escaped_arg quotes for, so an argument such as
  * `x" & calc & "` ran calc (the BatBadBut class, CVE-2024-24576).
  *
- * Now the program is resolved here, the way execvp does it: a name with a
- * path separator is used as written; a bare name is looked up on PATH only,
- * with PATHEXT's extensions when it has none. The absolute result is passed
- * as lpApplicationName, so CreateProcessW searches nothing. A batch file is
- * launched through the system cmd.exe explicitly, with every argument
- * quoted for cmd -- and refused when it holds a character cmd would still
- * interpret inside quotes (`"`, `%`, a line break).
+ * Now the program is resolved here. A name with a path separator is used as
+ * written. A bare name is looked up everywhere CreateProcessW looked EXCEPT
+ * the current directory -- the application's own directory, the system
+ * directory, the Windows directory, then PATH -- which is Microsoft's own
+ * mitigation (NoDefaultCurrentDirectoryInExePath) and keeps an app that
+ * ships helpers beside itself working. A name without an extension takes
+ * PATHEXT's, limited to the four CreateProcessW can start (.com .exe .bat
+ * .cmd): PATHEXT also lists .js, .vbs, .py and the like, and a tool.py
+ * earlier on PATH must not hide the tool.exe after it. The absolute result
+ * is passed as lpApplicationName, so CreateProcessW searches nothing. A
+ * batch file is launched through the system cmd.exe explicitly, with every
+ * argument quoted for cmd -- and refused when it holds a character cmd
+ * would still interpret inside quotes (`"`, `%`, a line break).
  * ============================================================ */
 
 /* Why the last win_prepare_launch on this thread failed, for the error
@@ -2483,8 +2489,19 @@ static wchar_t* win_try_candidate(const wchar_t* dir, size_t dir_len,
     return NULL;
 }
 
+/* Can CreateProcessW start a file with this extension (this launcher
+ * running .bat / .cmd through cmd.exe)? */
+static int win_launchable_ext(const wchar_t* ext, size_t len) {
+    static const wchar_t* ok[] = { L".com", L".exe", L".bat", L".cmd", NULL };
+    for (int i = 0; ok[i]; i++) {
+        if (len == 4 && _wcsnicmp(ext, ok[i], 4) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Try `name` in one directory: as written when it already has an
- * extension, else with each of PATHEXT's. */
+ * extension, else with each launchable extension PATHEXT lists, in its
+ * order. */
 static wchar_t* win_try_dir(const wchar_t* dir, size_t dir_len,
                             const wchar_t* name, int has_ext,
                             const wchar_t* pathext) {
@@ -2493,12 +2510,32 @@ static wchar_t* win_try_dir(const wchar_t* dir, size_t dir_len,
     while (*e) {
         const wchar_t* end = wcschr(e, L';');
         size_t len = end ? (size_t)(end - e) : wcslen(e);
-        if (len) {
+        if (len && win_launchable_ext(e, len)) {
             wchar_t* hit = win_try_candidate(dir, dir_len, name, e, len);
             if (hit) return hit;
         }
         if (!end) break;
         e = end + 1;
+    }
+    return NULL;
+}
+
+/* The directory this process's executable is in, or NULL. */
+static wchar_t* win_app_dir(void) {
+    DWORD cap = MAX_PATH;
+    for (int tries = 0; tries < 6; tries++) {
+        wchar_t* buf = (wchar_t*)malloc(sizeof(wchar_t) * cap);
+        if (!buf) return NULL;
+        DWORD got = GetModuleFileNameW(NULL, buf, cap);
+        if (got == 0) { free(buf); return NULL; }
+        if (got < cap) {
+            wchar_t* slash = wcsrchr(buf, L'\\');
+            if (!slash) { free(buf); return NULL; }
+            *slash = L'\0';
+            return buf;
+        }
+        free(buf);
+        cap *= 2;
     }
     return NULL;
 }
@@ -2537,6 +2574,19 @@ static wchar_t* win_resolve_program(const char* prog) {
          * directory, which the caller named explicitly). */
         found = win_try_dir(L"", 0, wprog, has_ext, exts);
     } else {
+        /* CreateProcessW's own order, less the current directory. */
+        wchar_t* app = win_app_dir();
+        if (app) {
+            found = win_try_dir(app, wcslen(app), wprog, has_ext, exts);
+            free(app);
+        }
+        wchar_t sysdir[MAX_PATH];
+        UINT sl = found ? 0 : GetSystemDirectoryW(sysdir, MAX_PATH);
+        if (sl > 0 && sl < MAX_PATH) found = win_try_dir(sysdir, sl, wprog, has_ext, exts);
+        UINT wl = found ? 0 : GetWindowsDirectoryW(sysdir, MAX_PATH);
+        if (wl > 0 && wl < MAX_PATH) found = win_try_dir(sysdir, wl, wprog, has_ext, exts);
+    }
+    if (!found && !has_sep) {
         wchar_t* path = win_getenv_copy(L"PATH");
         if (path) {
             const wchar_t* d = path;
@@ -2621,11 +2671,17 @@ static wchar_t* win_prepare_launch(const char* prog, void* argv_list, wchar_t** 
     wbuf_append_char(&b, L'"');
     wbuf_append(&b, cmd);
     wbuf_append(&b, L"\" /d /e:ON /v:OFF /s /c \"");
+    /* The script's own path goes through cmd's parser too. */
+    for (const wchar_t* p = app; *p; p++) {
+        if (*p == L'"' || *p == L'%') {
+            free(app); free(cmd); free(b.data);
+            g_win_launch_err = "batch file path cannot be passed to cmd.exe safely: "
+                               "it contains a quote or %";
+            return NULL;
+        }
+    }
     int ok = 1;
     wbuf_append_char(&b, L'"');
-    for (const wchar_t* p = app; *p; p++) {
-        if (*p == L'"' || *p == L'%') { ok = 0; break; }
-    }
     wbuf_append(&b, app);
     wbuf_append_char(&b, L'"');
     int n = argv_list ? list_size(argv_list) : 0;

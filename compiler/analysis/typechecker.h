@@ -30,6 +30,12 @@ typedef struct Symbol {
     // hoisted-local join); one from another body replaces it, as it
     // always did — names are reused freely across functions.
     void* inferred_in;
+    // #2173: which type-inference walk added this symbol (0: none). A walk
+    // may refine only the symbols it added itself; anything else it must
+    // shadow, because the unwind at its end can remove what it added but not
+    // restore what it overwrote. A stamp makes that check O(1) where walking
+    // the scope's list made rebinding quadratic in a function's locals.
+    unsigned walk_id;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the
@@ -111,6 +117,9 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name);
 // transitively-merged namespaces; user code only sees explicit
 // imports.
 int is_visible_namespace(const char* name, SymbolTable* table);
+/* Is `name` a builtin codegen lowers by name (`println`, `exit`, `sleep`,
+ * ...)? Such a name belongs to no module and needs no import. */
+int is_builtin_function_name(const char* name);
 
 // Type checking functions
 int typecheck_program(ASTNode* program);

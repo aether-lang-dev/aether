@@ -19,8 +19,7 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->symbols = table;
     ctx->iteration_count = 0;
     ctx->scope_owner = NULL;
-    ctx->scope_head = NULL;
-    ctx->has_scope_head = 0;
+    ctx->walk_id = 0;
     return ctx;
 }
 
@@ -389,13 +388,28 @@ void collect_literal_constraints(ASTNode* node, InferenceContext* ctx) {
  * made parameters follow this rule; locals and destructure targets now do
  * too.
  *
- * Outside a function walk (a top-level binding) there is no snapshot, and
+ * Outside a function walk (a top-level binding) there is no walk id, and
  * the old behaviour stands. */
-static int symbol_added_since(SymbolTable* t, Symbol* sym, Symbol* saved_head);
 static int rebindable_symbol(InferenceContext* ctx, Symbol* existing) {
     if (!existing) return 0;
-    if (!ctx->has_scope_head) return 1;
-    return symbol_added_since(ctx->symbols, existing, ctx->scope_head);
+    if (ctx->walk_id == 0) return 1;
+    return existing->walk_id == ctx->walk_id;
+}
+
+/* Add a symbol for the walk in progress, stamped as the walk's own. */
+static void add_walk_symbol(InferenceContext* ctx, const char* name, Type* type) {
+    add_symbol(ctx->symbols, name, type, 0, 0, 0);
+    /* add_symbol prepends: the new symbol is the list head. */
+    if (ctx->symbols->symbols) ctx->symbols->symbols->walk_id = ctx->walk_id;
+}
+
+/* Walk ids are never reused, so a stamp left by an earlier pass over the
+ * same function (whose symbols that pass's unwind removed anyway) can never
+ * be mistaken for the current walk's. */
+static unsigned g_next_walk_id = 0;
+static unsigned new_walk_id(void) {
+    if (++g_next_walk_id == 0) g_next_walk_id = 1;   /* 0 means "no walk" */
+    return g_next_walk_id;
 }
 
 // Collect constraints from expressions
@@ -516,7 +530,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     existing->inferred_in = ctx->scope_owner;
                 } else {
                     // Add new symbol
-                    add_symbol(ctx->symbols, node->value, clone_type(node->node_type), 0, 0, 0);
+                    add_walk_symbol(ctx, node->value, clone_type(node->node_type));
                     Symbol* fresh = lookup_symbol_local(ctx->symbols, node->value);
                     if (fresh) fresh->inferred_in = ctx->scope_owner;
                 }
@@ -557,7 +571,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                                 if (existing->type) free_type(existing->type);
                                 existing->type = clone_type(slot);
                             } else {
-                                add_symbol(ctx->symbols, var->value, clone_type(slot), 0, 0, 0);
+                                add_walk_symbol(ctx, var->value, clone_type(slot));
                             }
                         }
                     }
@@ -1106,26 +1120,12 @@ Type* infer_return_type_from_body(ASTNode* body, SymbolTable* symbols) {
 // definitions, externs, imports) are added by other code paths before any
 // function body is visited, so they sit beneath the snapshot and are
 // unaffected.
-/* Was `sym` added to `t` since `saved_head`, i.e. by the walk currently in
- * progress? Symbols beneath the snapshot belong to an enclosing scope and must
- * not be mutated: the unwind that trims back to `saved_head` can remove what we
- * added but cannot restore what we overwrote. */
-static int symbol_added_since(SymbolTable* t, Symbol* sym, Symbol* saved_head) {
-    if (!t || !sym) return 0;
-    for (Symbol* s = t->symbols; s && s != saved_head; s = s->next) {
-        if (s == sym) return 1;
-    }
-    return 0;
-}
-
 void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node || (node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION)) return;
 
     Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
-    Symbol* prev_scope_head = ctx->scope_head;
-    int prev_has_scope_head = ctx->has_scope_head;
-    ctx->scope_head = saved_head;
-    ctx->has_scope_head = 1;
+    unsigned prev_walk_id = ctx->walk_id;
+    ctx->walk_id = new_walk_id();
 
     /* Issue #243 sealed scopes: relax qualified-call visibility
      * while walking the body of a cloned merged-module function so
@@ -1162,7 +1162,7 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
              * and the unwind removes it on the way out, which is what shadowing
              * should do anyway. */
             Symbol* existing = lookup_symbol(ctx->symbols, param->value);
-            if (existing && symbol_added_since(ctx->symbols, existing, saved_head)) {
+            if (existing && rebindable_symbol(ctx, existing)) {
                 // Ours, from an earlier pass over this same function: refine it
                 // when we now have a more specific type.
                 if (param->node_type->kind != TYPE_UNKNOWN) {
@@ -1170,7 +1170,7 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
                     existing->type = clone_type(param->node_type);
                 }
             } else {
-                add_symbol(ctx->symbols, param->value, clone_type(param->node_type), 0, 0, 0);
+                add_walk_symbol(ctx, param->value, clone_type(param->node_type));
             }
         }
     }
@@ -1193,8 +1193,7 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     }
 
     if (ctx->symbols) ctx->symbols->inside_merged_body = saved_inside_merged;
-    ctx->scope_head = prev_scope_head;
-    ctx->has_scope_head = prev_has_scope_head;
+    ctx->walk_id = prev_walk_id;
 }
 
 // Main constraint collection
@@ -1240,10 +1239,8 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
              * including functions merged in from modules. Same snapshot and
              * unwind as collect_function_constraints. */
             Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
-            Symbol* prev_scope_head = ctx->scope_head;
-            int prev_has_scope_head = ctx->has_scope_head;
-            ctx->scope_head = saved_head;
-            ctx->has_scope_head = 1;
+            unsigned prev_walk_id = ctx->walk_id;
+            ctx->walk_id = new_walk_id();
             ASTNode* prev_owner = ctx->scope_owner;
             ctx->scope_owner = node;
             collect_expression_constraints(node, ctx);
@@ -1253,8 +1250,7 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
                     pop_symbol(ctx->symbols);
                 }
             }
-            ctx->scope_head = prev_scope_head;
-            ctx->has_scope_head = prev_has_scope_head;
+            ctx->walk_id = prev_walk_id;
             break;
         }
 

@@ -12,16 +12,22 @@
   for the C runtime, ran the second command: the BatBadBut class,
   CVE-2024-24576 in Rust's `std::process`.
 
-  `std.os` now resolves the program the way POSIX `execvp` does. A name with
-  a path separator is used as written. A bare name is looked up on `PATH`
-  only, with `PATHEXT`'s extensions when it has none. The absolute result is
-  passed to `CreateProcessW`, which has nothing left to search. A batch file
+  `std.os` now resolves the program itself. A name with a path separator is
+  used as written. A bare name is looked up everywhere `CreateProcessW`
+  looked except the current directory: the program's own directory, the
+  system directories, then `PATH`. That is Microsoft's own mitigation, and
+  it keeps an application that ships helpers beside itself working. A name
+  without an extension takes those `PATHEXT` extensions Windows can start
+  (`.com`, `.exe`, `.bat`, `.cmd`), so a `tool.py` earlier on `PATH` can't
+  hide the `tool.exe` after it. The absolute result is passed to
+  `CreateProcessW`, which has nothing left to search. A batch file
   runs through the system `cmd.exe` (`/d /e:ON /v:OFF /s /c`) with each
   argument quoted for cmd, so `a & b` arrives as one argument. An argument
   holding a `"`, a `%` or a line break is refused with
   `argument cannot be passed to a batch file safely`, since cmd acts on
-  those even inside quotes. A program found nowhere now reports
-  `program not found` instead of `spawn failed`.
+  those even inside quotes, and so is a batch file whose own path holds a
+  `"` or `%`. A program found nowhere now reports `program not found`
+  instead of `spawn failed`.
 
   `tests/integration/win_spawn_resolution` plants an `aetool.exe` in the
   working directory next to the real one on `PATH`, and sends a

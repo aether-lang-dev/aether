@@ -133,4 +133,47 @@ main() {
 AE
 accepted ok "42 4 3 en-US"
 
+# A value named like an imported module shadows it: `url.host` on a local
+# `url` is a field read, not a reach into std.url's exports. In a program and
+# inside a module, where namespace visibility is relaxed.
+cat > "$WORK/shadow.ae" <<'AE'
+import std.url
+import std.list
+
+struct Site {
+    host: string
+    size: int
+}
+
+main() {
+    url = Site { host: "example.org", size: 3 }
+    list = Site { host: "l", size: 4 }
+    println("${url.host} ${list.size}")
+}
+AE
+accepted shadow "example.org 4"
+
+mkdir -p "$WORK/shm"
+cat > "$WORK/shm/module.ae" <<'AE'
+import std.url
+exports(go)
+
+struct Page {
+    host: string
+}
+
+go() -> string {
+    url = Page { host: "in-module" }
+    return url.host
+}
+AE
+cat > "$WORK/shadow_mod.ae" <<'AE'
+import shm
+
+main() {
+    println(shm.go())
+}
+AE
+accepted shadow_mod "in-module"
+
 echo "  [PASS] exports_enforced: unexported names rejected qualified and selective, std and user; exported and prefixed names allowed"

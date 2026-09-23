@@ -261,6 +261,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
     symbol->inferred_in = NULL;
+    symbol->walk_id = 0;
     symtab_link(table, symbol);
 }
 
@@ -363,6 +364,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
     symbol->inferred_in = NULL;
+    symbol->walk_id = 0;
     symtab_link(table, symbol);
 }
 
@@ -712,6 +714,16 @@ static int builtin_lowered_by_name(const char* name, int params) {
     for (int i = 0; names[i].name; i++) {
         if (strcmp(name, names[i].name) != 0) continue;
         return params >= names[i].min && (names[i].max < 0 || params <= names[i].max);
+    }
+    return 0;
+}
+
+int is_builtin_function_name(const char* name) {
+    if (!name) return 0;
+    /* The table's smallest minimum arity is 2 (`str_eq`), so asking at 0, 1
+     * and 2 parameters reaches every entry. */
+    for (int params = 0; params <= 2; params++) {
+        if (builtin_lowered_by_name(name, params)) return 1;
     }
     return 0;
 }
@@ -2535,8 +2547,14 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             // sealed scopes) so user code that did not import a
             // transitively-pulled-in module gets a clear "not visible"
             // error rather than the looser "not exported" message.
+            //
+            // A bound value of the same name shadows the namespace (#2172):
+            // with `import std.url`, a local `url` struct's `url.host` is a
+            // field read, not a reach into std.url -- the same guard the
+            // const-lookup path in typecheck_expression applies.
             if (expr->child_count > 0 && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
+                !lookup_symbol(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value &&
                 is_export_blocked(expr->children[0]->value, expr->value)) {
                 char msg[256];

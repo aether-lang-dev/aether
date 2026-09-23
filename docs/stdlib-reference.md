@@ -2884,9 +2884,11 @@ with spaces or an argument holding `$` or `;` arrives exactly as written.
   still sees the program itself as its `argv[0]`.
 - `env` is a list of `"KEY=VALUE"` strings, or `null` to inherit this
   process's environment.
-- A program named without a path separator is looked up on `PATH`, and
-  only there. On Windows a name without an extension is tried with each of
-  `PATHEXT`'s (`.exe`, `.bat`, ...). The current directory is not searched
+- A program named without a path separator is looked up on `PATH`. On
+  Windows the program's own directory and the system directories come
+  first, as they always have there, and a name without an extension is
+  tried with the extensions in `PATHEXT` that Windows can start
+  (`.com`, `.exe`, `.bat`, `.cmd`). The current directory is not searched
   on any platform, so a `git.exe` someone left where the program runs is
   never the `git` it meant.
 

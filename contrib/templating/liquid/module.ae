@@ -629,9 +629,9 @@ is_number_literal(a: string) -> int {
 }
 
 // A filter argument's value: a quoted string without its quotes, or a
-// number literal as written (`round: 2`, `plus: -3`, `times: 1.5`), which
-// is how Liquid writes numeric arguments. Returns (value, "") or
-// ("", error). An argument naming a variable is not resolved here.
+// number literal as written (`round: 2`, `plus: -3`), which is how Liquid
+// writes numeric arguments. Returns (value, "") or ("", error). An argument
+// naming a variable is not resolved here (#2182).
 unquote_arg(a: string) -> (string, string) {
     n = string_length(a)
     if is_number_literal(a) == 1 { return a, "" }
@@ -1129,10 +1129,11 @@ number_parts(v: string) -> (int, int, string, string) {
         i = i + 1
     }
     neg = 0
+    plus_sign = 0
     if i < n {
         c0 = string.char_at_n(v, n, i)
         if c0 == 45 { neg = 1; i = i + 1 }
-        else if c0 == 43 { i = i + 1 }
+        else if c0 == 43 { plus_sign = 1; i = i + 1 }
     }
     int_start = i
     while i < n {
@@ -1147,14 +1148,15 @@ number_parts(v: string) -> (int, int, string, string) {
     while lead < int_end - 1 && string.char_at_n(v, n, lead) == 48 { lead = lead + 1 }
     idigits = string.substring_n(v, n, lead, int_end)
 
-    // A decimal only when the WHOLE (trimmed) text is `-?digits.digits`.
+    // A decimal only when the WHOLE (trimmed) text is `-?digits.digits`; a
+    // `+` sign is to_i's, not the decimal pattern's ("+1.5" is 1).
     stop = n
     while stop > int_end {
         c = string.char_at_n(v, n, stop - 1)
         if c != 32 && c != 9 && c != 10 && c != 13 { break }
         stop = stop - 1
     }
-    if int_end < stop && string.char_at_n(v, n, int_end) == 46 {
+    if plus_sign == 0 && int_end < stop && string.char_at_n(v, n, int_end) == 46 {
         f = int_end + 1
         while f < stop {
             c = string.char_at_n(v, n, f)
@@ -1486,7 +1488,16 @@ apply_filter(val: string, name: string, args: string) -> (string, string) {
         if e1 != "" { return "", e1 }
         rhs, ierr = parse_int_arg(s, name)
         if ierr != "" { return "", ierr }
-        lhs, _ = string.to_int(val)   // coerce empty/garbage to 0
+        // The input as Liquid reads it: "12px" is 12, "" and "abc" are 0. A
+        // decimal is refused rather than read as 0: these filters do integer
+        // arithmetic, and `3.7 | plus: 1` printing 1 was a wrong answer
+        // with no sign that anything had gone wrong (decimals are #2185).
+        l_dec, l_neg, l_digits, _l_frac = number_parts(val)
+        if l_dec == 1 {
+            return "", string.concat(string.concat(name, " works on integers; the value is a decimal: "), val)
+        }
+        lhs, lerr = string.to_int(int_text(l_neg, l_digits))
+        if lerr != "" { return "", string.concat(string.concat(name, ": integer out of range: "), val) }
         result = 0
         if string.equals(name, "plus") == 1       { result = lhs + rhs }
         else if string.equals(name, "minus") == 1 { result = lhs - rhs }
@@ -1960,38 +1971,10 @@ resolve_atom(ctx: ptr, atom: string) -> (string, int, string) {
         return "", 0, ""
     }
     first = string.char_at_n(a, n, 0)
-    // Integer literal (with optional leading `-`). All-digit body.
-    digit_start = 0
-    if first == 45 { digit_start = 1 }   // '-'
-    if digit_start < n {
-        all_digits = 1
-        di = digit_start
-        while di < n {
-            c = string.char_at_n(a, n, di)
-            if c < 48 || c > 57 { all_digits = 0 ; break }
-            di = di + 1
-        }
-        if all_digits == 1 {
-            // Treat the literal text as the value. Truthy if non-zero
-            // (Liquid actually treats 0 as truthy too; here we mark it
-            // truthy because the string "0" is non-empty).
-            return a, 1, ""
-        }
-        // A decimal literal, `-?digits.digits`, is a literal too; it used to
-        // fall through to a variable lookup of the name "3.7" and render
-        // empty.
-        dot = string.index_of_from_n(a, n, ".", digit_start)
-        if dot > digit_start && dot < n - 1 {
-            dec = 1
-            dj = digit_start
-            while dj < n {
-                c = string.char_at_n(a, n, dj)
-                if dj != dot && (c < 48 || c > 57) { dec = 0 ; break }
-                dj = dj + 1
-            }
-            if dec == 1 { return a, 1, "" }
-        }
-    }
+    // A number literal, integer or decimal, is its own text. Truthy: Liquid
+    // treats every number, 0 included, as true. (A decimal used to fall
+    // through to a variable lookup of the name "3.7" and render empty.)
+    if is_number_literal(a) == 1 { return a, 1, "" }
     if first == 34 || first == 39 {
         lit, err = unquote_arg(a)
         if err != "" { return "", 0, err }

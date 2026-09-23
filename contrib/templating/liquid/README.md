@@ -122,9 +122,10 @@ round away from zero). `round: N` rounds a decimal to N places and prints it
 as Liquid does, without padding zeros but with at least one fraction digit
 (`{{ 3.14159 | round: 2 }}` is `3.14`, `{{ 9.999 | round: 2 }}` is `10.0`),
 and it rounds in decimal, so `{{ 1.005 | round: 2 }}` is `1.01`. `abs` keeps
-the input's shape (`-5` is `5`, `-5.50` is `5.5`). The integer arithmetic
-filters (`plus` .. `at_most`) stay in integers: `10 | divided_by: 3` is
-`3`.
+the input's shape (`-5` is `5`, `-5.50` is `5.5`). The arithmetic filters
+(`plus` .. `at_most`) work on integers, read the same way (`"12px" | plus: 1`
+is `13`; `10 | divided_by: 3` is `3`), and a decimal operand is a render
+error rather than a wrong number (#2185).
 
 Unknown filter names pass the input through unchanged (Shopify
 behaviour, not an error). `divided_by:"0"` and `modulo:"0"` raise
@@ -226,6 +227,8 @@ Each has its own issue.
 - `date`: passes its input through unchanged (#2181).
 - A filter argument that names a variable, `{{ price | times: qty }}`:
   rejected at render (#2182).
+- Decimal operands to the arithmetic filters, `{{ 3.7 | plus: 1 }}`:
+  rejected at render (#2185).
 - Layout inheritance deeper than one level (#2183).
 - Caching parsed partials: each `{% include %}` reads and parses its file
   again (#2184).
