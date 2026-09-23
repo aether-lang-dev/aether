@@ -280,9 +280,8 @@ main() {
         }
 
         // middle.liquid is itself a layout-using template, parsed from disk
-        // rather than a string. Single-level inheritance only — a child
-        // layout-ing middle (which layouts base) is not supported in this
-        // slice and is tracked in the module's TODO.
+        // rather than a string. Inheritance is single-level: a child whose
+        // layout itself declares a layout is #2183.
         spec.it(fw, "inherits one level from a file parsed off disk") callback {
             t9, p9err = liquid.parse_file(string.concat(lay, "/middle.liquid"))
             spec.assert_str_eq(p9err, "", "9 parse_file")

@@ -261,6 +261,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
     symbol->inferred_in = NULL;
+    symbol->walk_id = 0;
     symtab_link(table, symbol);
 }
 
@@ -363,6 +364,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
     symbol->inferred_in = NULL;
+    symbol->walk_id = 0;
     symtab_link(table, symbol);
 }
 
@@ -528,12 +530,22 @@ int is_visible_namespace(const char* name, SymbolTable* table) {
  * cite the original source location and the original import path
  * without reconstructing them post-merge. */
 
+static AetherModule* module_find_by_name_or_leaf(const char* name);
+
 // Check if a symbol is blocked by export visibility.
 // Returns 1 if blocked (module has exports and symbol isn't one), 0 if allowed.
+//
+// #2172: the module is found by its full name OR its leaf. A qualified use
+// carries the leaf (`language.to_title_case`) while a std module registers
+// under its full path (`std.language`), so an exact-name lookup found no
+// module for ANY std module and blocked nothing: every std module's export
+// list was advisory, and `mem.long_to_ptr` was called all over the tree
+// while missing from std.mem's. User modules register under the name they
+// are used by, which is why they were enforced all along.
 static int is_export_blocked(const char* namespace, const char* symbol) {
     if (!global_module_registry) return 0;
-    AetherModule* mod = module_find(namespace);
-    return (mod && mod->export_count > 0 && !module_is_exported(mod, symbol));
+    AetherModule* mod = module_find_by_name_or_leaf(namespace);
+    return (mod && mod->export_count > 0 && !module_exports_symbol(mod, symbol));
 }
 
 /* Find a registered module by exact name, or by the last dot-component
@@ -702,6 +714,16 @@ static int builtin_lowered_by_name(const char* name, int params) {
     for (int i = 0; names[i].name; i++) {
         if (strcmp(name, names[i].name) != 0) continue;
         return params >= names[i].min && (names[i].max < 0 || params <= names[i].max);
+    }
+    return 0;
+}
+
+int is_builtin_function_name(const char* name) {
+    if (!name) return 0;
+    /* The table's smallest minimum arity is 2 (`str_eq`), so asking at 0, 1
+     * and 2 parameters reaches every entry. */
+    for (int params = 0; params <= 2; params++) {
+        if (builtin_lowered_by_name(name, params)) return 1;
     }
     return 0;
 }
@@ -2525,8 +2547,14 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             // sealed scopes) so user code that did not import a
             // transitively-pulled-in module gets a clear "not visible"
             // error rather than the looser "not exported" message.
+            //
+            // A bound value of the same name shadows the namespace (#2172):
+            // with `import std.url`, a local `url` struct's `url.host` is a
+            // field read, not a reach into std.url -- the same guard the
+            // const-lookup path in typecheck_expression applies.
             if (expr->child_count > 0 && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
+                !lookup_symbol(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value &&
                 is_export_blocked(expr->children[0]->value, expr->value)) {
                 char msg[256];

@@ -52,6 +52,8 @@ exports (
     on_start, on_end, on_text,
     parse, error_string, error_line, error_column,
     attr_count, attr_name, attr_value,
+    // Closure builder veneer: parse_with { bind_start / bind_end / bind_text }
+    parse_full, parse_with, bind_start, bind_end, bind_text,
 
     // Raw externs — exposed so escape-hatch callers can use the
     // `xml_*` C symbols directly without going through the Aether-

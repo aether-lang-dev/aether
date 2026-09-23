@@ -4,16 +4,9 @@
 // (https://shopify.github.io/liquid/). Sandbox-friendly: no reflection,
 // no eval, filter set is explicit.
 //
-// Current scope (incremental build):
-//
-//   - Text passthrough
-//   - `{{ varname }}` single-segment variable lookup against a string map
-//   - `{% comment %}...{% endcomment %}` (body suppressed)
-//   - `{% raw %}...{% endraw %}` (body emitted verbatim — no interpolation)
-//
-// Not yet implemented (see TODO.md): dotted attribute access, filters,
-// most other tags (`if`/`for`/`assign`/`case`/`capture`/...),
-// includes, layouts, JSON-tree value model.
+// What it supports -- output, filters, the control-flow and iteration tags,
+// includes and layouts -- is listed in README.md beside this file, and so
+// is each thing it does not do yet, with the issue that tracks it.
 //
 // Surface:
 //
@@ -207,7 +200,9 @@ trim(s: string) -> string {
 }
 
 // Strip a leading `-` from `s` if present. Returns (s_without_leading_dash, 1)
-// when stripped, else (s, 0).
+// when stripped, else (s, 0). Called on the RAW body, before any trimming:
+// the whitespace-control marker is only the `-` directly against the braces
+// (`{{-`), so `{{ -5 }}` is the number -5, not a marker and a 5.
 peel_left_dash(s: string) -> (string, int) {
     n = string_length(s)
     if n == 0 { return s, 0 }
@@ -267,8 +262,8 @@ closer_dashes(src: string, n: int, close_open: int, close_after: int) -> (int, i
     body_end   = close_after - 2
     if body_end <= body_start { return 0, 0 }
     raw = string.substring_n(src, n, body_start, body_end)
-    _, ls = peel_left_dash(ltrim(raw))
-    _, rs = peel_right_dash(rtrim(raw))
+    _, ls = peel_left_dash(raw)
+    _, rs = peel_right_dash(raw)
     return ls, rs
 }
 
@@ -363,8 +358,8 @@ lex(src: string) -> (ptr, string) {
                     return toks, string.concat("unterminated `{{`", loc_suffix(src, n, open_at))
                 }
                 raw_body = string.substring_n(src, n, open_at + 2, close_at)
-                body, ls = peel_left_dash(ltrim(raw_body))
-                body, rs = peel_right_dash(rtrim(body))
+                body, ls = peel_left_dash(raw_body)
+                body, rs = peel_right_dash(body)
                 body = trim(body)
                 if ls == 1 { strip_trailing_ws_of_last_text(kinds, contents) }
                 if rs == 1 { strip_next = 1 }
@@ -384,8 +379,8 @@ lex(src: string) -> (ptr, string) {
                     return toks, string.concat("unterminated `{%`", loc_suffix(src, n, open_at))
                 }
                 raw_body = string.substring_n(src, n, open_at + 2, close_at)
-                body, ls = peel_left_dash(ltrim(raw_body))
-                body, rs = peel_right_dash(rtrim(body))
+                body, ls = peel_left_dash(raw_body)
+                body, rs = peel_right_dash(body)
                 body = trim(body)
                 if ls == 1 { strip_trailing_ws_of_last_text(kinds, contents) }
                 pos_after = close_at + 2
@@ -495,8 +490,8 @@ find_block_end(src: string, n: int, p: int, endkw: string) -> (int, int) {
                 return -1, -1
             }
             raw_body = string.substring_n(src, n, body_start, close_at)
-            body, _ = peel_left_dash(ltrim(raw_body))
-            body, _ = peel_right_dash(rtrim(body))
+            body, _ = peel_left_dash(raw_body)
+            body, _ = peel_right_dash(body)
             body = trim(body)
             if string.equals(body, endkw) == 1 {
                 return i, close_at + 2
@@ -609,20 +604,46 @@ split_commas(args: string) -> ptr {
     return out
 }
 
-// Unquote a literal arg. Returns (value, "") on success or ("", error).
-// Rejects unquoted args in this slice — variable / number args land
-// with the Layer 2 expression parser.
+// Is `a` a number literal, `-?digits` or `-?digits.digits`?
+is_number_literal(a: string) -> int {
+    n = string_length(a)
+    i = 0
+    if n > 0 && string.char_at_n(a, n, 0) == 45 { i = 1 }
+    if i >= n { return 0 }
+    digits = 0
+    dot = -1
+    while i < n {
+        c = string.char_at_n(a, n, i)
+        if c == 46 {
+            if dot >= 0 || digits == 0 { return 0 }
+            dot = i
+        } else if c < 48 || c > 57 {
+            return 0
+        } else {
+            digits = digits + 1
+        }
+        i = i + 1
+    }
+    if dot == n - 1 { return 0 }
+    return 1
+}
+
+// A filter argument's value: a quoted string without its quotes, or a
+// number literal as written (`round: 2`, `plus: -3`), which is how Liquid
+// writes numeric arguments. Returns (value, "") or ("", error). An argument
+// naming a variable is not resolved here (#2182).
 unquote_arg(a: string) -> (string, string) {
     n = string_length(a)
+    if is_number_literal(a) == 1 { return a, "" }
     if n < 2 {
-        return "", string.concat("filter arg must be a quoted string: ", a)
+        return "", string.concat("filter arg must be a quoted string or a number: ", a)
     }
     first = string.char_at_n(a, n, 0)
     last  = string.char_at_n(a, n, n - 1)
     if (first == 34 && last == 34) || (first == 39 && last == 39) {
         return string.substring_n(a, n, 1, n - 1), ""
     }
-    return "", string.concat("filter arg must be a quoted string: ", a)
+    return "", string.concat("filter arg must be a quoted string or a number: ", a)
 }
 
 // Capitalize: first byte to upper, rest to lower (Liquid spec).
@@ -1061,8 +1082,9 @@ filter_slice(s: string, start: int, len: int) -> string {
     return string.substring_n(s, n, a, b)
 }
 
-// Parse a string-encoded integer. Returns (val, "") or (0, error). Used
-// for math-filter args while a real expression parser is still TODO.
+// Parse a string-encoded integer argument. Returns (val, "") or (0, error).
+// Filter arguments arrive as text (`round: 2` passes "2"), so the integer
+// math filters and round's place count read them through this.
 parse_int_arg(s: string, name: string) -> (int, string) {
     v, err = string.to_int(s)
     if err != "" {
@@ -1084,6 +1106,170 @@ filter_truncate(s: string, cap: int, ell: string) -> string {
     }
     body = string.substring_n(s, n, 0, cap - eln)
     return string.concat(body, ell)
+}
+
+// ---- Numbers, as Liquid reads them ---------------------------------------
+//
+// Liquid's Utils.to_number: a string that is exactly `-?digits.digits` is a
+// decimal (a BigDecimal in the reference implementation), anything else is
+// read the way Ruby's String#to_i reads it -- leading whitespace, an
+// optional sign, then as many digits as there are ("12px" is 12, "abc" is
+// 0). The decimal side is kept as TEXT and rounded digit by digit, which is
+// what makes `1.005 | round: 2` come out 1.01 as it does in Liquid, where
+// binary floating point would give 1.0.
+
+// (is_decimal, negative, integer_digits, fraction_digits). Integer digits
+// carry no leading zeros ("0" for zero); fraction digits are as written.
+number_parts(v: string) -> (int, int, string, string) {
+    n = string_length(v)
+    i = 0
+    while i < n {
+        c = string.char_at_n(v, n, i)
+        if c != 32 && c != 9 && c != 10 && c != 13 { break }
+        i = i + 1
+    }
+    neg = 0
+    plus_sign = 0
+    if i < n {
+        c0 = string.char_at_n(v, n, i)
+        if c0 == 45 { neg = 1; i = i + 1 }
+        else if c0 == 43 { plus_sign = 1; i = i + 1 }
+    }
+    int_start = i
+    while i < n {
+        c = string.char_at_n(v, n, i)
+        if c < 48 || c > 57 { break }
+        i = i + 1
+    }
+    int_end = i
+    if int_end == int_start { return 0, 0, "0", "" }
+    // Strip leading zeros, keeping one digit.
+    lead = int_start
+    while lead < int_end - 1 && string.char_at_n(v, n, lead) == 48 { lead = lead + 1 }
+    idigits = string.substring_n(v, n, lead, int_end)
+
+    // A decimal only when the WHOLE (trimmed) text is `-?digits.digits`; a
+    // `+` sign is to_i's, not the decimal pattern's ("+1.5" is 1).
+    stop = n
+    while stop > int_end {
+        c = string.char_at_n(v, n, stop - 1)
+        if c != 32 && c != 9 && c != 10 && c != 13 { break }
+        stop = stop - 1
+    }
+    if plus_sign == 0 && int_end < stop && string.char_at_n(v, n, int_end) == 46 {
+        f = int_end + 1
+        while f < stop {
+            c = string.char_at_n(v, n, f)
+            if c < 48 || c > 57 { break }
+            f = f + 1
+        }
+        if f == stop && f > int_end + 1 {
+            return 1, neg, idigits, string.substring_n(v, n, int_end + 1, stop)
+        }
+    }
+    if string.equals(idigits, "0") == 1 { neg = 0 }
+    return 0, neg, idigits, ""
+}
+
+// A decimal digit string plus one ("129" -> "130", "99" -> "100").
+digits_inc(d: string) -> string {
+    n = string_length(d)
+    carry = 1
+    i = n - 1
+    // Build the digits reversed, then flip them.
+    rev = strbuilder.new(n + 1)
+    while i >= 0 {
+        c = string.char_at_n(d, n, i) - 48 + carry
+        carry = 0
+        if c == 10 { c = 0; carry = 1 }
+        strbuilder.append(rev, string.from_char(c + 48))
+        i = i - 1
+    }
+    if carry == 1 { strbuilder.append(rev, "1") }
+    r = strbuilder.finish(rev)
+    rn = string_length(r)
+    sb = strbuilder.new(rn)
+    j = rn - 1
+    while j >= 0 {
+        strbuilder.append(sb, string.from_char(string.char_at_n(r, rn, j)))
+        j = j - 1
+    }
+    return strbuilder.finish(sb)
+}
+
+// Round `idigits.fdigits` to `places` fraction digits, half away from zero
+// (BigDecimal's ROUND_HALF_UP). Returns the new (integer, fraction) digits.
+round_digits(idigits: string, fdigits: string, places: int) -> (string, string) {
+    fn_ = string_length(fdigits)
+    if fn_ <= places { return idigits, fdigits }
+    keep = string.substring_n(fdigits, fn_, 0, places)
+    up = string.char_at_n(fdigits, fn_, places) >= 53     // '5'
+    if up == false { return idigits, keep }
+    if places == 0 { return digits_inc(idigits), "" }
+    joined = digits_inc(string.concat(idigits, keep))
+    jn = string_length(joined)
+    return string.substring_n(joined, jn, 0, jn - places), string.substring_n(joined, jn, jn - places, jn)
+}
+
+// An integer result: "-" only when it is not zero.
+int_text(neg: int, idigits: string) -> string {
+    if neg == 1 && string.equals(idigits, "0") == 0 { return string.concat("-", idigits) }
+    return idigits
+}
+
+// A decimal result as Ruby prints a Float: trailing zeros dropped, at least
+// one fraction digit kept ("3.10" -> "3.1", "4." -> "4.0"), the sign kept
+// even on zero ("-0.0"), as Ruby does.
+float_text(neg: int, idigits: string, fdigits: string) -> string {
+    fn_ = string_length(fdigits)
+    while fn_ > 1 && string.char_at_n(fdigits, fn_, fn_ - 1) == 48 { fn_ = fn_ - 1 }
+    frac = "0"
+    if fn_ > 0 { frac = string.substring_n(fdigits, string_length(fdigits), 0, fn_) }
+    body = string.concat(string.concat(idigits, "."), frac)
+    if neg == 1 { return string.concat("-", body) }
+    return body
+}
+
+// Is any fraction digit non-zero?
+digits_nonzero(d: string) -> int {
+    n = string_length(d)
+    i = 0
+    while i < n {
+        if string.char_at_n(d, n, i) != 48 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// `abs`: the magnitude, in the input's own shape (Liquid returns an
+// Integer for an integer and a Float for a decimal).
+filter_abs(val: string) -> string {
+    is_dec, _neg, idigits, fdigits = number_parts(val)
+    if is_dec == 1 { return float_text(0, idigits, fdigits) }
+    return idigits
+}
+
+// `ceil` / `floor`: the nearest integer above / below.
+filter_ceil_floor(val: string, want_ceil: int) -> string {
+    is_dec, neg, idigits, fdigits = number_parts(val)
+    if is_dec == 0 || digits_nonzero(fdigits) == 0 { return int_text(neg, idigits) }
+    // A fraction is present: ceil rounds a positive number up, floor a
+    // negative one (away from zero); the other direction truncates.
+    if (want_ceil == 1 && neg == 0) || (want_ceil == 0 && neg == 1) {
+        return int_text(neg, digits_inc(idigits))
+    }
+    return int_text(neg, idigits)
+}
+
+// `round` / `round: N`. No argument (or 0) gives an integer; N > 0 rounds a
+// decimal to N places and prints it as Ruby prints a Float. An integer input
+// is already exact at any N and stays an integer, as in Liquid.
+filter_round(val: string, places: int) -> string {
+    is_dec, neg, idigits, fdigits = number_parts(val)
+    if is_dec == 0 { return int_text(neg, idigits) }
+    ri, rf = round_digits(idigits, fdigits, places)
+    if places == 0 { return int_text(neg, ri) }
+    return float_text(neg, ri, rf)
 }
 
 // Apply one filter stage to the current value. Returns (new_value, "")
@@ -1302,7 +1488,16 @@ apply_filter(val: string, name: string, args: string) -> (string, string) {
         if e1 != "" { return "", e1 }
         rhs, ierr = parse_int_arg(s, name)
         if ierr != "" { return "", ierr }
-        lhs, _ = string.to_int(val)   // coerce empty/garbage to 0
+        // The input as Liquid reads it: "12px" is 12, "" and "abc" are 0. A
+        // decimal is refused rather than read as 0: these filters do integer
+        // arithmetic, and `3.7 | plus: 1` printing 1 was a wrong answer
+        // with no sign that anything had gone wrong (decimals are #2185).
+        l_dec, l_neg, l_digits, _l_frac = number_parts(val)
+        if l_dec == 1 {
+            return "", string.concat(string.concat(name, " works on integers; the value is a decimal: "), val)
+        }
+        lhs, lerr = string.to_int(int_text(l_neg, l_digits))
+        if lerr != "" { return "", string.concat(string.concat(name, ": integer out of range: "), val) }
         result = 0
         if string.equals(name, "plus") == 1       { result = lhs + rhs }
         else if string.equals(name, "minus") == 1 { result = lhs - rhs }
@@ -1362,6 +1557,31 @@ apply_filter(val: string, name: string, args: string) -> (string, string) {
         out, herr = cryptography.sha256_hex(val, string_length(val))
         if herr != "" { return "", herr }
         return out, ""
+    }
+    if string.equals(name, "abs") == 1 {
+        if argc != 0 { return "", "abs takes no args" }
+        return filter_abs(val), ""
+    }
+    if string.equals(name, "ceil") == 1 {
+        if argc != 0 { return "", "ceil takes no args" }
+        return filter_ceil_floor(val, 1), ""
+    }
+    if string.equals(name, "floor") == 1 {
+        if argc != 0 { return "", "floor takes no args" }
+        return filter_ceil_floor(val, 0), ""
+    }
+    if string.equals(name, "round") == 1 {
+        if argc > 1 { return "", "round takes at most 1 arg" }
+        places = 0
+        if argc == 1 {
+            ps, pe = unquote_arg(string_list_get(arg_list, 0))
+            if pe != "" { return "", pe }
+            p, perr = parse_int_arg(ps, name)
+            if perr != "" { return "", perr }
+            if p < 0 { return "", "round: the number of places must not be negative" }
+            places = p
+        }
+        return filter_round(val, places), ""
     }
     // Unknown filter: pass the input through unchanged (Shopify Liquid
     // behaviour — `{{ x | nope }}` renders `x`, doesn't error). This
@@ -1488,13 +1708,11 @@ exec_tag(ctx: ptr, body: string) -> string {
 // Public surface
 // ---------------------------------------------------------------------------
 //
-// A parsed template is the token list itself — we walk it directly at
-// render time. This keeps v0 small. Once tags arrive, an AST sits between
-// the lexer and renderer.
+// A parsed template is the token list itself, walked directly at render
+// time; there is no AST between the lexer and the renderer.
 //
-// A context is a `std.map` of string → string. Once filters and dotted
-// access land, the value side becomes a std.json value tree (see TODO.md
-// "Value model").
+// A context is a `std.map` of string -> string. Typed scalars are packed
+// strings (the value_* functions below); arrays and objects are #2177.
 
 // Parse a Liquid source string. Returns (template_handle, "") on success
 // or (null, error) on a syntax problem.
@@ -1753,24 +1971,10 @@ resolve_atom(ctx: ptr, atom: string) -> (string, int, string) {
         return "", 0, ""
     }
     first = string.char_at_n(a, n, 0)
-    // Integer literal (with optional leading `-`). All-digit body.
-    digit_start = 0
-    if first == 45 { digit_start = 1 }   // '-'
-    if digit_start < n {
-        all_digits = 1
-        di = digit_start
-        while di < n {
-            c = string.char_at_n(a, n, di)
-            if c < 48 || c > 57 { all_digits = 0 ; break }
-            di = di + 1
-        }
-        if all_digits == 1 {
-            // Treat the literal text as the value. Truthy if non-zero
-            // (Liquid actually treats 0 as truthy too; here we mark it
-            // truthy because the string "0" is non-empty).
-            return a, 1, ""
-        }
-    }
+    // A number literal, integer or decimal, is its own text. Truthy: Liquid
+    // treats every number, 0 included, as true. (A decimal used to fall
+    // through to a variable lookup of the name "3.7" and render empty.)
+    if is_number_literal(a) == 1 { return a, 1, "" }
     if first == 34 || first == 39 {
         lit, err = unquote_arg(a)
         if err != "" { return "", 0, err }

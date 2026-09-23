@@ -11,8 +11,6 @@
 // the walk never touches freed memory). A regression to a recursive
 // walk/free would crash here instead of passing.
 
-import std.io(println)
-
 extern malloc(n: long) -> ptr
 extern free(p: ptr)
 extern exit(code: int)

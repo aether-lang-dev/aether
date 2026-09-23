@@ -122,6 +122,15 @@ main() {
 - Private names can still be referenced from inside the module's own
   functions, they're merged into the program, just blocked at the
   external call boundary.
+- The boundary is every way a name can be reached from outside: the
+  qualified form (`geometry.helper()`, `geometry.CONST`) and a selective
+  import (`import geometry (helper)`) both fail with `E0303 'helper' is not
+  exported from module 'geometry'`, the selective form at the import line.
+  The same holds for standard-library modules, reached by their last
+  segment (`language.name` for `std.language`).
+- A module may list a name in its prefixed form, `<module>_<name>`: std.math
+  exports `math_sqrt`, and that is what `math.sqrt(x)` and
+  `import std.math (sqrt)` reach.
 
 ### Legacy `export <fn>` form (deprecated)
 

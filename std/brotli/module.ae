@@ -25,7 +25,9 @@ exports(
     brotli_try_compress, brotli_get_compress_bytes, brotli_get_compress_length,
     brotli_release_compress,
     available, compress,
-    stream_new, stream_write, stream_flush, stream_finish, stream_free
+    stream_new, stream_write, stream_flush, stream_finish, stream_free,
+    // Quality levels for compress / stream_new
+    MIN_QUALITY, MAX_QUALITY, DEFAULT_QUALITY, FAST_QUALITY
 )
 
 extern brotli_backend_available() -> int

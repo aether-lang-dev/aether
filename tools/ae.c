@@ -6277,8 +6277,10 @@ int cmd_build_namespace(int argc, char** argv) {
                     seen_count++;
                 }
             }
-            /* Skip duplicate main()s — keep only the first. */
-            if (strncmp(p, "main(", 5) == 0 || strncmp(p, "main (", 6) == 0) {
+            /* Skip duplicate main()s — keep only the first. `fn main()` is
+             * the same declaration spelled with `fn`. */
+            if (strncmp(p, "main(", 5) == 0 || strncmp(p, "main (", 6) == 0 ||
+                strncmp(p, "fn main(", 8) == 0 || strncmp(p, "fn main (", 9) == 0) {
                 if (has_main) {
                     /* Skip until matching close brace. Naive but
                      * sufficient for a synthesized namespace where

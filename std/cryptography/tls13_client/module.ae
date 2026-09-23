@@ -136,7 +136,9 @@ exports(
     connect, connect_mtls, connect_pq, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data,
-    verify_flight_auth
+    verify_flight_auth,
+    // Shared with std.cryptography.tls13_server
+    transcript_hash_algo, finished_verify_data_algo, ALERT_CLOSE_NOTIFY, alert_name
 )
 
 // Handshake message types (RFC 8446 §4) seen in the server's flight.

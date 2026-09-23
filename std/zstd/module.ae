@@ -26,7 +26,9 @@ exports(
     zstd_try_compress, zstd_get_compress_bytes, zstd_get_compress_length,
     zstd_release_compress,
     available, compress,
-    stream_new, stream_write, stream_flush, stream_finish, stream_free
+    stream_new, stream_write, stream_flush, stream_finish, stream_free,
+    // Compression levels for compress / stream_new
+    MIN_LEVEL, MAX_LEVEL, DEFAULT_LEVEL
 )
 
 extern zstd_backend_available() -> int

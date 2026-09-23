@@ -17,7 +17,6 @@
 //
 // Self-reports "sync_atomic: P passing, F failing" on the last line; the
 // shell wrapper asserts on it.
-import std.io(println)
 import std.sync
 import std.worker
 

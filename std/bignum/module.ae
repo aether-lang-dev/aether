@@ -50,7 +50,8 @@ exports(
     multiply, divide, remainder, mod,
     mod_pow, gcd, mod_inverse, is_probable_prime,
     shift_left, shift_right,
-    to_hex, to_decimal, from_decimal, free
+    to_hex, to_decimal, from_decimal, free,
+    clone, limb
 )
 
 // libc allocator — whitelisted externs, no shim. The struct is three

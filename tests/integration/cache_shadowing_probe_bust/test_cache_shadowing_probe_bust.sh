@@ -34,7 +34,6 @@ mkdir -p "$TMP/proj/src"
 cd "$TMP/proj"
 cat > src/main.ae <<'AEOF'
 import helper (help)
-import std.io (println)
 main() { println(help()) }
 AEOF
 cat > src/helper.ae <<'AEOF'

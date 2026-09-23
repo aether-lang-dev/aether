@@ -21,7 +21,8 @@ exports(
     copy, copy_state,
     blake3_hex, blake3_bytes,
     blake3_keyed_hex, blake3_keyed_bytes,
-    blake3_derived_hex, blake3_derived_bytes
+    blake3_derived_hex, blake3_derived_bytes,
+    reset_ctx
 )
 
 struct Blake3Ctx {

@@ -422,7 +422,7 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, v: string) -> int {
     }
     if k == RULE_REFINE {
         pred = unbox_closure(r.refine_fn)
-        res = call(pred, v)
+        int res = call(pred, v)
         if res != 1 {
             push_error(errors, f.name, "custom", "${f.name} failed validation")
             return 1

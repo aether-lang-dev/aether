@@ -31,7 +31,9 @@ exports(
     zlib_try_stream_finish, zlib_get_stream_bytes, zlib_get_stream_length,
     zlib_release_stream,
     available, deflate, inflate, gzip_deflate, gzip_inflate, inflate_raw,
-    stream_new, stream_write, stream_flush, stream_finish, stream_free
+    stream_new, stream_write, stream_flush, stream_finish, stream_free,
+    // Stream formats for stream_new
+    RAW, ZLIB, GZIP
 )
 
 // Probe: returns 1 when the toolchain was built with zlib detected,

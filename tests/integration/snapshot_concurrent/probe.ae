@@ -18,7 +18,6 @@
 //
 // Self-reports "snapshot_concurrent: P passing, F failing" on the last line; the
 // shell wrapper asserts on it.
-import std.io(println)
 import std.snapshot
 import std.mem
 import std.worker

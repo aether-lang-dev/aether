@@ -40,7 +40,6 @@ exports ( use_two )
 use_two() -> int { return two() }
 EOF
 cat > main.ae <<'EOF'
-import std.io (println)
 import aa (one)
 import bb (use_two)
 main() {
@@ -74,7 +73,6 @@ call_it(cb: fn) -> int { return cb() }
 wrap() -> int { return call_it(greet) }
 EOF
 cat > addr.ae <<'EOF'
-import std.io (println)
 import ww (wrap)
 main() { println("wrap=${wrap()}") }
 EOF

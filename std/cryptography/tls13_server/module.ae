@@ -35,7 +35,7 @@ import std.cryptography.tls13_cert
 import std.cryptography.tls13_record
 import std.cryptography.pem
 import std.cryptography.asn1
-import std.cryptography.bignum
+import std.bignum
 import std.cryptography
 
 extern malloc(size: int) -> ptr

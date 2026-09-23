@@ -19,7 +19,8 @@ char* os_getenv(const char* name);
 // program and need not match `prog`. Does NOT return on success — on
 // failure returns -1 and leaves the current process running. `prog` is
 // looked up on PATH if it does not contain a slash (POSIX `execvp`).
-// Not available on Windows (returns -1).
+// Windows cannot replace a process: there it runs `prog`, waits, and
+// exits with its status; -1 only when it could not be started.
 int os_execv(const char* prog, void* argv_list);
 
 // Send signal `sig` to `pid` (POSIX kill(2)). Returns 0 on success,
@@ -31,7 +32,8 @@ int os_execv(const char* prog, void* argv_list);
 //   - sig == 0 performs no delivery but still runs the permission /
 //     existence checks, so it is the canonical "is this pid/group
 //     still alive?" probe (returns 0 if it exists, -1/ESRCH if not).
-// Not available on Windows (returns -1). POSIX-only.
+// Windows: sig 0 probes, any other sig terminates (no catchable signal),
+// and a negative pid (a group) returns -1.
 int os_kill_raw(int pid, int sig);
 
 // Change the current process's working directory to `path`. Returns 0

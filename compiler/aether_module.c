@@ -3,6 +3,7 @@
 #include "aether_strmap.h"
 #include "parser/lexer.h"
 #include "parser/parser.h"
+#include "analysis/typechecker.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -395,6 +396,24 @@ int module_is_exported(AetherModule* module, const char* symbol) {
     }
 
     return 0;
+}
+
+static const char* module_last_segment(const char* path);
+
+/* #2172: does `module` make `name` reachable as `<leaf>.name`? Either it
+ * exports `name` itself, or it exports the prefixed C-style spelling
+ * `<leaf>_name` that a qualified call resolves to: std.math lists
+ * `math_sqrt`, and `math.sqrt` / `import std.math (sqrt)` reach it through
+ * that convention. Export enforcement asks this, not module_is_exported. */
+int module_exports_symbol(AetherModule* module, const char* name) {
+    if (!module || !name) return 0;
+    if (module_is_exported(module, name)) return 1;
+    if (!module->name) return 0;
+    char prefixed[512];
+    int n = snprintf(prefixed, sizeof(prefixed), "%s_%s",
+                     module_last_segment(module->name), name);
+    if (n < 0 || (size_t)n >= sizeof(prefixed)) return 0;
+    return module_is_exported(module, prefixed);
 }
 
 /* #924 re-export resolution. A module may list, in its `exports`, a symbol
@@ -1313,6 +1332,47 @@ static int check_selective_import_shadow(ASTNode* ast,
     return 1;
 }
 
+/* #2172: every name a selective import picks must be one the module exports.
+ * `import um (helper)` used to bind an unexported `helper` as readily as an
+ * exported one, so a module's export list kept nothing private from a
+ * selective import (the qualified form is checked by the typechecker). Run
+ * once the imported module is registered, which is when its export list is
+ * known. A module with no export list exports everything, as elsewhere.
+ * Prints the diagnostic and returns 0 on the first unexported name. */
+static int check_selective_import_exports(ASTNode* import_child,
+                                          const char* importer_path) {
+    if (!import_child || !import_child->value) return 1;
+    AetherModule* mod = module_find(import_child->value);
+    if (!mod || mod->export_count == 0) return 1;
+    for (int k = 0; k < import_child->child_count; k++) {
+        ASTNode* sel = import_child->children[k];
+        if (!sel || sel->type != AST_IDENTIFIER || !sel->value) continue;
+        if (sel->annotation && strcmp(sel->annotation, "module_alias") == 0) continue;
+        /* A per-symbol alias (`import m (name as local)`) keeps the
+         * exported name in value; the alias is only the local spelling. */
+        if (module_exports_symbol(mod, sel->value)) continue;
+        char msg[512];
+        snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'",
+                 sel->value, import_child->value);
+        /* `import std.io (println)`: the name is a builtin, which no
+         * module exports and nothing needs to import. Say that, rather
+         * than send the reader to std.io's export list. */
+        const char* hint = is_builtin_function_name(sel->value)
+            ? "it is a builtin: call it without importing it"
+            : "a selective import can only name what the module lists in "
+              "its exports(...)";
+        int line = sel->line ? sel->line : import_child->line;
+        int col = sel->line ? sel->column : import_child->column;
+        /* importer_path names the importing module's file; NULL is the entry
+         * program, which the reporter already knows. */
+        AetherError e = { importer_path, NULL, line, col, msg, hint, NULL,
+                          AETHER_ERR_NOT_EXPORTED };
+        aether_error_report(&e);
+        return 0;
+    }
+    return 1;
+}
+
 /* Last `.`-separated segment of a module path: "std.audio" -> "audio",
  * "audio" -> "audio". Returns a pointer into `path`. */
 static const char* module_last_segment(const char* path) {
@@ -1503,6 +1563,10 @@ static int orchestrate_module(const char* module_name, const char* file_path,
                 return 0;
             }
             free(sub_file);
+            if (!check_selective_import_exports(child, file_path)) {
+                module_set_source_dir(saved_source_dir);
+                return 0;
+            }
         } else {
             report_unresolved_import(child);
         }
@@ -1551,6 +1615,10 @@ int module_orchestrate(ASTNode* program) {
                 return 0;
             }
             free(file_path);
+            if (!check_selective_import_exports(child, NULL)) {
+                dependency_graph_free(graph);
+                return 0;
+            }
         } else {
             report_unresolved_import(child);
         }

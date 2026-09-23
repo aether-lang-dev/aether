@@ -16,7 +16,7 @@ header comment is the authoritative description.
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 9 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
-| `std.bignum` | Arbitrary-precision integers. | 27 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
+| `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 52 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
@@ -54,7 +54,7 @@ header comment is the authoritative description.
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 108 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
-| `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
+| `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
@@ -87,9 +87,9 @@ header comment is the authoritative description.
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 14 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 30 | [full section](#compression-stdzlib) |
-| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 19 | — |
-| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | — |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 33 | [full section](#compression-stdzlib) |
+| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 23 | — |
+| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 22 | — |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -1677,8 +1677,9 @@ keys 2
 ```
 
 **Functions:**
-- `msgpack.nil_value()` / `boolean(b)` / `from_int(n)` / `num(f)` / `str(s)` / `bin(s, len)` → `ptr` - Scalars
-- `msgpack.arr()` / `msgpack.map()` → `ptr`, `msgpack.ext(type, data, len)` → `ptr` - Containers
+- `msgpack.nil_value()` / `boolean(b)` / `from_int(n)` / `num(f)` / `str(s)` / `bin(s)` → `ptr` - Scalars
+- `msgpack.arr()` / `msgpack.map()` → `ptr` - Containers
+- `msgpack.ext(type_id, data)` → `ptr`, `msgpack.get_ext_type(v)` → `int` - An extension value and its application-defined type id
 - `msgpack.array_add(a, v)`, `msgpack.map_set(m, key, v)` - Build
 - `msgpack.array_size(a)` / `array_get(a, i)`, `msgpack.map_size(m)` / `map_get(m, key)` / `map_get_key(m, i)` / `map_get_value(m, i)` - Read
 - `msgpack.get_type(v)` → `int`, and `get_bool` / `get_int` / `get_float` / `get_string` / `get_bin` - Unwrap
@@ -2847,7 +2848,7 @@ main() {
 - `os.argv0()` → `string` - Convenience wrapper around `aether_argv0()` that returns `""` instead of null and hands back a fresh copy
 - `os.args_seal()` - **One-shot runtime seal** of the argv accessors. After this returns, `aether_args_count()` reports `0`, `aether_args_get(i)` returns null, `os.argv0()` returns `""`, and `aether_argv_raw()` returns null, as if argv had never been initialised. Idempotent (calling twice is a no-op); there is no unseal. Intended use: once `main()` has parsed its CLI flags into config state, call `os.args_seal()` to prevent any later code (imported libraries, plugin callbacks, untrusted Aether modules) from reading the original argv. Complements the compile-time `hide` / `seal except` scope directives, those deny *lexical* access, this denies *runtime* access. Caveat: this is a co-operative Aether-side gate, not a kernel boundary; the OS still has the original argv in process memory (Linux `/proc/self/cmdline`, macOS sysctl) and code that goes around the Aether accessors can still read it. Pair with the LD_PRELOAD libc sandbox if the threat model demands true inaccessibility.
 - `os.args_sealed()` → `int` - Returns `1` if `args_seal()` has been called in this process, `0` otherwise. Cheap; useful for cooperative callers that want to check before they call.
-- `os_execv(prog, argv_list)` → `int` - Replace the current process image with `prog`, passing an explicit `list<ptr>` argv. Uses POSIX `execvp(3)` so `prog` is looked up on `PATH` when it does not contain a slash. Flushes stdio before the exec so pre-exec output is not lost. On success this call **never returns**; on failure returns `-1` and the current process continues. Not available on Windows, use `os_run` + `exit(rc)` instead.
+- `os_execv(prog, argv_list)` → `int` - Replace the current process image with `prog`, passing an explicit `list<ptr>` argv. Uses POSIX `execvp(3)` so `prog` is looked up on `PATH` when it does not contain a slash. Flushes stdio before the exec so pre-exec output is not lost. On success this call **never returns**; on failure returns `-1` and the current process continues. Windows cannot replace a running process, so there it runs `prog`, waits for it and exits with its status, which is what a caller of exec observes.
 
 Raw extern: `os_exec_raw`.
 
@@ -2883,17 +2884,23 @@ with spaces or an argument holding `$` or `;` arrives exactly as written.
   still sees the program itself as its `argv[0]`.
 - `env` is a list of `"KEY=VALUE"` strings, or `null` to inherit this
   process's environment.
-- On POSIX, a program named without a `/` is looked up on `PATH`.
+- A program named without a path separator is looked up on `PATH`. On
+  Windows the program's own directory and the system directories come
+  first, as they always have there, and a name without an extension is
+  tried with the extensions in `PATHEXT` that Windows can start
+  (`.com`, `.exe`, `.bat`, `.cmd`). The current directory is not searched
+  on any platform, so a `git.exe` someone left where the program runs is
+  never the `git` it meant.
 
-**Windows is different in two ways that matter for untrusted input.** A
-Windows process receives one command line, not a list; `std.os` quotes each
-argument by the rules the C runtime uses to split it back apart, so an
-ordinary program sees exactly the arguments you passed. But the program
-itself is found by `CreateProcessW`, which searches the application's
-directory and the current directory **before** `PATH`, and a `.bat` or
-`.cmd` it finds runs under `cmd.exe`, which reads the command line by its
-own rules and not the C runtime's. So on Windows, name the program by its
-full path, and do not pass user input to a batch file.
+A Windows process receives one command line, not a list. `std.os` quotes
+each argument by the rules the C runtime uses to split it back apart, so an
+ordinary program sees exactly the arguments passed. A `.bat` or `.cmd` is
+different: it runs under `cmd.exe`, which reads the line by its own rules.
+`std.os` launches it through the system `cmd.exe` with every argument
+quoted for cmd, so `a & b` arrives as the one argument `"a & b"`. An
+argument holding a `"`, a `%` or a line break is refused: cmd still acts on
+those inside quotes, and no quoting makes them safe. The call returns the
+error `argument cannot be passed to a batch file safely`, and nothing runs.
 
 A child that ran and failed and a child that never started are told apart.
 `err` is non-empty only when the child could not be started; `grep` finding
@@ -2902,12 +2909,14 @@ exit status. A child killed by a signal reports 128 plus the signal number,
 the shell's convention. One platform difference: on POSIX a program that is
 not there fails inside the child after the fork, so it reads as status 127
 with no error, while on Windows it fails before any child exists and comes
-back as status -1 with `err` set.
+back as status -1 with `err` set to `program not found`.
 
 Process execution is native on Windows (`CreateProcessW` and Job Objects),
-with two exceptions. `os_execv` does not exist there and returns -1, and the
-`std.ipc` back-channel is POSIX-only: `os.run_pipe` spawns the child without
-it, and `os.run_pipe_drain_and_wait` returns `"unsupported on Windows"`.
+with two differences. Windows cannot replace a running process, so
+`os_execv` runs the program, waits for it and exits with its status, which
+is what a caller of exec observes. And the `std.ipc` back-channel is
+POSIX-only: `os.run_pipe` spawns the child without it, and
+`os.run_pipe_drain_and_wait` returns `"unsupported on Windows"`.
 
 ```aether,run
 import std.os
@@ -2972,7 +2981,7 @@ spawned child exited 5
 - `os.wait_pid_timeout(pid, secs)` → `(int, int, string)` - Wait at most `secs` for one child: status, `timed_out`, error. A child that times out is left running
 - `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`
 - `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only)
-- `os_execv(prog, argv_list)` → `int` - Replace this process (POSIX only); listed with the argv accessors above
+- `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
 - `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`
 

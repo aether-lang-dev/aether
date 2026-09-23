@@ -2426,16 +2426,302 @@ static wchar_t* build_environ_block(void* env_list) {
     return b.data;
 }
 
+/* ============================================================
+ * #2171: resolving the program, and launching a batch file safely.
+ *
+ * Every launch used to pass lpApplicationName = NULL and let CreateProcessW
+ * find cmdline[0] itself (the #706 fix for PATH lookup). That search is
+ * not POSIX's: it tries the application's own directory and the CURRENT
+ * directory before PATH, so os.run_capture("git", ...) run from a directory
+ * someone else can write to ran their .\git.exe. And a .bat / .cmd it found
+ * ran under cmd.exe, which reads the command line by its own rules, not the
+ * C runtime's that append_escaped_arg quotes for, so an argument such as
+ * `x" & calc & "` ran calc (the BatBadBut class, CVE-2024-24576).
+ *
+ * Now the program is resolved here. A name with a path separator is used as
+ * written. A bare name is looked up everywhere CreateProcessW looked EXCEPT
+ * the current directory -- the application's own directory, the system
+ * directory, the Windows directory, then PATH -- which is Microsoft's own
+ * mitigation (NoDefaultCurrentDirectoryInExePath) and keeps an app that
+ * ships helpers beside itself working. A name without an extension takes
+ * PATHEXT's, limited to the four CreateProcessW can start (.com .exe .bat
+ * .cmd): PATHEXT also lists .js, .vbs, .py and the like, and a tool.py
+ * earlier on PATH must not hide the tool.exe after it. The absolute result
+ * is passed as lpApplicationName, so CreateProcessW searches nothing. A
+ * batch file is launched through the system cmd.exe explicitly, with every
+ * argument quoted for cmd -- and refused when it holds a character cmd
+ * would still interpret inside quotes (`"`, `%`, a line break).
+ * ============================================================ */
+
+/* Why the last win_prepare_launch on this thread failed, for the error
+ * slot callers return. Static strings only. */
+static _Thread_local const char* g_win_launch_err = NULL;
+
+static const char* win_launch_error(void) {
+    return g_win_launch_err ? g_win_launch_err : "spawn failed";
+}
+
+static int win_is_file(const wchar_t* path) {
+    DWORD a = GetFileAttributesW(path);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* `dir` + `\` + `name` + `ext` if it names a file, else NULL. */
+static wchar_t* win_try_candidate(const wchar_t* dir, size_t dir_len,
+                                  const wchar_t* name, const wchar_t* ext,
+                                  size_t ext_len) {
+    size_t name_len = wcslen(name);
+    size_t n = dir_len + 1 + name_len + ext_len + 1;
+    wchar_t* c = (wchar_t*)malloc(sizeof(wchar_t) * n);
+    if (!c) return NULL;
+    size_t k = 0;
+    if (dir_len) {
+        memcpy(c, dir, sizeof(wchar_t) * dir_len);
+        k = dir_len;
+        if (c[k - 1] != L'\\' && c[k - 1] != L'/') c[k++] = L'\\';
+    }
+    memcpy(c + k, name, sizeof(wchar_t) * name_len);
+    k += name_len;
+    if (ext_len) { memcpy(c + k, ext, sizeof(wchar_t) * ext_len); k += ext_len; }
+    c[k] = L'\0';
+    if (win_is_file(c)) return c;
+    free(c);
+    return NULL;
+}
+
+/* Can CreateProcessW start a file with this extension (this launcher
+ * running .bat / .cmd through cmd.exe)? */
+static int win_launchable_ext(const wchar_t* ext, size_t len) {
+    static const wchar_t* ok[] = { L".com", L".exe", L".bat", L".cmd", NULL };
+    for (int i = 0; ok[i]; i++) {
+        if (len == 4 && _wcsnicmp(ext, ok[i], 4) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Try `name` in one directory: as written when it already has an
+ * extension, else with each launchable extension PATHEXT lists, in its
+ * order. */
+static wchar_t* win_try_dir(const wchar_t* dir, size_t dir_len,
+                            const wchar_t* name, int has_ext,
+                            const wchar_t* pathext) {
+    if (has_ext) return win_try_candidate(dir, dir_len, name, L"", 0);
+    const wchar_t* e = pathext;
+    while (*e) {
+        const wchar_t* end = wcschr(e, L';');
+        size_t len = end ? (size_t)(end - e) : wcslen(e);
+        if (len && win_launchable_ext(e, len)) {
+            wchar_t* hit = win_try_candidate(dir, dir_len, name, e, len);
+            if (hit) return hit;
+        }
+        if (!end) break;
+        e = end + 1;
+    }
+    return NULL;
+}
+
+/* The directory this process's executable is in, or NULL. */
+static wchar_t* win_app_dir(void) {
+    DWORD cap = MAX_PATH;
+    for (int tries = 0; tries < 6; tries++) {
+        wchar_t* buf = (wchar_t*)malloc(sizeof(wchar_t) * cap);
+        if (!buf) return NULL;
+        DWORD got = GetModuleFileNameW(NULL, buf, cap);
+        if (got == 0) { free(buf); return NULL; }
+        if (got < cap) {
+            wchar_t* slash = wcsrchr(buf, L'\\');
+            if (!slash) { free(buf); return NULL; }
+            *slash = L'\0';
+            return buf;
+        }
+        free(buf);
+        cap *= 2;
+    }
+    return NULL;
+}
+
+/* A copy of environment variable `name`, or NULL when it is unset. */
+static wchar_t* win_getenv_copy(const wchar_t* name) {
+    DWORD need = GetEnvironmentVariableW(name, NULL, 0);
+    if (need == 0) return NULL;
+    wchar_t* v = (wchar_t*)malloc(sizeof(wchar_t) * need);
+    if (!v) return NULL;
+    DWORD got = GetEnvironmentVariableW(name, v, need);
+    if (got == 0 || got >= need) { free(v); return NULL; }
+    return v;
+}
+
+/* The absolute path of the program `prog` names, resolved as execvp does
+ * (see the block comment above). NULL, with g_win_launch_err set, when
+ * there is none. */
+static wchar_t* win_resolve_program(const char* prog) {
+    wchar_t* wprog = utf8_to_wide(prog);
+    if (!wprog) { g_win_launch_err = "out of memory"; return NULL; }
+
+    const wchar_t* base = wprog;
+    for (const wchar_t* p = wprog; *p; p++) {
+        if (*p == L'\\' || *p == L'/' || *p == L':') base = p + 1;
+    }
+    int has_sep = (base != wprog);
+    int has_ext = wcschr(base, L'.') != NULL;
+
+    wchar_t* pathext = win_getenv_copy(L"PATHEXT");
+    const wchar_t* exts = (pathext && *pathext) ? pathext : L".COM;.EXE;.BAT;.CMD";
+
+    wchar_t* found = NULL;
+    if (has_sep) {
+        /* A path the caller named (relative ones against the current
+         * directory). Without an extension, PATHEXT's come first, as
+         * CreateProcessW appended .exe; then the file exactly as named, so
+         * an extensionless program at an explicit path still starts (Wine
+         * runs a Unix binary that way, os_execv("/bin/echo", ...)). */
+        found = win_try_dir(L"", 0, wprog, has_ext, exts);
+        if (!found && !has_ext) found = win_try_candidate(L"", 0, wprog, L"", 0);
+    } else {
+        /* CreateProcessW's own order, less the current directory. */
+        wchar_t* app = win_app_dir();
+        if (app) {
+            found = win_try_dir(app, wcslen(app), wprog, has_ext, exts);
+            free(app);
+        }
+        wchar_t sysdir[MAX_PATH];
+        UINT sl = found ? 0 : GetSystemDirectoryW(sysdir, MAX_PATH);
+        if (sl > 0 && sl < MAX_PATH) found = win_try_dir(sysdir, sl, wprog, has_ext, exts);
+        UINT wl = found ? 0 : GetWindowsDirectoryW(sysdir, MAX_PATH);
+        if (wl > 0 && wl < MAX_PATH) found = win_try_dir(sysdir, wl, wprog, has_ext, exts);
+    }
+    if (!found && !has_sep) {
+        wchar_t* path = win_getenv_copy(L"PATH");
+        if (path) {
+            const wchar_t* d = path;
+            while (!found) {
+                const wchar_t* end = wcschr(d, L';');
+                size_t len = end ? (size_t)(end - d) : wcslen(d);
+                /* A quoted entry ("C:\Program Files\x") is legal in PATH. */
+                const wchar_t* dir = d;
+                if (len >= 2 && dir[0] == L'"' && dir[len - 1] == L'"') { dir++; len -= 2; }
+                if (len) found = win_try_dir(dir, len, wprog, has_ext, exts);
+                if (!end) break;
+                d = end + 1;
+            }
+            free(path);
+        }
+    }
+    free(pathext);
+    free(wprog);
+    if (!found) { g_win_launch_err = "program not found"; return NULL; }
+
+    /* Absolute, so CreateProcessW has nothing left to search. */
+    DWORD need = GetFullPathNameW(found, 0, NULL, NULL);
+    if (need == 0) { free(found); g_win_launch_err = "program not found"; return NULL; }
+    wchar_t* full = (wchar_t*)malloc(sizeof(wchar_t) * need);
+    if (!full) { free(found); g_win_launch_err = "out of memory"; return NULL; }
+    DWORD got = GetFullPathNameW(found, need, full, NULL);
+    free(found);
+    if (got == 0 || got >= need) { free(full); g_win_launch_err = "program not found"; return NULL; }
+    return full;
+}
+
+static int win_is_batch(const wchar_t* path) {
+    size_t n = wcslen(path);
+    if (n < 4) return 0;
+    return _wcsicmp(path + n - 4, L".bat") == 0 || _wcsicmp(path + n - 4, L".cmd") == 0;
+}
+
+/* Append one value for cmd.exe: quoted when it holds anything cmd splits
+ * or acts on outside quotes. Returns 0 when it holds something cmd still
+ * interprets INSIDE quotes -- `"` ends the quoting, `%` expands a variable,
+ * a line break ends the command -- which no quoting makes safe. */
+static int win_append_cmd_arg(WBuf* b, const wchar_t* v) {
+    for (const wchar_t* p = v; *p; p++) {
+        if (*p == L'"' || *p == L'%' || *p == L'\r' || *p == L'\n') return 0;
+    }
+    int quote = (*v == L'\0') || wcspbrk(v, L" \t&|<>^(),;=@!") != NULL;
+    if (quote) wbuf_append_char(b, L'"');
+    wbuf_append(b, v);
+    if (quote) wbuf_append_char(b, L'"');
+    return 1;
+}
+
+/* Resolve `prog` and build what CreateProcessW is given: the absolute
+ * program in *out_app (caller frees) and the command line (returned,
+ * caller frees). NULL, with g_win_launch_err set, on failure. */
+static wchar_t* win_prepare_launch(const char* prog, void* argv_list, wchar_t** out_app) {
+    g_win_launch_err = NULL;
+    *out_app = NULL;
+    wchar_t* app = win_resolve_program(prog);
+    if (!app) return NULL;
+
+    if (!win_is_batch(app)) {
+        wchar_t* cmdline = build_command_line(prog, argv_list);
+        if (!cmdline) { free(app); g_win_launch_err = "out of memory"; return NULL; }
+        *out_app = app;
+        return cmdline;
+    }
+
+    /* cmd.exe from the system directory, never from PATH or %ComSpec%. */
+    wchar_t sysdir[MAX_PATH];
+    UINT sl = GetSystemDirectoryW(sysdir, MAX_PATH);
+    if (sl == 0 || sl + 9 >= MAX_PATH) { free(app); g_win_launch_err = "cannot locate cmd.exe"; return NULL; }
+    wchar_t* cmd = (wchar_t*)malloc(sizeof(wchar_t) * (sl + 9));
+    if (!cmd) { free(app); g_win_launch_err = "out of memory"; return NULL; }
+    memcpy(cmd, sysdir, sizeof(wchar_t) * sl);
+    memcpy(cmd + sl, L"\\cmd.exe", sizeof(wchar_t) * 9);
+
+    /* "<cmd>" /d /e:ON /v:OFF /s /c ""<script>" arg1 arg2"
+     * /d skips AutoRun, /v:OFF keeps `!` literal, and /s makes /c strip
+     * exactly the outermost pair of quotes whatever is inside. */
+    WBuf b; wbuf_init(&b);
+    wbuf_append_char(&b, L'"');
+    wbuf_append(&b, cmd);
+    wbuf_append(&b, L"\" /d /e:ON /v:OFF /s /c \"");
+    /* The script's own path goes through cmd's parser too. */
+    for (const wchar_t* p = app; *p; p++) {
+        if (*p == L'"' || *p == L'%') {
+            free(app); free(cmd); free(b.data);
+            g_win_launch_err = "batch file path cannot be passed to cmd.exe safely: "
+                               "it contains a quote or %";
+            return NULL;
+        }
+    }
+    int ok = 1;
+    wbuf_append_char(&b, L'"');
+    wbuf_append(&b, app);
+    wbuf_append_char(&b, L'"');
+    int n = argv_list ? list_size(argv_list) : 0;
+    for (int i = 0; ok && i < n; i++) {
+        const char* item = aether_string_data(list_get_raw(argv_list, i));
+        if (!item) continue;
+        wchar_t* w = utf8_to_wide(item);
+        if (!w) { b.oom = 1; break; }
+        wbuf_append_char(&b, L' ');
+        ok = win_append_cmd_arg(&b, w);
+        free(w);
+    }
+    wbuf_append_char(&b, L'"');
+    free(app);
+    if (!ok) {
+        free(cmd); free(b.data);
+        g_win_launch_err = "argument cannot be passed to a batch file safely: "
+                           "it contains a quote, % or a line break";
+        return NULL;
+    }
+    if (b.oom) { free(cmd); free(b.data); g_win_launch_err = "out of memory"; return NULL; }
+    *out_app = cmd;
+    return b.data;
+}
+
 // Shared launch path. If `capture_stdout` is non-zero we redirect the
 // child's stdout to a pipe and read it to completion. `out_exit_code`
 // and `out_capture` are optional outputs.
 static int win_launch(const char* prog, void* argv_list, void* env_list,
                       int capture_stdout,
                       int* out_exit_code, char** out_capture) {
-    /* prog seeds build_command_line's argv[0] (matching POSIX
-     * build_argv_array). CreateProcessW receives lpApplicationName=NULL
-     * and PATH-resolves that first token itself (see below). */
-    wchar_t* cmdline = build_command_line(prog, argv_list);
+    /* prog seeds the command line's argv[0] (matching POSIX
+     * build_argv_array); the program itself is resolved by
+     * win_prepare_launch (#2171). */
+    wchar_t* app = NULL;
+    wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
     if (!cmdline) return -1;
 
     wchar_t* wenv = build_environ_block(env_list);
@@ -2455,7 +2741,7 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
         sa.bInheritHandle = TRUE;
         sa.lpSecurityDescriptor = NULL;
         if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
-            free(cmdline); free(wenv);
+            free(app); free(cmdline); free(wenv);
             return -1;
         }
         // The read end must NOT be inherited by the child.
@@ -2471,18 +2757,11 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
     memset(&pi, 0, sizeof(pi));
 
     DWORD flags = CREATE_UNICODE_ENVIRONMENT;
-    /* lpApplicationName=NULL so CreateProcessW parses the first whitespace-
-     * delimited token of lpCommandLine and runs its own PATH + .exe + .bat
-     * resolution. Passing a bare program name (e.g. "cmd", "gcc") as
-     * lpApplicationName makes Win32 treat it as a literal filename in CWD
-     * — no PATH search, no extension append — and CreateProcessW returns
-     * ERROR_FILE_NOT_FOUND. That broke os.run / os.run_capture /
-     * os.run_supervised on Windows for every PATH-resolved program
-     * (issue #706). The argv[0] in cmdline (built by build_command_line)
-     * already carries the program name, properly quoted by append_escaped_arg,
-     * which is what CreateProcessW will parse. */
+    /* The absolute program win_prepare_launch resolved (#2171): a bare name
+     * handed to lpApplicationName would be a literal file in the CWD (#706),
+     * and NULL let CreateProcessW search the CWD before PATH. */
     BOOL ok = CreateProcessW(
-        NULL,          // application name — let CreateProcessW PATH-resolve cmdline[0]
+        app,           // absolute program: nothing left for Win32 to search
         cmdline,       // command line (modifiable — CreateProcessW may write)
         NULL, NULL,
         capture_stdout ? TRUE : FALSE,  // inherit handles only when capturing
@@ -2492,6 +2771,7 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
         &si,
         &pi);
 
+    free(app);
     free(cmdline);
     free(wenv);
 
@@ -2624,7 +2904,8 @@ static void winproc_remove(int token) {
  * HANDLE, or NULL on failure. hThread is closed here (never needed by the
  * caller); hProcess is the caller's to wait on and close. */
 static HANDLE win_spawn(const char* prog, void* argv_list, void* env_list) {
-    wchar_t* cmdline = build_command_line(prog, argv_list);
+    wchar_t* app = NULL;
+    wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
     if (!cmdline) return NULL;
     wchar_t* wenv = build_environ_block(env_list);
 
@@ -2635,13 +2916,14 @@ static HANDLE win_spawn(const char* prog, void* argv_list, void* env_list) {
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
 
-    /* Same CreateProcessW contract as win_launch: lpApplicationName=NULL so
-     * cmdline[0] is PATH-resolved (issue #706); no handle inheritance (no
-     * pipe), inherit parent env when wenv is NULL. */
+    /* Same CreateProcessW contract as win_launch: the resolved absolute
+     * program (#2171); no handle inheritance (no pipe), inherit parent env
+     * when wenv is NULL. */
     BOOL ok = CreateProcessW(
-        NULL, cmdline, NULL, NULL, FALSE,
+        app, cmdline, NULL, NULL, FALSE,
         CREATE_UNICODE_ENVIRONMENT, wenv, NULL, &si, &pi);
 
+    free(app);
     free(cmdline);
     free(wenv);
 
@@ -2719,7 +3001,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     int exit_code = 0;
     if (win_launch(prog, argv_list, env_list, 1, &exit_code, &capture) != 0) {
         free(capture);
-        out._2 = "spawn failed";
+        out._2 = win_launch_error();
         return out;
     }
     /* Free the empty-heap initializer before overwriting, so the
@@ -2764,7 +3046,7 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     if (!prog) { out._1 = "null prog"; return out; }
     if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
     HANDLE h = win_spawn(prog, argv_list, env_list);
-    if (!h) { out._1 = "spawn failed"; return out; }
+    if (!h) { out._1 = win_launch_error(); return out; }
     int tok = winproc_register(h);
     if (tok < 0) {
         /* Table full — don't leak the process: wait+close it and error. */
@@ -2999,12 +3281,13 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
     if (!prog) { out._1 = "null prog"; return out; }
     if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
 
-    wchar_t* cmdline = build_command_line(prog, argv_list);
-    if (!cmdline) { out._1 = "argv build failed"; return out; }
+    wchar_t* app = NULL;
+    wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
+    if (!cmdline) { out._1 = win_launch_error(); return out; }
     wchar_t* wenv = build_environ_block(env_list); /* NULL = inherit */
 
     HANDLE job = CreateJobObjectW(NULL, NULL);
-    if (!job) { free(cmdline); free(wenv); out._1 = "job create failed"; return out; }
+    if (!job) { free(app); free(cmdline); free(wenv); out._1 = "job create failed"; return out; }
 
     /* Arm kill-on-close only when reap_group is set: closing the job then
      * tears down the whole tree (the Windows group-reap). Without it,
@@ -3024,11 +3307,9 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
     DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED;
     if (new_process_group) flags |= CREATE_NEW_PROCESS_GROUP;
 
-    /* lpApplicationName=NULL — same reason as win_launch (issue #706):
-     * let CreateProcessW PATH-resolve cmdline[0] rather than treating
-     * the bare prog name as a literal CWD filename. */
-    BOOL ok = CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, flags, wenv, NULL, &si, &pi);
-    free(cmdline); free(wenv);
+    /* The resolved absolute program, as in win_launch (#2171). */
+    BOOL ok = CreateProcessW(app, cmdline, NULL, NULL, FALSE, flags, wenv, NULL, &si, &pi);
+    free(app); free(cmdline); free(wenv);
     if (!ok) { CloseHandle(job); out._1 = "spawn failed"; return out; }
 
     AssignProcessToJobObject(job, pi.hProcess);
@@ -3138,14 +3419,14 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
 
-    wchar_t* cmdline = build_command_line(prog, argv_list);
-    wchar_t* wenv = build_environ_block(env_list); /* NULL = inherit */
+    wchar_t* app = NULL;
+    wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
     if (!cmdline) {
-        free(cmdline); free(wenv);
         CloseHandle(in_r); CloseHandle(in_w); CloseHandle(out_r);
         CloseHandle(out_w); CloseHandle(err_r); CloseHandle(err_w);
-        out._3 = "argv build failed"; return out;
+        out._3 = win_launch_error(); return out;
     }
+    wchar_t* wenv = build_environ_block(env_list); /* NULL = inherit */
 
     STARTUPINFOW si; memset(&si, 0, sizeof si); si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -3154,12 +3435,10 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     si.hStdError  = err_w;
     PROCESS_INFORMATION pi; memset(&pi, 0, sizeof pi);
 
-    /* lpApplicationName=NULL — same reason as win_launch (issue #706):
-     * let CreateProcessW PATH-resolve cmdline[0] rather than treating
-     * the bare prog name as a literal CWD filename. */
-    BOOL ok = CreateProcessW(NULL, cmdline, NULL, NULL, TRUE,
+    /* The resolved absolute program, as in win_launch (#2171). */
+    BOOL ok = CreateProcessW(app, cmdline, NULL, NULL, TRUE,
                              CREATE_UNICODE_ENVIRONMENT, wenv, NULL, &si, &pi);
-    free(cmdline); free(wenv);
+    free(app); free(cmdline); free(wenv);
     /* Close the child-side ends in the parent so EOF propagates correctly. */
     CloseHandle(in_r); CloseHandle(out_w); CloseHandle(err_w);
     if (!ok) {

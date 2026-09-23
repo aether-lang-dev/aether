@@ -170,16 +170,16 @@ main() {
 
     // --- spawn failure: missing binary -------------------------------
     // POSIX finds out inside the forked child (exit 127, no err); Windows
-    // finds out in CreateProcessW (-1, "spawn failed"). Both are the
+    // looks the program up in the parent (-1, "program not found"). Both are the
     // platform's documented contract.
     av5 = list.new()
     out5, err5, code5, spawn5 = os.run_full("/no/such/binary", av5, null, "")
     if os_getenv("OS") == "Windows_NT" {
-        if code5 != -1 || spawn5 != "spawn failed" {
-            println("  FAIL: missing binary exit=${code5} spawn=${spawn5}, expected -1 / spawn failed")
+        if code5 != -1 || spawn5 != "program not found" {
+            println("  FAIL: missing binary exit=${code5} spawn=${spawn5}, expected -1 / program not found")
             exit(1)
         }
-        println("  PASS: missing binary → (-1, \"spawn failed\")")
+        println("  PASS: missing binary → (-1, \"program not found\")")
     } else {
         if code5 != 127 {
             println("  FAIL: missing binary exit=${code5}, expected 127 (exec-in-child)")
