@@ -14,6 +14,213 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.712.0]
+
+### Added
+
+- **`ae build --target=<triple> --emit=both` works (#1648).** It was the
+  last mode still rejected under `--target`, on the grounds that "the cross
+  path links once and cannot produce both artifacts from one invocation".
+  That described a design the code does not have: `--emit=both` has always
+  run two ordinary builds, one `--emit=exe` and one `--emit=lib`, each with
+  its own link — and both already worked cross. #1648 has no carve-out left.
+
+- **A cross build names its outputs for the target, not the host.** Making
+  `--emit=both` work cross exposed that several names were derived from the
+  machine doing the build:
+  - a Linux executable built on Windows was called `app.exe`, from the
+    host's `EXE_EXT`;
+  - with `-o NAME` the library pass appended the host's extension, so a
+    Linux `.so` built on Windows was `NAME.dll`; without `-o`, a Windows
+    library built on Linux came out as `libapp.dll.so`;
+  - `--target X`, the two-argument spelling `cmd_build` accepts, was not
+    read at all when naming, so it fell back to the host;
+  - `--emit=staticlib -o libgreet.a` for a Windows target wrote a correct
+    `!<arch>` archive named `libgreet.a.dll`, and `--emit=obj` did the same
+    to an object — the DLL-naming rule keyed on a flag every lib-codegen
+    mode sets;
+  - a Windows DLL's import library was named by zig after the first *input*
+    file (`app.lib` for `libapp.dll`, `appw.dll.lib` for `-o appw`), not the
+    DLL a consumer links against. It is `<dll-stem>.lib` now.
+
+  Each extension now comes from the target, classified by the canonical
+  triple from `cross_target_to_zig` — the same mapping the link itself uses
+  — so an alias like `arm64-macos` cannot be named one way and linked
+  another. For the Emscripten `wasm` target, where an executable and a
+  library are *both* a `.js` + `.wasm` pair, the library is `libNAME.js` +
+  `libNAME.wasm` beside `NAME.js` + `NAME.wasm`, as an unnamed library is
+  `lib<name>` on every other target; otherwise the two passes wrote the
+  same module.
+
+  `tests/integration/cross_emit_lib` now runs end to end on a Windows host,
+  where its static-archive section used to fall through to a Linux triple
+  and die with "cannot execute binary file", and it checks names exactly,
+  since MSYS makes `[ -f both ]` true for `both.exe`.
+
+### Changed
+
+- **The 37 modules the stdlib reference only indexed now have worked,
+  verified sections, and there is one stdlib reference instead of two
+  (#1523).** Each section says what the module is for and the thing about it
+  that is easy to get wrong, gives an example, and lists the functions; this
+  change adds the last 22 (`std.mem`, `alloc`, `tracking`, `snapshot`,
+  `ipc`, `signal`, `dl`, `ulid`, `ksuid`, `tsid`, `nanoid`, `plural`,
+  `message`, `language`, `clapae`, `http1`, `audio`, `audit`, `capsicum`,
+  `casper`, `host`, `longarr`). None of the examples is written from memory:
+  `make check-docs` compiles every one and runs most, comparing what they
+  print with the output shown beside them. The ones that cannot run
+  everywhere (`std.ipc` is POSIX-only, `std.capsicum` and `std.casper`
+  FreeBSD-only) are compiled, and `std.host`, a library with no `main()`, is
+  built as one.
+
+  `docs/stdlib-api.md` described the same modules as the reference in
+  different words, which is how errors survived in both. Its process-spawn
+  section, the only one with no counterpart, was also wrong. Its example put
+  the program name in `argv`, so it ran `git git rev-parse HEAD`. It
+  documented an `os.run` that is not exported. And it said Windows used POSIX
+  shims where it has used `CreateProcessW` for some time. The reference now
+  has a *Running programs* section written from `std.os`'s own contracts,
+  covering the whole surface: `run_capture`, `run_full`, `spawn_proc` with
+  `wait` / `wait_any` / `wait_any_timeout`, `kill`, `wait_pid_timeout`,
+  `run_supervised`, `chdir` / `getcwd` and `os_which`. It also says plainly
+  what skipping the shell does not buy on Windows: `CreateProcessW` searches
+  the current directory before `PATH`, and a batch file re-parses its
+  arguments through `cmd.exe`. Its example re-runs itself as the child, so it
+  runs on every OS. `stdlib-api.md` is now a one-page map from a task to the
+  reference section that covers it.
+
+  More corrections fell out of the checking:
+  - The reference's *Other structured-data formats* said YAML, CSV,
+    MessagePack and CBOR had no support, directly above the MessagePack
+    section.
+  - `std.mem`'s `ptr_to_long`, `long_to_ptr` and `call_fn2_void` were missing
+    from its export list, so the index undercounted the module and its own
+    guide called them unofficial.
+  - `make check-docs`' index fixer rewrote every line of the reference with
+    CRLF endings on Windows to change one count. It now keeps the file's own
+    line endings.
+
+### Fixed
+
+- **The packed arrays' unchecked accessors are exported from libaether
+  again, as well as being inline (#2169).** #1986 made
+  `intarr_get_unchecked` and its siblings `static inline` in
+  `aether_arr_inline.h` so element access vectorises, and in the same change
+  removed their out-of-line definitions. But those names were part of
+  libaether's ABI, and C outside the standard library declares and calls
+  them without the header — aether-ui's GTK4 and Win32 backends do
+  `extern double floatarr_get_unchecked(void* arr, int i);`. From 0.708.0
+  every program linking the toolkit failed with `undefined reference to
+  floatarr_get_unchecked`, ae3d's editor among them.
+
+  Each accessor now has two definitions, on purpose: a translation unit
+  that includes the header still gets the inline body, and the three
+  `.c` files define `AETHER_ARR_NO_INLINE_ACCESSORS`, see prototypes
+  instead, and export real definitions under the same names — ordinary C,
+  since a `static inline` in one TU and an external definition in another
+  never meet. `tests/integration/packed_array_c_abi` links a C program that
+  only *declares* the accessors, the way aether-ui does; checks every
+  accessor the header declares against libaether's exported symbols, so
+  one added later without its twin is caught here; and compiles a TU that
+  includes the header to confirm it still gets a load rather than a call,
+  so the vectorisation win is not quietly given back to fix the link.
+
+- **Building an executable from a file with no `main()` says so, instead of
+  failing in the linker.** `ae build lib.ae` on a library-shaped source
+  compiled cleanly and then died with `undefined reference to WinMain`
+  (MinGW) or `undefined symbol: main` (ld.lld) — a message about the C
+  runtime that names nothing the user wrote. It now stops before the link:
+
+  ```
+  Error: lib.ae has no main(), so there is no executable to build.
+         To build it as a library, use --emit=lib (or --emit=obj for an
+         object file). --emit=both builds an executable as well, so it
+         needs a main() too.
+  ```
+
+  The cross path used to reject `--emit=both` outright partly to avoid this
+  exact linker error — which hid it for one mode on one path while every
+  native build still produced it. The check lives in the driver rather than
+  the compiler, because the compiler is right to accept such a file:
+  libraries, objects, emitted C, documentation blocks whose `main` lives in
+  a host, and every test that runs `aetherc x.ae out.c` to inspect codegen
+  all legitimately have none. codegen reports the fact the way it reports
+  link, source and include requirements — a `// aether-entry: main` line in
+  the generated file's header — and only an executable link reads it.
+
+- **A variable named `stdout`, `stderr`, `errno`, `EOF` or another C header
+  macro compiles.** The generated C includes `<stdio.h>`, `<stdlib.h>`,
+  `<stdint.h>` and `<time.h>`, and the preprocessor rewrote any identifier
+  spelled like one of their macros before the C compiler saw it: `EOF = 1`
+  became `(-1) = 1`, `errno = 5` an assignment to a function call, and, under
+  the Windows UCRT, `stdout = x` became `(__acrt_iob_func(1)) = x`. The
+  program type-checked, and the C compile then failed with errors pointing
+  into generated code. glibc defines `stdout` as itself, so the most natural
+  case, `stdout, stderr, code, err = os.run_full(...)`, built on Linux and
+  failed only on Windows. The stdlib guide carried a warning telling readers
+  not to use those names.
+
+  Codegen now renames these names the way it already renamed C keywords and
+  Windows SDK names, in locals, parameters, tuple targets and struct fields,
+  on every platform so a program behaves the same everywhere. The list is the
+  object-like macros of the headers the generated C includes (`stdin`,
+  `stdout`, `stderr`, `EOF`, `BUFSIZ`, `SEEK_*`, `EXIT_*`, `RAND_MAX`,
+  `errno`, `CLOCKS_PER_SEC`, the `<stdint.h>` limits), plus `environ`. A
+  name the program imports on purpose with `extern const NAME: T @c_import`
+  keeps its C spelling, since it *is* the macro.
+  `tests/regression/test_c_header_macro_idents.ae` covers each position and
+  the `@c_import` exemption.
+
+### Performance
+
+- **The HTTP client's receive buffer travels with its pooled connection
+  (#2160).** The blocking client path read every response into a buffer
+  that started at nothing and grew to at least 16 KiB, then freed it when
+  the request ended — so a pooled connection serving thousands of requests
+  allocated and freed 16 KiB each time, even for a 200-byte response. In
+  #1739's census that was 5.3 MiB over 300 proxied requests, the largest
+  byte figure by an order of magnitude. The event-loop proxy driver already
+  kept its buffer per connection; this was the blocking driver's gap.
+
+  The buffer now lives on the `Transport`, which is exactly what the pool
+  stores and returns whole and exactly what every disposal path hands to
+  `transport_close` — so it rides with the connection into and out of the
+  pool and is freed on every path that retires one, with no new ownership
+  rule to get wrong. A buffer that grew past 64 KiB is not kept, so the idle
+  pool can pin at most `max_idle × 64 KiB` rather than whatever the largest
+  body was.
+
+  Measured, not assumed: `http.client_rx_buffer_allocs()` counts buffers
+  allocated from nothing. Ten requests over one pooled connection allocate
+  **one**; with pooling disabled the same ten allocate **ten**, which is
+  what every request did before. `tests/integration/http_client_keepalive`
+  asserts that three requests over its provably-single connection needed
+  one buffer.
+
+- **A reused server response rebuilds its headers in place (#1739).** The
+  allocation census found response headers costing two `strdup`s apiece on
+  every request, most of them rewriting text already sitting in the
+  response from the last one: a reset freed the two default headers and the
+  status text, then allocated identical copies of all three. Now the
+  defaults and `"OK"` are written into the strings already there, and
+  `set_header` overwrites a value in place when the new one fits — a
+  handler's `Content-Type: text/plain` over the default costs nothing.
+
+  Putting a header's name and value in one allocation would have cut more,
+  and was deliberately not done: each header string being its own
+  allocation is a convention C outside the library relies on —
+  `tests/integration/http_external_ptr` frees them one by one — and
+  breaking it would be the same kind of ABI break as #2169. That test used
+  to skip on Windows with no reason recorded; it passes there, so it now
+  runs everywhere and guards the convention. A unit test asserts the reuse
+  by pointer identity.
+
+  `std.http.server.lb`'s header comment listed the upstream picker as its
+  top development direction. #1739's census showed the picker is one
+  atomic add with its only mutex skipped unless rate limiting is on; the
+  comment now says where the per-request cost actually was, and that it is
+  addressed.
+
 ## [0.711.0]
 
 ### Added
