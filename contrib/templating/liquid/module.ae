@@ -1221,13 +1221,12 @@ int_text(neg: int, idigits: string) -> string {
 // one fraction digit kept ("3.10" -> "3.1", "4." -> "4.0"), the sign kept
 // even on zero ("-0.0"), as Ruby does.
 float_text(neg: int, idigits: string, fdigits: string) -> string {
-    fn_ = string_length(fdigits)
-    while fn_ > 1 && string.char_at_n(fdigits, fn_, fn_ - 1) == 48 { fn_ = fn_ - 1 }
-    frac = "0"
-    if fn_ > 0 { frac = string.substring_n(fdigits, string_length(fdigits), 0, fn_) }
+    frac = fdigits
+    if string_length(frac) == 0 { frac = "0" }
     body = string.concat(string.concat(idigits, "."), frac)
-    if neg == 1 { return string.concat("-", body) }
-    return body
+    if neg == 1 { body = string.concat("-", body) }
+    d, _derr = string.to_double(body)
+    return ruby_float_text(d)
 }
 
 // Is any fraction digit non-zero?
@@ -1270,6 +1269,369 @@ filter_round(val: string, places: int) -> string {
     ri, rf = round_digits(idigits, fdigits, places)
     if places == 0 { return int_text(neg, ri) }
     return float_text(neg, ri, rf)
+}
+
+// ---- Exact decimal arithmetic (#2185) --------------------------------------
+//
+// Liquid's arithmetic runs on Ruby numbers: Integers are unbounded, a
+// decimal operand makes a BigDecimal, and a BigDecimal result is printed
+// through Float (`to_f`). So the math filters work here on exact decimals
+// held as digit strings -- a sign, an unsigned mantissa without leading
+// zeros, and a scale (digits after the point) -- and print a decimal result
+// the way Ruby prints the Float nearest to it (ruby_float_text).
+
+// Strip leading zeros from a digit string, keeping one ("007" -> "7").
+dstrip(d: string) -> string {
+    n = string_length(d)
+    i = 0
+    while i < n - 1 && string.char_at_n(d, n, i) == 48 { i = i + 1 }
+    if i == 0 { return d }
+    return string.substring_n(d, n, i, n)
+}
+
+// Compare two stripped digit strings as magnitudes: -1, 0 or 1.
+dcmp(a: string, b: string) -> int {
+    an = string_length(a)
+    bn = string_length(b)
+    if an != bn {
+        if an < bn { return -1 }
+        return 1
+    }
+    i = 0
+    while i < an {
+        ca = string.char_at_n(a, an, i)
+        cb = string.char_at_n(b, bn, i)
+        if ca != cb {
+            if ca < cb { return -1 }
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Reverse a string (the digit arithmetic below builds results backwards).
+drev(r: string) -> string {
+    rn = string_length(r)
+    sb = strbuilder.new(rn + 1)
+    j = rn - 1
+    while j >= 0 {
+        strbuilder.append(sb, string.from_char(string.char_at_n(r, rn, j)))
+        j = j - 1
+    }
+    return strbuilder.finish(sb)
+}
+
+// a + b for digit strings.
+dadd(a: string, b: string) -> string {
+    an = string_length(a)
+    bn = string_length(b)
+    rev = strbuilder.new(an + bn + 2)
+    i = an - 1
+    j = bn - 1
+    carry = 0
+    while i >= 0 || j >= 0 || carry > 0 {
+        sum = carry
+        if i >= 0 { sum = sum + string.char_at_n(a, an, i) - 48 }
+        if j >= 0 { sum = sum + string.char_at_n(b, bn, j) - 48 }
+        carry = 0
+        if sum >= 10 { sum = sum - 10; carry = 1 }
+        strbuilder.append(rev, string.from_char(sum + 48))
+        i = i - 1
+        j = j - 1
+    }
+    return dstrip(drev(strbuilder.finish(rev)))
+}
+
+// a - b for digit strings, a >= b.
+dsub(a: string, b: string) -> string {
+    an = string_length(a)
+    bn = string_length(b)
+    rev = strbuilder.new(an + 1)
+    i = an - 1
+    j = bn - 1
+    borrow = 0
+    while i >= 0 {
+        diff = string.char_at_n(a, an, i) - 48 - borrow
+        if j >= 0 { diff = diff - (string.char_at_n(b, bn, j) - 48) }
+        borrow = 0
+        if diff < 0 { diff = diff + 10; borrow = 1 }
+        strbuilder.append(rev, string.from_char(diff + 48))
+        i = i - 1
+        j = j - 1
+    }
+    return dstrip(drev(strbuilder.finish(rev)))
+}
+
+// `d` followed by `k` zeros (d * 10^k).
+dshift(d: string, k: int) -> string {
+    if k <= 0 || string.equals(d, "0") == 1 { return d }
+    sb = strbuilder.new(string_length(d) + k + 1)
+    strbuilder.append(sb, d)
+    i = 0
+    while i < k { strbuilder.append(sb, "0"); i = i + 1 }
+    return strbuilder.finish(sb)
+}
+
+// a * b for digit strings (schoolbook: one scaled partial sum per digit).
+dmul(a: string, b: string) -> string {
+    if string.equals(a, "0") == 1 || string.equals(b, "0") == 1 { return "0" }
+    bn = string_length(b)
+    total = "0"
+    j = 0
+    while j < bn {
+        digit = string.char_at_n(b, bn, j) - 48
+        total = dshift(total, 1)
+        k = 0
+        while k < digit { total = dadd(total, a); k = k + 1 }
+        j = j + 1
+    }
+    return total
+}
+
+// (a / b, a mod b) for digit strings, b != "0" (long division).
+ddivmod(a: string, b: string) -> (string, string) {
+    an = string_length(a)
+    qb = strbuilder.new(an + 1)
+    r = "0"
+    i = 0
+    while i < an {
+        r = dstrip(string.concat(r, string.from_char(string.char_at_n(a, an, i))))
+        q = 0
+        while dcmp(r, b) >= 0 { r = dsub(r, b); q = q + 1 }
+        strbuilder.append(qb, string.from_char(q + 48))
+        i = i + 1
+    }
+    return dstrip(strbuilder.finish(qb)), r
+}
+
+// Signed a + b where both have the same scale: (negative, mantissa).
+dsigned_add(an: int, am: string, bn: int, bm: string) -> (int, string) {
+    if an == bn { return an, dadd(am, bm) }
+    c = dcmp(am, bm)
+    if c == 0 { return 0, "0" }
+    if c > 0 { return an, dsub(am, bm) }
+    return bn, dsub(bm, am)
+}
+
+// A number as (is_decimal, negative, mantissa, scale), read as Liquid reads
+// it (number_parts).
+dparse(v: string) -> (int, int, string, int) {
+    is_dec, neg, idigits, fdigits = number_parts(v)
+    m = dstrip(string.concat(idigits, fdigits))
+    if string.equals(m, "0") == 1 { neg = 0 }
+    return is_dec, neg, m, string_length(fdigits)
+}
+
+// Decimal text for (negative, mantissa, scale): "-12.340".
+dtext(neg: int, m: string, scale: int) -> string {
+    mm = m
+    while string_length(mm) <= scale { mm = string.concat("0", mm) }
+    n = string_length(mm)
+    body = string.substring_n(mm, n, 0, n - scale)
+    if scale > 0 {
+        body = string.concat(string.concat(body, "."), string.substring_n(mm, n, n - scale, n))
+    }
+    if neg == 1 { return string.concat("-", body) }
+    return body
+}
+
+// The shortest decimal digits that read back as exactly `mag` (> 0, finite):
+// (digits, decpt), meaning 0.<digits> x 10^decpt. string_from_double gives
+// 17 significant digits, always enough to round-trip; the first shorter
+// rounding of them that reads back the same double is the shortest.
+shortest_digits(mag: float) -> (string, int) {
+    t = string.string_from_double(mag)
+    tn = string_length(t)
+    epos = string.index_of_from_n(t, tn, "e", 0)
+    mant = t
+    exp10 = 0
+    if epos >= 0 {
+        mant = string.substring_n(t, tn, 0, epos)
+        ev, _eerr = string.to_int(string.substring_n(t, tn, epos + 1, tn))
+        exp10 = ev
+    }
+    mn = string_length(mant)
+    dot = string.index_of_from_n(mant, mn, ".", 0)
+    ipart = mant
+    fpart = ""
+    if dot >= 0 {
+        ipart = string.substring_n(mant, mn, 0, dot)
+        fpart = string.substring_n(mant, mn, dot + 1, mn)
+    }
+    digits = string.concat(ipart, fpart)
+    decpt = string_length(ipart) + exp10
+    // Leading zeros move the point.
+    dn = string_length(digits)
+    lz = 0
+    while lz < dn - 1 && string.char_at_n(digits, dn, lz) == 48 { lz = lz + 1 }
+    if lz > 0 {
+        digits = string.substring_n(digits, dn, lz, dn)
+        decpt = decpt - lz
+    }
+    dn = string_length(digits)
+    k = 1
+    while k <= dn {
+        head = string.substring_n(digits, dn, 0, k)
+        hd = decpt
+        if k < dn && string.char_at_n(digits, dn, k) >= 53 {
+            inc = digits_inc(head)
+            if string_length(inc) > k {
+                head = string.substring_n(inc, string_length(inc), 0, k)
+                hd = decpt + 1
+            } else {
+                head = inc
+            }
+        }
+        cand = string.concat(string.concat(string.concat("0.", head), "e"), string.from_int(hd))
+        back, _berr = string.to_double(cand)
+        if back == mag {
+            // Drop trailing zeros; they carry no digits.
+            hn = string_length(head)
+            while hn > 1 && string.char_at_n(head, hn, hn - 1) == 48 { hn = hn - 1 }
+            return string.substring_n(head, string_length(head), 0, hn), hd
+        }
+        k = k + 1
+    }
+    return digits, decpt
+}
+
+// `v` printed as Ruby prints a Float: the shortest digits that read back as
+// `v`, in fixed notation with at least one fraction digit ("2.5", "3.0",
+// "0.0001") while the decimal exponent is in (-4, 16], else scientific
+// ("1.0e+16", "1.5e-05"); zero keeps its sign ("-0.0").
+ruby_float_text(v: float) -> string {
+    if v != v { return "NaN" }
+    // Past NaN, v - v is non-zero only for an infinity.
+    if v - v != 0.0 {
+        if v > 0.0 { return "Infinity" }
+        return "-Infinity"
+    }
+    sign = ""
+    mag = v
+    if v < 0.0 { sign = "-"; mag = 0.0 - v }
+    if mag == 0.0 {
+        z = string.string_from_double(v)
+        if string.char_at_n(z, string_length(z), 0) == 45 { return "-0.0" }
+        return "0.0"
+    }
+    digits, decpt = shortest_digits(mag)
+    dn = string_length(digits)
+    body = ""
+    if decpt > 0 && decpt <= 16 {
+        if decpt >= dn {
+            body = string.concat(dshift(digits, decpt - dn), ".0")
+        } else {
+            body = string.concat(string.concat(string.substring_n(digits, dn, 0, decpt), "."),
+                                 string.substring_n(digits, dn, decpt, dn))
+        }
+    } else if decpt <= 0 && decpt > -4 {
+        zeros = ""
+        zi = 0
+        while zi < 0 - decpt { zeros = string.concat(zeros, "0"); zi = zi + 1 }
+        body = string.concat(string.concat("0.", zeros), digits)
+    } else {
+        frac = "0"
+        if dn > 1 { frac = string.substring_n(digits, dn, 1, dn) }
+        e = decpt - 1
+        esign = "+"
+        if e < 0 { esign = "-"; e = 0 - e }
+        etext = string.from_int(e)
+        if e < 10 { etext = string.concat("0", etext) }
+        body = string.concat(string.concat(string.concat(string.concat(
+            string.substring_n(digits, dn, 0, 1), "."), frac), string.concat("e", esign)), etext)
+    }
+    return string.concat(sign, body)
+}
+
+// A decimal result, printed through Float as Liquid prints it.
+ddecimal_out(neg: int, m: string, scale: int) -> string {
+    d, _derr = string.to_double(dtext(neg, m, scale))
+    return ruby_float_text(d)
+}
+
+// One arithmetic filter over two numbers read as Liquid reads them. Returns
+// (text, error). Integer operands stay integers, unbounded; a decimal on
+// either side makes the result a decimal. Division and modulo floor, as
+// Ruby's do (-7 / 2 is -4, -7 % 3 is 2).
+filter_arith(name: string, lhs_text: string, rhs_text: string) -> (string, string) {
+    a_dec, a_neg, a_m, a_scale = dparse(lhs_text)
+    b_dec, b_neg, b_m, b_scale = dparse(rhs_text)
+    dec = 0
+    if a_dec == 1 || b_dec == 1 { dec = 1 }
+    // Common scale, so the mantissas are directly comparable.
+    scale = a_scale
+    if b_scale > scale { scale = b_scale }
+    am = dshift(a_m, scale - a_scale)
+    bm = dshift(b_m, scale - b_scale)
+
+    if string.equals(name, "plus") == 1 || string.equals(name, "minus") == 1 {
+        bn2 = b_neg
+        if string.equals(name, "minus") == 1 && string.equals(bm, "0") == 0 { bn2 = 1 - b_neg }
+        rn, rm = dsigned_add(a_neg, am, bn2, bm)
+        if dec == 1 { return ddecimal_out(rn, rm, scale), "" }
+        return int_text(rn, rm), ""
+    }
+    if string.equals(name, "times") == 1 {
+        rm = dmul(a_m, b_m)
+        rn = 0
+        if a_neg != b_neg && string.equals(rm, "0") == 0 { rn = 1 }
+        if dec == 1 { return ddecimal_out(rn, rm, a_scale + b_scale), "" }
+        return int_text(rn, rm), ""
+    }
+    if string.equals(name, "at_least") == 1 || string.equals(name, "at_most") == 1 {
+        // Signed comparison of lhs and rhs: -1, 0, 1.
+        c = 0
+        if a_neg != b_neg {
+            c = 1
+            if a_neg == 1 { c = -1 }
+        } else {
+            c = dcmp(am, bm)
+            if a_neg == 1 { c = 0 - c }
+        }
+        take_rhs = 0
+        if string.equals(name, "at_least") == 1 && c < 0 { take_rhs = 1 }
+        if string.equals(name, "at_most") == 1 && c > 0 { take_rhs = 1 }
+        // The result is the chosen operand, in its own shape.
+        if take_rhs == 1 {
+            if b_dec == 1 { return ddecimal_out(b_neg, b_m, b_scale), "" }
+            return int_text(b_neg, b_m), ""
+        }
+        if a_dec == 1 { return ddecimal_out(a_neg, a_m, a_scale), "" }
+        return int_text(a_neg, a_m), ""
+    }
+    if string.equals(bm, "0") == 1 {
+        return "", string.concat(name, ": division by zero")
+    }
+    if string.equals(name, "divided_by") == 1 {
+        if dec == 0 {
+            q, r = ddivmod(am, bm)
+            qn = 0
+            if a_neg != b_neg {
+                if string.equals(r, "0") == 0 { q = dadd(q, "1") }
+                if string.equals(q, "0") == 0 { qn = 1 }
+            }
+            return int_text(qn, q), ""
+        }
+        // A decimal quotient to 25 significant digits past the divisor's
+        // length, then printed through Float: exact well past double
+        // precision, so the nearest Float is the one Liquid's BigDecimal
+        // quotient converts to.
+        extra = 25 + string_length(bm)
+        q, _r = ddivmod(dshift(am, extra), bm)
+        qn = 0
+        if a_neg != b_neg && string.equals(q, "0") == 0 { qn = 1 }
+        return ddecimal_out(qn, q, extra), ""
+    }
+    // modulo: the result takes the divisor's sign (floored).
+    _q, r = ddivmod(am, bm)
+    rn = 0
+    if string.equals(r, "0") == 0 {
+        if a_neg != b_neg { r = dsub(bm, r) }
+        rn = b_neg
+    }
+    if dec == 1 { return ddecimal_out(rn, r, scale), "" }
+    return int_text(rn, r), ""
 }
 
 // Apply one filter stage to the current value. Returns (new_value, "")
@@ -1486,39 +1848,9 @@ apply_filter(val: string, name: string, args: string) -> (string, string) {
         if argc != 1 { return "", string.concat(name, " needs exactly 1 arg") }
         s, e1 = unquote_arg(string_list_get(arg_list, 0))
         if e1 != "" { return "", e1 }
-        rhs, ierr = parse_int_arg(s, name)
-        if ierr != "" { return "", ierr }
-        // The input as Liquid reads it: "12px" is 12, "" and "abc" are 0. A
-        // decimal is refused rather than read as 0: these filters do integer
-        // arithmetic, and `3.7 | plus: 1` printing 1 was a wrong answer
-        // with no sign that anything had gone wrong (decimals are #2185).
-        l_dec, l_neg, l_digits, _l_frac = number_parts(val)
-        if l_dec == 1 {
-            return "", string.concat(string.concat(name, " works on integers; the value is a decimal: "), val)
-        }
-        lhs, lerr = string.to_int(int_text(l_neg, l_digits))
-        if lerr != "" { return "", string.concat(string.concat(name, ": integer out of range: "), val) }
-        result = 0
-        if string.equals(name, "plus") == 1       { result = lhs + rhs }
-        else if string.equals(name, "minus") == 1 { result = lhs - rhs }
-        else if string.equals(name, "times") == 1 { result = lhs * rhs }
-        else if string.equals(name, "divided_by") == 1 {
-            if rhs == 0 { return "", "divided_by: division by zero" }
-            result = lhs / rhs
-        }
-        else if string.equals(name, "modulo") == 1 {
-            if rhs == 0 { return "", "modulo: division by zero" }
-            result = lhs - (lhs / rhs) * rhs
-        }
-        else if string.equals(name, "at_least") == 1 {
-            result = lhs
-            if rhs > lhs { result = rhs }
-        }
-        else if string.equals(name, "at_most") == 1 {
-            result = lhs
-            if rhs < lhs { result = rhs }
-        }
-        return string.from_int(result), ""
+        // Both sides read as Liquid reads numbers ("12px" is 12, "abc" is
+        // 0), exactly: integers unbounded, decimals as decimals (#2185).
+        return filter_arith(name, val, s)
     }
     if string.equals(name, "escape_xml") == 1 {
         if argc != 0 { return "", "escape_xml takes no args" }

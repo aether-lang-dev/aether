@@ -231,6 +231,11 @@ static ASTNode* fold_float_binary(ASTNode* node, ASTNode* left, ASTNode* right,
     else if (strcmp(op, "/") == 0) { if (b == 0.0) return NULL; result = a / b; }
     else if (strcmp(op, "%") == 0) { if (b == 0.0) return NULL; result = fmod(a, b); }
     else return NULL;
+    /* An infinite or NaN result has no C literal: `%.17g` spells it `inf` /
+     * `nan`, which the C compiler reads as an undeclared identifier
+     * (`1.0e308 * 10.0` did exactly that). Leave it to the runtime, which
+     * computes the same IEEE value. */
+    if (!isfinite(result)) return NULL;
     return create_float_literal(result, node->line, node->column);
 }
 

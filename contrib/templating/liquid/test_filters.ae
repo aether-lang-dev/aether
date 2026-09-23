@@ -242,11 +242,12 @@ main() {
             spec.assert_str_eq(render_x("{{ x | times:\"5\" }}", "6"), "30", "3 times")
         }
 
-        // Integer division: 10/3 is 3, not 3.33 — the arithmetic stays in
-        // integers throughout.
-        spec.it(fw, "divides with truncation toward zero") callback {
+        // Integer division floors, as Ruby's does: 10/3 is 3, -7/2 is -4.
+        spec.it(fw, "divides integers with floor") callback {
             spec.assert_str_eq(render_x("{{ x | divided_by:\"3\" }}", "10"), "3",
-                "4 divided_by truncates")
+                "4 divided_by floors")
+            spec.assert_str_eq(render_x("{{ x | divided_by: 2 }}", "-7"), "-4",
+                "4a divided_by floors a negative quotient")
         }
 
         spec.it(fw, "errors on division by zero") callback {
@@ -254,8 +255,10 @@ main() {
                 "5 divided_by:0: expected error")
         }
 
-        spec.it(fw, "takes a modulo") callback {
+        spec.it(fw, "takes a modulo with the divisor's sign") callback {
             spec.assert_str_eq(render_x("{{ x | modulo:\"3\" }}", "10"), "1", "6 modulo")
+            spec.assert_str_eq(render_x("{{ x | modulo: 3 }}", "-7"), "2", "6a modulo of a negative")
+            spec.assert_str_eq(render_x("{{ x | modulo: -3 }}", "7"), "-2", "6b modulo by a negative")
         }
 
         spec.it(fw, "errors on modulo by zero") callback {
@@ -283,14 +286,9 @@ main() {
             spec.assert_str_eq(render_x("{{ x | plus:\"7\" }}", ""), "7", "12 plus on empty")
         }
 
-        // The input is read as Liquid reads it, and a decimal is refused
-        // rather than read as 0 (which printed `1` for `3.7 | plus: 1`).
-        spec.it(fw, "reads text as to_i and refuses a decimal") callback {
+        // The input is read as Liquid reads it ("12px" is 12).
+        spec.it(fw, "reads text as to_i") callback {
             spec.assert_str_eq(render_x("{{ x | plus: 1 }}", "12px"), "13", "12a leading digits")
-            spec.assert_not_eq(string.length(render_x_err("{{ x | plus: 1 }}", "3.7")), 0,
-                "12b decimal input: expected error")
-            spec.assert_not_eq(string.length(render_x_err("{{ x | times: 1.5 }}", "2")), 0,
-                "12c decimal argument: expected error")
         }
 
         spec.it(fw, "stays integral across a chain") callback {
@@ -368,6 +366,47 @@ main() {
             spec.assert_str_eq(render_x("{{ 3.7 | floor }}", ""), "3", "31 decimal literal through a filter")
             spec.assert_str_eq(render_x("a {{ -5 }} b", ""), "a -5 b", "32 a minus sign is not a trim marker")
             spec.assert_str_eq(render_x("a {{- -5 }} b", ""), "a-5 b", "33 the trim marker still trims")
+        }
+    }
+
+    // A decimal on either side makes the arithmetic decimal and exact, as
+    // Liquid's BigDecimal arithmetic is, and the result prints as the Float
+    // nearest to it (#2185). Integers stay integers, and unbounded.
+    spec.describe(fw, "liquid: decimal and unbounded arithmetic") {
+        spec.it(fw, "adds, subtracts and multiplies decimals exactly") callback {
+            spec.assert_str_eq(render_x("{{ x | plus: 1 }}", "3.7"), "4.7", "d1 plus")
+            spec.assert_str_eq(render_x("{{ x | plus: 0.2 }}", "0.1"), "0.3", "d2 no binary drift")
+            spec.assert_str_eq(render_x("{{ x | minus: 1 }}", "1.0"), "0.0", "d3 a zero decimal")
+            spec.assert_str_eq(render_x("{{ x | times: 4 }}", "2.5"), "10.0", "d4 a whole decimal keeps .0")
+            spec.assert_str_eq(render_x("{{ x | times: 1.5 }}", "1.5"), "2.25", "d5 decimal times decimal")
+        }
+
+        spec.it(fw, "divides decimals and prints the nearest Float") callback {
+            spec.assert_str_eq(render_x("{{ x | divided_by: 4.0 }}", "10"), "2.5", "d6 exact quotient")
+            spec.assert_str_eq(render_x("{{ x | divided_by: 3.0 }}", "10"), "3.3333333333333335", "d7 repeating")
+            spec.assert_str_eq(render_x("{{ x | divided_by: 0.1 }}", "0.3"), "3.0", "d8 decimal, not binary")
+            spec.assert_str_eq(render_x("{{ x | modulo: 2 }}", "5.5"), "1.5", "d9 decimal modulo")
+            spec.assert_not_eq(string.length(render_x_err("{{ x | divided_by: 0.0 }}", "1.5")), 0,
+                "d10 decimal division by zero: expected error")
+        }
+
+        spec.it(fw, "prints Float magnitudes as Ruby does") callback {
+            spec.assert_str_eq(render_x("{{ x | plus: 0 }}", "100000000000000000.0"), "1.0e+17", "d11 large")
+            spec.assert_str_eq(render_x("{{ x | plus: 0 }}", "0.00001"), "1.0e-05", "d12 small")
+            spec.assert_str_eq(render_x("{{ x | plus: 0 }}", "0.0001"), "0.0001", "d13 small, fixed")
+        }
+
+        spec.it(fw, "keeps the chosen operand's shape in at_least / at_most") callback {
+            spec.assert_str_eq(render_x("{{ x | at_least: 5.5 }}", "5"), "5.5", "d14 at_least takes the decimal")
+            spec.assert_str_eq(render_x("{{ x | at_most: 7 }}", "5.5"), "5.5", "d15 at_most keeps the decimal")
+            spec.assert_str_eq(render_x("{{ x | at_least: 3 }}", "5.5"), "5.5", "d16 at_least keeps the input")
+        }
+
+        spec.it(fw, "does integer arithmetic without overflow") callback {
+            spec.assert_str_eq(render_x("{{ x | times: 99999999999 }}", "99999999999"),
+                "9999999999800000000001", "d17 past 64 bits")
+            spec.assert_str_eq(render_x("{{ x | plus: 1 }}", "9223372036854775807"),
+                "9223372036854775808", "d18 past int64")
         }
     }
 

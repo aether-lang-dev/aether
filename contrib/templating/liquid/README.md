@@ -122,10 +122,18 @@ round away from zero). `round: N` rounds a decimal to N places and prints it
 as Liquid does, without padding zeros but with at least one fraction digit
 (`{{ 3.14159 | round: 2 }}` is `3.14`, `{{ 9.999 | round: 2 }}` is `10.0`),
 and it rounds in decimal, so `{{ 1.005 | round: 2 }}` is `1.01`. `abs` keeps
-the input's shape (`-5` is `5`, `-5.50` is `5.5`). The arithmetic filters
-(`plus` .. `at_most`) work on integers, read the same way (`"12px" | plus: 1`
-is `13`; `10 | divided_by: 3` is `3`), and a decimal operand is a render
-error rather than a wrong number (#2185).
+the input's shape (`-5` is `5`, `-5.50` is `5.5`).
+
+The arithmetic filters (`plus`, `minus`, `times`, `divided_by`, `modulo`,
+`at_least`, `at_most`) read both sides the same way and compute exactly, as
+Liquid's Ruby numbers do. Integers stay integers and do not overflow
+(`99999999999 | times: 99999999999` is `9999999999800000000001`), and
+division and modulo floor (`-7 | divided_by: 2` is `-4`, `-7 | modulo: 3`
+is `2`). A decimal on either side makes the result a decimal, computed
+exactly (`0.1 | plus: 0.2` is `0.3`, `0.3 | divided_by: 0.1` is `3.0`) and
+printed as Ruby prints the Float nearest to it (`10 | divided_by: 3.0` is
+`3.3333333333333335`; `1.0e+17` and `1.0e-05` past the range Ruby writes
+in full). Dividing by zero is a render error.
 
 Unknown filter names pass the input through unchanged (Shopify
 behaviour, not an error). `divided_by:"0"` and `modulo:"0"` raise
@@ -227,8 +235,6 @@ Each has its own issue.
 - `date`: passes its input through unchanged (#2181).
 - A filter argument that names a variable, `{{ price | times: qty }}`:
   rejected at render (#2182).
-- Decimal operands to the arithmetic filters, `{{ 3.7 | plus: 1 }}`:
-  rejected at render (#2185).
 - Layout inheritance deeper than one level (#2183).
 - Caching parsed partials: each `{% include %}` reads and parses its file
   again (#2184).
