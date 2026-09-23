@@ -1,0 +1,85 @@
+// Regression: a value named like a macro the C headers define -- `stdout`,
+// `stderr`, `stdin`, `errno`, `EOF`, `environ`, `SIZE_MAX` -- is an ordinary
+// Aether identifier, but the generated C includes <stdio.h> and friends, so
+// the preprocessor rewrote it before the C compiler saw it. `EOF = 1` became
+// `(-1) = 1`; under the Windows UCRT `stdout = x` became
+// `(__acrt_iob_func(1)) = x`. The program type-checked and then failed to
+// compile, and because glibc defines `stdout` as itself it failed only on
+// Windows, which is where a reader copying `stdout, stderr, code, err =
+// os.run_full(...)` found it. Codegen now renames such names the way it
+// renames C keywords, in locals, parameters, tuple targets and fields --
+// except a name the program imports from C on purpose, which keeps its C
+// spelling (BUFSIZ below).
+//
+// Self-asserting: FAIL + exit 1 on mismatch, PASS at the end.
+
+extern exit(code: int)
+extern const BUFSIZ: int @c_import
+
+struct Captured {
+    stdout: string,
+    stderr: string,
+    errno: int
+}
+
+check(name: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${name} = ${got}, expected ${want}")
+        exit(1)
+    }
+}
+
+check_str(name: string, got: string, want: string) {
+    if got != want {
+        println("FAIL: ${name} = ${got}, expected ${want}")
+        exit(1)
+    }
+}
+
+// the shape std.os.run_full returns
+four() -> (string, string, int, string) {
+    return "out", "err", 3, ""
+}
+
+// macro names as parameters
+total(stdin: int, EOF: int, SIZE_MAX: int) -> int {
+    return stdin + EOF + SIZE_MAX
+}
+
+main() {
+    // locals
+    errno = 5
+    EOF = 1
+    environ = 7
+    check("errno", errno, 5)
+    check("EOF", EOF, 1)
+    check("environ", environ, 7)
+
+    // reassignment
+    errno = errno + 1
+    check("errno after +1", errno, 6)
+
+    // tuple destructuring into macro-named targets
+    stdout, stderr, code, err = four()
+    check_str("stdout", stdout, "out")
+    check_str("stderr", stderr, "err")
+    check("code", code, 3)
+    check_str("err", err, "")
+
+    // parameters
+    check("total", total(1, 2, 3), 6)
+
+    // struct fields: declaration, construction, read
+    c = Captured { stdout: "a", stderr: "b", errno: 9 }
+    check_str("c.stdout", c.stdout, "a")
+    check_str("c.stderr", c.stderr, "b")
+    check("c.errno", c.errno, 9)
+
+    // a macro imported on purpose keeps its C meaning
+    if BUFSIZ <= 0 {
+        println("FAIL: BUFSIZ = ${BUFSIZ}, expected the <stdio.h> value")
+        exit(1)
+    }
+
+    println("PASS")
+}

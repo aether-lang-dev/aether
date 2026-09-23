@@ -24,13 +24,14 @@ The convention is the fence's info string:
                           this fails if it starts compiling.
     ```aether,nolink      a complete unit that cannot link BY ITSELF: it calls
                           C the reader supplies, or it is a library whose
-                          `main` lives in the host app. Built like any other
-                          block; the ONLY failure allowed is unresolved symbols
-                          at the link, since that is precisely what lives
-                          outside the block. Prefer this to `fragment` for
-                          anything that really does compile: a fragment is
-                          skipped, this is checked through codegen and the C
-                          compiler.
+                          `main` lives in the host app. One with a `main()` is
+                          built as a program, one without as the library it
+                          is (`--emit=lib`); either way the ONLY failure
+                          allowed is unresolved symbols at the link, since
+                          that is precisely what lives outside the block.
+                          Prefer this to `fragment` for anything that really
+                          does compile: a fragment is skipped, this is checked
+                          through codegen and the C compiler.
 
 A `run` block is followed by its expected output:
 
@@ -59,6 +60,10 @@ import sys
 import tempfile
 
 FENCE = re.compile(r"^```(aether[^\n]*)\n(.*?)^```", re.S | re.M)
+# A program's entry point: a `main(` declaration opening a line (indentation
+# allowed). Deciding from the source keeps the build choice here, rather than
+# inferring it from the wording of a failed build.
+ENTRY = re.compile(r"^[ \t]*main\s*\(", re.M)
 KNOWN = {"", "run", "fragment", "fails", "nolink"}
 OUTPUT_FENCE = re.compile(r"\A\s*```output\n(.*?)^```", re.S | re.M)
 
@@ -147,15 +152,22 @@ def compiles(ae, code, workdir, allow_unresolved=False):
     been mistaken for a regression because the gate could not see it.
 
     `allow_unresolved` accepts a failure that is provably nothing but missing
-    symbols at the link, for a block calling C the reader supplies.
+    symbols at the link, for a block calling C the reader supplies. Such a
+    block with no main() is the other half of what the label promises -- "a
+    library whose main lives in the host app" -- so it is built as the
+    library it is. It used to be built as an executable, and passed only
+    because the one thing the link lacked was `main` itself, which this gate
+    could not tell from a C symbol the reader supplies.
     """
     path = os.path.join(workdir, "block.ae")
     with open(path, "w", encoding="utf-8") as f:
         f.write(code)
     out_bin = os.path.join(workdir, "block_out")
+    cmd = [ae, "build", path, "-o", out_bin]
+    if allow_unresolved and not ENTRY.search(code):
+        cmd = [ae, "build", "--emit=lib", path, "-o", out_bin]
     try:
-        r = subprocess.run([ae, "build", path, "-o", out_bin],
-                           capture_output=True, timeout=180)
+        r = subprocess.run(cmd, capture_output=True, timeout=180)
     except subprocess.TimeoutExpired:
         return False, "timed out"
     if r.returncode == 0:

@@ -166,16 +166,34 @@ fi
 # generated C's `// aether-entry: main` line and refuses to link an executable
 # without one, naming the file and what to build instead -- on every target.
 # (--emit=both itself works cross now; tests/integration/cross_emit_lib.)
-if "$AE" build --target=aarch64-linux --emit=both "$SRC" -o "$TMP/x" \
-        >"$TMP/err" 2>&1; then
-    fail "--emit=both of a source with no main() should fail but succeeded"
+#
+# Asserted on the NATIVE build, which needs no cross toolchain and so runs on
+# every machine: the check is the driver's, not the target's. Without zig a
+# cross build stops earlier, at "could not start 'zig'", which is the right
+# answer to a different question.
+no_main_says_so() {
+    grep -q 'has no main()' "$1" \
+        || fail "$2: a no-main source did not say so: $(head -1 "$1")"
+    grep -q 'emit=lib' "$1" \
+        || fail "$2: the no-main diagnostic did not name --emit=lib"
+    if grep -qiE 'undefined (reference|symbol)' "$1"; then
+        fail "$2: the no-main case still reached the linker"
+    fi
+}
+if "$AE" build --emit=both "$SRC" -o "$TMP/xn" >"$TMP/errn" 2>&1; then
+    fail "native --emit=both of a source with no main() should fail but succeeded"
 fi
-grep -q 'has no main()' "$TMP/err" \
-    || fail "--emit=both of a no-main source did not say so: $(head -1 "$TMP/err")"
-grep -q 'emit=lib' "$TMP/err" \
-    || fail "the no-main diagnostic did not name --emit=lib"
-if grep -qiE 'undefined (reference|symbol)' "$TMP/err"; then
-    fail "the no-main case still reached the linker"
+no_main_says_so "$TMP/errn" "native --emit=both"
+
+# ...and on the cross build the rejection used to hide, where zig is there.
+if command -v zig >/dev/null 2>&1; then
+    if "$AE" build --target=aarch64-linux --emit=both "$SRC" -o "$TMP/x" \
+            >"$TMP/err" 2>&1; then
+        fail "--emit=both of a source with no main() should fail but succeeded"
+    fi
+    no_main_says_so "$TMP/err" "cross --emit=both"
+else
+    echo "  [skip] cross no-main check: zig not on PATH (the native one above ran)"
 fi
 
 echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); a no-main --emit=both says so before the linker"
