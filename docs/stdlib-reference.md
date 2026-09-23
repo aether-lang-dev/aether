@@ -86,8 +86,8 @@ header comment is the authoritative description.
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
-| `std.zip` | ZIP archive reader over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 14 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 33 | [full section](#compression-stdzlib) |
+| `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 20 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 35 | [full section](#compression-stdzlib) |
 | `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 23 | — |
 | `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 22 | — |
 

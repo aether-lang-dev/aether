@@ -60,6 +60,11 @@ void        zlib_release_inflate(void);
 int zlib_try_gzip_deflate(const char* data, int length, int level);
 int zlib_try_gzip_inflate(const char* data, int length);
 
+/* Raw DEFLATE (RFC 1951, no wrapper): the compressing counterpart of
+ * zlib_try_inflate_raw, and the framing ZIP entries store (method 8).
+ * Shares the deflate TLS output slots. */
+int zlib_try_deflate_raw(const char* data, int length, int level);
+
 /* ---- Streaming deflate (#1890) ---------------------------------
  *
  * The one-shot calls above run deflateInit2 -> deflate(Z_FINISH) ->
