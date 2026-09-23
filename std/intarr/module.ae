@@ -18,6 +18,7 @@ exports(
     intarr_new_raw, intarr_new_filled_raw,
     intarr_size, intarr_get_raw, intarr_set_raw,
     intarr_get_unchecked, intarr_set_unchecked,
+    intarr_data, intarr_array, array,
     intarr_fill, intarr_free
 )
 
@@ -53,6 +54,7 @@ extern intarr_set_raw(arr: ptr, i: int, value: int)
 
 // Hot-path variants — caller guarantees index is in [0, size). OOB
 // access is undefined behaviour. Don't use from outside a tight loop.
+extern intarr_data(arr: ptr) -> int[] @c_import
 extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
 extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
 
@@ -123,4 +125,28 @@ set(arr: ptr, i: int, value: int) -> {
     }
     intarr_set_raw(arr, i, value)
     return ""
+}
+
+// array(arr) -- the buffer as a plain `int[]`, so `v[i]` works (#2041).
+//
+// `a[i]` on the HANDLE cannot work: the handle is a bare `ptr`, and `[]`
+// has no element type to dispatch on. A view is typed, so it does:
+//
+//     v = intarr.array(a)
+//     v[3] = 42
+//     total = total + v[3]
+//
+// and the compiler lowers `v[i]` to the same load `intarr_get_unchecked`
+// inlines to, so the readable spelling costs nothing. `std.strarr` has had
+// this shape since it was written.
+//
+// BORROWED, not owned: valid until the handle is freed, and bounds are the
+// caller's to respect exactly as they are for the unchecked accessors.
+intarr_array(arr: ptr) -> int[] {
+    return intarr_data(arr)
+}
+
+// The short name, beside new / get / set: `intarr.array(a)`.
+array(arr: ptr) -> int[] {
+    return intarr_data(arr)
 }

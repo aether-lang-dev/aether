@@ -22,6 +22,9 @@
 #ifndef AETHER_ARR_INLINE_H
 #define AETHER_ARR_INLINE_H
 
+#include <stddef.h>   /* NULL, for the *_data view accessors below */
+#include <stdint.h>   /* int64_t: what Aether's `long` lowers to */
+
 /* Aether-prefixed, and that prefix is the point (#2162).
  *
  * This header is not the runtime's own business: `@c_include` puts it in
@@ -37,7 +40,7 @@
  * it deliberately; that header is not injected into anyone. */
 struct AetherIntArray   { int*       data; int size; };
 struct AetherFloatArray { double*    data; int size; };
-struct AetherLongArray  { long long* data; int size; };
+struct AetherLongArray  { int64_t*   data; int size; };
 
 typedef struct AetherIntArray   AetherIntArray;
 typedef struct AetherFloatArray AetherFloatArray;
@@ -59,11 +62,31 @@ static inline double floatarr_get_unchecked(AetherFloatArray* arr, int i) {
 static inline void floatarr_set_unchecked(AetherFloatArray* arr, int i, double value) {
     arr->data[i] = value;
 }
-static inline long long longarr_get_unchecked(AetherLongArray* arr, int i) {
+static inline int64_t longarr_get_unchecked(AetherLongArray* arr, int i) {
     return arr->data[i];
 }
-static inline void longarr_set_unchecked(AetherLongArray* arr, int i, long long value) {
+static inline void longarr_set_unchecked(AetherLongArray* arr, int i, int64_t value) {
     arr->data[i] = value;
+}
+
+/* The buffer itself, as a plain C array (#2041).
+ *
+ * `a[i]` on the handle cannot work: the handle is a bare `ptr` and `[]`
+ * has no element type to dispatch on. A VIEW does work, because it is
+ * typed -- `v = intarr.array(a)` then `v[i]`, which the compiler lowers to
+ * the same load the accessor inlines to. `std.strarr` has had exactly this
+ * shape since it was written (`strarr.array` feeding `sort.strings_by`).
+ *
+ * The view borrows: it is valid until the handle is freed or resized, and
+ * bounds are the caller's, as they are for the unchecked accessors. */
+static inline int* intarr_data(AetherIntArray* arr) {
+    return arr ? arr->data : NULL;
+}
+static inline double* floatarr_data(AetherFloatArray* arr) {
+    return arr ? arr->data : NULL;
+}
+static inline int64_t* longarr_data(AetherLongArray* arr) {
+    return arr ? arr->data : NULL;
 }
 
 #endif /* AETHER_ARR_INLINE_H */

@@ -20,6 +20,7 @@ exports(
     longarr_new_raw, longarr_new_filled_raw,
     longarr_size, longarr_get_raw, longarr_set_raw,
     longarr_get_unchecked, longarr_set_unchecked,
+    longarr_data, longarr_array, array,
     longarr_fill, longarr_free
 )
 
@@ -51,6 +52,7 @@ extern longarr_set_raw(arr: ptr, i: int, value: long)
 
 // Hot-path variants — caller guarantees index is in [0, size). OOB
 // access is undefined behaviour. Don't use from outside a tight loop.
+extern longarr_data(arr: ptr) -> long[] @c_import
 extern longarr_get_unchecked(arr: ptr, i: int) -> long @c_import
 extern longarr_set_unchecked(arr: ptr, i: int, value: long) @c_import
 
@@ -121,4 +123,28 @@ set(arr: ptr, i: int, value: long) -> {
     }
     longarr_set_raw(arr, i, value)
     return ""
+}
+
+// array(arr) -- the buffer as a plain `long[]`, so `v[i]` works (#2041).
+//
+// `a[i]` on the HANDLE cannot work: the handle is a bare `ptr`, and `[]`
+// has no element type to dispatch on. A view is typed, so it does:
+//
+//     v = longarr.array(a)
+//     v[3] = 42
+//     total = total + v[3]
+//
+// and the compiler lowers `v[i]` to the same load `longarr_get_unchecked`
+// inlines to, so the readable spelling costs nothing. `std.strarr` has had
+// this shape since it was written.
+//
+// BORROWED, not owned: valid until the handle is freed, and bounds are the
+// caller's to respect exactly as they are for the unchecked accessors.
+longarr_array(arr: ptr) -> long[] {
+    return longarr_data(arr)
+}
+
+// The short name, beside new / get / set: `longarr.array(a)`.
+array(arr: ptr) -> long[] {
+    return longarr_data(arr)
 }

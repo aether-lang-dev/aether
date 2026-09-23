@@ -1,5 +1,28 @@
 # REPLY: diagnostic done; index sugar deferred (it needs a distinct handle type, not sugar)
 
+> **UPDATE, 2026-09-23 — the deferral below was wrong, and the ask is now
+> answered.** The rebuttal is correct that `[]` cannot work on the *handle*:
+> it is a bare `ptr` with no element type, and nothing short of a distinct
+> handle type changes that. What it missed is that the handle is not the
+> only thing you can index. A **view** is typed:
+>
+> ```aether
+> v = intarr.intarr_array(a)    // an `int[]` over the same buffer
+> v[3] = 42
+> ```
+>
+> The view *is* the buffer, not a copy, so writes through it are writes to
+> the array. `std.strarr` had shipped exactly this shape since it was
+> written (`strarr.array` feeding `sort.strings_by`), which is the part I
+> should have noticed at the time. Added for `intarr` / `floatarr` /
+> `longarr` in #2041; no type-system change was needed.
+>
+> The related claim in #1986 — that a distinct handle type is needed for the
+> *codegen* to vectorize — did not survive measurement either: with the
+> accessors inlined (#1986 / #2161), a matmul through them and the same
+> matmul through a typed `float[]` view measure the same. The reasoning
+> below is left as written, because what it got wrong is worth seeing.
+
 **To:** the LangArena port line
 **From:** the aether line, 2026-09-09 (implemented on `fix/langarena-port-ergonomics`)
 **Re:** `asks/index-sugar-for-intarr-floatarr-longarr.md`
