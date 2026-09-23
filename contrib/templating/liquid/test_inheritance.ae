@@ -66,6 +66,18 @@ stage_fixtures(root: string) -> (string, string, string, string) {
     api = string.concat(root, "/api_extras")
     put_fixture(api, "hello.liquid", "Hello, {{ who }}!")
 
+    // A layout chain (#2183): mid lays out base2, sub lays out mid; cycle_a
+    // and cycle_b lay each other out.
+    ml = string.concat(root, "/multi_level")
+    put_fixture(ml, "base2.liquid",
+        "<t>{% block title %}base title{% endblock %}</t><c>{% block content %}base content{% endblock %}</c><f>{% block footer %}base foot{% endblock %}</f>")
+    put_fixture(ml, "mid.liquid",
+        "{% layout 'base2' %}{% block content %}MID[{{ block.super }}]{% endblock %}{% block footer %}mid foot{% endblock %}")
+    put_fixture(ml, "sub.liquid",
+        "{% layout 'mid' %}{% block content %}SUB({{ block.super }}){% endblock %}")
+    put_fixture(ml, "cycle_a.liquid", "{% layout 'cycle_b' %}{% block x %}a{% endblock %}")
+    put_fixture(ml, "cycle_b.liquid", "{% layout 'cycle_a' %}{% block x %}b{% endblock %}")
+
     return inc, lay, ext, api
 }
 
@@ -280,8 +292,7 @@ main() {
         }
 
         // middle.liquid is itself a layout-using template, parsed from disk
-        // rather than a string. Inheritance is single-level: a child whose
-        // layout itself declares a layout is #2183.
+        // rather than a string.
         spec.it(fw, "inherits one level from a file parsed off disk") callback {
             t9, p9err = liquid.parse_file(string.concat(lay, "/middle.liquid"))
             spec.assert_str_eq(p9err, "", "9 parse_file")
@@ -323,6 +334,39 @@ main() {
             spec.assert_str_eq(
                 render_rooted("{% layout 'simple' %}{% block body %}{% endblock %}", lay),
                 "<wrap></wrap>", "14 empty override")
+        }
+    }
+
+    // A layout may itself have a layout, to any depth (#2183). The most
+    // derived template that defines a block supplies it; block.super is the
+    // same block one level up.
+    spec.describe(fw, "liquid: multi-level layouts") {
+        ml = string.concat(root, "/multi_level")
+
+        spec.it(fw, "renders through a layout's own layout") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'mid' %}{% block title %}page title{% endblock %}", ml),
+                "<t>page title</t><c>MID[base content]</c><f>mid foot</f>",
+                "m1 page -> mid -> base2")
+        }
+
+        spec.it(fw, "chains block.super through every level") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'mid' %}{% block content %}PAGE<{{ block.super }}>{% endblock %}", ml),
+                "<t>base title</t><c>PAGE<MID[base content]></c><f>mid foot</f>",
+                "m2 super of a super")
+        }
+
+        spec.it(fw, "goes four levels deep") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'sub' %}{% block footer %}page foot / {{ block.super }}{% endblock %}", ml),
+                "<t>base title</t><c>SUB(MID[base content])</c><f>page foot / mid foot</f>",
+                "m3 page -> sub -> mid -> base2")
+        }
+
+        spec.it(fw, "refuses a layout cycle") callback {
+            e = render_rooted_err("{% layout 'cycle_a' %}{% block x %}p{% endblock %}", ml)
+            spec.assert_not_eq(string.index_of(e, "cycle"), -1, "m4 cycle: expected a cycle error")
         }
     }
 

@@ -95,10 +95,13 @@ All of the following have integration tests in
   rejected via `std.fs.is_within_base`. Depth-limited at 100 to
   prevent infinite-include recursion.
 - `{% layout 'parent' %}` + `{% block name %}…{% endblock %}` —
-  Jekyll-style template inheritance (single level).
+  Jekyll-style template inheritance, to any depth: a layout may itself have
+  a layout. The most derived template that defines a block supplies it, and
+  a cycle is an error.
 - `{% extends 'parent' %}` — Django/Jinja alias for `{% layout %}`.
-- `{{ block.super }}` — inside a child block override, emits the
-  parent's default block content.
+- `{{ block.super }}` — inside a block override, emits the same block as
+  the next template up the chain defines it (its own `block.super`
+  included).
 
 ### Filters
 
@@ -234,7 +237,6 @@ Each has its own issue.
   `where`, `compact`, `concat` (#2180). Until then, as unknown filters,
   they pass their input through unchanged.
 - `date`: passes its input through unchanged (#2181).
-- Layout inheritance deeper than one level (#2183).
 - Caching parsed partials: each `{% include %}` reads and parses its file
   again (#2184).
 
