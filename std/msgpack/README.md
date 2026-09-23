@@ -43,5 +43,5 @@ rather than assuming — the same discipline `std.json`'s `json_type` asks for.
 
 `nil_value`, `boolean`, `from_int`, `num`, `str`, `bin`, `arr`, `map`, `ext`,
 `pack`, `unpack`, `get_type`, `get_bool`, `get_int`, `get_float`, `get_string`,
-`get_bin`, `array_size`, `array_get`, `array_add`, `map_size`,
+`get_bin`, `get_ext_type`, `array_size`, `array_get`, `array_add`, `map_size`,
 `map_get`, `map_set`, `map_get_key`, `map_get_value`, `free`.

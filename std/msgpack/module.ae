@@ -25,7 +25,7 @@ import std.mem
 
 exports(
     nil_value, boolean, from_int, num, str, bin, arr, map, ext,
-    get_type, get_bool, get_int, get_float, get_string, get_bin,
+    get_type, get_bool, get_int, get_float, get_string, get_bin, get_ext_type,
     array_size, array_get, array_add,
     map_size, map_get_key, map_get_value, map_get, map_set,
     free, pack, unpack,
@@ -215,6 +215,16 @@ get_string(val: ptr) -> string {
 get_bin(val: ptr) -> string {
     if val == null { return "" }
     return payload_string(val as *MsgValue)
+}
+
+// The application-defined type id of an extension value -- the first
+// argument ext() was given, or what unpack() read. 0 for anything that is
+// not TYPE_EXT, which is also a valid id, so check get_type first.
+get_ext_type(val: ptr) -> int {
+    if val == null { return 0 }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_EXT { return 0 }
+    return m.ext_type
 }
 
 array_size(val: ptr) -> int {

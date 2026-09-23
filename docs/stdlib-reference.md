@@ -16,7 +16,7 @@ header comment is the authoritative description.
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 9 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
-| `std.bignum` | Arbitrary-precision integers. | 27 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
+| `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 52 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
@@ -54,7 +54,7 @@ header comment is the authoritative description.
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 108 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
-| `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
+| `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
@@ -87,9 +87,9 @@ header comment is the authoritative description.
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 14 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 30 | [full section](#compression-stdzlib) |
-| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 19 | — |
-| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | — |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 33 | [full section](#compression-stdzlib) |
+| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 23 | — |
+| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 22 | — |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -1677,8 +1677,9 @@ keys 2
 ```
 
 **Functions:**
-- `msgpack.nil_value()` / `boolean(b)` / `from_int(n)` / `num(f)` / `str(s)` / `bin(s, len)` → `ptr` - Scalars
-- `msgpack.arr()` / `msgpack.map()` → `ptr`, `msgpack.ext(type, data, len)` → `ptr` - Containers
+- `msgpack.nil_value()` / `boolean(b)` / `from_int(n)` / `num(f)` / `str(s)` / `bin(s)` → `ptr` - Scalars
+- `msgpack.arr()` / `msgpack.map()` → `ptr` - Containers
+- `msgpack.ext(type_id, data)` → `ptr`, `msgpack.get_ext_type(v)` → `int` - An extension value and its application-defined type id
 - `msgpack.array_add(a, v)`, `msgpack.map_set(m, key, v)` - Build
 - `msgpack.array_size(a)` / `array_get(a, i)`, `msgpack.map_size(m)` / `map_get(m, key)` / `map_get_key(m, i)` / `map_get_value(m, i)` - Read
 - `msgpack.get_type(v)` → `int`, and `get_bool` / `get_int` / `get_float` / `get_string` / `get_bin` - Unwrap

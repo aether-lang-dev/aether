@@ -528,12 +528,22 @@ int is_visible_namespace(const char* name, SymbolTable* table) {
  * cite the original source location and the original import path
  * without reconstructing them post-merge. */
 
+static AetherModule* module_find_by_name_or_leaf(const char* name);
+
 // Check if a symbol is blocked by export visibility.
 // Returns 1 if blocked (module has exports and symbol isn't one), 0 if allowed.
+//
+// #2172: the module is found by its full name OR its leaf. A qualified use
+// carries the leaf (`language.to_title_case`) while a std module registers
+// under its full path (`std.language`), so an exact-name lookup found no
+// module for ANY std module and blocked nothing: every std module's export
+// list was advisory, and `mem.long_to_ptr` was called all over the tree
+// while missing from std.mem's. User modules register under the name they
+// are used by, which is why they were enforced all along.
 static int is_export_blocked(const char* namespace, const char* symbol) {
     if (!global_module_registry) return 0;
-    AetherModule* mod = module_find(namespace);
-    return (mod && mod->export_count > 0 && !module_is_exported(mod, symbol));
+    AetherModule* mod = module_find_by_name_or_leaf(namespace);
+    return (mod && mod->export_count > 0 && !module_exports_symbol(mod, symbol));
 }
 
 /* Find a registered module by exact name, or by the last dot-component

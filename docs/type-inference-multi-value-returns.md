@@ -171,9 +171,31 @@ function symbol's declared tuple return type. Without this branch, a
 multi-value destructure of `some_call()` couldn't be the source of a
 local's type during return-type inference.
 
+## Bug 5, only the first returned value was constraint-collected (#2175)
+
+**Symptom.** A function returning its own parameters, `return lo, hi`, was
+emitted as `_tuple_int_int` through the fallback, with `unresolved type in
+codegen, defaulting to int` reported at the function, at its `return`, and at
+every destructuring caller. `std.cryptography.des3`'s `des_func` has this
+shape, so every program importing it printed 16 warnings pointing into the
+standard library. The fallback is not harmless: a `string` or `long`
+parameter in that slot was typed `int`.
+
+**Cause.** The `AST_RETURN_STATEMENT` case of `collect_constraints` visited
+`children[0]` only. A multi-value return carries one child per slot, so
+every slot after the first was never typed by constraint collection. Locals
+hid the gap, because `infer_return_type_impl` reads a local's type back from
+its declaration (bug 4's `resolve_local_var_type`); a parameter has no
+declaration in the body to read, so it stayed UNKNOWN.
+
+**Fix.** Collect constraints from every child of the return statement. The
+statement's own `node_type` is still set only for a single-value return; a
+multi-value return's type is the tuple `infer_return_type_impl` builds from
+the now-typed slots.
+
 ## Putting it together
 
-The four bugs have a shared shape: the inference pipeline runs in
+The five bugs have a shared shape: the inference pipeline runs in
 phases (constraint collection, propagation, return-type inference,
 constraint solving) and converges by iteration. Any phase that writes
 an UNKNOWN slot or a VOID type must be re-runnable when more
@@ -186,7 +208,7 @@ When in doubt, the litmus test for whether the inference pipeline is
 self-consistent is to compile the body of a function whose return
 mixes a destructured local with a literal, inside a nested if-body.
 If codegen prints `unresolved type in codegen, defaulting to int`, one
-of the four pieces above is misbehaving.
+of the five pieces above is misbehaving.
 
 ## Working tests
 
@@ -194,6 +216,7 @@ of the four pieces above is misbehaving.
 |---|---|
 | `tests/integration/tuple_destructure_cross_module/` | Bug 1: two modules with same-named locals don't collide. |
 | `tests/integration/multi_return_destructure_chain/` | Bugs 2–4 in combination: empty-string literal in tuple slot, nested return in if-body, destructured local across the boundary. |
+| `tests/integration/tuple_return_params/` | Bug 5: parameters of three types in later tuple slots, directly and through an import, plus a `std.cryptography.des3` program, all with no int fallback. |
 
 Run individually:
 

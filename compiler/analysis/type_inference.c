@@ -19,6 +19,8 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->symbols = table;
     ctx->iteration_count = 0;
     ctx->scope_owner = NULL;
+    ctx->scope_head = NULL;
+    ctx->has_scope_head = 0;
     return ctx;
 }
 
@@ -373,6 +375,29 @@ void collect_literal_constraints(ASTNode* node, InferenceContext* ctx) {
     }
 }
 
+/* #2173: may a binding in the function being walked retype `existing`?
+ *
+ * The symbol table here is the program's own, flat: a function's locals are
+ * pushed on top of it for the walk and popped at the end (see
+ * collect_function_constraints). Popping removes what the walk ADDED; it
+ * cannot restore what the walk OVERWROTE. So a local named like something
+ * beneath the snapshot -- a function, an extern, a module's extern -- must
+ * shadow it with a fresh entry, never retype it. `floor = loader.plane(...)`
+ * in one test function had retyped the `extern floor(x: float) -> float` a
+ * module declared, so the module's own `floor(x) as int` became a cast of a
+ * pointer and failed to compile, in a file its author never touched. #1967
+ * made parameters follow this rule; locals and destructure targets now do
+ * too.
+ *
+ * Outside a function walk (a top-level binding) there is no snapshot, and
+ * the old behaviour stands. */
+static int symbol_added_since(SymbolTable* t, Symbol* sym, Symbol* saved_head);
+static int rebindable_symbol(InferenceContext* ctx, Symbol* existing) {
+    if (!existing) return 0;
+    if (!ctx->has_scope_head) return 1;
+    return symbol_added_since(ctx->symbols, existing, ctx->scope_head);
+}
+
 // Collect constraints from expressions
 void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node) return;
@@ -472,6 +497,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             // Add variable to symbol table for later lookups (member access, etc.)
             if (node->value && node->node_type && node->node_type->kind != TYPE_UNKNOWN && ctx->symbols) {
                 Symbol* existing = lookup_symbol_local(ctx->symbols, node->value);
+                if (existing && !rebindable_symbol(ctx, existing)) existing = NULL;
                 if (existing) {
                     /* A name bound again. This table is flat: the entry is
                      * what a use AFTER sibling branches resolves to, and
@@ -526,6 +552,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
 
                         if (var->value && strcmp(var->value, "_") != 0 && ctx->symbols) {
                             Symbol* existing = lookup_symbol_local(ctx->symbols, var->value);
+                            if (existing && !rebindable_symbol(ctx, existing)) existing = NULL;
                             if (existing) {
                                 if (existing->type) free_type(existing->type);
                                 existing->type = clone_type(slot);
@@ -587,9 +614,19 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             break;
             
         case AST_RETURN_STATEMENT:
-            // Infer from return expression
-            if (node->child_count > 0) {
-                collect_constraints(node->children[0], ctx);
+            // Infer from the return expression -- from EVERY one. `return a, b`
+            // carries one child per tuple slot, and only the first used to be
+            // visited, so a slot after it stayed untyped unless it happened to
+            // be a local whose declaration infer_return_type_impl can read
+            // back. A parameter has no such declaration: `return lo, hi` typed
+            // `lo` and left `hi` UNKNOWN, and codegen reported it as
+            // "unresolved type, defaulting to int" at the function, its return
+            // and every destructuring caller (16 of them per program importing
+            // std.cryptography.des3).
+            for (int i = 0; i < node->child_count; i++) {
+                collect_constraints(node->children[i], ctx);
+            }
+            if (node->child_count == 1) {
                 if (!node->node_type || is_type_inferrable(node->node_type)) {
                     Type* expr_type = node->children[0]->node_type;
                     if (expr_type && expr_type->kind != TYPE_UNKNOWN) {
@@ -1085,6 +1122,10 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node || (node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION)) return;
 
     Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
+    Symbol* prev_scope_head = ctx->scope_head;
+    int prev_has_scope_head = ctx->has_scope_head;
+    ctx->scope_head = saved_head;
+    ctx->has_scope_head = 1;
 
     /* Issue #243 sealed scopes: relax qualified-call visibility
      * while walking the body of a cloned merged-module function so
@@ -1152,6 +1193,8 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     }
 
     if (ctx->symbols) ctx->symbols->inside_merged_body = saved_inside_merged;
+    ctx->scope_head = prev_scope_head;
+    ctx->has_scope_head = prev_has_scope_head;
 }
 
 // Main constraint collection
@@ -1190,8 +1233,34 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             collect_function_constraints(node, ctx);
             break;
 
-        case AST_MAIN_FUNCTION:
+        case AST_MAIN_FUNCTION: {
+            /* #2173: main is a function like any other. Its locals were
+             * added to the program's table and never popped, so they
+             * outlived main and shadowed whatever was walked after it --
+             * including functions merged in from modules. Same snapshot and
+             * unwind as collect_function_constraints. */
+            Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
+            Symbol* prev_scope_head = ctx->scope_head;
+            int prev_has_scope_head = ctx->has_scope_head;
+            ctx->scope_head = saved_head;
+            ctx->has_scope_head = 1;
+            ASTNode* prev_owner = ctx->scope_owner;
+            ctx->scope_owner = node;
+            collect_expression_constraints(node, ctx);
+            ctx->scope_owner = prev_owner;
+            if (ctx->symbols) {
+                while (ctx->symbols->symbols && ctx->symbols->symbols != saved_head) {
+                    pop_symbol(ctx->symbols);
+                }
+            }
+            ctx->scope_head = prev_scope_head;
+            ctx->has_scope_head = prev_has_scope_head;
+            break;
+        }
+
         case AST_CLOSURE: {
+            // A closure's locals belong to the enclosing function's walk and
+            // are popped with it.
             ASTNode* prev_owner = ctx->scope_owner;
             ctx->scope_owner = node;
             collect_expression_constraints(node, ctx);

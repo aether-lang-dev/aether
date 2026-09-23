@@ -22,6 +22,12 @@ typedef struct InferenceContext {
     SymbolTable* symbols;
     int iteration_count;
     ASTNode* scope_owner;   // the function / main / closure body being walked (#2124)
+    /* #2173: the symbol-list head when the enclosing function's walk began.
+     * Symbols beneath it belong to the program (functions, externs, module
+     * externs) and must never be retyped by a local; see
+     * rebindable_symbol. Meaningful only while has_scope_head is set. */
+    Symbol* scope_head;
+    int has_scope_head;
 } InferenceContext;
 
 // Main API
