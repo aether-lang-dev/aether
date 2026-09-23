@@ -6,8 +6,10 @@
 // hard-coding 15 (or 2, or 9). Pure-Aether: these are the standard
 // POSIX signal numbers, identical across Linux, macOS, and the BSDs.
 //
-// Exposed as zero-arg functions because Aether has no top-level `const`
-// (same shape as std.math's `math_pi` etc.). The set is limited to the
+// Exposed as zero-arg functions. They were written that way when Aether had
+// no exportable module constant; it has one now (std.yaml's YAML_MAPPING),
+// but every caller spells these `signal.SIGTERM()`, so the call form stays.
+// The set is limited to the
 // signals whose numbers are stable across every POSIX target — the
 // real-time and job-control signals (SIGUSR1/2, SIGCHLD, SIGSTOP…)
 // differ by platform (e.g. SIGUSR1 is 10 on Linux but 30 on macOS), so

@@ -36,7 +36,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 158 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 163 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 165 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
@@ -2069,6 +2069,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 - `http.client_pool_disable()` - Turn reuse off and close what is held.
 - `http.client_pool_clear()` - Close every idle connection, keeping reuse on. Worth calling before a measurement, or after a change that makes held connections invalid (a new CA, a rotated proxy).
 - `http.client_pool_idle_count()` → `int` - How many idle connections are held right now.
+- `http.client_rx_buffer_allocs()` → `long` - How many response buffers the client has allocated from nothing, over the life of the process. A pooled connection keeps the buffer its last response was read into and lends it to the next, so a run of requests over one kept connection allocates once, not once per request: ten requests over one connection read `1`, and `10` with pooling off. A buffer that grew past 64 KiB is not kept, so the idle pool cannot pin an outsized body. This is how to check the reuse rather than assume it.
 
 **Response accessors (used with raw externs):**
 - `http.response_status(response)` - Read HTTP status code (0 on transport failure)
