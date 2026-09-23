@@ -14,6 +14,172 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.713.0]
+
+### Fixed
+
+- **A multi-value `return` of a parameter is typed, not defaulted to `int`
+  (#2175).** Constraint collection visited only the first value of a
+  `return`, so in `return lo, hi` only `lo` was ever typed. A local in a
+  later slot was rescued by reading its declaration back; a parameter has no
+  declaration in the body, so its slot stayed unknown. Codegen then printed
+  `unresolved type in codegen, defaulting to int` at the function, at its
+  `return` and at every destructuring caller: 16 warnings in every program
+  that imported `std.cryptography.des3` and 19 for `std.cryptography.aes`
+  users, all pointing into the standard library. The fallback was not only
+  noise, either: a `string` or `long` parameter in that slot was typed
+  `int`. Every returned value is now collected.
+  `tests/integration/tuple_return_params` covers parameters of three types,
+  directly and through an import, plus a `des3` program, and fails on the
+  warning.
+
+  `std.schema`'s `refine` rule also stopped warning in every program that
+  used it: it now declares the closure's `int` result
+  (`int res = call(pred, v)`), as the compiler's own diagnostic asked.
+
+- **A program's local variable no longer retypes a module's extern of the
+  same name (#2173).** Type inference walks a program with one symbol table:
+  each function's locals are pushed for its walk and popped after it. A
+  local named like something already in the table retyped that entry in
+  place instead of shadowing it, and popping cannot undo an overwrite. So
+  `floor = loader.plane(...)` in one of ae3d's test functions left the
+  `extern floor(x: float) -> float` of its `cloudnoise` module typed as a
+  pointer. The module's own `floor(x) as int` then failed with "cannot cast
+  ptr to int with `as`", in a file the author had not touched, from the
+  moment a change elsewhere made the module reachable. An `int` local of
+  that name compiled, and silently typed the extern `int`.
+
+  Locals and tuple-destructure targets now follow the rule #1967 set for
+  parameters: a binding refines only a symbol its own function's walk
+  added, and otherwise shadows with a fresh entry that the pop removes. The
+  check is a per-walk stamp on the symbol, O(1), where #1967's list walk
+  made rebinding quadratic in a function's locals.
+  `main`'s locals were worse during inference: they stayed in the table
+  after its walk, so for every walk after it a local of `main` stood in for
+  any function, extern or local of the same name. A `p` that `main`
+  destructured as a pointer was what a TLS function's own `p` resolved to
+  until that function's first binding was typed, which had only been hidden
+  by the retype bug above. `main` is now walked like any function, and its
+  locals leave the table when the walk ends. They are put back once
+  inference is done, because the typechecker still reads a local bound in an
+  `if` arm or loop body of `main` from there. That also means a local in
+  `main` named like a module's extern still trips the typechecker (#2186).
+  `tests/integration/local_shadows_module_extern` binds `floor` three ways
+  (a pointer local, an `int` local, a destructure target) against a module
+  reached through another module, and checks both an `int` and a `float`
+  use of the extern.
+
+- **A module's `exports(...)` list is enforced for standard-library modules,
+  and for selective imports (#2172).** The qualified check looked the module
+  up by exact name. A qualified use carries the last segment
+  (`language.to_title_case`), while a std module registers under its full
+  path (`std.language`), so the check found no module for any std module and
+  blocked nothing. Every std export list was advisory: `mem.long_to_ptr` was
+  called across the tree while missing from `std.mem`'s. A selective import,
+  `import m (name)`, was never checked against the list at all, for any
+  module. Both now fail with `E0303 'name' is not exported from module 'm'`,
+  the selective form at the import line and in the file that wrote it. A
+  module may list a name in its prefixed form, `<module>_<name>`, which is
+  how `std.math`'s `math_sqrt` stays reachable as `math.sqrt` and through
+  `import std.math (sqrt)`.
+
+  Turning it on found what had been relying on the gap, each fixed at the
+  right end:
+  - Public names missing from their export lists are now exported:
+    `bignum.clone` and `bignum.limb` (used by seven crypto modules),
+    `blake3.reset_ctx`, the four `tls13_client` helpers `tls13_server` shares,
+    and the quality, level and format constants of `std.brotli`, `std.zstd`
+    and `std.zlib`.
+  - `std.msgpack` gains `get_ext_type(v)`. `ext(type_id, data)` could build
+    an extension value, but nothing read its type id back, so the module's
+    own test reached into the private struct.
+  - Six programs did `import std.io (println)`. `println` is a builtin, not
+    something `std.io` exports.
+
+  The reference's `std.msgpack` list also had `bin(s, len)` and
+  `ext(type, data, len)` for functions that take no length. New test:
+  `tests/integration/exports_enforced`.
+
+- **`contrib.templating.liquid`: `abs`, `ceil`, `floor` and `round` exist,
+  numbers are literals, and each missing feature has an issue (#1558).**
+  The README documented `abs`, `ceil`, `floor` and `round`, down to their
+  outputs, but none of the four was implemented. As unknown filters they
+  passed their input through, so `{{ 3.7 | floor }}` printed `3.7`. They
+  now follow the reference implementation:
+  - A value that is exactly `-?digits.digits` is a decimal; anything else
+    is read as Ruby's `to_i` reads it.
+  - Halves round away from zero.
+  - `round: N` rounds in decimal, so `1.005 | round: 2` is `1.01` as in
+    Liquid, where binary floating point would give `1.0`. It prints as
+    Liquid does (`3.1`, `10.0`, `-0.0`).
+
+  Four input bugs went with them:
+  - A decimal literal (`{{ 3.7 }}`) rendered as nothing: it was looked up
+    as a variable named `3.7`.
+  - `{{ -5 }}` rendered `5` and swallowed the space before it. The lexer
+    stripped whitespace before looking for the `{{-` trim marker, so the
+    minus sign was taken for one.
+  - A filter argument had to be a quoted string (`plus: "3"`). Bare numbers
+    are accepted now, as Liquid writes them (`round: 2`, `times: -2`).
+  - The arithmetic filters read any non-integer input as 0, so
+    `3.7 | plus: 1` printed `1` and `"12px" | plus: 1` printed `1`. They
+    now read text as Liquid does (`12px` is 12) and refuse a decimal
+    operand with an error. Decimal arithmetic itself is #2185.
+
+  The module's limitations used to live in a `TODO.md` build log that
+  described its first 200-line slice. Each one is now an issue: arrays and
+  objects in the context (#2177), path access (#2178), `for` over an array
+  (#2179), the array filters (#2180), `date` (#2181), variable filter
+  arguments (#2182), multi-level layouts (#2183), partial caching (#2184)
+  and decimal arithmetic (#2185). The README's "What's not supported yet"
+  links each one, and the module header points there.
+
+- **`fn main()` parses.** `fn name(...)` is recognised by its shape (`fn`,
+  an identifier, `(`), and `main` is a keyword token, not an identifier. So
+  `fn` could spell every function except `main`, which failed with
+  "Unexpected identifier at top level". `tests/regression/test_fn_main.ae`
+  is written with it.
+
+### Security
+
+- **On Windows, `std.os` no longer runs a program from the current
+  directory in place of the one on `PATH`, and a batch file can no longer
+  be made to run a second command through its arguments (#2171).** Every
+  argv-based launch (`run_capture`, `run_full`, `spawn_proc`,
+  `run_supervised`, `os_run`, and `run_pipe`'s spawn) passed
+  `lpApplicationName = NULL` and let `CreateProcessW` find the program
+  itself. That search tries the application's directory and the **current
+  directory** before `PATH`, so `os.run_capture("git", ...)` run from a
+  directory someone else can write to ran their `.\git.exe`. And a `.bat` or
+  `.cmd` it found ran under `cmd.exe`, which reads the command line by its
+  own rules. An argument such as `x" & echo INJECTED & "`, quoted correctly
+  for the C runtime, ran the second command: the BatBadBut class,
+  CVE-2024-24576 in Rust's `std::process`.
+
+  `std.os` now resolves the program itself. A name with a path separator is
+  used as written. A bare name is looked up everywhere `CreateProcessW`
+  looked except the current directory: the program's own directory, the
+  system directories, then `PATH`. That is Microsoft's own mitigation, and
+  it keeps an application that ships helpers beside itself working. A name
+  without an extension takes those `PATHEXT` extensions Windows can start
+  (`.com`, `.exe`, `.bat`, `.cmd`), so a `tool.py` earlier on `PATH` can't
+  hide the `tool.exe` after it. The absolute result is passed to
+  `CreateProcessW`, which has nothing left to search. A batch file
+  runs through the system `cmd.exe` (`/d /e:ON /v:OFF /s /c`) with each
+  argument quoted for cmd, so `a & b` arrives as one argument. An argument
+  holding a `"`, a `%` or a line break is refused with
+  `argument cannot be passed to a batch file safely`, since cmd acts on
+  those even inside quotes, and so is a batch file whose own path holds a
+  `"` or `%`. A program found nowhere now reports `program not found`
+  instead of `spawn failed`.
+
+  `tests/integration/win_spawn_resolution` plants an `aetool.exe` in the
+  working directory next to the real one on `PATH`, and sends a
+  quote-injection and a `%PATH%` argument to a batch file. Against the old
+  launcher it ran the planted tool, executed `echo INJECTED`, and expanded
+  `%PATH%`. It clears `NoDefaultCurrentDirectoryInExePath`, which MSYS2
+  shells set and which would otherwise hide the first of those.
+
 ## [0.712.0]
 
 ### Added
