@@ -79,8 +79,15 @@ main() {
             spec.assert_true(vk.WHOLE_SIZE == 0xFFFFFFFFFFFFFFFF, "WHOLE_SIZE is all 64 bits")
             spec.assert_eq(vk.MAX_PHYSICAL_DEVICE_NAME_SIZE, 256, "MAX_PHYSICAL_DEVICE_NAME_SIZE")
         }
-        spec.it(fw, "loader_available agrees with contrib.vulkan") callback {
-            spec.assert_eq(vk.loader_available(), vulkan.available(), "the same loader")
+        // loader_available() is the loader alone; contrib.vulkan's
+        // available() also needs a driver with a device. A loader with no
+        // driver is 1 and 0, so the relation holds one way only.
+        spec.it(fw, "finds the loader wherever contrib.vulkan is available") callback {
+            if vulkan.available() == 1 {
+                spec.assert_eq(vk.loader_available(), 1, "the loader contrib.vulkan uses")
+            } else {
+                spec.assert_true(vk.loader_available() == 0 || vk.loader_available() == 1, "0 or 1")
+            }
         }
     }
 

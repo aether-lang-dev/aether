@@ -537,8 +537,10 @@ jobs:
         # contrib.metal runs under it; MoltenVK's own Metal use is not this
         # repository's to validate.
         MTL_DEBUG_LAYER=1 ONLY="metal/" make contrib-check 2>&1 | tee contrib-macos.log
-        export VK_DRIVER_FILES="$(find "$(brew --prefix molten-vk)" -name MoltenVK_icd.json | head -1)"
+        # brew's opt/ prefix is a symlink, which find follows only with -L.
+        export VK_DRIVER_FILES="$(find -L "$(brew --prefix molten-vk)" -name MoltenVK_icd.json | head -1)"
         echo "MoltenVK manifest: ${VK_DRIVER_FILES}"
+        [ -n "$VK_DRIVER_FILES" ] || { echo "molten-vk installed no MoltenVK_icd.json"; exit 1; }
         ONLY="vulkan/" make contrib-check 2>&1 | tee -a contrib-macos.log
 
     # A device exists on this runner, so a Metal or Vulkan entry that skipped
@@ -547,7 +549,7 @@ jobs:
     # screen-recording permission) and the one that miniaturises the window.
     - name: Assert the Metal and Vulkan tests actually ran
       run: |
-        export VK_DRIVER_FILES="$(find "$(brew --prefix molten-vk)" -name MoltenVK_icd.json | head -1)"
+        export VK_DRIVER_FILES="$(find -L "$(brew --prefix molten-vk)" -name MoltenVK_icd.json | head -1)"
         for t in metal_core:0 metal_resources:0 metal_compute:0 metal_actors:0 metal_present:6 \
                  vulkan_offscreen:0 vulkan_formats:0 vulkan_compute:0 vulkan_raw:0 vulkan_present:6; do
           name="${t%%:*}"
