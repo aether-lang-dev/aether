@@ -14,6 +14,44 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.714.0]
+
+### Added
+
+- **`std.zip` can write archives, not only read them (#2010 follow-up).** The
+  module was a reader over an in-memory buffer; it now has the mirror —
+  `writer_new` / `writer_add` / `writer_add_dir` / `writer_finish` /
+  `writer_free`, plus a one-shot `create` — building a `.zip` entirely in
+  memory and handing back the bytes, the same buffer-in / buffer-out posture
+  as `open` (an extract-to-disk / directory-tree layer stays a separate
+  concern on top). Each entry is emitted as a Local File Header plus stored or
+  deflated data as it is added; `writer_finish` appends the Central Directory
+  and EOCD. A `METHOD_DEFLATE` entry falls back to `stored` when compression
+  would not shrink it, and ZIP64 records are written automatically when a
+  size, offset, or entry count overflows its 32-bit field — the same records
+  the reader already parses, so a written archive round-trips through `open`
+  and validates under system `unzip -t`.
+
+- **`std.zlib` gains `deflate_raw` (RFC 1951, no zlib/gzip wrapper).** The
+  compressing counterpart of the existing `inflate_raw`, and the framing a ZIP
+  entry stores for method 8. `zlib` could inflate a raw stream but not produce
+  one; the backend now has `zlib_try_deflate_raw` (windowBits -15), factored
+  out of the gzip deflate path. `std.zip`'s writer is the primary caller.
+
+- **`std.zip` extracts to disk, safely by default, and packs a directory tree
+  (#2010 follow-ups).** `extract(data, len, dest, ExtractOptions)` unpacks an
+  archive buffer under a destination (`extract_file` reads the `.zip` off disk
+  first); every entry is decompressed and CRC-checked by the reader before it
+  is written. It reuses `std.tar`'s extraction guards, sharpened for ZIP's
+  higher deflate ratios: absolute paths, `..` traversal, and backslash/colon
+  tricks that become absolute or drive-qualified on Windows are refused, and
+  `max_entries` / `max_entry_bytes` / `max_total_bytes` cap a zip bomb;
+  `overwrite` defaults off. `add_dir_tree(w, fs_root, arc_prefix, method,
+  level)` walks a directory and adds every file under it, named relative to
+  `fs_root`. `std/zip/test_zip.ae` gains a filesystem section: a dir-tree ->
+  extract round-trip that diffs identical, `extract_file`, and traversal /
+  absolute-path rejection with nothing written outside the destination.
+
 ## [0.713.0]
 
 ### Fixed
