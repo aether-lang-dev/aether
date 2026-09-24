@@ -200,6 +200,7 @@ main() {
             bytes.free(back)
             bytes.free(img)
             string.free(data)
+            spec.assert_str_eq(fs.delete(path), "", "removed")
         }
     }
 

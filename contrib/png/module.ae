@@ -24,7 +24,7 @@ import std.hash
 import std.string
 import std.zlib
 
-exports (
+exports(
     encode_rgba8, write_rgba8
 )
 
@@ -158,11 +158,11 @@ encode_rgba8(pixels: ptr, width: int, height: int) -> (string, int, string) {
     bytes.set_length(ihdr, 13)
     put_be32(ihdr, 0, width as long)
     put_be32(ihdr, 4, height as long)
-    bytes.set(ihdr, 8, 8)    // bits a channel
-    bytes.set(ihdr, 9, 6)    // colour type: RGBA
-    bytes.set(ihdr, 10, 0)   // deflate
-    bytes.set(ihdr, 11, 0)   // adaptive filtering
-    bytes.set(ihdr, 12, 0)   // not interlaced
+    bytes.set(ihdr, 8, 8) // bits a channel
+    bytes.set(ihdr, 9, 6) // colour type: RGBA
+    bytes.set(ihdr, 10, 0) // deflate
+    bytes.set(ihdr, 11, 0) // adaptive filtering
+    bytes.set(ihdr, 12, 0) // not interlaced
     ihdr_s = bytes.finish(ihdr, 13)
 
     at = put_chunk(out, 8, "IHDR", ihdr_s, 13)

@@ -49,7 +49,7 @@ main() {
     fails = fails + ck(hash.crc32("123456789", 9) == 3421780262, "crc32 check value (0xcbf43926)")
     fails = fails + ck(hash.crc32("a", 1) == 3904355907, "crc32 'a' (0xe8b7be43)")
     fails = fails + ck(hash.crc32("The quick brown fox jumps over the lazy dog", 43) == 1095738169,
-                       "crc32 quick brown fox (0x414fa339)")
+        "crc32 quick brown fox (0x414fa339)")
     // Embedded NULs are data, not terminators.
     fails = fails + ck(hash.crc32(ref_msg(4), 4) == 2344191507, "crc32 00 01 02 03 (0x8bb98613)")
     // Continuing across pieces gives the whole input's CRC.
