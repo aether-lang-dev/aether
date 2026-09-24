@@ -1157,6 +1157,11 @@ int aedx_ae_indices_reserve_ex(void* tp, int count, int bits) {
     if (bits != 16 && bits != 32) {
         return aedx_fail(AEDX_ERR_ARG, "index width must be 16 or 32 bits (got %d)", bits);
     }
+    /* Checked before it is multiplied: a count whose byte size wraps an int
+     * would reserve a few bytes and then accept writes far past them. */
+    if ((long long)count * (bits / 8) > 0x7fffffffLL) {
+        return aedx_fail(AEDX_ERR_ARG, "index count %d is too large", count);
+    }
     int need = count * (bits / 8);
     if (count > 0) {
         int rc = aedx_grow_upload(t, &t->ibuf, &t->ibuf_ptr, &t->ibuf_capacity, need);
@@ -1808,6 +1813,15 @@ AedxPipeline* aedx_pipeline_create_ex(AedxDevice* d, AedxTarget* t, const void* 
         p->stride = 20;
         p->vertex_input = 1;
     } else {
+    /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
+     * A layout declaring another would have the pipeline read a buffer that
+     * is never bound, so it is refused here rather than drawn from. */
+        for (int b = 1; b < AEDX_MAX_BINDINGS; b++) {
+            if (layout->declared[b]) {
+                aedx_fail(AEDX_ERR_ARG, "vertex binding %d is declared, but a target feeds binding 0 only", b);
+                goto fail;
+            }
+        }
         for (int i = 0; i < layout->attr_count; i++) {
             custom[i] = layout->el[i];
             UINT slot = custom[i].InputSlot;

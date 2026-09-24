@@ -114,7 +114,7 @@ main() {
             p = d3d12.pipeline_create(dev, target, vs, vs_len, bad, string.length(bad))
             spec.assert_true(p == null, "refused")
             spec.assert_true(string.index_of(d3d12.last_error(), "undefined_thing") >= 0,
-                             "the compiler's message names the problem (${d3d12.last_error()})")
+                "the compiler's message names the problem (${d3d12.last_error()})")
         }
         spec.it_when(ready, "builds a pipeline from HLSL source", reason) callback {
             spec.assert_true(pipe != null, "pipeline_create")
@@ -145,7 +145,7 @@ main() {
             top = d3d12.pixel(target, 32, 14)
             bottom_left = d3d12.pixel(target, 14, 52)
             spec.assert_true(d3d12.red(top) > d3d12.green(top) && d3d12.red(top) > d3d12.blue(top),
-                             "red near the top vertex")
+                "red near the top vertex")
             spec.assert_true(d3d12.green(bottom_left) > d3d12.red(bottom_left), "green near the bottom-left one")
         }
         spec.it_when(ready, "bounds-checks pixel()", reason) callback {

@@ -103,7 +103,7 @@ it does in Vulkan.
 
 ## Presenting to a window
 
-```aether
+```aether,fragment
 sc = d3d12.swapchain_create(dev, d3d12.WINDOW_WIN32, null, hwnd, w, h)
 defer d3d12.swapchain_destroy(sc)
 // each frame:
@@ -136,7 +136,7 @@ back buffers.
 
 ## Compute
 
-```aether
+```aether,fragment
 b = d3d12.bindings_create()
 d3d12.bindings_storage(b, 0)
 c = d3d12.compute_create(dev, cs, cs_len, b, 4)

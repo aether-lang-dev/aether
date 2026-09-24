@@ -113,7 +113,7 @@ main() {
             } else {
                 kind = tw_ae_kind(win)
                 sc = d3d12.swapchain_create(dev, kind, tw_ae_display(win), tw_ae_handle(win),
-                                             tw_ae_width(win), tw_ae_height(win))
+                    tw_ae_width(win), tw_ae_height(win))
                 if sc == null {
                     reason = "Direct3D 12 cannot present here (${d3d12.last_error()})"
                 } else {

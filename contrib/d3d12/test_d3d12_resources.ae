@@ -196,6 +196,19 @@ main() {
             spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.ERR_ARG, "a draw with bindings unset")
             spec.assert_true(string.index_of(d3d12.last_error(), "never set") >= 0, "names the binding")
             spec.assert_eq(d3d12.uniform_float(p, 1, 0, 1.0), d3d12.ERR_ARG, "uniform_float before uniform_floats")
+            // A target feeds vertex stream 0 only, so a layout declaring
+            // another is refused rather than drawn from an unbound buffer.
+            two = d3d12.layout_create()
+            d3d12.layout_binding(two, 0, 8, d3d12.PER_VERTEX)
+            d3d12.layout_binding(two, 1, 8, d3d12.PER_INSTANCE)
+            d3d12.layout_attr(two, 0, 0, d3d12.FORMAT_R32G32_SFLOAT, 0)
+            d3d12.layout_attr(two, 1, 1, d3d12.FORMAT_R32G32_SFLOAT, 0)
+            spec.assert_true(d3d12.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, two, 0, binds) == null,
+                "a second vertex stream")
+            spec.assert_true(string.index_of(d3d12.last_error(), "binding 0 only") >= 0, "says why")
+            d3d12.layout_destroy(two)
+            // An index count whose size in bytes does not fit an int.
+            spec.assert_eq(d3d12.indices_reserve_ex(t, 1073741825, 32), d3d12.ERR_ARG, "an index count that wraps")
             d3d12.texture_destroy(tex)
             d3d12.pipeline_destroy(p)
             d3d12.bindings_destroy(binds)

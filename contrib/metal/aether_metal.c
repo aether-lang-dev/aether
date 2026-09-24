@@ -212,6 +212,18 @@ static const char* mt_error_text(id error) {
     return mt_utf8(MT_SEND(id)(error, mt_sel("localizedDescription")));
 }
 
+/* Whether `obj` implements `selector`: for the properties newer than the
+ * oldest macOS this runs on, which an older system would answer with an
+ * unrecognised-selector exception. */
+static int mt_responds(id obj, const char* selector) {
+    return obj && MT_SEND(BOOL, SEL)(obj, mt_sel("respondsToSelector:"), mt_sel(selector)) ? 1 : 0;
+}
+
+/* A BOOL property that may not exist on this system; 0 when it does not. */
+static int mt_flag(id obj, const char* selector) {
+    return mt_responds(obj, selector) && MT_SEND(BOOL)(obj, mt_sel(selector)) ? 1 : 0;
+}
+
 static id mt_at(id array, AemtUInt i) {
     return MT_SEND(id, AemtUInt)(array, mt_sel("objectAtIndexedSubscript:"), i);
 }
@@ -243,10 +255,14 @@ struct AemtDevice {
     id              device;
     id              queue;
     int             unified;
+    int             msaa32;          /* resolves multisampled 32-bit float */
+    int             filter32;        /* filters 32-bit float textures linearly */
     /* The present pass (a textured full-screen triangle), made on first use:
-     * [0] writes a UNORM drawable, [1] an sRGB one. */
+     * [0] writes a UNORM drawable, [1] an sRGB one. The nearest sampler is
+     * for a 32-bit float target on a device that cannot filter one. */
     id              present_pipe[2];
     id              present_sampler;
+    id              present_sampler_nearest;
     char            name[256];
 };
 
@@ -300,6 +316,10 @@ AemtDevice* aemt_device_create(void) {
     d->queue = MT_SEND(id)(d->device, mt_sel("newCommandQueue"));
     if (!d->queue) { aemt_fail(AEMT_ERR_OOM, "newCommandQueue failed"); goto fail; }
     d->unified = MT_SEND(BOOL)(d->device, mt_sel("hasUnifiedMemory")) ? 1 : 0;
+    /* Both answer for 32-bit float formats, which not every GPU resolves or
+     * filters. */
+    d->msaa32 = mt_flag(d->device, "supports32BitMSAA");
+    d->filter32 = mt_flag(d->device, "supports32BitFloatFiltering");
     snprintf(d->name, sizeof(d->name), "%s", mt_utf8(MT_SEND(id)(d->device, mt_sel("name"))));
     g_mt.pool_pop(pool);
     return d;
@@ -328,6 +348,7 @@ void aemt_device_destroy(AemtDevice* d) {
     if (d->queue) aemt_idle(d);
     for (int i = 0; i < 2; i++) mt_release(d->present_pipe[i]);
     mt_release(d->present_sampler);
+    mt_release(d->present_sampler_nearest);
     mt_release(d->queue);
     mt_release(d->device);
     pthread_mutex_destroy(&d->lock);
@@ -381,8 +402,12 @@ static int aemt_fence_wait(AemtFence* f, int timeout_ms) {
          * this fence takes that signal. */
         return aemt_fail(AEMT_ERR_DEVICE_LOST, "the GPU did not finish within %d ms", timeout_ms);
     }
+    /* Its own pool: the error text and the command buffer's release may
+     * autorelease, and the waits run from calls that hold none. */
+    void* pool = g_mt.pool_push();
     int rc = aemt_cb_status(f->cb);
     mt_release(f->cb);
+    g_mt.pool_pop(pool);
     f->cb = NULL;
     f->submitted = 0;
     return rc;
@@ -723,6 +748,10 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
         aemt_fail(AEMT_ERR_UNSUPPORTED, "the device does not support %dx multisampling", samples);
         return NULL;
     }
+    if (samples > 1 && format == AEMT_FORMAT_R32G32B32A32_SFLOAT && !d->msaa32) {
+        aemt_fail(AEMT_ERR_UNSUPPORTED, "the device cannot resolve a multisampled 32-bit float target");
+        return NULL;
+    }
 
     AemtTarget* t = (AemtTarget*)calloc(1, sizeof(*t));
     if (!t) { aemt_fail(AEMT_ERR_OOM, "out of memory"); return NULL; }
@@ -921,6 +950,11 @@ int aemt_ae_indices_reserve_ex(void* tp, int count, int bits) {
     if (count < 0) return aemt_fail(AEMT_ERR_ARG, "index count must not be negative");
     if (bits != 16 && bits != 32) {
         return aemt_fail(AEMT_ERR_ARG, "index width must be 16 or 32 bits (got %d)", bits);
+    }
+    /* Checked before it is multiplied: a count whose byte size wraps an int
+     * would reserve a few bytes and then accept writes far past them. */
+    if ((long long)count * (bits / 8) > 0x7fffffffLL) {
+        return aemt_fail(AEMT_ERR_ARG, "index count %d is too large", count);
     }
     int need = count * (bits / 8);
     if (count > 0) {
@@ -1410,6 +1444,15 @@ AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* 
         return NULL;
     }
     if (layout) {
+        /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
+         * A layout declaring another would have the pipeline read a buffer that
+         * is never bound, so it is refused here rather than drawn from. */
+        for (int b = 1; b < AEMT_MAX_BINDINGS; b++) {
+            if (layout->declared[b]) {
+                aemt_fail(AEMT_ERR_ARG, "vertex binding %d is declared, but a target feeds binding 0 only", b);
+                return NULL;
+            }
+        }
         for (int i = 0; i < layout->attr_count; i++) {
             if (!layout->declared[layout->attr[i].binding]) {
                 aemt_fail(AEMT_ERR_ARG, "attribute %d reads binding %d, which was never declared",
@@ -2040,7 +2083,9 @@ static const char k_present_msl[] =
 
 /* THE DEVICE LOCK MUST BE HELD. */
 static int aemt_present_pass(AemtDevice* d) {
-    if (d->present_pipe[0] && d->present_pipe[1] && d->present_sampler) return AEMT_OK;
+    if (d->present_pipe[0] && d->present_pipe[1] && d->present_sampler && d->present_sampler_nearest) {
+        return AEMT_OK;
+    }
     id lib = aemt_library(d, k_present_msl, sizeof(k_present_msl) - 1, "present");
     if (!lib) return AEMT_ERR_SHADER;
     id vfn = aemt_function(lib, MTL_FUNCTION_VERTEX, "present vertex");
@@ -2060,15 +2105,18 @@ static int aemt_present_pass(AemtDevice* d) {
         mt_release(desc);
         if (!d->present_pipe[s]) rc = aemt_fail(AEMT_ERR_SHADER, "the present pipeline failed: %s", mt_error_text(error));
     }
-    if (rc == AEMT_OK && !d->present_sampler) {
+    for (int n = 0; n < 2 && rc == AEMT_OK; n++) {
+        id* slot = n ? &d->present_sampler_nearest : &d->present_sampler;
+        if (*slot) continue;
+        AemtUInt filter = n ? (AemtUInt)MTL_FILTER_NEAREST : (AemtUInt)MTL_FILTER_LINEAR;
         id sd = mt_new("MTLSamplerDescriptor");
-        MT_SEND(void, AemtUInt)(sd, mt_sel("setMinFilter:"), (AemtUInt)MTL_FILTER_LINEAR);
-        MT_SEND(void, AemtUInt)(sd, mt_sel("setMagFilter:"), (AemtUInt)MTL_FILTER_LINEAR);
+        MT_SEND(void, AemtUInt)(sd, mt_sel("setMinFilter:"), filter);
+        MT_SEND(void, AemtUInt)(sd, mt_sel("setMagFilter:"), filter);
         MT_SEND(void, AemtUInt)(sd, mt_sel("setSAddressMode:"), (AemtUInt)MTL_ADDRESS_CLAMP_TO_EDGE);
         MT_SEND(void, AemtUInt)(sd, mt_sel("setTAddressMode:"), (AemtUInt)MTL_ADDRESS_CLAMP_TO_EDGE);
-        d->present_sampler = MT_SEND(id, id)(d->device, mt_sel("newSamplerStateWithDescriptor:"), sd);
+        *slot = MT_SEND(id, id)(d->device, mt_sel("newSamplerStateWithDescriptor:"), sd);
         mt_release(sd);
-        if (!d->present_sampler) rc = aemt_fail(AEMT_ERR_OOM, "newSamplerStateWithDescriptor failed");
+        if (!*slot) rc = aemt_fail(AEMT_ERR_OOM, "newSamplerStateWithDescriptor failed");
     }
     mt_release(vfn);
     mt_release(ffn);
@@ -2104,10 +2152,21 @@ static id aemt_view_layer(id view) {
 
 /* Follows the view: its bounds at the window's backing scale, in pixels, and
  * 0 x 0 while the window is miniaturised. A bare layer keeps the caller's
- * size. The drawables are resized to match. */
+ * size. The drawables are resized to match.
+ *
+ * The view and its window are AppKit's, which is to say the main thread's.
+ * Presenting from another thread reads the size from the layer instead,
+ * whose properties Core Animation lets any thread read, and leaves the
+ * layer's scale as it was last set on the main thread. */
 static void aemt_sc_follow(AemtSwapchain* s) {
     int w = s->want_w, h = s->want_h;
-    if (s->view) {
+    if (s->view && !pthread_main_np()) {
+        double scale = MT_SEND(double)(s->layer, mt_sel("contentsScale"));
+        if (scale <= 0.0) scale = 1.0;
+        AemtCGRect b = mt_rect(s->layer, "bounds");
+        w = (int)(b.width * scale + 0.5);
+        h = (int)(b.height * scale + 0.5);
+    } else if (s->view) {
         id win = MT_SEND(id)(s->view, mt_sel("window"));
         double scale = win ? MT_SEND(double)(win, mt_sel("backingScaleFactor")) : 1.0;
         if (scale <= 0.0) scale = 1.0;
@@ -2264,7 +2323,9 @@ int aemt_present(AemtSwapchain* s, AemtTarget* t) {
     MT_SEND(void, AemtViewport)(enc, mt_sel("setViewport:"), vp);
     MT_SEND(void, id)(enc, mt_sel("setRenderPipelineState:"), d->present_pipe[srgb]);
     MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentTexture:atIndex:"), t->color, 0);
-    MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentSamplerState:atIndex:"), d->present_sampler, 0);
+    id sampler = (t->format == AEMT_FORMAT_R32G32B32A32_SFLOAT && !d->filter32)
+                     ? d->present_sampler_nearest : d->present_sampler;
+    MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentSamplerState:atIndex:"), sampler, 0);
     MT_SEND(void, AemtUInt, AemtUInt, AemtUInt)(enc, mt_sel("drawPrimitives:vertexStart:vertexCount:"),
                                                 (AemtUInt)MTL_PRIMITIVE_TRIANGLE, 0, 3);
     MT_SEND(void)(enc, mt_sel("endEncoding"));

@@ -122,7 +122,7 @@ main() {
             p = metal.pipeline_create(dev, target, vs, vs_len, bad, string.length(bad))
             spec.assert_true(p == null, "refused")
             spec.assert_true(string.index_of(metal.last_error(), "undefined_thing") >= 0,
-                             "the compiler's message names the problem (${metal.last_error()})")
+                "the compiler's message names the problem (${metal.last_error()})")
         }
         spec.it_when(ready, "builds a pipeline from MSL source", reason) callback {
             spec.assert_true(pipe != null, "pipeline_create")
@@ -153,7 +153,7 @@ main() {
             top = metal.pixel(target, 32, 14)
             bottom_left = metal.pixel(target, 14, 52)
             spec.assert_true(metal.red(top) > metal.green(top) && metal.red(top) > metal.blue(top),
-                             "red near the top vertex")
+                "red near the top vertex")
             spec.assert_true(metal.green(bottom_left) > metal.red(bottom_left), "green near the bottom-left one")
         }
         spec.it_when(ready, "bounds-checks pixel()", reason) callback {

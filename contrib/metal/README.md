@@ -118,6 +118,12 @@ where it is used. `target_format()` reports the same numbers.
 | `FORMAT_R16G16B16A16_SFLOAT` | half floats, not clamped |
 | `FORMAT_R32G32B32A32_SFLOAT` | single floats, not clamped |
 
+Not every GPU multisamples or filters 32-bit float formats, and the device
+says which it can (`supports32BitMSAA`, `supports32BitFloatFiltering`). A
+multisampled `FORMAT_R32G32B32A32_SFLOAT` target is refused where the device
+cannot resolve it, and presenting one is point-sampled where it cannot be
+filtered.
+
 ## Coordinates
 
 Metal's: x and y run -1 to 1 with **y pointing up** (Vulkan's points down), and
@@ -126,7 +132,7 @@ top row.
 
 ## Presenting to a window
 
-```aether
+```aether,fragment
 sc = metal.swapchain_create(dev, metal.WINDOW_NSVIEW, null, view, w, h)
 defer metal.swapchain_destroy(sc)
 // each frame:
@@ -161,9 +167,14 @@ The present is committed on the queue that rendered the frame, so Metal orders
 the sampling after the target's writes, and the target's next frame after the
 sampling.
 
+`present` may be called from any thread. The view and its window belong to
+AppKit's main thread, so off it the swapchain reads its size from the layer,
+which Core Animation lets any thread read, and a miniaturised window is
+noticed on the main thread only.
+
 ## Compute
 
-```aether
+```aether,fragment
 b = metal.bindings_create()
 metal.bindings_storage(b, 0)
 c = metal.compute_create(dev, cs, cs_len, b, 4)

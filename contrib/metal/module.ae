@@ -93,7 +93,7 @@ import std.bytes
 import std.string
 import contrib.png
 
-exports (
+exports(
     OK, ERR_NO_LOADER, ERR_NO_DEVICE, ERR_ARG, ERR_OOM, ERR_UNSUPPORTED, ERR_SHADER, ERR_DEVICE_LOST,
     WINDOW_NSVIEW, WINDOW_METAL_LAYER, PER_VERTEX, PER_INSTANCE,
     FORMAT_R32_SFLOAT, FORMAT_R32G32_SFLOAT, FORMAT_R32G32B32_SFLOAT, FORMAT_R32G32B32A32_SFLOAT,
@@ -184,7 +184,7 @@ extern aemt_ae_target_set_timeout_ms(t: ptr, ms: int) -> int
 extern aemt_ae_rgba_size(t: ptr) -> int
 extern aemt_ae_pipeline_create(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int) -> ptr
 extern aemt_ae_pipeline_create_ex(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int,
-                                  layout: ptr, push_bytes: int, bindings: ptr) -> ptr
+    layout: ptr, push_bytes: int, bindings: ptr) -> ptr
 extern aemt_ae_pipeline_destroy(p: ptr)
 extern aemt_ae_layout_create() -> ptr
 extern aemt_ae_layout_destroy(l: ptr)
@@ -344,7 +344,7 @@ pipeline_create(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: i
     return aemt_ae_pipeline_create(dev, t, vs, vs_len, fs, fs_len)
 }
 pipeline_create_ex(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int,
-                   layout: ptr, push_bytes: int, bindings: ptr) -> ptr {
+    layout: ptr, push_bytes: int, bindings: ptr) -> ptr {
     return aemt_ae_pipeline_create_ex(dev, t, vs, vs_len, fs, fs_len, layout, push_bytes, bindings)
 }
 pipeline_destroy(p: ptr) { aemt_ae_pipeline_destroy(p) }
