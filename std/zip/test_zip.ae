@@ -6,6 +6,8 @@ import std.zip
 import std.string
 import std.bytes
 import std.io
+import std.fs
+import std.path
 
 extern exit(code: int)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
@@ -99,6 +101,153 @@ main() {
     _na, naerr = zip.open("plainly not a zip archive at all, no sir", 39)
     if string.equals(naerr, "") == 0 { println("  ok   non-zip rejected") }
     else { println("  FAIL non-zip accepted"); fails = fails + 1 }
+
+    // ---- writer: build in memory, then read back with the trusted reader ---
+    println("--- writer ---")
+
+    // Highly repetitive payload so deflate is genuinely smaller than stored.
+    w_body = "ababababababababababababababababababababababababababababababababab deflate this"
+    w_bl = string.length(w_body)
+    s_body = "tiny" // 4 bytes: stored stays stored (deflate can't shrink it)
+    s_bl = string.length(s_body)
+
+    w = zip.writer_new()
+    check("w add dir", zip.writer_add_dir(w, "d"), "")
+    check("w add stored", zip.writer_add(w, "d/s.txt", s_body, s_bl, zip.METHOD_STORED, 0), "")
+    check("w add deflate", zip.writer_add(w, "big.txt", w_body, w_bl, zip.METHOD_DEFLATE, 9), "")
+    check("w add empty", zip.writer_add(w, "empty.dat", "", 0, zip.METHOD_DEFLATE, 6), "")
+    out, outlen, ferr = zip.writer_finish(w)
+    check("w finish err", ferr, "")
+    check_int("w archive nonempty", outlen > 0, 1)
+
+    war, woerr = zip.open(out, outlen)
+    if string.equals(woerr, "") != 1 { println("  FAIL writer output not readable: ${woerr}"); fails = fails + 1 }
+    else {
+        check_int("w count", zip.count(war), 4)
+
+        wi = zip.find(war, "big.txt")
+        check_int("w find big.txt", wi >= 0, 1)
+        // it must have actually deflated (smaller payload chose method 8)
+        check_int("w big.txt method deflate", zip.entry_method(war, wi), zip.METHOD_DEFLATE)
+        wb, _wl, wrerr = zip.entry_read(war, wi)
+        check("w big.txt read err empty", wrerr, "")
+        check("w big.txt content", wb, w_body)
+
+        // the un-shrinkable payload fell back to stored
+        sti = zip.find(war, "d/s.txt")
+        check_int("w s.txt method stored", zip.entry_method(war, sti), zip.METHOD_STORED)
+        stb, _stl, sterr = zip.entry_read(war, sti)
+        check("w s.txt content", stb, s_body)
+
+        // the directory entry
+        wdi = zip.find(war, "d/")
+        check_int("w dir is_dir", zip.entry_is_dir(war, wdi), 1)
+
+        // the empty entry reads back as empty with no error
+        wei = zip.find(war, "empty.dat")
+        check_int("w find empty", wei >= 0, 1)
+        eb, ebl, eerr = zip.entry_read(war, wei)
+        check("w empty read err empty", eerr, "")
+        check_int("w empty length 0", ebl, 0)
+        check("w empty content", eb, "")
+
+        zip.close(war)
+    }
+    zip.writer_free(w)
+
+    // one-shot create(): a single deflate entry, read straight back
+    c_body = "one-shot create: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    c_bl = string.length(c_body)
+    cout, coutlen, cerr = zip.create("only.txt", c_body, c_bl, zip.METHOD_DEFLATE, 6)
+    check("create err empty", cerr, "")
+    car, caoerr = zip.open(cout, coutlen)
+    if string.equals(caoerr, "") != 1 { println("  FAIL create output not readable: ${caoerr}"); fails = fails + 1 }
+    else {
+        check_int("create count", zip.count(car), 1)
+        cb, _cl, crerr = zip.entry_read(car, 0)
+        check("create read err empty", crerr, "")
+        check("create content", cb, c_body)
+        zip.close(car)
+    }
+
+    // ---- filesystem: dir-tree writer + extract round-trip -----------------
+    println("--- filesystem ---")
+    base = path.clean("zip_temp_test_dir")
+    fs.remove_tree(base)
+    fs.mkdir_p(base)
+
+    // Build a small source tree.
+    src = string.concat(base, "/src")
+    fs.mkdir_p("${src}/sub/deep")
+    fs.write_binary("${src}/a.txt", "alpha\n", 6)
+    big = "beta beta beta beta beta beta beta beta beta beta beta beta beta\n"
+    fs.write_binary("${src}/sub/b.txt", big, string.length(big))
+    fs.write_binary("${src}/sub/deep/c.txt", "gamma\n", 6)
+
+    // Pack it, prefixing entries with "pkg".
+    tw = zip.writer_new()
+    tperr = zip.add_dir_tree(tw, src, "pkg", zip.METHOD_DEFLATE, 6)
+    check("add_dir_tree err empty", tperr, "")
+    tout, toutlen, tferr = zip.writer_finish(tw)
+    check("tree finish err empty", tferr, "")
+
+    // Confirm the three files landed (order is fs.walk's, so check by find).
+    tar2, tarerr = zip.open(tout, toutlen)
+    if string.equals(tarerr, "") != 1 { println("  FAIL tree archive unreadable: ${tarerr}"); fails = fails + 1 }
+    else {
+        check_int("tree count", zip.count(tar2), 3)
+        check_int("tree find pkg/a.txt", zip.find(tar2, "pkg/a.txt") >= 0, 1)
+        check_int("tree find pkg/sub/b.txt", zip.find(tar2, "pkg/sub/b.txt") >= 0, 1)
+        check_int("tree find pkg/sub/deep/c.txt", zip.find(tar2, "pkg/sub/deep/c.txt") >= 0, 1)
+        zip.close(tar2)
+    }
+
+    // Extract it back and verify content.
+    xopts = zip.default_extract_options()
+    xdest = string.concat(base, "/out")
+    xerr = zip.extract(tout, toutlen, xdest, xopts)
+    check("extract err empty", xerr, "")
+    check_int("extracted a.txt exists", fs.exists("${xdest}/pkg/a.txt"), 1)
+    check_int("extracted nested exists", fs.exists("${xdest}/pkg/sub/deep/c.txt"), 1)
+    ra, rlen, rerr2 = fs.read_binary("${xdest}/pkg/a.txt")
+    check("extracted a.txt content", ra, "alpha\n")
+    string.free(ra)
+    zip.writer_free(tw)
+    string.free(tout)
+
+    // extract_file convenience: write the archive, extract from the path.
+    zpath = string.concat(base, "/pkg.zip")
+    cf_out, cf_len, _cfe = zip.create("hello.txt", "world\n", 6, zip.METHOD_STORED, 0)
+    fs.write_binary(zpath, cf_out, cf_len)
+    string.free(cf_out)
+    ef_err = zip.extract_file(zpath, "${base}/out2", xopts)
+    check("extract_file err empty", ef_err, "")
+    check_int("extract_file wrote hello.txt", fs.exists("${base}/out2/hello.txt"), 1)
+
+    // Security: a traversal entry must be refused, and nothing written.
+    ew = zip.writer_new()
+    zip.writer_add(ew, "../escape.txt", "pwned", 5, zip.METHOD_STORED, 0)
+    eout, eoutlen, _ef = zip.writer_finish(ew)
+    e_err = zip.extract(eout, eoutlen, "${base}/evil", xopts)
+    check_int("traversal rejected", string.equals(e_err, "") == 0, 1)
+    check_int("nothing escaped", fs.exists("${base}/escape.txt"), 0)
+    string.free(eout)
+    zip.writer_free(ew)
+
+    // Absolute path must be refused too.
+    aw = zip.writer_new()
+    zip.writer_add(aw, "/tmp/pwn", "x", 1, zip.METHOD_STORED, 0)
+    aout, aoutlen, _af = zip.writer_finish(aw)
+    a_err = zip.extract(aout, aoutlen, "${base}/evil2", xopts)
+    check_int("absolute path rejected", string.equals(a_err, "") == 0, 1)
+    string.free(aout)
+    zip.writer_free(aw)
+
+    string.free(src)
+    string.free(xdest)
+    string.free(zpath)
+    fs.remove_tree(base)
+    string.free(base)
 
     if fails == 0 { println("ALL PASS") }
     else { println("${fails} FAILED"); exit(1) }

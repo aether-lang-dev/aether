@@ -96,7 +96,12 @@ int zlib_try_deflate(const char* data, int length, int level) {
     return 1;
 }
 
-int zlib_try_gzip_deflate(const char* data, int length, int level) {
+/* deflateInit2 -> deflate(Z_FINISH) -> deflateEnd for a given framing.
+ * windowBits selects the wrapper: 15+16 = gzip, -15 = raw (RFC 1951, no
+ * header/trailer). Result lands in the shared tls_deflate_* slots, so
+ * zlib_get_deflate_bytes / _length / zlib_release_deflate all apply. */
+static int deflate_with_window_bits(const char* data, int length, int level,
+                                    int window_bits) {
     free_deflate_tls();
     if (length < 0) return 0;
 
@@ -107,7 +112,7 @@ int zlib_try_gzip_deflate(const char* data, int length, int level) {
     z_stream strm;
     memset(&strm, 0, sizeof(strm));
     int lvl = (level < -1 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
-    if (deflateInit2(&strm, lvl, Z_DEFLATED, 15 + 16, 8,
+    if (deflateInit2(&strm, lvl, Z_DEFLATED, window_bits, 8,
                      Z_DEFAULT_STRATEGY) != Z_OK) {
         return 0;
     }
@@ -134,6 +139,19 @@ int zlib_try_gzip_deflate(const char* data, int length, int level) {
     tls_deflate_len = (int)strm.total_out;
     deflateEnd(&strm);
     return 1;
+}
+
+int zlib_try_gzip_deflate(const char* data, int length, int level) {
+    return deflate_with_window_bits(data, length, level, 15 + 16);
+}
+
+/* Raw DEFLATE (RFC 1951, no zlib/gzip wrapper): windowBits -15. The
+ * compressing counterpart of zlib_try_inflate_raw, and the framing a ZIP
+ * entry stores for method 8 -- the container carries the sizes and CRC
+ * separately, so the stream has no header of its own. std.zip is the
+ * primary caller. */
+int zlib_try_deflate_raw(const char* data, int length, int level) {
+    return deflate_with_window_bits(data, length, level, -15);
 }
 
 int zlib_try_inflate(const char* data, int length) {
