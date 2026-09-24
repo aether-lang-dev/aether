@@ -73,6 +73,59 @@
 //   vulkan.copy_rgba(t, dest, dest_len) -> int     status
 //   vulkan.save_ppm(t, path)            -> int     status
 //
+// Colour formats and image files (#1514):
+//
+//   vulkan.target_create_format(dev, w, h, format, depth, samples) -> ptr
+//   vulkan.target_format(t)             -> int     a FORMAT_* value
+//   vulkan.target_bytes_per_pixel(t)    -> int     4, 8 or 16
+//   vulkan.pixel_value(t, x, y, channel) -> float  exact, HDR values included
+//   vulkan.copy_rgba8(t, dest, dest_len) -> int    8-bit RGBA whatever the format
+//   vulkan.save_png(t, path)            -> string  "" on success
+//
+// Buffers and compute (#1515):
+//
+//   vulkan.buffer_create(dev, bytes)    -> ptr     mapped, zeroed
+//   vulkan.buffer_destroy(b)
+//   vulkan.buffer_size(b)               -> int
+//   vulkan.buffer_set_float(b, i, v)    -> int     4-byte slot i
+//   vulkan.buffer_float(b, i)           -> float
+//   vulkan.buffer_set_int(b, i, v)      -> int
+//   vulkan.buffer_int(b, i)             -> int
+//   vulkan.buffer_write(b, offset, data, len) -> int
+//   vulkan.buffer_read(b, offset, dest, len)  -> int
+//   vulkan.bindings_storage(b, binding) -> int     std430 buffer binding
+//   vulkan.compute_create(dev, spv, len, bindings, push_bytes) -> ptr
+//   vulkan.compute_destroy(c)
+//   vulkan.compute_set_buffer(c, binding, buf) -> int
+//   vulkan.compute_set_texture(c, binding, tex) -> int
+//   vulkan.compute_push_float(c, slot, v) -> int
+//   vulkan.compute_push_int(c, slot, v) -> int
+//   vulkan.dispatch(c, gx, gy, gz)      -> int     runs and waits
+//   vulkan.dispatch_async(c, gx, gy, gz) -> int    runs; compute_wait later
+//   vulkan.compute_wait(c)              -> int
+//   vulkan.set_buffer(p, binding, buf)  -> int     a draw reads a buffer
+//   vulkan.material_set_buffer(m, binding, buf) -> int
+//
+// Presenting to a window (#1505):
+//
+//   vulkan.swapchain_create(dev, kind, display, window, w, h) -> ptr
+//   vulkan.swapchain_destroy(sc)
+//   vulkan.swapchain_resize(sc, w, h)   -> int     status
+//   vulkan.swapchain_set_vsync(sc, on)  -> int     status
+//   vulkan.swapchain_width(sc)          -> int     0 while the window has no area
+//   vulkan.swapchain_height(sc)         -> int
+//   vulkan.swapchain_format(sc)         -> int     VkFormat of the images
+//   vulkan.swapchain_presented(sc)      -> int     frames handed to the display
+//   vulkan.present(sc, t)               -> int     the target's newest frame
+//   vulkan.target_resize(t, w, h)       -> int     keeps every pipeline valid
+//   vulkan.target_set_readback(t, on)   -> int     off: no per-frame copy out
+//   vulkan.target_readback(t)           -> int
+//
+// The window is never this module's: `kind`, `display` and `window` are what
+// the toolkit that owns it hands out, numbered as aether-ui's
+// native_view_kind() numbers them (WINDOW_WIN32 = 1 ... WINDOW_WAYLAND = 4),
+// plus WINDOW_METAL_LAYER for a program with its own CAMetalLayer.
+//
 // Nothing links against libvulkan: the loader is opened at runtime, so a
 // program using this module builds and starts on a machine with no driver and
 // vulkan.available() reports 0. Check it before anything else.
@@ -88,7 +141,9 @@
 //     brew install vulkan-headers.
 //   - on Linux add `link_flags = "-ldl"` for dlopen.
 
+import std.bytes
 import std.string
+import contrib.png
 
 exports (
     OK, ERR_NO_LOADER, ERR_NO_DEVICE, ERR_ARG, ERR_OOM,
@@ -144,7 +199,36 @@ exports (
     FORMAT_R32_SFLOAT, FORMAT_R32G32_SFLOAT,
     FORMAT_R32G32B32_SFLOAT, FORMAT_R32G32B32A32_SFLOAT,
     FORMAT_R8G8B8A8_UNORM,
-    PER_VERTEX, PER_INSTANCE
+    PER_VERTEX, PER_INSTANCE,
+    WINDOW_WIN32, WINDOW_NSVIEW, WINDOW_X11, WINDOW_WAYLAND, WINDOW_METAL_LAYER,
+    FORMAT_R8G8B8A8_SRGB, FORMAT_R16G16B16A16_SFLOAT,
+    aevk_ae_target_create_format, aevk_ae_target_format, aevk_ae_target_bytes_per_pixel,
+    aevk_ae_copy_rgba8, aevk_ae_pixel_value,
+    target_create_format, target_format, target_bytes_per_pixel,
+    copy_rgba8, pixel_value, save_png,
+    aevk_ae_buffer_create, aevk_ae_buffer_destroy, aevk_ae_buffer_size,
+    aevk_ae_buffer_write, aevk_ae_buffer_read,
+    aevk_ae_buffer_set_float, aevk_ae_buffer_float,
+    aevk_ae_buffer_set_int, aevk_ae_buffer_int,
+    aevk_ae_bindings_storage, aevk_ae_material_set_buffer, aevk_ae_set_buffer,
+    aevk_ae_compute_create, aevk_ae_compute_destroy,
+    aevk_ae_compute_set_buffer, aevk_ae_compute_set_texture, aevk_ae_compute_set_push,
+    aevk_ae_compute_push_float, aevk_ae_compute_push_int, aevk_ae_compute_set_timeout_ms,
+    aevk_ae_dispatch, aevk_ae_dispatch_async, aevk_ae_compute_wait,
+    buffer_create, buffer_destroy, buffer_size, buffer_write, buffer_read,
+    buffer_set_float, buffer_float, buffer_set_int, buffer_int,
+    bindings_storage, material_set_buffer, set_buffer,
+    compute_create, compute_destroy, compute_set_buffer, compute_set_texture,
+    compute_set_push, compute_push_float, compute_push_int, compute_set_timeout_ms,
+    dispatch, dispatch_async, compute_wait,
+    aevk_ae_target_resize, aevk_ae_target_set_readback, aevk_ae_target_readback,
+    aevk_ae_swapchain_create, aevk_ae_swapchain_destroy, aevk_ae_swapchain_resize,
+    aevk_ae_swapchain_set_vsync, aevk_ae_swapchain_width, aevk_ae_swapchain_height,
+    aevk_ae_swapchain_format, aevk_ae_swapchain_presented, aevk_ae_present,
+    target_resize, target_set_readback, target_readback,
+    swapchain_create, swapchain_destroy, swapchain_resize, swapchain_set_vsync,
+    swapchain_width, swapchain_height, swapchain_format, swapchain_presented,
+    present
 )
 
 extern aevk_ae_available() -> int
@@ -229,6 +313,50 @@ extern aevk_ae_copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int
 extern aevk_ae_pixel(t: ptr, x: int, y: int) -> int
 extern aevk_ae_save_ppm(t: ptr, path: string) -> int
 
+extern aevk_ae_target_create_format(dev: ptr, w: int, h: int, format: int,
+                                    want_depth: int, samples: int) -> ptr
+extern aevk_ae_target_format(t: ptr) -> int
+extern aevk_ae_target_bytes_per_pixel(t: ptr) -> int
+extern aevk_ae_copy_rgba8(t: ptr, dest: ptr, dest_len: int) -> int
+extern aevk_ae_pixel_value(t: ptr, x: int, y: int, channel: int) -> float
+extern aevk_ae_buffer_create(dev: ptr, bytes: int) -> ptr
+extern aevk_ae_buffer_destroy(b: ptr)
+extern aevk_ae_buffer_size(b: ptr) -> int
+extern aevk_ae_buffer_write(b: ptr, offset: int, data: ptr, len: int) -> int
+extern aevk_ae_buffer_read(b: ptr, offset: int, dest: ptr, len: int) -> int
+extern aevk_ae_buffer_set_float(b: ptr, index: int, value: float) -> int
+extern aevk_ae_buffer_float(b: ptr, index: int) -> float
+extern aevk_ae_buffer_set_int(b: ptr, index: int, value: int) -> int
+extern aevk_ae_buffer_int(b: ptr, index: int) -> int
+extern aevk_ae_bindings_storage(b: ptr, binding: int) -> int
+extern aevk_ae_material_set_buffer(m: ptr, binding: int, buf: ptr) -> int
+extern aevk_ae_set_buffer(p: ptr, binding: int, buf: ptr) -> int
+extern aevk_ae_compute_create(dev: ptr, spv: string, len: int, bindings: ptr,
+                              push_bytes: int) -> ptr
+extern aevk_ae_compute_destroy(c: ptr)
+extern aevk_ae_compute_set_buffer(c: ptr, binding: int, buf: ptr) -> int
+extern aevk_ae_compute_set_texture(c: ptr, binding: int, tex: ptr) -> int
+extern aevk_ae_compute_set_push(c: ptr, data: ptr, len: int) -> int
+extern aevk_ae_compute_push_float(c: ptr, slot: int, value: float) -> int
+extern aevk_ae_compute_push_int(c: ptr, slot: int, value: int) -> int
+extern aevk_ae_compute_set_timeout_ms(c: ptr, ms: int) -> int
+extern aevk_ae_dispatch(c: ptr, gx: int, gy: int, gz: int) -> int
+extern aevk_ae_dispatch_async(c: ptr, gx: int, gy: int, gz: int) -> int
+extern aevk_ae_compute_wait(c: ptr) -> int
+extern aevk_ae_target_resize(t: ptr, w: int, h: int) -> int
+extern aevk_ae_target_set_readback(t: ptr, on: int) -> int
+extern aevk_ae_target_readback(t: ptr) -> int
+extern aevk_ae_swapchain_create(dev: ptr, kind: int, display: ptr, window: ptr,
+                                w: int, h: int) -> ptr
+extern aevk_ae_swapchain_destroy(sc: ptr)
+extern aevk_ae_swapchain_resize(sc: ptr, w: int, h: int) -> int
+extern aevk_ae_swapchain_set_vsync(sc: ptr, on: int) -> int
+extern aevk_ae_swapchain_width(sc: ptr) -> int
+extern aevk_ae_swapchain_height(sc: ptr) -> int
+extern aevk_ae_swapchain_format(sc: ptr) -> int
+extern aevk_ae_swapchain_presented(sc: ptr) -> int
+extern aevk_ae_present(sc: ptr, t: ptr) -> int
+
 // Status codes, mirroring aether_vulkan.h. A positive value is a VkResult
 // passed through from the driver.
 const OK = 0
@@ -308,13 +436,16 @@ copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int {
 pixel(t: ptr, x: int, y: int) -> int { return aevk_ae_pixel(t, x, y) }
 save_ppm(t: ptr, path: string) -> int { return aevk_ae_save_ppm(t, path) }
 
-// VkFormat values for layout_attr, spelled out so a caller never needs the
-// Vulkan headers to describe its own vertices.
+// VkFormat values, spelled out so a caller never needs the Vulkan headers:
+// for layout_attr to describe its own vertices, and (the four RGBA ones) for
+// target_create_format.
 const FORMAT_R32_SFLOAT = 100
 const FORMAT_R32G32_SFLOAT = 103
 const FORMAT_R32G32B32_SFLOAT = 106
 const FORMAT_R32G32B32A32_SFLOAT = 109
 const FORMAT_R8G8B8A8_UNORM = 37
+const FORMAT_R8G8B8A8_SRGB = 43
+const FORMAT_R16G16B16A16_SFLOAT = 97
 
 // Input rate for layout_binding.
 const PER_VERTEX = 0
@@ -322,7 +453,10 @@ const PER_INSTANCE = 1
 
 // A vertex layout: one or more interleaved streams, each with attributes at
 // byte offsets. Without one a pipeline uses the built-in position+colour
-// layout, so existing code needs no change.
+// layout, so existing code needs no change. An empty one, with nothing
+// described, is a pipeline with no vertex input: its vertex shader pulls
+// what it needs from a buffer by gl_VertexIndex, and verts_reserve still
+// sets how many vertices a draw runs.
 layout_create() -> ptr { return aevk_ae_layout_create() }
 layout_destroy(l: ptr) { aevk_ae_layout_destroy(l) }
 
@@ -460,3 +594,181 @@ red(px: int) -> int { return (px >> 24) & 255 }
 green(px: int) -> int { return (px >> 16) & 255 }
 blue(px: int) -> int { return (px >> 8) & 255 }
 alpha(px: int) -> int { return px & 255 }
+
+// ---------------------------------------------------------------------------
+// Presenting to a window (#1505)
+// ---------------------------------------------------------------------------
+
+// Window kinds, numbered as aether-ui's native_view_kind(). The display
+// argument is the connection the handle belongs to where the window system
+// has one (X11's Display*, Wayland's wl_display*) and null otherwise.
+const WINDOW_WIN32 = 1         // window: HWND
+const WINDOW_NSVIEW = 2        // window: NSView*, given a CAMetalLayer (main thread)
+const WINDOW_X11 = 3           // display: Display*, window: Window
+const WINDOW_WAYLAND = 4       // display: wl_display*, window: wl_surface*
+const WINDOW_METAL_LAYER = 5   // window: CAMetalLayer* the program made itself
+
+// A swapchain over a window the caller owns; the window must outlive it.
+// w x h is used only where the window system leaves the size to the
+// application (Wayland); elsewhere the window's own size is taken. Null with
+// last_error() naming the missing extension when this loader or device
+// cannot present to that kind of window.
+swapchain_create(dev: ptr, kind: int, display: ptr, window: ptr, w: int, h: int) -> ptr {
+    return aevk_ae_swapchain_create(dev, kind, display, window, w, h)
+}
+swapchain_destroy(sc: ptr) { aevk_ae_swapchain_destroy(sc) }
+
+// The window changed size (a toolkit's resize hook gives it in pixels).
+swapchain_resize(sc: ptr, w: int, h: int) -> int { return aevk_ae_swapchain_resize(sc, w, h) }
+
+// On by default: one frame per vertical blank, never tearing. Off presents as
+// soon as a frame is ready (MAILBOX where offered, else IMMEDIATE).
+swapchain_set_vsync(sc: ptr, on: int) -> int { return aevk_ae_swapchain_set_vsync(sc, on) }
+
+// 0 x 0 while the window has no area (minimised): present() then shows
+// nothing and succeeds, and picks the window up again when it returns.
+swapchain_width(sc: ptr) -> int { return aevk_ae_swapchain_width(sc) }
+swapchain_height(sc: ptr) -> int { return aevk_ae_swapchain_height(sc) }
+swapchain_format(sc: ptr) -> int { return aevk_ae_swapchain_format(sc) }
+swapchain_presented(sc: ptr) -> int { return aevk_ae_swapchain_presented(sc) }
+
+// Shows the target's newest frame: call it after draw() or submit(). It does
+// not wait for the GPU. The frame is scaled when the target and the window
+// differ in size; a swapchain the window outgrew is rebuilt here.
+present(sc: ptr, t: ptr) -> int { return aevk_ae_present(sc, t) }
+
+// New images at w x h with the same render pass, so pipelines made for the
+// target keep working: the other half of following a window's size.
+target_resize(t: ptr, w: int, h: int) -> int { return aevk_ae_target_resize(t, w, h) }
+
+// Readback (on by default) copies every frame into host memory for pixel(),
+// copy_rgba() and save_ppm(). A target that is only presented turns it off
+// and saves a width*height*4 copy per frame.
+target_set_readback(t: ptr, on: int) -> int { return aevk_ae_target_set_readback(t, on) }
+target_readback(t: ptr) -> int { return aevk_ae_target_readback(t) }
+
+// ---------------------------------------------------------------------------
+// Colour formats and image files (#1514)
+// ---------------------------------------------------------------------------
+
+// A target in a chosen colour format: FORMAT_R8G8B8A8_UNORM (what
+// target_create_ex makes), FORMAT_R8G8B8A8_SRGB (linear shader output encoded
+// for display on store), FORMAT_R16G16B16A16_SFLOAT or
+// FORMAT_R32G32B32A32_SFLOAT (HDR or compute-style values, not clamped to
+// 0..1). Refused with last_error() when the device cannot render to it.
+target_create_format(dev: ptr, w: int, h: int, format: int, want_depth: int, samples: int) -> ptr {
+    return aevk_ae_target_create_format(dev, w, h, format, want_depth, samples)
+}
+target_format(t: ptr) -> int { return aevk_ae_target_format(t) }
+target_bytes_per_pixel(t: ptr) -> int { return aevk_ae_target_bytes_per_pixel(t) }
+
+// One channel (0 red .. 3 alpha) at full precision: a float target's value
+// as stored, HDR above 1.0 included; an 8-bit target's byte over 255.
+pixel_value(t: ptr, x: int, y: int, channel: int) -> float {
+    return aevk_ae_pixel_value(t, x, y, channel)
+}
+
+// The newest frame as 8-bit RGBA whatever the format: w * h * 4 bytes, float
+// channels clamped to 0..1. copy_rgba() gives the format's own bytes
+// (rgba_size() of them).
+copy_rgba8(t: ptr, dest: ptr, dest_len: int) -> int {
+    return aevk_ae_copy_rgba8(t, dest, dest_len)
+}
+
+// Writes the newest frame as a PNG (8-bit RGBA). "" on success, the reason
+// otherwise. save_ppm() stays for callers that want a file with no
+// compressor in the path.
+save_png(t: ptr, path: string) -> string {
+    w = aevk_ae_target_width(t)
+    h = aevk_ae_target_height(t)
+    if t == null || w <= 0 || h <= 0 { return "target is null" }
+    buf = bytes.new(w * h * 4)
+    bytes.set_length(buf, w * h * 4)
+    rc = aevk_ae_copy_rgba8(t, bytes.data(buf), w * h * 4)
+    if rc != 0 {
+        bytes.free(buf)
+        return aevk_ae_last_error()
+    }
+    err = png.write_rgba8(path, bytes.data(buf), w, h)
+    bytes.free(buf)
+    return err
+}
+
+// ---------------------------------------------------------------------------
+// Buffers and compute (#1515)
+// ---------------------------------------------------------------------------
+
+// A buffer shaders read and write, mapped for its lifetime and zeroed when
+// made. The same buffer can be a storage or uniform binding of a compute pass
+// and of a graphics pipeline, so compute output feeds a draw with no copy. It
+// must outlive every dispatch and draw that uses it.
+buffer_create(dev: ptr, bytes: int) -> ptr { return aevk_ae_buffer_create(dev, bytes) }
+buffer_destroy(b: ptr) { aevk_ae_buffer_destroy(b) }
+buffer_size(b: ptr) -> int { return aevk_ae_buffer_size(b) }
+
+// Raw bytes in and out, bounds-checked.
+buffer_write(b: ptr, offset: int, data: ptr, len: int) -> int {
+    return aevk_ae_buffer_write(b, offset, data, len)
+}
+buffer_read(b: ptr, offset: int, dest: ptr, len: int) -> int {
+    return aevk_ae_buffer_read(b, offset, dest, len)
+}
+
+// By 4-byte slot, as a shader's float[] or int[] indexes it.
+buffer_set_float(b: ptr, index: int, value: float) -> int {
+    return aevk_ae_buffer_set_float(b, index, value)
+}
+buffer_float(b: ptr, index: int) -> float { return aevk_ae_buffer_float(b, index) }
+buffer_set_int(b: ptr, index: int, value: int) -> int {
+    return aevk_ae_buffer_set_int(b, index, value)
+}
+buffer_int(b: ptr, index: int) -> int { return aevk_ae_buffer_int(b, index) }
+
+// Declares `layout(std430, binding = N) buffer` for compute_create or
+// pipeline_create_ex.
+bindings_storage(b: ptr, binding: int) -> int { return aevk_ae_bindings_storage(b, binding) }
+
+// A graphics pipeline reading a buffer: vertices pulled by gl_VertexIndex,
+// or any storage or uniform block a compute pass produced.
+set_buffer(p: ptr, binding: int, buf: ptr) -> int { return aevk_ae_set_buffer(p, binding, buf) }
+material_set_buffer(m: ptr, binding: int, buf: ptr) -> int {
+    return aevk_ae_material_set_buffer(m, binding, buf)
+}
+
+// A compute pipeline from SPIR-V (entry point main), the bindings it reads
+// and writes (bindings_storage / bindings_uniform / bindings_texture) and a
+// push-constant block of push_bytes (0..128, a multiple of 4).
+compute_create(dev: ptr, spv: string, len: int, bindings: ptr, push_bytes: int) -> ptr {
+    return aevk_ae_compute_create(dev, spv, len, bindings, push_bytes)
+}
+compute_destroy(c: ptr) { aevk_ae_compute_destroy(c) }
+compute_set_buffer(c: ptr, binding: int, buf: ptr) -> int {
+    return aevk_ae_compute_set_buffer(c, binding, buf)
+}
+compute_set_texture(c: ptr, binding: int, tex: ptr) -> int {
+    return aevk_ae_compute_set_texture(c, binding, tex)
+}
+compute_set_push(c: ptr, data: ptr, len: int) -> int {
+    return aevk_ae_compute_set_push(c, data, len)
+}
+
+// Push constants by 4-byte slot: a float member, or an int / uint one.
+compute_push_float(c: ptr, slot: int, value: float) -> int {
+    return aevk_ae_compute_push_float(c, slot, value)
+}
+compute_push_int(c: ptr, slot: int, value: int) -> int {
+    return aevk_ae_compute_push_int(c, slot, value)
+}
+compute_set_timeout_ms(c: ptr, ms: int) -> int { return aevk_ae_compute_set_timeout_ms(c, ms) }
+
+// Runs gx * gy * gz work groups and waits: the buffers hold the results when
+// it returns. Every declared binding must be set first; a count past the
+// device's limit is refused with the limit named.
+dispatch(c: ptr, gx: int, gy: int, gz: int) -> int { return aevk_ae_dispatch(c, gx, gy, gz) }
+
+// Without waiting, so the CPU works while the GPU computes; compute_wait()
+// before reading results or dispatching again.
+dispatch_async(c: ptr, gx: int, gy: int, gz: int) -> int {
+    return aevk_ae_dispatch_async(c, gx, gy, gz)
+}
+compute_wait(c: ptr) -> int { return aevk_ae_compute_wait(c) }

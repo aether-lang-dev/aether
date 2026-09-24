@@ -1,0 +1,228 @@
+// contrib.vulkan compute pipelines (#1515).
+//
+// A compute shader transforms a buffer and every element is checked against
+// the same computation done here on the CPU: a float transform to float
+// precision, and an integer one that must be exact. Then compute output is
+// drawn: a pass writes a triangle's corners into a buffer that a vertex
+// shader pulls from, and the pixels show the triangle appear and disappear
+// with what the pass wrote.
+
+import std.fs
+import std.string
+import contrib.vulkan
+import std.spec
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// The shader's float math is single precision; the CPU twin here is double.
+// Agreement to 1e-5 relative (plus a floor near zero) is what float32 gives.
+close_enough(got: float, want: float) -> int {
+    d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    mag = want
+    if mag < 0.0 { mag = 0.0 - mag }
+    if d <= mag * 0.00001 + 0.0001 { return 1 }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    reason = "no Vulkan driver"
+    dev = null
+    spv = ""
+    spv_len = 0
+    if vulkan.available() == 1 {
+        dev = vulkan.device_create()
+        spv, spv_len = load_spv("contrib/vulkan/shaders/transform.comp.spv")
+        if dev == null {
+            reason = "device_create failed (${vulkan.last_error()})"
+        } else if spv_len == 0 {
+            reason = "SPIR-V shaders not built"
+        } else {
+            ready = 1
+        }
+    } else {
+        reason = "no Vulkan driver (${vulkan.last_error()})"
+    }
+
+    // 1000 elements: not a multiple of the 64-wide work group, so the
+    // shader's bounds guard is what keeps the last group in range.
+    n = 1000
+    groups = (n + 63) / 64
+    binds = null
+    comp = null
+    src = null
+    dst = null
+    ints = null
+    params = null
+    if ready == 1 {
+        binds = vulkan.bindings_create()
+        vulkan.bindings_storage(binds, 0)
+        vulkan.bindings_storage(binds, 1)
+        vulkan.bindings_storage(binds, 2)
+        vulkan.bindings_uniform(binds, 3)
+        comp = vulkan.compute_create(dev, spv, spv_len, binds, 12)
+        src = vulkan.buffer_create(dev, n * 4)
+        dst = vulkan.buffer_create(dev, n * 4)
+        ints = vulkan.buffer_create(dev, n * 4)
+        params = vulkan.buffer_create(dev, 16)
+        if comp == null { ready = 0; reason = "compute_create failed (${vulkan.last_error()})" }
+    }
+
+    spec.describe(fw, "vulkan: a compute pass over buffers") {
+        spec.it_when(ready, "refuses to dispatch before every binding is set", reason) callback {
+            rc = vulkan.dispatch(comp, groups, 1, 1)
+            spec.assert_eq(rc, vulkan.ERR_ARG, "refused")
+            spec.assert_true(string.index_of(vulkan.last_error(), "never set") >= 0, "names the binding")
+        }
+
+        spec.it_when(ready, "matches the CPU element by element", reason) callback {
+            i = 0
+            while i < n {
+                vulkan.buffer_set_float(src, i, (i as float) * 0.37 - 50.0)
+                vulkan.buffer_set_int(ints, i, i - 500)
+                i = i + 1
+            }
+            vulkan.buffer_set_float(params, 0, 0.25)
+            spec.assert_eq(vulkan.compute_set_buffer(comp, 0, src), 0, "bind src")
+            spec.assert_eq(vulkan.compute_set_buffer(comp, 1, dst), 0, "bind dst")
+            spec.assert_eq(vulkan.compute_set_buffer(comp, 2, ints), 0, "bind ints")
+            spec.assert_eq(vulkan.compute_set_buffer(comp, 3, params), 0, "bind the uniform")
+            vulkan.compute_push_float(comp, 0, 0.5)
+            vulkan.compute_push_float(comp, 1, -2.0)
+            vulkan.compute_push_int(comp, 2, n)
+            spec.assert_eq(vulkan.dispatch(comp, groups, 1, 1), 0, "dispatch")
+
+            bad_f = 0
+            bad_i = 0
+            i = 0
+            while i < n {
+                x = (i as float) * 0.37 - 50.0
+                want = x * x * 0.5 - 2.0 + 0.25
+                if close_enough(vulkan.buffer_float(dst, i), want) == 0 { bad_f = bad_f + 1 }
+                if vulkan.buffer_int(ints, i) != (i - 500) * 3 + 7 { bad_i = bad_i + 1 }
+                i = i + 1
+            }
+            spec.assert_eq(bad_f, 0, "every float matches the CPU")
+            spec.assert_eq(bad_i, 0, "every int is exact")
+        }
+
+        spec.it_when(ready, "takes new push constants on the next dispatch", reason) callback {
+            vulkan.compute_push_float(comp, 1, 10.0)
+            spec.assert_eq(vulkan.dispatch(comp, groups, 1, 1), 0, "dispatch again")
+            x = 3.0 * 0.37 - 50.0
+            spec.assert_eq(close_enough(vulkan.buffer_float(dst, 3), x * x * 0.5 + 10.0 + 0.25), 1, "new offset")
+            // Applied twice in place: ((v * 3 + 7) * 3 + 7).
+            spec.assert_eq(vulkan.buffer_int(ints, 3), ((3 - 500) * 3 + 7) * 3 + 7, "ints transformed again")
+        }
+
+        spec.it_when(ready, "runs asynchronously and waits on request", reason) callback {
+            spec.assert_eq(vulkan.dispatch_async(comp, groups, 1, 1), 0, "dispatch_async")
+            spec.assert_eq(vulkan.compute_set_buffer(comp, 0, src), vulkan.ERR_ARG, "no rebinding in flight")
+            spec.assert_eq(vulkan.compute_wait(comp), 0, "compute_wait")
+            spec.assert_eq(vulkan.buffer_int(ints, 0), (((0 - 500) * 3 + 7) * 3 + 7) * 3 + 7, "third pass landed")
+        }
+    }
+
+    spec.describe(fw, "vulkan: compute refusals") {
+        spec.it_when(ready, "refuses empty and oversized dispatches", reason) callback {
+            spec.assert_eq(vulkan.dispatch(comp, 0, 1, 1), vulkan.ERR_ARG, "zero groups")
+            spec.assert_eq(vulkan.dispatch(comp, 1, 1, 1000000), vulkan.ERR_UNSUPPORTED, "past the Z limit")
+            spec.assert_true(string.index_of(vulkan.last_error(), "device limit") >= 0, "names the limit")
+        }
+        spec.it_when(ready, "refuses a binding of the wrong kind", reason) callback {
+            spec.assert_eq(vulkan.compute_set_buffer(comp, 7, src), vulkan.ERR_ARG, "undeclared binding")
+        }
+        spec.it_when(ready, "bounds-checks buffer access", reason) callback {
+            spec.assert_eq(vulkan.buffer_size(params), 16, "size")
+            spec.assert_eq(vulkan.buffer_set_float(params, 4, 1.0), vulkan.ERR_ARG, "slot 4 of 16 bytes")
+            v = vulkan.buffer_float(params, 4)
+            spec.assert_true(v != v, "reading past the end is NaN")
+        }
+        spec.it_when(ready, "refuses SPIR-V that is not a whole number of words", reason) callback {
+            bad = vulkan.compute_create(dev, spv, 6, null, 0)
+            spec.assert_true(bad == null, "refused")
+        }
+    }
+
+    // Compute output drawn directly: vertices.comp writes three corners,
+    // pulled.vert reads them by gl_VertexIndex from the same buffer.
+    draw_ready = 0
+    draw_reason = reason
+    vspv = ""
+    vlen = 0
+    pvert = ""
+    pvlen = 0
+    frag = ""
+    flen = 0
+    if ready == 1 {
+        vspv, vlen = load_spv("contrib/vulkan/shaders/vertices.comp.spv")
+        pvert, pvlen = load_spv("contrib/vulkan/shaders/pulled.vert.spv")
+        frag, flen = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+        if vlen > 0 && pvlen > 0 && flen > 0 { draw_ready = 1 }
+        if draw_ready == 0 { draw_reason = "SPIR-V shaders not built" }
+    }
+
+    spec.describe(fw, "vulkan: drawing what a compute pass wrote") {
+        spec.it_when(draw_ready, "draws a triangle a compute pass placed", draw_reason) callback {
+            positions = vulkan.buffer_create(dev, 3 * 8)
+            cb = vulkan.bindings_create()
+            vulkan.bindings_storage(cb, 0)
+            gen = vulkan.compute_create(dev, vspv, vlen, cb, 4)
+            spec.assert_true(gen != null, "vertex generator (${vulkan.last_error()})")
+            vulkan.compute_set_buffer(gen, 0, positions)
+
+            t = vulkan.target_create(dev, 64, 64)
+            empty = vulkan.layout_create()
+            gb = vulkan.bindings_create()
+            vulkan.bindings_storage(gb, 0)
+            pipe = vulkan.pipeline_create_ex(dev, t, pvert, pvlen, frag, flen, empty, 0, gb)
+            spec.assert_true(pipe != null, "pulling pipeline (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.set_buffer(pipe, 0, positions), 0, "the draw reads the buffer")
+            vulkan.verts_reserve(t, 3)
+
+            vulkan.compute_push_float(gen, 0, 0.9)
+            spec.assert_eq(vulkan.dispatch(gen, 3, 1, 1), 0, "place the corners")
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), 0, "draw")
+            px = vulkan.pixel(t, 32, 40)
+            spec.assert_eq(vulkan.red(px), 255, "orange red")
+            spec.assert_true(vulkan.green(px) >= 127 && vulkan.green(px) <= 128, "orange green")
+
+            // A zero scale collapses the triangle: the next draw shows nothing,
+            // so the draw is reading the pass's output, not a copy made once.
+            vulkan.compute_push_float(gen, 0, 0.0)
+            spec.assert_eq(vulkan.dispatch(gen, 3, 1, 1), 0, "collapse the corners")
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), 0, "draw again")
+            spec.assert_eq(vulkan.red(vulkan.pixel(t, 32, 40)), 0, "nothing drawn")
+
+            vulkan.pipeline_destroy(pipe)
+            vulkan.target_destroy(t)
+            vulkan.layout_destroy(empty)
+            vulkan.bindings_destroy(gb)
+            vulkan.compute_destroy(gen)
+            vulkan.bindings_destroy(cb)
+            vulkan.buffer_destroy(positions)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    if comp != null { vulkan.compute_destroy(comp) }
+    if binds != null { vulkan.bindings_destroy(binds) }
+    if src != null { vulkan.buffer_destroy(src) }
+    if dst != null { vulkan.buffer_destroy(dst) }
+    if ints != null { vulkan.buffer_destroy(ints) }
+    if params != null { vulkan.buffer_destroy(params) }
+    string.free(spv)
+    string.free(vspv)
+    string.free(pvert)
+    string.free(frag)
+    if dev != null { vulkan.device_destroy(dev) }
+    return _rc
+}

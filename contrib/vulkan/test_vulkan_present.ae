@@ -1,0 +1,330 @@
+// contrib.vulkan presentation tests (#1505).
+//
+// A frame is drawn into a target, presented into a real window, and the
+// window's pixels are read back off the screen: a present that reports
+// success and shows nothing fails here. The window comes from the test
+// fixture in tests/support/native_window, which stands in for aether-ui's
+// native_view (this repository's CI cannot build a toolkit that is itself
+// built on this compiler); the handle kinds are the same.
+//
+// Skips where there is no Vulkan driver that can present or no display to
+// open a window on, which is the path a user's program takes there too.
+// Reading the screen back works on Windows and X11; on macOS the window is
+// still presented into and every call is checked, but the pixels are not
+// readable without the screen-recording permission.
+
+import std.fs
+import std.string
+import contrib.vulkan
+import std.spec
+
+extern tw_ae_available() -> int
+extern tw_ae_last_error() -> string
+extern tw_ae_create(title: string, w: int, h: int) -> ptr
+extern tw_ae_destroy(win: ptr)
+extern tw_ae_pump(win: ptr) -> int
+extern tw_ae_width(win: ptr) -> int
+extern tw_ae_height(win: ptr) -> int
+extern tw_ae_set_size(win: ptr, w: int, h: int) -> int
+extern tw_ae_kind(win: ptr) -> int
+extern tw_ae_handle(win: ptr) -> ptr
+extern tw_ae_display(win: ptr) -> ptr
+extern tw_ae_pixel(win: ptr, x: int, y: int) -> int
+extern tw_ae_set_minimized(win: ptr, on: int) -> int
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// |a - b| <= tol on each of the three channels of two 0xRRGGBB values.
+near_rgb(got: int, want: int, tol: int) -> int {
+    i = 0
+    while i < 3 {
+        shift = i * 8
+        a = (got >> shift) & 255
+        b = (want >> shift) & 255
+        d = a - b
+        if d < 0 { d = 0 - d }
+        if d > tol { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// The window shows the frame once the display has composed it, which is a
+// little after present() returns: poll the screen, pumping the window, for
+// up to two seconds. Returns the last colour read.
+wait_for_colour(win: ptr, x: int, y: int, want: int) -> int {
+    got = -1
+    tries = 0
+    while tries < 120 {
+        tw_ae_pump(win)
+        got = tw_ae_pixel(win, x, y)
+        if got >= 0 && near_rgb(got, want, 3) == 1 { return got }
+        sleep(16)
+        tries = tries + 1
+    }
+    return got
+}
+
+// A whole-target triangle in one colour, drawn over a clear of another, so
+// the corners and the centre each have one right answer.
+fill_triangle(t: ptr, r: float, g: float, b: float) {
+    vulkan.verts_reserve(t, 3)
+    vulkan.verts_set(t, 0, 0.0, -0.9, r, g, b)
+    vulkan.verts_set(t, 1, -0.9, 0.9, r, g, b)
+    vulkan.verts_set(t, 2, 0.9, 0.9, r, g, b)
+}
+
+main() {
+    fw = spec.init()
+
+    ready = 0
+    reason = "no Vulkan driver"
+    dev = null
+    win = null
+    sc = null
+    t = null
+    pipe = null
+    kind = 0
+    vert = ""
+    frag = ""
+    vert_len = 0
+    frag_len = 0
+
+    if vulkan.available() != 1 {
+        reason = "no Vulkan driver (${vulkan.last_error()})"
+    } else if tw_ae_available() != 1 {
+        reason = "no display to open a window on (${tw_ae_last_error()})"
+    } else {
+        dev = vulkan.device_create()
+        vert, vert_len = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+        frag, frag_len = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+        if dev == null {
+            reason = "device_create failed (${vulkan.last_error()})"
+        } else if vert_len == 0 || frag_len == 0 {
+            reason = "SPIR-V shaders not built"
+        } else {
+            win = tw_ae_create("contrib.vulkan present test", 160, 120)
+            if win == null {
+                reason = "cannot open a window (${tw_ae_last_error()})"
+            } else {
+                kind = tw_ae_kind(win)
+                sc = vulkan.swapchain_create(dev, kind, tw_ae_display(win), tw_ae_handle(win),
+                                             tw_ae_width(win), tw_ae_height(win))
+                if sc == null {
+                    reason = "this driver cannot present here (${vulkan.last_error()})"
+                } else {
+                    t = vulkan.target_create(dev, tw_ae_width(win), tw_ae_height(win))
+                    pipe = vulkan.pipeline_create(dev, t, vert, vert_len, frag, frag_len)
+                    if t != null && pipe != null { ready = 1 }
+                    if ready == 0 { reason = "target or pipeline failed (${vulkan.last_error()})" }
+                }
+            }
+        }
+    }
+    // Reading the screen back is what proves a frame arrived; on macOS the
+    // fixture cannot, so those cases say so instead of passing vacuously.
+    readable = 0
+    if ready == 1 && kind != vulkan.WINDOW_NSVIEW { readable = 1 }
+    read_reason = reason
+    if ready == 1 && readable == 0 { read_reason = "the screen is not readable on macOS" }
+
+    spec.describe(fw, "vulkan: swapchain over a window") {
+        spec.it_when(ready, "takes the window's size", reason) callback {
+            spec.assert_eq(vulkan.swapchain_width(sc), tw_ae_width(win), "width")
+            spec.assert_eq(vulkan.swapchain_height(sc), tw_ae_height(win), "height")
+            spec.assert_true(vulkan.swapchain_format(sc) > 0, "has an image format")
+        }
+
+        spec.it_when(ready, "refuses to present a target with no frame yet", reason) callback {
+            spec.assert_eq(vulkan.present(sc, t), vulkan.ERR_ARG, "present before any draw")
+            spec.assert_true(string.length(vulkan.last_error()) > 0, "explains why")
+        }
+
+        spec.it_when(readable, "shows the drawn frame in the window", read_reason) callback {
+            fill_triangle(t, 0.0, 1.0, 0.0)
+            spec.assert_eq(vulkan.draw(t, pipe, 0.2, 0.4, 0.8, 1.0), vulkan.OK, "draw")
+            before = vulkan.swapchain_presented(sc)
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present")
+            spec.assert_eq(vulkan.swapchain_presented(sc), before + 1, "one frame presented")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            // 0.2, 0.4, 0.8 is 51, 102, 204 in a UNORM image.
+            corner = wait_for_colour(win, 2, 2, 0x3366CC)
+            spec.assert_eq(near_rgb(corner, 0x3366CC, 3), 1, "the clear colour reached the corner (got ${corner})")
+            centre = wait_for_colour(win, w / 2, h / 2, 0x00FF00)
+            spec.assert_eq(near_rgb(centre, 0x00FF00, 3), 1, "the triangle reached the centre (got ${centre})")
+        }
+    }
+
+    spec.describe(fw, "vulkan: following the window's size") {
+        spec.it_when(readable, "rebuilds on swapchain_resize and shows the resized frame", read_reason) callback {
+            spec.assert_eq(tw_ae_set_size(win, 240, 180), 0, "window resized")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            spec.assert_eq(vulkan.swapchain_resize(sc, w, h), vulkan.OK, "swapchain_resize")
+            spec.assert_eq(vulkan.swapchain_width(sc), w, "new width")
+            spec.assert_eq(vulkan.swapchain_height(sc), h, "new height")
+            spec.assert_eq(vulkan.target_resize(t, w, h), vulkan.OK, "target_resize")
+            spec.assert_eq(vulkan.target_width(t), w, "target width")
+            // The same pipeline draws into the resized target.
+            fill_triangle(t, 1.0, 0.0, 0.0)
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 1.0, 1.0), vulkan.OK, "draw at the new size")
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present at the new size")
+            far = wait_for_colour(win, w - 3, h - 3, 0x0000FF)
+            spec.assert_eq(near_rgb(far, 0x0000FF, 3), 1, "the far corner of the larger window (got ${far})")
+            centre = wait_for_colour(win, w / 2, h / 2, 0xFF0000)
+            spec.assert_eq(near_rgb(centre, 0xFF0000, 3), 1, "the centre (got ${centre})")
+        }
+
+        spec.it_when(ready, "rebuilds by itself when the window outgrows it", reason) callback {
+            spec.assert_eq(tw_ae_set_size(win, 200, 150), 0, "window resized")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            spec.assert_eq(vulkan.target_resize(t, w, h), vulkan.OK, "target_resize")
+            fill_triangle(t, 1.0, 1.0, 0.0)
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw")
+            // No swapchain_resize: the out-of-date or suboptimal swapchain is
+            // rebuilt inside present, within a frame or two.
+            i = 0
+            while i < 4 {
+                spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present ${i}")
+                tw_ae_pump(win)
+                i = i + 1
+            }
+            spec.assert_eq(vulkan.swapchain_width(sc), w, "followed the width")
+            spec.assert_eq(vulkan.swapchain_height(sc), h, "followed the height")
+        }
+
+        spec.it_when(readable, "scales a smaller target up to the window", read_reason) callback {
+            small = vulkan.target_create(dev, 32, 24)
+            fill_triangle(small, 1.0, 0.0, 1.0)
+            spec.assert_eq(vulkan.draw(small, pipe, 1.0, 1.0, 1.0, 1.0), vulkan.OK, "draw small")
+            spec.assert_eq(vulkan.present(sc, small), vulkan.OK, "present small")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            corner = wait_for_colour(win, 1, 1, 0xFFFFFF)
+            spec.assert_eq(near_rgb(corner, 0xFFFFFF, 3), 1, "scaled clear (got ${corner})")
+            centre = wait_for_colour(win, w / 2, h / 2, 0xFF00FF)
+            spec.assert_eq(near_rgb(centre, 0xFF00FF, 3), 1, "scaled triangle (got ${centre})")
+            vulkan.target_destroy(small)
+        }
+    }
+
+    // A target's encoding decides the swapchain's: an sRGB target is shown as
+    // stored, and a float target's linear light is encoded on the way in. So
+    // linear 0.5 reaches the screen as ~188 from both; shown through a UNORM
+    // swapchain the float one would read 128.
+    spec.describe(fw, "vulkan: presenting sRGB and float targets") {
+        spec.it_when(readable, "shows an sRGB target's encoded colour", read_reason) callback {
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            st = vulkan.target_create_format(dev, w, h, vulkan.FORMAT_R8G8B8A8_SRGB, 0, 1)
+            spec.assert_true(st != null, "sRGB target (${vulkan.last_error()})")
+            sp = vulkan.pipeline_create(dev, st, vert, vert_len, frag, frag_len)
+            fill_triangle(st, 0.5, 0.5, 0.5)
+            spec.assert_eq(vulkan.draw(st, sp, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw")
+            spec.assert_eq(vulkan.present(sc, st), vulkan.OK, "present")
+            got = wait_for_colour(win, w / 2, h / 2, 0xBCBCBC)
+            spec.assert_eq(near_rgb(got, 0xBCBCBC, 2), 1, "linear 0.5 shows as ~188 (got ${got})")
+            vulkan.pipeline_destroy(sp)
+            vulkan.target_destroy(st)
+        }
+
+        spec.it_when(readable, "encodes a float target's linear light for display", read_reason) callback {
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            ft = vulkan.target_create_format(dev, w, h, vulkan.FORMAT_R16G16B16A16_SFLOAT, 0, 1)
+            spec.assert_true(ft != null, "float target (${vulkan.last_error()})")
+            fp = vulkan.pipeline_create(dev, ft, vert, vert_len, frag, frag_len)
+            fill_triangle(ft, 0.5, 0.5, 0.5)
+            spec.assert_eq(vulkan.draw(ft, fp, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw")
+            spec.assert_eq(vulkan.present(sc, ft), vulkan.OK, "present")
+            got = wait_for_colour(win, w / 2, h / 2, 0xBCBCBC)
+            spec.assert_eq(near_rgb(got, 0xBCBCBC, 2), 1, "linear 0.5 shows as ~188 (got ${got})")
+            // Back to the UNORM target: the swapchain follows it again.
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw UNORM")
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present UNORM")
+            vulkan.pipeline_destroy(fp)
+            vulkan.target_destroy(ft)
+        }
+    }
+
+    spec.describe(fw, "vulkan: presenting without readback") {
+        spec.it_when(ready, "presents with readback off and refuses the readers", reason) callback {
+            spec.assert_eq(vulkan.target_set_readback(t, 0), vulkan.OK, "readback off")
+            spec.assert_eq(vulkan.target_readback(t), 0, "reports off")
+            fill_triangle(t, 0.0, 1.0, 1.0)
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw")
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present")
+            spec.assert_eq(vulkan.pixel(t, 0, 0), -1, "pixel() refused")
+            spec.assert_true(string.index_of(vulkan.last_error(), "readback is off") >= 0, "says why")
+            spec.assert_eq(vulkan.target_set_readback(t, 1), vulkan.OK, "readback on")
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw")
+            px = vulkan.pixel(t, 0, 0)
+            spec.assert_eq(vulkan.red(px) + vulkan.green(px) + vulkan.blue(px), 0, "readback works again")
+        }
+
+        spec.it_when(ready, "keeps presenting with vsync off and back on", reason) callback {
+            spec.assert_eq(vulkan.swapchain_set_vsync(sc, 0), vulkan.OK, "vsync off")
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present without vsync")
+            spec.assert_eq(vulkan.swapchain_set_vsync(sc, 1), vulkan.OK, "vsync on")
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present with vsync")
+        }
+    }
+
+    // Only Win32 gives a minimised window a zero-sized surface; X11 and
+    // AppKit keep the surface at the window's size.
+    min_ready = 0
+    min_reason = reason
+    if ready == 1 && kind == vulkan.WINDOW_WIN32 { min_ready = 1 }
+    if ready == 1 && kind != vulkan.WINDOW_WIN32 { min_reason = "only a Win32 surface shrinks to 0 x 0 when minimised" }
+
+    spec.describe(fw, "vulkan: a window with no area") {
+        spec.it_when(min_ready, "skips presenting while minimised and resumes after", min_reason) callback {
+            spec.assert_eq(tw_ae_set_minimized(win, 1), 0, "minimised")
+            before = vulkan.swapchain_presented(sc)
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present while minimised succeeds")
+            spec.assert_eq(vulkan.swapchain_width(sc), 0, "no area")
+            spec.assert_eq(vulkan.swapchain_presented(sc), before, "nothing was presented")
+            spec.assert_eq(tw_ae_set_minimized(win, 0), 0, "restored")
+            spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present after restore")
+            spec.assert_eq(vulkan.swapchain_width(sc), tw_ae_width(win), "the area is back")
+            spec.assert_eq(vulkan.swapchain_presented(sc), before + 1, "presented again")
+        }
+    }
+
+    have_dev = 0
+    if dev != null { have_dev = 1 }
+    spec.describe(fw, "vulkan: swapchain refusals") {
+        spec.it_when(have_dev, "refuses an unknown window kind", reason) callback {
+            bad = vulkan.swapchain_create(dev, 9, null, null, 64, 64)
+            spec.assert_true(bad == null, "kind 9 refused")
+            spec.assert_true(string.length(vulkan.last_error()) > 0, "explains why")
+        }
+        spec.it_when(have_dev, "refuses a null window handle", reason) callback {
+            bad = vulkan.swapchain_create(dev, kind, null, null, 64, 64)
+            spec.assert_true(bad == null, "null handle refused")
+        }
+        spec.it(fw, "tolerates destroying a null swapchain") callback {
+            vulkan.swapchain_destroy(null)
+            spec.assert_eq(vulkan.present(null, null), vulkan.ERR_ARG, "present(null) refused")
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+
+    if pipe != null { vulkan.pipeline_destroy(pipe) }
+    if t != null { vulkan.target_destroy(t) }
+    if sc != null { vulkan.swapchain_destroy(sc) }
+    if win != null { tw_ae_destroy(win) }
+    string.free(vert)
+    string.free(frag)
+    if dev != null { vulkan.device_destroy(dev) }
+    return _rc
+}

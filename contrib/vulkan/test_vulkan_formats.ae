@@ -1,0 +1,188 @@
+// contrib.vulkan colour formats and image output (#1514).
+//
+// Each format is checked by a value only that format produces: an sRGB
+// target stores linear 0.5 as its display encoding (about 188, not 128), a
+// half or single float target keeps 2.5 and 1000.0 exactly instead of
+// clamping them to 1, and the 8-bit readers clamp those same values to 255.
+// A format that silently fell back to UNORM fails every one of these.
+
+import std.bytes
+import std.fs
+import std.string
+import contrib.vulkan
+import std.spec
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+within(got: float, want: float, tol: float) -> int {
+    d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    if d <= tol { return 1 }
+    return 0
+}
+
+// A triangle covering the centre in one colour, over a clear of another.
+draw_centre(dev: ptr, t: ptr, vert: string, vlen: int, frag: string, flen: int,
+            r: float, g: float, b: float,
+            cr: float, cg: float, cb: float, ca: float) -> int {
+    pipe = vulkan.pipeline_create(dev, t, vert, vlen, frag, flen)
+    if pipe == null { return -1 }
+    vulkan.verts_reserve(t, 3)
+    vulkan.verts_set(t, 0, 0.0, -0.9, r, g, b)
+    vulkan.verts_set(t, 1, -0.9, 0.9, r, g, b)
+    vulkan.verts_set(t, 2, 0.9, 0.9, r, g, b)
+    rc = vulkan.draw(t, pipe, cr, cg, cb, ca)
+    vulkan.pipeline_destroy(pipe)
+    return rc
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    reason = "no Vulkan driver"
+    dev = null
+    vert = ""
+    frag = ""
+    vlen = 0
+    flen = 0
+    if vulkan.available() == 1 {
+        dev = vulkan.device_create()
+        vert, vlen = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+        frag, flen = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+        if dev == null {
+            reason = "device_create failed (${vulkan.last_error()})"
+        } else if vlen == 0 || flen == 0 {
+            reason = "SPIR-V shaders not built"
+        } else {
+            ready = 1
+        }
+    } else {
+        reason = "no Vulkan driver (${vulkan.last_error()})"
+    }
+
+    spec.describe(fw, "vulkan: 8-bit formats") {
+        spec.it_when(ready, "UNORM stores what the shader wrote", reason) callback {
+            t = vulkan.target_create_format(dev, 32, 32, vulkan.FORMAT_R8G8B8A8_UNORM, 0, 1)
+            spec.assert_true(t != null, "created")
+            spec.assert_eq(vulkan.target_format(t), vulkan.FORMAT_R8G8B8A8_UNORM, "format")
+            spec.assert_eq(vulkan.target_bytes_per_pixel(t), 4, "4 bytes a pixel")
+            spec.assert_eq(vulkan.rgba_size(t), 32 * 32 * 4, "readback size")
+            spec.assert_eq(draw_centre(dev, t, vert, vlen, frag, flen, 0.5, 0.5, 0.5,
+                                       0.0, 0.0, 0.0, 1.0), 0, "draw")
+            px = vulkan.pixel(t, 16, 16)
+            spec.assert_true(vulkan.red(px) >= 127 && vulkan.red(px) <= 128, "0.5 is 127 or 128 (got ${vulkan.red(px)})")
+            vulkan.target_destroy(t)
+        }
+
+        spec.it_when(ready, "sRGB encodes linear output for display", reason) callback {
+            t = vulkan.target_create_format(dev, 32, 32, vulkan.FORMAT_R8G8B8A8_SRGB, 0, 1)
+            spec.assert_true(t != null, "created (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.target_format(t), vulkan.FORMAT_R8G8B8A8_SRGB, "format")
+            spec.assert_eq(draw_centre(dev, t, vert, vlen, frag, flen, 0.5, 0.5, 0.5,
+                                       0.0, 0.0, 0.0, 1.0), 0, "draw")
+            px = vulkan.pixel(t, 16, 16)
+            // The sRGB transfer function maps linear 0.5 to 0.7354, 187.5 of 255.
+            spec.assert_true(vulkan.red(px) >= 186 && vulkan.red(px) <= 189, "linear 0.5 stored as ~188 (got ${vulkan.red(px)})")
+            // pixel_value reads the stored (encoded) value.
+            spec.assert_eq(within(vulkan.pixel_value(t, 16, 16, 0), 0.7354, 0.006), 1, "pixel_value is the encoded value")
+            vulkan.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "vulkan: float formats") {
+        spec.it_when(ready, "half float keeps values above 1", reason) callback {
+            t = vulkan.target_create_format(dev, 32, 32, vulkan.FORMAT_R16G16B16A16_SFLOAT, 0, 1)
+            spec.assert_true(t != null, "created (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.target_bytes_per_pixel(t), 8, "8 bytes a pixel")
+            spec.assert_eq(vulkan.rgba_size(t), 32 * 32 * 8, "readback size")
+            spec.assert_eq(draw_centre(dev, t, vert, vlen, frag, flen, 0.25, 0.5, 0.75,
+                                       2.5, 0.0, 0.0, 1.0), 0, "draw")
+            spec.assert_eq(within(vulkan.pixel_value(t, 0, 0, 0), 2.5, 0.0), 1, "clear of 2.5 kept exactly")
+            spec.assert_eq(within(vulkan.pixel_value(t, 16, 16, 0), 0.25, 0.0), 1, "0.25 exact")
+            spec.assert_eq(within(vulkan.pixel_value(t, 16, 16, 2), 0.75, 0.0), 1, "0.75 exact")
+            // The 8-bit view clamps: 2.5 reads as 255.
+            spec.assert_eq(vulkan.red(vulkan.pixel(t, 0, 0)), 255, "pixel() clamps to 255")
+            vulkan.target_destroy(t)
+        }
+
+        spec.it_when(ready, "single float keeps large values exactly", reason) callback {
+            t = vulkan.target_create_format(dev, 16, 16, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            spec.assert_true(t != null, "created (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.target_bytes_per_pixel(t), 16, "16 bytes a pixel")
+            spec.assert_eq(draw_centre(dev, t, vert, vlen, frag, flen, 0.1, 0.2, 0.3,
+                                       1000.0, 0.0, 0.0, 1.0), 0, "draw")
+            spec.assert_eq(within(vulkan.pixel_value(t, 0, 0, 0), 1000.0, 0.0), 1, "1000.0 kept")
+            spec.assert_eq(within(vulkan.pixel_value(t, 8, 8, 1), 0.2, 0.000001), 1, "0.2 to float precision")
+            // The 8-bit copy of the whole frame clamps too.
+            buf = bytes.new(16 * 16 * 4)
+            bytes.set_length(buf, 16 * 16 * 4)
+            spec.assert_eq(vulkan.copy_rgba8(t, bytes.data(buf), 16 * 16 * 4), 0, "copy_rgba8")
+            spec.assert_eq(bytes.get(buf, 0), 255, "clamped red at the corner")
+            spec.assert_eq(bytes.get(buf, (8 * 16 + 8) * 4 + 1), 51, "0.2 as 51")
+            bytes.free(buf)
+            vulkan.target_destroy(t)
+        }
+
+        spec.it_when(ready, "multisamples and resolves a float target", reason) callback {
+            t = vulkan.target_create_format(dev, 32, 32, vulkan.FORMAT_R16G16B16A16_SFLOAT, 1, 4)
+            spec.assert_true(t != null, "created (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.target_samples(t), 4, "4x")
+            spec.assert_eq(vulkan.target_has_depth(t), 1, "with depth")
+            vulkan.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "vulkan: image files") {
+        spec.it_when(ready, "writes a PNG of any format's frame", reason) callback {
+            t = vulkan.target_create_format(dev, 24, 16, vulkan.FORMAT_R16G16B16A16_SFLOAT, 0, 1)
+            spec.assert_eq(draw_centre(dev, t, vert, vlen, frag, flen, 0.0, 1.0, 0.0,
+                                       0.0, 0.0, 1.0, 1.0), 0, "draw")
+            path = "vulkan_formats.png"
+            spec.assert_str_eq(vulkan.save_png(t, path), "", "save_png")
+            data, n, err = fs.read_binary(path)
+            spec.assert_str_eq(err, "", "file exists")
+            spec.assert_eq(string.char_at_n(data, n, 1) & 255, 80, "starts with the PNG signature")
+            spec.assert_eq(string.char_at_n(data, n, 3) & 255, 71, "...PNG")
+            string.free(data)
+            spec.assert_eq(vulkan.save_ppm(t, "vulkan_formats.ppm"), 0, "save_ppm still works")
+            vulkan.target_destroy(t)
+        }
+
+        spec.it_when(ready, "refuses save_png with readback off", reason) callback {
+            t = vulkan.target_create(dev, 8, 8)
+            vulkan.target_set_readback(t, 0)
+            err = vulkan.save_png(t, "never.png")
+            spec.assert_true(string.index_of(err, "readback is off") >= 0, "says why (${err})")
+            vulkan.target_destroy(t)
+        }
+    }
+
+    have_dev = 0
+    if dev != null { have_dev = 1 }
+    spec.describe(fw, "vulkan: format refusals") {
+        spec.it_when(have_dev, "refuses a format it does not render to", reason) callback {
+            t = vulkan.target_create_format(dev, 8, 8, 999, 0, 1)
+            spec.assert_true(t == null, "format 999 refused")
+            spec.assert_true(string.index_of(vulkan.last_error(), "not a target format") >= 0, "names the formats")
+        }
+        spec.it_when(ready, "refuses a channel outside 0..3", reason) callback {
+            t = vulkan.target_create(dev, 8, 8)
+            vulkan.draw(t, null, 0.0, 0.0, 0.0, 1.0)
+            v = vulkan.pixel_value(t, 0, 0, 4)
+            spec.assert_true(v != v, "NaN for channel 4")
+            vulkan.target_destroy(t)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    string.free(vert)
+    string.free(frag)
+    if dev != null { vulkan.device_destroy(dev) }
+    return _rc
+}

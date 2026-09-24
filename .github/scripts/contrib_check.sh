@@ -102,6 +102,8 @@ TESTS=(
   "tinyweb/schema_api|$TW/test_schema_api.ae|$TW/ws_handshake.c|run|"
   "tinyweb/websocket|$TW/test_websocket.ae|$TW/ws_handshake.c|run|"
   "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c $I18N/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
+  # png: pure Aether over std.zlib; its test decodes what it encoded.
+  "png/encode|contrib/png/test_png.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
   # and SKIPs itself at runtime when no driver is installed.
   #
@@ -119,6 +121,13 @@ TESTS=(
   "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae|$VK/aether_vulkan.c|lsan||vulkan"
   "vulkan/frames|$VK/test_vulkan_frames.ae|$VK/aether_vulkan.c|lsan||vulkan"
   "vulkan/materials|$VK/test_vulkan_materials.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  "vulkan/formats|$VK/test_vulkan_formats.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  "vulkan/compute|$VK/test_vulkan_compute.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  # Presents into a real window and reads the screen back. The window comes
+  # from the test fixture (tests/support/native_window), which opens X11 at
+  # runtime: the Linux leg runs it under Xvfb, and without a display it
+  # SKIPs like a machine without a driver.
+  "vulkan/present|$VK/test_vulkan_present.ae|$VK/aether_vulkan.c tests/support/native_window/native_window.c|lsan||vulkan"
   # The examples are RUN, not just compiled. An example that only builds
   # rots into decoration: both of these render and write a PPM, so a
   # regression that leaves them producing nothing fails here.
