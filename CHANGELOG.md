@@ -14,6 +14,201 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.716.0]
+
+### Added
+
+- **`contrib.vulkan` presents to a window (#1505).** A swapchain is made
+  over a window someone else owns, from the handle a toolkit hands out:
+  `vulkan.swapchain_create(dev, kind, display, window, w, h)`, with the kinds
+  numbered as aether-ui's `native_view_kind()` numbers them (Win32 HWND,
+  NSView, X11, Wayland) plus a CAMetalLayer a program made itself. The
+  language still owns no windowing; the handle is opaque.
+
+  `vulkan.present(sc, target)` shows a target's newest frame, so everything a
+  target already does (depth, MSAA, materials, frames in flight) reaches the
+  screen unchanged, without the CPU waiting on the GPU. What presenting has to
+  cope with is handled inside it:
+  - a window that resized is rebuilt when it is next presented, even where
+    the driver never reports it out of date (NVIDIA's keeps presenting into a
+    minimised Win32 window at the old size);
+  - a minimised window is skipped, and picked up again when restored;
+  - a target of another size is scaled, and an sRGB or float target presents
+    through an sRGB swapchain so linear light is encoded for display.
+
+  Around it: `swapchain_resize`, `swapchain_set_vsync` (FIFO, or MAILBOX /
+  IMMEDIATE), `target_resize`, which keeps every pipeline valid, and
+  `target_set_readback(t, 0)`, which stops a presented-only target paying a
+  full-frame copy to host memory every frame.
+
+  `test_vulkan_present` presents into a real window and reads the screen
+  back to prove the frame arrived. It runs on the Linux leg under Xvfb, on the
+  Windows leg on MSYS2's lavapipe, and on a real GPU, with the Khronos
+  validation layer's synchronization checks clean.
+
+- **`contrib.vulkan` renders in sRGB and float formats and writes PNGs
+  (#1514).** `vulkan.target_create_format` takes `FORMAT_R8G8B8A8_UNORM`,
+  `FORMAT_R8G8B8A8_SRGB`, `FORMAT_R16G16B16A16_SFLOAT` or
+  `FORMAT_R32G32B32A32_SFLOAT`, checked against what the device can render
+  to. `pixel_value` reads a channel at full precision, so HDR values above
+  1.0 are visible; `copy_rgba8` converts any format to 8-bit RGBA; and
+  `save_png` writes the frame as a PNG. `save_ppm` stays, for a file with no
+  compressor in the path.
+
+  The PNG writer is a module of its own, `contrib.png`
+  (`png.encode_rgba8` / `png.write_rgba8`), built on `std.zlib` with no new
+  dependency. It filters each row with whichever of the five PNG filters
+  suits it best, the heuristic libpng uses. Its test decodes the output
+  independently and requires every byte back.
+
+- **`contrib.vulkan` runs compute shaders (#1515).** `vulkan.compute_create`
+  builds a compute pipeline from SPIR-V with storage buffers, uniforms,
+  textures and push constants. `vulkan.dispatch` runs it and waits;
+  `dispatch_async` / `compute_wait` let the CPU work in the meantime.
+  Buffers (`vulkan.buffer_create`) are mapped, zeroed and readable by element
+  (`buffer_float`, `buffer_int`).
+
+  The same buffer binds to a graphics pipeline too (`bindings_storage`,
+  `set_buffer`), and a pipeline made with an empty vertex layout takes no
+  vertex input. So a compute pass can write vertices that a draw pulls by
+  `gl_VertexIndex`, with no copy in between. A dispatch that is larger than
+  the device allows, or that has a declared binding left unset, is refused
+  with the binding or limit named. An unset binding is undefined behaviour,
+  and a software rasteriser crashes on one.
+
+  The test checks every element of a compute transform against the same
+  computation on the CPU: floats to float precision, integers exactly. It
+  also draws a triangle whose corners a compute pass placed.
+
+- **`std.hash.crc32` and `crc32_update`.** CRC-32 (IEEE 802.3, the
+  reflected `0xEDB88320` polynomial) is the checksum on PNG chunks, gzip
+  members and ZIP entries. `crc32_update` continues a checksum across pieces
+  of input. It was only available privately inside `std.zip`; `contrib.png`
+  is its first caller. The tests use the catalogue check value
+  (`"123456789"` → `0xcbf43926`) and zlib's results.
+
+- **`contrib.d3d12`: GPU rendering, compute and presentation with Direct3D
+  12.** It has the same shape as `contrib.vulkan`: offscreen targets in four
+  colour formats with depth and MSAA, pipelines with vertex layouts, bindings
+  and push constants, textures with mip chains, materials and batches, frames
+  in flight, readback and PNG output, compute with storage buffers, and
+  flip-model swapchains over a Win32 window someone else owns. A program
+  written against one reads the same against the other; the differences are
+  HLSL shaders (source compiled at runtime, or DXBC bytecode) and Direct3D's
+  y-up coordinates. Resources map to HLSL registers by binding number
+  (`bN`, `tN`/`sN`, `uN`).
+
+  `d3d12.dll`, `dxgi.dll` and the HLSL compiler are opened at runtime, so the
+  module builds on every platform and `available()` is 0 where there is no
+  Direct3D. The device is the first hardware adapter, or WARP where there is
+  none, so the Windows CI leg runs every test on a runner without a GPU.
+  `AETHER_D3D12_ADAPTER=warp` selects WARP on a machine that has a GPU.
+  `AETHER_D3D12_DEBUG=1` (or `2`, for GPU-based validation) turns on the debug
+  layer. Every test passes with no warnings or errors on an RTX 4070 Ti and on
+  WARP.
+
+- **`contrib.vulkan.vk`: the Vulkan API as Aether declarations, generated
+  from the registry (#1506).** `contrib/vulkan/tools/vkgen.ae` streams
+  `vk.xml` with `std.xml` and writes, for a chosen core version and set of
+  extensions, every enum value and API constant as a `const`, every struct
+  and union as an `extern struct ... @c_import`, and every command as a
+  function that calls through the entry point the loader resolves at runtime,
+  so a program driving Vulkan directly still links nothing and starts where
+  there is no driver. Strings reach the driver as C characters and `null` as
+  `NULL`. `vk.load_instance` and `vk.load_device` switch the commands to an
+  instance's and a device's own entry points, and with `null` back to the
+  loader's dispatch. A command the registry marks as filling an array another
+  parameter counts also gets a `<command>_all` that makes both calls and fills
+  each element's `sType`. The committed module is Vulkan 1.3 with
+  `VK_KHR_surface` and `VK_KHR_swapchain`, generated from registry 1.3.204.
+
+  The entry points `aether_vulkan.c` loads come from the same generator
+  (`aether_vulkan_dispatch.h`, from a list of command names) rather than
+  hand-written tables. `tools/regenerate.sh` rebuilds both files, and
+  `tests/integration/vulkan_vkgen` checks them against the installed registry
+  and builds what it generates; the Linux CI job, whose registry is 1.3.204,
+  compares both byte for byte. The output is the same across registry
+  releases 1.3.204 to 1.4.357 apart from enum values added later.
+
+- **`contrib.metal`: GPU rendering, compute and presentation with Metal.** It
+  has the same shape as `contrib.vulkan` and `contrib.d3d12`: offscreen targets
+  in four colour formats with depth and MSAA, pipelines with vertex layouts,
+  bindings and push constants, textures with mip chains, materials and
+  batches, frames in flight, readback and PNG output, compute with shared
+  buffers, and presentation through a `CAMetalLayer` on an NSView someone else
+  owns (aether-ui's `native_view` kind 2) or a layer the program made. Shaders
+  are Metal Shading Language, source compiled at runtime or a metallib; a
+  stage's function is the library's one function of that kind. Resources map
+  to `[[buffer(N)]]`, `[[texture(N)]]` and `[[sampler(N)]]` by binding number.
+  MSL declares no threadgroup size, so `compute_set_group_size` gives it.
+
+  The file is C and reaches Metal through the Objective-C runtime, with
+  Metal, QuartzCore, Foundation and `libobjc` opened at runtime, so the module
+  builds on every platform and `available()` is 0 away from macOS. A new
+  macOS CI leg runs the tests on the runner's Metal device under Metal's API
+  validation, and runs `contrib.vulkan`'s through MoltenVK, whose NSView
+  surface is the Apple presentation path. `contrib_check.sh` takes `ONLY` to
+  run a subset of its entries, and uses `gtimeout` where there is no
+  `timeout`.
+
+- **`AETHER_VULKAN_LOADER` names the Vulkan loader `contrib.vulkan` opens.**
+  On a machine with more than one loader, the one the platform search finds
+  first need not be the one a driver was installed with: on Windows the DLL
+  search takes `System32` before `PATH`, so a loader beside MSYS2's or the
+  Vulkan SDK's driver loses to whatever `System32` holds. Set to a path, the
+  module opens exactly that loader, and reports it if it does not open rather
+  than falling back to another.
+
+### Changed
+
+- **`vulkan.pixel()` returns a `long`, so opaque white is no longer the error
+  value.** It packed `0xRRGGBBAA` into an `int`, so opaque white read as `-1`,
+  the same value it returned for a coordinate outside the image, and a caller
+  could not tell them apart. Every colour is now non-negative, and `-1` means
+  only "no pixel there". `red` / `green` / `blue` / `alpha` take the `long`.
+  Existing code keeps compiling unchanged, because a `long` passed where an
+  `int` is expected keeps its low 32 bits, which is what the channels read.
+  `contrib.d3d12` and `contrib.metal` return the same.
+
+  `contrib.vulkan` also declares its C file with `@source` now, so
+  `import contrib.vulkan` is all a build needs; an `extra_sources` entry for
+  it still works.
+
+### Fixed
+
+- **`contrib.vulkan`: a frame no longer starts writing the image while the
+  previous frame is still reading it.** The render pass's incoming dependency
+  waited on nothing (`TOP_OF_PIPE`, no access), so with more than one frame in
+  flight a frame's attachment writes were unordered against the previous
+  frame's readback copy of the same image. It now waits on earlier transfer
+  reads and attachment writes. Presentation reads the image the same way, so
+  every presented frame depends on this. The Khronos validation layer's
+  synchronization checks are clean across the module's tests.
+
+- **A module's `@source` file that the program also names with `--extra` is
+  compiled once.** `ae build` joined the `--extra` / `extra_sources` list and
+  the module-declared sources as they came. A program that still named a
+  module's C file itself, which modules asked for before `@source` existed
+  (#2125), and imported that module compiled the file twice. The link then
+  failed with every symbol in it defined twice. The lists are now merged by
+  file identity, so a relative path, a path with `..` and an absolute one
+  count as the same file. Cross builds share the merge. This is what lets
+  `contrib.vulkan` declare its C file with `@source` without breaking
+  projects that list it in `extra_sources`. New test:
+  `tests/integration/source_dedupe`.
+
+- **A string stored into an `extern struct ... @c_import`'s string field
+  compiles, and borrows.** The store was treated like one into an
+  Aether-defined struct and also wrote a `_heap_<field>` ownership flag the C
+  header does not have, so the generated C did not compile; a struct literal
+  of such a type got the same trackers, and a local holding one was declared
+  with the bare tag, which needs a typedef the header need not ship. The field
+  now borrows the string, as the C API that declares it expects, and the local
+  is declared `struct Name`. A string the function made and stored in such a
+  struct, by a field store or in a literal, is kept alive rather than freed at
+  the function's exit, since the struct may outlive it
+  (docs/c-interop.md, "String fields of a header-defined struct borrow").
+
 ## [0.715.0]
 
 ### Added
