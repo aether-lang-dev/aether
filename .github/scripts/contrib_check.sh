@@ -56,6 +56,7 @@ AVC="contrib/avcodec"
 TW="contrib/tinyweb"
 I18N="contrib/i18n"
 VK="contrib/vulkan"
+DX="contrib/d3d12"
 SQL="contrib/sqlite"
 NT="contrib/templating/native"
 XE="contrib/parsers/xml_expat"
@@ -115,25 +116,37 @@ TESTS=(
   # allocations are excluded by object while every allocation this repo makes
   # is still gated: 464 bytes of driver noise, and a deliberate malloc in
   # aether_vulkan.c fails the leg with the function and line named.
-  "vulkan/offscreen|$VK/test_vulkan.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/resources|$VK/test_vulkan_resources.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/actors|$VK/test_vulkan_actors.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/frames|$VK/test_vulkan_frames.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/materials|$VK/test_vulkan_materials.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/formats|$VK/test_vulkan_formats.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/compute|$VK/test_vulkan_compute.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  "vulkan/offscreen|$VK/test_vulkan.ae||lsan||vulkan"
+  "vulkan/resources|$VK/test_vulkan_resources.ae||lsan||vulkan"
+  "vulkan/actors|$VK/test_vulkan_actors.ae||lsan||vulkan"
+  "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae||lsan||vulkan"
+  "vulkan/frames|$VK/test_vulkan_frames.ae||lsan||vulkan"
+  "vulkan/materials|$VK/test_vulkan_materials.ae||lsan||vulkan"
+  "vulkan/formats|$VK/test_vulkan_formats.ae||lsan||vulkan"
+  "vulkan/compute|$VK/test_vulkan_compute.ae||lsan||vulkan"
+  "vulkan/raw|$VK/test_vulkan_raw.ae||lsan||vulkan"
   # Presents into a real window and reads the screen back. The window comes
   # from the test fixture (tests/support/native_window), which opens X11 at
   # runtime: the Linux leg runs it under Xvfb, and without a display it
   # SKIPs like a machine without a driver.
-  "vulkan/present|$VK/test_vulkan_present.ae|$VK/aether_vulkan.c tests/support/native_window/native_window.c|lsan||vulkan"
+  "vulkan/present|$VK/test_vulkan_present.ae|tests/support/native_window/native_window.c|lsan||vulkan"
   # The examples are RUN, not just compiled. An example that only builds
   # rots into decoration: both of these render and write a PPM, so a
   # regression that leaves them producing nothing fails here.
-  "vulkan/example-triangle|$VK/example_triangle.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/example-parallel|$VK/example_parallel_render.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/example-sprites|$VK/example_sprites.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  "vulkan/example-triangle|$VK/example_triangle.ae||lsan||vulkan"
+  "vulkan/example-parallel|$VK/example_parallel_render.ae||lsan||vulkan"
+  "vulkan/example-sprites|$VK/example_sprites.ae||lsan||vulkan"
+  # d3d12: builds everywhere (the implementation is Windows-only and the
+  # module compiles to stubs elsewhere, so these SKIP there). On the Windows
+  # leg they render on WARP, the software rasteriser every Windows ships, so
+  # a runner with no GPU still runs every case. Direct3D is outside valgrind's
+  # reach, so these are gated for correctness only.
+  "d3d12/core|$DX/test_d3d12.ae||run|"
+  "d3d12/resources|$DX/test_d3d12_resources.ae||run|"
+  "d3d12/compute|$DX/test_d3d12_compute.ae||run|"
+  "d3d12/actors|$DX/test_d3d12_actors.ae||run|"
+  "d3d12/present|$DX/test_d3d12_present.ae|tests/support/native_window/native_window.c|run|"
+  "d3d12/example-triangle|$DX/example_triangle.ae||run|"
 )
 
 # Kill any stray cache/test binaries squatting ports before we start (aborted
@@ -231,8 +244,14 @@ for entry in "${TESTS[@]}"; do
     rm -rf "$work"; mkdir -p "$work"
     ln -s "$(pwd)/contrib" "$work/contrib"
     cp "$src" "$work/probe.ae"
+    # Absolute: the workspace mirrors only contrib/, and an extra source from
+    # elsewhere in the tree (a test fixture under tests/support) must still
+    # resolve from inside it.
     extra_toml=""
-    for c in $extras; do extra_toml="$extra_toml\"$c\", "; done
+    for c in $extras; do
+      case "$c" in /*) abs_c="$c" ;; *) abs_c="$(pwd)/$c" ;; esac
+      extra_toml="$extra_toml\"$abs_c\", "
+    done
     {
       printf '[project]\nname = "%s"\nversion = "0.0.0"\n\n' "$safe"
       printf '[[bin]]\nname = "probe"\npath = "probe.ae"\n'

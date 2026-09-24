@@ -1,0 +1,396 @@
+// contrib.d3d12 shader resources: push constants, vertex layouts, index
+// buffers, textures, uniforms, materials, batches and mipmaps.
+//
+// Each feature is checked by what it does to pixels: a pushed mirror matrix
+// moves the triangle, a 2x2 texture lands one texel per quadrant, a tint
+// scales it, two materials put two textures in one frame, 16-bit indices give
+// the same frame as 32-bit byte for byte, and a mip chain turns a minified
+// checkerboard into its average. Coordinates are Direct3D's (y up; a
+// texture's v runs down from the top).
+
+import std.bytes
+import std.fs
+import std.string
+import contrib.d3d12
+import std.spec
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// RGBA texels, row by row, from a list of 0xRRGGBB colours.
+texels4(c0: int, c1: int, c2: int, c3: int) -> ptr {
+    b = bytes.new(16)
+    bytes.set_length(b, 16)
+    i = 0
+    while i < 4 {
+        c = c0
+        if i == 1 { c = c1 }
+        if i == 2 { c = c2 }
+        if i == 3 { c = c3 }
+        bytes.set(b, i * 4, (c >> 16) & 255)
+        bytes.set(b, i * 4 + 1, (c >> 8) & 255)
+        bytes.set(b, i * 4 + 2, c & 255)
+        bytes.set(b, i * 4 + 3, 255)
+        i = i + 1
+    }
+    return b
+}
+
+// A quad from (x0, y0) to (x1, y1) in NDC with uv 0..1 (v down), written as
+// four vertices of position(2) + normal(3) + uv(2) at vertex `first`, and
+// its six indices at index `first_index`.
+quad(t: ptr, first: int, first_index: int, x0: float, y0: float, x1: float, y1: float) {
+    corners = 0
+    while corners < 4 {
+        x = x0
+        y = y1
+        u = 0.0
+        v = 0.0
+        if corners == 1 || corners == 2 { x = x1; u = 1.0 }
+        if corners == 2 || corners == 3 { y = y0; v = 1.0 }
+        base = (first + corners) * 7
+        d3d12.verts_set_float(t, base, x)
+        d3d12.verts_set_float(t, base + 1, y)
+        d3d12.verts_set_float(t, base + 4, 1.0)
+        d3d12.verts_set_float(t, base + 5, u)
+        d3d12.verts_set_float(t, base + 6, v)
+        corners = corners + 1
+    }
+    d3d12.indices_set(t, first_index, first)
+    d3d12.indices_set(t, first_index + 1, first + 1)
+    d3d12.indices_set(t, first_index + 2, first + 2)
+    d3d12.indices_set(t, first_index + 3, first)
+    d3d12.indices_set(t, first_index + 4, first + 2)
+    d3d12.indices_set(t, first_index + 5, first + 3)
+}
+
+textured_layout() -> ptr {
+    lay = d3d12.layout_create()
+    d3d12.layout_binding(lay, 0, 28, d3d12.PER_VERTEX)
+    d3d12.layout_attr(lay, 0, 0, d3d12.FORMAT_R32G32_SFLOAT, 0)
+    d3d12.layout_attr(lay, 1, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 8)
+    d3d12.layout_attr(lay, 2, 0, d3d12.FORMAT_R32G32_SFLOAT, 20)
+    return lay
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    reason = "no Direct3D 12"
+    dev = null
+    tri_vs = ""
+    tri_ps = ""
+    xf_vs = ""
+    tex_vs = ""
+    tex_ps = ""
+    tvl = 0
+    tpl = 0
+    xvl = 0
+    txvl = 0
+    txpl = 0
+    if d3d12.available() == 1 {
+        dev = d3d12.device_create()
+        tri_vs, tvl = load("contrib/d3d12/shaders/triangle_vs.hlsl")
+        tri_ps, tpl = load("contrib/d3d12/shaders/triangle_ps.hlsl")
+        xf_vs, xvl = load("contrib/d3d12/shaders/transform_vs.hlsl")
+        tex_vs, txvl = load("contrib/d3d12/shaders/textured_vs.hlsl")
+        tex_ps, txpl = load("contrib/d3d12/shaders/textured_ps.hlsl")
+        if dev != null && tvl > 0 && tpl > 0 && xvl > 0 && txvl > 0 && txpl > 0 { ready = 1 }
+        if ready == 0 { reason = "device or shaders missing (${d3d12.last_error()})" }
+    } else {
+        reason = "no Direct3D 12 (${d3d12.last_error()})"
+    }
+
+    spec.describe(fw, "d3d12: push constants") {
+        spec.it_when(ready, "a pushed mirror matrix moves the triangle", reason) callback {
+            t = d3d12.target_create(dev, 64, 64)
+            p = d3d12.pipeline_create_ex(dev, t, xf_vs, xvl, tri_ps, tpl, null, 64, null)
+            spec.assert_true(p != null, "pipeline (${d3d12.last_error()})")
+            d3d12.verts_reserve(t, 3)
+            d3d12.verts_set(t, 0, 0.0, 0.8, 1.0, 0.0, 0.0)
+            d3d12.verts_set(t, 1, -0.8, -0.8, 0.0, 1.0, 0.0)
+            d3d12.verts_set(t, 2, 0.8, -0.8, 0.0, 0.0, 1.0)
+            d3d12.push_floats(t, 16)
+            d3d12.push_float(t, 0, 1.0)
+            d3d12.push_float(t, 5, 1.0)
+            d3d12.push_float(t, 10, 1.0)
+            d3d12.push_float(t, 15, 1.0)
+            d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            left = d3d12.pixel(t, 14, 56)
+            spec.assert_true(d3d12.green(left) > d3d12.blue(left), "identity: green at the bottom left")
+            d3d12.push_float(t, 0, -1.0)
+            d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            left = d3d12.pixel(t, 14, 56)
+            spec.assert_true(d3d12.blue(left) > d3d12.green(left), "mirrored in x: blue at the bottom left")
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+        }
+        spec.it_when(ready, "refuses a push block past 128 bytes", reason) callback {
+            t = d3d12.target_create(dev, 8, 8)
+            spec.assert_eq(d3d12.push_floats(t, 33), d3d12.ERR_ARG, "33 floats")
+            spec.assert_true(d3d12.pipeline_create_ex(dev, t, xf_vs, xvl, tri_ps, tpl, null, 132, null) == null, "132-byte block")
+            d3d12.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "d3d12: textures, uniforms and index buffers") {
+        spec.it_when(ready, "lands one texel per quadrant and scales it by a tint", reason) callback {
+            t = d3d12.target_create(dev, 64, 64)
+            lay = textured_layout()
+            binds = d3d12.bindings_create()
+            d3d12.bindings_texture(binds, 0)
+            d3d12.bindings_uniform(binds, 1)
+            p = d3d12.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            spec.assert_true(p != null, "pipeline (${d3d12.last_error()})")
+            tex = d3d12.texture_create(dev, 2, 2)
+            px = texels4(0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF)
+            spec.assert_eq(d3d12.texture_upload(tex, bytes.data(px), 16), d3d12.OK, "upload")
+            spec.assert_eq(d3d12.set_texture(p, 0, tex), d3d12.OK, "bind texture")
+            d3d12.uniform_floats(p, 1, 4)
+            d3d12.uniform_float(p, 1, 0, 1.0)
+            d3d12.uniform_float(p, 1, 1, 1.0)
+            d3d12.uniform_float(p, 1, 2, 1.0)
+            d3d12.uniform_float(p, 1, 3, 1.0)
+            d3d12.verts_reserve_n(t, 4, 7)
+            d3d12.indices_reserve(t, 6)
+            quad(t, 0, 0, -1.0, -1.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(d3d12.pixel(t, 16, 16), 0xFF0000FF, "top left: texel (0, 0) red")
+            spec.assert_eq(d3d12.pixel(t, 48, 16), 0x00FF00FF, "top right: green")
+            spec.assert_eq(d3d12.pixel(t, 16, 48), 0x0000FFFF, "bottom left: blue")
+            spec.assert_true(d3d12.pixel(t, 48, 48) == 0xFFFFFFFF, "bottom right: white, not the failure value")
+            d3d12.uniform_float(p, 1, 0, 0.5)
+            d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            r = d3d12.red(d3d12.pixel(t, 16, 16))
+            spec.assert_true(r >= 127 && r <= 128, "the tint halves red (got ${r})")
+            bytes.free(px)
+            d3d12.texture_destroy(tex)
+            d3d12.pipeline_destroy(p)
+            d3d12.bindings_destroy(binds)
+            d3d12.layout_destroy(lay)
+            d3d12.target_destroy(t)
+        }
+
+        spec.it_when(ready, "refuses what cannot be drawn", reason) callback {
+            t = d3d12.target_create(dev, 16, 16)
+            lay = textured_layout()
+            binds = d3d12.bindings_create()
+            d3d12.bindings_texture(binds, 0)
+            spec.assert_eq(d3d12.bindings_texture(binds, 0), d3d12.ERR_ARG, "a duplicate binding")
+            d3d12.bindings_uniform(binds, 1)
+            p = d3d12.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            tex = d3d12.texture_create(dev, 2, 2)
+            spec.assert_eq(d3d12.set_texture(p, 0, tex), d3d12.ERR_ARG, "a texture with no pixels yet")
+            short = bytes.new(8)
+            spec.assert_eq(d3d12.texture_upload(tex, bytes.data(short), 8), d3d12.ERR_ARG, "a short upload")
+            bytes.free(short)
+            d3d12.verts_reserve_n(t, 4, 7)
+            d3d12.indices_reserve(t, 6)
+            spec.assert_eq(d3d12.indices_set(t, 0, 4), d3d12.ERR_ARG, "an index past the vertices")
+            quad(t, 0, 0, -1.0, -1.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.ERR_ARG, "a draw with bindings unset")
+            spec.assert_true(string.index_of(d3d12.last_error(), "never set") >= 0, "names the binding")
+            spec.assert_eq(d3d12.uniform_float(p, 1, 0, 1.0), d3d12.ERR_ARG, "uniform_float before uniform_floats")
+            d3d12.texture_destroy(tex)
+            d3d12.pipeline_destroy(p)
+            d3d12.bindings_destroy(binds)
+            d3d12.layout_destroy(lay)
+            d3d12.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "d3d12: materials and batches") {
+        spec.it_when(ready, "draws two textures in one frame", reason) callback {
+            t = d3d12.target_create(dev, 64, 32)
+            lay = textured_layout()
+            binds = d3d12.bindings_create()
+            d3d12.bindings_texture(binds, 0)
+            d3d12.bindings_uniform(binds, 1)
+            p = d3d12.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            red_px = texels4(0xFF0000, 0xFF0000, 0xFF0000, 0xFF0000)
+            green_px = texels4(0x00FF00, 0x00FF00, 0x00FF00, 0x00FF00)
+            ta = d3d12.texture_create(dev, 2, 2)
+            tb = d3d12.texture_create(dev, 2, 2)
+            d3d12.texture_upload(ta, bytes.data(red_px), 16)
+            d3d12.texture_upload(tb, bytes.data(green_px), 16)
+            ma = d3d12.material_create(p)
+            mb = d3d12.material_create(p)
+            d3d12.material_set_texture(ma, 0, ta)
+            d3d12.material_set_texture(mb, 0, tb)
+            d3d12.material_floats(ma, 1, 4)
+            d3d12.material_floats(mb, 1, 4)
+            i = 0
+            while i < 4 {
+                d3d12.material_float(ma, 1, i, 1.0)
+                d3d12.material_float(mb, 1, i, 1.0)
+                i = i + 1
+            }
+            d3d12.verts_reserve_n(t, 8, 7)
+            d3d12.indices_reserve(t, 12)
+            quad(t, 0, 0, -1.0, -1.0, 0.0, 1.0)
+            quad(t, 4, 6, 0.0, -1.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.batch_add(t, ma, 0, 6), d3d12.OK, "left quad")
+            spec.assert_eq(d3d12.batch_add(t, mb, 6, 6), d3d12.OK, "right quad")
+            spec.assert_eq(d3d12.batch_count(t), 2, "two draws")
+            spec.assert_eq(d3d12.draw_material(t, p, null, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(d3d12.pixel(t, 16, 16), 0xFF0000FF, "the left half is the first texture")
+            spec.assert_eq(d3d12.pixel(t, 48, 16), 0x00FF00FF, "the right half the second")
+            spec.assert_eq(d3d12.batch_add(t, ma, 10, 6), d3d12.ERR_ARG, "a draw past the uploaded indices")
+            d3d12.batch_reset(t)
+            bytes.free(red_px)
+            bytes.free(green_px)
+            d3d12.material_destroy(ma)
+            d3d12.material_destroy(mb)
+            d3d12.texture_destroy(ta)
+            d3d12.texture_destroy(tb)
+            d3d12.pipeline_destroy(p)
+            d3d12.bindings_destroy(binds)
+            d3d12.layout_destroy(lay)
+            d3d12.target_destroy(t)
+        }
+
+        spec.it_when(ready, "gives the same frame with 16-bit indices as with 32-bit", reason) callback {
+            same = 1
+            t32 = d3d12.target_create(dev, 32, 32)
+            t16 = d3d12.target_create(dev, 32, 32)
+            lay = textured_layout()
+            binds = d3d12.bindings_create()
+            d3d12.bindings_texture(binds, 0)
+            d3d12.bindings_uniform(binds, 1)
+            p32 = d3d12.pipeline_create_ex(dev, t32, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            p16 = d3d12.pipeline_create_ex(dev, t16, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            tex = d3d12.texture_create(dev, 2, 2)
+            px = texels4(0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF)
+            d3d12.texture_upload(tex, bytes.data(px), 16)
+            d3d12.set_texture(p32, 0, tex)
+            d3d12.set_texture(p16, 0, tex)
+            d3d12.uniform_floats(p32, 1, 4)
+            d3d12.uniform_floats(p16, 1, 4)
+            k = 0
+            while k < 4 {
+                d3d12.uniform_float(p32, 1, k, 1.0)
+                d3d12.uniform_float(p16, 1, k, 1.0)
+                k = k + 1
+            }
+            d3d12.verts_reserve_n(t32, 4, 7)
+            d3d12.verts_reserve_n(t16, 4, 7)
+            d3d12.indices_reserve(t32, 6)
+            d3d12.indices_reserve_ex(t16, 6, 16)
+            quad(t32, 0, 0, -0.8, -0.8, 0.8, 0.8)
+            quad(t16, 0, 0, -0.8, -0.8, 0.8, 0.8)
+            d3d12.draw(t32, p32, 0.0, 0.0, 0.0, 1.0)
+            d3d12.draw(t16, p16, 0.0, 0.0, 0.0, 1.0)
+            n = d3d12.rgba_size(t32)
+            a = bytes.new(n)
+            b = bytes.new(n)
+            bytes.set_length(a, n)
+            bytes.set_length(b, n)
+            d3d12.copy_rgba(t32, bytes.data(a), n)
+            d3d12.copy_rgba(t16, bytes.data(b), n)
+            i = 0
+            while i < n {
+                if bytes.get(a, i) != bytes.get(b, i) { same = 0 }
+                i = i + 1
+            }
+            spec.assert_eq(same, 1, "byte for byte")
+            spec.assert_eq(d3d12.indices_reserve_ex(t16, 6, 8), d3d12.ERR_ARG, "8-bit refused")
+            spec.assert_eq(d3d12.indices_set(t16, 0, 70000), d3d12.ERR_ARG, "a value past 16 bits")
+            bytes.free(a)
+            bytes.free(b)
+            bytes.free(px)
+            d3d12.texture_destroy(tex)
+            d3d12.pipeline_destroy(p32)
+            d3d12.pipeline_destroy(p16)
+            d3d12.bindings_destroy(binds)
+            d3d12.layout_destroy(lay)
+            d3d12.target_destroy(t32)
+            d3d12.target_destroy(t16)
+        }
+    }
+
+    spec.describe(fw, "d3d12: mipmaps") {
+        spec.it_when(ready, "averages a minified checkerboard", reason) callback {
+            size = 128
+            board = bytes.new(size * size * 4)
+            bytes.set_length(board, size * size * 4)
+            y = 0
+            while y < size {
+                x = 0
+                while x < size {
+                    v = 0
+                    if ((x + y) & 1) == 1 { v = 255 }
+                    o = (y * size + x) * 4
+                    bytes.set(board, o, v)
+                    bytes.set(board, o + 1, v)
+                    bytes.set(board, o + 2, v)
+                    bytes.set(board, o + 3, 255)
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            pass = 0
+            while pass < 2 {
+                t = d3d12.target_create(dev, 16, 16)
+                lay = textured_layout()
+                binds = d3d12.bindings_create()
+                d3d12.bindings_texture(binds, 0)
+                d3d12.bindings_uniform(binds, 1)
+                p = d3d12.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+                tex = d3d12.texture_create_ex(dev, size, size, pass, pass, 0)
+                if pass == 1 { spec.assert_eq(d3d12.texture_mip_levels(tex), 8, "a full chain: 128 down to 1") }
+                d3d12.texture_upload(tex, bytes.data(board), size * size * 4)
+                d3d12.set_texture(p, 0, tex)
+                d3d12.uniform_floats(p, 1, 4)
+                k = 0
+                while k < 4 { d3d12.uniform_float(p, 1, k, 1.0); k = k + 1 }
+                d3d12.verts_reserve_n(t, 4, 7)
+                d3d12.indices_reserve(t, 6)
+                quad(t, 0, 0, -1.0, -1.0, 1.0, 1.0)
+                d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+                sum = 0
+                extremes = 0
+                yy = 0
+                while yy < 16 {
+                    xx = 0
+                    while xx < 16 {
+                        r = d3d12.red(d3d12.pixel(t, xx, yy))
+                        sum = sum + r
+                        if r == 0 || r == 255 { extremes = extremes + 1 }
+                        xx = xx + 1
+                    }
+                    yy = yy + 1
+                }
+                mean = sum / 256
+                if pass == 0 {
+                    spec.assert_eq(extremes, 256, "without a chain every pixel is a single texel")
+                } else {
+                    spec.assert_true(mean >= 120 && mean <= 136, "with one, the average (${mean})")
+                }
+                d3d12.texture_destroy(tex)
+                d3d12.pipeline_destroy(p)
+                d3d12.bindings_destroy(binds)
+                d3d12.layout_destroy(lay)
+                d3d12.target_destroy(t)
+                pass = pass + 1
+            }
+            bytes.free(board)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    string.free(tri_vs)
+    string.free(tri_ps)
+    string.free(xf_vs)
+    string.free(tex_vs)
+    string.free(tex_ps)
+    if dev != null {
+        println("  debug-layer warnings and errors: ${d3d12.debug_message_count(dev)}")
+        d3d12.device_destroy(dev)
+    }
+    return _rc
+}

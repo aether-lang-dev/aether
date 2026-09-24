@@ -1,0 +1,66 @@
+// A triangle drawn with Direct3D 12 and written to triangle_d3d12.png.
+//
+// The same program as contrib/vulkan/example_triangle.ae with the module
+// swapped: HLSL shaders instead of SPIR-V, and Direct3D's coordinates (y
+// up). Run it from the repository root, where the shader paths resolve:
+//
+//   ae run contrib/d3d12/example_triangle.ae
+//
+// Away from Windows, or on a machine without Direct3D 12, it says so and
+// exits cleanly.
+
+import std.fs
+import std.string
+import contrib.d3d12
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+main() {
+    if d3d12.available() != 1 {
+        println("no Direct3D 12: ${d3d12.last_error()}")
+        return
+    }
+    dev = d3d12.device_create()
+    if dev == null {
+        println("device_create failed: ${d3d12.last_error()}")
+        return
+    }
+    defer d3d12.device_destroy(dev)
+
+    target = d3d12.target_create(dev, 256, 256)
+    defer d3d12.target_destroy(target)
+
+    vs, vs_len = load("contrib/d3d12/shaders/triangle_vs.hlsl")
+    ps, ps_len = load("contrib/d3d12/shaders/triangle_ps.hlsl")
+    pipe = d3d12.pipeline_create(dev, target, vs, vs_len, ps, ps_len)
+    string.free(vs)
+    string.free(ps)
+    if pipe == null {
+        println("pipeline_create failed: ${d3d12.last_error()}")
+        return
+    }
+    defer d3d12.pipeline_destroy(pipe)
+
+    // Red at the top, green bottom left, blue bottom right: y points up.
+    d3d12.verts_reserve(target, 3)
+    d3d12.verts_set(target, 0, 0.0, 0.7, 1.0, 0.0, 0.0)
+    d3d12.verts_set(target, 1, -0.7, -0.7, 0.0, 1.0, 0.0)
+    d3d12.verts_set(target, 2, 0.7, -0.7, 0.0, 0.0, 1.0)
+
+    if d3d12.draw(target, pipe, 0.0, 0.0, 0.0, 1.0) != d3d12.OK {
+        println("draw failed: ${d3d12.last_error()}")
+        return
+    }
+    err = d3d12.save_png(target, "triangle_d3d12.png")
+    if err != "" {
+        println("save_png failed: ${err}")
+        return
+    }
+    println("wrote triangle_d3d12.png (256x256) on ${d3d12.device_name()}")
+}

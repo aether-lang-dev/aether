@@ -1,0 +1,428 @@
+// contrib.d3d12 tests: discovery, targets, drawing and readback, frames in
+// flight, colour formats, depth and multisampling.
+//
+// Runs anywhere: without Direct3D 12 (any system but Windows 10 or later)
+// every case skips and the run is green, the path a user's program takes
+// there. On Windows it renders on the first hardware adapter, or on WARP,
+// and checks pixels. Coordinates are Direct3D's: y points UP, so a vertex at
+// y = 0.7 is near the TOP of the image.
+
+import std.bytes
+import std.fs
+import std.string
+import contrib.d3d12
+import std.spec
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+within(got: float, want: float, tol: float) -> int {
+    d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    if d <= tol { return 1 }
+    return 0
+}
+
+// One colour over the centre (a triangle pointing up), another clear.
+triangle(t: ptr, r: float, g: float, b: float) {
+    d3d12.verts_reserve(t, 3)
+    d3d12.verts_set(t, 0, 0.0, 0.9, r, g, b)
+    d3d12.verts_set(t, 1, -0.9, -0.9, r, g, b)
+    d3d12.verts_set(t, 2, 0.9, -0.9, r, g, b)
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    have_dev = 0
+    reason = "no Direct3D 12"
+    dev = null
+    target = null
+    pipe = null
+    vs = ""
+    ps = ""
+    vs_len = 0
+    ps_len = 0
+
+    a1 = d3d12.available()
+    a2 = d3d12.available()
+    if a1 == 1 {
+        dev = d3d12.device_create()
+        if dev == null {
+            reason = "device_create failed (${d3d12.last_error()})"
+        } else {
+            have_dev = 1
+            vs, vs_len = load("contrib/d3d12/shaders/triangle_vs.hlsl")
+            ps, ps_len = load("contrib/d3d12/shaders/triangle_ps.hlsl")
+            target = d3d12.target_create(dev, 64, 64)
+            if target != null {
+                pipe = d3d12.pipeline_create(dev, target, vs, vs_len, ps, ps_len)
+            }
+            if target != null && pipe != null {
+                ready = 1
+            } else {
+                reason = "target or pipeline failed (${d3d12.last_error()})"
+            }
+        }
+    } else {
+        reason = "no Direct3D 12 (${d3d12.last_error()})"
+    }
+    dev_reason = reason
+
+    spec.describe(fw, "d3d12: discovery") {
+        spec.it(fw, "available() is stable across calls") callback {
+            spec.assert_eq(a2, a1, "two calls agree")
+        }
+        spec.it_when(a1 == 1, "names the adapter", reason) callback {
+            spec.assert_true(string.length(d3d12.device_name()) > 0, "device_name() is not empty")
+            println("  adapter: ${d3d12.device_name()} (warp ${d3d12.device_is_warp(dev)})")
+        }
+        spec.it_when(have_dev, "opens a device", dev_reason) callback {
+            spec.assert_true(dev != null, "device_create()")
+        }
+    }
+
+    spec.describe(fw, "d3d12: target edge cases") {
+        spec.it_when(have_dev, "rejects a zero width and a negative height", dev_reason) callback {
+            spec.assert_true(d3d12.target_create(dev, 0, 16) == null, "width 0")
+            spec.assert_true(string.length(d3d12.last_error()) > 0, "says why")
+            spec.assert_true(d3d12.target_create(dev, 16, -4) == null, "height -4")
+        }
+        spec.it_when(have_dev, "refuses a size beyond the Direct3D 12 limit", dev_reason) callback {
+            spec.assert_true(d3d12.target_create(dev, 1000000, 16) == null, "refused")
+            spec.assert_true(string.index_of(d3d12.last_error(), "limit") >= 0, "names the limit")
+        }
+        spec.it_when(ready, "reports its dimensions", reason) callback {
+            spec.assert_eq(d3d12.target_width(target), 64, "width")
+            spec.assert_eq(d3d12.target_height(target), 64, "height")
+            spec.assert_eq(d3d12.rgba_size(target), 64 * 64 * 4, "rgba_size")
+            spec.assert_eq(d3d12.target_format(target), d3d12.FORMAT_R8G8B8A8_UNORM, "RGBA8 by default")
+        }
+    }
+
+    spec.describe(fw, "d3d12: shader edge cases") {
+        spec.it_when(have_dev, "rejects an empty shader", dev_reason) callback {
+            spec.assert_true(d3d12.pipeline_create(dev, target, "", 0, "", 0) == null, "empty refused")
+        }
+        spec.it_when(have_dev, "reports the HLSL compiler's error", dev_reason) callback {
+            bad = "float4 main() : SV_Target { return undefined_thing; }"
+            p = d3d12.pipeline_create(dev, target, vs, vs_len, bad, string.length(bad))
+            spec.assert_true(p == null, "refused")
+            spec.assert_true(string.index_of(d3d12.last_error(), "undefined_thing") >= 0,
+                             "the compiler's message names the problem (${d3d12.last_error()})")
+        }
+        spec.it_when(ready, "builds a pipeline from HLSL source", reason) callback {
+            spec.assert_true(pipe != null, "pipeline_create")
+        }
+    }
+
+    spec.describe(fw, "d3d12: geometry edge cases") {
+        spec.it_when(ready, "refuses out-of-range vertex writes", reason) callback {
+            spec.assert_true(d3d12.verts_set(target, 0, 0.0, 0.0, 1.0, 1.0, 1.0) != 0, "before reserve")
+            spec.assert_eq(d3d12.verts_reserve(target, 0), d3d12.ERR_ARG, "reserve 0")
+            spec.assert_eq(d3d12.verts_reserve(target, 3), d3d12.OK, "reserve 3")
+            spec.assert_true(d3d12.verts_set(target, 3, 0.0, 0.0, 1.0, 1.0, 1.0) != 0, "past the end")
+            spec.assert_true(d3d12.verts_set(target, -1, 0.0, 0.0, 1.0, 1.0, 1.0) != 0, "negative")
+        }
+    }
+
+    spec.describe(fw, "d3d12: draw") {
+        spec.it_when(ready, "renders a triangle over a black clear, pointing up", reason) callback {
+            d3d12.verts_reserve(target, 3)
+            d3d12.verts_set(target, 0, 0.0, 0.7, 1.0, 0.0, 0.0)
+            d3d12.verts_set(target, 1, -0.7, -0.7, 0.0, 1.0, 0.0)
+            d3d12.verts_set(target, 2, 0.7, -0.7, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.draw(target, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            corner = d3d12.pixel(target, 0, 0)
+            spec.assert_eq(d3d12.red(corner) + d3d12.green(corner) + d3d12.blue(corner), 0, "black corner")
+            spec.assert_eq(d3d12.alpha(corner), 255, "opaque clear")
+            // The red vertex is at the top: y up.
+            top = d3d12.pixel(target, 32, 14)
+            bottom_left = d3d12.pixel(target, 14, 52)
+            spec.assert_true(d3d12.red(top) > d3d12.green(top) && d3d12.red(top) > d3d12.blue(top),
+                             "red near the top vertex")
+            spec.assert_true(d3d12.green(bottom_left) > d3d12.red(bottom_left), "green near the bottom-left one")
+        }
+        spec.it_when(ready, "bounds-checks pixel()", reason) callback {
+            spec.assert_eq(d3d12.pixel(target, -1, 0), -1, "negative x")
+            spec.assert_eq(d3d12.pixel(target, 0, 64), -1, "y past the height")
+            spec.assert_eq(d3d12.pixel(target, 64, 0), -1, "x past the width")
+        }
+        spec.it_when(ready, "gives a bit-identical frame on a repeated draw", reason) callback {
+            d3d12.draw(target, pipe, 0.0, 0.0, 0.0, 1.0)
+            before = d3d12.pixel(target, 32, 32)
+            spec.assert_eq(d3d12.draw(target, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "again")
+            spec.assert_eq(d3d12.pixel(target, 32, 32), before, "identical")
+        }
+        spec.it_when(ready, "takes a new clear colour", reason) callback {
+            spec.assert_eq(d3d12.draw(target, pipe, 1.0, 0.0, 0.0, 1.0), d3d12.OK, "red clear")
+            px = d3d12.pixel(target, 0, 0)
+            spec.assert_eq(d3d12.red(px), 255, "red")
+            spec.assert_eq(d3d12.green(px), 0, "no green")
+        }
+        spec.it_when(have_dev, "clears a target drawn with no pipeline", dev_reason) callback {
+            bare = d3d12.target_create(dev, 8, 8)
+            spec.assert_eq(d3d12.draw(bare, null, 0.0, 1.0, 0.0, 1.0), d3d12.OK, "clear only")
+            spec.assert_eq(d3d12.green(d3d12.pixel(bare, 4, 4)), 255, "green")
+            d3d12.target_destroy(bare)
+        }
+    }
+
+    spec.describe(fw, "d3d12: readback") {
+        spec.it_when(ready, "refuses a null or short destination", reason) callback {
+            spec.assert_true(d3d12.copy_rgba(target, null, 16) != 0, "null")
+            buf = bytes.new(16)
+            spec.assert_true(d3d12.copy_rgba(target, bytes.data(buf), 16) != 0, "16 bytes for a 64x64 image")
+            bytes.free(buf)
+        }
+        // Readback rows are padded to 256 bytes on the GPU side; the copy must
+        // hand back tight rows, or every row after the first is offset.
+        spec.it_when(ready, "copies tight rows that match pixel()", reason) callback {
+            d3d12.draw(target, pipe, 0.0, 0.0, 0.0, 1.0)
+            need = d3d12.rgba_size(target)
+            buf = bytes.new(need)
+            bytes.set_length(buf, need)
+            spec.assert_eq(d3d12.copy_rgba(target, bytes.data(buf), need), d3d12.OK, "copy")
+            mid = d3d12.pixel(target, 32, 40)
+            off = (40 * 64 + 32) * 4
+            spec.assert_eq(bytes.get(buf, off), d3d12.red(mid), "red at (32, 40)")
+            spec.assert_eq(bytes.get(buf, off + 1), d3d12.green(mid), "green")
+            spec.assert_eq(bytes.get(buf, off + 3), d3d12.alpha(mid), "alpha")
+            bytes.free(buf)
+        }
+    }
+
+    spec.describe(fw, "d3d12: frames in flight") {
+        spec.it_when(ready, "pipelines several frames and reads the newest", reason) callback {
+            t = d3d12.target_create(dev, 32, 32)
+            spec.assert_eq(d3d12.target_set_frames(t, 0), d3d12.ERR_ARG, "0 refused")
+            spec.assert_eq(d3d12.target_set_frames(t, 9), d3d12.ERR_ARG, "9 refused")
+            spec.assert_eq(d3d12.target_set_frames(t, 3), d3d12.OK, "3")
+            spec.assert_eq(d3d12.target_frames(t), 3, "reports 3")
+            i = 0
+            while i < 7 {
+                slot = d3d12.submit(t, null, (i as float) / 8.0, 0.0, 0.0, 1.0)
+                spec.assert_true(slot >= 0 && slot < 3, "submit ${i} took a slot")
+                i = i + 1
+            }
+            // The readers wait for the newest frame on their own.
+            spec.assert_eq(d3d12.red(d3d12.pixel(t, 0, 0)), 191, "the seventh clear (6/8 of 255)")
+            spec.assert_eq(d3d12.wait_all(t), d3d12.OK, "wait_all")
+            d3d12.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "d3d12: colour formats") {
+        spec.it_when(ready, "UNORM stores what the shader wrote", reason) callback {
+            t = d3d12.target_create_format(dev, 32, 32, d3d12.FORMAT_R8G8B8A8_UNORM, 0, 1)
+            p = d3d12.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.5, 0.5, 0.5)
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            r = d3d12.red(d3d12.pixel(t, 16, 16))
+            spec.assert_true(r >= 127 && r <= 128, "0.5 is 127 or 128 (got ${r})")
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+        }
+        spec.it_when(ready, "sRGB encodes linear output for display", reason) callback {
+            t = d3d12.target_create_format(dev, 32, 32, d3d12.FORMAT_R8G8B8A8_SRGB, 0, 1)
+            spec.assert_true(t != null, "created (${d3d12.last_error()})")
+            p = d3d12.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.5, 0.5, 0.5)
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            r = d3d12.red(d3d12.pixel(t, 16, 16))
+            spec.assert_true(r >= 186 && r <= 189, "linear 0.5 stored as ~188 (got ${r})")
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+        }
+        spec.it_when(ready, "half float keeps values above 1", reason) callback {
+            t = d3d12.target_create_format(dev, 32, 32, d3d12.FORMAT_R16G16B16A16_SFLOAT, 0, 1)
+            spec.assert_eq(d3d12.target_bytes_per_pixel(t), 8, "8 bytes a pixel")
+            p = d3d12.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.25, 0.5, 0.75)
+            spec.assert_eq(d3d12.draw(t, p, 2.5, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(within(d3d12.pixel_value(t, 0, 0, 0), 2.5, 0.0), 1, "2.5 kept")
+            spec.assert_eq(within(d3d12.pixel_value(t, 16, 16, 2), 0.75, 0.0), 1, "0.75 exact")
+            spec.assert_eq(d3d12.red(d3d12.pixel(t, 0, 0)), 255, "pixel() clamps")
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+        }
+        spec.it_when(ready, "single float keeps large values and converts to 8 bits", reason) callback {
+            t = d3d12.target_create_format(dev, 16, 16, d3d12.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            p = d3d12.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.1, 0.2, 0.3)
+            spec.assert_eq(d3d12.draw(t, p, 1000.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(within(d3d12.pixel_value(t, 0, 0, 0), 1000.0, 0.0), 1, "1000.0")
+            buf = bytes.new(16 * 16 * 4)
+            bytes.set_length(buf, 16 * 16 * 4)
+            spec.assert_eq(d3d12.copy_rgba8(t, bytes.data(buf), 16 * 16 * 4), d3d12.OK, "copy_rgba8")
+            spec.assert_eq(bytes.get(buf, 0), 255, "clamped")
+            spec.assert_eq(bytes.get(buf, (8 * 16 + 8) * 4 + 1), 51, "0.2 as 51")
+            bytes.free(buf)
+            spec.assert_str_eq(d3d12.save_png(t, "d3d12_float.png"), "", "save_png")
+            data, n, err = fs.read_binary("d3d12_float.png")
+            spec.assert_str_eq(err, "", "the file was written")
+            spec.assert_eq(string.char_at_n(data, n, 1) & 255, 80, "a PNG")
+            string.free(data)
+            spec.assert_str_eq(fs.delete("d3d12_float.png"), "", "removed")
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+        }
+        spec.it_when(have_dev, "refuses a format it does not render to", dev_reason) callback {
+            spec.assert_true(d3d12.target_create_format(dev, 8, 8, 999, 0, 1) == null, "999")
+            spec.assert_true(string.index_of(d3d12.last_error(), "not a target format") >= 0, "names the formats")
+        }
+    }
+
+    // Depth: the same two overlapping triangles in both orders must agree with
+    // a depth buffer and disagree without one.
+    dvs = ""
+    dvs_len = 0
+    if have_dev == 1 { dvs, dvs_len = load("contrib/d3d12/shaders/depth_vs.hlsl") }
+    spec.describe(fw, "d3d12: depth and multisampling") {
+        spec.it_when(ready, "resolves overlap by depth, not by order", reason) callback {
+            lay = d3d12.layout_create()
+            d3d12.layout_binding(lay, 0, 24, d3d12.PER_VERTEX)
+            d3d12.layout_attr(lay, 0, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 0)
+            d3d12.layout_attr(lay, 1, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 12)
+            with_depth = d3d12.target_create_ex(dev, 32, 32, 1, 1)
+            no_depth = d3d12.target_create_ex(dev, 32, 32, 0, 1)
+            spec.assert_eq(d3d12.target_has_depth(with_depth), 1, "has depth")
+            pd = d3d12.pipeline_create_ex(dev, with_depth, dvs, dvs_len, ps, ps_len, lay, 0, null)
+            pn = d3d12.pipeline_create_ex(dev, no_depth, dvs, dvs_len, ps, ps_len, lay, 0, null)
+            spec.assert_true(pd != null && pn != null, "pipelines (${d3d12.last_error()})")
+            // Near red (z 0.2) and far blue (z 0.8), full-screen, drawn in both orders.
+            order = 0
+            results = 0
+            while order < 2 {
+                for_each = 0
+                while for_each < 2 {
+                    t = with_depth
+                    p = pd
+                    if for_each == 1 { t = no_depth; p = pn }
+                    d3d12.verts_reserve_n(t, 6, 6)
+                    k = 0
+                    while k < 2 {
+                        tri = k
+                        if order == 1 { tri = 1 - k }
+                        z = 0.2
+                        r = 1.0
+                        b = 0.0
+                        if tri == 1 { z = 0.8; r = 0.0; b = 1.0 }
+                        base = k * 18
+                        d3d12.verts_set_float(t, base + 0, -1.0)
+                        d3d12.verts_set_float(t, base + 1, -1.0)
+                        d3d12.verts_set_float(t, base + 2, z)
+                        d3d12.verts_set_float(t, base + 3, r)
+                        d3d12.verts_set_float(t, base + 5, b)
+                        d3d12.verts_set_float(t, base + 6, 3.0)
+                        d3d12.verts_set_float(t, base + 7, -1.0)
+                        d3d12.verts_set_float(t, base + 8, z)
+                        d3d12.verts_set_float(t, base + 9, r)
+                        d3d12.verts_set_float(t, base + 11, b)
+                        d3d12.verts_set_float(t, base + 12, -1.0)
+                        d3d12.verts_set_float(t, base + 13, 3.0)
+                        d3d12.verts_set_float(t, base + 14, z)
+                        d3d12.verts_set_float(t, base + 15, r)
+                        d3d12.verts_set_float(t, base + 17, b)
+                        k = k + 1
+                    }
+                    d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+                    px = d3d12.pixel(t, 16, 16)
+                    if for_each == 0 && d3d12.red(px) == 255 { results = results + 1 }
+                    if for_each == 1 && order == 0 && d3d12.blue(px) == 255 { results = results + 10 }
+                    if for_each == 1 && order == 1 && d3d12.red(px) == 255 { results = results + 100 }
+                    for_each = for_each + 1
+                }
+                order = order + 1
+            }
+            // With depth: red (nearer) both times; without: whichever came last.
+            spec.assert_eq(results, 112, "depth decides with a buffer, order without (got ${results})")
+            d3d12.pipeline_destroy(pd)
+            d3d12.pipeline_destroy(pn)
+            d3d12.target_destroy(with_depth)
+            d3d12.target_destroy(no_depth)
+            d3d12.layout_destroy(lay)
+        }
+
+        spec.it_when(ready, "multisamples an edge into blended pixels", reason) callback {
+            one = d3d12.target_create_ex(dev, 64, 64, 0, 1)
+            four = d3d12.target_create_ex(dev, 64, 64, 0, 4)
+            spec.assert_true(four != null, "4x target (${d3d12.last_error()})")
+            spec.assert_eq(d3d12.target_samples(four), 4, "4 samples")
+            p1 = d3d12.pipeline_create(dev, one, vs, vs_len, ps, ps_len)
+            p4 = d3d12.pipeline_create(dev, four, vs, vs_len, ps, ps_len)
+            triangle(one, 1.0, 0.0, 0.0)
+            triangle(four, 1.0, 0.0, 0.0)
+            d3d12.draw(one, p1, 0.0, 0.0, 1.0, 1.0)
+            d3d12.draw(four, p4, 0.0, 0.0, 1.0, 1.0)
+            // Pixels that are neither the clear (blue) nor the triangle (red).
+            mixed1 = 0
+            mixed4 = 0
+            y = 0
+            while y < 64 {
+                x = 0
+                while x < 64 {
+                    a = d3d12.pixel(one, x, y)
+                    b = d3d12.pixel(four, x, y)
+                    if d3d12.red(a) != 0 && d3d12.red(a) != 255 { mixed1 = mixed1 + 1 }
+                    if d3d12.red(b) != 0 && d3d12.red(b) != 255 { mixed4 = mixed4 + 1 }
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            spec.assert_eq(mixed1, 0, "one sample: hard edges")
+            spec.assert_true(mixed4 > 0, "four samples: blended edge pixels (${mixed4})")
+            d3d12.pipeline_destroy(p1)
+            d3d12.pipeline_destroy(p4)
+            d3d12.target_destroy(one)
+            d3d12.target_destroy(four)
+        }
+
+        spec.it_when(have_dev, "refuses a sample count that is not a power of two", dev_reason) callback {
+            spec.assert_true(d3d12.target_create_ex(dev, 8, 8, 0, 3) == null, "3 samples")
+        }
+    }
+
+    spec.describe(fw, "d3d12: lifecycle") {
+        spec.it(fw, "tolerates destroying null handles") callback {
+            d3d12.target_destroy(null)
+            d3d12.pipeline_destroy(null)
+            d3d12.device_destroy(null)
+            spec.assert_true(1 == 1, "no crash")
+        }
+        spec.it_when(ready, "completes eight create/draw/destroy cycles", reason) callback {
+            c = 0
+            ok = 1
+            while c < 8 {
+                t2 = d3d12.target_create(dev, 32, 32)
+                p2 = d3d12.pipeline_create(dev, t2, vs, vs_len, ps, ps_len)
+                if t2 == null || p2 == null { ok = 0 }
+                triangle(t2, 1.0, 1.0, 1.0)
+                if d3d12.draw(t2, p2, 0.0, 0.0, 0.0, 1.0) != 0 { ok = 0 }
+                d3d12.pipeline_destroy(p2)
+                d3d12.target_destroy(t2)
+                c = c + 1
+            }
+            spec.assert_eq(ok, 1, "8 cycles")
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    if pipe != null { d3d12.pipeline_destroy(pipe) }
+    if target != null { d3d12.target_destroy(target) }
+    string.free(vs)
+    string.free(ps)
+    string.free(dvs)
+    if dev != null {
+        // With AETHER_D3D12_DEBUG=1 the debug layer's messages were printed
+        // above; the count is the summary.
+        println("  debug-layer warnings and errors: ${d3d12.debug_message_count(dev)}")
+        d3d12.device_destroy(dev)
+    }
+    return _rc
+}
