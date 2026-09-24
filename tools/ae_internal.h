@@ -184,6 +184,11 @@ int extras_next(const char** cursor, char* out, size_t out_size);
  * modules of the import closure ship, as a quoted space-separated list ready
  * for a compile command, "" when there are none. Static storage. */
 const char* get_aether_source_files(const char* c_file);
+/* The --extra / extra_sources list followed by the module-declared sources,
+ * each file once however it is spelled (a file named on the command line and
+ * declared by an imported module's @source is compiled a single time). The
+ * native and cross build paths both build their source list with this. */
+void merge_source_lists(const char* extra, const char* module_sources, char* out, size_t cap);
 /* The `-I"<dir>"` flags for the modules that declared a `@c_include`, read
  * from the generated C's `// aether-include:` lines (#1986). "" when none. */
 const char* get_aether_include_flags(const char* c_file);
