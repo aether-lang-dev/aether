@@ -159,6 +159,24 @@ main() {
             check(vulkan.bindings_uniform(binds, 1) != vulkan.OK,
                 "a duplicate binding is refused")
         }
+
+        // A target feeds vertex stream 0 only, so a layout declaring another
+        // is refused rather than drawn from a buffer that is never bound.
+        spec.it_when(ready, "refuses a layout with a second vertex stream", reason) callback {
+            two = vulkan.layout_create()
+            _ = vulkan.layout_binding(two, 0, 8, vulkan.PER_VERTEX)
+            _ = vulkan.layout_binding(two, 1, 8, vulkan.PER_INSTANCE)
+            _ = vulkan.layout_attr(two, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+            _ = vulkan.layout_attr(two, 1, 1, vulkan.FORMAT_R32G32_SFLOAT, 0)
+            yvs, yvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
+            yfs, yfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
+            check(vulkan.pipeline_create_ex(dev, target, yvs, yvl, yfs, yfl, two, 0, binds) == null,
+                "a second vertex stream is refused")
+            check(string.index_of(vulkan.last_error(), "binding 0 only") >= 0, "and says why")
+            string.free(yvs)
+            string.free(yfs)
+            vulkan.layout_destroy(two)
+        }
     }
 
     spec.describe(fw, "vulkan: indexed textured drawing") {

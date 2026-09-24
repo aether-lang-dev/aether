@@ -1,0 +1,282 @@
+// contrib.vulkan.vk: the Vulkan API driven directly from Aether (#1506).
+//
+// The module is generated from the registry by tools/vkgen.ae; this checks
+// that what it generated is the API the driver implements: its constants are
+// the header's values, its structs have the header's layouts (a field stored
+// through one is what the driver reads), and its commands reach the loader
+// contrib/vulkan opens at runtime, first through the loader's exports and then
+// through an instance's and a device's own entry points. Nothing links
+// against libvulkan; with no loader the commands fail rather than the start.
+// The <command>_all helpers, which vkgen writes from the registry's record of
+// which parameter counts which array, must agree with the calls by hand.
+
+import std.spec
+import std.string
+import contrib.vulkan
+import contrib.vulkan.vk
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+
+// A portability implementation (MoltenVK over Metal) is listed only to an
+// instance that enables VK_KHR_portability_enumeration and sets its flag, and
+// a device that offers VK_KHR_portability_subset must have it enabled. Both
+// arrived in registry 1.3.207, after the oldest registry the module is
+// generated from, so their name and flag are spelled here as the registry
+// gives them.
+const PORTABILITY_ENUMERATION = "VK_KHR_portability_enumeration"
+const PORTABILITY_SUBSET = "VK_KHR_portability_subset"
+const CREATE_ENUMERATE_PORTABILITY = 1   // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+
+// 1 when `name` is among the extension properties `props` lists.
+lists_extension(props: ptr, count: int, name: string) -> int {
+    i = 0
+    while i < count {
+        e = (props + i * sizeof(VkExtensionProperties)) as *VkExtensionProperties
+        if string.equals(e.extensionName, name) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// A VkInstance with the application info filled in, or null. It asks for
+// Vulkan 1.1, whose ...2 queries the _all case uses: a command from a version
+// the instance was not created with is not the instance's to call.
+create_instance() -> ptr {
+    app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
+    app.sType = vk.STRUCTURE_TYPE_APPLICATION_INFO
+    app.pApplicationName = "test_vulkan_raw"
+    app.apiVersion = (1 << 22) | (1 << 12)
+    ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+    ci.pApplicationInfo = app as ptr
+    names = calloc(1, 8)
+    exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
+    if lists_extension(exts, ne, PORTABILITY_ENUMERATION) == 1 {
+        (names as string[])[0] = PORTABILITY_ENUMERATION
+        ci.enabledExtensionCount = 1
+        ci.ppEnabledExtensionNames = names
+        ci.flags = CREATE_ENUMERATE_PORTABILITY
+    }
+    vk.array_free(exts)
+    out = calloc(1, 8)
+    r = vk.vkCreateInstance(ci as ptr, null, out)
+    instance = (out as ptr[])[0]
+    free(out)
+    free(names)
+    free(ci)
+    free(app)
+    if r != vk.SUCCESS {
+        println("  vkCreateInstance returned ${r}")
+        return null
+    }
+    return instance
+}
+
+// The instance's first physical device, or null.
+first_device(instance: ptr) -> ptr {
+    devs, n, r = vk.vkEnumeratePhysicalDevices_all(instance)
+    found = null
+    if r == vk.SUCCESS && n > 0 { found = (devs as ptr[])[0] }
+    vk.array_free(devs)
+    return found
+}
+
+// The index of a queue family with graphics, or -1. Through the
+// Properties2 query, whose elements the helper hands the driver with sType
+// already set: a driver writes nothing into an element it cannot identify.
+graphics_family(gpu: ptr) -> int {
+    props, n = vk.vkGetPhysicalDeviceQueueFamilyProperties2_all(gpu)
+    found = -1
+    i = 0
+    while i < n && found < 0 {
+        fam = (props + i * sizeof(VkQueueFamilyProperties2)) as *VkQueueFamilyProperties2
+        if (fam.queueFamilyProperties.queueFlags & vk.QUEUE_GRAPHICS_BIT) != 0 { found = i }
+        i = i + 1
+    }
+    vk.array_free(props)
+    return found
+}
+
+main() {
+    fw = spec.init()
+    ready = vulkan.available()
+    reason = "no Vulkan driver"
+    if ready == 0 { reason = "no Vulkan driver (${vulkan.last_error()})" }
+
+    // The cases that drive a device need an instance; one that could not be
+    // made is reported by its own case below, not by crashing the rest.
+    have_instance = 0
+    instance_reason = reason
+    if ready == 1 {
+        probe = create_instance()
+        if probe != null {
+            have_instance = 1
+            vk.vkDestroyInstance(probe, null)
+        } else {
+            instance_reason = "vkCreateInstance failed"
+        }
+    }
+
+    spec.describe(fw, "vulkan.vk: generated declarations") {
+        spec.it(fw, "constants are the header's values") callback {
+            spec.assert_eq(vk.SUCCESS, 0, "SUCCESS")
+            spec.assert_eq(vk.ERROR_INITIALIZATION_FAILED, -3, "ERROR_INITIALIZATION_FAILED")
+            spec.assert_eq(vk.FORMAT_R8G8B8A8_UNORM, vulkan.FORMAT_R8G8B8A8_UNORM, "FORMAT_R8G8B8A8_UNORM")
+            spec.assert_eq(vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 1, "STRUCTURE_TYPE_INSTANCE_CREATE_INFO")
+            spec.assert_eq(vk.QUEUE_GRAPHICS_BIT, 1, "QUEUE_GRAPHICS_BIT")
+            spec.assert_true(vk.WHOLE_SIZE == 0xFFFFFFFFFFFFFFFF, "WHOLE_SIZE is all 64 bits")
+            spec.assert_eq(vk.MAX_PHYSICAL_DEVICE_NAME_SIZE, 256, "MAX_PHYSICAL_DEVICE_NAME_SIZE")
+        }
+        // loader_available() is the loader alone; contrib.vulkan's
+        // available() also needs a driver with a device. A loader with no
+        // driver is 1 and 0, so the relation holds one way only.
+        spec.it(fw, "finds the loader wherever contrib.vulkan is available") callback {
+            if vulkan.available() == 1 {
+                spec.assert_eq(vk.loader_available(), 1, "the loader contrib.vulkan uses")
+            } else {
+                spec.assert_true(vk.loader_available() == 0 || vk.loader_available() == 1, "0 or 1")
+            }
+        }
+    }
+
+    spec.describe(fw, "vulkan.vk: driving the API") {
+        spec.it_when(ready, "reports the instance version through the loader's export", reason) callback {
+            ver = calloc(1, 4)
+            spec.assert_eq(vk.vkEnumerateInstanceVersion(ver), vk.SUCCESS, "vkEnumerateInstanceVersion")
+            v = (ver as uint32[])[0]
+            spec.assert_true(v >= ((1 << 22) | (1 << 12)), "the loader is at least 1.1 (got ${v >> 22}.${(v >> 12) & 1023})")
+            free(ver)
+        }
+        spec.it_when(ready, "creates an instance", reason) callback {
+            spec.assert_eq(have_instance, 1, "vkCreateInstance, with portability enumeration where offered")
+        }
+        spec.it_when(have_instance, "reads a device's properties", instance_reason) callback {
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance")
+            spec.assert_true(vk.load_instance(instance) > 0, "instance entry points resolved")
+            gpu = first_device(instance)
+            spec.assert_true(gpu != null, "a physical device")
+            props = calloc(1, sizeof(VkPhysicalDeviceProperties)) as *VkPhysicalDeviceProperties
+            vk.vkGetPhysicalDeviceProperties(gpu, props as ptr)
+            spec.assert_true(string.length(props.deviceName) > 0, "deviceName is set")
+            spec.assert_true((props.apiVersion >> 22) >= 1, "apiVersion is at least 1.0")
+            // Every Vulkan implementation supports 4096-texel 2D images: a
+            // nested struct read at the wrong offset does not land on it.
+            spec.assert_true(props.limits.maxImageDimension2D >= 4096,
+                             "limits.maxImageDimension2D >= 4096 (got ${props.limits.maxImageDimension2D})")
+            free(props)
+            // A string built at runtime is a wrapped AetherString on the
+            // Aether side: the command must hand the driver its characters.
+            kind = "Physical"
+            spec.assert_true(vk.vkGetInstanceProcAddr(instance, "vkEnumerate${kind}Devices") != null,
+                             "an interpolated name resolves")
+            spec.assert_true(vk.vkGetInstanceProcAddr(instance, "vkNoSuch${kind}Command") == null,
+                             "an unknown one does not")
+            vk.vkDestroyInstance(instance, null)
+        }
+        spec.it_when(have_instance, "the _all helpers agree with the two calls made by hand", instance_reason) callback {
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance")
+            vk.load_instance(instance)
+
+            devs, n, r = vk.vkEnumeratePhysicalDevices_all(instance)
+            spec.assert_eq(r, vk.SUCCESS, "vkEnumeratePhysicalDevices_all")
+            spec.assert_true(n > 0, "at least one device")
+            cell = calloc(1, 4)
+            vk.vkEnumeratePhysicalDevices(instance, cell, null)
+            spec.assert_eq((cell as uint32[])[0] as int, n, "the same count as the first call by hand")
+            by_hand = calloc(n, 8)
+            vk.vkEnumeratePhysicalDevices(instance, cell, by_hand)
+            spec.assert_true((by_hand as ptr[])[0] == (devs as ptr[])[0], "the same first device")
+            free(by_hand)
+            gpu = (devs as ptr[])[0]
+            vk.array_free(devs)
+
+            // Queue families, both ways: Properties2 only answers elements
+            // whose sType the helper set.
+            fams, nf = vk.vkGetPhysicalDeviceQueueFamilyProperties_all(gpu)
+            fams2, nf2 = vk.vkGetPhysicalDeviceQueueFamilyProperties2_all(gpu)
+            spec.assert_true(nf > 0, "at least one queue family")
+            spec.assert_eq(nf2, nf, "Properties2 reports as many families")
+            i = 0
+            while i < nf {
+                f1 = (fams + i * sizeof(VkQueueFamilyProperties)) as *VkQueueFamilyProperties
+                f2 = (fams2 + i * sizeof(VkQueueFamilyProperties2)) as *VkQueueFamilyProperties2
+                spec.assert_eq(f2.sType, vk.STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2, "sType set")
+                spec.assert_eq(f2.queueFamilyProperties.queueCount as int, f1.queueCount as int, "family ${i}: queueCount")
+                spec.assert_eq(f2.queueFamilyProperties.queueFlags as int, f1.queueFlags as int, "family ${i}: queueFlags")
+                i = i + 1
+            }
+            vk.array_free(fams)
+            vk.array_free(fams2)
+
+            // A global command with a string parameter: the loader's own
+            // instance extensions, each with a name.
+            exts, ne, re = vk.vkEnumerateInstanceExtensionProperties_all(null)
+            spec.assert_eq(re, vk.SUCCESS, "vkEnumerateInstanceExtensionProperties_all")
+            spec.assert_true(ne > 0, "at least one instance extension")
+            named = 0
+            j = 0
+            while j < ne {
+                e = (exts + j * sizeof(VkExtensionProperties)) as *VkExtensionProperties
+                if string.length(e.extensionName) > 0 { named = named + 1 }
+                j = j + 1
+            }
+            spec.assert_eq(named, ne, "every extension has a name")
+            vk.array_free(exts)
+
+            free(cell)
+            vk.vkDestroyInstance(instance, null)
+        }
+        spec.it_when(have_instance, "creates a device and reaches its queue through the device's entry points", instance_reason) callback {
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance")
+            vk.load_instance(instance)
+            gpu = first_device(instance)
+            family = graphics_family(gpu)
+            spec.assert_true(family >= 0, "a graphics queue family")
+
+            priority = calloc(1, 4)
+            (priority as f32[])[0] = 1.0
+            qci = calloc(1, sizeof(VkDeviceQueueCreateInfo)) as *VkDeviceQueueCreateInfo
+            qci.sType = vk.STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
+            qci.queueFamilyIndex = family as uint32
+            qci.queueCount = 1
+            qci.pQueuePriorities = priority
+            dci = calloc(1, sizeof(VkDeviceCreateInfo)) as *VkDeviceCreateInfo
+            dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO
+            dci.queueCreateInfoCount = 1
+            dci.pQueueCreateInfos = qci as ptr
+            dev_names = calloc(1, 8)
+            dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+            if lists_extension(dexts, nde, PORTABILITY_SUBSET) == 1 {
+                (dev_names as string[])[0] = PORTABILITY_SUBSET
+                dci.enabledExtensionCount = 1
+                dci.ppEnabledExtensionNames = dev_names
+            }
+            vk.array_free(dexts)
+            out = calloc(1, 8)
+            spec.assert_eq(vk.vkCreateDevice(gpu, dci as ptr, null, out), vk.SUCCESS, "vkCreateDevice")
+            device = (out as ptr[])[0]
+            spec.assert_true(vk.load_device(device) > 0, "device entry points resolved")
+
+            queue_out = calloc(1, 8)
+            vk.vkGetDeviceQueue(device, family as uint32, 0, queue_out)
+            spec.assert_true((queue_out as ptr[])[0] != null, "vkGetDeviceQueue")
+            spec.assert_eq(vk.vkQueueWaitIdle((queue_out as ptr[])[0]), vk.SUCCESS, "vkQueueWaitIdle")
+            spec.assert_eq(vk.vkDeviceWaitIdle(device), vk.SUCCESS, "vkDeviceWaitIdle")
+            vk.vkDestroyDevice(device, null)
+
+            free(queue_out)
+            free(dev_names)
+            free(out)
+            free(dci)
+            free(qci)
+            free(priority)
+            vk.vkDestroyInstance(instance, null)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

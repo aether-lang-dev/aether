@@ -449,6 +449,10 @@ jobs:
         # the leg still passes, which would be silent non-coverage; the
         # assertion below is what makes the skip visible.
         sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers vulkan-tools
+        # The presentation test opens a real window and reads the screen
+        # back: Xvfb is the display, the X11 headers let the window fixture
+        # and contrib/vulkan's VK_KHR_xlib_surface arm compile.
+        sudo apt-get install -y xvfb libx11-dev
 
     - name: Report the Vulkan implementation in use
       run: |
@@ -458,7 +462,7 @@ jobs:
     - name: Build + run all contrib tests (valgrind-gated where leak-clean)
       env:
         VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-      run: make contrib-check-valgrind
+      run: xvfb-run -a -s "-screen 0 1280x1024x24" make contrib-check-valgrind
 
     # A driver is installed above, so contrib/vulkan skipping here would mean
     # the GPU path silently stopped being covered. Fail instead.
@@ -466,19 +470,37 @@ jobs:
       env:
         VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       run: |
-        out="$(./build/contrib-check/vulkan_offscreen 2>&1 || true)"
-        echo "$out"
         # The spec must PASS cases, not skip them. std.spec prints
         # "N passing" and, separately, "N skipped" — so grepping only for
         # "passing" would accept a run of 0. Require a non-zero pass count
-        # AND no skips: with a driver installed, every case must render.
-        passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
-        skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
-        if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ -n "$skipped" ]; then
-          echo "contrib/vulkan did not render; lavapipe should be present on this leg"
-          echo "  passing=${passing:-none} skipped=${skipped:-0}"
-          exit 1
-        fi
+        # AND no skips: with a driver and a display, every case must run.
+        # The present test only skips the one case X11 cannot reach (a
+        # minimised window keeps its size there), so it may report that one.
+        for t in offscreen:0 formats:0 compute:0 raw:0 present:1; do
+          name="${t%%:*}"
+          allowed_skips="${t##*:}"
+          out="$(cd build/contrib-check/vulkan_${name}.rundir && xvfb-run -a -s "-screen 0 1280x1024x24" ../vulkan_${name} 2>&1 || true)"
+          echo "$out" | tail -4
+          passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+          skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
+            echo "contrib/vulkan ${name} did not run; lavapipe and Xvfb should be present on this leg"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+            exit 1
+          fi
+        done
+
+    # contrib/vulkan's files generated from the Vulkan registry, checked
+    # against the registry libvulkan-dev installs: the dispatch header must be
+    # what vkgen generates, and the module vkgen generates must build and run.
+    # The test skips where no registry is installed; one is installed here, so
+    # anything but a pass fails the leg.
+    - name: Check contrib/vulkan's generated declarations against the registry
+      run: |
+        out="$(VKGEN_REQUIRE_RELEASE=1 sh tests/integration/vulkan_vkgen/test_vulkan_vkgen.sh 2>&1)" || { echo "$out"; exit 1; }
+        echo "$out"
+        echo "$out" | grep -q '\[PASS\] vulkan_vkgen'
 
     # Leak gate for contrib/vulkan, which the valgrind run above deliberately
     # skips: lavapipe's LLVM JIT makes valgrind report ~13k errors of the
@@ -489,7 +511,67 @@ jobs:
     - name: Leak-gate contrib/vulkan (LeakSanitizer)
       env:
         VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-      run: make contrib-check-lsan
+      run: xvfb-run -a -s "-screen 0 1280x1024x24" make contrib-check-lsan
+
+  # ============================================================
+  # The GPU tier on macOS: contrib.metal on the runner's Metal device, and
+  # contrib.vulkan through MoltenVK, whose NSView surface is the Apple
+  # presentation path. Only these entries run here; the rest of the contrib
+  # series is covered on Linux and Windows.
+  # ============================================================
+  ci-contrib-macos:
+    name: contrib GPU tests (macOS)
+    runs-on: macos-latest
+
+    # `shell: bash` is what GitHub runs with -o pipefail; the default does
+    # not, and `make contrib-check | tee` would then report tee's status.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # Metal ships with macOS. Vulkan does not: the headers build
+    # contrib.vulkan, the loader is what it opens at runtime, and MoltenVK is
+    # the implementation over Metal.
+    - name: Install the Vulkan headers, loader and MoltenVK
+      run: brew install vulkan-headers vulkan-loader molten-vk
+
+    - name: Build and run the Metal and Vulkan contrib tests
+      run: |
+        # Metal's API validation stops a program at the first misuse, so
+        # contrib.metal runs under it; MoltenVK's own Metal use is not this
+        # repository's to validate.
+        MTL_DEBUG_LAYER=1 ONLY="metal/" make contrib-check 2>&1 | tee contrib-macos.log
+        # brew's opt/ prefix is a symlink, which find follows only with -L.
+        export VK_DRIVER_FILES="$(find -L "$(brew --prefix molten-vk)" -name MoltenVK_icd.json | head -1)"
+        echo "MoltenVK manifest: ${VK_DRIVER_FILES}"
+        [ -n "$VK_DRIVER_FILES" ] || { echo "molten-vk installed no MoltenVK_icd.json"; exit 1; }
+        ONLY="vulkan/" make contrib-check 2>&1 | tee -a contrib-macos.log
+
+    # A device exists on this runner, so a Metal or Vulkan entry that skipped
+    # would be coverage silently lost. The presentation tests may skip the
+    # cases that read the screen back (the fixture cannot on macOS without the
+    # screen-recording permission) and the one that miniaturises the window.
+    - name: Assert the Metal and Vulkan tests actually ran
+      run: |
+        export VK_DRIVER_FILES="$(find -L "$(brew --prefix molten-vk)" -name MoltenVK_icd.json | head -1)"
+        for t in metal_core:0 metal_resources:0 metal_compute:0 metal_actors:0 metal_present:6 \
+                 vulkan_offscreen:0 vulkan_formats:0 vulkan_compute:0 vulkan_raw:0 vulkan_present:6; do
+          name="${t%%:*}"
+          allowed_skips="${t##*:}"
+          out="$(cd build/contrib-check/${name}.rundir && ../${name} 2>&1 || true)"
+          echo "$out" | tail -4
+          passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+          skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
+            echo "contrib ${name} did not run on this runner's GPU"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+            exit 1
+          fi
+        done
 
   # ============================================================
   # Windows CI — MinGW via MSYS2
@@ -523,7 +605,9 @@ jobs:
         # sqlite3 and the Vulkan headers are what the contrib series needs to
         # build here; without them contrib-check skips those entries and the
         # coverage this leg exists for is silently absent.
-        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader pkg-config make bc
+        # Mesa brings lavapipe (vulkan_lvp.dll), a CPU Vulkan driver, so the
+        # Vulkan entries render and present here instead of skipping.
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc
 
     # Windows Defender real-time scanning of every compiler-produced
     # file is the dominant Windows-CI tax: `make ci` builds ~585 separate
@@ -593,19 +677,73 @@ jobs:
       # skips the entries whose dependency is absent, so this reports what this
       # runner can build rather than failing on what it cannot.
       #
-      # The Linux leg installs lavapipe, Mesa's CPU driver, so the Vulkan
-      # entries run on a runner with no GPU. Windows has no equivalent in MSYS2
-      # (SwiftShader is not packaged) and these runners have no Vulkan device,
-      # so the loader branch is COMPILED here and not executed. That is said out
-      # loud below rather than left to be discovered later; if a CPU driver
-      # becomes available, install it above and this becomes real coverage with
-      # no other change.
+      # The runner has no GPU, so the Vulkan entries run on lavapipe, the CPU
+      # driver in MSYS2's Mesa, registered as a Windows driver below: the
+      # loader branch, the Win32 surface and the swapchain all execute here,
+      # not only compile.
       run: |
+        set -o pipefail
+        # The runner's processes are elevated, and an elevated process's
+        # Vulkan loader ignores VK_DRIVER_FILES (the loader's "Elevated
+        # Privilege Caveats"), so lavapipe is registered the way a Windows
+        # software driver installs itself: its manifest's path as a DWORD 0
+        # under HKLM\SOFTWARE\Khronos\Vulkan\Drivers (LoaderDriverInterface).
+        # AETHER_VULKAN_LOADER opens the loader MSYS2 installed with that
+        # driver rather than the vulkan-1.dll the image keeps in System32,
+        # which the DLL search would take first.
+        lvp="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
+        MSYS2_ARG_CONV_EXCL='*' reg add 'HKLM\SOFTWARE\Khronos\Vulkan\Drivers' /v "$lvp" /t REG_DWORD /d 0 /f
+        export AETHER_VULKAN_LOADER="$(cygpath -w /mingw64/bin/vulkan-1.dll)"
         make contrib-check 2>&1 | tee contrib-windows.log
         echo ""
         echo "contrib/vulkan on this runner:"
         grep -E '^\s+(PASS|SKIP|FAIL)\s+vulkan/' contrib-windows.log || \
           echo "  no vulkan entries reported"
+
+    # lavapipe is installed above, so a Vulkan entry that skipped would be
+    # coverage silently lost. The same assertion as the Linux leg's.
+    - name: Assert the Vulkan tests actually ran
+      run: |
+        # lavapipe was registered in the step above; the same loader again.
+        export AETHER_VULKAN_LOADER="$(cygpath -w /mingw64/bin/vulkan-1.dll)"
+        for name in offscreen formats compute raw present; do
+          out="$(cd build/contrib-check/vulkan_${name}.rundir && ../vulkan_${name}.exe 2>&1 || true)"
+          echo "$out" | tail -4
+          passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+          skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ -n "$skipped" ]; then
+            echo "contrib/vulkan ${name} did not run on lavapipe"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+            # What the loader saw: which vulkan-1.dll the search found, and
+            # the loader's own account of the drivers it tried.
+            echo "vulkan-1.dll on the DLL search path:"
+            cmd //c "where vulkan-1.dll" || true
+            ls -l /c/Windows/System32/vulkan-1.dll 2>&1 || true
+            (cd build/contrib-check/vulkan_${name}.rundir &&
+             VK_LOADER_DEBUG=error,warn,driver ../vulkan_${name}.exe 2>&1 |
+             grep "Vulkan Loader" | grep -v "registry_entry" | head -40) || true
+            exit 1
+          fi
+        done
+
+    # Direct3D 12 needs no driver install: every Windows ships WARP, which is
+    # what a runner without a GPU renders on. A skip here would mean the
+    # module stopped finding Direct3D, so it fails the leg.
+    - name: Assert the Direct3D 12 tests actually ran
+      run: |
+        for name in core resources compute actors present; do
+          out="$(cd build/contrib-check/d3d12_${name}.rundir && ../d3d12_${name}.exe 2>&1 || true)"
+          echo "$out" | tail -4
+          passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+          skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ -n "$skipped" ]; then
+            echo "contrib/d3d12 ${name} did not run on WARP"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+            exit 1
+          fi
+        done
 
   # ============================================================
   # Platform portability — cooperative scheduler, WASM, embedded

@@ -371,6 +371,21 @@ t.hashFunction = my_hash        // checked against fn(ptr) -> int
 - **The field holds the function's real address**, cast to whatever type the header declared for that member, so C can call through it directly. Only a top-level function qualifies: a closure carries an environment pointer, and a C function pointer has nowhere to put it.
 - This is specific to **C-owned** structs (`extern struct`, with or without `@c_import`). A callback field on an Aether-owned struct holds a closure and keeps its captures, which is the right behaviour there and unchanged.
 
+### String fields of a header-defined struct borrow
+
+A `string` field of an `extern struct ... @c_import` is the header's `const char*`, and it **borrows** the string stored in it, as the C API that declares it expects. There is no hidden ownership flag beside the field, since the header's layout has none. The struct is never the owner:
+
+```aether,fragment
+app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
+app.pApplicationName = "viewer"          // a literal: static, nothing to free
+name = "viewer ${version}"
+app.pEngineName = name                   // borrowed: `name` must outlive every use
+```
+
+- A string this function made and then stored in such a struct, by `s.field = v` or in a literal, is **kept alive** rather than freed when the function returns, because the struct may outlive it (returned, stored, handed to C). The compiler prefers a leak to a dangling pointer. Free it yourself when the C side is done with it.
+- A string built directly in the store, as in `app.pEngineName = "viewer ${version}"`, belongs to nobody afterwards. Keep it in a local when you mean to free it.
+- A field of an Aether-defined struct is different: it owns its string, and the struct's destructor frees it.
+
 ### Companion: `@extern("c_symbol")`
 
 `@extern` and `@c_callback` close the FFI loop in both directions. `@extern` binds an Aether-namespace name to a C symbol the linker provides; `@c_callback` emits an Aether function under a C symbol the linker can hand to any consumer. Both use the same `@`-prefixed annotation grammar.

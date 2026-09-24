@@ -1,0 +1,244 @@
+// contrib.metal compute pipelines: the same checks as contrib.vulkan's
+// test_vulkan_compute.ae, with the kernels in MSL. MSL does not declare a
+// kernel's threadgroup size, so each pass is given the one the GLSL declares
+// (compute_set_group_size), and a dispatch without one is refused.
+//
+// A compute shader transforms a buffer and every element is checked against
+// the same computation done here on the CPU: a float transform to float
+// precision, and an integer one that must be exact. Then compute output is
+// drawn: a pass writes a triangle's corners into a buffer that a vertex
+// shader pulls from, and the pixels show the triangle appear and disappear
+// with what the pass wrote.
+
+import std.fs
+import std.string
+import contrib.metal
+import std.spec
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// The shader's float math is single precision; the CPU twin here is double.
+// Agreement to 1e-5 relative (plus a floor near zero) is what float32 gives.
+close_enough(got: float, want: float) -> int {
+    d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    mag = want
+    if mag < 0.0 { mag = 0.0 - mag }
+    if d <= mag * 0.00001 + 0.0001 { return 1 }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    reason = "no Metal"
+    dev = null
+    cs = ""
+    cs_len = 0
+    if metal.available() == 1 {
+        dev = metal.device_create()
+        cs, cs_len = load("contrib/metal/shaders/transform_cs.metal")
+        if dev == null {
+            reason = "device_create failed (${metal.last_error()})"
+        } else if cs_len == 0 {
+            reason = "MSL shaders missing"
+        } else {
+            ready = 1
+        }
+    } else {
+        reason = "no Metal (${metal.last_error()})"
+    }
+
+    // 1000 elements: not a multiple of the 64-wide work group, so the
+    // shader's bounds guard is what keeps the last group in range.
+    n = 1000
+    groups = (n + 63) / 64
+    binds = null
+    comp = null
+    src = null
+    dst = null
+    ints = null
+    params = null
+    if ready == 1 {
+        binds = metal.bindings_create()
+        metal.bindings_storage(binds, 0)
+        metal.bindings_storage(binds, 1)
+        metal.bindings_storage(binds, 2)
+        metal.bindings_uniform(binds, 3)
+        comp = metal.compute_create(dev, cs, cs_len, binds, 12)
+        if comp != null { metal.compute_set_group_size(comp, 64, 1, 1) }
+        src = metal.buffer_create(dev, n * 4)
+        dst = metal.buffer_create(dev, n * 4)
+        ints = metal.buffer_create(dev, n * 4)
+        params = metal.buffer_create(dev, 16)
+        if comp == null { ready = 0; reason = "compute_create failed (${metal.last_error()})" }
+    }
+
+    spec.describe(fw, "metal: a compute pass over buffers") {
+        spec.it_when(ready, "refuses to dispatch before every binding is set", reason) callback {
+            rc = metal.dispatch(comp, groups, 1, 1)
+            spec.assert_eq(rc, metal.ERR_ARG, "refused")
+            spec.assert_true(string.index_of(metal.last_error(), "never set") >= 0, "names the binding")
+        }
+
+        spec.it_when(ready, "matches the CPU element by element", reason) callback {
+            i = 0
+            while i < n {
+                metal.buffer_set_float(src, i, (i as float) * 0.37 - 50.0)
+                metal.buffer_set_int(ints, i, i - 500)
+                i = i + 1
+            }
+            metal.buffer_set_float(params, 0, 0.25)
+            spec.assert_eq(metal.compute_set_buffer(comp, 0, src), 0, "bind src")
+            spec.assert_eq(metal.compute_set_buffer(comp, 1, dst), 0, "bind dst")
+            spec.assert_eq(metal.compute_set_buffer(comp, 2, ints), 0, "bind ints")
+            spec.assert_eq(metal.compute_set_buffer(comp, 3, params), 0, "bind the uniform")
+            metal.compute_push_float(comp, 0, 0.5)
+            metal.compute_push_float(comp, 1, -2.0)
+            metal.compute_push_int(comp, 2, n)
+            spec.assert_eq(metal.dispatch(comp, groups, 1, 1), 0, "dispatch")
+
+            bad_f = 0
+            bad_i = 0
+            i = 0
+            while i < n {
+                x = (i as float) * 0.37 - 50.0
+                want = x * x * 0.5 - 2.0 + 0.25
+                if close_enough(metal.buffer_float(dst, i), want) == 0 { bad_f = bad_f + 1 }
+                if metal.buffer_int(ints, i) != (i - 500) * 3 + 7 { bad_i = bad_i + 1 }
+                i = i + 1
+            }
+            spec.assert_eq(bad_f, 0, "every float matches the CPU")
+            spec.assert_eq(bad_i, 0, "every int is exact")
+        }
+
+        spec.it_when(ready, "takes new push constants on the next dispatch", reason) callback {
+            metal.compute_push_float(comp, 1, 10.0)
+            spec.assert_eq(metal.dispatch(comp, groups, 1, 1), 0, "dispatch again")
+            x = 3.0 * 0.37 - 50.0
+            spec.assert_eq(close_enough(metal.buffer_float(dst, 3), x * x * 0.5 + 10.0 + 0.25), 1, "new offset")
+            // Applied twice in place: ((v * 3 + 7) * 3 + 7).
+            spec.assert_eq(metal.buffer_int(ints, 3), ((3 - 500) * 3 + 7) * 3 + 7, "ints transformed again")
+        }
+
+        spec.it_when(ready, "runs asynchronously and waits on request", reason) callback {
+            spec.assert_eq(metal.dispatch_async(comp, groups, 1, 1), 0, "dispatch_async")
+            spec.assert_eq(metal.compute_set_buffer(comp, 0, src), metal.ERR_ARG, "no rebinding in flight")
+            spec.assert_eq(metal.compute_wait(comp), 0, "compute_wait")
+            spec.assert_eq(metal.buffer_int(ints, 0), (((0 - 500) * 3 + 7) * 3 + 7) * 3 + 7, "third pass landed")
+        }
+    }
+
+    spec.describe(fw, "metal: compute refusals") {
+        spec.it_when(ready, "refuses empty dispatches and oversized groups", reason) callback {
+            spec.assert_eq(metal.dispatch(comp, 0, 1, 1), metal.ERR_ARG, "zero groups")
+            spec.assert_eq(metal.compute_set_group_size(comp, 0, 1, 1), metal.ERR_ARG, "an empty group")
+            spec.assert_eq(metal.compute_set_group_size(comp, 1 << 20, 1, 1), metal.ERR_UNSUPPORTED, "a million threads a group")
+            spec.assert_true(string.index_of(metal.last_error(), "exceeds") >= 0, "names the limit")
+            spec.assert_eq(metal.compute_set_group_size(comp, 64, 1, 1), metal.OK, "64 again")
+        }
+        spec.it_when(ready, "refuses to dispatch before the group size is set", reason) callback {
+            fresh = metal.compute_create(dev, cs, cs_len, binds, 12)
+            spec.assert_true(fresh != null, "created")
+            spec.assert_eq(metal.dispatch(fresh, 1, 1, 1), metal.ERR_ARG, "refused")
+            spec.assert_true(string.index_of(metal.last_error(), "compute_set_group_size") >= 0, "says what to call")
+            metal.compute_destroy(fresh)
+        }
+        spec.it_when(ready, "refuses a binding of the wrong kind", reason) callback {
+            spec.assert_eq(metal.compute_set_buffer(comp, 7, src), metal.ERR_ARG, "undeclared binding")
+        }
+        spec.it_when(ready, "bounds-checks buffer access", reason) callback {
+            spec.assert_eq(metal.buffer_size(params), 16, "size")
+            spec.assert_eq(metal.buffer_set_float(params, 4, 1.0), metal.ERR_ARG, "slot 4 of 16 bytes")
+            v = metal.buffer_float(params, 4)
+            spec.assert_true(v != v, "reading past the end is NaN")
+        }
+        spec.it_when(ready, "reports the MSL compiler's error", reason) callback {
+            broken = "kernel void broken() { undefined_call(); }"
+            bad = metal.compute_create(dev, broken, string.length(broken), null, 0)
+            spec.assert_true(bad == null, "refused")
+            spec.assert_true(string.index_of(metal.last_error(), "undefined_call") >= 0, "names the problem")
+        }
+    }
+
+    // Compute output drawn directly: vertices_cs writes three corners,
+    // pulled_vs reads them by [[vertex_id]] from the same buffer.
+    draw_ready = 0
+    draw_reason = reason
+    vcs = ""
+    vcs_len = 0
+    pvert = ""
+    pvlen = 0
+    frag = ""
+    flen = 0
+    if ready == 1 {
+        vcs, vcs_len = load("contrib/metal/shaders/vertices_cs.metal")
+        pvert, pvlen = load("contrib/metal/shaders/pulled_vs.metal")
+        frag, flen = load("contrib/metal/shaders/triangle_fs.metal")
+        if vcs_len > 0 && pvlen > 0 && flen > 0 { draw_ready = 1 }
+        if draw_ready == 0 { draw_reason = "MSL shaders missing" }
+    }
+
+    spec.describe(fw, "metal: drawing what a compute pass wrote") {
+        spec.it_when(draw_ready, "draws a triangle a compute pass placed", draw_reason) callback {
+            positions = metal.buffer_create(dev, 3 * 8)
+            cb = metal.bindings_create()
+            metal.bindings_storage(cb, 0)
+            gen = metal.compute_create(dev, vcs, vcs_len, cb, 4)
+            spec.assert_true(gen != null, "vertex generator (${metal.last_error()})")
+            metal.compute_set_group_size(gen, 1, 1, 1)
+            metal.compute_set_buffer(gen, 0, positions)
+
+            t = metal.target_create(dev, 64, 64)
+            empty = metal.layout_create()
+            gb = metal.bindings_create()
+            metal.bindings_storage(gb, 0)
+            pipe = metal.pipeline_create_ex(dev, t, pvert, pvlen, frag, flen, empty, 0, gb)
+            spec.assert_true(pipe != null, "pulling pipeline (${metal.last_error()})")
+            spec.assert_eq(metal.set_buffer(pipe, 0, positions), 0, "the draw reads the buffer")
+            metal.verts_reserve(t, 3)
+
+            metal.compute_push_float(gen, 0, 0.9)
+            spec.assert_eq(metal.dispatch(gen, 3, 1, 1), 0, "place the corners")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), 0, "draw")
+            px = metal.pixel(t, 32, 40)
+            spec.assert_eq(metal.red(px), 255, "orange red")
+            spec.assert_true(metal.green(px) >= 127 && metal.green(px) <= 128, "orange green")
+
+            // A zero scale collapses the triangle: the next draw shows nothing,
+            // so the draw is reading the pass's output, not a copy made once.
+            metal.compute_push_float(gen, 0, 0.0)
+            spec.assert_eq(metal.dispatch(gen, 3, 1, 1), 0, "collapse the corners")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), 0, "draw again")
+            spec.assert_eq(metal.red(metal.pixel(t, 32, 40)), 0, "nothing drawn")
+
+            metal.pipeline_destroy(pipe)
+            metal.target_destroy(t)
+            metal.layout_destroy(empty)
+            metal.bindings_destroy(gb)
+            metal.compute_destroy(gen)
+            metal.bindings_destroy(cb)
+            metal.buffer_destroy(positions)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    if comp != null { metal.compute_destroy(comp) }
+    if binds != null { metal.bindings_destroy(binds) }
+    if src != null { metal.buffer_destroy(src) }
+    if dst != null { metal.buffer_destroy(dst) }
+    if ints != null { metal.buffer_destroy(ints) }
+    if params != null { metal.buffer_destroy(params) }
+    string.free(cs)
+    string.free(vcs)
+    string.free(pvert)
+    string.free(frag)
+    if dev != null { metal.device_destroy(dev) }
+    return _rc
+}

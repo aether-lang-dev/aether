@@ -1,0 +1,327 @@
+// contrib.d3d12 presentation: the same checks as contrib.vulkan's
+// test_vulkan_present.ae, through a DXGI flip-model swapchain.
+//
+// A frame is drawn into a target, presented into a real window, and the
+// window's pixels are read back off the screen: a present that reports
+// success and shows nothing fails here. The window comes from the test
+// fixture in tests/support/native_window, which stands in for aether-ui's
+// native_view (this repository's CI cannot build a toolkit that is itself
+// built on this compiler); the handle kinds are the same.
+//
+// Direct3D 12 presents to Win32 windows, so everywhere else this skips, as a
+// user's program would find available() is 0 there.
+
+import std.fs
+import std.string
+import contrib.d3d12
+import std.spec
+
+extern tw_ae_available() -> int
+extern tw_ae_last_error() -> string
+extern tw_ae_create(title: string, w: int, h: int) -> ptr
+extern tw_ae_destroy(win: ptr)
+extern tw_ae_pump(win: ptr) -> int
+extern tw_ae_width(win: ptr) -> int
+extern tw_ae_height(win: ptr) -> int
+extern tw_ae_set_size(win: ptr, w: int, h: int) -> int
+extern tw_ae_kind(win: ptr) -> int
+extern tw_ae_handle(win: ptr) -> ptr
+extern tw_ae_display(win: ptr) -> ptr
+extern tw_ae_pixel(win: ptr, x: int, y: int) -> int
+extern tw_ae_set_minimized(win: ptr, on: int) -> int
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// |a - b| <= tol on each of the three channels of two 0xRRGGBB values.
+near_rgb(got: int, want: int, tol: int) -> int {
+    i = 0
+    while i < 3 {
+        shift = i * 8
+        a = (got >> shift) & 255
+        b = (want >> shift) & 255
+        d = a - b
+        if d < 0 { d = 0 - d }
+        if d > tol { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// The window shows the frame once the display has composed it, which is a
+// little after present() returns: poll the screen, pumping the window, for
+// up to two seconds. Returns the last colour read.
+wait_for_colour(win: ptr, x: int, y: int, want: int) -> int {
+    got = -1
+    tries = 0
+    while tries < 120 {
+        tw_ae_pump(win)
+        got = tw_ae_pixel(win, x, y)
+        if got >= 0 && near_rgb(got, want, 3) == 1 { return got }
+        sleep(16)
+        tries = tries + 1
+    }
+    return got
+}
+
+// A whole-target triangle in one colour, drawn over a clear of another, so
+// the corners and the centre each have one right answer.
+fill_triangle(t: ptr, r: float, g: float, b: float) {
+    d3d12.verts_reserve(t, 3)
+    d3d12.verts_set(t, 0, 0.0, 0.9, r, g, b)
+    d3d12.verts_set(t, 1, -0.9, -0.9, r, g, b)
+    d3d12.verts_set(t, 2, 0.9, -0.9, r, g, b)
+}
+
+main() {
+    fw = spec.init()
+
+    ready = 0
+    reason = "no Direct3D 12"
+    dev = null
+    win = null
+    sc = null
+    t = null
+    pipe = null
+    kind = 0
+    vert = ""
+    frag = ""
+    vert_len = 0
+    frag_len = 0
+
+    if d3d12.available() != 1 {
+        reason = "no Direct3D 12 (${d3d12.last_error()})"
+    } else if tw_ae_available() != 1 {
+        reason = "no display to open a window on (${tw_ae_last_error()})"
+    } else {
+        dev = d3d12.device_create()
+        vert, vert_len = load("contrib/d3d12/shaders/triangle_vs.hlsl")
+        frag, frag_len = load("contrib/d3d12/shaders/triangle_ps.hlsl")
+        if dev == null {
+            reason = "device_create failed (${d3d12.last_error()})"
+        } else if vert_len == 0 || frag_len == 0 {
+            reason = "HLSL shaders missing"
+        } else {
+            win = tw_ae_create("contrib.d3d12 present test", 160, 120)
+            if win == null {
+                reason = "cannot open a window (${tw_ae_last_error()})"
+            } else {
+                kind = tw_ae_kind(win)
+                sc = d3d12.swapchain_create(dev, kind, tw_ae_display(win), tw_ae_handle(win),
+                    tw_ae_width(win), tw_ae_height(win))
+                if sc == null {
+                    reason = "Direct3D 12 cannot present here (${d3d12.last_error()})"
+                } else {
+                    t = d3d12.target_create(dev, tw_ae_width(win), tw_ae_height(win))
+                    pipe = d3d12.pipeline_create(dev, t, vert, vert_len, frag, frag_len)
+                    if t != null && pipe != null { ready = 1 }
+                    if ready == 0 { reason = "target or pipeline failed (${d3d12.last_error()})" }
+                }
+            }
+        }
+    }
+    // Reading the screen back is what proves a frame arrived; on macOS the
+    // fixture cannot, so those cases say so instead of passing vacuously.
+    readable = ready
+    read_reason = reason
+
+    spec.describe(fw, "d3d12: swapchain over a window") {
+        spec.it_when(ready, "takes the window's size", reason) callback {
+            spec.assert_eq(d3d12.swapchain_width(sc), tw_ae_width(win), "width")
+            spec.assert_eq(d3d12.swapchain_height(sc), tw_ae_height(win), "height")
+            spec.assert_eq(d3d12.swapchain_format(sc), 87, "BGRA8 back buffers (DXGI_FORMAT_B8G8R8A8_UNORM)")
+        }
+
+        spec.it_when(ready, "refuses to present a target with no frame yet", reason) callback {
+            spec.assert_eq(d3d12.present(sc, t), d3d12.ERR_ARG, "present before any draw")
+            spec.assert_true(string.length(d3d12.last_error()) > 0, "explains why")
+        }
+
+        spec.it_when(readable, "shows the drawn frame in the window", read_reason) callback {
+            fill_triangle(t, 0.0, 1.0, 0.0)
+            spec.assert_eq(d3d12.draw(t, pipe, 0.2, 0.4, 0.8, 1.0), d3d12.OK, "draw")
+            before = d3d12.swapchain_presented(sc)
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present")
+            spec.assert_eq(d3d12.swapchain_presented(sc), before + 1, "one frame presented")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            // 0.2, 0.4, 0.8 is 51, 102, 204 in a UNORM image.
+            corner = wait_for_colour(win, 2, 2, 0x3366CC)
+            spec.assert_eq(near_rgb(corner, 0x3366CC, 3), 1, "the clear colour reached the corner (got ${corner})")
+            centre = wait_for_colour(win, w / 2, h / 2, 0x00FF00)
+            spec.assert_eq(near_rgb(centre, 0x00FF00, 3), 1, "the triangle reached the centre (got ${centre})")
+        }
+    }
+
+    spec.describe(fw, "d3d12: following the window's size") {
+        spec.it_when(readable, "rebuilds on swapchain_resize and shows the resized frame", read_reason) callback {
+            spec.assert_eq(tw_ae_set_size(win, 240, 180), 0, "window resized")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            spec.assert_eq(d3d12.swapchain_resize(sc, w, h), d3d12.OK, "swapchain_resize")
+            spec.assert_eq(d3d12.swapchain_width(sc), w, "new width")
+            spec.assert_eq(d3d12.swapchain_height(sc), h, "new height")
+            spec.assert_eq(d3d12.target_resize(t, w, h), d3d12.OK, "target_resize")
+            spec.assert_eq(d3d12.target_width(t), w, "target width")
+            // The same pipeline draws into the resized target.
+            fill_triangle(t, 1.0, 0.0, 0.0)
+            spec.assert_eq(d3d12.draw(t, pipe, 0.0, 0.0, 1.0, 1.0), d3d12.OK, "draw at the new size")
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present at the new size")
+            far = wait_for_colour(win, w - 3, h - 3, 0x0000FF)
+            spec.assert_eq(near_rgb(far, 0x0000FF, 3), 1, "the far corner of the larger window (got ${far})")
+            centre = wait_for_colour(win, w / 2, h / 2, 0xFF0000)
+            spec.assert_eq(near_rgb(centre, 0xFF0000, 3), 1, "the centre (got ${centre})")
+        }
+
+        spec.it_when(ready, "rebuilds by itself when the window outgrows it", reason) callback {
+            spec.assert_eq(tw_ae_set_size(win, 200, 150), 0, "window resized")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            spec.assert_eq(d3d12.target_resize(t, w, h), d3d12.OK, "target_resize")
+            fill_triangle(t, 1.0, 1.0, 0.0)
+            spec.assert_eq(d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            // No swapchain_resize: the out-of-date or suboptimal swapchain is
+            // rebuilt inside present, within a frame or two.
+            i = 0
+            while i < 4 {
+                spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present ${i}")
+                tw_ae_pump(win)
+                i = i + 1
+            }
+            spec.assert_eq(d3d12.swapchain_width(sc), w, "followed the width")
+            spec.assert_eq(d3d12.swapchain_height(sc), h, "followed the height")
+        }
+
+        spec.it_when(readable, "scales a smaller target up to the window", read_reason) callback {
+            small = d3d12.target_create(dev, 32, 24)
+            fill_triangle(small, 1.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.draw(small, pipe, 1.0, 1.0, 1.0, 1.0), d3d12.OK, "draw small")
+            spec.assert_eq(d3d12.present(sc, small), d3d12.OK, "present small")
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            corner = wait_for_colour(win, 1, 1, 0xFFFFFF)
+            spec.assert_eq(near_rgb(corner, 0xFFFFFF, 3), 1, "scaled clear (got ${corner})")
+            centre = wait_for_colour(win, w / 2, h / 2, 0xFF00FF)
+            spec.assert_eq(near_rgb(centre, 0xFF00FF, 3), 1, "scaled triangle (got ${centre})")
+            d3d12.target_destroy(small)
+        }
+    }
+
+    // A target's encoding decides the back buffer view's: an sRGB target is
+    // shown as stored, and a float target's linear light is encoded on the
+    // way in. So linear 0.5 reaches the screen as ~188 from both; through a
+    // UNORM view the float one would read 128.
+    spec.describe(fw, "d3d12: presenting sRGB and float targets") {
+        spec.it_when(readable, "shows an sRGB target's encoded colour", read_reason) callback {
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            st = d3d12.target_create_format(dev, w, h, d3d12.FORMAT_R8G8B8A8_SRGB, 0, 1)
+            spec.assert_true(st != null, "sRGB target (${d3d12.last_error()})")
+            sp = d3d12.pipeline_create(dev, st, vert, vert_len, frag, frag_len)
+            fill_triangle(st, 0.5, 0.5, 0.5)
+            spec.assert_eq(d3d12.draw(st, sp, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(d3d12.present(sc, st), d3d12.OK, "present")
+            got = wait_for_colour(win, w / 2, h / 2, 0xBCBCBC)
+            spec.assert_eq(near_rgb(got, 0xBCBCBC, 2), 1, "linear 0.5 shows as ~188 (got ${got})")
+            d3d12.pipeline_destroy(sp)
+            d3d12.target_destroy(st)
+        }
+
+        spec.it_when(readable, "encodes a float target's linear light for display", read_reason) callback {
+            w = tw_ae_width(win)
+            h = tw_ae_height(win)
+            ft = d3d12.target_create_format(dev, w, h, d3d12.FORMAT_R16G16B16A16_SFLOAT, 0, 1)
+            spec.assert_true(ft != null, "float target (${d3d12.last_error()})")
+            fp = d3d12.pipeline_create(dev, ft, vert, vert_len, frag, frag_len)
+            fill_triangle(ft, 0.5, 0.5, 0.5)
+            spec.assert_eq(d3d12.draw(ft, fp, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(d3d12.present(sc, ft), d3d12.OK, "present")
+            got = wait_for_colour(win, w / 2, h / 2, 0xBCBCBC)
+            spec.assert_eq(near_rgb(got, 0xBCBCBC, 2), 1, "linear 0.5 shows as ~188 (got ${got})")
+            // Back to the UNORM target: the swapchain follows it again.
+            spec.assert_eq(d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw UNORM")
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present UNORM")
+            d3d12.pipeline_destroy(fp)
+            d3d12.target_destroy(ft)
+        }
+    }
+
+    spec.describe(fw, "d3d12: presenting without readback") {
+        spec.it_when(ready, "presents with readback off and refuses the readers", reason) callback {
+            spec.assert_eq(d3d12.target_set_readback(t, 0), d3d12.OK, "readback off")
+            spec.assert_eq(d3d12.target_readback(t), 0, "reports off")
+            fill_triangle(t, 0.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present")
+            spec.assert_eq(d3d12.pixel(t, 0, 0), -1, "pixel() refused")
+            spec.assert_true(string.index_of(d3d12.last_error(), "readback is off") >= 0, "says why")
+            spec.assert_eq(d3d12.target_set_readback(t, 1), d3d12.OK, "readback on")
+            spec.assert_eq(d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "draw")
+            px = d3d12.pixel(t, 0, 0)
+            spec.assert_eq(d3d12.red(px) + d3d12.green(px) + d3d12.blue(px), 0, "readback works again")
+        }
+
+        spec.it_when(ready, "keeps presenting with vsync off and back on", reason) callback {
+            spec.assert_eq(d3d12.swapchain_set_vsync(sc, 0), d3d12.OK, "vsync off")
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present without vsync")
+            spec.assert_eq(d3d12.swapchain_set_vsync(sc, 1), d3d12.OK, "vsync on")
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present with vsync")
+        }
+    }
+
+    // A minimised Win32 window has no client area: nothing is presented and
+    // the swapchain picks the window up again when it is restored.
+    min_ready = ready
+    min_reason = reason
+
+    spec.describe(fw, "d3d12: a window with no area") {
+        spec.it_when(min_ready, "skips presenting while minimised and resumes after", min_reason) callback {
+            spec.assert_eq(tw_ae_set_minimized(win, 1), 0, "minimised")
+            before = d3d12.swapchain_presented(sc)
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present while minimised succeeds")
+            spec.assert_eq(d3d12.swapchain_width(sc), 0, "no area")
+            spec.assert_eq(d3d12.swapchain_presented(sc), before, "nothing was presented")
+            spec.assert_eq(tw_ae_set_minimized(win, 0), 0, "restored")
+            spec.assert_eq(d3d12.present(sc, t), d3d12.OK, "present after restore")
+            spec.assert_eq(d3d12.swapchain_width(sc), tw_ae_width(win), "the area is back")
+            spec.assert_eq(d3d12.swapchain_presented(sc), before + 1, "presented again")
+        }
+    }
+
+    have_dev = 0
+    if dev != null { have_dev = 1 }
+    spec.describe(fw, "d3d12: swapchain refusals") {
+        spec.it_when(have_dev, "refuses an unknown window kind", reason) callback {
+            bad = d3d12.swapchain_create(dev, 9, null, null, 64, 64)
+            spec.assert_true(bad == null, "kind 9 refused")
+            spec.assert_true(string.length(d3d12.last_error()) > 0, "explains why")
+        }
+        spec.it_when(have_dev, "refuses a null window handle", reason) callback {
+            bad = d3d12.swapchain_create(dev, kind, null, null, 64, 64)
+            spec.assert_true(bad == null, "null handle refused")
+        }
+        spec.it(fw, "tolerates destroying a null swapchain") callback {
+            d3d12.swapchain_destroy(null)
+            // An argument error where the module is built for Direct3D, and
+            // "no Direct3D" from the stub every other platform compiles.
+            rc = d3d12.present(null, null)
+            spec.assert_true(rc == d3d12.ERR_ARG || rc == d3d12.ERR_NO_LOADER, "present(null) refused (${rc})")
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+
+    if pipe != null { d3d12.pipeline_destroy(pipe) }
+    if t != null { d3d12.target_destroy(t) }
+    if sc != null { d3d12.swapchain_destroy(sc) }
+    if win != null { tw_ae_destroy(win) }
+    string.free(vert)
+    string.free(frag)
+    if dev != null { d3d12.device_destroy(dev) }
+    return _rc
+}

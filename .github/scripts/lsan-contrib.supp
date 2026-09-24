@@ -30,3 +30,9 @@ leak:libLLVM
 leak:libdrm
 leak:libgallium
 leak:libglapi
+
+# The X11 client libraries the presentation test's window and lavapipe's X11
+# swapchain run through: Xlib keeps per-display and per-extension state that
+# it frees lazily or never.
+leak:libX11
+leak:libxcb

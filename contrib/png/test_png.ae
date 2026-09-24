@@ -1,0 +1,224 @@
+// contrib.png tests: the encoder's output is decoded here, independently of
+// how it was made (chunk walk, CRC check, inflate, and the five PNG filters
+// undone as the specification defines them), and must give back exactly the
+// pixels that went in. A wrong filter, predictor or checksum fails it.
+
+import std.bytes
+import std.fs
+import std.hash
+import std.spec
+import std.string
+import std.zlib
+import contrib.png
+
+be32(s: string, n: int, at: int) -> long {
+    b0 = (string.char_at_n(s, n, at) & 255) as long
+    b1 = (string.char_at_n(s, n, at + 1) & 255) as long
+    b2 = (string.char_at_n(s, n, at + 2) & 255) as long
+    b3 = (string.char_at_n(s, n, at + 3) & 255) as long
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+paeth(a: int, b: int, c: int) -> int {
+    p = a + b - c
+    pa = p - a
+    if pa < 0 { pa = 0 - pa }
+    pb = p - b
+    if pb < 0 { pb = 0 - pb }
+    pc = p - c
+    if pc < 0 { pc = 0 - pc }
+    if pa <= pb && pa <= pc { return a }
+    if pb <= pc { return b }
+    return c
+}
+
+// Decodes an RGBA8 PNG the encoder wrote. Returns the pixels as a bytes
+// buffer (width * height * 4), or null with a reason in the second slot.
+decode(data: string, n: int, width: int, height: int) -> (ptr, string) {
+    // Signature.
+    sig = bytes.new(8)
+    bytes.set(sig, 0, 137)
+    bytes.set(sig, 1, 80)
+    bytes.set(sig, 2, 78)
+    bytes.set(sig, 3, 71)
+    bytes.set(sig, 4, 13)
+    bytes.set(sig, 5, 10)
+    bytes.set(sig, 6, 26)
+    bytes.set(sig, 7, 10)
+    k = 0
+    while k < 8 {
+        if (string.char_at_n(data, n, k) & 255) != bytes.get(sig, k) {
+            bytes.free(sig)
+            return (null, "signature byte ${k} is wrong")
+        }
+        k = k + 1
+    }
+    bytes.free(sig)
+
+    // Chunks: every CRC checked, IDATs concatenated, IHDR read.
+    idat = bytes.new(n)
+    idat_len = 0
+    at = 8
+    seen_end = 0
+    ihdr_w = -1
+    ihdr_h = -1
+    while at + 12 <= n && seen_end == 0 {
+        length = be32(data, n, at) as int
+        kind = string.substring(data, at + 4, at + 8)
+        body = string.substring(data, at + 4, at + 8 + length)
+        want = hash.crc32(body, length + 4)
+        string.free(body)
+        got = be32(data, n, at + 8 + length)
+        if want != got { return (null, "chunk ${kind} has a bad CRC") }
+        if string.equals(kind, "IHDR") == 1 {
+            ihdr_w = be32(data, n, at + 8) as int
+            ihdr_h = be32(data, n, at + 12) as int
+            depth = string.char_at_n(data, n, at + 16) & 255
+            ctype = string.char_at_n(data, n, at + 17) & 255
+            if depth != 8 || ctype != 6 { return (null, "IHDR says depth ${depth} type ${ctype}") }
+        }
+        if string.equals(kind, "IDAT") == 1 {
+            piece = string.substring(data, at + 8, at + 8 + length)
+            bytes.copy_from_string(idat, idat_len, piece, length)
+            string.free(piece)
+            idat_len = idat_len + length
+        }
+        if string.equals(kind, "IEND") == 1 { seen_end = 1 }
+        string.free(kind)
+        at = at + 12 + length
+    }
+    if seen_end == 0 { return (null, "no IEND chunk") }
+    if ihdr_w != width || ihdr_h != height { return (null, "IHDR size ${ihdr_w}x${ihdr_h}") }
+
+    packed = bytes.finish(idat, idat_len)
+    raw, raw_len, zerr = zlib.inflate(packed, idat_len)
+    string.free(packed)
+    if zerr != "" { return (null, "inflate: ${zerr}") }
+    stride = width * 4
+    if raw_len != height * (stride + 1) { return (null, "inflated ${raw_len} bytes") }
+
+    out = bytes.new(stride * height)
+    bytes.set_length(out, stride * height)
+    y = 0
+    while y < height {
+        f = string.char_at_n(raw, raw_len, y * (stride + 1)) & 255
+        if f > 4 { return (null, "row ${y} has filter ${f}") }
+        i = 0
+        while i < stride {
+            x = string.char_at_n(raw, raw_len, y * (stride + 1) + 1 + i) & 255
+            a = 0
+            if i >= 4 { a = bytes.get(out, y * stride + i - 4) }
+            b = 0
+            if y > 0 { b = bytes.get(out, (y - 1) * stride + i) }
+            c = 0
+            if i >= 4 && y > 0 { c = bytes.get(out, (y - 1) * stride + i - 4) }
+            v = x
+            if f == 1 { v = x + a }
+            if f == 2 { v = x + b }
+            if f == 3 { v = x + ((a + b) / 2) }
+            if f == 4 { v = x + paeth(a, b, c) }
+            bytes.set(out, y * stride + i, v & 255)
+            i = i + 1
+        }
+        y = y + 1
+    }
+    string.free(raw)
+    return (out, "")
+}
+
+// A test image with every kind of row the filters care about: a horizontal
+// gradient (Sub wins), a vertical one (Up wins), noise-like values, and a
+// flat colour, so every filter the encoder picks is exercised by decode.
+make_image(w: int, h: int) -> ptr {
+    b = bytes.new(w * h * 4)
+    bytes.set_length(b, w * h * 4)
+    y = 0
+    while y < h {
+        x = 0
+        while x < w {
+            o = (y * w + x) * 4
+            bytes.set(b, o, (x * 7) & 255)
+            bytes.set(b, o + 1, (y * 11) & 255)
+            bytes.set(b, o + 2, (x * y * 13 + 5) & 255)
+            bytes.set(b, o + 3, 255 - ((x + y) & 63))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return b
+}
+
+main() {
+    fw = spec.init()
+    zlib_ready = zlib.available()
+
+    spec.describe(fw, "png: encoding") {
+        spec.it_when(zlib_ready, "round-trips an image through an independent decoder", "built without zlib") callback {
+            img = make_image(37, 23)
+            data, n, err = png.encode_rgba8(bytes.data(img), 37, 23)
+            spec.assert_str_eq(err, "", "encodes")
+            back, derr = decode(data, n, 37, 23)
+            spec.assert_str_eq(derr, "", "decodes")
+            same = 1
+            i = 0
+            while i < 37 * 23 * 4 && back != null {
+                if bytes.get(back, i) != bytes.get(img, i) { same = 0 }
+                i = i + 1
+            }
+            spec.assert_eq(same, 1, "every byte comes back")
+            if back != null { bytes.free(back) }
+            bytes.free(img)
+            string.free(data)
+        }
+
+        spec.it_when(zlib_ready, "encodes a one-pixel image", "built without zlib") callback {
+            one = bytes.new(4)
+            bytes.set(one, 0, 255)
+            bytes.set(one, 1, 0)
+            bytes.set(one, 2, 128)
+            bytes.set(one, 3, 255)
+            data, n, err = png.encode_rgba8(bytes.data(one), 1, 1)
+            spec.assert_str_eq(err, "", "encodes")
+            back, derr = decode(data, n, 1, 1)
+            spec.assert_str_eq(derr, "", "decodes")
+            spec.assert_eq(bytes.get(back, 2), 128, "blue survives")
+            bytes.free(back)
+            bytes.free(one)
+            string.free(data)
+        }
+
+        spec.it_when(zlib_ready, "writes a file a decoder reads back", "built without zlib") callback {
+            img = make_image(16, 9)
+            path = "png_written.png"
+            werr = png.write_rgba8(path, bytes.data(img), 16, 9)
+            spec.assert_str_eq(werr, "", "written")
+            data, n, rerr = fs.read_binary(path)
+            spec.assert_str_eq(rerr, "", "read back")
+            back, derr = decode(data, n, 16, 9)
+            spec.assert_str_eq(derr, "", "decodes from disk")
+            spec.assert_eq(bytes.get(back, 16 * 9 * 4 - 1), bytes.get(img, 16 * 9 * 4 - 1), "last byte")
+            bytes.free(back)
+            bytes.free(img)
+            string.free(data)
+            spec.assert_str_eq(fs.delete(path), "", "removed")
+        }
+    }
+
+    spec.describe(fw, "png: refusals") {
+        spec.it(fw, "refuses a null pixel pointer") callback {
+            _d, n, err = png.encode_rgba8(null, 4, 4)
+            spec.assert_eq(n, 0, "no output")
+            spec.assert_true(string.length(err) > 0, "says why")
+        }
+        spec.it(fw, "refuses a zero or negative size") callback {
+            img = bytes.new(16)
+            _d1, _n1, e1 = png.encode_rgba8(bytes.data(img), 0, 4)
+            _d2, _n2, e2 = png.encode_rgba8(bytes.data(img), 4, -1)
+            spec.assert_true(string.length(e1) > 0, "width 0 refused")
+            spec.assert_true(string.length(e2) > 0, "height -1 refused")
+            bytes.free(img)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

@@ -5998,7 +5998,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             const char* moved_vars[16];
             int moved_count = 0;
             int any_moved = 0;
-            for (int i = 0; i < expr->child_count; i++) {
+            /* A header-defined struct (`extern struct ... @c_import`) has no
+             * `_heap_<field>` trackers and no destructor: its string fields
+             * BORROW, as a C struct's `char*` does. Its literal is spelled
+             * `(struct Name){...}` because the header need not typedef the
+             * tag. */
+            int c_imported = aether_is_c_import_struct(expr->value);
+            for (int i = 0; !c_imported && i < expr->child_count; i++) {
                 ASTNode* fi = expr->children[i];
                 if (fi && fi->type == AST_ASSIGNMENT && fi->child_count > 0 &&
                     fi->children[0]->type == AST_IDENTIFIER &&
@@ -6012,7 +6018,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * heap flags, then yield the temp. Otherwise emit the literal
              * directly. */
             if (any_moved) fprintf(gen->output, "({ %s _ae_slit = ", expr->value);
-            fprintf(gen->output, "(%s){", expr->value);
+            fprintf(gen->output, c_imported ? "(struct %s){" : "(%s){", expr->value);
             int emitted = 0;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
@@ -6020,7 +6026,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if (emitted > 0) fprintf(gen->output, ", ");
                     fprintf(gen->output, ".%s = ", field_init->value);
                     if (field_init->child_count > 0) {
-                        generate_expression(gen, field_init->children[0]);
+                        /* A header-defined struct's string field is C's
+                         * `const char*`: the payload, not a wrapped
+                         * AetherString (see emit_c_import_string_field_store). */
+                        ASTNode* fv = field_init->children[0];
+                        int unwrap = c_imported && fv && fv->node_type &&
+                                     fv->node_type->kind == TYPE_STRING;
+                        /* NULL stays NULL, as in the field store. */
+                        if (unwrap) fprintf(gen->output, "({ const void* _ae_cs = (const void*)(");
+                        generate_expression(gen, fv);
+                        if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }
                     emitted++;
                     /* If the init is heap-classified, also set the hidden
@@ -6034,7 +6049,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * (the deferred free becomes a no-op). For non-variable
                      * heap sources (an interp/concat temp), the value is freshly
                      * owned, so a constant 1 is correct. */
-                    if (field_init->child_count > 0 &&
+                    if (!c_imported && field_init->child_count > 0 &&
                         is_heap_string_expr(gen, field_init->children[0])) {
                         ASTNode* src = field_init->children[0];
                         if (src->type == AST_IDENTIFIER && src->value &&

@@ -37,6 +37,19 @@ typedef struct AevkLayout AevkLayout;
 typedef struct AevkBindings AevkBindings;
 typedef struct AevkTexture AevkTexture;
 typedef struct AevkMaterial AevkMaterial;
+typedef struct AevkSwapchain AevkSwapchain;
+typedef struct AevkBuffer AevkBuffer;
+typedef struct AevkCompute AevkCompute;
+
+/* The kinds of window a swapchain can present into (#1505), numbered as
+ * aether-ui's native_view_kind() numbers them so a toolkit's handle passes
+ * straight through. 5 is for a program that made its own CAMetalLayer, as a
+ * GLFW-based one does on macOS. */
+#define AEVK_WINDOW_WIN32        1   /* window = HWND                         */
+#define AEVK_WINDOW_NSVIEW       2   /* window = NSView*; given a CAMetalLayer */
+#define AEVK_WINDOW_X11          3   /* display = Display*, window = Window    */
+#define AEVK_WINDOW_WAYLAND      4   /* display = wl_display*, window = wl_surface* */
+#define AEVK_WINDOW_METAL_LAYER  5   /* window = CAMetalLayer*                 */
 
 /* 1 when a loader AND at least one physical device are present. Cheap after
  * the first call: the probe result is cached, including the negative. */
@@ -79,6 +92,31 @@ AevkTarget* aevk_target_create(AevkDevice* dev, int width, int height);
 AevkTarget* aevk_target_create_ex(AevkDevice* dev, int width, int height,
                                   int want_depth, int samples);
 
+/* New images and framebuffer at `width` x `height`, keeping the render pass,
+ * so every pipeline made for the target stays valid: the call for a window
+ * that changed size. Geometry, push constants, batch and frame count carry
+ * over; the previous contents do not. */
+int aevk_target_resize(AevkTarget* t, int width, int height);
+
+/* Whether each frame is copied into host memory for readback (on by
+ * default). A target that is only presented turns it off and stops paying a
+ * width*height*4 copy and a readback buffer per frame slot; the readers then
+ * refuse with AEVK_ERR_ARG. */
+int aevk_target_set_readback(AevkTarget* t, int on);
+int aevk_target_readback(const AevkTarget* t);
+
+/* As target_create_ex, in a chosen colour format (#1514): a VkFormat value,
+ * one of R8G8B8A8_UNORM (37, the default), R8G8B8A8_SRGB (43),
+ * R16G16B16A16_SFLOAT (97) or R32G32B32A32_SFLOAT (109). Checked against the
+ * device's attachment support and refused with AEVK_ERR_UNSUPPORTED when it
+ * cannot render to it. The readback buffers hold the format's own bytes. */
+AevkTarget* aevk_target_create_format(AevkDevice* dev, int width, int height, int format,
+                                      int want_depth, int samples);
+
+/* The target's VkFormat and its size in bytes a pixel (4, 8 or 16). */
+int aevk_target_format(const AevkTarget* t);
+int aevk_target_bytes_per_pixel(const AevkTarget* t);
+
 /* 1 when the target has a depth attachment; its sample count (1 when not
  * multisampled). For tests and diagnostics. */
 int aevk_target_has_depth(const AevkTarget* t);
@@ -114,7 +152,9 @@ void          aevk_pipeline_destroy(AevkPipeline* p);
 
 /* Describes vertex input for pipeline_create_ex. Without one the pipeline
  * uses the built-in layout: one interleaved stream of vec2 position and vec3
- * colour, stride 20. `format` is a VkFormat value. */
+ * colour, stride 20. An empty layout (nothing described) is a pipeline with
+ * no vertex input, whose vertex shader pulls its data from a storage buffer
+ * by gl_VertexIndex. `format` is a VkFormat value. */
 AevkLayout* aevk_layout_create(void);
 void        aevk_layout_destroy(AevkLayout* l);
 int         aevk_layout_binding(AevkLayout* l, int binding, int stride, int per_instance);
@@ -234,12 +274,99 @@ int aevk_submit(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float
  * caller that wants the queue drained rather than the pixels. */
 int aevk_wait_all(AevkTarget* t);
 
-/* Copies width*height*4 bytes of R8G8B8A8 from the mapped readback buffer.
- * `out_len` must be at least that; anything smaller is AEVK_ERR_ARG rather
- * than a truncated read. */
+/* --- buffers and compute (#1515) --------------------------------------------- */
+
+/* A buffer shaders read and write: host-visible, mapped for its lifetime and
+ * zeroed at creation. Usable as a storage or uniform binding by a compute
+ * pass and by a graphics pipeline, so compute output feeds a draw directly.
+ * It must outlive every dispatch and draw that uses it; destroying one waits
+ * for the device to be idle. */
+AevkBuffer* aevk_buffer_create(AevkDevice* dev, size_t bytes);
+void        aevk_buffer_destroy(AevkBuffer* b);
+size_t      aevk_buffer_size(const AevkBuffer* b);
+int         aevk_buffer_write(AevkBuffer* b, size_t offset, const void* data, size_t len);
+int         aevk_buffer_read(AevkBuffer* b, size_t offset, void* out, size_t len);
+
+/* Declares a storage buffer binding (`layout(std430, binding = N) buffer`)
+ * for a compute or graphics pipeline. */
+int aevk_bindings_storage(AevkBindings* b, int binding);
+
+/* Points a storage or uniform binding of a graphics pipeline at a buffer. */
+int aevk_material_set_buffer(AevkMaterial* m, int binding, AevkBuffer* buf);
+int aevk_pipeline_set_buffer(AevkPipeline* p, int binding, AevkBuffer* buf);
+
+/* A compute pipeline from SPIR-V (entry point `main`), the resources it
+ * reads and writes, and a push-constant block of `push_bytes` (0..128, a
+ * multiple of 4). It owns one descriptor set. */
+AevkCompute* aevk_compute_create(AevkDevice* dev, const void* spv, size_t len,
+                                 const AevkBindings* bindings, int push_bytes);
+void         aevk_compute_destroy(AevkCompute* c);
+int          aevk_compute_set_buffer(AevkCompute* c, int binding, AevkBuffer* buf);
+int          aevk_compute_set_texture(AevkCompute* c, int binding, AevkTexture* tex);
+int          aevk_compute_set_push(AevkCompute* c, const void* data, size_t len);
+int          aevk_compute_set_timeout_ms(AevkCompute* c, int ms);
+
+/* Runs gx * gy * gz work groups and waits for them; the buffers hold the
+ * results when it returns. Every declared binding must have been set, and
+ * the counts must be within the device's maxComputeWorkGroupCount. */
+int aevk_dispatch(AevkCompute* c, int gx, int gy, int gz);
+
+/* The same without waiting, so the CPU works while the GPU computes;
+ * aevk_compute_wait before reading the results or dispatching again. */
+int aevk_dispatch_async(AevkCompute* c, int gx, int gy, int gz);
+int aevk_compute_wait(AevkCompute* c);
+
+/* --- presentation (#1505) --------------------------------------------------- */
+
+/* A surface over a window someone else owns, and a swapchain on it. `kind` is
+ * an AEVK_WINDOW_* value and `display` / `window` are the handles that kind
+ * takes; the window must outlive the swapchain. `width` x `height` is used
+ * only where the window system leaves the size to the application (Wayland);
+ * elsewhere the swapchain takes the window's own size.
+ *
+ * On macOS an NSView is given a CAMetalLayer, which must happen on the main
+ * thread, as AppKit requires. Fails with AEVK_ERR_UNSUPPORTED, naming the
+ * extension, when the loader or device cannot present to that kind. */
+AevkSwapchain* aevk_swapchain_create(AevkDevice* dev, int kind, void* display,
+                                     void* window, int width, int height);
+void           aevk_swapchain_destroy(AevkSwapchain* sc);
+
+/* The window changed size: rebuild now at the new size. */
+int aevk_swapchain_resize(AevkSwapchain* sc, int width, int height);
+
+/* On (the default): FIFO, one frame per vertical blank, never tearing. Off:
+ * MAILBOX where offered, else IMMEDIATE, else FIFO. */
+int aevk_swapchain_set_vsync(AevkSwapchain* sc, int on);
+
+/* The current size in pixels; 0 x 0 while the window has no area (it is
+ * minimised), when presenting is skipped rather than failed. */
+int aevk_swapchain_width(const AevkSwapchain* sc);
+int aevk_swapchain_height(const AevkSwapchain* sc);
+
+/* The VkFormat of the swapchain images, and how many frames have reached the
+ * presentation engine. For tests and diagnostics. */
+int       aevk_swapchain_format(const AevkSwapchain* sc);
+long long aevk_swapchain_presented(const AevkSwapchain* sc);
+
+/* Shows the target's most recent frame in the window: acquires an image,
+ * copies the frame into it (scaled when the sizes differ) and queues it for
+ * presentation, without waiting for the GPU. Call it after draw() or
+ * submit(). A swapchain that went out of date is rebuilt here, and the
+ * encoding of its images follows the target's (sRGB for an sRGB target) so a
+ * colour reaches the screen as it was written. */
+int aevk_present(AevkSwapchain* sc, AevkTarget* t);
+
+/* Copies the most recent frame from the mapped readback buffer in the
+ * target's own format: aevk_rgba_size bytes. `out_len` must be at least that;
+ * anything smaller is AEVK_ERR_ARG rather than a truncated read. */
 int aevk_read_rgba(AevkTarget* t, void* out, size_t out_len);
 
-/* Bytes a full readback needs: width * height * 4. */
+/* The same frame as 8-bit RGBA whatever the format, width*height*4 bytes,
+ * float channels clamped to 0..1: what an image file takes. */
+int aevk_read_rgba8(AevkTarget* t, void* out, size_t out_len);
+
+/* Bytes a full readback in the target's format needs:
+ * width * height * bytes_per_pixel. */
 size_t aevk_rgba_size(const AevkTarget* t);
 
 #ifdef __cplusplus

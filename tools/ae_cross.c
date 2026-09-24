@@ -777,10 +777,7 @@ int run_cross_build(const char* c_file, const char* out_file,
      * where that name resolves. The cross path compiles the same file. */
     const char* ae_includes = get_aether_include_flags(c_file);
     char ex_buf[8192 + 8192 + 2];
-    snprintf(ex_buf, sizeof(ex_buf), "%s%s%s",
-             extra ? extra : "",
-             (extra && extra[0] && ae_sources[0]) ? " " : "",
-             ae_sources);
+    merge_source_lists(extra, ae_sources, ex_buf, sizeof(ex_buf));
     const char* ex = ex_buf;
     /* std.audio's vendored miniaudio auto-selects a backend by platform macro:
      * on a macos target it #includes <CoreAudio/CoreAudio.h>, an APPLE FRAMEWORK

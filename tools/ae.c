@@ -2494,6 +2494,57 @@ const char* get_aether_source_files(const char* c_file) {
     return files;
 }
 
+/* Do two spellings name the same file on disk? A relative path from the
+ * command line and the absolute one a module's `@source` resolved to are
+ * the usual pair. Compared by identity where the platform has one (device
+ * and inode) and by the canonical absolute path on Windows, where names are
+ * case-insensitive; spellings that do not resolve are compared as written. */
+static bool same_source_file(const char* a, const char* b) {
+#ifdef _WIN32
+    char fa[MAX_PATH], fb[MAX_PATH];
+    if (!_fullpath(fa, a, sizeof(fa)) || !_fullpath(fb, b, sizeof(fb))) return strcmp(a, b) == 0;
+    for (char* p = fa; *p; p++) if (*p == '/') *p = '\\';
+    for (char* p = fb; *p; p++) if (*p == '/') *p = '\\';
+    return _stricmp(fa, fb) == 0;
+#else
+    struct stat sa, sb;
+    if (stat(a, &sa) == 0 && stat(b, &sb) == 0) {
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+    }
+    return strcmp(a, b) == 0;
+#endif
+}
+
+/* The --extra / extra_sources files, then the C files the modules of the
+ * import closure ship (`@source`, #2125), each file once. A program that
+ * names a module's C file itself (what a module asked for before it could
+ * declare the file) and imports that module would otherwise compile it
+ * twice and fail at link on every symbol in it. Written to `out` in the
+ * quoted, space-separated form extras_next reads. */
+void merge_source_lists(const char* extra, const char* module_sources, char* out, size_t cap) {
+    out[0] = '\0';
+    char path[4096];
+    const char* cursor = extra ? extra : "";
+    while (extras_next(&cursor, path, sizeof(path))) {
+        if (!extras_append(out, cap, path)) {
+            fprintf(stderr, "Warning: the source list exceeded %zu bytes; '%s' was dropped.\n", cap, path);
+        }
+    }
+    cursor = module_sources ? module_sources : "";
+    while (extras_next(&cursor, path, sizeof(path))) {
+        bool seen = false;
+        const char* prior = out;
+        char have[4096];
+        while (!seen && extras_next(&prior, have, sizeof(have))) {
+            if (same_source_file(have, path)) seen = true;
+        }
+        if (seen) continue;
+        if (!extras_append(out, cap, path)) {
+            fprintf(stderr, "Warning: the source list exceeded %zu bytes; '%s' was dropped.\n", cap, path);
+        }
+    }
+}
+
 // Read the `// aether-include: <dir>` header lines codegen emits for the
 // modules that declared a `@c_include` (#1986), as `-I"<dir>"` flags. The
 // generated C includes the header by the name the module wrote, so the file
@@ -3229,10 +3280,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* -I for each module that declared a `@c_include` (#1986). */
     const char* ae_includes = get_aether_include_flags(c_file);
     char extra_buf[8192 + 8192 + 2];
-    snprintf(extra_buf, sizeof(extra_buf), "%s%s%s",
-             extra_files ? extra_files : "",
-             (extra_files && extra_files[0] && ae_sources[0]) ? " " : "",
-             ae_sources);
+    merge_source_lists(extra_files, ae_sources, extra_buf, sizeof(extra_buf));
     const char* extra = extra_buf;
 
     // User cflags from aether.toml apply to every build path — `ae build`,

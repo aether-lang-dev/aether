@@ -2192,6 +2192,9 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
  * function-exit destructor defer. */
 int struct_has_heap_string_field(ASTNode* struct_def) {
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
+    /* A header-defined struct's string fields borrow; nothing tracks them,
+     * and no `<Name>_destroy` / `<Name>_heap_free` is emitted for it. */
+    if (struct_def->annotation && strcmp(struct_def->annotation, "extern_c_import") == 0) return 0;
     for (int i = 0; i < struct_def->child_count; i++) {
         ASTNode* field = struct_def->children[i];
         if (field && field->type == AST_STRUCT_FIELD &&

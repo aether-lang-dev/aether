@@ -43,6 +43,21 @@ main() {
     // seed changes the digest
     fails = fails + ck(hash.murmur3_32("hello", 5, 42) != hash.murmur3_32("hello", 5, 0), "murmur seed matters")
 
+    // ---- CRC-32 (IEEE 802.3) reference vectors ----
+    // The check value from the CRC catalogue, and zlib's crc32() results.
+    fails = fails + ck(hash.crc32("", 0) == 0, "crc32 empty")
+    fails = fails + ck(hash.crc32("123456789", 9) == 3421780262, "crc32 check value (0xcbf43926)")
+    fails = fails + ck(hash.crc32("a", 1) == 3904355907, "crc32 'a' (0xe8b7be43)")
+    fails = fails + ck(hash.crc32("The quick brown fox jumps over the lazy dog", 43) == 1095738169,
+        "crc32 quick brown fox (0x414fa339)")
+    // Embedded NULs are data, not terminators.
+    fails = fails + ck(hash.crc32(ref_msg(4), 4) == 2344191507, "crc32 00 01 02 03 (0x8bb98613)")
+    // Continuing across pieces gives the whole input's CRC.
+    part = hash.crc32("12345", 5)
+    fails = fails + ck(hash.crc32_update(part, "6789", 4) == 3421780262, "crc32_update across two pieces")
+    // A PNG IEND chunk's CRC covers its type alone.
+    fails = fails + ck(hash.crc32("IEND", 4) == 2923585666, "crc32 IEND (0xae426082)")
+
     // ---- determinism + distribution sanity ----
     fails = fails + ck(hash.fnv32("abc", 3) == hash.fnv32("abc", 3), "fnv32 deterministic")
     fails = fails + ck(hash.fnv32("abc", 3) != hash.fnv32("abd", 3), "fnv32 distinguishes 1 bit")

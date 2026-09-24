@@ -1,0 +1,183 @@
+// contrib.png: encode 8-bit RGBA pixels as a PNG.
+// Import with: import contrib.png
+//
+//   png.encode_rgba8(pixels, width, height) -> (data, length, err)
+//   png.write_rgba8(path, pixels, width, height) -> err
+//
+// `pixels` points at width * height * 4 bytes, rows top to bottom, each pixel
+// R, G, B, A: what contrib.vulkan's copy_rgba (and its D3D12 and Metal
+// siblings) hand back. `err` is "" on success.
+//
+// The output is a standard PNG (colour type 6, 8 bits a channel, no
+// interlacing) that any decoder reads. Each row is filtered with whichever of
+// the five PNG filters leaves the smallest sum of absolute differences, the
+// heuristic libpng uses, and the result is compressed with std.zlib; the
+// chunk checksums are std.hash's CRC-32.
+//
+// Lives in contrib/ because it is one image format's writer rather than
+// something every program expects of a standard library (see
+// docs/stdlib-vs-contrib.md), and std.zlib is its only dependency.
+
+import std.bytes
+import std.fs
+import std.hash
+import std.string
+import std.zlib
+
+exports(
+    encode_rgba8, write_rgba8
+)
+
+// PNG's big-endian 32-bit field, written at `at`.
+put_be32(b: ptr, at: int, v: long) {
+    bytes.set(b, at, ((v >> 24) & 255) as int)
+    bytes.set(b, at + 1, ((v >> 16) & 255) as int)
+    bytes.set(b, at + 2, ((v >> 8) & 255) as int)
+    bytes.set(b, at + 3, (v & 255) as int)
+}
+
+// Appends one chunk (length, type, data, CRC of type and data) at `at` in
+// `out` and returns the offset after it.
+put_chunk(out: ptr, at: int, kind: string, data: string, length: int) -> int {
+    put_be32(out, at, length as long)
+    bytes.copy_from_string(out, at + 4, kind, 4)
+    if length > 0 { bytes.copy_from_string(out, at + 8, data, length) }
+    crc = hash.crc32_update(hash.crc32(kind, 4), data, length)
+    put_be32(out, at + 8 + length, crc)
+    return at + 12 + length
+}
+
+// The Paeth predictor from the PNG specification: whichever of left, up and
+// upper-left is closest to left + up - upper-left, ties broken in that order.
+paeth(a: int, b: int, c: int) -> int {
+    p = a + b - c
+    pa = p - a
+    if pa < 0 { pa = 0 - pa }
+    pb = p - b
+    if pb < 0 { pb = 0 - pb }
+    pc = p - c
+    if pc < 0 { pc = 0 - pc }
+    if pa <= pb && pa <= pc { return a }
+    if pb <= pc { return b }
+    return c
+}
+
+// The filtered value of byte `i` of the row starting at `row` in `src`, under
+// filter `f`, with `stride` bytes a row and 4 bytes a pixel. `row_above` is
+// -1 for the first row, whose "up" neighbours are zero by definition.
+filtered(src: ptr, row: int, row_above: int, i: int, f: int) -> int {
+    x = bytes.get(src, row + i)
+    a = 0
+    if i >= 4 { a = bytes.get(src, row + i - 4) }
+    b = 0
+    if row_above >= 0 { b = bytes.get(src, row_above + i) }
+    c = 0
+    if i >= 4 && row_above >= 0 { c = bytes.get(src, row_above + i - 4) }
+    v = x
+    if f == 1 { v = x - a }
+    if f == 2 { v = x - b }
+    if f == 3 { v = x - ((a + b) / 2) }
+    if f == 4 { v = x - paeth(a, b, c) }
+    return v & 255
+}
+
+// The encoded file in memory: (data, length, err).
+encode_rgba8(pixels: ptr, width: int, height: int) -> (string, int, string) {
+    if pixels == null { return ("", 0, "pixels is null") }
+    if width <= 0 || height <= 0 {
+        return ("", 0, "image size must be positive, got ${width}x${height}")
+    }
+    // PNG stores dimensions in 31 bits; this keeps the filtered stream's
+    // size well inside an int as well.
+    if width > 16384 || height > 16384 {
+        return ("", 0, "image ${width}x${height} is larger than 16384 on a side")
+    }
+    stride = width * 4
+    src = bytes.from_ptr(pixels, stride * height)
+
+    // Each row becomes its filter type followed by the filtered bytes.
+    rows = bytes.new(height * (stride + 1))
+    bytes.set_length(rows, height * (stride + 1))
+    y = 0
+    while y < height {
+        row = y * stride
+        above = -1
+        if y > 0 { above = row - stride }
+        // Pick the filter whose output bytes, read as signed, sum smallest.
+        best = 0
+        best_sum = -1
+        f = 0
+        while f < 5 {
+            sum = 0
+            i = 0
+            while i < stride {
+                v = filtered(src, row, above, i, f)
+                if v >= 128 { v = 256 - v }
+                sum = sum + v
+                i = i + 1
+            }
+            if best_sum < 0 || sum < best_sum {
+                best_sum = sum
+                best = f
+            }
+            f = f + 1
+        }
+        out_row = y * (stride + 1)
+        bytes.set(rows, out_row, best)
+        i = 0
+        while i < stride {
+            bytes.set(rows, out_row + 1 + i, filtered(src, row, above, i, best))
+            i = i + 1
+        }
+        y = y + 1
+    }
+    bytes.free(src)
+
+    raw = bytes.finish(rows, height * (stride + 1))
+    packed, packed_len, zerr = zlib.deflate(raw, height * (stride + 1), 9)
+    string.free(raw)
+    if zerr != "" { return ("", 0, "cannot compress the image: ${zerr}") }
+
+    // Signature, IHDR (13 bytes of data), IDAT, IEND.
+    total = 8 + (12 + 13) + (12 + packed_len) + 12
+    out = bytes.new(total)
+    bytes.set_length(out, total)
+    sig = bytes.new(8)
+    bytes.set(sig, 0, 137)
+    bytes.set(sig, 1, 80)
+    bytes.set(sig, 2, 78)
+    bytes.set(sig, 3, 71)
+    bytes.set(sig, 4, 13)
+    bytes.set(sig, 5, 10)
+    bytes.set(sig, 6, 26)
+    bytes.set(sig, 7, 10)
+    bytes.copy_from_bytes(out, 0, sig, 0, 8)
+    bytes.free(sig)
+
+    ihdr = bytes.new(13)
+    bytes.set_length(ihdr, 13)
+    put_be32(ihdr, 0, width as long)
+    put_be32(ihdr, 4, height as long)
+    bytes.set(ihdr, 8, 8) // bits a channel
+    bytes.set(ihdr, 9, 6) // colour type: RGBA
+    bytes.set(ihdr, 10, 0) // deflate
+    bytes.set(ihdr, 11, 0) // adaptive filtering
+    bytes.set(ihdr, 12, 0) // not interlaced
+    ihdr_s = bytes.finish(ihdr, 13)
+
+    at = put_chunk(out, 8, "IHDR", ihdr_s, 13)
+    at = put_chunk(out, at, "IDAT", packed, packed_len)
+    at = put_chunk(out, at, "IEND", "", 0)
+    string.free(ihdr_s)
+    string.free(packed)
+    return (bytes.finish(out, at), at, "")
+}
+
+// Encodes and writes the file at `path`. "" on success.
+write_rgba8(path: string, pixels: ptr, width: int, height: int) -> string {
+    data, length, err = encode_rgba8(pixels, width, height)
+    if err != "" { return err }
+    werr = fs.write_binary(path, data, length)
+    string.free(data)
+    return werr
+}

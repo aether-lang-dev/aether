@@ -4,13 +4,43 @@
 
 #include "aether_vulkan.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#  include <windows.h>
+#endif
+
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+
+/* The window-system surface extensions (#1505). Each platform header is
+ * included on its own rather than through VK_USE_PLATFORM_*, so a missing
+ * window-system header costs that one kind of window and not the build:
+ * Wayland's structs name only opaque pointers, so forward declarations do,
+ * while Xlib's name X11 types and need the X11 headers present. */
+#if defined(_WIN32)
+#  include <vulkan/vulkan_win32.h>
+#  define AEVK_HAVE_WIN32_SURFACE 1
+#elif defined(__APPLE__)
+#  include <vulkan/vulkan_metal.h>
+#  define AEVK_HAVE_METAL_SURFACE 1
+#else
+struct wl_display;
+struct wl_surface;
+#  include <vulkan/vulkan_wayland.h>
+#  define AEVK_HAVE_WAYLAND_SURFACE 1
+#  if defined(__has_include)
+#    if __has_include(<X11/Xlib.h>)
+#      include <X11/Xlib.h>
+#      include <vulkan/vulkan_xlib.h>
+#      define AEVK_HAVE_XLIB_SURFACE 1
+#    endif
+#  endif
+#endif
 
 /* VK_KHR_portability_enumeration landed in header 1.3.216, but Ubuntu 22.04
  * still ships 1.3.204 and the module must build there. Both values are fixed
@@ -25,7 +55,6 @@
 #endif
 
 #ifdef _WIN32
-#  include <windows.h>
 #  define AEVK_DLOPEN(p)      ((void*)LoadLibraryA(p))
 #  define AEVK_DLSYM(h, s)    ((void*)GetProcAddress((HMODULE)(h), (s)))
 #  define AEVK_DLCLOSE(h)     FreeLibrary((HMODULE)(h))
@@ -114,97 +143,39 @@ static const char* const k_loader_names[] = {
     NULL
 };
 
-#define AEVK_GLOBAL_FNS(X)          \
-    X(vkCreateInstance)             \
-    X(vkEnumerateInstanceExtensionProperties)
-
-#define AEVK_INSTANCE_FNS(X)                    \
-    X(vkDestroyInstance)                        \
-    X(vkEnumeratePhysicalDevices)               \
-    X(vkGetPhysicalDeviceProperties)            \
-    X(vkGetPhysicalDeviceMemoryProperties)      \
-    X(vkGetPhysicalDeviceQueueFamilyProperties) \
-    X(vkGetPhysicalDeviceFormatProperties)      \
-    X(vkEnumerateDeviceExtensionProperties)     \
-    X(vkCreateDevice)                           \
-    X(vkGetDeviceProcAddr)
-
-/* Resolved through vkGetDeviceProcAddr, not the loader's exported symbols:
- * those go straight to the driver and skip the loader's dispatch trampoline. */
-#define AEVK_DEVICE_FNS(X)          \
-    X(vkDestroyDevice)              \
-    X(vkGetDeviceQueue)             \
-    X(vkDeviceWaitIdle)             \
-    X(vkQueueSubmit)                \
-    X(vkQueueWaitIdle)              \
-    X(vkCreateCommandPool)          \
-    X(vkDestroyCommandPool)         \
-    X(vkAllocateCommandBuffers)     \
-    X(vkFreeCommandBuffers)         \
-    X(vkBeginCommandBuffer)         \
-    X(vkEndCommandBuffer)           \
-    X(vkResetCommandBuffer)         \
-    X(vkCreateFence)                \
-    X(vkDestroyFence)               \
-    X(vkResetFences)                \
-    X(vkWaitForFences)              \
-    X(vkCreateImage)                \
-    X(vkDestroyImage)               \
-    X(vkGetImageMemoryRequirements) \
-    X(vkBindImageMemory)            \
-    X(vkCreateImageView)            \
-    X(vkDestroyImageView)           \
-    X(vkCreateRenderPass)           \
-    X(vkDestroyRenderPass)          \
-    X(vkCreateFramebuffer)          \
-    X(vkDestroyFramebuffer)         \
-    X(vkCreateBuffer)               \
-    X(vkDestroyBuffer)              \
-    X(vkGetBufferMemoryRequirements)\
-    X(vkBindBufferMemory)           \
-    X(vkAllocateMemory)             \
-    X(vkFreeMemory)                 \
-    X(vkMapMemory)                  \
-    X(vkUnmapMemory)                \
-    X(vkCreateShaderModule)         \
-    X(vkDestroyShaderModule)        \
-    X(vkCreatePipelineLayout)       \
-    X(vkDestroyPipelineLayout)      \
-    X(vkCreateGraphicsPipelines)    \
-    X(vkDestroyPipeline)            \
-    X(vkCmdBeginRenderPass)         \
-    X(vkCmdEndRenderPass)           \
-    X(vkCmdBindPipeline)            \
-    X(vkCmdBindVertexBuffers)       \
-    X(vkCmdSetViewport)             \
-    X(vkCmdSetScissor)              \
-    X(vkCmdDraw)                    \
-    X(vkCmdCopyImageToBuffer)       \
-    X(vkCmdPushConstants)           \
-    X(vkCmdBindIndexBuffer)         \
-    X(vkCmdDrawIndexed)             \
-    X(vkCreateDescriptorSetLayout)  \
-    X(vkDestroyDescriptorSetLayout) \
-    X(vkCreateDescriptorPool)       \
-    X(vkDestroyDescriptorPool)      \
-    X(vkAllocateDescriptorSets)     \
-    X(vkUpdateDescriptorSets)       \
-    X(vkCmdBindDescriptorSets)      \
-    X(vkCreateSampler)              \
-    X(vkDestroySampler)             \
-    X(vkCmdPipelineBarrier)         \
-    X(vkCmdCopyBufferToImage)       \
-    X(vkCmdBlitImage)
+/* The entry points this file loads, as X-macro lists generated from the
+ * Vulkan registry by tools/vkgen.ae (#1506): one list per feature or
+ * extension and loading level, from tools/dispatch_commands.txt. GLOBAL and
+ * INSTANCE ones come from vkGetInstanceProcAddr; DEVICE ones from
+ * vkGetDeviceProcAddr, which returns the driver's own function and skips the
+ * loader's dispatch trampoline. The window-system lists (#1505) are loaded
+ * only when the loader and device advertise those extensions, and are NULL
+ * otherwise, so a driver without a window system still renders offscreen. */
+#include "aether_vulkan_dispatch.h"
 
 #define AEVK_DECL(name) PFN_##name name;
 
 typedef struct {
     AEVK_GLOBAL_FNS(AEVK_DECL)
     AEVK_INSTANCE_FNS(AEVK_DECL)
+    AEVK_KHR_SURFACE_FNS(AEVK_DECL)
+#if defined(AEVK_HAVE_WIN32_SURFACE)
+    AEVK_KHR_WIN32_SURFACE_FNS(AEVK_DECL)
+#endif
+#if defined(AEVK_HAVE_METAL_SURFACE)
+    AEVK_EXT_METAL_SURFACE_FNS(AEVK_DECL)
+#endif
+#if defined(AEVK_HAVE_WAYLAND_SURFACE)
+    AEVK_KHR_WAYLAND_SURFACE_FNS(AEVK_DECL)
+#endif
+#if defined(AEVK_HAVE_XLIB_SURFACE)
+    AEVK_KHR_XLIB_SURFACE_FNS(AEVK_DECL)
+#endif
 } AevkInstanceApi;
 
 typedef struct {
     AEVK_DEVICE_FNS(AEVK_DECL)
+    AEVK_KHR_SWAPCHAIN_FNS(AEVK_DECL)
 } AevkDeviceApi;
 
 #undef AEVK_DECL
@@ -219,21 +190,53 @@ static PFN_vkGetInstanceProcAddr g_gipa;
 static int                       g_probe;      /* 0 unprobed, 1 usable, -1 not */
 static char                      g_dev_name[256];
 
+/* Under a lock, every time: callers on several threads (two actors, or the
+ * first calls of contrib.vulkan.vk's commands) must neither open the loader
+ * twice nor see g_lib set while g_gipa is not yet. It runs when a device is
+ * made and when a command is first resolved, never per frame. */
 static int aevk_load_library(void) {
-    if (g_lib) return AEVK_OK;
-    for (int i = 0; k_loader_names[i]; i++) {
-        void* h = AEVK_DLOPEN(k_loader_names[i]);
-        if (!h) continue;
+    static AevkMutex load_lock = AEVK_MUTEX_STATIC;
+    AEVK_MUTEX_LOCK(&load_lock);
+    int rc = AEVK_OK;
+    /* AETHER_VULKAN_LOADER names the loader to open, for a machine with more
+     * than one: on Windows the DLL search takes System32 before PATH, so a
+     * loader installed beside a driver (MSYS2's, the Vulkan SDK's) loses to
+     * whatever System32 holds. An explicit choice that fails is an error,
+     * not a reason to fall back to another loader. */
+    const char* chosen = getenv("AETHER_VULKAN_LOADER");
+    if (!g_lib && chosen && chosen[0]) {
+        rc = AEVK_ERR_NO_LOADER;
+        void* h = AEVK_DLOPEN(chosen);
         PFN_vkGetInstanceProcAddr gipa =
-            (PFN_vkGetInstanceProcAddr)AEVK_DLSYM(h, "vkGetInstanceProcAddr");
-        if (!gipa) { AEVK_DLCLOSE(h); continue; }
-        g_lib = h;
-        g_gipa = gipa;
-        return AEVK_OK;
+            h ? (PFN_vkGetInstanceProcAddr)AEVK_DLSYM(h, "vkGetInstanceProcAddr") : NULL;
+        if (gipa) {
+            g_gipa = gipa;
+            g_lib = h;
+            rc = AEVK_OK;
+        } else {
+            if (h) AEVK_DLCLOSE(h);
+            aevk_fail(AEVK_ERR_NO_LOADER, "AETHER_VULKAN_LOADER=%s is not a Vulkan loader that opens", chosen);
+        }
+    } else if (!g_lib) {
+        rc = AEVK_ERR_NO_LOADER;
+        for (int i = 0; k_loader_names[i]; i++) {
+            void* h = AEVK_DLOPEN(k_loader_names[i]);
+            if (!h) continue;
+            PFN_vkGetInstanceProcAddr gipa =
+                (PFN_vkGetInstanceProcAddr)AEVK_DLSYM(h, "vkGetInstanceProcAddr");
+            if (!gipa) { AEVK_DLCLOSE(h); continue; }
+            g_gipa = gipa;
+            g_lib = h;
+            rc = AEVK_OK;
+            break;
+        }
+        if (rc != AEVK_OK) {
+            aevk_fail(AEVK_ERR_NO_LOADER, "no Vulkan loader found (tried %s and friends)",
+                      k_loader_names[0]);
+        }
     }
-    return aevk_fail(AEVK_ERR_NO_LOADER,
-                     "no Vulkan loader found (tried %s and friends)",
-                     k_loader_names[0]);
+    AEVK_MUTEX_UNLOCK(&load_lock);
+    return rc;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -254,10 +257,18 @@ struct AevkDevice {
     VkCommandPool    pool;
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t         max_dim;
+    /* The largest dispatch the device takes, per dimension (#1515). */
+    uint32_t         max_groups[3];
     /* Which sample counts the device can actually use for framebuffer colour
      * and depth. Asking for 4x on hardware that offers 2x is a caller error
      * worth naming, not something to silently round down. */
     VkSampleCountFlags sample_counts;
+    /* Which window kinds this instance can make a surface for (a bit per
+     * AEVK_WINDOW_* value), and whether the device can present at all. Both
+     * are what the loader and driver advertised, not what the platform could
+     * do in principle. */
+    unsigned         surface_kinds;
+    int              can_present;
     char             name[256];
 };
 
@@ -311,6 +322,17 @@ typedef struct {
 struct AevkTarget {
     AevkDevice*    dev;
     int            width, height;
+    /* The colour format rendered, read back and presented (#1514), and its
+     * size in bytes a pixel, which the readback buffers are sized by. */
+    VkFormat       color_format;
+    int            bytes_per_pixel;
+    /* 0 until a frame has been submitted, so the colour image has contents
+     * and sits in TRANSFER_SRC_OPTIMAL: presenting reads it from there. */
+    int            rendered;
+    /* Whether each frame is copied into the readback buffer. On by default;
+     * a target that is only presented turns it off and stops paying a
+     * width*height*4 copy per frame (target_set_readback). */
+    int            readback_on;
     VkImage        image;
     VkDeviceMemory image_mem;
     VkImageView    view;
@@ -401,6 +423,18 @@ struct AevkTexture {
  * Several can exist per pipeline, so one pipeline draws several objects with
  * different textures and constants in a frame instead of needing a pipeline
  * per material, which would duplicate the shader modules for nothing. */
+/* A storage buffer (#1515): host-visible and mapped for its lifetime, so the
+ * CPU fills it and reads results back with a memcpy. The same buffer serves
+ * a compute pass and a graphics pipeline, as a storage or a uniform binding,
+ * which is how compute output feeds a draw without a copy. */
+struct AevkBuffer {
+    AevkDevice*    dev;
+    VkBuffer       buf;
+    VkDeviceMemory mem;
+    void*          ptr;
+    VkDeviceSize   size;
+};
+
 struct AevkMaterial {
     AevkPipeline*   pipe;
     VkDescriptorSet set;
@@ -416,6 +450,10 @@ struct AevkMaterial {
         void*          ptr;
         VkDeviceSize   size;
     } ub[AEVK_MAX_DESC];
+    /* A caller's buffer bound in place of the material's own uniform (or at
+     * a storage binding), so a uniform written later knows to re-point the
+     * descriptor at the material's buffer. */
+    AevkBuffer*     ext[AEVK_MAX_DESC];
 };
 
 #define AEVK_SETS_PER_POOL 16
@@ -427,6 +465,9 @@ struct AevkPipeline {
     VkPipelineLayout layout;
     VkPipeline       pipeline;
     uint32_t         push_bytes;
+    /* 0 for a pipeline made with an empty layout, whose vertex shader pulls
+     * its data itself: no vertex buffer is bound for it. */
+    int              vertex_input;
 
     /* Descriptor pools, grown a block at a time: a fixed maxSets would put a
      * ceiling on how many materials a scene can have, and sizing one pool for
@@ -435,8 +476,12 @@ struct AevkPipeline {
     VkDescriptorPool      pools[AEVK_MAX_POOLS];
     int                   pool_count;
     int                   sets_in_pool;   /* used in the newest pool */
-    VkDescriptorPoolSize  pool_sizes[2];
+    VkDescriptorPoolSize  pool_sizes[3];
     uint32_t              pool_size_count;
+    /* What each binding was declared as, so a write of the wrong kind is
+     * refused with its binding named rather than left to the driver. */
+    int                   declared[AEVK_MAX_DESC];
+    VkDescriptorType      desc_type[AEVK_MAX_DESC];
 
     /* The set pipeline_set_uniform / pipeline_set_texture write to, so code
      * that never asks for a material keeps working unchanged. */
@@ -493,10 +538,38 @@ static int aevk_load_device_api(AevkDeviceApi* da, PFN_vkGetDeviceProcAddr gdpa,
     return AEVK_OK;
 }
 
+/* The surface functions, when VK_KHR_surface was enabled, and each
+ * platform's create function whose extension was. A NULL entry is an
+ * extension the loader did not offer, which the swapchain code reports by
+ * name rather than calling through. */
+static void aevk_load_surface_api(AevkInstanceApi* ia, VkInstance inst, int have_surface) {
+#define AEVK_LOAD_OPT(name) ia->name = have_surface ? (PFN_##name)g_gipa(inst, #name) : NULL;
+    AEVK_KHR_SURFACE_FNS(AEVK_LOAD_OPT)
+#if defined(AEVK_HAVE_WIN32_SURFACE)
+    AEVK_KHR_WIN32_SURFACE_FNS(AEVK_LOAD_OPT)
+#endif
+#if defined(AEVK_HAVE_METAL_SURFACE)
+    AEVK_EXT_METAL_SURFACE_FNS(AEVK_LOAD_OPT)
+#endif
+#if defined(AEVK_HAVE_WAYLAND_SURFACE)
+    AEVK_KHR_WAYLAND_SURFACE_FNS(AEVK_LOAD_OPT)
+#endif
+#if defined(AEVK_HAVE_XLIB_SURFACE)
+    AEVK_KHR_XLIB_SURFACE_FNS(AEVK_LOAD_OPT)
+#endif
+#undef AEVK_LOAD_OPT
+}
+
 /* Creates an instance, enabling the portability enumeration extension when the
  * loader advertises it. Without it MoltenVK's device is invisible, because a
- * non-conformant implementation is hidden from a 1.0 application by default. */
-static int aevk_create_instance(AevkInstanceApi* ia, VkInstance* out) {
+ * non-conformant implementation is hidden from a 1.0 application by default.
+ *
+ * Also enables VK_KHR_surface and every window-system surface extension this
+ * build knows and the loader offers (#1505), and reports which window kinds
+ * that makes presentable through `out_kinds` (a bit per AEVK_WINDOW_* value).
+ * Enabling them costs nothing for a program that never presents, and doing
+ * it here means a device is ready for a swapchain without being recreated. */
+static int aevk_create_instance(AevkInstanceApi* ia, VkInstance* out, unsigned* out_kinds) {
     PFN_vkCreateInstance create =
         (PFN_vkCreateInstance)g_gipa(NULL, "vkCreateInstance");
     PFN_vkEnumerateInstanceExtensionProperties enum_ext =
@@ -506,25 +579,52 @@ static int aevk_create_instance(AevkInstanceApi* ia, VkInstance* out) {
         return aevk_fail(AEVK_ERR_NO_LOADER, "loader exports no vkCreateInstance");
     }
 
-    int portability = 0;
+    const char* exts[4];
+    uint32_t ext_count = 0;
+    VkInstanceCreateFlags flags = 0;
+    unsigned kinds = 0;
+    int have_surface = 0;
+
     uint32_t n = 0;
     if (enum_ext(NULL, &n, NULL) == VK_SUCCESS && n) {
         VkExtensionProperties* props =
             (VkExtensionProperties*)calloc(n, sizeof(*props));
         if (!props) return aevk_fail(AEVK_ERR_OOM, "out of memory");
         if (enum_ext(NULL, &n, props) == VK_SUCCESS) {
-            portability = aevk_has_ext(props, n,
-                                       VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+            if (aevk_has_ext(props, n, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+                exts[ext_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+                flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+            }
+            if (aevk_has_ext(props, n, VK_KHR_SURFACE_EXTENSION_NAME)) {
+                have_surface = 1;
+                exts[ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+#if defined(AEVK_HAVE_WIN32_SURFACE)
+                if (aevk_has_ext(props, n, VK_KHR_WIN32_SURFACE_EXTENSION_NAME)) {
+                    exts[ext_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+                    kinds |= 1u << AEVK_WINDOW_WIN32;
+                }
+#elif defined(AEVK_HAVE_METAL_SURFACE)
+                /* Both Apple kinds present through a CAMetalLayer: an NSView
+                 * is given one, a layer is used as it is. */
+                if (aevk_has_ext(props, n, VK_EXT_METAL_SURFACE_EXTENSION_NAME)) {
+                    exts[ext_count++] = VK_EXT_METAL_SURFACE_EXTENSION_NAME;
+                    kinds |= (1u << AEVK_WINDOW_NSVIEW) | (1u << AEVK_WINDOW_METAL_LAYER);
+                }
+#else
+                if (aevk_has_ext(props, n, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME)) {
+                    exts[ext_count++] = VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME;
+                    kinds |= 1u << AEVK_WINDOW_WAYLAND;
+                }
+#  if defined(AEVK_HAVE_XLIB_SURFACE)
+                if (aevk_has_ext(props, n, VK_KHR_XLIB_SURFACE_EXTENSION_NAME)) {
+                    exts[ext_count++] = VK_KHR_XLIB_SURFACE_EXTENSION_NAME;
+                    kinds |= 1u << AEVK_WINDOW_X11;
+                }
+#  endif
+#endif
+            }
         }
         free(props);
-    }
-
-    const char* exts[1];
-    uint32_t ext_count = 0;
-    VkInstanceCreateFlags flags = 0;
-    if (portability) {
-        exts[ext_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-        flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
 
     VkApplicationInfo app = {0};
@@ -548,7 +648,12 @@ static int aevk_create_instance(AevkInstanceApi* ia, VkInstance* out) {
                                                           : AEVK_ERR_NO_DEVICE,
                          "vkCreateInstance failed (VkResult %d)", (int)r);
     }
-    return aevk_load_instance_api(ia, *out);
+    int rc = aevk_load_instance_api(ia, *out);
+    if (rc != AEVK_OK) return rc;
+    aevk_load_surface_api(ia, *out, have_surface);
+    if (!have_surface || !ia->vkGetPhysicalDeviceSurfaceSupportKHR) kinds = 0;
+    if (out_kinds) *out_kinds = kinds;
+    return AEVK_OK;
 }
 
 /* Discrete GPU, then integrated, then anything with a graphics queue. */
@@ -641,7 +746,7 @@ int aevk_available(void) {
         if (aevk_load_library() == AEVK_OK) {
             AevkInstanceApi ia;
             VkInstance inst = VK_NULL_HANDLE;
-            if (aevk_create_instance(&ia, &inst) == AEVK_OK) {
+            if (aevk_create_instance(&ia, &inst, NULL) == AEVK_OK) {
                 VkPhysicalDevice phys;
                 uint32_t family;
                 result = aevk_pick_physical(&ia, inst, &phys, &family,
@@ -669,28 +774,40 @@ AevkDevice* aevk_device_create(void) {
     if (!d) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     AEVK_MUTEX_INIT(&d->lock);
 
-    if (aevk_create_instance(&d->ia, &d->instance) != AEVK_OK) goto fail;
+    if (aevk_create_instance(&d->ia, &d->instance, &d->surface_kinds) != AEVK_OK) goto fail;
     if (aevk_pick_physical(&d->ia, d->instance, &d->phys, &d->queue_family,
                            d->name, sizeof(d->name)) != AEVK_OK) goto fail;
 
     VkPhysicalDeviceProperties props;
     d->ia.vkGetPhysicalDeviceProperties(d->phys, &props);
     d->max_dim = props.limits.maxImageDimension2D;
+    d->max_groups[0] = props.limits.maxComputeWorkGroupCount[0];
+    d->max_groups[1] = props.limits.maxComputeWorkGroupCount[1];
+    d->max_groups[2] = props.limits.maxComputeWorkGroupCount[2];
     d->sample_counts = props.limits.framebufferColorSampleCounts &
                        props.limits.framebufferDepthSampleCounts;
     d->ia.vkGetPhysicalDeviceMemoryProperties(d->phys, &d->mem_props);
 
     /* VK_KHR_portability_subset must be enabled when the device advertises it,
-     * or vkCreateDevice is required to fail. This is the MoltenVK path. */
-    const char* dev_exts[1];
+     * or vkCreateDevice is required to fail. This is the MoltenVK path.
+     * VK_KHR_swapchain is enabled whenever the instance can make a surface
+     * and the device offers it, so the same device renders offscreen and
+     * presents (#1505). */
+    const char* dev_exts[2];
     uint32_t dev_ext_count = 0;
+    int want_swapchain = 0;
     uint32_t en = 0;
     if (d->ia.vkEnumerateDeviceExtensionProperties(d->phys, NULL, &en, NULL) == VK_SUCCESS && en) {
         VkExtensionProperties* eps = (VkExtensionProperties*)calloc(en, sizeof(*eps));
         if (!eps) { aevk_fail(AEVK_ERR_OOM, "out of memory"); goto fail; }
-        if (d->ia.vkEnumerateDeviceExtensionProperties(d->phys, NULL, &en, eps) == VK_SUCCESS &&
-            aevk_has_ext(eps, en, "VK_KHR_portability_subset")) {
-            dev_exts[dev_ext_count++] = "VK_KHR_portability_subset";
+        if (d->ia.vkEnumerateDeviceExtensionProperties(d->phys, NULL, &en, eps) == VK_SUCCESS) {
+            if (aevk_has_ext(eps, en, "VK_KHR_portability_subset")) {
+                dev_exts[dev_ext_count++] = "VK_KHR_portability_subset";
+            }
+            if (d->surface_kinds && aevk_has_ext(eps, en, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+                dev_exts[dev_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+                want_swapchain = 1;
+            }
         }
         free(eps);
     }
@@ -717,6 +834,14 @@ AevkDevice* aevk_device_create(void) {
     }
     if (aevk_load_device_api(&d->da, d->ia.vkGetDeviceProcAddr, d->device) != AEVK_OK) {
         goto fail;
+    }
+    if (want_swapchain) {
+#define AEVK_LOAD_SC(name) d->da.name = (PFN_##name)d->ia.vkGetDeviceProcAddr(d->device, #name);
+        AEVK_KHR_SWAPCHAIN_FNS(AEVK_LOAD_SC)
+#undef AEVK_LOAD_SC
+        d->can_present = d->da.vkCreateSwapchainKHR && d->da.vkDestroySwapchainKHR &&
+                         d->da.vkGetSwapchainImagesKHR && d->da.vkAcquireNextImageKHR &&
+                         d->da.vkQueuePresentKHR;
     }
     d->da.vkGetDeviceQueue(d->device, d->queue_family, 0, &d->queue);
 
@@ -929,17 +1054,23 @@ static int aevk_frames_alloc(AevkTarget* t, int count) {
 
     for (int i = 0; i < count; i++) {
         AevkFrame* f = &frames[i];
-        if (aevk_make_buffer(d, t->readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                             &f->readback, &f->readback_mem) != AEVK_OK) {
-            goto fail;
+        VkResult r;
+        /* A target whose readback is off never copies a frame out, so its
+         * slots carry no readback buffer at all. */
+        if (t->readback_on) {
+            if (aevk_make_buffer(d, t->readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                 &f->readback, &f->readback_mem) != AEVK_OK) {
+                goto fail;
+            }
+            /* Mapped once and left mapped: a per-frame map/unmap pair is a
+             * driver round trip that buys nothing for a buffer that lives this
+             * long. */
+            r = d->da.vkMapMemory(d->device, f->readback_mem, 0,
+                                  t->readback_size, 0, &f->readback_ptr);
+            if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
         }
-        /* Mapped once and left mapped: a per-frame map/unmap pair is a driver
-         * round trip that buys nothing for a buffer that lives this long. */
-        VkResult r = d->da.vkMapMemory(d->device, f->readback_mem, 0,
-                                       t->readback_size, 0, &f->readback_ptr);
-        if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
 
         VkCommandBufferAllocateInfo cai = {0};
         cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -974,144 +1105,102 @@ fail:
     return AEVK_ERR_OOM;
 }
 
-AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
-    return aevk_target_create_ex(d, width, height, 0, 1);
-}
+/* The colour image the target renders into and reads back from, the
+ * multisampled and depth attachments when the target has them, and the
+ * framebuffer over them: everything that depends on the SIZE. target_resize
+ * rebuilds exactly this and keeps the render pass, which depends only on the
+ * formats and the sample count, and with it every pipeline made for the
+ * target. The caller guarantees nothing is using the old images. */
+static int aevk_target_make_images(AevkTarget* t) {
+    AevkDevice* d = t->dev;
+    int rc = aevk_make_attachment(d, t->width, t->height, t->color_format,
+                                  VK_SAMPLE_COUNT_1_BIT,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                  &t->image, &t->image_mem, &t->view);
+    if (rc != AEVK_OK) return rc;
 
-AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
-                                  int want_depth, int samples) {
-    aevk_clear_error();
-    if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
-    if (width <= 0 || height <= 0) {
-        aevk_fail(AEVK_ERR_ARG, "size must be positive, got %dx%d", width, height);
-        return NULL;
-    }
-    if ((uint32_t)width > d->max_dim || (uint32_t)height > d->max_dim) {
-        aevk_fail(AEVK_ERR_UNSUPPORTED, "%dx%d exceeds the device limit of %u",
-                  width, height, d->max_dim);
-        return NULL;
-    }
-    /* The readback size is computed in 64-bit so a large target reports
-     * UNSUPPORTED from the allocator rather than wrapping to a small buffer. */
-    uint64_t bytes = (uint64_t)width * (uint64_t)height * 4u;
-    if (bytes > (uint64_t)SIZE_MAX) {
-        aevk_fail(AEVK_ERR_UNSUPPORTED, "%dx%d does not fit in host memory", width, height);
-        return NULL;
-    }
-
-    VkSampleCountFlagBits sample_bit = aevk_sample_bit(samples);
-    if (!sample_bit) {
-        aevk_fail(AEVK_ERR_ARG, "sample count must be 1, 2, 4, 8 or 16 (got %d)", samples);
-        return NULL;
-    }
-    if (samples > 1 && !(d->sample_counts & sample_bit)) {
-        aevk_fail(AEVK_ERR_UNSUPPORTED,
-                  "device does not support %dx multisampling for framebuffers", samples);
-        return NULL;
-    }
-
-    VkFormat depth_format = VK_FORMAT_UNDEFINED;
-    if (want_depth) {
-        depth_format = aevk_pick_depth_format(d);
-        if (depth_format == VK_FORMAT_UNDEFINED) {
-            aevk_fail(AEVK_ERR_UNSUPPORTED, "device offers no depth attachment format");
-            return NULL;
-        }
-    }
-
-    AevkTarget* t = (AevkTarget*)calloc(1, sizeof(*t));
-    if (!t) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
-    t->dev = d;
-    t->width = width;
-    t->height = height;
-    t->readback_size = (VkDeviceSize)bytes;
-    t->samples = samples;
-    t->index_bits = 32;
-    t->has_depth = want_depth ? 1 : 0;
-    t->depth_format = depth_format;
-
-    VkImageCreateInfo ici = {0};
-    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ici.extent.width = (uint32_t)width;
-    ici.extent.height = (uint32_t)height;
-    ici.extent.depth = 1;
-    ici.mipLevels = 1;
-    ici.arrayLayers = 1;
-    ici.samples = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VkResult r = d->da.vkCreateImage(d->device, &ici, NULL, &t->image);
-    if (r != VK_SUCCESS) {
-        aevk_fail(AEVK_ERR_OOM, "vkCreateImage failed (%d)", (int)r);
-        goto fail;
-    }
-
-    VkMemoryRequirements req;
-    d->da.vkGetImageMemoryRequirements(d->device, t->image, &req);
-    uint32_t type = 0;
-    if (aevk_find_memory(d, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                         &type) != AEVK_OK &&
-        aevk_find_memory(d, req.memoryTypeBits, 0, &type) != AEVK_OK) {
-        aevk_fail(AEVK_ERR_UNSUPPORTED, "no memory type for the colour image");
-        goto fail;
-    }
-    VkMemoryAllocateInfo mi = {0};
-    mi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    mi.allocationSize = req.size;
-    mi.memoryTypeIndex = type;
-    r = d->da.vkAllocateMemory(d->device, &mi, NULL, &t->image_mem);
-    if (r != VK_SUCCESS) {
-        aevk_fail(AEVK_ERR_OOM, "image memory allocation failed (%d)", (int)r);
-        goto fail;
-    }
-    r = d->da.vkBindImageMemory(d->device, t->image, t->image_mem, 0);
-    if (r != VK_SUCCESS) {
-        aevk_fail(AEVK_ERR_OOM, "vkBindImageMemory failed (%d)", (int)r);
-        goto fail;
-    }
-
-    VkImageViewCreateInfo vci = {0};
-    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    vci.image = t->image;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    vci.subresourceRange.levelCount = 1;
-    vci.subresourceRange.layerCount = 1;
-    r = d->da.vkCreateImageView(d->device, &vci, NULL, &t->view);
-    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateImageView failed (%d)", (int)r); goto fail; }
-
-    /* The extra attachments, when asked for. The multisampled colour image is
-     * TRANSIENT: it exists only inside the render pass, resolving into
-     * `image`, so a tiler never has to write it to memory at all. */
+    /* The multisampled colour image is TRANSIENT: it exists only inside the
+     * render pass, resolving into `image`, so a tiler never has to write it
+     * to memory at all. */
     if (t->samples > 1) {
-        int rc = aevk_make_attachment(d, width, height, VK_FORMAT_R8G8B8A8_UNORM,
-                                      aevk_sample_bit(t->samples),
-                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
-                                      VK_IMAGE_ASPECT_COLOR_BIT,
-                                      &t->msaa_image, &t->msaa_mem, &t->msaa_view);
-        if (rc != AEVK_OK) goto fail;
+        rc = aevk_make_attachment(d, t->width, t->height, t->color_format,
+                                  aevk_sample_bit(t->samples),
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                  &t->msaa_image, &t->msaa_mem, &t->msaa_view);
+        if (rc != AEVK_OK) return rc;
     }
     if (t->has_depth) {
-        int rc = aevk_make_attachment(d, width, height, t->depth_format,
-                                      aevk_sample_bit(t->samples),
-                                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
-                                      VK_IMAGE_ASPECT_DEPTH_BIT,
-                                      &t->depth_image, &t->depth_mem, &t->depth_view);
-        if (rc != AEVK_OK) goto fail;
+        rc = aevk_make_attachment(d, t->width, t->height, t->depth_format,
+                                  aevk_sample_bit(t->samples),
+                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_DEPTH_BIT,
+                                  &t->depth_image, &t->depth_mem, &t->depth_view);
+        if (rc != AEVK_OK) return rc;
     }
+
+    /* In attachment order, which the render pass fixed: [0] colour written,
+     * [1] resolve (MSAA only), [last] depth. */
+    VkImageView views[3];
+    uint32_t n_view = 0;
+    views[n_view++] = (t->samples > 1) ? t->msaa_view : t->view;
+    if (t->samples > 1) views[n_view++] = t->view;
+    if (t->has_depth)   views[n_view++] = t->depth_view;
+
+    VkFramebufferCreateInfo fci = {0};
+    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fci.renderPass = t->pass;
+    fci.attachmentCount = n_view;
+    fci.pAttachments = views;
+    fci.width = (uint32_t)t->width;
+    fci.height = (uint32_t)t->height;
+    fci.layers = 1;
+    VkResult r = d->da.vkCreateFramebuffer(d->device, &fci, NULL, &t->fb);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateFramebuffer failed (%d)", (int)r);
+    return AEVK_OK;
+}
+
+/* Releases what aevk_target_make_images made, including a partial set left
+ * by a failure part-way through it. */
+static void aevk_target_free_images(AevkTarget* t) {
+    AevkDevice* d = t->dev;
+    if (t->fb)          d->da.vkDestroyFramebuffer(d->device, t->fb, NULL);
+    if (t->view)        d->da.vkDestroyImageView(d->device, t->view, NULL);
+    if (t->image)       d->da.vkDestroyImage(d->device, t->image, NULL);
+    if (t->image_mem)   d->da.vkFreeMemory(d->device, t->image_mem, NULL);
+    if (t->msaa_view)   d->da.vkDestroyImageView(d->device, t->msaa_view, NULL);
+    if (t->msaa_image)  d->da.vkDestroyImage(d->device, t->msaa_image, NULL);
+    if (t->msaa_mem)    d->da.vkFreeMemory(d->device, t->msaa_mem, NULL);
+    if (t->depth_view)  d->da.vkDestroyImageView(d->device, t->depth_view, NULL);
+    if (t->depth_image) d->da.vkDestroyImage(d->device, t->depth_image, NULL);
+    if (t->depth_mem)   d->da.vkFreeMemory(d->device, t->depth_mem, NULL);
+    t->fb = VK_NULL_HANDLE;
+    t->view = VK_NULL_HANDLE;
+    t->image = VK_NULL_HANDLE;
+    t->image_mem = VK_NULL_HANDLE;
+    t->msaa_view = VK_NULL_HANDLE;
+    t->msaa_image = VK_NULL_HANDLE;
+    t->msaa_mem = VK_NULL_HANDLE;
+    t->depth_view = VK_NULL_HANDLE;
+    t->depth_image = VK_NULL_HANDLE;
+    t->depth_mem = VK_NULL_HANDLE;
+    t->rendered = 0;
+}
+
+/* The render pass: attachment formats, sample count and layouts, nothing
+ * that depends on the size. */
+static int aevk_target_make_pass(AevkTarget* t) {
+    AevkDevice* d = t->dev;
 
     /* Attachment 0 is always the one the draw writes: the multisampled image
      * when there is one, otherwise the single-sample image that gets copied
      * out. finalLayout TRANSFER_SRC_OPTIMAL on whichever ends up being copied,
-     * so the copy after the render pass needs no barrier.
+     * so the copy after the render pass needs no barrier, and presenting
+     * reads it from the same layout.
      *
      * Order: [0] colour written, [1] resolve (MSAA only), [last] depth. The
      * clear-value array is indexed by attachment, so record() has to build it
@@ -1121,7 +1210,7 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
     uint32_t n_att = 0;
 
     uint32_t color_index = n_att;
-    atts[n_att].format = VK_FORMAT_R8G8B8A8_UNORM;
+    atts[n_att].format = t->color_format;
     atts[n_att].samples = aevk_sample_bit(t->samples);
     atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     atts[n_att].storeOp = (t->samples > 1) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
@@ -1136,7 +1225,7 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
     uint32_t resolve_index = 0;
     if (t->samples > 1) {
         resolve_index = n_att;
-        atts[n_att].format = VK_FORMAT_R8G8B8A8_UNORM;
+        atts[n_att].format = t->color_format;
         atts[n_att].samples = VK_SAMPLE_COUNT_1_BIT;
         atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         atts[n_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1182,13 +1271,23 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
     if (t->samples > 1)  sub.pResolveAttachments = &resolve_ref;
     if (t->has_depth)    sub.pDepthStencilAttachment = &depth_ref;
 
+    /* deps[0] orders this frame's attachment writes (and the layout
+     * transition out of UNDEFINED) after everything earlier on the queue that
+     * touched the same images: the previous frame's attachment writes, and
+     * the transfer reads of its readback copy and of a present blit. With a
+     * single frame in flight the fence wait already separates them; with
+     * several, or with a swapchain reading the image, only this dependency
+     * does. */
     VkSubpassDependency deps[2] = {{0}, {0}};
     deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
     deps[0].dstSubpass = 0;
-    deps[0].srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    deps[0].srcAccessMask = 0;
+    deps[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     deps[1].srcSubpass = 0;
@@ -1206,27 +1305,175 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
     rpi.pSubpasses = &sub;
     rpi.dependencyCount = 2;
     rpi.pDependencies = deps;
-    r = d->da.vkCreateRenderPass(d->device, &rpi, NULL, &t->pass);
-    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateRenderPass failed (%d)", (int)r); goto fail; }
+    VkResult r = d->da.vkCreateRenderPass(d->device, &rpi, NULL, &t->pass);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateRenderPass failed (%d)", (int)r);
+    return AEVK_OK;
+}
 
-    VkImageView views[3];
-    uint32_t n_view = 0;
-    views[n_view++] = (t->samples > 1) ? t->msaa_view : t->view;
-    if (t->samples > 1) views[n_view++] = t->view;
-    if (t->has_depth)   views[n_view++] = t->depth_view;
+/* The colour formats a target can be created with (#1514): 8-bit UNORM,
+ * which is what a display shows as written; 8-bit sRGB, whose stores encode
+ * linear shader output for display; and half and single float, for HDR or
+ * compute-style output that must not be clamped to 0..1. Bytes a pixel, or 0
+ * for a format this module does not render to. */
+static int aevk_format_bpp(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:        return 4;
+        case VK_FORMAT_R16G16B16A16_SFLOAT:  return 8;
+        case VK_FORMAT_R32G32B32A32_SFLOAT:  return 16;
+        default:                             return 0;
+    }
+}
 
-    VkFramebufferCreateInfo fci = {0};
-    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fci.renderPass = t->pass;
-    fci.attachmentCount = n_view;
-    fci.pAttachments = views;
-    fci.width = (uint32_t)width;
-    fci.height = (uint32_t)height;
-    fci.layers = 1;
-    r = d->da.vkCreateFramebuffer(d->device, &fci, NULL, &t->fb);
-    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateFramebuffer failed (%d)", (int)r); goto fail; }
+/* IEEE 754 half to float, subnormals, infinities and NaN included. */
+static float aevk_half_to_float(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t mant = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            /* Subnormal: shift the mantissa up until it is normalised. */
+            exp = 127 - 15 + 1;
+            while (!(mant & 0x400u)) { mant <<= 1; exp--; }
+            mant &= 0x3FFu;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+    float f;
+    memcpy(&f, &bits, sizeof(f));
+    return f;
+}
 
+/* Channel `c` (0 red .. 3 alpha) of the pixel at `px`, in the target's
+ * format, as a float: the stored byte over 255 for the 8-bit formats (for
+ * sRGB that is the ENCODED value, which is what is stored and displayed), the
+ * value itself for the float ones. */
+static float aevk_channel_value(const AevkTarget* t, const unsigned char* px, int c) {
+    switch (t->color_format) {
+        case VK_FORMAT_R16G16B16A16_SFLOAT: {
+            uint16_t h;
+            memcpy(&h, px + c * 2, sizeof(h));
+            return aevk_half_to_float(h);
+        }
+        case VK_FORMAT_R32G32B32A32_SFLOAT: {
+            float f;
+            memcpy(&f, px + c * 4, sizeof(f));
+            return f;
+        }
+        default:
+            return (float)px[c] / 255.0f;
+    }
+}
+
+/* The 8-bit value of channel `c`: the stored byte for the 8-bit formats, the
+ * float clamped to 0..1 and rounded for the others. NaN reads as 0. */
+static unsigned char aevk_channel_u8(const AevkTarget* t, const unsigned char* px, int c) {
+    if (t->bytes_per_pixel == 4) return px[c];
+    float v = aevk_channel_value(t, px, c);
+    if (!(v > 0.0f)) return 0;
+    if (v >= 1.0f) return 255;
+    return (unsigned char)(v * 255.0f + 0.5f);
+}
+
+/* Size checks shared by create and resize: positive, within the device's
+ * image limit, and a readback that fits in host memory. The byte count is
+ * computed in 64-bit so a large target reports UNSUPPORTED rather than
+ * wrapping to a small buffer. */
+static int aevk_target_check_size(AevkDevice* d, int width, int height, int bpp,
+                                  uint64_t* out_bytes) {
+    if (width <= 0 || height <= 0) {
+        return aevk_fail(AEVK_ERR_ARG, "size must be positive, got %dx%d", width, height);
+    }
+    if ((uint32_t)width > d->max_dim || (uint32_t)height > d->max_dim) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "%dx%d exceeds the device limit of %u",
+                         width, height, d->max_dim);
+    }
+    uint64_t bytes = (uint64_t)width * (uint64_t)height * (uint64_t)bpp;
+    if (bytes > (uint64_t)SIZE_MAX || bytes > (uint64_t)0x7fffffff) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "%dx%d does not fit in host memory", width, height);
+    }
+    *out_bytes = bytes;
+    return AEVK_OK;
+}
+
+AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
+    return aevk_target_create_format(d, width, height, VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
+}
+
+AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
+                                  int want_depth, int samples) {
+    return aevk_target_create_format(d, width, height, VK_FORMAT_R8G8B8A8_UNORM,
+                                     want_depth, samples);
+}
+
+AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int format,
+                                      int want_depth, int samples) {
+    aevk_clear_error();
+    if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
+    int bpp = aevk_format_bpp((VkFormat)format);
+    if (!bpp) {
+        aevk_fail(AEVK_ERR_ARG,
+                  "format %d is not a target format (R8G8B8A8_UNORM 37, R8G8B8A8_SRGB 43, "
+                  "R16G16B16A16_SFLOAT 97, R32G32B32A32_SFLOAT 109)", format);
+        return NULL;
+    }
+    /* Asked of the device rather than assumed: rendering to it is the
+     * attachment feature. The float formats' support is near universal on
+     * desktop drivers and not guaranteed everywhere. */
+    VkFormatProperties fp;
+    d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, (VkFormat)format, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot render to format %d", format);
+        return NULL;
+    }
+    uint64_t bytes = 0;
+    if (aevk_target_check_size(d, width, height, bpp, &bytes) != AEVK_OK) return NULL;
+
+    VkSampleCountFlagBits sample_bit = aevk_sample_bit(samples);
+    if (!sample_bit) {
+        aevk_fail(AEVK_ERR_ARG, "sample count must be 1, 2, 4, 8 or 16 (got %d)", samples);
+        return NULL;
+    }
+    if (samples > 1 && !(d->sample_counts & sample_bit)) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED,
+                  "device does not support %dx multisampling for framebuffers", samples);
+        return NULL;
+    }
+
+    VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    if (want_depth) {
+        depth_format = aevk_pick_depth_format(d);
+        if (depth_format == VK_FORMAT_UNDEFINED) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "device offers no depth attachment format");
+            return NULL;
+        }
+    }
+
+    AevkTarget* t = (AevkTarget*)calloc(1, sizeof(*t));
+    if (!t) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
+    t->dev = d;
+    t->width = width;
+    t->height = height;
+    t->color_format = (VkFormat)format;
+    t->bytes_per_pixel = bpp;
+    t->readback_on = 1;
+    t->readback_size = (VkDeviceSize)bytes;
+    t->samples = samples;
+    t->index_bits = 32;
+    t->has_depth = want_depth ? 1 : 0;
+    t->depth_format = depth_format;
     t->timeout_ns = 5000000000ull;
+
+    if (aevk_target_make_pass(t) != AEVK_OK) goto fail;
+    if (aevk_target_make_images(t) != AEVK_OK) goto fail;
+
     AEVK_MUTEX_LOCK(&d->lock);
     int frames_rc = aevk_frames_alloc(t, 1);
     AEVK_MUTEX_UNLOCK(&d->lock);
@@ -1252,22 +1499,73 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->ibuf_ptr)     d->da.vkUnmapMemory(d->device, t->ibuf_mem);
         if (t->ibuf)         d->da.vkDestroyBuffer(d->device, t->ibuf, NULL);
         if (t->ibuf_mem)     d->da.vkFreeMemory(d->device, t->ibuf_mem, NULL);
-        if (t->fb)           d->da.vkDestroyFramebuffer(d->device, t->fb, NULL);
+        aevk_target_free_images(t);
         if (t->pass)         d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
-        if (t->view)         d->da.vkDestroyImageView(d->device, t->view, NULL);
-        if (t->image)        d->da.vkDestroyImage(d->device, t->image, NULL);
-        if (t->image_mem)    d->da.vkFreeMemory(d->device, t->image_mem, NULL);
-        if (t->msaa_view)    d->da.vkDestroyImageView(d->device, t->msaa_view, NULL);
-        if (t->msaa_image)   d->da.vkDestroyImage(d->device, t->msaa_image, NULL);
-        if (t->msaa_mem)     d->da.vkFreeMemory(d->device, t->msaa_mem, NULL);
-        if (t->depth_view)   d->da.vkDestroyImageView(d->device, t->depth_view, NULL);
-        if (t->depth_image)  d->da.vkDestroyImage(d->device, t->depth_image, NULL);
-        if (t->depth_mem)    d->da.vkFreeMemory(d->device, t->depth_mem, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(t->batch);
     free(t);
 }
+
+/* A window changed size: new images and framebuffer at the new size, the
+ * same render pass, so every pipeline made for the target stays valid.
+ * Geometry, push constants, the batch and the frame count carry over; the
+ * previous contents do not, and nothing can be presented until a frame has
+ * been drawn at the new size. On failure the target has no images and every
+ * draw is refused until a resize succeeds. */
+int aevk_target_resize(AevkTarget* t, int width, int height) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    AevkDevice* d = t->dev;
+    uint64_t bytes = 0;
+    int rc = aevk_target_check_size(d, width, height, t->bytes_per_pixel, &bytes);
+    if (rc != AEVK_OK) return rc;
+    if (width == t->width && height == t->height && t->fb) return AEVK_OK;
+
+    AEVK_MUTEX_LOCK(&d->lock);
+    d->da.vkDeviceWaitIdle(d->device);
+    int frames = t->frame_count > 0 ? t->frame_count : 1;
+    aevk_frames_free(t);
+    aevk_target_free_images(t);
+    t->width = width;
+    t->height = height;
+    t->readback_size = (VkDeviceSize)bytes;
+    rc = aevk_target_make_images(t);
+    if (rc == AEVK_OK) rc = aevk_frames_alloc(t, frames);
+    if (rc != AEVK_OK) {
+        /* Leave nothing half-built behind: a target without images is one
+         * every draw refuses, which is what the comment above promises. */
+        aevk_frames_free(t);
+        aevk_target_free_images(t);
+    }
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+/* Whether each frame is copied into host memory for pixel(), copy_rgba() and
+ * save_ppm(). A target that is only ever presented turns it off: the copy is
+ * width*height*4 bytes of transfer per frame and a readback buffer per frame
+ * slot, all for pixels nobody reads. */
+int aevk_target_set_readback(AevkTarget* t, int on) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    on = on ? 1 : 0;
+    if (on == t->readback_on) return AEVK_OK;
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    d->da.vkDeviceWaitIdle(d->device);
+    int frames = t->frame_count > 0 ? t->frame_count : 1;
+    aevk_frames_free(t);
+    t->readback_on = on;
+    int rc = t->fb ? aevk_frames_alloc(t, frames) : AEVK_OK;
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+int aevk_target_readback(const AevkTarget* t) { return t ? t->readback_on : 0; }
+
+int aevk_target_format(const AevkTarget* t) { return t ? (int)t->color_format : 0; }
+int aevk_target_bytes_per_pixel(const AevkTarget* t) { return t ? t->bytes_per_pixel : 0; }
 
 /* Draw batching (#1540). An empty batch is the default and draws all the
  * geometry once, which is every caller that never asks for one. */
@@ -1437,6 +1735,13 @@ int aevk_bindings_uniform(AevkBindings* b, int binding) {
 int aevk_bindings_texture(AevkBindings* b, int binding) {
     aevk_clear_error();
     return aevk_bindings_add(b, binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+}
+
+/* A storage buffer: `layout(std430, binding = N) buffer`. What a compute pass
+ * reads and writes, and what a vertex shader pulls computed data from. */
+int aevk_bindings_storage(AevkBindings* b, int binding) {
+    aevk_clear_error();
+    return aevk_bindings_add(b, binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1904,6 +2209,16 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
                   AEVK_MAX_PUSH, push_bytes);
         return NULL;
     }
+    /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
+     * A layout declaring another would have the pipeline read a buffer that
+     * is never bound, so it is refused here rather than drawn from. */
+    for (uint32_t i = 0; layout && i < layout->bind_count; i++) {
+        if (layout->binds[i].binding != 0) {
+            aevk_fail(AEVK_ERR_ARG, "vertex binding %u is declared, but a target feeds binding 0 only",
+                      layout->binds[i].binding);
+            return NULL;
+        }
+    }
 
     AevkPipeline* p = (AevkPipeline*)calloc(1, sizeof(*p));
     if (!p) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
@@ -1935,16 +2250,22 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
             goto fail;
         }
 
-        VkDescriptorPoolSize sizes[2] = {{0}, {0}};
-        uint32_t nsizes = 0, n_ub = 0, n_img = 0;
+        VkDescriptorPoolSize sizes[3] = {{0}, {0}, {0}};
+        uint32_t nsizes = 0, n_ub = 0, n_img = 0, n_sb = 0;
         for (uint32_t i = 0; i < bindings->count; i++) {
-            if (bindings->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_ub++;
+            VkDescriptorType ty = bindings->b[i].descriptorType;
+            if (ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_ub++;
+            else if (ty == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) n_sb++;
             else n_img++;
+            p->declared[bindings->b[i].binding] = 1;
+            p->desc_type[bindings->b[i].binding] = ty;
         }
         if (n_ub)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                      sizes[nsizes++].descriptorCount = n_ub; }
         if (n_img) { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                      sizes[nsizes++].descriptorCount = n_img; }
+        if (n_sb)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                     sizes[nsizes++].descriptorCount = n_sb; }
 
         /* Counts are per set; a pool holds AEVK_SETS_PER_POOL of them. */
         for (uint32_t i = 0; i < nsizes; i++) {
@@ -2004,9 +2325,14 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
     attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
     attrs[1].offset = 2 * sizeof(float);
 
+    /* A layout with nothing described in it is a pipeline with no vertex
+     * input at all: the vertex shader pulls its data from a storage buffer
+     * by gl_VertexIndex (#1515), and the draw still takes its count from the
+     * target's reserved vertices. */
     VkPipelineVertexInputStateCreateInfo vin = {0};
     vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    if (layout && layout->bind_count > 0) {
+    p->vertex_input = !layout || layout->bind_count > 0;
+    if (layout) {
         vin.vertexBindingDescriptionCount = layout->bind_count;
         vin.pVertexBindingDescriptions = layout->binds;
         vin.vertexAttributeDescriptionCount = layout->attr_count;
@@ -2137,6 +2463,9 @@ int aevk_material_set_uniform(AevkMaterial* m, int binding,
         return aevk_fail(AEVK_ERR_ARG,
                          "pipeline was created without bindings, so it has no descriptor set");
     }
+    if (!p->declared[binding] || p->desc_type[binding] != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a uniform", binding);
+    }
     AevkDevice* d = p->dev;
 
     /* Reuse the buffer while it is big enough; a uniform that changes every
@@ -2150,6 +2479,11 @@ int aevk_material_set_uniform(AevkMaterial* m, int binding,
         m->ub[binding].ptr = NULL;
         m->ub[binding].size = 0;
     }
+
+    /* A caller's buffer was bound here: the uniform goes back to being the
+     * material's own, so the descriptor is rewritten below. */
+    int repoint = m->ext[binding] != NULL && m->ub[binding].buf != VK_NULL_HANDLE;
+    m->ext[binding] = NULL;
 
     if (!m->ub[binding].buf) {
         int rc = aevk_make_buffer(d, (VkDeviceSize)len, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -2180,6 +2514,18 @@ int aevk_material_set_uniform(AevkMaterial* m, int binding,
         w.pBufferInfo = &bi;
         d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
         m->writes++;
+    } else if (repoint) {
+        VkDescriptorBufferInfo bi = {0};
+        bi.buffer = m->ub[binding].buf;
+        bi.range = m->ub[binding].size;
+        VkWriteDescriptorSet w = {0};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = m->set;
+        w.dstBinding = (uint32_t)binding;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w.pBufferInfo = &bi;
+        d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
     }
 
     /* Host-coherent, so the write is visible without a flush. The descriptor
@@ -2204,6 +2550,10 @@ int aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex) {
         /* Sampling an image still in UNDEFINED layout is undefined behaviour
          * and reads as garbage, so refuse rather than render nonsense. */
         return aevk_fail(AEVK_ERR_ARG, "texture has no pixels yet, upload before binding");
+    }
+    if (!p->declared[binding] ||
+        p->desc_type[binding] != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a texture", binding);
     }
     AevkDevice* d = p->dev;
 
@@ -2242,6 +2592,53 @@ int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex) {
                          "pipeline was created without bindings, so it has no descriptor set");
     }
     return aevk_material_set_texture(p->def, binding, tex);
+}
+
+/* Points a storage or uniform binding at a caller's buffer (#1515): a vertex
+ * or fragment shader reading what a compute pass wrote. The buffer must
+ * outlive every draw that uses the material. */
+int aevk_material_set_buffer(AevkMaterial* m, int binding, AevkBuffer* buf) {
+    aevk_clear_error();
+    if (!m || !buf) return aevk_fail(AEVK_ERR_ARG, "material or buffer is null");
+    AevkPipeline* p = m->pipe;
+    if (binding < 0 || binding >= AEVK_MAX_DESC) {
+        return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
+    }
+    if (!m->set) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    if (buf->dev != p->dev) return aevk_fail(AEVK_ERR_ARG, "the buffer belongs to another device");
+    VkDescriptorType ty = p->desc_type[binding];
+    if (!p->declared[binding] ||
+        (ty != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && ty != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a storage or uniform buffer",
+                         binding);
+    }
+    VkDescriptorBufferInfo bi = {0};
+    bi.buffer = buf->buf;
+    bi.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w = {0};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = m->set;
+    w.dstBinding = (uint32_t)binding;
+    w.descriptorCount = 1;
+    w.descriptorType = ty;
+    w.pBufferInfo = &bi;
+    p->dev->da.vkUpdateDescriptorSets(p->dev->device, 1, &w, 0, NULL);
+    m->ext[binding] = buf;
+    m->writes++;
+    return AEVK_OK;
+}
+
+int aevk_pipeline_set_buffer(AevkPipeline* p, int binding, AevkBuffer* buf) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_buffer(p->def, binding, buf);
 }
 
 
@@ -2341,8 +2738,10 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
                                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                      0, p->push_bytes, block);
         }
-        VkDeviceSize off = 0;
-        d->da.vkCmdBindVertexBuffers(fr->cmd, 0, 1, &t->vbuf, &off);
+        if (p->vertex_input) {
+            VkDeviceSize off = 0;
+            d->da.vkCmdBindVertexBuffers(fr->cmd, 0, 1, &t->vbuf, &off);
+        }
         if (t->index_count > 0) {
             d->da.vkCmdBindIndexBuffer(fr->cmd, t->ibuf, 0,
                                        (t->index_bits == 16) ? VK_INDEX_TYPE_UINT16
@@ -2375,14 +2774,16 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     }
     d->da.vkCmdEndRenderPass(fr->cmd);
 
-    VkBufferImageCopy copy = {0};
-    copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy.imageSubresource.layerCount = 1;
-    copy.imageExtent.width = (uint32_t)t->width;
-    copy.imageExtent.height = (uint32_t)t->height;
-    copy.imageExtent.depth = 1;
-    d->da.vkCmdCopyImageToBuffer(fr->cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                 fr->readback, 1, &copy);
+    if (t->readback_on) {
+        VkBufferImageCopy copy = {0};
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent.width = (uint32_t)t->width;
+        copy.imageExtent.height = (uint32_t)t->height;
+        copy.imageExtent.depth = 1;
+        d->da.vkCmdCopyImageToBuffer(fr->cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     fr->readback, 1, &copy);
+    }
 
     vr = d->da.vkEndCommandBuffer(fr->cmd);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkEndCommandBuffer failed (%d)", (int)vr);
@@ -2463,6 +2864,9 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
     AevkDevice* d = t->dev;
     int slot = t->next_frame;
 
+    if (!t->fb || !t->frames) {
+        return aevk_fail(AEVK_ERR_ARG, "target has no images: its last resize failed");
+    }
     if (t->batch_count > 0 && p) {
         int brc = aevk_batch_check(t, p);
         if (brc != AEVK_OK) return brc;
@@ -2499,6 +2903,7 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                          "vkQueueSubmit failed (%d)", (int)vr);
     }
     fr->submitted = 1;
+    t->rendered = 1;
     t->last_submitted = slot;
     t->next_frame = (slot + 1) % t->frame_count;
     return slot;
@@ -2618,9 +3023,39 @@ int aevk_wait_all(AevkTarget* t) {
     return rc;
 }
 
+/* Every pixel as 8-bit RGBA, whatever the target's format: width*height*4
+ * bytes, float channels clamped to 0..1. What the image writers use. */
+int aevk_read_rgba8(AevkTarget* t, void* out, size_t out_len) {
+    aevk_clear_error();
+    if (!t || !out) return aevk_fail(AEVK_ERR_ARG, "target or destination is null");
+    if (!t->readback_on) {
+        return aevk_fail(AEVK_ERR_ARG, "readback is off for this target (target_set_readback)");
+    }
+    size_t pixels = (size_t)t->width * (size_t)t->height;
+    if (out_len < pixels * 4u) {
+        return aevk_fail(AEVK_ERR_ARG, "destination holds %zu bytes, the image needs %zu",
+                         out_len, pixels * 4u);
+    }
+    const unsigned char* src = aevk_readable_pixels(t);
+    if (!src) return aevk_fail(AEVK_ERR_ARG, "target has no readback mapping");
+    unsigned char* dst = (unsigned char*)out;
+    if (t->bytes_per_pixel == 4) {
+        memcpy(dst, src, pixels * 4u);
+        return AEVK_OK;
+    }
+    for (size_t i = 0; i < pixels; i++) {
+        const unsigned char* px = src + i * (size_t)t->bytes_per_pixel;
+        for (int c = 0; c < 4; c++) dst[i * 4u + (size_t)c] = aevk_channel_u8(t, px, c);
+    }
+    return AEVK_OK;
+}
+
 int aevk_read_rgba(AevkTarget* t, void* out, size_t out_len) {
     aevk_clear_error();
     if (!t || !out) return aevk_fail(AEVK_ERR_ARG, "target or destination is null");
+    if (!t->readback_on) {
+        return aevk_fail(AEVK_ERR_ARG, "readback is off for this target (target_set_readback)");
+    }
     if (out_len < (size_t)t->readback_size) {
         return aevk_fail(AEVK_ERR_ARG, "destination holds %zu bytes, the image needs %zu",
                          out_len, (size_t)t->readback_size);
@@ -2634,6 +3069,1231 @@ int aevk_read_rgba(AevkTarget* t, void* out, size_t out_len) {
     if (!src) return aevk_fail(AEVK_ERR_ARG, "target has no readback mapping");
     memcpy(out, src, (size_t)t->readback_size);
     return AEVK_OK;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Buffers and compute (#1515)                                               */
+/* ------------------------------------------------------------------------ */
+
+AevkBuffer* aevk_buffer_create(AevkDevice* d, size_t bytes) {
+    aevk_clear_error();
+    if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
+    if (bytes == 0) { aevk_fail(AEVK_ERR_ARG, "a buffer needs at least one byte"); return NULL; }
+    AevkBuffer* b = (AevkBuffer*)calloc(1, sizeof(*b));
+    if (!b) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
+    b->dev = d;
+    b->size = (VkDeviceSize)bytes;
+    /* Every use this module has for a buffer: read and written by a compute
+     * pass, read as a uniform, pulled from by a vertex shader, and copied. */
+    int rc = aevk_make_buffer(d, (VkDeviceSize)bytes,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              &b->buf, &b->mem);
+    if (rc != AEVK_OK) { free(b); return NULL; }
+    VkResult r = d->da.vkMapMemory(d->device, b->mem, 0, b->size, 0, &b->ptr);
+    if (r != VK_SUCCESS) {
+        aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r);
+        aevk_buffer_destroy(b);
+        return NULL;
+    }
+    /* Zeroed, so a shader reading a buffer the program never filled reads
+     * zeros rather than whatever the allocation last held. */
+    memset(b->ptr, 0, bytes);
+    return b;
+}
+
+void aevk_buffer_destroy(AevkBuffer* b) {
+    if (!b) return;
+    AevkDevice* d = b->dev;
+    if (d && d->device) {
+        /* The GPU may still be reading it from a submitted frame or dispatch. */
+        AEVK_MUTEX_LOCK(&d->lock);
+        d->da.vkDeviceWaitIdle(d->device);
+        if (b->ptr) d->da.vkUnmapMemory(d->device, b->mem);
+        if (b->buf) d->da.vkDestroyBuffer(d->device, b->buf, NULL);
+        if (b->mem) d->da.vkFreeMemory(d->device, b->mem, NULL);
+        AEVK_MUTEX_UNLOCK(&d->lock);
+    }
+    free(b);
+}
+
+size_t aevk_buffer_size(const AevkBuffer* b) { return b ? (size_t)b->size : 0; }
+
+int aevk_buffer_write(AevkBuffer* b, size_t offset, const void* data, size_t len) {
+    aevk_clear_error();
+    if (!b || !data) return aevk_fail(AEVK_ERR_ARG, "buffer or data is null");
+    if (offset > (size_t)b->size || len > (size_t)b->size - offset) {
+        return aevk_fail(AEVK_ERR_ARG, "writing %zu bytes at %zu overruns a %zu-byte buffer",
+                         len, offset, (size_t)b->size);
+    }
+    memcpy((char*)b->ptr + offset, data, len);
+    return AEVK_OK;
+}
+
+int aevk_buffer_read(AevkBuffer* b, size_t offset, void* out, size_t len) {
+    aevk_clear_error();
+    if (!b || !out) return aevk_fail(AEVK_ERR_ARG, "buffer or destination is null");
+    if (offset > (size_t)b->size || len > (size_t)b->size - offset) {
+        return aevk_fail(AEVK_ERR_ARG, "reading %zu bytes at %zu overruns a %zu-byte buffer",
+                         len, offset, (size_t)b->size);
+    }
+    memcpy(out, (const char*)b->ptr + offset, len);
+    return AEVK_OK;
+}
+
+struct AevkCompute {
+    AevkDevice*           dev;
+    VkShaderModule        module;
+    VkDescriptorSetLayout set_layout;
+    VkDescriptorPool      pool;
+    VkDescriptorSet       set;
+    VkPipelineLayout      layout;
+    VkPipeline            pipeline;
+    uint32_t              push_bytes;
+    unsigned char         push[AEVK_MAX_PUSH];
+    int                   declared[AEVK_MAX_DESC];
+    VkDescriptorType      desc_type[AEVK_MAX_DESC];
+    int                   written[AEVK_MAX_DESC];
+    VkCommandBuffer       cmd;
+    VkFence               fence;
+    int                   submitted;
+    uint64_t              timeout_ns;
+};
+
+void aevk_compute_destroy(AevkCompute* c) {
+    if (!c) return;
+    AevkDevice* d = c->dev;
+    if (d && d->device) {
+        AEVK_MUTEX_LOCK(&d->lock);
+        d->da.vkDeviceWaitIdle(d->device);
+        if (c->fence)      d->da.vkDestroyFence(d->device, c->fence, NULL);
+        if (c->cmd)        d->da.vkFreeCommandBuffers(d->device, d->pool, 1, &c->cmd);
+        if (c->pipeline)   d->da.vkDestroyPipeline(d->device, c->pipeline, NULL);
+        if (c->layout)     d->da.vkDestroyPipelineLayout(d->device, c->layout, NULL);
+        if (c->pool)       d->da.vkDestroyDescriptorPool(d->device, c->pool, NULL);
+        if (c->set_layout) d->da.vkDestroyDescriptorSetLayout(d->device, c->set_layout, NULL);
+        if (c->module)     d->da.vkDestroyShaderModule(d->device, c->module, NULL);
+        AEVK_MUTEX_UNLOCK(&d->lock);
+    }
+    free(c);
+}
+
+AevkCompute* aevk_compute_create(AevkDevice* d, const void* spv, size_t len,
+                                 const AevkBindings* bindings, int push_bytes) {
+    aevk_clear_error();
+    if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
+    if (!spv) { aevk_fail(AEVK_ERR_ARG, "shader bytes are null"); return NULL; }
+    if (len == 0 || (len % 4)) {
+        aevk_fail(AEVK_ERR_SHADER, "SPIR-V length must be a non-zero multiple of 4 (got %zu)", len);
+        return NULL;
+    }
+    if (push_bytes < 0 || push_bytes > AEVK_MAX_PUSH || (push_bytes % 4)) {
+        aevk_fail(AEVK_ERR_ARG,
+                  "push constant block must be 0..%d bytes and a multiple of 4 (got %d)",
+                  AEVK_MAX_PUSH, push_bytes);
+        return NULL;
+    }
+
+    AevkCompute* c = (AevkCompute*)calloc(1, sizeof(*c));
+    if (!c) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
+    c->dev = d;
+    c->push_bytes = (uint32_t)push_bytes;
+    c->timeout_ns = 5000000000ull;
+
+    VkShaderModuleCreateInfo smi = {0};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = len;
+    smi.pCode = (const uint32_t*)spv;
+    VkResult r = d->da.vkCreateShaderModule(d->device, &smi, NULL, &c->module);
+    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_SHADER, "compute SPIR-V rejected (%d)", (int)r); goto fail; }
+
+    if (bindings && bindings->count > 0) {
+        /* The same declarations a graphics pipeline takes, visible to the
+         * compute stage instead. */
+        VkDescriptorSetLayoutBinding b[AEVK_MAX_DESC];
+        uint32_t n_ub = 0, n_sb = 0, n_img = 0;
+        for (uint32_t i = 0; i < bindings->count; i++) {
+            b[i] = bindings->b[i];
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            c->declared[b[i].binding] = 1;
+            c->desc_type[b[i].binding] = b[i].descriptorType;
+            if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_ub++;
+            else if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) n_sb++;
+            else n_img++;
+        }
+        VkDescriptorSetLayoutCreateInfo dli = {0};
+        dli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dli.bindingCount = bindings->count;
+        dli.pBindings = b;
+        r = d->da.vkCreateDescriptorSetLayout(d->device, &dli, NULL, &c->set_layout);
+        if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateDescriptorSetLayout failed (%d)", (int)r); goto fail; }
+
+        VkDescriptorPoolSize sizes[3];
+        uint32_t nsizes = 0;
+        if (n_ub)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                     sizes[nsizes++].descriptorCount = n_ub; }
+        if (n_sb)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                     sizes[nsizes++].descriptorCount = n_sb; }
+        if (n_img) { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                     sizes[nsizes++].descriptorCount = n_img; }
+        VkDescriptorPoolCreateInfo dpi = {0};
+        dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 1;
+        dpi.poolSizeCount = nsizes;
+        dpi.pPoolSizes = sizes;
+        r = d->da.vkCreateDescriptorPool(d->device, &dpi, NULL, &c->pool);
+        if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateDescriptorPool failed (%d)", (int)r); goto fail; }
+        VkDescriptorSetAllocateInfo dsi = {0};
+        dsi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsi.descriptorPool = c->pool;
+        dsi.descriptorSetCount = 1;
+        dsi.pSetLayouts = &c->set_layout;
+        r = d->da.vkAllocateDescriptorSets(d->device, &dsi, &c->set);
+        if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkAllocateDescriptorSets failed (%d)", (int)r); goto fail; }
+    }
+
+    VkPushConstantRange pcr = {0};
+    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr.size = (uint32_t)push_bytes;
+    VkPipelineLayoutCreateInfo pli = {0};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    if (c->set_layout) { pli.setLayoutCount = 1; pli.pSetLayouts = &c->set_layout; }
+    if (push_bytes > 0) { pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr; }
+    r = d->da.vkCreatePipelineLayout(d->device, &pli, NULL, &c->layout);
+    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreatePipelineLayout failed (%d)", (int)r); goto fail; }
+
+    VkComputePipelineCreateInfo cpi = {0};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = c->module;
+    cpi.stage.pName = "main";
+    cpi.layout = c->layout;
+    r = d->da.vkCreateComputePipelines(d->device, VK_NULL_HANDLE, 1, &cpi, NULL, &c->pipeline);
+    if (r != VK_SUCCESS) {
+        aevk_fail(r == VK_ERROR_OUT_OF_HOST_MEMORY ? AEVK_ERR_OOM : AEVK_ERR_SHADER,
+                  "vkCreateComputePipelines failed (%d)", (int)r);
+        goto fail;
+    }
+
+    AEVK_MUTEX_LOCK(&d->lock);
+    VkCommandBufferAllocateInfo cai = {0};
+    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool = d->pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    r = d->da.vkAllocateCommandBuffers(d->device, &cai, &c->cmd);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkAllocateCommandBuffers failed (%d)", (int)r); goto fail; }
+    VkFenceCreateInfo fci = {0};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    r = d->da.vkCreateFence(d->device, &fci, NULL, &c->fence);
+    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateFence failed (%d)", (int)r); goto fail; }
+    return c;
+
+fail:
+    aevk_compute_destroy(c);
+    return NULL;
+}
+
+static int aevk_compute_check_binding(AevkCompute* c, int binding) {
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    if (binding < 0 || binding >= AEVK_MAX_DESC) {
+        return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
+    }
+    if (!c->declared[binding]) return aevk_fail(AEVK_ERR_ARG, "binding %d was not declared", binding);
+    if (c->submitted) {
+        return aevk_fail(AEVK_ERR_ARG, "a dispatch is in flight: compute_wait before rebinding");
+    }
+    return AEVK_OK;
+}
+
+int aevk_compute_set_buffer(AevkCompute* c, int binding, AevkBuffer* buf) {
+    aevk_clear_error();
+    int rc = aevk_compute_check_binding(c, binding);
+    if (rc != AEVK_OK) return rc;
+    if (!buf) return aevk_fail(AEVK_ERR_ARG, "buffer is null");
+    if (buf->dev != c->dev) return aevk_fail(AEVK_ERR_ARG, "the buffer belongs to another device");
+    VkDescriptorType ty = c->desc_type[binding];
+    if (ty != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && ty != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is declared as a texture, not a buffer", binding);
+    }
+    VkDescriptorBufferInfo bi = {0};
+    bi.buffer = buf->buf;
+    bi.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w = {0};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = c->set;
+    w.dstBinding = (uint32_t)binding;
+    w.descriptorCount = 1;
+    w.descriptorType = ty;
+    w.pBufferInfo = &bi;
+    c->dev->da.vkUpdateDescriptorSets(c->dev->device, 1, &w, 0, NULL);
+    c->written[binding] = 1;
+    return AEVK_OK;
+}
+
+int aevk_compute_set_texture(AevkCompute* c, int binding, AevkTexture* tex) {
+    aevk_clear_error();
+    int rc = aevk_compute_check_binding(c, binding);
+    if (rc != AEVK_OK) return rc;
+    if (!tex) return aevk_fail(AEVK_ERR_ARG, "texture is null");
+    if (tex->dev != c->dev) return aevk_fail(AEVK_ERR_ARG, "the texture belongs to another device");
+    if (c->desc_type[binding] != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is declared as a buffer, not a texture", binding);
+    }
+    if (!tex->uploaded) {
+        return aevk_fail(AEVK_ERR_ARG, "texture has no pixels yet, upload before binding");
+    }
+    VkDescriptorImageInfo ii = {0};
+    ii.sampler = tex->sampler;
+    ii.imageView = tex->view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w = {0};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = c->set;
+    w.dstBinding = (uint32_t)binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    c->dev->da.vkUpdateDescriptorSets(c->dev->device, 1, &w, 0, NULL);
+    c->written[binding] = 1;
+    return AEVK_OK;
+}
+
+int aevk_compute_set_push(AevkCompute* c, const void* data, size_t len) {
+    aevk_clear_error();
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    if (len > c->push_bytes) {
+        return aevk_fail(AEVK_ERR_ARG, "the pipeline declared %u push bytes, got %zu",
+                         c->push_bytes, len);
+    }
+    if (len > 0 && !data) return aevk_fail(AEVK_ERR_ARG, "push data is null");
+    if (len > 0) memcpy(c->push, data, len);
+    return AEVK_OK;
+}
+
+int aevk_compute_set_timeout_ms(AevkCompute* c, int ms) {
+    aevk_clear_error();
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    if (ms <= 0) return aevk_fail(AEVK_ERR_ARG, "timeout must be positive (got %d)", ms);
+    c->timeout_ns = (uint64_t)ms * 1000000ull;
+    return AEVK_OK;
+}
+
+/* THE DEVICE LOCK IS HELD. */
+static int aevk_compute_wait_locked(AevkCompute* c) {
+    if (!c->submitted) return AEVK_OK;
+    AevkDevice* d = c->dev;
+    VkResult vr = d->da.vkWaitForFences(d->device, 1, &c->fence, VK_TRUE, c->timeout_ns);
+    if (vr == VK_TIMEOUT) {
+        return aevk_fail(AEVK_ERR_DEVICE_LOST, "the dispatch did not finish within %llu ms",
+                         (unsigned long long)(c->timeout_ns / 1000000ull));
+    }
+    if (vr != VK_SUCCESS) {
+        return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                         "vkWaitForFences failed (%d)", (int)vr);
+    }
+    c->submitted = 0;
+    return AEVK_OK;
+}
+
+/* Records and submits one dispatch of gx * gy * gz work groups without
+ * waiting. The buffers it writes are readable once compute_wait returns. */
+int aevk_dispatch_async(AevkCompute* c, int gx, int gy, int gz) {
+    aevk_clear_error();
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    AevkDevice* d = c->dev;
+    if (gx <= 0 || gy <= 0 || gz <= 0) {
+        return aevk_fail(AEVK_ERR_ARG, "work group counts must be positive, got %d x %d x %d",
+                         gx, gy, gz);
+    }
+    if ((uint32_t)gx > d->max_groups[0] || (uint32_t)gy > d->max_groups[1] ||
+        (uint32_t)gz > d->max_groups[2]) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                         "%d x %d x %d work groups exceeds the device limit of %u x %u x %u",
+                         gx, gy, gz, d->max_groups[0], d->max_groups[1], d->max_groups[2]);
+    }
+    /* A descriptor never written has no defined contents, and a software
+     * rasteriser dereferences it as it is bound: refuse, and say which. */
+    for (int i = 0; i < AEVK_MAX_DESC; i++) {
+        if (c->declared[i] && !c->written[i]) {
+            return aevk_fail(AEVK_ERR_ARG, "binding %d was declared but never set", i);
+        }
+    }
+
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = aevk_compute_wait_locked(c);
+    if (rc != AEVK_OK) { AEVK_MUTEX_UNLOCK(&d->lock); return rc; }
+
+    VkCommandBuffer cmd = c->cmd;
+    VkResult vr = d->da.vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi = {0};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vr == VK_SUCCESS) vr = d->da.vkBeginCommandBuffer(cmd, &bi);
+    if (vr != VK_SUCCESS) {
+        AEVK_MUTEX_UNLOCK(&d->lock);
+        return aevk_fail(AEVK_ERR_OOM, "cannot begin the dispatch (%d)", (int)vr);
+    }
+
+    /* Earlier work on the queue that read or wrote these buffers (a draw
+     * pulling vertices from one, the previous dispatch) finishes first. */
+    VkMemoryBarrier before = {0};
+    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    d->da.vkCmdPipelineBarrier(cmd,
+                               VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               0, 1, &before, 0, NULL, 0, NULL);
+    d->da.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c->pipeline);
+    if (c->set) {
+        d->da.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c->layout, 0, 1,
+                                      &c->set, 0, NULL);
+    }
+    if (c->push_bytes > 0) {
+        d->da.vkCmdPushConstants(cmd, c->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                 c->push_bytes, c->push);
+    }
+    d->da.vkCmdDispatch(cmd, (uint32_t)gx, (uint32_t)gy, (uint32_t)gz);
+    /* The results are for the host (read back after the fence) and for any
+     * later draw that reads the buffers as vertices, indices, uniforms or
+     * storage. */
+    VkMemoryBarrier after = {0};
+    after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
+                          VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                          VK_ACCESS_UNIFORM_READ_BIT;
+    d->da.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_HOST_BIT |
+                               VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               0, 1, &after, 0, NULL, 0, NULL);
+    vr = d->da.vkEndCommandBuffer(cmd);
+    if (vr == VK_SUCCESS) vr = d->da.vkResetFences(d->device, 1, &c->fence);
+    if (vr == VK_SUCCESS) {
+        VkSubmitInfo si = {0};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        vr = d->da.vkQueueSubmit(d->queue, 1, &si, c->fence);
+    }
+    if (vr == VK_SUCCESS) c->submitted = 1;
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    if (vr != VK_SUCCESS) {
+        return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                         "the dispatch could not be submitted (%d)", (int)vr);
+    }
+    return AEVK_OK;
+}
+
+int aevk_compute_wait(AevkCompute* c) {
+    aevk_clear_error();
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    AEVK_MUTEX_LOCK(&c->dev->lock);
+    int rc = aevk_compute_wait_locked(c);
+    AEVK_MUTEX_UNLOCK(&c->dev->lock);
+    return rc;
+}
+
+int aevk_dispatch(AevkCompute* c, int gx, int gy, int gz) {
+    int rc = aevk_dispatch_async(c, gx, gy, gz);
+    if (rc != AEVK_OK) return rc;
+    return aevk_compute_wait(c);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Presentation (#1505)                                                      */
+/* ------------------------------------------------------------------------ */
+
+/* Frames the presentation path keeps in flight: the CPU records and submits
+ * frame N+1 while the GPU copies frame N into its swapchain image. */
+#define AEVK_PRESENT_FRAMES 2
+
+typedef struct {
+    VkCommandBuffer cmd;
+    VkFence         fence;
+    VkSemaphore     acquired;   /* signalled when the image is ours to write */
+    int             submitted;
+} AevkPresentFrame;
+
+struct AevkSwapchain {
+    AevkDevice*      dev;
+    int              kind;
+    VkSurfaceKHR     surface;
+    VkSwapchainKHR   swapchain;
+    VkFormat         format;
+    VkColorSpaceKHR  color_space;
+    VkFormatFeatureFlags features;   /* optimal-tiling features of `format` */
+    int              srgb;           /* the encoding `format` was chosen for */
+    uint32_t         width, height;  /* 0 x 0 while the window has no area */
+    uint32_t         want_w, want_h;
+    int              vsync;
+    int              stale;          /* rebuild before the next acquire */
+    uint32_t         image_count;
+    VkImage*         images;
+    /* One per swapchain IMAGE, not per frame: the semaphore a present waits
+     * on may only be reused once that image has been acquired again, which is
+     * what indexing by image guarantees and indexing by frame does not. */
+    VkSemaphore*     rendered;
+    AevkPresentFrame frames[AEVK_PRESENT_FRAMES];
+    int              frame;
+    uint64_t         timeout_ns;
+    long long        presented;
+};
+
+static int aevk_format_is_srgb(VkFormat f) {
+    return f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB;
+}
+
+/* An sRGB target's bytes are already display-encoded; so are a UNORM
+ * target's, by the convention that shaders writing to one write display
+ * values. A float target holds linear light, which an sRGB swapchain encodes
+ * on the way in; a UNORM one would show it too dark. So the swapchain's
+ * encoding follows the target's: sRGB for sRGB and float, UNORM for UNORM. */
+static int aevk_target_wants_srgb_display(VkFormat f) {
+    return aevk_format_is_srgb(f) ||
+           f == VK_FORMAT_R16G16B16A16_SFLOAT || f == VK_FORMAT_R32G32B32A32_SFLOAT;
+}
+
+#if defined(AEVK_HAVE_METAL_SURFACE)
+#include <pthread.h>
+#include <objc/runtime.h>
+
+/* An NSView presents through a CAMetalLayer, and AppKit gives a view one only
+ * when asked. Done through the Objective-C runtime so this file stays C and
+ * needs no framework on the link line: libobjc and QuartzCore are opened the
+ * way the loader is. Returns the view's layer (made and attached when it had
+ * none) or NULL with the reason set. */
+static void* aevk_metal_layer_for_view(void* view) {
+    static void* objc;
+    static void* quartz;
+    if (!objc) objc = AEVK_DLOPEN("/usr/lib/libobjc.A.dylib");
+    if (!quartz) quartz = AEVK_DLOPEN("/System/Library/Frameworks/QuartzCore.framework/QuartzCore");
+    if (!objc || !quartz) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "cannot load libobjc or QuartzCore");
+        return NULL;
+    }
+    Class (*get_class)(const char*) = (Class (*)(const char*))AEVK_DLSYM(objc, "objc_getClass");
+    SEL (*sel)(const char*) = (SEL (*)(const char*))AEVK_DLSYM(objc, "sel_registerName");
+    void* send = AEVK_DLSYM(objc, "objc_msgSend");
+    void* (*pool_push)(void) = (void* (*)(void))AEVK_DLSYM(objc, "objc_autoreleasePoolPush");
+    void (*pool_pop)(void*) = (void (*)(void*))AEVK_DLSYM(objc, "objc_autoreleasePoolPop");
+    if (!get_class || !sel || !send || !pool_push || !pool_pop) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "the Objective-C runtime is missing an entry point");
+        return NULL;
+    }
+    Class metal_layer = get_class("CAMetalLayer");
+    if (!metal_layer) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "QuartzCore has no CAMetalLayer");
+        return NULL;
+    }
+
+    void* pool = pool_push();
+    id v = (id)view;
+    id layer = ((id (*)(id, SEL))send)(v, sel("layer"));
+    if (!layer || !((BOOL (*)(id, SEL, Class))send)(layer, sel("isKindOfClass:"), metal_layer)) {
+        /* Layer-HOSTING, not layer-backed: set the layer before asking for
+         * one, so AppKit uses ours and never draws into it. */
+        layer = ((id (*)(id, SEL))send)((id)metal_layer, sel("layer"));
+        ((void (*)(id, SEL, id))send)(v, sel("setLayer:"), layer);
+        ((void (*)(id, SEL, BOOL))send)(v, sel("setWantsLayer:"), (BOOL)1);
+    }
+    /* Pixels, not points: without the backing scale a Retina window gets a
+     * swapchain at half its resolution. */
+    id win = ((id (*)(id, SEL))send)(v, sel("window"));
+    if (win) {
+        double scale = ((double (*)(id, SEL))send)(win, sel("backingScaleFactor"));
+        if (scale > 0.0) ((void (*)(id, SEL, double))send)(layer, sel("setContentsScale:"), scale);
+    }
+    pool_pop(pool);   /* the view holds the layer now */
+    return (void*)layer;
+}
+#endif
+
+static const char* aevk_window_kind_name(int kind) {
+    switch (kind) {
+        case AEVK_WINDOW_WIN32:       return "a Win32 window (VK_KHR_win32_surface)";
+        case AEVK_WINDOW_NSVIEW:      return "an NSView (VK_EXT_metal_surface)";
+        case AEVK_WINDOW_X11:         return "an X11 window (VK_KHR_xlib_surface)";
+        case AEVK_WINDOW_WAYLAND:     return "a Wayland surface (VK_KHR_wayland_surface)";
+        case AEVK_WINDOW_METAL_LAYER: return "a CAMetalLayer (VK_EXT_metal_surface)";
+        default:                      return "an unknown kind of window";
+    }
+}
+
+/* The surface for one window, by kind. The device lock need not be held: a
+ * surface belongs to the instance, and creating one touches no queue. */
+static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* window,
+                             VkSurfaceKHR* out) {
+    /* Only the X11 and Wayland kinds take a display connection. */
+    (void)display;
+    if (kind < AEVK_WINDOW_WIN32 || kind > AEVK_WINDOW_METAL_LAYER) {
+        return aevk_fail(AEVK_ERR_ARG, "window kind %d is not one of 1..5", kind);
+    }
+    if (!(d->surface_kinds & (1u << kind))) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "this build and loader cannot present to %s",
+                         aevk_window_kind_name(kind));
+    }
+    if (!window) return aevk_fail(AEVK_ERR_ARG, "window handle is null");
+    VkResult r = VK_ERROR_EXTENSION_NOT_PRESENT;
+    switch (kind) {
+#if defined(AEVK_HAVE_WIN32_SURFACE)
+        case AEVK_WINDOW_WIN32: {
+            VkWin32SurfaceCreateInfoKHR ci = {0};
+            ci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+            ci.hinstance = (HINSTANCE)GetWindowLongPtrW((HWND)window, GWLP_HINSTANCE);
+            ci.hwnd = (HWND)window;
+            r = d->ia.vkCreateWin32SurfaceKHR(d->instance, &ci, NULL, out);
+            break;
+        }
+#endif
+#if defined(AEVK_HAVE_METAL_SURFACE)
+        case AEVK_WINDOW_NSVIEW:
+        case AEVK_WINDOW_METAL_LAYER: {
+            void* layer = window;
+            if (kind == AEVK_WINDOW_NSVIEW) {
+                if (!pthread_main_np()) {
+                    return aevk_fail(AEVK_ERR_ARG,
+                                     "an NSView can only be given a Metal layer on the main thread");
+                }
+                layer = aevk_metal_layer_for_view(window);
+                if (!layer) return AEVK_ERR_UNSUPPORTED;
+            }
+            VkMetalSurfaceCreateInfoEXT ci = {0};
+            ci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
+            ci.pLayer = (const CAMetalLayer*)layer;
+            r = d->ia.vkCreateMetalSurfaceEXT(d->instance, &ci, NULL, out);
+            break;
+        }
+#endif
+#if defined(AEVK_HAVE_WAYLAND_SURFACE)
+        case AEVK_WINDOW_WAYLAND: {
+            if (!display) return aevk_fail(AEVK_ERR_ARG, "a Wayland surface needs its wl_display");
+            VkWaylandSurfaceCreateInfoKHR ci = {0};
+            ci.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+            ci.display = (struct wl_display*)display;
+            ci.surface = (struct wl_surface*)window;
+            r = d->ia.vkCreateWaylandSurfaceKHR(d->instance, &ci, NULL, out);
+            break;
+        }
+#endif
+#if defined(AEVK_HAVE_XLIB_SURFACE)
+        case AEVK_WINDOW_X11: {
+            if (!display) return aevk_fail(AEVK_ERR_ARG, "an X11 window needs its Display");
+            VkXlibSurfaceCreateInfoKHR ci = {0};
+            ci.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+            ci.dpy = (Display*)display;
+            ci.window = (Window)(uintptr_t)window;
+            r = d->ia.vkCreateXlibSurfaceKHR(d->instance, &ci, NULL, out);
+            break;
+        }
+#endif
+        default:
+            break;
+    }
+    if (r != VK_SUCCESS) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "cannot make a surface for %s (VkResult %d)",
+                         aevk_window_kind_name(kind), (int)r);
+    }
+    return AEVK_OK;
+}
+
+/* The image format, from what the surface offers: 8-bit BGRA or RGBA in the
+ * encoding the presented target uses, preferring one the device can blit
+ * into, since that is how a frame reaches it. A surface offering neither
+ * (possible, if unusual) gets its first format and a blit that converts. */
+static int aevk_sc_pick_format(AevkSwapchain* sc) {
+    AevkDevice* d = sc->dev;
+    uint32_t n = 0;
+    VkResult r = d->ia.vkGetPhysicalDeviceSurfaceFormatsKHR(d->phys, sc->surface, &n, NULL);
+    if (r != VK_SUCCESS || n == 0) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "the surface offers no formats (%d)", (int)r);
+    }
+    VkSurfaceFormatKHR* fmts = (VkSurfaceFormatKHR*)calloc(n, sizeof(*fmts));
+    if (!fmts) return aevk_fail(AEVK_ERR_OOM, "out of memory");
+    r = d->ia.vkGetPhysicalDeviceSurfaceFormatsKHR(d->phys, sc->surface, &n, fmts);
+    if (r != VK_SUCCESS || n == 0) {
+        free(fmts);
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "the surface offers no formats (%d)", (int)r);
+    }
+
+    const VkFormat wanted[2] = {
+        sc->srgb ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM,
+        sc->srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+    };
+    VkFormat pick = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    if (n == 1 && fmts[0].format == VK_FORMAT_UNDEFINED) {
+        /* "Any format": the surface imposes none. */
+        pick = wanted[0];
+        space = fmts[0].colorSpace;
+    }
+    for (int pass = 0; pass < 2 && pick == VK_FORMAT_UNDEFINED; pass++) {
+        for (int w = 0; w < 2 && pick == VK_FORMAT_UNDEFINED; w++) {
+            for (uint32_t i = 0; i < n; i++) {
+                if (fmts[i].format != wanted[w] ||
+                    fmts[i].colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) continue;
+                VkFormatProperties fp;
+                d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, fmts[i].format, &fp);
+                if (pass == 0 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) continue;
+                pick = fmts[i].format;
+                space = fmts[i].colorSpace;
+                break;
+            }
+        }
+    }
+    if (pick == VK_FORMAT_UNDEFINED) {
+        pick = fmts[0].format;
+        space = fmts[0].colorSpace;
+    }
+    free(fmts);
+
+    VkFormatProperties fp;
+    d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, pick, &fp);
+    sc->format = pick;
+    sc->color_space = space;
+    sc->features = fp.optimalTilingFeatures;
+    return AEVK_OK;
+}
+
+static void aevk_sc_free_images(AevkSwapchain* sc) {
+    AevkDevice* d = sc->dev;
+    if (sc->rendered) {
+        for (uint32_t i = 0; i < sc->image_count; i++) {
+            if (sc->rendered[i]) d->da.vkDestroySemaphore(d->device, sc->rendered[i], NULL);
+        }
+    }
+    free(sc->rendered);
+    free(sc->images);
+    sc->rendered = NULL;
+    sc->images = NULL;
+    sc->image_count = 0;
+}
+
+/* (Re)creates the swapchain at the surface's current size. THE DEVICE LOCK
+ * MUST BE HELD and the device idle: the old images, and the semaphores the
+ * presentation engine waits on, are released here.
+ *
+ * A window with no area (minimised) leaves the swapchain absent and the size
+ * 0 x 0, which aevk_present treats as "nothing to show" rather than as an
+ * error. */
+static int aevk_sc_build(AevkSwapchain* sc) {
+    AevkDevice* d = sc->dev;
+    int rc = aevk_sc_pick_format(sc);
+    if (rc != AEVK_OK) return rc;
+
+    VkSurfaceCapabilitiesKHR caps;
+    VkResult r = d->ia.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d->phys, sc->surface, &caps);
+    if (r != VK_SUCCESS) {
+        return aevk_fail(r == VK_ERROR_SURFACE_LOST_KHR ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_UNSUPPORTED,
+                         "cannot read the surface's capabilities (%d)", (int)r);
+    }
+
+    VkExtent2D extent = caps.currentExtent;
+    if (extent.width == 0xFFFFFFFFu) {
+        /* The window system leaves the size to us (Wayland). */
+        extent.width = sc->want_w;
+        extent.height = sc->want_h;
+        if (extent.width < caps.minImageExtent.width) extent.width = caps.minImageExtent.width;
+        if (extent.height < caps.minImageExtent.height) extent.height = caps.minImageExtent.height;
+        if (extent.width > caps.maxImageExtent.width) extent.width = caps.maxImageExtent.width;
+        if (extent.height > caps.maxImageExtent.height) extent.height = caps.maxImageExtent.height;
+    }
+
+    VkSwapchainKHR old = sc->swapchain;
+    if (extent.width == 0 || extent.height == 0) {
+        if (old) d->da.vkDestroySwapchainKHR(d->device, old, NULL);
+        aevk_sc_free_images(sc);
+        sc->swapchain = VK_NULL_HANDLE;
+        sc->width = 0;
+        sc->height = 0;
+        sc->stale = 0;
+        return AEVK_OK;
+    }
+
+    if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                         "the surface's images cannot be written by a transfer");
+    }
+
+    /* One more than the minimum, so acquiring never has to wait for the
+     * presentation engine to release the image on screen. */
+    uint32_t count = caps.minImageCount + 1;
+    if (count < 2) count = 2;
+    if (caps.maxImageCount > 0 && count > caps.maxImageCount) count = caps.maxImageCount;
+
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;   /* always offered */
+    if (!sc->vsync) {
+        uint32_t nm = 0;
+        if (d->ia.vkGetPhysicalDeviceSurfacePresentModesKHR(d->phys, sc->surface, &nm, NULL) == VK_SUCCESS &&
+            nm > 0) {
+            VkPresentModeKHR* modes = (VkPresentModeKHR*)calloc(nm, sizeof(*modes));
+            if (!modes) return aevk_fail(AEVK_ERR_OOM, "out of memory");
+            if (d->ia.vkGetPhysicalDeviceSurfacePresentModesKHR(d->phys, sc->surface, &nm, modes) == VK_SUCCESS) {
+                int mailbox = 0, immediate = 0;
+                for (uint32_t i = 0; i < nm; i++) {
+                    if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mailbox = 1;
+                    if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) immediate = 1;
+                }
+                if (mailbox) mode = VK_PRESENT_MODE_MAILBOX_KHR;
+                else if (immediate) mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            }
+            free(modes);
+        }
+    }
+
+    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (!(caps.supportedCompositeAlpha & alpha)) {
+        const VkCompositeAlphaFlagBitsKHR order[3] = {
+            VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+            VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+            VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+        };
+        for (int i = 0; i < 3; i++) {
+            if (caps.supportedCompositeAlpha & order[i]) { alpha = order[i]; break; }
+        }
+    }
+
+    VkSwapchainCreateInfoKHR ci = {0};
+    ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    ci.surface = sc->surface;
+    ci.minImageCount = count;
+    ci.imageFormat = sc->format;
+    ci.imageColorSpace = sc->color_space;
+    ci.imageExtent = extent;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.preTransform = caps.currentTransform;
+    ci.compositeAlpha = alpha;
+    ci.presentMode = mode;
+    ci.clipped = VK_TRUE;
+    ci.oldSwapchain = old;
+
+    VkSwapchainKHR fresh = VK_NULL_HANDLE;
+    r = d->da.vkCreateSwapchainKHR(d->device, &ci, NULL, &fresh);
+    /* The old swapchain is retired either way: after a successful create it
+     * is superseded, and after a failed one it was still passed as
+     * oldSwapchain, which retires it too. */
+    if (old) d->da.vkDestroySwapchainKHR(d->device, old, NULL);
+    sc->swapchain = VK_NULL_HANDLE;
+    aevk_sc_free_images(sc);
+    if (r != VK_SUCCESS) {
+        sc->width = 0;
+        sc->height = 0;
+        return aevk_fail(r == VK_ERROR_OUT_OF_HOST_MEMORY || r == VK_ERROR_OUT_OF_DEVICE_MEMORY
+                             ? AEVK_ERR_OOM : AEVK_ERR_UNSUPPORTED,
+                         "vkCreateSwapchainKHR failed (%d)", (int)r);
+    }
+    sc->swapchain = fresh;
+
+    uint32_t n = 0;
+    r = d->da.vkGetSwapchainImagesKHR(d->device, fresh, &n, NULL);
+    if (r != VK_SUCCESS || n == 0) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "vkGetSwapchainImagesKHR failed (%d)", (int)r);
+    }
+    sc->images = (VkImage*)calloc(n, sizeof(VkImage));
+    sc->rendered = (VkSemaphore*)calloc(n, sizeof(VkSemaphore));
+    if (!sc->images || !sc->rendered) {
+        aevk_sc_free_images(sc);
+        return aevk_fail(AEVK_ERR_OOM, "out of memory");
+    }
+    sc->image_count = n;
+    r = d->da.vkGetSwapchainImagesKHR(d->device, fresh, &n, sc->images);
+    if (r != VK_SUCCESS) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "vkGetSwapchainImagesKHR failed (%d)", (int)r);
+    }
+    for (uint32_t i = 0; i < sc->image_count; i++) {
+        VkSemaphoreCreateInfo si = {0};
+        si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        r = d->da.vkCreateSemaphore(d->device, &si, NULL, &sc->rendered[i]);
+        if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateSemaphore failed (%d)", (int)r);
+    }
+    sc->width = extent.width;
+    sc->height = extent.height;
+    sc->stale = 0;
+    return AEVK_OK;
+}
+
+/* Rebuild with the device idle, which is what makes releasing the old images
+ * and their semaphores safe. THE DEVICE LOCK MUST BE HELD. */
+static int aevk_sc_rebuild(AevkSwapchain* sc) {
+    AevkDevice* d = sc->dev;
+    d->da.vkDeviceWaitIdle(d->device);
+    for (int i = 0; i < AEVK_PRESENT_FRAMES; i++) sc->frames[i].submitted = 0;
+    return aevk_sc_build(sc);
+}
+
+void aevk_swapchain_destroy(AevkSwapchain* sc) {
+    if (!sc) return;
+    AevkDevice* d = sc->dev;
+    if (d && d->device) {
+        AEVK_MUTEX_LOCK(&d->lock);
+        d->da.vkDeviceWaitIdle(d->device);
+        for (int i = 0; i < AEVK_PRESENT_FRAMES; i++) {
+            AevkPresentFrame* f = &sc->frames[i];
+            if (f->acquired) d->da.vkDestroySemaphore(d->device, f->acquired, NULL);
+            if (f->fence)    d->da.vkDestroyFence(d->device, f->fence, NULL);
+            if (f->cmd)      d->da.vkFreeCommandBuffers(d->device, d->pool, 1, &f->cmd);
+        }
+        aevk_sc_free_images(sc);
+        if (sc->swapchain) d->da.vkDestroySwapchainKHR(d->device, sc->swapchain, NULL);
+        AEVK_MUTEX_UNLOCK(&d->lock);
+        if (sc->surface) d->ia.vkDestroySurfaceKHR(d->instance, sc->surface, NULL);
+    }
+    free(sc);
+}
+
+AevkSwapchain* aevk_swapchain_create(AevkDevice* d, int kind, void* display,
+                                     void* window, int width, int height) {
+    aevk_clear_error();
+    if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
+    if (width < 0 || height < 0) {
+        aevk_fail(AEVK_ERR_ARG, "size must not be negative, got %dx%d", width, height);
+        return NULL;
+    }
+    if (!d->surface_kinds) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "the Vulkan loader offers no VK_KHR_surface");
+        return NULL;
+    }
+    if (!d->can_present) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "the device offers no VK_KHR_swapchain");
+        return NULL;
+    }
+
+    AevkSwapchain* sc = (AevkSwapchain*)calloc(1, sizeof(*sc));
+    if (!sc) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
+    sc->dev = d;
+    sc->kind = kind;
+    sc->want_w = (uint32_t)width;
+    sc->want_h = (uint32_t)height;
+    sc->vsync = 1;
+    sc->timeout_ns = 5000000000ull;
+
+    if (aevk_make_surface(d, kind, display, window, &sc->surface) != AEVK_OK) {
+        free(sc);
+        return NULL;
+    }
+
+    /* The device's graphics queue has to be able to present to THIS surface:
+     * the queue is chosen before any window exists, so this is where it is
+     * checked. Every desktop driver presents from its graphics queue. */
+    VkBool32 ok = VK_FALSE;
+    VkResult r = d->ia.vkGetPhysicalDeviceSurfaceSupportKHR(d->phys, d->queue_family,
+                                                            sc->surface, &ok);
+    if (r != VK_SUCCESS || !ok) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED,
+                  "the device's graphics queue cannot present to this window (%d)", (int)r);
+        aevk_swapchain_destroy(sc);
+        return NULL;
+    }
+
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = AEVK_OK;
+    for (int i = 0; i < AEVK_PRESENT_FRAMES && rc == AEVK_OK; i++) {
+        AevkPresentFrame* f = &sc->frames[i];
+        VkCommandBufferAllocateInfo cai = {0};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = d->pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        r = d->da.vkAllocateCommandBuffers(d->device, &cai, &f->cmd);
+        if (r != VK_SUCCESS) { rc = aevk_fail(AEVK_ERR_OOM, "vkAllocateCommandBuffers failed (%d)", (int)r); break; }
+        VkFenceCreateInfo fci = {0};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        r = d->da.vkCreateFence(d->device, &fci, NULL, &f->fence);
+        if (r != VK_SUCCESS) { rc = aevk_fail(AEVK_ERR_OOM, "vkCreateFence failed (%d)", (int)r); break; }
+        VkSemaphoreCreateInfo si = {0};
+        si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        r = d->da.vkCreateSemaphore(d->device, &si, NULL, &f->acquired);
+        if (r != VK_SUCCESS) { rc = aevk_fail(AEVK_ERR_OOM, "vkCreateSemaphore failed (%d)", (int)r); break; }
+    }
+    if (rc == AEVK_OK) rc = aevk_sc_build(sc);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    if (rc != AEVK_OK) {
+        /* Keep the reason: destroying runs no failing call, but be explicit
+         * that the message is the build's. */
+        char reason[sizeof(g_err)];
+        snprintf(reason, sizeof(reason), "%s", g_err);
+        aevk_swapchain_destroy(sc);
+        snprintf(g_err, sizeof(g_err), "%s", reason);
+        return NULL;
+    }
+    return sc;
+}
+
+int aevk_swapchain_resize(AevkSwapchain* sc, int width, int height) {
+    aevk_clear_error();
+    if (!sc) return aevk_fail(AEVK_ERR_ARG, "swapchain is null");
+    if (width < 0 || height < 0) {
+        return aevk_fail(AEVK_ERR_ARG, "size must not be negative, got %dx%d", width, height);
+    }
+    AevkDevice* d = sc->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    sc->want_w = (uint32_t)width;
+    sc->want_h = (uint32_t)height;
+    int rc = aevk_sc_rebuild(sc);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+int aevk_swapchain_set_vsync(AevkSwapchain* sc, int on) {
+    aevk_clear_error();
+    if (!sc) return aevk_fail(AEVK_ERR_ARG, "swapchain is null");
+    on = on ? 1 : 0;
+    if (on == sc->vsync) return AEVK_OK;
+    AevkDevice* d = sc->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    sc->vsync = on;
+    int rc = aevk_sc_rebuild(sc);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+int aevk_swapchain_width(const AevkSwapchain* sc)  { return sc ? (int)sc->width : 0; }
+int aevk_swapchain_height(const AevkSwapchain* sc) { return sc ? (int)sc->height : 0; }
+int aevk_swapchain_format(const AevkSwapchain* sc) { return sc ? (int)sc->format : 0; }
+long long aevk_swapchain_presented(const AevkSwapchain* sc) { return sc ? sc->presented : 0; }
+
+/* How a frame gets from the target into a swapchain image: a blit when the
+ * device can blit between the two formats (and filter, when the sizes
+ * differ), a plain copy when the formats and sizes are identical, and
+ * otherwise nothing, which is reported before an image is acquired so no
+ * acquired image is ever left unpresented. 1 blit, 2 copy, 0 impossible. */
+static int aevk_sc_transfer_kind(AevkSwapchain* sc, AevkTarget* t, int* linear) {
+    AevkDevice* d = sc->dev;
+    VkFormatProperties src;
+    d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, t->color_format, &src);
+    int same_size = (uint32_t)t->width == sc->width && (uint32_t)t->height == sc->height;
+    /* A scaled blit filters linearly where the source format allows it and
+     * picks the nearest texel where it does not (some drivers cannot filter
+     * 32-bit float): a blockier scale beats refusing to show the frame. */
+    *linear = !same_size &&
+              (src.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    if ((src.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
+        (sc->features & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+        return 1;
+    }
+    if (same_size && sc->format == t->color_format) return 2;
+    return 0;
+}
+
+/* THE DEVICE LOCK IS HELD. */
+static int aevk_present_locked(AevkSwapchain* sc, AevkTarget* t) {
+    AevkDevice* d = sc->dev;
+
+    int want_srgb = aevk_target_wants_srgb_display(t->color_format);
+    if (want_srgb != sc->srgb) {
+        sc->srgb = want_srgb;
+        sc->stale = 1;
+    }
+    /* The window's size now, against the swapchain's. Drivers are not
+     * required to report a swapchain out of date when its window resizes or
+     * is minimised (NVIDIA's keeps acquiring and presenting into a minimised
+     * Win32 window at the old size), so the surface is asked every frame
+     * rather than trusting acquire and present to say so. Where the window
+     * system leaves the size to the application (0xFFFFFFFF, Wayland) there is
+     * nothing to compare, and swapchain_resize is how it changes. */
+    VkSurfaceCapabilitiesKHR caps;
+    VkResult cr = d->ia.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d->phys, sc->surface, &caps);
+    if (cr == VK_ERROR_SURFACE_LOST_KHR) {
+        return aevk_fail(AEVK_ERR_DEVICE_LOST, "the window's surface is gone");
+    }
+    if (cr == VK_SUCCESS && caps.currentExtent.width != 0xFFFFFFFFu &&
+        (caps.currentExtent.width != sc->width || caps.currentExtent.height != sc->height)) {
+        sc->stale = 1;
+    }
+
+    /* A swapchain that went stale is rebuilt, and so is an absent one: the
+     * window had no area last time and may have one now. */
+    if (sc->stale || !sc->swapchain) {
+        int rc = aevk_sc_rebuild(sc);
+        if (rc != AEVK_OK) return rc;
+        if (!sc->swapchain) return AEVK_OK;   /* still no area: nothing to show */
+    }
+
+    int linear = 0;
+    int how = aevk_sc_transfer_kind(sc, t, &linear);
+    if (!how) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                         "the device can neither blit nor copy format %d into the swapchain's %d",
+                         (int)t->color_format, (int)sc->format);
+    }
+
+    AevkPresentFrame* f = &sc->frames[sc->frame];
+    if (f->submitted) {
+        VkResult wr = d->da.vkWaitForFences(d->device, 1, &f->fence, VK_TRUE, sc->timeout_ns);
+        if (wr == VK_TIMEOUT) {
+            return aevk_fail(AEVK_ERR_DEVICE_LOST, "the GPU did not finish a present within %llu ms",
+                             (unsigned long long)(sc->timeout_ns / 1000000ull));
+        }
+        if (wr != VK_SUCCESS) {
+            return aevk_fail(wr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                             "vkWaitForFences failed (%d)", (int)wr);
+        }
+        f->submitted = 0;
+    }
+
+    uint32_t idx = 0;
+    VkResult vr = d->da.vkAcquireNextImageKHR(d->device, sc->swapchain, sc->timeout_ns,
+                                              f->acquired, VK_NULL_HANDLE, &idx);
+    if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
+        int rc = aevk_sc_rebuild(sc);
+        if (rc != AEVK_OK) return rc;
+        if (!sc->swapchain) return AEVK_OK;
+        how = aevk_sc_transfer_kind(sc, t, &linear);
+        if (!how) {
+            return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                             "the device can neither blit nor copy format %d into the swapchain's %d",
+                             (int)t->color_format, (int)sc->format);
+        }
+        vr = d->da.vkAcquireNextImageKHR(d->device, sc->swapchain, sc->timeout_ns,
+                                         f->acquired, VK_NULL_HANDLE, &idx);
+    }
+    if (vr == VK_SUBOPTIMAL_KHR) {
+        /* Usable, but the window no longer matches it: this frame goes out,
+         * the next one gets a rebuilt swapchain. */
+        sc->stale = 1;
+    } else if (vr != VK_SUCCESS) {
+        if (vr == VK_TIMEOUT || vr == VK_NOT_READY) {
+            return aevk_fail(AEVK_ERR_DEVICE_LOST, "no swapchain image became available within %llu ms",
+                             (unsigned long long)(sc->timeout_ns / 1000000ull));
+        }
+        if (vr == VK_ERROR_SURFACE_LOST_KHR) {
+            return aevk_fail(AEVK_ERR_DEVICE_LOST, "the window's surface is gone");
+        }
+        return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                         "vkAcquireNextImageKHR failed (%d)", (int)vr);
+    }
+
+    /* From here the image is ours and has to be presented, so nothing below
+     * returns early except on a device-level failure. */
+    VkImage dst = sc->images[idx];
+    VkCommandBuffer cmd = f->cmd;
+    vr = d->da.vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi = {0};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vr == VK_SUCCESS) vr = d->da.vkBeginCommandBuffer(cmd, &bi);
+    if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "cannot begin the present commands (%d)", (int)vr);
+
+    /* The whole image is overwritten, so its old contents are discarded
+     * (UNDEFINED). The source needs no barrier: the render pass left it in
+     * TRANSFER_SRC_OPTIMAL, and its external dependency already orders the
+     * colour writes before transfer reads later on the queue. */
+    aevk_image_barrier(d, cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    if (how == 1) {
+        VkImageBlit blit = {0};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1].x = t->width;
+        blit.srcOffsets[1].y = t->height;
+        blit.srcOffsets[1].z = 1;
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1].x = (int32_t)sc->width;
+        blit.dstOffsets[1].y = (int32_t)sc->height;
+        blit.dstOffsets[1].z = 1;
+        d->da.vkCmdBlitImage(cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                             linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    } else {
+        VkImageCopy copy = {0};
+        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.srcSubresource.layerCount = 1;
+        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.dstSubresource.layerCount = 1;
+        copy.extent.width = sc->width;
+        copy.extent.height = sc->height;
+        copy.extent.depth = 1;
+        d->da.vkCmdCopyImage(cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    }
+    aevk_image_barrier(d, cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                       VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    vr = d->da.vkEndCommandBuffer(cmd);
+    if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "cannot end the present commands (%d)", (int)vr);
+
+    vr = d->da.vkResetFences(d->device, 1, &f->fence);
+    if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkResetFences failed (%d)", (int)vr);
+
+    /* The copy waits for the image at the transfer stage, the only stage
+     * that touches it. */
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo si = {0};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &f->acquired;
+    si.pWaitDstStageMask = &wait_stage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &sc->rendered[idx];
+    vr = d->da.vkQueueSubmit(d->queue, 1, &si, f->fence);
+    if (vr != VK_SUCCESS) {
+        return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                         "vkQueueSubmit failed (%d)", (int)vr);
+    }
+    f->submitted = 1;
+    sc->frame = (sc->frame + 1) % AEVK_PRESENT_FRAMES;
+
+    VkPresentInfoKHR pi = {0};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &sc->rendered[idx];
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &sc->swapchain;
+    pi.pImageIndices = &idx;
+    vr = d->da.vkQueuePresentKHR(d->queue, &pi);
+    if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR) {
+        sc->presented++;
+        if (vr == VK_SUBOPTIMAL_KHR) sc->stale = 1;
+        return AEVK_OK;
+    }
+    if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
+        /* The window changed between acquire and present; this frame is
+         * dropped and the next one rebuilds. */
+        sc->stale = 1;
+        return AEVK_OK;
+    }
+    if (vr == VK_ERROR_SURFACE_LOST_KHR) {
+        return aevk_fail(AEVK_ERR_DEVICE_LOST, "the window's surface is gone");
+    }
+    return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                     "vkQueuePresentKHR failed (%d)", (int)vr);
+}
+
+int aevk_present(AevkSwapchain* sc, AevkTarget* t) {
+    aevk_clear_error();
+    if (!sc || !t) return aevk_fail(AEVK_ERR_ARG, "swapchain or target is null");
+    if (sc->dev != t->dev) return aevk_fail(AEVK_ERR_ARG, "the target belongs to another device");
+    if (!t->rendered) {
+        return aevk_fail(AEVK_ERR_ARG, "the target has no frame yet: draw or submit before presenting");
+    }
+    AevkDevice* d = sc->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = aevk_present_locked(sc, t);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -3059,7 +4719,7 @@ int aevk_ae_copy_rgba(void* t, void* dest, int dest_len) {
  * have waited, and reading a buffer the GPU is still writing hands back a torn
  * frame. NULL when the target has no mapping or the wait failed. */
 static const unsigned char* aevk_readable_pixels(AevkTarget* t) {
-    if (!t || !t->frames) return NULL;
+    if (!t || !t->frames || !t->readback_on) return NULL;
     AevkDevice* d = t->dev;
     AEVK_MUTEX_LOCK(&d->lock);
     /* The NEWEST frame, not the last one that happened to be waited on: a
@@ -3073,10 +4733,12 @@ static const unsigned char* aevk_readable_pixels(AevkTarget* t) {
     return (const unsigned char*)t->frames[slot].readback_ptr;
 }
 
-/* Packed 0xRRGGBBAA for one pixel, or -1 when the coordinates are outside the
- * image. Reads the mapped buffer directly, so a test can sample without
+/* Packed 0xRRGGBBAA for one pixel, as a non-negative 64-bit value, or -1 when
+ * the coordinates are outside the image or there is no frame to read. 64 bits
+ * so that every colour, opaque white (0xFFFFFFFF) included, is distinct from
+ * the failure. Reads the mapped buffer directly, so a test can sample without
  * copying the whole frame. */
-int aevk_ae_pixel(void* tp, int x, int y) {
+int64_t aevk_ae_pixel(void* tp, int x, int y) {
     AevkTarget* t = (AevkTarget*)tp;
     aevk_clear_error();
     if (!t) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
@@ -3084,11 +4746,46 @@ int aevk_ae_pixel(void* tp, int x, int y) {
         aevk_fail(AEVK_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, t->width, t->height);
         return -1;
     }
+    if (!t->readback_on) {
+        aevk_fail(AEVK_ERR_ARG, "readback is off for this target (target_set_readback)");
+        return -1;
+    }
     const unsigned char* base = aevk_readable_pixels(t);
     if (!base) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
-    const unsigned char* px = base + ((size_t)y * (size_t)t->width + (size_t)x) * 4u;
-    return (int)(((unsigned)px[0] << 24) | ((unsigned)px[1] << 16) |
-                 ((unsigned)px[2] << 8)  |  (unsigned)px[3]);
+    const unsigned char* px =
+        base + ((size_t)y * (size_t)t->width + (size_t)x) * (size_t)t->bytes_per_pixel;
+    return (int64_t)(((uint32_t)aevk_channel_u8(t, px, 0) << 24) |
+                     ((uint32_t)aevk_channel_u8(t, px, 1) << 16) |
+                     ((uint32_t)aevk_channel_u8(t, px, 2) << 8)  |
+                      (uint32_t)aevk_channel_u8(t, px, 3));
+}
+
+/* One channel of one pixel at full precision: the float value for the float
+ * formats, the stored byte over 255 for the 8-bit ones. A float target's
+ * HDR values above 1 are only visible this way. NaN (with the reason set)
+ * for a bad coordinate or channel. */
+double aevk_ae_pixel_value(void* tp, int x, int y, int channel) {
+    AevkTarget* t = (AevkTarget*)tp;
+    aevk_clear_error();
+    const double nan = (double)NAN;
+    if (!t) { aevk_fail(AEVK_ERR_ARG, "target is null"); return nan; }
+    if (x < 0 || y < 0 || x >= t->width || y >= t->height) {
+        aevk_fail(AEVK_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, t->width, t->height);
+        return nan;
+    }
+    if (channel < 0 || channel > 3) {
+        aevk_fail(AEVK_ERR_ARG, "channel %d is not 0..3", channel);
+        return nan;
+    }
+    if (!t->readback_on) {
+        aevk_fail(AEVK_ERR_ARG, "readback is off for this target (target_set_readback)");
+        return nan;
+    }
+    const unsigned char* base = aevk_readable_pixels(t);
+    if (!base) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return nan; }
+    const unsigned char* px =
+        base + ((size_t)y * (size_t)t->width + (size_t)x) * (size_t)t->bytes_per_pixel;
+    return (double)aevk_channel_value(t, px, channel);
 }
 
 /* Binary PPM (P6). Chosen over PNG because it needs no compressor, so the
@@ -3098,6 +4795,9 @@ int aevk_ae_save_ppm(void* tp, const char* path) {
     AevkTarget* t = (AevkTarget*)tp;
     aevk_clear_error();
     if (!t || !path) return aevk_fail(AEVK_ERR_ARG, "target or path is null");
+    if (!t->readback_on) {
+        return aevk_fail(AEVK_ERR_ARG, "readback is off for this target (target_set_readback)");
+    }
     const unsigned char* src = aevk_readable_pixels(t);
     if (!src) return aevk_fail(AEVK_ERR_ARG, "target has no readback");
 
@@ -3110,11 +4810,220 @@ int aevk_ae_save_ppm(void* tp, const char* path) {
 
     size_t pixels = (size_t)t->width * (size_t)t->height;
     for (size_t i = 0; i < pixels; i++) {
-        if (fwrite(src + i * 4u, 1, 3, f) != 3) {
+        const unsigned char* px = src + i * (size_t)t->bytes_per_pixel;
+        unsigned char rgb[3] = { aevk_channel_u8(t, px, 0), aevk_channel_u8(t, px, 1),
+                                 aevk_channel_u8(t, px, 2) };
+        if (fwrite(rgb, 1, 3, f) != 3) {
             fclose(f);
             return aevk_fail(AEVK_ERR_ARG, "short write to %s", path);
         }
     }
     if (fclose(f) != 0) return aevk_fail(AEVK_ERR_ARG, "cannot flush %s", path);
     return AEVK_OK;
+}
+
+/* Presentation and resizing (#1505). `kind` is an AEVK_WINDOW_* value;
+ * `display` and `window` are the handles a toolkit's native view hands out. */
+int aevk_ae_target_resize(void* t, int w, int h) {
+    return aevk_target_resize((AevkTarget*)t, w, h);
+}
+int aevk_ae_target_set_readback(void* t, int on) {
+    return aevk_target_set_readback((AevkTarget*)t, on);
+}
+int aevk_ae_target_readback(void* t) { return aevk_target_readback((const AevkTarget*)t); }
+
+/* Colour formats (#1514). */
+void* aevk_ae_target_create_format(void* d, int w, int h, int format, int want_depth, int samples) {
+    return (void*)aevk_target_create_format((AevkDevice*)d, w, h, format, want_depth, samples);
+}
+int aevk_ae_target_format(void* t) { return aevk_target_format((const AevkTarget*)t); }
+int aevk_ae_target_bytes_per_pixel(void* t) {
+    return aevk_target_bytes_per_pixel((const AevkTarget*)t);
+}
+int aevk_ae_copy_rgba8(void* t, void* dest, int dest_len) {
+    if (dest_len < 0) return aevk_fail(AEVK_ERR_ARG, "negative destination length");
+    return aevk_read_rgba8((AevkTarget*)t, dest, (size_t)dest_len);
+}
+
+void* aevk_ae_swapchain_create(void* d, int kind, void* display, void* window, int w, int h) {
+    return (void*)aevk_swapchain_create((AevkDevice*)d, kind, display, window, w, h);
+}
+void aevk_ae_swapchain_destroy(void* sc) { aevk_swapchain_destroy((AevkSwapchain*)sc); }
+int aevk_ae_swapchain_resize(void* sc, int w, int h) {
+    return aevk_swapchain_resize((AevkSwapchain*)sc, w, h);
+}
+int aevk_ae_swapchain_set_vsync(void* sc, int on) {
+    return aevk_swapchain_set_vsync((AevkSwapchain*)sc, on);
+}
+int aevk_ae_swapchain_width(void* sc)  { return aevk_swapchain_width((const AevkSwapchain*)sc); }
+int aevk_ae_swapchain_height(void* sc) { return aevk_swapchain_height((const AevkSwapchain*)sc); }
+int aevk_ae_swapchain_format(void* sc) { return aevk_swapchain_format((const AevkSwapchain*)sc); }
+/* The count as an int: two billion presented frames is over a year at 60 Hz,
+ * and an Aether int is what the rest of the surface speaks. */
+int aevk_ae_swapchain_presented(void* sc) {
+    long long n = aevk_swapchain_presented((const AevkSwapchain*)sc);
+    return n > 0x7fffffffLL ? 0x7fffffff : (int)n;
+}
+int aevk_ae_present(void* sc, void* t) {
+    return aevk_present((AevkSwapchain*)sc, (AevkTarget*)t);
+}
+
+/* Buffers and compute (#1515). */
+void* aevk_ae_buffer_create(void* d, int bytes) {
+    if (bytes < 0) { aevk_fail(AEVK_ERR_ARG, "negative buffer size"); return NULL; }
+    return (void*)aevk_buffer_create((AevkDevice*)d, (size_t)bytes);
+}
+void aevk_ae_buffer_destroy(void* b) { aevk_buffer_destroy((AevkBuffer*)b); }
+int aevk_ae_buffer_size(void* b) {
+    size_t n = aevk_buffer_size((const AevkBuffer*)b);
+    return n > 0x7fffffffu ? 0x7fffffff : (int)n;
+}
+int aevk_ae_buffer_write(void* b, int offset, const void* data, int len) {
+    if (offset < 0 || len < 0) return aevk_fail(AEVK_ERR_ARG, "negative offset or length");
+    return aevk_buffer_write((AevkBuffer*)b, (size_t)offset, data, (size_t)len);
+}
+int aevk_ae_buffer_read(void* b, int offset, void* dest, int len) {
+    if (offset < 0 || len < 0) return aevk_fail(AEVK_ERR_ARG, "negative offset or length");
+    return aevk_buffer_read((AevkBuffer*)b, (size_t)offset, dest, (size_t)len);
+}
+/* Element access by 4-byte index, so a caller fills a float[] or int[] the
+ * shader declares without packing bytes. */
+int aevk_ae_buffer_set_float(void* b, int index, double value) {
+    float f = (float)value;
+    if (index < 0) return aevk_fail(AEVK_ERR_ARG, "negative index");
+    return aevk_buffer_write((AevkBuffer*)b, (size_t)index * 4u, &f, sizeof(f));
+}
+double aevk_ae_buffer_float(void* b, int index) {
+    float f = 0.0f;
+    if (index < 0) { aevk_fail(AEVK_ERR_ARG, "negative index"); return (double)NAN; }
+    if (aevk_buffer_read((AevkBuffer*)b, (size_t)index * 4u, &f, sizeof(f)) != AEVK_OK) {
+        return (double)NAN;
+    }
+    return (double)f;
+}
+int aevk_ae_buffer_set_int(void* b, int index, int value) {
+    int32_t v = (int32_t)value;
+    if (index < 0) return aevk_fail(AEVK_ERR_ARG, "negative index");
+    return aevk_buffer_write((AevkBuffer*)b, (size_t)index * 4u, &v, sizeof(v));
+}
+/* 0 with the reason set when the index is outside the buffer; check
+ * last_error() when 0 is a value the buffer could hold. */
+int aevk_ae_buffer_int(void* b, int index) {
+    int32_t v = 0;
+    if (index < 0) { aevk_fail(AEVK_ERR_ARG, "negative index"); return 0; }
+    if (aevk_buffer_read((AevkBuffer*)b, (size_t)index * 4u, &v, sizeof(v)) != AEVK_OK) return 0;
+    return (int)v;
+}
+
+int aevk_ae_bindings_storage(void* b, int binding) {
+    return aevk_bindings_storage((AevkBindings*)b, binding);
+}
+int aevk_ae_material_set_buffer(void* m, int binding, void* buf) {
+    return aevk_material_set_buffer((AevkMaterial*)m, binding, (AevkBuffer*)buf);
+}
+int aevk_ae_set_buffer(void* p, int binding, void* buf) {
+    return aevk_pipeline_set_buffer((AevkPipeline*)p, binding, (AevkBuffer*)buf);
+}
+
+void* aevk_ae_compute_create(void* d, const char* spv, int len, void* bindings, int push_bytes) {
+    if (len < 0) { aevk_fail(AEVK_ERR_SHADER, "negative SPIR-V length"); return NULL; }
+    return (void*)aevk_compute_create((AevkDevice*)d, spv, (size_t)len,
+                                      (const AevkBindings*)bindings, push_bytes);
+}
+void aevk_ae_compute_destroy(void* c) { aevk_compute_destroy((AevkCompute*)c); }
+int aevk_ae_compute_set_buffer(void* c, int binding, void* buf) {
+    return aevk_compute_set_buffer((AevkCompute*)c, binding, (AevkBuffer*)buf);
+}
+int aevk_ae_compute_set_texture(void* c, int binding, void* tex) {
+    return aevk_compute_set_texture((AevkCompute*)c, binding, (AevkTexture*)tex);
+}
+int aevk_ae_compute_set_push(void* c, const void* data, int len) {
+    if (len < 0) return aevk_fail(AEVK_ERR_ARG, "negative push length");
+    return aevk_compute_set_push((AevkCompute*)c, data, (size_t)len);
+}
+/* Push constants by 4-byte slot: a float, or a 32-bit int (an `int` or
+ * `uint` member in the shader's block). */
+static int aevk_compute_push_word(AevkCompute* c, int index, const void* word) {
+    aevk_clear_error();
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    int n = (int)(c->push_bytes / 4u);
+    if (index < 0 || index >= n) {
+        return aevk_fail(AEVK_ERR_ARG, "push slot %d is outside 0..%d", index, n - 1);
+    }
+    memcpy(c->push + (size_t)index * 4u, word, 4);
+    return AEVK_OK;
+}
+int aevk_ae_compute_push_float(void* c, int index, double value) {
+    float f = (float)value;
+    return aevk_compute_push_word((AevkCompute*)c, index, &f);
+}
+int aevk_ae_compute_push_int(void* c, int index, int value) {
+    int32_t v = (int32_t)value;
+    return aevk_compute_push_word((AevkCompute*)c, index, &v);
+}
+int aevk_ae_compute_set_timeout_ms(void* c, int ms) {
+    return aevk_compute_set_timeout_ms((AevkCompute*)c, ms);
+}
+int aevk_ae_dispatch(void* c, int gx, int gy, int gz) {
+    return aevk_dispatch((AevkCompute*)c, gx, gy, gz);
+}
+int aevk_ae_dispatch_async(void* c, int gx, int gy, int gz) {
+    return aevk_dispatch_async((AevkCompute*)c, gx, gy, gz);
+}
+int aevk_ae_compute_wait(void* c) { return aevk_compute_wait((AevkCompute*)c); }
+
+/* The loader's entry points for contrib.vulkan.vk, the generated module that
+ * drives the API directly (#1506). It goes through the loader this file
+ * opens at runtime rather than linking one, so a program using it starts
+ * where there is no Vulkan and learns so from the results, as one using the
+ * rest of the module does. Each returns NULL where there is no loader or no
+ * such entry point. */
+
+/* An entry point the loader exports: every core command and the window-
+ * system ones (surface, swapchain), each dispatching on its first handle. */
+void* aevk_ae_loader_proc(const char* name) {
+    if (!name || aevk_load_library() != AEVK_OK) return NULL;
+    return (void*)AEVK_DLSYM(g_lib, name);
+}
+
+/* vkGetInstanceProcAddr: `instance` may be NULL for the global commands. */
+void* aevk_ae_instance_proc(void* instance, const char* name) {
+    if (!name || aevk_load_library() != AEVK_OK) return NULL;
+    return (void*)g_gipa((VkInstance)instance, name);
+}
+
+/* vkGetDeviceProcAddr: the driver's own entry, skipping the loader's
+ * dispatch, for a command whose first handle belongs to `device`. */
+void* aevk_ae_device_proc(void* device, const char* name) {
+    if (!name || !device || aevk_load_library() != AEVK_OK) return NULL;
+    PFN_vkGetDeviceProcAddr gdpa =
+        (PFN_vkGetDeviceProcAddr)AEVK_DLSYM(g_lib, "vkGetDeviceProcAddr");
+    if (!gdpa) return NULL;
+    return (void*)gdpa((VkDevice)device, name);
+}
+
+/* The arrays contrib.vulkan.vk's <command>_all helpers fill: zeroed, and
+ * NULL when count * size overflows or memory runs out. */
+void* aevk_ae_array_alloc(int count, int size) {
+    if (count <= 0 || size <= 0 || (size_t)count > SIZE_MAX / (size_t)size) return NULL;
+    return calloc((size_t)count, (size_t)size);
+}
+
+void aevk_ae_array_free(void* p) { free(p); }
+
+/* A string argument for a command contrib.vulkan.vk calls through a function
+ * pointer: the C characters of whatever Aether holds (a wrapped AetherString
+ * included), with NULL kept NULL, since Vulkan tells a NULL layer name (the
+ * loader's own extensions) from an empty one. Declared `@aether string` on
+ * the Aether side, so it receives the value as Aether holds it. */
+extern const char* aether_string_data(const void* s);
+void* aevk_ae_cstr(const void* s) {
+    return s ? (void*)aether_string_data(s) : NULL;
+}
+
+/* sizeof a handle, which Aether cannot spell: a dispatchable one is a
+ * pointer, a non-dispatchable one a pointer on 64-bit targets and a
+ * uint64_t on 32-bit ones. */
+int aevk_ae_handle_size(int dispatchable) {
+    return dispatchable ? (int)sizeof(VkInstance) : (int)sizeof(VkSemaphore);
 }

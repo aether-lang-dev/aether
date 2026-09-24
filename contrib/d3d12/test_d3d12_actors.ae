@@ -1,0 +1,209 @@
+// contrib.d3d12 thread safety: the same contract as contrib.vulkan's.
+//
+// A Direct3D 12 device is free-threaded, but a command queue's submission
+// order, the timeline fence the module signals on it, and the shader-visible
+// descriptor heaps every texture and target takes a slot from are shared
+// state the module must serialise. It takes one lock per device across
+// them. Aether is an actor language, so two actors sharing one device is the
+// expected shape.
+//
+// Two actors, one shared device, each drawing to its own target and creating
+// and destroying a scratch target (which takes and returns a descriptor slot)
+// every iteration, checking its OWN colour each frame. A frame drawn against
+// the wrong target, or a slot handed to both, shows up as a wrong pixel.
+// Passing shows the contract holding; it cannot show a race is absent.
+//
+// Runs anywhere: without Direct3D 12 it skips.
+
+import std.string
+import std.fs
+import contrib.d3d12
+import std.spec
+
+message Start { dev: ptr, tag: int, reps: int }
+message Poll {}
+message Probe { reps: int }
+
+extern exit(code: int)
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// Each painter owns its target and pipeline; only the DEVICE is shared.
+actor Painter {
+    state verdict = 0
+    receive {
+        Start(dev, tag, reps) -> {
+            // Create and destroy a target per iteration, not once: the
+            // descriptor heaps are the shared state most likely to corrupt
+            // under unsynchronised take/give, and one target per actor would
+            // touch them twice in the whole run.
+            target = d3d12.target_create(dev, 64, 64)
+            if target == null {
+                verdict = 0
+            } else {
+                vs, vl = load("contrib/d3d12/shaders/triangle_vs.hlsl")
+                fs_, fl = load("contrib/d3d12/shaders/triangle_ps.hlsl")
+                pipe = d3d12.pipeline_create(dev, target, vs, vl, fs_, fl)
+                // The HLSL is compiled into the pipeline, and passing it to an
+                // extern marks it escaped, so scope exit will not reclaim it.
+                string.free(vs)
+                string.free(fs_)
+
+                // Seeded here, not reset in the loop. Without this check the
+                // test is vacuous: drawing with a null pipeline still clears
+                // the target, so every colour check below passes having
+                // rendered nothing.
+                bad = 0
+                if vl == 0 || fl == 0 || pipe == null {
+                    println("  no pipeline: HLSL ${vl}/${fl} bytes, ${d3d12.last_error()}")
+                    bad = 1
+                }
+
+                // Distinct clear colour per actor: red for tag 0, blue for 1.
+                red = 0.0
+                blue = 0.0
+                if tag == 0 { red = 1.0 } else { blue = 1.0 }
+
+                n = 0
+                while n < reps {
+                    st = d3d12.draw(target, pipe, red, 0.0, blue, 1.0)
+                    if st != d3d12.OK { bad = bad + 1 }
+                    px = d3d12.pixel(target, 4, 4)
+                    if tag == 0 {
+                        if d3d12.red(px) < 200 || d3d12.blue(px) > 60 { bad = bad + 1 }
+                    } else {
+                        if d3d12.blue(px) < 200 || d3d12.red(px) > 60 { bad = bad + 1 }
+                    }
+
+                    // Descriptor-slot churn against the other actor.
+                    scratch = d3d12.target_create(dev, 32, 32)
+                    if scratch == null {
+                        bad = bad + 1
+                    } else {
+                        if d3d12.draw(scratch, null, 0.0, 1.0, 0.0, 1.0) != d3d12.OK {
+                            bad = bad + 1
+                        }
+                        d3d12.target_destroy(scratch)
+                    }
+                    n = n + 1
+                }
+
+                if pipe != null { d3d12.pipeline_destroy(pipe) }
+                d3d12.target_destroy(target)
+                if bad == 0 { verdict = 1 } else { verdict = 0 }
+            }
+        }
+        // Concern (1) in the issue: available() fills a 256-byte device-name
+        // buffer that device_name() reads. Hammer both from several actors at
+        // once and require every read to be the same non-empty string. A torn
+        // or empty read fails here; the probe lock is what prevents it.
+        Probe(reps) -> {
+            expect = d3d12.device_name()
+            bad = 0
+            n = 0
+            while n < reps {
+                if d3d12.available() != 1 { bad = bad + 1 }
+                got = d3d12.device_name()
+                if string.equals(got, expect) != 1 { bad = bad + 1 }
+                if string.length(got) == 0 { bad = bad + 1 }
+                n = n + 1
+            }
+            if bad == 0 { verdict = 1 } else { verdict = 0 }
+        }
+
+        // Mailbox order puts this after Start, so the ask below waits for the
+        // render to finish without the sender polling or sleeping.
+        Poll() -> { reply verdict }
+    }
+}
+
+// The whole two-actor exchange, in one function, returning the four verdicts.
+//
+// It originally sat outside the it() block to work around #1626 — an ask did
+// not lower inside a closure body, and a captured actor handle lost its
+// `struct` keyword. Both are fixed, so this COULD now be inlined into the
+// block. It stays a named function because the sequence is
+// ordering-sensitive: both actors must be started before either is polled
+// (see the note below), and keeping it whole in one place makes that
+// constraint legible rather than something to re-derive from an it() body.
+run_painters(dev: ptr) -> (int, int, int, int) {
+    a = spawn(Painter())
+    b = spawn(Painter())
+
+    // Fire-and-forget both, THEN collect. Asking the first and waiting for
+    // its reply before sending the second would run them one after the other
+    // and the test would pass with no locking at all.
+    a ! Start { dev: dev, tag: 0, reps: 40 }
+    b ! Start { dev: dev, tag: 1, reps: 40 }
+
+    ra = a ? Poll {}
+    rb = b ? Poll {}
+
+    // Same two actors, now racing the cached probe and its name buffer.
+    a ! Probe { reps: 400 }
+    b ! Probe { reps: 400 }
+    pa = a ? Poll {}
+    pb = b ? Poll {}
+
+    return (ra, rb, pa, pb)
+}
+
+main() {
+    fw = spec.init()
+
+    // The device is created once and shared by both painters — that sharing is
+    // the whole point of the test, and device creation is expensive besides.
+    //
+    // With no driver, or no device, there is nothing to race and nothing to
+    // assert against, so the cases below skip rather than fail: a machine
+    // without a GPU is a provisioning condition, exactly as the original's
+    // SKIP-and-exit-0 path treated it.
+    ready = 0
+    reason = "no Direct3D 12"
+    dev = null
+
+    if d3d12.available() == 1 {
+        dev = d3d12.device_create()
+        if dev == null {
+            reason = "device_create failed (${d3d12.last_error()})"
+        } else {
+            ready = 1
+        }
+    } else {
+        reason = "no Direct3D 12 (${d3d12.last_error()})"
+    }
+
+    // The two painters and the two probes share one pair of actors and one
+    // mailbox ordering, so the whole exchange stays in one it(): both Starts
+    // must be in flight before either Poll, and the Probes must follow the
+    // Polls that drained the renders. Splitting on the assertion boundaries
+    // would serialise the actors and the test would pass with no locking at
+    // all.
+    spec.describe(fw, "d3d12: two actors on one device") {
+        spec.it_when(ready, "runs both painters and both probes concurrently", reason) callback {
+            ra, rb, pa, pb = run_painters(dev)
+
+            spec.assert_eq(ra, 1, "painter 0 rendered its own colour every frame")
+            spec.assert_eq(rb, 1, "painter 1 rendered its own colour every frame")
+            spec.assert_true(pa == 1 && pb == 1,
+                "concurrent probe reads agree and are non-empty")
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+
+    if dev != null { d3d12.device_destroy(dev) }
+
+    // The two painters are still alive with nothing left to receive, and a
+    // process kept alive by idle actors is a quiet one — the sandbox watchdog
+    // reaps it before the summary reaches the terminal. Leave deliberately.
+    exit(_rc)
+}

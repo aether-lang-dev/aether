@@ -1,0 +1,78 @@
+// A string stored into a `@c_import` struct's string field is a plain store:
+// the header's layout has no `_heap_<field>` companion to record ownership
+// in, and the field borrows the string, as the C API that declares it
+// expects. Each form of store is exercised: through a pointer, in a struct
+// literal, and into a field of a nested struct.
+
+import std.string
+
+extern struct label @c_import {
+    text: string
+    size: int
+}
+
+extern struct tagged @c_import {
+    id: int
+    label: label
+}
+
+extern label_c_length(l: ptr) -> int @c_import
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+
+// A literal built from a string this function made, and returned: the field
+// borrows, so the string must outlive the function rather than be freed at
+// its exit under the struct that still points at it.
+build_one(n: int) -> label {
+    s = "val ${n}"
+    return label { text: s, size: n }
+}
+
+main() {
+    // Through a pointer, with a literal and with a string built at runtime.
+    l = calloc(1, sizeof(label)) as *label
+    l.text = "hello"
+    l.size = 5
+    println("pointer: ${l.text} ${l.size}")
+    name = string.concat("wor", "ld")
+    l.text = name
+    println("pointer, runtime string: ${l.text}")
+
+    // Strings built at runtime are wrapped AetherStrings on the Aether side;
+    // C must see their characters, through a pointer store and a literal.
+    part = string.substring("hello world", 0, 5)
+    l.text = part
+    println("C sees: ${label_c_length(l as ptr)}")
+    built = "n=${l.size}"
+    lit = label { text: built, size: 3 }
+    lp = calloc(1, sizeof(label)) as *label
+    lp.text = lit.text
+    println("C sees in a literal: ${label_c_length(lp as ptr)}")
+    free(lp)
+
+    // A struct literal: spelled `(struct label){...}`, no trackers.
+    v = label { text: name, size: 5 }
+    println("literal: ${v.text} ${v.size}")
+
+    // A field of a nested struct, through a pointer to the outer one.
+    t = calloc(1, sizeof(tagged)) as *tagged
+    t.id = 7
+    t.label.text = "nested"
+    println("nested: ${t.id} ${t.label.text}")
+
+    // Returned from a function: still readable after its frame is gone and
+    // after more strings have been made and freed in between.
+    r = build_one(42)
+    churn = 0
+    while churn < 1000 {
+        _noise = "noise ${churn} xxxxxxxxxxxxxxxx"
+        churn = churn + 1
+    }
+    println("returned: ${r.text} ${r.size}")
+
+    // The fields borrowed `name`; it is still the caller's to free.
+    free(t)
+    free(l)
+    string.free(name)
+    println("OK")
+}

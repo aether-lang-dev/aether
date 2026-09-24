@@ -10,6 +10,9 @@
 #   .github/scripts/contrib_check.sh            # build + run each test
 #   VALGRIND=1 .github/scripts/contrib_check.sh # ... under valgrind (leak gate)
 #   LSAN=1 .github/scripts/contrib_check.sh     # LeakSanitizer gate (vulkan)
+#   ONLY="metal/ vulkan/" .github/scripts/contrib_check.sh
+#                                               # only the entries whose label
+#                                               # starts with one of these
 #
 # Assumes ./build/ae is already built (the Makefile target depends on it).
 # Exits nonzero if any contrib test fails to build, fails at runtime, or (under
@@ -21,6 +24,7 @@ AE="./build/ae"
 EXE_EXT="${EXE_EXT:-}"
 VALGRIND="${VALGRIND:-0}"
 LSAN="${LSAN:-0}"
+ONLY="${ONLY:-}"
 VG="valgrind --leak-check=full --error-exitcode=99 --errors-for-leak-kinds=definite"
 
 # LeakSanitizer gate (leakgate = "lsan"). Standalone LSan, not ASan: ASan's
@@ -32,6 +36,17 @@ LSAN_CFLAGS="-fsanitize=leak -fno-omit-frame-pointer -g"
 LSAN_SUPP="$(pwd)/.github/scripts/lsan-contrib.supp"
 LSAN_KEEP_SRC="$(pwd)/.github/scripts/lsan_keep_modules.c"
 LSAN_KEEP_SO="$(pwd)/build/contrib-check/lsan_keep_modules.so"
+
+# A hard timeout per test, so a hung server test can never wedge the run:
+# GNU coreutils `timeout` on Linux and MSYS2, `gtimeout` on macOS (coreutils
+# via brew), none on a macOS without coreutils, where tests run unbounded.
+if command -v timeout >/dev/null 2>&1; then
+  TO="timeout 120"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TO="gtimeout 120"
+else
+  TO=""
+fi
 
 rc=0
 run_dir="build/contrib-check"
@@ -56,6 +71,8 @@ AVC="contrib/avcodec"
 TW="contrib/tinyweb"
 I18N="contrib/i18n"
 VK="contrib/vulkan"
+DX="contrib/d3d12"
+MT="contrib/metal"
 SQL="contrib/sqlite"
 NT="contrib/templating/native"
 XE="contrib/parsers/xml_expat"
@@ -102,6 +119,8 @@ TESTS=(
   "tinyweb/schema_api|$TW/test_schema_api.ae|$TW/ws_handshake.c|run|"
   "tinyweb/websocket|$TW/test_websocket.ae|$TW/ws_handshake.c|run|"
   "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c $I18N/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
+  # png: pure Aether over std.zlib; its test decodes what it encoded.
+  "png/encode|contrib/png/test_png.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
   # and SKIPs itself at runtime when no driver is installed.
   #
@@ -113,18 +132,47 @@ TESTS=(
   # allocations are excluded by object while every allocation this repo makes
   # is still gated: 464 bytes of driver noise, and a deliberate malloc in
   # aether_vulkan.c fails the leg with the function and line named.
-  "vulkan/offscreen|$VK/test_vulkan.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/resources|$VK/test_vulkan_resources.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/actors|$VK/test_vulkan_actors.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/frames|$VK/test_vulkan_frames.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/materials|$VK/test_vulkan_materials.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  "vulkan/offscreen|$VK/test_vulkan.ae||lsan||vulkan"
+  "vulkan/resources|$VK/test_vulkan_resources.ae||lsan||vulkan"
+  "vulkan/actors|$VK/test_vulkan_actors.ae||lsan||vulkan"
+  "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae||lsan||vulkan"
+  "vulkan/frames|$VK/test_vulkan_frames.ae||lsan||vulkan"
+  "vulkan/materials|$VK/test_vulkan_materials.ae||lsan||vulkan"
+  "vulkan/formats|$VK/test_vulkan_formats.ae||lsan||vulkan"
+  "vulkan/compute|$VK/test_vulkan_compute.ae||lsan||vulkan"
+  "vulkan/raw|$VK/test_vulkan_raw.ae||lsan||vulkan"
+  # Presents into a real window and reads the screen back. The window comes
+  # from the test fixture (tests/support/native_window), which opens X11 at
+  # runtime: the Linux leg runs it under Xvfb, and without a display it
+  # SKIPs like a machine without a driver.
+  "vulkan/present|$VK/test_vulkan_present.ae|tests/support/native_window/native_window.c|lsan||vulkan"
   # The examples are RUN, not just compiled. An example that only builds
   # rots into decoration: both of these render and write a PPM, so a
   # regression that leaves them producing nothing fails here.
-  "vulkan/example-triangle|$VK/example_triangle.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/example-parallel|$VK/example_parallel_render.ae|$VK/aether_vulkan.c|lsan||vulkan"
-  "vulkan/example-sprites|$VK/example_sprites.ae|$VK/aether_vulkan.c|lsan||vulkan"
+  "vulkan/example-triangle|$VK/example_triangle.ae||lsan||vulkan"
+  "vulkan/example-parallel|$VK/example_parallel_render.ae||lsan||vulkan"
+  "vulkan/example-sprites|$VK/example_sprites.ae||lsan||vulkan"
+  # d3d12: builds everywhere (the implementation is Windows-only and the
+  # module compiles to stubs elsewhere, so these SKIP there). On the Windows
+  # leg they render on WARP, the software rasteriser every Windows ships, so
+  # a runner with no GPU still runs every case. Direct3D is outside valgrind's
+  # reach, so these are gated for correctness only.
+  "d3d12/core|$DX/test_d3d12.ae||run|"
+  "d3d12/resources|$DX/test_d3d12_resources.ae||run|"
+  "d3d12/compute|$DX/test_d3d12_compute.ae||run|"
+  "d3d12/actors|$DX/test_d3d12_actors.ae||run|"
+  "d3d12/present|$DX/test_d3d12_present.ae|tests/support/native_window/native_window.c|run|"
+  "d3d12/example-triangle|$DX/example_triangle.ae||run|"
+  # metal: builds everywhere (the implementation is macOS-only and the module
+  # compiles to stubs elsewhere, so these SKIP there). The macOS leg renders
+  # on the runner's Metal device and asserts they ran. Run-only: the leak
+  # gates here are valgrind and LSan on Linux, where Metal does not exist.
+  "metal/core|$MT/test_metal.ae||run|"
+  "metal/resources|$MT/test_metal_resources.ae||run|"
+  "metal/compute|$MT/test_metal_compute.ae||run|"
+  "metal/actors|$MT/test_metal_actors.ae||run|"
+  "metal/present|$MT/test_metal_present.ae|tests/support/native_window/native_window.c|run|"
+  "metal/example-triangle|$MT/example_triangle.ae||run|"
 )
 
 # Kill any stray cache/test binaries squatting ports before we start (aborted
@@ -146,6 +194,14 @@ fi
 
 for entry in "${TESTS[@]}"; do
   IFS='|' read -r label src extras leakgate pcmods pchdrs <<< "$entry"
+
+  if [ -n "$ONLY" ]; then
+    wanted=0
+    for prefix in $ONLY; do
+      case "$label" in "$prefix"*) wanted=1 ;; esac
+    done
+    [ "$wanted" = "1" ] || continue
+  fi
 
   if [ ! -f "$src" ]; then
     printf '  SKIP  %-22s (%s not found)\n' "$label" "$src"
@@ -222,8 +278,17 @@ for entry in "${TESTS[@]}"; do
     rm -rf "$work"; mkdir -p "$work"
     ln -s "$(pwd)/contrib" "$work/contrib"
     cp "$src" "$work/probe.ae"
+    # Absolute: the workspace mirrors only contrib/, and an extra source from
+    # elsewhere in the tree (a test fixture under tests/support) must still
+    # resolve from inside it.
     extra_toml=""
-    for c in $extras; do extra_toml="$extra_toml\"$c\", "; done
+    for c in $extras; do
+      case "$c" in /*) abs_c="$c" ;; *) abs_c="$(pwd)/$c" ;; esac
+      # Under MSYS2 the shell's /d/... spelling means nothing to the native
+      # ae and gcc that read aether.toml; hand them the Windows path.
+      if command -v cygpath >/dev/null 2>&1; then abs_c="$(cygpath -m "$abs_c")"; fi
+      extra_toml="$extra_toml\"$abs_c\", "
+    done
     {
       printf '[project]\nname = "%s"\nversion = "0.0.0"\n\n' "$safe"
       printf '[[bin]]\nname = "probe"\npath = "probe.ae"\n'
@@ -279,7 +344,7 @@ for entry in "${TESTS[@]}"; do
     [ "$top" = "build" ] && continue
     ln -s "$(pwd)/$top" "$rundir/$top" 2>/dev/null || true
   done
-  if ( cd "$rundir" && env $lsan_env timeout 120 $runner > "$log" 2>&1 < /dev/null ); then
+  if ( cd "$rundir" && env $lsan_env $TO $runner > "$log" 2>&1 < /dev/null ); then
     if [ "$use_vg" = "1" ]; then
       printf '  PASS  %-22s (run + valgrind)\n' "$label"
     elif [ "$use_lsan" = "1" ]; then
