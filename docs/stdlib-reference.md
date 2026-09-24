@@ -34,7 +34,7 @@ header comment is the authoritative description.
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 16 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 158 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
-| `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
+| `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 165 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
@@ -3245,6 +3245,10 @@ main() {
     // the input is attacker-controlled: without a secret key, an attacker
     // can pick inputs that all land in one bucket.
     println("siphash ${hash.siphash24(key, n, 0, 0)}")
+
+    // CRC-32 is the checksum PNG, gzip and ZIP carry: for a format that
+    // names it, not for a hash table.
+    println("crc32 ${hash.crc32(key, n)}")
 }
 ```
 ```output
@@ -3252,12 +3256,14 @@ fnv32 193060292
 fnv64 6601642739325170724
 murmur3 306734394
 siphash -3624809858559077013
+crc32 955761749
 ```
 
 **Functions:**
 - `hash.fnv32(data, length)` → `long`, `hash.fnv64(data, length)` → `long` - FNV-1a, fast and simple
 - `hash.murmur3_32(data, length, seed)` → `long` - MurmurHash3, better distribution
 - `hash.siphash24(data, length, k0, k1)` → `long` - SipHash-2-4 under a 128-bit key
+- `hash.crc32(data, length)` → `long`, `hash.crc32_update(crc, data, length)` → `long` - CRC-32 (IEEE 802.3), continued across pieces by `crc32_update`
 
 None of these is a cryptographic hash: for integrity or signatures use
 `std.cryptography`.
