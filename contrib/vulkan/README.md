@@ -1,9 +1,14 @@
-# contrib.vulkan: offscreen GPU rendering
+# contrib.vulkan: GPU rendering, compute and presentation
 
-Phase 1 of [#1495](https://github.com/aether-lang-dev/aether/issues/1495): a GPU
-tier for Aether. This is the offscreen half, which is the part that runs on every
-platform and in CI. Surface creation, swapchains and presenting to a window are
-phase 2 and are not here.
+The Vulkan member of Aether's GPU tier
+([#1495](https://github.com/aether-lang-dev/aether/issues/1495)): offscreen
+targets, pipelines, textures, materials, frames in flight, colour formats,
+compute, and swapchains over a window someone else owns. For whatever that
+does not cover, `contrib.vulkan.vk` is the Vulkan API itself, generated from
+the registry. [`contrib.d3d12`](../d3d12/README.md) and
+[`contrib.metal`](../metal/README.md) have the same shape over Direct3D 12 and
+Metal; [docs/gpu.md](../../docs/gpu.md) covers what the three share and how to
+pick one.
 
 It lives in `contrib/` rather than `std/` for the reason
 [docs/stdlib-vs-contrib.md](../../docs/stdlib-vs-contrib.md) gives: Vulkan needs
@@ -214,6 +219,105 @@ render pass, so a tiler never writes them to memory.
 `target_has_depth(t)` and `target_samples(t)` report what a target actually
 got.
 
+## Colour formats and image files
+
+`target_create` renders to RGBA8 UNORM. `target_create_format` takes any of
+four formats, each checked against the device before anything is made:
+
+| Format | What it stores | Bytes a pixel |
+|---|---|---:|
+| `FORMAT_R8G8B8A8_UNORM` | 0..1 as 0..255 | 4 |
+| `FORMAT_R8G8B8A8_SRGB` | linear shader output encoded for display: 0.5 is stored as 188 | 4 |
+| `FORMAT_R16G16B16A16_SFLOAT` | half floats, not clamped: HDR light, accumulation | 8 |
+| `FORMAT_R32G32B32A32_SFLOAT` | single floats, not clamped: values a shader computes | 16 |
+
+```aether
+t = vulkan.target_create_format(dev, 512, 512, vulkan.FORMAT_R16G16B16A16_SFLOAT, 1, 4)
+vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+v = vulkan.pixel_value(t, 256, 256, 0)   // red as stored: 2.5 stays 2.5
+err = vulkan.save_png(t, "frame.png")    // "" on success, the reason otherwise
+```
+
+`pixel_value` reads one channel at full precision. `pixel`, `copy_rgba8` and
+`save_png` give 8-bit RGBA whatever the format, float channels clamped to 0..1.
+`copy_rgba` gives the format's own bytes (`rgba_size()` of them). PNG output
+goes through [`contrib.png`](../png/README.md), which encodes over `std.zlib`.
+`save_ppm` remains for a file with no compressor in the path.
+
+## Presenting to a window
+
+```aether
+sc = vulkan.swapchain_create(dev, vulkan.WINDOW_WIN32, null, hwnd, w, h)
+defer vulkan.swapchain_destroy(sc)
+vulkan.target_set_readback(target, 0)   // shown only: no copy back to host memory
+// each frame:
+vulkan.submit(target, pipe, 0.0, 0.0, 0.0, 1.0)
+vulkan.present(sc, target)
+```
+
+The window is never this module's. The language does not own windowing
+([#1505](https://github.com/aether-lang-dev/aether/issues/1505)): a swapchain is
+made over the handle that whoever owns the window hands out. The kinds are
+numbered as aether-ui's `native_view_kind()` numbers them, so its handle passes
+straight through:
+
+| Kind | `display` | `window` | Surface extension |
+|---|---|---|---|
+| `WINDOW_WIN32` (1) | null | `HWND` | `VK_KHR_win32_surface` |
+| `WINDOW_NSVIEW` (2) | null | `NSView*` | `VK_EXT_metal_surface` |
+| `WINDOW_X11` (3) | `Display*` | `Window` | `VK_KHR_xlib_surface` |
+| `WINDOW_WAYLAND` (4) | `wl_display*` | `wl_surface*` | `VK_KHR_wayland_surface` |
+| `WINDOW_METAL_LAYER` (5) | null | `CAMetalLayer*` | `VK_EXT_metal_surface` |
+
+The instance enables each surface extension the loader offers and this build
+has headers for. A kind whose extension is missing is refused with the
+extension named, so one program presents wherever its loader can and says why
+where it cannot. An `NSView` is given a `CAMetalLayer` at the window's backing
+scale, on the main thread. That goes through the Objective-C runtime, so no
+framework is linked.
+
+- **Scaling and colour.** `present` blits the target's newest frame into the
+  acquired image, scaling it when the two differ in size, and does not wait
+  for the GPU. The swapchain is sRGB when the target is sRGB or float, so an
+  sRGB target is shown as stored and a float target's linear light is encoded
+  for display. Depth, MSAA, materials and frames in flight reach the screen
+  unchanged.
+- **Resizing.** Every present compares the surface's current size with the
+  swapchain's and rebuilds on a change, because a driver need not report a
+  resized or minimised window as out of date. `swapchain_resize` does it at
+  once from a toolkit's resize hook. `target_resize` gives the target new
+  images at the new size and keeps its render pass, so every pipeline made for
+  it keeps working.
+- **Minimised** (no area): presenting shows nothing and succeeds, and
+  `swapchain_width()` is 0 until the window comes back.
+- **Vsync** is on by default (FIFO, never tearing). `swapchain_set_vsync(sc, 0)`
+  presents as soon as a frame is ready: MAILBOX where the surface offers it,
+  IMMEDIATE otherwise.
+
+## Compute
+
+```aether
+b = vulkan.bindings_create()
+vulkan.bindings_storage(b, 0)              // layout(std430, binding = 0) buffer
+c = vulkan.compute_create(dev, spv, spv_len, b, 4)
+buf = vulkan.buffer_create(dev, 1024 * 4)
+vulkan.compute_set_buffer(c, 0, buf)
+vulkan.compute_push_float(c, 0, 2.0)
+vulkan.dispatch(c, 16, 1, 1)               // waits; dispatch_async does not
+v = vulkan.buffer_float(buf, 7)
+```
+
+Buffers are host-visible, coherent and mapped for their lifetime, and zeroed
+when made, so results are read without a copy once the dispatch is done. A
+buffer can be a storage or uniform binding of a compute pass and of a graphics
+pipeline (`set_buffer`, `material_set_buffer`). A pipeline made with an empty
+vertex layout takes no vertex input, so its vertex shader can pull what a
+compute pass wrote by `gl_VertexIndex`, with no copy in between. A dispatch is
+refused, with the reason named, when a declared binding was never set or a
+group count exceeds the device's `maxComputeWorkGroupCount`. `dispatch_async`
+returns at once, and `compute_wait` waits before the results are read or the
+pass dispatched again.
+
 ## Nothing links against libvulkan
 
 The loader is opened with `dlopen` at runtime and every entry point is fetched
@@ -233,6 +337,82 @@ and the driver entry is cheaper per call:
 vkResetFences via loader    12.2 ns/call
 vkResetFences via driver    11.6 ns/call   (5.2% less)
 ```
+
+The entry points this file loads are not hand-written tables.
+`aether_vulkan_dispatch.h` lists them as X-macros generated from the registry
+(see below), one list per feature or extension and loading level, from the
+command names in `tools/dispatch_commands.txt`.
+
+## The Vulkan API directly: `contrib.vulkan.vk`
+
+For anything the module above does not do, `contrib.vulkan.vk` is the API
+itself, generated from the Vulkan registry
+([#1506](https://github.com/aether-lang-dev/aether/issues/1506)):
+
+```aether
+import contrib.vulkan.vk
+
+app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
+app.sType = vk.STRUCTURE_TYPE_APPLICATION_INFO
+app.pApplicationName = "raw"
+app.apiVersion = 1 << 22
+ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
+ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+ci.pApplicationInfo = app as ptr
+out = calloc(1, 8)
+r = vk.vkCreateInstance(ci as ptr, null, out)
+instance = (out as ptr[])[0]
+vk.load_instance(instance)
+
+devices, n, r2 = vk.vkEnumeratePhysicalDevices_all(instance)
+defer vk.array_free(devices)
+```
+
+- **Constants** drop the `VK_` prefix (`vk.FORMAT_R8G8B8A8_UNORM`), so they
+  cannot collide with the enumerators the header declares.
+- **Structs and unions** are `extern struct ... @c_import`: field names and
+  Aether types come from the registry, and the layout from `<vulkan/vulkan.h>`,
+  so nothing depends on offsets computed by hand. A string field borrows the
+  string it is given, as the C API expects.
+- **Commands** call through entry points resolved at runtime from the loader
+  this module opens, so a program driving the API directly still links nothing
+  and starts where there is no Vulkan; there a command returning `VkResult`
+  returns `ERROR_INITIALIZATION_FAILED`. `vk.load_instance(instance)` and
+  `vk.load_device(device)` point the commands at that instance's and device's
+  own entry points, the driver's rather than the loader's dispatch, which is
+  also how an extension command the loader does not export is reached.
+- **The two-call idiom** is generated. The registry records which parameter
+  counts which array, so each command that fills one also has a
+  `<command>_all`. It asks for the count, allocates, fills, and asks again
+  while the implementation answers `INCOMPLETE`, then returns the array, its
+  length and the result. Each element's `sType` is set from the registry
+  first, which the `...2` queries require.
+
+`tools/vkgen.ae` is the generator: an Aether program that streams `vk.xml`
+with `std.xml` and takes a selection, a core version plus extensions, rather
+than all of the registry. The committed module is Vulkan 1.3 with
+`VK_KHR_surface` and `VK_KHR_swapchain`: 229 commands, 294 structs and 18
+`_all` helpers. Platform extensions are refused, since their structs name
+types (`HWND`, `Display`) that only their own headers declare.
+
+```sh
+contrib/vulkan/tools/regenerate.sh             # vk.xml from $VULKAN_SDK or the usual prefixes
+contrib/vulkan/tools/regenerate.sh --registry /path/to/vk.xml
+```
+
+Both generated files record the registry release they came from. Registries
+1.3.204, 1.3.275, 1.4.309 and 1.4.357 give the same commands, structs and
+dispatch header; later releases add enum values and aliases.
+`tests/integration/vulkan_vkgen` regenerates from the installed registry and
+requires the dispatch header to be identical, and the module too when the
+release matches. It then builds and runs what it generated, which the Linux
+contrib job requires to pass.
+
+What it costs: `aetherc` spends about 40 ms more on a program importing the
+7,700-line module than on an empty one. A cold `ae build` of such a program
+takes 6.2 s, against 5.9 s importing `contrib.vulkan` and 2.8 s for a program
+importing nothing: the time is compiling `aether_vulkan.c`, which both share
+and the build cache keeps. Only the commands a program calls are emitted.
 
 ## Threads
 
@@ -353,19 +533,21 @@ cycles in the test are what surface accumulation on either.
 
 ## Building against it
 
-`ae build --extra` cannot pass `-I`, so a project needs an `aether.toml`:
+Importing the module is all a build needs. Its C file is declared with
+`@source` and compiled into the program, and nothing is linked, which is the
+point of the runtime loading. What the build needs is the Vulkan headers,
+which are header-only. Where they are not on the default include path
+(Homebrew on Apple silicon), name them in `aether.toml`:
 
 ```toml
-[[bin]]
-name = "app"
-path = "src/main.ae"
-extra_sources = ["contrib/vulkan/aether_vulkan.c"]
-
 [build]
 cflags = "-I/opt/homebrew/include"   # or: $(pkg-config --cflags vulkan)
 ```
 
-No `link_flags` entry is needed, which is the point of the runtime loading.
+A project that still lists `contrib/vulkan/aether_vulkan.c` in
+`extra_sources`, which the module asked for before `@source`, keeps building:
+a file named both ways is compiled once. A glibc older than 2.34 keeps `dlopen`
+in libdl, so add `link_flags = "-ldl"` there.
 
 Headers from **1.3.204** onward work: that is what Ubuntu 22.04 ships and what
 the Linux CI leg builds against, so using a symbol newer than that fails there.
@@ -374,15 +556,17 @@ the Linux CI leg builds against, so using a symbol newer than that fails there.
 |---|---|---|
 | Linux | `apt install libvulkan-dev` | vendor ICD, or `mesa-vulkan-drivers` for lavapipe on the CPU |
 | macOS | `brew install vulkan-headers` | `brew install vulkan-loader molten-vk` |
-| Windows | Vulkan SDK | vendor ICD |
+| Windows | Vulkan SDK, or MSYS2's `mingw-w64-x86_64-vulkan-headers` | vendor ICD, or MSYS2's `mingw-w64-x86_64-mesa` for lavapipe |
 
 ## Shaders
 
-`shaders/*.vert` and `*.frag` are the GLSL sources; the `.spv` files beside them
-are committed so that building needs no shader compiler. After editing the GLSL,
-run `shaders/build_shaders.sh` and commit the result. `triangle` is the built-in
-layout, `transform` adds a push-constant mat4, and `textured` reads a
-caller-described layout plus a sampler and a uniform.
+`shaders/*.vert`, `*.frag` and `*.comp` are the GLSL sources; the `.spv` files
+beside them are committed so that building needs no shader compiler. After
+editing the GLSL, run `shaders/build_shaders.sh` and commit the result.
+`triangle` is the built-in layout, `transform` adds a push-constant mat4,
+`textured` reads a caller-described layout plus a sampler and a uniform,
+`transform.comp` and `vertices.comp` are compute passes, and `pulled.vert`
+reads its vertices from a storage buffer.
 
 `tests/integration/vulkan_shaders` checks that the committed binaries are
 well-formed SPIR-V and that the GLSL still compiles. It deliberately does not
@@ -393,9 +577,10 @@ rather than on a defect. What proves the pair is correct is the render test.
 ## Testing
 
 `test_vulkan.ae`, `test_vulkan_resources.ae`, `test_vulkan_actors.ae`,
-`test_vulkan_depth_msaa.ae`, `test_vulkan_frames.ae` and
-`test_vulkan_materials.ae` run from `make contrib-check`, along with all three
-examples. With no driver it prints SKIP
+`test_vulkan_depth_msaa.ae`, `test_vulkan_frames.ae`,
+`test_vulkan_materials.ae`, `test_vulkan_formats.ae`,
+`test_vulkan_compute.ae`, `test_vulkan_present.ae` and `test_vulkan_raw.ae`
+run from `make contrib-check`, along with all three examples. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -442,19 +627,44 @@ draw past the uploaded geometry, at both add and draw time, an empty or
 negative draw range, an index width that is neither 16 nor 32, a material
 without a pipeline, and a uniform write to a binding that has no buffer.
 
+`test_vulkan_formats.ae` checks each format by a value only that format
+produces: an sRGB target stores linear 0.5 as about 188 rather than 128, and
+the float targets keep 2.5 and 1000.0 where the 8-bit readers clamp them to
+255. A format that silently fell back to UNORM fails every one.
+`test_vulkan_compute.ae` compares a compute transform with the CPU element by
+element, and draws what a compute pass wrote, pulled by `gl_VertexIndex`.
+
+`test_vulkan_present.ae` presents into a real window and reads the screen
+back: the drawn colour; a resize, both through `swapchain_resize` and by the
+window outgrowing the swapchain; a smaller target scaled to fit; an sRGB and a
+float target shown as encoded; readback off; vsync off and back on;
+minimising and restoring; and the refusals. The window comes from
+`tests/support/native_window`, a test fixture that stands in for aether-ui's
+`native_view` (Win32, X11 and AppKit), because the language's own CI cannot
+depend on the toolkit. X11 does not shrink a minimised window, so the Linux leg
+skips that one case.
+
+`test_vulkan_raw.ae` drives `contrib.vulkan.vk` against the driver. It checks
+that the constants match the header and that a nested struct field reads at
+the right offset. It creates an instance and a device through their own entry
+points, and requires the `_all` helpers to agree with the two calls made by
+hand.
+
+Every test passes on an NVIDIA RTX 4070 Ti and on lavapipe. The Khronos
+validation layer, with synchronization validation on, reports nothing for
+them.
+
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
-and then asserts the test did **not** skip. A skip there would be silent loss of
-coverage.
+and Xvfb so the presentation test has a display; it then asserts the tests did
+**not** skip. A skip there would be silent loss of coverage. The Windows leg
+does the same on MSYS2's lavapipe, so the Win32 surface and swapchain run
+there too.
 
 ## Not here yet
 
 Every limitation below has an issue. Nothing here is a TODO in a comment or a
 plan in someone's head.
 
-| Missing | Issue | Priority |
-|---|---|---|
-| Surfaces, swapchains, presenting to a window, and the aether-ui handle seam | #1505 | P1 |
-| Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
-| Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
-| More colour formats, and PNG output rather than PPM | #1514 | P3 |
-| Compute pipelines | #1515 | P3 |
+| Missing | Issue |
+|---|---|
+| Presenting to a Wayland surface is built but never run: no CI leg has a compositor, and the window fixture has no Wayland backend | [#2197](https://github.com/aether-lang-dev/aether/issues/2197) |
