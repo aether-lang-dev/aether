@@ -10,6 +10,9 @@
 #   .github/scripts/contrib_check.sh            # build + run each test
 #   VALGRIND=1 .github/scripts/contrib_check.sh # ... under valgrind (leak gate)
 #   LSAN=1 .github/scripts/contrib_check.sh     # LeakSanitizer gate (vulkan)
+#   ONLY="metal/ vulkan/" .github/scripts/contrib_check.sh
+#                                               # only the entries whose label
+#                                               # starts with one of these
 #
 # Assumes ./build/ae is already built (the Makefile target depends on it).
 # Exits nonzero if any contrib test fails to build, fails at runtime, or (under
@@ -21,6 +24,7 @@ AE="./build/ae"
 EXE_EXT="${EXE_EXT:-}"
 VALGRIND="${VALGRIND:-0}"
 LSAN="${LSAN:-0}"
+ONLY="${ONLY:-}"
 VG="valgrind --leak-check=full --error-exitcode=99 --errors-for-leak-kinds=definite"
 
 # LeakSanitizer gate (leakgate = "lsan"). Standalone LSan, not ASan: ASan's
@@ -32,6 +36,17 @@ LSAN_CFLAGS="-fsanitize=leak -fno-omit-frame-pointer -g"
 LSAN_SUPP="$(pwd)/.github/scripts/lsan-contrib.supp"
 LSAN_KEEP_SRC="$(pwd)/.github/scripts/lsan_keep_modules.c"
 LSAN_KEEP_SO="$(pwd)/build/contrib-check/lsan_keep_modules.so"
+
+# A hard timeout per test, so a hung server test can never wedge the run:
+# GNU coreutils `timeout` on Linux and MSYS2, `gtimeout` on macOS (coreutils
+# via brew), none on a macOS without coreutils, where tests run unbounded.
+if command -v timeout >/dev/null 2>&1; then
+  TO="timeout 120"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TO="gtimeout 120"
+else
+  TO=""
+fi
 
 rc=0
 run_dir="build/contrib-check"
@@ -57,6 +72,7 @@ TW="contrib/tinyweb"
 I18N="contrib/i18n"
 VK="contrib/vulkan"
 DX="contrib/d3d12"
+MT="contrib/metal"
 SQL="contrib/sqlite"
 NT="contrib/templating/native"
 XE="contrib/parsers/xml_expat"
@@ -147,6 +163,16 @@ TESTS=(
   "d3d12/actors|$DX/test_d3d12_actors.ae||run|"
   "d3d12/present|$DX/test_d3d12_present.ae|tests/support/native_window/native_window.c|run|"
   "d3d12/example-triangle|$DX/example_triangle.ae||run|"
+  # metal: builds everywhere (the implementation is macOS-only and the module
+  # compiles to stubs elsewhere, so these SKIP there). The macOS leg renders
+  # on the runner's Metal device and asserts they ran. Run-only: the leak
+  # gates here are valgrind and LSan on Linux, where Metal does not exist.
+  "metal/core|$MT/test_metal.ae||run|"
+  "metal/resources|$MT/test_metal_resources.ae||run|"
+  "metal/compute|$MT/test_metal_compute.ae||run|"
+  "metal/actors|$MT/test_metal_actors.ae||run|"
+  "metal/present|$MT/test_metal_present.ae|tests/support/native_window/native_window.c|run|"
+  "metal/example-triangle|$MT/example_triangle.ae||run|"
 )
 
 # Kill any stray cache/test binaries squatting ports before we start (aborted
@@ -168,6 +194,14 @@ fi
 
 for entry in "${TESTS[@]}"; do
   IFS='|' read -r label src extras leakgate pcmods pchdrs <<< "$entry"
+
+  if [ -n "$ONLY" ]; then
+    wanted=0
+    for prefix in $ONLY; do
+      case "$label" in "$prefix"*) wanted=1 ;; esac
+    done
+    [ "$wanted" = "1" ] || continue
+  fi
 
   if [ ! -f "$src" ]; then
     printf '  SKIP  %-22s (%s not found)\n' "$label" "$src"
@@ -307,7 +341,7 @@ for entry in "${TESTS[@]}"; do
     [ "$top" = "build" ] && continue
     ln -s "$(pwd)/$top" "$rundir/$top" 2>/dev/null || true
   done
-  if ( cd "$rundir" && env $lsan_env timeout 120 $runner > "$log" 2>&1 < /dev/null ); then
+  if ( cd "$rundir" && env $lsan_env $TO $runner > "$log" 2>&1 < /dev/null ); then
     if [ "$use_vg" = "1" ]; then
       printf '  PASS  %-22s (run + valgrind)\n' "$label"
     elif [ "$use_lsan" = "1" ]; then

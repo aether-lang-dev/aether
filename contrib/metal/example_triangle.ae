@@ -1,0 +1,65 @@
+// A triangle drawn with Metal and written to triangle_metal.png.
+//
+// The same program as contrib/vulkan/example_triangle.ae with the module
+// swapped: MSL shaders instead of SPIR-V, and Metal's coordinates (y up).
+// Run it from the repository root, where the shader paths resolve:
+//
+//   ae run contrib/metal/example_triangle.ae
+//
+// Away from macOS it says so and exits cleanly.
+
+import std.fs
+import std.string
+import contrib.metal
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+main() {
+    if metal.available() != 1 {
+        println("no Metal: ${metal.last_error()}")
+        return
+    }
+    dev = metal.device_create()
+    if dev == null {
+        println("device_create failed: ${metal.last_error()}")
+        return
+    }
+    defer metal.device_destroy(dev)
+
+    target = metal.target_create(dev, 256, 256)
+    defer metal.target_destroy(target)
+
+    vs, vs_len = load("contrib/metal/shaders/triangle_vs.metal")
+    ps, ps_len = load("contrib/metal/shaders/triangle_fs.metal")
+    pipe = metal.pipeline_create(dev, target, vs, vs_len, ps, ps_len)
+    string.free(vs)
+    string.free(ps)
+    if pipe == null {
+        println("pipeline_create failed: ${metal.last_error()}")
+        return
+    }
+    defer metal.pipeline_destroy(pipe)
+
+    // Red at the top, green bottom left, blue bottom right: y points up.
+    metal.verts_reserve(target, 3)
+    metal.verts_set(target, 0, 0.0, 0.7, 1.0, 0.0, 0.0)
+    metal.verts_set(target, 1, -0.7, -0.7, 0.0, 1.0, 0.0)
+    metal.verts_set(target, 2, 0.7, -0.7, 0.0, 0.0, 1.0)
+
+    if metal.draw(target, pipe, 0.0, 0.0, 0.0, 1.0) != metal.OK {
+        println("draw failed: ${metal.last_error()}")
+        return
+    }
+    err = metal.save_png(target, "triangle_metal.png")
+    if err != "" {
+        println("save_png failed: ${err}")
+        return
+    }
+    println("wrote triangle_metal.png (256x256) on ${metal.device_name()}")
+}

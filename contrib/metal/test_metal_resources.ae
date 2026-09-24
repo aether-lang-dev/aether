@@ -1,0 +1,395 @@
+// contrib.metal shader resources: push constants, vertex layouts, index
+// buffers, textures, uniforms, materials, batches and mipmaps.
+//
+// Each feature is checked by what it does to pixels: a pushed mirror matrix
+// moves the triangle, a 2x2 texture lands one texel per quadrant, a tint
+// scales it, two materials put two textures in one frame, 16-bit indices give
+// the same frame as 32-bit byte for byte, and a mip chain turns a minified
+// checkerboard into its average. Coordinates are Metal's (y up; a
+// texture's v runs down from the top).
+
+import std.bytes
+import std.fs
+import std.string
+import contrib.metal
+import std.spec
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// RGBA texels, row by row, from a list of 0xRRGGBB colours.
+texels4(c0: int, c1: int, c2: int, c3: int) -> ptr {
+    b = bytes.new(16)
+    bytes.set_length(b, 16)
+    i = 0
+    while i < 4 {
+        c = c0
+        if i == 1 { c = c1 }
+        if i == 2 { c = c2 }
+        if i == 3 { c = c3 }
+        bytes.set(b, i * 4, (c >> 16) & 255)
+        bytes.set(b, i * 4 + 1, (c >> 8) & 255)
+        bytes.set(b, i * 4 + 2, c & 255)
+        bytes.set(b, i * 4 + 3, 255)
+        i = i + 1
+    }
+    return b
+}
+
+// A quad from (x0, y0) to (x1, y1) in NDC with uv 0..1 (v down), written as
+// four vertices of position(2) + normal(3) + uv(2) at vertex `first`, and
+// its six indices at index `first_index`.
+quad(t: ptr, first: int, first_index: int, x0: float, y0: float, x1: float, y1: float) {
+    corners = 0
+    while corners < 4 {
+        x = x0
+        y = y1
+        u = 0.0
+        v = 0.0
+        if corners == 1 || corners == 2 { x = x1; u = 1.0 }
+        if corners == 2 || corners == 3 { y = y0; v = 1.0 }
+        base = (first + corners) * 7
+        metal.verts_set_float(t, base, x)
+        metal.verts_set_float(t, base + 1, y)
+        metal.verts_set_float(t, base + 4, 1.0)
+        metal.verts_set_float(t, base + 5, u)
+        metal.verts_set_float(t, base + 6, v)
+        corners = corners + 1
+    }
+    metal.indices_set(t, first_index, first)
+    metal.indices_set(t, first_index + 1, first + 1)
+    metal.indices_set(t, first_index + 2, first + 2)
+    metal.indices_set(t, first_index + 3, first)
+    metal.indices_set(t, first_index + 4, first + 2)
+    metal.indices_set(t, first_index + 5, first + 3)
+}
+
+textured_layout() -> ptr {
+    lay = metal.layout_create()
+    metal.layout_binding(lay, 0, 28, metal.PER_VERTEX)
+    metal.layout_attr(lay, 0, 0, metal.FORMAT_R32G32_SFLOAT, 0)
+    metal.layout_attr(lay, 1, 0, metal.FORMAT_R32G32B32_SFLOAT, 8)
+    metal.layout_attr(lay, 2, 0, metal.FORMAT_R32G32_SFLOAT, 20)
+    return lay
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    reason = "no Metal"
+    dev = null
+    tri_vs = ""
+    tri_ps = ""
+    xf_vs = ""
+    tex_vs = ""
+    tex_ps = ""
+    tvl = 0
+    tpl = 0
+    xvl = 0
+    txvl = 0
+    txpl = 0
+    if metal.available() == 1 {
+        dev = metal.device_create()
+        tri_vs, tvl = load("contrib/metal/shaders/triangle_vs.metal")
+        tri_ps, tpl = load("contrib/metal/shaders/triangle_fs.metal")
+        xf_vs, xvl = load("contrib/metal/shaders/transform_vs.metal")
+        tex_vs, txvl = load("contrib/metal/shaders/textured_vs.metal")
+        tex_ps, txpl = load("contrib/metal/shaders/textured_fs.metal")
+        if dev != null && tvl > 0 && tpl > 0 && xvl > 0 && txvl > 0 && txpl > 0 { ready = 1 }
+        if ready == 0 { reason = "device or shaders missing (${metal.last_error()})" }
+    } else {
+        reason = "no Metal (${metal.last_error()})"
+    }
+
+    spec.describe(fw, "metal: push constants") {
+        spec.it_when(ready, "a pushed mirror matrix moves the triangle", reason) callback {
+            t = metal.target_create(dev, 64, 64)
+            p = metal.pipeline_create_ex(dev, t, xf_vs, xvl, tri_ps, tpl, null, 64, null)
+            spec.assert_true(p != null, "pipeline (${metal.last_error()})")
+            metal.verts_reserve(t, 3)
+            metal.verts_set(t, 0, 0.0, 0.8, 1.0, 0.0, 0.0)
+            metal.verts_set(t, 1, -0.8, -0.8, 0.0, 1.0, 0.0)
+            metal.verts_set(t, 2, 0.8, -0.8, 0.0, 0.0, 1.0)
+            metal.push_floats(t, 16)
+            metal.push_float(t, 0, 1.0)
+            metal.push_float(t, 5, 1.0)
+            metal.push_float(t, 10, 1.0)
+            metal.push_float(t, 15, 1.0)
+            metal.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            left = metal.pixel(t, 14, 56)
+            spec.assert_true(metal.green(left) > metal.blue(left), "identity: green at the bottom left")
+            metal.push_float(t, 0, -1.0)
+            metal.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            left = metal.pixel(t, 14, 56)
+            spec.assert_true(metal.blue(left) > metal.green(left), "mirrored in x: blue at the bottom left")
+            metal.pipeline_destroy(p)
+            metal.target_destroy(t)
+        }
+        spec.it_when(ready, "refuses a push block past 128 bytes", reason) callback {
+            t = metal.target_create(dev, 8, 8)
+            spec.assert_eq(metal.push_floats(t, 33), metal.ERR_ARG, "33 floats")
+            spec.assert_true(metal.pipeline_create_ex(dev, t, xf_vs, xvl, tri_ps, tpl, null, 132, null) == null, "132-byte block")
+            metal.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "metal: textures, uniforms and index buffers") {
+        spec.it_when(ready, "lands one texel per quadrant and scales it by a tint", reason) callback {
+            t = metal.target_create(dev, 64, 64)
+            lay = textured_layout()
+            binds = metal.bindings_create()
+            metal.bindings_texture(binds, 0)
+            metal.bindings_uniform(binds, 1)
+            p = metal.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            spec.assert_true(p != null, "pipeline (${metal.last_error()})")
+            tex = metal.texture_create(dev, 2, 2)
+            px = texels4(0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF)
+            spec.assert_eq(metal.texture_upload(tex, bytes.data(px), 16), metal.OK, "upload")
+            spec.assert_eq(metal.set_texture(p, 0, tex), metal.OK, "bind texture")
+            metal.uniform_floats(p, 1, 4)
+            metal.uniform_float(p, 1, 0, 1.0)
+            metal.uniform_float(p, 1, 1, 1.0)
+            metal.uniform_float(p, 1, 2, 1.0)
+            metal.uniform_float(p, 1, 3, 1.0)
+            metal.verts_reserve_n(t, 4, 7)
+            metal.indices_reserve(t, 6)
+            quad(t, 0, 0, -1.0, -1.0, 1.0, 1.0)
+            spec.assert_eq(metal.draw(t, p, 0.0, 0.0, 0.0, 1.0), metal.OK, "draw")
+            spec.assert_eq(metal.pixel(t, 16, 16), 0xFF0000FF, "top left: texel (0, 0) red")
+            spec.assert_eq(metal.pixel(t, 48, 16), 0x00FF00FF, "top right: green")
+            spec.assert_eq(metal.pixel(t, 16, 48), 0x0000FFFF, "bottom left: blue")
+            spec.assert_true(metal.pixel(t, 48, 48) == 0xFFFFFFFF, "bottom right: white, not the failure value")
+            metal.uniform_float(p, 1, 0, 0.5)
+            metal.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            r = metal.red(metal.pixel(t, 16, 16))
+            spec.assert_true(r >= 127 && r <= 128, "the tint halves red (got ${r})")
+            bytes.free(px)
+            metal.texture_destroy(tex)
+            metal.pipeline_destroy(p)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+        }
+
+        spec.it_when(ready, "refuses what cannot be drawn", reason) callback {
+            t = metal.target_create(dev, 16, 16)
+            lay = textured_layout()
+            binds = metal.bindings_create()
+            metal.bindings_texture(binds, 0)
+            spec.assert_eq(metal.bindings_texture(binds, 0), metal.ERR_ARG, "a duplicate binding")
+            metal.bindings_uniform(binds, 1)
+            p = metal.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            tex = metal.texture_create(dev, 2, 2)
+            spec.assert_eq(metal.set_texture(p, 0, tex), metal.ERR_ARG, "a texture with no pixels yet")
+            short = bytes.new(8)
+            spec.assert_eq(metal.texture_upload(tex, bytes.data(short), 8), metal.ERR_ARG, "a short upload")
+            bytes.free(short)
+            metal.verts_reserve_n(t, 4, 7)
+            metal.indices_reserve(t, 6)
+            spec.assert_eq(metal.indices_set(t, 0, 4), metal.ERR_ARG, "an index past the vertices")
+            quad(t, 0, 0, -1.0, -1.0, 1.0, 1.0)
+            spec.assert_eq(metal.draw(t, p, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG, "a draw with bindings unset")
+            spec.assert_true(string.index_of(metal.last_error(), "never set") >= 0, "names the binding")
+            spec.assert_eq(metal.uniform_float(p, 1, 0, 1.0), metal.ERR_ARG, "uniform_float before uniform_floats")
+            metal.texture_destroy(tex)
+            metal.pipeline_destroy(p)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "metal: materials and batches") {
+        spec.it_when(ready, "draws two textures in one frame", reason) callback {
+            t = metal.target_create(dev, 64, 32)
+            lay = textured_layout()
+            binds = metal.bindings_create()
+            metal.bindings_texture(binds, 0)
+            metal.bindings_uniform(binds, 1)
+            p = metal.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            red_px = texels4(0xFF0000, 0xFF0000, 0xFF0000, 0xFF0000)
+            green_px = texels4(0x00FF00, 0x00FF00, 0x00FF00, 0x00FF00)
+            ta = metal.texture_create(dev, 2, 2)
+            tb = metal.texture_create(dev, 2, 2)
+            metal.texture_upload(ta, bytes.data(red_px), 16)
+            metal.texture_upload(tb, bytes.data(green_px), 16)
+            ma = metal.material_create(p)
+            mb = metal.material_create(p)
+            metal.material_set_texture(ma, 0, ta)
+            metal.material_set_texture(mb, 0, tb)
+            metal.material_floats(ma, 1, 4)
+            metal.material_floats(mb, 1, 4)
+            i = 0
+            while i < 4 {
+                metal.material_float(ma, 1, i, 1.0)
+                metal.material_float(mb, 1, i, 1.0)
+                i = i + 1
+            }
+            metal.verts_reserve_n(t, 8, 7)
+            metal.indices_reserve(t, 12)
+            quad(t, 0, 0, -1.0, -1.0, 0.0, 1.0)
+            quad(t, 4, 6, 0.0, -1.0, 1.0, 1.0)
+            spec.assert_eq(metal.batch_add(t, ma, 0, 6), metal.OK, "left quad")
+            spec.assert_eq(metal.batch_add(t, mb, 6, 6), metal.OK, "right quad")
+            spec.assert_eq(metal.batch_count(t), 2, "two draws")
+            spec.assert_eq(metal.draw_material(t, p, null, 0.0, 0.0, 0.0, 1.0), metal.OK, "draw")
+            spec.assert_eq(metal.pixel(t, 16, 16), 0xFF0000FF, "the left half is the first texture")
+            spec.assert_eq(metal.pixel(t, 48, 16), 0x00FF00FF, "the right half the second")
+            spec.assert_eq(metal.batch_add(t, ma, 10, 6), metal.ERR_ARG, "a draw past the uploaded indices")
+            metal.batch_reset(t)
+            bytes.free(red_px)
+            bytes.free(green_px)
+            metal.material_destroy(ma)
+            metal.material_destroy(mb)
+            metal.texture_destroy(ta)
+            metal.texture_destroy(tb)
+            metal.pipeline_destroy(p)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+        }
+
+        spec.it_when(ready, "gives the same frame with 16-bit indices as with 32-bit", reason) callback {
+            same = 1
+            t32 = metal.target_create(dev, 32, 32)
+            t16 = metal.target_create(dev, 32, 32)
+            lay = textured_layout()
+            binds = metal.bindings_create()
+            metal.bindings_texture(binds, 0)
+            metal.bindings_uniform(binds, 1)
+            p32 = metal.pipeline_create_ex(dev, t32, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            p16 = metal.pipeline_create_ex(dev, t16, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+            tex = metal.texture_create(dev, 2, 2)
+            px = texels4(0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF)
+            metal.texture_upload(tex, bytes.data(px), 16)
+            metal.set_texture(p32, 0, tex)
+            metal.set_texture(p16, 0, tex)
+            metal.uniform_floats(p32, 1, 4)
+            metal.uniform_floats(p16, 1, 4)
+            k = 0
+            while k < 4 {
+                metal.uniform_float(p32, 1, k, 1.0)
+                metal.uniform_float(p16, 1, k, 1.0)
+                k = k + 1
+            }
+            metal.verts_reserve_n(t32, 4, 7)
+            metal.verts_reserve_n(t16, 4, 7)
+            metal.indices_reserve(t32, 6)
+            metal.indices_reserve_ex(t16, 6, 16)
+            quad(t32, 0, 0, -0.8, -0.8, 0.8, 0.8)
+            quad(t16, 0, 0, -0.8, -0.8, 0.8, 0.8)
+            metal.draw(t32, p32, 0.0, 0.0, 0.0, 1.0)
+            metal.draw(t16, p16, 0.0, 0.0, 0.0, 1.0)
+            n = metal.rgba_size(t32)
+            a = bytes.new(n)
+            b = bytes.new(n)
+            bytes.set_length(a, n)
+            bytes.set_length(b, n)
+            metal.copy_rgba(t32, bytes.data(a), n)
+            metal.copy_rgba(t16, bytes.data(b), n)
+            i = 0
+            while i < n {
+                if bytes.get(a, i) != bytes.get(b, i) { same = 0 }
+                i = i + 1
+            }
+            spec.assert_eq(same, 1, "byte for byte")
+            spec.assert_eq(metal.indices_reserve_ex(t16, 6, 8), metal.ERR_ARG, "8-bit refused")
+            spec.assert_eq(metal.indices_set(t16, 0, 70000), metal.ERR_ARG, "a value past 16 bits")
+            bytes.free(a)
+            bytes.free(b)
+            bytes.free(px)
+            metal.texture_destroy(tex)
+            metal.pipeline_destroy(p32)
+            metal.pipeline_destroy(p16)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t32)
+            metal.target_destroy(t16)
+        }
+    }
+
+    spec.describe(fw, "metal: mipmaps") {
+        spec.it_when(ready, "averages a minified checkerboard", reason) callback {
+            size = 128
+            board = bytes.new(size * size * 4)
+            bytes.set_length(board, size * size * 4)
+            y = 0
+            while y < size {
+                x = 0
+                while x < size {
+                    v = 0
+                    if ((x + y) & 1) == 1 { v = 255 }
+                    o = (y * size + x) * 4
+                    bytes.set(board, o, v)
+                    bytes.set(board, o + 1, v)
+                    bytes.set(board, o + 2, v)
+                    bytes.set(board, o + 3, 255)
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            pass = 0
+            while pass < 2 {
+                t = metal.target_create(dev, 16, 16)
+                lay = textured_layout()
+                binds = metal.bindings_create()
+                metal.bindings_texture(binds, 0)
+                metal.bindings_uniform(binds, 1)
+                p = metal.pipeline_create_ex(dev, t, tex_vs, txvl, tex_ps, txpl, lay, 0, binds)
+                tex = metal.texture_create_ex(dev, size, size, pass, pass, 0)
+                if pass == 1 { spec.assert_eq(metal.texture_mip_levels(tex), 8, "a full chain: 128 down to 1") }
+                metal.texture_upload(tex, bytes.data(board), size * size * 4)
+                metal.set_texture(p, 0, tex)
+                metal.uniform_floats(p, 1, 4)
+                k = 0
+                while k < 4 { metal.uniform_float(p, 1, k, 1.0); k = k + 1 }
+                metal.verts_reserve_n(t, 4, 7)
+                metal.indices_reserve(t, 6)
+                quad(t, 0, 0, -1.0, -1.0, 1.0, 1.0)
+                metal.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+                sum = 0
+                extremes = 0
+                yy = 0
+                while yy < 16 {
+                    xx = 0
+                    while xx < 16 {
+                        r = metal.red(metal.pixel(t, xx, yy))
+                        sum = sum + r
+                        if r == 0 || r == 255 { extremes = extremes + 1 }
+                        xx = xx + 1
+                    }
+                    yy = yy + 1
+                }
+                mean = sum / 256
+                if pass == 0 {
+                    spec.assert_eq(extremes, 256, "without a chain every pixel is a single texel")
+                } else {
+                    spec.assert_true(mean >= 120 && mean <= 136, "with one, the average (${mean})")
+                }
+                metal.texture_destroy(tex)
+                metal.pipeline_destroy(p)
+                metal.bindings_destroy(binds)
+                metal.layout_destroy(lay)
+                metal.target_destroy(t)
+                pass = pass + 1
+            }
+            bytes.free(board)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    string.free(tri_vs)
+    string.free(tri_ps)
+    string.free(xf_vs)
+    string.free(tex_vs)
+    string.free(tex_ps)
+    if dev != null {
+        metal.device_destroy(dev)
+    }
+    return _rc
+}

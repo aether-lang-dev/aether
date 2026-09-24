@@ -1,0 +1,431 @@
+// contrib.metal tests: discovery, targets, drawing and readback, frames in
+// flight, colour formats, depth and multisampling.
+//
+// Runs anywhere: without Metal (any system but macOS) every case skips and
+// the run is green, the path a user's program takes there. On macOS it
+// renders on the system default device and checks pixels. Coordinates are
+// Metal's: y points UP, as in Direct3D, so a vertex at y = 0.7 is near the
+// TOP of the image.
+
+import std.bytes
+import std.fs
+import std.string
+import contrib.metal
+import std.spec
+
+load(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+within(got: float, want: float, tol: float) -> int {
+    d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    if d <= tol { return 1 }
+    return 0
+}
+
+// One colour over the centre (a triangle pointing up), another clear.
+triangle(t: ptr, r: float, g: float, b: float) {
+    metal.verts_reserve(t, 3)
+    metal.verts_set(t, 0, 0.0, 0.9, r, g, b)
+    metal.verts_set(t, 1, -0.9, -0.9, r, g, b)
+    metal.verts_set(t, 2, 0.9, -0.9, r, g, b)
+}
+
+main() {
+    fw = spec.init()
+    ready = 0
+    have_dev = 0
+    reason = "no Metal"
+    dev = null
+    target = null
+    pipe = null
+    vs = ""
+    ps = ""
+    vs_len = 0
+    ps_len = 0
+
+    a1 = metal.available()
+    a2 = metal.available()
+    if a1 == 1 {
+        dev = metal.device_create()
+        if dev == null {
+            reason = "device_create failed (${metal.last_error()})"
+        } else {
+            have_dev = 1
+            vs, vs_len = load("contrib/metal/shaders/triangle_vs.metal")
+            ps, ps_len = load("contrib/metal/shaders/triangle_fs.metal")
+            target = metal.target_create(dev, 64, 64)
+            if target != null {
+                pipe = metal.pipeline_create(dev, target, vs, vs_len, ps, ps_len)
+            }
+            if target != null && pipe != null {
+                ready = 1
+            } else {
+                reason = "target or pipeline failed (${metal.last_error()})"
+            }
+        }
+    } else {
+        reason = "no Metal (${metal.last_error()})"
+    }
+    dev_reason = reason
+
+    spec.describe(fw, "metal: discovery") {
+        spec.it(fw, "available() is stable across calls") callback {
+            spec.assert_eq(a2, a1, "two calls agree")
+        }
+        spec.it_when(a1 == 1, "names the device", reason) callback {
+            spec.assert_true(string.length(metal.device_name()) > 0, "device_name() is not empty")
+            println("  device: ${metal.device_name()} (unified memory ${metal.device_unified_memory(dev)})")
+        }
+        spec.it_when(have_dev, "opens a device", dev_reason) callback {
+            spec.assert_true(dev != null, "device_create()")
+        }
+    }
+
+    spec.describe(fw, "metal: target edge cases") {
+        spec.it_when(have_dev, "rejects a zero width and a negative height", dev_reason) callback {
+            spec.assert_true(metal.target_create(dev, 0, 16) == null, "width 0")
+            spec.assert_true(string.length(metal.last_error()) > 0, "says why")
+            spec.assert_true(metal.target_create(dev, 16, -4) == null, "height -4")
+        }
+        spec.it_when(have_dev, "refuses a size beyond the Metal limit", dev_reason) callback {
+            spec.assert_true(metal.target_create(dev, 1000000, 16) == null, "refused")
+            spec.assert_true(string.index_of(metal.last_error(), "limit") >= 0, "names the limit")
+        }
+        spec.it_when(ready, "reports its dimensions", reason) callback {
+            spec.assert_eq(metal.target_width(target), 64, "width")
+            spec.assert_eq(metal.target_height(target), 64, "height")
+            spec.assert_eq(metal.rgba_size(target), 64 * 64 * 4, "rgba_size")
+            spec.assert_eq(metal.target_format(target), metal.FORMAT_R8G8B8A8_UNORM, "RGBA8 by default")
+        }
+    }
+
+    spec.describe(fw, "metal: shader edge cases") {
+        spec.it_when(have_dev, "rejects an empty shader", dev_reason) callback {
+            spec.assert_true(metal.pipeline_create(dev, target, "", 0, "", 0) == null, "empty refused")
+        }
+        // MSL names no entry point: the stage's function is the library's one
+        // function of that kind, so a library with two is ambiguous.
+        spec.it_when(have_dev, "refuses a library with two vertex functions", dev_reason) callback {
+            two = "#include <metal_stdlib>\nusing namespace metal;\nvertex float4 a() { return float4(0.0); }\nvertex float4 b() { return float4(1.0); }\n"
+            p = metal.pipeline_create(dev, target, two, string.length(two), ps, ps_len)
+            spec.assert_true(p == null, "refused")
+            spec.assert_true(string.index_of(metal.last_error(), "exactly one") >= 0, "says why (${metal.last_error()})")
+        }
+        spec.it_when(have_dev, "reports the MSL compiler's error", dev_reason) callback {
+            bad = "fragment float4 broken() { return undefined_thing; }"
+            p = metal.pipeline_create(dev, target, vs, vs_len, bad, string.length(bad))
+            spec.assert_true(p == null, "refused")
+            spec.assert_true(string.index_of(metal.last_error(), "undefined_thing") >= 0,
+                             "the compiler's message names the problem (${metal.last_error()})")
+        }
+        spec.it_when(ready, "builds a pipeline from MSL source", reason) callback {
+            spec.assert_true(pipe != null, "pipeline_create")
+        }
+    }
+
+    spec.describe(fw, "metal: geometry edge cases") {
+        spec.it_when(ready, "refuses out-of-range vertex writes", reason) callback {
+            spec.assert_true(metal.verts_set(target, 0, 0.0, 0.0, 1.0, 1.0, 1.0) != 0, "before reserve")
+            spec.assert_eq(metal.verts_reserve(target, 0), metal.ERR_ARG, "reserve 0")
+            spec.assert_eq(metal.verts_reserve(target, 3), metal.OK, "reserve 3")
+            spec.assert_true(metal.verts_set(target, 3, 0.0, 0.0, 1.0, 1.0, 1.0) != 0, "past the end")
+            spec.assert_true(metal.verts_set(target, -1, 0.0, 0.0, 1.0, 1.0, 1.0) != 0, "negative")
+        }
+    }
+
+    spec.describe(fw, "metal: draw") {
+        spec.it_when(ready, "renders a triangle over a black clear, pointing up", reason) callback {
+            metal.verts_reserve(target, 3)
+            metal.verts_set(target, 0, 0.0, 0.7, 1.0, 0.0, 0.0)
+            metal.verts_set(target, 1, -0.7, -0.7, 0.0, 1.0, 0.0)
+            metal.verts_set(target, 2, 0.7, -0.7, 0.0, 0.0, 1.0)
+            spec.assert_eq(metal.draw(target, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "draw")
+            corner = metal.pixel(target, 0, 0)
+            spec.assert_eq(metal.red(corner) + metal.green(corner) + metal.blue(corner), 0, "black corner")
+            spec.assert_eq(metal.alpha(corner), 255, "opaque clear")
+            // The red vertex is at the top: y up.
+            top = metal.pixel(target, 32, 14)
+            bottom_left = metal.pixel(target, 14, 52)
+            spec.assert_true(metal.red(top) > metal.green(top) && metal.red(top) > metal.blue(top),
+                             "red near the top vertex")
+            spec.assert_true(metal.green(bottom_left) > metal.red(bottom_left), "green near the bottom-left one")
+        }
+        spec.it_when(ready, "bounds-checks pixel()", reason) callback {
+            spec.assert_eq(metal.pixel(target, -1, 0), -1, "negative x")
+            spec.assert_eq(metal.pixel(target, 0, 64), -1, "y past the height")
+            spec.assert_eq(metal.pixel(target, 64, 0), -1, "x past the width")
+        }
+        spec.it_when(ready, "gives a bit-identical frame on a repeated draw", reason) callback {
+            metal.draw(target, pipe, 0.0, 0.0, 0.0, 1.0)
+            before = metal.pixel(target, 32, 32)
+            spec.assert_eq(metal.draw(target, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "again")
+            spec.assert_eq(metal.pixel(target, 32, 32), before, "identical")
+        }
+        spec.it_when(ready, "takes a new clear colour", reason) callback {
+            spec.assert_eq(metal.draw(target, pipe, 1.0, 0.0, 0.0, 1.0), metal.OK, "red clear")
+            px = metal.pixel(target, 0, 0)
+            spec.assert_eq(metal.red(px), 255, "red")
+            spec.assert_eq(metal.green(px), 0, "no green")
+        }
+        spec.it_when(have_dev, "clears a target drawn with no pipeline", dev_reason) callback {
+            bare = metal.target_create(dev, 8, 8)
+            spec.assert_eq(metal.draw(bare, null, 0.0, 1.0, 0.0, 1.0), metal.OK, "clear only")
+            spec.assert_eq(metal.green(metal.pixel(bare, 4, 4)), 255, "green")
+            metal.target_destroy(bare)
+        }
+    }
+
+    spec.describe(fw, "metal: readback") {
+        spec.it_when(ready, "refuses a null or short destination", reason) callback {
+            spec.assert_true(metal.copy_rgba(target, null, 16) != 0, "null")
+            buf = bytes.new(16)
+            spec.assert_true(metal.copy_rgba(target, bytes.data(buf), 16) != 0, "16 bytes for a 64x64 image")
+            bytes.free(buf)
+        }
+        // The readback copy writes tight rows; a row pitch that disagreed with
+        // the readers would offset every row after the first.
+        spec.it_when(ready, "copies tight rows that match pixel()", reason) callback {
+            metal.draw(target, pipe, 0.0, 0.0, 0.0, 1.0)
+            need = metal.rgba_size(target)
+            buf = bytes.new(need)
+            bytes.set_length(buf, need)
+            spec.assert_eq(metal.copy_rgba(target, bytes.data(buf), need), metal.OK, "copy")
+            mid = metal.pixel(target, 32, 40)
+            off = (40 * 64 + 32) * 4
+            spec.assert_eq(bytes.get(buf, off), metal.red(mid), "red at (32, 40)")
+            spec.assert_eq(bytes.get(buf, off + 1), metal.green(mid), "green")
+            spec.assert_eq(bytes.get(buf, off + 3), metal.alpha(mid), "alpha")
+            bytes.free(buf)
+        }
+    }
+
+    spec.describe(fw, "metal: frames in flight") {
+        spec.it_when(ready, "pipelines several frames and reads the newest", reason) callback {
+            t = metal.target_create(dev, 32, 32)
+            spec.assert_eq(metal.target_set_frames(t, 0), metal.ERR_ARG, "0 refused")
+            spec.assert_eq(metal.target_set_frames(t, 9), metal.ERR_ARG, "9 refused")
+            spec.assert_eq(metal.target_set_frames(t, 3), metal.OK, "3")
+            spec.assert_eq(metal.target_frames(t), 3, "reports 3")
+            i = 0
+            while i < 7 {
+                slot = metal.submit(t, null, (i as float) / 8.0, 0.0, 0.0, 1.0)
+                spec.assert_true(slot >= 0 && slot < 3, "submit ${i} took a slot")
+                i = i + 1
+            }
+            // The readers wait for the newest frame on their own.
+            spec.assert_eq(metal.red(metal.pixel(t, 0, 0)), 191, "the seventh clear (6/8 of 255)")
+            spec.assert_eq(metal.wait_all(t), metal.OK, "wait_all")
+            metal.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "metal: colour formats") {
+        spec.it_when(ready, "UNORM stores what the shader wrote", reason) callback {
+            t = metal.target_create_format(dev, 32, 32, metal.FORMAT_R8G8B8A8_UNORM, 0, 1)
+            p = metal.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.5, 0.5, 0.5)
+            spec.assert_eq(metal.draw(t, p, 0.0, 0.0, 0.0, 1.0), metal.OK, "draw")
+            r = metal.red(metal.pixel(t, 16, 16))
+            spec.assert_true(r >= 127 && r <= 128, "0.5 is 127 or 128 (got ${r})")
+            metal.pipeline_destroy(p)
+            metal.target_destroy(t)
+        }
+        spec.it_when(ready, "sRGB encodes linear output for display", reason) callback {
+            t = metal.target_create_format(dev, 32, 32, metal.FORMAT_R8G8B8A8_SRGB, 0, 1)
+            spec.assert_true(t != null, "created (${metal.last_error()})")
+            p = metal.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.5, 0.5, 0.5)
+            spec.assert_eq(metal.draw(t, p, 0.0, 0.0, 0.0, 1.0), metal.OK, "draw")
+            r = metal.red(metal.pixel(t, 16, 16))
+            spec.assert_true(r >= 186 && r <= 189, "linear 0.5 stored as ~188 (got ${r})")
+            metal.pipeline_destroy(p)
+            metal.target_destroy(t)
+        }
+        spec.it_when(ready, "half float keeps values above 1", reason) callback {
+            t = metal.target_create_format(dev, 32, 32, metal.FORMAT_R16G16B16A16_SFLOAT, 0, 1)
+            spec.assert_eq(metal.target_bytes_per_pixel(t), 8, "8 bytes a pixel")
+            p = metal.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.25, 0.5, 0.75)
+            spec.assert_eq(metal.draw(t, p, 2.5, 0.0, 0.0, 1.0), metal.OK, "draw")
+            spec.assert_eq(within(metal.pixel_value(t, 0, 0, 0), 2.5, 0.0), 1, "2.5 kept")
+            spec.assert_eq(within(metal.pixel_value(t, 16, 16, 2), 0.75, 0.0), 1, "0.75 exact")
+            spec.assert_eq(metal.red(metal.pixel(t, 0, 0)), 255, "pixel() clamps")
+            metal.pipeline_destroy(p)
+            metal.target_destroy(t)
+        }
+        spec.it_when(ready, "single float keeps large values and converts to 8 bits", reason) callback {
+            t = metal.target_create_format(dev, 16, 16, metal.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            p = metal.pipeline_create(dev, t, vs, vs_len, ps, ps_len)
+            triangle(t, 0.1, 0.2, 0.3)
+            spec.assert_eq(metal.draw(t, p, 1000.0, 0.0, 0.0, 1.0), metal.OK, "draw")
+            spec.assert_eq(within(metal.pixel_value(t, 0, 0, 0), 1000.0, 0.0), 1, "1000.0")
+            buf = bytes.new(16 * 16 * 4)
+            bytes.set_length(buf, 16 * 16 * 4)
+            spec.assert_eq(metal.copy_rgba8(t, bytes.data(buf), 16 * 16 * 4), metal.OK, "copy_rgba8")
+            spec.assert_eq(bytes.get(buf, 0), 255, "clamped")
+            spec.assert_eq(bytes.get(buf, (8 * 16 + 8) * 4 + 1), 51, "0.2 as 51")
+            bytes.free(buf)
+            spec.assert_str_eq(metal.save_png(t, "metal_float.png"), "", "save_png")
+            data, n, err = fs.read_binary("metal_float.png")
+            spec.assert_str_eq(err, "", "the file was written")
+            spec.assert_eq(string.char_at_n(data, n, 1) & 255, 80, "a PNG")
+            string.free(data)
+            spec.assert_str_eq(fs.delete("metal_float.png"), "", "removed")
+            metal.pipeline_destroy(p)
+            metal.target_destroy(t)
+        }
+        spec.it_when(have_dev, "refuses a format it does not render to", dev_reason) callback {
+            spec.assert_true(metal.target_create_format(dev, 8, 8, 999, 0, 1) == null, "999")
+            spec.assert_true(string.index_of(metal.last_error(), "not a target format") >= 0, "names the formats")
+        }
+    }
+
+    // Depth: the same two overlapping triangles in both orders must agree with
+    // a depth buffer and disagree without one.
+    dvs = ""
+    dvs_len = 0
+    if have_dev == 1 { dvs, dvs_len = load("contrib/metal/shaders/depth_vs.metal") }
+    spec.describe(fw, "metal: depth and multisampling") {
+        spec.it_when(ready, "resolves overlap by depth, not by order", reason) callback {
+            lay = metal.layout_create()
+            metal.layout_binding(lay, 0, 24, metal.PER_VERTEX)
+            metal.layout_attr(lay, 0, 0, metal.FORMAT_R32G32B32_SFLOAT, 0)
+            metal.layout_attr(lay, 1, 0, metal.FORMAT_R32G32B32_SFLOAT, 12)
+            with_depth = metal.target_create_ex(dev, 32, 32, 1, 1)
+            no_depth = metal.target_create_ex(dev, 32, 32, 0, 1)
+            spec.assert_eq(metal.target_has_depth(with_depth), 1, "has depth")
+            pd = metal.pipeline_create_ex(dev, with_depth, dvs, dvs_len, ps, ps_len, lay, 0, null)
+            pn = metal.pipeline_create_ex(dev, no_depth, dvs, dvs_len, ps, ps_len, lay, 0, null)
+            spec.assert_true(pd != null && pn != null, "pipelines (${metal.last_error()})")
+            // Near red (z 0.2) and far blue (z 0.8), full-screen, drawn in both orders.
+            order = 0
+            results = 0
+            while order < 2 {
+                for_each = 0
+                while for_each < 2 {
+                    t = with_depth
+                    p = pd
+                    if for_each == 1 { t = no_depth; p = pn }
+                    metal.verts_reserve_n(t, 6, 6)
+                    k = 0
+                    while k < 2 {
+                        tri = k
+                        if order == 1 { tri = 1 - k }
+                        z = 0.2
+                        r = 1.0
+                        b = 0.0
+                        if tri == 1 { z = 0.8; r = 0.0; b = 1.0 }
+                        base = k * 18
+                        metal.verts_set_float(t, base + 0, -1.0)
+                        metal.verts_set_float(t, base + 1, -1.0)
+                        metal.verts_set_float(t, base + 2, z)
+                        metal.verts_set_float(t, base + 3, r)
+                        metal.verts_set_float(t, base + 5, b)
+                        metal.verts_set_float(t, base + 6, 3.0)
+                        metal.verts_set_float(t, base + 7, -1.0)
+                        metal.verts_set_float(t, base + 8, z)
+                        metal.verts_set_float(t, base + 9, r)
+                        metal.verts_set_float(t, base + 11, b)
+                        metal.verts_set_float(t, base + 12, -1.0)
+                        metal.verts_set_float(t, base + 13, 3.0)
+                        metal.verts_set_float(t, base + 14, z)
+                        metal.verts_set_float(t, base + 15, r)
+                        metal.verts_set_float(t, base + 17, b)
+                        k = k + 1
+                    }
+                    metal.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+                    px = metal.pixel(t, 16, 16)
+                    if for_each == 0 && metal.red(px) == 255 { results = results + 1 }
+                    if for_each == 1 && order == 0 && metal.blue(px) == 255 { results = results + 10 }
+                    if for_each == 1 && order == 1 && metal.red(px) == 255 { results = results + 100 }
+                    for_each = for_each + 1
+                }
+                order = order + 1
+            }
+            // With depth: red (nearer) both times; without: whichever came last.
+            spec.assert_eq(results, 112, "depth decides with a buffer, order without (got ${results})")
+            metal.pipeline_destroy(pd)
+            metal.pipeline_destroy(pn)
+            metal.target_destroy(with_depth)
+            metal.target_destroy(no_depth)
+            metal.layout_destroy(lay)
+        }
+
+        spec.it_when(ready, "multisamples an edge into blended pixels", reason) callback {
+            one = metal.target_create_ex(dev, 64, 64, 0, 1)
+            four = metal.target_create_ex(dev, 64, 64, 0, 4)
+            spec.assert_true(four != null, "4x target (${metal.last_error()})")
+            spec.assert_eq(metal.target_samples(four), 4, "4 samples")
+            p1 = metal.pipeline_create(dev, one, vs, vs_len, ps, ps_len)
+            p4 = metal.pipeline_create(dev, four, vs, vs_len, ps, ps_len)
+            triangle(one, 1.0, 0.0, 0.0)
+            triangle(four, 1.0, 0.0, 0.0)
+            metal.draw(one, p1, 0.0, 0.0, 1.0, 1.0)
+            metal.draw(four, p4, 0.0, 0.0, 1.0, 1.0)
+            // Pixels that are neither the clear (blue) nor the triangle (red).
+            mixed1 = 0
+            mixed4 = 0
+            y = 0
+            while y < 64 {
+                x = 0
+                while x < 64 {
+                    a = metal.pixel(one, x, y)
+                    b = metal.pixel(four, x, y)
+                    if metal.red(a) != 0 && metal.red(a) != 255 { mixed1 = mixed1 + 1 }
+                    if metal.red(b) != 0 && metal.red(b) != 255 { mixed4 = mixed4 + 1 }
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            spec.assert_eq(mixed1, 0, "one sample: hard edges")
+            spec.assert_true(mixed4 > 0, "four samples: blended edge pixels (${mixed4})")
+            metal.pipeline_destroy(p1)
+            metal.pipeline_destroy(p4)
+            metal.target_destroy(one)
+            metal.target_destroy(four)
+        }
+
+        spec.it_when(have_dev, "refuses a sample count that is not a power of two", dev_reason) callback {
+            spec.assert_true(metal.target_create_ex(dev, 8, 8, 0, 3) == null, "3 samples")
+        }
+    }
+
+    spec.describe(fw, "metal: lifecycle") {
+        spec.it(fw, "tolerates destroying null handles") callback {
+            metal.target_destroy(null)
+            metal.pipeline_destroy(null)
+            metal.device_destroy(null)
+            spec.assert_true(1 == 1, "no crash")
+        }
+        spec.it_when(ready, "completes eight create/draw/destroy cycles", reason) callback {
+            c = 0
+            ok = 1
+            while c < 8 {
+                t2 = metal.target_create(dev, 32, 32)
+                p2 = metal.pipeline_create(dev, t2, vs, vs_len, ps, ps_len)
+                if t2 == null || p2 == null { ok = 0 }
+                triangle(t2, 1.0, 1.0, 1.0)
+                if metal.draw(t2, p2, 0.0, 0.0, 0.0, 1.0) != 0 { ok = 0 }
+                metal.pipeline_destroy(p2)
+                metal.target_destroy(t2)
+                c = c + 1
+            }
+            spec.assert_eq(ok, 1, "8 cycles")
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    if pipe != null { metal.pipeline_destroy(pipe) }
+    if target != null { metal.target_destroy(target) }
+    string.free(vs)
+    string.free(ps)
+    string.free(dvs)
+    if dev != null { metal.device_destroy(dev) }
+    return _rc
+}

@@ -1,0 +1,510 @@
+// contrib.metal: GPU rendering, compute and presentation with Metal.
+// Import with: import contrib.metal
+//
+// The same shape as contrib.vulkan and contrib.d3d12: a program written
+// against one reads the same against the others, and what differs is the
+// shading language (Metal Shading Language here) and the coordinates (Metal's
+// y points UP, as Direct3D's does).
+//
+//   metal.available()                   -> int     1 when a Metal device exists
+//   metal.device_name()                 -> string  the device, "" when none
+//   metal.last_error()                  -> string
+//
+//   metal.device_create()               -> ptr     the system default device
+//   metal.device_destroy(dev)
+//   metal.device_unified_memory(dev)    -> int     1 on Apple silicon
+//
+//   metal.target_create(dev, w, h)      -> ptr     offscreen RGBA8 image
+//   metal.target_create_ex(dev, w, h, depth, samples) -> ptr
+//   metal.target_create_format(dev, w, h, format, depth, samples) -> ptr
+//   metal.target_destroy(t)   target_width(t)   target_height(t)
+//   metal.target_format(t)    target_bytes_per_pixel(t)   rgba_size(t)
+//   metal.target_has_depth(t) target_samples(t)
+//   metal.target_resize(t, w, h)        -> int     keeps every pipeline valid
+//   metal.target_set_readback(t, on)    -> int     off: no per-frame copy out
+//   metal.target_set_frames(t, n)       -> int     frames in flight, 1..8
+//   metal.target_set_timeout_ms(t, ms)  -> int
+//
+//   metal.pipeline_create(dev, t, vs, vs_len, ps, ps_len)           -> ptr
+//   metal.pipeline_create_ex(dev, t, vs, vs_len, ps, ps_len, layout, push_bytes, bindings) -> ptr
+//   metal.pipeline_destroy(p)
+//   metal.layout_create() / layout_binding / layout_attr / layout_destroy
+//   metal.bindings_create() / bindings_uniform / bindings_texture /
+//         bindings_storage / bindings_destroy
+//
+//   metal.texture_create(dev, w, h)     -> ptr
+//   metal.texture_create_ex(dev, w, h, mipmapped, linear, repeat) -> ptr
+//   metal.texture_upload(tex, rgba, len) -> int
+//   metal.texture_mip_levels(tex)       -> int
+//   metal.texture_destroy(tex)
+//
+//   metal.set_texture / set_uniform / set_buffer / uniform_floats /
+//         uniform_float                 the pipeline's own resources
+//   metal.material_create(p) / material_set_texture / material_set_uniform /
+//         material_set_buffer / material_floats / material_float /
+//         material_destroy               one set of resources per draw
+//
+//   metal.verts_reserve(t, n) / verts_set(t, i, x, y, r, g, b)
+//   metal.verts_reserve_n(t, n, floats) / verts_set_float(t, i, v)
+//   metal.indices_reserve(t, n) / indices_reserve_ex(t, n, bits) / indices_set
+//   metal.push_floats(t, n) / push_float(t, i, v) / set_push(t, data, len)
+//   metal.batch_reset(t) / batch_add(t, m, first, count) / batch_count(t)
+//   metal.draw(t, p, r, g, b, a) / draw_material(t, p, m, r, g, b, a)
+//   metal.submit(t, p, r, g, b, a) / submit_material(...) / wait_all(t)
+//   metal.pixel(t, x, y)                -> long    0xRRGGBBAA, -1 outside
+//   metal.pixel_value(t, x, y, channel) -> float   full precision
+//   metal.copy_rgba(t, dest, len) / copy_rgba8(t, dest, len)
+//   metal.save_ppm(t, path) -> int      save_png(t, path) -> string
+//
+//   metal.buffer_create(dev, bytes) / buffer_destroy / buffer_size /
+//         buffer_write / buffer_read / buffer_set_float / buffer_float /
+//         buffer_set_int / buffer_int
+//   metal.compute_create(dev, cs, len, bindings, push_bytes) -> ptr
+//   metal.compute_set_group_size(c, x, y, z) -> int  threads a group; MSL
+//         does not declare them, so this is required before a dispatch
+//   metal.compute_set_buffer / compute_set_texture / compute_push_float /
+//         compute_push_int / compute_set_timeout_ms / compute_destroy
+//   metal.dispatch(c, gx, gy, gz) / dispatch_async / compute_wait
+//
+//   metal.swapchain_create(dev, kind, display, window, w, h) -> ptr
+//   metal.swapchain_destroy / swapchain_resize / swapchain_set_vsync /
+//         swapchain_width / swapchain_height / swapchain_format /
+//         swapchain_presented
+//   metal.present(sc, t)                -> int
+//
+// Shaders are Metal Shading Language, source compiled at runtime or a
+// metallib compiled ahead of time; the entry point is the library's one
+// function of the stage's kind (vertex, fragment, kernel), whatever its name.
+// Resources map to argument-table indices by binding number: a uniform or a
+// storage buffer at binding N is [[buffer(N)]], a texture [[texture(N)]] with
+// its sampler [[sampler(N)]], the push constants [[buffer(8)]], and vertex
+// stream B [[buffer(16 + B)]]. Vertex attribute location N is [[attribute(N)]]
+// of the [[stage_in]] struct.
+//
+// Nothing links against Metal: Metal, QuartzCore, Foundation and the
+// Objective-C runtime are opened at runtime. The module builds on every
+// platform, and away from macOS available() is 0 and every call says why. The
+// view a swapchain presents into is never this module's: it is the NSView a
+// toolkit hands out (aether-ui's native_view kind 2), or a CAMetalLayer.
+
+@source("aether_metal.c")
+
+import std.bytes
+import std.string
+import contrib.png
+
+exports (
+    OK, ERR_NO_LOADER, ERR_NO_DEVICE, ERR_ARG, ERR_OOM, ERR_UNSUPPORTED, ERR_SHADER, ERR_DEVICE_LOST,
+    WINDOW_NSVIEW, WINDOW_METAL_LAYER, PER_VERTEX, PER_INSTANCE,
+    FORMAT_R32_SFLOAT, FORMAT_R32G32_SFLOAT, FORMAT_R32G32B32_SFLOAT, FORMAT_R32G32B32A32_SFLOAT,
+    FORMAT_R8G8B8A8_UNORM, FORMAT_R8G8B8A8_SRGB, FORMAT_R16G16B16A16_SFLOAT,
+    FORMAT_B8G8R8A8_UNORM, FORMAT_B8G8R8A8_SRGB,
+    aemt_ae_available, aemt_ae_last_error, aemt_ae_device_name,
+    aemt_ae_device_create, aemt_ae_device_destroy, aemt_ae_device_unified_memory,
+    aemt_ae_target_create, aemt_ae_target_create_ex, aemt_ae_target_create_format, aemt_ae_target_destroy,
+    aemt_ae_target_width, aemt_ae_target_height, aemt_ae_target_format, aemt_ae_target_bytes_per_pixel,
+    aemt_ae_target_has_depth, aemt_ae_target_samples, aemt_ae_target_resize,
+    aemt_ae_target_set_readback, aemt_ae_target_readback, aemt_ae_target_set_frames, aemt_ae_target_frames,
+    aemt_ae_target_set_timeout_ms, aemt_ae_rgba_size,
+    aemt_ae_pipeline_create, aemt_ae_pipeline_create_ex, aemt_ae_pipeline_destroy,
+    aemt_ae_layout_create, aemt_ae_layout_destroy, aemt_ae_layout_binding, aemt_ae_layout_attr,
+    aemt_ae_bindings_create, aemt_ae_bindings_destroy, aemt_ae_bindings_uniform, aemt_ae_bindings_texture,
+    aemt_ae_bindings_storage,
+    aemt_ae_texture_create, aemt_ae_texture_create_ex, aemt_ae_texture_destroy, aemt_ae_texture_mip_levels,
+    aemt_ae_texture_upload,
+    aemt_ae_set_uniform, aemt_ae_set_texture, aemt_ae_set_buffer, aemt_ae_uniform_floats, aemt_ae_uniform_float,
+    aemt_ae_material_create, aemt_ae_material_destroy, aemt_ae_material_set_texture,
+    aemt_ae_material_set_uniform, aemt_ae_material_set_buffer, aemt_ae_material_floats, aemt_ae_material_float,
+    aemt_ae_verts_reserve, aemt_ae_verts_reserve_n, aemt_ae_verts_set, aemt_ae_verts_set_float,
+    aemt_ae_indices_reserve, aemt_ae_indices_reserve_ex, aemt_ae_indices_set,
+    aemt_ae_set_push, aemt_ae_push_floats, aemt_ae_push_float,
+    aemt_ae_batch_reset, aemt_ae_batch_add, aemt_ae_batch_count,
+    aemt_ae_draw, aemt_ae_draw_material, aemt_ae_submit, aemt_ae_submit_material, aemt_ae_wait_all,
+    aemt_ae_copy_rgba, aemt_ae_copy_rgba8, aemt_ae_pixel, aemt_ae_pixel_value, aemt_ae_save_ppm,
+    aemt_ae_buffer_create, aemt_ae_buffer_destroy, aemt_ae_buffer_size, aemt_ae_buffer_write,
+    aemt_ae_buffer_read, aemt_ae_buffer_set_float, aemt_ae_buffer_float, aemt_ae_buffer_set_int,
+    aemt_ae_buffer_int,
+    aemt_ae_compute_create, aemt_ae_compute_destroy, aemt_ae_compute_set_group_size,
+    aemt_ae_compute_set_buffer, aemt_ae_compute_set_texture,
+    aemt_ae_compute_set_push, aemt_ae_compute_push_float, aemt_ae_compute_push_int,
+    aemt_ae_compute_set_timeout_ms, aemt_ae_dispatch, aemt_ae_dispatch_async, aemt_ae_compute_wait,
+    aemt_ae_swapchain_create, aemt_ae_swapchain_destroy, aemt_ae_swapchain_resize,
+    aemt_ae_swapchain_set_vsync, aemt_ae_swapchain_width, aemt_ae_swapchain_height,
+    aemt_ae_swapchain_format, aemt_ae_swapchain_presented, aemt_ae_present,
+    available, last_error, device_name, device_create, device_destroy, device_unified_memory,
+    target_create, target_create_ex, target_create_format, target_destroy, target_width, target_height,
+    target_format, target_bytes_per_pixel, target_has_depth, target_samples, target_resize,
+    target_set_readback, target_readback, target_set_frames, target_frames, target_set_timeout_ms,
+    rgba_size,
+    pipeline_create, pipeline_create_ex, pipeline_destroy,
+    layout_create, layout_destroy, layout_binding, layout_attr,
+    bindings_create, bindings_destroy, bindings_uniform, bindings_texture, bindings_storage,
+    texture_create, texture_create_ex, texture_destroy, texture_mip_levels, texture_upload,
+    set_uniform, set_texture, set_buffer, uniform_floats, uniform_float,
+    material_create, material_destroy, material_set_texture, material_set_uniform, material_set_buffer,
+    material_floats, material_float,
+    verts_reserve, verts_reserve_n, verts_set, verts_set_float,
+    indices_reserve, indices_reserve_ex, indices_set,
+    set_push, push_floats, push_float,
+    batch_reset, batch_add, batch_count,
+    draw, draw_material, submit, submit_material, wait_all,
+    copy_rgba, copy_rgba8, pixel, pixel_value, save_ppm, save_png,
+    red, green, blue, alpha,
+    buffer_create, buffer_destroy, buffer_size, buffer_write, buffer_read,
+    buffer_set_float, buffer_float, buffer_set_int, buffer_int,
+    compute_create, compute_destroy, compute_set_group_size, compute_set_buffer, compute_set_texture,
+    compute_set_push,
+    compute_push_float, compute_push_int, compute_set_timeout_ms, dispatch, dispatch_async, compute_wait,
+    swapchain_create, swapchain_destroy, swapchain_resize, swapchain_set_vsync,
+    swapchain_width, swapchain_height, swapchain_format, swapchain_presented, present
+)
+
+extern aemt_ae_available() -> int
+extern aemt_ae_last_error() -> string
+extern aemt_ae_device_name() -> string
+extern aemt_ae_device_create() -> ptr
+extern aemt_ae_device_destroy(dev: ptr)
+extern aemt_ae_device_unified_memory(dev: ptr) -> int
+extern aemt_ae_target_create(dev: ptr, w: int, h: int) -> ptr
+extern aemt_ae_target_create_ex(dev: ptr, w: int, h: int, want_depth: int, samples: int) -> ptr
+extern aemt_ae_target_create_format(dev: ptr, w: int, h: int, format: int, want_depth: int, samples: int) -> ptr
+extern aemt_ae_target_destroy(t: ptr)
+extern aemt_ae_target_width(t: ptr) -> int
+extern aemt_ae_target_height(t: ptr) -> int
+extern aemt_ae_target_format(t: ptr) -> int
+extern aemt_ae_target_bytes_per_pixel(t: ptr) -> int
+extern aemt_ae_target_has_depth(t: ptr) -> int
+extern aemt_ae_target_samples(t: ptr) -> int
+extern aemt_ae_target_resize(t: ptr, w: int, h: int) -> int
+extern aemt_ae_target_set_readback(t: ptr, on: int) -> int
+extern aemt_ae_target_readback(t: ptr) -> int
+extern aemt_ae_target_set_frames(t: ptr, count: int) -> int
+extern aemt_ae_target_frames(t: ptr) -> int
+extern aemt_ae_target_set_timeout_ms(t: ptr, ms: int) -> int
+extern aemt_ae_rgba_size(t: ptr) -> int
+extern aemt_ae_pipeline_create(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int) -> ptr
+extern aemt_ae_pipeline_create_ex(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int,
+                                  layout: ptr, push_bytes: int, bindings: ptr) -> ptr
+extern aemt_ae_pipeline_destroy(p: ptr)
+extern aemt_ae_layout_create() -> ptr
+extern aemt_ae_layout_destroy(l: ptr)
+extern aemt_ae_layout_binding(l: ptr, binding: int, stride: int, per_instance: int) -> int
+extern aemt_ae_layout_attr(l: ptr, location: int, binding: int, format: int, offset: int) -> int
+extern aemt_ae_bindings_create() -> ptr
+extern aemt_ae_bindings_destroy(b: ptr)
+extern aemt_ae_bindings_uniform(b: ptr, binding: int) -> int
+extern aemt_ae_bindings_texture(b: ptr, binding: int) -> int
+extern aemt_ae_bindings_storage(b: ptr, binding: int) -> int
+extern aemt_ae_texture_create(dev: ptr, w: int, h: int) -> ptr
+extern aemt_ae_texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int, linear: int, repeat: int) -> ptr
+extern aemt_ae_texture_destroy(tex: ptr)
+extern aemt_ae_texture_mip_levels(tex: ptr) -> int
+extern aemt_ae_texture_upload(tex: ptr, rgba: ptr, len: int) -> int
+extern aemt_ae_set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int
+extern aemt_ae_set_texture(p: ptr, binding: int, tex: ptr) -> int
+extern aemt_ae_set_buffer(p: ptr, binding: int, buf: ptr) -> int
+extern aemt_ae_uniform_floats(p: ptr, binding: int, count: int) -> int
+extern aemt_ae_uniform_float(p: ptr, binding: int, index: int, value: float) -> int
+extern aemt_ae_material_create(p: ptr) -> ptr
+extern aemt_ae_material_destroy(m: ptr)
+extern aemt_ae_material_set_texture(m: ptr, binding: int, tex: ptr) -> int
+extern aemt_ae_material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int
+extern aemt_ae_material_set_buffer(m: ptr, binding: int, buf: ptr) -> int
+extern aemt_ae_material_floats(m: ptr, binding: int, count: int) -> int
+extern aemt_ae_material_float(m: ptr, binding: int, index: int, value: float) -> int
+extern aemt_ae_verts_reserve(t: ptr, count: int) -> int
+extern aemt_ae_verts_reserve_n(t: ptr, count: int, floats_per_vertex: int) -> int
+extern aemt_ae_verts_set(t: ptr, index: int, x: float, y: float, r: float, g: float, b: float) -> int
+extern aemt_ae_verts_set_float(t: ptr, float_index: int, value: float) -> int
+extern aemt_ae_indices_reserve(t: ptr, count: int) -> int
+extern aemt_ae_indices_reserve_ex(t: ptr, count: int, bits: int) -> int
+extern aemt_ae_indices_set(t: ptr, index: int, value: int) -> int
+extern aemt_ae_set_push(t: ptr, data: ptr, len: int) -> int
+extern aemt_ae_push_floats(t: ptr, count: int) -> int
+extern aemt_ae_push_float(t: ptr, index: int, value: float) -> int
+extern aemt_ae_batch_reset(t: ptr) -> int
+extern aemt_ae_batch_add(t: ptr, m: ptr, first: int, count: int) -> int
+extern aemt_ae_batch_count(t: ptr) -> int
+extern aemt_ae_draw(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int
+extern aemt_ae_draw_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int
+extern aemt_ae_submit(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int
+extern aemt_ae_submit_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int
+extern aemt_ae_wait_all(t: ptr) -> int
+extern aemt_ae_copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int
+extern aemt_ae_copy_rgba8(t: ptr, dest: ptr, dest_len: int) -> int
+extern aemt_ae_pixel(t: ptr, x: int, y: int) -> long
+extern aemt_ae_pixel_value(t: ptr, x: int, y: int, channel: int) -> float
+extern aemt_ae_save_ppm(t: ptr, path: string) -> int
+extern aemt_ae_buffer_create(dev: ptr, bytes: int) -> ptr
+extern aemt_ae_buffer_destroy(b: ptr)
+extern aemt_ae_buffer_size(b: ptr) -> int
+extern aemt_ae_buffer_write(b: ptr, offset: int, data: ptr, len: int) -> int
+extern aemt_ae_buffer_read(b: ptr, offset: int, dest: ptr, len: int) -> int
+extern aemt_ae_buffer_set_float(b: ptr, index: int, value: float) -> int
+extern aemt_ae_buffer_float(b: ptr, index: int) -> float
+extern aemt_ae_buffer_set_int(b: ptr, index: int, value: int) -> int
+extern aemt_ae_buffer_int(b: ptr, index: int) -> int
+extern aemt_ae_compute_create(dev: ptr, cs: string, len: int, bindings: ptr, push_bytes: int) -> ptr
+extern aemt_ae_compute_destroy(c: ptr)
+extern aemt_ae_compute_set_group_size(c: ptr, x: int, y: int, z: int) -> int
+extern aemt_ae_compute_set_buffer(c: ptr, binding: int, buf: ptr) -> int
+extern aemt_ae_compute_set_texture(c: ptr, binding: int, tex: ptr) -> int
+extern aemt_ae_compute_set_push(c: ptr, data: ptr, len: int) -> int
+extern aemt_ae_compute_push_float(c: ptr, slot: int, value: float) -> int
+extern aemt_ae_compute_push_int(c: ptr, slot: int, value: int) -> int
+extern aemt_ae_compute_set_timeout_ms(c: ptr, ms: int) -> int
+extern aemt_ae_dispatch(c: ptr, gx: int, gy: int, gz: int) -> int
+extern aemt_ae_dispatch_async(c: ptr, gx: int, gy: int, gz: int) -> int
+extern aemt_ae_compute_wait(c: ptr) -> int
+extern aemt_ae_swapchain_create(dev: ptr, kind: int, display: ptr, window: ptr, w: int, h: int) -> ptr
+extern aemt_ae_swapchain_destroy(sc: ptr)
+extern aemt_ae_swapchain_resize(sc: ptr, w: int, h: int) -> int
+extern aemt_ae_swapchain_set_vsync(sc: ptr, on: int) -> int
+extern aemt_ae_swapchain_width(sc: ptr) -> int
+extern aemt_ae_swapchain_height(sc: ptr) -> int
+extern aemt_ae_swapchain_format(sc: ptr) -> int
+extern aemt_ae_swapchain_presented(sc: ptr) -> int
+extern aemt_ae_present(sc: ptr, t: ptr) -> int
+
+// Status codes, mirroring aether_metal.h (and contrib.vulkan's).
+const OK = 0
+const ERR_NO_LOADER = -1
+const ERR_NO_DEVICE = -2
+const ERR_ARG = -3
+const ERR_OOM = -4
+const ERR_UNSUPPORTED = -5
+const ERR_SHADER = -6
+const ERR_DEVICE_LOST = -7
+
+// The window kinds a swapchain presents into, numbered as aether-ui's
+// native_view_kind(): an NSView (given a CAMetalLayer, on the main thread),
+// or a CAMetalLayer the program made itself.
+const WINDOW_NSVIEW = 2
+const WINDOW_METAL_LAYER = 5
+
+// Input rate for layout_binding.
+const PER_VERTEX = 0
+const PER_INSTANCE = 1
+
+// Formats, named and numbered as contrib.vulkan's (VkFormat): Metal keeps
+// pixel and vertex formats in two enums, and one name here serves both, so
+// the module translates the number where it is used. For layout_attr: the
+// four float ones and R8G8B8A8_UNORM (four normalised bytes); for
+// target_create_format: the four RGBA ones. swapchain_format() reports a
+// B8G8R8A8 one.
+const FORMAT_R32_SFLOAT = 100
+const FORMAT_R32G32_SFLOAT = 103
+const FORMAT_R32G32B32_SFLOAT = 106
+const FORMAT_R32G32B32A32_SFLOAT = 109
+const FORMAT_R8G8B8A8_UNORM = 37
+const FORMAT_R8G8B8A8_SRGB = 43
+const FORMAT_R16G16B16A16_SFLOAT = 97
+const FORMAT_B8G8R8A8_UNORM = 44
+const FORMAT_B8G8R8A8_SRGB = 50
+
+available() -> int { return aemt_ae_available() }
+last_error() -> string { return aemt_ae_last_error() }
+device_name() -> string { return aemt_ae_device_name() }
+
+// The system default device (MTLCreateSystemDefaultDevice).
+device_create() -> ptr { return aemt_ae_device_create() }
+device_destroy(dev: ptr) { aemt_ae_device_destroy(dev) }
+// 1 when the device shares memory with the CPU (Apple silicon).
+device_unified_memory(dev: ptr) -> int { return aemt_ae_device_unified_memory(dev) }
+
+target_create(dev: ptr, w: int, h: int) -> ptr { return aemt_ae_target_create(dev, w, h) }
+// Depth makes geometry resolve by distance; samples is 1, 2, 4, 8 or 16,
+// checked against the device rather than rounded down.
+target_create_ex(dev: ptr, w: int, h: int, want_depth: int, samples: int) -> ptr {
+    return aemt_ae_target_create_ex(dev, w, h, want_depth, samples)
+}
+// FORMAT_R8G8B8A8_UNORM, _SRGB, FORMAT_R16G16B16A16_SFLOAT or
+// FORMAT_R32G32B32A32_SFLOAT.
+target_create_format(dev: ptr, w: int, h: int, format: int, want_depth: int, samples: int) -> ptr {
+    return aemt_ae_target_create_format(dev, w, h, format, want_depth, samples)
+}
+target_destroy(t: ptr) { aemt_ae_target_destroy(t) }
+target_width(t: ptr) -> int { return aemt_ae_target_width(t) }
+target_height(t: ptr) -> int { return aemt_ae_target_height(t) }
+target_format(t: ptr) -> int { return aemt_ae_target_format(t) }
+target_bytes_per_pixel(t: ptr) -> int { return aemt_ae_target_bytes_per_pixel(t) }
+target_has_depth(t: ptr) -> int { return aemt_ae_target_has_depth(t) }
+target_samples(t: ptr) -> int { return aemt_ae_target_samples(t) }
+target_resize(t: ptr, w: int, h: int) -> int { return aemt_ae_target_resize(t, w, h) }
+target_set_readback(t: ptr, on: int) -> int { return aemt_ae_target_set_readback(t, on) }
+target_readback(t: ptr) -> int { return aemt_ae_target_readback(t) }
+target_set_frames(t: ptr, count: int) -> int { return aemt_ae_target_set_frames(t, count) }
+target_frames(t: ptr) -> int { return aemt_ae_target_frames(t) }
+target_set_timeout_ms(t: ptr, ms: int) -> int { return aemt_ae_target_set_timeout_ms(t, ms) }
+rgba_size(t: ptr) -> int { return aemt_ae_rgba_size(t) }
+
+// MSL source or a metallib: the vertex shader's one vertex function and the
+// fragment shader's one fragment function.
+pipeline_create(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int) -> ptr {
+    return aemt_ae_pipeline_create(dev, t, vs, vs_len, fs, fs_len)
+}
+pipeline_create_ex(dev: ptr, t: ptr, vs: string, vs_len: int, fs: string, fs_len: int,
+                   layout: ptr, push_bytes: int, bindings: ptr) -> ptr {
+    return aemt_ae_pipeline_create_ex(dev, t, vs, vs_len, fs, fs_len, layout, push_bytes, bindings)
+}
+pipeline_destroy(p: ptr) { aemt_ae_pipeline_destroy(p) }
+
+// Attribute `location` is [[attribute(location)]]; stream `binding` is
+// [[buffer(16 + binding)]]. An empty layout is a pipeline with no vertex
+// input.
+layout_create() -> ptr { return aemt_ae_layout_create() }
+layout_destroy(l: ptr) { aemt_ae_layout_destroy(l) }
+layout_binding(l: ptr, binding: int, stride: int, per_instance: int) -> int {
+    return aemt_ae_layout_binding(l, binding, stride, per_instance)
+}
+layout_attr(l: ptr, location: int, binding: int, format: int, offset: int) -> int {
+    return aemt_ae_layout_attr(l, location, binding, format, offset)
+}
+
+// Binding N is [[buffer(N)]] (uniform or storage), or [[texture(N)]] with
+// [[sampler(N)]] (texture).
+bindings_create() -> ptr { return aemt_ae_bindings_create() }
+bindings_destroy(b: ptr) { aemt_ae_bindings_destroy(b) }
+bindings_uniform(b: ptr, binding: int) -> int { return aemt_ae_bindings_uniform(b, binding) }
+bindings_texture(b: ptr, binding: int) -> int { return aemt_ae_bindings_texture(b, binding) }
+bindings_storage(b: ptr, binding: int) -> int { return aemt_ae_bindings_storage(b, binding) }
+
+// An RGBA8 texture; upload before binding. A mipmapped one builds its chain
+// on upload, on the GPU (generateMipmapsForTexture).
+texture_create(dev: ptr, w: int, h: int) -> ptr { return aemt_ae_texture_create(dev, w, h) }
+texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int, linear: int, repeat: int) -> ptr {
+    return aemt_ae_texture_create_ex(dev, w, h, mipmapped, linear, repeat)
+}
+texture_destroy(tex: ptr) { aemt_ae_texture_destroy(tex) }
+texture_mip_levels(tex: ptr) -> int { return aemt_ae_texture_mip_levels(tex) }
+texture_upload(tex: ptr, rgba: ptr, len: int) -> int { return aemt_ae_texture_upload(tex, rgba, len) }
+
+set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int { return aemt_ae_set_uniform(p, binding, data, len) }
+set_texture(p: ptr, binding: int, tex: ptr) -> int { return aemt_ae_set_texture(p, binding, tex) }
+set_buffer(p: ptr, binding: int, buf: ptr) -> int { return aemt_ae_set_buffer(p, binding, buf) }
+uniform_floats(p: ptr, binding: int, count: int) -> int { return aemt_ae_uniform_floats(p, binding, count) }
+uniform_float(p: ptr, binding: int, index: int, value: float) -> int {
+    return aemt_ae_uniform_float(p, binding, index, value)
+}
+
+material_create(p: ptr) -> ptr { return aemt_ae_material_create(p) }
+material_destroy(m: ptr) { aemt_ae_material_destroy(m) }
+material_set_texture(m: ptr, binding: int, tex: ptr) -> int { return aemt_ae_material_set_texture(m, binding, tex) }
+material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int {
+    return aemt_ae_material_set_uniform(m, binding, data, len)
+}
+material_set_buffer(m: ptr, binding: int, buf: ptr) -> int { return aemt_ae_material_set_buffer(m, binding, buf) }
+material_floats(m: ptr, binding: int, count: int) -> int { return aemt_ae_material_floats(m, binding, count) }
+material_float(m: ptr, binding: int, index: int, value: float) -> int {
+    return aemt_ae_material_float(m, binding, index, value)
+}
+
+verts_reserve(t: ptr, count: int) -> int { return aemt_ae_verts_reserve(t, count) }
+verts_reserve_n(t: ptr, count: int, floats_per_vertex: int) -> int {
+    return aemt_ae_verts_reserve_n(t, count, floats_per_vertex)
+}
+verts_set(t: ptr, index: int, x: float, y: float, r: float, g: float, b: float) -> int {
+    return aemt_ae_verts_set(t, index, x, y, r, g, b)
+}
+verts_set_float(t: ptr, float_index: int, value: float) -> int {
+    return aemt_ae_verts_set_float(t, float_index, value)
+}
+indices_reserve(t: ptr, count: int) -> int { return aemt_ae_indices_reserve(t, count) }
+indices_reserve_ex(t: ptr, count: int, bits: int) -> int { return aemt_ae_indices_reserve_ex(t, count, bits) }
+indices_set(t: ptr, index: int, value: int) -> int { return aemt_ae_indices_set(t, index, value) }
+set_push(t: ptr, data: ptr, len: int) -> int { return aemt_ae_set_push(t, data, len) }
+push_floats(t: ptr, count: int) -> int { return aemt_ae_push_floats(t, count) }
+push_float(t: ptr, index: int, value: float) -> int { return aemt_ae_push_float(t, index, value) }
+batch_reset(t: ptr) -> int { return aemt_ae_batch_reset(t) }
+batch_add(t: ptr, m: ptr, first: int, count: int) -> int { return aemt_ae_batch_add(t, m, first, count) }
+batch_count(t: ptr) -> int { return aemt_ae_batch_count(t) }
+
+draw(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int { return aemt_ae_draw(t, p, r, g, b, a) }
+draw_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int {
+    return aemt_ae_draw_material(t, p, m, r, g, b, a)
+}
+submit(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int { return aemt_ae_submit(t, p, r, g, b, a) }
+submit_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int {
+    return aemt_ae_submit_material(t, p, m, r, g, b, a)
+}
+wait_all(t: ptr) -> int { return aemt_ae_wait_all(t) }
+
+copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int { return aemt_ae_copy_rgba(t, dest, dest_len) }
+copy_rgba8(t: ptr, dest: ptr, dest_len: int) -> int { return aemt_ae_copy_rgba8(t, dest, dest_len) }
+pixel(t: ptr, x: int, y: int) -> long { return aemt_ae_pixel(t, x, y) }
+pixel_value(t: ptr, x: int, y: int, channel: int) -> float { return aemt_ae_pixel_value(t, x, y, channel) }
+save_ppm(t: ptr, path: string) -> int { return aemt_ae_save_ppm(t, path) }
+
+// Writes the newest frame as a PNG (8-bit RGBA); "" on success.
+save_png(t: ptr, path: string) -> string {
+    w = aemt_ae_target_width(t)
+    h = aemt_ae_target_height(t)
+    if t == null || w <= 0 || h <= 0 { return "target is null" }
+    buf = bytes.new(w * h * 4)
+    bytes.set_length(buf, w * h * 4)
+    rc = aemt_ae_copy_rgba8(t, bytes.data(buf), w * h * 4)
+    if rc != 0 {
+        bytes.free(buf)
+        return aemt_ae_last_error()
+    }
+    err = png.write_rgba8(path, bytes.data(buf), w, h)
+    bytes.free(buf)
+    return err
+}
+
+// Channels of the packed value pixel() returns: a long, so every colour is
+// non-negative and -1 means only "no pixel there".
+red(px: long) -> int { return ((px >> 24) & 255) as int }
+green(px: long) -> int { return ((px >> 16) & 255) as int }
+blue(px: long) -> int { return ((px >> 8) & 255) as int }
+alpha(px: long) -> int { return (px & 255) as int }
+
+// A buffer shaders read and write (CPU-visible, mapped, zeroed).
+buffer_create(dev: ptr, bytes: int) -> ptr { return aemt_ae_buffer_create(dev, bytes) }
+buffer_destroy(b: ptr) { aemt_ae_buffer_destroy(b) }
+buffer_size(b: ptr) -> int { return aemt_ae_buffer_size(b) }
+buffer_write(b: ptr, offset: int, data: ptr, len: int) -> int { return aemt_ae_buffer_write(b, offset, data, len) }
+buffer_read(b: ptr, offset: int, dest: ptr, len: int) -> int { return aemt_ae_buffer_read(b, offset, dest, len) }
+buffer_set_float(b: ptr, index: int, value: float) -> int { return aemt_ae_buffer_set_float(b, index, value) }
+buffer_float(b: ptr, index: int) -> float { return aemt_ae_buffer_float(b, index) }
+buffer_set_int(b: ptr, index: int, value: int) -> int { return aemt_ae_buffer_set_int(b, index, value) }
+buffer_int(b: ptr, index: int) -> int { return aemt_ae_buffer_int(b, index) }
+
+// A compute pipeline from MSL or a metallib: its one kernel function.
+compute_create(dev: ptr, cs: string, len: int, bindings: ptr, push_bytes: int) -> ptr {
+    return aemt_ae_compute_create(dev, cs, len, bindings, push_bytes)
+}
+compute_destroy(c: ptr) { aemt_ae_compute_destroy(c) }
+// The threads in one group: what [numthreads] gives in HLSL and local_size
+// in GLSL. MSL does not declare it, so a dispatch is refused until it is set.
+compute_set_group_size(c: ptr, x: int, y: int, z: int) -> int {
+    return aemt_ae_compute_set_group_size(c, x, y, z)
+}
+compute_set_buffer(c: ptr, binding: int, buf: ptr) -> int { return aemt_ae_compute_set_buffer(c, binding, buf) }
+compute_set_texture(c: ptr, binding: int, tex: ptr) -> int { return aemt_ae_compute_set_texture(c, binding, tex) }
+compute_set_push(c: ptr, data: ptr, len: int) -> int { return aemt_ae_compute_set_push(c, data, len) }
+compute_push_float(c: ptr, slot: int, value: float) -> int { return aemt_ae_compute_push_float(c, slot, value) }
+compute_push_int(c: ptr, slot: int, value: int) -> int { return aemt_ae_compute_push_int(c, slot, value) }
+compute_set_timeout_ms(c: ptr, ms: int) -> int { return aemt_ae_compute_set_timeout_ms(c, ms) }
+dispatch(c: ptr, gx: int, gy: int, gz: int) -> int { return aemt_ae_dispatch(c, gx, gy, gz) }
+dispatch_async(c: ptr, gx: int, gy: int, gz: int) -> int { return aemt_ae_dispatch_async(c, gx, gy, gz) }
+compute_wait(c: ptr) -> int { return aemt_ae_compute_wait(c) }
+
+// A swapchain over an NSView (kind WINDOW_NSVIEW, given a CAMetalLayer; on
+// the main thread) or a CAMetalLayer (WINDOW_METAL_LAYER) the caller owns;
+// display is unused. A view's size is followed, and presenting while its
+// window is miniaturised shows nothing and succeeds. A bare layer takes the
+// size given here and to swapchain_resize.
+swapchain_create(dev: ptr, kind: int, display: ptr, window: ptr, w: int, h: int) -> ptr {
+    return aemt_ae_swapchain_create(dev, kind, display, window, w, h)
+}
+swapchain_destroy(sc: ptr) { aemt_ae_swapchain_destroy(sc) }
+swapchain_resize(sc: ptr, w: int, h: int) -> int { return aemt_ae_swapchain_resize(sc, w, h) }
+swapchain_set_vsync(sc: ptr, on: int) -> int { return aemt_ae_swapchain_set_vsync(sc, on) }
+swapchain_width(sc: ptr) -> int { return aemt_ae_swapchain_width(sc) }
+swapchain_height(sc: ptr) -> int { return aemt_ae_swapchain_height(sc) }
+swapchain_format(sc: ptr) -> int { return aemt_ae_swapchain_format(sc) }
+swapchain_presented(sc: ptr) -> int { return aemt_ae_swapchain_presented(sc) }
+// Shows the target's newest frame, scaled to the drawable and encoded for
+// display when the target is sRGB or float.
+present(sc: ptr, t: ptr) -> int { return aemt_ae_present(sc, t) }
