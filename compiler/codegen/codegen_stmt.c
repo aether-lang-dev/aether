@@ -1463,6 +1463,10 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     if (obj_type->kind != TYPE_PTR || !obj_type->element_type ||
         obj_type->element_type->kind != TYPE_STRUCT ||
         !obj_type->element_type->struct_name) return 0;
+    /* A header-defined struct has no `_heap_<field>` trackers: its fields
+     * are the C header's, and the store is a plain one (see
+     * emit_struct_field_heap_assign). */
+    if (aether_is_c_import_struct(obj_type->element_type->struct_name)) return 0;
     if (!gen->program) return 0;
 
     ASTNode* sdef = find_struct_definition_by_name(gen->program,
@@ -1587,6 +1591,11 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     } else {
         return 0;
     }
+    /* `extern struct ... @c_import`: the layout is the C header's, which has
+     * no `_heap_<field>` companions, so there is nothing to track ownership
+     * in. The field BORROWS the string, as any C API that stores a `char*`
+     * does: a plain store, and the string stays owned where it was. */
+    if (aether_is_c_import_struct(struct_name)) return 0;
     if (!gen->program) return 0;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, struct_name);
     if (!sdef) return 0;
@@ -5445,9 +5454,13 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                (stmt->children[0]->type == AST_MESSAGE_CONSTRUCTOR ||
                                 stmt->children[0]->type == AST_STRUCT_LITERAL) &&
                                stmt->children[0]->value) {
-                        // Message/struct constructor — use the constructor name as type
-                        fprintf(gen->output, "%s%s %s",
-                                vq, stmt->children[0]->value, stmt->value);
+                        // Message/struct constructor — use the constructor name as type.
+                        // A header-defined struct is spelled `struct Name`, as
+                        // get_c_type spells it: the header need not typedef the tag.
+                        fprintf(gen->output, "%s%s%s %s", vq,
+                                (stmt->children[0]->type == AST_STRUCT_LITERAL &&
+                                 aether_is_c_import_struct(stmt->children[0]->value)) ? "struct " : "",
+                                stmt->children[0]->value, stmt->value);
                         /* Struct-field heap-string ownership (#465).
                          * Push a function-exit defer that calls the
                          * auto-emitted <Struct>_destroy(&<var>) to

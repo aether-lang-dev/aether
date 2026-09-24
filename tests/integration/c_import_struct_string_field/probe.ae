@@ -1,0 +1,47 @@
+// A string stored into a `@c_import` struct's string field is a plain store:
+// the header's layout has no `_heap_<field>` companion to record ownership
+// in, and the field borrows the string, as the C API that declares it
+// expects. Each form of store is exercised: through a pointer, in a struct
+// literal, and into a field of a nested struct.
+
+import std.string
+
+extern struct label @c_import {
+    text: string
+    size: int
+}
+
+extern struct tagged @c_import {
+    id: int
+    label: label
+}
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+
+main() {
+    // Through a pointer, with a literal and with a string built at runtime.
+    l = calloc(1, sizeof(label)) as *label
+    l.text = "hello"
+    l.size = 5
+    println("pointer: ${l.text} ${l.size}")
+    name = string.concat("wor", "ld")
+    l.text = name
+    println("pointer, runtime string: ${l.text}")
+
+    // A struct literal: spelled `(struct label){...}`, no trackers.
+    v = label { text: name, size: 5 }
+    println("literal: ${v.text} ${v.size}")
+
+    // A field of a nested struct, through a pointer to the outer one.
+    t = calloc(1, sizeof(tagged)) as *tagged
+    t.id = 7
+    t.label.text = "nested"
+    println("nested: ${t.id} ${t.label.text}")
+
+    // The fields borrowed `name`; it is still the caller's to free.
+    free(t)
+    free(l)
+    string.free(name)
+    println("OK")
+}

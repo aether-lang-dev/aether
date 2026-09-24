@@ -1,0 +1,10 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+
+[build]
+# Force-include the C header that owns `struct label` and `struct tagged`
+# into every TU, including the Aether-generated .gen.c. The header has no
+# `_heap_text` companion field and no typedef, so the probe compiles only
+# when aetherc stores the string plainly and spells `struct label`.
+cflags = "-include label.h -I."
