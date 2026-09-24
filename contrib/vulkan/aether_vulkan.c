@@ -198,7 +198,26 @@ static int aevk_load_library(void) {
     static AevkMutex load_lock = AEVK_MUTEX_STATIC;
     AEVK_MUTEX_LOCK(&load_lock);
     int rc = AEVK_OK;
-    if (!g_lib) {
+    /* AETHER_VULKAN_LOADER names the loader to open, for a machine with more
+     * than one: on Windows the DLL search takes System32 before PATH, so a
+     * loader installed beside a driver (MSYS2's, the Vulkan SDK's) loses to
+     * whatever System32 holds. An explicit choice that fails is an error,
+     * not a reason to fall back to another loader. */
+    const char* chosen = getenv("AETHER_VULKAN_LOADER");
+    if (!g_lib && chosen && chosen[0]) {
+        rc = AEVK_ERR_NO_LOADER;
+        void* h = AEVK_DLOPEN(chosen);
+        PFN_vkGetInstanceProcAddr gipa =
+            h ? (PFN_vkGetInstanceProcAddr)AEVK_DLSYM(h, "vkGetInstanceProcAddr") : NULL;
+        if (gipa) {
+            g_gipa = gipa;
+            g_lib = h;
+            rc = AEVK_OK;
+        } else {
+            if (h) AEVK_DLCLOSE(h);
+            aevk_fail(AEVK_ERR_NO_LOADER, "AETHER_VULKAN_LOADER=%s is not a Vulkan loader that opens", chosen);
+        }
+    } else if (!g_lib) {
         rc = AEVK_ERR_NO_LOADER;
         for (int i = 0; k_loader_names[i]; i++) {
             void* h = AEVK_DLOPEN(k_loader_names[i]);

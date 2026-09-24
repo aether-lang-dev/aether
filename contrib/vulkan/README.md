@@ -329,6 +329,12 @@ being explicit about:
   launch. Only the Vulkan headers are needed to build, and they are header-only.
 - Device-level entry points come from `vkGetDeviceProcAddr`, which returns the
   driver's own function rather than the loader's dispatch trampoline.
+- `AETHER_VULKAN_LOADER=<path>` names the loader to open instead of searching
+  for one, for a machine with more than one. On Windows the DLL search takes
+  `System32` before `PATH`, so a loader installed beside a driver (MSYS2's, or
+  the Vulkan SDK's) loses to whatever `System32` holds; the Windows CI leg sets
+  it to MSYS2's loader for lavapipe. A loader named there that does not open is
+  reported, not replaced by another.
 
 That second point is measurable rather than folklore. The two pointers differ,
 and the driver entry is cheaper per call:
