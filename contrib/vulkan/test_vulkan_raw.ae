@@ -18,12 +18,14 @@ import contrib.vulkan.vk
 extern calloc(n: int, size: int) -> ptr
 extern free(p: ptr)
 
-// A VkInstance with the application info filled in, or null.
+// A VkInstance with the application info filled in, or null. It asks for
+// Vulkan 1.1, whose ...2 queries the _all case uses: a command from a version
+// the instance was not created with is not the instance's to call.
 create_instance() -> ptr {
     app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
     app.sType = vk.STRUCTURE_TYPE_APPLICATION_INFO
     app.pApplicationName = "test_vulkan_raw"
-    app.apiVersion = 1 << 22
+    app.apiVersion = (1 << 22) | (1 << 12)
     ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
     ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
     ci.pApplicationInfo = app as ptr
@@ -87,7 +89,7 @@ main() {
             ver = calloc(1, 4)
             spec.assert_eq(vk.vkEnumerateInstanceVersion(ver), vk.SUCCESS, "vkEnumerateInstanceVersion")
             v = (ver as uint32[])[0]
-            spec.assert_true((v >> 22) >= 1, "major version is at least 1 (got ${v >> 22})")
+            spec.assert_true(v >= ((1 << 22) | (1 << 12)), "the loader is at least 1.1 (got ${v >> 22}.${(v >> 12) & 1023})")
             free(ver)
         }
         spec.it_when(ready, "creates an instance and reads a device's properties", reason) callback {

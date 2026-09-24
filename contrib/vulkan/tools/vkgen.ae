@@ -1019,9 +1019,11 @@ emit_module(path: string, api: string, extensions: string) {
         }
         if string.length(rtype) > 0 { rt = " -> ${rtype}" }
         pfn = "pfn_${c}"
+        got = "got_${c}"
         strbuilder.append(body, "var ${pfn}: ptr = null\n")
+        strbuilder.append(body, "var ${got}: int = 0\n")
         strbuilder.append(body, "${c}(${params})${rt} {\n")
-        strbuilder.append(body, "    if ${pfn} == null { ${pfn} = aevk_ae_loader_proc(\"${c}\") }\n")
+        strbuilder.append(body, "    if ${got} == 0 { ${pfn} = aevk_ae_loader_proc(\"${c}\"); ${got} = 1 }\n")
         if string.length(rtype) > 0 {
             strbuilder.append(body, "    if ${pfn} == null { return ${fail} }\n")
         } else {
@@ -1037,24 +1039,30 @@ emit_module(path: string, api: string, extensions: string) {
         string_array_free(ps)
         level = cmd_level(c)
         if string.equals(level, "INSTANCE") == 1 {
-            strbuilder.append(loads_inst, "    p = aevk_ae_instance_proc(instance, \"${c}\")\n")
-            strbuilder.append(loads_inst, "    if p != null { ${pfn} = p; n = n + 1 }\n")
+            strbuilder.append(loads_inst, "    ${pfn} = aevk_ae_instance_proc(instance, \"${c}\")\n")
+            strbuilder.append(loads_inst, "    ${got} = 1\n")
+            strbuilder.append(loads_inst, "    if ${pfn} != null { n = n + 1 }\n")
         }
         if string.equals(level, "DEVICE") == 1 {
-            strbuilder.append(loads_dev, "    p = aevk_ae_device_proc(device, \"${c}\")\n")
-            strbuilder.append(loads_dev, "    if p != null { ${pfn} = p; n = n + 1 }\n")
+            strbuilder.append(loads_dev, "    ${pfn} = aevk_ae_device_proc(device, \"${c}\")\n")
+            strbuilder.append(loads_dev, "    ${got} = 1\n")
+            strbuilder.append(loads_dev, "    if ${pfn} != null { n = n + 1 }\n")
         }
         strbuilder.append(names, "    ${c},\n")
         ci = ci + 1
     }
     strbuilder.append(body, "// Points every instance-level command at `instance`'s own entry points.\n")
-    strbuilder.append(body, "// Returns how many resolved.\n")
-    strbuilder.append(body, "load_instance(instance: ptr) -> int {\n    n = 0\n    p = null\n")
+    strbuilder.append(body, "// Returns how many resolved. A command the instance does not provide (one\n")
+    strbuilder.append(body, "// from a version or extension it was not created with) then fails as it\n")
+    strbuilder.append(body, "// would with no loader, rather than calling through the loader's export\n")
+    strbuilder.append(body, "// into a dispatch slot the instance never filled.\n")
+    strbuilder.append(body, "load_instance(instance: ptr) -> int {\n    n = 0\n")
     strbuilder.append(body, strbuilder.finish(loads_inst))
     strbuilder.append(body, "    return n\n}\n\n")
     strbuilder.append(body, "// Points every device-level command at `device`'s own entry points, the\n")
-    strbuilder.append(body, "// driver's rather than the loader's dispatch. Returns how many resolved.\n")
-    strbuilder.append(body, "load_device(device: ptr) -> int {\n    n = 0\n    p = null\n")
+    strbuilder.append(body, "// driver's rather than the loader's dispatch. Returns how many resolved; a\n")
+    strbuilder.append(body, "// command the device does not provide then fails, as with load_instance.\n")
+    strbuilder.append(body, "load_device(device: ptr) -> int {\n    n = 0\n")
     strbuilder.append(body, strbuilder.finish(loads_dev))
     strbuilder.append(body, "    return n\n}\n")
 

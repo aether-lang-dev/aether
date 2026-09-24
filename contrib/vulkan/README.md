@@ -380,7 +380,10 @@ defer vk.array_free(devices)
   returns `ERROR_INITIALIZATION_FAILED`. `vk.load_instance(instance)` and
   `vk.load_device(device)` point the commands at that instance's and device's
   own entry points, the driver's rather than the loader's dispatch, which is
-  also how an extension command the loader does not export is reached.
+  also how an extension command the loader does not export is reached. After
+  that, a command the instance or device does not provide (one from a version
+  or extension it was not created with) fails as it would with no loader
+  instead of being called.
 - **The two-call idiom** is generated. The registry records which parameter
   counts which array, so each command that fills one also has a
   `<command>_all`. It asks for the count, allocates, fills, and asks again

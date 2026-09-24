@@ -307,7 +307,10 @@ main() {
         }
         spec.it(fw, "tolerates destroying a null swapchain") callback {
             d3d12.swapchain_destroy(null)
-            spec.assert_eq(d3d12.present(null, null), d3d12.ERR_ARG, "present(null) refused")
+            // An argument error where the module is built for Direct3D, and
+            // "no Direct3D" from the stub every other platform compiles.
+            rc = d3d12.present(null, null)
+            spec.assert_true(rc == d3d12.ERR_ARG || rc == d3d12.ERR_NO_LOADER, "present(null) refused (${rc})")
         }
     }
 
