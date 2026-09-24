@@ -1,6 +1,6 @@
 # std.zip
 
-A ZIP archive **reader**, over an in-memory byte buffer.
+A ZIP archive **reader and writer**, over an in-memory byte buffer.
 
 A `.zip` is a container, not a compressed blob: entries (each *stored* or
 *deflate*d) indexed by a central directory, located from an end-of-central-
@@ -34,6 +34,32 @@ zip.close(ar)
 
 `find(ar, name)` returns an entry index by exact name, or `-1`.
 
+## Writing
+
+The mirror of the reader: build an archive in memory, entry by entry, and get
+back the raw `.zip` bytes — no path or fd, the same posture as `open`. Writing
+an entry to disk is a layer on top and a separate concern.
+
+```aether,fragment
+import std.zip
+
+w = zip.writer_new()
+zip.writer_add(w, "a.txt", data_a, len_a, zip.METHOD_DEFLATE, 6) // level 0..9
+zip.writer_add(w, "b.bin", data_b, len_b, zip.METHOD_STORED, 0)
+zip.writer_add_dir(w, "sub")                                     // a directory entry
+out, outlen, err = zip.writer_finish(w)   // `out` is a complete, valid .zip
+if string.equals(err, "") != 1 { /* handle */ }
+// ... use out (outlen bytes): fs.write_binary, a socket, another archive ...
+zip.writer_free(w)
+```
+
+`create(name, data, len, method, level)` is the one-shot form for a
+single-entry archive. A `METHOD_DEFLATE` entry falls back to `stored` when
+compression would not shrink it, and ZIP64 records are emitted automatically
+when a size, offset, or entry count exceeds its 32-bit field — the same
+records the reader parses back, so a written archive round-trips through
+`open`.
+
 ## What it covers
 
 - **Methods**: `stored` (0) and `deflate` (8, via `std.zlib`'s raw inflate).
@@ -55,12 +81,15 @@ rejected by `open`.
 
 ## Not in scope (yet)
 
-Writing archives, and extraction to disk (which would layer traversal- and
-zip-bomb-guards over this reader, as `std.tar`'s `extract` does). Filed as
-follow-ups on the tracking issue.
+Extraction to disk (which would layer traversal- and zip-bomb-guards over the
+reader, as `std.tar`'s `extract` does), and a directory-tree writer on top of
+`writer_add`. Filed as follow-ups on the tracking issue.
 
 ## Exports
 
-`METHOD_STORED`, `METHOD_DEFLATE`; `open`, `close`; `count`, `find`;
+Reader: `METHOD_STORED`, `METHOD_DEFLATE`; `open`, `close`; `count`, `find`;
 `entry_name`, `entry_size`, `entry_compressed_size`, `entry_method`,
 `entry_crc32`, `entry_is_dir`, `entry_is_encrypted`; `entry_read`.
+
+Writer: `writer_new`, `writer_add`, `writer_add_dir`, `writer_finish`,
+`writer_free`; `create`.

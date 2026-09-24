@@ -27,10 +27,12 @@ exports(
     zlib_try_inflate, zlib_get_inflate_bytes, zlib_get_inflate_length,
     zlib_release_inflate,
     zlib_try_gzip_deflate, zlib_try_gzip_inflate, zlib_try_inflate_raw,
+    zlib_try_deflate_raw,
     zlib_try_stream_new, zlib_try_stream_write, zlib_try_stream_flush,
     zlib_try_stream_finish, zlib_get_stream_bytes, zlib_get_stream_length,
     zlib_release_stream,
-    available, deflate, inflate, gzip_deflate, gzip_inflate, inflate_raw,
+    available, deflate, inflate, gzip_deflate, gzip_inflate,
+    deflate_raw, inflate_raw,
     stream_new, stream_write, stream_flush, stream_finish, stream_free,
     // Stream formats for stream_new
     RAW, ZLIB, GZIP
@@ -60,6 +62,7 @@ extern zlib_release_inflate()
 extern zlib_try_gzip_deflate(data: string, length: int, level: int) -> int
 extern zlib_try_gzip_inflate(data: string, length: int) -> int
 extern zlib_try_inflate_raw(data: string, length: int) -> int
+extern zlib_try_deflate_raw(data: string, length: int, level: int) -> int
 
 // Streaming deflate (#1890). The handle keeps ONE deflate stream open
 // across many writes, so a long-lived response (an SSE connection, a
@@ -152,10 +155,30 @@ gzip_inflate(data: string, length: int) -> {
     return owned, n, ""
 }
 
-// Raw DEFLATE (RFC 1951) — no zlib/gzip wrapper. This is the framing a
-// ZIP entry stores for method 8 (deflate): the archive's central
-// directory carries the sizes and CRC, so the stream itself has no
-// header. std.zip is the primary caller.
+// Raw DEFLATE (RFC 1951) — no zlib/gzip wrapper — the COMPRESSING side.
+// This is the framing a ZIP entry stores for method 8: the archive's
+// central directory carries the sizes and CRC, so the stream has no
+// header of its own. `level` is 0..9 (0 = store, 9 = best); -1 for the
+// zlib default. std.zip's writer is the primary caller.
+deflate_raw(data: string, length: int, level: int) -> {
+    if zlib_backend_available() == 0 {
+        return "", 0, "zlib unavailable"
+    }
+    ok = zlib_try_deflate_raw(data, length, level)
+    if ok == 0 {
+        return "", 0, "raw deflate failed"
+    }
+    raw = zlib_get_deflate_bytes()
+    n = zlib_get_deflate_length()
+    owned = string_new_with_length(raw, n)
+    zlib_release_deflate()
+    return owned, n, ""
+}
+
+// Raw DEFLATE (RFC 1951) — no zlib/gzip wrapper — the DECOMPRESSING side.
+// This is the framing a ZIP entry stores for method 8 (deflate): the
+// archive's central directory carries the sizes and CRC, so the stream
+// itself has no header. std.zip is the primary caller.
 inflate_raw(data: string, length: int) -> {
     if zlib_backend_available() == 0 {
         return "", 0, "zlib unavailable"

@@ -51,6 +51,9 @@ exports(
     entry_is_dir, entry_is_encrypted,
     // per-entry data
     entry_read,
+    // writer (#2010 follow-up): build a .zip in memory
+    writer_new, writer_add, writer_add_dir, writer_finish, writer_free,
+    create,
 )
 
 extern malloc(size: int) -> ptr
@@ -474,4 +477,387 @@ fn slice_string(b: ptr, off: int, len: int) -> string {
     s = bytes.to_string(tmp, len)
     bytes.free(tmp)
     return s
+}
+
+// ============================================================================
+// Writer — build a .zip entirely in memory (#2010 follow-up).
+//
+// The mirror of the reader: entries are appended one at a time, each emitted
+// as a Local File Header + (stored or raw-deflated) data as it is added, and
+// `writer_finish` appends the Central Directory and End-Of-Central-Directory
+// record and hands back the finished bytes. Buffer in, buffer out — no path
+// or fd, exactly as `open` takes a buffer. An extract-to-disk / directory
+// layer belongs on top and is a separate concern.
+//
+//   w = zip.writer_new()
+//   zip.writer_add(w, "a.txt", data_a, len_a, zip.METHOD_DEFLATE, 6)
+//   zip.writer_add(w, "b.bin", data_b, len_b, zip.METHOD_STORED, 0)
+//   out, outlen, err = zip.writer_finish(w)   // `out` is a valid .zip
+//   zip.writer_free(w)
+//
+// ZIP64 is emitted automatically when a size, an offset, or the entry count
+// exceeds its 32-bit field — the same records the reader already parses back.
+
+const VERSION_NEEDED = 20 // 2.0: deflate + folder support
+const VERSION_NEEDED_ZIP64 = 45 // 4.5: ZIP64 extensions
+const FLAG_UTF8 = 0x0800 // general-purpose bit 11: name/comment are UTF-8
+
+// One queued entry's central-directory facts. The data itself is already in
+// the writer's buffer at `lfh_offset`; this is only what the CD needs later.
+struct ZipWEntry {
+    name: ptr // owned AetherBytes holding the UTF-8 name
+    name_len: int
+    method: int
+    crc32: int // unsigned 32-bit CRC in an int slot
+    comp_size: long
+    uncomp_size: long
+    lfh_offset: long
+}
+
+// The output archive under construction: the growing buffer, the running
+// write position (= buffer logical length), and the entry list for the CD.
+struct ZipWriter {
+    buf: ptr // owned AetherBytes: LFHs + data so far, CD appended at finish
+    pos: int // next write offset == current logical length
+    entries: ptr // std.list of *ZipWEntry
+}
+
+fn alloc_wentry() -> *ZipWEntry {
+    e = malloc(sizeof(ZipWEntry)) as *ZipWEntry
+    e.name = null
+    e.name_len = 0
+    e.method = 0
+    e.crc32 = 0
+    e.comp_size = 0
+    e.uncomp_size = 0
+    e.lfh_offset = 0
+    return e
+}
+
+fn free_wentry(e: *ZipWEntry) {
+    if e.name != null { bytes.free(e.name) }
+    libc_free(e as ptr)
+}
+
+// Write `len` bytes of a string into the writer's buffer at the current
+// position and advance. The buffer auto-grows.
+fn w_put_str(w: *ZipWriter, s: string, len: int) {
+    if len > 0 {
+        bytes.copy_from_string(w.buf, w.pos, s, len)
+        w.pos = w.pos + len
+    }
+}
+
+fn w_put_u16(w: *ZipWriter, v: int) {
+    bytes.set_le16(w.buf, w.pos, v & 0xFFFF)
+    w.pos = w.pos + 2
+}
+
+fn w_put_u32(w: *ZipWriter, v: int) {
+    bytes.set_le32(w.buf, w.pos, v)
+    w.pos = w.pos + 4
+}
+
+fn w_put_u32l(w: *ZipWriter, v: long) {
+    // Low 32 bits of a long into a 4-byte LE field. Narrow to an int slot
+    // first (a bare `v as int` does not truncate), so the high word is
+    // dropped exactly.
+    var lo: int = v & 0xFFFFFFFF
+    bytes.set_le32(w.buf, w.pos, lo)
+    w.pos = w.pos + 4
+}
+
+fn w_put_u64(w: *ZipWriter, v: long) {
+    bytes.set_le64(w.buf, w.pos, v)
+    w.pos = w.pos + 8
+}
+
+// Emit a Local File Header + the entry name. Sizes are known up front, so no
+// data descriptor is used (general-purpose bit 3 stays clear). The caller
+// writes the payload bytes immediately after.
+fn w_put_local_header(w: *ZipWriter, method: int, crc: int,
+    comp_len: int, uncomp_len: int, name: string, name_len: int) {
+    w_put_u32(w, SIG_LFH)
+    w_put_u16(w, VERSION_NEEDED)
+    w_put_u16(w, FLAG_UTF8)
+    w_put_u16(w, method)
+    w_put_u16(w, 0) // mod time (0 = unset; readers tolerate it)
+    w_put_u16(w, 0) // mod date
+    w_put_u32(w, crc)
+    w_put_u32(w, comp_len)
+    w_put_u32(w, uncomp_len)
+    w_put_u16(w, name_len)
+    w_put_u16(w, 0) // extra field length
+    w_put_str(w, name, name_len)
+}
+
+// Start a fresh in-memory archive. Free it with writer_free.
+writer_new() -> ptr {
+    w = malloc(sizeof(ZipWriter)) as *ZipWriter
+    w.buf = bytes.new(256)
+    w.pos = 0
+    w.entries = list.new()
+    return w as ptr
+}
+
+// Release a writer and every entry it holds. Safe on a null pointer.
+writer_free(wp: ptr) {
+    if wp == null { return }
+    w = wp as *ZipWriter
+    if w.entries != null {
+        n = list_size(w.entries)
+        i = 0
+        while i < n {
+            free_wentry(list_get_raw(w.entries, i) as *ZipWEntry)
+            i = i + 1
+        }
+        list.free(w.entries)
+    }
+    if w.buf != null { bytes.free(w.buf) }
+    libc_free(w as ptr)
+}
+
+// Shared body of writer_add / writer_add_dir. `data`/`data_len` may be empty
+// (a directory, or a zero-length file). `method` is METHOD_STORED or
+// METHOD_DEFLATE; `level` (0..9, or -1) applies to deflate. Returns "" or an
+// error. On error the writer is left unchanged (nothing was appended).
+fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
+    data: string, data_len: int, method: int, level: int) -> string {
+    if name_len < 0 || data_len < 0 { return "zip: negative length" }
+
+    // CRC-32 is over the UNCOMPRESSED bytes; compute it from a scratch buffer.
+    var crc: int = 0
+    if data_len > 0 {
+        scratch = bytes.new(data_len)
+        bytes.set(scratch, data_len - 1, 0)
+        bytes.copy_from_string(scratch, 0, data, data_len)
+        crc = crc32_bytes(scratch, 0, data_len)
+        bytes.free(scratch)
+    } else {
+        crc = crc32_bytes(w.buf, 0, 0) // == 0 for empty input
+    }
+
+    // Compress if asked, but never let a "compressed" entry come out larger
+    // than stored — fall back to stored, as every real zip writer does. The
+    // whole entry is emitted inside the arm that owns the compressed string,
+    // so that string (`cc`) is freed exactly once in its own scope and the
+    // heap-string tracker keeps it classified (a pre-declared `var c: string`
+    // reassigned across a branch loses that classification).
+    var use_method: int = METHOD_STORED
+    var comp_len: int = data_len
+    lfh_off = w.pos
+
+    if method == METHOD_DEFLATE && data_len > 0 {
+        cc, cl, derr = zlib.deflate_raw(data, data_len, level)
+        if string.equals(derr, "") != 1 {
+            // Static message (no interpolation): keeps this function's return
+            // a borrowed string literal, so callers' `err` slots stay non-heap
+            // and are not leaked on the success path. `derr` is one of a small
+            // fixed set from zlib.deflate_raw ("zlib unavailable" / "raw
+            // deflate failed"); losing it from the text is acceptable.
+            return "zip: deflate failed"
+        }
+        if cl < data_len {
+            use_method = METHOD_DEFLATE
+            comp_len = cl
+            w_put_local_header(w, use_method, crc, comp_len, data_len, name, name_len)
+            w_put_str(w, cc, comp_len)
+        } else {
+            // not smaller: keep stored, write the raw data
+            comp_len = data_len
+            w_put_local_header(w, use_method, crc, comp_len, data_len, name, name_len)
+            w_put_str(w, data, comp_len)
+        }
+        string.free(cc)
+    } else {
+        w_put_local_header(w, use_method, crc, comp_len, data_len, name, name_len)
+        w_put_str(w, data, comp_len)
+    }
+
+    // ---- record for the central directory ---------------------------------
+    e = alloc_wentry()
+    e.name = bytes.new(name_len)
+    if name_len > 0 {
+        bytes.set(e.name, name_len - 1, 0)
+        bytes.copy_from_string(e.name, 0, name, name_len)
+    }
+    e.name_len = name_len
+    e.method = use_method
+    e.crc32 = crc
+    e.comp_size = comp_len as long
+    e.uncomp_size = data_len as long
+    e.lfh_offset = lfh_off as long
+    list_add_raw(w.entries, e as ptr)
+    return ""
+}
+
+// Add a file entry. `name` is the archive path (forward slashes). `method`
+// is zip.METHOD_STORED or zip.METHOD_DEFLATE; `level` is 0..9 (or -1) and is
+// ignored for stored. Returns "" on success, else an error.
+writer_add(wp: ptr, name: string, data: string, data_len: int,
+    method: int, level: int) -> string {
+    if wp == null { return "zip: null writer" }
+    w = wp as *ZipWriter
+    return w_add_entry(w, name, string_length(name), data, data_len, method, level)
+}
+
+// Add a directory entry (a name ending in "/", zero-length, stored). A "/"
+// is appended if the caller left it off.
+writer_add_dir(wp: ptr, name: string) -> string {
+    if wp == null { return "zip: null writer" }
+    w = wp as *ZipWriter
+    nlen = string_length(name)
+    var dname: string = name
+    var owns: int = 0
+    if nlen == 0 || string.char_at(name, nlen - 1) != 47 { // 47 == '/'
+        dname = string.concat(name, "/")
+        nlen = nlen + 1
+        owns = 1
+    }
+    err = w_add_entry(w, dname, nlen, "", 0, METHOD_STORED, 0)
+    if owns == 1 { string.free(dname) }
+    return err
+}
+
+// Finish: append the Central Directory and EOCD, and return the archive as
+// (bytes, length, ""). ZIP64 records are emitted when any field overflows 32
+// bits. The writer's buffer still owns the bytes; free with writer_free after
+// the returned string has been used (it is an independent copy).
+//
+// Inferred return type (`-> {`), not an explicit `(string, int, string)`: the
+// archive bytes come from bytes.to_string, whose `@heap` classification only
+// propagates to the caller's destructure site through an inferred tuple. An
+// explicit tuple type cannot carry the per-position `@heap` flag, so the
+// returned string would leak when passed on (e.g. through create).
+writer_finish(wp: ptr) -> {
+    if wp == null { return "", 0, "zip: null writer" }
+    w = wp as *ZipWriter
+
+    n = list_size(w.entries)
+    cd_start = w.pos
+
+    i = 0
+    while i < n {
+        e = list_get_raw(w.entries, i) as *ZipWEntry
+
+        // A field that overflows 32 bits is written as the 0xFFFFFFFF sentinel
+        // in the fixed record and carried in a ZIP64 extra block.
+        var need_zip64: int = 0
+        if e.comp_size >= U32_MAX { need_zip64 = 1 }
+        if e.uncomp_size >= U32_MAX { need_zip64 = 1 }
+        if e.lfh_offset >= U32_MAX { need_zip64 = 1 }
+
+        var extra_len: int = 0
+        if need_zip64 == 1 { extra_len = 28 } // 2+2 header + 3x8 fields
+
+        w_put_u32(w, SIG_CDH)
+        w_put_u16(w, VERSION_NEEDED_ZIP64) // version made by
+        if need_zip64 == 1 { w_put_u16(w, VERSION_NEEDED_ZIP64) }
+        else { w_put_u16(w, VERSION_NEEDED) } // version needed
+        w_put_u16(w, FLAG_UTF8)
+        w_put_u16(w, e.method)
+        w_put_u16(w, 0) // mod time
+        w_put_u16(w, 0) // mod date
+        w_put_u32(w, e.crc32)
+        if need_zip64 == 1 {
+            w_put_u32(w, -1) // 0xFFFFFFFF comp size sentinel
+            w_put_u32(w, -1) // 0xFFFFFFFF uncomp size sentinel
+        } else {
+            w_put_u32l(w, e.comp_size)
+            w_put_u32l(w, e.uncomp_size)
+        }
+        w_put_u16(w, e.name_len)
+        w_put_u16(w, extra_len)
+        w_put_u16(w, 0) // comment length
+        w_put_u16(w, 0) // disk number start
+        w_put_u16(w, 0) // internal attributes
+        w_put_u32(w, 0) // external attributes
+        if need_zip64 == 1 {
+            w_put_u32(w, -1) // 0xFFFFFFFF lfh offset sentinel
+        } else {
+            w_put_u32l(w, e.lfh_offset)
+        }
+        // name — copy the bytes buffer straight into the output, no string
+        if e.name_len > 0 {
+            bytes.copy_from_bytes(w.buf, w.pos, e.name, 0, e.name_len)
+            w.pos = w.pos + e.name_len
+        }
+        // ZIP64 extra block: tag 0x0001, then the fields present, order
+        // uncompressed / compressed / lfh offset (the reader reads them so).
+        if need_zip64 == 1 {
+            w_put_u16(w, 0x0001)
+            w_put_u16(w, 24) // 3 x 8-byte fields
+            w_put_u64(w, e.uncomp_size)
+            w_put_u64(w, e.comp_size)
+            w_put_u64(w, e.lfh_offset)
+        }
+        i = i + 1
+    }
+
+    cd_size = w.pos - cd_start
+
+    // Decide whether the archive as a whole needs the ZIP64 EOCD records.
+    var arch_zip64: int = 0
+    if n > 65534 { arch_zip64 = 1 }
+    if (cd_start as long) >= U32_MAX { arch_zip64 = 1 }
+    if (cd_size as long) >= U32_MAX { arch_zip64 = 1 }
+
+    if arch_zip64 == 1 {
+        z64_eocd_off = w.pos
+        // ---- ZIP64 EOCD record --------------------------------------------
+        w_put_u32(w, SIG_EOCD64)
+        w_put_u64(w, 44 as long) // size of remainder of this record
+        w_put_u16(w, VERSION_NEEDED_ZIP64) // version made by
+        w_put_u16(w, VERSION_NEEDED_ZIP64) // version needed
+        w_put_u32(w, 0) // this disk
+        w_put_u32(w, 0) // disk with CD start
+        w_put_u64(w, n as long) // entries on this disk
+        w_put_u64(w, n as long) // total entries
+        w_put_u64(w, cd_size as long)
+        w_put_u64(w, cd_start as long)
+        // ---- ZIP64 EOCD locator -------------------------------------------
+        w_put_u32(w, SIG_EOCD64_LOC)
+        w_put_u32(w, 0) // disk with ZIP64 EOCD
+        w_put_u64(w, z64_eocd_off as long)
+        w_put_u32(w, 1) // total disks
+    }
+
+    // ---- End Of Central Directory -----------------------------------------
+    w_put_u32(w, SIG_EOCD)
+    w_put_u16(w, 0) // this disk
+    w_put_u16(w, 0) // disk with CD start
+    var entries_here: int = n
+    if n > 65535 { entries_here = 65535 } // sentinel; real count in ZIP64
+    w_put_u16(w, entries_here)
+    w_put_u16(w, entries_here)
+    if arch_zip64 == 1 {
+        w_put_u32(w, -1) // CD size sentinel
+        w_put_u32(w, -1) // CD offset sentinel
+    } else {
+        w_put_u32(w, cd_size)
+        w_put_u32(w, cd_start)
+    }
+    w_put_u16(w, 0) // comment length
+
+    out = bytes.to_string(w.buf, w.pos)
+    return out, w.pos, ""
+}
+
+// One-shot convenience: build a single-entry archive. For multiple entries
+// use writer_new / writer_add / writer_finish.
+create(name: string, data: string, data_len: int, method: int, level: int)
+-> {
+    w = writer_new()
+    err = writer_add(w, name, data, data_len, method, level)
+    if string.equals(err, "") == 1 {
+        // Heap-returning arm first: writer_finish's `out` is an owned string,
+        // and pinning the first tuple slot to it here keeps the caller's slot
+        // heap-classified (a `return "", 0, err` seen first would pin it to a
+        // non-heap literal and the returned string would leak).
+        out, outlen, ferr = writer_finish(w)
+        writer_free(w)
+        return out, outlen, ferr
+    }
+    writer_free(w)
+    return "", 0, err
 }
