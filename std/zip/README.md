@@ -60,6 +60,32 @@ when a size, offset, or entry count exceeds its 32-bit field — the same
 records the reader parses back, so a written archive round-trips through
 `open`.
 
+`add_dir_tree(w, fs_root, arc_prefix, method, level)` walks a directory on
+disk and adds every file under it, naming each entry by its path relative to
+`fs_root` with `arc_prefix` prepended.
+
+## Extracting to disk
+
+`extract(data, len, dest_dir, options)` unpacks an archive buffer under
+`dest_dir` (`extract_file(zip_path, …)` reads the `.zip` off disk first). Every
+entry is decompressed and CRC-checked by the reader before it is written.
+
+```aether,fragment
+import std.zip
+
+opts = zip.default_extract_options()   // safe by default
+err = zip.extract(data, len, "out", opts)
+if string.equals(err, "") != 1 { /* handle */ }
+```
+
+Extraction is **safe by default**, reusing `std.tar`'s guards (sharpened for
+ZIP's higher deflate ratios):
+
+- absolute paths, `..` traversal, and backslash/colon tricks that become
+  absolute or drive-qualified on Windows are refused;
+- `max_entries` / `max_entry_bytes` / `max_total_bytes` cap a zip-bomb;
+- `overwrite` (default off) controls replacing an existing file.
+
 ## What it covers
 
 - **Methods**: `stored` (0) and `deflate` (8, via `std.zlib`'s raw inflate).
@@ -81,9 +107,10 @@ rejected by `open`.
 
 ## Not in scope (yet)
 
-Extraction to disk (which would layer traversal- and zip-bomb-guards over the
-reader, as `std.tar`'s `extract` does), and a directory-tree writer on top of
-`writer_add`. Filed as follow-ups on the tracking issue.
+Preserving Unix modes / mtimes on extraction (a zip's external-attributes
+field could carry them), and symlink entries (rare, and an escape vector — the
+base reader treats every entry as a file or directory). Filed as follow-ups on
+the tracking issue.
 
 ## Exports
 
@@ -92,4 +119,7 @@ Reader: `METHOD_STORED`, `METHOD_DEFLATE`; `open`, `close`; `count`, `find`;
 `entry_crc32`, `entry_is_dir`, `entry_is_encrypted`; `entry_read`.
 
 Writer: `writer_new`, `writer_add`, `writer_add_dir`, `writer_finish`,
-`writer_free`; `create`.
+`writer_free`; `create`; `add_dir_tree`.
+
+Extract: `ExtractOptions`, `default_extract_options`, `extract`,
+`extract_file`.
