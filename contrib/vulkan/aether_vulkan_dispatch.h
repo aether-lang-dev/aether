@@ -8,7 +8,7 @@
  * vkGetDeviceProcAddr. The registry says which is which (the first
  * parameter's type), and which version or extension brought each.
  *
- * Registry: 1.3.275. */
+ * Registry: 1.3.204. */
 
 #ifndef AETHER_VULKAN_DISPATCH_H
 #define AETHER_VULKAN_DISPATCH_H

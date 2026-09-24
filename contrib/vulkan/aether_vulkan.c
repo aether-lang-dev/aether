@@ -190,21 +190,34 @@ static PFN_vkGetInstanceProcAddr g_gipa;
 static int                       g_probe;      /* 0 unprobed, 1 usable, -1 not */
 static char                      g_dev_name[256];
 
+/* Under a lock, every time: callers on several threads (two actors, or the
+ * first calls of contrib.vulkan.vk's commands) must neither open the loader
+ * twice nor see g_lib set while g_gipa is not yet. It runs when a device is
+ * made and when a command is first resolved, never per frame. */
 static int aevk_load_library(void) {
-    if (g_lib) return AEVK_OK;
-    for (int i = 0; k_loader_names[i]; i++) {
-        void* h = AEVK_DLOPEN(k_loader_names[i]);
-        if (!h) continue;
-        PFN_vkGetInstanceProcAddr gipa =
-            (PFN_vkGetInstanceProcAddr)AEVK_DLSYM(h, "vkGetInstanceProcAddr");
-        if (!gipa) { AEVK_DLCLOSE(h); continue; }
-        g_lib = h;
-        g_gipa = gipa;
-        return AEVK_OK;
+    static AevkMutex load_lock = AEVK_MUTEX_STATIC;
+    AEVK_MUTEX_LOCK(&load_lock);
+    int rc = AEVK_OK;
+    if (!g_lib) {
+        rc = AEVK_ERR_NO_LOADER;
+        for (int i = 0; k_loader_names[i]; i++) {
+            void* h = AEVK_DLOPEN(k_loader_names[i]);
+            if (!h) continue;
+            PFN_vkGetInstanceProcAddr gipa =
+                (PFN_vkGetInstanceProcAddr)AEVK_DLSYM(h, "vkGetInstanceProcAddr");
+            if (!gipa) { AEVK_DLCLOSE(h); continue; }
+            g_gipa = gipa;
+            g_lib = h;
+            rc = AEVK_OK;
+            break;
+        }
+        if (rc != AEVK_OK) {
+            aevk_fail(AEVK_ERR_NO_LOADER, "no Vulkan loader found (tried %s and friends)",
+                      k_loader_names[0]);
+        }
     }
-    return aevk_fail(AEVK_ERR_NO_LOADER,
-                     "no Vulkan loader found (tried %s and friends)",
-                     k_loader_names[0]);
+    AEVK_MUTEX_UNLOCK(&load_lock);
+    return rc;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -2176,6 +2189,16 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
                   "push constant block must be 0..%d bytes and a multiple of 4 (got %d)",
                   AEVK_MAX_PUSH, push_bytes);
         return NULL;
+    }
+    /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
+     * A layout declaring another would have the pipeline read a buffer that
+     * is never bound, so it is refused here rather than drawn from. */
+    for (uint32_t i = 0; layout && i < layout->bind_count; i++) {
+        if (layout->binds[i].binding != 0) {
+            aevk_fail(AEVK_ERR_ARG, "vertex binding %u is declared, but a target feeds binding 0 only",
+                      layout->binds[i].binding);
+            return NULL;
+        }
     }
 
     AevkPipeline* p = (AevkPipeline*)calloc(1, sizeof(*p));
@@ -4968,6 +4991,16 @@ void* aevk_ae_array_alloc(int count, int size) {
 }
 
 void aevk_ae_array_free(void* p) { free(p); }
+
+/* A string argument for a command contrib.vulkan.vk calls through a function
+ * pointer: the C characters of whatever Aether holds (a wrapped AetherString
+ * included), with NULL kept NULL, since Vulkan tells a NULL layer name (the
+ * loader's own extensions) from an empty one. Declared `@aether string` on
+ * the Aether side, so it receives the value as Aether holds it. */
+extern const char* aether_string_data(const void* s);
+void* aevk_ae_cstr(const void* s) {
+    return s ? (void*)aether_string_data(s) : NULL;
+}
 
 /* sizeof a handle, which Aether cannot spell: a dispatchable one is a
  * pointer, a non-dispatchable one a pointer on 64-bit targets and a

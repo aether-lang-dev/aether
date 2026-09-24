@@ -17,7 +17,7 @@ ship with the OS. That fails the "minimal and well-scoped dependencies" test.
 
 ## What it does
 
-```aether
+```aether,fragment
 import contrib.vulkan
 
 main() {
@@ -58,7 +58,7 @@ interleaved `vec2` position plus `vec3` colour.
 For anything past that, `pipeline_create_ex` takes a vertex layout you
 describe, a push-constant block, and the shader resources the shaders read:
 
-```aether
+```aether,fragment
 // position(2) + normal(3) + uv(2), interleaved, stride 28
 lay = vulkan.layout_create()
 defer vulkan.layout_destroy(lay)
@@ -108,7 +108,7 @@ read, and a `vkQueueWaitIdle` between draws is not a fix.
 A material is one set of bound resources. Several are made from one pipeline,
 and a frame holds a list of draws, each naming the material it uses:
 
-```aether
+```aether,fragment
 mat_a = vulkan.material_create(pipe)
 mat_b = vulkan.material_create(pipe)
 defer vulkan.material_destroy(mat_a)
@@ -149,7 +149,7 @@ memory, the same contract Vulkan gives for any resource bound to a set.
 halves the index buffer, which is the right width for any mesh under 65536
 vertices:
 
-```aether
+```aether,fragment
 vulkan.indices_reserve_ex(target, 24, 16)
 vulkan.indices_set(target, 0, 0)
 ```
@@ -164,7 +164,7 @@ reserving.
 `texture_create` gives a single-level image sampled with a linear filter and
 clamped addressing. `texture_create_ex` chooses:
 
-```aether
+```aether,fragment
 tex = vulkan.texture_create_ex(dev, 128, 128, 1, 1, 0)  // mipmapped, linear, clamped
 vulkan.texture_upload(tex, bytes.data(rgba), 128 * 128 * 4)
 vulkan.texture_mip_levels(tex)                          // 8
@@ -189,7 +189,7 @@ asserts both.
 `target_create` gives one colour attachment at one sample. `target_create_ex`
 adds either or both:
 
-```aether
+```aether,fragment
 // depth on, 4x multisampling
 t = vulkan.target_create_ex(dev, 512, 512, 1, 4)
 ```
@@ -231,7 +231,7 @@ four formats, each checked against the device before anything is made:
 | `FORMAT_R16G16B16A16_SFLOAT` | half floats, not clamped: HDR light, accumulation | 8 |
 | `FORMAT_R32G32B32A32_SFLOAT` | single floats, not clamped: values a shader computes | 16 |
 
-```aether
+```aether,fragment
 t = vulkan.target_create_format(dev, 512, 512, vulkan.FORMAT_R16G16B16A16_SFLOAT, 1, 4)
 vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
 v = vulkan.pixel_value(t, 256, 256, 0)   // red as stored: 2.5 stays 2.5
@@ -246,7 +246,7 @@ goes through [`contrib.png`](../png/README.md), which encodes over `std.zlib`.
 
 ## Presenting to a window
 
-```aether
+```aether,fragment
 sc = vulkan.swapchain_create(dev, vulkan.WINDOW_WIN32, null, hwnd, w, h)
 defer vulkan.swapchain_destroy(sc)
 vulkan.target_set_readback(target, 0)   // shown only: no copy back to host memory
@@ -296,7 +296,7 @@ framework is linked.
 
 ## Compute
 
-```aether
+```aether,fragment
 b = vulkan.bindings_create()
 vulkan.bindings_storage(b, 0)              // layout(std430, binding = 0) buffer
 c = vulkan.compute_create(dev, spv, spv_len, b, 4)
@@ -349,7 +349,7 @@ For anything the module above does not do, `contrib.vulkan.vk` is the API
 itself, generated from the Vulkan registry
 ([#1506](https://github.com/aether-lang-dev/aether/issues/1506)):
 
-```aether
+```aether,fragment
 import contrib.vulkan.vk
 
 app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
@@ -372,8 +372,9 @@ defer vk.array_free(devices)
   cannot collide with the enumerators the header declares.
 - **Structs and unions** are `extern struct ... @c_import`: field names and
   Aether types come from the registry, and the layout from `<vulkan/vulkan.h>`,
-  so nothing depends on offsets computed by hand. A string field borrows the
-  string it is given, as the C API expects.
+  so nothing depends on offsets computed by hand. A string field holds the C
+  characters of the string it is given and borrows them, as the C API expects
+  (docs/c-interop.md).
 - **Commands** call through entry points resolved at runtime from the loader
   this module opens, so a program driving the API directly still links nothing
   and starts where there is no Vulkan; there a command returning `VkResult`
@@ -383,7 +384,15 @@ defer vk.array_free(devices)
   also how an extension command the loader does not export is reached. After
   that, a command the instance or device does not provide (one from a version
   or extension it was not created with) fails as it would with no loader
-  instead of being called.
+  instead of being called; a command that returns nothing then does nothing.
+  The entry points are the program's, one instance and one device at a time:
+  load them before other threads call the commands, pass null after
+  destroying the instance or device to put the commands back on the loader's
+  dispatch, and leave them there in a program that drives several devices,
+  since the loader's dispatch serves any of them.
+- **Strings** reach the driver as C characters, `null` as `NULL`: a name built
+  at runtime works, and `vkEnumerateInstanceExtensionProperties_all(null)`
+  asks for the loader's own extensions.
 - **The two-call idiom** is generated. The registry records which parameter
   counts which array, so each command that fills one also has a
   `<command>_all`. It asks for the count, allocates, fills, and asks again
@@ -395,21 +404,27 @@ defer vk.array_free(devices)
 with `std.xml` and takes a selection, a core version plus extensions, rather
 than all of the registry. The committed module is Vulkan 1.3 with
 `VK_KHR_surface` and `VK_KHR_swapchain`: 229 commands, 294 structs and 18
-`_all` helpers. Platform extensions are refused, since their structs name
-types (`HWND`, `Display`) that only their own headers declare.
+`_all` helpers, and every API constant their array members are sized by.
+Platform extensions are refused, since their structs name types (`HWND`,
+`Display`) that only their own headers declare. Handles are pointers, which
+is what Vulkan's non-dispatchable handles are on 64-bit targets; a 32-bit
+target, where they are `uint64_t`, is not supported.
 
 ```sh
 contrib/vulkan/tools/regenerate.sh             # vk.xml from $VULKAN_SDK or the usual prefixes
-contrib/vulkan/tools/regenerate.sh --registry /path/to/vk.xml
+contrib/vulkan/tools/regenerate.sh --registry /path/to/vk-1.3.204.xml
 ```
 
-Both generated files record the registry release they came from. Registries
-1.3.204, 1.3.275, 1.4.309 and 1.4.357 give the same commands, structs and
-dispatch header; later releases add enum values and aliases.
+Both generated files record the registry release they came from, and the
+committed ones come from 1.3.204, the oldest registry this repository builds
+against (Ubuntu 22.04's), so every header from there on declares what they
+name. Registries 1.3.204, 1.3.275, 1.4.309 and 1.4.357 give the same commands,
+structs and dispatch header; later releases add enum values and aliases.
 `tests/integration/vulkan_vkgen` regenerates from the installed registry and
 requires the dispatch header to be identical, and the module too when the
-release matches. It then builds and runs what it generated, which the Linux
-contrib job requires to pass.
+release matches. It then builds and runs what it generated. The Linux contrib
+job installs 1.3.204 and requires the releases to match, so there both files
+are compared byte for byte: to regenerate, pass that registry.
 
 What it costs: `aetherc` spends about 40 ms more on a program importing the
 7,700-line module than on an empty one. A cold `ae build` of such a program
@@ -451,7 +466,7 @@ deterministic offscreen render, and it is a hard ceiling: the CPU idles for the
 whole GPU execution. `submit` hands the work to the queue and returns, so the
 CPU records the next frame while the GPU runs this one.
 
-```aether
+```aether,fragment
 vulkan.target_set_frames(t, 3)        // 1..8; 1 is the default and synchronous
 vulkan.submit(t, pipe, r, g, b, 1.0)  // returns a slot, or a negative status
 vulkan.wait_all(t)                    // drain, when you want the queue empty

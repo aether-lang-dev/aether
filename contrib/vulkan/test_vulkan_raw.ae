@@ -18,6 +18,27 @@ import contrib.vulkan.vk
 extern calloc(n: int, size: int) -> ptr
 extern free(p: ptr)
 
+// A portability implementation (MoltenVK over Metal) is listed only to an
+// instance that enables VK_KHR_portability_enumeration and sets its flag, and
+// a device that offers VK_KHR_portability_subset must have it enabled. Both
+// arrived in registry 1.3.207, after the oldest registry the module is
+// generated from, so their name and flag are spelled here as the registry
+// gives them.
+const PORTABILITY_ENUMERATION = "VK_KHR_portability_enumeration"
+const PORTABILITY_SUBSET = "VK_KHR_portability_subset"
+const CREATE_ENUMERATE_PORTABILITY = 1   // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+
+// 1 when `name` is among the extension properties `props` lists.
+lists_extension(props: ptr, count: int, name: string) -> int {
+    i = 0
+    while i < count {
+        e = (props + i * sizeof(VkExtensionProperties)) as *VkExtensionProperties
+        if string.equals(e.extensionName, name) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
 // A VkInstance with the application info filled in, or null. It asks for
 // Vulkan 1.1, whose ...2 queries the _all case uses: a command from a version
 // the instance was not created with is not the instance's to call.
@@ -29,13 +50,26 @@ create_instance() -> ptr {
     ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
     ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
     ci.pApplicationInfo = app as ptr
+    names = calloc(1, 8)
+    exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
+    if lists_extension(exts, ne, PORTABILITY_ENUMERATION) == 1 {
+        (names as string[])[0] = PORTABILITY_ENUMERATION
+        ci.enabledExtensionCount = 1
+        ci.ppEnabledExtensionNames = names
+        ci.flags = CREATE_ENUMERATE_PORTABILITY
+    }
+    vk.array_free(exts)
     out = calloc(1, 8)
     r = vk.vkCreateInstance(ci as ptr, null, out)
     instance = (out as ptr[])[0]
     free(out)
+    free(names)
     free(ci)
     free(app)
-    if r != vk.SUCCESS { return null }
+    if r != vk.SUCCESS {
+        println("  vkCreateInstance returned ${r}")
+        return null
+    }
     return instance
 }
 
@@ -67,7 +101,22 @@ graphics_family(gpu: ptr) -> int {
 main() {
     fw = spec.init()
     ready = vulkan.available()
-    reason = "no Vulkan driver (${vulkan.last_error()})"
+    reason = "no Vulkan driver"
+    if ready == 0 { reason = "no Vulkan driver (${vulkan.last_error()})" }
+
+    // The cases that drive a device need an instance; one that could not be
+    // made is reported by its own case below, not by crashing the rest.
+    have_instance = 0
+    instance_reason = reason
+    if ready == 1 {
+        probe = create_instance()
+        if probe != null {
+            have_instance = 1
+            vk.vkDestroyInstance(probe, null)
+        } else {
+            instance_reason = "vkCreateInstance failed"
+        }
+    }
 
     spec.describe(fw, "vulkan.vk: generated declarations") {
         spec.it(fw, "constants are the header's values") callback {
@@ -99,7 +148,10 @@ main() {
             spec.assert_true(v >= ((1 << 22) | (1 << 12)), "the loader is at least 1.1 (got ${v >> 22}.${(v >> 12) & 1023})")
             free(ver)
         }
-        spec.it_when(ready, "creates an instance and reads a device's properties", reason) callback {
+        spec.it_when(ready, "creates an instance", reason) callback {
+            spec.assert_eq(have_instance, 1, "vkCreateInstance, with portability enumeration where offered")
+        }
+        spec.it_when(have_instance, "reads a device's properties", instance_reason) callback {
             instance = create_instance()
             spec.assert_true(instance != null, "vkCreateInstance")
             spec.assert_true(vk.load_instance(instance) > 0, "instance entry points resolved")
@@ -114,9 +166,16 @@ main() {
             spec.assert_true(props.limits.maxImageDimension2D >= 4096,
                              "limits.maxImageDimension2D >= 4096 (got ${props.limits.maxImageDimension2D})")
             free(props)
+            // A string built at runtime is a wrapped AetherString on the
+            // Aether side: the command must hand the driver its characters.
+            kind = "Physical"
+            spec.assert_true(vk.vkGetInstanceProcAddr(instance, "vkEnumerate${kind}Devices") != null,
+                             "an interpolated name resolves")
+            spec.assert_true(vk.vkGetInstanceProcAddr(instance, "vkNoSuch${kind}Command") == null,
+                             "an unknown one does not")
             vk.vkDestroyInstance(instance, null)
         }
-        spec.it_when(ready, "the _all helpers agree with the two calls made by hand", reason) callback {
+        spec.it_when(have_instance, "the _all helpers agree with the two calls made by hand", instance_reason) callback {
             instance = create_instance()
             spec.assert_true(instance != null, "vkCreateInstance")
             vk.load_instance(instance)
@@ -170,7 +229,7 @@ main() {
             free(cell)
             vk.vkDestroyInstance(instance, null)
         }
-        spec.it_when(ready, "creates a device and reaches its queue through the device's entry points", reason) callback {
+        spec.it_when(have_instance, "creates a device and reaches its queue through the device's entry points", instance_reason) callback {
             instance = create_instance()
             spec.assert_true(instance != null, "vkCreateInstance")
             vk.load_instance(instance)
@@ -189,6 +248,14 @@ main() {
             dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO
             dci.queueCreateInfoCount = 1
             dci.pQueueCreateInfos = qci as ptr
+            dev_names = calloc(1, 8)
+            dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+            if lists_extension(dexts, nde, PORTABILITY_SUBSET) == 1 {
+                (dev_names as string[])[0] = PORTABILITY_SUBSET
+                dci.enabledExtensionCount = 1
+                dci.ppEnabledExtensionNames = dev_names
+            }
+            vk.array_free(dexts)
             out = calloc(1, 8)
             spec.assert_eq(vk.vkCreateDevice(gpu, dci as ptr, null, out), vk.SUCCESS, "vkCreateDevice")
             device = (out as ptr[])[0]
@@ -202,6 +269,7 @@ main() {
             vk.vkDestroyDevice(device, null)
 
             free(queue_out)
+            free(dev_names)
             free(out)
             free(dci)
             free(qci)

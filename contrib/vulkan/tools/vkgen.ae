@@ -54,6 +54,7 @@ extern exit(code: int)
 var g_cat: ptr = null            // type name -> category
 var g_alias: ptr = null          // type, command or enum name -> alias target
 var g_under: ptr = null          // basetype / bitmask / handle -> underlying C type
+var g_parent: ptr = null         // handle -> its parent handles, comma-separated
 var g_bits: ptr = null           // bitmask type -> its FlagBits enum
 var g_members: ptr = null        // struct / union -> member lines
 var g_union: ptr = null          // union name -> "1"
@@ -263,6 +264,7 @@ read_registry(path: string) {
     type_depth = -1        // depth of the <type> being defined, -1 outside one
     type_name = ""
     type_cat = ""
+    type_parent = ""       // a handle's parent attribute
     member_depth = -1
     decl_reset()
     in_comment = 0
@@ -301,6 +303,7 @@ read_registry(path: string) {
                 } else {
                     type_depth = depth
                     type_cat = xml.attr(p, "category")
+                    type_parent = xml.attr(p, "parent")
                     type_name = xml.attr(p, "name")
                     alias = xml.attr(p, "alias")
                     decl_reset()
@@ -497,6 +500,7 @@ read_registry(path: string) {
                    string.equals(type_cat, "handle") == 1 {
                     put(g_under, type_name, field(line, 0))
                 }
+                if string.equals(type_cat, "handle") == 1 { put(g_parent, type_name, type_parent) }
                 type_depth = -1
                 type_name = ""
             } else if (member_depth >= 0 || type_depth >= 0 || param_depth >= 0 || proto_depth >= 0) &&
@@ -721,7 +725,7 @@ select_selection(api: string, extensions: string) {
                                 put(g_ext_consts, nm, val)
                                 list.add(g_ext_const_order, string.concat(nm, ""))
                             }
-                        } else if map_has(g_const_value, nm) == 1 {
+                        } else if map_has(g_const_value, nm) == 1 && map_has(g_ext_consts, nm) == 0 {
                             put(g_ext_consts, nm, "=")
                             list.add(g_ext_const_order, string.concat(nm, ""))
                         }
@@ -733,6 +737,37 @@ select_selection(api: string, extensions: string) {
         }
         k = k + 1
     }
+    // An API constant that bounds an array member of a selected struct
+    // (VK_MAX_PHYSICAL_DEVICE_NAME_SIZE in VkPhysicalDeviceProperties) is
+    // declared too. Registries from 1.3.207 list them in the features'
+    // requirements; earlier ones name them only in the member.
+    keys = map_keys_raw(g_req_types)
+    t = 0
+    while t < map_keys_size_raw(keys) {
+        ty = str_of(map_keys_get_raw(keys, t))
+        cat = get(g_cat, ty)
+        if string.equals(cat, "struct") == 1 || string.equals(cat, "union") == 1 {
+            mem = lines_of(get(g_members, ty))
+            m = 0
+            while m < string_array_size(mem) {
+                bounds = string_split(field(str_of(string_array_get(mem, m)), 4), " ")
+                b = 0
+                while b < string_array_size(bounds) {
+                    tok = string.trim(str_of(string_array_get(bounds, b)))
+                    if map_has(g_const_value, tok) == 1 && map_has(g_ext_consts, tok) == 0 {
+                        put(g_ext_consts, tok, "=")
+                        list.add(g_ext_const_order, string.concat(tok, ""))
+                    }
+                    b = b + 1
+                }
+                string_array_free(bounds)
+                m = m + 1
+            }
+            string_array_free(mem)
+        }
+        t = t + 1
+    }
+    map_keys_free(keys)
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +818,7 @@ scalar_type(ctype: string) -> string {
     if string.equals(ctype, "int32_t") == 1 { return "int" }
     if string.equals(ctype, "int64_t") == 1 { return "long" }
     if string.equals(ctype, "int") == 1 { return "int" }
-    if string.equals(ctype, "size_t") == 1 { return "uint64" }
+    if string.equals(ctype, "size_t") == 1 { return "size_t" }
     if string.equals(ctype, "float") == 1 { return "f32" }
     if string.equals(ctype, "double") == 1 { return "float" }
     if string.equals(ctype, "char") == 1 { return "byte" }
@@ -914,9 +949,12 @@ emit_module(path: string, api: string, extensions: string) {
         strbuilder.append(body, "// ${t}\n")
         all = string.concat(get(g_enum_values, t), get(g_ext_values, t))
         vals = lines_of(all)
-        // Values first, aliases after, so an alias names a declared const.
+        // Values first, then aliases until none is left whose target has been
+        // declared: an alias may name another alias later in the block.
         pass = 0
-        while pass < 2 {
+        progress = 1
+        while pass < 2 || progress == 1 {
+            progress = 0
             vi = 0
             while vi < string_array_size(vals) {
                 line = str_of(string_array_get(vals, vi))
@@ -924,7 +962,7 @@ emit_module(path: string, api: string, extensions: string) {
                     nm = field(line, 0)
                     val = field(line, 1)
                     is_alias = string.starts_with(val, "@")
-                    if map_has(emitted, nm) == 0 && ((pass == 0 && is_alias == 0) || (pass == 1 && is_alias == 1)) {
+                    if map_has(emitted, nm) == 0 && ((pass == 0 && is_alias == 0) || (pass >= 1 && is_alias == 1)) {
                         target = val
                         if is_alias == 1 { target = const_name(string.substring(val, 1, string.length(val))) }
                         if is_alias == 0 || map_has(emitted, string.substring(val, 1, string.length(val))) == 1 {
@@ -936,6 +974,7 @@ emit_module(path: string, api: string, extensions: string) {
                             }
                             strbuilder.append(names, "    ${const_name(nm)},\n")
                             put(emitted, nm, "1")
+                            if pass >= 1 { progress = 1 }
                         }
                     }
                 }
@@ -964,9 +1003,11 @@ emit_module(path: string, api: string, extensions: string) {
     strbuilder.append(body, "extern aevk_ae_device_proc(device: ptr, name: string) -> ptr\n")
     strbuilder.append(body, "extern aevk_ae_array_alloc(count: int, size: int) -> ptr\n")
     strbuilder.append(body, "extern aevk_ae_array_free(p: ptr)\n")
-    strbuilder.append(body, "extern aevk_ae_handle_size(dispatchable: int) -> int\n\n")
+    strbuilder.append(body, "extern aevk_ae_handle_size(dispatchable: int) -> int\n")
+    strbuilder.append(body, "extern aevk_ae_cstr(s: @aether string) -> ptr\n\n")
     strbuilder.append(names, "    aevk_ae_loader_proc,\n    aevk_ae_instance_proc,\n    aevk_ae_device_proc,\n")
     strbuilder.append(names, "    aevk_ae_array_alloc,\n    aevk_ae_array_free,\n    aevk_ae_handle_size,\n")
+    strbuilder.append(names, "    aevk_ae_cstr,\n")
     strbuilder.append(names, "    loader_available,\n    load_instance,\n    load_device,\n    array_free,\n")
     strbuilder.append(body, "// Releases an array a <command>_all returned; null is ignored.\n")
     strbuilder.append(body, "array_free(items: ptr) { aevk_ae_array_free(items) }\n\n")
@@ -999,8 +1040,16 @@ emit_module(path: string, api: string, extensions: string) {
                     arg_names = string.concat(arg_names, ", ")
                 }
                 params = string.concat(params, "${ident(field(line, 3))}: ${ty}")
-                arg_types = string.concat(arg_types, ty)
-                arg_names = string.concat(arg_names, ident(field(line, 3)))
+                if string.equals(ty, "string") == 1 {
+                    // Through the function pointer a string would arrive as
+                    // whatever Aether holds, a wrapped AetherString included:
+                    // passed as the C characters instead, NULL kept NULL.
+                    arg_types = string.concat(arg_types, "ptr")
+                    arg_names = string.concat(arg_names, "aevk_ae_cstr(${ident(field(line, 3))})")
+                } else {
+                    arg_types = string.concat(arg_types, ty)
+                    arg_names = string.concat(arg_names, ident(field(line, 3)))
+                }
             }
             pi = pi + 1
         }
@@ -1023,7 +1072,7 @@ emit_module(path: string, api: string, extensions: string) {
         strbuilder.append(body, "var ${pfn}: ptr = null\n")
         strbuilder.append(body, "var ${got}: int = 0\n")
         strbuilder.append(body, "${c}(${params})${rt} {\n")
-        strbuilder.append(body, "    if ${got} == 0 { ${pfn} = aevk_ae_loader_proc(\"${c}\"); ${got} = 1 }\n")
+        strbuilder.append(body, "    if ${pfn} == null && ${got} == 0 { ${pfn} = aevk_ae_loader_proc(\"${c}\") }\n")
         if string.length(rtype) > 0 {
             strbuilder.append(body, "    if ${pfn} == null { return ${fail} }\n")
         } else {
@@ -1040,12 +1089,12 @@ emit_module(path: string, api: string, extensions: string) {
         level = cmd_level(c)
         if string.equals(level, "INSTANCE") == 1 {
             strbuilder.append(loads_inst, "    ${pfn} = aevk_ae_instance_proc(instance, \"${c}\")\n")
-            strbuilder.append(loads_inst, "    ${got} = 1\n")
+            strbuilder.append(loads_inst, "    ${got} = pin\n")
             strbuilder.append(loads_inst, "    if ${pfn} != null { n = n + 1 }\n")
         }
         if string.equals(level, "DEVICE") == 1 {
             strbuilder.append(loads_dev, "    ${pfn} = aevk_ae_device_proc(device, \"${c}\")\n")
-            strbuilder.append(loads_dev, "    ${got} = 1\n")
+            strbuilder.append(loads_dev, "    ${got} = pin\n")
             strbuilder.append(loads_dev, "    if ${pfn} != null { n = n + 1 }\n")
         }
         strbuilder.append(names, "    ${c},\n")
@@ -1055,14 +1104,22 @@ emit_module(path: string, api: string, extensions: string) {
     strbuilder.append(body, "// Returns how many resolved. A command the instance does not provide (one\n")
     strbuilder.append(body, "// from a version or extension it was not created with) then fails as it\n")
     strbuilder.append(body, "// would with no loader, rather than calling through the loader's export\n")
-    strbuilder.append(body, "// into a dispatch slot the instance never filled.\n")
-    strbuilder.append(body, "load_instance(instance: ptr) -> int {\n    n = 0\n")
+    strbuilder.append(body, "// into a dispatch slot the instance never filled. The pointers are the\n")
+    strbuilder.append(body, "// program's, not the instance's: call it before other threads use the\n")
+    strbuilder.append(body, "// commands, and with null after destroying the instance, which puts them\n")
+    strbuilder.append(body, "// back on the loader's dispatch.\n")
+    strbuilder.append(body, "load_instance(instance: ptr) -> int {\n    n = 0\n    pin = 1\n")
+    strbuilder.append(body, "    if instance == null { pin = 0 }\n")
     strbuilder.append(body, strbuilder.finish(loads_inst))
     strbuilder.append(body, "    return n\n}\n\n")
     strbuilder.append(body, "// Points every device-level command at `device`'s own entry points, the\n")
     strbuilder.append(body, "// driver's rather than the loader's dispatch. Returns how many resolved; a\n")
     strbuilder.append(body, "// command the device does not provide then fails, as with load_instance.\n")
-    strbuilder.append(body, "load_device(device: ptr) -> int {\n    n = 0\n")
+    strbuilder.append(body, "// One device at a time: a program driving several (on different drivers)\n")
+    strbuilder.append(body, "// leaves the commands on the loader's dispatch, which serves any device.\n")
+    strbuilder.append(body, "// With null, after destroying the device, they go back to it.\n")
+    strbuilder.append(body, "load_device(device: ptr) -> int {\n    n = 0\n    pin = 1\n")
+    strbuilder.append(body, "    if device == null { pin = 0 }\n")
     strbuilder.append(body, strbuilder.finish(loads_dev))
     strbuilder.append(body, "    return n\n}\n")
 
@@ -1293,9 +1350,24 @@ cmd_level(c: string) -> string {
     arr = lines_of(ps)
     if string_array_size(arr) > 0 { first = field(str_of(string_array_get(arr, 0)), 0) }
     string_array_free(arr)
-    if string.equals(first, "VkInstance") == 1 || string.equals(first, "VkPhysicalDevice") == 1 { return "INSTANCE" }
-    if string.equals(first, "VkDevice") == 1 || string.equals(first, "VkQueue") == 1 ||
-       string.equals(first, "VkCommandBuffer") == 1 { return "DEVICE" }
+    // A command is dispatched through its first parameter when that is a
+    // dispatchable handle: device-level when the handle's parent chain reaches
+    // VkDevice (VkQueue, VkCommandBuffer by way of VkCommandPool, and any
+    // later one such as VkExternalComputeQueueNV), instance-level when it
+    // reaches VkInstance (VkPhysicalDevice). Otherwise it is global.
+    t = first
+    if string.length(get(g_alias, t)) > 0 { t = get(g_alias, t) }
+    if string.equals(get(g_cat, t), "handle") == 0 { return "GLOBAL" }
+    if string.equals(get(g_under, t), "VK_DEFINE_HANDLE") == 0 { return "GLOBAL" }
+    hops = 0
+    while hops < 16 {
+        if string.equals(t, "VkDevice") == 1 { return "DEVICE" }
+        if string.equals(t, "VkInstance") == 1 { return "INSTANCE" }
+        parents = get(g_parent, t)
+        if string.length(parents) == 0 { return "GLOBAL" }
+        t = field(string.replace_all(parents, ",", "\t"), 0)
+        hops = hops + 1
+    }
     return "GLOBAL"
 }
 
@@ -1403,6 +1475,7 @@ main() {
     g_cat = map.new()
     g_alias = map.new()
     g_under = map.new()
+    g_parent = map.new()
     g_bits = map.new()
     g_members = map.new()
     g_union = map.new()

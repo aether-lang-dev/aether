@@ -14,6 +14,11 @@
 # --out writes both files under <dir> (<dir>/aether_vulkan_dispatch.h,
 # <dir>/vk/module.ae) instead of into the tree, to compare against what is
 # committed. $AE names the `ae` to build vkgen with (default: build/ae).
+#
+# The committed files are generated from registry 1.3.204, the oldest this
+# repository builds against, and the Linux CI job checks them byte for byte
+# against it: regenerate with that release's vk.xml
+# (registry/vk.xml at tag v1.3.204 of KhronosGroup/Vulkan-Headers).
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

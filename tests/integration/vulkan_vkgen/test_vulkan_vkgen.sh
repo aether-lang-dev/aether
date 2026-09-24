@@ -15,8 +15,11 @@
 # installed <vulkan/vulkan.h>, and aether_vulkan.c (which the module compiles
 # in) against the regenerated dispatch header.
 #
-# Skips where no vk.xml is installed; the Linux contrib job installs one and
-# requires this to pass.
+# Skips where no vk.xml is installed. The Linux contrib job installs one and
+# sets VKGEN_REQUIRE_RELEASE=1: the committed files are generated from the
+# registry that job installs (the oldest this repository builds against), so
+# there both are compared byte for byte, and a release that differs fails
+# rather than turning the module comparison off.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -49,7 +52,12 @@ COMMITTED="$ROOT/contrib/vulkan"
 release() { sed -n 's/.*Registry: \([0-9.]*[0-9]\)\..*/\1/p' "$1" | head -1; }
 have="$(release "$WORK/gen/aether_vulkan_dispatch.h")"
 want="$(release "$COMMITTED/aether_vulkan_dispatch.h")"
-[ -n "$have" ] && [ -n "$want" ] || fail "a generated file does not name its registry release"
+want_module="$(release "$COMMITTED/vk/module.ae")"
+[ -n "$have" ] && [ -n "$want" ] && [ -n "$want_module" ] || fail "a generated file does not name its registry release"
+[ "$want" = "$want_module" ] || fail "the committed dispatch header ($want) and module ($want_module) come from different registries"
+if [ "${VKGEN_REQUIRE_RELEASE:-0}" = "1" ] && [ "$have" != "$want" ]; then
+    fail "the committed files come from registry $want and this registry is $have: regenerate them from this one (contrib/vulkan/tools/regenerate.sh --registry <its vk.xml>)"
+fi
 
 grep -v "Registry: " "$COMMITTED/aether_vulkan_dispatch.h" > "$WORK/committed.h"
 grep -v "Registry: " "$WORK/gen/aether_vulkan_dispatch.h" > "$WORK/generated.h"

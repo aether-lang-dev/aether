@@ -134,7 +134,9 @@ main() {
     spec.describe(fw, "vulkan: compute refusals") {
         spec.it_when(ready, "refuses empty and oversized dispatches", reason) callback {
             spec.assert_eq(vulkan.dispatch(comp, 0, 1, 1), vulkan.ERR_ARG, "zero groups")
-            spec.assert_eq(vulkan.dispatch(comp, 1, 1, 1000000), vulkan.ERR_UNSUPPORTED, "past the Z limit")
+            // Past any device's Z limit: 65535 on most, 2^30 on MoltenVK,
+            // which a million groups would not exceed.
+            spec.assert_eq(vulkan.dispatch(comp, 1, 1, 2147483647), vulkan.ERR_UNSUPPORTED, "past the Z limit")
             spec.assert_true(string.index_of(vulkan.last_error(), "device limit") >= 0, "names the limit")
         }
         spec.it_when(ready, "refuses a binding of the wrong kind", reason) callback {
