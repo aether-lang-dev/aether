@@ -678,17 +678,22 @@ jobs:
       # runner can build rather than failing on what it cannot.
       #
       # The runner has no GPU, so the Vulkan entries run on lavapipe, the CPU
-      # driver in MSYS2's Mesa, selected by its manifest the way the Linux leg
-      # selects its own: the loader branch, the Win32 surface and the
-      # swapchain all execute here, not only compile.
+      # driver in MSYS2's Mesa, registered as a Windows driver below: the
+      # loader branch, the Win32 surface and the swapchain all execute here,
+      # not only compile.
       run: |
         set -o pipefail
-        # The runner image has a vulkan-1.dll in System32, which the DLL
-        # search takes before PATH and which refuses MSYS2's lavapipe
-        # (VK_ERROR_INCOMPATIBLE_DRIVER). AETHER_VULKAN_LOADER names the
-        # loader MSYS2 installed beside that driver.
+        # The runner's processes are elevated, and an elevated process's
+        # Vulkan loader ignores VK_DRIVER_FILES (the loader's "Elevated
+        # Privilege Caveats"), so lavapipe is registered the way a Windows
+        # software driver installs itself: its manifest's path as a DWORD 0
+        # under HKLM\SOFTWARE\Khronos\Vulkan\Drivers (LoaderDriverInterface).
+        # AETHER_VULKAN_LOADER opens the loader MSYS2 installed with that
+        # driver rather than the vulkan-1.dll the image keeps in System32,
+        # which the DLL search would take first.
+        lvp="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
+        MSYS2_ARG_CONV_EXCL='*' reg add 'HKLM\SOFTWARE\Khronos\Vulkan\Drivers' /v "$lvp" /t REG_DWORD /d 0 /f
         export AETHER_VULKAN_LOADER="$(cygpath -w /mingw64/bin/vulkan-1.dll)"
-        export VK_DRIVER_FILES="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
         make contrib-check 2>&1 | tee contrib-windows.log
         echo ""
         echo "contrib/vulkan on this runner:"
@@ -699,12 +704,8 @@ jobs:
     # coverage silently lost. The same assertion as the Linux leg's.
     - name: Assert the Vulkan tests actually ran
       run: |
-        # The runner image has a vulkan-1.dll in System32, which the DLL
-        # search takes before PATH and which refuses MSYS2's lavapipe
-        # (VK_ERROR_INCOMPATIBLE_DRIVER). AETHER_VULKAN_LOADER names the
-        # loader MSYS2 installed beside that driver.
+        # lavapipe was registered in the step above; the same loader again.
         export AETHER_VULKAN_LOADER="$(cygpath -w /mingw64/bin/vulkan-1.dll)"
-        export VK_DRIVER_FILES="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
         for name in offscreen formats compute raw present; do
           out="$(cd build/contrib-check/vulkan_${name}.rundir && ../vulkan_${name}.exe 2>&1 || true)"
           echo "$out" | tail -4
