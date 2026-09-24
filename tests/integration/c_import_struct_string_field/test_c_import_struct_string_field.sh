@@ -34,8 +34,11 @@ fi
 
 expected="pointer: hello 5
 pointer, runtime string: world
+C sees: 5
+C sees in a literal: 3
 literal: world 5
 nested: 7 nested
+returned: val 42 42
 OK"
 if [ "$(tr -d '\r' < "$tmpdir/run.out")" != "$expected" ]; then
     echo "  [FAIL] c_import_struct_string_field: unexpected output"

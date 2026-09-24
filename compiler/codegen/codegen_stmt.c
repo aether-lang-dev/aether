@@ -1533,10 +1533,39 @@ static int emit_field_tracker_from_rhs(CodeGenerator* gen, ASTNode* rhs,
     return 1;
 }
 
+/* A `string` field of a header-defined struct (`extern struct ... @c_import`)
+ * is the header's `const char*`, read by C. An Aether string may be a wrapped
+ * AetherString (interpolation, substring and the like build one), whose
+ * header would reach C in place of the characters, so the store takes the
+ * payload with aether_string_data, as a call to a C extern does. Any spelling
+ * of the object: a value (`v.f`), a pointer (`p.f`), a nested path
+ * (`t.inner.f`). The field borrows (see the escape walk); nothing is freed. */
+static int emit_c_import_string_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    if (lhs->type != AST_MEMBER_ACCESS || lhs->child_count != 1 || !lhs->children[0]) return 0;
+    if (!lhs->node_type || lhs->node_type->kind != TYPE_STRING) return 0;
+    Type* ot = lhs->children[0]->node_type;
+    const char* sname = NULL;
+    if (ot && ot->kind == TYPE_STRUCT) sname = ot->struct_name;
+    else if (ot && ot->kind == TYPE_PTR && ot->element_type &&
+             ot->element_type->kind == TYPE_STRUCT) sname = ot->element_type->struct_name;
+    if (!sname || !aether_is_c_import_struct(sname)) return 0;
+    print_indent(gen);
+    gen->generating_lvalue = 1;
+    generate_expression(gen, lhs);
+    gen->generating_lvalue = 0;
+    /* NULL stays NULL: aether_string_data maps it to "", and a C field told
+     * apart from an empty string by being NULL must stay so. */
+    fprintf(gen->output, " = ({ const void* _ae_cs = (const void*)(");
+    generate_expression(gen, rhs);
+    fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; });\n");
+    return 1;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
     if (lhs->child_count != 1 || !lhs->children[0]) return 0;
+    if (emit_c_import_string_field_store(gen, lhs, rhs)) return 1;
     /* #1879: a nested path (`o.inner.name`) has a MEMBER_ACCESS object rather
      * than a bare identifier. Handle it separately -- the code below splices
      * the object in as a name. */
@@ -3119,6 +3148,25 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
             escape_walk(gen, lhs, NULL);
             escape_walk(gen, rhs, NULL);
             return;
+        }
+    }
+
+    /* A literal of a header-defined struct (`extern struct ... @c_import`):
+     * its string fields BORROW (no `_heap_<field>` to move ownership into),
+     * and the value may outlive this activation (returned, stored, handed
+     * to C). A heap-tracked local named in a field therefore escapes, as it
+     * does when stored with `s.field = v`: kept alive rather than freed at
+     * exit under the struct that still points at it. */
+    if (node->type == AST_STRUCT_LITERAL && node->value &&
+        aether_is_c_import_struct(node->value)) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* fi = node->children[i];
+            if (fi && fi->type == AST_ASSIGNMENT && fi->child_count > 0 &&
+                fi->children[0] && fi->children[0]->type == AST_IDENTIFIER &&
+                fi->children[0]->value &&
+                is_heap_string_var(gen, fi->children[0]->value)) {
+                mark_escaped_string_var(gen, fi->children[0]->value);
+            }
         }
     }
 

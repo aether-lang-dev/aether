@@ -18,4 +18,11 @@ struct tagged {
     struct label label;
 };
 
+/* What C sees in the field: its length by strlen, -1 for NULL. A wrapped
+ * Aether string stored as is would show its header's bytes instead. */
+#include <string.h>
+static inline int label_c_length(const struct label* l) {
+    return l->text ? (int)strlen(l->text) : -1;
+}
+
 #endif

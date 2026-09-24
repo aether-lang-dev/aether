@@ -6026,7 +6026,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if (emitted > 0) fprintf(gen->output, ", ");
                     fprintf(gen->output, ".%s = ", field_init->value);
                     if (field_init->child_count > 0) {
-                        generate_expression(gen, field_init->children[0]);
+                        /* A header-defined struct's string field is C's
+                         * `const char*`: the payload, not a wrapped
+                         * AetherString (see emit_c_import_string_field_store). */
+                        ASTNode* fv = field_init->children[0];
+                        int unwrap = c_imported && fv && fv->node_type &&
+                                     fv->node_type->kind == TYPE_STRING;
+                        /* NULL stays NULL, as in the field store. */
+                        if (unwrap) fprintf(gen->output, "({ const void* _ae_cs = (const void*)(");
+                        generate_expression(gen, fv);
+                        if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }
                     emitted++;
                     /* If the init is heap-classified, also set the hidden
