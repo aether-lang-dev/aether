@@ -6,6 +6,10 @@
 //   siphash24      — SipHash-2-4, a KEYED PRF: DoS-resistant hashmap seeding
 //                    and short-message MACs. Not a general crypto hash, but
 //                    unlike the others it is keyed and hash-flood resistant.
+//   crc32          — CRC-32 (IEEE 802.3, the reflected 0xEDB88320
+//                    polynomial): the checksum PNG chunks, gzip members and
+//                    ZIP entries carry. crc32_update continues one across
+//                    several pieces of input.
 //
 // Input is a byte string (embedded NULs honoured via the supplied length).
 // Results are the exact 32-/64-bit unsigned values the reference algorithms
@@ -17,9 +21,10 @@
 
 import std.string
 import std.bits
+import std.bytes
 
 exports(
-    fnv32, fnv64, murmur3_32, siphash24
+    fnv32, fnv64, murmur3_32, siphash24, crc32, crc32_update
 )
 
 // FNV-1a 32-bit. offset basis 0x811c9dc5, prime 0x01000193. Returned as a
@@ -198,4 +203,59 @@ siphash24(data: string, length: int, k0: long, k1: long) -> long {
     v0, v1, v2, v3 = sipround(v0, v1, v2, v3)
 
     return v0 ^ v1 ^ v2 ^ v3
+}
+
+// ---- CRC-32 (IEEE 802.3) ----------------------------------------------------
+// The reflected table, built once on first use: 256 entries of the CRC of
+// each byte value, so the checksum costs one lookup per input byte.
+
+var g_crc32_table: ptr = null
+
+fn crc32_table() -> ptr {
+    if g_crc32_table != null { return g_crc32_table }
+    t = bytes.new(256 * 4)
+    bytes.set_length(t, 256 * 4)
+    let poly: long = 0xEDB88320
+    let mask: long = 0xFFFFFFFF
+    n = 0
+    while n < 256 {
+        let c: long = n as long
+        k = 0
+        while k < 8 {
+            if (c & 1) == 1 {
+                c = (poly ^ (c >> 1)) & mask
+            } else {
+                c = (c >> 1) & mask
+            }
+            k = k + 1
+        }
+        bytes.set_le32(t, n * 4, c as int)
+        n = n + 1
+    }
+    g_crc32_table = t
+    return t
+}
+
+// Continues a CRC-32 over `length` more bytes of `data`: pass the value a
+// previous crc32 / crc32_update returned (0 to start), and the result is the
+// CRC of everything so far, as crc32 of the whole input would be. Returned as
+// the unsigned 32-bit value in a `long`.
+crc32_update(crc: long, data: string, length: int) -> long {
+    t = crc32_table()
+    let mask: long = 0xFFFFFFFF
+    let c: long = (crc ^ mask) & mask
+    i = 0
+    while i < length {
+        b = (string.char_at_n(data, length, i) & 255) as long
+        idx = ((c ^ b) & 255) as int
+        entry = (bytes.get_le32(t, idx * 4) as long) & mask
+        c = (entry ^ (c >> 8)) & mask
+        i = i + 1
+    }
+    return (c ^ mask) & mask
+}
+
+// CRC-32 of `length` bytes of `data`.
+crc32(data: string, length: int) -> long {
+    return crc32_update(0, data, length)
 }
