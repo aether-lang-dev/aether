@@ -18,6 +18,10 @@ swapchains over a window someone else owns. A program written against one
 reads the same against the others. What differs is below: the shading
 language, where resources sit in it, and the coordinate conventions.
 
+A target feeds one vertex stream, binding 0, from the vertices reserved on it;
+a layout that declares another binding is refused when the pipeline is made,
+in all three, rather than drawn from a buffer that is never bound.
+
 For anything the shared shape does not cover,
 [`contrib.vulkan.vk`](../contrib/vulkan/README.md#the-vulkan-api-directly-contribvulkanvk)
 is the Vulkan API itself, generated from the Khronos registry.
@@ -152,3 +156,14 @@ Each leg asserts that the tests ran instead of skipping, because a GPU test
 that quietly skips on a machine that has the driver is coverage lost. The
 exceptions are the cases the window fixture cannot do on a platform, which
 each test names: reading the screen back on macOS, for example.
+
+## Not here yet
+
+Each gap has an issue:
+
+| Missing | Issue |
+|---|---|
+| Sampling a target's colour or depth in a later pass, 3D textures, indirect draws, dynamic uniform offsets, GPU timestamps, and a second vertex stream for per-instance data, in all three modules | [#2198](https://github.com/aether-lang-dev/aether/issues/2198) |
+| Making a `VkSurfaceKHR` from a window handle on a program's own instance, for `contrib.vulkan.vk` | [#2199](https://github.com/aether-lang-dev/aether/issues/2199) |
+| Running Wayland presentation in CI | [#2197](https://github.com/aether-lang-dev/aether/issues/2197) |
+| `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

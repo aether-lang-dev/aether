@@ -284,6 +284,9 @@ for entry in "${TESTS[@]}"; do
     extra_toml=""
     for c in $extras; do
       case "$c" in /*) abs_c="$c" ;; *) abs_c="$(pwd)/$c" ;; esac
+      # Under MSYS2 the shell's /d/... spelling means nothing to the native
+      # ae and gcc that read aether.toml; hand them the Windows path.
+      if command -v cygpath >/dev/null 2>&1; then abs_c="$(cygpath -m "$abs_c")"; fi
       extra_toml="$extra_toml\"$abs_c\", "
     done
     {

@@ -483,9 +483,10 @@ jobs:
           echo "$out" | tail -4
           passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
           skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
-          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
             echo "contrib/vulkan ${name} did not run; lavapipe and Xvfb should be present on this leg"
-            echo "  passing=${passing:-none} skipped=${skipped:-0}"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
             exit 1
           fi
         done
@@ -497,7 +498,7 @@ jobs:
     # anything but a pass fails the leg.
     - name: Check contrib/vulkan's generated declarations against the registry
       run: |
-        out="$(sh tests/integration/vulkan_vkgen/test_vulkan_vkgen.sh 2>&1)" || { echo "$out"; exit 1; }
+        out="$(VKGEN_REQUIRE_RELEASE=1 sh tests/integration/vulkan_vkgen/test_vulkan_vkgen.sh 2>&1)" || { echo "$out"; exit 1; }
         echo "$out"
         echo "$out" | grep -q '\[PASS\] vulkan_vkgen'
 
@@ -521,6 +522,12 @@ jobs:
   ci-contrib-macos:
     name: contrib GPU tests (macOS)
     runs-on: macos-latest
+
+    # `shell: bash` is what GitHub runs with -o pipefail; the default does
+    # not, and `make contrib-check | tee` would then report tee's status.
+    defaults:
+      run:
+        shell: bash
 
     steps:
     - uses: actions/checkout@v4
@@ -558,9 +565,10 @@ jobs:
           echo "$out" | tail -4
           passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
           skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
-          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
             echo "contrib ${name} did not run on this runner's GPU"
-            echo "  passing=${passing:-none} skipped=${skipped:-0}"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
             exit 1
           fi
         done
@@ -674,6 +682,7 @@ jobs:
       # selects its own: the loader branch, the Win32 surface and the
       # swapchain all execute here, not only compile.
       run: |
+        set -o pipefail
         export VK_DRIVER_FILES="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
         make contrib-check 2>&1 | tee contrib-windows.log
         echo ""
@@ -691,9 +700,10 @@ jobs:
           echo "$out" | tail -4
           passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
           skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
-          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ -n "$skipped" ]; then
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ -n "$skipped" ]; then
             echo "contrib/vulkan ${name} did not run on lavapipe"
-            echo "  passing=${passing:-none} skipped=${skipped:-0}"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
             exit 1
           fi
         done
@@ -708,9 +718,10 @@ jobs:
           echo "$out" | tail -4
           passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
           skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
-          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ -n "$skipped" ]; then
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ -n "$skipped" ]; then
             echo "contrib/d3d12 ${name} did not run on WARP"
-            echo "  passing=${passing:-none} skipped=${skipped:-0}"
+            echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
             exit 1
           fi
         done
