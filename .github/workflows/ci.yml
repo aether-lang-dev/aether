@@ -683,7 +683,11 @@ jobs:
       # swapchain all execute here, not only compile.
       run: |
         set -o pipefail
+        # Both names: VK_DRIVER_FILES is what loaders from 1.3.207 read,
+        # VK_ICD_FILENAMES what older ones read, and a Windows program loads
+        # whichever vulkan-1.dll the DLL search finds first.
         export VK_DRIVER_FILES="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
+        export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
         make contrib-check 2>&1 | tee contrib-windows.log
         echo ""
         echo "contrib/vulkan on this runner:"
@@ -694,7 +698,11 @@ jobs:
     # coverage silently lost. The same assertion as the Linux leg's.
     - name: Assert the Vulkan tests actually ran
       run: |
+        # Both names: VK_DRIVER_FILES is what loaders from 1.3.207 read,
+        # VK_ICD_FILENAMES what older ones read, and a Windows program loads
+        # whichever vulkan-1.dll the DLL search finds first.
         export VK_DRIVER_FILES="$(cygpath -w /mingw64/share/vulkan/icd.d/lvp_icd.x86_64.json)"
+        export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
         for name in offscreen formats compute raw present; do
           out="$(cd build/contrib-check/vulkan_${name}.rundir && ../vulkan_${name}.exe 2>&1 || true)"
           echo "$out" | tail -4
@@ -704,6 +712,14 @@ jobs:
           if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ -n "$skipped" ]; then
             echo "contrib/vulkan ${name} did not run on lavapipe"
             echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+            # What the loader saw: which vulkan-1.dll the search found, and
+            # the loader's own account of the drivers it tried.
+            echo "vulkan-1.dll on the DLL search path:"
+            cmd //c "where vulkan-1.dll" || true
+            ls -l /c/Windows/System32/vulkan-1.dll 2>&1 || true
+            (cd build/contrib-check/vulkan_${name}.rundir &&
+             VK_LOADER_DEBUG=error,warn,driver ../vulkan_${name}.exe 2>&1 |
+             grep "Vulkan Loader" | grep -v "registry_entry" | head -40) || true
             exit 1
           fi
         done
