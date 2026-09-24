@@ -14,6 +14,130 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.715.0]
+
+### Added
+
+- **`contrib.templating.liquid`: layouts can have layouts (#2183).** A
+  template whose `{% layout %}` (or `{% extends %}`) parent itself declares
+  a layout used to fail with `layout: nested layouts are not supported`. The
+  whole chain now renders, to any depth: the base (the template with no
+  layout) renders the page, and each `{% block %}` in it comes from the most
+  derived template that defines it. `{{ block.super }}` is the same block
+  one level up, which may use its own `block.super`, down to the base's
+  default. A parent reached twice is reported as a cycle, and the chain
+  counts against the include depth limit.
+
+### Fixed
+
+- **A local bound in an `if` arm or a `while` body can be read after the
+  block in any function, not only in `main` (#2186).**
+
+  ```aether
+  show(c: int) {
+      if c == 1 { heading = "A" } else { heading = "B" }
+      println(heading)    // was: error[E0300]: Undefined variable 'heading'
+  }
+  ```
+
+  Codegen always supported this. It declares such a local in an enclosing
+  scope by three rules:
+  - the arm locals of a function body's top-level `if`s that a top-level
+    statement reads;
+  - the names both arms of an `if/else` declare, at any depth;
+  - a `while` body's locals, including those nested in it.
+
+  But the typechecker gave every block its own scope, so the read after it
+  resolved only through the names the early inference pass had left in the
+  program table. It left them for `main`, whose locals it never popped, and
+  never for any other function.
+
+  The three rules now live in one place, `compiler/analysis/hoist.c`, which
+  codegen and the typechecker both use. The typechecker declares each name
+  where codegen declares it, with the same joined type, so a read the
+  generated C allows is accepted and a read it would reject is an
+  `Undefined variable` error from the typechecker, not a C compiler's
+  "undeclared". Codegen output is unchanged: 425 of 427 regression tests
+  and examples generate byte-identical C before and after. The other two
+  are the float-fold test, whose change is intended, and one file that
+  fails on both.
+
+  With that, inference pops `main`'s locals like any function's, and they
+  stopped leaking: a local in `main` no longer shadows or retypes a function,
+  extern or local of the same name for everything checked after it. That
+  completes #2173 for `main`. New test:
+  `tests/integration/hoisted_local_scope`. The `main` case is back in
+  `local_shadows_module_extern`.
+
+- **`contrib.templating.liquid`: the arithmetic filters compute as Liquid
+  does, with decimals and without overflow (#2185).** `plus`, `minus`,
+  `times`, `divided_by`, `modulo`, `at_least` and `at_most` were 32-bit
+  integer arithmetic, and a decimal operand was an error (before #1558 it
+  was silently read as 0). They now work on exact decimals, as Liquid's
+  Ruby numbers do:
+  - A decimal on either side gives an exact decimal result
+    (`0.1 | plus: 0.2` is `0.3`, `0.3 | divided_by: 0.1` is `3.0`), printed
+    as Ruby prints the Float nearest to it (`10 | divided_by: 3.0` is
+    `3.3333333333333335`, and `1.0e+17` and `1.0e-05` beyond the range Ruby
+    writes in full).
+  - Integers stay integers and no longer overflow
+    (`99999999999 | times: 99999999999` is `9999999999800000000001`).
+  - Integer division and modulo floor, as Ruby's do. They used to truncate,
+    so `-7 | divided_by: 2` printed `-3` where Liquid prints `-4`, and
+    `-7 | modulo: 3` printed `-1` where Liquid prints `2`.
+  - `at_least` / `at_most` return the chosen operand in its own shape.
+
+  `abs` and `round` print decimals through the same Float formatting, and
+  a result past a double's range prints `Infinity` (or `0.0` when too
+  small), signed, as Ruby's `to_f` does. The arithmetic itself is
+  `std.bignum`'s.
+
+  A float binding (`context_put_float`) also prints as Liquid prints a
+  Float. It was formatted with `%g`, so it kept 6 significant digits, `3.0`
+  printed `3`, and `1e20` became `1e+20`, which arithmetic then read as
+  the integer 1. It is now `3.0` and `1.0e+20`, and arithmetic reads the
+  latter back as the same number.
+
+- **A constant float expression that overflows to infinity compiles.** The
+  optimizer folded `1.0e308 * 10.0` at compile time and printed the result
+  with `%.17g`, which spells infinity `inf`, so the generated C
+  (`double big = inf;`) failed with "'inf' undeclared". Like a division by
+  zero, a fold whose result is not finite is now left to the runtime, which
+  computes the same IEEE value. `tests/regression/test_float_fold_overflow.ae`
+  covers both signs.
+
+- **`contrib.templating.liquid`: a filter argument can name a variable
+  (#2182).** `{{ price | times: qty }}` and `{{ a | append: sep }}` failed at
+  render with `filter arg must be a quoted string or a number`, because a
+  filter got its arguments as text with no render context to look a name
+  up in. An argument that names a variable is now resolved first, the way
+  a condition's operands are, in output and in `assign` alike. A value
+  containing quotes passes through intact, and an unbound name reads as
+  empty. The module also stops warning `unused variable 'cn'` in every
+  program that imports it.
+
+### Performance
+
+- **`contrib.templating.liquid`: a partial cache (#2184).** Every
+  `{% include %}`, `{% render %}` and layout parent was read from disk and
+  parsed at every use. `liquid.partial_cache_new()`, attached with
+  `context_set_partial_cache`, parses each once, keyed by resolved path. The
+  include root is still checked at every use, and `{% render %}`'s fresh
+  context shares the cache. A page that includes one partial 200 times,
+  rendered 20 times, went from 4,000 reads and parses and 162 ms to one and
+  39 ms. `liquid.partial_loads()` counts reads and parses, so the saving can
+  be measured.
+
+  The cache lives under a context key no template can name. A tag or
+  output body may no longer contain a control character (other than tab,
+  CR and LF), which no Liquid syntax uses, so a template can neither read
+  nor write it.
+
+  Parsed templates can now be released too. `liquid.template_free(t)` frees
+  what `parse_string` / `parse_file` return, and an uncached include or
+  layout parent is freed after use. Each used to stay allocated for the
+  life of the program.
+
 ## [0.714.0]
 
 ### Added
