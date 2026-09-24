@@ -143,133 +143,39 @@ static const char* const k_loader_names[] = {
     NULL
 };
 
-#define AEVK_GLOBAL_FNS(X)          \
-    X(vkCreateInstance)             \
-    X(vkEnumerateInstanceExtensionProperties)
-
-#define AEVK_INSTANCE_FNS(X)                    \
-    X(vkDestroyInstance)                        \
-    X(vkEnumeratePhysicalDevices)               \
-    X(vkGetPhysicalDeviceProperties)            \
-    X(vkGetPhysicalDeviceMemoryProperties)      \
-    X(vkGetPhysicalDeviceQueueFamilyProperties) \
-    X(vkGetPhysicalDeviceFormatProperties)      \
-    X(vkEnumerateDeviceExtensionProperties)     \
-    X(vkCreateDevice)                           \
-    X(vkGetDeviceProcAddr)
-
-/* Resolved through vkGetDeviceProcAddr, not the loader's exported symbols:
- * those go straight to the driver and skip the loader's dispatch trampoline. */
-#define AEVK_DEVICE_FNS(X)          \
-    X(vkDestroyDevice)              \
-    X(vkGetDeviceQueue)             \
-    X(vkDeviceWaitIdle)             \
-    X(vkQueueSubmit)                \
-    X(vkQueueWaitIdle)              \
-    X(vkCreateCommandPool)          \
-    X(vkDestroyCommandPool)         \
-    X(vkAllocateCommandBuffers)     \
-    X(vkFreeCommandBuffers)         \
-    X(vkBeginCommandBuffer)         \
-    X(vkEndCommandBuffer)           \
-    X(vkResetCommandBuffer)         \
-    X(vkCreateFence)                \
-    X(vkDestroyFence)               \
-    X(vkResetFences)                \
-    X(vkWaitForFences)              \
-    X(vkCreateImage)                \
-    X(vkDestroyImage)               \
-    X(vkGetImageMemoryRequirements) \
-    X(vkBindImageMemory)            \
-    X(vkCreateImageView)            \
-    X(vkDestroyImageView)           \
-    X(vkCreateRenderPass)           \
-    X(vkDestroyRenderPass)          \
-    X(vkCreateFramebuffer)          \
-    X(vkDestroyFramebuffer)         \
-    X(vkCreateBuffer)               \
-    X(vkDestroyBuffer)              \
-    X(vkGetBufferMemoryRequirements)\
-    X(vkBindBufferMemory)           \
-    X(vkAllocateMemory)             \
-    X(vkFreeMemory)                 \
-    X(vkMapMemory)                  \
-    X(vkUnmapMemory)                \
-    X(vkCreateShaderModule)         \
-    X(vkDestroyShaderModule)        \
-    X(vkCreatePipelineLayout)       \
-    X(vkDestroyPipelineLayout)      \
-    X(vkCreateGraphicsPipelines)    \
-    X(vkDestroyPipeline)            \
-    X(vkCmdBeginRenderPass)         \
-    X(vkCmdEndRenderPass)           \
-    X(vkCmdBindPipeline)            \
-    X(vkCmdBindVertexBuffers)       \
-    X(vkCmdSetViewport)             \
-    X(vkCmdSetScissor)              \
-    X(vkCmdDraw)                    \
-    X(vkCmdCopyImageToBuffer)       \
-    X(vkCmdPushConstants)           \
-    X(vkCmdBindIndexBuffer)         \
-    X(vkCmdDrawIndexed)             \
-    X(vkCreateDescriptorSetLayout)  \
-    X(vkDestroyDescriptorSetLayout) \
-    X(vkCreateDescriptorPool)       \
-    X(vkDestroyDescriptorPool)      \
-    X(vkAllocateDescriptorSets)     \
-    X(vkUpdateDescriptorSets)       \
-    X(vkCmdBindDescriptorSets)      \
-    X(vkCreateSampler)              \
-    X(vkDestroySampler)             \
-    X(vkCmdPipelineBarrier)         \
-    X(vkCmdCopyBufferToImage)       \
-    X(vkCmdBlitImage)               \
-    X(vkCmdCopyImage)               \
-    X(vkCreateSemaphore)            \
-    X(vkDestroySemaphore)           \
-    X(vkCreateComputePipelines)     \
-    X(vkCmdDispatch)
-
-/* Presentation (#1505). Optional: loaded only when the loader and device
- * advertise the extensions, and NULL otherwise, so a driver without a
- * window system still renders offscreen. */
-#define AEVK_SURFACE_FNS(X)                          \
-    X(vkDestroySurfaceKHR)                           \
-    X(vkGetPhysicalDeviceSurfaceSupportKHR)          \
-    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)     \
-    X(vkGetPhysicalDeviceSurfaceFormatsKHR)          \
-    X(vkGetPhysicalDeviceSurfacePresentModesKHR)
-
-#define AEVK_SWAPCHAIN_FNS(X)       \
-    X(vkCreateSwapchainKHR)         \
-    X(vkDestroySwapchainKHR)        \
-    X(vkGetSwapchainImagesKHR)      \
-    X(vkAcquireNextImageKHR)        \
-    X(vkQueuePresentKHR)
+/* The entry points this file loads, as X-macro lists generated from the
+ * Vulkan registry by tools/vkgen.ae (#1506): one list per feature or
+ * extension and loading level, from tools/dispatch_commands.txt. GLOBAL and
+ * INSTANCE ones come from vkGetInstanceProcAddr; DEVICE ones from
+ * vkGetDeviceProcAddr, which returns the driver's own function and skips the
+ * loader's dispatch trampoline. The window-system lists (#1505) are loaded
+ * only when the loader and device advertise those extensions, and are NULL
+ * otherwise, so a driver without a window system still renders offscreen. */
+#include "aether_vulkan_dispatch.h"
 
 #define AEVK_DECL(name) PFN_##name name;
 
 typedef struct {
     AEVK_GLOBAL_FNS(AEVK_DECL)
     AEVK_INSTANCE_FNS(AEVK_DECL)
-    AEVK_SURFACE_FNS(AEVK_DECL)
+    AEVK_KHR_SURFACE_FNS(AEVK_DECL)
 #if defined(AEVK_HAVE_WIN32_SURFACE)
-    PFN_vkCreateWin32SurfaceKHR   vkCreateWin32SurfaceKHR;
+    AEVK_KHR_WIN32_SURFACE_FNS(AEVK_DECL)
 #endif
 #if defined(AEVK_HAVE_METAL_SURFACE)
-    PFN_vkCreateMetalSurfaceEXT   vkCreateMetalSurfaceEXT;
+    AEVK_EXT_METAL_SURFACE_FNS(AEVK_DECL)
 #endif
 #if defined(AEVK_HAVE_WAYLAND_SURFACE)
-    PFN_vkCreateWaylandSurfaceKHR vkCreateWaylandSurfaceKHR;
+    AEVK_KHR_WAYLAND_SURFACE_FNS(AEVK_DECL)
 #endif
 #if defined(AEVK_HAVE_XLIB_SURFACE)
-    PFN_vkCreateXlibSurfaceKHR    vkCreateXlibSurfaceKHR;
+    AEVK_KHR_XLIB_SURFACE_FNS(AEVK_DECL)
 #endif
 } AevkInstanceApi;
 
 typedef struct {
     AEVK_DEVICE_FNS(AEVK_DECL)
-    AEVK_SWAPCHAIN_FNS(AEVK_DECL)
+    AEVK_KHR_SWAPCHAIN_FNS(AEVK_DECL)
 } AevkDeviceApi;
 
 #undef AEVK_DECL
@@ -606,24 +512,20 @@ static int aevk_load_device_api(AevkDeviceApi* da, PFN_vkGetDeviceProcAddr gdpa,
  * name rather than calling through. */
 static void aevk_load_surface_api(AevkInstanceApi* ia, VkInstance inst, int have_surface) {
 #define AEVK_LOAD_OPT(name) ia->name = have_surface ? (PFN_##name)g_gipa(inst, #name) : NULL;
-    AEVK_SURFACE_FNS(AEVK_LOAD_OPT)
-#undef AEVK_LOAD_OPT
+    AEVK_KHR_SURFACE_FNS(AEVK_LOAD_OPT)
 #if defined(AEVK_HAVE_WIN32_SURFACE)
-    ia->vkCreateWin32SurfaceKHR =
-        (PFN_vkCreateWin32SurfaceKHR)g_gipa(inst, "vkCreateWin32SurfaceKHR");
+    AEVK_KHR_WIN32_SURFACE_FNS(AEVK_LOAD_OPT)
 #endif
 #if defined(AEVK_HAVE_METAL_SURFACE)
-    ia->vkCreateMetalSurfaceEXT =
-        (PFN_vkCreateMetalSurfaceEXT)g_gipa(inst, "vkCreateMetalSurfaceEXT");
+    AEVK_EXT_METAL_SURFACE_FNS(AEVK_LOAD_OPT)
 #endif
 #if defined(AEVK_HAVE_WAYLAND_SURFACE)
-    ia->vkCreateWaylandSurfaceKHR =
-        (PFN_vkCreateWaylandSurfaceKHR)g_gipa(inst, "vkCreateWaylandSurfaceKHR");
+    AEVK_KHR_WAYLAND_SURFACE_FNS(AEVK_LOAD_OPT)
 #endif
 #if defined(AEVK_HAVE_XLIB_SURFACE)
-    ia->vkCreateXlibSurfaceKHR =
-        (PFN_vkCreateXlibSurfaceKHR)g_gipa(inst, "vkCreateXlibSurfaceKHR");
+    AEVK_KHR_XLIB_SURFACE_FNS(AEVK_LOAD_OPT)
 #endif
+#undef AEVK_LOAD_OPT
 }
 
 /* Creates an instance, enabling the portability enumeration extension when the
@@ -903,7 +805,7 @@ AevkDevice* aevk_device_create(void) {
     }
     if (want_swapchain) {
 #define AEVK_LOAD_SC(name) d->da.name = (PFN_##name)d->ia.vkGetDeviceProcAddr(d->device, #name);
-        AEVK_SWAPCHAIN_FNS(AEVK_LOAD_SC)
+        AEVK_KHR_SWAPCHAIN_FNS(AEVK_LOAD_SC)
 #undef AEVK_LOAD_SC
         d->can_present = d->da.vkCreateSwapchainKHR && d->da.vkDestroySwapchainKHR &&
                          d->da.vkGetSwapchainImagesKHR && d->da.vkAcquireNextImageKHR &&
@@ -4789,10 +4691,12 @@ static const unsigned char* aevk_readable_pixels(AevkTarget* t) {
     return (const unsigned char*)t->frames[slot].readback_ptr;
 }
 
-/* Packed 0xRRGGBBAA for one pixel, or -1 when the coordinates are outside the
- * image. Reads the mapped buffer directly, so a test can sample without
+/* Packed 0xRRGGBBAA for one pixel, as a non-negative 64-bit value, or -1 when
+ * the coordinates are outside the image or there is no frame to read. 64 bits
+ * so that every colour, opaque white (0xFFFFFFFF) included, is distinct from
+ * the failure. Reads the mapped buffer directly, so a test can sample without
  * copying the whole frame. */
-int aevk_ae_pixel(void* tp, int x, int y) {
+int64_t aevk_ae_pixel(void* tp, int x, int y) {
     AevkTarget* t = (AevkTarget*)tp;
     aevk_clear_error();
     if (!t) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
@@ -4808,10 +4712,10 @@ int aevk_ae_pixel(void* tp, int x, int y) {
     if (!base) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
     const unsigned char* px =
         base + ((size_t)y * (size_t)t->width + (size_t)x) * (size_t)t->bytes_per_pixel;
-    return (int)(((unsigned)aevk_channel_u8(t, px, 0) << 24) |
-                 ((unsigned)aevk_channel_u8(t, px, 1) << 16) |
-                 ((unsigned)aevk_channel_u8(t, px, 2) << 8)  |
-                  (unsigned)aevk_channel_u8(t, px, 3));
+    return (int64_t)(((uint32_t)aevk_channel_u8(t, px, 0) << 24) |
+                     ((uint32_t)aevk_channel_u8(t, px, 1) << 16) |
+                     ((uint32_t)aevk_channel_u8(t, px, 2) << 8)  |
+                      (uint32_t)aevk_channel_u8(t, px, 3));
 }
 
 /* One channel of one pixel at full precision: the float value for the float
@@ -5025,3 +4929,49 @@ int aevk_ae_dispatch_async(void* c, int gx, int gy, int gz) {
     return aevk_dispatch_async((AevkCompute*)c, gx, gy, gz);
 }
 int aevk_ae_compute_wait(void* c) { return aevk_compute_wait((AevkCompute*)c); }
+
+/* The loader's entry points for contrib.vulkan.vk, the generated module that
+ * drives the API directly (#1506). It goes through the loader this file
+ * opens at runtime rather than linking one, so a program using it starts
+ * where there is no Vulkan and learns so from the results, as one using the
+ * rest of the module does. Each returns NULL where there is no loader or no
+ * such entry point. */
+
+/* An entry point the loader exports: every core command and the window-
+ * system ones (surface, swapchain), each dispatching on its first handle. */
+void* aevk_ae_loader_proc(const char* name) {
+    if (!name || aevk_load_library() != AEVK_OK) return NULL;
+    return (void*)AEVK_DLSYM(g_lib, name);
+}
+
+/* vkGetInstanceProcAddr: `instance` may be NULL for the global commands. */
+void* aevk_ae_instance_proc(void* instance, const char* name) {
+    if (!name || aevk_load_library() != AEVK_OK) return NULL;
+    return (void*)g_gipa((VkInstance)instance, name);
+}
+
+/* vkGetDeviceProcAddr: the driver's own entry, skipping the loader's
+ * dispatch, for a command whose first handle belongs to `device`. */
+void* aevk_ae_device_proc(void* device, const char* name) {
+    if (!name || !device || aevk_load_library() != AEVK_OK) return NULL;
+    PFN_vkGetDeviceProcAddr gdpa =
+        (PFN_vkGetDeviceProcAddr)AEVK_DLSYM(g_lib, "vkGetDeviceProcAddr");
+    if (!gdpa) return NULL;
+    return (void*)gdpa((VkDevice)device, name);
+}
+
+/* The arrays contrib.vulkan.vk's <command>_all helpers fill: zeroed, and
+ * NULL when count * size overflows or memory runs out. */
+void* aevk_ae_array_alloc(int count, int size) {
+    if (count <= 0 || size <= 0 || (size_t)count > SIZE_MAX / (size_t)size) return NULL;
+    return calloc((size_t)count, (size_t)size);
+}
+
+void aevk_ae_array_free(void* p) { free(p); }
+
+/* sizeof a handle, which Aether cannot spell: a dispatchable one is a
+ * pointer, a non-dispatchable one a pointer on 64-bit targets and a
+ * uint64_t on 32-bit ones. */
+int aevk_ae_handle_size(int dispatchable) {
+    return dispatchable ? (int)sizeof(VkInstance) : (int)sizeof(VkSemaphore);
+}

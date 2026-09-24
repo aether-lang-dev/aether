@@ -151,6 +151,8 @@ main() {
             spec.assert_eq(string.char_at_n(data, n, 3) & 255, 71, "...PNG")
             string.free(data)
             spec.assert_eq(vulkan.save_ppm(t, "vulkan_formats.ppm"), 0, "save_ppm still works")
+            spec.assert_str_eq(fs.delete(path), "", "PNG removed")
+            spec.assert_str_eq(fs.delete("vulkan_formats.ppm"), "", "PPM removed")
             vulkan.target_destroy(t)
         }
 

@@ -1,0 +1,1430 @@
+// vkgen: Aether and C declarations generated from the Vulkan registry (#1506).
+//
+// The Vulkan headers are themselves generated from registry/vk.xml, which
+// carries what the headers have thrown away: which version or extension
+// introduced each symbol, and what every command's first parameter makes it
+// (a global, instance-level or device-level entry point). This program
+// streams the registry with std.xml and writes two things from it:
+//
+//   --module <file>      contrib.vulkan.vk: every enum value and API constant
+//                        of the selection as an Aether const (the VK_ prefix
+//                        dropped: vk.FORMAT_R8G8B8A8_UNORM), every struct and
+//                        union as an `extern struct ... @c_import`, and every
+//                        command as a function that calls the entry point the
+//                        Vulkan loader resolves at runtime. A command the
+//                        registry marks as filling an array whose length another
+//                        parameter carries (the two-call idiom) also gets a
+//                        <command>_all that makes both calls and returns the
+//                        array, each element's sType filled in from the
+//                        registry.
+//   --dispatch <file>    the X-macro lists of entry points aether_vulkan.c
+//                        loads, from a list of command names (--commands),
+//                        grouped by the feature or extension that introduced
+//                        each and by the level it is loaded at.
+//
+// A selection is a core version and a set of extensions, not the whole
+// registry: `--api 1.3 --extensions VK_KHR_surface,VK_KHR_swapchain` takes
+// Vulkan 1.0 through 1.3 and those two extensions, with every type their
+// structs and commands reach.
+//
+//   ae build contrib/vulkan/tools/vkgen.ae -o build/vkgen
+//   build/vkgen --registry /usr/share/vulkan/registry/vk.xml --api 1.3 \
+//       --extensions VK_KHR_surface,VK_KHR_swapchain \
+//       --module contrib/vulkan/vk/module.ae
+//
+// contrib/vulkan/tools/regenerate.sh runs both with the selections the
+// repository commits.
+
+import std.fs
+import std.list
+import std.map
+import std.os
+import std.string
+import std.strbuilder
+import std.xml
+
+extern exit(code: int)
+
+// ---------------------------------------------------------------------------
+// The registry, held as strings in maps: a record is a map entry, and a list
+// of fields is tab-separated lines. The registry is read once and the maps
+// live until the program exits.
+// ---------------------------------------------------------------------------
+
+var g_cat: ptr = null            // type name -> category
+var g_alias: ptr = null          // type, command or enum name -> alias target
+var g_under: ptr = null          // basetype / bitmask / handle -> underlying C type
+var g_bits: ptr = null           // bitmask type -> its FlagBits enum
+var g_members: ptr = null        // struct / union -> member lines
+var g_union: ptr = null          // union name -> "1"
+var g_order: ptr = null          // struct and union names in registry order
+var g_enum_kind: ptr = null      // enums block -> enum | bitmask | constants
+var g_enum_width: ptr = null     // enums block -> "64" for 64-bit bitmasks
+var g_enum_values: ptr = null    // enums block -> value lines (name \t literal)
+var g_const_value: ptr = null    // API constant -> literal
+var g_const_type: ptr = null     // API constant -> uint32 | uint64 | f32 | int
+var g_enum_owner: ptr = null     // enum value name -> enums block
+var g_cmd_ret: ptr = null        // command -> return C type (with stars)
+var g_cmd_params: ptr = null     // command -> parameter lines
+var g_features: ptr = null       // feature names in registry order
+var g_feat_number: ptr = null    // feature -> "1.2"
+var g_ext_number: ptr = null     // extension -> number
+var g_ext_supported: ptr = null  // extension -> supported attribute
+var g_ext_platform: ptr = null   // extension -> platform, "" for none
+var g_reqs: ptr = null           // feature or extension -> requirement lines
+var g_order_owners: ptr = null   // features, then extensions, in registry order
+var g_header_patch: string = ""  // VK_HEADER_VERSION: 357
+var g_header_api: string = ""    // VK_HEADER_VERSION_COMPLETE's major.minor: 1.4
+
+str_of(v: string) -> string { return v }
+
+get(m: ptr, k: string) -> string {
+    if map_has(m, k) == 0 { return "" }
+    return str_of(map_get_raw(m, k))
+}
+
+put(m: ptr, k: string, v: string) {
+    map.put(m, k, string.concat(v, ""))
+}
+
+append_line(m: ptr, k: string, line: string) {
+    prev = get(m, k)
+    put(m, k, string.concat(prev, string.concat(line, "\n")))
+}
+
+die(msg: string) {
+    println("vkgen: ${msg}")
+    exit(1)
+}
+
+lines_of(s: string) -> ptr {
+    return string_split(s, "\n")
+}
+
+field(line: string, n: int) -> string {
+    parts = string_split(line, "\t")
+    out = ""
+    if n < string_array_size(parts) { out = string.concat(str_of(string_array_get(parts, n)), "") }
+    string_array_free(parts)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Numbers
+// ---------------------------------------------------------------------------
+
+hex_digit(v: long) -> string {
+    return string.substring("0123456789ABCDEF", v as int, (v as int) + 1)
+}
+
+hex_of(v: long) -> string {
+    if v == 0 { return "0x0" }
+    s = ""
+    x = v
+    n = 0
+    while n < 16 && x != 0 {
+        s = string.concat(hex_digit(x & 15), s)
+        x = (x >> 4) & 0x0FFFFFFFFFFFFFFF
+        n = n + 1
+    }
+    return string.concat("0x", s)
+}
+
+// A registry value as an Aether literal: suffixes dropped, `(~0U)` and
+// friends evaluated, floats kept as floats, string constants kept quoted.
+literal(raw: string) -> string {
+    v = string.trim(raw)
+    if string.starts_with(v, "\"") == 1 { return v }
+    if string.equals(v, "(~0U)") == 1 { return "0xFFFFFFFF" }
+    if string.equals(v, "(~1U)") == 1 { return "0xFFFFFFFE" }
+    if string.equals(v, "(~2U)") == 1 { return "0xFFFFFFFD" }
+    if string.equals(v, "(~0ULL)") == 1 { return "0xFFFFFFFFFFFFFFFF" }
+    if string.ends_with(v, "F") == 1 && string.contains(v, ".") == 1 {
+        return string.substring(v, 0, string.length(v) - 1)
+    }
+    while string.ends_with(v, "U") == 1 || string.ends_with(v, "L") == 1 {
+        v = string.substring(v, 0, string.length(v) - 1)
+    }
+    return v
+}
+
+// The value an extension or a later core version gives an enum it extends:
+// offset within the extension's block, or a bit, or a value, or an alias.
+ext_value(e_value: string, e_bitpos: string, e_offset: string, e_extnumber: string,
+          e_dir: string, owner_number: string) -> string {
+    if string.length(e_value) > 0 { return literal(e_value) }
+    if string.length(e_bitpos) > 0 {
+        pos, _e = string.to_long(e_bitpos)
+        return hex_of(1 << pos)
+    }
+    if string.length(e_offset) > 0 {
+        num = owner_number
+        if string.length(e_extnumber) > 0 { num = e_extnumber }
+        n, _e1 = string.to_long(num)
+        off, _e2 = string.to_long(e_offset)
+        v = 1000000000 + (n - 1) * 1000 + off
+        if string.equals(e_dir, "-") == 1 { v = 0 - v }
+        return string.from_long(v)
+    }
+    return ""
+}
+
+// ---------------------------------------------------------------------------
+// Reading the registry
+// ---------------------------------------------------------------------------
+
+// The declaration being read: a <member>, <param> or <proto>, or a type
+// defined by a C declaration. Its pieces are the text before the <type>, the
+// <type>, the text between it and the <name>, the <name>, and what follows
+// (an array bound or a bitfield width); g_d_part says which one text goes
+// to. One declaration is read at a time, so these are module state.
+var g_d_pre: string = ""
+var g_d_ctype: string = ""
+var g_d_mid: string = ""
+var g_d_name: string = ""
+var g_d_post: string = ""
+var g_d_part: int = 0
+
+decl_reset() {
+    g_d_pre = ""
+    g_d_ctype = ""
+    g_d_mid = ""
+    g_d_name = ""
+    g_d_post = ""
+    g_d_part = 0
+}
+
+decl_text(t: string) {
+    if g_d_part == 0 { g_d_pre = string.concat(g_d_pre, t) }
+    if g_d_part == 1 { g_d_ctype = string.concat(g_d_ctype, t) }
+    if g_d_part == 2 { g_d_mid = string.concat(g_d_mid, t) }
+    if g_d_part == 3 { g_d_name = string.concat(g_d_name, t) }
+    if g_d_part == 4 { g_d_post = string.concat(g_d_post, t) }
+}
+
+count_char(s: string, c: string) -> int {
+    n = 0
+    i = 0
+    while i < string.length(s) {
+        if string.equals(string.substring(s, i, i + 1), c) == 1 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// One member or parameter line, ctype \t stars \t const \t name \t array \t
+// bits, from the declaration read so far; the declaration is reset after.
+// The reader appends a seventh field: a parameter's len attribute, a
+// member's values attribute.
+decl_line() -> string {
+    pre = g_d_pre
+    ctype = string.trim(g_d_ctype)
+    mid = g_d_mid
+    name = string.trim(g_d_name)
+    post = string.trim(g_d_post)
+    decl_reset()
+    stars = count_char(mid, "*")
+    is_const = 0
+    if string.contains(pre, "const") == 1 { is_const = 1 }
+    arr = ""
+    bits = ""
+    if string.starts_with(post, "[") == 1 {
+        // One or two bounds: [4] or [3][4], a literal or an API constant.
+        body = string.replace_all(string.replace_all(post, "[", " "), "]", " ")
+        arr = string.trim(body)
+    }
+    if string.starts_with(post, ":") == 1 {
+        bits = string.trim(string.substring(post, 1, string.length(post)))
+    }
+    return "${ctype}\t${stars}\t${is_const}\t${name}\t${arr}\t${bits}"
+}
+
+api_ok(api: string) -> int {
+    if string.length(api) == 0 { return 1 }
+    parts = string_split(api, ",")
+    ok = 0
+    i = 0
+    while i < string_array_size(parts) {
+        if string.equals(string.trim(str_of(string_array_get(parts, i))), "vulkan") == 1 { ok = 1 }
+        i = i + 1
+    }
+    string_array_free(parts)
+    return ok
+}
+
+read_registry(path: string) {
+    text, n, err = fs.read_binary(path)
+    if err != "" { die("cannot read ${path}: ${err}") }
+    p = xml.parser(text)
+
+    stack = list.new()
+    // What the reader is inside of.
+    in_types = 0
+    type_depth = -1        // depth of the <type> being defined, -1 outside one
+    type_name = ""
+    type_cat = ""
+    member_depth = -1
+    decl_reset()
+    in_comment = 0
+    enums_block = ""
+    cmd_depth = -1
+    cmd_name = ""
+    cmd_params = ""
+    param_depth = -1
+    param_len = ""         // a parameter's len attribute: what gives its length
+    member_values = ""     // a member's values attribute: sType's one value
+    proto_depth = -1
+    owner = ""
+    req_depends = ""
+    in_require = 0
+    in_remove = 0
+    skip_depth = -1        // an element for another API (vulkansc), skipped whole
+
+    done = 0
+    while done == 0 {
+        ev = xml.next(p)
+        if ev == xml.EVENT_EOF { done = 1 }
+        if ev == xml.EVENT_ERROR { die("vk.xml: ${xml.error(p)}") }
+        if ev == xml.EVENT_START {
+            name = xml.name(p)
+            depth = list_size(stack)
+            list.add(stack, name)
+            if skip_depth >= 0 {
+                // inside a skipped element
+            } else if string.equals(name, "comment") == 1 {
+                in_comment = in_comment + 1
+            } else if string.equals(name, "types") == 1 {
+                in_types = 1
+            } else if in_types == 1 && type_depth < 0 && string.equals(name, "type") == 1 {
+                if api_ok(xml.attr(p, "api")) == 0 {
+                    skip_depth = depth
+                } else {
+                    type_depth = depth
+                    type_cat = xml.attr(p, "category")
+                    type_name = xml.attr(p, "name")
+                    alias = xml.attr(p, "alias")
+                    decl_reset()
+                    if string.length(type_name) > 0 {
+                        put(g_cat, type_name, type_cat)
+                        if string.length(alias) > 0 { put(g_alias, type_name, alias) }
+                        req = xml.attr(p, "requires")
+                        bv = xml.attr(p, "bitvalues")
+                        if string.equals(type_cat, "bitmask") == 1 {
+                            if string.length(bv) > 0 { put(g_bits, type_name, bv) } else if string.length(req) > 0 { put(g_bits, type_name, req) }
+                        }
+                        if string.equals(type_cat, "struct") == 1 || string.equals(type_cat, "union") == 1 {
+                            list.add(g_order, string.concat(type_name, ""))
+                            if string.equals(type_cat, "union") == 1 { put(g_union, type_name, "1") }
+                        }
+                    }
+                }
+            } else if type_depth >= 0 && member_depth < 0 && string.equals(name, "param") == 1 {
+                // A function-pointer type's parameters (newer registries give
+                // it a <proto> and <param>s): only its own name is needed, and
+                // a parameter's <name> must not be taken for it.
+                skip_depth = depth
+            } else if type_depth >= 0 && string.equals(name, "member") == 1 {
+                if api_ok(xml.attr(p, "api")) == 0 {
+                    skip_depth = depth
+                } else {
+                    member_depth = depth
+                    member_values = xml.attr(p, "values")
+                    decl_reset()
+                }
+            } else if type_depth >= 0 && string.equals(name, "type") == 1 {
+                g_d_part = 1
+            } else if type_depth >= 0 && string.equals(name, "name") == 1 {
+                g_d_part = 3
+            } else if string.equals(name, "enums") == 1 {
+                enums_block = xml.attr(p, "name")
+                kind = xml.attr(p, "type")
+                if string.equals(enums_block, "API Constants") == 1 { kind = "constants" }
+                put(g_enum_kind, enums_block, kind)
+                put(g_enum_width, enums_block, xml.attr(p, "bitwidth"))
+            } else if string.length(enums_block) > 0 && string.equals(name, "enum") == 1 {
+                if api_ok(xml.attr(p, "api")) == 1 {
+                    en = xml.attr(p, "name")
+                    alias = xml.attr(p, "alias")
+                    val = ""
+                    if string.length(alias) > 0 {
+                        val = string.concat("@", alias)
+                    } else if string.length(xml.attr(p, "bitpos")) > 0 {
+                        pos, _e = string.to_long(xml.attr(p, "bitpos"))
+                        val = hex_of(1 << pos)
+                    } else {
+                        val = literal(xml.attr(p, "value"))
+                    }
+                    if string.equals(get(g_enum_kind, enums_block), "constants") == 1 {
+                        put(g_const_value, en, val)
+                        ty = xml.attr(p, "type")
+                        aty = "int"
+                        if string.equals(ty, "uint32_t") == 1 { aty = "uint32" }
+                        if string.equals(ty, "uint64_t") == 1 { aty = "uint64" }
+                        if string.equals(ty, "float") == 1 { aty = "f32" }
+                        put(g_const_type, en, aty)
+                    } else {
+                        append_line(g_enum_values, enums_block, "${en}\t${val}")
+                        put(g_enum_owner, en, enums_block)
+                    }
+                }
+            } else if string.equals(name, "command") == 1 && cmd_depth < 0 && string.length(enums_block) == 0 {
+                if api_ok(xml.attr(p, "api")) == 0 {
+                    skip_depth = depth
+                } else {
+                    alias = xml.attr(p, "alias")
+                    nm = xml.attr(p, "name")
+                    if string.length(alias) > 0 && string.length(nm) > 0 {
+                        put(g_alias, nm, alias)
+                    } else if in_require == 0 {
+                        cmd_depth = depth
+                        cmd_name = ""
+                        cmd_params = ""
+                    }
+                    if in_require == 1 {
+                        if in_remove == 0 { append_line(g_reqs, owner, "command\t${nm}\t\t\t${req_depends}") }
+                    }
+                }
+            } else if cmd_depth >= 0 && string.equals(name, "implicitexternsyncparams") == 1 {
+                // Prose about external synchronisation in <param> elements,
+                // not parameters.
+                skip_depth = depth
+            } else if cmd_depth >= 0 && string.equals(name, "proto") == 1 {
+                proto_depth = depth
+                decl_reset()
+            } else if cmd_depth >= 0 && string.equals(name, "param") == 1 {
+                if api_ok(xml.attr(p, "api")) == 0 {
+                    skip_depth = depth
+                } else {
+                    param_depth = depth
+                    param_len = xml.attr(p, "len")
+                    decl_reset()
+                }
+            } else if (proto_depth >= 0 || param_depth >= 0) && string.equals(name, "type") == 1 {
+                g_d_part = 1
+            } else if (proto_depth >= 0 || param_depth >= 0) && string.equals(name, "name") == 1 {
+                g_d_part = 3
+            } else if in_require == 1 && string.equals(name, "feature") == 1 {
+                // A device feature the requirement needs enabled
+                // (<feature name="robustBufferAccess" struct="..."/>), not an
+                // API version: nothing to declare.
+            } else if string.equals(name, "feature") == 1 {
+                owner = xml.attr(p, "name")
+                if api_ok(xml.attr(p, "api")) == 1 {
+                    list.add(g_features, string.concat(owner, ""))
+                    list.add(g_order_owners, string.concat(owner, ""))
+                    put(g_feat_number, owner, xml.attr(p, "number"))
+                } else {
+                    skip_depth = depth
+                }
+            } else if string.equals(name, "extension") == 1 {
+                owner = xml.attr(p, "name")
+                put(g_ext_number, owner, xml.attr(p, "number"))
+                put(g_ext_supported, owner, xml.attr(p, "supported"))
+                put(g_ext_platform, owner, xml.attr(p, "platform"))
+                list.add(g_order_owners, string.concat(owner, ""))
+            } else if string.equals(name, "require") == 1 {
+                if api_ok(xml.attr(p, "api")) == 0 {
+                    skip_depth = depth
+                } else {
+                    in_require = 1
+                    req_depends = xml.attr(p, "depends")
+                    if string.length(req_depends) == 0 { req_depends = xml.attr(p, "feature") }
+                    if string.length(req_depends) == 0 { req_depends = xml.attr(p, "extension") }
+                }
+            } else if string.equals(name, "remove") == 1 {
+                in_remove = 1
+            } else if in_require == 1 && in_remove == 0 && string.equals(name, "type") == 1 {
+                append_line(g_reqs, owner, "type\t${xml.attr(p, "name")}\t\t\t${req_depends}")
+            } else if in_require == 1 && in_remove == 0 && string.equals(name, "enum") == 1 {
+                if api_ok(xml.attr(p, "api")) == 1 {
+                    en = xml.attr(p, "name")
+                    ext = xml.attr(p, "extends")
+                    val = ""
+                    alias = xml.attr(p, "alias")
+                    if string.length(alias) > 0 {
+                        val = string.concat("@", alias)
+                    } else {
+                        num = get(g_ext_number, owner)
+                        val = ext_value(xml.attr(p, "value"), xml.attr(p, "bitpos"), xml.attr(p, "offset"),
+                                        xml.attr(p, "extnumber"), xml.attr(p, "dir"), num)
+                    }
+                    append_line(g_reqs, owner, "enum\t${en}\t${ext}\t${val}\t${req_depends}")
+                }
+            }
+        }
+        if ev == xml.EVENT_TEXT {
+            if skip_depth < 0 && in_comment == 0 && (member_depth >= 0 || param_depth >= 0 || proto_depth >= 0 ||
+                                                     (type_depth >= 0 && member_depth < 0)) {
+                decl_text(xml.text(p))
+            }
+        }
+        if ev == xml.EVENT_END {
+            name = xml.name(p)
+            last = list_size(stack) - 1
+            list_remove(stack, last)
+            depth = last
+            if skip_depth >= 0 {
+                if depth == skip_depth { skip_depth = -1 }
+            } else if string.equals(name, "comment") == 1 {
+                in_comment = in_comment - 1
+            } else if depth == member_depth {
+                append_line(g_members, type_name, "${decl_line()}\t${member_values}")
+                member_depth = -1
+            } else if depth == type_depth {
+                // The registry's own version, which the generated files record:
+                //   #define <name>VK_HEADER_VERSION</name> 357
+                //   #define <name>VK_HEADER_VERSION_COMPLETE</name>
+                //       <type>VK_MAKE_API_VERSION</type>(0, 1, 4, VK_HEADER_VERSION)
+                if string.equals(type_cat, "define") == 1 {
+                    dn = string.trim(g_d_name)
+                    if string.equals(dn, "VK_HEADER_VERSION") == 1 { g_header_patch = string.trim(g_d_post) }
+                    if string.equals(dn, "VK_HEADER_VERSION_COMPLETE") == 1 {
+                        args = string_split(string.replace_all(string.replace_all(g_d_mid, "(", ""), ")", ""), ",")
+                        if string_array_size(args) == 4 {
+                            g_header_api = "${string.trim(str_of(string_array_get(args, 1)))}.${string.trim(str_of(string_array_get(args, 2)))}"
+                        }
+                        string_array_free(args)
+                    }
+                }
+                // A type defined by a C declaration (basetype, bitmask, handle,
+                // funcpointer) carries its name in a <name> child.
+                line = decl_line()
+                if string.length(type_name) == 0 {
+                    type_name = field(line, 3)
+                    if string.length(type_name) > 0 { put(g_cat, type_name, type_cat) }
+                }
+                if string.equals(type_cat, "basetype") == 1 || string.equals(type_cat, "bitmask") == 1 ||
+                   string.equals(type_cat, "handle") == 1 {
+                    put(g_under, type_name, field(line, 0))
+                }
+                type_depth = -1
+                type_name = ""
+            } else if (member_depth >= 0 || type_depth >= 0 || param_depth >= 0 || proto_depth >= 0) &&
+                      (string.equals(name, "type") == 1) {
+                g_d_part = 2
+            } else if (member_depth >= 0 || type_depth >= 0 || param_depth >= 0 || proto_depth >= 0) &&
+                      (string.equals(name, "name") == 1) {
+                g_d_part = 4
+            } else if depth == proto_depth {
+                line = decl_line()
+                cmd_name = field(line, 3)
+                ret = field(line, 0)
+                stars = field(line, 1)
+                if string.equals(stars, "0") == 0 { ret = string.concat(ret, "*") }
+                put(g_cmd_ret, cmd_name, ret)
+                proto_depth = -1
+            } else if depth == param_depth {
+                cmd_params = string.concat(cmd_params, "${decl_line()}\t${param_len}\n")
+                param_depth = -1
+            } else if depth == cmd_depth {
+                put(g_cmd_params, cmd_name, cmd_params)
+                cmd_depth = -1
+            } else if string.equals(name, "types") == 1 {
+                in_types = 0
+            } else if string.equals(name, "enums") == 1 {
+                enums_block = ""
+            } else if string.equals(name, "require") == 1 {
+                in_require = 0
+                req_depends = ""
+            } else if string.equals(name, "remove") == 1 {
+                in_remove = 0
+            } else if in_require == 0 && (string.equals(name, "feature") == 1 || string.equals(name, "extension") == 1) {
+                owner = ""
+            }
+        }
+    }
+    xml.free(p)
+    string.free(text)
+    if n == 0 { die("${path} is empty") }
+    if string.length(g_header_patch) == 0 || string.length(g_header_api) == 0 {
+        die("${path}: no VK_HEADER_VERSION / VK_HEADER_VERSION_COMPLETE define")
+    }
+}
+
+// "1.4.357": the registry release the output was generated from.
+registry_version() -> string {
+    return "${g_header_api}.${g_header_patch}"
+}
+
+// ---------------------------------------------------------------------------
+// Selection
+// ---------------------------------------------------------------------------
+
+var g_selected: ptr = null       // feature / extension -> "1"
+var g_req_types: ptr = null      // type -> "1"
+var g_req_cmds: ptr = null       // command -> owner that introduced it
+var g_req_cmd_order: ptr = null  // commands in requirement order
+var g_ext_values: ptr = null     // enums block -> added value lines
+var g_ext_consts: ptr = null     // extension constant -> literal
+var g_ext_const_order: ptr = null
+
+version_le(a: string, b: string) -> int {
+    // "1.2" <= "1.3": major then minor.
+    pa = string_split(a, ".")
+    pb = string_split(b, ".")
+    ma, _e1 = string.to_long(str_of(string_array_get(pa, 0)))
+    mi_a, _e2 = string.to_long(str_of(string_array_get(pa, 1)))
+    mb, _e3 = string.to_long(str_of(string_array_get(pb, 0)))
+    mi_b, _e4 = string.to_long(str_of(string_array_get(pb, 1)))
+    string_array_free(pa)
+    string_array_free(pb)
+    if ma != mb {
+        if ma < mb { return 1 }
+        return 0
+    }
+    if mi_a <= mi_b { return 1 }
+    return 0
+}
+
+// A `depends` expression over feature and extension names: `,` is or, `+`
+// is and, parentheses group. Satisfied when the selected set makes it true.
+var g_dep_text: string = ""
+var g_dep_pos: int = 0
+
+dep_peek() -> string {
+    if g_dep_pos >= string.length(g_dep_text) { return "" }
+    return string.substring(g_dep_text, g_dep_pos, g_dep_pos + 1)
+}
+
+dep_atom() -> int {
+    c = dep_peek()
+    if string.equals(c, "(") == 1 {
+        g_dep_pos = g_dep_pos + 1
+        v = dep_or()
+        g_dep_pos = g_dep_pos + 1   // ")"
+        return v
+    }
+    start = g_dep_pos
+    while g_dep_pos < string.length(g_dep_text) {
+        ch = dep_peek()
+        if string.equals(ch, ",") == 1 || string.equals(ch, "+") == 1 || string.equals(ch, ")") == 1 { break }
+        g_dep_pos = g_dep_pos + 1
+    }
+    nm = string.substring(g_dep_text, start, g_dep_pos)
+    // A dependency on a structure's feature bit (`VK_VERSION_1_2::field`)
+    // names the version it belongs to.
+    colon = string.index_of(nm, "::")
+    if colon >= 0 { nm = string.substring(nm, 0, colon) }
+    if map_has(g_selected, nm) == 1 { return 1 }
+    return 0
+}
+
+dep_and() -> int {
+    v = dep_atom()
+    while string.equals(dep_peek(), "+") == 1 {
+        g_dep_pos = g_dep_pos + 1
+        r = dep_atom()
+        if r == 0 { v = 0 }
+    }
+    return v
+}
+
+dep_or() -> int {
+    v = dep_and()
+    while string.equals(dep_peek(), ",") == 1 {
+        g_dep_pos = g_dep_pos + 1
+        r = dep_and()
+        if r == 1 { v = 1 }
+    }
+    return v
+}
+
+depends_ok(expr: string) -> int {
+    if string.length(expr) == 0 { return 1 }
+    g_dep_text = expr
+    g_dep_pos = 0
+    return dep_or()
+}
+
+require_type(t: string) {
+    if string.length(t) == 0 || map_has(g_req_types, t) == 1 { return }
+    put(g_req_types, t, "1")
+    alias = get(g_alias, t)
+    if string.length(alias) > 0 { require_type(alias) }
+    bits = get(g_bits, t)
+    if string.length(bits) > 0 { require_type(bits) }
+    under = get(g_under, t)
+    if string.length(under) > 0 { require_type(under) }
+    mem = get(g_members, t)
+    if string.length(mem) > 0 {
+        arr = lines_of(mem)
+        i = 0
+        while i < string_array_size(arr) {
+            line = str_of(string_array_get(arr, i))
+            if string.length(line) > 0 { require_type(field(line, 0)) }
+            i = i + 1
+        }
+        string_array_free(arr)
+    }
+}
+
+require_command(c: string, owner: string) {
+    if map_has(g_req_cmds, c) == 1 { return }
+    put(g_req_cmds, c, owner)
+    list.add(g_req_cmd_order, string.concat(c, ""))
+    target = c
+    alias = get(g_alias, c)
+    if string.length(alias) > 0 { target = alias }
+    require_type(get(g_cmd_ret, target))
+    ps = get(g_cmd_params, target)
+    arr = lines_of(ps)
+    i = 0
+    while i < string_array_size(arr) {
+        line = str_of(string_array_get(arr, i))
+        if string.length(line) > 0 { require_type(field(line, 0)) }
+        i = i + 1
+    }
+    string_array_free(arr)
+}
+
+select_selection(api: string, extensions: string) {
+    i = 0
+    while i < list_size(g_features) {
+        f = str_of(list_get_raw(g_features, i))
+        if version_le(get(g_feat_number, f), api) == 1 { put(g_selected, f, "1") }
+        i = i + 1
+    }
+    if string.length(extensions) > 0 {
+        parts = string_split(extensions, ",")
+        j = 0
+        while j < string_array_size(parts) {
+            e = string.trim(str_of(string_array_get(parts, j)))
+            if map_has(g_ext_number, e) == 0 { die("no extension named ${e} in the registry") }
+            if api_ok(get(g_ext_supported, e)) == 0 { die("${e} is not supported for the vulkan API") }
+            put(g_selected, e, "1")
+            j = j + 1
+        }
+        string_array_free(parts)
+    }
+    // Requirements of every selected feature and extension, in registry
+    // order, each block only when its `depends` holds.
+    k = 0
+    while k < list_size(g_order_owners) {
+        owner = str_of(list_get_raw(g_order_owners, k))
+        if map_has(g_selected, owner) == 1 {
+            reqs = lines_of(get(g_reqs, owner))
+            r = 0
+            while r < string_array_size(reqs) {
+                line = str_of(string_array_get(reqs, r))
+                if string.length(line) > 0 && depends_ok(field(line, 4)) == 1 {
+                    kind = field(line, 0)
+                    nm = field(line, 1)
+                    if string.equals(kind, "type") == 1 { require_type(nm) }
+                    if string.equals(kind, "command") == 1 { require_command(nm, owner) }
+                    if string.equals(kind, "enum") == 1 {
+                        ext = field(line, 2)
+                        val = field(line, 3)
+                        if string.length(ext) > 0 {
+                            if string.length(val) > 0 { append_line(g_ext_values, ext, "${nm}\t${val}") }
+                        } else if string.length(val) > 0 {
+                            if map_has(g_ext_consts, nm) == 0 {
+                                put(g_ext_consts, nm, val)
+                                list.add(g_ext_const_order, string.concat(nm, ""))
+                            }
+                        } else if map_has(g_const_value, nm) == 1 {
+                            put(g_ext_consts, nm, "=")
+                            list.add(g_ext_const_order, string.concat(nm, ""))
+                        }
+                    }
+                }
+                r = r + 1
+            }
+            string_array_free(reqs)
+        }
+        k = k + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Aether names and types
+// ---------------------------------------------------------------------------
+
+var g_keywords: ptr = null
+
+init_keywords() {
+    g_keywords = map.new()
+    kws = "actor actor_ref after as bool break builder byte callback case catch const continue default defer else ensures except export exports extern false float for func hide if import in int let long main make match message module null panic print ptr receive reply requires return seal self send spawn spawn_actor state string struct switch true try uint64 union var when while"
+    arr = string_split(kws, " ")
+    i = 0
+    while i < string_array_size(arr) {
+        put(g_keywords, str_of(string_array_get(arr, i)), "1")
+        i = i + 1
+    }
+    string_array_free(arr)
+}
+
+// A registry name as an Aether identifier: a reserved word is escaped with
+// backticks, which Aether reads as the plain name.
+ident(n: string) -> string {
+    if map_has(g_keywords, n) == 1 { return "`${n}`" }
+    return n
+}
+
+const_name(n: string) -> string {
+    if string.starts_with(n, "VK_") == 1 { return string.substring(n, 3, string.length(n)) }
+    return n
+}
+
+// An API constant's value as a number, for array bounds.
+bound_of(tok: string) -> string {
+    if map_has(g_const_value, tok) == 1 { return get(g_const_value, tok) }
+    return tok
+}
+
+// The Aether type for a scalar C type name, "" when it has none (a platform
+// type the selection does not reach).
+scalar_type(ctype: string) -> string {
+    if string.equals(ctype, "uint8_t") == 1 { return "uint8" }
+    if string.equals(ctype, "uint16_t") == 1 { return "uint16" }
+    if string.equals(ctype, "uint32_t") == 1 { return "uint32" }
+    if string.equals(ctype, "uint64_t") == 1 { return "uint64" }
+    if string.equals(ctype, "int8_t") == 1 { return "int" }
+    if string.equals(ctype, "int16_t") == 1 { return "int" }
+    if string.equals(ctype, "int32_t") == 1 { return "int" }
+    if string.equals(ctype, "int64_t") == 1 { return "long" }
+    if string.equals(ctype, "int") == 1 { return "int" }
+    if string.equals(ctype, "size_t") == 1 { return "uint64" }
+    if string.equals(ctype, "float") == 1 { return "f32" }
+    if string.equals(ctype, "double") == 1 { return "float" }
+    if string.equals(ctype, "char") == 1 { return "byte" }
+    cat = get(g_cat, ctype)
+    if string.length(get(g_alias, ctype)) > 0 && (string.equals(cat, "struct") == 1 || string.equals(cat, "union") == 1) {
+        return ctype
+    }
+    if string.equals(cat, "struct") == 1 || string.equals(cat, "union") == 1 { return ctype }
+    if string.equals(cat, "handle") == 1 { return "ptr" }
+    if string.equals(cat, "funcpointer") == 1 { return "ptr" }
+    if string.equals(cat, "enum") == 1 { return "int" }
+    if string.equals(cat, "basetype") == 1 || string.equals(cat, "bitmask") == 1 {
+        alias = get(g_alias, ctype)
+        if string.length(alias) > 0 { return scalar_type(alias) }
+        under = get(g_under, ctype)
+        if string.length(under) > 0 { return scalar_type(under) }
+    }
+    return ""
+}
+
+// The Aether type of a member or parameter line, "" to leave it out.
+line_type(line: string, is_member: int) -> string {
+    ctype = field(line, 0)
+    stars = field(line, 1)
+    arr = field(line, 4)
+    if string.equals(stars, "0") == 0 {
+        if string.equals(ctype, "char") == 1 && string.equals(stars, "1") == 1 { return "string" }
+        return "ptr"
+    }
+    if string.length(arr) > 0 {
+        if string.equals(ctype, "char") == 1 { return "string" }
+        if is_member == 0 { return "ptr" }
+        elem = scalar_type(ctype)
+        if string.length(elem) == 0 { return "" }
+        // Flatten [3][4] to 12: the C layout is the same.
+        dims = string_split(arr, " ")
+        long total = 1
+        k = 0
+        while k < string_array_size(dims) {
+            tok = string.trim(str_of(string_array_get(dims, k)))
+            if string.length(tok) > 0 {
+                nv, _e = string.to_long(bound_of(tok))
+                total = total * nv
+            }
+            k = k + 1
+        }
+        string_array_free(dims)
+        return "${elem}[${total}]"
+    }
+    return scalar_type(ctype)
+}
+
+// ---------------------------------------------------------------------------
+// The Aether module
+// ---------------------------------------------------------------------------
+
+emit_module(path: string, api: string, extensions: string) {
+    for_each_platform_check(extensions)
+    sb = strbuilder.new(1 << 20)
+    names = strbuilder.new(1 << 16)
+    body = strbuilder.new(1 << 20)
+
+    strbuilder.append(sb, "// contrib.vulkan.vk: the Vulkan API as Aether declarations, GENERATED from the\n")
+    strbuilder.append(sb, "// Vulkan registry (vk.xml) by contrib/vulkan/tools/vkgen.ae. Do not edit: change\n")
+    strbuilder.append(sb, "// the selection in contrib/vulkan/tools/regenerate.sh and run it.\n//\n")
+    strbuilder.append(sb, "// Selection: Vulkan ${api}")
+    if string.length(extensions) > 0 { strbuilder.append(sb, " + ${extensions}") }
+    strbuilder.append(sb, ".\n// Registry: ${registry_version()}.\n//\n")
+    strbuilder.append(sb, "// Constants drop the VK_ prefix (vk.FORMAT_R8G8B8A8_UNORM), so they cannot\n")
+    strbuilder.append(sb, "// collide with the enumerators the header declares. Structs keep their C names,\n")
+    strbuilder.append(sb, "// which @c_import resolves against <vulkan/vulkan.h>: the header is the layout.\n")
+    strbuilder.append(sb, "//\n")
+    strbuilder.append(sb, "// Commands are reached through the loader contrib/vulkan opens at runtime,\n")
+    strbuilder.append(sb, "// never linked, so a program starts where there is no Vulkan. Each resolves on\n")
+    strbuilder.append(sb, "// first call to the loader's exported entry point (every core and window-system\n")
+    strbuilder.append(sb, "// command); vk.load_instance(instance) and vk.load_device(device) switch them to\n")
+    strbuilder.append(sb, "// that instance's and device's own entry points, which is also how an extension\n")
+    strbuilder.append(sb, "// command the loader does not export is reached. With no loader a command that\n")
+    strbuilder.append(sb, "// returns a VkResult returns ERROR_INITIALIZATION_FAILED, others 0 or null.\n//\n")
+    strbuilder.append(sb, "// A command that fills an array another parameter counts also has a <command>_all\n")
+    strbuilder.append(sb, "// making both calls: devices, n, r = vk.vkEnumeratePhysicalDevices_all(instance).\n\n")
+    strbuilder.append(sb, "@c_include(\"vulkan/vulkan.h\")\n")
+    strbuilder.append(sb, "@source(\"../aether_vulkan.c\")\n\n")
+
+    // Constants: API constants the selection names, every value of every
+    // enum it reaches (the registry's own and those the selection adds),
+    // and the extensions' spec versions and names.
+    k = 0
+    while k < list_size(g_ext_const_order) {
+        nm = str_of(list_get_raw(g_ext_const_order, k))
+        v = get(g_ext_consts, nm)
+        if string.equals(v, "=") == 1 {
+            ty = get(g_const_type, nm)
+            val = get(g_const_value, nm)
+            if string.starts_with(val, "@") == 1 {
+                strbuilder.append(body, "const ${const_name(nm)} = ${const_name(string.substring(val, 1, string.length(val)))}\n")
+            } else if string.equals(ty, "uint64") == 1 {
+                strbuilder.append(body, "const ${const_name(nm)}: uint64 = ${val}\n")
+            } else {
+                strbuilder.append(body, "const ${const_name(nm)} = ${val}\n")
+            }
+        } else if string.starts_with(v, "@") == 1 {
+            strbuilder.append(body, "const ${const_name(nm)} = ${const_name(string.substring(v, 1, string.length(v)))}\n")
+        } else {
+            strbuilder.append(body, "const ${const_name(nm)} = ${v}\n")
+        }
+        strbuilder.append(names, "    ${const_name(nm)},\n")
+        k = k + 1
+    }
+    strbuilder.append(body, "\n")
+
+    enum_blocks = map_keys_raw(g_req_types)
+    blocks = list.new()
+    b = 0
+    while b < map_keys_size_raw(enum_blocks) {
+        t = str_of(map_keys_get_raw(enum_blocks, b))
+        if string.equals(get(g_cat, t), "enum") == 1 && map_has(g_enum_kind, t) == 1 {
+            list.add(blocks, string.concat(t, ""))
+        }
+        b = b + 1
+    }
+    map_keys_free(enum_blocks)
+    sort_list(blocks)
+    emitted = map.new()
+    bi = 0
+    while bi < list_size(blocks) {
+        t = str_of(list_get_raw(blocks, bi))
+        strbuilder.append(body, "// ${t}\n")
+        all = string.concat(get(g_enum_values, t), get(g_ext_values, t))
+        vals = lines_of(all)
+        // Values first, aliases after, so an alias names a declared const.
+        pass = 0
+        while pass < 2 {
+            vi = 0
+            while vi < string_array_size(vals) {
+                line = str_of(string_array_get(vals, vi))
+                if string.length(line) > 0 {
+                    nm = field(line, 0)
+                    val = field(line, 1)
+                    is_alias = string.starts_with(val, "@")
+                    if map_has(emitted, nm) == 0 && ((pass == 0 && is_alias == 0) || (pass == 1 && is_alias == 1)) {
+                        target = val
+                        if is_alias == 1 { target = const_name(string.substring(val, 1, string.length(val))) }
+                        if is_alias == 0 || map_has(emitted, string.substring(val, 1, string.length(val))) == 1 {
+                            if string.starts_with(target, "0x") == 1 && string.length(target) == 18 &&
+                               string.compare(target, "0x7FFFFFFFFFFFFFFF") > 0 {
+                                strbuilder.append(body, "const ${const_name(nm)}: uint64 = ${target}\n")
+                            } else {
+                                strbuilder.append(body, "const ${const_name(nm)} = ${target}\n")
+                            }
+                            strbuilder.append(names, "    ${const_name(nm)},\n")
+                            put(emitted, nm, "1")
+                        }
+                    }
+                }
+                vi = vi + 1
+            }
+            pass = pass + 1
+        }
+        string_array_free(vals)
+        strbuilder.append(body, "\n")
+        bi = bi + 1
+    }
+
+    // Structs and unions, in an order where every by-value member's type is
+    // declared before the struct that holds it.
+    done = map.new()
+    oi = 0
+    while oi < list_size(g_order) {
+        emit_struct(str_of(list_get_raw(g_order, oi)), body, names, done)
+        oi = oi + 1
+    }
+
+    // Commands: a cached entry point each, and a wrapper that resolves it on
+    // first use and calls through it.
+    strbuilder.append(body, "extern aevk_ae_loader_proc(name: string) -> ptr\n")
+    strbuilder.append(body, "extern aevk_ae_instance_proc(instance: ptr, name: string) -> ptr\n")
+    strbuilder.append(body, "extern aevk_ae_device_proc(device: ptr, name: string) -> ptr\n")
+    strbuilder.append(body, "extern aevk_ae_array_alloc(count: int, size: int) -> ptr\n")
+    strbuilder.append(body, "extern aevk_ae_array_free(p: ptr)\n")
+    strbuilder.append(body, "extern aevk_ae_handle_size(dispatchable: int) -> int\n\n")
+    strbuilder.append(names, "    aevk_ae_loader_proc,\n    aevk_ae_instance_proc,\n    aevk_ae_device_proc,\n")
+    strbuilder.append(names, "    aevk_ae_array_alloc,\n    aevk_ae_array_free,\n    aevk_ae_handle_size,\n")
+    strbuilder.append(names, "    loader_available,\n    load_instance,\n    load_device,\n    array_free,\n")
+    strbuilder.append(body, "// Releases an array a <command>_all returned; null is ignored.\n")
+    strbuilder.append(body, "array_free(items: ptr) { aevk_ae_array_free(items) }\n\n")
+    strbuilder.append(body, "// 1 when a Vulkan loader was found.\n")
+    strbuilder.append(body, "loader_available() -> int {\n")
+    strbuilder.append(body, "    if aevk_ae_loader_proc(\"vkGetInstanceProcAddr\") == null { return 0 }\n")
+    strbuilder.append(body, "    return 1\n}\n\n")
+    loads_inst = strbuilder.new(1 << 14)
+    loads_dev = strbuilder.new(1 << 14)
+    ci = 0
+    while ci < list_size(g_req_cmd_order) {
+        c = str_of(list_get_raw(g_req_cmd_order, ci))
+        target = c
+        alias = get(g_alias, c)
+        if string.length(alias) > 0 { target = alias }
+        ret = get(g_cmd_ret, target)
+        ps = lines_of(get(g_cmd_params, target))
+        params = ""
+        arg_types = ""
+        arg_names = ""
+        pi = 0
+        while pi < string_array_size(ps) {
+            line = str_of(string_array_get(ps, pi))
+            if string.length(line) > 0 {
+                ty = line_type(line, 0)
+                if string.length(ty) == 0 { die("${c}: no Aether type for parameter ${field(line, 3)}") }
+                if string.length(params) > 0 {
+                    params = string.concat(params, ", ")
+                    arg_types = string.concat(arg_types, ", ")
+                    arg_names = string.concat(arg_names, ", ")
+                }
+                params = string.concat(params, "${ident(field(line, 3))}: ${ty}")
+                arg_types = string.concat(arg_types, ty)
+                arg_names = string.concat(arg_names, ident(field(line, 3)))
+            }
+            pi = pi + 1
+        }
+        rt = ""
+        rtype = ""
+        fail = ""
+        if string.ends_with(ret, "*") == 1 {
+            rtype = "ptr"
+            fail = "null"
+        } else if string.equals(ret, "void") == 0 {
+            rtype = scalar_type(ret)
+            if string.length(rtype) == 0 { die("${c}: no Aether type for its return type ${ret}") }
+            fail = "0"
+            if string.equals(ret, "VkResult") == 1 { fail = "ERROR_INITIALIZATION_FAILED" }
+            if string.equals(rtype, "ptr") == 1 { fail = "null" }
+        }
+        if string.length(rtype) > 0 { rt = " -> ${rtype}" }
+        pfn = "pfn_${c}"
+        strbuilder.append(body, "var ${pfn}: ptr = null\n")
+        strbuilder.append(body, "${c}(${params})${rt} {\n")
+        strbuilder.append(body, "    if ${pfn} == null { ${pfn} = aevk_ae_loader_proc(\"${c}\") }\n")
+        if string.length(rtype) > 0 {
+            strbuilder.append(body, "    if ${pfn} == null { return ${fail} }\n")
+        } else {
+            strbuilder.append(body, "    if ${pfn} == null { return }\n")
+        }
+        strbuilder.append(body, "    f = ${pfn} as fn(${arg_types})${rt}\n")
+        if string.length(rtype) > 0 {
+            strbuilder.append(body, "    return f(${arg_names})\n}\n\n")
+        } else {
+            strbuilder.append(body, "    f(${arg_names})\n}\n\n")
+        }
+        emit_enumerate(c, ret, ps, body, names, emitted)
+        string_array_free(ps)
+        level = cmd_level(c)
+        if string.equals(level, "INSTANCE") == 1 {
+            strbuilder.append(loads_inst, "    p = aevk_ae_instance_proc(instance, \"${c}\")\n")
+            strbuilder.append(loads_inst, "    if p != null { ${pfn} = p; n = n + 1 }\n")
+        }
+        if string.equals(level, "DEVICE") == 1 {
+            strbuilder.append(loads_dev, "    p = aevk_ae_device_proc(device, \"${c}\")\n")
+            strbuilder.append(loads_dev, "    if p != null { ${pfn} = p; n = n + 1 }\n")
+        }
+        strbuilder.append(names, "    ${c},\n")
+        ci = ci + 1
+    }
+    strbuilder.append(body, "// Points every instance-level command at `instance`'s own entry points.\n")
+    strbuilder.append(body, "// Returns how many resolved.\n")
+    strbuilder.append(body, "load_instance(instance: ptr) -> int {\n    n = 0\n    p = null\n")
+    strbuilder.append(body, strbuilder.finish(loads_inst))
+    strbuilder.append(body, "    return n\n}\n\n")
+    strbuilder.append(body, "// Points every device-level command at `device`'s own entry points, the\n")
+    strbuilder.append(body, "// driver's rather than the loader's dispatch. Returns how many resolved.\n")
+    strbuilder.append(body, "load_device(device: ptr) -> int {\n    n = 0\n    p = null\n")
+    strbuilder.append(body, strbuilder.finish(loads_dev))
+    strbuilder.append(body, "    return n\n}\n")
+
+    names_s = strbuilder.finish(names)
+    strbuilder.append(sb, "exports (\n")
+    // The last export carries no comma.
+    strbuilder.append(sb, string.substring(names_s, 0, string.length(names_s) - 2))
+    strbuilder.append(sb, "\n)\n\n")
+    strbuilder.append(sb, strbuilder.finish(body))
+    out = strbuilder.finish(sb)
+    werr = fs.write_binary(path, out, string.length(out))
+    if werr != "" { die("cannot write ${path}: ${werr}") }
+    println("vkgen: wrote ${path}")
+}
+
+// The Aether expression for the size of one ctype, "" when it has none.
+elem_size(ctype: string) -> string {
+    t = ctype
+    if string.length(get(g_alias, t)) > 0 { t = get(g_alias, t) }
+    cat = get(g_cat, t)
+    if string.equals(cat, "struct") == 1 || string.equals(cat, "union") == 1 { return "sizeof(${ctype})" }
+    // A dispatchable handle is a pointer; a non-dispatchable one a pointer on
+    // 64-bit targets and a uint64_t on 32-bit ones. The C side knows which.
+    if string.equals(cat, "handle") == 1 {
+        if string.equals(get(g_under, t), "VK_DEFINE_HANDLE") == 1 { return "aevk_ae_handle_size(1)" }
+        return "aevk_ae_handle_size(0)"
+    }
+    if string.equals(cat, "enum") == 1 { return "4" }
+    st = scalar_type(t)
+    if string.equals(st, "uint32") == 1 || string.equals(st, "int") == 1 || string.equals(st, "f32") == 1 { return "4" }
+    if string.equals(st, "uint64") == 1 || string.equals(st, "long") == 1 { return "8" }
+    return ""
+}
+
+// The VkStructureType value a struct's sType must hold, "" when it has none.
+stype_of(ctype: string) -> string {
+    t = ctype
+    if string.length(get(g_alias, t)) > 0 { t = get(g_alias, t) }
+    mem = lines_of(get(g_members, t))
+    out = ""
+    if string_array_size(mem) > 0 {
+        first = str_of(string_array_get(mem, 0))
+        if string.equals(field(first, 3), "sType") == 1 { out = field(first, 6) }
+    }
+    string_array_free(mem)
+    return out
+}
+
+// <command>_all for a command whose last two parameters are a uint32_t count
+// and the array the registry says it measures: the two-call idiom (ask for
+// the count, allocate, fill) in one call, repeated while the implementation
+// answers INCOMPLETE because the set grew in between. Nothing is emitted for
+// a command of another shape.
+emit_enumerate(c: string, ret: string, ps: ptr, body: ptr, names: ptr, emitted: ptr) {
+    np = 0
+    i = 0
+    while i < string_array_size(ps) {
+        if string.length(str_of(string_array_get(ps, i))) > 0 { np = i + 1 }
+        i = i + 1
+    }
+    if np < 2 { return }
+    cl = str_of(string_array_get(ps, np - 2))
+    al = str_of(string_array_get(ps, np - 1))
+    if string.equals(field(cl, 0), "uint32_t") == 0 || string.equals(field(cl, 1), "1") == 0 ||
+       string.equals(field(cl, 2), "0") == 0 { return }
+    if string.equals(field(al, 1), "1") == 0 || string.equals(field(al, 2), "0") == 0 ||
+       string.equals(field(al, 6), field(cl, 3)) == 0 { return }
+    is_result = string.equals(ret, "VkResult")
+    if is_result == 0 && string.equals(ret, "void") == 0 { return }
+    elem = field(al, 0)
+    size = elem_size(elem)
+    if string.length(size) == 0 { return }
+    stype = stype_of(elem)
+    if string.length(stype) > 0 && map_has(emitted, stype) == 0 { return }
+
+    params = ""
+    args = ""
+    i = 0
+    while i < np - 2 {
+        line = str_of(string_array_get(ps, i))
+        if string.length(params) > 0 {
+            params = string.concat(params, ", ")
+            args = string.concat(args, ", ")
+        }
+        params = string.concat(params, "${ident(field(line, 3))}: ${line_type(line, 0)}")
+        args = string.concat(args, ident(field(line, 3)))
+        i = i + 1
+    }
+    lead = ""
+    if string.length(args) > 0 { lead = "${args}, " }
+    fill = ""
+    if string.length(stype) > 0 {
+        fill = "            k = 0\n            while k < total {\n                item = (items + k * ${size}) as *${elem}\n                item.sType = ${const_name(stype)}\n                k = k + 1\n            }\n"
+    }
+
+    all = "${c}_all"
+    if is_result == 1 {
+        strbuilder.append(body, "// ${c} with both of its calls: the ${elem} array (vk.array_free releases\n")
+        strbuilder.append(body, "// it), its length, and the VkResult. On a failure the array is null.\n")
+        strbuilder.append(body, "${all}(${params}) -> (ptr, int, int) {\n")
+        strbuilder.append(body, "    cell = aevk_ae_array_alloc(1, 4)\n")
+        strbuilder.append(body, "    if cell == null { return (null, 0, ERROR_OUT_OF_HOST_MEMORY) }\n")
+        strbuilder.append(body, "    items = null\n    total = 0\n    res = INCOMPLETE\n")
+        strbuilder.append(body, "    while res == INCOMPLETE {\n")
+        strbuilder.append(body, "        aevk_ae_array_free(items)\n        items = null\n")
+        strbuilder.append(body, "        res = ${c}(${lead}cell, null)\n")
+        strbuilder.append(body, "        total = (cell as uint32[])[0] as int\n")
+        strbuilder.append(body, "        if res == SUCCESS && total > 0 {\n")
+        strbuilder.append(body, "            items = aevk_ae_array_alloc(total, ${size})\n")
+        strbuilder.append(body, "            if items == null { aevk_ae_array_free(cell); return (null, 0, ERROR_OUT_OF_HOST_MEMORY) }\n")
+        strbuilder.append(body, fill)
+        strbuilder.append(body, "            res = ${c}(${lead}cell, items)\n")
+        strbuilder.append(body, "            total = (cell as uint32[])[0] as int\n")
+        strbuilder.append(body, "        }\n    }\n")
+        strbuilder.append(body, "    aevk_ae_array_free(cell)\n")
+        strbuilder.append(body, "    if res != SUCCESS {\n        aevk_ae_array_free(items)\n        return (null, 0, res)\n    }\n")
+        strbuilder.append(body, "    return (items, total, res)\n}\n\n")
+    } else {
+        strbuilder.append(body, "// ${c} with both of its calls: the ${elem} array (vk.array_free releases\n")
+        strbuilder.append(body, "// it) and its length.\n")
+        strbuilder.append(body, "${all}(${params}) -> (ptr, int) {\n")
+        strbuilder.append(body, "    cell = aevk_ae_array_alloc(1, 4)\n")
+        strbuilder.append(body, "    if cell == null { return (null, 0) }\n")
+        strbuilder.append(body, "    ${c}(${lead}cell, null)\n")
+        strbuilder.append(body, "    total = (cell as uint32[])[0] as int\n")
+        strbuilder.append(body, "    items = null\n")
+        strbuilder.append(body, "    if total > 0 {\n")
+        strbuilder.append(body, "        items = aevk_ae_array_alloc(total, ${size})\n")
+        strbuilder.append(body, "        if items == null { aevk_ae_array_free(cell); return (null, 0) }\n")
+        // One level shallower: 12 spaces become 8, and 16 become 12.
+        strbuilder.append(body, string.replace_all(fill, "            ", "        "))
+        strbuilder.append(body, "        ${c}(${lead}cell, items)\n")
+        strbuilder.append(body, "        total = (cell as uint32[])[0] as int\n")
+        strbuilder.append(body, "    }\n")
+        strbuilder.append(body, "    aevk_ae_array_free(cell)\n")
+        strbuilder.append(body, "    return (items, total)\n}\n\n")
+    }
+    strbuilder.append(names, "    ${all},\n")
+}
+
+emit_struct(t: string, body: ptr, names: ptr, done: ptr) {
+    if map_has(done, t) == 1 || map_has(g_req_types, t) == 0 { return }
+    put(done, t, "1")
+    alias = get(g_alias, t)
+    src = t
+    if string.length(alias) > 0 {
+        emit_struct(alias, body, names, done)
+        src = alias
+    }
+    mem = lines_of(get(g_members, src))
+    // By-value members first.
+    i = 0
+    while i < string_array_size(mem) {
+        line = str_of(string_array_get(mem, i))
+        if string.length(line) > 0 && string.equals(field(line, 1), "0") == 1 {
+            ct = field(line, 0)
+            cat = get(g_cat, ct)
+            if string.equals(cat, "struct") == 1 || string.equals(cat, "union") == 1 {
+                emit_struct(ct, body, names, done)
+            }
+        }
+        i = i + 1
+    }
+    strbuilder.append(body, "extern struct ${t} @c_import {\n")
+    j = 0
+    while j < string_array_size(mem) {
+        line = str_of(string_array_get(mem, j))
+        if string.length(line) > 0 {
+            ty = line_type(line, 1)
+            if string.length(ty) == 0 { die("${t}: no Aether type for member ${field(line, 3)} (${field(line, 0)})") }
+            strbuilder.append(body, "    ${ident(field(line, 3))}: ${ty}\n")
+        }
+        j = j + 1
+    }
+    strbuilder.append(body, "}\n\n")
+    strbuilder.append(names, "    ${t},\n")
+    string_array_free(mem)
+}
+
+// A platform extension's structs name that platform's types (HWND, Display),
+// which only its own header declares; the module is for what every platform
+// shares, and the refusal says where those declarations live.
+for_each_platform_check(extensions: string) {
+    if string.length(extensions) == 0 { return }
+    parts = string_split(extensions, ",")
+    i = 0
+    while i < string_array_size(parts) {
+        e = string.trim(str_of(string_array_get(parts, i)))
+        if string.length(get(g_ext_platform, e)) > 0 {
+            die("${e} is a ${get(g_ext_platform, e)} platform extension; --module takes platform-independent extensions only")
+        }
+        i = i + 1
+    }
+    string_array_free(parts)
+}
+
+// Insertion sort: the lists are a few hundred names long.
+sort_list(l: ptr) {
+    n = list_size(l)
+    i = 1
+    while i < n {
+        j = i
+        while j > 0 && string.compare(str_of(list_get_raw(l, j - 1)), str_of(list_get_raw(l, j))) > 0 {
+            a = list_get_raw(l, j - 1)
+            list_set(l, j - 1, list_get_raw(l, j))
+            list_set(l, j, a)
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The C dispatch tables
+// ---------------------------------------------------------------------------
+
+// Where an entry point comes from: vkGetInstanceProcAddr for global and
+// instance-level commands, vkGetDeviceProcAddr for device-level ones. The
+// level is the first parameter's type, as the loader defines it; the device
+// getter itself is fetched through the instance.
+cmd_level(c: string) -> string {
+    if string.equals(c, "vkGetDeviceProcAddr") == 1 { return "INSTANCE" }
+    target = c
+    alias = get(g_alias, c)
+    if string.length(alias) > 0 { target = alias }
+    ps = get(g_cmd_params, target)
+    first = ""
+    arr = lines_of(ps)
+    if string_array_size(arr) > 0 { first = field(str_of(string_array_get(arr, 0)), 0) }
+    string_array_free(arr)
+    if string.equals(first, "VkInstance") == 1 || string.equals(first, "VkPhysicalDevice") == 1 { return "INSTANCE" }
+    if string.equals(first, "VkDevice") == 1 || string.equals(first, "VkQueue") == 1 ||
+       string.equals(first, "VkCommandBuffer") == 1 { return "DEVICE" }
+    return "GLOBAL"
+}
+
+macro_for(owner: string, level: string) -> string {
+    if map_has(g_feat_number, owner) == 1 { return "AEVK_${level}_FNS" }
+    // VK_KHR_surface -> AEVK_KHR_SURFACE_FNS
+    rest = const_name(owner)
+    return "AEVK_${string.to_upper(rest)}_FNS"
+}
+
+emit_dispatch(path: string, commands_path: string, api: string, extensions: string) {
+    list_text, n, err = fs.read_binary(commands_path)
+    if err != "" { die("cannot read ${commands_path}: ${err}") }
+    wanted = lines_of(list_text)
+    // Macro name -> "X(cmd) \\\n" lines, and the macros in first-use order.
+    groups = map.new()
+    order = list.new()
+    levels = map.new()
+    i = 0
+    while i < string_array_size(wanted) {
+        line = string.trim(str_of(string_array_get(wanted, i)))
+        if string.length(line) > 0 && string.starts_with(line, "#") == 0 {
+            owner = get(g_req_cmds, line)
+            if string.length(owner) == 0 {
+                die("${line} is not in Vulkan ${api} or the selected extensions (${extensions})")
+            }
+            level = cmd_level(line)
+            m = macro_for(owner, level)
+            prior = get(levels, m)
+            if string.length(prior) > 0 && string.equals(prior, level) == 0 {
+                die("${owner} mixes ${prior} and ${level} commands in one group; list them separately")
+            }
+            put(levels, m, level)
+            if map_has(groups, m) == 0 {
+                list.add(order, string.concat(m, ""))
+                put(groups, m, "")
+            }
+            put(groups, m, string.concat(get(groups, m), "    X(${line}) \\\n"))
+        }
+        i = i + 1
+    }
+    string_array_free(wanted)
+    if n == 0 { die("${commands_path} is empty") }
+
+    sb = strbuilder.new(1 << 14)
+    strbuilder.append(sb, "/* The entry points contrib/vulkan loads, GENERATED from the Vulkan registry\n")
+    strbuilder.append(sb, " * (vk.xml) by contrib/vulkan/tools/vkgen.ae from contrib/vulkan/tools/\n")
+    strbuilder.append(sb, " * dispatch_commands.txt. Do not edit: add a command to that list and run\n")
+    strbuilder.append(sb, " * contrib/vulkan/tools/regenerate.sh.\n *\n")
+    strbuilder.append(sb, " * One X-macro list per feature or extension and loading level: GLOBAL and\n")
+    strbuilder.append(sb, " * INSTANCE entry points come from vkGetInstanceProcAddr, DEVICE ones from\n")
+    strbuilder.append(sb, " * vkGetDeviceProcAddr. The registry says which is which (the first\n")
+    strbuilder.append(sb, " * parameter's type), and which version or extension brought each.\n *\n")
+    strbuilder.append(sb, " * Registry: ${registry_version()}. */\n\n")
+    strbuilder.append(sb, "#ifndef AETHER_VULKAN_DISPATCH_H\n#define AETHER_VULKAN_DISPATCH_H\n")
+    oi = 0
+    while oi < list_size(order) {
+        m = str_of(list_get_raw(order, oi))
+        body = get(groups, m)
+        strbuilder.append(sb, "\n/* ${get(levels, m)} */\n#define ${m}(X) \\\n")
+        // Drop the continuation after the last entry.
+        strbuilder.append(sb, string.substring(body, 0, string.length(body) - 3))
+        strbuilder.append(sb, "\n")
+        oi = oi + 1
+    }
+    strbuilder.append(sb, "\n#endif /* AETHER_VULKAN_DISPATCH_H */\n")
+    out = strbuilder.finish(sb)
+    werr = fs.write_binary(path, out, string.length(out))
+    if werr != "" { die("cannot write ${path}: ${werr}") }
+    println("vkgen: wrote ${path}")
+}
+
+// ---------------------------------------------------------------------------
+
+usage() {
+    println("usage: vkgen --registry <vk.xml> --api <major.minor> [--extensions A,B,...]")
+    println("             [--module <out.ae>] [--commands <list.txt> --dispatch <out.h>]")
+    exit(2)
+}
+
+main() {
+    registry = ""
+    api = "1.0"
+    extensions = ""
+    module_out = ""
+    commands = ""
+    dispatch_out = ""
+    i = 1
+    while i < os.args_count() {
+        a = os.args_get(i)
+        v = os.args_get(i + 1)
+        if string.equals(a, "--registry") == 1 { registry = v; i = i + 1 }
+        else if string.equals(a, "--api") == 1 { api = v; i = i + 1 }
+        else if string.equals(a, "--extensions") == 1 { extensions = v; i = i + 1 }
+        else if string.equals(a, "--module") == 1 { module_out = v; i = i + 1 }
+        else if string.equals(a, "--commands") == 1 { commands = v; i = i + 1 }
+        else if string.equals(a, "--dispatch") == 1 { dispatch_out = v; i = i + 1 }
+        else { usage() }
+        i = i + 1
+    }
+    if string.length(registry) == 0 { usage() }
+    if string.length(module_out) == 0 && string.length(dispatch_out) == 0 { usage() }
+    if string.length(dispatch_out) > 0 && string.length(commands) == 0 { usage() }
+
+    g_cat = map.new()
+    g_alias = map.new()
+    g_under = map.new()
+    g_bits = map.new()
+    g_members = map.new()
+    g_union = map.new()
+    g_order = list.new()
+    g_enum_kind = map.new()
+    g_enum_width = map.new()
+    g_enum_values = map.new()
+    g_const_value = map.new()
+    g_const_type = map.new()
+    g_enum_owner = map.new()
+    g_cmd_ret = map.new()
+    g_cmd_params = map.new()
+    g_features = list.new()
+    g_feat_number = map.new()
+    g_ext_number = map.new()
+    g_ext_supported = map.new()
+    g_ext_platform = map.new()
+    g_reqs = map.new()
+    g_order_owners = list.new()
+    g_selected = map.new()
+    g_req_types = map.new()
+    g_req_cmds = map.new()
+    g_req_cmd_order = list.new()
+    g_ext_values = map.new()
+    g_ext_consts = map.new()
+    g_ext_const_order = list.new()
+    init_keywords()
+
+    read_registry(registry)
+    select_selection(api, extensions)
+    if string.length(module_out) > 0 { emit_module(module_out, api, extensions) }
+    if string.length(dispatch_out) > 0 { emit_dispatch(dispatch_out, commands, api, extensions) }
+}

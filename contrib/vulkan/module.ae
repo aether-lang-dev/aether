@@ -69,7 +69,7 @@
 //   vulkan.batch_count(t)               -> int
 //   vulkan.draw_material(t, p, m, r, g, b, a)    -> int
 //   vulkan.submit_material(t, p, m, r, g, b, a)  -> int
-//   vulkan.pixel(t, x, y)               -> int     0xRRGGBBAA, -1 outside
+//   vulkan.pixel(t, x, y)               -> long    0xRRGGBBAA, -1 outside
 //   vulkan.copy_rgba(t, dest, dest_len) -> int     status
 //   vulkan.save_ppm(t, path)            -> int     status
 //
@@ -133,13 +133,15 @@
 // Coordinates are Vulkan NDC: x and y run -1..1, y points DOWN, and a
 // front-facing triangle is counter-clockwise. Colours are 0..1.
 //
-// Build:
-//   - add contrib/vulkan/aether_vulkan.c to your aether.toml [[bin]]
-//     extra_sources (or pass --extra)
-//   - the Vulkan HEADERS must be on the include path (they are header-only;
-//     no library is linked). On Debian/Ubuntu: libvulkan-dev. On macOS:
-//     brew install vulkan-headers.
-//   - on Linux add `link_flags = "-ldl"` for dlopen.
+// Build: importing the module is enough. Its C file is declared below with
+// @source and compiled into the program; nothing is linked, since the
+// loader is opened at runtime. What a build needs is the Vulkan HEADERS on
+// the include path (header-only): libvulkan-dev on Debian/Ubuntu, the
+// vulkan-headers package in MSYS2, `brew install vulkan-headers` on macOS
+// (add `cflags = "-I/opt/homebrew/include"` to aether.toml there). A glibc
+// older than 2.34 keeps dlopen in libdl: add `link_flags = "-ldl"`.
+
+@source("aether_vulkan.c")
 
 import std.bytes
 import std.string
@@ -310,7 +312,7 @@ extern aevk_ae_verts_set(t: ptr, index: int, x: float, y: float,
                          r: float, g: float, b: float) -> int
 extern aevk_ae_draw(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int
 extern aevk_ae_copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int
-extern aevk_ae_pixel(t: ptr, x: int, y: int) -> int
+extern aevk_ae_pixel(t: ptr, x: int, y: int) -> long
 extern aevk_ae_save_ppm(t: ptr, path: string) -> int
 
 extern aevk_ae_target_create_format(dev: ptr, w: int, h: int, format: int,
@@ -433,7 +435,7 @@ copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int {
     return aevk_ae_copy_rgba(t, dest, dest_len)
 }
 
-pixel(t: ptr, x: int, y: int) -> int { return aevk_ae_pixel(t, x, y) }
+pixel(t: ptr, x: int, y: int) -> long { return aevk_ae_pixel(t, x, y) }
 save_ppm(t: ptr, path: string) -> int { return aevk_ae_save_ppm(t, path) }
 
 // VkFormat values, spelled out so a caller never needs the Vulkan headers:
@@ -589,11 +591,13 @@ submit_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) 
     return aevk_ae_submit_material(t, p, m, r, g, b, a)
 }
 
-// Channel accessors for the packed value pixel() returns.
-red(px: int) -> int { return (px >> 24) & 255 }
-green(px: int) -> int { return (px >> 16) & 255 }
-blue(px: int) -> int { return (px >> 8) & 255 }
-alpha(px: int) -> int { return px & 255 }
+// Channel accessors for the packed value pixel() returns. pixel() is a long
+// so every colour (opaque white is 0xFFFFFFFF) is non-negative and -1 means
+// only "no pixel there".
+red(px: long) -> int { return ((px >> 24) & 255) as int }
+green(px: long) -> int { return ((px >> 16) & 255) as int }
+blue(px: long) -> int { return ((px >> 8) & 255) as int }
+alpha(px: long) -> int { return (px & 255) as int }
 
 // ---------------------------------------------------------------------------
 // Presenting to a window (#1505)
