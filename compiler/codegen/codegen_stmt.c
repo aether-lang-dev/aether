@@ -3,6 +3,7 @@
 #include "../aether_module.h"
 #include "../analysis/contract_eval.h"
 #include "../analysis/typechecker.h"
+#include "../analysis/hoist.h"
 #include "../aether_error.h"
 
 // Is `name` the variable name of a known closure? If yes, also returns the
@@ -3625,39 +3626,6 @@ void push_opt_str_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
 // Pulls only direct children (not nested blocks) since a name introduced
 // inside a deeper `while` of the then-branch should NOT escape to the
 // post-if scope.
-static void collect_branch_decl_names(ASTNode* body,
-                                       const char** names, int* count, int cap) {
-    if (!body) return;
-    for (int i = 0; i < body->child_count; i++) {
-        ASTNode* child = body->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value
-            && *count < cap) {
-            // Dedup so a branch like `x = 1; x = 2` only registers once.
-            int already = 0;
-            for (int j = 0; j < *count; j++) {
-                if (strcmp(names[j], child->value) == 0) { already = 1; break; }
-            }
-            if (!already) names[(*count)++] = child->value;
-        }
-    }
-}
-
-// Find the AST_VARIABLE_DECLARATION node for `name` inside a block,
-// returning the first match (so type inference can use its initializer).
-static ASTNode* find_branch_decl(ASTNode* body, const char* name) {
-    if (!body || !name) return NULL;
-    for (int i = 0; i < body->child_count; i++) {
-        ASTNode* child = body->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value
-            && strcmp(child->value, name) == 0) {
-            return child;
-        }
-    }
-    return NULL;
-}
-
 // When both arms of an if/else first-assign the same variable name,
 // hoist a single declaration to the enclosing scope so the post-block
 // code can read it. Without this, both arms emit a C-local declaration
@@ -3725,29 +3693,9 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
  * the branches. Non-numeric kinds keep `seed` (a clash is reported at
  * the binding). Nested closures are their own functions and are not
  * walked. Returns a fresh Type, or NULL when nothing widened `seed`. */
-static Type* sibling_join_type_walk(ASTNode* n, const char* name, Type* acc) {
-    if (!n) return acc;
-    if (n->type == AST_CLOSURE) return acc;
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
-        strcmp(n->value, name) == 0) {
-        Type* t = n->node_type;
-        if ((!t || t->kind == TYPE_UNKNOWN) && n->child_count > 0 && n->children[0])
-            t = n->children[0]->node_type;
-        Type* j = numeric_join_type(acc, t);
-        if (j) { free_type(acc); acc = j; }
-    }
-    for (int i = 0; i < n->child_count; i++) acc = sibling_join_type_walk(n->children[i], name, acc);
-    return acc;
-}
-
 static Type* sibling_join_type(CodeGenerator* gen, const char* name, Type* seed) {
-    if (!gen->hoist_scope_body || !seed) return NULL;
-    Type* probe = numeric_join_type(seed, seed);
-    if (!probe) return NULL;          /* not a numeric kind: nothing to join */
-    free_type(probe);
-    Type* acc = sibling_join_type_walk(gen->hoist_scope_body, name, clone_type(seed));
-    if (acc && acc->kind == seed->kind) { free_type(acc); return NULL; }
-    return acc;
+    if (!gen->hoist_scope_body) return NULL;
+    return hoist_join_type(gen->hoist_scope_body, name, seed);
 }
 
 /* #2124: the kinds a number local holds; a pointer cannot flow into one
@@ -3774,12 +3722,10 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
                                        ASTNode* then_body,
                                        ASTNode* else_body) {
     if (!then_body || !else_body) return;
-    const char* then_names[64];
-    int then_count = 0;
-    collect_branch_decl_names(then_body, then_names, &then_count, 64);
-    const char* else_names[64];
-    int else_count = 0;
-    collect_branch_decl_names(else_body, else_names, &else_count, 64);
+    const char* then_names[HOIST_MAX_NAMES];
+    int then_count = hoist_direct_decl_names(then_body, then_names, 0, HOIST_MAX_NAMES);
+    const char* else_names[HOIST_MAX_NAMES];
+    int else_count = hoist_direct_decl_names(else_body, else_names, 0, HOIST_MAX_NAMES);
 
     for (int i = 0; i < then_count; i++) {
         const char* n = then_names[i];
@@ -3798,7 +3744,7 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
         if (is_module_global_var(gen, n)) continue;
 
         // Recover a usable type from either branch's initializer.
-        ASTNode* decl = find_branch_decl(then_body, n);
+        ASTNode* decl = hoist_find_decl(then_body, n);
         Type* var_type = decl ? decl->node_type : NULL;
         if ((!var_type || var_type->kind == TYPE_VOID
              || var_type->kind == TYPE_UNKNOWN)
@@ -3808,7 +3754,7 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
         }
         if (!var_type || var_type->kind == TYPE_VOID
             || var_type->kind == TYPE_UNKNOWN) {
-            decl = find_branch_decl(else_body, n);
+            decl = hoist_find_decl(else_body, n);
             if (decl && decl->child_count > 0
                 && decl->children[0] && decl->children[0]->node_type) {
                 var_type = decl->children[0]->node_type;
@@ -3836,91 +3782,84 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
 // at function scope in the generated C. Without this, variables first
 // assigned inside a while block are C-block-scoped and invisible to
 // subsequent while blocks in the same function.
-static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
-    if (!body) return;
-    for (int i = 0; i < body->child_count; i++) {
-        ASTNode* child = body->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value) {
-            /* #744: don't hoist a module-level `var` global as a loop-
-             * scoped local — it would shadow the file-scope static. */
-            if (!is_var_declared(gen, child->value) &&
-                !is_module_global_var(gen, child->value)) {
-                // Determine type
-                Type* var_type = child->node_type;
-                if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
-                    && child->child_count > 0 && child->children[0] && child->children[0]->node_type) {
-                    var_type = child->children[0]->node_type;
-                }
-                Type* joined = sibling_join_type(gen, child->value, var_type);
-                if (joined) var_type = joined;
-                const char* c_type = get_c_type(var_type);
-                print_indent(gen);
-                /* #2024: a variable a closure mutates lives in a heap
-                 * cell, not a plain value, and every later write to it
-                 * is `*name = ...`. Hoisting it as `T name;` declared
-                 * the wrong thing and the first assignment in the body
-                 * then dereferenced an int. The cell is hoisted instead
-                 * -- same scope as any other hoisted loop variable, so
-                 * one cell across iterations, and its release is queued
-                 * at this scope's exit like a first assignment would. */
-                if (is_promoted_capture(gen, child->value)) {
-                    emit_promoted_cell_declaration(gen, child->value, c_type, NULL, NULL,
-                                                   child->line, child->column);
-                    if (joined) free_type(joined);
-                    continue;
-                }
-                mark_var_declared_typed(gen, child->value, var_type);
-                /* Zero-initialize struct hoists so the first-iteration
-                 * struct-destroy call (#465) sees zero `_heap_<field>`
-                 * trackers instead of stack-uninitialised garbage.
-                 * Without this, the first `b = Box { ... }` inside the
-                 * loop body runs `Box_destroy(&b)` on uninit memory
-                 * and may free a garbage pointer. The {0} initialiser
-                 * is C99-portable and a no-op for non-struct types
-                 * either (the C compiler does the right thing). */
-                if (var_type && var_type->kind == TYPE_STRUCT) {
-                    fprintf(gen->output, "%s %s = {0};\n", c_type, child->value);
-                    /* Push the function-exit struct-destroy defer
-                     * here too — the in-loop reassignment path
-                     * doesn't run the first-declaration codegen
-                     * that normally pushes the defer (the var is
-                     * already-declared via this hoist). Without
-                     * this, the final loop-iteration's heap fields
-                     * never get reclaimed at function exit. */
-                    if (var_type->struct_name && gen->program) {
-                        ASTNode* sdef = find_struct_definition_by_name(
-                            gen->program, var_type->struct_name);
-                        if (sdef && struct_has_heap_string_field(sdef)) {
-                            char annot[300];
-                            snprintf(annot, sizeof(annot),
-                                     "struct_destroy:%s:%s",
-                                     child->value, var_type->struct_name);
-                            ASTNode* carrier = create_ast_node(
-                                AST_EXPRESSION_STATEMENT, NULL,
-                                child->line, child->column);
-                            if (carrier) {
-                                if (carrier->annotation) free(carrier->annotation);
-                                carrier->annotation = strdup(annot);
-                                codegen_own_node(gen, carrier);
-                                push_defer(gen, carrier);
-                            }
-                        }
+/* One declaration hoist_loop_vars declares before its while (the order
+ * and the set come from hoist_loop_decls, shared with the typechecker). */
+static void hoist_loop_var(ASTNode* child, void* user) {
+    CodeGenerator* gen = (CodeGenerator*)user;
+    /* #744: don't hoist a module-level `var` global as a loop-
+     * scoped local — it would shadow the file-scope static. */
+    if (!is_var_declared(gen, child->value) &&
+        !is_module_global_var(gen, child->value)) {
+        // Determine type
+        Type* var_type = child->node_type;
+        if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
+            && child->child_count > 0 && child->children[0] && child->children[0]->node_type) {
+            var_type = child->children[0]->node_type;
+        }
+        Type* joined = sibling_join_type(gen, child->value, var_type);
+        if (joined) var_type = joined;
+        const char* c_type = get_c_type(var_type);
+        print_indent(gen);
+        /* #2024: a variable a closure mutates lives in a heap
+         * cell, not a plain value, and every later write to it
+         * is `*name = ...`. Hoisting it as `T name;` declared
+         * the wrong thing and the first assignment in the body
+         * then dereferenced an int. The cell is hoisted instead
+         * -- same scope as any other hoisted loop variable, so
+         * one cell across iterations, and its release is queued
+         * at this scope's exit like a first assignment would. */
+        if (is_promoted_capture(gen, child->value)) {
+            emit_promoted_cell_declaration(gen, child->value, c_type, NULL, NULL,
+                                           child->line, child->column);
+            if (joined) free_type(joined);
+            return;
+        }
+        mark_var_declared_typed(gen, child->value, var_type);
+        /* Zero-initialize struct hoists so the first-iteration
+         * struct-destroy call (#465) sees zero `_heap_<field>`
+         * trackers instead of stack-uninitialised garbage.
+         * Without this, the first `b = Box { ... }` inside the
+         * loop body runs `Box_destroy(&b)` on uninit memory
+         * and may free a garbage pointer. The {0} initialiser
+         * is C99-portable and a no-op for non-struct types
+         * either (the C compiler does the right thing). */
+        if (var_type && var_type->kind == TYPE_STRUCT) {
+            fprintf(gen->output, "%s %s = {0};\n", c_type, child->value);
+            /* Push the function-exit struct-destroy defer
+             * here too — the in-loop reassignment path
+             * doesn't run the first-declaration codegen
+             * that normally pushes the defer (the var is
+             * already-declared via this hoist). Without
+             * this, the final loop-iteration's heap fields
+             * never get reclaimed at function exit. */
+            if (var_type->struct_name && gen->program) {
+                ASTNode* sdef = find_struct_definition_by_name(
+                    gen->program, var_type->struct_name);
+                if (sdef && struct_has_heap_string_field(sdef)) {
+                    char annot[300];
+                    snprintf(annot, sizeof(annot),
+                             "struct_destroy:%s:%s",
+                             child->value, var_type->struct_name);
+                    ASTNode* carrier = create_ast_node(
+                        AST_EXPRESSION_STATEMENT, NULL,
+                        child->line, child->column);
+                    if (carrier) {
+                        if (carrier->annotation) free(carrier->annotation);
+                        carrier->annotation = strdup(annot);
+                        codegen_own_node(gen, carrier);
+                        push_defer(gen, carrier);
                     }
-                } else {
-                    emit_hoisted_local_decl(gen, var_type, child->value);
                 }
-                if (joined) free_type(joined);
             }
+        } else {
+            emit_hoisted_local_decl(gen, var_type, child->value);
         }
-        // Recurse into nested blocks (e.g., if inside while)
-        if (child->type == AST_IF_STATEMENT || child->type == AST_WHILE_LOOP ||
-            child->type == AST_FOR_LOOP) {
-            for (int j = 0; j < child->child_count; j++) {
-                hoist_loop_vars(gen, child->children[j]);
-            }
-        }
+        if (joined) free_type(joined);
     }
+}
+
+static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
+    hoist_loop_decls(body, hoist_loop_var, gen);
 }
 
 // Pre-hoist variables first-declared inside if-statement branches at
@@ -3944,21 +3883,6 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
 // definition); the inner branches' `Type x = expr` becomes an
 // assignment to the outer-scope `x`. The codegen's existing
 // is_var_declared check skips re-declaration in the inner branch.
-static void collect_if_branch_vars(ASTNode* body, const char** out, int* count, int max);
-
-static int has_identifier_ref(ASTNode* node, const char* name) {
-    if (!node || !name) return 0;
-    if (node->type == AST_IDENTIFIER && node->value &&
-        strcmp(node->value, name) == 0) return 1;
-    /* Don't treat a fresh declaration as a "ref" — only post-decl
-     * uses count. But we don't know declaration order from a single
-     * subtree, so treat any AST_IDENTIFIER as a use. The hoist is
-     * over-eager but safe. */
-    for (int i = 0; i < node->child_count; i++) {
-        if (has_identifier_ref(node->children[i], name)) return 1;
-    }
-    return 0;
-}
 
 // ============================================================
 // Issue #348 — Eiffel-style `requires` / `ensures` contracts.
@@ -4112,50 +4036,10 @@ static int function_has_ensures(ASTNode* func) {
 
 void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
     if (!body) return;
-    /* First: collect names that appear as top-level declarations in
-     * the function body (outside any if). These already get a
-     * function-scope declaration via the regular generate_statement
-     * path AND its companion `_heap_<name>` tracker. Hoisting them
-     * here would emit a duplicate declaration AND skip the heap
-     * tracker — see the test_string_late_heap_reassign repro that
-     * exercises variant 2 (`line = ""` then if/else reassignment). */
-    const char* top_level_decls[64];
-    int top_count = 0;
-    for (int i = 0; i < body->child_count && top_count < 64; i++) {
-        ASTNode* child = body->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value) {
-            top_level_decls[top_count++] = child->value;
-        }
-    }
-
-    /* Walk top-level statements collecting names first-declared
-     * inside any if-branch. */
-    const char* names[64];
-    int count = 0;
-    for (int i = 0; i < body->child_count; i++) {
-        ASTNode* child = body->children[i];
-        if (!child || child->type != AST_IF_STATEMENT) continue;
-        /* Walk both then- and else- branches (children[1], [2] when
-         * present). children[0] is the condition. */
-        for (int j = 1; j < child->child_count && j < 3; j++) {
-            collect_if_branch_vars(child->children[j], names, &count, 64);
-        }
-    }
-    /* Filter out names already declared at top level. */
-    int kept = 0;
-    for (int n = 0; n < count; n++) {
-        int dup = 0;
-        for (int k = 0; k < top_count; k++) {
-            if (strcmp(names[n], top_level_decls[k]) == 0) { dup = 1; break; }
-        }
-        if (!dup) names[kept++] = names[n];
-    }
-    count = kept;
-    /* For each candidate, only hoist if it's referenced outside any
-     * if-block in the function body (i.e. in a top-level statement
-     * that isn't an AST_IF_STATEMENT, or as the controlling condition
-     * of an if). Otherwise the existing C-local scoping was correct. */
+    /* Which names: hoist_if_branch_candidates (shared with the typechecker,
+     * which must accept exactly the reads this makes compile). */
+    const char* names[HOIST_MAX_NAMES];
+    int count = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
     for (int n = 0; n < count; n++) {
         const char* name = names[n];
         if (is_var_declared(gen, name)) continue;
@@ -4168,35 +4052,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
          * AST_VARIABLE_DECLARATION emitter (is_module_global_var), so
          * skip it here exactly as that path does. */
         if (is_module_global_var(gen, name)) continue;
-        int referenced_outside = 0;
-        for (int i = 0; i < body->child_count; i++) {
-            ASTNode* child = body->children[i];
-            if (!child) continue;
-            if (child->type == AST_IF_STATEMENT) {
-                /* The condition (child[0]) counts as outside-the-branch. */
-                if (child->child_count > 0 &&
-                    has_identifier_ref(child->children[0], name)) {
-                    referenced_outside = 1;
-                    break;
-                }
-                continue;
-            }
-            if (has_identifier_ref(child, name)) {
-                referenced_outside = 1;
-                break;
-            }
-        }
-        if (!referenced_outside) continue;
-        /* Hoist: find the first declaration in any branch to recover
-         * the type, then emit a function-scope declaration. */
-        ASTNode* first_decl = NULL;
-        for (int i = 0; i < body->child_count && !first_decl; i++) {
-            ASTNode* child = body->children[i];
-            if (!child || child->type != AST_IF_STATEMENT) continue;
-            for (int j = 1; j < child->child_count && j < 3 && !first_decl; j++) {
-                first_decl = find_branch_decl(child->children[j], name);
-            }
-        }
+        ASTNode* first_decl = hoist_if_branch_first_decl(body, name);
         if (!first_decl) continue;
         Type* var_type = first_decl->node_type;
         if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
@@ -4222,20 +4078,6 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
     }
 }
 
-static void collect_if_branch_vars(ASTNode* body, const char** out, int* count, int max) {
-    if (!body || !out || !count) return;
-    for (int i = 0; i < body->child_count && *count < max; i++) {
-        ASTNode* child = body->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value) {
-            int dup = 0;
-            for (int k = 0; k < *count; k++) {
-                if (strcmp(out[k], child->value) == 0) { dup = 1; break; }
-            }
-            if (!dup) out[(*count)++] = child->value;
-        }
-    }
-}
 
 /* #752: a struct local returned (directly or as a tuple element) hands
  * ownership of its heap-string fields to the caller. Mark it so the

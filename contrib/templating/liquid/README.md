@@ -54,8 +54,9 @@ All of the following have integration tests in
 - `{{ "literal string" }}` — string literals (single or double quotes).
 - `{{ 42 }}` — integer literals.
 - `{{ 3.7 }}`, `{{ -5 }}` — decimal and negative number literals.
-- `{{ x | filter | filter2: 2 | filter3: 'a', 'b' }}` — filter chains
-  with positional args: quoted strings or bare numbers.
+- `{{ x | filter | filter2: 2 | filter3: 'a', qty }}` — filter chains
+  with positional args: quoted strings, bare numbers, or names resolved in
+  the render context.
 
 ### Tags
 
@@ -94,10 +95,13 @@ All of the following have integration tests in
   rejected via `std.fs.is_within_base`. Depth-limited at 100 to
   prevent infinite-include recursion.
 - `{% layout 'parent' %}` + `{% block name %}…{% endblock %}` —
-  Jekyll-style template inheritance (single level).
+  Jekyll-style template inheritance, to any depth: a layout may itself have
+  a layout. The most derived template that defines a block supplies it, and
+  a cycle is an error.
 - `{% extends 'parent' %}` — Django/Jinja alias for `{% layout %}`.
-- `{{ block.super }}` — inside a child block override, emits the
-  parent's default block content.
+- `{{ block.super }}` — inside a block override, emits the same block as
+  the next template up the chain defines it (its own `block.super`
+  included).
 
 ### Filters
 
@@ -122,10 +126,18 @@ round away from zero). `round: N` rounds a decimal to N places and prints it
 as Liquid does, without padding zeros but with at least one fraction digit
 (`{{ 3.14159 | round: 2 }}` is `3.14`, `{{ 9.999 | round: 2 }}` is `10.0`),
 and it rounds in decimal, so `{{ 1.005 | round: 2 }}` is `1.01`. `abs` keeps
-the input's shape (`-5` is `5`, `-5.50` is `5.5`). The arithmetic filters
-(`plus` .. `at_most`) work on integers, read the same way (`"12px" | plus: 1`
-is `13`; `10 | divided_by: 3` is `3`), and a decimal operand is a render
-error rather than a wrong number (#2185).
+the input's shape (`-5` is `5`, `-5.50` is `5.5`).
+
+The arithmetic filters (`plus`, `minus`, `times`, `divided_by`, `modulo`,
+`at_least`, `at_most`) read both sides the same way and compute exactly, as
+Liquid's Ruby numbers do. Integers stay integers and do not overflow
+(`99999999999 | times: 99999999999` is `9999999999800000000001`), and
+division and modulo floor (`-7 | divided_by: 2` is `-4`, `-7 | modulo: 3`
+is `2`). A decimal on either side makes the result a decimal, computed
+exactly (`0.1 | plus: 0.2` is `0.3`, `0.3 | divided_by: 0.1` is `3.0`) and
+printed as Ruby prints the Float nearest to it (`10 | divided_by: 3.0` is
+`3.3333333333333335`; `1.0e+17` and `1.0e-05` past the range Ruby writes
+in full). Dividing by zero is a render error.
 
 Unknown filter names pass the input through unchanged (Shopify
 behaviour, not an error). `divided_by:"0"` and `modulo:"0"` raise
@@ -174,7 +186,38 @@ context_free(ctx: ptr)
 
 render(t: ptr, ctx: ptr)                       -> (string, string)
 render_to_strbuilder(t: ptr, ctx: ptr, sb: ptr) -> string  // (error)
+template_free(t: ptr)                          // release a parsed template
+
+partial_cache_new()                            -> ptr
+context_set_partial_cache(ctx: ptr, cache: ptr)
+partial_cache_free(cache: ptr)
+partial_loads()                                -> int     // reads + parses so far
 ```
+
+### Partial cache
+
+Without a cache, every `{% include %}`, `{% render %}` and layout parent is
+read from disk and parsed at every use. A cache parses each once, keyed by
+its resolved path. The include root is still checked at every use, and
+`{% render %}`'s fresh context shares the cache:
+
+```aether
+cache = liquid.partial_cache_new()
+// for each page:
+ctx = liquid.context_new()
+liquid.context_set_include_root(ctx, "partials")
+liquid.context_set_partial_cache(ctx, cache)
+out, err = liquid.render(t, ctx)
+liquid.context_free(ctx)
+// once no context uses it:
+liquid.partial_cache_free(cache)
+```
+
+A cache holds what it read. A partial edited on disk after being cached is
+not re-read; use a new cache for that. `partial_loads()` counts reads and
+parses, so the saving can be measured. A page including one partial 200
+times, rendered 20 times, loads it 4,000 times without a cache and once
+with one (162 ms against 39 ms on a Windows laptop).
 
 Value constructors / inspectors (mostly for downstream code that
 builds packed values directly):
@@ -225,13 +268,6 @@ Each has its own issue.
   `where`, `compact`, `concat` (#2180). Until then, as unknown filters,
   they pass their input through unchanged.
 - `date`: passes its input through unchanged (#2181).
-- A filter argument that names a variable, `{{ price | times: qty }}`:
-  rejected at render (#2182).
-- Decimal operands to the arithmetic filters, `{{ 3.7 | plus: 1 }}`:
-  rejected at render (#2185).
-- Layout inheritance deeper than one level (#2183).
-- Caching parsed partials: each `{% include %}` reads and parses its file
-  again (#2184).
 
 ## Performance notes
 
@@ -240,9 +276,8 @@ Each has its own issue.
 - Strings are `std.string` (refcounted heap strings); the renderer
   uses `std.strbuilder` for output accumulation so output assembly
   is O(N).
-- Includes are uncached: partials are read and parsed again at every
-  use. For a static-site generator that uses 100 partials, this is the
-  long-pole cost (#2184).
+- Includes read and parse their partial at every use unless the context
+  has a partial cache (above), which parses each once.
 
 ## Testing
 

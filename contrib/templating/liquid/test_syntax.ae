@@ -100,6 +100,24 @@ main() {
     // Line numbers in lex errors: a template author reading "unterminated
     // tag" with no location has to bisect the file by hand, so the reported
     // line is part of the contract, not a nicety.
+    // No Liquid syntax uses a control character, and refusing them inside
+    // tags keeps every name a template can bind printable -- the context's
+    // internal keys start with one (#2184's partial cache).
+    spec.describe(fw, "liquid: control characters in tags") {
+        spec.it(fw, "refuses a control character inside a tag") callback {
+            src = string.concat(string.concat("{% assign ", string.from_char(1)), "k = 1 %}")
+            _t, e = liquid.parse_string(src)
+            spec.assert_not_eq(string.index_of(e, "control character"), -1, "k1 refused at parse")
+        }
+
+        spec.it(fw, "still allows tabs and newlines inside a tag") callback {
+            t, e = liquid.parse_string("{%\tassign\n x = 2 %}{{ x }}")
+            spec.assert_str_eq(e, "", "k2 parses")
+            out, _r = liquid.render(t, liquid.context_new())
+            spec.assert_str_eq(out, "2", "k3 renders")
+        }
+    }
+
     spec.describe(fw, "liquid: lex error locations") {
         spec.it(fw, "reports line 1 for an unterminated output tag") callback {
             _, e1 = liquid.parse_string("{{ x")

@@ -1,0 +1,19 @@
+// Regression: a constant float expression whose value overflows to infinity
+// compiles and keeps that value.
+//
+// The optimizer folds `1.0e308 * 10.0` at compile time and printed the
+// result with `%.17g`, which spells infinity `inf` -- and the generated C,
+// `double big = inf;`, failed with "'inf' undeclared". A non-finite result
+// is now left to the runtime, which computes the same IEEE value.
+
+extern exit(code: int)
+
+main() {
+    big = 1.0e308 * 10.0
+    if big <= 1.0e308 { println("FAIL: big = ${big}"); exit(1) }
+    // Infinity minus itself is NaN, which compares unequal to everything.
+    if big - big == 0.0 { println("FAIL: big is finite"); exit(1) }
+    small = 0.0 - 1.0e308 * 10.0
+    if small >= 0.0 { println("FAIL: small = ${small}"); exit(1) }
+    println("PASS")
+}

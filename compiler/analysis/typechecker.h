@@ -36,6 +36,13 @@ typedef struct Symbol {
     // restore what it overwrote. A stamp makes that check O(1) where walking
     // the scope's list made rebinding quadratic in a function's locals.
     unsigned walk_id;
+    // #2186: a local the typechecker bound in an enclosing scope because it
+    // was first bound in an `if` arm or loop body and codegen hoists it
+    // there (hoist_if_branch_vars / hoist_loop_vars). A binding of it in a
+    // sibling branch or loop body is judged by codegen's sibling check,
+    // which knows the joined type; this only makes the name readable after
+    // the block.
+    int branch_hoisted;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the
