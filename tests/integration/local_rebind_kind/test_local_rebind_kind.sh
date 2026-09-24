@@ -224,6 +224,28 @@ if ! printf '%s' "$out" | grep -q "Format specifier '%u' does not match argument
     fail=1
 fi
 
+# `_` is the discard binding: its type never sticks, so re-binding it to a
+# different kind is legal (the whole point of `_` is to throw the value
+# away). A named local in the same shape is refused; `_` is not.
+cat > "$tmp/discard.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+main() {
+    _ = 5              // int
+    p = malloc(4)
+    _ = p              // ptr — a different kind, but `_` does not stick
+    free(p)
+    _ = "s"            // string
+    println("ok")
+}
+AE
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/discard.ae" 2>&1 | tail -1)"
+if [ "$got" != "ok" ]; then
+    echo "  [FAIL] local_rebind_kind: re-binding the discard '_' to another kind was refused (got '$got')"
+    fail=1
+fi
+
 # A bare expression statement, then a binding on the next line.
 cat > "$tmp/lines.ae" <<'AE'
 struct P { a: int }

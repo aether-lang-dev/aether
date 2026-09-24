@@ -6337,6 +6337,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * typed by is_type_compatible's actor-ref rules. */
                 if (bound && bound->type && !bound->is_state &&
                     !bound->is_function && !bound->is_actor && !bound->is_module_alias &&
+                    /* `_` is the discard binding: it names no value the code
+                     * reads back, so it is never "the same local" across
+                     * assignments and its type does not stick. `_ = f()` then
+                     * `_ = g()` with a different return type is legal, as it
+                     * always was before locals kept their first type. */
+                    !(stmt->value && strcmp(stmt->value, "_") == 0) &&
                     bound->type->kind != TYPE_UNKNOWN &&
                     init_type && init_type->kind != TYPE_UNKNOWN &&
                     init_type->kind != TYPE_VOID &&
