@@ -59,16 +59,29 @@ if [ "${VKGEN_REQUIRE_RELEASE:-0}" = "1" ] && [ "$have" != "$want" ]; then
     fail "the committed files come from registry $want and this registry is $have: regenerate them from this one (contrib/vulkan/tools/regenerate.sh --registry <its vk.xml>)"
 fi
 
+# Line by line with awk rather than diff: the MSYS2 CI image has no
+# diffutils. Prints the first lines that differ and fails; a file longer or
+# shorter than the other differs too.
+same_lines() {
+    awk 'NR == FNR { a[FNR] = $0; n = FNR; next }
+         { m = FNR
+           if (!(FNR in a) || a[FNR] != $0) {
+               if (shown < 10) printf "    line %d\n      committed: %s\n      generated: %s\n", FNR, a[FNR], $0
+               shown++
+               bad = 1
+           } }
+         END { if (m != n) { printf "    committed has %d lines, generated %d\n", n, m; bad = 1 }
+               exit bad }' "$1" "$2"
+}
+
 grep -v "Registry: " "$COMMITTED/aether_vulkan_dispatch.h" > "$WORK/committed.h"
 grep -v "Registry: " "$WORK/gen/aether_vulkan_dispatch.h" > "$WORK/generated.h"
-if ! diff -u "$WORK/committed.h" "$WORK/generated.h" > "$WORK/dispatch.diff"; then
-    sed 's/^/    /' "$WORK/dispatch.diff" | head -30
+if ! same_lines "$WORK/committed.h" "$WORK/generated.h"; then
     fail "aether_vulkan_dispatch.h differs from what vkgen generates; run contrib/vulkan/tools/regenerate.sh"
 fi
 
 if [ "$have" = "$want" ]; then
-    if ! diff -u "$COMMITTED/vk/module.ae" "$WORK/gen/vk/module.ae" > "$WORK/module.diff"; then
-        sed 's/^/    /' "$WORK/module.diff" | head -30
+    if ! same_lines "$COMMITTED/vk/module.ae" "$WORK/gen/vk/module.ae"; then
         fail "vk/module.ae differs from what vkgen generates from registry $have; run contrib/vulkan/tools/regenerate.sh"
     fi
     module_check="identical"
