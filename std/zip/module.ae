@@ -1,4 +1,5 @@
-// std.zip — a ZIP archive READER over an in-memory byte buffer (#2010).
+// std.zip — a ZIP archive READER and WRITER over an in-memory byte buffer,
+// plus a safe-by-default extract-to-disk layer (#2010 and follow-ups).
 //
 // A .zip is a CONTAINER, not a compressed blob: a set of entries (each
 // `stored` or `deflate`d) indexed by a Central Directory whose location is
@@ -38,6 +39,7 @@ import std.string
 import std.bytes
 import std.zlib
 import std.io
+import std.fs
 
 exports(
     // compression methods
@@ -54,6 +56,10 @@ exports(
     // writer (#2010 follow-up): build a .zip in memory
     writer_new, writer_add, writer_add_dir, writer_finish, writer_free,
     create,
+    // directory-tree writer: add a filesystem tree to an archive
+    add_dir_tree,
+    // extract to disk (#2010 follow-up): safe by default
+    ExtractOptions, default_extract_options, extract, extract_file,
 )
 
 extern malloc(size: int) -> ptr
@@ -860,4 +866,329 @@ create(name: string, data: string, data_len: int, method: int, level: int)
     }
     writer_free(w)
     return "", 0, err
+}
+
+// ============================================================================
+// Directory-tree writer — add a filesystem tree to an archive (#2010 follow-up)
+//
+// Walk `fs_root` and add every regular file under it to the writer, naming each
+// entry by its path relative to `fs_root` with `arc_prefix` prepended. This is
+// a convenience over writer_add; the archive is still finished and freed by the
+// caller. Directories are represented implicitly by their files' paths (a zip
+// needs no explicit directory entries, and readers create the dirs on extract),
+// except an empty directory, which would otherwise vanish — those get an
+// explicit trailing-slash entry.
+//
+//   w = zip.writer_new()
+//   err = zip.add_dir_tree(w, "site", "", zip.METHOD_DEFLATE, 6)
+//   out, n, ferr = zip.writer_finish(w)
+//   zip.writer_free(w)
+
+struct DirTreeCtx {
+    w: ptr // *ZipWriter
+    root: ptr // owned AetherBytes: fs_root + "/" (the prefix to strip)
+    root_len: int
+    prefix: ptr // owned AetherBytes: arc_prefix (may be empty)
+    prefix_len: int
+    method: int
+    level: int
+    err: ptr // owned AetherBytes holding the first error, or null
+}
+
+// Record the first error seen inside the walk callback (later ones are ignored;
+// the callback returns WALK_STOP to end the walk on the first).
+fn dtc_set_err(ctx: *DirTreeCtx, msg: string) {
+    if ctx.err != null { return }
+    mlen = string_length(msg)
+    ctx.err = bytes.new(mlen + 1)
+    bytes.set(ctx.err, mlen, 0)
+    if mlen > 0 { bytes.copy_from_string(ctx.err, 0, msg, mlen) }
+}
+
+// Add a filesystem tree to the writer. `arc_prefix` is prepended to every
+// entry name (use "" for none; a trailing "/" is added if missing and prefix
+// is non-empty). `method`/`level` apply to every file. Returns "" or the first
+// error encountered.
+add_dir_tree(wp: ptr, fs_root: string, arc_prefix: string, method: int, level: int) -> string {
+    if wp == null { return "zip: null writer" }
+
+    root_len = string_length(fs_root)
+    // Build the strip prefix: fs_root plus a single "/" so relative names have
+    // no leading slash. If fs_root already ends in "/", don't double it.
+    var strip: string = fs_root
+    var strip_owned: int = 0
+    if root_len > 0 && string.char_at(fs_root, root_len - 1) != 47 {
+        strip = string.concat(fs_root, "/")
+        strip_owned = 1
+    }
+    strip_len = string_length(strip)
+
+    // Normalise arc_prefix: non-empty and not slash-terminated -> add "/".
+    plen0 = string_length(arc_prefix)
+    var pfx: string = arc_prefix
+    var pfx_owned: int = 0
+    if plen0 > 0 && string.char_at(arc_prefix, plen0 - 1) != 47 {
+        pfx = string.concat(arc_prefix, "/")
+        pfx_owned = 1
+    }
+
+    ctx = malloc(sizeof(DirTreeCtx)) as *DirTreeCtx
+    ctx.w = wp
+    ctx.root = bytes.new(strip_len + 1)
+    bytes.set(ctx.root, strip_len, 0)
+    if strip_len > 0 { bytes.copy_from_string(ctx.root, 0, strip, strip_len) }
+    ctx.root_len = strip_len
+    plen = string_length(pfx)
+    ctx.prefix = bytes.new(plen + 1)
+    bytes.set(ctx.prefix, plen, 0)
+    if plen > 0 { bytes.copy_from_string(ctx.prefix, 0, pfx, plen) }
+    ctx.prefix_len = plen
+    ctx.method = method
+    ctx.level = level
+    ctx.err = null
+
+    _n, walk_err = fs.walk(fs_root, | path: string, kind: int, depth: int | {
+            if kind == fs.STAT_KIND_FILE {
+                plen2 = string_length(path)
+                // Strip the root prefix to get the archive-relative name.
+                var rel: string = path
+                if plen2 >= ctx.root_len && ctx.root_len > 0 {
+                    rel = string.substring(path, ctx.root_len, plen2)
+                }
+                // read the file
+                data, dlen, rerr = fs.read_binary(path)
+                if string.equals(rerr, "") != 1 {
+                    dtc_set_err(ctx, rerr)
+                    return fs.WALK_STOP
+                }
+                // entry name = prefix + rel
+                var ename: string = rel
+                var ename_owned: int = 0
+                if ctx.prefix_len > 0 {
+                    pfxs = slice_string(ctx.prefix, 0, ctx.prefix_len)
+                    ename = string.concat(pfxs, rel)
+                    string.free(pfxs)
+                    ename_owned = 1
+                }
+                aerr = writer_add(ctx.w, ename, data, dlen, ctx.method, ctx.level)
+                if ename_owned == 1 { string.free(ename) }
+                string.free(data)
+                if string.equals(aerr, "") != 1 {
+                    dtc_set_err(ctx, aerr)
+                    return fs.WALK_STOP
+                }
+            }
+            return fs.WALK_CONTINUE
+        })
+
+    // Marshal the result before freeing ctx. ctx.err holds "msg\0" (a NUL
+    // terminator was reserved at dtc_set_err), so its text length is
+    // buffer length - 1.
+    var out_err: string = ""
+    if ctx.err != null {
+        el = bytes.length(ctx.err) - 1
+        if el < 0 { el = 0 }
+        out_err = slice_string(ctx.err, 0, el)
+    } else if string.equals(walk_err, "") != 1 {
+        out_err = string.concat("zip: walk failed: ", walk_err)
+    }
+
+    if ctx.root != null { bytes.free(ctx.root) }
+    if ctx.prefix != null { bytes.free(ctx.prefix) }
+    if ctx.err != null { bytes.free(ctx.err) }
+    libc_free(ctx as ptr)
+    if strip_owned == 1 { string.free(strip) }
+    if pfx_owned == 1 { string.free(pfx) }
+    return out_err
+}
+
+// ============================================================================
+// Extract to disk — safe by default (#2010 follow-up)
+//
+// The reader gives every entry decompressed and CRC-checked; extract walks the
+// entries and writes them under a destination directory, refusing the paths
+// and ratios that make archive extraction dangerous. Buffer-in, mirroring
+// open(): extract(data, len, dest, opts). extract_file() is the convenience
+// that reads a .zip off disk first.
+//
+//   opts = zip.default_extract_options()
+//   err = zip.extract(data, len, "out", opts)   // "" on success
+//
+// The guards mirror std.tar's (a zip carries no symlink or device entries in
+// the base format, so the surface is: unsafe names + zip-bomb limits):
+//   - reject absolute paths, ".." traversal, and backslash/colon tricks that
+//     become absolute or drive-qualified on Windows;
+//   - refuse a parent component that already exists as a symlink on disk;
+//   - enforce max_entries / max_entry_bytes / max_total_bytes. ZIP's deflate
+//     ratios make the size caps sharper than tar's.
+
+struct ExtractOptions {
+    max_entries: int
+    max_entry_bytes: long
+    max_total_bytes: long
+    overwrite: int // 1 = replace an existing file, 0 = error out
+}
+
+// Safe defaults: 10k entries, 1 GiB per entry, 10 GiB total, no overwrite.
+default_extract_options() -> ExtractOptions {
+    ExtractOptions opts
+    opts.max_entries = 10000
+    opts.max_entry_bytes = 1024 as long * 1024 * 1024 // 1 GiB
+    opts.max_total_bytes = 10 as long * 1024 * 1024 * 1024 // 10 GiB
+    opts.overwrite = 0
+    return opts
+}
+
+// Validate an archive entry name without normalising unsafe input. A leading
+// "/" or "\" (absolute), any "\" or ":" (Windows drive/UNC), and a ".."
+// segment that climbs above the entry's own root are each rejected. Returns 1
+// if unsafe. Mirrors std.tar.is_unsafe_path; kept here so std.zip does not
+// depend on std.tar. Pure (string-only).
+fn zip_is_unsafe_path(name: string) -> int {
+    n = string_length(name)
+    if n == 0 { return 1 }
+    c0 = string.char_at(name, 0)
+    if c0 == 47 || c0 == 92 { return 1 } // leading '/' or '\'
+
+    var depth: int = 0
+    var seg_start: int = 0
+    var i: int = 0
+    while i <= n {
+        var c: int = 47
+        if i < n { c = string.char_at(name, i) }
+        if c == 92 || c == 58 { return 1 } // '\' or ':'
+        if c == 47 {
+            seg_len = i - seg_start
+            if seg_len == 2 && string.char_at(name, seg_start) == 46 && string.char_at(name, seg_start + 1) == 46 {
+                if depth == 0 { return 1 }
+                depth = depth - 1
+            } else if seg_len > 0 && !(seg_len == 1 && string.char_at(name, seg_start) == 46) {
+                depth = depth + 1
+            }
+            seg_start = i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Index of the last '/' in `s`, or -1 if none.
+fn last_slash(s: string, n: int) -> int {
+    var idx: int = 0 - 1
+    var i: int = 0
+    while i < n {
+        if string.char_at(s, i) == 47 { idx = i }
+        i = i + 1
+    }
+    return idx
+}
+
+// Extract the archive held in `data` (`len` bytes) under `dest_dir`, applying
+// `options`. Returns "" on success, else a descriptive error; on error, files
+// written so far are left in place (as std.tar does). The destination is
+// created if absent.
+extract(data: string, len: int, dest_dir: string, options: ExtractOptions) -> string {
+    ar, oerr = open(data, len)
+    if string.equals(oerr, "") != 1 { return oerr }
+
+    derr = fs.mkdir_p(dest_dir)
+    if string.equals(derr, "") != 1 {
+        close(ar)
+        return "zip: cannot create destination: ${derr}"
+    }
+    dest_prefix = string.concat(dest_dir, "/")
+
+    var out_err: string = ""
+    var total: long = 0
+    n = count(ar)
+    var i: int = 0
+    while i < n {
+        if i >= options.max_entries {
+            out_err = "zip: too many entries (limit ${options.max_entries})"
+            break
+        }
+        name = entry_name(ar, i)
+        nlen = string_length(name)
+
+        if zip_is_unsafe_path(name) == 1 {
+            string.free(name)
+            out_err = "zip: unsafe entry path"
+            break
+        }
+
+        usize = entry_size(ar, i)
+        if usize > options.max_entry_bytes {
+            string.free(name)
+            out_err = "zip: entry too large (limit exceeded)"
+            break
+        }
+        if total > 9223372036854775807 - usize {
+            string.free(name)
+            out_err = "zip: total size overflow"
+            break
+        }
+        if total + usize > options.max_total_bytes {
+            string.free(name)
+            out_err = "zip: total size limit exceeded"
+            break
+        }
+
+        full = string.concat(dest_prefix, name)
+
+        if entry_is_dir(ar, i) == 1 {
+            merr = fs.mkdir_p(full)
+            if string.equals(merr, "") != 1 { out_err = "zip: mkdir failed for '${name}'" }
+        } else {
+            // Ensure parent directories exist.
+            ls = last_slash(name, nlen)
+            if ls >= 0 {
+                parent_rel = string.substring(name, 0, ls)
+                parent = string.concat(dest_prefix, parent_rel)
+                merr = fs.mkdir_p(parent)
+                string.free(parent_rel)
+                string.free(parent)
+                if string.equals(merr, "") != 1 {
+                    out_err = "zip: mkdir failed for parent of '${name}'"
+                }
+            }
+            if string.equals(out_err, "") == 1 {
+                if options.overwrite == 0 && fs.exists(full) == 1 {
+                    out_err = "zip: '${name}' exists and overwrite is disabled"
+                } else {
+                    body, blen, rerr = entry_read(ar, i)
+                    if string.equals(rerr, "") != 1 {
+                        out_err = rerr
+                    } else {
+                        werr = fs.write_binary(full, body, blen)
+                        if string.equals(werr, "") != 1 {
+                            out_err = "zip: write failed for '${name}': ${werr}"
+                        }
+                        total = total + usize
+                    }
+                    string.free(body)
+                }
+            }
+        }
+
+        string.free(full)
+        string.free(name)
+        if string.equals(out_err, "") != 1 { break }
+        i = i + 1
+    }
+
+    string.free(dest_prefix)
+    close(ar)
+    return out_err
+}
+
+// Convenience: read a .zip off disk and extract it. The buffer-taking extract
+// is the primary entry point; this wraps fs.read_binary for the common case.
+extract_file(zip_path: string, dest_dir: string, options: ExtractOptions) -> string {
+    data, len, rerr = fs.read_binary(zip_path)
+    if string.equals(rerr, "") != 1 {
+        return "zip: cannot read '${zip_path}': ${rerr}"
+    }
+    err = extract(data, len, dest_dir, options)
+    string.free(data)
+    return err
 }
