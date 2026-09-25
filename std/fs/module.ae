@@ -33,7 +33,7 @@ exports(
     file_exists, fs_path_exists, file_delete_raw, file_size_raw, file_mtime,
     dir_exists, dir_create_raw, dir_delete_raw, dir_list_raw,
     fs_mkdir_p_raw,
-    fs_symlink_raw, fs_readlink_raw, fs_is_symlink, fs_is_socket, fs_unlink_raw,
+    fs_symlink_raw, fs_hard_link_raw, fs_readlink_raw, fs_is_symlink, fs_is_socket, fs_unlink_raw,
     fs_make_temp_dir_raw, fs_make_temp_file_raw,
     make_temp_dir, make_temp_file,
     STAT_KIND_FILE, STAT_KIND_DIR, STAT_KIND_SYMLINK, STAT_KIND_OTHER,
@@ -62,7 +62,7 @@ exports(
     fs_walk_raw, fs_watch_open_raw,
     open, read, write, delete, size, mtime, exists,
     create_dir, create_dir_with_mode, delete_dir, mkdir_p,
-    symlink, readlink, unlink,
+    symlink, hard_link, readlink, unlink,
     list_dir, glob, glob_multi,
     walk, watch_open, watch_wait, watch_close,
     write_binary, write_atomic, rename, file_stat, read_binary,
@@ -158,6 +158,9 @@ extern fs_mkdir_p_raw(path: string) -> int
 //                      Pure boolean query, no wrapper (matches file_exists).
 //   fs_unlink_raw    — remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
+//   fs_hard_link_raw — a second name (`link_path`) for the file at `target`;
+//                      same filesystem, files only. 1 on success.
+extern fs_hard_link_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string @heap
 // Both return a fresh strdup'd path (or null). `@heap` so the heap-tracker
 // frees the C allocation — without it the returned path leaks (caught by the
@@ -567,6 +570,18 @@ symlink(target: string, link_path: string) -> {
     ok = fs_symlink_raw(target, link_path)
     if ok == 0 {
         return "cannot create symlink"
+    }
+    return ""
+}
+
+// Hard link: `link_path` becomes another name for the file at `target`
+// (same filesystem; not directories). Returns "" on success, error on
+// failure (e.g. `link_path` already exists, or they are on different
+// filesystems). Windows uses CreateHardLinkW (NTFS).
+hard_link(target: string, link_path: string) -> {
+    ok = fs_hard_link_raw(target, link_path)
+    if ok == 0 {
+        return "cannot create hard link"
     }
     return ""
 }

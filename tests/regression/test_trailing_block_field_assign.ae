@@ -1,0 +1,35 @@
+// A trailing block on the right of a STRUCT-FIELD assignment runs.
+//
+// `obj.field = f(args) { ... }` parses as an expression statement wrapping
+// a binary `=`, not as an assignment statement, and that path emitted the
+// assignment but never visited the block: the whole body vanished without a
+// diagnostic (aether-ui apps building `st.pane = vstack() { ... }` got empty
+// panes). The same call assigned to a local always ran its block.
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+struct Holder {
+    value: int,
+    ran: int
+}
+
+seven() -> int { return 7 }
+
+main() {
+    h = malloc(sizeof(Holder)) as *Holder
+    h.value = 0
+    h.ran = 0
+    h.value = seven() {
+        h.ran = h.ran + 1
+    }
+    if h.value != 7 {
+        println("FAIL: field got ${h.value}, want 7")
+        exit(1)
+    }
+    if h.ran != 1 {
+        println("FAIL: the trailing block ran ${h.ran} times, want 1")
+        exit(1)
+    }
+    println("ok")
+}

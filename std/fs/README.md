@@ -61,7 +61,7 @@ accessor that will make that one call.
 `read`, `write`, `write_binary`, `write_atomic`, `read_binary`, `pread`,
 `pwrite`, `pread_into`, `copy`, `move`, `rename`, `delete`, `unlink`,
 `exists`, `size`, `mtime`, `file_stat`, `realpath`, `chmod`, `ftruncate`,
-`fsync`, `symlink`, `readlink`; `create_dir`, `create_dir_with_mode`,
+`fsync`, `symlink`, `hard_link`, `readlink`; `create_dir`, `create_dir_with_mode`,
 `mkdir_p`, `delete_dir`, `list_dir`, `glob`, `glob_multi`, `walk`;
 `watch_open`, `watch_wait`, `watch_close`; `statvfs`, `mounts`, `block_info`;
 `last_os_error` with the `KIND_*` constants; and the path helpers `clean`,

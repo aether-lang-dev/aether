@@ -5802,6 +5802,11 @@ static int bound_in_local_scope(SymbolTable* table, const char* name) {
  * local here or a program-level variable. */
 static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t) {
     if (!table || !table->parent || !name || !t) return;
+    /* `_` is the discard binding: it names no value and is never declared
+     * (codegen emits `(void)expr`). Hoisting it out of a loop body typed it
+     * in the enclosing scope, so `_ = int_fn()` in a while followed by
+     * `_ = string_fn()` after it failed with E0200. */
+    if (strcmp(name, "_") == 0) return;
     if (bound_in_local_scope(table, name)) return;
     SymbolTable* root = table;
     while (root->parent) root = root->parent;

@@ -1,0 +1,56 @@
+// fs.hard_link: a second name for the same file, on every platform.
+//
+//   - both names read the same content, and a write through one is seen
+//     through the other (it is one file, not a copy)
+//   - removing one name leaves the file reachable through the other
+//   - linking onto an existing name fails with an error
+//   - a directory cannot be hard-linked
+//
+// POSIX link(2); Windows CreateHardLinkW (NTFS).
+
+import std.fs
+import std.os
+import std.string
+
+extern exit(code: int)
+
+check(label: string, ok: int) {
+    if ok == 0 {
+        println("FAIL: ${label}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== fs hard links ===")
+    base = "${os.temp_dir()}/aether_fs_hard_link_test"
+    fs.remove_tree(base)
+    fs.create_dir(base)
+    a = "${base}/a.txt"
+    b = "${base}/b.txt"
+    fs.write(a, "one file")
+
+    err = fs.hard_link(a, b)
+    check("hard_link succeeds", string.length(err) == 0)
+    got, rerr = fs.read(b)
+    check("the new name reads the file", string.equals(got, "one file") == 1)
+
+    fs.write(a, "changed through a")
+    got2, _r2 = fs.read(b)
+    check("a write through one name is seen through the other",
+        string.equals(got2, "changed through a") == 1)
+
+    again = fs.hard_link(a, b)
+    check("linking onto an existing name fails", string.length(again) > 0)
+
+    dir_err = fs.hard_link("${base}", "${base}/dir_link")
+    check("a directory cannot be hard-linked", string.length(dir_err) > 0)
+
+    _u = fs.unlink(a)
+    got3, _r3 = fs.read(b)
+    check("removing one name leaves the file", string.equals(got3, "changed through a") == 1)
+
+    fs.remove_tree(base)
+    println("=== all fs hard link checks passed ===")
+}
