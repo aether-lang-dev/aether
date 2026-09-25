@@ -246,6 +246,33 @@ if [ "$got" != "ok" ]; then
     fail=1
 fi
 
+# The discard bound inside a LOOP body, then re-bound to another kind after
+# it. The loop-hoisting pass used to declare `_` in the enclosing scope as
+# int, so the string re-bind below failed with E0200 (aether-ui's vg hit it).
+cat > "$tmp/discard_loop.ae" <<'AE'
+ival() -> int { return 1 }
+sval() -> string { return "s" }
+
+drain() -> int {
+    k = 0
+    while k < 2 {
+        _ = ival()
+        k = k + 1
+    }
+    _ = sval()
+    return k
+}
+
+main() {
+    if drain() == 2 { println("ok") }
+}
+AE
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/discard_loop.ae" 2>&1 | tail -1)"
+if [ "$got" != "ok" ]; then
+    echo "  [FAIL] local_rebind_kind: a discard '_' bound in a loop kept its type after the loop (got '$got')"
+    fail=1
+fi
+
 # A bare expression statement, then a binding on the next line.
 cat > "$tmp/lines.ae" <<'AE'
 struct P { a: int }

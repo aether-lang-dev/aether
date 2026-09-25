@@ -23,6 +23,7 @@ int dir_create_raw(const char* p) { (void)p; return 0; }
 int dir_delete_raw(const char* p) { (void)p; return 0; }
 int fs_mkdir_p_raw(const char* p) { (void)p; return 0; }
 int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
+int fs_hard_link_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
 char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
 char* fs_make_temp_dir_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
 char* fs_make_temp_file_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
@@ -766,6 +767,14 @@ int fs_symlink_raw(const char* target, const char* link_path) {
     return symlink(target, link_path) == 0 ? 1 : 0;
 }
 
+// Create a hard link: a second directory entry for the same file. Both
+// names must be on one filesystem; directories cannot be hard-linked.
+int fs_hard_link_raw(const char* target, const char* link_path) {
+    if (!target || !link_path) return 0;
+    if (!aether_sandbox_check("fs_write", link_path)) return 0;
+    return link(target, link_path) == 0 ? 1 : 0;
+}
+
 // Read a symbolic link. Returns the target as a heap-allocated string,
 // or NULL if `path` isn't a symlink or can't be read.
 char* fs_readlink_raw(const char* path) {
@@ -892,6 +901,20 @@ typedef struct {
     ULONG  Flags;
     WCHAR  PathBuffer[1];
 } fs_win_symlink_reparse;
+
+/* A hard link on Windows: CreateHardLinkW (NTFS; same volume; files only). */
+int fs_hard_link_raw(const char* target, const char* link_path) {
+    if (!target || !link_path) return 0;
+    if (!aether_sandbox_check("fs_write", link_path)) return 0;
+    size_t wt_bytes = 0, wl_bytes = 0;
+    wchar_t* wt = fs_win_wide(target, &wt_bytes);
+    wchar_t* wl = fs_win_wide(link_path, &wl_bytes);
+    int ok = 0;
+    if (wt && wl) ok = CreateHardLinkW(wl, wt, NULL) ? 1 : 0;
+    if (wt) aether_caps_free(wt, wt_bytes);
+    if (wl) aether_caps_free(wl, wl_bytes);
+    return ok;
+}
 
 /* Create a symbolic link at `link_path` pointing to `target`, the way the
  * POSIX twin does. Windows needs to know whether the link is to a

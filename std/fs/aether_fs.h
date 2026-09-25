@@ -93,6 +93,7 @@ int fs_mkdir_p_raw(const char* path);
 //                — use dir_delete_raw for that. Returns 1 on success,
 //                0 on failure.
 int   fs_symlink_raw(const char* target, const char* link_path);
+int   fs_hard_link_raw(const char* target, const char* link_path);
 char* fs_readlink_raw(const char* path);
 
 // Atomically create a uniquely-named temp dir / file under `dir` with name

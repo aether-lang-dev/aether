@@ -7330,6 +7330,32 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                                        inner->children[1])) {
                         break;
                     }
+                    /* `obj.field = builder(args) { ... }`: the right side
+                     * carries a trailing block. Emitted as a plain binary
+                     * `=` the block was never visited — the whole body was
+                     * silently dropped (aether-ui: every widget built inside
+                     * `st.pane = vstack() { ... }` went missing). The
+                     * AST_ASSIGNMENT case runs the block (builder or
+                     * regular pattern), so route this shape through it. */
+                    ASTNode* arhs = inner->children[1];
+                    int rhs_trailing = 0;
+                    if (arhs && arhs->type == AST_FUNCTION_CALL) {
+                        for (int tc = 0; tc < arhs->child_count; tc++) {
+                            if (arhs->children[tc] && arhs->children[tc]->type == AST_CLOSURE &&
+                                arhs->children[tc]->value &&
+                                strcmp(arhs->children[tc]->value, "trailing") == 0) {
+                                rhs_trailing = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (rhs_trailing) {
+                        ASTNode as_assign = *inner;
+                        as_assign.type = AST_ASSIGNMENT;
+                        print_indent(gen);
+                        generate_statement(gen, &as_assign);
+                        break;
+                    }
                 }
 
                 // Check if this function call has a trailing block

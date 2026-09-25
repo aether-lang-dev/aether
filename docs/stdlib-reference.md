@@ -33,7 +33,7 @@ header comment is the authoritative description.
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 16 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 158 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 160 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 165 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
@@ -98,7 +98,7 @@ header comment is the authoritative description.
 | Target | Filesystem | Networking | Threading | Notes |
 |---|---|---|---|---|
 | Linux / macOS / BSD | full POSIX | full | full | Reference target. |
-| Windows (MSYS2 / mingw-w64) | partial | full | full | Process exec is native: `run`, `run_capture`, `spawn`, `wait`, `kill` and supervision go through `CreateProcessW` and Job Objects. One thing stays POSIX-only and says so: the back-channel pipe (`run_pipe` spawns but hands back no pipe fd, `run_pipe_drain_and_wait` returns `"unsupported on Windows"`). `symlink` / `readlink` / `is_symlink` are native (`CreateSymbolicLinkW`, the link's reparse data); creating a link needs the privilege administrators hold and Developer Mode grants everyone, and without it `symlink` returns its error. |
+| Windows (MSYS2 / mingw-w64) | partial | full | full | Process exec is native: `run`, `run_capture`, `spawn`, `wait`, `kill` and supervision go through `CreateProcessW` and Job Objects. One thing stays POSIX-only and says so: the back-channel pipe (`run_pipe` spawns but hands back no pipe fd, `run_pipe_drain_and_wait` returns `"unsupported on Windows"`). `symlink` / `readlink` / `is_symlink` are native (`CreateSymbolicLinkW`, the link's reparse data); creating a link needs the privilege administrators hold and Developer Mode grants everyone, and without it `symlink` returns its error. `hard_link` is `CreateHardLinkW` (NTFS, same volume, files only). |
 | WASI (wasi-sdk) | per preopened paths | none | single-threaded | wasi-libc provides POSIX-compatible `fopen`/`fread`/`stat`/etc., so the normal fs code path compiles. Paths must be under a WASI preopen. |
 | Emscripten (browser WASM) | off by default | off | cooperative | Builds pass `-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING`. File ops return `(null, "cannot open file")` via the Go-style wrappers, no silent failures. To enable, compile with `-sFORCE_FILESYSTEM=1` and drop the define; untested in CI. |
 | Bare embedded | off | off | cooperative | Same as Emscripten, stubs route all failures through the Go-style error tuples. |
