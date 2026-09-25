@@ -14,6 +14,56 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.717.0]
+
+### Added
+
+- **`fs.hard_link(target, link_path)`**: a second name for an existing file,
+  `link(2)` on POSIX and `CreateHardLinkW` on Windows (NTFS, same volume,
+  files only). Returns `""` or an error: the name already exists, a
+  directory, another filesystem. `std.fs` could make symlinks but not hard
+  links, so a program testing hard-link handling (a disk-usage scanner
+  counting a multiply-linked file once) had to shell out to `ln`. New test:
+  `tests/regression/test_fs_hard_link.ae`.
+
+### Fixed
+
+- **`ae run` / `ae build`'s cache now invalidates when aetherc itself
+  changes, even within the same wall-clock second.** The cache key folded the
+  toolchain binaries — aetherc (which owns codegen), the `ae` driver, and
+  libaether — in by `st_mtime`, which is second-granularity. A `make` that
+  rebuilt aetherc with a different codegen followed by an `ae run` in the same
+  second produced an identical key and served the binary the *old* compiler
+  emitted: a different codegen, reported as success, with every measurement
+  taken against it silently wrong (the worst shape a cache bug takes, and the
+  one this key's own comments warn about for source files). The three toolchain
+  binaries are now keyed by a content hash (`fnv64_file`, ~1 ms each on a
+  ~2 MB binary — negligible beside the recompile a real miss triggers) rather
+  than mtime, so any change in what they produce is reflected regardless of
+  timestamp granularity. `tests/integration/cache_compiler_invalidation`
+  changes aetherc's bytes while restoring its mtime and asserts the next run
+  is a miss; it fails on the pre-fix key.
+
+- **`_` bound inside a `while` no longer fixes its type for the code after
+  the loop.** The loop-hoisting pass (#2186) pre-declares a loop body's
+  bindings in the enclosing scope, and it declared the discard binding `_`
+  there too, typed by its first use. `_ = count()` inside a loop followed by
+  `_ = name()` after it then failed with `E0200 Type mismatch in variable
+  initialization`, although `_` names no value (#2173's exemption covered
+  re-binds in one scope, not the hoisted declaration). aether-ui's vg hit
+  it: every program importing `vg.grammar.shapes` stopped compiling. `_` is
+  no longer hoisted. `tests/integration/local_rebind_kind` gains the loop case.
+
+- **A trailing block on the right of a struct-field assignment runs.**
+  `obj.field = f(args) { ... }` parses as an expression statement around a
+  binary `=`, not as an assignment statement, and that path emitted the
+  assignment and never visited the block: the whole body vanished with no
+  diagnostic. The same call assigned to a local always ran its block. In
+  aether-ui this silently emptied every pane built as
+  `st.pane = vstack() { ... }`. The shape now goes through the assignment
+  path, builder and regular pattern alike. New test:
+  `tests/regression/test_trailing_block_field_assign.ae`.
+
 ## [0.716.0]
 
 ### Added
