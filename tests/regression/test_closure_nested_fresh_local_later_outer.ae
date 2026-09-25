@@ -1,0 +1,60 @@
+// #2189: a fresh local of a closure, whose name also names a binding in the
+// enclosing function DECLARED AFTER the closure, was compiled as a capture of
+// that later binding. codegen then referenced a name declared later (an
+// undeclared use in the generated C), or promoted the later binding to a cell
+// keyed on a coincidental name match.
+//
+// The fix keys the write-only capture on DECLARATION ORDER: a `name = expr`
+// in a closure captures an enclosing binding only when that binding precedes
+// the closure. A same-named binding that follows is unrelated, so the
+// closure's `name` is its own fresh local. A nested closure's own reads of
+// such a local are likewise not free variables of the enclosing closure.
+//
+// Two levels deep is the shape OpenDisk-ae hit ('use of undeclared
+// identifier nm'); the one-level and no-later-binding shapes must keep
+// compiling. Each case prints, so a silently-wrong capture also shows.
+
+outer(render: fn) { call(render, "item") }
+inner(on_click: fn) { call(on_click) }
+use(s: string) { println(s) }
+
+// Two closure levels: the inner binds `nm`, `main`-analog binds `nm` after.
+two_level() {
+    start = "outer-start"
+    outer(| item: string | {
+            inner(|| {
+                    nm = item // inner's own fresh local
+                    use(nm) // must print "item"
+                })
+        })
+    nm = start // a DIFFERENT nm, declared AFTER the closure
+    use(nm) // must print "outer-start"
+}
+
+// One level: closure binds `nm`, later same-named local.
+one_level() {
+    start = "one-start"
+    outer(| item: string | {
+            nm = item
+            use(nm) // "item"
+        })
+    nm = start
+    use(nm) // "one-start"
+}
+
+// Two levels, no later binding at all — must still compile and run.
+no_later() {
+    outer(| item: string | {
+            inner(|| {
+                    nm = item
+                    use(nm) // "item"
+                })
+        })
+}
+
+main() {
+    two_level()
+    one_level()
+    no_later()
+    println("done")
+}
