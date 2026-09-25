@@ -31,7 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "utf8proc/utf8proc.h"
+#include "../../std/unicode/utf8proc/utf8proc.h"
 #include "ducet/ducet.h"
 #include "aether_string.h" /* string_new_with_length — return managed strings */
 

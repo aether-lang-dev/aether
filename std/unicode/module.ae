@@ -1,0 +1,82 @@
+// std.unicode — Unicode-correct text operations, over the vendored utf8proc
+// (std/unicode/utf8proc, v2.9.0, MIT + Unicode data license).
+//
+// std.string is byte-indexed: `substring` and `length` count bytes, which cut
+// multi-byte characters. This module is codepoint- and grapheme-correct, for
+// the jobs that need it — accent-insensitive search, caseless compare, and
+// slicing user-perceived characters.
+//
+//   import std.unicode
+//
+//   unicode.fold_accents("café")            // "cafe"
+//   unicode.casefold("STRASSE")             // "strasse"  (ß folds to ss too)
+//   unicode.nfc(s) / unicode.nfd(s)         // normalize
+//   unicode.grapheme_len("é")               // 1, even if é is e + U+0301
+//   unicode.grapheme_substring("a👨‍👩‍👧b", 1, 1)  // the family emoji, whole
+//
+// A caseless / accent-insensitive compare is fold + compare:
+//   unicode.equals_fold_accents(a, b)       // "Café" == "cafe" -> 1
+//
+// Returned strings are owned by the caller (managed AetherStrings).
+
+import std.string
+
+exports(
+    nfc, nfd, fold_accents, casefold,
+    grapheme_len, grapheme_substring,
+    equals_ignore_case, equals_fold_accents
+)
+
+extern aether_unicode_nfc(input: string) -> string @heap
+extern aether_unicode_nfd(input: string) -> string @heap
+extern aether_unicode_fold_accents(input: string) -> string @heap
+extern aether_unicode_casefold(input: string) -> string @heap
+extern aether_unicode_grapheme_len(input: string) -> int
+extern aether_unicode_grapheme_substring(input: string, start: int, count: int) -> string @heap
+
+// Normalization Form C (composed) / D (decomposed). Returns an owned string.
+nfc(s: string) -> string { return aether_unicode_nfc(s) }
+nfd(s: string) -> string { return aether_unicode_nfd(s) }
+
+// Strip combining marks (accents): "café" -> "cafe". Owned string.
+fold_accents(s: string) -> string { return aether_unicode_fold_accents(s) }
+
+// Unicode case folding for caseless comparison (NOT lowercasing): maps e.g.
+// German 'ß' to "ss". Owned string.
+casefold(s: string) -> string { return aether_unicode_casefold(s) }
+
+// Number of grapheme clusters (user-perceived characters). A combining
+// sequence (e + U+0301) or an emoji ZWJ sequence counts as one.
+grapheme_len(s: string) -> int { return aether_unicode_grapheme_len(s) }
+
+// The substring spanning grapheme clusters [start, start+count), never
+// splitting a multi-byte character or a combining sequence. count < 0 means
+// to the end. Owned string.
+grapheme_substring(s: string, start: int, count: int) -> string {
+    return aether_unicode_grapheme_substring(s, start, count)
+}
+
+// Caseless equality: fold both sides, compare. Returns 1 if equal.
+equals_ignore_case(a: string, b: string) -> int {
+    fa = aether_unicode_casefold(a)
+    fb = aether_unicode_casefold(b)
+    r = string.equals(fa, fb)
+    string.free(fa)
+    string.free(fb)
+    return r
+}
+
+// Accent- AND case-insensitive equality: "Café" matches "cafe". Fold accents,
+// then casefold, on both sides, then compare. Returns 1 if equal.
+equals_fold_accents(a: string, b: string) -> int {
+    aa = aether_unicode_fold_accents(a)
+    bb = aether_unicode_fold_accents(b)
+    ca = aether_unicode_casefold(aa)
+    cb = aether_unicode_casefold(bb)
+    r = string.equals(ca, cb)
+    string.free(aa)
+    string.free(bb)
+    string.free(ca)
+    string.free(cb)
+    return r
+}

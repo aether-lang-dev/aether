@@ -60,7 +60,7 @@ The module is backed by three C files; pass them with `--extra`:
 ```sh
 ae build yourprog.ae \
   --extra contrib/i18n/aether_i18n.c \
-  --extra contrib/i18n/utf8proc/utf8proc.c \
+  --extra std/unicode/utf8proc/utf8proc.c \
   --extra contrib/i18n/ducet/ducet_data.c
 ```
 
