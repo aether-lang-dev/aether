@@ -666,16 +666,31 @@ unsigned long long compute_cache_key(const char* ae_file,
     int pos = 0;
     pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, "%016llx", src_hash);
 
-    struct stat st;
-    if (stat(tc.compiler, &st) == 0)
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%lld", (long long)st.st_mtime);
-    /* The driver's own mtime: flags ae passes to the C compiler are part
-     * of the output, so a rebuilt ae must miss the cache (#1235 family). */
+    /* The three toolchain binaries — aetherc (the compiler, which owns
+     * codegen), the ae driver (owns the flags passed to the C compiler),
+     * and libaether — are keyed by CONTENT HASH, not mtime.
+     *
+     * st_mtime is second-granularity, so a `make` that rebuilds aetherc and
+     * an `ae run` within the same wall-clock second produced an identical key
+     * and served the binary the OLD compiler emitted: a different codegen with
+     * a report of success and every measurement against it silently wrong.
+     * (Sub-second mtime is not portable in the key, and size alone misses a
+     * same-length codegen change.) Hashing each is ~1 ms on a ~2 MB binary,
+     * negligible beside the recompile a real miss triggers, and it is the
+     * only fold that reflects an actual change in what these produce.
+     * A hash of 0 (unreadable) folds in nothing rather than colliding. */
+    struct stat st; (void)st;
+    unsigned long long cc_hash = fnv64_file(tc.compiler);
+    if (cc_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":cc=%016llx", cc_hash);
     char self_path[1200];
-    if (get_exe_path(self_path, sizeof(self_path)) && stat(self_path, &st) == 0)
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ae=%lld", (long long)st.st_mtime);
-    if (tc.has_lib && stat(tc.lib, &st) == 0)
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%lld", (long long)st.st_mtime);
+    if (get_exe_path(self_path, sizeof(self_path))) {
+        unsigned long long ae_hash = fnv64_file(self_path);
+        if (ae_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ae=%016llx", ae_hash);
+    }
+    if (tc.has_lib) {
+        unsigned long long lib_hash = fnv64_file(tc.lib);
+        if (lib_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=%016llx", lib_hash);
+    }
 
     if (extra_files && extra_files[0]) {
         const char* cursor = extra_files;
