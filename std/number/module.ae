@@ -9,7 +9,8 @@ exports(
     FormatOptions, default_options,
     format_decimal_string, format_percent_string, format_currency_string,
     format_decimal, format_percent, format_currency,
-    format_decimal_default, format_percent_default
+    format_decimal_default, format_percent_default,
+    BYTES_SI, BYTES_IEC, bytes, bytes_si, bytes_iec
 )
 
 struct FormatOptions {
@@ -856,3 +857,95 @@ fn format_percent_default(locale: string, value: float) -> string {
     opts = default_options()
     return format_percent(locale, value, opts)
 }
+
+// ---- Human-readable byte sizes (#, requested by the OpenDisk-ae port) -------
+//
+// `bytes(n, style, locale)` renders a byte count the way a file manager does:
+//   BYTES_SI  (decimal, /1000, SI units)  1_070_000_000 -> "1.07 GB"
+//   BYTES_IEC (binary,  /1024, IEC units)  1_073_741_824 -> "1 GiB"
+// The decimal-vs-binary choice is explicit in the style — "GB" and "GiB" are
+// not interchangeable, and picking one silently is how "1.07 GB" and "1.0 GiB"
+// come to disagree about the same file. Bytes below one unit print as a plain
+// integer count ("512 B"). The mantissa is rendered through format_decimal, so
+// the decimal separator follows `locale` (en-US "1.07 GB", de-DE "1,07 GB").
+//
+// The unit is chosen as the largest whose divisor does not exceed |n|, and the
+// mantissa is shown to 3 significant figures (2 fraction digits under 10, 1
+// under 100, 0 at/above 100) — the convention Finder/Nautilus/ByteCountFormatter
+// use, so 1_070_000_000 is "1.07 GB", not "1.070 GB" or "1 GB".
+
+const BYTES_SI = 0 // decimal: divisor 1000, units B KB MB GB TB PB EB
+const BYTES_IEC = 1 // binary:  divisor 1024, units B KiB MiB GiB TiB PiB EiB
+
+fn byte_unit(style: int, index: int) -> string {
+    // index 0 = bytes; 1.. = the scaled units.
+    if index == 0 { return "B" }
+    var prefix: string = ""
+    if index == 1 { prefix = "K" }
+    else if index == 2 { prefix = "M" }
+    else if index == 3 { prefix = "G" }
+    else if index == 4 { prefix = "T" }
+    else if index == 5 { prefix = "P" }
+    else { prefix = "E" }
+    if style == BYTES_IEC {
+        return string_concat(prefix, "iB")
+    }
+    return string_concat(prefix, "B")
+}
+
+// Render `n` bytes for a person to read. `style` is BYTES_SI or BYTES_IEC;
+// `locale` sets the decimal separator (use "en-US" for a dot). Returns an
+// owned string.
+fn bytes(n: long, style: int, locale: string) -> string {
+    var neg: int = 0
+    var v: long = n
+    if v < 0 { neg = 1; v = 0 - v }
+
+    var divisor: long = 1000
+    if style == BYTES_IEC { divisor = 1024 }
+
+    // Below one unit: a plain integer byte count, no fraction, no locale
+    // grouping (byte counts are not thousands-grouped by these formatters).
+    if v < divisor {
+        u = byte_unit(style, 0)
+        // "${v} B", sign restored.
+        var body: string = ""
+        if neg == 1 { body = "-${v} ${u}" } else { body = "${v} ${u}" }
+        string_free(u)
+        return body
+    }
+
+    // Scale down until the value is under one more divisor, tracking the unit.
+    var scaled: float = v as float
+    var idx: int = 0
+    while scaled >= (divisor as float) && idx < 6 {
+        scaled = scaled / (divisor as float)
+        idx = idx + 1
+    }
+    if neg == 1 { scaled = 0.0 - scaled }
+
+    // Significant-figure fraction digits: 2 under 10, 1 under 100, else 0.
+    var abs_scaled: float = scaled
+    if abs_scaled < 0.0 { abs_scaled = 0.0 - abs_scaled }
+    var frac: int = 0
+    if abs_scaled < 10.0 { frac = 2 }
+    else if abs_scaled < 100.0 { frac = 1 }
+    else { frac = 0 }
+
+    opts = default_options()
+    opts.min_fraction_digits = frac
+    opts.max_fraction_digits = frac
+    opts.use_grouping = 0
+
+    mant = format_decimal(locale, scaled, opts)
+    u = byte_unit(style, idx)
+    res = "${mant} ${u}"
+    string_free(mant)
+    string_free(u)
+    return res
+}
+
+// Convenience: en-US locale (dot decimal), decimal (SI) style.
+fn bytes_si(n: long) -> string { return bytes(n, BYTES_SI, "en-US") }
+// Convenience: en-US locale, binary (IEC) style.
+fn bytes_iec(n: long) -> string { return bytes(n, BYTES_IEC, "en-US") }

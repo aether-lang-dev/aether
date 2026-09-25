@@ -3,6 +3,13 @@
 import std.number
 import std.string
 
+fn check_bytes(got: string, expected: string, label: string) {
+    if string_equals(got, expected) != 1 {
+        println("FAIL: ${label} - got \"${got}\", expected \"${expected}\"")
+        exit(1)
+    }
+}
+
 fn check_decimal(locale: string, decimal: string, min_frac: int, max_frac: int, use_group: int, expected: string, label: string) {
     FormatOptions opts
     opts.min_fraction_digits = min_frac
@@ -242,6 +249,21 @@ main() {
 
     // 26. malformed locale fallback without a crash
     check_decimal("invalid---tag", "1234.5", 1, 1, 1, "1,234.5", "invalid-tag malformed fallback without a crash")
+
+    // ---- byte-size formatting ----
+    check_bytes(number.bytes_si(1070000000), "1.07 GB", "SI GB, 3 sig figs")
+    check_bytes(number.bytes_iec(1073741824), "1.00 GiB", "IEC exact GiB")
+    check_bytes(number.bytes_si(512), "512 B", "sub-unit is a plain count")
+    check_bytes(number.bytes_iec(0), "0 B", "zero")
+    check_bytes(number.bytes_si(1500), "1.50 KB", "SI KB")
+    check_bytes(number.bytes_iec(1536), "1.50 KiB", "IEC KiB")
+    check_bytes(number.bytes_si(1234567890123), "1.23 TB", "SI TB")
+    check_bytes(number.bytes(1070000000, number.BYTES_SI, "de-DE"), "1,07 GB", "locale decimal separator")
+    check_bytes(number.bytes_si(999), "999 B", "just below one KB")
+    check_bytes(number.bytes_si(1000), "1.00 KB", "exactly one KB (SI)")
+    check_bytes(number.bytes_si(0 - 2500000), "-2.50 MB", "negative")
+    check_bytes(number.bytes_si(12300000), "12.3 MB", "1 fraction digit in [10,100)")
+    check_bytes(number.bytes_si(123000000), "123 MB", "0 fraction digits at/above 100")
 
     // Repeated formatting to ensure no leaks
     i = 0
