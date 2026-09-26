@@ -338,6 +338,12 @@ int udp_recv_from_into_raw(UdpSocket* sock, void* buf, int cap, UdpAddr* addr) {
     int got = (int)recvfrom(sock->fd, (char*)buf, (size_t)cap, 0,
                             (struct sockaddr*)&target->ss, &target->len);
     if (got < 0) {
+#ifdef _WIN32
+        /* Winsock reports a datagram longer than `cap` as WSAEMSGSIZE after
+         * copying the first `cap` bytes and filling the sender; POSIX just
+         * returns `cap`. Same outcome: a truncated packet, not an error. */
+        if (WSAGetLastError() == WSAEMSGSIZE) return cap;
+#endif
         target->len = 0;
         return aether_net_wouldblock() ? UDP_RECV_WOULDBLOCK : UDP_RECV_ERROR;
     }
