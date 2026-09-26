@@ -15,6 +15,13 @@ fn ck(cond: bool, msg: string) -> int {
     return 0
 }
 
+// Float settings cross the FFI as C floats, so compare within a tolerance.
+fn near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.0001
+}
+
 // Build a canonical 16-bit PCM WAV: `frames` frames, `ch` channels,
 // `rate` Hz, every sample set to `sample16` (a signed 16-bit value).
 // Returns (wav_bytes, total_length).
@@ -94,6 +101,25 @@ main() {
     fails = fails + ck(audio.get_volume(src) == 1.0, "volume clamps high")
     _ = audio.volume(src, -1.0) // clamps to 0.0
     fails = fails + ck(audio.get_volume(src) == 0.0, "volume clamps low")
+
+    // ---- mixer-tier controls on the device path (#2205) ----
+    // The numbers are held under open_headless in test_audio_mixer.ae; here
+    // the graph is wired against a real (or null) device, so only the
+    // settings round-trip is asserted.
+    fails = fails + ck(audio.get_pan(src) == 0.0 && audio.get_pitch(src) == 1.0 && !audio.is_looping(src),
+        "pan/pitch/looping defaults")
+    _ = audio.pan(src, 0.25)
+    fails = fails + ck(near(audio.get_pan(src), 0.25), "pan reads back")
+    _ = audio.pitch(src, 1.5)
+    fails = fails + ck(near(audio.get_pitch(src), 1.5), "pitch reads back")
+    _ = audio.looping(src, true)
+    fails = fails + ck(audio.is_looping(src), "looping reads back")
+    fails = fails + ck(audio.played_frames(src) >= 0, "played_frames is readable")
+    g, gerr = audio.group_new()
+    fails = fails + ck(gerr == "" && audio.set_group(src, g), "a source joins a group")
+    fails = fails + ck(audio.set_group(src, null), "and leaves it")
+    audio.group_free(g)
+    fails = fails + ck(audio.render(10) == 0, "render is a no-op off the headless engine")
 
     audio.unload(src)
 
