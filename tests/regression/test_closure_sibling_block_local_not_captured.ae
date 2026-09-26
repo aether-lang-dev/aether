@@ -1,0 +1,66 @@
+// #2189: a closure's own `name = expr` was compiled as a capture of a
+// same-named variable declared in a SIBLING trailing block. A trailing block
+// (`group("first") { ... }`) inlines at its call site as a C `{ ... }` block,
+// so a name bound inside it has gone out of scope by the time a later sibling
+// block runs. The capture analysis treated every trailing block as transparent
+// to the enclosing function, matched the closure's binding against the
+// sibling's, and the generated C referenced an undeclared name:
+//
+//     error: 'ml' undeclared (first use in this function)
+//
+// The fix keys the write-only capture on VISIBILITY: a closure captures a
+// binding only when it is declared in the enclosing scope's own top level or
+// in a trailing block the closure itself sits inside, and precedes it.
+//
+// Three shapes, each of which prints so a silently-wrong capture also shows:
+//   - outer name read from a callback inside the SAME trailing block (must
+//     still capture),
+//   - a sibling block's callback binding its own same-named local (the bug),
+//   - a callback inside a trailing block mutating a name that block declared
+//     before it (write-through must still work).
+
+extern exit(code: int)
+
+group(name: string) -> int { return 1 }
+run(cb: fn) { cb() }
+use(s: string) { println(s) }
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+main() {
+    root = "/tmp/x"
+
+    group("first") {
+        ml = "${root}/a"
+        run() callback {
+            check("outer name read from the same block", ml, "/tmp/x/a")
+            use(ml)
+        }
+    }
+
+    group("second") {
+        run() callback {
+            ml = "${root}/b" // the callback's own fresh local
+            check("own local in a sibling block", ml, "/tmp/x/b")
+            use(ml)
+        }
+    }
+
+    group("third") {
+        hits = 0
+        run() callback { hits = hits + 1 }
+        run() callback { hits = hits + 1 }
+        if hits != 2 {
+            println("  FAIL: write-through in the same block hits=${hits}")
+            exit(1)
+        }
+    }
+
+    println("PASS: sibling block local is not captured")
+    return 0
+}

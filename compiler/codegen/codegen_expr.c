@@ -860,179 +860,102 @@ static int find_enclosing_scope_name(ASTNode* node, const char* scope,
 // closures.
 static int subtree_declares(ASTNode* node, const char* var_name);
 
-// Does a block declare `var_name` at its top-level, treating trailing-
-// block closures as transparent (their contents inline at the call site)
-// but if/for/while blocks and real closures as opaque? Used by
-// is_top_level_decl_in_function so that a declaration inside a trailing
-// block (e.g. `root = grid() { c = 42 }`) is recognised as living in
-// the enclosing function's scope, while a declaration inside
-// `if cond { v = ... }` correctly stays block-local.
-static int scope_declares_at_top_level(ASTNode* block, const char* var_name) {
-    if (!block) return 0;
-    for (int k = 0; k < block->child_count; k++) {
-        ASTNode* s = block->children[k];
-        if (!s) continue;
-        if ((s->type == AST_VARIABLE_DECLARATION ||
-             s->type == AST_CONST_DECLARATION) &&
-            s->value && strcmp(s->value, var_name) == 0) {
-            return 1;
-        }
-        // Var decls whose initializer is a function call with a trailing
-        // block: `root = grid() { ... }`. The trailing block's body is
-        // part of the enclosing function's scope. Look into it.
-        // Same for bare function-call expression statements with trailing
-        // blocks.
-        ASTNode* call = NULL;
-        if (s->type == AST_VARIABLE_DECLARATION && s->child_count > 0 &&
-            s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
-            call = s->children[0];
-        } else if (s->type == AST_EXPRESSION_STATEMENT && s->child_count > 0 &&
-                   s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
-            call = s->children[0];
-        } else if (s->type == AST_FUNCTION_CALL) {
-            call = s;
-        }
-        if (call) {
-            for (int ci = 0; ci < call->child_count; ci++) {
-                ASTNode* arg = call->children[ci];
-                if (arg && arg->type == AST_CLOSURE &&
-                    arg->value && strcmp(arg->value, "trailing") == 0) {
-                    // Trailing block's body is this closure's (last) AST_BLOCK child.
-                    for (int bi = arg->child_count - 1; bi >= 0; bi--) {
-                        if (arg->children[bi] && arg->children[bi]->type == AST_BLOCK) {
-                            if (scope_declares_at_top_level(arg->children[bi], var_name)) {
-                                return 1;
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+// Does `target` sit anywhere under `node`?
+static int subtree_contains(ASTNode* node, ASTNode* target) {
+    if (!node) return 0;
+    if (node == target) return 1;
+    for (int i = 0; i < node->child_count; i++) {
+        if (subtree_contains(node->children[i], target)) return 1;
     }
     return 0;
 }
 
-// The line of the FIRST top-level declaration of `var_name` in `block`, or
-// INT_MAX if none. Used to compare a same-named enclosing binding's position
-// against a closure's: a binding that precedes the closure is one the closure
-// mutates through (a write-through capture); one that follows is an unrelated
-// later local, and the closure's `name = expr` is its own fresh local. #2189.
-static int top_level_decl_line(ASTNode* block, const char* var_name) {
+// The trailing-block closure argument of a call statement `s`, if `s` is a
+// call with one (`root = grid() { ... }`, `grid() { ... }`), else NULL.
+static ASTNode* trailing_block_of_statement(ASTNode* s) {
+    ASTNode* call = NULL;
+    if (s->type == AST_VARIABLE_DECLARATION && s->child_count > 0 &&
+        s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
+        call = s->children[0];
+    } else if (s->type == AST_EXPRESSION_STATEMENT && s->child_count > 0 &&
+               s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
+        call = s->children[0];
+    } else if (s->type == AST_FUNCTION_CALL) {
+        call = s;
+    }
+    if (!call) return NULL;
+    for (int ci = 0; ci < call->child_count; ci++) {
+        ASTNode* arg = call->children[ci];
+        if (arg && arg->type == AST_CLOSURE && arg->value &&
+            strcmp(arg->value, "trailing") == 0) {
+            return arg;
+        }
+    }
+    return NULL;
+}
+
+// The line of the first declaration of `var_name` that is VISIBLE from
+// `viewer` (a closure node) among the top-level statements of `block`, or
+// INT_MAX if there is none. A trailing block (`grid() { ... }`) inlines at its
+// call site as a C `{ ... }` block, so a declaration inside it is in scope for
+// a closure nested inside that same trailing block and for nothing else: the
+// walk descends only into the trailing block that contains `viewer`. A
+// declaration in a sibling trailing block, or in an if/for/while body, shares
+// the name by coincidence and is skipped. #2189: treating every trailing block
+// as transparent compiled a closure's own `ml = ...` as a capture of the `ml`
+// a sibling `describe` block had declared, and the generated C referenced a
+// name that had gone out of scope.
+static int visible_decl_line(ASTNode* block, const char* var_name, ASTNode* viewer) {
     if (!block) return INT_MAX;
     for (int k = 0; k < block->child_count; k++) {
         ASTNode* s = block->children[k];
-        if (s && (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
+        if (!s) continue;
+        if ((s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
             s->value && strcmp(s->value, var_name) == 0) {
             return s->line;
+        }
+        ASTNode* trailing = trailing_block_of_statement(s);
+        if (trailing && subtree_contains(trailing, viewer)) {
+            int inner = visible_decl_line(last_block_child(trailing), var_name, viewer);
+            if (inner != INT_MAX) return inner;
         }
     }
     return INT_MAX;
 }
 
-// Is `var_name` declared at the TOP level of the given function's body
-// block (or as a parameter) — i.e. in the function's "own" lexical scope,
-// not inside a nested if/for/while block? This is the scope that closures
-// capture from in languages like JavaScript and Ruby. Names declared
-// inside nested blocks share names only by coincidence and are not
-// capture targets.
-static int is_top_level_decl_in_function(ASTNode* program, const char* func_name, const char* var_name) {
-    if (!program || !func_name || !var_name) return 0;
-    // Hoisted closures are scopes too: `__closure_<ptr>`. Their params and
-    // top-level body decls are the enclosing scope of any closure nested
-    // inside them. A name the outer closure itself captures is also live in
-    // its C frame (the `T name = _env->name;` prologue alias), so chain up to
-    // the outer closure's own scope for anything not found locally.
-    if (strncmp(func_name, "__closure_", 10) == 0) {
-        ASTNode* c = find_closure_by_name(program, func_name);
-        if (!c) return 0;
-        if (is_closure_param(c, var_name)) return 1;
-        if (scope_declares_at_top_level(last_block_child(c), var_name)) return 1;
-        char outer[64];
-        if (find_enclosing_scope_name(program, NULL, c, outer, sizeof(outer))) {
-            return is_top_level_decl_in_function(program, outer, var_name);
-        }
-        return 0;
-    }
-    // Actor receive arms use synthetic function names `__recv_arm_<ptr>`.
-    if (strncmp(func_name, "__recv_arm_", 11) == 0) {
-        ASTNode* arm = find_receive_arm_by_name(program, func_name);
-        if (!arm) return 0;
-        // Arm body is children[1] (children[0] is the pattern).
-        if (arm->child_count < 2) return 0;
-        ASTNode* body = arm->children[1];
-        if (!body || body->type != AST_BLOCK) return 0;
-        for (int k = 0; k < body->child_count; k++) {
-            ASTNode* s = body->children[k];
-            if (s && (s->type == AST_VARIABLE_DECLARATION ||
-                      s->type == AST_CONST_DECLARATION) &&
-                s->value && strcmp(s->value, var_name) == 0) {
-                return 1;
-            }
-        }
-        return 0;
-    }
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* top = program->children[i];
-        if (!top) continue;
-        int matches = 0;
-        if (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) {
-            matches = 1;
-        } else if ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
-                   top->value && strcmp(top->value, func_name) == 0) {
-            matches = 1;
-        }
-        if (!matches) continue;
-        // Parameters count as top-level declarations.
-        if (top->type != AST_MAIN_FUNCTION) {
-            for (int j = 0; j < top->child_count; j++) {
-                ASTNode* p = top->children[j];
-                if (p && p->type == AST_PATTERN_VARIABLE && p->value &&
-                    strcmp(p->value, var_name) == 0) {
-                    return 1;
-                }
-            }
-        }
-        // Only TOP-LEVEL statements of the body block count — not nested
-        // if/for/while bodies. But trailing-block closures ARE top-level
-        // for scoping purposes: they inline at the call site, so a
-        // declaration inside a trailing block binds in the enclosing
-        // function's scope. Walk through trailing blocks only, not
-        // through if/for/while blocks or real closures.
-        for (int j = 0; j < top->child_count; j++) {
-            ASTNode* body = top->children[j];
-            if (!body || body->type != AST_BLOCK) continue;
-            if (scope_declares_at_top_level(body, var_name)) return 1;
-        }
-        return 0;
-    }
-    return 0;
-}
-
-// The line of `var_name`'s top-level declaration in the named function's own
-// scope (main / a function / a hoisted closure / a receive arm), or INT_MAX if
-// it is not declared there. A thin line-returning companion to
-// is_top_level_decl_in_function, used to compare a same-named enclosing
-// binding's position against a closure's (#2189). Only the plain-block scopes
-// are resolved; anything else returns INT_MAX (treated as "no earlier
-// binding", the conservative fresh-local answer).
-static int enclosing_top_level_decl_line(ASTNode* program, const char* func_name,
-                                         const char* var_name) {
+// Where, in the scope named `func_name` (main / a function / a hoisted closure
+// / a receive arm), is `var_name` bound as seen from `viewer`, a closure that
+// sits in that scope? Returns 0 for a parameter, the declaration's line for a
+// local visible from `viewer` (see visible_decl_line), and INT_MAX when the
+// scope binds no such name. A hoisted closure's scope chains up to its
+// enclosing scope, with that closure as the new viewer, so an inner closure
+// sees a binding declared in an outer closure or in the function two levels
+// out, and its position there. The caller compares the result against the
+// viewer's own line: only a binding that precedes the closure is one it
+// mutates through (#2189).
+static int enclosing_decl_line(ASTNode* program, const char* func_name,
+                               const char* var_name, ASTNode* viewer) {
     if (!program || !func_name || !var_name) return INT_MAX;
     if (strncmp(func_name, "__closure_", 10) == 0) {
         ASTNode* c = find_closure_by_name(program, func_name);
         if (!c) return INT_MAX;
-        int here = top_level_decl_line(last_block_child(c), var_name);
+        if (is_closure_param(c, var_name)) return 0;
+        int here = visible_decl_line(last_block_child(c), var_name, viewer);
         if (here != INT_MAX) return here;
-        /* Not declared in this closure's own scope: chain up to the enclosing
-         * scope, exactly as is_top_level_decl_in_function does, so an inner
-         * closure sees a binding declared in an outer closure or the function
-         * two levels out (and its position there). */
         char outer[64];
         if (find_enclosing_scope_name(program, NULL, c, outer, sizeof(outer))) {
-            return enclosing_top_level_decl_line(program, outer, var_name);
+            return enclosing_decl_line(program, outer, var_name, c);
         }
         return INT_MAX;
+    }
+    // Actor receive arms use synthetic function names `__recv_arm_<ptr>`;
+    // the arm body is children[1] (children[0] is the pattern).
+    if (strncmp(func_name, "__recv_arm_", 11) == 0) {
+        ASTNode* arm = find_receive_arm_by_name(program, func_name);
+        if (!arm || arm->child_count < 2) return INT_MAX;
+        ASTNode* body = arm->children[1];
+        if (!body || body->type != AST_BLOCK) return INT_MAX;
+        return visible_decl_line(body, var_name, viewer);
     }
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
@@ -1042,10 +965,21 @@ static int enclosing_top_level_decl_line(ASTNode* program, const char* func_name
             ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
              top->value && strcmp(top->value, func_name) == 0);
         if (!matches) continue;
+        // Parameters count as bindings that precede everything in the body
+        // (main has no declared params).
+        if (top->type != AST_MAIN_FUNCTION) {
+            for (int j = 0; j < top->child_count; j++) {
+                ASTNode* p = top->children[j];
+                if (p && p->type == AST_PATTERN_VARIABLE && p->value &&
+                    strcmp(p->value, var_name) == 0) {
+                    return 0;
+                }
+            }
+        }
         for (int j = 0; j < top->child_count; j++) {
             ASTNode* body = top->children[j];
             if (body && body->type == AST_BLOCK) {
-                return top_level_decl_line(body, var_name);
+                return visible_decl_line(body, var_name, viewer);
             }
         }
         return INT_MAX;
@@ -1372,30 +1306,26 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                     continue;
                 }
                 // A write `name = expr` in the closure captures an enclosing
-                // binding only when that binding is declared in the enclosing
-                // function's own scope AND *precedes* this closure. A same-
-                // named top-level binding that comes AFTER the closure is an
-                // unrelated later local (declaration order decides, #2189): the
-                // closure's `name = expr` is then its own fresh local, so
-                // promoting it emitted C referencing a name declared later (an
-                // undeclared use), or, for a nested closure two levels in, a
-                // write-through into a cell that closure's env owns and frees
-                // -> heap-use-after-free. A binding that precedes the closure
-                // is genuinely mutated through, and stays a capture.
-                if (is_top_level_decl_in_function(gen->program, enclosing_func, writes[i])) {
-                    int decl_line = enclosing_top_level_decl_line(gen->program,
-                                        enclosing_func, writes[i]);
-                    /* decl_line == INT_MAX means the binding is a parameter or
-                     * lives in a scope this line lookup does not resolve; treat
-                     * it as preceding (the prior behaviour) rather than guess. */
-                    int precedes = (decl_line == INT_MAX) || (decl_line <= node->line);
-                    if (precedes) {
-                        if (cap_count >= cap_cap) {
-                            cap_cap = cap_cap ? cap_cap * 2 : 8;
-                            captures = aether_xrealloc(captures, cap_cap * sizeof(char*));
-                        }
-                        captures[cap_count++] = strdup(writes[i]);
+                // binding only when that binding is VISIBLE from the closure
+                // (the enclosing scope's own top level, or a trailing block the
+                // closure sits inside) AND *precedes* it. A same-named binding
+                // that comes after the closure, or lives in a sibling trailing
+                // block or an if/for/while body, is an unrelated local
+                // (#2189): the closure's `name = expr` is then its own fresh
+                // local, so promoting it emitted C referencing a name declared
+                // later or already out of scope (an undeclared use), or, for a
+                // nested closure two levels in, a write-through into a cell
+                // that closure's env owns and frees -> heap-use-after-free. A
+                // binding that precedes the closure in its scope is genuinely
+                // mutated through, and stays a capture.
+                int decl_line = enclosing_decl_line(gen->program, enclosing_func,
+                                                    writes[i], node);
+                if (decl_line <= node->line) {
+                    if (cap_count >= cap_cap) {
+                        cap_cap = cap_cap ? cap_cap * 2 : 8;
+                        captures = aether_xrealloc(captures, cap_cap * sizeof(char*));
                     }
+                    captures[cap_count++] = strdup(writes[i]);
                 }
                 free(writes[i]);
             }
