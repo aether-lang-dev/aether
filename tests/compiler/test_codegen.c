@@ -191,3 +191,52 @@ TEST(codegen_ptr_eq_int_zero_stays_pointer_check) {
     ASSERT_TRUE(strstr(buf, "_aether_safe_str(p)") == NULL);
     free(buf);
 }
+
+/* #2189: a trailing block (`group("first") { ... }`) inlines as a C `{ ... }`
+ * block, so a name it binds is out of scope in a sibling block. A callback in
+ * the second block binding its own `ml` must not capture the first block's
+ * `ml`: the capture analysis used to treat every trailing block as transparent
+ * and emitted `_aether_make_closure_1(root, ml)` against a name that had
+ * already gone out of scope. The first block's callback still captures it. */
+TEST(codegen_closure_does_not_capture_sibling_trailing_block_local) {
+    char* buf = generate_typechecked(
+        "group(name: string) -> int { return 1 }\n"
+        "run(cb: fn) { cb() }\n"
+        "main() {\n"
+        "    root = \"/tmp/x\"\n"
+        "    group(\"first\") {\n"
+        "        ml = \"${root}/a\"\n"
+        "        run() callback { println(ml) }\n"
+        "    }\n"
+        "    group(\"second\") {\n"
+        "        run() callback {\n"
+        "            ml = \"${root}/b\"\n"
+        "            println(ml)\n"
+        "        }\n"
+        "    }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    /* First block's callback reads the outer name: captured. */
+    ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(ml)") != NULL);
+    /* Second block's callback binds its own: only `root` crosses into it. */
+    ASSERT_TRUE(strstr(buf, "_aether_make_closure_1(root)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_closure_1(root, ml)") == NULL);
+    free(buf);
+}
+
+/* The companion shape: a binding declared in the SAME trailing block, before
+ * the callback, is visible to it and a write in the callback goes through. */
+TEST(codegen_closure_captures_same_trailing_block_local_it_mutates) {
+    char* buf = generate_typechecked(
+        "group(name: string) -> int { return 1 }\n"
+        "run(cb: fn) { cb() }\n"
+        "main() {\n"
+        "    group(\"counted\") {\n"
+        "        hits = 0\n"
+        "        run() callback { hits = hits + 1 }\n"
+        "    }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(hits)") != NULL);
+    free(buf);
+}

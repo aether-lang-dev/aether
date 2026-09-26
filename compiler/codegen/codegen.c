@@ -639,6 +639,34 @@ void free_code_generator(CodeGenerator* gen) {
         for (int i = 0; i < gen->synthesised_count; i++) {
             free_ast_node(gen->synthesised_nodes[i]);
         }
+        /* The closure registry discover_closures builds (one strdup'd capture
+         * name per capture, plus the parent scope name; capture_types point
+         * into the typechecker's types and are not owned here) and the
+         * per-scope promoted-name map compute_promoted_captures derives from
+         * it. */
+        for (int i = 0; i < gen->closure_count; i++) {
+            for (int j = 0; j < gen->closures[i].capture_count; j++) {
+                free(gen->closures[i].captures[j]);
+            }
+            free(gen->closures[i].captures);
+            free(gen->closures[i].capture_types);
+            free(gen->closures[i].parent_func);
+        }
+        free(gen->closures);
+        gen->closures = NULL;
+        gen->closure_count = 0;
+        gen->closure_capacity = 0;
+        for (int i = 0; i < gen->promoted_func_count; i++) {
+            for (int j = 0; j < gen->promoted_funcs[i].count; j++) {
+                free(gen->promoted_funcs[i].names[j]);
+            }
+            free(gen->promoted_funcs[i].names);
+            free(gen->promoted_funcs[i].func_name);
+        }
+        free(gen->promoted_funcs);
+        gen->promoted_funcs = NULL;
+        gen->promoted_func_count = 0;
+        gen->promoted_func_capacity = 0;
         free(gen->synthesised_nodes);
         gen->synthesised_nodes = NULL;
         gen->synthesised_count = 0;

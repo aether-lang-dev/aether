@@ -3356,6 +3356,9 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     add_child(release_call, arg);
     ASTNode* expr_stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
     add_child(expr_stmt, release_call);
+    /* Built here, never attached to the program AST: owned by the generator
+     * so free_code_generator reaches it (#1667). */
+    codegen_own_node(gen, expr_stmt);
     push_defer(gen, expr_stmt);
 }
 
