@@ -256,6 +256,52 @@ main() {
     tls13_record.free_ctx(arecv)
     bytes.free(akey); bytes.free(aiv); bytes.free(amsg); bytes.free(arec)
 
+    // ---- record-size / sequence hardening (RFC 8446 §5.1/§5.2/§5.3) ----
+    hctx = tls13_record.new(key, 32, biv)
+
+    // open_record rejects a TLSCiphertext claiming > 2^14 + 256 bytes before
+    // it allocates. Forge a 5-byte header with length 0xFFFF and a short body;
+    // the length check must fire regardless of the (absent) real payload.
+    big_len = tls13_record.RECORD_HEADER_LEN + tls13_record.TAG_LEN + 8
+    big = bytes.new(big_len)
+    bytes.set(big, big_len - 1, 0) // establish logical length (bytes.new leaves it 0)
+    bytes.set(big, 0, tls13_record.OPAQUE_APPLICATION_DATA)
+    bytes.set(big, 1, 0x03)
+    bytes.set(big, 2, 0x03)
+    bytes.set(big, 3, 0xFF) // length hi
+    bytes.set(big, 4, 0xFF) // length lo -> 65535, over the 16640 cap
+    OpenedRecord ob
+    berr = tls13_record.open_record(hctx, big, big_len, &ob)
+    if string.equals(berr, "record: length exceeds maximum record size") == 1 {
+        println("ok   oversized ciphertext rejected")
+    } else {
+        println("FAIL oversized ciphertext not rejected: got \"${berr}\""); total_ok = 0
+    }
+
+    // seal_record rejects a plaintext fragment over 2^14 bytes (returns null).
+    over = bytes.new(tls13_record.CONTENT_MAX_PLAIN_LEN + 1)
+    bytes.set(over, tls13_record.CONTENT_MAX_PLAIN_LEN, 0)
+    sbig = tls13_record.seal_record(hctx, tls13_record.CONTENT_APPLICATION_DATA, over, bytes.length(over))
+    if sbig == null {
+        println("ok   oversized plaintext rejected")
+    } else {
+        println("FAIL oversized plaintext sealed"); total_ok = 0
+        bytes.free(sbig)
+    }
+
+    // a null context is rejected on both paths rather than dereferenced.
+    if tls13_record.seal_record(null, tls13_record.CONTENT_APPLICATION_DATA, msg, bytes.length(msg)) != null {
+        println("FAIL seal_record(null) did not reject"); total_ok = 0
+    } else { println("ok   seal_record null ctx rejected") }
+    OpenedRecord onull
+    if string.equals(tls13_record.open_record(null, rec, bytes.length(rec), &onull), "record: null context") != 1 {
+        println("FAIL open_record(null) did not reject"); total_ok = 0
+    } else { println("ok   open_record null ctx rejected") }
+
+    tls13_record.free_ctx(hctx)
+    bytes.free(big)
+    bytes.free(over)
+
     tls13_record.free_ctx(sender)
     tls13_record.free_ctx(receiver)
     tls13_record.free_ctx(receiver2)

@@ -47,7 +47,8 @@ exports(
     new, new_aead, free_ctx, seal_record, open_record, nonce_for,
     RecordCtx, OpenedRecord,
     CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
-    TAG_LEN, RECORD_HEADER_LEN,
+    TAG_LEN, RECORD_HEADER_LEN, OPAQUE_APPLICATION_DATA,
+    CONTENT_MAX_PLAIN_LEN, RECORD_MAX_CIPHERTEXT_LEN,
     AEAD_CHACHA20_POLY1305, AEAD_AES_128_GCM, AEAD_AES_256_GCM
 )
 
@@ -67,6 +68,15 @@ const TAG_LEN = 16 // ChaCha20-Poly1305 / AES-GCM tag
 const RECORD_HEADER_LEN = 5 // opaque_type(1) + version(2) + length(2)
 const NONCE_LEN = 12
 const OPAQUE_APPLICATION_DATA = 0x17
+// RFC 8446 record-size limits. A plaintext fragment is at most 2^14 bytes
+// (§5.1); a protected TLSCiphertext is at most 2^14 + 256 (§5.2, the extra 256
+// covering the content-type byte, padding and the AEAD tag). Enforcing both
+// keeps a peer's declared length from driving an unbounded allocation.
+const CONTENT_MAX_PLAIN_LEN = 16384 // 2^14
+const RECORD_MAX_CIPHERTEXT_LEN = 16640 // 2^14 + 256
+// A 64-bit record sequence number must never wrap (§5.3): a connection that
+// reached the ceiling must fail rather than reuse a (key, nonce) pair.
+const SEQ_MAX = 0x7FFFFFFFFFFFFFFF
 
 // A directional record context: the AEAD key, base iv, and a 64-bit sequence
 // number (the record sequence resets to 0 per key, per RFC 8446 §5.3).
@@ -157,7 +167,13 @@ fn build_aad(ct_len: int) -> ptr {
 // (5-byte header + encrypted_record). No extra padding is added (the inner
 // plaintext is content || content_type). Advances ctx.seq. Caller frees.
 seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
+    if ctx == null { return null }
     c = ctx as *RecordCtx
+
+    // RFC 8446 §5.1 / §5.3: refuse an over-2^14 fragment or a sequence number
+    // at the wrap point rather than emit an out-of-spec record or reuse a nonce.
+    if pt_len < 0 || pt_len > CONTENT_MAX_PLAIN_LEN { return null }
+    if c.seq < 0 || c.seq >= SEQ_MAX { return null }
 
     // TLSInnerPlaintext = content || content_type (no padding in this cut).
     inner_len = pt_len + 1
@@ -222,7 +238,13 @@ open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
     out.plaintext = null
     out.plaintext_len = 0
 
+    if ctx == null { return "record: null context" }
     c = ctx as *RecordCtx
+    // RFC 8446 §5.3: a sequence number at the wrap point must end the
+    // connection, not silently reuse a (key, nonce) pair.
+    if c.seq < 0 || c.seq >= SEQ_MAX {
+        return "record: sequence number overflow"
+    }
     if rec_len < RECORD_HEADER_LEN + TAG_LEN {
         return "record: too short"
     }
@@ -231,6 +253,11 @@ open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
         return "record: unexpected opaque_type"
     }
     ct_len = ((bytes.get(record, 3) & 0xFF) << 8) | (bytes.get(record, 4) & 0xFF)
+    // RFC 8446 §5.2: a TLSCiphertext over 2^14 + 256 bytes is a record_overflow.
+    // Reject before allocating so a bogus length cannot drive the buffer size.
+    if ct_len > RECORD_MAX_CIPHERTEXT_LEN {
+        return "record: length exceeds maximum record size"
+    }
     if RECORD_HEADER_LEN + ct_len > rec_len {
         return "record: length overruns buffer"
     }
