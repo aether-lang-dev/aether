@@ -45,6 +45,7 @@ main() {
     // The sender is an address value: answer it without resolving.
     _, aerr = udp.send_to_addr(server, sender, "ack", 3)
     if aerr != "" { println("answer failed: ${aerr}"); return }
+    _, _ = udp.poll(client, 1000)               // loopback is not synchronous
     m, from, _ = udp.recv_from(client, bytes.data(buf), 1200)
     println("client got ${bytes.to_string(buf, m)} from the server: ${udp.addr_port(from) == port}")
 
