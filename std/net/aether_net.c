@@ -27,6 +27,8 @@ int tcp_server_fd_raw(TcpServer* s) { (void)s; return -1; }
 TcpSocket* tcp_socket_from_fd_owned(int fd) { (void)fd; return NULL; }
 int tcp_poll_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t; return -1; }
+void aether_net_init(void) {}
+int aether_net_wouldblock(void) { return 0; }
 #else
 
 #include <stdlib.h>
@@ -60,7 +62,7 @@ int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t
  * normal and must NOT tear the connection down — see issue #1092. Returns 1
  * for would-block/timeout/interrupt, 0 for a genuine close-or-error. Only
  * meaningful when `received < 0`; an orderly FIN is received == 0. */
-static int net_recv_wouldblock(void) {
+int aether_net_wouldblock(void) {
 #ifdef _WIN32
     int err = WSAGetLastError();
     return err == WSAEWOULDBLOCK || err == WSAETIMEDOUT;
@@ -81,7 +83,7 @@ struct TcpServer {
 
 static int net_initialized = 0;
 
-static void net_init(void) {
+void aether_net_init(void) {
     if (net_initialized) return;
     #ifdef _WIN32
     WSADATA wsa_data;
@@ -110,7 +112,7 @@ TcpSocket* tcp_connect_raw(const char* host, int port) {
     // Sandbox check: is TCP connect to this host allowed?
     if (!aether_sandbox_check("tcp", host)) return NULL;
 
-    net_init();
+    aether_net_init();
 
     /* getaddrinfo, not gethostbyname: the latter returns a pointer into a
      * shared, process-static struct, so concurrent connects on different
@@ -189,7 +191,7 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
          * still collapses both to NULL — callers needing to tell idle from
          * closed must use tcp_receive_n_raw, whose "timeout" sentinel is
          * distinct. */
-        if (!(received < 0 && net_recv_wouldblock())) {
+        if (!(received < 0 && aether_net_wouldblock())) {
             sock->connected = 0;
         }
         return NULL;
@@ -224,7 +226,7 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
          * hard error is a real close that marks the socket dead. Collapsing
          * these (the old behaviour) tore down full-duplex tunnels the first
          * time either direction went quiet for 30 s. */
-        if (received < 0 && net_recv_wouldblock()) {
+        if (received < 0 && aether_net_wouldblock()) {
             out._2 = "timeout";
         } else {
             sock->connected = 0;
@@ -267,7 +269,7 @@ static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero)
     // Sandbox check: is listening on this port allowed?
     if (!aether_sandbox_check("tcp_listen", "*")) return NULL;
 
-    net_init();
+    aether_net_init();
 
     if (port < (allow_zero ? 0 : 1) || port > 65535) {
         return NULL;
@@ -388,7 +390,7 @@ int tcp_server_fd_raw(TcpServer* server) {
 
 TcpSocket* tcp_socket_from_fd_owned(int fd) {
     if (fd < 0) return NULL;
-    net_init();
+    aether_net_init();
 #ifndef _WIN32
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
@@ -435,7 +437,7 @@ int tcp_server_poll_raw(TcpServer* server, int timeout_ms) {
     pfd.revents = 0;
     int rc = ae_poll(&pfd, (ae_nfds_t)1, timeout_ms);
     if (rc < 0) {
-        if (net_recv_wouldblock()) return 0;   /* EINTR: treat as no-event */
+        if (aether_net_wouldblock()) return 0;   /* EINTR: treat as no-event */
         return -1;
     }
     if (rc == 0) return 0;
@@ -450,7 +452,7 @@ int tcp_poll_raw(TcpSocket* sock, int timeout_ms) {
     pfd.revents = 0;
     int rc = ae_poll(&pfd, (ae_nfds_t)1, timeout_ms);
     if (rc < 0) {
-        if (net_recv_wouldblock()) return 0;   /* EINTR: treat as no-event */
+        if (aether_net_wouldblock()) return 0;   /* EINTR: treat as no-event */
         return -1;
     }
     if (rc == 0) return 0;                      /* timeout */
@@ -478,7 +480,7 @@ int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int timeout_ms) {
 
     int rc = ae_poll(pfds, n, timeout_ms);
     if (rc < 0) {
-        if (net_recv_wouldblock()) return 0;   /* EINTR: caller re-polls */
+        if (aether_net_wouldblock()) return 0;   /* EINTR: caller re-polls */
         return -1;
     }
     if (rc == 0) return 0;                      /* timeout */

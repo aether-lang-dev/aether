@@ -1,0 +1,231 @@
+// std.udp - Datagram sockets: bind, send_to, recv_from, poll (#2201)
+//
+// The other half of std.tcp, for game networking: a state snapshot that
+// arrives late is worth less than none, so it must not queue behind a
+// lost one the way TCP's in-order stream makes it. Every socket is
+// non-blocking from bind: a game loop drains it once a tick with
+// `recv_from` and never waits on it; `poll` is for the program that does
+// want to wait.
+//
+// Raw externs end in `_raw` and return NULL/int in C-style. Aether-native
+// wrappers (below) use Go-style `(value, err)` tuple returns. The
+// implementations are in std/udp/aether_udp.c.
+//
+// An address (`resolve`, or the sender of a received packet) is a value:
+// compare it with `addr_equal`, key a table on `addr_hash` or
+// `addr_string`, and `send_to_addr` it without resolving the name again.
+// Free it with `addr_free`.
+
+exports(
+    udp_bind_raw, udp_local_port_raw, udp_close, udp_fd_raw, udp_poll_raw,
+    udp_set_buffer_sizes_raw, udp_set_broadcast_raw,
+    udp_resolve_raw, udp_addr_new, udp_addr_clone_raw, udp_addr_free,
+    udp_addr_host_raw, udp_addr_port_raw, udp_addr_equal_raw, udp_addr_hash_raw,
+    udp_send_to_raw, udp_send_to_addr_raw,
+    udp_recv_from_into_raw, udp_recv_from_raw,
+    bind, local_port, close, fd, poll, set_buffer_sizes, set_broadcast,
+    resolve, addr_new, addr_clone, addr_free, addr_host, addr_port,
+    addr_string, addr_equal, addr_hash,
+    send_to, send_to_addr, recv_from, recv_from_into
+)
+
+// Raw externs - escape hatch
+extern string_contains(str: string, substring: string) -> int
+extern udp_bind_raw(host: string, port: int) -> ptr
+extern udp_local_port_raw(sock: ptr) -> int
+extern udp_close(sock: ptr) -> int
+extern udp_fd_raw(sock: ptr) -> int
+extern udp_poll_raw(sock: ptr, timeout_ms: int) -> int
+extern udp_set_buffer_sizes_raw(sock: ptr, send_bytes: int, recv_bytes: int) -> int
+extern udp_set_broadcast_raw(sock: ptr, on: int) -> int
+extern udp_resolve_raw(host: string, port: int) -> ptr
+extern udp_addr_new() -> ptr
+extern udp_addr_clone_raw(addr: ptr) -> ptr
+extern udp_addr_free(addr: ptr) -> int
+extern udp_addr_host_raw(addr: ptr) -> string @heap
+extern udp_addr_port_raw(addr: ptr) -> int
+extern udp_addr_equal_raw(a: ptr, b: ptr) -> int
+extern udp_addr_hash_raw(addr: ptr) -> int
+extern udp_send_to_raw(sock: ptr, host: string, port: int, data: ptr, n: int) -> int
+extern udp_send_to_addr_raw(sock: ptr, addr: ptr, data: ptr, n: int) -> int
+extern udp_recv_from_into_raw(sock: ptr, buf: ptr, cap: int, addr: ptr) -> int
+extern udp_recv_from_raw(sock: ptr, buf: ptr, cap: int) -> (int, ptr, string)
+
+// Bind a datagram socket on host:port. "0.0.0.0" (or "") takes every
+// IPv4 interface, "::" IPv6 (dual-stack where the OS allows), "127.0.0.1"
+// or "::1" loopback only. Port 0 asks the OS for an ephemeral port; read
+// it back with `local_port`. The socket is non-blocking. Returns
+// (socket, "") or (null, error). Caller must udp.close it.
+bind(host: string, port: int) -> {
+    sock = udp_bind_raw(host, port)
+    if sock == null {
+        return null, "bind failed"
+    }
+    return sock, ""
+}
+
+// The port a socket is bound to (the one the OS chose for a bind on 0),
+// or -1 for a null handle.
+local_port(sock: ptr) -> int {
+    return udp_local_port_raw(sock)
+}
+
+// Close a socket and release its handle. -1 for a null handle.
+close(sock: ptr) -> int {
+    return udp_close(sock)
+}
+
+// The OS-level descriptor inside a socket, or -1 for a null handle. For a
+// poll across several sockets, or capsicum narrowing. Owned by the handle:
+// do not close it directly, it is released by udp.close.
+fd(sock: ptr) -> int {
+    return udp_fd_raw(sock)
+}
+
+// Wait until a datagram is waiting, up to timeout_ms (-1 blocks, 0 polls,
+// >0 waits that many ms). Returns (true, "") when a recv_from will return
+// a packet, (false, "") on timeout, (false, error) on a null handle.
+poll(sock: ptr, timeout_ms: int) -> {
+    rc = udp_poll_raw(sock, timeout_ms)
+    if rc < 0 {
+        return false, "poll failed"
+    }
+    if rc == 0 {
+        return false, ""
+    }
+    return true, ""
+}
+
+// SO_SNDBUF / SO_RCVBUF in bytes; 0 leaves that side as it is. A server
+// fanning snapshots out to many peers wants a larger send buffer than
+// the default. Returns "" or an error.
+set_buffer_sizes(sock: ptr, send_bytes: int, recv_bytes: int) -> string {
+    if udp_set_buffer_sizes_raw(sock, send_bytes, recv_bytes) != 0 {
+        return "set_buffer_sizes failed"
+    }
+    return ""
+}
+
+// Allow sends to a broadcast address (255.255.255.255 or the subnet's),
+// for LAN discovery on an IPv4 socket. Returns "" or an error.
+set_broadcast(sock: ptr, on: bool) -> string {
+    flag = 0
+    if on { flag = 1 }
+    if udp_set_broadcast_raw(sock, flag) != 0 {
+        return "set_broadcast failed"
+    }
+    return ""
+}
+
+// Resolve host:port once to an address value for `send_to_addr`.
+// Returns (addr, "") or (null, error). Caller must addr_free it.
+resolve(host: string, port: int) -> {
+    addr = udp_resolve_raw(host, port)
+    if addr == null {
+        return null, "resolve failed"
+    }
+    return addr, ""
+}
+
+// An unset address for `recv_from_into` to fill, so a receive loop
+// allocates nothing per packet. Caller must addr_free it.
+addr_new() -> ptr {
+    return udp_addr_new()
+}
+
+// A copy of an address, to keep past the receive that produced it.
+addr_clone(addr: ptr) -> ptr {
+    return udp_addr_clone_raw(addr)
+}
+
+// Release an address. -1 for null.
+addr_free(addr: ptr) -> int {
+    return udp_addr_free(addr)
+}
+
+// The numeric host of an address ("10.0.0.7", "fe80::1"), or "" for a
+// null or unset one.
+addr_host(addr: ptr) -> string {
+    s = udp_addr_host_raw(addr)
+    if s == null {
+        return ""
+    }
+    return s
+}
+
+// The port of an address, or -1 for a null or unset one.
+addr_port(addr: ptr) -> int {
+    return udp_addr_port_raw(addr)
+}
+
+// "host:port" ("[host]:port" for IPv6), the natural map key for a peer
+// table. "" for a null or unset address.
+addr_string(addr: ptr) -> string {
+    port = udp_addr_port_raw(addr)
+    if port < 0 {
+        return ""
+    }
+    host = addr_host(addr)
+    if string_contains(host, ":") == 1 {
+        return "[${host}]:${port}"
+    }
+    return "${host}:${port}"
+}
+
+// True when both addresses name the same family, host and port. Two
+// null or unset addresses are not equal.
+addr_equal(a: ptr, b: ptr) -> bool {
+    return udp_addr_equal_raw(a, b) != 0
+}
+
+// A non-negative hash of an address, stable for equal addresses within a
+// process. 0 for a null or unset one.
+addr_hash(addr: ptr) -> int {
+    return udp_addr_hash_raw(addr)
+}
+
+// Send one datagram of n bytes from `data` (a string or a bytes buffer's
+// data pointer) to host:port, resolving the name each call. Returns
+// (bytes_sent, "") or (0, error). A dropped packet (full send buffer)
+// is an error: a datagram protocol expects loss and resends on its own
+// schedule.
+send_to(sock: ptr, host: string, port: int, data: ptr, n: int) -> {
+    sent = udp_send_to_raw(sock, host, port, data, n)
+    if sent < 0 {
+        return 0, "send failed"
+    }
+    return sent, ""
+}
+
+// Send to an already-resolved address: the per-peer form for a server
+// answering many peers a tick. Returns (bytes_sent, "") or (0, error).
+send_to_addr(sock: ptr, addr: ptr, data: ptr, n: int) -> {
+    sent = udp_send_to_addr_raw(sock, addr, data, n)
+    if sent < 0 {
+        return 0, "send failed"
+    }
+    return sent, ""
+}
+
+// Receive one datagram into `buf` (at most `cap` bytes; a longer packet
+// is truncated). Never blocks. Returns (n, sender, "") on a packet,
+// (0, null, "would block") when nothing is waiting (the socket is fine:
+// come back next tick), (0, null, error) on failure. The sender must be
+// addr_free'd; use recv_from_into to reuse one across packets.
+recv_from(sock: ptr, buf: ptr, cap: int) -> {
+    return udp_recv_from_raw(sock, buf, cap)
+}
+
+// recv_from with a caller-owned address (`addr_new`) filled in place, so
+// the drain loop allocates nothing. Returns (n, "") on a packet,
+// (0, "would block") when nothing is waiting, (0, error) on failure.
+recv_from_into(sock: ptr, buf: ptr, cap: int, addr: ptr) -> {
+    n = udp_recv_from_into_raw(sock, buf, cap, addr)
+    if n == -1 {
+        return 0, "would block"
+    }
+    if n < 0 {
+        return 0, "receive failed"
+    }
+    return n, ""
+}
