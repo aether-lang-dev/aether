@@ -215,6 +215,100 @@ static void arg_drain_truncate(int target_count) {
     }
 }
 
+/* Returns 1 if the expression has any side effects (function calls, sends).
+ * Shared by the series-collapse optimizer in codegen_stmt.c and the
+ * interpolation-segment hoist below. */
+int codegen_expr_has_side_effects(ASTNode* node) {
+    if (!node) return 0;
+    if (node->type == AST_FUNCTION_CALL ||
+        node->type == AST_SEND_FIRE_FORGET ||
+        node->type == AST_SEND_ASK ||
+        // va_arg advances the va_list each evaluation; va_start/va_end
+        // mutate it too. Treating them as impure stops the series-
+        // collapse optimizer from hoisting/folding them (which would
+        // read the wrong number of varargs). Issue #536.
+        node->type == AST_VA_ARG ||
+        node->type == AST_VA_START ||
+        node->type == AST_VA_END) return 1;
+    for (int i = 0; i < node->child_count; i++) {
+        if (codegen_expr_has_side_effects(node->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* --- String-interpolation segment helpers (#2195) --------------------
+ *
+ * An AST_STRING_INTERP's children alternate between text pieces (string
+ * literals, spliced into the format string) and `${expr}` segments (the
+ * printf varargs). */
+
+/* A text piece of the interpolation, as opposed to a `${expr}` segment. */
+int interp_segment_is_text(ASTNode* ch) {
+    return ch && ch->type == AST_LITERAL && ch->node_type &&
+           ch->node_type->kind == TYPE_STRING;
+}
+
+/* A `${expr}` segment that is a CALL producing an owned heap string, or a
+ * nested interpolation (always heap), which the enclosing interpolation
+ * must free once printf / _aether_interp has read it. */
+int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
+    if (!ch) return 0;
+    if (ch->type != AST_FUNCTION_CALL && ch->type != AST_STRING_INTERP) return 0;
+    TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
+    if (tk != TYPE_STRING && tk != TYPE_PTR) return 0;
+    return is_heap_string_expr(gen, ch);
+}
+
+/* Index of the last child that must be evaluated into a temp to keep the
+ * segments in source order, or -1 when none must. C leaves vararg
+ * evaluation order unspecified, so once any segment has a side effect
+ * every `${}` segment of the interpolation is hoisted: the impure ones so
+ * they run left to right, and the pure ones because a read of `c.n` on
+ * either side of `bump(c)` sees a different value depending on which ran
+ * first. An all-pure interpolation, or one whose only `${}` segment is
+ * the impure one, has no order to observe and stays inline. Heap-call
+ * freeing is a separate concern, see interp_segment_is_heap_call. */
+int interp_order_hoist_boundary(ASTNode* interp) {
+    int expr_count = 0, last_expr = -1, impure = 0;
+    for (int i = 0; i < interp->child_count; i++) {
+        ASTNode* ch = interp->children[i];
+        if (interp_segment_is_text(ch)) continue;
+        expr_count++;
+        last_expr = i;
+        if (codegen_expr_has_side_effects(ch)) impure = 1;
+    }
+    return (impure && expr_count >= 2) ? last_expr : -1;
+}
+
+/* The C type a `${expr}` segment's temp is declared with, matching the
+ * cast EMIT_INTERP_ARGS applies for the same TypeKind, or NULL for a kind
+ * the interpolation has no scalar/string temp shape for (left inline). */
+const char* interp_temp_c_type(Type* t) {
+    if (!t) return "int";   /* untyped segment: formatted with %d */
+    switch (t->kind) {
+        case TYPE_STRING:
+        case TYPE_PTR:      return "const char*";
+        case TYPE_BOOL:
+        case TYPE_INT:      return "int";
+        case TYPE_INT64:
+        case TYPE_DURATION: return "long long";
+        case TYPE_UINT32:   return "unsigned int";
+        case TYPE_UINT64:   return "unsigned long long";
+        case TYPE_FLOAT:    return "double";
+        case TYPE_FLOAT32:  return "float";
+        case TYPE_LONGDOUBLE: return "long double";
+        default:            return NULL;
+    }
+}
+
+/* Emit one `${expr}` segment as a printf vararg: the hoisted temp's name
+ * when the segment was evaluated ahead of the call, else the expression
+ * itself. */
+static void interp_emit_segment(CodeGenerator* gen, ASTNode* ch, const char* hoisted) {
+    if (hoisted) fprintf(gen->output, "%s", hoisted);
+    else generate_expression(gen, ch);
+}
+
 /* Emit `call` as a block that frees the env of a TRANSIENT capturing
  * closure argument after the call returns. The closure is hoisted into an
  * `_AeClosure` temp, the call is emitted with the closure substituted by
@@ -5836,7 +5930,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             #define EMIT_INTERP_FMT() do { \
                 for (int i = 0; i < expr->child_count; i++) { \
                     ASTNode* ch = expr->children[i]; \
-                    if (ch->type == AST_LITERAL && ch->node_type && ch->node_type->kind == TYPE_STRING) { \
+                    if (interp_segment_is_text(ch)) { \
                         const char* s = ch->value ? ch->value : ""; \
                         for (; *s; s++) { \
                             switch (*s) { \
@@ -5908,20 +6002,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             #define EMIT_INTERP_ARGS() do { \
                 for (int i = 0; i < expr->child_count; i++) { \
                     ASTNode* ch = expr->children[i]; \
-                    if (ch->type == AST_LITERAL && ch->node_type && ch->node_type->kind == TYPE_STRING) \
+                    if (interp_segment_is_text(ch)) \
                         continue; \
                     fprintf(gen->output, ", "); \
                     TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN; \
                     if (tk == TYPE_BOOL) { \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, " ? \"true\" : \"false\""); \
                     } else if (tk == TYPE_STRING || tk == TYPE_PTR) { \
                         fprintf(gen->output, "_aether_safe_str("); \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, ")"); \
                     } else if (tk == TYPE_INT64) { \
                         fprintf(gen->output, "(long long)"); \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                     } else if (tk == TYPE_INT) { \
                         /* Aether int is C `int` and %d expects one, but a \
                          * TYPE_INT value can be stored wider: a single-scalar \
@@ -5931,51 +6025,67 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * ptr fields are TYPE_PTR and print via %s), so no \
                          * pointer is ever truncated. */ \
                         fprintf(gen->output, "(int)"); \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                     } else if (tk == TYPE_UINT64) { \
                         fprintf(gen->output, "(unsigned long long)"); \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                     } else if (tk == TYPE_DURATION) { \
                         fprintf(gen->output, "_aether_duration_repr("); \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, ")"); \
                     } else { \
-                        generate_expression(gen, ch); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                     } \
                 } \
             } while(0)
 
-            /* A heap-producing CALL segment ("[${string.join(parts, ",")}]")
-             * is a temporary nothing owns: bind it to a drained temp so it
-             * is freed after the printf / _aether_interp consumes it, or it
-             * leaks once per interpolation. Identifiers are never drained
-             * (their owner frees them); only calls the classifier proves
-             * heap-producing qualify. Same registry-substitution pattern
-             * as the closure-env and call-argument drains above. */
+            /* Segments become C varargs, and C leaves argument evaluation
+             * order unspecified: gcc evaluates right to left, so
+             * `"${bump(c)} ${bump(c)} ${bump(c)}"` printed `3 2 1` (#2195).
+             * Once any segment has a side effect, every segment is
+             * evaluated into a temp in source order ahead of the printf /
+             * _aether_interp call (a pure read on either side of the
+             * impure one observes it). An all-pure interpolation stays
+             * inline, so the common `"${name} is ${age}"` costs nothing
+             * extra.
+             *
+             * Independently, a heap-producing CALL segment
+             * ("[${string.join(parts, ",")}]") is a temporary nothing owns:
+             * it is bound to a temp so it can be freed after the consumer
+             * has read it, or it leaks once per interpolation. Identifiers
+             * are never freed (their owner frees them); only calls the
+             * classifier proves heap-producing qualify. Same
+             * registry-substitution pattern as the closure-env and
+             * call-argument drains above. */
             int it_saved = g_arg_drain_count;
-            int it_drain_count = 0;
+            int it_hoist_upto = interp_order_hoist_boundary(expr);
+            const char** it_names = (const char**)calloc(
+                (size_t)(expr->child_count > 0 ? expr->child_count : 1),
+                sizeof(const char*));
+            int* it_heap = (int*)calloc(
+                (size_t)(expr->child_count > 0 ? expr->child_count : 1),
+                sizeof(int));
+            if (!it_names || !it_heap) {
+                fprintf(stderr, "Fatal: out of memory hoisting interpolation segments\n");
+                exit(1);
+            }
+            int it_hoisted = 0;
             for (int di = 0; di < expr->child_count; di++) {
                 ASTNode* ch = expr->children[di];
-                if (!ch || ch->type != AST_FUNCTION_CALL) continue;
-                TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
-                if (tk != TYPE_STRING && tk != TYPE_PTR) continue;
-                if (!is_heap_string_expr(gen, ch)) continue;
-                it_drain_count++;
-            }
-            if (it_drain_count > 0) {
-                fprintf(gen->output, as_printf ? "{ " : "({ ");
-                for (int di = 0; di < expr->child_count; di++) {
-                    ASTNode* ch = expr->children[di];
-                    if (!ch || ch->type != AST_FUNCTION_CALL) continue;
-                    TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
-                    if (tk != TYPE_STRING && tk != TYPE_PTR) continue;
-                    if (!is_heap_string_expr(gen, ch)) continue;
-                    char* nm = arg_drain_mint_name();
-                    fprintf(gen->output, "const char* %s = (const char*)(", nm);
-                    generate_expression(gen, ch);
-                    fprintf(gen->output, "); ");
-                    arg_drain_bind(ch, nm);
-                }
+                if (interp_segment_is_text(ch)) continue;
+                int heap = interp_segment_is_heap_call(gen, ch);
+                if (!heap && di > it_hoist_upto) continue;
+                const char* ctype = interp_temp_c_type(ch->node_type);
+                if (!ctype) continue;   /* no scalar/string temp shape: leave inline */
+                if (it_hoisted == 0) fprintf(gen->output, as_printf ? "{ " : "({ ");
+                it_hoisted++;
+                char* nm = arg_drain_mint_name();
+                fprintf(gen->output, "%s %s = (%s)(", ctype, nm, ctype);
+                generate_expression(gen, ch);
+                fprintf(gen->output, "); ");
+                arg_drain_bind(ch, nm);   /* registry owns nm; truncate frees it */
+                it_names[di] = nm;
+                it_heap[di] = heap;
             }
             if (as_printf) {
                 // Mode 1: direct printf (for print/println)
@@ -5986,7 +6096,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, ")");
             } else {
                 // Mode 2: heap-allocated C string — always use portable helper function
-                if (it_drain_count > 0) {
+                if (it_hoisted > 0) {
                     fprintf(gen->output, "const char* _it_r = ");
                 }
                 fprintf(gen->output, "_aether_interp(\"");
@@ -5995,12 +6105,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 EMIT_INTERP_ARGS();
                 fprintf(gen->output, ")");
             }
-            if (it_drain_count > 0) {
+            if (it_hoisted > 0) {
                 fprintf(gen->output, "; ");
-                for (int di = g_arg_drain_count - it_drain_count;
-                     di < g_arg_drain_count; di++) {
-                    fprintf(gen->output, "aether_heap_str_free(%s); ",
-                            g_arg_drain_subs[di].name);
+                for (int di = 0; di < expr->child_count; di++) {
+                    if (it_names[di] && it_heap[di]) {
+                        fprintf(gen->output, "aether_heap_str_free(%s); ", it_names[di]);
+                    }
                 }
                 if (as_printf) {
                     fprintf(gen->output, "}");
@@ -6009,6 +6119,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 arg_drain_truncate(it_saved);
             }
+            free(it_names);
+            free(it_heap);
             gen->interp_as_printf = as_printf;
 
             #undef EMIT_INTERP_FMT
