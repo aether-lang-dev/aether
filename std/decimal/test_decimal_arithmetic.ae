@@ -1,0 +1,299 @@
+// std.decimal: arithmetic, division and comparison (issue #2067).
+//
+// The point of a decimal type is that 0.1 + 0.2 is 0.3 and nothing else, so
+// the exact operations are checked for exactness (value AND exponent) and the
+// rounding ones (divide, pow with a negative exponent) against the digits the
+// Go library (shopspring/decimal) produces with its default precision of 16.
+
+import std.spec
+import std.decimal
+
+parsed(s: string) -> ptr {
+    d, err = decimal.from_string(s)
+    spec.assert_ok(err, "from_string(${s})")
+    return d
+}
+
+// Render a result and free it, so an assertion line stays one line.
+str(d: ptr) -> string {
+    s = decimal.to_string(d)
+    decimal.free(d)
+    return s
+}
+
+// a op b for a binary exact operation, freeing the operands.
+add_str(a: string, b: string) -> string {
+    x = parsed(a)
+    y = parsed(b)
+    r = decimal.add(x, y)
+    decimal.free(x)
+    decimal.free(y)
+    return str(r)
+}
+
+sub_str(a: string, b: string) -> string {
+    x = parsed(a)
+    y = parsed(b)
+    r = decimal.subtract(x, y)
+    decimal.free(x)
+    decimal.free(y)
+    return str(r)
+}
+
+mul_str(a: string, b: string) -> string {
+    x = parsed(a)
+    y = parsed(b)
+    r = decimal.multiply(x, y)
+    decimal.free(x)
+    decimal.free(y)
+    return str(r)
+}
+
+// a / b at the default precision; a division error fails the test.
+div_str(a: string, b: string) -> string {
+    x = parsed(a)
+    y = parsed(b)
+    r, err = decimal.divide(x, y)
+    spec.assert_ok(err, "${a} / ${b}")
+    decimal.free(x)
+    decimal.free(y)
+    return str(r)
+}
+
+div_round_str(a: string, b: string, places: int) -> string {
+    x = parsed(a)
+    y = parsed(b)
+    r, err = decimal.divide_round(x, y, places)
+    spec.assert_ok(err, "${a} / ${b} at ${places}")
+    decimal.free(x)
+    decimal.free(y)
+    return str(r)
+}
+
+mod_str(a: string, b: string) -> string {
+    x = parsed(a)
+    y = parsed(b)
+    r, err = decimal.mod(x, y)
+    spec.assert_ok(err, "${a} mod ${b}")
+    decimal.free(x)
+    decimal.free(y)
+    return str(r)
+}
+
+pow_str(a: string, n: int) -> string {
+    x = parsed(a)
+    r, err = decimal.pow(x, n)
+    spec.assert_ok(err, "${a} ^ ${n}")
+    decimal.free(x)
+    return str(r)
+}
+
+cmp(a: string, b: string) -> int {
+    x = parsed(a)
+    y = parsed(b)
+    c = decimal.compare(x, y)
+    decimal.free(x)
+    decimal.free(y)
+    return c
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.decimal exact arithmetic") {
+        spec.it("adds without binary drift") callback {
+            spec.assert_str_eq(add_str("0.1", "0.2"), "0.3", "0.1 + 0.2")
+            spec.assert_str_eq(add_str("1.5", "-2"), "-0.5", "mixed signs")
+            spec.assert_str_eq(add_str("99.99", "0.01"), "100", "carry across the point")
+            spec.assert_str_eq(add_str("1e3", "1e-3"), "1000.001", "exponents far apart")
+        }
+
+        spec.it("keeps the finer scale of the two operands") callback {
+            a = parsed("1.5")
+            b = parsed("0.25")
+            s = decimal.add(a, b)
+            spec.assert_eq(decimal.exponent(s), -2, "sum at the finer scale")
+            spec.assert_str_eq(decimal.to_string(s), "1.75", "1.5 + 0.25")
+            decimal.free(a)
+            decimal.free(b)
+            decimal.free(s)
+        }
+
+        spec.it("subtracts exactly, to a true zero") callback {
+            spec.assert_str_eq(sub_str("12.34", "0.004"), "12.336", "12.34 - 0.004")
+            spec.assert_str_eq(sub_str("0.3", "0.1"), "0.2", "0.3 - 0.1")
+            a = parsed("1.1")
+            b = parsed("1.1")
+            z = decimal.subtract(a, b)
+            spec.assert_true(decimal.is_zero(z), "1.1 - 1.1 is zero")
+            decimal.free(a)
+            decimal.free(b)
+            decimal.free(z)
+        }
+
+        spec.it("multiplies by adding exponents") callback {
+            spec.assert_str_eq(mul_str("1.10", "3"), "3.3", "1.10 * 3")
+            spec.assert_str_eq(mul_str("2.5", "-4"), "-10", "sign of the product")
+            spec.assert_str_eq(mul_str("0.1", "0.1"), "0.01", "0.1 * 0.1")
+            spec.assert_str_eq(mul_str("123456789012345678901234567890", "1000000000000000000000"),
+                "123456789012345678901234567890000000000000000000000", "past 64 bits")
+            a = parsed("1.10")
+            b = parsed("3")
+            p = decimal.multiply(a, b)
+            spec.assert_eq(decimal.exponent(p), -2, "product exponent is the sum")
+            decimal.free(a)
+            decimal.free(b)
+            decimal.free(p)
+        }
+
+        spec.it("negates, takes abs and shifts the point") callback {
+            a = parsed("-1.5")
+            spec.assert_str_eq(str(decimal.negate(a)), "1.5", "negate")
+            spec.assert_str_eq(str(decimal.abs(a)), "1.5", "abs of negative")
+            spec.assert_str_eq(str(decimal.shift(a, 2)), "-150", "shift left two")
+            spec.assert_str_eq(str(decimal.shift(a, -3)), "-0.0015", "shift right three")
+            decimal.free(a)
+            b = parsed("2")
+            spec.assert_str_eq(str(decimal.abs(b)), "2", "abs of positive")
+            decimal.free(b)
+        }
+
+        spec.it("raises to integer powers") callback {
+            spec.assert_str_eq(pow_str("1.1", 2), "1.21", "1.1 squared")
+            spec.assert_str_eq(pow_str("2", 10), "1024", "2^10")
+            spec.assert_str_eq(pow_str("-2", 3), "-8", "odd power keeps the sign")
+            spec.assert_str_eq(pow_str("7", 0), "1", "x^0")
+            spec.assert_str_eq(pow_str("2", -1), "0.5", "negative exponent divides")
+            spec.assert_str_eq(pow_str("3", -1), "0.3333333333333333", "1/3 at the default precision")
+            z = decimal.zero()
+            r, err = decimal.pow(z, -1)
+            spec.assert_err(err, "0^-1 is an error")
+            spec.assert_null(r, "0^-1 yields no value")
+            decimal.free(z)
+        }
+    }
+
+    spec.describe(fw, "std.decimal division") {
+        spec.it("rounds a non-terminating quotient to 16 places") callback {
+            spec.assert_str_eq(div_str("1", "3"), "0.3333333333333333", "1/3")
+            spec.assert_str_eq(div_str("2", "3"), "0.6666666666666667", "2/3 rounds the last digit up")
+            spec.assert_str_eq(div_str("-2", "3"), "-0.6666666666666667", "-2/3 rounds away from zero")
+            spec.assert_eq(decimal.division_precision(), 16, "the default precision is 16")
+        }
+
+        spec.it("gives an exact quotient when there is one") callback {
+            spec.assert_str_eq(div_str("10", "4"), "2.5", "10/4")
+            spec.assert_str_eq(div_str("1.5", "0.5"), "3", "1.5/0.5")
+            spec.assert_str_eq(div_str("0", "7"), "0", "0/x")
+        }
+
+        spec.it("rounds half away from zero at the asked precision") callback {
+            spec.assert_str_eq(div_round_str("1", "3", 2), "0.33", "1/3 at 2")
+            spec.assert_str_eq(div_round_str("2", "3", 2), "0.67", "2/3 at 2")
+            spec.assert_str_eq(div_round_str("-2", "3", 2), "-0.67", "-2/3 at 2")
+            spec.assert_str_eq(div_round_str("7", "2", 0), "4", "3.5 rounds to 4")
+            spec.assert_str_eq(div_round_str("-7", "2", 0), "-4", "-3.5 rounds to -4")
+            spec.assert_str_eq(div_round_str("123.456", "1", -1), "120", "negative precision rounds to tens")
+            spec.assert_str_eq(div_round_str("125", "1", -1), "130", "125 to tens rounds away")
+        }
+
+        spec.it("refuses division by zero without a value") callback {
+            a = parsed("1")
+            z = decimal.zero()
+            r, err = decimal.divide(a, z)
+            spec.assert_err(err, "1/0 errors")
+            spec.assert_null(r, "1/0 yields no value")
+            q, rem, qerr = decimal.quo_rem(a, z, 2)
+            spec.assert_err(qerr, "quo_rem by zero errors")
+            spec.assert_null(q, "no quotient")
+            spec.assert_null(rem, "no remainder")
+            m, merr = decimal.mod(a, z)
+            spec.assert_err(merr, "mod by zero errors")
+            spec.assert_null(m, "no modulus")
+            decimal.free(a)
+            decimal.free(z)
+        }
+
+        spec.it("quo_rem splits into truncated quotient and remainder") callback {
+            a = parsed("10")
+            b = parsed("3")
+            q, r, err = decimal.quo_rem(a, b, 0)
+            spec.assert_ok(err, "10 quo_rem 3")
+            spec.assert_str_eq(decimal.to_string(q), "3", "quotient")
+            spec.assert_str_eq(decimal.to_string(r), "1", "remainder")
+            decimal.free(q)
+            decimal.free(r)
+            // remainder takes the dividend's sign
+            na = parsed("-10")
+            nq, nr, nerr = decimal.quo_rem(na, b, 0)
+            spec.assert_ok(nerr, "-10 quo_rem 3")
+            spec.assert_str_eq(decimal.to_string(nq), "-3", "negative quotient truncates toward zero")
+            spec.assert_str_eq(decimal.to_string(nr), "-1", "remainder is negative")
+            decimal.free(nq)
+            decimal.free(nr)
+            decimal.free(na)
+            // with fractional places in the quotient
+            one = parsed("1")
+            pq, pr, perr = decimal.quo_rem(one, b, 2)
+            decimal.free(one)
+            spec.assert_ok(perr, "1 quo_rem 3 at 2")
+            spec.assert_str_eq(decimal.to_string(pq), "0.33", "two-place quotient")
+            spec.assert_str_eq(decimal.to_string(pr), "0.01", "exact remainder")
+            spec.assert_eq(decimal.exponent(pq), -2, "quotient exponent is -precision")
+            decimal.free(pq)
+            decimal.free(pr)
+            decimal.free(a)
+            decimal.free(b)
+        }
+
+        spec.it("quo_rem satisfies d == q * d2 + r") callback {
+            d = parsed("123.4567")
+            d2 = parsed("-0.037")
+            q, r, err = decimal.quo_rem(d, d2, 3)
+            spec.assert_ok(err, "quo_rem")
+            prod = decimal.multiply(q, d2)
+            back = decimal.add(prod, r)
+            spec.assert_true(decimal.equals(back, d), "q * d2 + r == d (got ${decimal.to_string(back)})")
+            decimal.free(q)
+            decimal.free(r)
+            decimal.free(prod)
+            decimal.free(back)
+            decimal.free(d)
+            decimal.free(d2)
+        }
+
+        spec.it("mod keeps the sign of the dividend") callback {
+            spec.assert_str_eq(mod_str("10", "3"), "1", "10 mod 3")
+            spec.assert_str_eq(mod_str("-10", "3"), "-1", "-10 mod 3")
+            spec.assert_str_eq(mod_str("7.5", "2"), "1.5", "7.5 mod 2")
+            spec.assert_str_eq(mod_str("6", "1.5"), "0", "exact multiple")
+        }
+    }
+
+    spec.describe(fw, "std.decimal comparison") {
+        spec.it("compares by value regardless of scale") callback {
+            spec.assert_eq(cmp("1.0", "1.00"), 0, "1.0 == 1.00")
+            spec.assert_eq(cmp("1e2", "100"), 0, "1e2 == 100")
+            spec.assert_eq(cmp("1.01", "1.001"), 1, "1.01 > 1.001")
+            spec.assert_eq(cmp("-0.5", "0.5"), -1, "-0.5 < 0.5")
+            spec.assert_eq(cmp("-0.5", "-0.25"), -1, "-0.5 < -0.25")
+            spec.assert_eq(cmp("0", "-0.0"), 0, "zero equals negative zero")
+        }
+
+        spec.it("equals, min and max follow compare") callback {
+            a = parsed("2.50")
+            b = parsed("2.5")
+            c = parsed("3")
+            spec.assert_true(decimal.equals(a, b), "2.50 equals 2.5")
+            spec.assert_false(decimal.equals(a, c), "2.50 is not 3")
+            spec.assert_str_eq(str(decimal.min(a, c)), "2.5", "min")
+            spec.assert_str_eq(str(decimal.max(a, c)), "3", "max")
+            spec.assert_str_eq(str(decimal.min(c, a)), "2.5", "min is commutative")
+            decimal.free(a)
+            decimal.free(b)
+            decimal.free(c)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

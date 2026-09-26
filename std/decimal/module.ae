@@ -1,0 +1,750 @@
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Portions copyright (c) 2015 Spring, Inc. (https://github.com/shopspring/decimal)
+//
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.decimal — arbitrary-precision decimal fixed-point numbers.
+//
+// Ported from shopspring/decimal (Go). A decimal is a pair (coefficient,
+// exponent) meaning `coefficient * 10^exponent`, where the coefficient is a
+// std.bignum integer and the exponent a plain int. Because the base is ten,
+// every value a person can write in decimal notation is held EXACTLY:
+// 0.1 + 0.2 == 0.3, 1.10 * 3 == 3.30, and a price never drifts the way a
+// binary float does. This is the type for money, invoices, exchange rates and
+// anything else where the digits on the page are the value.
+//
+// std.bignum is the integer underneath, not an alternative: it has no
+// fractional part, no exponent and no rounding modes. Its to_decimal /
+// from_decimal are base-10 integer I/O, this module is base-10 arithmetic.
+//
+// Semantics follow the Go library where they are observable:
+//   - add / subtract / multiply are exact and never round.
+//   - divide rounds half away from zero to division_precision() (16) places;
+//     divide_round takes the places explicitly; quo_rem gives the truncated
+//     quotient and the exact remainder.
+//   - round is half away from zero, round_bank is half to even, and the
+//     ceil / floor / up / down variants are the directed modes.
+//   - to_string drops trailing fractional zeros ("1.50" renders "1.5");
+//     to_string_fixed(d, places) rounds and pads ("1.5" at 2 is "1.50").
+//   - Equality is by value: 1.0 and 1.00 compare equal although their
+//     exponents differ. The exponent is observable only through exponent()
+//     and coefficient().
+//
+// A decimal is an opaque `ptr`. Operations return NEW decimals and never
+// mutate their inputs; every result is the caller's to free with
+// decimal.free. Operations that can fail (division by zero, a malformed
+// string) return (value, err) with err == "" on success and value == null on
+// failure, so a failed call leaves nothing to free.
+
+import std.bignum
+import std.string
+import std.strbuilder
+
+exports(
+    // construction
+    new, from_int, from_string, zero, clone, free,
+    // inspection
+    coefficient, exponent, sign, is_zero, is_negative, is_positive,
+    // arithmetic
+    add, subtract, multiply, negate, abs, shift, pow,
+    divide, divide_round, quo_rem, mod, division_precision,
+    // comparison
+    compare, equals, min, max,
+    // rounding
+    rescale, round, round_bank, round_ceil, round_floor, round_up, round_down,
+    truncate, ceil, floor,
+    // rendering and conversion
+    to_string, to_string_fixed, to_string_fixed_bank, to_double, int_part
+)
+
+// libc allocator for the struct, bound as in std.bignum so libc `free` can
+// coexist with this module's public `free`.
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+
+struct Dec {
+    value: ptr // std.bignum coefficient; owned by this struct
+    exp: int // value * 10^exp
+}
+
+// Places divide() rounds to when the quotient does not terminate. The Go
+// library's DivisionPrecision default.
+division_precision() -> int {
+    return 16
+}
+
+// ---- construction --------------------------------------------------------
+
+// Wrap a coefficient bignum, taking ownership of it.
+dec_alloc(value: ptr, exp: int) -> ptr {
+    d = malloc(sizeof(Dec)) as *Dec
+    d.value = value
+    d.exp = exp
+    return d as ptr
+}
+
+dv(d: ptr) -> *Dec {
+    return d as *Dec
+}
+
+// coef * 10^exp, e.g. new(1234, -2) is 12.34 and new(5, 3) is 5000.
+new(coef: long, exp: int) -> ptr {
+    return dec_alloc(bignum.from_int(coef), exp)
+}
+
+from_int(v: long) -> ptr {
+    return new(v, 0)
+}
+
+zero() -> ptr {
+    return new(0, 0)
+}
+
+clone(d: ptr) -> ptr {
+    x = dv(d)
+    return dec_alloc(bignum.clone(x.value), x.exp)
+}
+
+free(d: ptr) {
+    if d == null {
+        return
+    }
+    x = dv(d)
+    bignum.free(x.value)
+    libc_free(d)
+}
+
+// Parse decimal text: an optional sign, digits with at most one '.', and an
+// optional exponent part ("1.5e-3", "2E10"). "-.5" and "5." are accepted as
+// the Go library accepts them; whitespace, underscores, "Inf" and "NaN" are
+// not. The exponent of the result is exactly the number of fractional digits
+// written (adjusted by any e-part), so from_string("1.50") keeps the trailing
+// zero until something rounds or rescales it.
+from_string(s: string) -> (ptr, string) {
+    n = string.length(s)
+    i = 0
+    neg = 0
+    if n > 0 {
+        c0 = string.char_at(s, 0)
+        if c0 == 45 { // '-'
+            neg = 1
+            i = 1
+        } else if c0 == 43 { // '+'
+            i = 1
+        }
+    }
+    sb = strbuilder.new(n + 1)
+    digits = 0
+    frac_digits = 0
+    seen_dot = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c >= 48 && c <= 57 {
+            strbuilder.append_byte(sb, c)
+            digits = digits + 1
+            if seen_dot == 1 {
+                frac_digits = frac_digits + 1
+            }
+        } else if c == 46 { // '.'
+            if seen_dot == 1 {
+                strbuilder.free(sb)
+                return null, "decimal string has two decimal points"
+            }
+            seen_dot = 1
+        } else if c == 101 || c == 69 { // 'e' / 'E'
+            break
+        } else {
+            strbuilder.free(sb)
+            return null, "invalid character in decimal string"
+        }
+        i = i + 1
+    }
+    if digits == 0 {
+        strbuilder.free(sb)
+        return null, "decimal string has no digits"
+    }
+    exp = 0 - frac_digits
+    if i < n {
+        // exponent part: 'e' then optional sign then digits
+        i = i + 1
+        eneg = 0
+        if i < n {
+            ec = string.char_at(s, i)
+            if ec == 45 {
+                eneg = 1
+                i = i + 1
+            } else if ec == 43 {
+                i = i + 1
+            }
+        }
+        edigits = 0
+        evalue = 0
+        while i < n {
+            c = string.char_at(s, i)
+            if c < 48 || c > 57 {
+                strbuilder.free(sb)
+                return null, "invalid character in decimal exponent"
+            }
+            if edigits >= 9 {
+                strbuilder.free(sb)
+                return null, "decimal exponent out of range"
+            }
+            evalue = evalue * 10 + (c - 48)
+            edigits = edigits + 1
+            i = i + 1
+        }
+        if edigits == 0 {
+            strbuilder.free(sb)
+            return null, "decimal exponent has no digits"
+        }
+        if eneg == 1 {
+            evalue = 0 - evalue
+        }
+        exp = exp + evalue
+    }
+    coef, err = bignum.from_decimal(strbuilder.finish(sb))
+    if err != "" {
+        return null, err
+    }
+    if neg == 1 {
+        nc = bignum.negate(coef)
+        bignum.free(coef)
+        coef = nc
+    }
+    return dec_alloc(coef, exp), ""
+}
+
+// ---- inspection ----------------------------------------------------------
+
+// A copy of the coefficient as a std.bignum; the caller frees it.
+coefficient(d: ptr) -> ptr {
+    return bignum.clone(dv(d).value)
+}
+
+exponent(d: ptr) -> int {
+    return dv(d).exp
+}
+
+// -1, 0 or 1.
+sign(d: ptr) -> int {
+    return bignum.sign(dv(d).value)
+}
+
+is_zero(d: ptr) -> int {
+    return bignum.is_zero(dv(d).value)
+}
+
+is_negative(d: ptr) -> int {
+    if sign(d) < 0 {
+        return 1
+    }
+    return 0
+}
+
+is_positive(d: ptr) -> int {
+    if sign(d) > 0 {
+        return 1
+    }
+    return 0
+}
+
+// ---- powers of ten and rescaling ------------------------------------------
+
+// 10^n as a bignum, n >= 0. Built nine digits per multiply so a large scale
+// change costs a handful of bignum multiplies rather than one per digit.
+pow10(n: int) -> ptr {
+    acc = bignum.from_int(1)
+    left = n
+    while left > 0 {
+        step = 9
+        if left < 9 {
+            step = left
+        }
+        m = 1
+        k = 0
+        while k < step {
+            m = m * 10
+            k = k + 1
+        }
+        mb = bignum.from_int(m)
+        nx = bignum.multiply(acc, mb)
+        bignum.free(mb)
+        bignum.free(acc)
+        acc = nx
+        left = left - step
+    }
+    return acc
+}
+
+// The same value expressed with exponent `exp`. Lowering the exponent is
+// exact (the coefficient gains zeros); raising it truncates toward zero, so
+// rescale(1.29, -1) is 1.2 and rescale(-1.29, -1) is -1.2. The rounding
+// functions are all built on this truncation.
+rescale(d: ptr, exp: int) -> ptr {
+    x = dv(d)
+    if x.exp == exp {
+        return clone(d)
+    }
+    if x.exp > exp {
+        scale = pow10(x.exp - exp)
+        v = bignum.multiply(x.value, scale)
+        bignum.free(scale)
+        return dec_alloc(v, exp)
+    }
+    scale = pow10(exp - x.exp)
+    v = bignum.divide(x.value, scale)
+    bignum.free(scale)
+    return dec_alloc(v, exp)
+}
+
+min_exp(a: ptr, b: ptr) -> int {
+    ea = dv(a).exp
+    eb = dv(b).exp
+    if ea < eb {
+        return ea
+    }
+    return eb
+}
+
+// ---- arithmetic ----------------------------------------------------------
+
+add(a: ptr, b: ptr) -> ptr {
+    e = min_exp(a, b)
+    ra = rescale(a, e)
+    rb = rescale(b, e)
+    v = bignum.add(dv(ra).value, dv(rb).value)
+    free(ra)
+    free(rb)
+    return dec_alloc(v, e)
+}
+
+subtract(a: ptr, b: ptr) -> ptr {
+    e = min_exp(a, b)
+    ra = rescale(a, e)
+    rb = rescale(b, e)
+    v = bignum.subtract(dv(ra).value, dv(rb).value)
+    free(ra)
+    free(rb)
+    return dec_alloc(v, e)
+}
+
+multiply(a: ptr, b: ptr) -> ptr {
+    x = dv(a)
+    y = dv(b)
+    return dec_alloc(bignum.multiply(x.value, y.value), x.exp + y.exp)
+}
+
+negate(d: ptr) -> ptr {
+    x = dv(d)
+    return dec_alloc(bignum.negate(x.value), x.exp)
+}
+
+abs(d: ptr) -> ptr {
+    x = dv(d)
+    return dec_alloc(bignum.abs(x.value), x.exp)
+}
+
+// d * 10^n, exactly: only the exponent moves.
+shift(d: ptr, n: int) -> ptr {
+    x = dv(d)
+    return dec_alloc(bignum.clone(x.value), x.exp + n)
+}
+
+// d^n by square-and-multiply. A negative n is 1 / d^(-n) rounded to
+// division_precision(), which is the one way this can fail: d == 0.
+pow(d: ptr, n: int) -> (ptr, string) {
+    if n < 0 {
+        if is_zero(d) == 1 {
+            return null, "decimal zero raised to a negative power"
+        }
+        p, perr = pow(d, 0 - n)
+        if perr != "" {
+            return null, perr
+        }
+        one = from_int(1)
+        q, qerr = divide(one, p)
+        free(one)
+        free(p)
+        return q, qerr
+    }
+    result = from_int(1)
+    base = clone(d)
+    e = n
+    while e > 0 {
+        if (e & 1) == 1 {
+            nr = multiply(result, base)
+            free(result)
+            result = nr
+        }
+        e = e >> 1
+        if e > 0 {
+            nb = multiply(base, base)
+            free(base)
+            base = nb
+        }
+    }
+    free(base)
+    return result, ""
+}
+
+// Truncated quotient with `precision` fractional places, and the exact
+// remainder, such that d == q * d2 + r. Sign of r follows d.
+quo_rem(d: ptr, d2: ptr, precision: int) -> (ptr, ptr, string) {
+    if is_zero(d2) == 1 {
+        return null, null, "decimal division by zero"
+    }
+    x = dv(d)
+    y = dv(d2)
+    scale = 0 - precision
+    e = x.exp - y.exp - scale
+    if e < 0 {
+        // d = a*10^ea, d2 = b*10^eb: divide a by b*10^(-e)
+        s = pow10(0 - e)
+        bb = bignum.multiply(y.value, s)
+        bignum.free(s)
+        q = bignum.divide(x.value, bb)
+        r = bignum.remainder(x.value, bb)
+        bignum.free(bb)
+        return dec_alloc(q, scale), dec_alloc(r, x.exp), ""
+    }
+    s = pow10(e)
+    aa = bignum.multiply(x.value, s)
+    bignum.free(s)
+    q = bignum.divide(aa, y.value)
+    r = bignum.remainder(aa, y.value)
+    bignum.free(aa)
+    return dec_alloc(q, scale), dec_alloc(r, scale + y.exp), ""
+}
+
+// d / d2 rounded half away from zero to `precision` fractional places.
+divide_round(d: ptr, d2: ptr, precision: int) -> (ptr, string) {
+    q, r, err = quo_rem(d, d2, precision)
+    if err != "" {
+        return null, err
+    }
+    // Compare 2*|r| against |d2| (both at the remainder's scale): a
+    // remainder of at least half a unit in the last place rounds away.
+    rv = bignum.abs(dv(r).value)
+    rv2 = bignum.shift_left(rv, 1)
+    bignum.free(rv)
+    r2 = dec_alloc(rv2, dv(r).exp + precision)
+    free(r)
+    ad2 = abs(d2)
+    c = compare(r2, ad2)
+    free(r2)
+    free(ad2)
+    if c < 0 {
+        return q, ""
+    }
+    ulp = new(1, 0 - precision)
+    if sign(d) * sign(d2) < 0 {
+        adjusted = subtract(q, ulp)
+    } else {
+        adjusted = add(q, ulp)
+    }
+    free(ulp)
+    free(q)
+    return adjusted, ""
+}
+
+// d / d2 rounded to division_precision() places.
+divide(d: ptr, d2: ptr) -> (ptr, string) {
+    return divide_round(d, d2, division_precision())
+}
+
+// The remainder of truncated integer division: d - trunc(d / d2) * d2, with
+// the sign of d.
+mod(d: ptr, d2: ptr) -> (ptr, string) {
+    q, r, err = quo_rem(d, d2, 0)
+    if err != "" {
+        return null, err
+    }
+    free(q)
+    return r, ""
+}
+
+// ---- comparison ----------------------------------------------------------
+
+// -1, 0 or 1 by value; 1.0 and 1.00 are equal.
+compare(a: ptr, b: ptr) -> int {
+    x = dv(a)
+    y = dv(b)
+    if x.exp == y.exp {
+        return bignum.compare(x.value, y.value)
+    }
+    e = min_exp(a, b)
+    ra = rescale(a, e)
+    rb = rescale(b, e)
+    c = bignum.compare(dv(ra).value, dv(rb).value)
+    free(ra)
+    free(rb)
+    return c
+}
+
+equals(a: ptr, b: ptr) -> int {
+    if compare(a, b) == 0 {
+        return 1
+    }
+    return 0
+}
+
+min(a: ptr, b: ptr) -> ptr {
+    if compare(a, b) <= 0 {
+        return clone(a)
+    }
+    return clone(b)
+}
+
+max(a: ptr, b: ptr) -> ptr {
+    if compare(a, b) >= 0 {
+        return clone(a)
+    }
+    return clone(b)
+}
+
+// ---- rounding ------------------------------------------------------------
+//
+// Every mode is "truncate to the target scale, then decide whether the
+// dropped digits push the last kept digit one unit away". Negative places
+// round to the left of the point: round(1234.5, -2) is 1200.
+
+// Coefficient +1 or -1 in the direction away from zero (dir > 0) or toward
+// it (dir < 0), leaving the exponent alone. `toward` supplies which way
+// "away" is: a truncated value can be zero (floor(-0.5) truncates to 0) and
+// so cannot say which side of zero the original was on.
+nudge(d: ptr, toward: int, dir: int) -> ptr {
+    x = dv(d)
+    step = 1
+    if toward < 0 {
+        step = -1
+    }
+    if dir < 0 {
+        step = 0 - step
+    }
+    sb = bignum.from_int(step)
+    v = bignum.add(x.value, sb)
+    bignum.free(sb)
+    return dec_alloc(v, x.exp)
+}
+
+// Did rescaling to `exp` lose any nonzero digits?
+lossy_at(d: ptr, exp: int) -> int {
+    t = rescale(d, exp)
+    c = compare(t, d)
+    free(t)
+    if c != 0 {
+        return 1
+    }
+    return 0
+}
+
+// Half away from zero: round(1.25, 1) is 1.3 and round(-1.25, 1) is -1.3.
+round(d: ptr, places: int) -> ptr {
+    x = dv(d)
+    if x.exp == 0 - places {
+        return clone(d)
+    }
+    // Keep one extra digit (truncated), add 5 to the magnitude, then drop
+    // it: the carry out of that digit is exactly the round-half-away rule.
+    t = rescale(d, 0 - places - 1)
+    mag = bignum.abs(dv(t).value)
+    five = bignum.from_int(5)
+    ten = bignum.from_int(10)
+    bumped = bignum.add(mag, five)
+    q = bignum.divide(bumped, ten)
+    bignum.free(mag)
+    bignum.free(five)
+    bignum.free(ten)
+    bignum.free(bumped)
+    free(t)
+    if bignum.sign(x.value) < 0 {
+        nq = bignum.negate(q)
+        bignum.free(q)
+        q = nq
+    }
+    return dec_alloc(q, 0 - places)
+}
+
+// Half to even (banker's rounding): round_bank(2.5, 0) is 2, and 3.5 is 4.
+round_bank(d: ptr, places: int) -> ptr {
+    r = round(d, places)
+    diff = subtract(d, r)
+    rem = abs(diff)
+    free(diff)
+    half = new(5, 0 - places - 1)
+    tie = compare(rem, half)
+    free(rem)
+    free(half)
+    if tie != 0 {
+        return r
+    }
+    two = bignum.from_int(2)
+    parity = bignum.remainder(dv(r).value, two)
+    odd = 0
+    if bignum.is_zero(parity) == 0 {
+        odd = 1
+    }
+    bignum.free(parity)
+    bignum.free(two)
+    if odd == 0 {
+        return r
+    }
+    // A tie that rounded to an odd digit goes the other way, back toward
+    // zero, to land on the even neighbour.
+    even = nudge(r, sign(r), -1)
+    free(r)
+    return even
+}
+
+// Toward positive infinity.
+round_ceil(d: ptr, places: int) -> ptr {
+    t = rescale(d, 0 - places)
+    if sign(d) > 0 && lossy_at(d, 0 - places) == 1 {
+        up = nudge(t, 1, 1)
+        free(t)
+        return up
+    }
+    return t
+}
+
+// Toward negative infinity.
+round_floor(d: ptr, places: int) -> ptr {
+    t = rescale(d, 0 - places)
+    if sign(d) < 0 && lossy_at(d, 0 - places) == 1 {
+        down = nudge(t, -1, 1)
+        free(t)
+        return down
+    }
+    return t
+}
+
+// Away from zero whenever any digit is dropped.
+round_up(d: ptr, places: int) -> ptr {
+    t = rescale(d, 0 - places)
+    if lossy_at(d, 0 - places) == 1 {
+        up = nudge(t, sign(d), 1)
+        free(t)
+        return up
+    }
+    return t
+}
+
+// Toward zero: plain truncation.
+round_down(d: ptr, places: int) -> ptr {
+    return rescale(d, 0 - places)
+}
+
+// Drop fractional digits beyond `places` without rounding; a value that
+// already has fewer keeps its exponent.
+truncate(d: ptr, places: int) -> ptr {
+    if dv(d).exp >= 0 - places {
+        return clone(d)
+    }
+    return rescale(d, 0 - places)
+}
+
+ceil(d: ptr) -> ptr {
+    return round_ceil(d, 0)
+}
+
+floor(d: ptr) -> ptr {
+    return round_floor(d, 0)
+}
+
+// ---- rendering and conversion ----------------------------------------------
+
+append_zeros(sb: ptr, count: int) {
+    k = 0
+    while k < count {
+        strbuilder.append_byte(sb, 48)
+        k = k + 1
+    }
+}
+
+// Plain notation, never exponent form. With trim == 1 trailing fractional
+// zeros (and a then-empty fraction) are dropped.
+render(d: ptr, trim: int) -> string {
+    x = dv(d)
+    if x.exp >= 0 {
+        whole = rescale(d, 0)
+        s = bignum.to_decimal(dv(whole).value)
+        free(whole)
+        return s
+    }
+    mag = bignum.abs(x.value)
+    digits = bignum.to_decimal(mag)
+    bignum.free(mag)
+    len = string.length(digits)
+    scale = 0 - x.exp
+    sb = strbuilder.new(len + scale + 3)
+    if bignum.sign(x.value) < 0 {
+        strbuilder.append_byte(sb, 45)
+    }
+    // Where the point falls in the digit string; a value below 1 needs
+    // leading zeros after the point.
+    frac_start = 0
+    lead_zeros = 0
+    if len > scale {
+        frac_start = len - scale
+        strbuilder.append(sb, string.substring(digits, 0, frac_start))
+    } else {
+        strbuilder.append_byte(sb, 48)
+        lead_zeros = scale - len
+    }
+    frac_end = len
+    if trim == 1 {
+        while frac_end > frac_start && string.char_at(digits, frac_end - 1) == 48 {
+            frac_end = frac_end - 1
+        }
+        if frac_end == frac_start {
+            // every fractional digit was a zero, leading zeros included
+            lead_zeros = 0
+        }
+    }
+    if lead_zeros > 0 || frac_end > frac_start {
+        strbuilder.append_byte(sb, 46)
+        append_zeros(sb, lead_zeros)
+        strbuilder.append(sb, string.substring(digits, frac_start, frac_end))
+    }
+    return strbuilder.finish(sb)
+}
+
+// Shortest plain notation: "1.5", "-0.25", "1200", "0".
+to_string(d: ptr) -> string {
+    return render(d, 1)
+}
+
+// Rounded half away from zero to `places` and padded: to_string_fixed of
+// 1.5 at 2 is "1.50", of 1.005 at 2 is "1.01".
+to_string_fixed(d: ptr, places: int) -> string {
+    r = round(d, places)
+    s = render(r, 0)
+    free(r)
+    return s
+}
+
+// As to_string_fixed, rounding half to even.
+to_string_fixed_bank(d: ptr, places: int) -> string {
+    r = round_bank(d, places)
+    s = render(r, 0)
+    free(r)
+    return s
+}
+
+// The nearest binary float. Lossy by nature; for display use to_string.
+to_double(d: ptr) -> float {
+    s = to_string(d)
+    v, _err = string.to_double(s)
+    return v
+}
+
+// The integer part, truncated toward zero, as a long. Values beyond the long
+// range are the caller's to avoid; use truncate(d, 0) and to_string instead.
+int_part(d: ptr) -> long {
+    whole = rescale(d, 0)
+    s = bignum.to_decimal(dv(whole).value)
+    free(whole)
+    v, _err = string.to_long(s)
+    return v
+}
