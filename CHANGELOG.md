@@ -14,6 +14,63 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.725.0]
+
+### Added
+
+- **`std.udp`: datagram sockets for game networking (#2201).**
+  `std.tcp` had the reliable half; a game's state snapshots run on datagrams,
+  because one that arrives late is worth less than none and must not wait
+  behind a lost one the way TCP's in-order stream makes it. ae3d had to keep
+  a C file of its own for that. Now `udp.bind(host, port)` (port 0 for an
+  ephemeral one, read back with `local_port`; IPv4 and IPv6, dual-stack on
+  `"::"` where the OS allows) gives a socket that is non-blocking from the
+  start: `recv_from(sock, buf, cap)` returns `(n, sender, err)` and reports
+  `"would block"` when nothing is waiting, so a loop drains it once a tick and
+  never waits; `poll(sock, timeout_ms)` and `fd` are there for the program
+  that does. A sender is an address value: `addr_equal`, `addr_hash`,
+  `addr_string` (`host:port`), `addr_clone`, and `send_to_addr` answer it
+  without resolving anything, and `resolve(host, port)` makes one up front for
+  a server answering many peers a tick; `recv_from_into` fills a caller's
+  address so the drain loop allocates nothing. `send_to(sock, host, port,
+  data, n)` resolves per call. `set_buffer_sizes` sets `SO_SNDBUF`/`SO_RCVBUF`,
+  `set_broadcast` allows LAN discovery. The C layer is held to numbers in
+  `tests/runtime/test_runtime_udp.c` (loopback, truncation, zero-length
+  datagrams, address semantics, IPv6) and the wrappers in
+  `std/udp/test_udp.ae`.
+
+- **`std.decimal`: arbitrary-precision decimal fixed-point arithmetic (#2067).**
+  A port of Go's shopspring/decimal over `std.bignum`. A value is a bignum
+  coefficient and a base-10 exponent, so `0.1 + 0.2` is exactly `0.3` and
+  money never drifts the way a binary `float` does. `add`, `subtract` and
+  `multiply` are exact; `divide` rounds half away from zero to 16 places
+  (`divide_round` takes the places, `quo_rem` gives the truncated quotient and
+  exact remainder, `mod` the remainder). Every rounding policy has a name:
+  `round` (half away from zero), `round_bank` (half to even), `round_ceil`,
+  `round_floor`, `round_up`, `round_down`, `truncate`, `ceil`, `floor`, plus
+  `rescale` for an explicit exponent. `from_string` parses `"1.50"`,
+  `"-.5"` and `"1.5e-3"`; `to_string` prints the shortest plain form and
+  `to_string_fixed` / `to_string_fixed_bank` pad to a fixed number of places.
+  `std.bignum` stays the integer underneath: its `to_decimal` / `from_decimal`
+  are base-10 integer I/O, not decimal arithmetic. Three co-located spec files
+  pin every mode on both sides of zero and of the tie against the Go library's
+  results.
+
+### Fixed
+
+- **`std.cryptography.tls13_record` enforces the RFC 8446 record-size and
+  sequence-number limits.** `seal_record` refused nothing and `open_record`
+  trusted the peer's declared length, so a record claiming a huge size drove
+  the buffer allocation, and the 64-bit sequence counter could wrap. Now the
+  seal path rejects a plaintext fragment over 2^14 bytes (§5.1), the open path
+  rejects a TLSCiphertext over 2^14 + 256 bytes *before* allocating (§5.2), and
+  both refuse to proceed at the sequence-number ceiling rather than reuse a
+  (key, nonce) pair (§5.3); a null context is rejected rather than
+  dereferenced. `tests/integration/crypto_tls13_record` gains the oversized,
+  null-context and boundary cases; the existing round-trip and tamper checks
+  are unchanged. (The handshake-parser bounds checks from the same source were
+  already present on main and are not duplicated.)
+
 ## [0.724.0]
 
 ### Added
