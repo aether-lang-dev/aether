@@ -50,6 +50,54 @@ DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+## shopspring/decimal — MIT License
+
+Used by `std.decimal` (issue
+[#2067](https://github.com/aether-lang-dev/aether/issues/2067)). The module
+ports the representation (coefficient and base-10 exponent), the rescaling
+and rounding rules, and the division algorithm (`QuoRem` / `DivRound`) from
+the Go library, and carries the attribution header:
+
+```
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Portions copyright (c) 2015 Spring, Inc. (https://github.com/shopspring/decimal)
+//
+// Portions copyright (c) 2026 Aether Developers.
+```
+
+Ported so far:
+
+- `std/decimal/module.ae` (`std.decimal`) — ported from `decimal.go`.
+- `std/decimal/test_decimal_*.ae` — expected values checked against the
+  library's documented behaviour.
+
+### License text
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2015 Spring, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## PCRE2 — BSD-3-Clause (with binary-redistribution exemption)
 
 Used by `std.regex` (issue

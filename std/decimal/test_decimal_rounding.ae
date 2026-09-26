@@ -1,0 +1,210 @@
+// std.decimal: rounding modes (issue #2067).
+//
+// Money math is mostly rounding policy: half away from zero for a till,
+// half to even for a ledger, ceilings for fees, floors for payouts. Each
+// mode is pinned on both sides of zero and on both sides of the tie, with
+// the expected values taken from the Go library (shopspring/decimal).
+
+import std.spec
+import std.decimal
+
+parsed(s: string) -> ptr {
+    d, err = decimal.from_string(s)
+    spec.assert_ok(err, "from_string(${s})")
+    return d
+}
+
+str(d: ptr) -> string {
+    s = decimal.to_string(d)
+    decimal.free(d)
+    return s
+}
+
+round_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.round(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+bank_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.round_bank(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+ceil_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.round_ceil(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+floor_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.round_floor(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+up_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.round_up(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+down_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.round_down(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+ceil_int_str(s: string) -> string {
+    d = parsed(s)
+    r = decimal.ceil(d)
+    decimal.free(d)
+    return str(r)
+}
+
+floor_int_str(s: string) -> string {
+    d = parsed(s)
+    r = decimal.floor(d)
+    decimal.free(d)
+    return str(r)
+}
+
+trunc_str(s: string, places: int) -> string {
+    d = parsed(s)
+    r = decimal.truncate(d, places)
+    decimal.free(d)
+    return str(r)
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.decimal round (half away from zero)") {
+        spec.it("rounds ties away from zero on both sides") callback {
+            spec.assert_str_eq(round_str("1.25", 1), "1.3", "1.25 -> 1.3")
+            spec.assert_str_eq(round_str("-1.25", 1), "-1.3", "-1.25 -> -1.3")
+            spec.assert_str_eq(round_str("2.5", 0), "3", "2.5 -> 3")
+            spec.assert_str_eq(round_str("-2.5", 0), "-3", "-2.5 -> -3")
+        }
+
+        spec.it("rounds non-ties to the nearest") callback {
+            spec.assert_str_eq(round_str("1.24", 1), "1.2", "1.24 -> 1.2")
+            spec.assert_str_eq(round_str("1.249", 1), "1.2", "digits past the first dropped one do not matter")
+            spec.assert_str_eq(round_str("1.26", 1), "1.3", "1.26 -> 1.3")
+            spec.assert_str_eq(round_str("-1.26", 1), "-1.3", "-1.26 -> -1.3")
+            spec.assert_str_eq(round_str("0.9999", 2), "1", "carries through to the integer part")
+        }
+
+        spec.it("rounds left of the point with negative places") callback {
+            spec.assert_str_eq(round_str("1234.5", -2), "1200", "1234.5 to hundreds")
+            spec.assert_str_eq(round_str("1250", -2), "1300", "1250 to hundreds rounds away")
+            spec.assert_str_eq(round_str("-1250", -2), "-1300", "-1250 to hundreds rounds away")
+        }
+
+        spec.it("leaves a value already at that scale alone, and rescales a coarser one") callback {
+            d = parsed("1.5")
+            same = decimal.round(d, 1)
+            spec.assert_eq(decimal.exponent(same), -1, "exponent unchanged")
+            finer = decimal.round(d, 3)
+            spec.assert_eq(decimal.exponent(finer), -3, "exponent is -places")
+            spec.assert_str_eq(decimal.to_string_fixed(finer, 3), "1.500", "1.5 at three places")
+            decimal.free(same)
+            decimal.free(finer)
+            decimal.free(d)
+        }
+    }
+
+    spec.describe(fw, "std.decimal round_bank (half to even)") {
+        spec.it("breaks ties toward the even neighbour") callback {
+            spec.assert_str_eq(bank_str("2.5", 0), "2", "2.5 -> 2")
+            spec.assert_str_eq(bank_str("3.5", 0), "4", "3.5 -> 4")
+            spec.assert_str_eq(bank_str("-2.5", 0), "-2", "-2.5 -> -2")
+            spec.assert_str_eq(bank_str("-3.5", 0), "-4", "-3.5 -> -4")
+            spec.assert_str_eq(bank_str("2.45", 1), "2.4", "2.45 -> 2.4")
+            spec.assert_str_eq(bank_str("2.55", 1), "2.6", "2.55 -> 2.6")
+        }
+
+        spec.it("rounds non-ties like round") callback {
+            spec.assert_str_eq(bank_str("2.51", 0), "3", "2.51 -> 3")
+            spec.assert_str_eq(bank_str("2.49", 0), "2", "2.49 -> 2")
+            spec.assert_str_eq(bank_str("-2.51", 0), "-3", "-2.51 -> -3")
+            spec.assert_str_eq(bank_str("2.501", 0), "3", "a hair over the tie is not a tie")
+        }
+    }
+
+    spec.describe(fw, "std.decimal directed modes") {
+        spec.it("round_ceil goes toward positive infinity") callback {
+            spec.assert_str_eq(ceil_str("1.21", 1), "1.3", "1.21 -> 1.3")
+            spec.assert_str_eq(ceil_str("1.20", 1), "1.2", "1.20 is exact")
+            spec.assert_str_eq(ceil_str("-1.29", 1), "-1.2", "-1.29 -> -1.2")
+            spec.assert_str_eq(ceil_str("1201", -2), "1300", "1201 to hundreds")
+            spec.assert_str_eq(ceil_str("-0.5", 0), "0", "-0.5 -> 0")
+        }
+
+        spec.it("round_floor goes toward negative infinity") callback {
+            spec.assert_str_eq(floor_str("1.29", 1), "1.2", "1.29 -> 1.2")
+            spec.assert_str_eq(floor_str("-1.21", 1), "-1.3", "-1.21 -> -1.3")
+            spec.assert_str_eq(floor_str("-1.20", 1), "-1.2", "-1.20 is exact")
+            spec.assert_str_eq(floor_str("-0.05", 1), "-0.1", "-0.05 truncates to zero yet still goes negative")
+        }
+
+        spec.it("round_up goes away from zero") callback {
+            spec.assert_str_eq(up_str("1.21", 1), "1.3", "1.21 -> 1.3")
+            spec.assert_str_eq(up_str("-1.21", 1), "-1.3", "-1.21 -> -1.3")
+            spec.assert_str_eq(up_str("1.2", 1), "1.2", "exact value unchanged")
+            spec.assert_str_eq(up_str("-0.5", 0), "-1", "-0.5 truncates to zero yet still goes negative")
+            spec.assert_str_eq(up_str("0.5", 0), "1", "0.5 -> 1")
+        }
+
+        spec.it("round_down goes toward zero") callback {
+            spec.assert_str_eq(down_str("1.29", 1), "1.2", "1.29 -> 1.2")
+            spec.assert_str_eq(down_str("-1.29", 1), "-1.2", "-1.29 -> -1.2")
+        }
+
+        spec.it("ceil and floor are the integer forms") callback {
+            spec.assert_str_eq(ceil_int_str("1.1"), "2", "ceil 1.1")
+            spec.assert_str_eq(ceil_int_str("-1.1"), "-1", "ceil -1.1")
+            spec.assert_str_eq(ceil_int_str("2"), "2", "ceil 2")
+            spec.assert_str_eq(floor_int_str("1.9"), "1", "floor 1.9")
+            spec.assert_str_eq(floor_int_str("-1.1"), "-2", "floor -1.1")
+            spec.assert_str_eq(floor_int_str("-0.5"), "-1", "floor -0.5")
+        }
+    }
+
+    spec.describe(fw, "std.decimal truncate and rescale") {
+        spec.it("truncate drops digits without rounding") callback {
+            spec.assert_str_eq(trunc_str("1.2345", 2), "1.23", "1.2345 -> 1.23")
+            spec.assert_str_eq(trunc_str("-1.2399", 2), "-1.23", "-1.2399 -> -1.23")
+            spec.assert_str_eq(trunc_str("1.9", 0), "1", "1.9 -> 1")
+        }
+
+        spec.it("truncate keeps a coarser value's exponent") callback {
+            d = parsed("1.2")
+            t = decimal.truncate(d, 5)
+            spec.assert_eq(decimal.exponent(t), -1, "exponent not widened")
+            decimal.free(t)
+            decimal.free(d)
+        }
+
+        spec.it("rescale is exact downward and truncating upward") callback {
+            d = parsed("1.29")
+            down = decimal.rescale(d, -4)
+            spec.assert_eq(decimal.exponent(down), -4, "rescaled to four places")
+            spec.assert_true(decimal.equals(down, d), "lowering the exponent is exact")
+            up = decimal.rescale(d, -1)
+            spec.assert_str_eq(decimal.to_string(up), "1.2", "raising the exponent truncates")
+            decimal.free(down)
+            decimal.free(up)
+            decimal.free(d)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

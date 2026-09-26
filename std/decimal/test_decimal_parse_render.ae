@@ -1,0 +1,187 @@
+// std.decimal: parsing and rendering (issue #2067).
+//
+// The text forms are the contract most callers touch: a price arrives as a
+// string and leaves as one. Every expected value here is what the upstream
+// Go library (shopspring/decimal) produces for the same input, so the port
+// cannot agree with itself while disagreeing with its source.
+
+import std.spec
+import std.decimal
+import std.bignum
+import std.string
+
+// Parse, assert success, and hand back the value; a parse failure fails the
+// test at the call site rather than crashing on a null later.
+parsed(s: string) -> ptr {
+    d, err = decimal.from_string(s)
+    spec.assert_ok(err, "from_string(${s})")
+    return d
+}
+
+// from_string then to_string, freeing the value.
+round_trip(s: string) -> string {
+    d = parsed(s)
+    out = decimal.to_string(d)
+    decimal.free(d)
+    return out
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.decimal from_string") {
+        spec.it("keeps the written scale as the exponent") callback {
+            d = parsed("1.50")
+            spec.assert_eq(decimal.exponent(d), -2, "two fractional digits")
+            spec.assert_eq(decimal.sign(d), 1, "positive")
+            c = decimal.coefficient(d)
+            decimal.free(d)
+            // the coefficient is a std.bignum copy that outlives the decimal
+            spec.assert_str_eq(bignum.to_decimal(c), "150", "coefficient is 150")
+            bignum.free(c)
+        }
+
+        spec.it("accepts the forms the Go library accepts") callback {
+            spec.assert_str_eq(round_trip("-0.25"), "-0.25", "negative fraction")
+            spec.assert_str_eq(round_trip(".5"), "0.5", "no integer digits")
+            spec.assert_str_eq(round_trip("5."), "5", "no fractional digits")
+            spec.assert_str_eq(round_trip("+3"), "3", "explicit plus")
+            spec.assert_str_eq(round_trip("000123.4500"), "123.45", "leading and trailing zeros")
+            spec.assert_str_eq(round_trip("0.000"), "0", "zero at scale three")
+            spec.assert_str_eq(round_trip("-0"), "0", "negative zero has no sign")
+        }
+
+        spec.it("applies an exponent part") callback {
+            d = parsed("1e3")
+            spec.assert_eq(decimal.exponent(d), 3, "1e3 has exponent 3")
+            spec.assert_str_eq(decimal.to_string(d), "1000", "1e3 renders in full")
+            decimal.free(d)
+            spec.assert_str_eq(round_trip("1.5E-3"), "0.0015", "fraction with negative exponent")
+            spec.assert_str_eq(round_trip("-1.2e2"), "-120", "negative with positive exponent")
+            spec.assert_str_eq(round_trip("2e+1"), "20", "signed positive exponent")
+        }
+
+        spec.it("holds more digits than a long or a double") callback {
+            spec.assert_str_eq(round_trip("123456789012345678901234567890.123456789"),
+                "123456789012345678901234567890.123456789", "39 significant digits")
+        }
+
+        spec.it("rejects malformed text with a null value") callback {
+            bad = "|-|.|1.2.3|abc|1e|1e+| 1|1_000|1x|1e9999999999"
+            parts = string.split(bad, "|")
+            n = string.array_size(parts)
+            i = 0
+            while i < n {
+                s = string.array_get(parts, i)
+                d, err = decimal.from_string(s)
+                spec.assert_err(err, "[${s}] is rejected")
+                spec.assert_null(d, "[${s}] yields no value")
+                i = i + 1
+            }
+            string.array_free(parts)
+        }
+    }
+
+    spec.describe(fw, "std.decimal constructors") {
+        spec.it("builds from a coefficient and exponent") callback {
+            d = decimal.new(1234, -2)
+            spec.assert_str_eq(decimal.to_string(d), "12.34", "1234 * 10^-2")
+            decimal.free(d)
+            big = decimal.new(5, 3)
+            spec.assert_str_eq(decimal.to_string(big), "5000", "5 * 10^3")
+            decimal.free(big)
+        }
+
+        spec.it("builds from an int and a zero") callback {
+            d = decimal.from_int(-7)
+            spec.assert_str_eq(decimal.to_string(d), "-7", "from_int(-7)")
+            spec.assert_true(decimal.is_negative(d), "negative")
+            spec.assert_false(decimal.is_positive(d), "not positive")
+            decimal.free(d)
+            z = decimal.zero()
+            spec.assert_true(decimal.is_zero(z), "zero is zero")
+            spec.assert_eq(decimal.sign(z), 0, "zero has sign 0")
+            spec.assert_str_eq(decimal.to_string(z), "0", "zero renders as 0")
+            decimal.free(z)
+        }
+
+        spec.it("clones to an independent value") callback {
+            a = parsed("1.25")
+            b = decimal.clone(a)
+            decimal.free(a)
+            spec.assert_str_eq(decimal.to_string(b), "1.25", "clone survives freeing the original")
+            spec.assert_eq(decimal.exponent(b), -2, "clone keeps the exponent")
+            decimal.free(b)
+        }
+    }
+
+    spec.describe(fw, "std.decimal to_string_fixed") {
+        spec.it("pads and rounds half away from zero") callback {
+            d = parsed("1.5")
+            spec.assert_str_eq(decimal.to_string_fixed(d, 2), "1.50", "pads to two places")
+            spec.assert_str_eq(decimal.to_string_fixed(d, 0), "2", "rounds to an integer")
+            decimal.free(d)
+            e = parsed("1.005")
+            spec.assert_str_eq(decimal.to_string_fixed(e, 2), "1.01", "1.005 rounds up")
+            decimal.free(e)
+            f = parsed("-1.005")
+            spec.assert_str_eq(decimal.to_string_fixed(f, 2), "-1.01", "-1.005 rounds away from zero")
+            decimal.free(f)
+            g = parsed("1.23456")
+            spec.assert_str_eq(decimal.to_string_fixed(g, 3), "1.235", "1.23456 to three places")
+            decimal.free(g)
+        }
+
+        spec.it("pads zero and whole numbers") callback {
+            z = decimal.zero()
+            spec.assert_str_eq(decimal.to_string_fixed(z, 3), "0.000", "zero to three places")
+            decimal.free(z)
+            k = decimal.new(5, 3)
+            spec.assert_str_eq(decimal.to_string_fixed(k, 1), "5000.0", "5000 to one place")
+            decimal.free(k)
+            s = parsed("0.05")
+            spec.assert_str_eq(decimal.to_string_fixed(s, 3), "0.050", "leading zero after the point kept")
+            decimal.free(s)
+        }
+
+        spec.it("rounds half to even in the bank variant") callback {
+            a = parsed("2.5")
+            spec.assert_str_eq(decimal.to_string_fixed_bank(a, 0), "2", "2.5 to even 2")
+            decimal.free(a)
+            b = parsed("3.5")
+            spec.assert_str_eq(decimal.to_string_fixed_bank(b, 0), "4", "3.5 to even 4")
+            decimal.free(b)
+            c = parsed("2.51")
+            spec.assert_str_eq(decimal.to_string_fixed_bank(c, 0), "3", "2.51 is not a tie")
+            decimal.free(c)
+            d = parsed("1.005")
+            spec.assert_str_eq(decimal.to_string_fixed_bank(d, 2), "1.00", "1.005 to even 1.00")
+            decimal.free(d)
+        }
+    }
+
+    spec.describe(fw, "std.decimal conversion") {
+        spec.it("int_part truncates toward zero") callback {
+            a = parsed("12.99")
+            spec.assert_eq_long(decimal.int_part(a), 12, "12.99 -> 12")
+            decimal.free(a)
+            b = parsed("-12.99")
+            spec.assert_eq_long(decimal.int_part(b), -12, "-12.99 -> -12")
+            decimal.free(b)
+            c = parsed("1e3")
+            spec.assert_eq_long(decimal.int_part(c), 1000, "1e3 -> 1000")
+            decimal.free(c)
+        }
+
+        spec.it("to_double gives the nearest binary float") callback {
+            a = parsed("0.5")
+            spec.assert_true(decimal.to_double(a) == 0.5, "0.5 is exact in binary")
+            decimal.free(a)
+            b = parsed("-2.25")
+            spec.assert_true(decimal.to_double(b) == -2.25, "-2.25 is exact in binary")
+            decimal.free(b)
+        }
+    }
+
+    return spec.run_summary(fw)
+}
