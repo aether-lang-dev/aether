@@ -1,0 +1,66 @@
+// std.unicode tests. Self-contained; run: ae run std/unicode/test_unicode.ae
+import std.unicode
+import std.string
+import std.io
+
+extern exit(code: int)
+
+var fails: int = 0
+
+fn check(name: string, got: string, want: string) {
+    if string.equals(got, want) == 1 { println("  ok   ${name}") }
+    else { println("  FAIL ${name}: got [${got}] want [${want}]"); fails = fails + 1 }
+}
+fn check_int(name: string, got: int, want: int) {
+    if got == want { println("  ok   ${name}") }
+    else { println("  FAIL ${name}: got ${got} want ${want}"); fails = fails + 1 }
+}
+
+main() {
+    println("=== std.unicode ===")
+
+    // "café" with a precomposed é (U+00E9) and with e + combining acute
+    // (U+0301) — NFC makes them equal, NFD makes them equal the other way.
+    precomposed = "café" // café (é = one codepoint)
+    decomposed = "café" // café (e + U+0301)
+
+    // NFC collapses the decomposed form to the precomposed bytes.
+    check("nfc(decomposed) == precomposed", unicode.nfc(decomposed), precomposed)
+    // NFD expands the precomposed form to the decomposed bytes.
+    check("nfd(precomposed) == decomposed", unicode.nfd(precomposed), decomposed)
+
+    // Accent folding strips the mark either way.
+    check("fold_accents precomposed", unicode.fold_accents(precomposed), "cafe")
+    check("fold_accents decomposed", unicode.fold_accents(decomposed), "cafe")
+    check("fold_accents plain ASCII unchanged", unicode.fold_accents("cafe"), "cafe")
+
+    // Case folding (not just lowercasing): ß folds to ss.
+    check("casefold STRASSE", unicode.casefold("STRASSE"), "strasse")
+    check("casefold sharp-s", unicode.casefold("straße"), "strasse")
+    check("casefold ascii", unicode.casefold("MixedCase"), "mixedcase")
+
+    // Caseless compare.
+    check_int("equals_ignore_case", unicode.equals_ignore_case("Straße", "STRASSE"), 1)
+    check_int("equals_ignore_case neg", unicode.equals_ignore_case("abc", "abd"), 0)
+
+    // Accent + case insensitive: "Café" matches "cafe".
+    check_int("equals_fold_accents", unicode.equals_fold_accents("Café", "cafe"), 1)
+    check_int("equals_fold_accents decomposed", unicode.equals_fold_accents(decomposed, "CAFE"), 1)
+    check_int("equals_fold_accents neg", unicode.equals_fold_accents("café", "cafo"), 0)
+
+    // Grapheme length: the decomposed café is 4 graphemes (e+accent = one).
+    check_int("grapheme_len decomposed café", unicode.grapheme_len(decomposed), 4)
+    check_int("grapheme_len precomposed café", unicode.grapheme_len(precomposed), 4)
+    check_int("grapheme_len ascii", unicode.grapheme_len("hello"), 5)
+    check_int("grapheme_len empty", unicode.grapheme_len(""), 0)
+
+    // Grapheme substring never splits the combining sequence.
+    // decomposed = c a f e+U+0301 : graphemes [c][a][f][é]
+    check("grapheme_substring [3,1) is the whole é", unicode.grapheme_substring(decomposed, 3, 1), "é")
+    check("grapheme_substring [0,3)", unicode.grapheme_substring(decomposed, 0, 3), "caf")
+    check("grapheme_substring to end (count<0)", unicode.grapheme_substring(decomposed, 3, 0 - 1), "é")
+    check("grapheme_substring past end -> empty", unicode.grapheme_substring("ab", 5, 1), "")
+
+    if fails == 0 { println("ALL PASS") }
+    else { println("${fails} FAILED"); exit(1) }
+}

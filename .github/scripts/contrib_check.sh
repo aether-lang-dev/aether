@@ -118,7 +118,7 @@ TESTS=(
   "tinyweb/integration|$TW/test_integration.ae|$TW/ws_handshake.c|run|"
   "tinyweb/schema_api|$TW/test_schema_api.ae|$TW/ws_handshake.c|run|"
   "tinyweb/websocket|$TW/test_websocket.ae|$TW/ws_handshake.c|run|"
-  "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c $I18N/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
+  "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c std/unicode/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
   # png: pure Aether over std.zlib; its test decodes what it encoded.
   "png/encode|contrib/png/test_png.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),

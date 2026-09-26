@@ -4,7 +4,7 @@
 // Build/run (needs the three C backing files):
 //   ae run contrib/i18n/collate/test_collate.ae \
 //     --extra contrib/i18n/aether_i18n.c \
-//     --extra contrib/i18n/utf8proc/utf8proc.c \
+//     --extra std/unicode/utf8proc/utf8proc.c \
 //     --extra contrib/i18n/ducet/ducet_data.c
 //
 // Normally driven by contrib_check.sh, whose entry compiles those three C

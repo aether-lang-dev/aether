@@ -18,11 +18,11 @@
 //
 // C backing (compiled in; pass with --extra when building a consumer):
 //   contrib/i18n/aether_i18n.c
-//   contrib/i18n/utf8proc/utf8proc.c
+//   std/unicode/utf8proc/utf8proc.c
 //   contrib/i18n/ducet/ducet_data.c
 // e.g.  ae run yourprog.ae \
 //         --extra contrib/i18n/aether_i18n.c \
-//         --extra contrib/i18n/utf8proc/utf8proc.c \
+//         --extra std/unicode/utf8proc/utf8proc.c \
 //         --extra contrib/i18n/ducet/ducet_data.c
 
 import std.string
