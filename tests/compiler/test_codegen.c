@@ -2,6 +2,7 @@
 #include "../../compiler/parser/lexer.h"
 #include "../../compiler/parser/parser.h"
 #include "../../compiler/codegen/codegen.h"
+#include "../../compiler/codegen/codegen_internal.h"
 #include "../../compiler/analysis/typechecker.h"
 #include <string.h>
 #include <stdio.h>
@@ -239,4 +240,195 @@ TEST(codegen_closure_captures_same_trailing_block_local_it_mutates) {
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(hits)") != NULL);
     free(buf);
+}
+
+/* #2195: `${}` segments are printf varargs, whose evaluation order C leaves
+ * unspecified (gcc goes right to left). Once any segment has a side effect,
+ * every segment is evaluated into a `_ad_N` temp in source order before the
+ * call; an all-pure interpolation stays inline.
+ *
+ * The temp counter is process-global and the tests share one process, so
+ * the assertions match the shape of each emission and the order of its
+ * pieces, never a particular `_ad_N` number. */
+static int emitted_in_order(const char* buf, const char* const* pieces, int n) {
+    const char* at = buf;
+    for (int i = 0; i < n; i++) {
+        at = strstr(at, pieces[i]);
+        if (!at) return 0;
+        at += strlen(pieces[i]);
+    }
+    return 1;
+}
+
+TEST(codegen_interp_impure_segments_hoist_in_source_order) {
+    char* buf = generate_typechecked(
+        "bump() -> int { return 1 }\n"
+        "main() { println(\"${bump()} ${bump()} ${bump()}\") }");
+    ASSERT_NOT_NULL(buf);
+    const char* const pieces[] = {
+        "{ int _ad_", " = (int)(bump()); int _ad_", " = (int)(bump()); int _ad_",
+        " = (int)(bump()); printf(\"%d %d %d\", (int)_ad_", ", (int)_ad_", ", (int)_ad_",
+        "); }; putchar('\\n');",
+    };
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
+    ASSERT_TRUE(strstr(buf, "(int)bump()") == NULL);
+    free(buf);
+}
+
+TEST(codegen_interp_value_path_hoists_and_yields_result) {
+    char* buf = generate_typechecked(
+        "bump() -> int { return 1 }\n"
+        "main() { s = \"${bump()}/${bump()}\"\n println(s) }");
+    ASSERT_NOT_NULL(buf);
+    const char* const pieces[] = {
+        "({ int _ad_", " = (int)(bump()); int _ad_", " = (int)(bump()); ",
+        "const char* _it_r = _aether_interp(\"%d/%d\", (int)_ad_", ", (int)_ad_", "); _it_r; })",
+    };
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 6));
+    free(buf);
+}
+
+TEST(codegen_interp_pure_segment_beside_impure_is_hoisted_too) {
+    /* A pure read on either side of the call observes it, so it is hoisted
+     * in its source position rather than left as a vararg. */
+    char* buf = generate_typechecked(
+        "bump() -> int { return 1 }\n"
+        "main() { n = 10\n println(\"${n} ${bump()} ${n}\") }");
+    ASSERT_NOT_NULL(buf);
+    const char* const pieces[] = {
+        "{ int _ad_", " = (int)(n); int _ad_", " = (int)(bump()); int _ad_", " = (int)(n); ",
+        "printf(\"%d %d %d\", (int)_ad_",
+    };
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
+    ASSERT_TRUE(strstr(buf, "(int)n)") == NULL);
+    free(buf);
+}
+
+TEST(codegen_interp_all_pure_segments_stay_inline) {
+    char* buf = generate_typechecked(
+        "main() { name = \"x\"\n age = 3\n println(\"${name} is ${age}\") }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "_ad_") == NULL);
+    ASSERT_NOT_NULL(strstr(buf, "printf(\"%s is %d\", _aether_safe_str(name), (int)age)"));
+    free(buf);
+}
+
+TEST(codegen_interp_single_impure_segment_stays_inline) {
+    char* buf = generate_typechecked(
+        "bump() -> int { return 1 }\n"
+        "main() { println(\"got ${bump()}\") }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "_ad_") == NULL);
+    ASSERT_NOT_NULL(strstr(buf, "printf(\"got %d\", (int)bump())"));
+    free(buf);
+}
+
+TEST(codegen_interp_hoisted_heap_segment_is_freed_after_call) {
+    char* buf = generate_typechecked(
+        /* The snippet typechecker resolves no std modules, so name the
+         * runtime's heap-producing concat directly; the classifier keys on
+         * the callee name either way. */
+        "extern string_concat(a: string, b: string) -> string\n"
+        "bump() -> int { return 1 }\n"
+        "main() { name = \"ab\"\n println(\"${string_concat(name, name)} ${bump()}\") }");
+    ASSERT_NOT_NULL(buf);
+    const char* const pieces[] = {
+        "{ const char* _ad_", " = (const char*)(string_concat(name, name)); int _ad_", " = (int)(bump()); ",
+        "printf(\"%s %d\", _aether_safe_str(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
+    };
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
+    free(buf);
+}
+
+TEST(codegen_interp_nested_interp_segment_is_freed_after_call) {
+    char* buf = generate_typechecked(
+        "main() { x = 3\n s = \"a ${\"${x}-${x}\"} b\"\n println(s) }");
+    ASSERT_NOT_NULL(buf);
+    const char* const pieces[] = {
+        "({ const char* _ad_", " = (const char*)(_aether_interp(\"%d-%d\", (int)x, (int)x)); ",
+        "const char* _it_r = _aether_interp(\"a %s b\", _aether_safe_str(_ad_", ")); aether_heap_str_free(_ad_", "); _it_r; })",
+    };
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
+    free(buf);
+}
+
+/* The classifiers behind the hoist, on hand-built nodes. */
+static ASTNode* interp_text(const char* text) {
+    ASTNode* n = create_ast_node(AST_LITERAL, text, 1, 1);
+    n->node_type = create_type(TYPE_STRING);
+    return n;
+}
+
+static ASTNode* interp_int_segment(ASTNodeType kind, const char* value) {
+    ASTNode* n = create_ast_node(kind, value, 1, 1);
+    n->node_type = create_type(TYPE_INT);
+    return n;
+}
+
+static ASTNode* interp_of(ASTNode* a, ASTNode* b, ASTNode* c) {
+    ASTNode* s = create_ast_node(AST_STRING_INTERP, NULL, 1, 1);
+    if (a) add_child(s, a);
+    if (b) add_child(s, b);
+    if (c) add_child(s, c);
+    return s;
+}
+
+TEST(interp_order_hoist_boundary_all_pure_is_none) {
+    ASTNode* s = interp_of(interp_int_segment(AST_IDENTIFIER, "a"), interp_text(" "),
+                           interp_int_segment(AST_IDENTIFIER, "b"));
+    ASSERT_EQ(-1, interp_order_hoist_boundary(s));
+    free_ast_node(s);
+}
+
+TEST(interp_order_hoist_boundary_lone_impure_is_none) {
+    ASTNode* s = interp_of(interp_text("got "), interp_int_segment(AST_FUNCTION_CALL, "f"), NULL);
+    ASSERT_EQ(-1, interp_order_hoist_boundary(s));
+    free_ast_node(s);
+}
+
+TEST(interp_order_hoist_boundary_impure_pair_is_last_segment) {
+    ASTNode* s = interp_of(interp_int_segment(AST_FUNCTION_CALL, "f"), interp_text(" "),
+                           interp_int_segment(AST_FUNCTION_CALL, "f"));
+    ASSERT_EQ(2, interp_order_hoist_boundary(s));
+    free_ast_node(s);
+}
+
+TEST(interp_order_hoist_boundary_pure_after_impure_is_the_pure_one) {
+    ASTNode* s = interp_of(interp_int_segment(AST_FUNCTION_CALL, "f"), interp_text(" "),
+                           interp_int_segment(AST_IDENTIFIER, "n"));
+    ASSERT_EQ(2, interp_order_hoist_boundary(s));
+    free_ast_node(s);
+}
+
+TEST(interp_order_hoist_boundary_sees_nested_call) {
+    ASTNode* sum = interp_int_segment(AST_BINARY_EXPRESSION, "+");
+    add_child(sum, interp_int_segment(AST_IDENTIFIER, "n"));
+    add_child(sum, interp_int_segment(AST_FUNCTION_CALL, "f"));
+    ASTNode* s = interp_of(interp_int_segment(AST_IDENTIFIER, "n"), interp_text(" "), sum);
+    ASSERT_EQ(2, interp_order_hoist_boundary(s));
+    free_ast_node(s);
+}
+
+TEST(interp_segment_is_text_only_for_string_literals) {
+    ASTNode* text = interp_text("hi");
+    ASTNode* ident = interp_int_segment(AST_IDENTIFIER, "n");
+    ASTNode* str_ident = create_ast_node(AST_IDENTIFIER, "s", 1, 1);
+    str_ident->node_type = create_type(TYPE_STRING);
+    ASSERT_TRUE(interp_segment_is_text(text));
+    ASSERT_FALSE(interp_segment_is_text(ident));
+    ASSERT_FALSE(interp_segment_is_text(str_ident));
+    ASSERT_FALSE(interp_segment_is_text(NULL));
+    free_ast_node(text);
+    free_ast_node(ident);
+    free_ast_node(str_ident);
+}
+
+TEST(interp_temp_c_type_matches_vararg_casts) {
+    Type* t;
+    t = create_type(TYPE_STRING);   ASSERT_TRUE(strcmp("const char*", interp_temp_c_type(t)) == 0); free_type(t);
+    t = create_type(TYPE_BOOL);     ASSERT_TRUE(strcmp("int", interp_temp_c_type(t)) == 0);         free_type(t);
+    t = create_type(TYPE_INT64);    ASSERT_TRUE(strcmp("long long", interp_temp_c_type(t)) == 0);   free_type(t);
+    t = create_type(TYPE_FLOAT);    ASSERT_TRUE(strcmp("double", interp_temp_c_type(t)) == 0);      free_type(t);
+    ASSERT_TRUE(strcmp("int", interp_temp_c_type(NULL)) == 0);
+    t = create_type(TYPE_STRUCT);   ASSERT_NULL(interp_temp_c_type(t));                              free_type(t);
 }

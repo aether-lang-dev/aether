@@ -2724,6 +2724,26 @@ tcp_send_raw(conn, msg)          // can be passed to any function expecting ptr
 
 When used directly inside `print`/`println`, the compiler optimizes to a `printf` call (no allocation).
 
+**Evaluation order.** The `${expr}` segments of one interpolated string are
+evaluated left to right, in source order, on every C compiler and
+optimisation level. A segment with a side effect sees the effects of the
+segments before it, and a plain read beside such a segment sees the value
+from its own position in the string:
+
+```aether,fragment
+n = 0
+bump() -> int { n = n + 1; return n }
+
+println("${bump()} ${bump()} ${bump()}")   // 1 2 3
+println("${n} ${bump()} ${n}")             // 3 4 4
+```
+
+The guarantee costs nothing when no segment has a side effect: those
+interpolations pass their segments straight to the formatting call. Once a
+segment calls a function, sends a message, or reads varargs, the compiler
+evaluates every segment into a temporary in source order first, so the
+order the C compiler chooses for the call's arguments can no longer show.
+
 ### Heredoc strings
 
 `<<MARKER … MARKER` captures a multi-line **literal** string, no `${}`

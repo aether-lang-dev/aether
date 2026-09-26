@@ -1,0 +1,81 @@
+// Regression test for #2195 — `${}` segments of one interpolated string
+// evaluate left to right, in source order, whatever C compiler and
+// optimisation level the program is built with.
+//
+// What the bug was: the segments were lowered to the varargs of a single
+// printf / _aether_interp call, and C leaves argument evaluation order
+// unspecified, so gcc ran `"${bump(c)} ${bump(c)} ${bump(c)}"` right to
+// left and printed `3 2 1`.
+//
+// Why this would have failed pre-fix: every case below has two segments
+// whose relative order is observable through a mutable cell, and each
+// asserts the source-order result.
+//
+// What part of the fix it exercises: once any segment has a side effect
+// the codegen hoists every segment into a temp in source order ahead of
+// the call (both the print/println printf path and the heap-string
+// _aether_interp path), leaves an all-pure interpolation inline, and
+// still frees a hoisted heap-producing call segment.
+
+import std.string
+
+extern exit(code: int)
+
+struct Cell {
+    n: int
+}
+
+bump(c: *Cell) -> int {
+    c.n = c.n + 1
+    return c.n
+}
+
+tag(c: *Cell) -> string {
+    c.n = c.n + 1
+    return string.concat("t", string.from_int(c.n))
+}
+
+check(name: string, got: string, expected: string) {
+    if !string.equals(got, expected) {
+        println("FAIL ${name}: expected '${expected}', got '${got}'")
+        exit(1)
+    }
+}
+
+main() {
+    cell = Cell { n: 0 }
+
+    // The reported shape, on the println → printf path.
+    println("${bump(&cell)} ${bump(&cell)} ${bump(&cell)}")
+
+    // Same shape on the value → _aether_interp path.
+    s = "${bump(&cell)} ${bump(&cell)}"
+    check("value path", s, "4 5")
+
+    // A pure read BEFORE an impure segment sees the value from before it.
+    cell.n = 10
+    s2 = "${cell.n} ${bump(&cell)}"
+    check("pure before impure", s2, "10 11")
+
+    // A pure read AFTER an impure segment sees the value it left behind.
+    s3 = "${bump(&cell)} ${cell.n}"
+    check("pure after impure", s3, "12 12")
+
+    // A heap-producing string segment (freed after the call) ordered
+    // against an int segment, both mutating the same cell.
+    s4 = "${tag(&cell)} ${bump(&cell)}"
+    check("heap string before int", s4, "t13 14")
+    s5 = "${bump(&cell)} ${tag(&cell)}"
+    check("int before heap string", s5, "15 t16")
+
+    // All-pure segments are untouched by the hoist and still format.
+    name = "cell"
+    s6 = "${name} holds ${cell.n} (${cell.n > 0})"
+    check("all pure", s6, "cell holds 16 (true)")
+
+    // Impure segments nested inside a segment's own interpolation.
+    s7 = "${bump(&cell)} [${"${bump(&cell)}-${bump(&cell)}"}]"
+    check("nested", s7, "17 [18-19]")
+
+    println("OK")
+}
