@@ -1,0 +1,78 @@
+// Regression (#2210): a `string` passed through a typed function pointer
+// reaches C as its bytes, as it does through an extern.
+//
+// A call to an extern wraps a `string` argument in aether_string_data, so
+// a heap string (interpolated, concatenated) arrives as its characters and
+// not as its AetherString header. A call through a `fn(..., string) -> R`
+// pointer passed the value as it was: for a heap string the callee read
+// the header. ae3d's OpenGL wrappers hit it with run-time uniform names —
+// `glGetUniformLocation` returned -1 for every `lights[${i}].position`
+// while a literal name worked, which hid the cause.
+//
+// libc's strlen is the observer: its answer for the header bytes is the
+// 4-byte magic and the low byte of the refcount (5), never the length of
+// the text. Covers the three call shapes that lower through a typed
+// pointer — a cast local, a `fn(...)` parameter and a struct field, by
+// value and by pointer — with a heap string and with a literal.
+
+import std.string
+
+extern exit(code: int)
+extern strlen(s: string) -> int
+extern malloc(n: long) -> ptr
+@extern("free") libc_free(p: ptr)
+
+struct Ops {
+    measure: fn(string) -> int
+}
+
+through_param(cb: fn(string) -> int, s: string) -> int {
+    return cb(s)
+}
+
+through_value_field(o: Ops, s: string) -> int {
+    return o.measure(s)
+}
+
+through_pointer_field(p: *Ops, s: string) -> int {
+    return p.measure(s)
+}
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${label}: got ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    println("=== test_fnptr_string_arg_bytes ===")
+
+    prefix = "lights"
+    name = "${prefix}[0].position" // heap string: 18 characters
+    want = 18
+
+    f = strlen as fn(string) -> int
+    check("cast local, heap string", f(name), want)
+    check("cast local, literal", f("abc"), 3)
+
+    check("fn(...) parameter, heap string",
+        through_param(strlen as fn(string) -> int, name), want)
+
+    o = Ops { measure: strlen as fn(string) -> int }
+    check("struct field, heap string", o.measure(name), want)
+    check("struct field via value param", through_value_field(o, name), want)
+
+    * Ops p = malloc(sizeof(Ops)) as *Ops
+    p.measure = strlen as fn(string) -> int
+    check("struct field via pointer", p.measure(name), want)
+    check("struct field via pointer param", through_pointer_field(p, name), want)
+
+    // Free what the test allocated: the interpolated heap string and the
+    // malloc'd Ops, so the leak gates stay clean.
+    libc_free(p as ptr)
+    string.free(name)
+
+    println("  PASS: a string through a typed fn pointer arrives as its bytes")
+    println("OK")
+}

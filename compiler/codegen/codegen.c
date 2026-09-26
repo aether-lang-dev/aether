@@ -650,6 +650,17 @@ void free_code_generator(CodeGenerator* gen) {
             }
             free(gen->actor_state_vars);
         }
+        /* #2210: the fn-pointer-local registry. clear_fnptr_locals frees the
+         * strdup'd names between functions but the last function's entries and
+         * the array itself outlive it; free both at teardown. (Exposed by the
+         * fnptr codegen tests, which register a local a program without them
+         * never did.) */
+        if (gen->fnptr_locals) {
+            for (int i = 0; i < gen->fnptr_local_count; i++) {
+                free(gen->fnptr_locals[i].name);
+            }
+            free(gen->fnptr_locals);
+        }
         if (gen->declared_var_types) {
             for (int i = 0; i < gen->declared_var_count; i++) {
                 if (gen->declared_var_types[i]) free_type(gen->declared_var_types[i]);

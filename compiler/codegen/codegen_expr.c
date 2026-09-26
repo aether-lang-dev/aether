@@ -290,6 +290,70 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
     return 0;
 }
 
+/* #2210: the arguments of a call through a typed function pointer
+ * (`fn(T1, ...) -> R`): a cast local, a `fn(...)` parameter or a struct
+ * field. The callee is C, so a `string` parameter is its `const char*` and
+ * the argument goes as its bytes through aether_string_data, as a call to
+ * an extern passes one. A heap string (interpolated, concatenated, built by
+ * a string op) is an AetherString whose header would otherwise reach the
+ * callee in place of the characters; aether_string_data yields the payload
+ * for either shape. Every other parameter takes the expression as written. */
+static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call) {
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* arg = call->children[i];
+        if (i > 0) fprintf(gen->output, ", ");
+        Type* param = (sig && sig->param_types && i < sig->param_count)
+                      ? sig->param_types[i] : NULL;
+        if (param && param->kind == TYPE_STRING && arg && arg->node_type &&
+            (arg->node_type->kind == TYPE_STRING || arg->node_type->kind == TYPE_PTR)) {
+            fprintf(gen->output, "aether_string_data(");
+            generate_expression(gen, arg);
+            fprintf(gen->output, ")");
+        } else {
+            generate_expression(gen, arg);
+        }
+    }
+}
+
+/* The declaration of `name` inside `n`: a parameter, a local or a closure
+ * parameter, carrying the type the checker stamped on it. */
+static ASTNode* find_declaration_in(ASTNode* n, const char* name) {
+    if (!n) return NULL;
+    if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE ||
+         n->type == AST_CLOSURE_PARAM) && n->value && strcmp(n->value, name) == 0) {
+        return n;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* found = find_declaration_in(n->children[i], name);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+/* #2210: the signature of the function-pointer field `recv.field`, where
+ * `recv` is a struct or pointer-to-struct local of the function being
+ * emitted (the receiver the checker admitted for a "fnfield_" call). The
+ * type is read off the struct definition, as the checker read it; NULL
+ * when the receiver's declaration or the field is not found, and the call
+ * then passes its arguments as written. */
+static Type* fnptr_field_signature(CodeGenerator* gen, const char* recv, const char* field) {
+    ASTNode* decl = find_declaration_in(gen->current_function, recv);
+    Type* t = decl ? decl->node_type : NULL;
+    const char* sname = NULL;
+    if (t && t->kind == TYPE_STRUCT) sname = t->struct_name;
+    else if (t && t->kind == TYPE_PTR && t->element_type &&
+             t->element_type->kind == TYPE_STRUCT) sname = t->element_type->struct_name;
+    ASTNode* sdef = sname ? find_struct_definition_by_name(gen->program, sname) : NULL;
+    if (!sdef) return NULL;
+    for (int i = 0; i < sdef->child_count; i++) {
+        ASTNode* f = sdef->children[i];
+        if (f && f->value && strcmp(f->value, field) == 0) {
+            return is_fnptr_type(f->node_type) ? f->node_type : NULL;
+        }
+    }
+    return NULL;
+}
+
 /* Translate an Aether integer-literal text into a form C accepts.
  *
  *   0o777   → 0777        (C uses bare leading-zero for octal)
@@ -3988,7 +4052,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * (receiver is a pointer-to-struct vs a value struct). Emit
              * the indirect call `(recv->field)(args)` / `(recv.field)(args)`
              * — the field already has a real C fn-ptr type (#749 codegen),
-             * so no cast is needed. */
+             * so no cast is needed. A `string` argument goes as its bytes
+             * (generate_fnptr_call_args, #2210). */
             if (expr->annotation && expr->value &&
                 strncmp(expr->annotation, "fnfield_", 8) == 0) {
                 int is_ptr = strcmp(expr->annotation, "fnfield_ptr") == 0;
@@ -4011,10 +4076,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     snprintf(field_c, sizeof(field_c), "%s", safe_value_name(dot + 1));
                     fprintf(gen->output, "(%s%s%s)(",
                             recv_c, is_ptr ? "->" : ".", field_c);
-                    for (int i = 0; i < expr->child_count; i++) {
-                        if (i > 0) fprintf(gen->output, ", ");
-                        generate_expression(gen, expr->children[i]);
-                    }
+                    generate_fnptr_call_args(gen, fnptr_field_signature(gen, recv, dot + 1), expr);
                     fprintf(gen->output, ")");
                     break;
                 }
@@ -4946,7 +5008,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * Emit a typed C function-pointer cast around the
                      * stored void* so the C compiler sees the correct
                      * signature.  The cast and call are inlined here;
-                     * no per-signature shim is needed. */
+                     * no per-signature shim is needed. A `string`
+                     * argument goes as its bytes (#2210). */
                     Type* fnptr_sig = lookup_fnptr_local(gen, func_name);
                     if (fnptr_sig && fnptr_sig->kind == TYPE_FUNCTION &&
                         fnptr_sig->is_fnptr) {
@@ -4962,10 +5025,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "void");
                         }
                         fprintf(gen->output, "))(%s))(", safe_c_name(func_name));
-                        for (int i = 0; i < expr->child_count; i++) {
-                            if (i > 0) fprintf(gen->output, ", ");
-                            generate_expression(gen, expr->children[i]);
-                        }
+                        generate_fnptr_call_args(gen, fnptr_sig, expr);
                         fprintf(gen->output, ")");
                         break;
                     }
