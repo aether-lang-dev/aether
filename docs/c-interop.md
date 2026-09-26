@@ -737,6 +737,8 @@ The `@aether` annotation is a sibling to the `: ptr` escape hatch above. Both op
 | `s: @aether string` | `foo(s)` | AetherString pointer with header, dispatches via `str_len` |
 | `s: ptr` | `foo(s)` | `void*` caller dispatches manually with `aether_string_data` / `aether_string_length` |
 
+A call through a typed function pointer (`f = p as fn(uint32, string) -> int`, a `cb: fn(string) -> int` parameter, or a `fn(...)`-typed struct field) unwraps a `string` argument the same way: `f(7, name)` emits `f(7, aether_string_data(name))`. A `ptr` parameter in the pointer's type passes the value as it is, for a callee that wants the header.
+
 The regression range was v0.97.0 → v0.98.0 (the blanket auto-unwrap landed in v0.98.0); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
 
 **Length-clamp hazard for binary content.** Once the auto-unwrap has fired, a C shim that receives a `string`-typed parameter has only payload bytes, no header, no stored length. A common defensive pattern is fatal here:

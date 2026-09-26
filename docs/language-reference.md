@@ -377,7 +377,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 | From → To | How |
 |---|---|
 | `int` → `ptr` (e.g. passing an int to a `ptr`-typed extern param) | Implicit. The compiler emits `(void*)(intptr_t)` automatically at the call site. |
-| `string` → C `const char*` (passing a `string` to a C extern) | Implicit. The auto-unwrap injects `aether_string_data(arg)` at call sites for `string`-typed extern parameters. |
+| `string` → C `const char*` (passing a `string` to a C extern, or through a `fn(...)` pointer) | Implicit. The auto-unwrap injects `aether_string_data(arg)` at call sites for `string`-typed extern parameters, and for `string` parameters of a typed function pointer (a cast local, a `fn(...)` parameter, a struct field). |
 | `int` → `string` | `string.from_int(n)` (and `string.from_long(n)`, `string.from_float(f)`). |
 | C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or returning from a function declared `-> string`. The returned `ptr` is treated as a borrowed C-string until it crosses into refcounted-string territory. |
 | `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). |
@@ -2673,7 +2673,7 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 }
 ```
 
-Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
+Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
 ### `@derive(eq)` synthesize an equality helper for a struct
 
