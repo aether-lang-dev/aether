@@ -45,7 +45,7 @@ header comment is the authoritative description.
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
-| `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 44 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
+| `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 72 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 16 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |

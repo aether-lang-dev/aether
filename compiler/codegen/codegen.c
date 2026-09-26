@@ -331,6 +331,7 @@ const char* const_array_elem_c_type(Type* t) {
         case TYPE_F64X2:   return "AeF64x2";
         case TYPE_I32X4:   return "AeI32x4";
         case TYPE_I64X2:   return "AeI64x2";
+        case TYPE_I16X8:   return "AeI16x8";
         case TYPE_PTR:     return "void*";
         case TYPE_BYTE:    return "unsigned char";
         case TYPE_BOOL:    return "_Bool";
@@ -2258,6 +2259,7 @@ const char* get_c_type(Type* type) {
         case TYPE_F64X2: return "AeF64x2";
         case TYPE_I32X4: return "AeI32x4";
         case TYPE_I64X2: return "AeI64x2";
+        case TYPE_I16X8: return "AeI16x8";
         case TYPE_BOOL: return "int";
         /* `unsigned char` (not `uint8_t`) so the compiler's strict-aliasing
          * exemption applies: code may legally read or write any other
@@ -2499,6 +2501,7 @@ static const char* get_abi_type(Type* type) {
         case TYPE_F64X2: return "AeF64x2";
         case TYPE_I32X4: return "AeI32x4";
         case TYPE_I64X2: return "AeI64x2";
+        case TYPE_I16X8: return "AeI16x8";
         case TYPE_BOOL:   return "int32_t";
         case TYPE_BYTE:   return "unsigned char";
         case TYPE_STRING: return "const char*";
@@ -2545,6 +2548,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 "typedef double AeF64x2 __attribute__((vector_size(16)));\n"
                 "typedef int32_t AeI32x4 __attribute__((vector_size(16)));\n"
                 "typedef int64_t AeI64x2 __attribute__((vector_size(16)));\n"
+                "typedef int16_t AeI16x8 __attribute__((vector_size(16)));\n"
                 "#endif\n"
                 "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
     }
@@ -4918,6 +4922,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef double AeF64x2 __attribute__((vector_size(16)));");
     print_line(gen, "typedef int32_t AeI32x4 __attribute__((vector_size(16)));");
     print_line(gen, "typedef int64_t AeI64x2 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef int16_t AeI16x8 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef uint32_t AeU32x4 __attribute__((vector_size(16)));");
+    /* SSE2 intrinsics for the saturating packs (_mm_packs_epi32 /
+       _mm_packus_epi16). Only needed on x86 with SSE2; elsewhere the packs use
+       a scalar fallback and this header is not referenced. */
+    print_line(gen, "#if defined(__SSE2__)");
+    print_line(gen, "#  include <emmintrin.h>");
+    print_line(gen, "#endif");
     print_line(gen, "#else");
     print_line(gen, "#  define AETHER_HAS_LANES 0");
     print_line(gen, "#endif");
@@ -5011,6 +5023,65 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i64x2_any(AeI64x2 m) { return (m[0] | m[1]) != 0; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i64x2_all(AeI64x2 m) { return m[0] != 0 && m[1] != 0; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i64x2_lane(AeI64x2 v, int64_t i) { return v[i & 1]; }");
+    /* #2212: integer lanes for image/audio kernels (JPEG IDCT, YCbCr->RGB,
+       PNG filters, mixing). vector_size arithmetic lowers to SSE2/NEON at
+       -O2; the only ops without a portable operator are the two saturating
+       packs, which take the hardware instruction where there is one and a
+       clamped scalar loop otherwise. Lanes are read/written as int (a 16-bit
+       lane widens to int in Aether). */
+    /* i32x4: four 32-bit lanes, in their own right (not just a mask). */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_splat(int v) { return (AeI32x4){v, v, v, v}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_set(int a, int b, int c, int d) { return (AeI32x4){a, b, c, d}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_load(void* p, int64_t i) { AeI32x4 v; memcpy(&v, (char*)p + (size_t)i * 4u, 16); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i32x4_store(void* p, int64_t i, AeI32x4 v) { memcpy((char*)p + (size_t)i * 4u, &v, 16); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_add(AeI32x4 a, AeI32x4 b) { return a + b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_sub(AeI32x4 a, AeI32x4 b) { return a - b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_mul(AeI32x4 a, AeI32x4 b) { return a * b; }");
+    /* Shifts by a compile-time-or-runtime constant count; the count is the
+       same for every lane (a vector-scalar shift), which is what the hardware
+       shift-immediate/GPR-count forms provide. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { return a << (int32_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)n; AeI32x4 r; memcpy(&r, &u, 16); return r; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_min(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a < b; return (m & a) | (~m & b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_max(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a > b; return (m & a) | (~m & b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_sum(AeI32x4 v) { return (int64_t)v[0] + v[1] + v[2] + v[3]; }");
+    /* i16x8: eight 16-bit lanes. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_splat(int v) { return (AeI16x8){(int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_set(int a, int b, int c, int d, int e, int f, int g, int h) { return (AeI16x8){(int16_t)a, (int16_t)b, (int16_t)c, (int16_t)d, (int16_t)e, (int16_t)f, (int16_t)g, (int16_t)h}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_load(void* p, int64_t i) { AeI16x8 v; memcpy(&v, (char*)p + (size_t)i * 2u, 16); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i16x8_store(void* p, int64_t i, AeI16x8 v) { memcpy((char*)p + (size_t)i * 2u, &v, 16); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i16x8_lane(AeI16x8 v, int64_t i) { return v[i & 7]; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_add(AeI16x8 a, AeI16x8 b) { return a + b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_sub(AeI16x8 a, AeI16x8 b) { return a - b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_mul(AeI16x8 a, AeI16x8 b) { return a * b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { return a << (int16_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_min(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a < b; return (m & a) | (~m & b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_max(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a > b; return (m & a) | (~m & b); }");
+    /* Saturating packs. i32x4 -> i16x8 packs two i32x4 vectors (a in the low
+       four lanes, b in the high four) with signed saturation; i16x8 -> u8x16
+       packs two i16x8 with unsigned saturation to bytes. These are the JPEG
+       decoder's hot exit. SSE2 has the exact instruction; elsewhere a clamped
+       scalar loop is correct, just not one instruction. u8x16 is returned in
+       an AeI16x8-shaped 16-byte register the caller stores as bytes. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i32x4_packs_i16x8(AeI32x4 a, AeI32x4 b) {");
+    print_line(gen, "#if defined(__SSE2__)");
+    print_line(gen, "    AeI16x8 r; __m128i p = _mm_packs_epi32((__m128i)a, (__m128i)b); memcpy(&r, &p, 16); return r;");
+    print_line(gen, "#else");
+    print_line(gen, "    AeI16x8 r; for (int i = 0; i < 4; i++) { int32_t x = a[i]; r[i] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x); }");
+    print_line(gen, "    for (int i = 0; i < 4; i++) { int32_t x = b[i]; r[i + 4] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x); } return r;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i16x8_packus_u8x16(AeI16x8 a, AeI16x8 b, void* out) {");
+    print_line(gen, "#if defined(__SSE2__)");
+    print_line(gen, "    __m128i p = _mm_packus_epi16((__m128i)a, (__m128i)b); memcpy(out, &p, 16);");
+    print_line(gen, "#else");
+    print_line(gen, "    unsigned char* o = (unsigned char*)out;");
+    print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = a[i]; o[i] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
+    print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = b[i]; o[i + 8] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
     print_line(gen, "#endif /* AETHER_HAS_LANES */");
     print_line(gen, "#ifndef AETHER_GCC_COMPAT");
     print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)");

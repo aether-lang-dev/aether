@@ -779,6 +779,11 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                     /* The mask a lane comparison yields (all-ones or zero per
                      * lane), and four 32-bit integer lanes in its own right. */
                     type = create_type(TYPE_I32X4);
+                } else if (strcmp(token->value, "i16x8") == 0) {
+                    /* #2212: eight 16-bit integer lanes, for integer image /
+                     * audio kernels (JPEG IDCT, YCbCr->RGB): 16-bit fixed
+                     * point with 32-bit accumulators and a saturating pack. */
+                    type = create_type(TYPE_I16X8);
                 } else if (strcmp(token->value, "int64") == 0) {
                     /* The signed sibling of the `uint64` keyword, and the
                      * name the reference uses for the widening `int -> int64`.

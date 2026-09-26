@@ -386,7 +386,8 @@ typedef enum {
     TYPE_F32X4,
     TYPE_F64X2,
     TYPE_I32X4,
-    TYPE_I64X2          /* the mask an f64x2 comparison yields (2 x 64-bit) */
+    TYPE_I64X2,         /* the mask an f64x2 comparison yields (2 x 64-bit) */
+    TYPE_I16X8          /* eight 16-bit integer lanes (#2212, integer kernels) */
 } TypeKind;
 
 typedef struct Type {

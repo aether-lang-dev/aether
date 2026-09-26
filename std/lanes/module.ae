@@ -39,7 +39,13 @@ exports(
     mask_and, mask_or, mask_not, any4, all4, mask_lane,
     f64x2, splat2, load2, store2, lane2, sum2, min2, max2, sqrt2, abs2,
     select2, lt2, le2, gt2, ge2, eq2,
-    mask2_and, mask2_or, mask2_not, any2, all2, mask2_lane
+    mask2_and, mask2_or, mask2_not, any2, all2, mask2_lane,
+    // ---- integer lanes (#2212) ----
+    i32x4, i32splat, i32load, i32store, i32lane, i32sum,
+    i32add, i32sub, i32mul, i32shl, i32shr, i32shr_u, i32min, i32max,
+    i16x8, i16splat, i16load, i16store, i16lane,
+    i16add, i16sub, i16mul, i16shl, i16shr, i16min, i16max,
+    pack_i32_i16, pack_i16_u8
 )
 
 // ---- f32x4: four single-precision lanes ---------------------------------
@@ -120,3 +126,63 @@ exports(
 @extern("_ae_i64x2_any") any2(mask: i64x2) -> bool
 @extern("_ae_i64x2_all") all2(mask: i64x2) -> bool
 @extern("_ae_i64x2_lane") mask2_lane(v: i64x2, index: long) -> long
+
+// ---- i32x4: four 32-bit integer lanes (#2212) ---------------------------
+//
+// The mask type above doubles as an integer vector in its own right, for the
+// integer image/audio kernels stb-image and stb-vorbis vectorise (JPEG IDCT
+// accumulators, PNG-filter deltas, PCM mixing). Arithmetic is lane-wise and
+// lowers to SSE2/NEON at -O2.
+
+// Build / broadcast.
+@extern("_ae_i32x4_set") i32x4(a: int, b: int, c: int, d: int) -> i32x4
+@extern("_ae_i32x4_splat") i32splat(v: int) -> i32x4
+// Four consecutive 32-bit ints at element `index` of `buf`; store writes back.
+@extern("_ae_i32x4_load") i32load(buf: ptr, index: long) -> i32x4
+@extern("_ae_i32x4_store") i32store(buf: ptr, index: long, v: i32x4)
+// Lane `index` (0-3), sign-extended to int; sum of all four (as long, no overflow).
+@extern("_ae_i32x4_lane") i32lane(v: i32x4, index: long) -> long
+@extern("_ae_i32x4_sum") i32sum(v: i32x4) -> long
+// Lane-wise add / sub / mul (mul keeps the low 32 bits of each product).
+@extern("_ae_i32x4_add") i32add(a: i32x4, b: i32x4) -> i32x4
+@extern("_ae_i32x4_sub") i32sub(a: i32x4, b: i32x4) -> i32x4
+@extern("_ae_i32x4_mul") i32mul(a: i32x4, b: i32x4) -> i32x4
+// Shift every lane by the same count `n`: shl (logical left), shr (ARITHMETIC
+// right, sign-preserving), shr_u (LOGICAL right, zero-filling).
+@extern("_ae_i32x4_shl") i32shl(a: i32x4, n: long) -> i32x4
+@extern("_ae_i32x4_shr") i32shr(a: i32x4, n: long) -> i32x4
+@extern("_ae_i32x4_shr_u") i32shr_u(a: i32x4, n: long) -> i32x4
+// Lane-wise signed minimum / maximum.
+@extern("_ae_i32x4_min") i32min(a: i32x4, b: i32x4) -> i32x4
+@extern("_ae_i32x4_max") i32max(a: i32x4, b: i32x4) -> i32x4
+
+// ---- i16x8: eight 16-bit integer lanes (#2212) --------------------------
+//
+// 16-bit fixed point is the JPEG IDCT and YCbCr->RGB working width. Lanes read
+// back sign-extended to int.
+
+@extern("_ae_i16x8_set") i16x8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> i16x8
+@extern("_ae_i16x8_splat") i16splat(v: int) -> i16x8
+@extern("_ae_i16x8_load") i16load(buf: ptr, index: long) -> i16x8
+@extern("_ae_i16x8_store") i16store(buf: ptr, index: long, v: i16x8)
+@extern("_ae_i16x8_lane") i16lane(v: i16x8, index: long) -> long
+@extern("_ae_i16x8_add") i16add(a: i16x8, b: i16x8) -> i16x8
+@extern("_ae_i16x8_sub") i16sub(a: i16x8, b: i16x8) -> i16x8
+@extern("_ae_i16x8_mul") i16mul(a: i16x8, b: i16x8) -> i16x8
+@extern("_ae_i16x8_shl") i16shl(a: i16x8, n: long) -> i16x8
+@extern("_ae_i16x8_shr") i16shr(a: i16x8, n: long) -> i16x8
+@extern("_ae_i16x8_min") i16min(a: i16x8, b: i16x8) -> i16x8
+@extern("_ae_i16x8_max") i16max(a: i16x8, b: i16x8) -> i16x8
+
+// ---- saturating packs (#2212) -------------------------------------------
+//
+// The hot exit of an integer image kernel: narrow wide accumulators to the
+// next size down, clamping (not wrapping) out-of-range lanes.
+
+// Two i32x4 -> one i16x8, signed-saturated: `a` fills lanes 0-3, `b` lanes 4-7.
+// A lane outside [-32768, 32767] clamps to the nearest end.
+@extern("_ae_i32x4_packs_i16x8") pack_i32_i16(a: i32x4, b: i32x4) -> i16x8
+// Two i16x8 -> sixteen u8 written to `out`, unsigned-saturated: `a` fills bytes
+// 0-7, `b` bytes 8-15. A lane below 0 clamps to 0, above 255 to 255. `out` must
+// have room for 16 bytes.
+@extern("_ae_i16x8_packus_u8x16") pack_i16_u8(a: i16x8, b: i16x8, out: ptr)
