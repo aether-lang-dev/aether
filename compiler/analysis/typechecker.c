@@ -1043,6 +1043,7 @@ static const char* type_name_of_kind(TypeKind k) {
         case TYPE_F64X2: return "f64x2";
         case TYPE_I32X4: return "i32x4";
         case TYPE_I64X2: return "i64x2";
+        case TYPE_I16X8: return "i16x8";
         default: return "a lane type";
     }
 }
@@ -1066,6 +1067,7 @@ static const char* type_name(Type* t) {
         case TYPE_F64X2:    return "f64x2";
         case TYPE_I32X4:    return "i32x4";
         case TYPE_I64X2:    return "i64x2";
+        case TYPE_I16X8:    return "i16x8";
         case TYPE_BOOL:     return "bool";
         case TYPE_BYTE:     return "byte";
         case TYPE_STRING:   return "string";
@@ -1100,7 +1102,8 @@ static int is_integer_scalar(TypeKind kind) {
  * scalar the way a one-element array might. */
 static int is_lane_type(TypeKind kind) {
     return kind == TYPE_F32X4 || kind == TYPE_F64X2 ||
-           kind == TYPE_I32X4 || kind == TYPE_I64X2;
+           kind == TYPE_I32X4 || kind == TYPE_I64X2 ||
+           kind == TYPE_I16X8;
 }
 
 /* The mask a comparison of this lane type yields: the SAME register width,
@@ -1110,6 +1113,7 @@ static TypeKind lane_mask_kind(TypeKind kind) {
     switch (kind) {
         case TYPE_F32X4: case TYPE_I32X4: return TYPE_I32X4;
         case TYPE_F64X2: case TYPE_I64X2: return TYPE_I64X2;
+        case TYPE_I16X8: return TYPE_I16X8;
         default: return TYPE_UNKNOWN;
     }
 }
@@ -1120,6 +1124,7 @@ static TypeKind lane_scalar_kind(TypeKind kind) {
     if (kind == TYPE_F64X2) return TYPE_FLOAT;
     if (kind == TYPE_I32X4) return TYPE_INT;
     if (kind == TYPE_I64X2) return TYPE_INT64;
+    if (kind == TYPE_I16X8) return TYPE_INT;
     return TYPE_UNKNOWN;
 }
 

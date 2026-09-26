@@ -255,9 +255,11 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
         if (left->kind == TYPE_F32X4 || right->kind == TYPE_F32X4 ||
             left->kind == TYPE_F64X2 || right->kind == TYPE_F64X2 ||
             left->kind == TYPE_I32X4 || right->kind == TYPE_I32X4 ||
-            left->kind == TYPE_I64X2 || right->kind == TYPE_I64X2) {
+            left->kind == TYPE_I64X2 || right->kind == TYPE_I64X2 ||
+            left->kind == TYPE_I16X8 || right->kind == TYPE_I16X8) {
             TypeKind lane = (left->kind == TYPE_F32X4 || left->kind == TYPE_F64X2 ||
-                             left->kind == TYPE_I32X4 || left->kind == TYPE_I64X2)
+                             left->kind == TYPE_I32X4 || left->kind == TYPE_I64X2 ||
+                             left->kind == TYPE_I16X8)
                             ? left->kind : right->kind;
             return create_type(lane);
         }
@@ -335,6 +337,8 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
         if (left->kind == TYPE_F64X2 || right->kind == TYPE_F64X2 ||
             left->kind == TYPE_I64X2 || right->kind == TYPE_I64X2)
             return create_type(TYPE_I64X2);   /* same width as its operands */
+        if (left->kind == TYPE_I16X8 || right->kind == TYPE_I16X8)
+            return create_type(TYPE_I16X8);   /* eight 16-bit mask lanes */
         return create_type(TYPE_BOOL);
     }
     
