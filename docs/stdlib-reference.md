@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (81 modules)
+## Module index (82 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
