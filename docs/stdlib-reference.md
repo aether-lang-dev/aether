@@ -14,7 +14,7 @@ header comment is the authoritative description.
 | `std.actors` | Process-global registry mapping names to actor references. | 12 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
-| `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
+| `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 9 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
@@ -3576,6 +3576,16 @@ after stop: playing false, at 0 ms
 - `audio.volume(src, v)` → `bool` (clamped to 0-1), `audio.get_volume(src)` → `float`
 - `audio.seek_ms(src, ms)` → `bool`, `position_ms(src)` / `duration_ms(src)` → `long`, `channels(src)` / `sample_rate(src)` → `int`
 - `audio.unload(src)`, `audio.last_error()` → `string`
+
+**Mixer tier (#2205)** — per-source controls a game engine needs, groups,
+a queue source, and a headless engine that holds a mix to numbers:
+- `audio.pan(src, p)` → `bool` (clamped to -1..1, equal-power: the Web Audio StereoPannerNode law), `audio.get_pan(src)` → `float`
+- `audio.pitch(src, ratio)` → `bool` (ratio > 0), `audio.get_pitch(src)` → `float`
+- `audio.looping(src, on)` → `bool`, `audio.is_looping(src)` → `bool`, `audio.fade_ms(src, from, to, ms)` → `bool` (`from` of -1 means "from the current volume")
+- `audio.played_frames(src)` → `long` - Output frames this source has produced, across loops and whatever the pitch
+- `audio.group_new()` → `ptr!`, `audio.group_free(g)`, `audio.group_volume(g, v)` → `bool`, `audio.group_get_volume(g)` → `float`, `audio.set_group(src, g)` → `bool` (`null` routes back to the output)
+- `audio.stream_open(rate, channels, format, capacity_frames)` → `ptr!` - A bounded ring the program pushes PCM into as it plays; `audio.stream_push(src, data, len)` → `int!` (frames accepted), `stream_queued(src)` / `stream_capacity(src)` → `int`, `stream_underruns(src)` → `long`
+- `audio.open_headless(rate, channels)` → `bool`, `audio.is_headless()` → `bool`, `audio.render(frames)` → `int` - No device, no mixer thread: nothing advances until `render` pulls frames, so a test's numbers follow from its calls; `audio.rendered_peak(channel)` / `audio.rendered_sample(frame, channel)` → `float` read the block back
 
 ## Sandboxing
 

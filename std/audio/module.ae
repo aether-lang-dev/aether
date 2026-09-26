@@ -15,20 +15,32 @@
 // edge today (there is no Duration-from-ns constructor yet — see the note on
 // `position`). A later tier can add Duration accessors once that lands.
 //
-// Not in v1 (named later tiers): synthesis/DSP, capture, game-style sample
-// banks, the actor pipeline, and format breadth beyond WAV. mp3/flac arrive
-// with the vendored-decoder substrate.
+// Mixer tier (#2205, for a game engine whose sources sit on objects and
+// whose listener sits on the camera): per-source `pan` (equal-power),
+// `pitch`, `looping`, `fade_ms`; groups/buses with a volume each; a queue
+// source the program pushes PCM into as it plays (`stream_open` /
+// `stream_push`); and a headless engine (`open_headless` + `render`) that
+// advances only when told to, so a test holds a mix to numbers: the gain,
+// pan and pitch last applied, the frames each source played, the peak of
+// the rendered block. mp3 and flac already decode through `load_wav`
+// (miniaudio sniffs the container); OGG Vorbis is a later tier.
+//
+// Not here (named later tiers): synthesis/DSP, capture, the actor pipeline.
 
 import std.string
 
 exports(
-    open, close, is_null_backend,
+    open, open_headless, close, is_null_backend, is_headless,
     load_wav, load_pcm, last_error,
     FORMAT_U8, FORMAT_S16, FORMAT_S24, FORMAT_S32, FORMAT_F32,
     play, pause, stop, is_playing,
     volume, get_volume,
+    pan, get_pan, pitch, get_pitch, looping, is_looping, fade_ms,
     seek_ms, position_ms, duration_ms,
-    channels, sample_rate,
+    channels, sample_rate, played_frames,
+    group_new, group_free, group_volume, group_get_volume, set_group,
+    stream_open, stream_push, stream_queued, stream_capacity, stream_underruns,
+    render, rendered_peak, rendered_sample,
     unload
 )
 
@@ -51,6 +63,29 @@ extern aether_audio_duration_ns(sound: ptr) -> long
 extern aether_audio_seek_ns(sound: ptr, ns: long) -> int
 extern aether_audio_channels(sound: ptr) -> int
 extern aether_audio_sample_rate(sound: ptr) -> int
+extern aether_audio_set_pan(sound: ptr, pan: float) -> int
+extern aether_audio_get_pan(sound: ptr) -> float
+extern aether_audio_set_pitch(sound: ptr, ratio: float) -> int
+extern aether_audio_get_pitch(sound: ptr) -> float
+extern aether_audio_set_looping(sound: ptr, on: int) -> int
+extern aether_audio_is_looping(sound: ptr) -> int
+extern aether_audio_fade_ms(sound: ptr, from: float, to: float, ms: long) -> int
+extern aether_audio_played_frames(sound: ptr) -> long
+extern aether_audio_group_new() -> ptr
+extern aether_audio_group_free(group: ptr)
+extern aether_audio_group_set_volume(group: ptr, v: float) -> int
+extern aether_audio_group_get_volume(group: ptr) -> float
+extern aether_audio_set_group(sound: ptr, group: ptr) -> int
+extern aether_audio_stream_open(sample_rate: int, channels: int, format: int, capacity_frames: int) -> ptr
+extern aether_audio_stream_push(sound: ptr, data: string, length: int) -> int
+extern aether_audio_stream_queued(sound: ptr) -> int
+extern aether_audio_stream_capacity(sound: ptr) -> int
+extern aether_audio_stream_underruns(sound: ptr) -> long
+extern aether_audio_open_headless(sample_rate: int, channels: int) -> int
+extern aether_audio_is_headless() -> int
+extern aether_audio_render(frames: int) -> int
+extern aether_audio_rendered_peak(channel: int) -> float
+extern aether_audio_rendered_sample(frame: int, channel: int) -> float
 
 // ---- engine lifecycle ----
 
@@ -60,7 +95,18 @@ open() -> bool {
     return aether_audio_open() == 1
 }
 
-// Shut the engine down. Unload sounds first.
+// Open a HEADLESS engine instead: no device, no mixer thread. Nothing
+// advances — no position, no played frame, no fade — until `render` pulls
+// frames through the mixer, so every number a test reads back follows from
+// the calls it made rather than from wall-clock time. Use it to hold a mix
+// to numbers the way a renderer is held to pixels. Returns false (with
+// `last_error`) if an engine is already open. `is_null_backend` is also
+// true for a headless engine.
+open_headless(sample_rate: int, channels: int) -> bool {
+    return aether_audio_open_headless(sample_rate, channels) == 1
+}
+
+// Shut the engine down. Unload sounds and free groups first.
 close() {
     aether_audio_close()
 }
@@ -70,6 +116,32 @@ close() {
 // behaviour.
 is_null_backend() -> bool {
     return aether_audio_is_null_backend() == 1
+}
+
+// True when the engine was opened with `open_headless`.
+is_headless() -> bool {
+    return aether_audio_is_headless() == 1
+}
+
+// Mix `frames` frames of output through the headless engine and keep the
+// block for `rendered_peak` / `rendered_sample`. Returns the number of
+// frames rendered: 0 on a real-device or null-backend engine (use
+// `open_headless`), or for a block over 4,194,304 frames.
+render(frames: int) -> int {
+    return aether_audio_render(frames)
+}
+
+// The largest absolute sample on `channel` in the last rendered block, in
+// [0.0, 1.0] for an unclipped mix. The one-line "held to a number" check:
+// a mono clip of constant sample 0.125 at pan 0 renders a peak of
+// 0.125 * cos(pi/4) in each channel.
+rendered_peak(channel: int) -> float {
+    return aether_audio_rendered_peak(channel)
+}
+
+// One sample of the last rendered block, or 0.0 out of range.
+rendered_sample(frame: int, channel: int) -> float {
+    return aether_audio_rendered_sample(frame, channel)
 }
 
 // ---- loading ----
@@ -99,6 +171,12 @@ const FORMAT_S16 = 2
 const FORMAT_S24 = 3
 const FORMAT_S32 = 4
 const FORMAT_F32 = 5
+
+// Note on streaming: `load_wav` keeps the ENCODED bytes and decodes them
+// as the mixer pulls, so a long track costs its encoded size, not its
+// decoded one — music and long ambiences need no separate path. For audio
+// that does not exist yet (a procedural wind, a decoder of your own running
+// ahead of playback) use `stream_open` + `stream_push`.
 
 // Play PCM samples the caller ALREADY decoded, rather than an encoded
 // container (asks/pcm-please.md).
@@ -141,6 +219,48 @@ last_error() -> string {
     return e
 }
 
+// Open a QUEUE source: a bounded ring of `capacity_frames` frames of PCM
+// in `format` (a FORMAT_* constant) that the program pushes into with
+// `stream_push` while the source plays. Reads past what has been pushed
+// play silence and count as underruns rather than ending the source, so a
+// producer that falls behind recovers instead of stopping. A stream cannot
+// seek or loop and reports a duration of 0; `position_ms` is the audio it
+// has consumed. Returns (src, "") on success, (null, reason) on failure.
+stream_open(sample_rate: int, channels: int, format: int, capacity_frames: int) -> ptr! {
+    s = aether_audio_stream_open(sample_rate, channels, format, capacity_frames)
+    if s == null {
+        e = aether_audio_last_error()
+        if e == null { return null, "audio: stream_open failed" }
+        return null, e
+    }
+    return s
+}
+
+// Push `length` bytes of interleaved samples into a queue source. `length`
+// must be a whole number of frames. Returns (frames_accepted, ""): fewer
+// than offered when the ring is full — push the rest later — or
+// (-1, reason) for a bad argument or a source that is not a stream.
+stream_push(src: ptr, data: string, length: int) -> int! {
+    n = aether_audio_stream_push(src, data, length)
+    if n < 0 {
+        e = aether_audio_last_error()
+        if e == null { return -1, "audio: stream_push failed" }
+        return -1, e
+    }
+    return n
+}
+
+// Frames pushed and not yet consumed by the mixer (0 for a non-stream).
+stream_queued(src: ptr) -> int { return aether_audio_stream_queued(src) }
+
+// The ring's capacity in frames (0 for a non-stream). Free space is
+// `stream_capacity(src) - stream_queued(src)`.
+stream_capacity(src: ptr) -> int { return aether_audio_stream_capacity(src) }
+
+// Frames of silence the mixer substituted because the ring was empty. A
+// producer keeping up holds this at 0; a headless test can assert it.
+stream_underruns(src: ptr) -> long { return aether_audio_stream_underruns(src) }
+
 // Release a source. After this the pointer is invalid.
 unload(src: ptr) {
     aether_audio_unload(src)
@@ -173,6 +293,91 @@ volume(src: ptr, v: float) -> bool {
 // The source's current volume in [0.0, 1.0].
 get_volume(src: ptr) -> float {
     return aether_audio_get_volume(src)
+}
+
+// ---- pan / pitch / looping / fade ----
+
+// Set the stereo pan in [-1.0, 1.0] (clamped): -1 wholly left, 0 centre,
+// 1 wholly right. Equal-power, the Web Audio StereoPannerNode law, so a
+// source keeps its loudness as it moves: a mono source at 0 sits at
+// cos(pi/4) in each ear and at -1 at full gain in the left alone; a stereo
+// source passes through unchanged at 0 and folds its far channel into the
+// near one as it moves. The engine computes `p` from the listener's frame
+// each tick and calls this. Returns true on success.
+pan(src: ptr, p: float) -> bool {
+    return aether_audio_set_pan(src, p) == 1
+}
+
+// The pan last applied, in [-1.0, 1.0].
+get_pan(src: ptr) -> float { return aether_audio_get_pan(src) }
+
+// Set the playback-rate ratio: 2.0 plays an octave up in half the time,
+// 0.5 an octave down in twice. Doppler, an engine note, variation between
+// repeats of a clip. A ratio <= 0 is refused (false, see `last_error`).
+pitch(src: ptr, ratio: float) -> bool {
+    return aether_audio_set_pitch(src, ratio) == 1
+}
+
+// The pitch ratio last applied (1.0 by default).
+get_pitch(src: ptr) -> float { return aether_audio_get_pitch(src) }
+
+// Loop back to the start on reaching the end: engines, rain, wind,
+// ambience. A stream cannot loop (false). Returns true on success.
+looping(src: ptr, on: bool) -> bool {
+    flag = 0
+    if on { flag = 1 }
+    return aether_audio_set_looping(src, flag) == 1
+}
+
+// True when the source loops.
+is_looping(src: ptr) -> bool { return aether_audio_is_looping(src) == 1 }
+
+// Fade the volume from `from` to `to` over `ms` milliseconds, starting now
+// (at the next mixed frame). A `from` of -1.0 means "from wherever the
+// volume is now" — the shape of a fade-out on stop. Returns true on
+// success; a negative `ms` is refused.
+fade_ms(src: ptr, from: float, to: float, ms: long) -> bool {
+    return aether_audio_fade_ms(src, from, to, ms) == 1
+}
+
+// Frames of the SOURCE the mixer has consumed since load — across loops,
+// and in source frames regardless of pitch. Under `open_headless` this is
+// exactly what `render` pulled, which lets a test hold playback to a number.
+played_frames(src: ptr) -> long { return aether_audio_played_frames(src) }
+
+// ---- groups / buses ----
+
+// Create a group (a bus: music, effects, ambience, voice) with its own
+// volume. Sources join it with `set_group`. A group must outlive the
+// sources routed through it: reassign or unload them before `group_free`.
+// Returns (group, "") on success, (null, reason) on failure.
+group_new() -> ptr! {
+    g = aether_audio_group_new()
+    if g == null {
+        e = aether_audio_last_error()
+        if e == null { return null, "audio: group_new failed" }
+        return null, e
+    }
+    return g
+}
+
+// Release a group. Sources still routed through it fall silent until
+// reassigned, so unload or `set_group` them first.
+group_free(group: ptr) { aether_audio_group_free(group) }
+
+// Set the group's volume in [0.0, 1.0] (clamped); it multiplies each
+// member's own volume. Returns true on success.
+group_volume(group: ptr, v: float) -> bool {
+    return aether_audio_group_set_volume(group, v) == 1
+}
+
+// The group's current volume in [0.0, 1.0].
+group_get_volume(group: ptr) -> float { return aether_audio_group_get_volume(group) }
+
+// Route `src` through `group`; `null` routes it straight to the output
+// again. A source is in one group at a time. Returns true on success.
+set_group(src: ptr, group: ptr) -> bool {
+    return aether_audio_set_group(src, group) == 1
 }
 
 // ---- position / duration (milliseconds) ----

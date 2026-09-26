@@ -1,0 +1,314 @@
+// std.audio mixer tier (#2205) — pan, pitch, looping, fade, groups, a queue
+// source, and the headless engine that makes all of it testable by number.
+//
+// Everything here runs on `open_headless`: no device, no mixer thread, and
+// nothing advances until `render` pulls frames through the mixer. So each
+// assertion below is a function of the calls made, not of wall-clock time —
+// the same discipline a renderer held to pixels follows. The PCM is built
+// in-test from std.bytes; there is no binary fixture.
+
+import std.audio
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if !cond { println("FAIL: ${msg}"); return 1 }
+    return 0
+}
+
+fn near(a: float, b: float, tol: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d <= tol
+}
+
+// Interleaved 16-bit PCM: `frames` frames of `ch` channels, every sample
+// `sample16`. Returns (bytes, length).
+fn make_pcm(frames: int, ch: int, sample16: int) -> (string, int) {
+    total = frames * ch * 2
+    b = bytes.new(total)
+    i = 0
+    while i < frames * ch {
+        bytes.set_le16(b, i * 2, sample16 & 65535)
+        i = i + 1
+    }
+    return bytes.finish(b, total), total
+}
+
+// 4096 / 32768: the constant sample every clip below carries, as a float.
+const AMP = 0.125
+// cos(pi/4): where an equal-power law puts a mono source at pan 0.
+const CENTRE = 0.70710678
+const TOL = 0.001
+
+fn test_mono_pan_and_volume() -> int {
+    fails = 0
+    pcm, n = make_pcm(8000, 1, 4096)
+    src, err = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    fails = fails + ck(err == "", "mono clip loads")
+
+    // Nothing moves until render is called: the headless contract.
+    _ = audio.play(src)
+    fails = fails + ck(audio.played_frames(src) == 0, "no frames played before render")
+    fails = fails + ck(audio.position_ms(src) == 0, "position 0 before render")
+
+    // Centre: equal-power puts cos(pi/4) of the signal in each ear.
+    got = audio.render(1000)
+    fails = fails + ck(got == 1000, "render returns the frames mixed (got ${got})")
+    fails = fails + ck(audio.played_frames(src) == 1000, "played_frames counts what render pulled")
+    // The sound reads its source a block (512 frames) ahead of the output,
+    // so the cursor leads the render by up to 64 ms at 8 kHz.
+    pos = audio.position_ms(src)
+    fails = fails + ck(pos >= 125 && pos < 190, "position follows render, at most a block ahead (got ${pos})")
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * CENTRE, TOL), "pan 0: left = amp*cos(pi/4)")
+    fails = fails + ck(near(audio.rendered_peak(1), AMP * CENTRE, TOL), "pan 0: right = amp*cos(pi/4)")
+    fails = fails + ck(near(audio.rendered_sample(500, 0), AMP * CENTRE, TOL), "rendered_sample reads the block")
+
+    // Hard left / hard right: all the signal in one ear, none in the other.
+    _ = audio.pan(src, -1.0)
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), AMP, TOL), "pan -1: left at full amp")
+    fails = fails + ck(near(audio.rendered_peak(1), 0.0, TOL), "pan -1: right silent")
+    _ = audio.pan(src, 1.0)
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), 0.0, TOL), "pan +1: left silent")
+    fails = fails + ck(near(audio.rendered_peak(1), AMP, TOL), "pan +1: right at full amp")
+
+    // Clamped, and read back.
+    _ = audio.pan(src, 7.0)
+    fails = fails + ck(audio.get_pan(src) == 1.0, "pan clamps high")
+    _ = audio.pan(src, -7.0)
+    fails = fails + ck(audio.get_pan(src) == -1.0, "pan clamps low")
+
+    // Volume multiplies the panned signal.
+    _ = audio.pan(src, 0.0)
+    _ = audio.volume(src, 0.5)
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * CENTRE * 0.5, TOL), "volume 0.5 halves the mix")
+
+    // Out-of-range reads are 0, not a crash.
+    fails = fails + ck(audio.rendered_peak(2) == 0.0, "peak of a missing channel is 0")
+    fails = fails + ck(audio.rendered_sample(5000, 0) == 0.0, "sample past the block is 0")
+
+    audio.unload(src)
+    return fails
+}
+
+fn test_stereo_pan_passthrough() -> int {
+    fails = 0
+    pcm, n = make_pcm(4000, 2, 4096)
+    src, err = audio.load_pcm(pcm, n, 8000, 2, audio.FORMAT_S16)
+    fails = fails + ck(err == "", "stereo clip loads")
+    _ = audio.play(src)
+
+    // A stereo source at pan 0 is untouched — existing playback keeps its
+    // level — and at -1 the right channel folds into the left.
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), AMP, TOL), "stereo pan 0: left passes through at unity")
+    fails = fails + ck(near(audio.rendered_peak(1), AMP, TOL), "stereo pan 0: right passes through at unity")
+    _ = audio.pan(src, -1.0)
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * 2.0, TOL), "stereo pan -1: left = l + r")
+    fails = fails + ck(near(audio.rendered_peak(1), 0.0, TOL), "stereo pan -1: right silent")
+
+    audio.unload(src)
+    return fails
+}
+
+fn test_pitch() -> int {
+    fails = 0
+    pcm, n = make_pcm(8000, 1, 4096)
+    src, _ = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    fails = fails + ck(audio.get_pitch(src) == 1.0, "pitch defaults to 1.0")
+
+    fails = fails + ck(!audio.pitch(src, 0.0), "pitch 0 refused")
+    fails = fails + ck(!audio.pitch(src, -2.0), "negative pitch refused")
+    fails = fails + ck(audio.get_pitch(src) == 1.0, "refused pitch leaves 1.0 in place")
+
+    // At ratio 2 the mixer consumes 2 source frames per output frame:
+    // played_frames counts OUTPUT frames (exactly what render pulled) while
+    // the cursor runs through the clip at double speed, a block ahead.
+    fails = fails + ck(audio.pitch(src, 2.0), "pitch 2.0 accepted")
+    fails = fails + ck(audio.get_pitch(src) == 2.0, "pitch reads back")
+    _ = audio.play(src)
+    _ = audio.render(1000)
+    fails = fails + ck(audio.played_frames(src) == 1000, "played_frames is output frames, pitch or not")
+    pos = audio.position_ms(src)
+    fails = fails + ck(pos >= 250 && pos < 320,
+        "pitch 2.0 moves the cursor ~250ms per 1000 output frames (got ${pos})")
+
+    audio.unload(src)
+    return fails
+}
+
+fn test_looping() -> int {
+    fails = 0
+    pcm, n = make_pcm(500, 1, 4096) // a 62.5 ms clip
+    src, _ = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    fails = fails + ck(!audio.is_looping(src), "not looping by default")
+
+    _ = audio.looping(src, true)
+    fails = fails + ck(audio.is_looping(src), "looping reads back")
+    _ = audio.play(src)
+    _ = audio.render(2000)
+    fails = fails + ck(audio.is_playing(src), "a looping clip is still playing past its length")
+    fails = fails + ck(audio.played_frames(src) == 2000, "played_frames keeps counting across loops")
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * CENTRE, TOL), "the loop keeps producing signal")
+
+    _ = audio.looping(src, false)
+    _ = audio.render(2000)
+    fails = fails + ck(!audio.is_playing(src), "without looping the clip ends")
+    // It finishes the pass it was on plus the block it had read ahead
+    // while looping: under 2000 + 500 + 512.
+    fails = fails + ck(audio.played_frames(src) < 3100, "and stops producing frames")
+
+    audio.unload(src)
+    return fails
+}
+
+fn test_fade() -> int {
+    fails = 0
+    pcm, n = make_pcm(8000, 1, 4096)
+    src, _ = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    _ = audio.play(src)
+    fails = fails + ck(!audio.fade_ms(src, 1.0, 0.0, -1), "negative fade length refused")
+
+    // Fade to silence over 125 ms (1000 frames): the block that carries the
+    // fade is quieter than full level at its end, and the next is silent.
+    fails = fails + ck(audio.fade_ms(src, 1.0, 0.0, 125), "fade accepted")
+    _ = audio.render(1000)
+    tail = audio.rendered_sample(999, 0)
+    fails = fails + ck(tail < AMP * CENTRE * 0.05, "the fade's last frame is near silent (got ${tail})")
+    fails = fails + ck(audio.rendered_sample(10, 0) > AMP * CENTRE * 0.9, "the fade starts near full level")
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), 0.0, 0.0001), "after the fade: silence")
+
+    audio.unload(src)
+    return fails
+}
+
+fn test_groups() -> int {
+    fails = 0
+    g, gerr = audio.group_new()
+    fails = fails + ck(gerr == "", "group_new")
+    fails = fails + ck(audio.group_get_volume(g) == 1.0, "group volume defaults to 1.0")
+    _ = audio.group_volume(g, 3.0)
+    fails = fails + ck(audio.group_get_volume(g) == 1.0, "group volume clamps high")
+    _ = audio.group_volume(g, 0.5)
+    fails = fails + ck(audio.group_get_volume(g) == 0.5, "group volume reads back")
+
+    pcm, n = make_pcm(8000, 1, 4096)
+    src, _ = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    _ = audio.play(src)
+
+    fails = fails + ck(audio.set_group(src, g), "set_group")
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * CENTRE * 0.5, TOL), "a group's volume scales its members")
+
+    // Back to the output directly: full level again.
+    fails = fails + ck(audio.set_group(src, null), "set_group(null) routes to the output")
+    _ = audio.render(1000)
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * CENTRE, TOL), "leaving the group restores the level")
+
+    fails = fails + ck(!audio.set_group(null, g), "set_group on a null source is false")
+    audio.unload(src)
+    audio.group_free(g)
+    return fails
+}
+
+fn test_stream() -> int {
+    fails = 0
+    _, e0 = audio.stream_open(8000, 1, 99, 4000)
+    fails = fails + ck(e0 != "", "stream_open rejects an unknown format")
+    _, e1 = audio.stream_open(8000, 1, audio.FORMAT_S16, 0)
+    fails = fails + ck(e1 != "", "stream_open rejects a zero capacity")
+
+    st, err = audio.stream_open(8000, 1, audio.FORMAT_S16, 4000)
+    fails = fails + ck(err == "", "stream_open")
+    fails = fails + ck(audio.stream_capacity(st) == 4000, "capacity reads back")
+    fails = fails + ck(audio.stream_queued(st) == 0, "nothing queued at open")
+    fails = fails + ck(audio.duration_ms(st) == 0, "a stream has no duration")
+    fails = fails + ck(audio.channels(st) == 1 && audio.sample_rate(st) == 8000, "stream format reads back")
+    fails = fails + ck(!audio.looping(st, true), "a stream cannot loop")
+    fails = fails + ck(!audio.seek_ms(st, 10), "a stream cannot seek")
+
+    pcm, n = make_pcm(1000, 1, 4096)
+    acc, perr = audio.stream_push(st, pcm, n)
+    fails = fails + ck(perr == "" && acc == 1000, "push accepts 1000 frames (got ${acc})")
+    fails = fails + ck(audio.stream_queued(st) == 1000, "queued after push")
+
+    bad, berr = audio.stream_push(st, pcm, n - 1)
+    fails = fails + ck(bad == -1 && berr != "", "a partial trailing frame is refused")
+
+    // Half the queue plays; the mixer reads what was pushed, no underrun.
+    // The sound drains the ring a block (512 frames) ahead of the output.
+    _ = audio.play(st)
+    _ = audio.render(500)
+    q = audio.stream_queued(st)
+    fails = fails + ck(q <= 500 && q > 0, "render drains the queue, at most a block ahead (got ${q})")
+    fails = fails + ck(audio.played_frames(st) == 500, "played_frames counts output frames")
+    fails = fails + ck(audio.stream_underruns(st) == 0, "no underrun while fed")
+    fails = fails + ck(near(audio.rendered_peak(0), AMP * CENTRE, TOL), "the stream's samples reach the mix")
+    pos = audio.position_ms(st)
+    fails = fails + ck(pos >= 62 && pos < 130, "position is audio consumed (got ${pos})")
+
+    // Starve it: the rest plays, then silence, counted — and it keeps going.
+    _ = audio.render(1000)
+    fails = fails + ck(audio.stream_queued(st) == 0, "queue empty after starving")
+    fails = fails + ck(audio.played_frames(st) == 1500, "output keeps counting through an underrun")
+    u = audio.stream_underruns(st)
+    fails = fails + ck(u >= 500 && u < 1100, "the shortfall is counted as underrun (got ${u})")
+    fails = fails + ck(audio.is_playing(st), "an underrun does not end the stream")
+    _ = audio.render(100)
+    fails = fails + ck(near(audio.rendered_peak(0), 0.0, 0.0001), "a starved stream renders silence")
+
+    // The ring is bounded: an over-full push accepts what fits.
+    big, bn = make_pcm(5000, 1, 4096)
+    acc2, _ = audio.stream_push(st, big, bn)
+    fails = fails + ck(acc2 == 4000, "push into an empty ring accepts its capacity (got ${acc2})")
+    acc3, _ = audio.stream_push(st, pcm, n)
+    fails = fails + ck(acc3 == 0, "push into a full ring accepts nothing")
+
+    // A non-stream refuses pushes.
+    clip, _ = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    r, rerr = audio.stream_push(clip, pcm, n)
+    fails = fails + ck(r == -1 && rerr != "", "push into a clip is refused")
+    fails = fails + ck(audio.stream_capacity(clip) == 0, "a clip has no ring")
+    audio.unload(clip)
+
+    audio.unload(st)
+    return fails
+}
+
+main() {
+    fails = 0
+
+    if !audio.open_headless(8000, 2) { println("FAIL: open_headless ${audio.last_error()}"); exit(1) }
+    fails = fails + ck(audio.is_headless(), "is_headless")
+    fails = fails + ck(audio.is_null_backend(), "headless counts as the null backend")
+    fails = fails + ck(!audio.open_headless(8000, 2), "a second open is refused")
+    fails = fails + ck(audio.render(0) == 0, "render(0) renders nothing")
+
+    fails = fails + test_mono_pan_and_volume()
+    fails = fails + test_stereo_pan_passthrough()
+    fails = fails + test_pitch()
+    fails = fails + test_looping()
+    fails = fails + test_fade()
+    fails = fails + test_groups()
+    fails = fails + test_stream()
+
+    audio.close()
+    fails = fails + ck(audio.render(10) == 0, "render after close renders nothing")
+
+    // The engine can be reopened after close: cleanup left nothing behind.
+    fails = fails + ck(audio.open_headless(48000, 2), "reopen after close")
+    audio.close()
+
+    if fails != 0 {
+        println("audio mixer: ${fails} failure(s)")
+        exit(1)
+    }
+    println("PASS: test_audio_mixer")
+}

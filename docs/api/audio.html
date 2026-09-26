@@ -16,21 +16,50 @@
   <h2>Exports</h2>
   <ul class="function-nav">
     <li><a href="#open">open</a></li>
+    <li><a href="#open_headless">open_headless</a></li>
     <li><a href="#close">close</a></li>
     <li><a href="#is_null_backend">is_null_backend</a></li>
+    <li><a href="#is_headless">is_headless</a></li>
     <li><a href="#load_wav">load_wav</a></li>
+    <li><a href="#load_pcm">load_pcm</a></li>
     <li><a href="#last_error">last_error</a></li>
+    <li><a href="#FORMAT_U8">FORMAT_U8</a></li>
+    <li><a href="#FORMAT_S16">FORMAT_S16</a></li>
+    <li><a href="#FORMAT_S24">FORMAT_S24</a></li>
+    <li><a href="#FORMAT_S32">FORMAT_S32</a></li>
+    <li><a href="#FORMAT_F32">FORMAT_F32</a></li>
     <li><a href="#play">play</a></li>
     <li><a href="#pause">pause</a></li>
     <li><a href="#stop">stop</a></li>
     <li><a href="#is_playing">is_playing</a></li>
     <li><a href="#volume">volume</a></li>
     <li><a href="#get_volume">get_volume</a></li>
+    <li><a href="#pan">pan</a></li>
+    <li><a href="#get_pan">get_pan</a></li>
+    <li><a href="#pitch">pitch</a></li>
+    <li><a href="#get_pitch">get_pitch</a></li>
+    <li><a href="#looping">looping</a></li>
+    <li><a href="#is_looping">is_looping</a></li>
+    <li><a href="#fade_ms">fade_ms</a></li>
     <li><a href="#seek_ms">seek_ms</a></li>
     <li><a href="#position_ms">position_ms</a></li>
     <li><a href="#duration_ms">duration_ms</a></li>
     <li><a href="#channels">channels</a></li>
     <li><a href="#sample_rate">sample_rate</a></li>
+    <li><a href="#played_frames">played_frames</a></li>
+    <li><a href="#group_new">group_new</a></li>
+    <li><a href="#group_free">group_free</a></li>
+    <li><a href="#group_volume">group_volume</a></li>
+    <li><a href="#group_get_volume">group_get_volume</a></li>
+    <li><a href="#set_group">set_group</a></li>
+    <li><a href="#stream_open">stream_open</a></li>
+    <li><a href="#stream_push">stream_push</a></li>
+    <li><a href="#stream_queued">stream_queued</a></li>
+    <li><a href="#stream_capacity">stream_capacity</a></li>
+    <li><a href="#stream_underruns">stream_underruns</a></li>
+    <li><a href="#render">render</a></li>
+    <li><a href="#rendered_peak">rendered_peak</a></li>
+    <li><a href="#rendered_sample">rendered_sample</a></li>
     <li><a href="#unload">unload</a></li>
   </ul>
   <hr>
@@ -43,11 +72,10 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
-    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
-    <li><a href="casper.html">casper</a></li>
-    <li><a href="collections.html">collections</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
     <li><a href="deque.html">deque</a></li>
@@ -58,13 +86,13 @@
     <li><a href="floatarr.html">floatarr</a></li>
     <li><a href="fs.html">fs</a></li>
     <li><a href="hash.html">hash</a></li>
-    <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
-    <li><a href="io.html">io</a></li>
-    <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -72,28 +100,35 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
     <li><a href="os.html">os</a></li>
-    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
-    <li><a href="regex.html">regex</a></li>
-    <li><a href="set.html">set</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
-    <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
     <li><a href="tsid.html">tsid</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
-    <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
-    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -108,15 +143,26 @@
       <pre class="usage"><code>open() <span class="arrow">-&gt;</span> bool</code></pre>
       <p class="doc">Initialise the audio engine. Call once before loading/playing. Returns true on success. v1 always succeeds (null backend).</p>
     </div>
+    <div class="function" id="open_headless" data-name="open_headless">
+      <h3 class="function-name">open_headless <span class="kind">fn</span></h3>
+      <pre class="usage"><code>open_headless(sample_rate, channels) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">sample_rate: int, channels: int</span></p>
+      <p class="doc">Open a HEADLESS engine instead: no device, no mixer thread. Nothing advances — no position, no played frame, no fade — until `render` pulls frames through the mixer, so every number a test reads back follows from the calls it made rather than from wall-clock time. Use it to hold a mix to numbers the way a renderer is held to pixels. Returns false (with `last_error`) if an engine is already open. `is_null_backend` is also true for a headless engine.</p>
+    </div>
     <div class="function" id="close" data-name="close">
       <h3 class="function-name">close <span class="kind">fn</span></h3>
       <pre class="usage"><code>close()</code></pre>
-      <p class="doc">Shut the engine down. Unload sounds first.</p>
+      <p class="doc">Shut the engine down. Unload sounds and free groups first.</p>
     </div>
     <div class="function" id="is_null_backend" data-name="is_null_backend">
       <h3 class="function-name">is_null_backend <span class="kind">fn</span></h3>
       <pre class="usage"><code>is_null_backend() <span class="arrow">-&gt;</span> bool</code></pre>
       <p class="doc">True when the active backend is the NULL (silent) backend — the v1 default. Lets a caller / test assert deterministic, device-free behaviour.</p>
+    </div>
+    <div class="function" id="is_headless" data-name="is_headless">
+      <h3 class="function-name">is_headless <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_headless() <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="doc">True when the engine was opened with `open_headless`.</p>
     </div>
     <div class="function" id="load_wav" data-name="load_wav">
       <h3 class="function-name">load_wav <span class="kind">fn</span></h3>
@@ -124,10 +170,37 @@
       <p class="signature"><span class="sig-params">data: string, length: int</span></p>
       <p class="doc">Decode `length` bytes of `data` (a WAV byte string — e.g. from fs.read_binary) into a playable source. Returns the source on success, or a non-empty error on malformed / unsupported input. The source is owned by the caller: release it with `unload`.</p>
     </div>
+    <div class="function" id="load_pcm" data-name="load_pcm">
+      <h3 class="function-name">load_pcm <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load_pcm(data, length, sample_rate, channels, format) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">data: string, length: int, sample_rate: int, channels: int, format: int</span></p>
+      <p class="doc">Play PCM samples the caller ALREADY decoded, rather than an encoded container (asks/pcm-please.md). `load_wav` is really a format-sniffing decoder — it accepts mp3 and flac too — but every entry point wants bytes miniaudio can demux itself. That leaves no way in for samples a *different* decoder produced, which is exactly the case when contrib.avcodec has demuxed an MP4 and holds the audio packets. The workaround was pre-extracting a sidecar WAV: roughly doubling on-disk cost, a manual step before playback, and nothing at all for a live source with no file to extract from. `data` is interleaved samples, `length` its byte count, `format` one of the FORMAT_* constants above. The bytes are copied, so the caller's buffer need not outlive the source. Everything downstream works exactly as for `load_wav` — play, pause, position_ms, duration_ms, seek_ms, volume — because they all read the underlying sound, not the decoder. position_ms in particular remains usable as an A/V-sync master clock. `length` must be a whole number of frames (bytes-per-sample x channels); a partial trailing frame is refused rather than played as noise.</p>
+    </div>
     <div class="function" id="last_error" data-name="last_error">
       <h3 class="function-name">last_error <span class="kind">fn</span></h3>
       <pre class="usage"><code>last_error() <span class="arrow">-&gt;</span> string</code></pre>
       <p class="doc">The reason the most recent load failed (or &quot;&quot; after a success). BORROWED from the substrate — a static C string valid until the next load_wav.</p>
+    </div>
+    <div class="function" id="FORMAT_U8" data-name="FORMAT_U8">
+      <h3 class="function-name">FORMAT_U8 <span class="kind">const</span></h3>
+      <pre class="usage"><code>FORMAT_U8 = 1</code></pre>
+      <p class="doc">PCM sample formats for `load_pcm`. These mirror miniaudio's ma_format_* numbering so a caller never has to hardcode it. FORMAT_S16 (interleaved 16-bit signed) is what most decoders emit and what ffmpeg's `s16le` means.</p>
+    </div>
+    <div class="function" id="FORMAT_S16" data-name="FORMAT_S16">
+      <h3 class="function-name">FORMAT_S16 <span class="kind">const</span></h3>
+      <pre class="usage"><code>FORMAT_S16 = 2</code></pre>
+    </div>
+    <div class="function" id="FORMAT_S24" data-name="FORMAT_S24">
+      <h3 class="function-name">FORMAT_S24 <span class="kind">const</span></h3>
+      <pre class="usage"><code>FORMAT_S24 = 3</code></pre>
+    </div>
+    <div class="function" id="FORMAT_S32" data-name="FORMAT_S32">
+      <h3 class="function-name">FORMAT_S32 <span class="kind">const</span></h3>
+      <pre class="usage"><code>FORMAT_S32 = 4</code></pre>
+    </div>
+    <div class="function" id="FORMAT_F32" data-name="FORMAT_F32">
+      <h3 class="function-name">FORMAT_F32 <span class="kind">const</span></h3>
+      <pre class="usage"><code>FORMAT_F32 = 5</code></pre>
     </div>
     <div class="function" id="play" data-name="play">
       <h3 class="function-name">play <span class="kind">fn</span></h3>
@@ -165,6 +238,48 @@
       <p class="signature"><span class="sig-params">src: ptr</span></p>
       <p class="doc">The source's current volume in [0.0, 1.0].</p>
     </div>
+    <div class="function" id="pan" data-name="pan">
+      <h3 class="function-name">pan <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pan(src, p) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, p: float</span></p>
+      <p class="doc">Set the stereo pan in [-1.0, 1.0] (clamped): -1 wholly left, 0 centre, 1 wholly right. Equal-power, the Web Audio StereoPannerNode law, so a source keeps its loudness as it moves: a mono source at 0 sits at cos(pi/4) in each ear and at -1 at full gain in the left alone; a stereo source passes through unchanged at 0 and folds its far channel into the near one as it moves. The engine computes `p` from the listener's frame each tick and calls this. Returns true on success.</p>
+    </div>
+    <div class="function" id="get_pan" data-name="get_pan">
+      <h3 class="function-name">get_pan <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_pan(src) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">The pan last applied, in [-1.0, 1.0].</p>
+    </div>
+    <div class="function" id="pitch" data-name="pitch">
+      <h3 class="function-name">pitch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pitch(src, ratio) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, ratio: float</span></p>
+      <p class="doc">Set the playback-rate ratio: 2.0 plays an octave up in half the time, 0.5 an octave down in twice. Doppler, an engine note, variation between repeats of a clip. A ratio &lt;= 0 is refused (false, see `last_error`).</p>
+    </div>
+    <div class="function" id="get_pitch" data-name="get_pitch">
+      <h3 class="function-name">get_pitch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_pitch(src) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">The pitch ratio last applied (1.0 by default).</p>
+    </div>
+    <div class="function" id="looping" data-name="looping">
+      <h3 class="function-name">looping <span class="kind">fn</span></h3>
+      <pre class="usage"><code>looping(src, on) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, on: bool</span></p>
+      <p class="doc">Loop back to the start on reaching the end: engines, rain, wind, ambience. A stream cannot loop (false). Returns true on success.</p>
+    </div>
+    <div class="function" id="is_looping" data-name="is_looping">
+      <h3 class="function-name">is_looping <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_looping(src) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">True when the source loops.</p>
+    </div>
+    <div class="function" id="fade_ms" data-name="fade_ms">
+      <h3 class="function-name">fade_ms <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fade_ms(src, from, to, ms) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, from: float, to: float, ms: long</span></p>
+      <p class="doc">Fade the volume from `from` to `to` over `ms` milliseconds, starting now (at the next mixed frame). A `from` of -1.0 means &quot;from wherever the volume is now&quot; — the shape of a fade-out on stop. Returns true on success; a negative `ms` is refused.</p>
+    </div>
     <div class="function" id="seek_ms" data-name="seek_ms">
       <h3 class="function-name">seek_ms <span class="kind">fn</span></h3>
       <pre class="usage"><code>seek_ms(src, ms) <span class="arrow">-&gt;</span> bool</code></pre>
@@ -192,6 +307,89 @@
       <h3 class="function-name">sample_rate <span class="kind">fn</span></h3>
       <pre class="usage"><code>sample_rate(src) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">src: ptr</span></p>
+    </div>
+    <div class="function" id="played_frames" data-name="played_frames">
+      <h3 class="function-name">played_frames <span class="kind">fn</span></h3>
+      <pre class="usage"><code>played_frames(src) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">Frames of the SOURCE the mixer has consumed since load — across loops, and in source frames regardless of pitch. Under `open_headless` this is exactly what `render` pulled, which lets a test hold playback to a number.</p>
+    </div>
+    <div class="function" id="group_new" data-name="group_new">
+      <h3 class="function-name">group_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>group_new() <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="doc">Create a group (a bus: music, effects, ambience, voice) with its own volume. Sources join it with `set_group`. A group must outlive the sources routed through it: reassign or unload them before `group_free`. Returns (group, &quot;&quot;) on success, (null, reason) on failure.</p>
+    </div>
+    <div class="function" id="group_free" data-name="group_free">
+      <h3 class="function-name">group_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>group_free(group)</code></pre>
+      <p class="signature"><span class="sig-params">group: ptr</span></p>
+      <p class="doc">Release a group. Sources still routed through it fall silent until reassigned, so unload or `set_group` them first.</p>
+    </div>
+    <div class="function" id="group_volume" data-name="group_volume">
+      <h3 class="function-name">group_volume <span class="kind">fn</span></h3>
+      <pre class="usage"><code>group_volume(group, v) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">group: ptr, v: float</span></p>
+      <p class="doc">Set the group's volume in [0.0, 1.0] (clamped); it multiplies each member's own volume. Returns true on success.</p>
+    </div>
+    <div class="function" id="group_get_volume" data-name="group_get_volume">
+      <h3 class="function-name">group_get_volume <span class="kind">fn</span></h3>
+      <pre class="usage"><code>group_get_volume(group) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">group: ptr</span></p>
+      <p class="doc">The group's current volume in [0.0, 1.0].</p>
+    </div>
+    <div class="function" id="set_group" data-name="set_group">
+      <h3 class="function-name">set_group <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_group(src, group) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, group: ptr</span></p>
+      <p class="doc">Route `src` through `group`; `null` routes it straight to the output again. A source is in one group at a time. Returns true on success.</p>
+    </div>
+    <div class="function" id="stream_open" data-name="stream_open">
+      <h3 class="function-name">stream_open <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_open(sample_rate, channels, format, capacity_frames) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">sample_rate: int, channels: int, format: int, capacity_frames: int</span></p>
+      <p class="doc">Open a QUEUE source: a bounded ring of `capacity_frames` frames of PCM in `format` (a FORMAT_* constant) that the program pushes into with `stream_push` while the source plays. Reads past what has been pushed play silence and count as underruns rather than ending the source, so a producer that falls behind recovers instead of stopping. A stream cannot seek or loop and reports a duration of 0; `position_ms` is the audio it has consumed. Returns (src, &quot;&quot;) on success, (null, reason) on failure.</p>
+    </div>
+    <div class="function" id="stream_push" data-name="stream_push">
+      <h3 class="function-name">stream_push <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_push(src, data, length) <span class="arrow">-&gt;</span> int!</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, data: string, length: int</span></p>
+      <p class="doc">Push `length` bytes of interleaved samples into a queue source. `length` must be a whole number of frames. Returns (frames_accepted, &quot;&quot;): fewer than offered when the ring is full — push the rest later — or (-1, reason) for a bad argument or a source that is not a stream.</p>
+    </div>
+    <div class="function" id="stream_queued" data-name="stream_queued">
+      <h3 class="function-name">stream_queued <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_queued(src) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">Frames pushed and not yet consumed by the mixer (0 for a non-stream).</p>
+    </div>
+    <div class="function" id="stream_capacity" data-name="stream_capacity">
+      <h3 class="function-name">stream_capacity <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_capacity(src) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">The ring's capacity in frames (0 for a non-stream). Free space is `stream_capacity(src) - stream_queued(src)`.</p>
+    </div>
+    <div class="function" id="stream_underruns" data-name="stream_underruns">
+      <h3 class="function-name">stream_underruns <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_underruns(src) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr</span></p>
+      <p class="doc">Frames of silence the mixer substituted because the ring was empty. A producer keeping up holds this at 0; a headless test can assert it.</p>
+    </div>
+    <div class="function" id="render" data-name="render">
+      <h3 class="function-name">render <span class="kind">fn</span></h3>
+      <pre class="usage"><code>render(frames) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">frames: int</span></p>
+      <p class="doc">Mix `frames` frames of output through the headless engine and keep the block for `rendered_peak` / `rendered_sample`. Returns the number of frames rendered: 0 on a real-device or null-backend engine (use `open_headless`), or for a block over 4,194,304 frames.</p>
+    </div>
+    <div class="function" id="rendered_peak" data-name="rendered_peak">
+      <h3 class="function-name">rendered_peak <span class="kind">fn</span></h3>
+      <pre class="usage"><code>rendered_peak(channel) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">channel: int</span></p>
+      <p class="doc">The largest absolute sample on `channel` in the last rendered block, in [0.0, 1.0] for an unclipped mix. The one-line &quot;held to a number&quot; check: a mono clip of constant sample 0.125 at pan 0 renders a peak of 0.125 * cos(pi/4) in each channel.</p>
+    </div>
+    <div class="function" id="rendered_sample" data-name="rendered_sample">
+      <h3 class="function-name">rendered_sample <span class="kind">fn</span></h3>
+      <pre class="usage"><code>rendered_sample(frame, channel) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">frame: int, channel: int</span></p>
+      <p class="doc">One sample of the last rendered block, or 0.0 out of range.</p>
     </div>
     <div class="function" id="unload" data-name="unload">
       <h3 class="function-name">unload <span class="kind">fn</span></h3>
