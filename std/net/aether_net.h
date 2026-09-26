@@ -60,4 +60,10 @@ TcpSocket* tcp_socket_from_fd_owned(int fd);
 int tcp_poll_raw(TcpSocket* sock, int timeout_ms);
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int timeout_ms);
 
+// Shared by std.udp (#2201): one-time platform socket init (WSAStartup on
+// Windows, a no-op elsewhere), and the "was that EAGAIN/EWOULDBLOCK/EINTR"
+// test both modules apply after a recv/send that returned < 0.
+void aether_net_init(void);
+int aether_net_wouldblock(void);
+
 #endif

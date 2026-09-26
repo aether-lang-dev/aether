@@ -1,0 +1,104 @@
+// std.udp (#2201): the Go-style wrappers over loopback. The C layer is
+// held to numbers in tests/runtime/test_runtime_udp.c; this checks the
+// tuple shapes, the "would block" sentinel a game loop branches on, and
+// that an address received can be answered without resolving.
+
+import std.udp
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if !cond { println("FAIL: ${msg}"); return 1 }
+    return 0
+}
+
+main() {
+    fails = 0
+
+    // A null handle errors through every wrapper, never crashes.
+    _, berr = udp.bind("not an address", 0)
+    fails = fails + ck(berr != "", "bind of a bad host errors")
+    fails = fails + ck(udp.local_port(null) == -1, "local_port(null) is -1")
+    fails = fails + ck(udp.fd(null) == -1, "fd(null) is -1")
+    _, perr = udp.poll(null, 0)
+    fails = fails + ck(perr != "", "poll(null) errors")
+    fails = fails + ck(udp.set_buffer_sizes(null, 1, 1) != "", "set_buffer_sizes(null) errors")
+    fails = fails + ck(udp.set_broadcast(null, true) != "", "set_broadcast(null) errors")
+    _, rerr = udp.resolve("", 1)
+    fails = fails + ck(rerr != "", "resolve of an empty host errors")
+    fails = fails + ck(udp.addr_string(null) == "", "addr_string(null) is empty")
+    fails = fails + ck(udp.addr_host(null) == "", "addr_host(null) is empty")
+    fails = fails + ck(!udp.addr_equal(null, null), "addr_equal(null, null) is false")
+    _, serr = udp.send_to(null, "127.0.0.1", 1, "x", 1)
+    fails = fails + ck(serr != "", "send_to(null) errors")
+
+    server, err = udp.bind("127.0.0.1", 0)
+    fails = fails + ck(err == "", "bind server")
+    client, cerr = udp.bind("127.0.0.1", 0)
+    fails = fails + ck(cerr == "", "bind client")
+    port = udp.local_port(server)
+    fails = fails + ck(port > 0, "ephemeral port read back")
+    fails = fails + ck(udp.fd(server) >= 0, "fd is a descriptor")
+    fails = fails + ck(udp.set_buffer_sizes(server, 65536, 65536) == "", "set_buffer_sizes")
+    fails = fails + ck(udp.set_broadcast(client, true) == "", "set_broadcast")
+
+    // Idle socket: would block, not an error and not a wait.
+    buf = bytes.new(64)
+    n, sender, werr = udp.recv_from(server, bytes.data(buf), 64)
+    fails = fails + ck(werr == "would block", "idle recv_from reports would block, got '${werr}'")
+    fails = fails + ck(n == 0 && sender == null, "idle recv_from carries no packet")
+    ready, _ = udp.poll(server, 0)
+    fails = fails + ck(!ready, "poll(0) on an idle socket is false")
+
+    // Client -> server by host, answered by address.
+    sent, serr2 = udp.send_to(client, "127.0.0.1", port, "snapshot", 8)
+    fails = fails + ck(serr2 == "" && sent == 8, "send_to by host")
+    ready, _ = udp.poll(server, 1000)
+    fails = fails + ck(ready, "poll sees the packet")
+    n, sender, werr = udp.recv_from(server, bytes.data(buf), 64)
+    fails = fails + ck(werr == "" && n == 8, "recv_from gets 8 bytes, got ${n} '${werr}'")
+    fails = fails + ck(bytes.to_string(buf, n) == "snapshot", "payload intact")
+    fails = fails + ck(udp.addr_host(sender) == "127.0.0.1", "sender host")
+    fails = fails + ck(udp.addr_port(sender) == udp.local_port(client), "sender port is the client's")
+    fails = fails + ck(udp.addr_string(sender) == "127.0.0.1:${udp.local_port(client)}", "addr_string is host:port")
+
+    // The sender address is a value: equal to a fresh resolve of it, and
+    // hashes the same; a clone survives freeing the original.
+    same, _ = udp.resolve("127.0.0.1", udp.local_port(client))
+    fails = fails + ck(udp.addr_equal(sender, same), "received address equals a resolved one")
+    fails = fails + ck(udp.addr_hash(sender) == udp.addr_hash(same), "equal addresses hash alike")
+    other, _ = udp.resolve("127.0.0.1", port)
+    fails = fails + ck(!udp.addr_equal(sender, other), "different ports differ")
+    keep = udp.addr_clone(sender)
+    udp.addr_free(sender)
+    fails = fails + ck(udp.addr_equal(keep, same), "clone equals the original")
+
+    // Server -> client without resolving, received into a reused address.
+    asent, aerr = udp.send_to_addr(server, keep, "ack", 3)
+    fails = fails + ck(aerr == "" && asent == 3, "send_to_addr")
+    from = udp.addr_new()
+    ready, _ = udp.poll(client, 1000)
+    fails = fails + ck(ready, "client poll sees the ack")
+    m, ierr = udp.recv_from_into(client, bytes.data(buf), 64, from)
+    fails = fails + ck(ierr == "" && m == 3, "recv_from_into gets 3 bytes")
+    fails = fails + ck(bytes.to_string(buf, m) == "ack", "ack intact")
+    fails = fails + ck(udp.addr_port(from) == port, "ack came from the server")
+    m, ierr = udp.recv_from_into(client, bytes.data(buf), 64, from)
+    fails = fails + ck(ierr == "would block" && m == 0, "drained: would block again")
+
+    udp.addr_free(from)
+    udp.addr_free(keep)
+    udp.addr_free(other)
+    udp.addr_free(same)
+    bytes.free(buf)
+    fails = fails + ck(udp.close(client) == 0, "close client")
+    fails = fails + ck(udp.close(server) == 0, "close server")
+
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("std.udp ok")
+}
