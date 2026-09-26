@@ -5519,6 +5519,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
+    /* #2220: the post-store hook for `struct T @observable`. Declared
+     * unconditionally (it is one prototype); only a store on an observable
+     * struct field emits a call to it. Defined in runtime/aether_observe.c. */
+    print_line(gen, "extern void aether_observe_notify(void* obj);");
     /* Boxed form. The tag sits AFTER the {fn, env} prefix on purpose: that
      * prefix is the FFI layout std/collections and std/worker mirror and
      * embedders are documented to rely on, so putting the tag first would

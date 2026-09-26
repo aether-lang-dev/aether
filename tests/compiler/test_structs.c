@@ -131,3 +131,58 @@ TEST(duplicate_field_detection) {
 }
 
 // Registration is the TEST() macro's constructor; the harness owns main().
+
+/* #2220 — `struct Name @observable { ... }` carries the marker codegen keys
+ * on; any other attribute in that position is a parse error. */
+static ASTNode* parse_struct_source(const char* code, Token*** out_tokens,
+                                    int* out_count, Parser** out_parser) {
+    lexer_init(code);
+    Token** tokens = NULL;
+    int token_count = 0;
+    Token* token;
+    while ((token = next_token())->type != TOKEN_EOF) {
+        tokens = realloc(tokens, (token_count + 1) * sizeof(Token*));
+        tokens[token_count++] = token;
+    }
+    tokens = realloc(tokens, (token_count + 1) * sizeof(Token*));
+    tokens[token_count++] = token;
+    Parser* parser = create_parser(tokens, token_count);
+    parser->suppress_errors = 1;
+    *out_tokens = tokens;
+    *out_count = token_count;
+    *out_parser = parser;
+    return parse_struct_definition(parser);
+}
+
+static void free_struct_source(ASTNode* sd, Token** tokens, int count, Parser* parser) {
+    if (sd) free_ast_node(sd);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+}
+
+TEST(parse_observable_struct_attribute) {
+    Token** tokens; int count; Parser* parser;
+    ASTNode* sd = parse_struct_source("struct Model @observable { count: int, status: string }",
+                                      &tokens, &count, &parser);
+    ASSERT_NOT_NULL(sd);
+    ASSERT_TRUE(strcmp(sd->value, "Model") == 0);
+    ASSERT_EQ(2, sd->child_count);
+    ASSERT_TRUE(annotation_has_marker(sd->annotation, "observable"));
+    free_struct_source(sd, tokens, count, parser);
+}
+
+TEST(parse_plain_struct_has_no_observable_marker) {
+    Token** tokens; int count; Parser* parser;
+    ASTNode* sd = parse_struct_source("struct Model { count: int }", &tokens, &count, &parser);
+    ASSERT_NOT_NULL(sd);
+    ASSERT_FALSE(annotation_has_marker(sd->annotation, "observable"));
+    free_struct_source(sd, tokens, count, parser);
+}
+
+TEST(parse_unknown_struct_attribute_is_an_error) {
+    Token** tokens; int count; Parser* parser;
+    ASTNode* sd = parse_struct_source("struct Model @packed { count: int }", &tokens, &count, &parser);
+    ASSERT_NULL(sd);
+    free_struct_source(sd, tokens, count, parser);
+}

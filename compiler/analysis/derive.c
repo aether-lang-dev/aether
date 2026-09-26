@@ -47,9 +47,11 @@ static int parse_derive_list(const char* annotation,
     if (unsupported_cap > 0) unsupported_buf[0] = '\0';
     if (!annotation || strncmp(annotation, "derive:", 7) != 0) return 0;
     const char* p = annotation + 7;
-    while (*p) {
+    /* The list runs to the end of the string or to the `;` that starts the
+     * next annotation marker (`derive:eq;observable`). */
+    while (*p && *p != ';') {
         const char* start = p;
-        while (*p && *p != ',') p++;
+        while (*p && *p != ',' && *p != ';') p++;
         size_t len = (size_t)(p - start);
         if (*p == ',') p++;
         if (len == 0) continue;
@@ -287,9 +289,13 @@ int derive_synthesize_pass(ASTNode* program) {
             }
             add_child(program, fn);
         }
-        /* Clear annotation so re-running the pass is a no-op. */
+        /* Drop the `derive:` marker so re-running the pass is a no-op. The
+         * markers after it (`observable`, #2220) belong to later passes and
+         * stay. */
+        char* rest = strchr(t.sd->annotation, ';');
+        char* kept = rest ? strdup(rest + 1) : NULL;
         free(t.sd->annotation);
-        t.sd->annotation = NULL;
+        t.sd->annotation = kept;
     }
 
     free(tasks);

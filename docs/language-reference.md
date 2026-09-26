@@ -2675,6 +2675,61 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 
 Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
+### `@observable` notify on every field store
+
+`struct Name @observable { ... }` marks a struct whose values report each
+field assignment at run time. After every store into a field of such a
+value (`m.count = 1`, `p.status = "ready"`, and the compound forms
+`m.count += 1` desugars to), the generated code calls the runtime with the
+object's address, and the closures registered on that object through
+`std.observe` run, synchronously, in registration order. Nothing changes in
+the struct's layout: observers live in a runtime side table keyed by
+address, and a program that never observes pays one counter read per store.
+
+```aether
+import std.observe
+
+struct Model @observable {
+    count: int
+    status: string
+}
+
+main() {
+    m = heap.new(Model)
+    token = observe.observe(m, |obj: ptr| {
+        println("count is now ${m.count}")
+    })
+    m.count = 1          // count is now 1
+    m.count += 1         // count is now 2
+    observe.unobserve(m, token)
+    m.count = 3          // silent
+    heap.free(m)
+}
+```
+
+The rules for which object hears about a store:
+
+- A `heap.new` box or any `*Name` pointer is the object; pass it as it is.
+  A local value is its address: `observe.observe(&m, ...)`.
+- A store into a nested value (`a.b.c = v`, with `b: Inner`) notifies
+  `&a.b` and then `&a`, when each is observable, because both values'
+  bytes changed. A store through a pointer field (`a.p.c = v`, with
+  `p: *Inner`) notifies only the pointee; `a` did not change.
+- A store an observer makes on the object it is being told about lands but
+  starts no nested pass (the re-entrancy guard is per object). A store on
+  another object from inside an observer notifies that object at once.
+- An observer removed during a pass does not run later in that pass; one
+  added during a pass runs from the next.
+- A first field shares its parent's address, so observing `&a.first` and
+  `&a` is observing one object. Order the struct so a nested observable
+  value is not the first field when the two must be told apart.
+
+Notification is per object, not per field, and runs on the storing thread;
+marshal to a loop thread yourself (`std.worker`'s poster is the tool). An
+observer holds its closure until `unobserve` / `unobserve_all` releases it;
+remove observers before freeing the object. The attribute combines with a
+leading `@derive(...)`.
+
 ### `@derive(eq)` synthesize an equality helper for a struct
 
 Annotate a struct definition with `@derive(eq)` and the compiler synthesizes `int <StructName>_eq(<StructName> a, <StructName> b)` automatically, a field-by-field `==` chain that returns `1` when every field matches, `0` otherwise:
