@@ -4,6 +4,7 @@
 #include "../../compiler/codegen/codegen.h"
 #include "../../compiler/codegen/codegen_internal.h"
 #include "../../compiler/analysis/typechecker.h"
+#include "../../compiler/analysis/derive.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
