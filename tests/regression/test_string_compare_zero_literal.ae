@@ -1,0 +1,60 @@
+// Regression test for #2206 — `s == "0"` / `s != "0"` compiled to a
+// pointer compare.
+//
+// Bug: comparing a string with the one-character literal `"0"` emitted
+// a bare C pointer compare (`a != "0"`) while every other literal went
+// through strcmp. The string-compare codegen took a literal spelled `0`
+// for the integer null-check shortcut (`p == 0`) without looking at its
+// type, and the string literal `"0"` carries the same spelling.
+//
+// Pre-fix this file failed: `s != "0"` compared a runtime-built string
+// against a `.rodata` literal by address, so it was always true (and
+// `s == "0"` always false), whichever bytes the string held.
+//
+// Exercises: the type-aware null-operand check in the string-compare
+// codegen — a TYPE_STRING literal `"0"` is a content compare on either
+// side of the operator; an integer `0` against a `ptr` is still a null
+// check. The strings under test are built at run time so the C
+// compiler cannot make the pointer compare pass by literal pooling.
+
+import std.string
+
+extern exit(code: int)
+
+check(label: string, ok: bool) {
+    if ok {
+        println("  PASS: ${label}")
+    } else {
+        println("  FAIL: ${label}")
+        exit(1)
+    }
+}
+
+main() {
+    println("=== #2206 regression: string vs \"0\" literal ===")
+
+    zero = string.trim(" 0 ")
+    one = string.trim(" 1 ")
+
+    check("zero == \"0\"", zero == "0")
+    check("!(zero != \"0\")", !(zero != "0"))
+    check("one != \"0\"", one != "0")
+    check("!(one == \"0\")", !(one == "0"))
+
+    // Literal on the left-hand side takes the same path.
+    check("\"0\" == zero", "0" == zero)
+    check("\"0\" != one", "0" != one)
+
+    // A `ptr`-typed string (the #267 shape) against "0" is a content
+    // compare too, not a null check.
+    p = string.from_int(0)
+    check("string.from_int(0) == \"0\"", p == "0")
+    check("string.from_int(7) != \"0\"", string.from_int(7) != "0")
+
+    // The integer literal 0 against a ptr is still a null check.
+    let q: ptr = null
+    check("null ptr == 0", q == 0)
+    check("!(non-null ptr == 0)", !(p == 0))
+
+    println("=== all passed ===")
+}

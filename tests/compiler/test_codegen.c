@@ -91,11 +91,9 @@ TEST(codegen_while_loop_syntax) {
     free(tokens);
 }
 
-/* #2210: a `string` argument of a call through a typed function pointer
- * is passed as its bytes (`aether_string_data(arg)`), as an extern call
- * passes one, so a heap string's AetherString header never reaches the C
- * callee. Typechecked first: the pointer's signature and the argument's
- * type are what the checker stamped. One test per call shape. */
+/* Parse -> typecheck -> codegen a snippet and return the emitted C, for
+ * tests that assert on the generated text. Used by the #2210 typed-fn-pointer
+ * tests and the #2206 string-"0"-compare tests below. */
 static char* generate_typechecked(const char* source) {
     int count;
     Token** tokens = tokenize_source(source, &count);
@@ -105,6 +103,7 @@ static char* generate_typechecked(const char* source) {
     if (!typecheck_program(ast)) return NULL;
 
     FILE* out = tmpfile();
+    if (!out) return NULL;
     CodeGenerator* gen = create_code_generator(out);
     generate_program(gen, ast);
     char* buf = read_all(out);
@@ -158,5 +157,37 @@ TEST(codegen_fnptr_non_string_param_passes_arg_as_written) {
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "(cb))(n, p)") != NULL);
     ASSERT_TRUE(strstr(buf, "aether_string_data(p)") == NULL);
+    free(buf);
+}
+
+/* #2206: `s != "0"` must be a content compare, not a pointer compare. Both
+ * the integer literal `0` and the string literal `"0"` carry the text `0`;
+ * the null-check shortcut in the string-compare codegen used to match either,
+ * so the string one skipped strcmp. The string literal is TYPE_STRING out of
+ * the parser, which is what the fix keys on. */
+TEST(codegen_string_ne_zero_literal_uses_strcmp) {
+    char* buf = generate_typechecked(
+        "main() { a = \"abc\"\n if a != \"0\" { println(\"ne\") } }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a), _aether_safe_str(\"0\")) != 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "a != \"0\"") == NULL);
+    free(buf);
+}
+
+TEST(codegen_zero_literal_eq_string_uses_strcmp) {
+    char* buf = generate_typechecked(
+        "main() { a = \"abc\"\n if \"0\" == a { println(\"eq\") } }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(\"0\"), _aether_safe_str(a)) == 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "\"0\" == a") == NULL);
+    free(buf);
+}
+
+TEST(codegen_ptr_eq_int_zero_stays_pointer_check) {
+    char* buf = generate_typechecked(
+        "main() { let p: ptr = null\n if p == 0 { println(\"null\") } }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "p == 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_safe_str(p)") == NULL);
     free(buf);
 }
