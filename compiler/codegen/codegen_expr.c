@@ -2734,6 +2734,21 @@ static int utf8_sequence_length(const char* s) {
     return len;
 }
 
+/* True when `n` spells the null pointer in a comparison: the identifier
+ * `NULL`, or a bare literal `0` — but NOT the one-character string
+ * literal `"0"`. Both literals carry the text `0` in `value`; only the
+ * string one is TYPE_STRING at parse time (create_literal_node), so
+ * that is what tells them apart. Pre-#2206 `s != "0"` was taken for a
+ * null check and emitted a bare pointer compare against a `.rodata`
+ * literal, which was never equal (and drew clang's -Wstring-compare). */
+static int is_null_compare_operand(const ASTNode* n) {
+    if (!n || !n->value) return 0;
+    if (n->type == AST_IDENTIFIER) return strcmp(n->value, "NULL") == 0;
+    if (n->type != AST_LITERAL) return 0;
+    if (n->node_type && n->node_type->kind == TYPE_STRING) return 0;
+    return strcmp(n->value, "0") == 0;
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -3752,10 +3767,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     Type* rhs_type = expr->children[1]->node_type;
                     ASTNode* rhs = expr->children[1];
                     ASTNode* lhs_node = expr->children[0];
-                    int rhs_is_null = (rhs->type == AST_LITERAL && rhs->value && strcmp(rhs->value, "0") == 0)
-                                   || (rhs->type == AST_IDENTIFIER && rhs->value && strcmp(rhs->value, "NULL") == 0);
-                    int lhs_is_null = (lhs_node->type == AST_LITERAL && lhs_node->value && strcmp(lhs_node->value, "0") == 0)
-                                   || (lhs_node->type == AST_IDENTIFIER && lhs_node->value && strcmp(lhs_node->value, "NULL") == 0);
+                    int rhs_is_null = is_null_compare_operand(rhs);
+                    int lhs_is_null = is_null_compare_operand(lhs_node);
                     int lhs_is_string = (lhs_type && lhs_type->kind == TYPE_STRING);
                     int rhs_is_string = (rhs_type && rhs_type->kind == TYPE_STRING);
                     int lhs_is_ptr_t  = (lhs_type && lhs_type->kind == TYPE_PTR);
