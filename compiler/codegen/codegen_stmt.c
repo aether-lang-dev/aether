@@ -166,24 +166,6 @@ static int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
     return count_var_identifier_uses(gen->current_function, src_name) > 1;
 }
 
-// Returns 1 if the expression has any side effects (function calls, sends).
-static int expr_has_side_effects(ASTNode* node) {
-    if (!node) return 0;
-    if (node->type == AST_FUNCTION_CALL ||
-        node->type == AST_SEND_FIRE_FORGET ||
-        node->type == AST_SEND_ASK ||
-        // va_arg advances the va_list each evaluation; va_start/va_end
-        // mutate it too. Treating them as impure stops the series-
-        // collapse optimizer from hoisting/folding them (which would
-        // read the wrong number of varargs). Issue #536.
-        node->type == AST_VA_ARG ||
-        node->type == AST_VA_START ||
-        node->type == AST_VA_END) return 1;
-    for (int i = 0; i < node->child_count; i++) {
-        if (expr_has_side_effects(node->children[i])) return 1;
-    }
-    return 0;
-}
 
 // Try to detect and emit a collapsed arithmetic series loop.
 // Returns 1 if the loop was collapsed and emitted; 0 otherwise (caller emits normally).
@@ -207,7 +189,7 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     const char* counter_var = cond_left->value;
 
     // Bound must not have side effects
-    if (expr_has_side_effects(cond_right)) return 0;
+    if (codegen_expr_has_side_effects(cond_right)) return 0;
 
     // 2. Body: get statement list
     ASTNode** stmts;
@@ -317,7 +299,7 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
             } else {
                 // Regular invariant addend: must not reference counter
                 if (expr_references_var(addend, counter_var)) return 0;
-                if (expr_has_side_effects(addend)) return 0;
+                if (codegen_expr_has_side_effects(addend)) return 0;
                 acc_vars[acc_count]          = target;
                 acc_addends[acc_count]       = addend;
                 acc_is_linear[acc_count]     = 0;

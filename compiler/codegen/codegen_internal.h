@@ -77,6 +77,19 @@ int is_seq_owning_expr(CodeGenerator* gen, ASTNode* expr);
  * temp lifetime wrap (ArgDrainSub) to detect heap-returning
  * function calls in argument position. */
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
+
+/* Does evaluating the expression have a side effect (a call, a send, a
+ * va_* op)? Defined in codegen_expr.c. Gates the series-collapse
+ * optimizer in codegen_stmt.c and the source-order hoist of string-
+ * interpolation segments (#2195). */
+int codegen_expr_has_side_effects(ASTNode* node);
+
+/* String-interpolation segment classifiers (#2195), defined in
+ * codegen_expr.c and unit-tested directly. */
+int interp_segment_is_text(ASTNode* ch);
+int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch);
+int interp_order_hoist_boundary(ASTNode* interp);
+const char* interp_temp_c_type(Type* t);
 /* Whether the discarded error slot of an `or`-expression's fallible is a
  * heap-owned string the `or` lowering must release (vs a raw literal it
  * must not free). See the definition in codegen_stmt.c. */
