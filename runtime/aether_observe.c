@@ -46,7 +46,28 @@ static size_t g_used;     /* live + tombstones */
 static size_t g_live;
 static long   g_next_token = 1;
 static int    g_total_observers;   /* fast-path gate for notify */
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* PTHREAD_MUTEX_INITIALIZER is POSIX-only: the Win32 shim maps
+ * pthread_mutex_t to a CRITICAL_SECTION, which has no static initialiser.
+ * Same one-shot gate as runtime/sandbox/aether_audit.c. */
+#if defined(_WIN32)
+#include <stdatomic.h>
+static pthread_mutex_t g_lock_storage;
+static atomic_int g_lock_state = 0;   /* 0 uninit, 1 initing, 2 ready */
+static pthread_mutex_t* obs_lock(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&g_lock_state, &expected, 1)) {
+        pthread_mutex_init(&g_lock_storage, NULL);
+        atomic_store(&g_lock_state, 2);
+    } else {
+        while (atomic_load(&g_lock_state) != 2) { /* spin: one-shot */ }
+    }
+    return &g_lock_storage;
+}
+#else
+static pthread_mutex_t g_lock_storage = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t* obs_lock(void) { return &g_lock_storage; }
+#endif
 
 /* The gate is read without the lock in aether_observe_notify, so it is
  * kept with relaxed atomics where the compiler offers them. */
@@ -151,7 +172,7 @@ long aether_observe(void* obj, AetherObserverClosure cb) {
         aether_closure_env_free(cb.env);
         return 0;
     }
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     Slot* s = obs_slot_for(obj);
     long token = 0;
     if (s) {
@@ -171,7 +192,7 @@ long aether_observe(void* obj, AetherObserverClosure cb) {
             obs_release_slot(s);
         }
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
     if (!token) aether_closure_env_free(cb.env);
     return token;
 }
@@ -196,21 +217,21 @@ static int obs_retire(Slot* s, int idx) {
 int aether_unobserve(void* obj, long token) {
     if (!obj || token <= 0) return 0;
     int found = 0;
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     Slot* s = obs_find(obj);
     if (s) {
         for (int i = 0; i < s->count; i++) {
             if (s->items[i].token == token) { found = obs_retire(s, i); break; }
         }
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
     return found;
 }
 
 int aether_unobserve_all(void* obj) {
     if (!obj) return 0;
     int removed = 0;
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     Slot* s = obs_find(obj);
     if (s) {
         for (int i = 0; i < s->count; i++) {
@@ -226,28 +247,28 @@ int aether_unobserve_all(void* obj) {
         obs_total_add(-removed);
         if (!s->notifying) obs_release_slot(s);
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
     return removed;
 }
 
 int aether_observer_count(void* obj) {
     if (!obj) return 0;
     int n = 0;
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     Slot* s = obs_find(obj);
     if (s) {
         for (int i = 0; i < s->count; i++) n += !s->items[i].dead;
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
     return n;
 }
 
 int aether_observe_is_notifying(void* obj) {
     if (!obj) return 0;
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     Slot* s = obs_find(obj);
     int r = s ? s->notifying : 0;
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
     return r;
 }
 
@@ -257,25 +278,25 @@ void aether_observe_notify(void* obj) {
      * caller can distinguish from the store having happened first. */
     if (!obj || obs_total_load() == 0) return;
 
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     Slot* s = obs_find(obj);
     if (!s || s->notifying || s->count == 0) {
-        pthread_mutex_unlock(&g_lock);
+        pthread_mutex_unlock(obs_lock());
         return;
     }
     int n = s->count;
     Observer* snapshot = (Observer*)malloc(sizeof(Observer) * (size_t)n);
-    if (!snapshot) { pthread_mutex_unlock(&g_lock); return; }
+    if (!snapshot) { pthread_mutex_unlock(obs_lock()); return; }
     memcpy(snapshot, s->items, sizeof(Observer) * (size_t)n);
     s->notifying = 1;
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
 
     for (int i = 0; i < n; i++) {
         if (snapshot[i].dead) continue;
         /* An observer removed by an earlier observer in this same pass must
          * not run: re-check its liveness against the table. */
         int live = 1;
-        pthread_mutex_lock(&g_lock);
+        pthread_mutex_lock(obs_lock());
         Slot* cur = obs_find(obj);
         if (cur) {
             live = 0;
@@ -285,17 +306,17 @@ void aether_observe_notify(void* obj) {
         } else {
             live = 0;
         }
-        pthread_mutex_unlock(&g_lock);
+        pthread_mutex_unlock(obs_lock());
         if (!live) continue;
         ((void (*)(void*, void*))snapshot[i].cb.fn)(snapshot[i].cb.env, obj);
     }
     free(snapshot);
 
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(obs_lock());
     s = obs_find(obj);
     if (s) {
         s->notifying = 0;
         if (s->pending_dead) obs_sweep_dead(s);
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(obs_lock());
 }

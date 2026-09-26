@@ -639,6 +639,12 @@ void free_code_generator(CodeGenerator* gen) {
         for (int i = 0; i < gen->synthesised_count; i++) {
             free_ast_node(gen->synthesised_nodes[i]);
         }
+        /* #790: the heap.new box registry is reset per function, so the
+         * last function's entries (main's, typically) are still held here. */
+        for (int i = 0; i < gen->heap_box_var_count; i++) free(gen->heap_box_vars[i]);
+        free(gen->heap_box_vars);
+        gen->heap_box_vars = NULL;
+        gen->heap_box_var_count = 0;
         /* The closure registry discover_closures builds (one strdup'd capture
          * name per capture, plus the parent scope name; capture_types point
          * into the typechecker's types and are not owned here) and the
