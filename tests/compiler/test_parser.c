@@ -99,3 +99,28 @@ TEST(parser_cfn_is_still_a_plain_identifier_elsewhere) {
     ASSERT_EQ(AST_MAIN_FUNCTION, ast->children[0]->type);
     free_ast_node(ast);
 }
+
+/* The alias spelling, `type Name = fn(T1, T2) -> R`, is the same declaration
+ * as `cfn Name(a: T1, b: T2) -> R`: one node, one resolution. */
+TEST(parser_type_alias_of_fn_signature_is_a_cfn_def) {
+    ASTNode* ast = parse_source("type GenBuffers = fn(int, ptr)\ntype Add = fn(int, int) -> int\nmain() { }");
+    ASSERT_NOT_NULL(ast);
+    ASTNode* gen = ast->children[0];
+    ASSERT_EQ(AST_CFN_TYPE_DEF, gen->type);
+    ASSERT_STREQ("GenBuffers", gen->value);
+    ASSERT_EQ(TYPE_FUNCTION, gen->node_type->kind);
+    ASSERT_EQ(1, gen->node_type->is_fnptr);
+    ASSERT_EQ(2, gen->node_type->param_count);
+    ASSERT_EQ(TYPE_VOID, gen->node_type->return_type->kind);
+    ASTNode* add = ast->children[1];
+    ASSERT_EQ(AST_CFN_TYPE_DEF, add->type);
+    ASSERT_EQ(TYPE_INT, add->node_type->return_type->kind);
+    free_ast_node(ast);
+}
+
+/* A bare `fn` alias has no signature to call through, so it is refused. */
+TEST(parser_type_alias_of_bare_fn_is_an_error) {
+    ASTNode* ast = parse_source("type Cb = fn\nmain() { }");
+    ASSERT_TRUE(ast == NULL || ast->child_count == 0 || ast->children[0]->type != AST_CFN_TYPE_DEF);
+    if (ast) free_ast_node(ast);
+}

@@ -1,5 +1,5 @@
 #!/bin/sh
-# #2200: `cfn Name(...) -> R`, the loader shape. A module declares a named C
+# #2200: `cfn Name(...) -> R` / `type Name = fn(...) -> R`, the loader shape. A module declares a named C
 # function-pointer type, keeps the loaded pointer in a module-level `var`,
 # fills it from a C `get_proc_address(name)` (the wglGetProcAddress /
 # vkGetDeviceProcAddr / dlsym shape) and calls through it; the program that
@@ -41,7 +41,7 @@ exports (GenBuffers, BufferData, load, gen, lookup)
 extern get_proc_address(name: string) -> ptr
 
 cfn GenBuffers(n: int, ids: ptr)
-cfn BufferData(target: int, size: long, data: ptr, usage: int)
+type BufferData = fn(int, long, ptr, int)
 
 var gen_buffers: GenBuffers = null
 var buffer_data: BufferData = null

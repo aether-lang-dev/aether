@@ -6386,6 +6386,27 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     match_token(parser, TOKEN_SEMICOLON);
                     return d;
                 }
+                // #2200: `type Name = fn(T1, T2) -> R` — a named C function-
+                // pointer type, the alias form of `cfn Name(a: T1, b: T2) -> R`
+                // (no new word; the signature is written as a use site would
+                // write it). Same node, same resolution.
+                if (dk && dk->type == TOKEN_IDENTIFIER && dk->value &&
+                    strcmp(dk->value, "fn") == 0) {
+                    Token* paren = peek_ahead(parser, 1);
+                    if (!paren || paren->type != TOKEN_LEFT_PAREN) {
+                        parser_error(parser,
+                            "a function-pointer type alias needs a signature: "
+                            "`type Name = fn(T1, T2) -> R`");
+                        return NULL;
+                    }
+                    Type* sig = parse_type(parser);
+                    if (!sig) return NULL;
+                    ASTNode* d = create_ast_node(AST_CFN_TYPE_DEF,
+                                                 name->value, name->line, name->column);
+                    d->node_type = sig;
+                    match_token(parser, TOKEN_SEMICOLON);
+                    return d;
+                }
                 // #914 sum/variant type: `type Name = A | B | C`. The variants
                 // are existing struct type names separated by `|`. At least two
                 // are required (a single-name alias is not a supported form).

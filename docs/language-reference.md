@@ -370,7 +370,7 @@ Aether has **no general-purpose cast operator**. The `as` keyword is reserved fo
 - `import mod as alias` module aliasing (only inside `import` statements)
 - `expr as *StructName` pointer-overlay struct cast (a leading `*` then a struct name; see [§ Pointer-to-struct type](#pointer-to-struct-type-structname-and-expr-as-structname) below)
 - `expr as fn(T1, T2, ...) -> R` function-pointer cast (call a stored pointer with type checking; see [§ Function-pointer parameters](#function-pointer-parameters-fnt1-t2---r) below)
-- `expr as Name` where `Name` is a `cfn` declaration, the same function-pointer cast under a name (see [§ Named C function-pointer types](#named-c-function-pointer-types-cfn-namea-t1-b-t2---r) below)
+- `expr as Name` where `Name` is a named function-pointer type (`type Name = fn(...) -> R` or `cfn Name(...) -> R`), the same function-pointer cast under a name (see [§ Named C function-pointer types](#named-c-function-pointer-types-type-name--fnt1-t2---r) below)
 - `expr as T[]` typed-array view cast (reinterpret a raw pointer as a `T[]`)
 
 After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too. Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
@@ -2676,15 +2676,15 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 
 Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
-### Named C function-pointer types, `cfn Name(a: T1, b: T2) -> R`
+### Named C function-pointer types, `type Name = fn(T1, T2) -> R`
 
-`cfn` declares a C function-pointer signature under a name, the typedef form of `fn(T1, T2) -> R`. It exists for entry points a program fetches at run time: OpenGL past 1.1 on Windows and all of Vulkan come back from `wglGetProcAddress` / `glfwGetProcAddress` / `vkGetDeviceProcAddr` / `dlsym` as a bare `ptr`, and the signature has to be written down once, not at every use.
+A C function-pointer signature can be declared under a name, the typedef form of `fn(T1, T2) -> R`, in two spellings that mean the same thing: `type GenBuffers = fn(int, ptr)`, the signature as a use site writes it, and `cfn GenBuffers(n: int, ids: ptr)`, the shape of the C prototype it mirrors. It exists for entry points a program fetches at run time: OpenGL past 1.1 on Windows and all of Vulkan come back from `wglGetProcAddress` / `glfwGetProcAddress` / `vkGetDeviceProcAddr` / `dlsym` as a bare `ptr`, and the signature has to be written down once, not at every use.
 
 ```aether,fragment
 extern get_proc_address(name: string) -> ptr
 
-cfn GenBuffers(n: int, ids: ptr)
-cfn BufferData(target: int, size: long, data: ptr, usage: int)
+type GenBuffers = fn(int, ptr)
+cfn BufferData(target: int, size: long, data: ptr, usage: int)   // same declaration, prototype-shaped
 
 var gl_gen_buffers: GenBuffers = null      // loaded once, called anywhere
 
@@ -2699,9 +2699,9 @@ make_buffer() -> int {
 }
 ```
 
-The parameter list takes the `extern` spelling (`name: type`, so a declaration can be pasted from the C prototype) or a bare type list (`cfn Add(int, int) -> int`); omitting `-> R` means void. Parameter names are documentation only. A `cfn` name goes wherever `fn(T1, T2) -> R` goes, with the same meaning: a local (`sc = p as Scale`, `let sc: Scale = ...`), a module-level `var`, a parameter, a struct field, a return type, and a parameter of another `cfn` (`cfn Visit(cb: Bump, t: *Thing)`). The argument and return types are those `extern` accepts, `*StructName` pointers included; a struct passed by value is not (C would need the typedef, and Vulkan's `VkCreateInfo` family takes pointers). A module lists it in `exports (...)` and an importer names it bare, as it names an imported struct.
+In the `cfn` spelling the parameter list takes the `extern` form (`name: type`, so a declaration can be pasted from the C prototype) or a bare type list (`cfn Add(int, int) -> int`); parameter names are documentation only. In both spellings, omitting `-> R` means void, and `type Name = fn` with no signature is an error (a bare `fn` is a closure, which cannot be a C function pointer). The name goes wherever `fn(T1, T2) -> R` goes, with the same meaning: a local (`sc = p as Scale`, `let sc: Scale = ...`), a module-level `var`, a parameter, a struct field, a return type, and a parameter of another `cfn` (`cfn Visit(cb: Bump, t: *Thing)`). The argument and return types are those `extern` accepts, `*StructName` pointers included; a struct passed by value is not (C would need the typedef, and Vulkan's `VkCreateInfo` family takes pointers); a struct returned by value works when an Aether `struct` with the same layout names it. A module lists it in `exports (...)` and an importer names it bare, as it names an imported struct.
 
-Two things do not change from the anonymous spelling. Storage is a `void*`, and each call carries the typed cast, so no C `typedef` is emitted and the name cannot collide with one from a header (`PFNGLGENBUFFERSPROC`). And the type is structural: two `cfn`s over the same signature are one type, and a `GenBuffers` value is assignable to a `fn(int, ptr)` slot. The operand of `as Name` must be a `ptr` (or an Aether function's name, which takes its address); a closure has an environment and cannot become a C function pointer.
+Two things do not change from the anonymous spelling. Storage is a `void*`, and each call carries the typed cast, so no C `typedef` is emitted and the name cannot collide with one from a header (`PFNGLGENBUFFERSPROC`). And the type is structural: two names over the same signature are one type, and a `GenBuffers` value is assignable to a `fn(int, ptr)` slot. The operand of `as Name` must be a `ptr` (or an Aether function's name, which takes its address); a closure has an environment and cannot become a C function pointer.
 
 ### `@observable` notify on every field store
 

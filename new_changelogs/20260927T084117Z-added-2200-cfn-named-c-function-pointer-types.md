@@ -1,7 +1,8 @@
-- **Named C function-pointer types, `cfn Name(a: T1, b: T2) -> R`.** OpenGL
+- **Named C function-pointer types, `type Name = fn(T1, T2) -> R` and `cfn Name(a: T1, b: T2) -> R`.** OpenGL
   past 1.1 and all of Vulkan are reached through pointers fetched at run time
-  (`wglGetProcAddress`, `vkGetDeviceProcAddr`, `dlsym`). A `cfn` names one
-  such signature once: `var gen_buffers: GenBuffers = null`, loaded with
+  (`wglGetProcAddress`, `vkGetDeviceProcAddr`, `dlsym`). Either spelling names one
+  such signature once (the `type` alias as a use site writes it, `cfn` as the
+  C prototype reads): `var gen_buffers: GenBuffers = null`, loaded with
   `get_proc_address("glGenBuffers") as GenBuffers`, is then called with C's
   calling convention from anywhere, with struct pointers, `float` and `f32` in
   the signature. It is the typedef form of `fn(T1, T2) -> R` and goes wherever

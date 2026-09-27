@@ -150,3 +150,24 @@ TEST(typechecker_float_returning_function_address_casts_to_a_cfn) {
     ASSERT_EQ(1, typecheck_program(ast));
     free_ast_node(ast);
 }
+
+/* Both spellings name the same structural type: a value cast to the `cfn`
+ * form is assignable where the `type` alias form is expected, and a struct
+ * returned by value goes through. */
+TEST(typechecker_type_alias_and_cfn_spellings_interoperate) {
+    ASTNode* ast = parse_source(
+        "struct Vec2 { x: f32, y: f32 }\n"
+        "extern getp() -> ptr\n"
+        "type MakeVec = fn(f32, f32) -> Vec2\n"
+        "cfn Maker(x: f32, y: f32) -> Vec2\n"
+        "use(mk: MakeVec) -> Vec2 { return mk(1.0, 2.0) }\n"
+        "main() { m = getp() as Maker\n"
+        "  v = use(m)\n"
+        "  println(\"${v.x}\") }");
+    ASSERT_NOT_NULL(ast);
+    ASSERT_EQ(1, typecheck_program(ast));
+    ASTNode* alias = find_first_node(ast, AST_CFN_TYPE_DEF, "MakeVec");
+    ASSERT_NOT_NULL(alias);
+    ASSERT_EQ(TYPE_STRUCT, alias->node_type->return_type->kind);
+    free_ast_node(ast);
+}

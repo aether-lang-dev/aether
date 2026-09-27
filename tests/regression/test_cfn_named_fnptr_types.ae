@@ -1,4 +1,5 @@
-// #2200: `cfn Name(a: T1, b: T2) -> R` names a C function-pointer type once,
+// #2200: `cfn Name(a: T1, b: T2) -> R`, or `type Name = fn(T1, T2) -> R`,
+// names a C function-pointer type once,
 // so a GetProcAddress'd entry point (OpenGL past 1.1, all of Vulkan) can be
 // declared, stored in a module-level `var`, loaded with `p as Name`, and
 // called with C's calling convention from anywhere. The name resolves to the
@@ -15,12 +16,14 @@ extern calloc(n: long, size: long) -> ptr
 extern free(p: ptr)
 
 struct Thing { value: int }
+struct Vec2 { x: f32, y: f32 }
 
 cfn GenBuffers(n: int, ids: ptr)
 cfn Bump(t: *Thing, by: int) -> *Thing
-cfn Peek(*Thing) -> int
+type Peek = fn(*Thing) -> int
 cfn Visit(cb: Bump, t: *Thing)
-cfn Scale(v: float, s: f32) -> float
+type Scale = fn(float, f32) -> float
+cfn MakeVec(x: f32, y: f32) -> Vec2
 
 struct Slot { bump: Bump, peek: Peek }
 
@@ -47,6 +50,7 @@ bump_impl(t: *Thing, by: int) -> *Thing { t.value = t.value + by; return t }
 peek_impl(t: *Thing) -> int { return t.value }
 visit_impl(cb: Bump, t: *Thing) { cb(t, 100) }
 scale_impl(v: float, s: f32) -> float { return v * s }
+make_vec_impl(x: f32, y: f32) -> Vec2 { return Vec2 { x: x, y: y } }
 
 apply(f: Bump, t: *Thing) { f(t, 5) }
 pick_bump() -> Bump { return bump_impl as Bump }
@@ -74,6 +78,10 @@ main() {
 
     let sc: Scale = scale_impl as Scale
     if sc(2.5, 4.0) != 10.0 { println("FAIL: float/f32 cfn (got ${sc(2.5, 4.0)})"); exit(1) }
+
+    mk = make_vec_impl as MakeVec
+    vec = mk(1.5, 2.5)
+    if vec.x != 1.5 || vec.y != 2.5 { println("FAIL: struct returned by value (got ${vec.x} ${vec.y})"); exit(1) }
 
     println("  PASS: named C function-pointer types")
     println("OK")
