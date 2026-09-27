@@ -1,6 +1,6 @@
 // Stands in for contrib.vulkan.vk in issue #2209: a library module whose
 // path ends in `vk`, imported by another library rather than by the program.
-exports ( SUCCESS, describe )
+exports(SUCCESS, describe)
 
 const SUCCESS = 0
 

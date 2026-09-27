@@ -1,6 +1,6 @@
 // `import … as …` inside a library module (#2209's second finding).
 import gfx.vk as vkapi
-exports ( ok, name, shadowed )
+exports(ok, name, shadowed)
 
 ok() -> int {
     return vkapi.SUCCESS

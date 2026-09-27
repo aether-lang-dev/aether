@@ -1,6 +1,6 @@
 // Imports gfx.vk by its last segment and uses a const and a function of it.
 import gfx.vk
-exports ( ok, name )
+exports(ok, name)
 
 ok() -> int {
     return vk.SUCCESS
