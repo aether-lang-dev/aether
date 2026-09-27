@@ -131,7 +131,7 @@ _diagnostic(status: int, code: int, err: ptr) -> string {
 query(src: string, input_text: string) -> string! {
     prog, cerr = compile(src)
     if prog == null { return "", "jq: error: ${cerr}" }
-    input, jerr = json.parse(input_text)
+    input, jerr = value.parse_json(input_text)
     if input == null {
         free(prog)
         return "", "jq: error: invalid JSON input: ${jerr}"
@@ -184,7 +184,7 @@ parse_stream(text: string) -> ptr! {
         if i < n {
             start = i
             i = _value_end(text, n, i)
-            v, err = json.parse(string.substring_n(text, n, start, i))
+            v, err = value.parse_json(string.substring_n(text, n, start, i))
             if v == null {
                 free_values(out)
                 return null, "${err} (in the JSON text at byte ${start})"

@@ -19,15 +19,17 @@ import std.list
 import std.math
 import std.string
 import std.strbuilder
+import std.set
 
 exports(
     T_NULL, T_BOOL, T_NUMBER, T_STRING, T_ARRAY, T_OBJECT,
     type_of, type_name, truthy,
     make_number, make_int, number_of, is_integral,
     copy, eq, cmp,
+    MAX_DEPTH, deeper_than, clamp_int, parse_json,
     sorted_keys, sort_list,
     to_json, to_json_indent, num_to_string,
-    codepoint_count, explode, implode, codepoint_slice, codepoint_of_byte,
+    codepoint_count, explode, implode, codepoint_slice, codepoint_of_byte, codepoints_between,
     without_key, array_slice,
     environ_count, environ_entry,
     new_string, string_value
@@ -136,6 +138,131 @@ copy(v: ptr) -> ptr {
         i = i + 1
     }
     return o
+}
+
+// How deep a value may nest: [] is 1 deep, [[]] 2. std.json's parser stops
+// at 256, and a program can build deeper; this is the bound the recursive
+// operations here (copy, cmp, to_json) are sized for on a small stack.
+const MAX_DEPTH = 512
+
+// 1 when `v` nests more than `limit` containers deep. Stops descending at
+// the limit, so it is safe on any value, however deep.
+deeper_than(v: ptr, limit: int) -> int {
+    t = type_of(v)
+    if t != T_ARRAY && t != T_OBJECT { return 0 }
+    if limit <= 0 { return 1 }
+    if t == T_ARRAY {
+        n = json.json_array_size(v)
+        i = 0
+        while i < n {
+            if deeper_than(json.json_array_get_raw(v, i), limit - 1) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    n = json.json_object_size_raw(v)
+    i = 0
+    while i < n {
+        if deeper_than(json.json_object_value_at(v, i), limit - 1) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// A double as an int, saturating at the int range instead of overflowing
+// (which C leaves undefined and x86 answers with INT_MIN). NaN is 0. Any
+// index or count jq takes from a number goes through here.
+clamp_int(d: float) -> int {
+    if d != d { return 0 }
+    if d >= 2147483647.0 { return 2147483647 }
+    if d <= -2147483648.0 { return -2147483648 }
+    return d as int
+}
+
+// Parse a JSON text into a value with jq's semantics where std.json's
+// differ: a repeated key resolves to its last value (std.json keeps every
+// entry, and which one a lookup found depended on whether the object had
+// been copied yet), and U+0000 is refused rather than silently truncating
+// the string it appears in (std.json strings are C strings). Returns
+// (value, "") or (null, diagnostic).
+parse_json(text: string) -> ptr! {
+    if _has_nul_escape(text) == 1 {
+        return null, "\\u0000 is not supported in strings"
+    }
+    v, err = json.parse(text)
+    if v == null { return null, "${err}" }
+    if _has_repeated_key(v) == 0 { return v, "" }
+    // copy() writes each key once, keeping the last value in the first
+    // key's position, which is what jq does.
+    fixed = copy(v)
+    json.json_free(v)
+    return fixed, ""
+}
+
+// Does the JSON text spell the escape \u0000 (outside of an escaped
+// backslash)? A backslash outside a string is a parse error either way.
+_has_nul_escape(text: string) -> int {
+    n = string.length(text)
+    i = 0
+    while i + 1 < n {
+        if string.char_at_n(text, n, i) == 92 {
+            if string.char_at_n(text, n, i + 1) == 117 && i + 5 < n {
+                if string.char_at_n(text, n, i + 2) == 48 && string.char_at_n(text, n, i + 3) == 48 && string.char_at_n(text, n, i + 4) == 48 && string.char_at_n(text, n, i + 5) == 48 {
+                    return 1
+                }
+            }
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+    return 0
+}
+
+// Does any object in `v` hold the same key twice? Small objects are
+// checked pairwise, larger ones through a set, so the check stays linear
+// in the document.
+_has_repeated_key(v: ptr) -> int {
+    t = type_of(v)
+    if t == T_ARRAY {
+        n = json.json_array_size(v)
+        i = 0
+        while i < n {
+            if _has_repeated_key(json.json_array_get_raw(v, i)) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t != T_OBJECT { return 0 }
+    n = json.json_object_size_raw(v)
+    if n <= 8 {
+        i = 1
+        while i < n {
+            j = 0
+            while j < i {
+                if string.equals(json.json_object_key_at(v, i), json.json_object_key_at(v, j)) == 1 { return 1 }
+                j = j + 1
+            }
+            i = i + 1
+        }
+    } else {
+        seen = set.new()
+        i = 0
+        while i < n {
+            if set.add(seen, json.json_object_key_at(v, i)) == false {
+                set.free(seen)
+                return 1
+            }
+            i = i + 1
+        }
+        set.free(seen)
+    }
+    i = 0
+    while i < n {
+        if _has_repeated_key(json.json_object_value_at(v, i)) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
 }
 
 // Deep equality: numbers by value, objects regardless of key order.
@@ -491,11 +618,18 @@ _byte_of_codepoint(s: string, n: int, cp: int) -> int {
 // The codepoint index a byte offset falls in (regex spans are bytes, jq
 // reports offsets in codepoints).
 codepoint_of_byte(s: string, byte_off: int) -> int {
+    return codepoints_between(s, 0, byte_off)
+}
+
+// The codepoints that start in s[from:to). A caller walking a string can
+// keep a running (byte, codepoint) position and count from there, instead
+// of from the start each time.
+codepoints_between(s: string, from: int, to: int) -> int {
     n = string.length(s)
-    if byte_off > n { byte_off = n }
+    if to > n { to = n }
     count = 0
-    i = 0
-    while i < byte_off {
+    i = from
+    while i < to {
         c = string.char_at_n(s, n, i)
         if (c & 192) != 128 { count = count + 1 }
         i = i + 1
@@ -564,6 +698,10 @@ implode(arr: ptr) -> string! {
             return "", "Unicode codepoint must be numeric"
         }
         cp = json.json_get_int(e)
+        if cp == 0 {
+            strbuilder.free(sb)
+            return "", "\\u0000 is not supported in strings"
+        }
         if cp < 0 || cp > 1114111 { cp = 65533 }
         if cp >= 55296 && cp <= 57343 { cp = 65533 } // a lone surrogate
         strbuilder.append_codepoint(sb, cp)

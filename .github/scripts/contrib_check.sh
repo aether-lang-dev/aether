@@ -132,6 +132,19 @@ TESTS=(
   "jq/paths|contrib/jq/test_paths.ae||leak|"
   "jq/builtins|contrib/jq/test_builtins.ae||leak|"
   "jq/facade|contrib/jq/test_jq.ae||leak|"
+  # Hostile-input specs: programs nested past the stack (nesting), values
+  # nested past the depth cap and runaway recursion (depth), and numbers,
+  # NUL, duplicate keys, regexes, unbounded work (hardening).
+  #
+  # nesting is run-only: to trip a STACK-size guard on every runner its
+  # chains must be tens of thousands deep, which is ~9.4M allocations and
+  # ~485 MB. That runs in a second natively but ~30x slower under valgrind,
+  # past the 120 s entry timeout on a loaded CI runner. Its error/free paths
+  # are the same ones depth and hardening exercise at a volume valgrind can
+  # afford, so those two stay leak-gated and cover the leak surface.
+  "jq/nesting|contrib/jq/test_nesting.ae||run|"
+  "jq/depth|contrib/jq/test_depth.ae||leak|"
+  "jq/hardening|contrib/jq/test_hardening.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
   # and SKIPs itself at runtime when no driver is installed.
   #
@@ -382,9 +395,12 @@ for entry in "${TESTS[@]}"; do
       sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log" | head -25
     elif [ "$code" = "124" ]; then
       printf '  FAIL  %-22s (timeout — did not terminate)\n' "$label"
+      tail -40 "$log"
     else
       printf '  FAIL  %-22s (run, exit %s)\n' "$label" "$code"
-      grep -iE "fail" "$log" | head -5
+      # Loader errors and crash diagnostics need not contain "fail".
+      # Keep the last completed spec and the actual termination message.
+      tail -40 "$log"
     fi
     rc=1
   fi

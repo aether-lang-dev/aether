@@ -147,18 +147,43 @@ name_of(n: ptr) -> string {
 // Release a tree. Every child pointer is a node and every list holds nodes,
 // so one walk covers every kind. List slots are nulled before list.free so
 // std.list does not sniff the freed node memory for strings.
+// Iterative, over a work list, because a tree can be far deeper than the
+// C stack: the parser builds `1,1,1,…` and `.a.a.a…` as chains one node
+// deep per term, and a program the evaluator refused as too deeply nested
+// still has to be released.
 free_node(n: ptr) {
     if n == null { return }
-    p = n as *Node
-    free_node(p.a)
-    free_node(p.b)
-    free_node(p.c)
-    free_node(p.d)
-    free_node(p.e)
-    free_node_list(p.list)
-    if p.val != null { json.json_free(p.val) }
-    if p.name != null { json.json_free(p.name) }
-    heap.free(n)
+    work = list.new()
+    list.list_add_raw(work, n)
+    while list.size(work) > 0 {
+        last = list.size(work) - 1
+        p = list.get_raw(work, last) as *Node
+        list.set(work, last, null)
+        list.remove(work, last)
+        _push_child(work, p.a)
+        _push_child(work, p.b)
+        _push_child(work, p.c)
+        _push_child(work, p.d)
+        _push_child(work, p.e)
+        if p.list != null {
+            m = list.size(p.list)
+            i = 0
+            while i < m {
+                _push_child(work, list.get_raw(p.list, i))
+                list.set(p.list, i, null)
+                i = i + 1
+            }
+            list.free(p.list)
+        }
+        if p.val != null { json.json_free(p.val) }
+        if p.name != null { json.json_free(p.name) }
+        heap.free(p)
+    }
+    list.free(work)
+}
+
+_push_child(work: ptr, child: ptr) {
+    if child != null { list.list_add_raw(work, child) }
 }
 
 free_node_list(l: ptr) {

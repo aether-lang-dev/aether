@@ -27,6 +27,7 @@ import std.list
 import std.string
 import std.strbuilder
 import ast
+import guard
 import lexer
 import value
 
@@ -42,8 +43,20 @@ struct Parser {
     err: ptr, // owned JSON string: the first diagnostic, or null
     err_pos: int,
     no_comma: int, // 1 while parsing an object value, where `,` ends the entry
-    src: ptr // owned JSON string copy of the source, for $__loc__ line numbers
+    src: ptr, // owned JSON string copy of the source, for $__loc__ line numbers
+    depth: int, // terms being parsed, for the recursion guard
+    interp: int // string interpolations this parse is nested inside
 }
+
+// The stack the parser leaves for the evaluator that follows it, and the
+// nesting it allows where the stack cannot be measured.
+const PARSE_RESERVE = 262144
+const PARSE_FALLBACK_MAX = 500
+
+// Each `\(…)` is parsed by a nested parse of its text, which tokenizes
+// that text again, so interpolations nested n deep cost n passes over the
+// source. The stack would allow thousands; this keeps the cost bounded.
+const MAX_INTERPOLATION_DEPTH = 256
 
 // Strings the parser keeps are JSON strings (like the AST's names) so their
 // lifetime is explicit: released here, never by a generated destructor.
@@ -55,6 +68,14 @@ _dispose(p: *Parser) {
 
 // Parse a jq program. Returns (ast, "") or (null, diagnostic).
 parse(src: string) -> ptr! {
+    return _parse_at(src, 0, 0)
+}
+
+// `depth` is the nesting already on the stack when this parse starts and
+// `interp` the interpolations it is inside: the interpolations in a string
+// are parsed by a nested parse, and the guards have to see the whole
+// depth, not each parse's own.
+_parse_at(src: string, depth: int, interp: int) -> ptr! {
     toks, lerr = lexer.tokenize(src)
     if toks == null {
         return null, "syntax error: ${lerr}"
@@ -68,6 +89,8 @@ parse(src: string) -> ptr! {
     p.err_pos = 0
     p.no_comma = 0
     p.src = json.json_create_string(src)
+    p.depth = depth
+    p.interp = interp
     node = _parse_pipe(p)
     if p.failed == 0 {
         if _kind(p) != lexer.TK_EOF {
@@ -352,8 +375,17 @@ _parse_mul(p: *Parser) -> ptr {
 
 _parse_unary(p: *Parser) -> ptr {
     if _is_op(p, "-") == 1 {
+        // A `-` chain recurses here, not through _parse_term, so guard it
+        // here too: 80000 leading minuses would otherwise overflow the stack
+        // before the first _parse_term check (#2066).
+        p.depth = p.depth + 1
+        if guard.too_deep(p.depth, PARSE_RESERVE, PARSE_FALLBACK_MAX) == 1 {
+            p.depth = p.depth - 1
+            return _fail(p, "program nested too deeply")
+        }
         _advance(p)
         operand = _parse_unary(p)
+        p.depth = p.depth - 1
         return _mk(p, ast.N_NEG, operand, null)
     }
     return _parse_postfix(p, 1)
@@ -456,7 +488,21 @@ _number_literal(p: *Parser, d: float) -> ptr {
     return n
 }
 
+// Every nesting level of the grammar passes through here (a pipe's next
+// stage, a call's argument, a constructor's element, an interpolation's
+// program), so this is where the recursion is guarded.
 _parse_term(p: *Parser) -> ptr {
+    p.depth = p.depth + 1
+    if guard.too_deep(p.depth, PARSE_RESERVE, PARSE_FALLBACK_MAX) == 1 {
+        p.depth = p.depth - 1
+        return _fail(p, "program nested too deeply")
+    }
+    t = _parse_term_kind(p)
+    p.depth = p.depth - 1
+    return t
+}
+
+_parse_term_kind(p: *Parser) -> ptr {
     k = _kind(p)
     if k == lexer.TK_NUM {
         n = _number_literal(p, lexer.token_num(_tok(p)))
@@ -637,10 +683,23 @@ _parse_string_token(p: *Parser, format: string) -> ptr {
             (pn as *Node).val = json.json_create_string(json.json_get_string_raw(part))
         } else {
             src = json.json_get_string_raw(json.json_array_get_raw(part, 0))
-            sub, err = parse(src)
+            if p.interp >= MAX_INTERPOLATION_DEPTH {
+                ast.free_node(pn)
+                _fail(p, "string interpolation nested too deeply")
+                _advance(p)
+                return n
+            }
+            sub, err = _parse_at(src, p.depth, p.interp + 1)
             if sub == null {
                 ast.free_node(pn)
-                _fail(p, "in string interpolation: ${err}")
+                // One prefix names the context; a failure from a nested
+                // interpolation already carries it.
+                nested = "syntax error: in string interpolation: "
+                if string.starts_with(err, nested) == 1 {
+                    _fail(p, string.substring_n(err, string.length(err), 14, string.length(err)))
+                } else {
+                    _fail(p, "in string interpolation: ${err}")
+                }
                 _advance(p)
                 return n
             }

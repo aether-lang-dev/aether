@@ -108,6 +108,56 @@ Not supported:
   that allows depends on the stack: around 3500 calls on an 8 MiB Linux main
   thread, around 250 on a 1 MiB Windows one. Where the platform can't report
   its stack, calls stop at 300 deep.
+- U+0000 in strings: `std.json` strings are C strings, so a NUL would cut
+  the string short (and turn `{"a\u0000b":1,"a":2}` into two `"a"` keys).
+  `\u0000` is refused instead, in JSON input, in a program's string literal,
+  and from `implode`, `@base64d` and `@base32d`.
+
+## Limits against hostile input
+
+A program or an input can be built to exhaust the stack, the heap or the
+clock. These are the bounds; `test_nesting.ae`, `test_depth.ae` and
+`test_hardening.ae` hold them. Each ends in a jq error (so `try` catches it), never a crash.
+
+- Nesting in JSON input stops at `std.json`'s 256 levels (`nesting depth
+  exceeds limit of 256`).
+- Nesting in a program stops when the parser has less than 256 KiB of stack
+  left (`program nested too deeply`), or at 256 nested string
+  interpolations, each of which is parsed by a nested parse of its text.
+  Chains the parser builds in a loop (`1,1,1,…`, `.a.a.a…`) stop when the
+  evaluator has less than 128 KiB left (`expression nested too deeply`).
+- A value a program builds may nest 512 deep (`value nesting depth exceeds
+  limit of 512`), checked where containers are built: `[…]`, `{…}`,
+  `setpath` and the assignment operators, `group_by`. The recursive value
+  operations (copy, compare, serialise) are sized for that on a 1 MiB stack.
+  Values handed to `run` by the caller are not checked.
+- Every index and count taken from a number saturates at the `int` range
+  instead of overflowing: `.[1e300]` is null, `.[1e300:]` is empty,
+  `limit(1e300; f)` is all of `f`, `flatten(1e300)` flattens fully.
+- An array assignment past index 67108863 raises `Array index too large`
+  (jq's message; its own bound is 536870911, and `std.json`'s arrays cost
+  more per element). A string repeat whose result would pass 2^31 bytes
+  raises `Repeat string result too long`, as in jq.
+- `range` with a NaN step yields nothing, as in jq; a zero step still
+  repeats the start until something stops it.
+- A repeated key in JSON input resolves to its last value everywhere
+  (`.a`, `keys`, `length`, `to_entries`), as in jq. This holds for input
+  parsed by `query`, `parse_stream` and `fromjson`; a value parsed with
+  `std.json` directly keeps `std.json`'s entries. Parse with `parse_stream`.
+- Regular expressions are PCRE2 with its default match limit, so a
+  catastrophic pattern (`(a+)+$` against `aaaa…!`) reports no match instead
+  of running for hours. Global matching costs time linear in the subject
+  for a pattern without groups; with groups, each match re-runs a capturing
+  match on the rest of the string.
+
+What is not bounded, and costs what it costs: the size of what a program
+builds (`[range(1e8)]`), the work of a generator nothing limits
+(`range(1e18)`, `repeat(.)`), and, because every pipe stage copies its
+value and `std.json` looks a key up by scanning, objects of tens of
+thousands of keys built or updated one key at a time. `..` over a document
+copies each subtree once per level, so a deep and wide document costs depth
+times size. `sub`, `gsub` and `split` slice by codepoint, which is linear
+in the string per slice, as in jq.
 
 ## How it is built
 
@@ -115,6 +165,7 @@ Not supported:
 |---|---|
 | `value.ae` | jq's view of a `std.json` value: total order, deep copy, serialiser, codepoints |
 | `lexer.ae`, `parser.ae`, `ast.ae` | source to syntax tree, jq's precedence table |
+| `guard.ae` | the recursion guard the lexer, parser and evaluator share: stop while the stack still has room for the error |
 | `eval.ae` | the evaluator and the native builtins |
 | `prelude.ae` | builtins written in jq, installed under the program's own definitions |
 | `module.ae` | this facade |
@@ -142,6 +193,9 @@ few API-level ones at the top.
 | `test_paths.ae` | path expressions, path builtins, every assignment operator |
 | `test_builtins.ae` | the builtin library, regex, formats, math, dates |
 | `test_jq.ae` | the facade: compile, run, result codes, halt, variables, inputs, rendering |
+| `test_nesting.ae` | programs nested past the stack: constructors, pipes, chains, interpolations, sinks, paths |
+| `test_depth.ae` | values nested past their limit: deep input, runaway recursion, values a program builds |
+| `test_hardening.ae` | the other hostile-input classes: numbers past the int range, NUL and bad UTF-8, duplicate keys, pathological regexes, unbounded work, shell and CSV quoting |
 
 ```sh
 ae run contrib/jq/test_eval.ae

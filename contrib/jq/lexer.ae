@@ -16,6 +16,7 @@ import std.json
 import std.list
 import std.string
 import std.strbuilder
+import guard
 
 exports(
     TK_EOF, TK_IDENT, TK_KEYWORD, TK_FIELD, TK_VAR, TK_NUM, TK_STR, TK_FORMAT, TK_OP,
@@ -51,8 +52,14 @@ struct Lexer {
     pos: int,
     tokens: ptr,
     err: ptr,
-    err_pos: int
+    err_pos: int,
+    depth: int // interpolations currently being skipped, for the recursion guard
 }
+
+// The stack the interpolation scan leaves for whoever called tokenize, and
+// the nesting it allows where the stack cannot be measured.
+const SCAN_RESERVE = 262144
+const SCAN_FALLBACK_MAX = 500
 
 _dispose(lx: *Lexer) {
     json.json_free(lx.src)
@@ -73,6 +80,7 @@ tokenize(src: string) -> ptr! {
     lx.tokens = list.new()
     lx.err = null
     lx.err_pos = 0
+    lx.depth = 0
     ok = _run(lx)
     if ok == 0 {
         msg = "${json.json_get_string_raw(lx.err)} at position ${lx.err_pos}"
@@ -424,6 +432,11 @@ _lex_string(lx: *Lexer) -> int {
             else if e == 47 { strbuilder.append_byte(sb, 47) }
             else if e == 117 { // \uXXXX, with surrogate pairs combined
                 cp = _read_hex4(lx)
+                if cp == 0 {
+                    strbuilder.free(sb)
+                    json.json_free(parts)
+                    return _fail(lx, "\\u0000 is not supported in strings", lx.pos - 6)
+                }
                 if cp < 0 {
                     strbuilder.free(sb)
                     json.json_free(parts)
@@ -446,9 +459,13 @@ _lex_string(lx: *Lexer) -> int {
             } else if e == 40 { // \( expression )
                 sb = _flush_literal(sb, parts)
                 expr_start = lx.pos
-                if _skip_interpolation(lx) == 0 {
+                skipped = _skip_interpolation(lx)
+                if skipped <= 0 {
                     strbuilder.free(sb)
                     json.json_free(parts)
+                    if skipped < 0 {
+                        return _fail(lx, "string interpolation nested too deeply", expr_start)
+                    }
                     return _fail(lx, "unterminated string interpolation", expr_start)
                 }
                 src = string.substring_n(_src(lx), lx.len, expr_start, lx.pos - 1)
@@ -484,8 +501,21 @@ _lex_string(lx: *Lexer) -> int {
 
 // Advance past the `)` that closes a `\(`. lx.pos is just after `\(`.
 // Nested parentheses and nested strings (with their own escapes and
-// interpolations) are skipped, so `"\("a)b" | length)"` lexes.
+// interpolations) are skipped, so `"\("a)b" | length)"` lexes. Returns 1,
+// 0 when the interpolation never closes, or -1 when the nesting is deeper
+// than the stack allows: `"\("\("\(` … recurses here once per level.
 _skip_interpolation(lx: *Lexer) -> int {
+    lx.depth = lx.depth + 1
+    if guard.too_deep(lx.depth, SCAN_RESERVE, SCAN_FALLBACK_MAX) == 1 {
+        lx.depth = lx.depth - 1
+        return -1
+    }
+    r = _skip_parens(lx)
+    lx.depth = lx.depth - 1
+    return r
+}
+
+_skip_parens(lx: *Lexer) -> int {
     depth = 1
     while lx.pos < lx.len {
         c = _peek(lx)
@@ -497,7 +527,8 @@ _skip_interpolation(lx: *Lexer) -> int {
             lx.pos = lx.pos + 1
             if depth == 0 { return 1 }
         } else if c == 34 {
-            if _skip_string(lx) == 0 { return 0 }
+            r = _skip_string(lx)
+            if r <= 0 { return r }
         } else {
             lx.pos = lx.pos + 1
         }
@@ -519,7 +550,8 @@ _skip_string(lx: *Lexer) -> int {
             lx.pos = lx.pos + 1
             if _peek(lx) == 40 {
                 lx.pos = lx.pos + 1
-                if _skip_interpolation(lx) == 0 { return 0 }
+                r = _skip_interpolation(lx)
+                if r <= 0 { return r }
             } else {
                 lx.pos = lx.pos + 1
             }
