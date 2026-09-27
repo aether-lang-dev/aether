@@ -40,6 +40,7 @@ import std.encoding
 import std.os
 import std.io
 import ast
+import guard
 import parser
 import prelude
 import value
@@ -59,7 +60,6 @@ extern aether_jq_math2(op: int, x: float, y: float) -> float
 extern aether_jq_math3(op: int, x: float, y: float, z: float) -> float
 extern aether_jq_frexp_exp(x: float) -> int
 extern aether_jq_modf_int(x: float) -> float
-extern aether_jq_stack_remaining() -> long
 
 const ST_OK = 0
 const ST_ERROR = 1 // ctx.err holds the error value
@@ -138,7 +138,8 @@ struct Ctx {
     prog: ptr, // *Program
     inputs: ptr, // queue (std.list) of borrowed JSON values that `input` pops
     env_obj: ptr, // cached $ENV, owned
-    depth: int
+    depth: int, // jq function calls on the stack
+    nest: int // expressions being evaluated, for the recursion guard
 }
 
 // A compiled program: its AST, the prelude's, and the root environment
@@ -255,6 +256,7 @@ new_ctx(prog: ptr, inputs: ptr) -> *Ctx {
     c.inputs = inputs
     c.env_obj = null
     c.depth = 0
+    c.nest = 0
     return c
 }
 
@@ -401,6 +403,14 @@ emit(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
         _free_val(p)
         return
     }
+    // Sinks chain: a value leaving 30000 nested `try`s climbs 30000 sink
+    // frames without passing through ev, so the guard is here too.
+    if guard.too_deep(ctx.nest, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 {
+        _free_val(v)
+        _free_val(p)
+        _fail(ctx, "expression nested too deeply")
+        return
+    }
     k = s.kind
     if k == SK_COLLECT {
         list.list_add_raw(s.list, v)
@@ -506,6 +516,17 @@ emit(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
 
 ev(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
     if ctx.status != ST_OK { return }
+    ctx.nest = ctx.nest + 1
+    if guard.too_deep(ctx.nest, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 {
+        ctx.nest = ctx.nest - 1
+        _fail(ctx, "expression nested too deeply")
+        return
+    }
+    _ev_node(ctx, node, input, env, sink, p)
+    ctx.nest = ctx.nest - 1
+}
+
+_ev_node(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
     n = node as *Node
     k = n.kind
     if k == ast.N_IDENTITY {
@@ -551,7 +572,7 @@ ev(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
         arr = json.json_create_array()
         _drain_into_array(s.list, arr)
         heap.free(s)
-        if ctx.status != ST_OK {
+        if ctx.status != ST_OK || _check_depth(ctx, arr) == 0 {
             json.json_free(arr)
             return
         }
@@ -761,7 +782,7 @@ _index(v: ptr, key: ptr) -> ptr! {
         d = value.number_of(key)
         if d != d { return json.json_create_null(), "" }
         len = json.json_array_size(v)
-        idx = (math.floor(d)) as int
+        idx = value.clamp_int(math.floor(d))
         if idx < 0 { idx = idx + len }
         if idx < 0 || idx >= len { return json.json_create_null(), "" }
         return value.copy(json.json_array_get_raw(v, idx)), ""
@@ -827,14 +848,14 @@ _slice_bounds(len: int, from: ptr, to: ptr) -> (int, int) {
         if value.type_of(from) != value.T_NULL {
             d = value.number_of(from)
             if d < 0.0 { d = d + (len as float) }
-            a = (math.floor(d)) as int
+            a = value.clamp_int(math.floor(d))
         }
     }
     if to != null {
         if value.type_of(to) != value.T_NULL {
             d = value.number_of(to)
             if d < 0.0 { d = d + (len as float) }
-            b = (math.ceil(d)) as int
+            b = value.clamp_int(math.ceil(d))
         }
     }
     if a < 0 { a = 0 }
@@ -1148,8 +1169,16 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
         if ta == value.T_NUMBER && tb == value.T_NUMBER {
             return value.make_number(value.number_of(a) * value.number_of(b)), ""
         }
-        if ta == value.T_STRING && tb == value.T_NUMBER { return _repeat_string(a, b), "" }
-        if ta == value.T_NUMBER && tb == value.T_STRING { return _repeat_string(b, a), "" }
+        if ta == value.T_STRING && tb == value.T_NUMBER {
+            rep1, rerr1 = _repeat_string(a, b)
+            if rep1 == null { return null, "${rerr1}" }
+            return rep1, ""
+        }
+        if ta == value.T_NUMBER && tb == value.T_STRING {
+            rep2, rerr2 = _repeat_string(b, a)
+            if rep2 == null { return null, "${rerr2}" }
+            return rep2, ""
+        }
         if ta == value.T_OBJECT && tb == value.T_OBJECT { return _merge_deep(a, b), "" }
         return null, _arith_error(a, b, "multiplied")
     }
@@ -1245,18 +1274,27 @@ _merge_deep(a: ptr, b: ptr) -> ptr {
 
 // "ab" * 3 → "ababab"; n <= 0 → null (jq 1.7 semantics: repeat count
 // below one yields null).
-_repeat_string(s: ptr, n: ptr) -> ptr {
+// `s` repeated `n` times (null when n <= 0), refused as jq refuses it when
+// the result would not fit an int's worth of bytes.
+const MAX_REPEAT_BYTES = 2147483647.0
+
+_repeat_string(s: ptr, n: ptr) -> ptr! {
     d = value.number_of(n)
-    if d <= 0.0 || d != d { return json.json_create_null() }
-    count = (math.ceil(d)) as int
-    if d < 1.0 { count = 1 }
+    if d <= 0.0 || d != d { return json.json_create_null(), "" }
+    text = value.string_value(s)
+    len = string.length(text)
+    if len == 0 { return json.json_create_string(""), "" }
+    times = math.ceil(d)
+    if d < 1.0 { times = 1.0 }
+    if times * (len as float) > MAX_REPEAT_BYTES { return null, "Repeat string result too long" }
+    count = times as int
     sb = strbuilder.new(16)
     i = 0
     while i < count {
-        strbuilder.append(sb, value.string_value(s))
+        strbuilder.append(sb, text)
         i = i + 1
     }
-    return json.json_create_string(strbuilder.finish(sb))
+    return json.json_create_string(strbuilder.finish(sb)), ""
 }
 
 // "a,b" / "," → ["a","b"]; an empty separator splits into codepoints... no:
@@ -1384,6 +1422,10 @@ _object_entry(ctx: *Ctx, entries: ptr, i: int, partial: ptr, input: ptr, env: pt
         return
     }
     if i >= list.size(entries) {
+        if _check_depth(ctx, partial) == 0 {
+            json.json_free(partial)
+            return
+        }
         emit(ctx, sink, partial, null)
         return
     }
@@ -1936,22 +1978,20 @@ _env_object(ctx: *Ctx) -> ptr {
 
 // Runaway recursion must end in a jq error, not a C stack overflow. The
 // evaluator recurses on the C stack, about 2 KiB per jq call, so the guard
-// is the stack the thread has left: it stops while STACK_RESERVE bytes
-// remain for the error's own unwinding. Only where the platform cannot say
-// how much stack is left does a fixed call count stand in, set low enough
-// for a 1 MiB stack.
-const STACK_RESERVE = 262144
+// (jq.guard) is the stack the thread has left: a call stops while
+// CALL_RESERVE bytes remain for the error's own unwinding. Only where the
+// platform cannot say how much stack is left does a fixed call count stand
+// in, set low enough for a 1 MiB stack.
+//
+// Expressions nest on the stack too, without a call: `[[[[…]]]]`, a long
+// `1,1,1,…`, a `.a.a.a…` chain. `ev` guards those with half the reserve,
+// so that deep recursion still reports the call it was in, and a program
+// whose expressions alone would overflow the stack stops before it does
+// ("expression nested too deeply"; `?` and `try` catch it like any error).
+const CALL_RESERVE = 262144
 const FALLBACK_MAX_DEPTH = 300
-
-_too_deep(depth: int) -> int {
-    left = aether_jq_stack_remaining()
-    if left < 0 {
-        if depth > FALLBACK_MAX_DEPTH { return 1 }
-        return 0
-    }
-    if left < STACK_RESERVE { return 1 }
-    return 0
-}
+const NEST_RESERVE = 131072
+const FALLBACK_MAX_NEST = 1000
 
 _ev_call(ctx: *Ctx, n: *Node, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
     name = ast.name_of(node)
@@ -1976,7 +2016,7 @@ _ev_call(ctx: *Ctx, n: *Node, node: ptr, input: ptr, env: ptr, sink: *Sink, p: p
         return
     }
     ctx.depth = ctx.depth + 1
-    if _too_deep(ctx.depth) != 0 {
+    if guard.too_deep(ctx.depth, CALL_RESERVE, FALLBACK_MAX_DEPTH) != 0 {
         ctx.depth = ctx.depth - 1
         _fail(ctx, "function call depth exceeded in ${name}/${arity}")
         return
@@ -2040,22 +2080,75 @@ _call_bind(ctx: *Ctx, def: *Node, i: int, callee: ptr, caller: ptr, args: ptr, i
 
 // The value at `path` (borrowed array) inside `v` (borrowed), from index i.
 // Missing members read as null; a type mismatch is an error.
+// The value at `path` from index i, as a copy. Plain field and index steps
+// borrow their way down and copy once at the end: copying at every step
+// made getpath quadratic in the depth, and `tostream`, which calls it for
+// every path, cubic.
 _getpath(v: ptr, path: ptr, i: int) -> ptr! {
     n = json.json_array_size(path)
-    if i >= n { return value.copy(v), "" }
-    if value.type_of(v) == value.T_NULL { return json.json_create_null(), "" }
-    child, err = _index(v, json.json_array_get_raw(path, i))
-    if child == null { return null, "${err}" }
-    out, err2 = _getpath(child, path, i + 1)
-    json.json_free(child)
-    return out, "${err2}"
+    cur = v
+    while i < n {
+        key = json.json_array_get_raw(path, i)
+        tv = value.type_of(cur)
+        tk = value.type_of(key)
+        if tv == value.T_NULL && (tk == value.T_STRING || tk == value.T_NUMBER || tk == value.T_OBJECT || tk == value.T_NULL) {
+            return json.json_create_null(), ""
+        }
+        if tv == value.T_OBJECT && tk == value.T_STRING {
+            got = json.json_object_get_raw(cur, value.string_value(key))
+            if got == null { return json.json_create_null(), "" }
+            cur = got
+        } else if tv == value.T_ARRAY && tk == value.T_NUMBER {
+            d = value.number_of(key)
+            if d != d { return json.json_create_null(), "" }
+            len = json.json_array_size(cur)
+            idx = value.clamp_int(math.floor(d))
+            if idx < 0 { idx = idx + len }
+            if idx < 0 || idx >= len { return json.json_create_null(), "" }
+            cur = json.json_array_get_raw(cur, idx)
+        } else {
+            // A slice, an indices lookup, or an error: _index materialises
+            // the step, and the rest of the path is taken from that. One
+            // frame per such step, so the guard applies.
+            if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 { return null, "path nested too deeply" }
+            child, err = _index(cur, key)
+            if child == null { return null, "${err}" }
+            out, err2 = _getpath(child, path, i + 1)
+            json.json_free(child)
+            return out, "${err2}"
+        }
+        i = i + 1
+    }
+    return value.copy(cur), ""
 }
 
-// A copy of `v` with `newv` (owned) at `path` from index i. On error the
-// result is null and `newv` has been released.
-_setpath(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
+// Past this index an array assignment raises "Array index too large" (jq's
+// message; jq's own bound is 536870911, std.json's arrays cost more per
+// element, and either way `.[1e9] = 1` should fail, not thrash).
+const MAX_ARRAY_INDEX = 67108863
+
+// A copy of `v` with `newv` (owned) at `path`. On error the result is null
+// and `newv` has been released. Refused when the result would nest past
+// value.MAX_DEPTH, which a long path builds without any constructor.
+_setpath(v: ptr, path: ptr, newv: ptr) -> ptr! {
+    out, err = _setpath_at(v, path, 0, newv)
+    if out == null { return null, "${err}" }
+    if value.deeper_than(out, value.MAX_DEPTH) == 1 {
+        json.json_free(out)
+        return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
+    }
+    return out, ""
+}
+
+_setpath_at(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
     n = json.json_array_size(path)
     if i >= n { return newv, "" }
+    // One frame per path element: a 100000-element path would overflow
+    // the stack before the result's depth could be measured.
+    if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 {
+        json.json_free(newv)
+        return null, "path nested too deeply"
+    }
     key = json.json_array_get_raw(path, i)
     tv = value.type_of(v)
     tk = value.type_of(key)
@@ -2067,7 +2160,7 @@ _setpath(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
         k = value.string_value(key)
         child = null
         if tv == value.T_OBJECT { child = json.json_object_get_raw(v, k) }
-        sub, err = _setpath(child, path, i + 1, newv)
+        sub, err = _setpath_at(child, path, i + 1, newv)
         if sub == null { return null, "${err}" }
         out = json.json_create_object()
         if tv == value.T_OBJECT { json.json_free(out); out = value.copy(v) }
@@ -2081,15 +2174,20 @@ _setpath(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
         }
         len = 0
         if tv == value.T_ARRAY { len = json.json_array_size(v) }
-        idx = (math.floor(value.number_of(key))) as int
+        d = value.number_of(key)
+        idx = value.clamp_int(math.floor(d))
         if idx < 0 { idx = idx + len }
-        if idx < 0 {
+        if idx < 0 || d != d {
             json.json_free(newv)
             return null, "Out of bounds negative array index"
         }
+        if idx > MAX_ARRAY_INDEX {
+            json.json_free(newv)
+            return null, "Array index too large"
+        }
         child = null
         if idx < len { child = json.json_array_get_raw(v, idx) }
-        sub, err = _setpath(child, path, i + 1, newv)
+        sub, err = _setpath_at(child, path, i + 1, newv)
         if sub == null { return null, "${err}" }
         out = json.json_create_array()
         j = 0
@@ -2115,7 +2213,7 @@ _setpath(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
         a, b = _slice_bounds(len, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
         child = json.json_create_array()
         if tv == value.T_ARRAY { json.json_free(child); child = value.array_slice(v, a, b) }
-        sub, err = _setpath(child, path, i + 1, newv)
+        sub, err = _setpath_at(child, path, i + 1, newv)
         json.json_free(child)
         if sub == null { return null, "${err}" }
         if value.type_of(sub) != value.T_ARRAY {
@@ -2149,6 +2247,7 @@ _setpath(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
 // A copy of `v` without the member at `path` (from index i). Deleting a
 // missing member is a no-op; deleting the root gives null.
 _delpath(v: ptr, path: ptr, i: int) -> ptr! {
+    if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 { return null, "path nested too deeply" }
     n = json.json_array_size(path)
     if n == 0 { return json.json_create_null(), "" }
     tv = value.type_of(v)
@@ -2167,7 +2266,7 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
         if sub == null { return null, "${err2}" }
         one = json.json_create_array()
         json.json_array_add_raw(one, value.copy(key))
-        out, err3 = _setpath(v, one, 0, sub)
+        out, err3 = _setpath(v, one, sub)
         json.json_free(one)
         return out, "${err3}"
     }
@@ -2178,7 +2277,7 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
     if tv == value.T_ARRAY {
         len = json.json_array_size(v)
         if tk == value.T_NUMBER {
-            idx = (math.floor(value.number_of(key))) as int
+            idx = value.clamp_int(math.floor(value.number_of(key)))
             if idx < 0 { idx = idx + len }
             if idx < 0 { return null, "Out of bounds negative array index" }
             if idx >= len { return value.copy(v), "" }
@@ -2329,7 +2428,7 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
                 newv = combined
             }
         }
-        next, serr = _setpath(result, pth, 0, newv)
+        next, serr = _setpath(result, pth, newv)
         json.json_free(result)
         if next == null {
             json.json_free(rhs)
@@ -2370,7 +2469,7 @@ _update_paths(ctx: *Ctx, paths: ptr, f: ptr, input: ptr, env: ptr, sink: *Sink) 
                 if ctx.status == ST_BREAK && ctx.break_id == id { ctx.status = ST_OK }
                 if ctx.status == ST_OK {
                     if last.flag == 1 {
-                        next, serr = _setpath(result, pth, 0, last.val)
+                        next, serr = _setpath(result, pth, last.val)
                         last.val = null
                         json.json_free(result)
                         result = next
@@ -2541,7 +2640,7 @@ _native(ctx: *Ctx, name: string, arity: int, args: ptr, input: ptr, env: ptr, si
                     if value.type_of(nv) != value.T_NUMBER {
                         _fail(ctx, "Invalid limit: ${value.to_json(nv)}")
                     } else {
-                        _limit(ctx, (math.ceil(value.number_of(nv))) as int, list.get_raw(args, 1), input, env, sink, null)
+                        _limit(ctx, value.clamp_int(math.ceil(value.number_of(nv))), list.get_raw(args, 1), input, env, sink, null)
                     }
                 }
                 i = i + 1
@@ -2752,6 +2851,10 @@ _by(ctx: *Ctx, name: string, f: ptr, input: ptr, env: ptr, sink: *Sink) {
     }
     _free_list(vals)
     _free_list(keys)
+    if _check_depth(ctx, out) == 0 {
+        json.json_free(out)
+        return
+    }
     emit(ctx, sink, out, null)
 }
 
@@ -2797,7 +2900,7 @@ _apply(ctx: *Ctx, name: string, arity: int, vals: ptr, input: ptr, sink: *Sink) 
             return
         }
         ctx.status = ST_HALT
-        ctx.halt_code = (value.number_of(code)) as int
+        ctx.halt_code = value.clamp_int(value.number_of(code))
         ctx.err = value.copy(input)
         return
     }
@@ -2820,6 +2923,17 @@ _apply(ctx: *Ctx, name: string, arity: int, vals: ptr, input: ptr, sink: *Sink) 
         out3, err3 = _apply3(name, input, list.get_raw(vals, 0), list.get_raw(vals, 1), list.get_raw(vals, 2))
         _deliver(ctx, sink, out3, err3)
     }
+}
+
+// 1 when `v` may be emitted, 0 after raising the nesting error. Every
+// place that builds a container one level deeper than its members (array
+// and object construction, setpath, group_by) checks here, which is what
+// keeps values within value.MAX_DEPTH: everything else either flattens,
+// selects, or copies what it was given.
+_check_depth(ctx: *Ctx, v: ptr) -> int {
+    if value.deeper_than(v, value.MAX_DEPTH) == 0 { return 1 }
+    _fail(ctx, "value nesting depth exceeds limit of ${value.MAX_DEPTH}")
+    return 0
 }
 
 // Emit a native's result, or raise its error.
@@ -2849,6 +2963,9 @@ _range(ctx: *Ctx, vals: ptr, arity: int, sink: *Sink) {
     }
     x = value.number_of(a)
     end = value.number_of(b)
+    // A NaN step is neither positive, negative nor zero: jq yields nothing,
+    // where the zero-step loop below would never end.
+    if step != step { return }
     if step > 0.0 {
         while x < end {
             if ctx.status != ST_OK { return }
@@ -3176,7 +3293,7 @@ _array_to_list(arr: ptr) -> ptr {
 // Parse `s` with std.json (jq's fromjson). `nan` and friends are not JSON
 // and are not accepted here either.
 _fromjson(s: string) -> ptr! {
-    v, err = json.parse(s)
+    v, err = value.parse_json(s)
     if v == null {
         return null, "${err} (while parsing '${s}')"
     }
@@ -3352,7 +3469,7 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if value.number_of(a) < 0.0 { return null, "flatten depth must not be negative" }
         if t != value.T_ARRAY { return null, "Cannot iterate over ${_tname(t)}" }
         out = json.json_create_array()
-        _flatten_into(out, v, (value.number_of(a)) as int)
+        _flatten_into(out, v, value.clamp_int(value.number_of(a)))
         return out, ""
     }
     if string.equals(name, "startswith") == 1 {
@@ -3424,7 +3541,7 @@ _apply2(name: string, v: ptr, a: ptr, b: ptr) -> ptr! {
     }
     if string.equals(name, "setpath") == 1 {
         if value.type_of(a) != value.T_ARRAY { return null, "Path must be specified as an array" }
-        res5, rerr5 = _setpath(v, a, 0, value.copy(b))
+        res5, rerr5 = _setpath(v, a, value.copy(b))
         if res5 == null { return null, "${rerr5}" }
         return res5, ""
     }
@@ -3575,7 +3692,9 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
                 json.json_free(out)
                 out = json.json_create_bool(1)
             } else {
-                json.json_array_add_raw(out, _match_object(s, 0, caps, pattern))
+                names1 = _group_names(pattern)
+                json.json_array_add_raw(out, _match_object(s, 0, 0, caps, names1))
+                json.json_free(names1)
             }
             regex.captures_free(caps)
         } else if is_test == 1 {
@@ -3585,9 +3704,17 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
         regex.free(compiled)
         return out, ""
     }
+    // Global: the spans come from find_all; a pattern with groups needs a
+    // capturing match on each span's suffix as well. Codepoint offsets are
+    // counted from the previous match, not from the start, so a subject
+    // with many matches costs time linear in its length.
+    names = _group_names(pattern)
+    has_groups = json.json_array_size(names) > 0
     fa, _ferr = regex.find_all(compiled, s)
     if fa != null {
         count = regex.find_all_count(fa)
+        cp_byte = 0
+        cp_pos = 0
         i = 0
         while i < count {
             st = regex.find_all_start(fa, i)
@@ -3595,17 +3722,24 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
             if en == st && skip_empty == 1 {
                 i = i + 1
             } else {
-                suffix = string.substring_n(s, slen, st, slen)
-                caps, _e2 = regex.captures(compiled, suffix)
-                if caps != null {
-                    json.json_array_add_raw(out, _match_object(s, st, caps, pattern))
-                    regex.captures_free(caps)
+                cp_pos = cp_pos + value.codepoints_between(s, cp_byte, st)
+                cp_byte = st
+                if has_groups == true {
+                    suffix = string.substring_n(s, slen, st, slen)
+                    caps, _e2 = regex.captures(compiled, suffix)
+                    if caps != null {
+                        json.json_array_add_raw(out, _match_object(s, st, cp_pos, caps, names))
+                        regex.captures_free(caps)
+                    }
+                } else {
+                    json.json_array_add_raw(out, _match_span(s, st, en, cp_pos))
                 }
                 i = i + 1
             }
         }
         regex.find_all_free(fa)
     }
+    json.json_free(names)
     regex.free(compiled)
     if is_test == 1 {
         found = _b(json.json_array_size(out) > 0)
@@ -3616,18 +3750,16 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
 }
 
 // One jq match object from a captures handle whose byte offsets are
-// relative to s[base:].
-_match_object(s: string, base: int, caps: ptr, pattern: string) -> ptr {
+// relative to s[base:]; `base_cp` is base's offset in codepoints. `names`
+// is _group_names of the pattern (borrowed).
+_match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr {
     slen = string.length(s)
     st = base + regex.capture_start(caps, 0)
     en = base + regex.capture_end(caps, 0)
-    m = json.json_create_object()
-    json.json_object_set_raw(m, "offset", json.json_create_int(value.codepoint_of_byte(s, st) as long))
-    json.json_object_set_raw(m, "length", json.json_create_int((value.codepoint_of_byte(s, en) - value.codepoint_of_byte(s, st)) as long))
-    json.json_object_set_raw(m, "string", json.json_create_string(string.substring_n(s, slen, st, en)))
+    st_cp = base_cp + value.codepoints_between(s, base, st)
+    m = _match_head(s, st, en, st_cp)
     // The group count comes from the pattern: PCRE2 leaves unset trailing
     // groups out of its count, but jq reports every group.
-    names = _group_names(pattern)
     arr = json.json_create_array()
     n = json.json_array_size(names) + 1
     have = regex.capture_count(caps)
@@ -3647,8 +3779,9 @@ _match_object(s: string, base: int, caps: ptr, pattern: string) -> ptr {
         } else {
             gs = gs + base
             ge = ge + base
-            json.json_object_set_raw(c, "offset", json.json_create_int(value.codepoint_of_byte(s, gs) as long))
-            json.json_object_set_raw(c, "length", json.json_create_int((value.codepoint_of_byte(s, ge) - value.codepoint_of_byte(s, gs)) as long))
+            gs_cp = base_cp + value.codepoints_between(s, base, gs)
+            json.json_object_set_raw(c, "offset", json.json_create_int(gs_cp as long))
+            json.json_object_set_raw(c, "length", json.json_create_int(value.codepoints_between(s, gs, ge) as long))
             json.json_object_set_raw(c, "string", json.json_create_string(string.substring_n(s, slen, gs, ge)))
         }
         nm = json.json_create_null()
@@ -3663,8 +3796,24 @@ _match_object(s: string, base: int, caps: ptr, pattern: string) -> ptr {
         json.json_array_add_raw(arr, c)
         g = g + 1
     }
-    json.json_free(names)
     json.json_object_set_raw(m, "captures", arr)
+    return m
+}
+
+// The match object for a span of a pattern without groups: no capturing
+// match is needed, so global matching stays linear.
+_match_span(s: string, st: int, en: int, st_cp: int) -> ptr {
+    m = _match_head(s, st, en, st_cp)
+    json.json_object_set_raw(m, "captures", json.json_create_array())
+    return m
+}
+
+// offset, length (in codepoints) and string of the match at bytes [st, en).
+_match_head(s: string, st: int, en: int, st_cp: int) -> ptr {
+    m = json.json_create_object()
+    json.json_object_set_raw(m, "offset", json.json_create_int(st_cp as long))
+    json.json_object_set_raw(m, "length", json.json_create_int(value.codepoints_between(s, st, en) as long))
+    json.json_object_set_raw(m, "string", json.json_create_string(string.substring_n(s, string.length(s), st, en)))
     return m
 }
 
@@ -3766,6 +3915,7 @@ _format(name: string, v: ptr) -> ptr! {
             return null, msg
         }
         json.json_free(s)
+        if _has_nul_byte(out) == 1 { return null, "\\u0000 is not supported in strings" }
         return json.json_create_string(out), ""
     }
     if string.equals(name, "base32") == 1 {
@@ -3783,9 +3933,23 @@ _format(name: string, v: ptr) -> ptr! {
             return null, msg
         }
         json.json_free(s)
+        if _has_nul_byte(out) == 1 { return null, "\\u0000 is not supported in strings" }
         return json.json_create_string(out), ""
     }
     return null, "${name} is not a valid format"
+}
+
+// Does the decoded string hold a NUL byte? std.encoding gives back every
+// byte with the string's length beside it, but a JSON string is a C
+// string: storing it would cut it off at the NUL. Refuse instead.
+_has_nul_byte(s: string) -> int {
+    n = string.length(s)
+    i = 0
+    while i < n {
+        if string.char_at_n(s, n, i) == 0 { return 1 }
+        i = i + 1
+    }
+    return 0
 }
 
 _escape_html(s: string) -> string {

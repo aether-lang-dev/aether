@@ -1,0 +1,30 @@
+// jq.guard — the recursion guard the lexer, parser and evaluator share.
+//
+// All three recurse on the C stack: the lexer through nested string
+// interpolations, the parser through nested expressions (and the nested
+// parse of each interpolation), the evaluator through nested expressions
+// and jq function calls. A hostile program can make any of them recurse
+// until the stack overflows, which is a crash, not a diagnostic. The guard
+// turns it into one: it asks the platform how much stack the thread has
+// left (aether_jq.c) and says stop while `reserve` bytes remain for the
+// unwinding and the error's own work. Where the platform cannot say, a
+// count of the caller's own recursion stands in, with a limit sized for a
+// 1 MiB stack.
+
+exports(
+    too_deep
+)
+
+extern aether_jq_stack_remaining() -> long
+
+// 1 when the recursion should stop: less than `reserve` bytes of stack
+// remain, or, where that is unknown, `depth` has passed `fallback_max`.
+too_deep(depth: int, reserve: int, fallback_max: int) -> int {
+    left = aether_jq_stack_remaining()
+    if left < 0 {
+        if depth > fallback_max { return 1 }
+        return 0
+    }
+    if left < reserve { return 1 }
+    return 0
+}
