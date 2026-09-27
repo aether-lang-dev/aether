@@ -375,8 +375,17 @@ _parse_mul(p: *Parser) -> ptr {
 
 _parse_unary(p: *Parser) -> ptr {
     if _is_op(p, "-") == 1 {
+        // A `-` chain recurses here, not through _parse_term, so guard it
+        // here too: 80000 leading minuses would otherwise overflow the stack
+        // before the first _parse_term check (#2066).
+        p.depth = p.depth + 1
+        if guard.too_deep(p.depth, PARSE_RESERVE, PARSE_FALLBACK_MAX) == 1 {
+            p.depth = p.depth - 1
+            return _fail(p, "program nested too deeply")
+        }
         _advance(p)
         operand = _parse_unary(p)
+        p.depth = p.depth - 1
         return _mk(p, ast.N_NEG, operand, null)
     }
     return _parse_postfix(p, 1)
