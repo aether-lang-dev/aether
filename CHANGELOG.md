@@ -14,6 +14,37 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.730.0]
+
+### Fixed
+
+- **A local holding a function pointer now shadows a same-named builtin
+  (#2211).** `release = h.release` followed by `release(state)` was
+  type-checked through the local but lowered as the `release` builtin,
+  because codegen's by-name builtin dispatch ran before its typed
+  fn-pointer local branch: a type error went to stderr, the build still
+  exited 0, and the binary never called the hook. A local named `free`
+  had the same defect plus a spelling mismatch (`ae_free` at the call,
+  `free` at the declaration) that broke the C compile. The fn-pointer
+  branch now runs first and spells the local as its declaration does,
+  and a genuine `release()` on a non-string is a reported error, so the
+  build fails instead of emitting a binary beside an error line.
+  `tests/regression/test_local_fnptr_shadows_builtin.ae` and three
+  `test_codegen.c` cases cover it.
+
+- **Two modules whose paths end in the same segment no longer collide, and
+  `import X as Y` works inside a library module.** `mine.vk` and
+  `contrib.vulkan.vk` used to share the namespace `vk` program-wide, so
+  whichever was imported first answered for both and the other's exports were
+  reported missing; an alias written in a library was ignored and failed with
+  `Undefined variable`. A module's imports now resolve in that module, by
+  their full path or alias: when two loaded modules share a last segment each
+  gets a namespace built from its full path (`mine_vk`, `contrib_vulkan_vk`),
+  and the merger rewrites every `vk.`/alias prefix a program or library wrote
+  to the module it meant. An alias-only import (`import m as x`) also merges
+  `m`'s functions now, so a program-level alias reaches a local package
+  (#2209).
+
 ## [0.729.0]
 
 ### Added
