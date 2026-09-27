@@ -150,6 +150,7 @@ tests/integration/malloc_literal_struct_cast_warn/
 tests/integration/match_arm_unreachable/
 tests/integration/message_trace/
 tests/integration/module_extern_auto_unwrap/
+tests/integration/module_leaf_collision/
 tests/integration/module_name_local_shadow/
 tests/integration/module_reexport/
 tests/integration/module_token_cap/

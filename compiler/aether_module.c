@@ -284,6 +284,7 @@ AetherModule* module_create(const char* name, const char* file_path) {
     module->export_count = 0;
     module->imports = NULL;
     module->import_count = 0;
+    module->ns = NULL;
     return module;
 }
 
@@ -292,6 +293,7 @@ void module_free(AetherModule* module) {
     
     free(module->name);
     free(module->file_path);
+    free(module->ns);
     
     if (module->ast) {
         free_ast_node(module->ast);
@@ -353,6 +355,62 @@ AetherModule* module_find(const char* name) {
     return NULL;
 }
 
+static const char* module_last_segment(const char* path);  /* defined below */
+
+/* #2209: two modules whose paths end in the same segment (`mine.vk` and
+ * `contrib.vulkan.vk`) used to share the namespace `vk`, so their merged
+ * symbols were both `vk_<name>`, `module_find_by_name_or_leaf("vk")` returned
+ * whichever loaded first, and the other's exports were reported as missing.
+ * A module keeps the short last-segment namespace unless another loaded
+ * module ends the same way; then each gets its full path, dots as
+ * underscores (`mine_vk`, `contrib_vulkan_vk`). Written `vk.` / alias
+ * prefixes are rewritten to these namespaces by the merger, in the scope
+ * that wrote them, so nothing downstream sees the collision. */
+void module_assign_namespaces(void) {
+    if (!global_module_registry) return;
+    ModuleRegistry* reg = global_module_registry;
+    for (int i = 0; i < reg->module_count; i++) {
+        AetherModule* m = reg->modules[i];
+        if (!m || !m->name) continue;
+        const char* leaf = module_last_segment(m->name);
+        int shared = 0;
+        for (int j = 0; j < reg->module_count && !shared; j++) {
+            AetherModule* o = reg->modules[j];
+            if (j == i || !o || !o->name) continue;
+            shared = strcmp(module_last_segment(o->name), leaf) == 0;
+        }
+        free(m->ns);
+        m->ns = strdup(shared ? m->name : leaf);
+        if (shared) {
+            for (char* p = m->ns; *p; p++) if (*p == '.') *p = '_';
+        }
+    }
+}
+
+const char* module_namespace_of(const char* module_path) {
+    if (!module_path) return "";
+    AetherModule* m = module_find(module_path);
+    if (m && m->ns) return m->ns;
+    return module_last_segment(module_path);
+}
+
+AetherModule* module_find_by_namespace(const char* ns) {
+    if (!global_module_registry || !ns) return NULL;
+    AetherModule* m = module_find(ns);
+    if (m) return m;
+    ModuleRegistry* reg = global_module_registry;
+    for (int i = 0; i < reg->module_count; i++) {
+        AetherModule* cand = reg->modules[i];
+        if (cand && cand->ns && strcmp(cand->ns, ns) == 0) return cand;
+    }
+    for (int i = 0; i < reg->module_count; i++) {
+        AetherModule* cand = reg->modules[i];
+        if (cand && cand->name && strcmp(module_last_segment(cand->name), ns) == 0)
+            return cand;
+    }
+    return NULL;
+}
+
 // Import/export handling
 void module_add_export(AetherModule* module, const char* symbol) {
     if (!module) return;
@@ -397,8 +455,6 @@ int module_is_exported(AetherModule* module, const char* symbol) {
 
     return 0;
 }
-
-static const char* module_last_segment(const char* path);
 
 /* #2172: does `module` make `name` reachable as `<leaf>.name`? Either it
  * exports `name` itself, or it exports the prefixed C-style spelling
@@ -1632,6 +1688,11 @@ int module_orchestrate(ASTNode* program) {
 
     dependency_graph_free(graph);
 
+    /* #2209: every module is loaded, so each can be given a namespace no
+     * other loaded module shares. Before the collision check below, which
+     * builds the `<ns>_<name>` symbols the merge will emit. */
+    module_assign_namespaces();
+
     /* All imports are now registered, but merge hasn't run yet — so the
      * program's top-level functions are still exactly the user's. Reject
      * any that forge an imported export's mangled C symbol (the silent
@@ -1667,11 +1728,24 @@ int module_orchestrate(ASTNode* program) {
 // allocation rather than another bump.
 #define AETHER_MODULE_MAX_DECLS 4096
 
-// Extract namespace from module path: "mypackage.utils" -> "utils"
+// Namespace a module path's merged symbols carry: "mypackage.utils" ->
+// "utils", unless another loaded module also ends in `utils` (#2209, see
+// module_assign_namespaces).
 static const char* module_get_namespace(const char* module_path) {
-    const char* last_dot = strrchr(module_path, '.');
-    if (last_dot) return last_dot + 1;
-    return module_path;
+    return module_namespace_of(module_path);
+}
+
+
+/* Does this import select names (`import m (a, b)`, or the `import m.sym`
+ * form resolve_import_path rewrites into it)? Selectors are AST_IDENTIFIER
+ * children, and so is an `as` alias — which the parser appends LAST, so it
+ * is children[0] only when it is the sole child. #2209: `import m as x`
+ * used to read as a selection of `x`, merging nothing from `m`. */
+static int import_has_selection(const ASTNode* imp) {
+    if (!imp || imp->child_count == 0 || !imp->children[0]) return 0;
+    const ASTNode* first = imp->children[0];
+    if (first->type != AST_IDENTIFIER) return 0;
+    return !(first->annotation && strcmp(first->annotation, "module_alias") == 0);
 }
 
 // Get the actual declaration from a node (unwrap AST_EXPORT_STATEMENT if needed)
@@ -1726,38 +1800,11 @@ static int collect_module_const_names(ASTNode* mod_ast, const char** names, int 
  * assignment target into the `#define`, producing invalid C. */
 static int name_is_module_global_var(const char* ns, const char* name) {
     if (!ns || !name) return 0;
-    AetherModule* m = module_find(ns);
-    if (!m) {
-        // Modules are registered under their FULL dotted path
-        // ("std.spec", "contrib.foo", nested local "a.b"), but `ns` here
-        // is the short namespace tail ("spec") the codegen prefix is
-        // built from — so module_find(ns) misses for every dotted path.
-        // Fall back to scanning the registry for a module whose
-        // namespace tail matches `ns`. Without this the mutable-`var`
-        // write rename below never fires for a dotted-path module, and
-        // `name = expr` against a module global lowers to a shadowing
-        // local instead of a store to the shared static (a silent
-        // miscompile → NULL global → crash on the next read). Single-
-        // segment local imports (full path == namespace) already hit the
-        // exact match above and are unaffected.
-        //
-        // KNOWN LIMIT: the scan takes the FIRST module whose namespace
-        // tail matches, so two co-imported dotted modules sharing a tail
-        // ("std.spec" and "a.spec") could resolve to the wrong one —
-        // same global-namespace family as the cross-module struct-name
-        // collisions. Correct fix is plumbing the full dotted path to
-        // this call; do that if a real collision ever appears.
-        if (global_module_registry) {
-            for (int i = 0; i < global_module_registry->module_count; i++) {
-                AetherModule* cand = global_module_registry->modules[i];
-                if (cand && cand->name &&
-                    strcmp(module_get_namespace(cand->name), ns) == 0) {
-                    m = cand;
-                    break;
-                }
-            }
-        }
-    }
+    /* `ns` is the namespace the codegen prefix is built from, not the
+     * module's full dotted path; module_find_by_namespace maps it back
+     * (#2209: by the assigned namespace first, so two co-imported modules
+     * sharing a last segment resolve to the right one). */
+    AetherModule* m = module_find_by_namespace(ns);
     if (!m || !m->ast) return 0;
     for (int i = 0; i < m->ast->child_count; i++) {
         ASTNode* decl = unwrap_export(m->ast->children[i]);
@@ -1848,8 +1895,7 @@ static int check_namespace_prefix_collision(ASTNode* program) {
         if (!mod || !mod->ast) continue;
         const char* ns = module_get_namespace(child->value);
         if (!ns) continue;
-        int has_selection = (child->child_count > 0 && child->children[0] &&
-                             child->children[0]->type == AST_IDENTIFIER);
+        int has_selection = import_has_selection(child);
 
         for (int j = 0; j < mod->ast->child_count; j++) {
             ASTNode* decl = unwrap_export(mod->ast->children[j]);
@@ -2360,8 +2406,118 @@ static void rename_aliased_import_refs(ASTNode* node, const char* alias,
     }
 }
 
+/* #2209: rewrite the qualified prefix a scope WROTE for an import to the
+ * namespace the import's symbols actually carry after the merge.
+ *
+ *   import contrib.vulkan.vk            vk.SUCCESS     -> contrib_vulkan_vk.SUCCESS
+ *   import contrib.vulkan.vk as vkapi   vkapi.ok()     -> contrib_vulkan_vk.ok()
+ *
+ * The rewrite is what makes a module's imports resolve IN THAT MODULE, by
+ * their full path or alias, instead of program-wide by last segment: once
+ * a body reaches the program it names the module it meant, whatever the
+ * entry program or a sibling library calls its own `vk`. It runs on the
+ * program's own code (module_merge_into_program) and on every cloned
+ * module body (apply_inherited_selective_imports), before the typechecker
+ * sees either.
+ *
+ * `from` is skipped inside any function or closure that binds it as a
+ * parameter or local: `vk.field` on a local struct is a field read, the
+ * same shadowing rule rename_intra_module_refs and the typechecker apply. */
+static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char* to,
+                                     const char** local_names, int local_count) {
+    if (!node) return;
+    if (name_in_list(from, local_names, local_count)) return;
+    size_t from_len = strlen(from);
+
+    if ((node->type == AST_FUNCTION_CALL || node->type == AST_IDENTIFIER) &&
+        node->value && strncmp(node->value, from, from_len) == 0 &&
+        node->value[from_len] == '.') {
+        size_t len = strlen(to) + strlen(node->value + from_len) + 1;
+        char* renamed = malloc(len);
+        if (renamed) {
+            snprintf(renamed, len, "%s%s", to, node->value + from_len);
+            free(node->value);
+            node->value = renamed;
+        }
+    }
+    if (node->type == AST_MEMBER_ACCESS && node->child_count > 0) {
+        ASTNode* base = node->children[0];
+        if (base && base->type == AST_IDENTIFIER && base->value &&
+            strcmp(base->value, from) == 0) {
+            free(base->value);
+            base->value = strdup(to);
+        }
+    }
+
+    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_CLOSURE) {
+        const char* scope_locals[128];
+        int scope_count = 0;
+        collect_local_names(node, scope_locals, &scope_count, 128);
+        for (int i = 0; i < local_count && scope_count < 128; i++) {
+            if (!name_in_list(local_names[i], scope_locals, scope_count))
+                scope_locals[scope_count++] = local_names[i];
+        }
+        for (int i = 0; i < node->child_count; i++) {
+            rewrite_qualified_prefix(node->children[i], from, to,
+                                     scope_locals, scope_count);
+        }
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        rewrite_qualified_prefix(node->children[i], from, to, local_names, local_count);
+    }
+}
+
+/* The prefix a scope writes for one of its imports: the `as` alias when
+ * there is one, else the import path's last segment. */
+static const char* import_written_prefix(ASTNode* imp) {
+    for (int k = 0; k < imp->child_count; k++) {
+        ASTNode* c = imp->children[k];
+        if (c && c->type == AST_IDENTIFIER && c->value && c->annotation &&
+            strcmp(c->annotation, "module_alias") == 0)
+            return c->value;
+    }
+    return module_last_segment(imp->value);
+}
+
+/* #2209: for every import `scope_ast` declares, rewrite `body`'s uses of the
+ * written prefix to the imported module's namespace (a no-op when the two
+ * already agree, which is every unaliased import whose last segment no other
+ * loaded module shares). `self_name` is the module `scope_ast` belongs to,
+ * NULL for the entry program: an import written with the module's OWN last
+ * segment (module `audio` importing `std.audio`, #1780) is left alone, so
+ * `audio.x` there keeps resolving to the module itself, as documented. */
+static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
+                                    const char* self_name) {
+    if (!body || !scope_ast) return;
+    for (int i = 0; i < scope_ast->child_count; i++) {
+        ASTNode* imp = scope_ast->children[i];
+        if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
+        if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
+        const char* written = import_written_prefix(imp);
+        const char* ns = module_namespace_of(imp->value);
+        if (strcmp(written, ns) == 0) continue;
+        if (self_name && strcmp(written, module_last_segment(self_name)) == 0) continue;
+        rewrite_qualified_prefix(body, written, ns, NULL, 0);
+    }
+}
+
+/* The registered module whose parsed AST is `mod_ast`, or NULL. */
+static AetherModule* module_owning_ast(ASTNode* mod_ast) {
+    if (!global_module_registry || !mod_ast) return NULL;
+    for (int i = 0; i < global_module_registry->module_count; i++) {
+        AetherModule* m = global_module_registry->modules[i];
+        if (m && m->ast == mod_ast) return m;
+    }
+    return NULL;
+}
+
 static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) {
     if (!clone || !mod_ast) return;
+
+    /* #2209: the module's qualified uses name the modules IT imported. */
+    AetherModule* owner = module_owning_ast(mod_ast);
+    rewrite_import_prefixes(clone, mod_ast, owner ? owner->name : NULL);
 
     for (int i = 0; i < mod_ast->child_count; i++) {
         ASTNode* imp = mod_ast->children[i];
@@ -2375,10 +2531,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
         // identifier children; a glob has none.
         int is_glob = (imp->annotation &&
                        strcmp(imp->annotation, "glob_import") == 0);
-        if (!is_glob) {
-            if (imp->child_count == 0) continue;
-            if (imp->children[0]->type != AST_IDENTIFIER) continue;
-        }
+        if (!is_glob && !import_has_selection(imp)) continue;
 
         // Resolve the import path to the merged-name prefix the
         // transitive pass will / has used (`std.http.client` →
@@ -2565,8 +2718,7 @@ static void inject_synthetic_bare_imports_from(ASTNode* program,
         if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
         /* A selective import carries AST_IDENTIFIER selection children; only
          * bare imports re-open the qualified surface. */
-        if (imp->child_count > 0 && imp->children[0] &&
-            imp->children[0]->type == AST_IDENTIFIER) continue;
+        if (import_has_selection(imp)) continue;
         /* Dedup: skip if the program already carries a bare import of this
          * path (so two merged modules importing the same one inject once). */
         int already = 0;
@@ -2574,8 +2726,7 @@ static void inject_synthetic_bare_imports_from(ASTNode* program,
             ASTNode* pc = program->children[p];
             if (pc && pc->type == AST_IMPORT_STATEMENT && pc->value &&
                 strcmp(pc->value, imp->value) == 0 &&
-                !(pc->child_count > 0 && pc->children[0] &&
-                  pc->children[0]->type == AST_IDENTIFIER)) {
+                !import_has_selection(pc)) {
                 already = 1;
                 break;
             }
@@ -2589,6 +2740,15 @@ static void inject_synthetic_bare_imports_from(ASTNode* program,
 
 void module_merge_into_program(ASTNode* program) {
     if (!program || !global_module_registry) return;
+
+    /* #2209: the program's own code names its imports by alias or last
+     * segment; point each at the imported module's namespace before any
+     * module body is cloned in beside it. */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (!child || child->type == AST_IMPORT_STATEMENT) continue;
+        rewrite_import_prefixes(child, program, NULL);
+    }
 
     // Find insertion point: just before AST_MAIN_FUNCTION
     int insert_idx = program->child_count;
@@ -2651,8 +2811,7 @@ void module_merge_into_program(ASTNode* program) {
 
         // Check for selective import: if import has AST_IDENTIFIER children,
         // only merge functions/constants that appear in the selection list
-        int has_selection = (child->child_count > 0 &&
-                            child->children[0]->type == AST_IDENTIFIER);
+        int has_selection = import_has_selection(child);
 
         // #870: re-open the qualified-call surface for any module this
         // imported module bare-imports, so its merged bodies' `ns.fn(...)`
@@ -2803,6 +2962,7 @@ void module_merge_into_program(ASTNode* program) {
                 // Rename references to other module constants in the value expression
                 rename_intra_module_refs(clone, ns, func_names, func_count,
                                          const_names, const_count, NULL, 0);
+                apply_inherited_selective_imports(clone, mod_ast);
 
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_FAULT_DEFINITION) {
@@ -2998,9 +3158,7 @@ void module_merge_into_program(ASTNode* program) {
             // selective imports already merged everything (they have no
             // selection list so the `if (!selected) continue;` guard
             // above never fired).
-            int has_selection = (child->child_count > 0 &&
-                                child->children[0]->type == AST_IDENTIFIER);
-            if (!has_selection) continue;
+            if (!import_has_selection(child)) continue;
 
             AetherModule* mod = module_find(child->value);
             if (!mod || !mod->ast) continue;
@@ -3254,6 +3412,7 @@ void module_merge_into_program(ASTNode* program) {
 
                     rename_intra_module_refs(clone, ns, func_names, func_count,
                                              const_names, const_count, NULL, 0);
+                    apply_inherited_selective_imports(clone, mod_ast);
 
                     insert_child_at(program, clone, insert_idx++);
                 } else if (decl->type == AST_STRUCT_DEFINITION) {
@@ -3308,8 +3467,7 @@ void module_merge_into_program(ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* import_node = program->children[i];
         if (!import_node || import_node->type != AST_IMPORT_STATEMENT || !import_node->value) continue;
-        if (import_node->child_count == 0 ||
-            import_node->children[0]->type != AST_IDENTIFIER) continue;
+        if (!import_has_selection(import_node)) continue;
 
         const char* module_path = import_node->value;
         AetherModule* mod = module_find(module_path);
@@ -3441,6 +3599,7 @@ void module_merge_into_program(ASTNode* program) {
                     clone->value = strdup(prefixed);
                     rename_intra_module_refs(clone, ons, of_names, of_count,
                                              oc_names, oc_count, NULL, 0);
+                    apply_inherited_selective_imports(clone, origin->ast);
                     insert_child_at(program, clone, insert_idx++);
                 }
                 break;

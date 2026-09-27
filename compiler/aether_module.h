@@ -16,6 +16,12 @@ typedef struct {
     int export_count;
     char** imports;       // Imported modules
     int import_count;
+    // #2209: the namespace this module's merged symbols are prefixed with
+    // (`<ns>_<name>`). The last path segment when no other loaded module
+    // shares it, else the full path with dots as underscores, so two
+    // modules ending in `vk` never share one namespace. Assigned by
+    // module_assign_namespaces once every module is loaded; NULL before.
+    char* ns;
 } AetherModule;
 
 // Module registry
@@ -46,6 +52,19 @@ void module_free(AetherModule* module);
 // Module registration
 void module_register(AetherModule* module);
 AetherModule* module_find(const char* name);
+
+/* #2209: per-module namespaces. `module_assign_namespaces` gives every
+ * registered module its `ns` (see AetherModule.ns); module_orchestrate
+ * calls it once all imports are loaded. `module_namespace_of` is the
+ * namespace a module path's merged symbols carry: the assigned `ns` for a
+ * registered module, the last path segment for anything else (the
+ * pre-#2209 rule, so an unregistered path still prefixes as before).
+ * `module_find_by_namespace` finds a module by its full name, its `ns`, or
+ * — last — its bare last segment (the first such match), which is what a
+ * qualified `ns.name` use carries. */
+void module_assign_namespaces(void);
+const char* module_namespace_of(const char* module_path);
+AetherModule* module_find_by_namespace(const char* ns);
 
 // Import/export handling
 void module_add_export(AetherModule* module, const char* symbol);

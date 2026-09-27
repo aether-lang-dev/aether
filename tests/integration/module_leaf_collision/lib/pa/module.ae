@@ -1,0 +1,22 @@
+// `import … as …` inside a library module (#2209's second finding).
+import gfx.vk as vkapi
+exports(ok, name, shadowed)
+
+ok() -> int {
+    return vkapi.SUCCESS
+}
+
+name() -> string {
+    return vkapi.describe()
+}
+
+// A local named like the alias is a value, not the module: `vkapi.count`
+// is a field read and must not be rewritten to a module lookup.
+struct Counter {
+    count: int
+}
+
+shadowed() -> int {
+    vkapi = Counter { count: 41 }
+    return vkapi.count + 1
+}
