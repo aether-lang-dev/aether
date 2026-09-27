@@ -274,7 +274,8 @@ has headers for. A kind whose extension is missing is refused with the
 extension named, so one program presents wherever its loader can and says why
 where it cannot. An `NSView` is given a `CAMetalLayer` at the window's backing
 scale, on the main thread. That goes through the Objective-C runtime, so no
-framework is linked.
+framework is linked. A program with an instance of its own gets the same
+surface from `vk.surface_create` (below), over the same kinds.
 
 - **Scaling and colour.** `present` blits the target's newest frame into the
   acquired image, scaling it when the two differ in size, and does not wait
@@ -396,6 +397,28 @@ defer vk.array_free(devices)
   destroying the instance or device to put the commands back on the loader's
   dispatch, and leave them there in a program that drives several devices,
   since the loader's dispatch serves any of them.
+- **A caller's loader** ([#2204](https://github.com/aether-lang-dev/aether/issues/2204)).
+  `vk.load_instance_with(gipa, instance)` resolves through a
+  `vkGetInstanceProcAddr` the program holds instead of the loader's own: an
+  interposer such as NVIDIA Streamline, whose hooks on the present, swapchain
+  and command-buffer calls DLSS frame generation and Reflex depend on, or a
+  host's loader, so there is one loader in the process. With a null instance
+  the global commands, `vkCreateInstance` among them, go through it, so the
+  instance itself is made through the interposer; call it again with the
+  instance for the rest. `vk.load_device` then takes the device's
+  `vkGetDeviceProcAddr` from the adopted one, and `vk.load_device_with(gdpa,
+  device)` takes one given by hand. `vk.load_instance(instance)` is the
+  loader's own again.
+- **A surface on the program's own instance**
+  ([#2199](https://github.com/aether-lang-dev/aether/issues/2199)).
+  `vk.surface_create(instance, kind, display, window)` makes a `VkSurfaceKHR`
+  over a toolkit's window handle, the five kinds in the table above, on an
+  instance created with `VK_KHR_surface` and the kind's own extension, which
+  `vk.surface_extension(kind)` names. It shares the platform code the
+  swapchain uses and resolves the create function on the caller's instance
+  (through the adopted `vkGetInstanceProcAddr`, if any). Null with the reason
+  in `vk.last_error()`, naming the missing extension for a kind this build or
+  the instance cannot serve; `vkDestroySurfaceKHR` releases it.
 - **Strings** reach the driver as C characters, `null` as `NULL`: a name built
   at runtime works, and `vkEnumerateInstanceExtensionProperties_all(null)`
   asks for the loader's own extensions.
@@ -409,12 +432,21 @@ defer vk.array_free(devices)
 `tools/vkgen.ae` is the generator: an Aether program that streams `vk.xml`
 with `std.xml` and takes a selection, a core version plus extensions, rather
 than all of the registry. The committed module is Vulkan 1.3 with
-`VK_KHR_surface` and `VK_KHR_swapchain`: 229 commands, 294 structs and 18
-`_all` helpers, and every API constant their array members are sized by.
-Platform extensions are refused, since their structs name types (`HWND`,
-`Display`) that only their own headers declare. Handles are pointers, which
-is what Vulkan's non-dispatchable handles are on 64-bit targets; a 32-bit
-target, where they are `uint64_t`, is not supported.
+`VK_KHR_surface`, `VK_KHR_swapchain`, `VK_KHR_acceleration_structure`,
+`VK_KHR_ray_query` and `VK_KHR_deferred_host_operations`
+([#2203](https://github.com/aether-lang-dev/aether/issues/2203)): 250
+commands, 317 structs and 18 `_all` helpers, and every API constant their
+array members are sized by. Platform extensions are refused, since their
+structs name types (`HWND`, `Display`) that only their own headers declare;
+`vk.surface_create` above is how a surface over one is made. Two more are
+spelled by hand, because the registry the module is generated from predates
+`VK_KHR_portability_enumeration` and keeps `VK_KHR_portability_subset`
+provisional: `vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME` with
+`vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`, which an instance needs
+to list MoltenVK, and `vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME`, which a
+device offering it must enable. Handles are pointers, which is what Vulkan's
+non-dispatchable handles are on 64-bit targets; a 32-bit target, where they
+are `uint64_t`, is not supported.
 
 ```sh
 contrib/vulkan/tools/regenerate.sh             # vk.xml from $VULKAN_SDK or the usual prefixes
@@ -433,7 +465,8 @@ job installs 1.3.204 and requires the releases to match, so there both files
 are compared byte for byte: to regenerate, pass that registry.
 
 What it costs: `aetherc` spends about 40 ms more on a program importing the
-7,700-line module than on an empty one. A cold `ae build` of such a program
+module (measured at 7,700 lines; the ray query selection makes it 10,000)
+than on an empty one. A cold `ae build` of such a program
 takes 6.2 s, against 5.9 s importing `contrib.vulkan` and 2.8 s for a program
 importing nothing: the time is compiling `aether_vulkan.c`, which both share
 and the build cache keeps. Only the commands a program calls are emitted.
@@ -664,15 +697,39 @@ window outgrowing the swapchain; a smaller target scaled to fit; an sRGB and a
 float target shown as encoded; readback off; vsync off and back on;
 minimising and restoring; and the refusals. The window comes from
 `tests/support/native_window`, a test fixture that stands in for aether-ui's
-`native_view` (Win32, X11 and AppKit), because the language's own CI cannot
-depend on the toolkit. X11 does not shrink a minimised window, so the Linux leg
-skips that one case.
+`native_view` (Win32, X11, Wayland and AppKit), because the language's own CI
+cannot depend on the toolkit. X11 does not shrink a minimised window, so the
+Linux leg skips that one case. The Linux leg runs it twice: on Xvfb, where the
+screen is read back, and against weston's headless backend with
+`AETHER_TEST_WINDOW_SYSTEM=wayland`
+([#2197](https://github.com/aether-lang-dev/aether/issues/2197)), where a
+client cannot read the screen and the window's size is the application's,
+so the cases that check pixels on screen and the one where the window
+outgrows the swapchain skip and say so; every present is still checked to
+succeed and be counted, and the target read back. The same test also makes a
+`VkSurfaceKHR` over the window through `vk.surface_create`, on an instance of
+its own, and queries its capabilities with the module's own command.
 
 `test_vulkan_raw.ae` drives `contrib.vulkan.vk` against the driver. It checks
 that the constants match the header and that a nested struct field reads at
 the right offset. It creates an instance and a device through their own entry
 points, and requires the `_all` helpers to agree with the two calls made by
-hand.
+hand. A `vkGetInstanceProcAddr` and a `vkGetDeviceProcAddr` of the test's own,
+`@c_callback` functions that count the lookups they serve, stand in for an
+interposer: `load_instance_with` must resolve everything through them,
+`load_device` must fetch `vkGetDeviceProcAddr` from the adopted one, and
+`load_instance` must drop them again. It also checks the ray query
+declarations against the header and reads the feature through the Features2
+chain, on any device.
+
+`test_vulkan_ray_query.ae` builds a one-triangle bottom-level acceleration
+structure and a one-instance top-level one through `contrib.vulkan.vk`, on a
+device made with the three extensions and their features enabled, and traces
+two ray queries through them from a compute shader: one through the origin
+that must hit at `t = 1`, one five units aside that must miss. It skips where
+the device has no ray query, and says so: lavapipe before Mesa 24.1 (Ubuntu
+22.04's, which the Linux leg runs) and MoltenVK have none; Ubuntu 24.04's
+lavapipe and the discrete GPUs run it.
 
 Every test passes on an NVIDIA RTX 4070 Ti and on lavapipe. The Khronos
 validation layer, with synchronization validation on, reports nothing for
@@ -691,4 +748,4 @@ plan in someone's head.
 
 | Missing | Issue |
 |---|---|
-| Presenting to a Wayland surface is built but never run: no CI leg has a compositor, and the window fixture has no Wayland backend | [#2197](https://github.com/aether-lang-dev/aether/issues/2197) |
+| The pixels a Wayland compositor shows are not checked: a client cannot read the screen there, so the Wayland leg checks presents and the target, not the screen | [#2197](https://github.com/aether-lang-dev/aether/issues/2197) |
