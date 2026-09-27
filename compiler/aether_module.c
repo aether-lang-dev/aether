@@ -15,6 +15,7 @@
     #define F_OK 0
 #else
     #include <unistd.h>
+    #include <sys/stat.h>
 #endif
 #include <dirent.h>
 #ifdef __FreeBSD__
@@ -356,27 +357,50 @@ AetherModule* module_find(const char* name) {
 }
 
 static const char* module_last_segment(const char* path);  /* defined below */
+static ASTNode* unwrap_export(ASTNode* node);              /* defined below */
+
+static int module_is_shipped(const char* name) {
+    return name && (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0);
+}
+
+/* #2190 / #2255: does this module need its last segment as its namespace?
+ * A module whose externs carry that segment as a prefix does: std.math
+ * declares `extern math_floor`, and `math.floor` reaches it as
+ * `<ns>_floor`, so under a namespace of `std_math` the call would look
+ * for `std_math_floor` and find nothing. A module without such externs
+ * (all its functions are Aether, renamed along with the namespace) can
+ * take its full path like any other. Without an AST to inspect, a shipped
+ * module is assumed to need its leaf and a local one not to. */
+static int module_pins_leaf(AetherModule* m) {
+    if (!m || !m->name) return 0;
+    if (!m->ast) return module_is_shipped(m->name);
+    const char* leaf = module_last_segment(m->name);
+    size_t n = strlen(leaf);
+    for (int i = 0; i < m->ast->child_count; i++) {
+        ASTNode* decl = unwrap_export(m->ast->children[i]);
+        if (decl && decl->type == AST_EXTERN_FUNCTION && decl->value &&
+            strncmp(decl->value, leaf, n) == 0 && decl->value[n] == '_') {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 /* #2209: two modules whose paths end in the same segment (`mine.vk` and
  * `contrib.vulkan.vk`) used to share the namespace `vk`, so their merged
  * symbols were both `vk_<name>`, `module_find_by_name_or_leaf("vk")` returned
  * whichever loaded first, and the other's exports were reported as missing.
  * A module keeps the short last-segment namespace unless another loaded
- * module ends the same way; then a local module gets its full path, dots as
- * underscores (`mine_vk`). Written `vk.` / alias prefixes are rewritten to
- * these namespaces by the merger, in the scope that wrote them, so nothing
+ * module ends the same way; then it gets its full path, dots as underscores
+ * (`mine_vk`). Written `vk.` / alias prefixes are rewritten to these
+ * namespaces by the merger, in the scope that wrote them, so nothing
  * downstream sees the collision.
  *
- * #2190: a shipped module (`std.*`, `contrib.*`) is never renamed. Its API
- * is largely raw externs the runtime library already compiled under the
- * leaf prefix (`math_floor`, `sqlite_open`), which `math.floor` reaches as
- * `<ns>_floor`; a namespace of `std_math` would look for `std_math_floor`
- * and find nothing. So when a program's own `pkg.math` collides with a
- * library's `std.math`, the local module is the one that moves. */
-static int module_is_shipped(const char* name) {
-    return name && (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0);
-}
-
+ * #2190: a module whose externs need its leaf (module_pins_leaf) keeps it
+ * whatever collides with it, so when a program's own `pkg.math` collides
+ * with std.math, pkg.math is the one that moves. #2255: two pure-Aether
+ * modules that happen to share a leaf, such as std.jsonpath.parser and
+ * contrib.jq.parser, both move, shipped or not. */
 void module_assign_namespaces(void) {
     if (!global_module_registry) return;
     ModuleRegistry* reg = global_module_registry;
@@ -390,7 +414,7 @@ void module_assign_namespaces(void) {
             if (j == i || !o || !o->name) continue;
             shared = strcmp(module_last_segment(o->name), leaf) == 0;
         }
-        int renamed = shared && !module_is_shipped(m->name);
+        int renamed = shared && !module_pins_leaf(m);
         free(m->ns);
         m->ns = strdup(renamed ? m->name : leaf);
         if (renamed) {
@@ -1487,6 +1511,121 @@ static void warn_self_shadowing_import(const char* self_name,
         import_child->value, self_seg, self_seg);
 }
 
+/* #2255: do two paths name the same file? The same module is reached as
+ * `contrib/jq/value.ae` from one import and as an absolute path from
+ * another, so compare identity (device and inode) where the platform has
+ * it, and the canonical full path on Windows, where names are
+ * case-insensitive. */
+static int module_same_file(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    if (strcmp(a, b) == 0) return 1;
+#ifdef _WIN32
+    char fa[MAX_PATH], fb[MAX_PATH];
+    if (!_fullpath(fa, a, sizeof(fa)) || !_fullpath(fb, b, sizeof(fb))) return 0;
+    for (char* p = fa; *p; p++) if (*p == '/') *p = '\\';
+    for (char* p = fb; *p; p++) if (*p == '/') *p = '\\';
+    return _stricmp(fa, fb) == 0;
+#else
+    struct stat sa, sb;
+    if (stat(a, &sa) != 0 || stat(b, &sb) != 0) return 0;
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+#endif
+}
+
+static AetherModule* module_find_by_file(const char* file_path) {
+    if (!global_module_registry || !file_path) return NULL;
+    for (int i = 0; i < global_module_registry->module_count; i++) {
+        AetherModule* m = global_module_registry->modules[i];
+        if (m && module_same_file(m->file_path, file_path)) return m;
+    }
+    return NULL;
+}
+
+/* Is `resolved` the file `import <import_path>` names inside the directory
+ * of `importer_file`, i.e. a package importing one of its own files? */
+static int import_is_sibling(const char* importer_file, const char* import_path,
+                             const char* resolved) {
+    if (!importer_file || !import_path || !resolved) return 0;
+    const char* slash = strrchr(importer_file, '/');
+#ifdef _WIN32
+    const char* bslash = strrchr(importer_file, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+    size_t dir_len = slash ? (size_t)(slash - importer_file) + 1 : 0;
+    char converted[512];
+    snprintf(converted, sizeof(converted), "%s", import_path);
+    for (char* p = converted; *p; p++) if (*p == '.') *p = '/';
+    char cand[4096];
+    snprintf(cand, sizeof(cand), "%.*s%s.ae", (int)dir_len, importer_file, converted);
+    if (module_same_file(resolved, cand)) return 1;
+    snprintf(cand, sizeof(cand), "%.*s%s/module.ae", (int)dir_len, importer_file, converted);
+    return module_same_file(resolved, cand);
+}
+
+/* The dotted path a package's own files are named under: the module's
+ * name when it is the package's facade (`<dir>/module.ae`), otherwise its
+ * name without the last segment (`contrib.jq.eval` is a file beside the
+ * facade). NULL when there is no such prefix. Caller frees. */
+static char* module_package_prefix(const char* name, const char* file_path) {
+    if (!name) return NULL;
+    size_t fl = file_path ? strlen(file_path) : 0;
+    if (fl >= 9 && strcmp(file_path + fl - 9, "module.ae") == 0 &&
+        (fl == 9 || file_path[fl - 10] == '/' || file_path[fl - 10] == '\\')) {
+        return strdup(name);
+    }
+    const char* dot = strrchr(name, '.');
+    if (!dot) return NULL;
+    char* prefix = malloc((size_t)(dot - name) + 1);
+    memcpy(prefix, name, (size_t)(dot - name));
+    prefix[dot - name] = '\0';
+    return prefix;
+}
+
+/* #2255: settle which registered module an import names, BEFORE it is
+ * looked up or loaded. The registry is keyed by name, and a package
+ * importing one of its own files writes a bare name: std.jsonpath and
+ * contrib.jq both `import parser`. Keyed as `parser`, whichever loaded
+ * first answered for both, so the other package ran against the wrong
+ * parser (a compile error one way round, a silently failing
+ * jsonpath.query the other).
+ *
+ *  - A bare import from inside a shipped package that resolves to one of
+ *    its own files is named by its place in the package
+ *    (`contrib.jq.parser`), so a package's internals never take a bare
+ *    name another package, or the program, could also want. The
+ *    namespace is still the last segment unless something else ends the
+ *    same way, so the generated C only changes when there is a clash.
+ *  - An import of a file already loaded under another name binds to that
+ *    module instead of loading the file a second time (jq's tests import
+ *    `value` directly while contrib.jq loads it as contrib.jq.value). Only
+ *    when both names end the same way: the scope's written prefix is that
+ *    last segment, and must not change under it. */
+static void module_bind_import_identity(ASTNode* imp, const char* resolved,
+                                        const char* importer,
+                                        const char* importer_file) {
+    if (!imp || !imp->value || !resolved) return;
+    if (importer && module_is_shipped(importer) && !module_is_shipped(imp->value) &&
+        import_is_sibling(importer_file, imp->value, resolved)) {
+        char* prefix = module_package_prefix(importer, importer_file);
+        if (prefix) {
+            size_t n = strlen(prefix) + 1 + strlen(imp->value) + 1;
+            char* qualified = malloc(n);
+            snprintf(qualified, n, "%s.%s", prefix, imp->value);
+            free(prefix);
+            free(imp->value);
+            imp->value = qualified;
+        }
+    }
+    AetherModule* by_name = module_find(imp->value);
+    if (by_name) return;
+    AetherModule* by_file = module_find_by_file(resolved);
+    if (by_file && by_file->name &&
+        strcmp(module_last_segment(by_file->name), module_last_segment(imp->value)) == 0) {
+        free(imp->value);
+        imp->value = strdup(by_file->name);
+    }
+}
+
 // Recursive helper: load a single module and its transitive imports
 static int orchestrate_module(const char* module_name, const char* file_path,
                               DependencyGraph* graph) {
@@ -1618,6 +1757,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
 
         char* sub_file = resolve_import_path(child);
+        module_bind_import_identity(child, sub_file, module_name, file_path);  /* #2255 */
         const char* sub_path = child->value;
 
         warn_self_shadowing_import(module_name, child);   /* #1780 */
@@ -1672,6 +1812,7 @@ int module_orchestrate(ASTNode* program) {
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
 
         char* file_path = resolve_import_path(child);
+        module_bind_import_identity(child, file_path, NULL, NULL);  /* #2255 */
         const char* module_path = child->value;
 
         dependency_graph_add_edge(graph, "__main__", module_path);

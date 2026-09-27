@@ -37,13 +37,27 @@ main() {
 3. Dot-style calls: `string.new()`, `list.free()`, etc. (compiler translates to C-level `string_new`, `list_free`)
 
 A module's namespace is the last segment of its path. When two loaded
-modules end in the same segment (`mine.vk` and `contrib.vulkan.vk`, #2209),
-each instead gets its full path with dots as underscores (`mine_vk`,
-`contrib_vulkan_vk`), and the merger rewrites the prefix each program or
-library *wrote* (`vk.`, or an `import … as …` alias) to the module that scope
-imported. So a module's imports resolve in that module, by full path or
-alias, never program-wide by last segment; `import X as Y` works in a library
-module exactly as it does in a program.
+modules end in the same segment (`mine.vk` and `gfx.vk`, #2209), each
+instead gets its full path with dots as underscores (`mine_vk`, `gfx_vk`),
+and the merger rewrites the prefix each program or library *wrote* (`vk.`,
+or an `import … as …` alias) to the module that scope imported. So a
+module's imports resolve in that module, by full path or alias, never
+program-wide by last segment; `import X as Y` works in a library module
+exactly as it does in a program.
+
+One kind of module cannot move: one whose externs carry its last segment as
+a prefix. std.math declares `extern math_floor`, and `math.floor` reaches it
+as `<namespace>_floor`, so only the namespace `math` finds it. Such a module
+keeps its last segment and whatever collides with it moves (`pkg.math` →
+`pkg_math`, #2190). No two shipped modules may need the same last segment;
+`tests/scripts/check_shipped_module_leaves.py` enforces that in
+`make check-docs` (#2255).
+
+A package's own files are modules too, and a package usually imports them by
+bare name (`import parser` in `contrib/jq/module.ae`). Such an import from a
+shipped package is registered by its place in the package
+(`contrib.jq.parser`), so two packages with a `parser.ae` each get their own,
+and a file already loaded under another name is not loaded twice (#2255).
 
 ### Module Orchestration Phase
 
