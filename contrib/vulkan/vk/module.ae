@@ -2,7 +2,7 @@
 // Vulkan registry (vk.xml) by contrib/vulkan/tools/vkgen.ae. Do not edit: change
 // the selection in contrib/vulkan/tools/regenerate.sh and run it.
 //
-// Selection: Vulkan 1.3 + VK_KHR_surface,VK_KHR_swapchain.
+// Selection: Vulkan 1.3 + VK_KHR_surface,VK_KHR_swapchain,VK_KHR_deferred_host_operations,VK_KHR_acceleration_structure,VK_KHR_ray_query.
 // Registry: 1.3.204.
 //
 // Constants drop the VK_ prefix (vk.FORMAT_R8G8B8A8_UNORM), so they cannot
@@ -45,6 +45,12 @@ exports (
     KHR_SURFACE_EXTENSION_NAME,
     KHR_SWAPCHAIN_SPEC_VERSION,
     KHR_SWAPCHAIN_EXTENSION_NAME,
+    KHR_ACCELERATION_STRUCTURE_SPEC_VERSION,
+    KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+    KHR_RAY_QUERY_SPEC_VERSION,
+    KHR_RAY_QUERY_EXTENSION_NAME,
+    KHR_DEFERRED_HOST_OPERATIONS_SPEC_VERSION,
+    KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
     MAX_EXTENSION_NAME_SIZE,
     MAX_DESCRIPTION_SIZE,
     MAX_PHYSICAL_DEVICE_NAME_SIZE,
@@ -56,6 +62,15 @@ exports (
     INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
     KHR_PORTABILITY_SUBSET_SPEC_VERSION,
     KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+    ACCELERATION_STRUCTURE_BUILD_TYPE_HOST_KHR,
+    ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+    ACCELERATION_STRUCTURE_BUILD_TYPE_HOST_OR_DEVICE_KHR,
+    ACCELERATION_STRUCTURE_COMPATIBILITY_COMPATIBLE_KHR,
+    ACCELERATION_STRUCTURE_COMPATIBILITY_INCOMPATIBLE_KHR,
+    ACCELERATION_STRUCTURE_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT_KHR,
+    ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+    ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+    ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR,
     ACCESS_INDIRECT_COMMAND_READ_BIT,
     ACCESS_INDEX_READ_BIT,
     ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
@@ -74,6 +89,8 @@ exports (
     ACCESS_MEMORY_READ_BIT,
     ACCESS_MEMORY_WRITE_BIT,
     ACCESS_NONE,
+    ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+    ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
     ACCESS_2_NONE,
     ACCESS_2_INDIRECT_COMMAND_READ_BIT,
     ACCESS_2_INDEX_READ_BIT,
@@ -168,6 +185,15 @@ exports (
     BUFFER_USAGE_VERTEX_BUFFER_BIT,
     BUFFER_USAGE_INDIRECT_BUFFER_BIT,
     BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+    BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+    BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+    BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR,
+    BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+    BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR,
+    BUILD_ACCELERATION_STRUCTURE_LOW_MEMORY_BIT_KHR,
+    BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+    BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
     CHROMA_LOCATION_COSITED_EVEN,
     CHROMA_LOCATION_MIDPOINT,
     COLOR_COMPONENT_R_BIT,
@@ -205,6 +231,10 @@ exports (
     COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
     COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
     COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+    COPY_ACCELERATION_STRUCTURE_MODE_CLONE_KHR,
+    COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR,
+    COPY_ACCELERATION_STRUCTURE_MODE_SERIALIZE_KHR,
+    COPY_ACCELERATION_STRUCTURE_MODE_DESERIALIZE_KHR,
     CULL_MODE_NONE,
     CULL_MODE_FRONT_BIT,
     CULL_MODE_BACK_BIT,
@@ -231,6 +261,7 @@ exports (
     DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
     DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
     DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK,
+    DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
     DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET,
     DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR,
     DEVICE_GROUP_PRESENT_MODE_REMOTE_BIT_KHR,
@@ -574,6 +605,7 @@ exports (
     FORMAT_FEATURE_DISJOINT_BIT,
     FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT,
     FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT,
+    FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR,
     FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT,
     FORMAT_FEATURE_2_STORAGE_IMAGE_BIT,
     FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT,
@@ -631,6 +663,16 @@ exports (
     FRAMEBUFFER_CREATE_IMAGELESS_BIT,
     FRONT_FACE_COUNTER_CLOCKWISE,
     FRONT_FACE_CLOCKWISE,
+    GEOMETRY_OPAQUE_BIT_KHR,
+    GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR,
+    GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
+    GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR,
+    GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR,
+    GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR,
+    GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR,
+    GEOMETRY_TYPE_TRIANGLES_KHR,
+    GEOMETRY_TYPE_AABBS_KHR,
+    GEOMETRY_TYPE_INSTANCES_KHR,
     IMAGE_ASPECT_COLOR_BIT,
     IMAGE_ASPECT_DEPTH_BIT,
     IMAGE_ASPECT_STENCIL_BIT,
@@ -690,6 +732,7 @@ exports (
     IMAGE_VIEW_TYPE_CUBE_ARRAY,
     INDEX_TYPE_UINT16,
     INDEX_TYPE_UINT32,
+    INDEX_TYPE_NONE_KHR,
     INTERNAL_ALLOCATION_TYPE_EXECUTABLE,
     LOGIC_OP_CLEAR,
     LOGIC_OP_AND,
@@ -749,6 +792,8 @@ exports (
     OBJECT_TYPE_PRIVATE_DATA_SLOT,
     OBJECT_TYPE_SURFACE_KHR,
     OBJECT_TYPE_SWAPCHAIN_KHR,
+    OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
+    OBJECT_TYPE_DEFERRED_OPERATION_KHR,
     PEER_MEMORY_FEATURE_COPY_SRC_BIT,
     PEER_MEMORY_FEATURE_COPY_DST_BIT,
     PEER_MEMORY_FEATURE_GENERIC_SRC_BIT,
@@ -795,6 +840,7 @@ exports (
     PIPELINE_STAGE_ALL_GRAPHICS_BIT,
     PIPELINE_STAGE_ALL_COMMANDS_BIT,
     PIPELINE_STAGE_NONE,
+    PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
     PIPELINE_STAGE_2_NONE,
     PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
     PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
@@ -886,6 +932,8 @@ exports (
     QUERY_TYPE_OCCLUSION,
     QUERY_TYPE_PIPELINE_STATISTICS,
     QUERY_TYPE_TIMESTAMP,
+    QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+    QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR,
     QUEUE_GRAPHICS_BIT,
     QUEUE_COMPUTE_BIT,
     QUEUE_TRANSFER_BIT,
@@ -930,6 +978,10 @@ exports (
     ERROR_NATIVE_WINDOW_IN_USE_KHR,
     SUBOPTIMAL_KHR,
     ERROR_OUT_OF_DATE_KHR,
+    THREAD_IDLE_KHR,
+    THREAD_DONE_KHR,
+    OPERATION_DEFERRED_KHR,
+    OPERATION_NOT_DEFERRED_KHR,
     SAMPLE_COUNT_1_BIT,
     SAMPLE_COUNT_2_BIT,
     SAMPLE_COUNT_4_BIT,
@@ -1211,6 +1263,22 @@ exports (
     STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
     STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR,
     STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR,
+    STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_VERSION_INFO_KHR,
+    STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR,
+    STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_TO_MEMORY_INFO_KHR,
+    STRUCTURE_TYPE_COPY_MEMORY_TO_ACCELERATION_STRUCTURE_INFO_KHR,
+    STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+    STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+    STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+    STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
     STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTER_FEATURES,
     STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETER_FEATURES,
     SUBGROUP_FEATURE_BASIC_BIT,
@@ -1494,6 +1562,10 @@ exports (
     VkPhysicalDeviceShaderAtomicInt64Features,
     VkPhysicalDeviceDepthStencilResolveProperties,
     VkSubpassDescriptionDepthStencilResolve,
+    VkWriteDescriptorSetAccelerationStructureKHR,
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR,
+    VkPhysicalDeviceRayQueryFeaturesKHR,
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR,
     VkImageStencilUsageCreateInfo,
     VkPhysicalDeviceScalarBlockLayoutFeatures,
     VkPhysicalDeviceUniformBufferStandardLayoutFeatures,
@@ -1525,6 +1597,24 @@ exports (
     VkPhysicalDeviceVulkan13Features,
     VkPhysicalDeviceVulkan13Properties,
     VkPhysicalDeviceToolProperties,
+    VkDeviceOrHostAddressKHR,
+    VkDeviceOrHostAddressConstKHR,
+    VkAccelerationStructureGeometryTrianglesDataKHR,
+    VkAccelerationStructureGeometryAabbsDataKHR,
+    VkAccelerationStructureGeometryInstancesDataKHR,
+    VkAccelerationStructureGeometryDataKHR,
+    VkAccelerationStructureGeometryKHR,
+    VkAccelerationStructureBuildGeometryInfoKHR,
+    VkAccelerationStructureBuildRangeInfoKHR,
+    VkAccelerationStructureCreateInfoKHR,
+    VkAabbPositionsKHR,
+    VkTransformMatrixKHR,
+    VkAccelerationStructureInstanceKHR,
+    VkAccelerationStructureDeviceAddressInfoKHR,
+    VkAccelerationStructureVersionInfoKHR,
+    VkCopyAccelerationStructureInfoKHR,
+    VkCopyAccelerationStructureToMemoryInfoKHR,
+    VkCopyMemoryToAccelerationStructureInfoKHR,
     VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures,
     VkPhysicalDeviceImageRobustnessFeatures,
     VkBufferCopy2,
@@ -1539,6 +1629,7 @@ exports (
     VkCopyImageToBufferInfo2,
     VkResolveImageInfo2,
     VkPhysicalDeviceShaderTerminateInvocationFeatures,
+    VkAccelerationStructureBuildSizesInfoKHR,
     VkMemoryBarrier2,
     VkImageMemoryBarrier2,
     VkBufferMemoryBarrier2,
@@ -1820,7 +1911,28 @@ exports (
     vkGetDeviceGroupSurfacePresentModesKHR,
     vkGetPhysicalDevicePresentRectanglesKHR_all,
     vkGetPhysicalDevicePresentRectanglesKHR,
-    vkAcquireNextImage2KHR
+    vkAcquireNextImage2KHR,
+    vkCreateAccelerationStructureKHR,
+    vkDestroyAccelerationStructureKHR,
+    vkCmdBuildAccelerationStructuresKHR,
+    vkCmdBuildAccelerationStructuresIndirectKHR,
+    vkBuildAccelerationStructuresKHR,
+    vkCopyAccelerationStructureKHR,
+    vkCopyAccelerationStructureToMemoryKHR,
+    vkCopyMemoryToAccelerationStructureKHR,
+    vkWriteAccelerationStructuresPropertiesKHR,
+    vkCmdCopyAccelerationStructureKHR,
+    vkCmdCopyAccelerationStructureToMemoryKHR,
+    vkCmdCopyMemoryToAccelerationStructureKHR,
+    vkGetAccelerationStructureDeviceAddressKHR,
+    vkCmdWriteAccelerationStructuresPropertiesKHR,
+    vkGetDeviceAccelerationStructureCompatibilityKHR,
+    vkGetAccelerationStructureBuildSizesKHR,
+    vkCreateDeferredOperationKHR,
+    vkDestroyDeferredOperationKHR,
+    vkGetDeferredOperationMaxConcurrencyKHR,
+    vkGetDeferredOperationResultKHR,
+    vkDeferredOperationJoinKHR
 )
 
 const ATTACHMENT_UNUSED = 0xFFFFFFFF
@@ -1841,6 +1953,12 @@ const KHR_SURFACE_SPEC_VERSION = 25
 const KHR_SURFACE_EXTENSION_NAME = "VK_KHR_surface"
 const KHR_SWAPCHAIN_SPEC_VERSION = 70
 const KHR_SWAPCHAIN_EXTENSION_NAME = "VK_KHR_swapchain"
+const KHR_ACCELERATION_STRUCTURE_SPEC_VERSION = 13
+const KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME = "VK_KHR_acceleration_structure"
+const KHR_RAY_QUERY_SPEC_VERSION = 1
+const KHR_RAY_QUERY_EXTENSION_NAME = "VK_KHR_ray_query"
+const KHR_DEFERRED_HOST_OPERATIONS_SPEC_VERSION = 4
+const KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME = "VK_KHR_deferred_host_operations"
 const MAX_EXTENSION_NAME_SIZE = 256
 const MAX_DESCRIPTION_SIZE = 256
 const MAX_PHYSICAL_DEVICE_NAME_SIZE = 256
@@ -1852,6 +1970,23 @@ const KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME = "VK_KHR_portability_enumerati
 const INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR = 1
 const KHR_PORTABILITY_SUBSET_SPEC_VERSION = 1
 const KHR_PORTABILITY_SUBSET_EXTENSION_NAME = "VK_KHR_portability_subset"
+
+// VkAccelerationStructureBuildTypeKHR
+const ACCELERATION_STRUCTURE_BUILD_TYPE_HOST_KHR = 0
+const ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR = 1
+const ACCELERATION_STRUCTURE_BUILD_TYPE_HOST_OR_DEVICE_KHR = 2
+
+// VkAccelerationStructureCompatibilityKHR
+const ACCELERATION_STRUCTURE_COMPATIBILITY_COMPATIBLE_KHR = 0
+const ACCELERATION_STRUCTURE_COMPATIBILITY_INCOMPATIBLE_KHR = 1
+
+// VkAccelerationStructureCreateFlagBitsKHR
+const ACCELERATION_STRUCTURE_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT_KHR = 0x1
+
+// VkAccelerationStructureTypeKHR
+const ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR = 0
+const ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR = 1
+const ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR = 2
 
 // VkAccessFlagBits
 const ACCESS_INDIRECT_COMMAND_READ_BIT = 0x1
@@ -1872,6 +2007,8 @@ const ACCESS_HOST_WRITE_BIT = 0x4000
 const ACCESS_MEMORY_READ_BIT = 0x8000
 const ACCESS_MEMORY_WRITE_BIT = 0x10000
 const ACCESS_NONE = 0
+const ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR = 0x200000
+const ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR = 0x400000
 
 // VkAccessFlagBits2
 const ACCESS_2_NONE = 0
@@ -1984,6 +2121,19 @@ const BUFFER_USAGE_INDEX_BUFFER_BIT = 0x40
 const BUFFER_USAGE_VERTEX_BUFFER_BIT = 0x80
 const BUFFER_USAGE_INDIRECT_BUFFER_BIT = 0x100
 const BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT = 0x20000
+const BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR = 0x80000
+const BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR = 0x100000
+
+// VkBuildAccelerationStructureFlagBitsKHR
+const BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR = 0x1
+const BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR = 0x2
+const BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR = 0x4
+const BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR = 0x8
+const BUILD_ACCELERATION_STRUCTURE_LOW_MEMORY_BIT_KHR = 0x10
+
+// VkBuildAccelerationStructureModeKHR
+const BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR = 0
+const BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR = 1
 
 // VkChromaLocation
 const CHROMA_LOCATION_COSITED_EVEN = 0
@@ -2044,6 +2194,12 @@ const COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR = 0x2
 const COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR = 0x4
 const COMPOSITE_ALPHA_INHERIT_BIT_KHR = 0x8
 
+// VkCopyAccelerationStructureModeKHR
+const COPY_ACCELERATION_STRUCTURE_MODE_CLONE_KHR = 0
+const COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR = 1
+const COPY_ACCELERATION_STRUCTURE_MODE_SERIALIZE_KHR = 2
+const COPY_ACCELERATION_STRUCTURE_MODE_DESERIALIZE_KHR = 3
+
 // VkCullModeFlagBits
 const CULL_MODE_NONE = 0
 const CULL_MODE_FRONT_BIT = 0x1
@@ -2081,6 +2237,7 @@ const DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC = 8
 const DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC = 9
 const DESCRIPTOR_TYPE_INPUT_ATTACHMENT = 10
 const DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK = 1000138000
+const DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR = 1000150000
 
 // VkDescriptorUpdateTemplateType
 const DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET = 0
@@ -2458,6 +2615,7 @@ const FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLIC
 const FORMAT_FEATURE_DISJOINT_BIT = 0x400000
 const FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT = 0x800000
 const FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT = 0x10000
+const FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR = 0x20000000
 
 // VkFormatFeatureFlagBits2
 const FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT = 0x1
@@ -2521,6 +2679,22 @@ const FRAMEBUFFER_CREATE_IMAGELESS_BIT = 0x1
 // VkFrontFace
 const FRONT_FACE_COUNTER_CLOCKWISE = 0
 const FRONT_FACE_CLOCKWISE = 1
+
+// VkGeometryFlagBitsKHR
+const GEOMETRY_OPAQUE_BIT_KHR = 0x1
+const GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR = 0x2
+
+// VkGeometryInstanceFlagBitsKHR
+const GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR = 0x1
+const GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR = 0x2
+const GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR = 0x4
+const GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR = 0x8
+const GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR = GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR
+
+// VkGeometryTypeKHR
+const GEOMETRY_TYPE_TRIANGLES_KHR = 0
+const GEOMETRY_TYPE_AABBS_KHR = 1
+const GEOMETRY_TYPE_INSTANCES_KHR = 2
 
 // VkImageAspectFlagBits
 const IMAGE_ASPECT_COLOR_BIT = 0x1
@@ -2598,6 +2772,7 @@ const IMAGE_VIEW_TYPE_CUBE_ARRAY = 6
 // VkIndexType
 const INDEX_TYPE_UINT16 = 0
 const INDEX_TYPE_UINT32 = 1
+const INDEX_TYPE_NONE_KHR = 1000165000
 
 // VkInternalAllocationType
 const INTERNAL_ALLOCATION_TYPE_EXECUTABLE = 0
@@ -2669,6 +2844,8 @@ const OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE = 1000085000
 const OBJECT_TYPE_PRIVATE_DATA_SLOT = 1000295000
 const OBJECT_TYPE_SURFACE_KHR = 1000000000
 const OBJECT_TYPE_SWAPCHAIN_KHR = 1000001000
+const OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR = 1000150000
+const OBJECT_TYPE_DEFERRED_OPERATION_KHR = 1000268000
 
 // VkPeerMemoryFeatureFlagBits
 const PEER_MEMORY_FEATURE_COPY_SRC_BIT = 0x1
@@ -2731,6 +2908,7 @@ const PIPELINE_STAGE_HOST_BIT = 0x4000
 const PIPELINE_STAGE_ALL_GRAPHICS_BIT = 0x8000
 const PIPELINE_STAGE_ALL_COMMANDS_BIT = 0x10000
 const PIPELINE_STAGE_NONE = 0
+const PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR = 0x2000000
 
 // VkPipelineStageFlagBits2
 const PIPELINE_STAGE_2_NONE = 0
@@ -2842,6 +3020,8 @@ const QUERY_RESULT_PARTIAL_BIT = 0x8
 const QUERY_TYPE_OCCLUSION = 0
 const QUERY_TYPE_PIPELINE_STATISTICS = 1
 const QUERY_TYPE_TIMESTAMP = 2
+const QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR = 1000150000
+const QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR = 1000150001
 
 // VkQueueFlagBits
 const QUEUE_GRAPHICS_BIT = 0x1
@@ -2896,6 +3076,10 @@ const ERROR_SURFACE_LOST_KHR = -1000000000
 const ERROR_NATIVE_WINDOW_IN_USE_KHR = -1000000001
 const SUBOPTIMAL_KHR = 1000001003
 const ERROR_OUT_OF_DATE_KHR = -1000001004
+const THREAD_IDLE_KHR = 1000268000
+const THREAD_DONE_KHR = 1000268001
+const OPERATION_DEFERRED_KHR = 1000268002
+const OPERATION_NOT_DEFERRED_KHR = 1000268003
 
 // VkSampleCountFlagBits
 const SAMPLE_COUNT_1_BIT = 0x1
@@ -3213,6 +3397,22 @@ const STRUCTURE_TYPE_BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR = 1000060009
 const STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR = 1000060010
 const STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR = 1000060011
 const STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR = 1000060012
+const STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR = 1000150007
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR = 1000150000
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR = 1000150002
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR = 1000150003
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR = 1000150004
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR = 1000150005
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR = 1000150006
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_VERSION_INFO_KHR = 1000150009
+const STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR = 1000150010
+const STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_TO_MEMORY_INFO_KHR = 1000150011
+const STRUCTURE_TYPE_COPY_MEMORY_TO_ACCELERATION_STRUCTURE_INFO_KHR = 1000150012
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR = 1000150013
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR = 1000150014
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR = 1000150017
+const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR = 1000150020
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR = 1000348013
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTER_FEATURES = STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETER_FEATURES = STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES
 
@@ -5353,6 +5553,42 @@ extern struct VkSubpassDescriptionDepthStencilResolve @c_import {
     pDepthStencilResolveAttachment: ptr
 }
 
+extern struct VkWriteDescriptorSetAccelerationStructureKHR @c_import {
+    sType: int
+    pNext: ptr
+    accelerationStructureCount: uint32
+    pAccelerationStructures: ptr
+}
+
+extern struct VkPhysicalDeviceAccelerationStructureFeaturesKHR @c_import {
+    sType: int
+    pNext: ptr
+    accelerationStructure: uint32
+    accelerationStructureCaptureReplay: uint32
+    accelerationStructureIndirectBuild: uint32
+    accelerationStructureHostCommands: uint32
+    descriptorBindingAccelerationStructureUpdateAfterBind: uint32
+}
+
+extern struct VkPhysicalDeviceRayQueryFeaturesKHR @c_import {
+    sType: int
+    pNext: ptr
+    rayQuery: uint32
+}
+
+extern struct VkPhysicalDeviceAccelerationStructurePropertiesKHR @c_import {
+    sType: int
+    pNext: ptr
+    maxGeometryCount: uint64
+    maxInstanceCount: uint64
+    maxPrimitiveCount: uint64
+    maxPerStageDescriptorAccelerationStructures: uint32
+    maxPerStageDescriptorUpdateAfterBindAccelerationStructures: uint32
+    maxDescriptorSetAccelerationStructures: uint32
+    maxDescriptorSetUpdateAfterBindAccelerationStructures: uint32
+    minAccelerationStructureScratchOffsetAlignment: uint32
+}
+
 extern struct VkImageStencilUsageCreateInfo @c_import {
     sType: int
     pNext: ptr
@@ -5742,6 +5978,146 @@ extern struct VkPhysicalDeviceToolProperties @c_import {
     layer: string
 }
 
+extern struct VkDeviceOrHostAddressKHR @c_import {
+    deviceAddress: uint64
+    hostAddress: ptr
+}
+
+extern struct VkDeviceOrHostAddressConstKHR @c_import {
+    deviceAddress: uint64
+    hostAddress: ptr
+}
+
+extern struct VkAccelerationStructureGeometryTrianglesDataKHR @c_import {
+    sType: int
+    pNext: ptr
+    vertexFormat: int
+    vertexData: VkDeviceOrHostAddressConstKHR
+    vertexStride: uint64
+    maxVertex: uint32
+    indexType: int
+    indexData: VkDeviceOrHostAddressConstKHR
+    transformData: VkDeviceOrHostAddressConstKHR
+}
+
+extern struct VkAccelerationStructureGeometryAabbsDataKHR @c_import {
+    sType: int
+    pNext: ptr
+    data: VkDeviceOrHostAddressConstKHR
+    stride: uint64
+}
+
+extern struct VkAccelerationStructureGeometryInstancesDataKHR @c_import {
+    sType: int
+    pNext: ptr
+    arrayOfPointers: uint32
+    data: VkDeviceOrHostAddressConstKHR
+}
+
+extern struct VkAccelerationStructureGeometryDataKHR @c_import {
+    triangles: VkAccelerationStructureGeometryTrianglesDataKHR
+    aabbs: VkAccelerationStructureGeometryAabbsDataKHR
+    instances: VkAccelerationStructureGeometryInstancesDataKHR
+}
+
+extern struct VkAccelerationStructureGeometryKHR @c_import {
+    sType: int
+    pNext: ptr
+    geometryType: int
+    geometry: VkAccelerationStructureGeometryDataKHR
+    flags: uint32
+}
+
+extern struct VkAccelerationStructureBuildGeometryInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    type: int
+    flags: uint32
+    mode: int
+    srcAccelerationStructure: ptr
+    dstAccelerationStructure: ptr
+    geometryCount: uint32
+    pGeometries: ptr
+    ppGeometries: ptr
+    scratchData: VkDeviceOrHostAddressKHR
+}
+
+extern struct VkAccelerationStructureBuildRangeInfoKHR @c_import {
+    primitiveCount: uint32
+    primitiveOffset: uint32
+    firstVertex: uint32
+    transformOffset: uint32
+}
+
+extern struct VkAccelerationStructureCreateInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    createFlags: uint32
+    buffer: ptr
+    offset: uint64
+    size: uint64
+    type: int
+    deviceAddress: uint64
+}
+
+extern struct VkAabbPositionsKHR @c_import {
+    minX: f32
+    minY: f32
+    minZ: f32
+    maxX: f32
+    maxY: f32
+    maxZ: f32
+}
+
+extern struct VkTransformMatrixKHR @c_import {
+    matrix: f32[12]
+}
+
+extern struct VkAccelerationStructureInstanceKHR @c_import {
+    transform: VkTransformMatrixKHR
+    instanceCustomIndex: uint32
+    mask: uint32
+    instanceShaderBindingTableRecordOffset: uint32
+    flags: uint32
+    accelerationStructureReference: uint64
+}
+
+extern struct VkAccelerationStructureDeviceAddressInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    accelerationStructure: ptr
+}
+
+extern struct VkAccelerationStructureVersionInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    pVersionData: ptr
+}
+
+extern struct VkCopyAccelerationStructureInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    src: ptr
+    dst: ptr
+    mode: int
+}
+
+extern struct VkCopyAccelerationStructureToMemoryInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    src: ptr
+    dst: VkDeviceOrHostAddressKHR
+    mode: int
+}
+
+extern struct VkCopyMemoryToAccelerationStructureInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    src: VkDeviceOrHostAddressConstKHR
+    dst: ptr
+    mode: int
+}
+
 extern struct VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures @c_import {
     sType: int
     pNext: ptr
@@ -5869,6 +6245,14 @@ extern struct VkPhysicalDeviceShaderTerminateInvocationFeatures @c_import {
     sType: int
     pNext: ptr
     shaderTerminateInvocation: uint32
+}
+
+extern struct VkAccelerationStructureBuildSizesInfoKHR @c_import {
+    sType: int
+    pNext: ptr
+    accelerationStructureSize: uint64
+    updateScratchSize: uint64
+    buildScratchSize: uint64
 }
 
 extern struct VkMemoryBarrier2 @c_import {
@@ -8651,6 +9035,195 @@ vkAcquireNextImage2KHR(device: ptr, pAcquireInfo: ptr, pImageIndex: ptr) -> int 
     return f(device, pAcquireInfo, pImageIndex)
 }
 
+var pfn_vkCreateAccelerationStructureKHR: ptr = null
+var got_vkCreateAccelerationStructureKHR: int = 0
+vkCreateAccelerationStructureKHR(device: ptr, pCreateInfo: ptr, pAllocator: ptr, pAccelerationStructure: ptr) -> int {
+    if pfn_vkCreateAccelerationStructureKHR == null && got_vkCreateAccelerationStructureKHR == 0 { pfn_vkCreateAccelerationStructureKHR = aevk_ae_loader_proc("vkCreateAccelerationStructureKHR") }
+    if pfn_vkCreateAccelerationStructureKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkCreateAccelerationStructureKHR as fn(ptr, ptr, ptr, ptr) -> int
+    return f(device, pCreateInfo, pAllocator, pAccelerationStructure)
+}
+
+var pfn_vkDestroyAccelerationStructureKHR: ptr = null
+var got_vkDestroyAccelerationStructureKHR: int = 0
+vkDestroyAccelerationStructureKHR(device: ptr, accelerationStructure: ptr, pAllocator: ptr) {
+    if pfn_vkDestroyAccelerationStructureKHR == null && got_vkDestroyAccelerationStructureKHR == 0 { pfn_vkDestroyAccelerationStructureKHR = aevk_ae_loader_proc("vkDestroyAccelerationStructureKHR") }
+    if pfn_vkDestroyAccelerationStructureKHR == null { return }
+    f = pfn_vkDestroyAccelerationStructureKHR as fn(ptr, ptr, ptr)
+    f(device, accelerationStructure, pAllocator)
+}
+
+var pfn_vkCmdBuildAccelerationStructuresKHR: ptr = null
+var got_vkCmdBuildAccelerationStructuresKHR: int = 0
+vkCmdBuildAccelerationStructuresKHR(commandBuffer: ptr, infoCount: uint32, pInfos: ptr, ppBuildRangeInfos: ptr) {
+    if pfn_vkCmdBuildAccelerationStructuresKHR == null && got_vkCmdBuildAccelerationStructuresKHR == 0 { pfn_vkCmdBuildAccelerationStructuresKHR = aevk_ae_loader_proc("vkCmdBuildAccelerationStructuresKHR") }
+    if pfn_vkCmdBuildAccelerationStructuresKHR == null { return }
+    f = pfn_vkCmdBuildAccelerationStructuresKHR as fn(ptr, uint32, ptr, ptr)
+    f(commandBuffer, infoCount, pInfos, ppBuildRangeInfos)
+}
+
+var pfn_vkCmdBuildAccelerationStructuresIndirectKHR: ptr = null
+var got_vkCmdBuildAccelerationStructuresIndirectKHR: int = 0
+vkCmdBuildAccelerationStructuresIndirectKHR(commandBuffer: ptr, infoCount: uint32, pInfos: ptr, pIndirectDeviceAddresses: ptr, pIndirectStrides: ptr, ppMaxPrimitiveCounts: ptr) {
+    if pfn_vkCmdBuildAccelerationStructuresIndirectKHR == null && got_vkCmdBuildAccelerationStructuresIndirectKHR == 0 { pfn_vkCmdBuildAccelerationStructuresIndirectKHR = aevk_ae_loader_proc("vkCmdBuildAccelerationStructuresIndirectKHR") }
+    if pfn_vkCmdBuildAccelerationStructuresIndirectKHR == null { return }
+    f = pfn_vkCmdBuildAccelerationStructuresIndirectKHR as fn(ptr, uint32, ptr, ptr, ptr, ptr)
+    f(commandBuffer, infoCount, pInfos, pIndirectDeviceAddresses, pIndirectStrides, ppMaxPrimitiveCounts)
+}
+
+var pfn_vkBuildAccelerationStructuresKHR: ptr = null
+var got_vkBuildAccelerationStructuresKHR: int = 0
+vkBuildAccelerationStructuresKHR(device: ptr, deferredOperation: ptr, infoCount: uint32, pInfos: ptr, ppBuildRangeInfos: ptr) -> int {
+    if pfn_vkBuildAccelerationStructuresKHR == null && got_vkBuildAccelerationStructuresKHR == 0 { pfn_vkBuildAccelerationStructuresKHR = aevk_ae_loader_proc("vkBuildAccelerationStructuresKHR") }
+    if pfn_vkBuildAccelerationStructuresKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkBuildAccelerationStructuresKHR as fn(ptr, ptr, uint32, ptr, ptr) -> int
+    return f(device, deferredOperation, infoCount, pInfos, ppBuildRangeInfos)
+}
+
+var pfn_vkCopyAccelerationStructureKHR: ptr = null
+var got_vkCopyAccelerationStructureKHR: int = 0
+vkCopyAccelerationStructureKHR(device: ptr, deferredOperation: ptr, pInfo: ptr) -> int {
+    if pfn_vkCopyAccelerationStructureKHR == null && got_vkCopyAccelerationStructureKHR == 0 { pfn_vkCopyAccelerationStructureKHR = aevk_ae_loader_proc("vkCopyAccelerationStructureKHR") }
+    if pfn_vkCopyAccelerationStructureKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkCopyAccelerationStructureKHR as fn(ptr, ptr, ptr) -> int
+    return f(device, deferredOperation, pInfo)
+}
+
+var pfn_vkCopyAccelerationStructureToMemoryKHR: ptr = null
+var got_vkCopyAccelerationStructureToMemoryKHR: int = 0
+vkCopyAccelerationStructureToMemoryKHR(device: ptr, deferredOperation: ptr, pInfo: ptr) -> int {
+    if pfn_vkCopyAccelerationStructureToMemoryKHR == null && got_vkCopyAccelerationStructureToMemoryKHR == 0 { pfn_vkCopyAccelerationStructureToMemoryKHR = aevk_ae_loader_proc("vkCopyAccelerationStructureToMemoryKHR") }
+    if pfn_vkCopyAccelerationStructureToMemoryKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkCopyAccelerationStructureToMemoryKHR as fn(ptr, ptr, ptr) -> int
+    return f(device, deferredOperation, pInfo)
+}
+
+var pfn_vkCopyMemoryToAccelerationStructureKHR: ptr = null
+var got_vkCopyMemoryToAccelerationStructureKHR: int = 0
+vkCopyMemoryToAccelerationStructureKHR(device: ptr, deferredOperation: ptr, pInfo: ptr) -> int {
+    if pfn_vkCopyMemoryToAccelerationStructureKHR == null && got_vkCopyMemoryToAccelerationStructureKHR == 0 { pfn_vkCopyMemoryToAccelerationStructureKHR = aevk_ae_loader_proc("vkCopyMemoryToAccelerationStructureKHR") }
+    if pfn_vkCopyMemoryToAccelerationStructureKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkCopyMemoryToAccelerationStructureKHR as fn(ptr, ptr, ptr) -> int
+    return f(device, deferredOperation, pInfo)
+}
+
+var pfn_vkWriteAccelerationStructuresPropertiesKHR: ptr = null
+var got_vkWriteAccelerationStructuresPropertiesKHR: int = 0
+vkWriteAccelerationStructuresPropertiesKHR(device: ptr, accelerationStructureCount: uint32, pAccelerationStructures: ptr, queryType: int, dataSize: size_t, pData: ptr, stride: size_t) -> int {
+    if pfn_vkWriteAccelerationStructuresPropertiesKHR == null && got_vkWriteAccelerationStructuresPropertiesKHR == 0 { pfn_vkWriteAccelerationStructuresPropertiesKHR = aevk_ae_loader_proc("vkWriteAccelerationStructuresPropertiesKHR") }
+    if pfn_vkWriteAccelerationStructuresPropertiesKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkWriteAccelerationStructuresPropertiesKHR as fn(ptr, uint32, ptr, int, size_t, ptr, size_t) -> int
+    return f(device, accelerationStructureCount, pAccelerationStructures, queryType, dataSize, pData, stride)
+}
+
+var pfn_vkCmdCopyAccelerationStructureKHR: ptr = null
+var got_vkCmdCopyAccelerationStructureKHR: int = 0
+vkCmdCopyAccelerationStructureKHR(commandBuffer: ptr, pInfo: ptr) {
+    if pfn_vkCmdCopyAccelerationStructureKHR == null && got_vkCmdCopyAccelerationStructureKHR == 0 { pfn_vkCmdCopyAccelerationStructureKHR = aevk_ae_loader_proc("vkCmdCopyAccelerationStructureKHR") }
+    if pfn_vkCmdCopyAccelerationStructureKHR == null { return }
+    f = pfn_vkCmdCopyAccelerationStructureKHR as fn(ptr, ptr)
+    f(commandBuffer, pInfo)
+}
+
+var pfn_vkCmdCopyAccelerationStructureToMemoryKHR: ptr = null
+var got_vkCmdCopyAccelerationStructureToMemoryKHR: int = 0
+vkCmdCopyAccelerationStructureToMemoryKHR(commandBuffer: ptr, pInfo: ptr) {
+    if pfn_vkCmdCopyAccelerationStructureToMemoryKHR == null && got_vkCmdCopyAccelerationStructureToMemoryKHR == 0 { pfn_vkCmdCopyAccelerationStructureToMemoryKHR = aevk_ae_loader_proc("vkCmdCopyAccelerationStructureToMemoryKHR") }
+    if pfn_vkCmdCopyAccelerationStructureToMemoryKHR == null { return }
+    f = pfn_vkCmdCopyAccelerationStructureToMemoryKHR as fn(ptr, ptr)
+    f(commandBuffer, pInfo)
+}
+
+var pfn_vkCmdCopyMemoryToAccelerationStructureKHR: ptr = null
+var got_vkCmdCopyMemoryToAccelerationStructureKHR: int = 0
+vkCmdCopyMemoryToAccelerationStructureKHR(commandBuffer: ptr, pInfo: ptr) {
+    if pfn_vkCmdCopyMemoryToAccelerationStructureKHR == null && got_vkCmdCopyMemoryToAccelerationStructureKHR == 0 { pfn_vkCmdCopyMemoryToAccelerationStructureKHR = aevk_ae_loader_proc("vkCmdCopyMemoryToAccelerationStructureKHR") }
+    if pfn_vkCmdCopyMemoryToAccelerationStructureKHR == null { return }
+    f = pfn_vkCmdCopyMemoryToAccelerationStructureKHR as fn(ptr, ptr)
+    f(commandBuffer, pInfo)
+}
+
+var pfn_vkGetAccelerationStructureDeviceAddressKHR: ptr = null
+var got_vkGetAccelerationStructureDeviceAddressKHR: int = 0
+vkGetAccelerationStructureDeviceAddressKHR(device: ptr, pInfo: ptr) -> uint64 {
+    if pfn_vkGetAccelerationStructureDeviceAddressKHR == null && got_vkGetAccelerationStructureDeviceAddressKHR == 0 { pfn_vkGetAccelerationStructureDeviceAddressKHR = aevk_ae_loader_proc("vkGetAccelerationStructureDeviceAddressKHR") }
+    if pfn_vkGetAccelerationStructureDeviceAddressKHR == null { return 0 }
+    f = pfn_vkGetAccelerationStructureDeviceAddressKHR as fn(ptr, ptr) -> uint64
+    return f(device, pInfo)
+}
+
+var pfn_vkCmdWriteAccelerationStructuresPropertiesKHR: ptr = null
+var got_vkCmdWriteAccelerationStructuresPropertiesKHR: int = 0
+vkCmdWriteAccelerationStructuresPropertiesKHR(commandBuffer: ptr, accelerationStructureCount: uint32, pAccelerationStructures: ptr, queryType: int, queryPool: ptr, firstQuery: uint32) {
+    if pfn_vkCmdWriteAccelerationStructuresPropertiesKHR == null && got_vkCmdWriteAccelerationStructuresPropertiesKHR == 0 { pfn_vkCmdWriteAccelerationStructuresPropertiesKHR = aevk_ae_loader_proc("vkCmdWriteAccelerationStructuresPropertiesKHR") }
+    if pfn_vkCmdWriteAccelerationStructuresPropertiesKHR == null { return }
+    f = pfn_vkCmdWriteAccelerationStructuresPropertiesKHR as fn(ptr, uint32, ptr, int, ptr, uint32)
+    f(commandBuffer, accelerationStructureCount, pAccelerationStructures, queryType, queryPool, firstQuery)
+}
+
+var pfn_vkGetDeviceAccelerationStructureCompatibilityKHR: ptr = null
+var got_vkGetDeviceAccelerationStructureCompatibilityKHR: int = 0
+vkGetDeviceAccelerationStructureCompatibilityKHR(device: ptr, pVersionInfo: ptr, pCompatibility: ptr) {
+    if pfn_vkGetDeviceAccelerationStructureCompatibilityKHR == null && got_vkGetDeviceAccelerationStructureCompatibilityKHR == 0 { pfn_vkGetDeviceAccelerationStructureCompatibilityKHR = aevk_ae_loader_proc("vkGetDeviceAccelerationStructureCompatibilityKHR") }
+    if pfn_vkGetDeviceAccelerationStructureCompatibilityKHR == null { return }
+    f = pfn_vkGetDeviceAccelerationStructureCompatibilityKHR as fn(ptr, ptr, ptr)
+    f(device, pVersionInfo, pCompatibility)
+}
+
+var pfn_vkGetAccelerationStructureBuildSizesKHR: ptr = null
+var got_vkGetAccelerationStructureBuildSizesKHR: int = 0
+vkGetAccelerationStructureBuildSizesKHR(device: ptr, buildType: int, pBuildInfo: ptr, pMaxPrimitiveCounts: ptr, pSizeInfo: ptr) {
+    if pfn_vkGetAccelerationStructureBuildSizesKHR == null && got_vkGetAccelerationStructureBuildSizesKHR == 0 { pfn_vkGetAccelerationStructureBuildSizesKHR = aevk_ae_loader_proc("vkGetAccelerationStructureBuildSizesKHR") }
+    if pfn_vkGetAccelerationStructureBuildSizesKHR == null { return }
+    f = pfn_vkGetAccelerationStructureBuildSizesKHR as fn(ptr, int, ptr, ptr, ptr)
+    f(device, buildType, pBuildInfo, pMaxPrimitiveCounts, pSizeInfo)
+}
+
+var pfn_vkCreateDeferredOperationKHR: ptr = null
+var got_vkCreateDeferredOperationKHR: int = 0
+vkCreateDeferredOperationKHR(device: ptr, pAllocator: ptr, pDeferredOperation: ptr) -> int {
+    if pfn_vkCreateDeferredOperationKHR == null && got_vkCreateDeferredOperationKHR == 0 { pfn_vkCreateDeferredOperationKHR = aevk_ae_loader_proc("vkCreateDeferredOperationKHR") }
+    if pfn_vkCreateDeferredOperationKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkCreateDeferredOperationKHR as fn(ptr, ptr, ptr) -> int
+    return f(device, pAllocator, pDeferredOperation)
+}
+
+var pfn_vkDestroyDeferredOperationKHR: ptr = null
+var got_vkDestroyDeferredOperationKHR: int = 0
+vkDestroyDeferredOperationKHR(device: ptr, operation: ptr, pAllocator: ptr) {
+    if pfn_vkDestroyDeferredOperationKHR == null && got_vkDestroyDeferredOperationKHR == 0 { pfn_vkDestroyDeferredOperationKHR = aevk_ae_loader_proc("vkDestroyDeferredOperationKHR") }
+    if pfn_vkDestroyDeferredOperationKHR == null { return }
+    f = pfn_vkDestroyDeferredOperationKHR as fn(ptr, ptr, ptr)
+    f(device, operation, pAllocator)
+}
+
+var pfn_vkGetDeferredOperationMaxConcurrencyKHR: ptr = null
+var got_vkGetDeferredOperationMaxConcurrencyKHR: int = 0
+vkGetDeferredOperationMaxConcurrencyKHR(device: ptr, operation: ptr) -> uint32 {
+    if pfn_vkGetDeferredOperationMaxConcurrencyKHR == null && got_vkGetDeferredOperationMaxConcurrencyKHR == 0 { pfn_vkGetDeferredOperationMaxConcurrencyKHR = aevk_ae_loader_proc("vkGetDeferredOperationMaxConcurrencyKHR") }
+    if pfn_vkGetDeferredOperationMaxConcurrencyKHR == null { return 0 }
+    f = pfn_vkGetDeferredOperationMaxConcurrencyKHR as fn(ptr, ptr) -> uint32
+    return f(device, operation)
+}
+
+var pfn_vkGetDeferredOperationResultKHR: ptr = null
+var got_vkGetDeferredOperationResultKHR: int = 0
+vkGetDeferredOperationResultKHR(device: ptr, operation: ptr) -> int {
+    if pfn_vkGetDeferredOperationResultKHR == null && got_vkGetDeferredOperationResultKHR == 0 { pfn_vkGetDeferredOperationResultKHR = aevk_ae_loader_proc("vkGetDeferredOperationResultKHR") }
+    if pfn_vkGetDeferredOperationResultKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkGetDeferredOperationResultKHR as fn(ptr, ptr) -> int
+    return f(device, operation)
+}
+
+var pfn_vkDeferredOperationJoinKHR: ptr = null
+var got_vkDeferredOperationJoinKHR: int = 0
+vkDeferredOperationJoinKHR(device: ptr, operation: ptr) -> int {
+    if pfn_vkDeferredOperationJoinKHR == null && got_vkDeferredOperationJoinKHR == 0 { pfn_vkDeferredOperationJoinKHR = aevk_ae_loader_proc("vkDeferredOperationJoinKHR") }
+    if pfn_vkDeferredOperationJoinKHR == null { return ERROR_INITIALIZATION_FAILED }
+    f = pfn_vkDeferredOperationJoinKHR as fn(ptr, ptr) -> int
+    return f(device, operation)
+}
+
 // Points every instance-level command at `instance`'s own entry points.
 // Returns how many resolved. A command the instance does not provide (one
 // from a version or extension it was not created with) then fails as it
@@ -9394,5 +9967,68 @@ load_device_with(gdpa: ptr, device: ptr) -> int {
     pfn_vkAcquireNextImage2KHR = device_entry(gdpa, device, "vkAcquireNextImage2KHR")
     got_vkAcquireNextImage2KHR = pin
     if pfn_vkAcquireNextImage2KHR != null { n = n + 1 }
+    pfn_vkCreateAccelerationStructureKHR = device_entry(gdpa, device, "vkCreateAccelerationStructureKHR")
+    got_vkCreateAccelerationStructureKHR = pin
+    if pfn_vkCreateAccelerationStructureKHR != null { n = n + 1 }
+    pfn_vkDestroyAccelerationStructureKHR = device_entry(gdpa, device, "vkDestroyAccelerationStructureKHR")
+    got_vkDestroyAccelerationStructureKHR = pin
+    if pfn_vkDestroyAccelerationStructureKHR != null { n = n + 1 }
+    pfn_vkCmdBuildAccelerationStructuresKHR = device_entry(gdpa, device, "vkCmdBuildAccelerationStructuresKHR")
+    got_vkCmdBuildAccelerationStructuresKHR = pin
+    if pfn_vkCmdBuildAccelerationStructuresKHR != null { n = n + 1 }
+    pfn_vkCmdBuildAccelerationStructuresIndirectKHR = device_entry(gdpa, device, "vkCmdBuildAccelerationStructuresIndirectKHR")
+    got_vkCmdBuildAccelerationStructuresIndirectKHR = pin
+    if pfn_vkCmdBuildAccelerationStructuresIndirectKHR != null { n = n + 1 }
+    pfn_vkBuildAccelerationStructuresKHR = device_entry(gdpa, device, "vkBuildAccelerationStructuresKHR")
+    got_vkBuildAccelerationStructuresKHR = pin
+    if pfn_vkBuildAccelerationStructuresKHR != null { n = n + 1 }
+    pfn_vkCopyAccelerationStructureKHR = device_entry(gdpa, device, "vkCopyAccelerationStructureKHR")
+    got_vkCopyAccelerationStructureKHR = pin
+    if pfn_vkCopyAccelerationStructureKHR != null { n = n + 1 }
+    pfn_vkCopyAccelerationStructureToMemoryKHR = device_entry(gdpa, device, "vkCopyAccelerationStructureToMemoryKHR")
+    got_vkCopyAccelerationStructureToMemoryKHR = pin
+    if pfn_vkCopyAccelerationStructureToMemoryKHR != null { n = n + 1 }
+    pfn_vkCopyMemoryToAccelerationStructureKHR = device_entry(gdpa, device, "vkCopyMemoryToAccelerationStructureKHR")
+    got_vkCopyMemoryToAccelerationStructureKHR = pin
+    if pfn_vkCopyMemoryToAccelerationStructureKHR != null { n = n + 1 }
+    pfn_vkWriteAccelerationStructuresPropertiesKHR = device_entry(gdpa, device, "vkWriteAccelerationStructuresPropertiesKHR")
+    got_vkWriteAccelerationStructuresPropertiesKHR = pin
+    if pfn_vkWriteAccelerationStructuresPropertiesKHR != null { n = n + 1 }
+    pfn_vkCmdCopyAccelerationStructureKHR = device_entry(gdpa, device, "vkCmdCopyAccelerationStructureKHR")
+    got_vkCmdCopyAccelerationStructureKHR = pin
+    if pfn_vkCmdCopyAccelerationStructureKHR != null { n = n + 1 }
+    pfn_vkCmdCopyAccelerationStructureToMemoryKHR = device_entry(gdpa, device, "vkCmdCopyAccelerationStructureToMemoryKHR")
+    got_vkCmdCopyAccelerationStructureToMemoryKHR = pin
+    if pfn_vkCmdCopyAccelerationStructureToMemoryKHR != null { n = n + 1 }
+    pfn_vkCmdCopyMemoryToAccelerationStructureKHR = device_entry(gdpa, device, "vkCmdCopyMemoryToAccelerationStructureKHR")
+    got_vkCmdCopyMemoryToAccelerationStructureKHR = pin
+    if pfn_vkCmdCopyMemoryToAccelerationStructureKHR != null { n = n + 1 }
+    pfn_vkGetAccelerationStructureDeviceAddressKHR = device_entry(gdpa, device, "vkGetAccelerationStructureDeviceAddressKHR")
+    got_vkGetAccelerationStructureDeviceAddressKHR = pin
+    if pfn_vkGetAccelerationStructureDeviceAddressKHR != null { n = n + 1 }
+    pfn_vkCmdWriteAccelerationStructuresPropertiesKHR = device_entry(gdpa, device, "vkCmdWriteAccelerationStructuresPropertiesKHR")
+    got_vkCmdWriteAccelerationStructuresPropertiesKHR = pin
+    if pfn_vkCmdWriteAccelerationStructuresPropertiesKHR != null { n = n + 1 }
+    pfn_vkGetDeviceAccelerationStructureCompatibilityKHR = device_entry(gdpa, device, "vkGetDeviceAccelerationStructureCompatibilityKHR")
+    got_vkGetDeviceAccelerationStructureCompatibilityKHR = pin
+    if pfn_vkGetDeviceAccelerationStructureCompatibilityKHR != null { n = n + 1 }
+    pfn_vkGetAccelerationStructureBuildSizesKHR = device_entry(gdpa, device, "vkGetAccelerationStructureBuildSizesKHR")
+    got_vkGetAccelerationStructureBuildSizesKHR = pin
+    if pfn_vkGetAccelerationStructureBuildSizesKHR != null { n = n + 1 }
+    pfn_vkCreateDeferredOperationKHR = device_entry(gdpa, device, "vkCreateDeferredOperationKHR")
+    got_vkCreateDeferredOperationKHR = pin
+    if pfn_vkCreateDeferredOperationKHR != null { n = n + 1 }
+    pfn_vkDestroyDeferredOperationKHR = device_entry(gdpa, device, "vkDestroyDeferredOperationKHR")
+    got_vkDestroyDeferredOperationKHR = pin
+    if pfn_vkDestroyDeferredOperationKHR != null { n = n + 1 }
+    pfn_vkGetDeferredOperationMaxConcurrencyKHR = device_entry(gdpa, device, "vkGetDeferredOperationMaxConcurrencyKHR")
+    got_vkGetDeferredOperationMaxConcurrencyKHR = pin
+    if pfn_vkGetDeferredOperationMaxConcurrencyKHR != null { n = n + 1 }
+    pfn_vkGetDeferredOperationResultKHR = device_entry(gdpa, device, "vkGetDeferredOperationResultKHR")
+    got_vkGetDeferredOperationResultKHR = pin
+    if pfn_vkGetDeferredOperationResultKHR != null { n = n + 1 }
+    pfn_vkDeferredOperationJoinKHR = device_entry(gdpa, device, "vkDeferredOperationJoinKHR")
+    got_vkDeferredOperationJoinKHR = pin
+    if pfn_vkDeferredOperationJoinKHR != null { n = n + 1 }
     return n
 }

@@ -387,5 +387,62 @@ main() {
         }
     }
 
+    // Ray queries (#2203): the selection carries VK_KHR_acceleration_structure,
+    // VK_KHR_ray_query and VK_KHR_deferred_host_operations. Building an
+    // acceleration structure and tracing through it is test_vulkan_ray_query.ae,
+    // which needs a device with the feature; this checks the declarations
+    // against the header on any device.
+    spec.describe(fw, "vulkan.vk: ray query declarations") {
+        spec.it(fw, "names the extensions and their structure types") callback {
+            spec.assert_eq(string.equals(vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, "VK_KHR_acceleration_structure"), 1, "acceleration structure")
+            spec.assert_eq(string.equals(vk.KHR_RAY_QUERY_EXTENSION_NAME, "VK_KHR_ray_query"), 1, "ray query")
+            spec.assert_eq(string.equals(vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME, "VK_KHR_deferred_host_operations"), 1, "deferred host operations")
+            spec.assert_eq(vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR, 1000150017, "STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR")
+            spec.assert_eq(vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, 1000348013, "STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR")
+            spec.assert_eq(vk.GEOMETRY_TYPE_TRIANGLES_KHR, 0, "GEOMETRY_TYPE_TRIANGLES_KHR")
+            spec.assert_eq(vk.BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, 4, "BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR")
+            // An instance record is 64 bytes by the specification: the
+            // header's bit-fields pack as the driver reads them.
+            spec.assert_eq(sizeof(VkAccelerationStructureInstanceKHR), 64, "sizeof(VkAccelerationStructureInstanceKHR)")
+        }
+        spec.it(fw, "spells the portability extensions the registry postdates or keeps provisional") callback {
+            spec.assert_eq(string.equals(vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME, "VK_KHR_portability_enumeration"), 1, "enumeration")
+            spec.assert_eq(vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR, 1, "its instance flag")
+            spec.assert_eq(string.equals(vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME, "VK_KHR_portability_subset"), 1, "subset")
+        }
+        spec.it_when(have_instance, "reads the ray query features through the Features2 chain", instance_reason) callback {
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance")
+            vk.load_instance(instance)
+            gpu = first_device(instance)
+            rq = calloc(1, sizeof(VkPhysicalDeviceRayQueryFeaturesKHR)) as *VkPhysicalDeviceRayQueryFeaturesKHR
+            rq.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+            asf = calloc(1, sizeof(VkPhysicalDeviceAccelerationStructureFeaturesKHR)) as *VkPhysicalDeviceAccelerationStructureFeaturesKHR
+            asf.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
+            asf.pNext = rq as ptr
+            f2 = calloc(1, sizeof(VkPhysicalDeviceFeatures2)) as *VkPhysicalDeviceFeatures2
+            f2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
+            f2.pNext = asf as ptr
+            vk.vkGetPhysicalDeviceFeatures2(gpu, f2 as ptr)
+            spec.assert_true(rq.rayQuery == 0 || rq.rayQuery == 1, "rayQuery is a VkBool32 (${rq.rayQuery})")
+            // A device with ray queries has acceleration structures and lists
+            // the extension; one without may still list it (the feature is
+            // per device, the extension per driver), so only one way holds.
+            dexts, nde, _r = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+            listed = lists_extension(dexts, nde, vk.KHR_RAY_QUERY_EXTENSION_NAME)
+            vk.array_free(dexts)
+            if rq.rayQuery == 1 {
+                spec.assert_eq(asf.accelerationStructure, 1, "ray queries come with acceleration structures")
+                spec.assert_eq(listed, 1, "and the extension is listed")
+            }
+            println("    ray query on this device: ${rq.rayQuery}")
+            free(f2)
+            free(asf)
+            free(rq)
+            vk.vkDestroyInstance(instance, null)
+            vk.load_instance(null)
+        }
+    }
+
     return spec.run_summary(fw)
 }

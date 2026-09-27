@@ -169,6 +169,11 @@ TESTS=(
   "vulkan/formats|$VK/test_vulkan_formats.ae||lsan||vulkan"
   "vulkan/compute|$VK/test_vulkan_compute.ae||lsan||vulkan"
   "vulkan/raw|$VK/test_vulkan_raw.ae||lsan||vulkan"
+  # Ray queries through contrib.vulkan.vk (#2203): builds a BLAS and a TLAS
+  # and traces through them. Skips where the device has no ray query
+  # (lavapipe before Mesa 24.1, MoltenVK), so the Linux leg's skip assertion
+  # leaves it out; Ubuntu 24.04's lavapipe and the discrete GPUs run it.
+  "vulkan/ray-query|$VK/test_vulkan_ray_query.ae||lsan||vulkan"
   # Presents into a real window and reads the screen back. The window comes
   # from the test fixture (tests/support/native_window), which opens X11 at
   # runtime: the Linux leg runs it under Xvfb, and without a display it

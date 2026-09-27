@@ -1,0 +1,773 @@
+// contrib.vulkan.vk ray queries (#2203): VK_KHR_acceleration_structure and
+// VK_KHR_ray_query in the generated selection, driven end to end.
+//
+// A bottom-level acceleration structure is built over one triangle, a
+// top-level one over one instance of it, and a compute shader traces two ray
+// queries through them: one that must hit the triangle at a known distance
+// and one that must miss. Every call is the generated module's, through the
+// device's own entry points; nothing here goes through contrib.vulkan's
+// device.
+//
+// Skips, saying so, where the device has no ray query: lavapipe before Mesa
+// 24.1 (Ubuntu 22.04's) and MoltenVK have none, Ubuntu 24.04's lavapipe and
+// NVIDIA, AMD and Intel discrete GPUs do. The declarations themselves are
+// checked on every device by test_vulkan_raw.ae.
+
+import std.fs
+import std.spec
+import std.string
+import contrib.vulkan
+import contrib.vulkan.vk
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dest: ptr, src: ptr, n: int) -> ptr
+
+// The device this test drives, and what it learned about it while setting
+// up; one set for the whole run, as the presentation tests keep theirs.
+var g_instance: ptr = null
+var g_gpu: ptr = null
+var g_device: ptr = null
+var g_queue: ptr = null
+var g_family: int = -1
+var g_mem_props: ptr = null       // *VkPhysicalDeviceMemoryProperties
+var g_scratch_align: int = 256    // minAccelerationStructureScratchOffsetAlignment
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// 1 when `name` is among the extension properties `props` lists.
+lists_extension(props: ptr, count: int, name: string) -> int {
+    i = 0
+    while i < count {
+        e = (props + i * sizeof(VkExtensionProperties)) as *VkExtensionProperties
+        if string.equals(e.extensionName, name) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// A cell holding one handle, for the commands that write one out.
+new_handle() -> ptr { return calloc(1, 8) }
+take_handle(cell: ptr) -> ptr {
+    h = (cell as ptr[])[0]
+    free(cell)
+    return h
+}
+
+// A Vulkan 1.2 instance (ray queries need 1.1 and buffer device addresses,
+// which 1.2 has in core), with portability enumeration where offered.
+create_instance() -> ptr {
+    app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
+    app.sType = vk.STRUCTURE_TYPE_APPLICATION_INFO
+    app.pApplicationName = "test_vulkan_ray_query"
+    app.apiVersion = (1 << 22) | (2 << 12)
+    ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+    ci.pApplicationInfo = app as ptr
+    names = calloc(1, 8)
+    exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
+    if lists_extension(exts, ne, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 1 {
+        (names as string[])[0] = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+        ci.enabledExtensionCount = 1
+        ci.ppEnabledExtensionNames = names
+        ci.flags = vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+    }
+    vk.array_free(exts)
+    cell = new_handle()
+    r = vk.vkCreateInstance(ci as ptr, null, cell)
+    instance = take_handle(cell)
+    free(names)
+    free(ci)
+    free(app)
+    if r != vk.SUCCESS { return null }
+    return instance
+}
+
+// The index of a queue family with compute, or -1.
+compute_family(gpu: ptr) -> int {
+    props, n = vk.vkGetPhysicalDeviceQueueFamilyProperties_all(gpu)
+    found = -1
+    i = 0
+    while i < n && found < 0 {
+        fam = (props + i * sizeof(VkQueueFamilyProperties)) as *VkQueueFamilyProperties
+        if (fam.queueFlags & vk.QUEUE_COMPUTE_BIT) != 0 { found = i }
+        i = i + 1
+    }
+    vk.array_free(props)
+    return found
+}
+
+// 1 when the device reports ray queries, acceleration structures and buffer
+// device addresses through the Features2 chain; 0 with the reason otherwise.
+has_ray_query(gpu: ptr) -> (int, string) {
+    rq = calloc(1, sizeof(VkPhysicalDeviceRayQueryFeaturesKHR)) as *VkPhysicalDeviceRayQueryFeaturesKHR
+    rq.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+    asf = calloc(1, sizeof(VkPhysicalDeviceAccelerationStructureFeaturesKHR)) as *VkPhysicalDeviceAccelerationStructureFeaturesKHR
+    asf.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
+    asf.pNext = rq as ptr
+    bda = calloc(1, sizeof(VkPhysicalDeviceBufferDeviceAddressFeatures)) as *VkPhysicalDeviceBufferDeviceAddressFeatures
+    bda.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+    bda.pNext = asf as ptr
+    f2 = calloc(1, sizeof(VkPhysicalDeviceFeatures2)) as *VkPhysicalDeviceFeatures2
+    f2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
+    f2.pNext = bda as ptr
+    vk.vkGetPhysicalDeviceFeatures2(gpu, f2 as ptr)
+    ok = 0
+    reason = ""
+    if rq.rayQuery == 0 { reason = "no ray query on this device" }
+    else if asf.accelerationStructure == 0 { reason = "no acceleration structures on this device" }
+    else if bda.bufferDeviceAddress == 0 { reason = "no buffer device addresses on this device" }
+    else { ok = 1 }
+    free(f2)
+    free(bda)
+    free(asf)
+    free(rq)
+    return (ok, reason)
+}
+
+// The alignment a build's scratch address needs, from the acceleration
+// structure properties.
+scratch_alignment(gpu: ptr) -> int {
+    asp = calloc(1, sizeof(VkPhysicalDeviceAccelerationStructurePropertiesKHR)) as *VkPhysicalDeviceAccelerationStructurePropertiesKHR
+    asp.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR
+    p2 = calloc(1, sizeof(VkPhysicalDeviceProperties2)) as *VkPhysicalDeviceProperties2
+    p2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2
+    p2.pNext = asp as ptr
+    vk.vkGetPhysicalDeviceProperties2(gpu, p2 as ptr)
+    a = asp.minAccelerationStructureScratchOffsetAlignment as int
+    free(p2)
+    free(asp)
+    if a < 1 { a = 1 }
+    return a
+}
+
+// A device with the three extensions and their features enabled, one
+// compute queue, and portability subset where the device offers it.
+create_device(gpu: ptr, family: int) -> ptr {
+    rq = calloc(1, sizeof(VkPhysicalDeviceRayQueryFeaturesKHR)) as *VkPhysicalDeviceRayQueryFeaturesKHR
+    rq.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR
+    rq.rayQuery = 1
+    asf = calloc(1, sizeof(VkPhysicalDeviceAccelerationStructureFeaturesKHR)) as *VkPhysicalDeviceAccelerationStructureFeaturesKHR
+    asf.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR
+    asf.pNext = rq as ptr
+    asf.accelerationStructure = 1
+    bda = calloc(1, sizeof(VkPhysicalDeviceBufferDeviceAddressFeatures)) as *VkPhysicalDeviceBufferDeviceAddressFeatures
+    bda.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+    bda.pNext = asf as ptr
+    bda.bufferDeviceAddress = 1
+
+    priority = calloc(1, 4)
+    (priority as f32[])[0] = 1.0
+    qci = calloc(1, sizeof(VkDeviceQueueCreateInfo)) as *VkDeviceQueueCreateInfo
+    qci.sType = vk.STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
+    qci.queueFamilyIndex = family as uint32
+    qci.queueCount = 1
+    qci.pQueuePriorities = priority
+
+    names = calloc(4, 8)
+    (names as string[])[0] = vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
+    (names as string[])[1] = vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME
+    (names as string[])[2] = vk.KHR_RAY_QUERY_EXTENSION_NAME
+    n = 3
+    dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+    if lists_extension(dexts, nde, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 1 {
+        (names as string[])[3] = vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+        n = 4
+    }
+    vk.array_free(dexts)
+
+    dci = calloc(1, sizeof(VkDeviceCreateInfo)) as *VkDeviceCreateInfo
+    dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO
+    dci.pNext = bda as ptr
+    dci.queueCreateInfoCount = 1
+    dci.pQueueCreateInfos = qci as ptr
+    dci.enabledExtensionCount = n as uint32
+    dci.ppEnabledExtensionNames = names
+    cell = new_handle()
+    r = vk.vkCreateDevice(gpu, dci as ptr, null, cell)
+    device = take_handle(cell)
+    free(dci)
+    free(names)
+    free(qci)
+    free(priority)
+    free(bda)
+    free(asf)
+    free(rq)
+    if r != vk.SUCCESS {
+        println("  vkCreateDevice returned ${r}")
+        return null
+    }
+    return device
+}
+
+// A memory type of `type_bits` with every flag in `wanted`, or -1.
+memory_type(type_bits: int, wanted: int) -> int {
+    mp = g_mem_props as *VkPhysicalDeviceMemoryProperties
+    count = mp.memoryTypeCount as int
+    i = 0
+    while i < count {
+        // memoryTypes[] follows the count; each VkMemoryType is two uint32s.
+        mt = (g_mem_props + 4 + i * sizeof(VkMemoryType)) as *VkMemoryType
+        if (type_bits & (1 << i)) != 0 && ((mt.propertyFlags as int) & wanted) == wanted { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// A buffer of `bytes` with `usage` (device addresses always on) in host-
+// visible, host-coherent memory, so this test fills and reads it by mapping.
+// Returns the buffer, its memory and its device address; null handles and 0
+// when anything fails.
+struct Buf {
+    buffer: ptr
+    memory: ptr
+    address: uint64
+    mapped: ptr
+}
+
+buf_create(bytes: int, usage: int) -> Buf {
+    b = Buf{buffer: null, memory: null, address: 0, mapped: null}
+    bci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
+    bci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
+    bci.size = bytes as uint64
+    bci.usage = (usage | vk.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) as uint32
+    bci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    cell = new_handle()
+    r = vk.vkCreateBuffer(g_device, bci as ptr, null, cell)
+    b.buffer = take_handle(cell)
+    free(bci)
+    if r != vk.SUCCESS { return b }
+
+    req = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetBufferMemoryRequirements(g_device, b.buffer, req as ptr)
+    flags = calloc(1, sizeof(VkMemoryAllocateFlagsInfo)) as *VkMemoryAllocateFlagsInfo
+    flags.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO
+    flags.flags = vk.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+    mai = calloc(1, sizeof(VkMemoryAllocateInfo)) as *VkMemoryAllocateInfo
+    mai.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+    mai.pNext = flags as ptr
+    mai.allocationSize = req.size
+    mt = memory_type(req.memoryTypeBits as int,
+                     vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    free(req)
+    if mt < 0 { free(mai); free(flags); return b }
+    mai.memoryTypeIndex = mt as uint32
+    cell = new_handle()
+    r = vk.vkAllocateMemory(g_device, mai as ptr, null, cell)
+    b.memory = take_handle(cell)
+    free(mai)
+    free(flags)
+    if r != vk.SUCCESS { return b }
+    if vk.vkBindBufferMemory(g_device, b.buffer, b.memory, 0) != vk.SUCCESS { return b }
+
+    info = calloc(1, sizeof(VkBufferDeviceAddressInfo)) as *VkBufferDeviceAddressInfo
+    info.sType = vk.STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO
+    info.buffer = b.buffer
+    b.address = vk.vkGetBufferDeviceAddress(g_device, info as ptr)
+    free(info)
+    cell = new_handle()
+    if vk.vkMapMemory(g_device, b.memory, 0, vk.WHOLE_SIZE, 0, cell) == vk.SUCCESS {
+        b.mapped = take_handle(cell)
+    } else {
+        free(cell)
+    }
+    return b
+}
+
+buf_destroy(b: Buf) {
+    if b.buffer != null { vk.vkDestroyBuffer(g_device, b.buffer, null) }
+    if b.memory != null { vk.vkFreeMemory(g_device, b.memory, null) }
+}
+
+// `a` rounded up to a multiple of `align`.
+align_up(a: uint64, align: int) -> uint64 {
+    m = align as uint64
+    return ((a + m - 1) / m) * m
+}
+
+// One command buffer from a pool of its own, recorded by the caller between
+// begin and submit_and_wait, which submits it and waits for the queue.
+struct Cmd {
+    pool: ptr
+    buffer: ptr
+}
+
+cmd_begin() -> Cmd {
+    c = Cmd{pool: null, buffer: null}
+    pci = calloc(1, sizeof(VkCommandPoolCreateInfo)) as *VkCommandPoolCreateInfo
+    pci.sType = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
+    pci.queueFamilyIndex = g_family as uint32
+    cell = new_handle()
+    if vk.vkCreateCommandPool(g_device, pci as ptr, null, cell) != vk.SUCCESS { free(cell); free(pci); return c }
+    c.pool = take_handle(cell)
+    free(pci)
+    ai = calloc(1, sizeof(VkCommandBufferAllocateInfo)) as *VkCommandBufferAllocateInfo
+    ai.sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
+    ai.commandPool = c.pool
+    ai.level = vk.COMMAND_BUFFER_LEVEL_PRIMARY
+    ai.commandBufferCount = 1
+    cell = new_handle()
+    if vk.vkAllocateCommandBuffers(g_device, ai as ptr, cell) != vk.SUCCESS { free(cell); free(ai); return c }
+    c.buffer = take_handle(cell)
+    free(ai)
+    bi = calloc(1, sizeof(VkCommandBufferBeginInfo)) as *VkCommandBufferBeginInfo
+    bi.sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+    bi.flags = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    vk.vkBeginCommandBuffer(c.buffer, bi as ptr)
+    free(bi)
+    return c
+}
+
+// Ends, submits and waits for `c`, then releases it. Returns the first
+// VkResult that was not SUCCESS. Waiting for the queue between the builds
+// and the dispatch stands in for the barriers a frame would carry.
+cmd_submit_and_wait(c: Cmd) -> int {
+    r = vk.vkEndCommandBuffer(c.buffer)
+    if r == vk.SUCCESS {
+        cmds = calloc(1, 8)
+        (cmds as ptr[])[0] = c.buffer
+        si = calloc(1, sizeof(VkSubmitInfo)) as *VkSubmitInfo
+        si.sType = vk.STRUCTURE_TYPE_SUBMIT_INFO
+        si.commandBufferCount = 1
+        si.pCommandBuffers = cmds
+        r = vk.vkQueueSubmit(g_queue, 1, si as ptr, null)
+        if r == vk.SUCCESS { r = vk.vkQueueWaitIdle(g_queue) }
+        free(si)
+        free(cmds)
+    }
+    if c.pool != null { vk.vkDestroyCommandPool(g_device, c.pool, null) }
+    return r
+}
+
+// An acceleration structure: the handle, the buffer it lives in, and the
+// scratch the build used (kept until the build's queue work is done).
+struct Accel {
+    handle: ptr
+    storage: Buf
+    scratch: Buf
+    address: uint64
+    result: int
+}
+
+// Builds an acceleration structure of `kind` over `geometry`, one primitive,
+// on the device: sizes, storage, create, scratch, build, wait.
+accel_build(kind: int, geometry: ptr) -> Accel {
+    a = Accel{handle: null, storage: Buf{buffer: null, memory: null, address: 0, mapped: null},
+              scratch: Buf{buffer: null, memory: null, address: 0, mapped: null}, address: 0, result: 0}
+    info = calloc(1, sizeof(VkAccelerationStructureBuildGeometryInfoKHR)) as *VkAccelerationStructureBuildGeometryInfoKHR
+    info.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR
+    info.type = kind
+    info.flags = vk.BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+    info.mode = vk.BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+    info.geometryCount = 1
+    info.pGeometries = geometry
+    counts = calloc(1, 4)
+    (counts as uint32[])[0] = 1
+    sizes = calloc(1, sizeof(VkAccelerationStructureBuildSizesInfoKHR)) as *VkAccelerationStructureBuildSizesInfoKHR
+    sizes.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+    vk.vkGetAccelerationStructureBuildSizesKHR(g_device, vk.ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                info as ptr, counts, sizes as ptr)
+    free(counts)
+    if sizes.accelerationStructureSize == 0 || sizes.buildScratchSize == 0 {
+        a.result = -1
+        free(sizes)
+        free(info)
+        return a
+    }
+
+    as_size = sizes.accelerationStructureSize
+    a.storage = buf_create(as_size as int, vk.BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR)
+    a.scratch = buf_create((sizes.buildScratchSize as int) + g_scratch_align, vk.BUFFER_USAGE_STORAGE_BUFFER_BIT)
+    free(sizes)
+    if a.storage.address == 0 || a.scratch.address == 0 {
+        a.result = -2
+        free(info)
+        return a
+    }
+
+    ci = calloc(1, sizeof(VkAccelerationStructureCreateInfoKHR)) as *VkAccelerationStructureCreateInfoKHR
+    ci.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR
+    ci.buffer = a.storage.buffer
+    ci.size = as_size
+    ci.type = kind
+    cell = new_handle()
+    a.result = vk.vkCreateAccelerationStructureKHR(g_device, ci as ptr, null, cell)
+    a.handle = take_handle(cell)
+    free(ci)
+    if a.result != vk.SUCCESS { free(info); return a }
+
+    addr = calloc(1, sizeof(VkAccelerationStructureDeviceAddressInfoKHR)) as *VkAccelerationStructureDeviceAddressInfoKHR
+    addr.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR
+    addr.accelerationStructure = a.handle
+    a.address = vk.vkGetAccelerationStructureDeviceAddressKHR(g_device, addr as ptr)
+    free(addr)
+
+    info.dstAccelerationStructure = a.handle
+    info.scratchData.deviceAddress = align_up(a.scratch.address, g_scratch_align)
+    range = calloc(1, sizeof(VkAccelerationStructureBuildRangeInfoKHR)) as *VkAccelerationStructureBuildRangeInfoKHR
+    range.primitiveCount = 1
+    ranges = calloc(1, 8)
+    (ranges as ptr[])[0] = range as ptr
+    c = cmd_begin()
+    if c.buffer == null {
+        a.result = -3
+    } else {
+        vk.vkCmdBuildAccelerationStructuresKHR(c.buffer, 1, info as ptr, ranges)
+        a.result = cmd_submit_and_wait(c)
+    }
+    free(ranges)
+    free(range)
+    free(info)
+    return a
+}
+
+accel_destroy(a: Accel) {
+    if a.handle != null { vk.vkDestroyAccelerationStructureKHR(g_device, a.handle, null) }
+    buf_destroy(a.scratch)
+    buf_destroy(a.storage)
+}
+
+main() {
+    fw = spec.init()
+
+    ready = 0
+    reason = "no Vulkan driver"
+    if vulkan.available() != 1 {
+        reason = "no Vulkan driver (${vulkan.last_error()})"
+    } else {
+        g_instance = create_instance()
+        if g_instance == null {
+            reason = "vkCreateInstance failed"
+        } else {
+            vk.load_instance(g_instance)
+            devs, n, _r = vk.vkEnumeratePhysicalDevices_all(g_instance)
+            if n > 0 { g_gpu = (devs as ptr[])[0] }
+            vk.array_free(devs)
+            if g_gpu == null {
+                reason = "no physical device"
+            } else {
+                ok, why = has_ray_query(g_gpu)
+                if ok == 0 {
+                    reason = "${why} (lavapipe before Mesa 24.1 and MoltenVK have none)"
+                } else {
+                    g_family = compute_family(g_gpu)
+                    g_device = create_device(g_gpu, g_family)
+                    if g_family < 0 || g_device == null {
+                        reason = "vkCreateDevice with ray query failed"
+                    } else {
+                        vk.load_device(g_device)
+                        cell = new_handle()
+                        vk.vkGetDeviceQueue(g_device, g_family as uint32, 0, cell)
+                        g_queue = take_handle(cell)
+                        g_mem_props = calloc(1, sizeof(VkPhysicalDeviceMemoryProperties))
+                        vk.vkGetPhysicalDeviceMemoryProperties(g_gpu, g_mem_props)
+                        g_scratch_align = scratch_alignment(g_gpu)
+                        ready = 1
+                    }
+                }
+            }
+        }
+    }
+
+    spv, spv_len = load_spv("contrib/vulkan/shaders/ray_query.comp.spv")
+    shader_ready = ready
+    shader_reason = reason
+    if ready == 1 && spv_len == 0 {
+        shader_ready = 0
+        shader_reason = "SPIR-V shader not built (contrib/vulkan/shaders/build_shaders.sh)"
+    }
+
+    // The triangle every case shares: in the z = 0 plane around the origin,
+    // so a ray up the z axis through the origin hits it at t = 1.
+    verts = Buf{buffer: null, memory: null, address: 0, mapped: null}
+    if ready == 1 {
+        verts = buf_create(36, vk.BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR)
+        if verts.mapped != null {
+            f = verts.mapped as f32[]
+            f[0] = -1.0; f[1] = -1.0; f[2] = 0.0
+            f[3] = 1.0;  f[4] = -1.0; f[5] = 0.0
+            f[6] = 0.0;  f[7] = 1.0;  f[8] = 0.0
+        }
+    }
+
+    spec.describe(fw, "vulkan.vk: ray queries") {
+        spec.it_when(ready, "sizes a one-triangle bottom-level build", reason) callback {
+            geom = triangle_geometry(verts.address)
+            info = calloc(1, sizeof(VkAccelerationStructureBuildGeometryInfoKHR)) as *VkAccelerationStructureBuildGeometryInfoKHR
+            info.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR
+            info.type = vk.ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR
+            info.mode = vk.BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+            info.geometryCount = 1
+            info.pGeometries = geom as ptr
+            counts = calloc(1, 4)
+            (counts as uint32[])[0] = 1
+            sizes = calloc(1, sizeof(VkAccelerationStructureBuildSizesInfoKHR)) as *VkAccelerationStructureBuildSizesInfoKHR
+            sizes.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+            vk.vkGetAccelerationStructureBuildSizesKHR(g_device, vk.ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                        info as ptr, counts, sizes as ptr)
+            spec.assert_true(sizes.accelerationStructureSize > 0, "a structure size (${sizes.accelerationStructureSize})")
+            spec.assert_true(sizes.buildScratchSize > 0, "a scratch size (${sizes.buildScratchSize})")
+            free(sizes)
+            free(counts)
+            free(info)
+            free(geom)
+        }
+
+        spec.it_when(shader_ready, "builds a BLAS and a TLAS and traces a hit and a miss through them", shader_reason) callback {
+            spec.assert_true(verts.address != 0, "a vertex buffer with a device address")
+
+            // Bottom level: the triangle.
+            geom = triangle_geometry(verts.address)
+            blas = accel_build(vk.ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, geom as ptr)
+            spec.assert_eq(blas.result, vk.SUCCESS, "bottom-level build")
+            spec.assert_true(blas.address != 0, "the BLAS has a device address")
+            free(geom)
+
+            // One instance of it, identity transform, in a buffer the top
+            // level reads. The record's bit-fields (a 24-bit custom index
+            // with an 8-bit mask, then a 24-bit SBT offset with 8-bit flags)
+            // are written as the two 32-bit words the specification lays out.
+            inst = buf_create(sizeof(VkAccelerationStructureInstanceKHR),
+                              vk.BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR)
+            spec.assert_true(inst.mapped != null, "an instance buffer")
+            m = inst.mapped as f32[]
+            m[0] = 1.0; m[5] = 1.0; m[10] = 1.0
+            words = (inst.mapped + 48) as uint32[]
+            words[0] = 0 | (255 << 24)                       // customIndex 0, mask 0xFF
+            words[1] = 0 | (vk.GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24)
+            refs = (inst.mapped + 56) as uint64[]
+            refs[0] = blas.address
+
+            igeom = calloc(1, sizeof(VkAccelerationStructureGeometryKHR)) as *VkAccelerationStructureGeometryKHR
+            igeom.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR
+            igeom.geometryType = vk.GEOMETRY_TYPE_INSTANCES_KHR
+            igeom.geometry.instances.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR
+            igeom.geometry.instances.arrayOfPointers = 0
+            igeom.geometry.instances.data.deviceAddress = inst.address
+            tlas = accel_build(vk.ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, igeom as ptr)
+            spec.assert_eq(tlas.result, vk.SUCCESS, "top-level build")
+            spec.assert_true(tlas.address != 0, "the TLAS has a device address")
+            free(igeom)
+
+            // The shader's result buffer: {hit, t} for each of two rays.
+            results = buf_create(16, vk.BUFFER_USAGE_STORAGE_BUFFER_BIT)
+            spec.assert_true(results.mapped != null, "a result buffer")
+            (results.mapped as uint32[])[0] = 7
+            (results.mapped as uint32[])[2] = 7
+
+            r = trace(tlas.handle, results.buffer, spv, spv_len)
+            spec.assert_eq(r, vk.SUCCESS, "the compute dispatch that traces")
+            hit0 = (results.mapped as uint32[])[0] as int
+            t0 = (results.mapped as f32[])[1]
+            hit1 = (results.mapped as uint32[])[2] as int
+            t1 = (results.mapped as f32[])[3]
+            spec.assert_eq(hit0, 1, "the ray through the origin hits the triangle")
+            spec.assert_true(t0 > 0.999 && t0 < 1.001, "at t = 1 (got ${t0})")
+            spec.assert_eq(hit1, 0, "the ray five units aside misses")
+            spec.assert_true(t1 < 0.0, "with no distance (got ${t1})")
+
+            buf_destroy(results)
+            accel_destroy(tlas)
+            buf_destroy(inst)
+            accel_destroy(blas)
+        }
+    }
+
+    rc = spec.run_summary(fw)
+
+    buf_destroy(verts)
+    if spv_len > 0 { string.free(spv) }
+    if g_mem_props != null { free(g_mem_props) }
+    if g_device != null {
+        vk.vkDeviceWaitIdle(g_device)
+        vk.vkDestroyDevice(g_device, null)
+        vk.load_device(null)
+    }
+    if g_instance != null {
+        vk.vkDestroyInstance(g_instance, null)
+        vk.load_instance(null)
+    }
+    return rc
+}
+
+// The triangle geometry over the vertex buffer at `address`: three
+// R32G32B32_SFLOAT positions, no indices, no transform.
+triangle_geometry(address: uint64) -> *VkAccelerationStructureGeometryKHR {
+    geom = calloc(1, sizeof(VkAccelerationStructureGeometryKHR)) as *VkAccelerationStructureGeometryKHR
+    geom.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR
+    geom.geometryType = vk.GEOMETRY_TYPE_TRIANGLES_KHR
+    geom.flags = vk.GEOMETRY_OPAQUE_BIT_KHR
+    geom.geometry.triangles.sType = vk.STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR
+    geom.geometry.triangles.vertexFormat = vk.FORMAT_R32G32B32_SFLOAT
+    geom.geometry.triangles.vertexData.deviceAddress = address
+    geom.geometry.triangles.vertexStride = 12
+    geom.geometry.triangles.maxVertex = 2
+    geom.geometry.triangles.indexType = vk.INDEX_TYPE_NONE_KHR
+    return geom
+}
+
+// One dispatch of the ray query shader over `tlas`, writing into `results`:
+// descriptor set layout, pool and set, shader module, pipeline layout and
+// pipeline, then a command buffer that binds them and dispatches two
+// invocations. Returns the first VkResult that was not SUCCESS.
+trace(tlas: ptr, results: ptr, spv: string, spv_len: int) -> int {
+    r = vk.SUCCESS
+
+    bindings = calloc(2, sizeof(VkDescriptorSetLayoutBinding))
+    b0 = bindings as *VkDescriptorSetLayoutBinding
+    b0.binding = 0
+    b0.descriptorType = vk.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
+    b0.descriptorCount = 1
+    b0.stageFlags = vk.SHADER_STAGE_COMPUTE_BIT
+    b1 = (bindings + sizeof(VkDescriptorSetLayoutBinding)) as *VkDescriptorSetLayoutBinding
+    b1.binding = 1
+    b1.descriptorType = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER
+    b1.descriptorCount = 1
+    b1.stageFlags = vk.SHADER_STAGE_COMPUTE_BIT
+    lci = calloc(1, sizeof(VkDescriptorSetLayoutCreateInfo)) as *VkDescriptorSetLayoutCreateInfo
+    lci.sType = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
+    lci.bindingCount = 2
+    lci.pBindings = bindings
+    cell = new_handle()
+    r = vk.vkCreateDescriptorSetLayout(g_device, lci as ptr, null, cell)
+    layout = take_handle(cell)
+    free(lci)
+    free(bindings)
+    if r != vk.SUCCESS { return r }
+
+    sizes = calloc(2, sizeof(VkDescriptorPoolSize))
+    s0 = sizes as *VkDescriptorPoolSize
+    s0.type = vk.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
+    s0.descriptorCount = 1
+    s1 = (sizes + sizeof(VkDescriptorPoolSize)) as *VkDescriptorPoolSize
+    s1.type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER
+    s1.descriptorCount = 1
+    pci = calloc(1, sizeof(VkDescriptorPoolCreateInfo)) as *VkDescriptorPoolCreateInfo
+    pci.sType = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
+    pci.maxSets = 1
+    pci.poolSizeCount = 2
+    pci.pPoolSizes = sizes
+    cell = new_handle()
+    r = vk.vkCreateDescriptorPool(g_device, pci as ptr, null, cell)
+    pool = take_handle(cell)
+    free(pci)
+    free(sizes)
+    set = null
+    if r == vk.SUCCESS {
+        layouts = calloc(1, 8)
+        (layouts as ptr[])[0] = layout
+        dai = calloc(1, sizeof(VkDescriptorSetAllocateInfo)) as *VkDescriptorSetAllocateInfo
+        dai.sType = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
+        dai.descriptorPool = pool
+        dai.descriptorSetCount = 1
+        dai.pSetLayouts = layouts
+        cell = new_handle()
+        r = vk.vkAllocateDescriptorSets(g_device, dai as ptr, cell)
+        set = take_handle(cell)
+        free(dai)
+        free(layouts)
+    }
+
+    if r == vk.SUCCESS {
+        handles = calloc(1, 8)
+        (handles as ptr[])[0] = tlas
+        was = calloc(1, sizeof(VkWriteDescriptorSetAccelerationStructureKHR)) as *VkWriteDescriptorSetAccelerationStructureKHR
+        was.sType = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR
+        was.accelerationStructureCount = 1
+        was.pAccelerationStructures = handles
+        bi = calloc(1, sizeof(VkDescriptorBufferInfo)) as *VkDescriptorBufferInfo
+        bi.buffer = results
+        bi.offset = 0
+        bi.range = vk.WHOLE_SIZE
+        writes = calloc(2, sizeof(VkWriteDescriptorSet))
+        w0 = writes as *VkWriteDescriptorSet
+        w0.sType = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+        w0.pNext = was as ptr
+        w0.dstSet = set
+        w0.dstBinding = 0
+        w0.descriptorCount = 1
+        w0.descriptorType = vk.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
+        w1 = (writes + sizeof(VkWriteDescriptorSet)) as *VkWriteDescriptorSet
+        w1.sType = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+        w1.dstSet = set
+        w1.dstBinding = 1
+        w1.descriptorCount = 1
+        w1.descriptorType = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER
+        w1.pBufferInfo = bi as ptr
+        vk.vkUpdateDescriptorSets(g_device, 2, writes, 0, null)
+        free(writes)
+        free(bi)
+        free(was)
+        free(handles)
+    }
+
+    shader = null
+    if r == vk.SUCCESS {
+        sci = calloc(1, sizeof(VkShaderModuleCreateInfo)) as *VkShaderModuleCreateInfo
+        sci.sType = vk.STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+        sci.codeSize = spv_len as uint64
+        sci.pCode = vk.aevk_ae_cstr(spv)   // the bytes as Aether holds them, as a C pointer
+        cell = new_handle()
+        r = vk.vkCreateShaderModule(g_device, sci as ptr, null, cell)
+        shader = take_handle(cell)
+        free(sci)
+    }
+
+    pipe_layout = null
+    if r == vk.SUCCESS {
+        layouts = calloc(1, 8)
+        (layouts as ptr[])[0] = layout
+        plci = calloc(1, sizeof(VkPipelineLayoutCreateInfo)) as *VkPipelineLayoutCreateInfo
+        plci.sType = vk.STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+        plci.setLayoutCount = 1
+        plci.pSetLayouts = layouts
+        cell = new_handle()
+        r = vk.vkCreatePipelineLayout(g_device, plci as ptr, null, cell)
+        pipe_layout = take_handle(cell)
+        free(plci)
+        free(layouts)
+    }
+
+    pipeline = null
+    if r == vk.SUCCESS {
+        cpci = calloc(1, sizeof(VkComputePipelineCreateInfo)) as *VkComputePipelineCreateInfo
+        cpci.sType = vk.STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO
+        cpci.stage.sType = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+        cpci.stage.stage = vk.SHADER_STAGE_COMPUTE_BIT
+        cpci.stage.module = shader
+        cpci.stage.pName = "main"
+        cpci.layout = pipe_layout
+        cell = new_handle()
+        r = vk.vkCreateComputePipelines(g_device, null, 1, cpci as ptr, null, cell)
+        pipeline = take_handle(cell)
+        free(cpci)
+    }
+
+    if r == vk.SUCCESS {
+        c = cmd_begin()
+        if c.buffer == null {
+            r = vk.ERROR_INITIALIZATION_FAILED
+        } else {
+            sets = calloc(1, 8)
+            (sets as ptr[])[0] = set
+            vk.vkCmdBindPipeline(c.buffer, vk.PIPELINE_BIND_POINT_COMPUTE, pipeline)
+            vk.vkCmdBindDescriptorSets(c.buffer, vk.PIPELINE_BIND_POINT_COMPUTE, pipe_layout, 0, 1, sets, 0, null)
+            vk.vkCmdDispatch(c.buffer, 2, 1, 1)
+            r = cmd_submit_and_wait(c)
+            free(sets)
+        }
+    }
+
+    if pipeline != null { vk.vkDestroyPipeline(g_device, pipeline, null) }
+    if pipe_layout != null { vk.vkDestroyPipelineLayout(g_device, pipe_layout, null) }
+    if shader != null { vk.vkDestroyShaderModule(g_device, shader, null) }
+    if pool != null { vk.vkDestroyDescriptorPool(g_device, pool, null) }
+    if layout != null { vk.vkDestroyDescriptorSetLayout(g_device, layout, null) }
+    return r
+}
