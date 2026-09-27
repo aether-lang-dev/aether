@@ -1392,6 +1392,43 @@ check-archive-exports: stdlib
 	@echo "==================================="
 	@sh scripts/check_archive_exports.sh build/libaether.a
 
+# #2207: check-archive-exports above only ever ran on a host that HAS zlib
+# (every normal dev box and CI runner), so a symbol whose only definition
+# was in std/zlib/aether_zlib.c's `#ifdef AETHER_HAS_ZLIB` branch went
+# unexported by its `#else` stub branch from 0.714.0 on. Only the release
+# workflow's lean, zlib-less FreeBSD sysroot caught it, and it failed there
+# on every release from 0.714.0 to 0.731.0, none of which published. Check
+# the archive as a zlib-less build would produce it too, so a std module
+# missing a no-zlib stub fails a normal CI run instead.
+#
+# Only the std sources that branch on AETHER_HAS_ZLIB differ in such a
+# build, so rather than rebuild the tree with ZLIB=0 (every object depends
+# on the .build-flags stamp, so that recompiles everything), compile just
+# them without the define, swap them into a COPY of the archive, and check
+# the copy. build/ is never touched, so the ordinary build that later ci
+# steps and the CI steps after `make ci` (the hardened leg's checksec, the
+# macOS leaks gate) read is exactly what it was. The list is found by grep,
+# so a new source that branches on AETHER_HAS_ZLIB is covered without
+# anyone remembering to add it.
+ZLIB_DEPENDENT_SRCS = $(shell grep -rl --include='*.c' 'AETHER_HAS_ZLIB' std)
+
+.PHONY: check-archive-exports-nozlib
+check-archive-exports-nozlib: stdlib
+	@echo "==================================="
+	@echo "  Archive Export Check (no zlib)"
+	@echo "==================================="
+	@[ -n "$(ZLIB_DEPENDENT_SRCS)" ] || { \
+	  echo "  [FAIL] no std source branches on AETHER_HAS_ZLIB; this check would test nothing"; exit 1; }
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	cp build/libaether.a "$$tmp/libaether.a" && \
+	for src in $(ZLIB_DEPENDENT_SRCS); do \
+	  obj="$$tmp/$$(basename "$$src" .c).o"; \
+	  $(CC) $(filter-out -DAETHER_HAS_ZLIB,$(AETHER_REQUIRED_CFLAGS)) $(CFLAGS) \
+	    -c "$$src" -o "$$obj" || exit 1; \
+	  ar r "$$tmp/libaether.a" "$$obj" || exit 1; \
+	done && \
+	sh scripts/check_archive_exports.sh "$$tmp/libaether.a"
+
 test-release-archive: compiler ae stdlib check-archive-exports
 	@echo "==================================="
 	@echo "  Release Archive Smoke Test"
@@ -2705,43 +2742,46 @@ ci: clean
 	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-1} (shell tests)"
 	@echo "==================================="
 	@echo ""
-	@echo "[0/10] Restoring miniaudio object cache (if valid)..."
+	@echo "[0/11] Restoring miniaudio object cache (if valid)..."
 	@$(MAKE) audio-cache-restore
 	@echo ""
-	@echo "[1/10] Building compiler (-Werror)..."
+	@echo "[1/11] Building compiler (-Werror)..."
 	@$(MAKE) -j$(NPROC) compiler EXTRA_CFLAGS=-Werror
 	@$(MAKE) audio-cache-save
 	@echo ""
-	@echo "[2/10] Building ae CLI..."
+	@echo "[2/11] Building ae CLI..."
 	@$(MAKE) -j$(NPROC) ae
 	@echo ""
-	@echo "[3/10] Building stdlib..."
+	@echo "[3/11] Building stdlib..."
 	@$(MAKE) -j$(NPROC) stdlib
 	@echo ""
-	@echo "[4/10] Running C unit tests..."
+	@echo "[4/11] Running C unit tests..."
 	@$(MAKE) -j$(NPROC) test
 	@$(MAKE) check-standalone
 	@$(MAKE) check-docs
 	@$(MAKE) check-tests
 	@echo ""
-	@echo "[5/10] Running .ae integration tests..."
+	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
 	@echo ""
-	@echo "[6/10] Building examples..."
+	@echo "[6/11] Building examples..."
 	@$(MAKE) examples
 	@echo ""
-	@echo "[7/10] Install smoke test..."
+	@echo "[7/11] Install smoke test..."
 	@$(MAKE) test-install
 	@echo ""
-	@echo "[8/10] ae test smoke check..."
+	@echo "[8/11] ae test smoke check..."
 	@AETHER_HOME="" ./build/ae test examples/basics/hello.ae 2>&1 | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
-	@echo "[9/10] Differential test (lowering paths agree)..."
+	@echo "[9/11] Differential test (lowering paths agree)..."
 	@$(MAKE) test-differential
 	@echo ""
-	@echo "[10/10] Release archive smoke test..."
+	@echo "[10/11] Release archive smoke test..."
 	@$(MAKE) test-release-archive
+	@echo ""
+	@echo "[11/11] Archive export check without zlib (#2207)..."
+	@$(MAKE) check-archive-exports-nozlib
 	@echo ""
 	@echo "==================================="
 	@echo "  CI PASSED — all checks green"

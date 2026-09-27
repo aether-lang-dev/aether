@@ -429,6 +429,9 @@ int zlib_try_gzip_deflate(const char* data, int length, int level) {
 int zlib_try_gzip_inflate(const char* data, int length) {
     (void)data; (void)length; return 0;
 }
+int zlib_try_deflate_raw(const char* data, int length, int level) {
+    (void)data; (void)length; (void)level; return 0;
+}
 int zlib_try_inflate_raw(const char* data, int length) {
     (void)data; (void)length; return 0;
 }
