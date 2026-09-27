@@ -1,0 +1,191 @@
+// Adversarial-input specs for contrib.jq: the attacks that have worked on
+// other parsers and query engines (XML and JSON parsers, regex libraries,
+// template engines), aimed at this module. Each `describe` is one class:
+// numbers past the integer range, strings that truncate or fail to decode,
+// duplicate keys, pathological regexes, work that grows without bound, and
+// the formats whose output other programs run. Nesting and recursion have
+// their own spec, test_nesting.ae.
+//
+// The contract under test is the same throughout: hostile input ends in a
+// jq diagnostic or a bounded answer, never a crash, a hang, a silently
+// truncated value or an inconsistent one. Where jq 1.7 defines the answer,
+// the expectation is jq's.
+//
+// Run with:  ae run contrib/jq/test_hardening.ae
+
+import std.spec
+import std.string
+import std.strbuilder
+import jq_spec
+
+// `s` repeated `n` times.
+rep(s: string, n: int) -> string {
+    sb = strbuilder.new(64)
+    i = 0
+    while i < n {
+        strbuilder.append(sb, s)
+        i = i + 1
+    }
+    return strbuilder.finish(sb)
+}
+
+// A JSON string literal holding the given bytes (0 = none): the bytes an
+// Aether literal cannot spell.
+quoted_bytes(b1: int, b2: int, b3: int, b4: int) -> string {
+    sb = strbuilder.new(8)
+    strbuilder.append_byte(sb, 34)
+    if b1 != 0 { strbuilder.append_byte(sb, b1) }
+    if b2 != 0 { strbuilder.append_byte(sb, b2) }
+    if b3 != 0 { strbuilder.append_byte(sb, b3) }
+    if b4 != 0 { strbuilder.append_byte(sb, b4) }
+    strbuilder.append_byte(sb, 34)
+    return strbuilder.finish(sb)
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "numbers past the integer range") {
+        spec.it("clamp literals to the double range as jq does") callback {
+            spec.assert_str_eq(jq_spec.yields("1e400, -1e400, 1e-400", "null"), "1.7976931348623157e+308\n-1.7976931348623157e+308\n0", "literals")
+            spec.assert_str_eq(jq_spec.yields(".", "[1e400, 123456789012345678901234567890]"), "[1.7976931348623157e+308,1.2345678901234568e+29]", "input")
+            spec.assert_str_eq(jq_spec.yields("[.[] | try tonumber catch \"bad\"]", "[\"1e999\", \"nan\", \"0x10\", \"1_000\", \" 1\"]"), "[\"bad\",\"bad\",\"bad\",\"bad\",\"bad\"]", "tonumber rejects what JSON would")
+        }
+        spec.it("index and slice by huge, negative-huge, infinite and NaN positions without overflow") callback {
+            spec.assert_str_eq(jq_spec.yields(".[1e300], .[-1e300], .[nan], .[infinite], .[-infinite], .[4294967297]", "[1,2,3]"), "null\nnull\nnull\nnull\nnull\nnull", "indexes are null")
+            spec.assert_str_eq(jq_spec.yields(".[1e300:], .[:1e300], .[-1e300:], .[:-1e300], .[4294967297:], .[-4294967297:]", "[1,2,3]"), "[]\n[1,2,3]\n[1,2,3]\n[]\n[]\n[1,2,3]", "array slices")
+            spec.assert_str_eq(jq_spec.yields(".[1e300:], .[:1e300], .[-1e300:]", "\"abc\""), "\"\"\n\"abc\"\n\"abc\"", "string slices")
+            spec.assert_str_eq(jq_spec.yields("has(1e300), has(-1), has(nan), has(4294967297)", "[1]"), "false\nfalse\nfalse\nfalse", "has")
+            spec.assert_str_eq(jq_spec.yields("getpath([1e300]), getpath([-1e300]), del(.[1e300])", "[1]"), "null\nnull\n[1]", "paths")
+            spec.assert_str_eq(jq_spec.yields("flatten(1e300)", "[[[1]]]"), "[1]", "flatten depth")
+        }
+        spec.it("refuse array indexes that would allocate the machine away") callback {
+            spec.assert_str_eq(jq_spec.yields(".[100] = 1 | length", "[]"), "101", "a sparse write pads with null")
+            spec.assert_str_eq(jq_spec.fails_with(".[1e9] = 1", "[]"), "Array index too large", "assignment")
+            spec.assert_str_eq(jq_spec.fails_with("setpath([1e300]; 1)", "null"), "Array index too large", "setpath")
+            spec.assert_str_eq(jq_spec.fails_with(".[infinite] = 1", "[]"), "Array index too large", "infinite")
+            spec.assert_str_eq(jq_spec.fails_with(".[67108864] = 1", "[]"), "Array index too large", "just past the limit")
+            spec.assert_str_eq(jq_spec.fails_with(".[-1e300] = 1", "[1]"), "Out of bounds negative array index", "negative")
+            spec.assert_str_eq(jq_spec.fails_with(".[nan] = 1", "[1]"), "Out of bounds negative array index", "nan")
+        }
+        spec.it("count limits past 2^31 as all, not none") callback {
+            spec.assert_str_eq(jq_spec.yields("[limit(1e300; 1, 2)], [limit(2147483648; 1, 2)], [limit(infinite; 1, 2)], [limit(-1e300; 1, 2)]", "null"), "[1,2]\n[1,2]\n[1,2]\n[]", "limit")
+            spec.assert_str_eq(jq_spec.yields("nth(1e18; 1, 2), nth(4294967296; 1, 2)", "null"), "2\n2", "nth")
+            spec.assert_str_eq(jq_spec.yields("[limit(3; range(0; 10; 1e-300))]", "null"), "[0,1e-300,2e-300]", "tiny step")
+        }
+        spec.it("end a range whose step is NaN, as jq does") callback {
+            spec.assert_str_eq(jq_spec.yields("[range(0; 10; nan)], [range(nan; 10)], [range(0; nan)], [range(infinite; 0)]", "null"), "[]\n[]\n[]\n[]", "NaN and reversed ranges are empty")
+            spec.assert_str_eq(jq_spec.yields("[limit(3; range(0; infinite))]", "null"), "[0,1,2]", "infinite end")
+        }
+        spec.it("refuse string repeats that would not fit") callback {
+            spec.assert_str_eq(jq_spec.yields("\"ab\" * 3, \"ab\" * 0, \"ab\" * 0.5, \"\" * 1e300", "null"), "\"ababab\"\nnull\n\"ab\"\n\"\"", "ordinary repeats")
+            spec.assert_str_eq(jq_spec.fails_with("\"ab\" * 1e300", "null"), "Repeat string result too long", "huge count")
+            spec.assert_str_eq(jq_spec.fails_with("\"ab\" * 2147483648", "null"), "Repeat string result too long", "count past 2^31")
+            spec.assert_str_eq(jq_spec.fails_with("\"ab\" * infinite", "null"), "Repeat string result too long", "infinite count")
+            spec.assert_str_eq(jq_spec.fails_with("\"abcdefgh\" * 300000000", "null"), "Repeat string result too long", "product past 2^31")
+        }
+        spec.it("keep arithmetic on the edges total") callback {
+            spec.assert_str_eq(jq_spec.yields("1e308 * 10, -1e308 * 10, pow(2; 1e6), (1 % 0)?, (7 % 1e300), (5 % nan), (5 % infinite)", "null"), "1.7976931348623157e+308\n-1.7976931348623157e+308\n1.7976931348623157e+308\n7\n5\n5", "no traps")
+            spec.assert_str_eq(jq_spec.fails_with("1 % 0", "null"), "number (1) and number (0) cannot be divided because the divisor is zero", "modulo by zero")
+            spec.assert_str_eq(jq_spec.yields("[infinite, -infinite, nan] | tojson", "null"), "\"[1.7976931348623157e+308,-1.7976931348623157e+308,null]\"", "serialised")
+        }
+    }
+
+    spec.describe(fw, "strings that truncate or fail to decode") {
+        spec.it("rejects input that is not UTF-8, and lone surrogate escapes") callback {
+            spec.assert_contains(jq_spec.yields(".", quoted_bytes(255, 0, 0, 0)), "invalid UTF-8 sequence", "0xFF byte")
+            spec.assert_contains(jq_spec.yields(".", quoted_bytes(192, 128, 0, 0)), "invalid UTF-8 sequence", "overlong NUL")
+            spec.assert_contains(jq_spec.yields(".", quoted_bytes(237, 160, 128, 0)), "invalid UTF-8 sequence", "encoded surrogate")
+            spec.assert_contains(jq_spec.yields(".", quoted_bytes(244, 144, 128, 128)), "invalid UTF-8 sequence", "past U+10FFFF")
+            spec.assert_contains(jq_spec.yields(".", "\"\\ud83d\""), "high surrogate must be followed by", "lone high surrogate")
+            spec.assert_contains(jq_spec.yields(".", "\"\\ude00\""), "unpaired low surrogate", "lone low surrogate")
+            spec.assert_str_eq(jq_spec.yields("explode", "\"\\ud83d\\ude00\""), "[128512]", "a proper pair decodes")
+            spec.assert_contains(jq_spec.yields(".", quoted_bytes(97, 9, 98, 0)), "control character U+0009 must be escaped", "raw control character")
+        }
+        spec.it("refuses U+0000, which the string layer cannot hold, instead of truncating") callback {
+            spec.assert_contains(jq_spec.yields(".", "\"a\\u0000b\""), "ERR: jq: error: invalid JSON input: \\u0000 is not supported in strings", "in an input string")
+            spec.assert_contains(jq_spec.yields(".", "{\"admin\\u0000x\": false, \"admin\": true}"), "\\u0000 is not supported in strings", "in an input key")
+            spec.assert_contains(jq_spec.yields(".", "{\"k\": \"\\u0000\"}"), "\\u0000 is not supported in strings", "nested in an input")
+            spec.assert_str_eq(jq_spec.yields(".", "\"a\\\\u0000b\""), "\"a\\\\u0000b\"", "an escaped backslash before u0000 is not the escape")
+            spec.assert_contains(jq_spec.yields("\"a\\u0000b\"", "null"), "ERR: jq: error: syntax error: \\u0000 is not supported in strings", "in a program literal")
+            spec.assert_str_eq(jq_spec.fails_with("fromjson", "\"\\\"a\\\\u0000b\\\"\""), "\\u0000 is not supported in strings (while parsing '\"a\\u0000b\"')", "fromjson")
+            spec.assert_str_eq(jq_spec.fails_with("[97, 0, 98] | implode", "null"), "\\u0000 is not supported in strings", "implode")
+            spec.assert_str_eq(jq_spec.fails_with("@base64d", "\"YQBi\""), "\\u0000 is not supported in strings", "base64 decoding")
+            spec.assert_str_eq(jq_spec.fails_with("@base32d", "\"MEAGC===\""), "\\u0000 is not supported in strings", "base32 decoding")
+            spec.assert_str_eq(jq_spec.yields("@base64d, (\"MFRGG===\" | @base32d)", "\"YWJj\""), "\"abc\"\n\"abc\"", "decoding without NUL")
+        }
+        spec.it("keeps other escapes and unusual codepoints intact") callback {
+            spec.assert_str_eq(jq_spec.yields("tojson", "\"\\u007f\\u001f\""), "\"\\\"\\\\u007f\\\\u001f\\\"\"", "controls are re-escaped")
+            spec.assert_str_eq(jq_spec.yields("length, utf8bytelength", "\"\\ufeffabc\""), "4\n6", "a BOM inside a string is a codepoint")
+            spec.assert_str_eq(jq_spec.yields("[1114111] | implode | explode, ([1114112, -1, 55296] | implode | explode)", "null"), "[1114111]\n[65533,65533,65533]", "codepoints out of range become U+FFFD")
+        }
+    }
+
+    spec.describe(fw, "duplicate keys") {
+        spec.it("resolve to the last value everywhere, as in jq") callback {
+            spec.assert_str_eq(jq_spec.yields(".a, keys, length, (to_entries | length), tojson, has(\"a\"), ([.[]] | length)", "{\"a\":1,\"a\":2,\"b\":0}"), "2\n[\"a\",\"b\"]\n2\n2\n\"{\\\"a\\\":2,\\\"b\\\":0}\"\ntrue\n2", "input")
+            spec.assert_str_eq(jq_spec.yields("fromjson | .a, keys", "\"{\\\"a\\\":1,\\\"a\\\":2}\""), "2\n[\"a\"]", "fromjson")
+            spec.assert_str_eq(jq_spec.yields(".[0].role, ([.[] | .role])", "[{\"role\":\"user\",\"role\":\"admin\"}]"), "\"admin\"\n[\"admin\"]", "nested")
+            spec.assert_str_eq(jq_spec.yields("{a:1, a:2}, ({a:1} + {a:2}), ({(\"a\",\"a\"): 1})", "null"), "{\"a\":2}\n{\"a\":2}\n{\"a\":1}\n{\"a\":1}", "constructed")
+        }
+    }
+
+    spec.describe(fw, "pathological regular expressions") {
+        spec.it("give up on catastrophic backtracking instead of hanging") callback {
+            spec.assert_str_eq(jq_spec.yields("test(\"(a+)+$\")", "\"${rep("a", 40)}!\""), "false", "nested quantifiers")
+            spec.assert_str_eq(jq_spec.yields("test(\"^(([a-z])+.)+[A-Z]([a-z])+$\")", "\"${rep("a", 60)}\""), "false", "classic ReDoS")
+            spec.assert_str_eq(jq_spec.yields("test(\"(?:a|aa)+$\")", "\"${rep("a", 5000)}b\""), "false", "alternation")
+        }
+        spec.it("report malformed and oversized patterns as errors") callback {
+            spec.assert_contains(jq_spec.fails_with("test(\"(\")", "\"a\""), "is not a valid regex", "unbalanced")
+            spec.assert_contains(jq_spec.fails_with("test(\"a{99999999}\")", "\"a\""), "is not a valid regex", "huge repeat")
+            spec.assert_contains(jq_spec.fails_with("test(\"${rep("(", 100000)}a${rep(")", 100000)}\")", "\"a\""), "is not a valid regex", "deep nesting")
+            spec.assert_str_eq(jq_spec.fails_with("test(\"x\"; \"z\")", "\"a\""), "z is not a valid modifier string", "unknown flag")
+        }
+        spec.it("match globally in time linear in the subject") callback {
+            spec.assert_str_eq(jq_spec.yields("([match(\"a\"; \"g\")] | length), ([scan(\"a\")] | length), ([match(\"(a)\"; \"g\")] | length)", "\"${rep("a", 5000)}\""), "5000\n5000\n5000", "5k matches")
+            spec.assert_str_eq(jq_spec.yields("[match(\"é\"; \"g\")] | .[-1].offset", "\"${rep("é", 5000)}\""), "4999", "offsets stay in codepoints")
+        }
+    }
+
+    spec.describe(fw, "work without bound") {
+        spec.it("stops infinite generators at the consumer") callback {
+            spec.assert_str_eq(jq_spec.yields("[limit(3; repeat(1))], first(range(1e18)), [limit(2; recurse(. + 1))], isempty(range(1e18))", "0"), "[0,1,1]\n0\n[0,1]\nfalse", "limit, first, isempty")
+            spec.assert_str_eq(jq_spec.yields("[limit(3; range(0; 10; 0))]", "null"), "[0,0,0]", "zero step repeats until limited")
+            spec.assert_str_eq(jq_spec.yields("label $out | foreach range(1e18) as $i (0; . + $i; if . > 5 then ., break $out else empty end)", "null"), "6", "break")
+        }
+        spec.it("handles wide values in proportion to their size") callback {
+            spec.assert_str_eq(jq_spec.yields("[range(50000)] | length, (map(-.) | sort | .[0]), (unique | length)", "null"), "50000\n-49999\n50000", "50k-element arrays")
+            spec.assert_str_eq(jq_spec.yields("\"x\" * 300000 | length, (explode | length)", "null"), "300000\n300000", "300 KB strings")
+            spec.assert_str_eq(jq_spec.yields("[.. | numbers] | add", "[${rep("[", 200)}1${rep("]", 200)},${rep("[", 200)}2${rep("]", 200)}]"), "3", "deep and wide")
+        }
+    }
+
+    spec.describe(fw, "formats that feed other programs") {
+        spec.it("quote shell metacharacters") callback {
+            spec.assert_str_eq(jq_spec.yields("@sh", "\"it's; rm -rf /; $(x) `y`\""), "\"'it'\\\\''s; rm -rf /; $(x) `y`'\"", "single quotes closed and reopened")
+            spec.assert_str_eq(jq_spec.yields("@sh", "[\"a b\", 1, null, true]"), "\"'a b' 1 null true\"", "arrays word by word")
+            spec.assert_str_eq(jq_spec.fails_with("@sh", "{\"a\":1}"), "object ({\"a\":1}) can not be escaped for shell", "objects refused")
+        }
+        spec.it("quote CSV and TSV separators and quotes") callback {
+            spec.assert_str_eq(jq_spec.yields("@csv", "[\"a,b\", \"c\\\"d\", \"=cmd()\", null]"), "\"\\\"a,b\\\",\\\"c\\\"\\\"d\\\",\\\"=cmd()\\\",\"", "csv")
+            spec.assert_str_eq(jq_spec.yields("@tsv", "[\"e\\tf\", \"g\\nh\", \"i\\\\j\"]"), "\"e\\\\tf\\tg\\\\nh\\ti\\\\\\\\j\"", "tsv")
+        }
+    }
+
+    spec.describe(fw, "errors and halts carry any value") {
+        spec.it("report non-string errors without a crash") callback {
+            spec.assert_str_eq(jq_spec.fails_with("error", "{\"a\":1}"), "{\"a\":1} (not a string)", "object")
+            spec.assert_str_eq(jq_spec.fails_with("error(null)", "null"), "null (not a string)", "null")
+            spec.assert_str_eq(jq_spec.fails_with("error(1e300)", "null"), "1e+300 (not a string)", "number")
+            spec.assert_str_eq(jq_spec.yields("[.[] | try error catch .]", "[1, \"a\", null, {\"b\": 2}]"), "[1,\"a\",null,{\"b\":2}]", "caught values round trip")
+            spec.assert_str_eq(jq_spec.yields("try error(\"${rep("x", 100000)}\") catch length", "null"), "100000", "large message")
+        }
+        spec.it("clamp halt codes to the integer range") callback {
+            spec.assert_str_eq(jq_spec.yields("halt_error(1e300)", "\"x\""), "ERR: x", "the message survives a code past the integer range")
+            spec.assert_str_eq(jq_spec.fails_with("halt_error(\"a\")", "\"x\""), "halt_error/1: number required", "non-numeric code")
+        }
+    }
+
+    spec.run_summary(fw)
+}

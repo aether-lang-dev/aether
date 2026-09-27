@@ -132,6 +132,14 @@ TESTS=(
   "jq/paths|contrib/jq/test_paths.ae||leak|"
   "jq/builtins|contrib/jq/test_builtins.ae||leak|"
   "jq/facade|contrib/jq/test_jq.ae||leak|"
+  # Hostile-input specs: programs nested past the stack (nesting), values
+  # nested past the depth cap and runaway recursion (depth), and numbers,
+  # NUL, duplicate keys, regexes, unbounded work (hardening). Leak-gated
+  # too: every error path they take must release. Three files because each
+  # runs about 30x slower under valgrind and the entry timeout is 120 s.
+  "jq/nesting|contrib/jq/test_nesting.ae||leak|"
+  "jq/depth|contrib/jq/test_depth.ae||leak|"
+  "jq/hardening|contrib/jq/test_hardening.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
   # and SKIPs itself at runtime when no driver is installed.
   #

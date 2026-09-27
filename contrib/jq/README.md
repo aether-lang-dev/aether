@@ -142,6 +142,10 @@ few API-level ones at the top.
 | `test_paths.ae` | path expressions, path builtins, every assignment operator |
 | `test_builtins.ae` | the builtin library, regex, formats, math, dates |
 | `test_jq.ae` | the facade: compile, run, result codes, halt, variables, inputs, rendering |
+| `test_nesting.ae` | programs nested past the stack: constructors, pipes, chains, interpolations, sinks, paths |
+| `test_depth.ae` | values nested past their limit: deep input, runaway recursion, values a program builds |
+| `test_hardening.ae` | the other hostile-input classes: numbers past the int range, NUL and bad UTF-8, duplicate keys, pathological regexes, unbounded work, shell and CSV quoting |
+
 
 ```sh
 ae run contrib/jq/test_eval.ae

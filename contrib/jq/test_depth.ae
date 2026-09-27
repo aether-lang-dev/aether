@@ -1,0 +1,88 @@
+// Value-depth specs for contrib.jq: input nested past the JSON parser's
+// limit, and the deepest input it accepts run through every recursive
+// builtin; recursion that never returns; and values a program builds deeper
+// than the recursive value operations (copy, compare, serialise) are sized
+// for on a small stack. The contract is the one test_hardening.ae states: a
+// diagnostic or a bounded answer, never a crash. Nesting in the program
+// text is test_nesting.ae.
+//
+// Run with:  ae run contrib/jq/test_depth.ae
+
+import std.spec
+import std.strbuilder
+import jq_spec
+
+// `s` repeated `n` times.
+rep(s: string, n: int) -> string {
+    sb = strbuilder.new(64)
+    i = 0
+    while i < n {
+        strbuilder.append(sb, s)
+        i = i + 1
+    }
+    return strbuilder.finish(sb)
+}
+
+// `open` n times, then `core`, then `close` n times.
+nest(open: string, core: string, close: string, n: int) -> string {
+    return "${rep(open, n)}${core}${rep(close, n)}"
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "deeply nested input") {
+        spec.it("refuses documents nested past std.json's limit with a diagnostic") callback {
+            spec.assert_contains(jq_spec.yields(".", nest("[", "1", "]", 300)), "ERR: jq: error: invalid JSON input: nesting depth exceeds limit of 256", "arrays")
+            spec.assert_contains(jq_spec.yields(".", nest("{\"a\":", "1", "}", 300)), "nesting depth exceeds limit of 256", "objects")
+            spec.assert_contains(jq_spec.yields("fromjson", "\"${nest("[", "1", "]", 300)}\""), "nesting depth exceeds limit of 256", "fromjson")
+        }
+        spec.it("survives every recursive builtin at the deepest input it accepts") callback {
+            deep = nest("[", "1", "]", 256)
+            spec.assert_str_eq(jq_spec.yields("[..] | length", deep), "257", "recursive descent")
+            spec.assert_str_eq(jq_spec.yields("tojson | length", deep), "513", "serialisation")
+            spec.assert_str_eq(jq_spec.yields(". == ., (. < [.])", deep), "true\ntrue", "comparison")
+            spec.assert_str_eq(jq_spec.yields("[paths] | length", deep), "256", "paths")
+            spec.assert_str_eq(jq_spec.yields("flatten | length", deep), "1", "flatten")
+            spec.assert_str_eq(jq_spec.yields("[., .] | sort | unique | length", deep), "1", "sort and unique")
+            spec.assert_str_eq(jq_spec.yields("contains(.)", deep), "true", "contains")
+            spec.assert_str_eq(jq_spec.yields("getpath([range(256) | 0])", deep), "1", "getpath")
+            spec.assert_str_eq(jq_spec.yields("([tostream] | length), (fromstream(tostream) == .)", deep), "257\ntrue", "tostream and back")
+            spec.assert_str_eq(jq_spec.yields("del(.[0]) | length", deep), "0", "delete")
+        }
+    }
+
+    spec.describe(fw, "runaway recursion") {
+        spec.it("raises jq's depth error rather than overflowing the C stack") callback {
+            spec.assert_str_eq(jq_spec.fails_with("def f: f; f", "null"), "function call depth exceeded in f/0", "direct")
+            spec.assert_contains(jq_spec.fails_with("def f(g): g; def h: f(h); h", "null"), "function call depth exceeded in ", "through a closure")
+            spec.assert_str_eq(jq_spec.fails_with("def f: [f]; f", "null"), "function call depth exceeded in f/0", "building a value on the way down")
+            spec.assert_str_eq(jq_spec.fails_with("def f: f | f; f", "1"), "function call depth exceeded in f/0", "in a pipe")
+            spec.assert_str_eq(jq_spec.fails_with("last(recurse(. + 1))", "0"), "function call depth exceeded in r/0", "unbounded recurse")
+        }
+        spec.it("is caught by try like any other error") callback {
+            spec.assert_str_eq(jq_spec.yields("def f: f; try f catch \"caught\"", "null"), "\"caught\"", "try")
+            spec.assert_str_eq(jq_spec.yields("def f: f; [f?] | length", "null"), "0", "optional")
+        }
+    }
+
+    spec.describe(fw, "values built deeper than the nesting limit") {
+        spec.it("are refused by array and object construction") callback {
+            spec.assert_str_eq(jq_spec.yields("reduce range(64) as $i (0; [[[[[[[[.]]]]]]]]) | tojson | length", "null"), "1025", "512 deep is allowed")
+            spec.assert_str_eq(jq_spec.fails_with("reduce range(65) as $i (0; [[[[[[[[.]]]]]]]])", "null"), "value nesting depth exceeds limit of 512", "arrays")
+            spec.assert_str_eq(jq_spec.fails_with("reduce range(65) as $i (0; {a:{a:{a:{a:{a:{a:{a:{a:.}}}}}}}})", "null"), "value nesting depth exceeds limit of 512", "objects")
+            spec.assert_str_eq(jq_spec.fails_with("def f: if . == 0 then 0 else (. - 1 | f | [[[[[[[[.]]]]]]]]) end; 65 | f", "null"), "value nesting depth exceeds limit of 512", "through recursion")
+        }
+        spec.it("are refused by setpath and the assignment operators") callback {
+            spec.assert_str_eq(jq_spec.yields("setpath([range(512) | 0]; 1) | tojson | length", "null"), "1025", "512 deep is allowed")
+            spec.assert_str_eq(jq_spec.fails_with("setpath([range(513) | 0]; 1)", "null"), "value nesting depth exceeds limit of 512", "setpath")
+            spec.assert_str_eq(jq_spec.fails_with("[range(513) | 0] as $p | null | getpath($p) = 1", "null"), "value nesting depth exceeds limit of 512", "assignment")
+            spec.assert_str_eq(jq_spec.fails_with("reduce range(64) as $i (0; [[[[[[[[.]]]]]]]]) | group_by(.)", "null"), "value nesting depth exceeds limit of 512", "group_by wraps once more")
+        }
+        spec.it("can be caught, and the program goes on") callback {
+            spec.assert_str_eq(jq_spec.yields("[try (reduce range(65) as $i (0; [[[[[[[[.]]]]]]]])) catch \"deep\", 1]", "null"), "[\"deep\",1]", "caught")
+        }
+    }
+
+    spec.run_summary(fw)
+}
