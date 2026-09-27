@@ -437,9 +437,13 @@ main() {
     fw = spec.init()
 
     ready = 0
+    // `reason` is a literal unless an interpolation below built it; that one
+    // is allocated, and freed once the specs that print it have run.
     reason = "no Vulkan driver"
+    reason_owned = 0
     if vulkan.available() != 1 {
         reason = "no Vulkan driver (${vulkan.last_error()})"
+        reason_owned = 1
     } else {
         g_instance = create_instance()
         if g_instance == null {
@@ -455,6 +459,7 @@ main() {
                 ok, why = has_ray_query(g_gpu)
                 if ok == 0 {
                     reason = "${why} (lavapipe before Mesa 24.1 and MoltenVK have none)"
+                    reason_owned = 1
                 } else {
                     g_family = compute_family(g_gpu)
                     g_device = create_device(g_gpu, g_family)
@@ -581,6 +586,7 @@ main() {
 
     rc = spec.run_summary(fw)
 
+    if reason_owned == 1 { free(reason) }
     buf_destroy(verts)
     if spv_len > 0 { string.free(spv) }
     if g_mem_props != null { free(g_mem_props) }
