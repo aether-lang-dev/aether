@@ -1394,31 +1394,40 @@ check-archive-exports: stdlib
 
 # #2207: check-archive-exports above only ever ran on a host that HAS zlib
 # (every normal dev box and CI runner), so a symbol whose only definition
-# was in std/zlib/aether_zlib.c's `#ifdef AETHER_HAS_ZLIB` branch could go
-# unexported by its `#else` stub branch for four releases before the release
-# workflow's lean, zlib-less FreeBSD sysroot happened to catch it — at that
-# point too late to stop the release. Rebuild the stdlib archive with
-# ZLIB=0 and run the same check against IT, so any std module missing a
-# no-zlib stub fails a normal CI run instead of only the release's FreeBSD
-# leg.
+# was in std/zlib/aether_zlib.c's `#ifdef AETHER_HAS_ZLIB` branch went
+# unexported by its `#else` stub branch from 0.714.0 on. Only the release
+# workflow's lean, zlib-less FreeBSD sysroot caught it, and it failed there
+# on every release from 0.714.0 to 0.731.0, none of which published. Check
+# the archive as a zlib-less build would produce it too, so a std module
+# missing a no-zlib stub fails a normal CI run instead.
 #
-# build/libaether.a is a fixed path with no ZLIB=0-specific object dir, so
-# a `clean` brackets the ZLIB=0 build on both sides, and the normal
-# (zlib-present) toolchain is rebuilt before returning: `ci`'s steps after
-# this one — and CI steps that run after `make ci` itself, like the
-# hardened leg's checksec and the macOS leaks gate — read build/ae,
-# build/aetherc and build/libaether.a expecting the ordinary build, not a
-# no-zlib one or an empty directory.
+# Only the std sources that branch on AETHER_HAS_ZLIB differ in such a
+# build, so rather than rebuild the tree with ZLIB=0 (every object depends
+# on the .build-flags stamp, so that recompiles everything), compile just
+# them without the define, swap them into a COPY of the archive, and check
+# the copy. build/ is never touched, so the ordinary build that later ci
+# steps and the CI steps after `make ci` (the hardened leg's checksec, the
+# macOS leaks gate) read is exactly what it was. The list is found by grep,
+# so a new source that branches on AETHER_HAS_ZLIB is covered without
+# anyone remembering to add it.
+ZLIB_DEPENDENT_SRCS = $(shell grep -rl --include='*.c' 'AETHER_HAS_ZLIB' std)
+
 .PHONY: check-archive-exports-nozlib
-check-archive-exports-nozlib:
+check-archive-exports-nozlib: stdlib
 	@echo "==================================="
 	@echo "  Archive Export Check (no zlib)"
 	@echo "==================================="
-	@$(MAKE) clean
-	@$(MAKE) -j$(NPROC) stdlib ZLIB=0
-	@sh scripts/check_archive_exports.sh build/libaether.a
-	@$(MAKE) clean
-	@$(MAKE) -j$(NPROC) compiler ae stdlib
+	@[ -n "$(ZLIB_DEPENDENT_SRCS)" ] || { \
+	  echo "  [FAIL] no std source branches on AETHER_HAS_ZLIB; this check would test nothing"; exit 1; }
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	cp build/libaether.a "$$tmp/libaether.a" && \
+	for src in $(ZLIB_DEPENDENT_SRCS); do \
+	  obj="$$tmp/$$(basename "$$src" .c).o"; \
+	  $(CC) $(filter-out -DAETHER_HAS_ZLIB,$(AETHER_REQUIRED_CFLAGS)) $(CFLAGS) \
+	    -c "$$src" -o "$$obj" || exit 1; \
+	  ar r "$$tmp/libaether.a" "$$obj" || exit 1; \
+	done && \
+	sh scripts/check_archive_exports.sh "$$tmp/libaether.a"
 
 test-release-archive: compiler ae stdlib check-archive-exports
 	@echo "==================================="
