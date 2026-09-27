@@ -3902,6 +3902,70 @@ ASTNode* parse_exports_list(Parser* parser) {
     return list;
 }
 
+/* #2200: `cfn Name(a: T1, b: T2) -> R` — a named C function-pointer type,
+ * the typedef form of `fn(T1, T2) -> R`. OpenGL past 1.1 and all of Vulkan
+ * are reached through pointers fetched at run time (wglGetProcAddress,
+ * vkGetDeviceProcAddr, dlsym); naming each signature once lets a program
+ * declare `var gen_buffers: GenBuffers = null`, load it with
+ * `p as GenBuffers`, and call it with C's calling convention.
+ *
+ * The parameter list takes the extern spelling (`name: type`) so a
+ * declaration can be pasted from the C prototype, and also a bare type
+ * list (`cfn Add(int, int) -> int`) to match the anonymous `fn(...)`
+ * form. Omitting `-> R` means void. Only the types survive: the node is
+ * `value` = Name with `node_type` = the TYPE_FUNCTION (is_fnptr=1). */
+ASTNode* parse_cfn_type_def(Parser* parser) {
+    Token* name = expect_token(parser, TOKEN_IDENTIFIER);
+    if (!name) return NULL;
+    if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
+
+    Type* sig = create_type(TYPE_FUNCTION);
+    sig->is_fnptr = 1;
+    if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
+        do {
+            /* `name: type` when an identifier is followed by `:`; otherwise
+             * the token starts a bare type (`int`, `ptr`, `*Thing`, ...). */
+            Token* t0 = peek_token(parser);
+            Token* t1 = peek_ahead(parser, 1);
+            if (t0 && t0->type == TOKEN_IDENTIFIER && t1 && t1->type == TOKEN_COLON) {
+                advance_token(parser);   // parameter name
+                advance_token(parser);   // ':'
+            }
+            Type* p = parse_type(parser);
+            if (!p) {
+                parser_error(parser, "Expected a parameter type in cfn signature "
+                                     "(`cfn Name(n: int, ids: ptr) -> int`)");
+                free_type(sig);
+                return NULL;
+            }
+            sig->param_count++;
+            sig->param_types = aether_xrealloc(sig->param_types,
+                (size_t)sig->param_count * sizeof(Type*));
+            sig->param_types[sig->param_count - 1] = p;
+        } while (match_token(parser, TOKEN_COMMA));
+        if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
+            free_type(sig);
+            return NULL;
+        }
+    }
+    if (peek_token(parser) && peek_token(parser)->type == TOKEN_ARROW) {
+        advance_token(parser);   // consume '->'
+        sig->return_type = parse_type(parser);
+        if (!sig->return_type) {
+            parser_error(parser, "Expected a return type after `->` in cfn signature");
+            free_type(sig);
+            return NULL;
+        }
+    } else {
+        sig->return_type = create_type(TYPE_VOID);
+    }
+
+    ASTNode* def = create_ast_node(AST_CFN_TYPE_DEF, name->value, name->line, name->column);
+    def->node_type = sig;
+    match_token(parser, TOKEN_SEMICOLON);
+    return def;
+}
+
 // Parse export statement
 // Syntax: export func_name
 // Syntax: export struct Point { ... }
@@ -3962,7 +4026,14 @@ ASTNode* parse_export_statement(Parser* parser) {
         case TOKEN_IDENTIFIER: {
             // Check if this is a function: export func_name(...)
             Token* after = peek_ahead(parser, 1);
-            if (after && after->type == TOKEN_LEFT_PAREN) {
+            Token* after2 = peek_ahead(parser, 2);
+            if (next->value && strcmp(next->value, "cfn") == 0 &&
+                after && after->type == TOKEN_IDENTIFIER &&
+                after2 && after2->type == TOKEN_LEFT_PAREN) {
+                // #2200: `export cfn Name(...) -> R`
+                advance_token(parser);   // consume 'cfn'
+                exported_item = parse_cfn_type_def(parser);
+            } else if (after && after->type == TOKEN_LEFT_PAREN) {
                 exported_item = parse_function_definition(parser);
             } else {
                 // Export existing symbol: export my_func
@@ -6272,6 +6343,20 @@ ASTNode* parse_top_level_decl(Parser* parser) {
             }
         }
 
+        // #2200: `cfn Name(a: T1, b: T2) -> R` — a named C function-pointer
+        // type. `cfn` is a contextual identifier (still usable as a name
+        // elsewhere); only the `cfn <ident> (` shape here is intercepted.
+        if (token->type == TOKEN_IDENTIFIER && token->value &&
+            strcmp(token->value, "cfn") == 0) {
+            Token* n1 = peek_ahead(parser, 1);
+            Token* n2 = peek_ahead(parser, 2);
+            if (n1 && n1->type == TOKEN_IDENTIFIER &&
+                n2 && n2->type == TOKEN_LEFT_PAREN) {
+                advance_token(parser);   // consume 'cfn'
+                return parse_cfn_type_def(parser);
+            }
+        }
+
         // #480: `type Name = distinct Base` — a zero-cost nominal type over
         // Base. `type` and `distinct` are contextual identifiers (usable as
         // names elsewhere); only the `type <ident> = distinct ...` shape here
@@ -6298,6 +6383,27 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     ASTNode* d = create_ast_node(AST_DISTINCT_TYPE_DEF,
                                                  name->value, name->line, name->column);
                     d->node_type = base;
+                    match_token(parser, TOKEN_SEMICOLON);
+                    return d;
+                }
+                // #2200: `type Name = fn(T1, T2) -> R` — a named C function-
+                // pointer type, the alias form of `cfn Name(a: T1, b: T2) -> R`
+                // (no new word; the signature is written as a use site would
+                // write it). Same node, same resolution.
+                if (dk && dk->type == TOKEN_IDENTIFIER && dk->value &&
+                    strcmp(dk->value, "fn") == 0) {
+                    Token* paren = peek_ahead(parser, 1);
+                    if (!paren || paren->type != TOKEN_LEFT_PAREN) {
+                        parser_error(parser,
+                            "a function-pointer type alias needs a signature: "
+                            "`type Name = fn(T1, T2) -> R`");
+                        return NULL;
+                    }
+                    Type* sig = parse_type(parser);
+                    if (!sig) return NULL;
+                    ASTNode* d = create_ast_node(AST_CFN_TYPE_DEF,
+                                                 name->value, name->line, name->column);
+                    d->node_type = sig;
                     match_token(parser, TOKEN_SEMICOLON);
                     return d;
                 }

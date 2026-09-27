@@ -50,6 +50,7 @@ ASTNode* parse_program(Parser* parser);
 ASTNode* parse_module_declaration(Parser* parser);
 ASTNode* parse_import_statement(Parser* parser);
 ASTNode* parse_export_statement(Parser* parser);
+ASTNode* parse_cfn_type_def(Parser* parser);   /* #2200 `cfn Name(...) -> R` */
 ASTNode* parse_exports_list(Parser* parser);
 ASTNode* parse_actor_definition(Parser* parser);
 ASTNode* parse_function_definition(Parser* parser);

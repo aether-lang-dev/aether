@@ -2336,6 +2336,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
              * function whose name is a libc symbol (`read`, `time`, ...)
              * is defined as `ae_<name>`, and the bare name under the cast
              * used to reach libc's function instead (#2064). */
+            int operand_is_fn_addr = 0;
             {
                 ASTNode* operand_node = expr->children[0];
                 if (operand_node->type == AST_IDENTIFIER && operand_node->value) {
@@ -2345,10 +2346,17 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                          fsym->node->type == AST_BUILDER_FUNCTION)) {
                         if (operand_node->annotation) free(operand_node->annotation);
                         operand_node->annotation = strdup("fn_addr");
+                        operand_is_fn_addr = 1;
                     }
                 }
             }
-            Type* operand = infer_type(expr->children[0], table);
+            /* A function's address is always a valid operand. Inferring the
+             * bare name yields the function's RETURN type, so the pointer
+             * check below passed `-> int` and `-> *T` functions by accident
+             * and rejected `-> float` / `-> string` ones as "must be a ptr
+             * value" (#2200: a `scale_impl as Scale` fallback for a float-
+             * returning GL entry point). */
+            Type* operand = operand_is_fn_addr ? NULL : infer_type(expr->children[0], table);
             if (operand) {
                 int operand_ok = operand->kind == TYPE_PTR ||
                                  operand->kind == TYPE_INT ||
@@ -3408,6 +3416,7 @@ static void resolve_purity_queries(ASTNode* node, ASTNode* program,
                                    const char** globals, int nglobals);
 // #480: resolve `type X = distinct Y` placeholders into distinct Types.
 static void resolve_distinct_types(ASTNode* program);
+static void resolve_cfn_types(ASTNode* program);   /* #2200 */
 // #914: resolve `type Name = A | B | C` references into TYPE_SUM.
 static void resolve_sum_types(ASTNode* program);
 static void sum_apply(Type* t, ASTNode* def);   // fill TYPE_SUM variant Types
@@ -3678,6 +3687,13 @@ int typecheck_program(ASTNode* program) {
     // #480: resolve `type X = distinct Y` placeholders into distinct Types
     // across the whole AST before any type-checking or inference runs.
     resolve_distinct_types(program);
+
+    // #2200: resolve `cfn Name(...) -> R` references — rewrite bare
+    // TYPE_STRUCT{Name} use-sites into the named function-pointer signature.
+    // After distinct resolution (a name is one or the other) and before any
+    // type-checking, so a `p as Name` cast is already a function-pointer cast
+    // when its operand is checked.
+    resolve_cfn_types(program);
 
     // #914: resolve `type Name = A | B | C` references — rewrite bare
     // TYPE_STRUCT{Name} use-sites into the real TYPE_SUM. Runs after distinct
@@ -4527,6 +4543,11 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             return 1;
         case AST_STRUCT_DEFINITION:
             return typecheck_struct_definition(node, table);
+        case AST_CFN_TYPE_DEF:
+            // #2200: every reference was rewritten in resolve_cfn_types and
+            // a duplicate name reported there; the declaration itself is
+            // only a signature, nothing to check per node.
+            return 1;
         case AST_SUM_TYPE_DEF: {
             // #914: variant references were rewritten in resolve_sum_types;
             // validate here that every variant names a real struct (and not
@@ -5460,6 +5481,100 @@ static void resolve_distinct_types(ASTNode* program) {
     }
     if (ndefs == 0) return;
     distinct_rewrite_ast(program, defs, ndefs);
+}
+
+// #2200 named C function-pointer types. `cfn Name(a: T1, b: T2) -> R` parses
+// to AST_CFN_TYPE_DEF (value = Name, node_type = the TYPE_FUNCTION signature
+// with is_fnptr=1). A use site `x: Name` or `p as Name` is parsed as a bare
+// TYPE_STRUCT{Name}; this pass rewrites every such reference into a copy of
+// the signature, exactly as resolve_distinct_types does for distinct aliases,
+// so everything downstream sees the same `fn(T1, T2) -> R` it already knows.
+// A `p as Name` cast was parsed as an AST_VALUE_CAST (the parser cannot tell a
+// cfn name from a distinct one); once its target is a function pointer the
+// node becomes the AST_PTR_AS_FN_CAST that `p as fn(...)` produces directly.
+#define AETHER_MAX_CFNS 256
+typedef struct { const char* name; Type* sig; } CfnDef;
+
+/* Turn the in-place TYPE_STRUCT{cfnName} into the signature. The name is
+ * dropped: a cfn is structural, two names over the same signature are one
+ * type (as `fn(int) -> int` written twice is). */
+static void cfn_apply(Type* t, Type* sig) {
+    free(t->struct_name);
+    t->struct_name = NULL;
+    t->kind = TYPE_FUNCTION;
+    t->is_fnptr = 1;
+    t->param_count = sig->param_count;
+    t->param_types = sig->param_count > 0
+        ? (Type**)malloc((size_t)sig->param_count * sizeof(Type*)) : NULL;
+    for (int i = 0; i < sig->param_count; i++)
+        t->param_types[i] = clone_type(sig->param_types[i]);
+    t->return_type = sig->return_type ? clone_type(sig->return_type)
+                                      : create_type(TYPE_VOID);
+}
+
+static void cfn_rewrite_type(Type* t, CfnDef* defs, int ndefs, int depth) {
+    if (!t || depth > 64) return;
+    if (t->kind == TYPE_STRUCT && t->struct_name && !t->distinct_name) {
+        for (int i = 0; i < ndefs; i++) {
+            if (strcmp(t->struct_name, defs[i].name) == 0) {
+                cfn_apply(t, defs[i].sig);
+                break;
+            }
+        }
+    }
+    /* Recurse after the rewrite: a signature naming another cfn
+     * (`cfn Register(cb: Callback)`) resolves that one too. */
+    cfn_rewrite_type(t->element_type, defs, ndefs, depth + 1);
+    cfn_rewrite_type(t->return_type, defs, ndefs, depth + 1);
+    for (int i = 0; i < t->tuple_count; i++)
+        if (t->tuple_types) cfn_rewrite_type(t->tuple_types[i], defs, ndefs, depth + 1);
+    for (int i = 0; i < t->param_count; i++)
+        if (t->param_types) cfn_rewrite_type(t->param_types[i], defs, ndefs, depth + 1);
+}
+
+static void cfn_rewrite_ast(ASTNode* n, CfnDef* defs, int ndefs) {
+    if (!n) return;
+    if (n->node_type) {
+        cfn_rewrite_type(n->node_type, defs, ndefs, 0);
+        if (n->type == AST_VALUE_CAST && n->node_type->kind == TYPE_FUNCTION &&
+            n->node_type->is_fnptr) {
+            n->type = AST_PTR_AS_FN_CAST;
+        }
+    }
+    for (int i = 0; i < n->child_count; i++)
+        cfn_rewrite_ast(n->children[i], defs, ndefs);
+}
+
+static ASTNode* unwrap_cfn_def(ASTNode* c) {
+    if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+    return (c && c->type == AST_CFN_TYPE_DEF && c->value && c->node_type) ? c : NULL;
+}
+
+static void resolve_cfn_types(ASTNode* program) {
+    if (!program) return;
+    CfnDef defs[AETHER_MAX_CFNS];
+    int ndefs = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = unwrap_cfn_def(program->children[i]);
+        if (!c) continue;
+        int dup = 0;
+        for (int j = 0; j < ndefs; j++) {
+            if (strcmp(defs[j].name, c->value) == 0) { dup = 1; break; }
+        }
+        if (dup) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "cfn `%s` is declared twice", c->value);
+            type_error(msg, c->line, c->column);
+            continue;
+        }
+        if (ndefs < AETHER_MAX_CFNS) {
+            defs[ndefs].name = c->value;
+            defs[ndefs].sig = c->node_type;
+            ndefs++;
+        }
+    }
+    if (ndefs == 0) return;
+    cfn_rewrite_ast(program, defs, ndefs);
 }
 
 // #914 sum/variant types. `type Name = A | B | C` parses to AST_SUM_TYPE_DEF

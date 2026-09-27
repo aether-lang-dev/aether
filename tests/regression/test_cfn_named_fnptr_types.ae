@@ -1,0 +1,88 @@
+// #2200: `cfn Name(a: T1, b: T2) -> R`, or `type Name = fn(T1, T2) -> R`,
+// names a C function-pointer type once,
+// so a GetProcAddress'd entry point (OpenGL past 1.1, all of Vulkan) can be
+// declared, stored in a module-level `var`, loaded with `p as Name`, and
+// called with C's calling convention from anywhere. The name resolves to the
+// same typed pointer `fn(T1, T2) -> R` gives, so it works as a local, a
+// parameter, a struct field, a return type, and inside another cfn's
+// signature, with struct pointers, floats and f32 in the signature.
+//
+// The function pointers here are Aether functions' own addresses (`f as
+// Name`) so the test needs no C glue; the loader shape with a real
+// `get_proc_address` C function is tests/integration/aether_cfn_proc_address.
+
+extern exit(code: int)
+extern calloc(n: long, size: long) -> ptr
+extern free(p: ptr)
+
+struct Thing { value: int }
+struct Vec2 { x: f32, y: f32 }
+
+cfn GenBuffers(n: int, ids: ptr)
+cfn Bump(t: *Thing, by: int) -> *Thing
+type Peek = fn(*Thing) -> int
+cfn Visit(cb: Bump, t: *Thing)
+type Scale = fn(float, f32) -> float
+cfn MakeVec(x: f32, y: f32) -> Vec2
+
+struct Slot { bump: Bump, peek: Peek }
+
+// The issue's shape: loaded once into a module-level var, called elsewhere.
+var gl_gen_buffers: GenBuffers = null
+
+gen_buffers_impl(n: int, ids: ptr) {
+    (ids as int[])[0] = 40 + n
+}
+
+load() {
+    gl_gen_buffers = gen_buffers_impl as GenBuffers
+}
+
+make_buffer() -> int {
+    ids = calloc(1, 4)
+    gl_gen_buffers(1, ids)
+    id = (ids as int[])[0]
+    free(ids)
+    return id
+}
+
+bump_impl(t: *Thing, by: int) -> *Thing { t.value = t.value + by; return t }
+peek_impl(t: *Thing) -> int { return t.value }
+visit_impl(cb: Bump, t: *Thing) { cb(t, 100) }
+scale_impl(v: float, s: f32) -> float { return v * s }
+make_vec_impl(x: f32, y: f32) -> Vec2 { return Vec2 { x: x, y: y } }
+
+apply(f: Bump, t: *Thing) { f(t, 5) }
+pick_bump() -> Bump { return bump_impl as Bump }
+
+main() {
+    println("=== test_cfn_named_fnptr_types ===")
+
+    load()
+    if make_buffer() != 41 { println("FAIL: call through global cfn var"); exit(1) }
+
+    thing = Thing { value: 0 }
+    b = bump_impl as Bump
+    if b(&thing, 2).value != 2 { println("FAIL: cfn local"); exit(1) }
+
+    apply(b, &thing)
+    if thing.value != 7 { println("FAIL: cfn parameter (got ${thing.value})"); exit(1) }
+
+    slot = Slot { bump: pick_bump(), peek: peek_impl as Peek }
+    slot.bump(&thing, 3)
+    if slot.peek(&thing) != 10 { println("FAIL: cfn struct field (got ${slot.peek(&thing)})"); exit(1) }
+
+    v = visit_impl as Visit
+    v(b, &thing)
+    if thing.value != 110 { println("FAIL: cfn inside a cfn signature (got ${thing.value})"); exit(1) }
+
+    let sc: Scale = scale_impl as Scale
+    if sc(2.5, 4.0) != 10.0 { println("FAIL: float/f32 cfn (got ${sc(2.5, 4.0)})"); exit(1) }
+
+    mk = make_vec_impl as MakeVec
+    vec = mk(1.5, 2.5)
+    if vec.x != 1.5 || vec.y != 2.5 { println("FAIL: struct returned by value (got ${vec.x} ${vec.y})"); exit(1) }
+
+    println("  PASS: named C function-pointer types")
+    println("OK")
+}

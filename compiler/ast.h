@@ -304,7 +304,16 @@ typedef enum {
     // the reason: declared out of line it is a call the C compiler cannot
     // see through, and a hot loop over a packed buffer pays for that;
     // included, it is the load it names and the loop vectorises.
-    AST_C_INCLUDE_DIRECTIVE
+    AST_C_INCLUDE_DIRECTIVE,
+    // #2200: `cfn Name(a: T1, b: T2) -> R` — a NAMED C function-pointer
+    // type. `value` is Name; `node_type` is the TYPE_FUNCTION (is_fnptr=1)
+    // signature. It is the typedef form of `fn(T1, T2) -> R`: an annotation
+    // `x: Name` or a cast `p as Name` resolves (resolve_cfn_types) to that
+    // signature, so a GetProcAddress'd OpenGL/Vulkan entry point is declared
+    // once and called with C's calling convention everywhere. Emits no C of
+    // its own: storage stays `void*` and each call site carries the typed
+    // cast, exactly as the anonymous spelling does. Appended at the enum END.
+    AST_CFN_TYPE_DEF
 } ASTNodeType;
 
 typedef enum {
