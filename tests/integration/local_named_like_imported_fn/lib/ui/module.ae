@@ -1,0 +1,10 @@
+// Stands in for aether-ui's `ui` module (#2218): an exported builder named
+// `record`, declared `-> int`, that hands back its config handle.
+exports(record, label)
+
+label(s: string) -> int { return 1 }
+
+builder record(w: int, h: int) -> int {
+    if w > 0 { return _builder }
+    return h
+}

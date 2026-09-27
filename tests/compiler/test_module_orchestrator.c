@@ -152,3 +152,127 @@ TEST_CATEGORY(module_orchestrate_empty_program, TEST_CATEGORY_COMPILER) {
     module_registry_shutdown();
     free_ast_node(program);
 }
+
+/* #2218: module_prune_unreachable seeds every bare identifier as a possible
+ * function reference, and a bare name reaches an imported `<mod>_<name>`
+ * through the suffix match that glob imports rely on. A name the function
+ * binds itself (a local, a parameter, a closure parameter) is that binding,
+ * so it must not keep an unrelated imported function alive. */
+
+static ASTNode* prune_node(ASTNodeType type, const char* value, ASTNode* child) {
+    ASTNode* n = create_ast_node(type, value, 0, 0);
+    if (child) add_child(n, child);
+    return n;
+}
+
+/* An imported function or builder, as module merging clones it in. */
+static ASTNode* prune_imported(ASTNodeType type, const char* name, ASTNode* body_stmt) {
+    ASTNode* fn = create_ast_node(type, name, 0, 0);
+    fn->is_imported = 1;
+    add_child(fn, prune_node(AST_BLOCK, NULL, body_stmt));
+    return fn;
+}
+
+/* main() { <stmt> } */
+static ASTNode* prune_main(ASTNode* stmt) {
+    return prune_node(AST_MAIN_FUNCTION, "main", prune_node(AST_BLOCK, NULL, stmt));
+}
+
+static int prune_has(ASTNode* program, const char* name) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->value && strcmp(c->value, name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* glyphs_find() { record = 1; return record } */
+static ASTNode* prune_fn_with_local_named(const char* fn_name, const char* local) {
+    ASTNode* fn = prune_imported(AST_FUNCTION_DEFINITION, fn_name,
+        prune_node(AST_VARIABLE_DECLARATION, local, prune_node(AST_LITERAL, "1", NULL)));
+    add_child(fn->children[0],
+              prune_node(AST_RETURN_STATEMENT, NULL, prune_node(AST_IDENTIFIER, local, NULL)));
+    return fn;
+}
+
+TEST_CATEGORY(prune_drops_imported_fn_named_like_a_local, TEST_CATEGORY_COMPILER) {
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, prune_main(prune_node(AST_FUNCTION_CALL, "glyphs.find", NULL)));
+    add_child(program, prune_fn_with_local_named("glyphs_find", "record"));
+    add_child(program, prune_imported(AST_BUILDER_FUNCTION, "ui_record", NULL));
+
+    module_prune_unreachable(program);
+
+    ASSERT_TRUE(prune_has(program, "glyphs_find"));
+    ASSERT_FALSE(prune_has(program, "ui_record"));
+    free_ast_node(program);
+}
+
+TEST_CATEGORY(prune_keeps_glob_imported_fn_named_by_bare_identifier, TEST_CATEGORY_COMPILER) {
+    /* main() { f = cube } with `import mathlist (*)`: the bare name is the
+     * function, and the suffix match is what keeps `mathlist_cube`. */
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, prune_main(
+        prune_node(AST_VARIABLE_DECLARATION, "f", prune_node(AST_IDENTIFIER, "cube", NULL))));
+    add_child(program, prune_imported(AST_FUNCTION_DEFINITION, "mathlist_cube", NULL));
+
+    module_prune_unreachable(program);
+
+    ASSERT_TRUE(prune_has(program, "mathlist_cube"));
+    free_ast_node(program);
+}
+
+TEST_CATEGORY(prune_drops_imported_fn_named_like_a_parameter, TEST_CATEGORY_COMPILER) {
+    /* glyphs_find(record) { return record } */
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, prune_main(prune_node(AST_FUNCTION_CALL, "glyphs_find", NULL)));
+    ASTNode* find = create_ast_node(AST_FUNCTION_DEFINITION, "glyphs_find", 0, 0);
+    find->is_imported = 1;
+    add_child(find, prune_node(AST_PATTERN_VARIABLE, "record", NULL));
+    add_child(find, prune_node(AST_BLOCK, NULL,
+        prune_node(AST_RETURN_STATEMENT, NULL, prune_node(AST_IDENTIFIER, "record", NULL))));
+    add_child(program, find);
+    add_child(program, prune_imported(AST_FUNCTION_DEFINITION, "ui_record", NULL));
+
+    module_prune_unreachable(program);
+
+    ASSERT_FALSE(prune_has(program, "ui_record"));
+    free_ast_node(program);
+}
+
+TEST_CATEGORY(prune_drops_imported_fn_named_like_a_called_local, TEST_CATEGORY_COMPILER) {
+    /* main() { f = |k| { ... }; f(1) }: calling a local closure is not a
+     * call of any imported `<mod>_f`. */
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    ASTNode* main_fn = prune_main(
+        prune_node(AST_VARIABLE_DECLARATION, "f",
+            prune_node(AST_CLOSURE, NULL, prune_node(AST_CLOSURE_PARAM, "k", NULL))));
+    add_child(main_fn->children[0], prune_node(AST_FUNCTION_CALL, "f", NULL));
+    add_child(program, main_fn);
+    add_child(program, prune_imported(AST_FUNCTION_DEFINITION, "util_f", NULL));
+    add_child(program, prune_imported(AST_FUNCTION_DEFINITION, "util_k", NULL));
+
+    module_prune_unreachable(program);
+
+    ASSERT_FALSE(prune_has(program, "util_f"));
+    ASSERT_FALSE(prune_has(program, "util_k"));
+    free_ast_node(program);
+}
+
+TEST_CATEGORY(prune_local_in_one_function_does_not_hide_a_reference_in_another, TEST_CATEGORY_COMPILER) {
+    /* glyphs_find binds `record`; main names the glob-imported `record`
+     * function as a value. Locals are per function, so main's reference
+     * still keeps `ui_record`. */
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    ASTNode* main_fn = prune_main(prune_node(AST_FUNCTION_CALL, "glyphs_find", NULL));
+    add_child(main_fn->children[0],
+              prune_node(AST_VARIABLE_DECLARATION, "cb", prune_node(AST_IDENTIFIER, "record", NULL)));
+    add_child(program, main_fn);
+    add_child(program, prune_fn_with_local_named("glyphs_find", "record"));
+    add_child(program, prune_imported(AST_BUILDER_FUNCTION, "ui_record", NULL));
+
+    module_prune_unreachable(program);
+
+    ASSERT_TRUE(prune_has(program, "ui_record"));
+    free_ast_node(program);
+}

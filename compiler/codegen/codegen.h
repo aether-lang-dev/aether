@@ -554,6 +554,7 @@ void emit_sum_typedef(CodeGenerator* gen, ASTNode* def);   // #914
 void emit_enum_typedef(CodeGenerator* gen, ASTNode* def);  // #1044
 void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target);   // #340
 int needs_optional_coerce(ASTNode* value, Type* target);   // #340
+int emit_int_ptr_bridged(CodeGenerator* gen, ASTNode* expr, TypeKind target);  // #2218
 void emit_sum_coerced(CodeGenerator* gen, ASTNode* value, Type* target);   // #914
 int needs_sum_coerce(ASTNode* value, Type* target);   // #914
 

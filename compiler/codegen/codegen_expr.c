@@ -5780,24 +5780,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             } else {
                                 generate_expression(gen, arg);
                             }
-                        } else if (expected == TYPE_PTR && arg->node_type &&
-                            (arg->node_type->kind == TYPE_INT || arg->node_type->kind == TYPE_BOOL)) {
-                            fprintf(gen->output, "(void*)(intptr_t)(");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if ((expected == TYPE_INT || expected == TYPE_BOOL) &&
-                                   arg->node_type && arg->node_type->kind == TYPE_PTR) {
-                            /* Inverse of the ptr-cast above: bridges the injected
-                             * `_builder` (typed `ptr`, lowered to `void*`) and ctx
-                             * values when a callee parameter is declared `int`.
-                             * Without this, the body of a `builder ... with factory`
-                             * function passing `_builder` to an int-handle extern
-                             * emits a bare void*→int conversion that GCC 14+/MinGW64
-                             * reject under default -Werror=int-conversion. See
-                             * builder-ctx-handle-void-ptr-int-conversion.md. */
-                            fprintf(gen->output, "(int)(intptr_t)(");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
+                        } else if (emit_int_ptr_bridged(gen, arg, expected)) {
+                            /* int <-> ptr parameter: cast emitted. */
                         } else if (expected == TYPE_PTR && arg->node_type &&
                                    arg->node_type->kind == TYPE_STRING) {
                             if (arg->type == AST_LITERAL) {
@@ -6693,4 +6677,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             break;
     }
+}
+
+/* Emits `expr` bridged across the int <-> pointer boundary when `target`
+ * and the expression's type sit on opposite sides of it; returns 0 and
+ * emits nothing otherwise. Handles such as the injected `_builder`
+ * (typed `ptr`, lowered to `void*`) flow into `int` slots and back, and a
+ * bare conversion is rejected by GCC 14+/MinGW64 under default
+ * -Werror=int-conversion. Used for call arguments and for returns (#2218:
+ * `return _builder` from a builder declared `-> int`). See
+ * builder-ctx-handle-void-ptr-int-conversion.md. */
+int emit_int_ptr_bridged(CodeGenerator* gen, ASTNode* expr, TypeKind target) {
+    if (!expr || !expr->node_type) return 0;
+    TypeKind have = expr->node_type->kind;
+    const char* cast = NULL;
+    if (target == TYPE_PTR && (have == TYPE_INT || have == TYPE_BOOL)) {
+        cast = "(void*)(intptr_t)(";
+    } else if ((target == TYPE_INT || target == TYPE_BOOL) && have == TYPE_PTR) {
+        cast = "(int)(intptr_t)(";
+    }
+    if (!cast) return 0;
+    fprintf(gen->output, "%s", cast);
+    generate_expression(gen, expr);
+    fprintf(gen->output, ")");
+    return 1;
 }

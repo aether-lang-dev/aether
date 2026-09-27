@@ -12,7 +12,11 @@ invoke_cell(cb: fn, it: ptr, c: int) -> string { return call(cb, it, c) }
 each_row(f: fn, r: ptr) { call(f, r, 0, 0) }
 
 // The closure's `item` must win over the module's `item` throughout the body.
+// The direct call outside the closure is the module function, so it is what
+// keeps `uix_item` in the build and exercises the intra-module rename (#2218:
+// a closure parameter spelt `item` no longer keeps the function alive).
 drive(cell: fn, rows: ptr) {
+    item(null, "drive")
     each_row(| item: ptr, i: int, row: int | {
             // Argument position: the bug lived here.
             s = invoke_cell(cell, item, 0)

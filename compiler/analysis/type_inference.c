@@ -1179,6 +1179,17 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
         }
     }
 
+    /* #2218: a builder body sees the injected `_builder: ptr`, as the
+     * typechecker declares it. Without it here, `return _builder` stayed
+     * untyped and codegen could not tell it needed the pointer-to-int cast
+     * in a builder declared `-> int`. Scoped to this walk like a parameter. */
+    if (node->type == AST_BUILDER_FUNCTION) {
+        Symbol* existing = lookup_symbol(ctx->symbols, "_builder");
+        if (!(existing && rebindable_symbol(ctx, existing))) {
+            add_walk_symbol(ctx, "_builder", create_type(TYPE_PTR));
+        }
+    }
+
     // Collect constraints from function body
     if (body_index >= 0 && body_index < node->child_count) {
         ASTNode* prev_owner = ctx->scope_owner;

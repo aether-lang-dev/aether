@@ -194,6 +194,40 @@ TEST(codegen_ptr_eq_int_zero_stays_pointer_check) {
     free(buf);
 }
 
+/* #2218: a builder declared `-> int` that returns the injected `_builder`
+ * (a `void*`) must cast it, or GCC 14 rejects the TU under its default
+ * -Werror=int-conversion. The cast is the same one a call argument gets. */
+TEST(codegen_builder_int_return_of_builder_casts_pointer) {
+    char* buf = generate_typechecked(
+        "builder rec(w: int) -> int {\n"
+        "  if w > 0 { return _builder }\n"
+        "  return w }\n"
+        "main() { println(\"${rec(2) {}}\") }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "return (int)(intptr_t)(_builder);") != NULL);
+    ASSERT_TRUE(strstr(buf, "return _builder;") == NULL);
+    free(buf);
+}
+
+TEST(codegen_int_return_of_int_is_not_cast) {
+    char* buf = generate_typechecked(
+        "builder rec(w: int) -> int { return w }\n"
+        "main() { println(\"${rec(2) {}}\") }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "return w;") != NULL);
+    ASSERT_TRUE(strstr(buf, "(intptr_t)(w)") == NULL);
+    free(buf);
+}
+
+TEST(codegen_ptr_return_of_int_casts_to_pointer) {
+    char* buf = generate_typechecked(
+        "handle(n: int) -> ptr { return n }\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "return (void*)(intptr_t)(n);") != NULL);
+    free(buf);
+}
+
 /* #2189: a trailing block (`group("first") { ... }`) inlines as a C `{ ... }`
  * block, so a name it binds is out of scope in a sibling block. A callback in
  * the second block binding its own `ml` must not capture the first block's

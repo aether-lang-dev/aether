@@ -645,6 +645,16 @@ void free_code_generator(CodeGenerator* gen) {
         free(gen->heap_box_vars);
         gen->heap_box_vars = NULL;
         gen->heap_box_var_count = 0;
+        /* The builder registry generate_program's pre-pass fills: one
+         * strdup'd name and optional factory per `builder` function. */
+        for (int i = 0; i < gen->builder_func_reg_count; i++) {
+            free(gen->builder_funcs_reg[i].name);
+            free(gen->builder_funcs_reg[i].factory);
+        }
+        free(gen->builder_funcs_reg);
+        gen->builder_funcs_reg = NULL;
+        gen->builder_func_reg_count = 0;
+        gen->builder_func_reg_capacity = 0;
         /* The closure registry discover_closures builds (one strdup'd capture
          * name per capture, plus the parent scope name; capture_types point
          * into the typechecker's types and are not owned here) and the

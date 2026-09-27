@@ -1,0 +1,8 @@
+// Stands in for ae3d's glyph table search (#2218): a local that happens to
+// be spelt like ui's exported `record`.
+exports(find)
+
+find(dir: int, t: int) -> int {
+    record = dir + 12 + 16 * t
+    return record
+}
