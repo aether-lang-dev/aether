@@ -1,0 +1,7 @@
+import ui
+import glyphs
+
+main() {
+    println("${ui.label("x")}")
+    println("${glyphs.find(1, 2)}")
+}

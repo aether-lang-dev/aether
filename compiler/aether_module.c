@@ -3612,9 +3612,74 @@ static void prune_seed_ufcs_method(const char* method, NameSet* seen,
     }
 }
 
-static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklist) {
+/* #2218: the names a function binds for itself -- parameters, locals,
+ * loop and tuple variables, closure parameters, match bindings and catch
+ * names. A bare identifier spelt like one of these is that binding, not a
+ * function reference, so the reachability walk must not seed it: seeding
+ * `record` pulled in every imported `<mod>_record` through the suffix
+ * index below, and an unrelated local kept aether-ui's `ui_record` alive.
+ * The set covers the whole function body, nested closures included; an
+ * over-wide set can only drop a seed for a name the body has already
+ * rebound, which no call in that body can mean as a function. */
+static int prune_binds_name(const ASTNode* node) {
+    switch (node->type) {
+        case AST_VARIABLE_DECLARATION:
+        case AST_PATTERN_VARIABLE:
+        case AST_CLOSURE_PARAM:
+        case AST_CATCH_CLAUSE:
+            return node->value != NULL;
+        default:
+            return 0;
+    }
+}
+
+static void prune_collect_locals(const ASTNode* node, NameSet* locals) {
     if (!node) return;
-    if (node->type == AST_FUNCTION_CALL && node->value) {
+    if (prune_binds_name(node) && !strchr(node->value, '.')) {
+        nameset_add(locals, node->value);
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        prune_collect_locals(node->children[i], locals);
+    }
+}
+
+static int prune_is_function_scope(const ASTNode* node) {
+    return node->type == AST_FUNCTION_DEFINITION ||
+           node->type == AST_BUILDER_FUNCTION ||
+           node->type == AST_MAIN_FUNCTION;
+}
+
+/* A bare (undotted) name the enclosing function binds as a local. */
+static int prune_is_local(const NameSet* locals, const char* name) {
+    return locals && !strchr(name, '.') && nameset_contains(locals, name);
+}
+
+static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
+                                   const NameSet* locals);
+
+static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklist) {
+    prune_collect_calls_in(node, seen, worklist, NULL);
+}
+
+static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
+                                   const NameSet* locals) {
+    if (!node) return;
+    if (prune_is_function_scope(node)) {
+        NameSet own = {0};
+        prune_collect_locals(node, &own);
+        for (int i = 0; i < node->child_count; i++) {
+            prune_collect_calls_in(node->children[i], seen, worklist, &own);
+        }
+        if (node->type == AST_BUILDER_FUNCTION && node->annotation) {
+            if (nameset_add(seen, node->annotation)) {
+                namestack_push(worklist, node->annotation);
+            }
+        }
+        nameset_free(&own);
+        return;
+    }
+    if (node->type == AST_FUNCTION_CALL && node->value &&
+        !prune_is_local(locals, node->value)) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -3654,7 +3719,8 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklis
     // by address, or stored in a variable for later dispatch. Adding
     // every identifier name is a sound over-approximation: non-function
     // names won't match any function definition and harmlessly dead-end.
-    if (node->type == AST_IDENTIFIER && node->value) {
+    if (node->type == AST_IDENTIFIER && node->value &&
+        !prune_is_local(locals, node->value)) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -3698,7 +3764,7 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklis
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        prune_collect_calls(node->children[i], seen, worklist);
+        prune_collect_calls_in(node->children[i], seen, worklist, locals);
     }
 }
 

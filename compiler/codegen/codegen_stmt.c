@@ -4279,6 +4279,10 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
     }
     if (should_uniform_heap_return(gen, stmt)) {
         emit_uniform_heap_return_expr(gen, stmt->children[0]);
+    } else if (gen->current_func_return_type &&
+               emit_int_ptr_bridged(gen, stmt->children[0],
+                                    gen->current_func_return_type->kind)) {
+        /* #2218: int <-> ptr return, cast emitted. */
     } else {
         generate_expression(gen, stmt->children[0]);
     }

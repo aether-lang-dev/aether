@@ -1,0 +1,5 @@
+import ui
+
+main() {
+    println("${ui.record(0, 7) {}}")
+}
