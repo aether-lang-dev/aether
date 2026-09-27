@@ -9,8 +9,18 @@
 // Run with:  ae run contrib/jq/test_nesting.ae
 
 import std.spec
+import std.string
 import std.strbuilder
 import jq_spec
+
+// True when `out` is the successful result `good`, or ANY "nested too deeply"
+// diagnostic. Some chains fit the stack on one runner and trip the guard on
+// another, so either is correct; the diagnostic carries an `at line 1,
+// position N` suffix, so match it as a substring, not by equality.
+nested_or(out: string, good: string) -> bool {
+    if string.equals(out, good) == 1 { return true }
+    return string.contains(out, "nested too deeply") == 1
+}
 
 // `s` repeated `n` times.
 rep(s: string, n: int) -> string {
@@ -47,16 +57,14 @@ main() {
             spec.assert_contains(jq_spec.yields("${rep("try ", 80000)}1", "null"), "nested too deeply", "try")
             // A larger stack or smaller compiler-generated frames can fit
             // this chain. Its exact answer is just as valid as a guard error.
-            out = jq_spec.yields("${rep("-", 80000)}1", "null")
-            spec.assert_true(out == "1" || out == "ERR: jq: error: syntax error: program nested too deeply" || out == "ERR: jq: error: expression nested too deeply", "unary minus: correct answer or nesting diagnostic")
+            spec.assert_true(nested_or(jq_spec.yields("${rep("-", 80000)}1", "null"), "1"), "unary minus: correct answer or nesting diagnostic")
         }
         spec.it("stop string interpolations nested past the parser's limit") callback {
             spec.assert_contains(jq_spec.yields(nest("\"\\(", "1", ")\"", 5000), "null"), "ERR: jq: error: syntax error: in string interpolation: syntax error: string interpolation nested too deeply", "interpolation")
             spec.assert_str_eq(jq_spec.yields(nest("\"\\(", "1", ")\"", 100), "null"), "\"1\"", "100 deep still runs")
         }
         spec.it("stop chains the parser builds iteratively when the evaluator would overflow") callback {
-            out = jq_spec.yields("${rep("1,", 70000)}1", "null")
-            spec.assert_true(out == "${rep("1\n", 70000)}1" || out == "ERR: jq: error: expression nested too deeply", "comma chain: every output or nesting diagnostic")
+            spec.assert_true(nested_or(jq_spec.yields("${rep("1,", 70000)}1", "null"), "${rep("1\n", 70000)}1"), "comma chain: every output or nesting diagnostic")
             spec.assert_contains(jq_spec.yields("${rep("1+", 70000)}1", "null"), "expression nested too deeply", "addition chain")
             spec.assert_contains(jq_spec.yields(rep(".a", 70000), "null"), "expression nested too deeply", "field chain")
             spec.assert_contains(jq_spec.yields(".${rep("[0]", 70000)}", "[]"), "expression nested too deeply", "index chain")
@@ -66,7 +74,9 @@ main() {
             // the result leaves through 30000 sink frames; a guard error
             // caught by try produces no output. Each is a valid outcome.
             out = jq_spec.yields("${rep("try ", 30000)}1", "null")
-            spec.assert_true(out == "1" || out == "" || out == "ERR: jq: error: syntax error: program nested too deeply", "try chain: ${out}")
+            // "1" (parsed and evaluated), "" (a guard error caught by try),
+            // or a nesting diagnostic (the parser rejected it) are all valid.
+            spec.assert_true(string.equals(out, "") == 1 || nested_or(out, "1"), "try chain: ${out}")
         }
         spec.it("stop paths longer than the stack can follow") callback {
             spec.assert_str_eq(jq_spec.fails_with("setpath([range(100000) | 0]; 1)", "null"), "path nested too deeply", "setpath")
