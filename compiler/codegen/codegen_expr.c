@@ -409,6 +409,26 @@ static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* cal
     }
 }
 
+/* A call through a typed fn-pointer local: `((R (*)(T1, T2))(fp))(a, b)`.
+ * The local stores a void*, so the cast gives the C compiler the signature
+ * the checker recorded for it. The local is spelled as its declaration
+ * spelled it (safe_value_name: keyword mangling only). safe_c_name would
+ * rename a local called `free` to `ae_free` while its declaration kept
+ * `free`, so the emitted C referenced a variable that did not exist. */
+static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
+                                      const char* local_name, ASTNode* call) {
+    const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
+    fprintf(gen->output, "((%s(*)(", ret_c);
+    for (int pi = 0; pi < sig->param_count; pi++) {
+        if (pi > 0) fprintf(gen->output, ", ");
+        fprintf(gen->output, "%s", get_c_type(sig->param_types[pi]));
+    }
+    if (sig->param_count == 0) fprintf(gen->output, "void");
+    fprintf(gen->output, "))(%s))(", safe_value_name(local_name));
+    generate_fnptr_call_args(gen, sig, call);
+    fprintf(gen->output, ")");
+}
+
 /* The declaration of `name` inside `n`: a parameter, a local or a closure
  * parameter, carrying the type the checker stamped on it. */
 static ASTNode* find_declaration_in(ASTNode* n, const char* name) {
@@ -4136,6 +4156,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 int ad_call_discarded = gen->discard_call_value;
                 gen->discard_call_value = 0;
 
+                /* Typed fn-pointer local call: `fp(a, b)` where `fp` was
+                 * declared as `fn(T1, T2, ...) -> R` (or initialised from
+                 * an `expr as fn(...)` cast). Emit a typed C function-pointer
+                 * cast around the stored void* so the C compiler sees the
+                 * correct signature. The cast and call are inlined here; no
+                 * per-signature shim is needed. A `string` argument goes as
+                 * its bytes (#2210).
+                 *
+                 * This must come BEFORE the by-name builtin dispatch below.
+                 * The typechecker resolves a call through the innermost
+                 * symbol, so a local named `release` or `free` holding a
+                 * function pointer shadows the builtin of that name; when
+                 * this branch sat after the name chain, codegen lowered the
+                 * call as the builtin instead, printed a type error for the
+                 * argument, and still emitted a binary (#2211). */
+                Type* fnptr_sig = lookup_fnptr_local(gen, func_name);
+                if (fnptr_sig && fnptr_sig->kind == TYPE_FUNCTION &&
+                    fnptr_sig->is_fnptr) {
+                    generate_fnptr_local_call(gen, fnptr_sig, func_name, expr);
+                    break;
+                }
+
                 if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
                     fprintf(gen->output, "(%s)malloc(", get_c_type(expr->node_type));
                     if (expr->child_count > 0) {
@@ -4568,13 +4610,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ")");
                         }
                     } else {
-                        fprintf(stderr,
-                            "error: release() at line %d: only `string` is supported today.\n"
-                            "  For other heap types, call the typed release function:\n"
-                            "    *StringSeq -> string.string_seq_free\n"
-                            "    *Map       -> hashmap.free\n",
-                            expr->line);
-                        fprintf(gen->output, "0 /* release() type error, see stderr */");
+                        /* A reported error, not a bare stderr line: the
+                         * driver bails when codegen raised the error count,
+                         * so the build exits non-zero instead of handing a
+                         * binary that skips the release to the user
+                         * (#2211). */
+                        aether_error_full(
+                            "release(): only `string` is supported today",
+                            expr->line, expr->column,
+                            "for other heap types call the typed release "
+                            "function: *StringSeq -> string.string_seq_free, "
+                            "*Map -> hashmap.free",
+                            "in release() call", AETHER_ERR_TYPE_MISMATCH);
+                        fprintf(gen->output, "0 /* release() type error */");
                     }
                 }
                 // string.release(X) — the namespaced sibling of the bare
@@ -5039,34 +5087,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                 }
                 else {
-                    /* Typed fn-pointer local call: `fp(a, b)` where
-                     * `fp` was declared as `fn(T1, T2, ...) -> R` (or
-                     * initialised from an `expr as fn(...)` cast).
-                     * Emit a typed C function-pointer cast around the
-                     * stored void* so the C compiler sees the correct
-                     * signature.  The cast and call are inlined here;
-                     * no per-signature shim is needed. A `string`
-                     * argument goes as its bytes (#2210). */
-                    Type* fnptr_sig = lookup_fnptr_local(gen, func_name);
-                    if (fnptr_sig && fnptr_sig->kind == TYPE_FUNCTION &&
-                        fnptr_sig->is_fnptr) {
-                        const char* ret_c = fnptr_sig->return_type
-                            ? get_c_type(fnptr_sig->return_type) : "void";
-                        fprintf(gen->output, "((%s(*)(", ret_c);
-                        for (int pi = 0; pi < fnptr_sig->param_count; pi++) {
-                            if (pi > 0) fprintf(gen->output, ", ");
-                            fprintf(gen->output, "%s",
-                                get_c_type(fnptr_sig->param_types[pi]));
-                        }
-                        if (fnptr_sig->param_count == 0) {
-                            fprintf(gen->output, "void");
-                        }
-                        fprintf(gen->output, "))(%s))(", safe_c_name(func_name));
-                        generate_fnptr_call_args(gen, fnptr_sig, expr);
-                        fprintf(gen->output, ")");
-                        break;
-                    }
-
                     char c_func_name[256];
                     // Don't mangle extern functions — they refer to real C symbols.
                     // For @extern("c_symbol") aether_name(...), translate the

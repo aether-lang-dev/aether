@@ -1,0 +1,53 @@
+// Regression: a local holding a function pointer shadows a same-named
+// builtin (#2211).
+//
+// `release = h.release` followed by `release(state)` was type-checked
+// through the local, but codegen's by-name builtin dispatch ran first, so the
+// call lowered as the `release` builtin: a type error went to stderr, the
+// build still exited 0, and the binary never called the hook. `free` had the
+// same shape, plus a second defect: the call was spelled `ae_free` (the
+// libc-avoiding rename) while the declaration kept `free`, so the C did not
+// compile. Both locals must now call through the pointer they hold.
+
+extern exit(code: int)
+
+struct FreeHook {
+    release: fn(ptr)
+    free: fn(ptr)
+    state: ptr
+}
+
+struct Counter {
+    hits: int
+}
+
+count_hit(p: ptr) {
+    c = p as *Counter
+    c.hits = c.hits + 1
+}
+
+run_release(h: *FreeHook) {
+    release = h.release
+    state = h.state
+    release(state)
+}
+
+run_free(h: *FreeHook) {
+    free = h.free
+    state = h.state
+    free(state)
+}
+
+main() {
+    println("=== a local fn-pointer named like a builtin calls the pointer ===")
+    c = Counter { hits: 0 }
+    h = FreeHook { release: count_hit, free: count_hit, state: &c }
+    run_release(&h)
+    run_free(&h)
+    if c.hits == 2 {
+        println("  PASS both hooks called (hits = ${c.hits})")
+    } else {
+        println("  FAIL hooks called ${c.hits} times, want 2")
+        exit(1)
+    }
+}
