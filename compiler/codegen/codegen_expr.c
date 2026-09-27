@@ -415,9 +415,30 @@ static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* cal
  * spelled it (safe_value_name: keyword mangling only). safe_c_name would
  * rename a local called `free` to `ae_free` while its declaration kept
  * `free`, so the emitted C referenced a variable that did not exist. */
+/* 1 when a call through a typed C function pointer returns `bool`.
+ *
+ * An Aether `bool` is a C `int`, so the call is typed `int (*)(...)`, but
+ * the function behind the pointer is usually C, and a C `bool` return
+ * defines only the low byte of the return register: the upper bytes are
+ * whatever was there before. On Windows x64 `is_even(7)` read true that
+ * way (#2200). So the call's result is narrowed to that byte and back to
+ * 0/1 — `(_Bool)(unsigned char)(call)` — which is also exact for an Aether
+ * function in the pointer, whose full-int 0/1 has the same low byte. The
+ * value is fixed rather than the pointer type: a `_Bool (*)(...)` type
+ * would no longer accept an Aether function's `int (*)(...)` address.
+ * Only when the value is used: a narrowed call as a bare statement is a
+ * computed-but-unused value, which -Wunused-value (an error under
+ * HARDEN=1) rejects, and a discarded result needs no narrowing anyway. */
+static int fnptr_returns_bool(Type* sig) {
+    return sig && sig->return_type && sig->return_type->kind == TYPE_BOOL;
+}
+
 static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
-                                      const char* local_name, ASTNode* call) {
+                                      const char* local_name, ASTNode* call,
+                                      int discarded) {
     const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
+    int narrow = !discarded && fnptr_returns_bool(sig);
+    if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
     fprintf(gen->output, "((%s(*)(", ret_c);
     for (int pi = 0; pi < sig->param_count; pi++) {
         if (pi > 0) fprintf(gen->output, ", ");
@@ -427,6 +448,7 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     fprintf(gen->output, "))(%s))(", safe_value_name(local_name));
     generate_fnptr_call_args(gen, sig, call);
     fprintf(gen->output, ")");
+    if (narrow) fprintf(gen->output, "))");
 }
 
 /* The declaration of `name` inside `n`: a parameter, a local or a closure
@@ -4131,10 +4153,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * does not exist (#1251). */
                     snprintf(recv_c, sizeof(recv_c), "%s", safe_value_name(recv));
                     snprintf(field_c, sizeof(field_c), "%s", safe_value_name(dot + 1));
+                    Type* field_sig = fnptr_field_signature(gen, recv, dot + 1);
+                    int narrow = !gen->discard_call_value && fnptr_returns_bool(field_sig);
+                    if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
                     fprintf(gen->output, "(%s%s%s)(",
                             recv_c, is_ptr ? "->" : ".", field_c);
-                    generate_fnptr_call_args(gen, fnptr_field_signature(gen, recv, dot + 1), expr);
+                    generate_fnptr_call_args(gen, field_sig, expr);
                     fprintf(gen->output, ")");
+                    if (narrow) fprintf(gen->output, "))");
                     break;
                 }
             }
@@ -4175,7 +4201,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (!fnptr_sig) fnptr_sig = lookup_fnptr_global(gen, func_name);   /* #2200 */
                 if (fnptr_sig && fnptr_sig->kind == TYPE_FUNCTION &&
                     fnptr_sig->is_fnptr) {
-                    generate_fnptr_local_call(gen, fnptr_sig, func_name, expr);
+                    generate_fnptr_local_call(gen, fnptr_sig, func_name, expr, ad_call_discarded);
                     break;
                 }
 

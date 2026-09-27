@@ -12,4 +12,7 @@
   module-level `var` holding a function pointer was emitted bare (C rejected
   it) and failed the checker inside an imported module ("Undefined function");
   and `f as fn(...)` rejected the address of a `-> float` or `-> string`
-  function as "must be a ptr value". (#2200)
+  function as "must be a ptr value". A third: a call through any C function
+  pointer returning `bool` read the full `int` return register, but a C
+  `bool` return defines only its low byte, so on Windows x64 `is_even(7)`
+  came back true; the result is now read from that byte. (#2200)

@@ -11,6 +11,12 @@
 # emitted bare on a `void*` (C rejected it), and the same call inside an
 # IMPORTED module failed the checker with "Undefined function": the cell was
 # merged as `<module>_name` but the call kept the bare name.
+#
+# The `IsReady` entry points return a C `bool`, which defines only the low
+# byte of the return register. The glue returns 0x100 / 0x201 to stand in
+# for the garbage a real `bool` function may leave above that byte (it did
+# on Windows x64): the call must read false / true from the low byte, not
+# the non-zero int, and a call whose result is discarded must still compile.
 
 set -e
 
@@ -36,19 +42,22 @@ trap 'rm -rf "$tmpdir" || true' EXIT
 cat > "$tmpdir/glx.ae" <<'AE'
 module glx
 
-exports (GenBuffers, BufferData, load, gen, lookup)
+exports (GenBuffers, BufferData, IsReady, load, gen, lookup, ready)
 
 extern get_proc_address(name: string) -> ptr
 
 cfn GenBuffers(n: int, ids: ptr)
 type BufferData = fn(int, long, ptr, int)
+cfn IsReady(unit: int) -> bool
 
 var gen_buffers: GenBuffers = null
 var buffer_data: BufferData = null
+var is_ready: IsReady = null
 
 load() {
     gen_buffers = get_proc_address("glGenBuffers") as GenBuffers
     buffer_data = get_proc_address("glBufferData") as BufferData
+    is_ready = get_proc_address("isReadyNo") as IsReady
 }
 
 gen(ids: ptr) {
@@ -59,10 +68,17 @@ gen(ids: ptr) {
 lookup(name: string) -> GenBuffers {
     return get_proc_address(name) as GenBuffers
 }
+
+ready() -> bool {
+    is_ready(0)
+    if is_ready(0) { return true }
+    return false
+}
 AE
 
 cat > "$tmpdir/app.ae" <<'AE'
 import glx
+extern get_proc_address(name: string) -> ptr
 extern calloc(n: long, size: long) -> ptr
 extern free(p: ptr)
 
@@ -75,6 +91,9 @@ main() {
     g(2, ids)
     println("buffer2=${(ids as int[])[0]}")
     free(ids)
+    println("ready=${glx.ready()}")
+    let r: IsReady = get_proc_address("isReadyYes") as IsReady
+    println("ready2=${r(0)}")
 }
 AE
 
@@ -86,7 +105,13 @@ static void buffer_data(int target, long size, void* data, int usage) {
     printf("buffer_data target=%d size=%ld data=%s usage=%d\n",
            target, size, data ? "set" : "null", usage);
 }
+/* A C `bool` return defines only the low byte; these set the bits above
+ * it, as a real one may, so reading the full int would be wrong. */
+static unsigned is_ready_no(int unit)  { (void)unit; return 0x100u; }
+static unsigned is_ready_yes(int unit) { (void)unit; return 0x201u; }
 void* get_proc_address(const char* name) {
+    if (strcmp(name, "isReadyNo") == 0) return (void*)is_ready_no;
+    if (strcmp(name, "isReadyYes") == 0) return (void*)is_ready_yes;
     if (strcmp(name, "glGenBuffers") == 0) return (void*)gen_buffers;
     if (strcmp(name, "glBufferData") == 0) return (void*)buffer_data;
     return 0;
@@ -131,7 +156,9 @@ fi
 
 expected="buffer_data target=34962 size=16 data=null usage=35044
 buffer=41
-buffer2=42"
+buffer2=42
+ready=false
+ready2=true"
 got="$(cat "$tmpdir/app.out")"
 if [ "$got" != "$expected" ]; then
     echo "  [FAIL] aether_cfn_proc_address: output mismatch"

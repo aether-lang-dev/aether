@@ -655,3 +655,30 @@ TEST(codegen_cfn_local_param_and_field_lower_like_fn_types) {
     ASSERT_TRUE(strstr(buf, "typedef") == NULL || strstr(buf, "Scale;") == NULL);
     free(buf);
 }
+
+/* #2200: a C `bool` return defines only the low byte of the return
+ * register, so a call through a `-> bool` function pointer whose value is
+ * used reads just that byte; the upper bytes were garbage on Windows x64.
+ * A call made as a bare statement is left alone: narrowing a discarded
+ * value would be an unused computed value (-Wunused-value, an error under
+ * HARDEN=1). Both the pointer-variable and the struct-field call paths. */
+TEST(codegen_fnptr_bool_return_reads_low_byte_when_used) {
+    char* buf = generate_typechecked(
+        "extern getp() -> ptr\n"
+        "cfn Ready(u: int) -> bool\n"
+        "struct Dev { ready: Ready }\n"
+        "main() { r = getp() as Ready\n"
+        "  d = Dev { ready: r }\n"
+        "  r(1)\n"
+        "  d.ready(2)\n"
+        "  if r(3) { println(\"a\") }\n"
+        "  if d.ready(4) { println(\"b\") } }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)(((int(*)(int))(r))(3)))") != NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready)(4)))") != NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)(((int(*)(int))(r))(1)") == NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready)(2)") == NULL);
+    ASSERT_TRUE(strstr(buf, "((int(*)(int))(r))(1);") != NULL);
+    ASSERT_TRUE(strstr(buf, "(d.ready)(2);") != NULL);
+    free(buf);
+}
