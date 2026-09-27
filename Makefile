@@ -2239,10 +2239,10 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# downstream apps that `import contrib.host.<lang>` need the bridge
 	@# source to compile in. Without this carve-out the resolver finds
 	@# module.ae / .h but the link step has no `aether_host_<lang>_*`
-	@# symbols available — broken installed tree.
-	@find $(PREFIX)/share/aether/contrib -type f -name '*.c' \
-		! -path '*/contrib/host/*/aether_host_*.c' -delete 2>/dev/null || true
-	@find $(PREFIX)/share/aether/contrib -type f -name '*.m' -delete 2>/dev/null || true
+	@# symbols available — broken installed tree. The .c a module.ae
+	@# names with @source stays too (#2208): contrib.vulkan and friends
+	@# compile theirs into the program rather than linking an archive.
+	@sh .github/scripts/trim_contrib_sources.sh $(PREFIX)/share/aether/contrib --keep-host-bridges 2>/dev/null || true
 	@# Trim install-noise that confuses external consumers (aetherBuild
 	@# and the like). runtime/examples/ holds standalone benches with
 	@# their own main(), never link-suitable, so a naive
@@ -2405,9 +2405,9 @@ install-contrib: contrib
 	@find $(PREFIX)/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
 	@# Drop the .c files now that they're compiled into .a — no
 	@# reason to ship sources alongside the archive. Keep .h so
-	@# downstream callers that #include the bridge header can.
-	@find $(PREFIX)/share/aether/contrib -type f -name '*.c' -delete 2>/dev/null || true
-	@find $(PREFIX)/share/aether/contrib -type f -name '*.m' -delete 2>/dev/null || true
+	@# downstream callers that #include the bridge header can, and the
+	@# .c a module.ae names with @source (#2208), which no archive holds.
+	@sh .github/scripts/trim_contrib_sources.sh $(PREFIX)/share/aether/contrib 2>/dev/null || true
 	@# See the same SUDO_USER chown rationale on the `install:` target.
 	@if [ -n "$$SUDO_USER" ] && [ -d build ]; then \
 		chown -R "$$SUDO_USER:$$(id -gn $$SUDO_USER 2>/dev/null || echo $$SUDO_USER)" build 2>/dev/null || true; \

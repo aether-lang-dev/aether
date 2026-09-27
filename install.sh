@@ -435,9 +435,11 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # doesn't ship libaether_host_<lang>.a, so downstream apps that
     # `import contrib.host.<lang>` compile the bridge from source.
     # See docs/install-layout.md "What does NOT ship" for context.
-    find "$SRC_DIR/contrib" -type f -name '*.c' \
-        ! -path '*/contrib/host/*/aether_host_*.c' -delete 2>/dev/null || true
-    find "$SRC_DIR/contrib" -type f -name '*.m' -delete 2>/dev/null || true
+    # Also keep every .c a module.ae names with @source (#2208):
+    # contrib.vulkan, contrib.vulkan.vk, contrib.d3d12 and contrib.metal
+    # compile theirs into the program, so the installed module must find
+    # it where it says.
+    sh .github/scripts/trim_contrib_sources.sh "$SRC_DIR/contrib" --keep-host-bridges 2>/dev/null || true
     # Trim install-noise that confuses external consumers
     # (aetherBuild and the like). runtime/examples/ holds standalone
     # benches with their own main() — never link-suitable.
