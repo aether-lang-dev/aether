@@ -1,0 +1,90 @@
+// Path specs for contrib.jq: path expressions, the path builtins
+// (path, paths, getpath, setpath, delpaths, del, pick, to/fromstream) and
+// every assignment operator, which are all defined in terms of paths.
+//
+// Run with:  ae run contrib/jq/test_paths.ae
+
+import std.spec
+import jq_spec
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "path(f)") {
+        spec.it("reports where each output came from") callback {
+            spec.assert_str_eq(jq_spec.yields("path(.a[0].b)", "null"), "[\"a\",0,\"b\"]", "chain")
+            spec.assert_str_eq(jq_spec.yields("[path(..)]", "[[1]]"), "[[],[0],[0,0]]", "recursive descent")
+            spec.assert_str_eq(jq_spec.yields("path(.a[].b)", "{\"a\":[{\"b\":1},{\"b\":2}]}"), "[\"a\",0,\"b\"]\n[\"a\",1,\"b\"]", "iteration")
+            spec.assert_str_eq(jq_spec.yields("path(.a[1:3])", "null"), "[\"a\",{\"start\":1,\"end\":3}]", "slice")
+        }
+        spec.it("follows paths through control flow and functions") callback {
+            spec.assert_str_eq(jq_spec.yields("path(if .a then .b else .c end)", "{\"a\":1}"), "[\"b\"]", "if")
+            spec.assert_str_eq(jq_spec.yields("path(.a // .b)", "{\"a\":null}"), "[\"b\"]", "alternative")
+            spec.assert_str_eq(jq_spec.yields("path(select(.a))", "{\"a\":1}"), "[]", "select")
+            spec.assert_str_eq(jq_spec.yields("path(first(.a, .b))", "null"), "[\"a\"]", "first")
+            spec.assert_str_eq(jq_spec.yields("path(getpath([\"a\"]) | .b)", "null"), "[\"a\",\"b\"]", "getpath")
+            spec.assert_str_eq(jq_spec.yields("def f: .a; path(f)", "null"), "[\"a\"]", "user function")
+        }
+        spec.it("rejects expressions that are not paths") callback {
+            spec.assert_str_eq(jq_spec.fails_with("path(1)", "null"), "Invalid path expression with result 1", "literal")
+            spec.assert_str_eq(jq_spec.fails_with("path(.a | tostring)", "{\"a\":1}"), "Invalid path expression", "computed value")
+        }
+    }
+
+    spec.describe(fw, "path builtins") {
+        spec.it("paths and leaf_paths") callback {
+            spec.assert_str_eq(jq_spec.yields("[paths]", "{\"a\":[1,{\"b\":2}]}"), "[[\"a\"],[\"a\",0],[\"a\",1],[\"a\",1,\"b\"]]", "paths")
+            spec.assert_str_eq(jq_spec.yields("[leaf_paths]", "{\"a\":[1,{\"b\":2}]}"), "[[\"a\",0],[\"a\",1,\"b\"]]", "leaf_paths")
+            spec.assert_str_eq(jq_spec.yields("[paths(type == \"number\")]", "{\"a\":1,\"b\":[2]}"), "[[\"a\"],[\"b\",0]]", "filtered")
+        }
+        spec.it("getpath, setpath, delpaths") callback {
+            spec.assert_str_eq(jq_spec.yields("getpath([\"a\",\"b\"]), getpath([\"x\",\"y\"])", "{\"a\":{\"b\":1}}"), "1\nnull", "getpath")
+            spec.assert_str_eq(jq_spec.yields("setpath([\"a\",1]; 9)", "null"), "{\"a\":[null,9]}", "setpath creates")
+            spec.assert_str_eq(jq_spec.yields("delpaths([[\"a\"],[\"b\",0]])", "{\"a\":1,\"b\":[1,2]}"), "{\"b\":[2]}", "delpaths")
+            spec.assert_str_eq(jq_spec.fails_with("setpath([\"a\"]; 1)", "[]"), "Cannot index array with \"a\"", "type mismatch")
+        }
+        spec.it("del removes every matched path, highest index first") callback {
+            spec.assert_str_eq(jq_spec.yields("del(.[1, 2])", "[1,2,3,4]"), "[1,4]", "indices")
+            spec.assert_str_eq(jq_spec.yields("del(.a, .c)", "{\"a\":1,\"b\":2,\"c\":3}"), "{\"b\":2}", "keys")
+            spec.assert_str_eq(jq_spec.yields("del(.[] | select(. > 1))", "[1,2,3]"), "[1]", "selected")
+            spec.assert_str_eq(jq_spec.yields("del(.[1:])", "[1,2,3]"), "[1]", "slice")
+            spec.assert_str_eq(jq_spec.yields("del(.)", "1"), "null", "root")
+        }
+        spec.it("pick, tostream and fromstream") callback {
+            spec.assert_str_eq(jq_spec.yields("pick(.a, .c.d)", "{\"a\":1,\"b\":2,\"c\":{\"d\":3,\"e\":4}}"), "{\"a\":1,\"c\":{\"d\":3}}", "pick")
+            spec.assert_str_eq(jq_spec.yields("[tostream]", "{\"a\":[1,2]}"), "[[[\"a\",0],1],[[\"a\",1],2],[[\"a\",1]],[[\"a\"]]]", "tostream")
+            spec.assert_str_eq(jq_spec.yields("fromstream(tostream)", "{\"a\":[1,{\"b\":null}]}"), "{\"a\":[1,{\"b\":null}]}", "round trip")
+        }
+    }
+
+    spec.describe(fw, "assignment") {
+        spec.it("= sets every path to each value of the right-hand side") callback {
+            spec.assert_str_eq(jq_spec.yields(".a.b = 1", "{}"), "{\"a\":{\"b\":1}}", "creates")
+            spec.assert_str_eq(jq_spec.yields(".a = .b", "{\"b\":5}"), "{\"b\":5,\"a\":5}", "rhs sees the original input")
+            spec.assert_str_eq(jq_spec.yields("(.a, .b) = (1, 2)", "{}"), "{\"a\":1,\"b\":1}\n{\"a\":2,\"b\":2}", "one result per rhs value")
+            spec.assert_str_eq(jq_spec.yields(".[1:3] = [\"x\"]", "[1,2,3,4]"), "[1,\"x\",4]", "slice")
+        }
+        spec.it("|= updates each path with the first output of the filter") callback {
+            spec.assert_str_eq(jq_spec.yields(".[] |= . + 1", "[1,2]"), "[2,3]", "update")
+            spec.assert_str_eq(jq_spec.yields(".a |= (., .)", "{\"a\":1}"), "{\"a\":1}", "first output only")
+            spec.assert_str_eq(jq_spec.yields(".[] |= (if . > 1 then empty else . end)", "[1,2,3,0]"), "[1,0]", "empty deletes")
+            spec.assert_str_eq(jq_spec.yields(".. |= (if type == \"number\" then . + 1 else . end)", "[1,[2]]"), "[2,[3]]", "recursive")
+            spec.assert_str_eq(jq_spec.yields(".a[1:] |= map(. * 10)", "{\"a\":[1,2,3]}"), "{\"a\":[1,20,30]}", "slice")
+        }
+        spec.it("arithmetic update-assignment") callback {
+            spec.assert_str_eq(jq_spec.yields(".a += 1, .a -= 1, .a *= 2, .a /= 2, .a %= 2", "{\"a\":5}"), "{\"a\":6}\n{\"a\":4}\n{\"a\":10}\n{\"a\":2.5}\n{\"a\":1}", "ops")
+            spec.assert_str_eq(jq_spec.yields(".a //= 3, .b //= 3", "{\"a\":false,\"b\":1}"), "{\"a\":3,\"b\":1}\n{\"a\":false,\"b\":1}", "//=")
+            spec.assert_str_eq(jq_spec.yields(".[] += (1, 2)", "[10]"), "[11]\n[12]", "rhs generator")
+        }
+        spec.it("with_entries, map_values and walk are built on it") callback {
+            spec.assert_str_eq(jq_spec.yields("with_entries(.value += 1)", "{\"a\":1}"), "{\"a\":2}", "with_entries")
+            spec.assert_str_eq(jq_spec.yields("map_values(empty)", "{\"a\":1}"), "{}", "map_values")
+            spec.assert_str_eq(jq_spec.yields("walk(if type == \"array\" then sort else . end)", "[[3,1],{\"a\":[2,1]}]"), "[[1,3],{\"a\":[1,2]}]", "walk")
+        }
+        spec.it("rejects a non-path left-hand side") callback {
+            spec.assert_str_eq(jq_spec.fails_with("1 = 2", "null"), "Invalid path expression with result 1", "literal")
+        }
+    }
+
+    spec.run_summary(fw)
+}

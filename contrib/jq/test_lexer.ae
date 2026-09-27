@@ -1,0 +1,103 @@
+// Lexer specs for contrib.jq: token kinds, the text and numbers they carry,
+// string literals split into literal and interpolated parts, and the
+// diagnostics for malformed input. The parser specs cover how tokens
+// combine; these pin the tokens themselves.
+//
+// Run with:  ae run contrib/jq/test_lexer.ae
+
+import std.spec
+import std.list
+import std.string
+import std.strbuilder
+import value
+import lexer
+
+// "KIND:text" for each token (EOF excluded), space-separated; "ERR: ..."
+// when the source does not tokenize.
+kinds(src: string) -> string {
+    toks, err = lexer.tokenize(src)
+    if toks == null { return "ERR: ${err}" }
+    sb = strbuilder.new(32)
+    n = list.size(toks)
+    i = 0
+    while i < n - 1 {
+        t = list.get_raw(toks, i)
+        if i > 0 { strbuilder.append_byte(sb, 32) }
+        strbuilder.append(sb, _kind_name(lexer.token_kind(t)))
+        strbuilder.append_byte(sb, 58)
+        strbuilder.append(sb, lexer.token_text(t))
+        i = i + 1
+    }
+    lexer.free_tokens(toks)
+    return strbuilder.finish(sb)
+}
+
+_kind_name(k: int) -> string {
+    if k == lexer.TK_IDENT { return "ident" }
+    if k == lexer.TK_KEYWORD { return "kw" }
+    if k == lexer.TK_FIELD { return "field" }
+    if k == lexer.TK_VAR { return "var" }
+    if k == lexer.TK_NUM { return "num" }
+    if k == lexer.TK_STR { return "str" }
+    if k == lexer.TK_FORMAT { return "fmt" }
+    if k == lexer.TK_OP { return "op" }
+    return "eof"
+}
+
+// The single token's parts array as JSON (strings = literal text,
+// [src] = an interpolation's source).
+parts_of(src: string) -> string {
+    toks, err = lexer.tokenize(src)
+    if toks == null { return "ERR: ${err}" }
+    out = value.to_json(lexer.token_parts(list.get_raw(toks, 0)))
+    lexer.free_tokens(toks)
+    return out
+}
+
+number_of(src: string) -> float {
+    toks, _ = lexer.tokenize(src)
+    d = lexer.token_num(list.get_raw(toks, 0))
+    lexer.free_tokens(toks)
+    return d
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "tokens") {
+        spec.it("classifies identifiers, keywords, fields, variables and formats") callback {
+            spec.assert_str_eq(kinds("map(.a) | $x | @csv"), "ident:map op:( field:a op:) op:| var:x op:| fmt:csv", "kinds")
+            spec.assert_str_eq(kinds("if reduce as def"), "kw:if kw:reduce kw:as kw:def", "keywords")
+            spec.assert_str_eq(kinds("a::b"), "ident:a::b", "module-qualified identifier")
+        }
+        spec.it("longest-match operators") callback {
+            spec.assert_str_eq(kinds(".. // //= |= == != <= >= ?// +="), "op:.. op:// op://= op:|= op:== op:!= op:<= op:>= op:?// op:+=", "operators")
+        }
+        spec.it("skips whitespace and comments") callback {
+            spec.assert_str_eq(kinds("1 # one\n\t+ 2"), "num: op:+ num:", "comments")
+        }
+    }
+
+    spec.describe(fw, "literals") {
+        spec.it("numbers") callback {
+            spec.assert_true(number_of("12.5e1") == 125.0, "exponent")
+            spec.assert_true(number_of(".5") == 0.5, "leading dot")
+            spec.assert_true(number_of("1e1000") > 1.0e308, "overflow is infinite")
+            spec.assert_true(number_of("1e-1000") == 0.0, "underflow is zero")
+        }
+        spec.it("strings split into literal and interpolated parts") callback {
+            spec.assert_str_eq(parts_of("\"a\\n\\u00e9\\ud83d\\ude00\""), "[\"a\\né😀\"]", "escapes and surrogate pairs")
+            spec.assert_str_eq(parts_of("\"x\\(.a | \"(\")y\""), "[\"x\",[\".a | \\\"(\\\"\"],\"y\"]", "interpolation with nested parens in a string")
+        }
+    }
+
+    spec.describe(fw, "diagnostics") {
+        spec.it("rejects malformed input with a position") callback {
+            spec.assert_str_eq(kinds("\"abc"), "ERR: unterminated string at position 0", "unterminated")
+            spec.assert_str_eq(kinds("\"\\q\""), "ERR: invalid escape in string at position 1", "bad escape")
+            spec.assert_str_eq(kinds("1 ; §"), "ERR: unexpected character '\xc2' at position 4", "stray byte")
+        }
+    }
+
+    spec.run_summary(fw)
+}

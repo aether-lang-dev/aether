@@ -1,0 +1,159 @@
+// jq.prelude — the builtins that are written in jq itself.
+//
+// jq ships most of its library as jq source (src/builtin.jq); gojq does the
+// same (builtin.jq). This is that file for the Aether port: everything the
+// evaluator does not implement natively is a `def` here, parsed once per
+// program and installed under the user's definitions. Native builtins
+// (length, keys, sort, regex, path arithmetic, …) are in eval.ae; anything
+// defined here may be shadowed by a user `def` of the same name and arity,
+// exactly as in jq.
+//
+// The text is jq, not Aether, hence the heredoc.
+
+exports(
+    SOURCE
+)
+
+const SOURCE = <<JQ
+def not: if . then false else true end;
+def select(f): if f then . else empty end;
+def recurse(f): def r: ., (f | r); r;
+def recurse(f; cond): def r: ., (f | select(cond) | r); r;
+def recurse: recurse(.[]?);
+def recurse_down: recurse;
+def map(f): [.[] | f];
+def map_values(f): .[] |= f;
+def values: select(. != null);
+def nulls: select(. == null);
+def booleans: select(type == "boolean");
+def numbers: select(type == "number");
+def strings: select(type == "string");
+def arrays: select(type == "array");
+def objects: select(type == "object");
+def iterables: select(type == "array" or type == "object");
+def scalars: select(type != "array" and type != "object");
+def finites: select(isinfinite or isnan | not);
+def normals: select(isnormal);
+def to_entries: [keys_unsorted[] as $k | {key: $k, value: .[$k]}];
+def from_entries: reduce .[] as $x ({};
+    . + { ($x | if .key == null then .k // .name // .Name // .K // .Key else .key end
+             | if type == "string" then . elif type == "null" then "null" else tojson end):
+          ($x | if has("value") then .value elif has("v") then .v else .Value end) });
+def with_entries(f): to_entries | map(f) | from_entries;
+def add: reduce .[] as $x (null; . + $x);
+def add(f): reduce f as $x (null; . + $x);
+def any(g; c): isempty(first(g | c or empty)) | not;
+def any(f): any(.[]; f);
+def any: any(.);
+def all(g; c): isempty(first(g | c and empty));
+def all(f): all(.[]; f);
+def all: all(.);
+def range($x): range(0; $x);
+def in(xs): . as $x | xs | has($x);
+def inside(xs): . as $x | xs | contains($x);
+def del(f): delpaths([path(f)]);
+def paths: path(..) | select(length > 0);
+def paths(node_filter): . as $dot | paths | select(. as $p | $dot | getpath($p) | node_filter);
+def leaf_paths: paths(scalars);
+def join($x): reduce .[] as $i (null;
+    (if . == null then "" else . + $x end) +
+    ($i | if . == null then "" elif type == "string" then . else tojson end)) // "";
+def first: .[0];
+def last: .[-1];
+def nth($n): .[$n];
+def last(f): reduce f as $x (null; $x);
+def nth($n; f): if $n < 0 then error("Out of bounds negative array index") else last(limit($n + 1; f)) end;
+def combinations: if length == 0 then [] else .[0][] as $x | (.[1:] | combinations) as $w | [$x] + $w end;
+def combinations(n): . as $dot | [range(n)] | map($dot) | combinations;
+def walk(f): def w: if type == "object" then map_values(w) elif type == "array" then map(w) else . end | f; w;
+def env: $ENV;
+def transpose: if . == [] then [] else . as $in | (map(length) | max) as $max
+    | [range(0; $max) as $j | [range(0; $in | length) as $i | $in[$i][$j]]] end;
+def index($i): indices($i) | .[0];
+def rindex($i): indices($i) | .[-1:][0];
+def ascii: [.] | implode;
+def todate: strftime("%Y-%m-%dT%H:%M:%SZ");
+def fromdateiso8601: strptime("%Y-%m-%dT%H:%M:%SZ") | mktime;
+def todateiso8601: strftime("%Y-%m-%dT%H:%M:%SZ");
+def fromdate: fromdateiso8601;
+def date: todate;
+def dateadd(u; n): . + n;
+def datesub(u; n): . - n;
+def match($re; $flags): _match_impl($re; $flags; false) | .[];
+def test($re; $flags): _match_impl($re; $flags; true);
+def match($val): ($val | type) as $vt
+    | if $vt == "string" then match($val; null)
+      elif $vt == "array" and ($val | length) > 1 then match($val[0]; $val[1])
+      elif $vt == "array" and ($val | length) > 0 then match($val[0]; null)
+      else error($vt + " not a string or array") end;
+def test($val): ($val | type) as $vt
+    | if $vt == "string" then test($val; null)
+      elif $vt == "array" and ($val | length) > 1 then test($val[0]; $val[1])
+      elif $vt == "array" and ($val | length) > 0 then test($val[0]; null)
+      else error($vt + " not a string or array") end;
+def capture($val): ($val | type) as $vt
+    | if $vt == "string" then capture($val; null)
+      elif $vt == "array" and ($val | length) > 1 then capture($val[0]; $val[1])
+      elif $vt == "array" and ($val | length) > 0 then capture($val[0]; null)
+      else error($vt + " not a string or array") end;
+def capture($re; $flags): match($re; $flags) | _capobj;
+def _capobj: [.captures | .[] | select(.name != null) | {key: .name, value: .string}] | from_entries;
+def scan($re): scan($re; null);
+def scan($re; $flags): match($re; "g" + ($flags // ""))
+    | if (.captures | length > 0) then [.captures | .[] | .string] else .string end;
+def splits($re): splits($re; null);
+def splits($re; $flags): split($re; $flags) | .[];
+def split($re; $flags): . as $s
+    | [match($re; "g" + ($flags // "")) | (.offset, .offset + .length)] as $ms
+    | [0] + $ms + [$s | length]
+    | [range(0; length; 2) as $i | $s[.[$i]:.[$i + 1]]];
+def sub($re; str): sub($re; str; "");
+def sub($re; str; $flags): . as $in
+    | [match($re; $flags)] as $ms
+    | def _sub($i; $from):
+        if $i >= ($ms | length) then $in[$from:]
+        else $ms[$i] as $m
+            | ($m | _capobj | str) as $rep
+            | if ($rep | type) != "string" then error("\($rep | type) (\($rep | tojson)) cannot be added to a string")
+              else $in[$from:$m.offset] + $rep + _sub($i + 1; $m.offset + $m.length) end
+        end;
+      _sub(0; 0);
+def gsub($re; str): sub($re; str; "g");
+def gsub($re; str; $flags): sub($re; str; $flags + "g");
+def ascii_downcase: explode | map(if 65 <= . and . <= 90 then . + 32 else . end) | implode;
+def ascii_upcase: explode | map(if 97 <= . and . <= 122 then . - 32 else . end) | implode;
+def tostream: path(def r: (.[]? | r), .; r) as $p | getpath($p) | reduce path(.[]?) as $q ([$p, .]; [$p + $q]);
+def fromstream(f): { x: null, e: false } as $init
+    | foreach f as $i ($init;
+        if .e then $init else . end
+        | if $i | length == 2
+          then setpath(["e"]; $i[0] | length == 0) | setpath(["x"] + $i[0]; $i[1])
+          else setpath(["e"]; $i[0] | length == 1) end;
+        if .e then .x else empty end);
+def truncate_stream(stream): . as $n | null | stream | . as $input
+    | if (.[0] | length) > $n then setpath([0]; .[0][$n:]) else empty end;
+def unique_by(f): [group_by(f)[] | .[0]];
+def IN(s): any(s == .; .);
+def IN(src; s): any(src == s; .);
+def INDEX(stream; idx_expr): reduce stream as $row ({}; .[$row | idx_expr | tostring] |= $row);
+def INDEX(idx_expr): INDEX(.[]; idx_expr);
+def pick(pathexps): . as $top | reduce path(pathexps) as $p (null; setpath($p; $top | getpath($p)));
+def debug(msg): (msg | debug | empty), .;
+def abs: if type == "number" and . < 0 then -. else . end;
+def toarray: if type == "array" then . else [.] end;
+def have_literal_numbers: true;
+def have_decnum: false;
+def halt_error: halt_error(5);
+def input_line_number: 0;
+def isvalid(f): try (f | true) catch false;
+def error(msg): msg | error;
+def flatten: flatten(1e9);
+def significand: if . == 0 then 0 else . as $x | ($x | fabs | log2 | floor) as $e | $x / pow(2; $e) end;
+def logb: if . == 0 then -infinite else fabs | log2 | floor end;
+def drem($a; $b): $a - $b * ($a / $b | round);
+def ldexp($a; $b): $a * pow(2; $b);
+def scalb($a; $b): $a * pow(2; $b);
+def scalbln($a; $b): $a * pow(2; $b);
+def nearbyint: round;
+.
+JQ

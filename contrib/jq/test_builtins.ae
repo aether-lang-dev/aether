@@ -1,0 +1,153 @@
+// Builtin library specs for contrib.jq: the natives in eval.ae and the
+// jq-source definitions in prelude.ae, grouped as the jq manual groups
+// them. One or two representative cases each, plus the error each raises
+// on a wrong type where jq documents one.
+//
+// Run with:  ae run contrib/jq/test_builtins.ae
+
+import std.spec
+import jq_spec
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "types and values") {
+        spec.it("length, utf8bytelength, type") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] | length]", "[[1,2], \"héllo\", {\"a\":1}, null, -5]"), "[2,5,1,0,5]", "length")
+            spec.assert_str_eq(jq_spec.yields("utf8bytelength", "\"héllo\""), "6", "bytes")
+            spec.assert_str_eq(jq_spec.yields("[.[] | type]", "[null,true,1,\"a\",[],{}]"), "[\"null\",\"boolean\",\"number\",\"string\",\"array\",\"object\"]", "type")
+            spec.assert_str_eq(jq_spec.fails_with("length", "true"), "boolean (true) has no length", "boolean")
+        }
+        spec.it("selectors by type") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] | numbers], [.[] | strings], [.[] | scalars], [.[] | iterables]", "[1,\"a\",null,[2]]"), "[1]\n[\"a\"]\n[1,\"a\",null]\n[[2]]", "selectors")
+            spec.assert_str_eq(jq_spec.yields("[.[] | values]", "[1,null]"), "[1]", "values")
+        }
+        spec.it("tostring, tonumber, tojson, fromjson") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] | tostring]", "[1,\"a\",[1]]"), "[\"1\",\"a\",\"[1]\"]", "tostring")
+            spec.assert_str_eq(jq_spec.yields("tonumber", "\"12.5\""), "12.5", "tonumber")
+            spec.assert_str_eq(jq_spec.fails_with("tonumber", "\"abc\""), "Cannot parse 'abc' as JSON", "tonumber error")
+            spec.assert_str_eq(jq_spec.yields("tojson, (tojson | fromjson)", "{\"a\":[1,\"x\"]}"), "\"{\\\"a\\\":[1,\\\"x\\\"]}\"\n{\"a\":[1,\"x\"]}", "json round trip")
+        }
+        spec.it("infinite, nan and their tests") callback {
+            spec.assert_str_eq(jq_spec.yields("infinite, -infinite, nan", "null"), "1.7976931348623157e+308\n-1.7976931348623157e+308\nnull", "print as jq does")
+            spec.assert_str_eq(jq_spec.yields("[nan, infinite, 1] | map(isnan), map(isinfinite), map(isnormal)", "null"), "[true,false,false]\n[false,true,false]\n[false,false,true]", "tests")
+        }
+    }
+
+    spec.describe(fw, "objects and arrays") {
+        spec.it("keys, has, in, to_entries, from_entries") callback {
+            spec.assert_str_eq(jq_spec.yields("keys, keys_unsorted", "{\"b\":1,\"a\":2}"), "[\"a\",\"b\"]\n[\"b\",\"a\"]", "keys")
+            spec.assert_str_eq(jq_spec.yields("has(\"a\"), has(\"z\")", "{\"a\":1}"), "true\nfalse", "has")
+            spec.assert_str_eq(jq_spec.yields("[.[] | in({\"a\":1})]", "[\"a\",\"b\"]"), "[true,false]", "in")
+            spec.assert_str_eq(jq_spec.yields("to_entries", "{\"a\":1}"), "[{\"key\":\"a\",\"value\":1}]", "to_entries")
+            spec.assert_str_eq(jq_spec.yields("from_entries", "[{\"key\":\"a\",\"value\":1},{\"name\":\"b\",\"v\":2},{\"k\":null,\"value\":3}]"), "{\"a\":1,\"b\":2,\"null\":3}", "from_entries accepts jq's aliases")
+        }
+        spec.it("map, select, add, any, all") callback {
+            spec.assert_str_eq(jq_spec.yields("map(. + 1), map(select(. > 1))", "[1,2]"), "[2,3]\n[2]", "map/select")
+            spec.assert_str_eq(jq_spec.yields("add, add(.[] * 2)", "[1,2]"), "3\n6", "add")
+            spec.assert_str_eq(jq_spec.yields("add", "[]"), "null", "add of nothing")
+            spec.assert_str_eq(jq_spec.yields("any, all, any(. == false), all(type == \"boolean\")", "[true,false]"), "true\nfalse\ntrue\ntrue", "any/all")
+        }
+        spec.it("sorting, grouping, uniqueness, extremes") callback {
+            spec.assert_str_eq(jq_spec.yields("sort, sort_by(-.), group_by(. % 2), unique, min, max", "[3,1,2,1]"), "[1,1,2,3]\n[3,2,1,1]\n[[2],[3,1,1]]\n[1,2,3]\n1\n3", "numbers")
+            spec.assert_str_eq(jq_spec.yields("sort_by(.a, .b) | map(.b)", "[{\"a\":2,\"b\":1},{\"a\":1,\"b\":2},{\"a\":1,\"b\":1}]"), "[1,2,1]", "multiple keys, stable")
+            spec.assert_str_eq(jq_spec.yields("min_by(.a), max_by(.a), unique_by(.a) | length", "[{\"a\":2},{\"a\":1},{\"a\":2}]"), "1\n1\n2", "by")
+            spec.assert_str_eq(jq_spec.fails_with("sort", "5"), "number (5) cannot be sorted, as it is not an array", "sort error")
+        }
+        spec.it("flatten, reverse, contains, inside, indices, bsearch") callback {
+            spec.assert_str_eq(jq_spec.yields("flatten, flatten(1)", "[1,[2,[3]]]"), "[1,2,3]\n[1,2,[3]]", "flatten")
+            spec.assert_str_eq(jq_spec.yields("reverse", "[1,2,3]"), "[3,2,1]", "reverse")
+            spec.assert_str_eq(jq_spec.yields("contains({a:[1]}), inside({a:[1,2,3]})", "{\"a\":[1,2]}"), "true\ntrue", "containment")
+            spec.assert_str_eq(jq_spec.yields("indices(1), indices([1,2])", "[0,1,2,1,2]"), "[1,3]\n[1,3]", "indices")
+            spec.assert_str_eq(jq_spec.yields("bsearch(3), bsearch(0)", "[1,3,4]"), "1\n-1", "bsearch")
+        }
+        spec.it("range, limit, first, last, nth, until, while, repeat") callback {
+            spec.assert_str_eq(jq_spec.yields("[range(3)], [range(2; 5)], [range(0; 10; 4)], [range(3; 0; -1)]", "null"), "[0,1,2]\n[2,3,4]\n[0,4,8]\n[3,2,1]", "range")
+            spec.assert_str_eq(jq_spec.yields("first, last, nth(1), nth(2; .[])", "[5,6,7]"), "5\n7\n6\n7", "positional")
+            spec.assert_str_eq(jq_spec.yields("until(. > 100; . * 2), [while(. < 20; . * 2)], [limit(3; repeat(. * 3))]", "1"), "128\n[1,2,4,8,16]\n[1,3,9]", "loops")
+            spec.assert_str_eq(jq_spec.yields("[recurse(if . < 3 then . + 1 else empty end)], [recurse(. * .; . < 20)]", "2"), "[2,3]\n[2,4,16]", "recurse")
+            spec.assert_str_eq(jq_spec.yields("isempty(empty), isempty(1)", "null"), "true\nfalse", "isempty")
+        }
+        spec.it("combinations, transpose, IN, INDEX, input/inputs") callback {
+            spec.assert_str_eq(jq_spec.yields("[combinations]", "[[1,2],[3,4]]"), "[[1,3],[1,4],[2,3],[2,4]]", "combinations")
+            spec.assert_str_eq(jq_spec.yields("transpose", "[[1,2],[3]]"), "[[1,3],[2,null]]", "transpose")
+            spec.assert_str_eq(jq_spec.yields("IN(1, 2), IN(.[]; 5)", "[2]"), "false\nfalse", "IN")
+            spec.assert_str_eq(jq_spec.yields("INDEX(.id)", "[{\"id\":\"a\"},{\"id\":\"b\"}]"), "{\"a\":{\"id\":\"a\"},\"b\":{\"id\":\"b\"}}", "INDEX")
+        }
+    }
+
+    spec.describe(fw, "strings") {
+        spec.it("prefixes, suffixes, splitting and joining") callback {
+            spec.assert_str_eq(jq_spec.yields("startswith(\"he\"), endswith(\"lo\"), ltrimstr(\"he\"), rtrimstr(\"lo\")", "\"hello\""), "true\ntrue\n\"llo\"\n\"hel\"", "affixes")
+            spec.assert_str_eq(jq_spec.yields("split(\", \")", "\"a, b\""), "[\"a\",\"b\"]", "split")
+            spec.assert_str_eq(jq_spec.yields("join(\"-\")", "[\"a\",1,null,true]"), "\"a-1--true\"", "join")
+            spec.assert_str_eq(jq_spec.yields("trim, ltrim, rtrim", "\"  x  \""), "\"x\"\n\"x  \"\n\"  x\"", "trim")
+        }
+        spec.it("codepoints and case") callback {
+            spec.assert_str_eq(jq_spec.yields("explode, (explode | implode)", "\"aé\""), "[97,233]\n\"aé\"", "explode/implode")
+            spec.assert_str_eq(jq_spec.yields("ascii_downcase, ascii_upcase", "\"aBé\""), "\"abé\"\n\"ABé\"", "ascii only")
+            spec.assert_str_eq(jq_spec.yields("index(\",\"), rindex(\",\"), indices(\", \")", "\"a,b, cd, e\""), "1\n7\n[3,7]", "string indices")
+        }
+    }
+
+    spec.describe(fw, "regular expressions") {
+        spec.it("test and match") callback {
+            spec.assert_str_eq(jq_spec.yields("test(\"B\"), test(\"B\"; \"i\"), test([\"B\", \"i\"])", "\"abc\""), "false\ntrue\ntrue", "test")
+            spec.assert_str_eq(jq_spec.yields("match(\"(?<x>a)(b)?\")", "\"za\""), "{\"offset\":1,\"length\":1,\"string\":\"a\",\"captures\":[{\"offset\":1,\"length\":1,\"string\":\"a\",\"name\":\"x\"},{\"offset\":-1,\"length\":0,\"string\":null,\"name\":null}]}", "match object")
+            spec.assert_str_eq(jq_spec.yields("[match(\"a\"; \"g\") | .offset]", "\"éaXa\""), "[1,3]", "offsets in codepoints")
+            spec.assert_str_eq(jq_spec.fails_with("test(\"(\")", "\"a\""), "( (at offset 0) is not a valid regex: regex: missing closing parenthesis (at offset 1)", "bad pattern")
+        }
+        spec.it("capture, scan, splits") callback {
+            spec.assert_str_eq(jq_spec.yields("capture(\"(?<y>\\\\d+)-(?<m>\\\\d+)\")", "\"2024-05\""), "{\"y\":\"2024\",\"m\":\"05\"}", "capture")
+            spec.assert_str_eq(jq_spec.yields("[scan(\"\\\\d+\")], [scan(\"(a)(\\\\d)\")]", "\"a1b22\""), "[\"1\",\"22\"]\n[[\"a\",\"1\"]]", "scan")
+            spec.assert_str_eq(jq_spec.yields("[splits(\", *\")]", "\"a, b,c\""), "[\"a\",\"b\",\"c\"]", "splits")
+        }
+        spec.it("sub and gsub, with named captures in the replacement") callback {
+            spec.assert_str_eq(jq_spec.yields("sub(\"a\"; \"X\"), gsub(\"a\"; \"X\")", "\"banana\""), "\"bXnana\"\n\"bXnXnX\"", "literal")
+            spec.assert_str_eq(jq_spec.yields("gsub(\"(?<l>[a-z])\"; \"<\\(.l)>\")", "\"ab\""), "\"<a><b>\"", "captures")
+            spec.assert_str_eq(jq_spec.yields("gsub(\"^a\"; \"X\")", "\"aaa\""), "\"Xaa\"", "anchors hold under g")
+        }
+    }
+
+    spec.describe(fw, "formats") {
+        spec.it("@text @json @html @uri @sh @base64 @base32") callback {
+            spec.assert_str_eq(jq_spec.yields("@html, @uri, @sh, @base64, @base32", "\"<a b'>\""), "\"&lt;a b&#39;&gt;\"\n\"%3Ca%20b%27%3E\"\n\"'<a b'\\\\''>'\"\n\"PGEgYic+\"\n\"HRQSAYRHHY======\"", "encoders")
+            spec.assert_str_eq(jq_spec.yields("@base64d", "\"aGk=\""), "\"hi\"", "base64d")
+            spec.assert_str_eq(jq_spec.yields("@json \"v=\\(.)\"", "{\"a\":\"x\"}"), "\"v={\\\"a\\\":\\\"x\\\"}\"", "format string")
+        }
+        spec.it("@csv and @tsv rows") callback {
+            spec.assert_str_eq(jq_spec.yields("@csv, @tsv", "[\"a,b\",1,null,true,\"t\\tq\\\"\"]"), "\"\\\"a,b\\\",1,,true,\\\"t\\tq\\\"\\\"\\\"\"\n\"a,b\\t1\\t\\ttrue\\tt\\\\tq\\\"\"", "rows")
+            spec.assert_str_eq(jq_spec.fails_with("@csv", "[[1]]"), "array ([1]) is not valid in a csv row", "nested")
+        }
+    }
+
+    spec.describe(fw, "math") {
+        spec.it("one-, two- and three-argument functions") callback {
+            spec.assert_str_eq(jq_spec.yields("floor, ceil, round, fabs, sqrt, log10", "100.5"), "100\n101\n101\n100.5\n10.024968827881711\n2.002166061756508", "unary")
+            spec.assert_str_eq(jq_spec.yields("pow(2; 10), atan2(0; 1), fmin(1; 2), ldexp(3; 2), fma(2; 3; 4)", "null"), "1024\n0\n1\n12\n10", "n-ary")
+            spec.assert_str_eq(jq_spec.yields("frexp, modf", "8.5"), "[0.53125,4]\n[0.5,8]", "pairs")
+            spec.assert_str_eq(jq_spec.fails_with("sqrt", "\"a\""), "string (\"a\") number required", "type")
+        }
+    }
+
+    spec.describe(fw, "dates") {
+        spec.it("converts between epoch seconds, broken-down time and text") callback {
+            spec.assert_str_eq(jq_spec.yields("todate, gmtime, (gmtime | mktime)", "1425599507"), "\"2015-03-05T23:51:47Z\"\n[2015,2,5,23,51,47,4,63]\n1425599507", "from seconds")
+            spec.assert_str_eq(jq_spec.yields("fromdate, strptime(\"%Y-%m-%dT%H:%M:%SZ\")", "\"2015-03-05T23:51:47Z\""), "1425599507\n[2015,2,5,23,51,47,4,63]", "from text")
+            spec.assert_str_eq(jq_spec.yields("strftime(\"%A, %B %d, %Y %j %e %T\")", "1425599507"), "\"Thursday, March 05, 2015 064  5 23:51:47\"", "strftime")
+            spec.assert_str_eq(jq_spec.yields("strptime(\"%a, %d %b %Y %H:%M:%S %z\") | mktime", "\"Thu, 05 Mar 2015 23:51:47 +0100\""), "1425595907", "zone offset")
+            spec.assert_str_eq(jq_spec.yields("fromdate", "\"1969-12-31T23:59:59Z\""), "-1", "before the epoch")
+            spec.assert_str_eq(jq_spec.fails_with("fromdate", "\"x\""), "date \"x\" does not match format \"%Y-%m-%dT%H:%M:%SZ\"", "mismatch")
+        }
+    }
+
+    spec.describe(fw, "environment and introspection") {
+        spec.it("$ENV, env, $__loc__, builtins") callback {
+            spec.assert_str_eq(jq_spec.yields("$ENV | has(\"PATH\"), (env | type)", "null"), "true\n\"object\"", "environment")
+            spec.assert_str_eq(jq_spec.yields("builtins | map(select(. == \"map/1\" or . == \"length/0\")) | sort", "null"), "[\"length/0\",\"map/1\"]", "builtins lists natives and prelude")
+            spec.assert_str_eq(jq_spec.yields("[splits(\"a\")] | length", "\"banana\""), "4", "splits")
+        }
+    }
+
+    spec.run_summary(fw)
+}

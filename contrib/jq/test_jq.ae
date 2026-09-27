@@ -1,0 +1,214 @@
+// Facade specs for contrib.jq: the API a caller uses — compiling, running
+// against std.json values, result codes, halt, --arg style variables,
+// `input`/`inputs`, output rendering options and diagnostics. What the
+// language does is specified in test_eval.ae and friends; this file only
+// checks that the facade wires it up.
+//
+// Run with:  ae run contrib/jq/test_jq.ae
+
+import std.spec
+import std.json
+import std.list
+import std.string
+import contrib.jq
+
+// Parse JSON text that the spec itself wrote (so never malformed).
+parsed(text: string) -> ptr {
+    v, _ = json.parse(text)
+    return v
+}
+
+// Run `prog` on `input` and describe the outcome as "STATUS CODE OUTPUTS",
+// freeing everything.
+outcome(src: string, input_text: string) -> string {
+    prog, _ = jq.compile(src)
+    input = parsed(input_text)
+    out = list.new()
+    status, code, err = jq.run(prog, input, out)
+    text = jq.render(out, 0, 0, 0)
+    msg = jq.error_message(err)
+    if err != null { json.json_free(err) }
+    json.json_free(input)
+    jq.free(prog)
+    return "${status} ${code} ${msg}|${text}"
+}
+
+// Run `src` against null with the stream `texts` as its inputs: its outputs
+// and the inputs left unread, as "OUTPUTS|[LEFT...]".
+left_after(src: string, texts: string) -> string {
+    prog, _ = jq.compile(src)
+    queue, _e = jq.parse_stream(texts)
+    all_values = list.new()
+    k = 0
+    while k < list.size(queue) {
+        list.list_add_raw(all_values, list.get_raw(queue, k))
+        k = k + 1
+    }
+    input = json.json_create_null()
+    out = list.new()
+    _s, _c, err = jq.run_with_inputs(prog, input, queue, out)
+    if err != null { json.json_free(err) }
+    text = jq.render(out, 0, 0, 0)
+    left = json.json_create_array()
+    k = 0
+    while k < list.size(queue) {
+        json.json_array_add_raw(left, json.json_create_int(json.json_get_int(list.get_raw(queue, k)) as long))
+        list.set(queue, k, null)
+        k = k + 1
+    }
+    list.free(queue)
+    result = "${string.substring_n(text, string.length(text), 0, string.length(text) - 1)}|${jq.to_json(left)}"
+    json.json_free(left)
+    jq.free_values(all_values)
+    json.json_free(input)
+    jq.free(prog)
+    return result
+}
+
+// The values parse_stream reads, as one JSON array; "ERR: ..." on failure.
+stream_of(text: string) -> string {
+    vals, err = jq.parse_stream(text)
+    if vals == null { return "ERR: ${err}" }
+    arr = json.json_create_array()
+    k = 0
+    while k < list.size(vals) {
+        json.json_array_add_raw(arr, list.get_raw(vals, k))
+        list.set(vals, k, null)
+        k = k + 1
+    }
+    list.free(vals)
+    out = jq.to_json(arr)
+    json.json_free(arr)
+    return out
+}
+
+// Bind $x through a name string that is released before the program runs,
+// as a command line's argument buffer would be.
+bind_from_temporary_name(prog: ptr) {
+    name = json.json_create_string("x")
+    jq.set_var(prog, json.json_get_string_raw(name), json.json_create_string("hi"))
+    json.json_free(name)
+}
+
+// jq.query's two results as "OUTPUTS|ERROR".
+query_both(src: string, input_text: string) -> string {
+    out, err = jq.query(src, input_text)
+    return "${out}|${err}"
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "compile") {
+        spec.it("returns a program, or a positioned syntax error") callback {
+            prog, err = jq.compile(".a | .b")
+            spec.assert_true(prog != null, "compiles")
+            spec.assert_str_eq(err, "", "no diagnostic")
+            jq.free(prog)
+            bad, berr = jq.compile(".a |\n (")
+            spec.assert_true(bad == null, "rejects")
+            spec.assert_true(string.contains(berr, "syntax error"), "says syntax error: ${berr}")
+            spec.assert_true(string.contains(berr, "line 2"), "names the line: ${berr}")
+        }
+    }
+
+    spec.describe(fw, "run") {
+        spec.it("appends each output to the list, caller-owned") callback {
+            spec.assert_str_eq(outcome(".[] * 2", "[1,2]"), "0 0 |2\n4\n", "outputs")
+        }
+        spec.it("reports an error with the outputs produced before it") callback {
+            spec.assert_str_eq(outcome(".[] | if . == 2 then error(\"two\") else . end", "[1,2,3]"), "1 5 two|1\n", "error")
+            spec.assert_str_eq(outcome("error({a: 1})", "null"), "1 5 {\"a\":1} (not a string)|", "non-string error value")
+        }
+        spec.it("halt and halt_error stop with an exit code") callback {
+            spec.assert_str_eq(outcome("1, halt, 2", "null"), "2 0 |1\n", "halt")
+            spec.assert_str_eq(outcome("\"bye\" | halt_error(3)", "null"), "2 3 bye|", "halt_error")
+            spec.assert_str_eq(outcome("{} | halt_error", "null"), "2 5 {} (not a string)|", "default code 5")
+        }
+    }
+
+    spec.describe(fw, "variables and inputs") {
+        spec.it("set_var binds $name for every run") callback {
+            prog, _ = jq.compile("[$x, $y.k]")
+            bind_from_temporary_name(prog)
+            jq.set_var(prog, "y", parsed("{\"k\":1}"))
+            input = json.json_create_null()
+            text, err = jq.run_json(prog, input)
+            spec.assert_str_eq(text, "[\"hi\",1]\n", "bound")
+            spec.assert_str_eq(err, "", "no error")
+            text2, _ = jq.run_json(prog, input)
+            spec.assert_str_eq(text2, "[\"hi\",1]\n", "still bound on a second run")
+            json.json_free(input)
+            jq.free(prog)
+        }
+        spec.it("input and inputs consume from the front of the given list") callback {
+            prog, _ = jq.compile("[., input, [inputs]]")
+            a = parsed("1")
+            b = parsed("2")
+            c = parsed("3")
+            rest = list.new()
+            list.list_add_raw(rest, b)
+            list.list_add_raw(rest, c)
+            out = list.new()
+            status, _code, err = jq.run_with_inputs(prog, a, rest, out)
+            spec.assert_true(status == jq.RESULT_OK, "ok")
+            spec.assert_true(err == null, "no error value")
+            spec.assert_str_eq(jq.render(out, 0, 0, 0), "[1,2,[3]]\n", "consumed in order")
+            spec.assert_true(list.size(rest) == 0, "nothing left")
+            list.free(rest)
+            json.json_free(a)
+            json.json_free(b)
+            json.json_free(c)
+            jq.free(prog)
+        }
+        spec.it("leaves unread inputs in the list") callback {
+            spec.assert_str_eq(left_after("input", "1 2 3"), "1|[2,3]", "one read")
+        }
+        spec.it("input with nothing left is an error") callback {
+            spec.assert_str_eq(outcome("input", "null"), "1 5 No more inputs|", "exhausted")
+        }
+    }
+
+    spec.describe(fw, "rendering") {
+        spec.it("indents, sorts keys and prints raw strings on request") callback {
+            prog, _ = jq.compile(".")
+            input = parsed("{\"b\":[1],\"a\":\"x\"}")
+            pretty, _ = jq.run_json_opts(prog, input, 2, 0, 0)
+            spec.assert_str_eq(pretty, "{\n  \"b\": [\n    1\n  ],\n  \"a\": \"x\"\n}\n", "indent 2")
+            sorted, _ = jq.run_json_opts(prog, input, 0, 1, 0)
+            spec.assert_str_eq(sorted, "{\"a\":\"x\",\"b\":[1]}\n", "sort keys")
+            jq.free(prog)
+            raw_prog, _ = jq.compile(".a, .b")
+            raw, _ = jq.run_json_opts(raw_prog, input, 0, 0, 1)
+            spec.assert_str_eq(raw, "x\n[1]\n", "raw strings only")
+            jq.free(raw_prog)
+            json.json_free(input)
+        }
+        spec.it("prints jq's escapes") callback {
+            v = parsed("\"\\u0001\\u007f\\n\\\"\\\\é\"")
+            spec.assert_str_eq(jq.to_json(v), "\"\\u0001\\u007f\\n\\\"\\\\é\"", "escapes")
+            json.json_free(v)
+        }
+    }
+
+    spec.describe(fw, "parse_stream") {
+        spec.it("reads whitespace-separated JSON texts") callback {
+            spec.assert_str_eq(stream_of("1 \"a b\" [2,[3]]\n{\"k\":\"}\"} null"), "[1,\"a b\",[2,[3]],{\"k\":\"}\"},null]", "mixed stream")
+            spec.assert_str_eq(stream_of("  "), "[]", "empty")
+            spec.assert_true(string.starts_with(stream_of("1 {bad"), "ERR: "), "malformed text")
+        }
+    }
+
+    spec.describe(fw, "query") {
+        spec.it("runs a program against JSON text in one call") callback {
+            spec.assert_str_eq(query_both(".a[] * 2", "{\"a\":[1,2]}"), "2\n4|", "outputs, no error")
+        }
+        spec.it("reports compile, input and runtime errors") callback {
+            spec.assert_true(string.starts_with(query_both("(", "1"), "|jq: error: syntax error"), "compile")
+            spec.assert_true(string.starts_with(query_both(".", "{bad"), "|jq: error: invalid JSON input"), "input")
+            spec.assert_str_eq(query_both(".[] | 10 / .", "[5, 0]"), "2|jq: error: number (10) and number (0) cannot be divided because the divisor is zero", "outputs before the error, then the error")
+        }
+    }
+
+    spec.run_summary(fw)
+}
