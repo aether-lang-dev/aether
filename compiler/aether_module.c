@@ -1985,14 +1985,29 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
 
     if (node->type == AST_FUNCTION_CALL && node->value) {
         // Check if this call targets a function defined in the same module
+        int renamed = 0;
         for (int i = 0; i < func_count; i++) {
             if (strcmp(node->value, func_names[i]) == 0) {
                 char prefixed[256];
                 snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
                 free(node->value);
                 node->value = strdup(prefixed);
+                renamed = 1;
                 break;
             }
+        }
+        /* #2200: a call THROUGH a module-level `var` holding a function
+         * pointer (`gen_buffers(1, ids)` where `var gen_buffers: GenBuffers`
+         * is the module's own state). The cell itself merges as
+         * `<prefix>_gen_buffers` and its reads and writes are renamed below
+         * and above, but the call kept the bare name and the checker then
+         * reported "Undefined function". A local of that name shadows it. */
+        if (!renamed && !name_in_list(node->value, local_names, local_count) &&
+            name_is_module_global_var(prefix, node->value)) {
+            char prefixed[256];
+            snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+            free(node->value);
+            node->value = strdup(prefixed);
         }
     }
 
@@ -2303,6 +2318,22 @@ static int program_has_distinct(ASTNode* program, const char* name) {
         if (!existing) continue;
         ASTNode* unwrapped = unwrap_export(existing);
         if (unwrapped && unwrapped->type == AST_DISTINCT_TYPE_DEF &&
+            unwrapped->value && strcmp(unwrapped->value, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* #2200: a `cfn Name(...) -> R` def already present in the program (the
+ * consumer's own, or an earlier merge). Used to dedup cfn-def merges. */
+static int program_has_cfn(ASTNode* program, const char* name) {
+    if (!program || !name) return 0;
+    for (int m = 0; m < program->child_count; m++) {
+        ASTNode* existing = program->children[m];
+        if (!existing) continue;
+        ASTNode* unwrapped = unwrap_export(existing);
+        if (unwrapped && unwrapped->type == AST_CFN_TYPE_DEF &&
             unwrapped->value && strcmp(unwrapped->value, name) == 0) {
             return 1;
         }
@@ -3057,6 +3088,17 @@ void module_merge_into_program(ASTNode* program) {
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
                 insert_child_at(program, clone, insert_idx++);
+            } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
+                // #2200: a `cfn Name(...) -> R` from an imported module enters
+                // the consumer's program AST (bare name, like distincts) so
+                // resolve_cfn_types learns `Name` and rewrites the `x: Name`
+                // annotations and `p as Name` casts inside the merged bodies.
+                // Bypasses the selective-import filter on purpose, same as
+                // structs: a merged body cannot type-check without it.
+                if (program_has_cfn(program, decl->value)) continue;
+                ASTNode* clone = clone_ast_node(decl);
+                clone->is_imported = 1;
+                insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_BITSTRUCT_DEFINITION && decl->value) {
                 // A `bitstruct Name : <backing> { ... }` from an imported module
                 // must enter the consumer's program AST (bare name, like structs
@@ -3429,6 +3471,12 @@ void module_merge_into_program(ASTNode* program) {
                 } else if (decl->type == AST_DISTINCT_TYPE_DEF && decl->value) {
                     // #908: transitive sibling of the distinct-def merge above.
                     if (program_has_distinct(program, decl->value)) continue;
+                    ASTNode* clone = clone_ast_node(decl);
+                    clone->is_imported = 1;
+                    insert_child_at(program, clone, insert_idx++);
+                } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
+                    // #2200: transitive sibling of the cfn-def merge above.
+                    if (program_has_cfn(program, decl->value)) continue;
                     ASTNode* clone = clone_ast_node(decl);
                     clone->is_imported = 1;
                     insert_child_at(program, clone, insert_idx++);

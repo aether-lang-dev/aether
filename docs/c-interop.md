@@ -498,6 +498,23 @@ import dropped by `when defined(...)` takes the file with it. Libraries the
 file needs go in `@link` beside it. See
 [`docs/build-system.md`](build-system.md#c-sources-a-module-ships-source).
 
+## Calling a Runtime-Loaded Entry Point, `cfn`
+
+A C API that hands out its functions at run time (`wglGetProcAddress`, `vkGetDeviceProcAddr`, `dlsym`) returns a bare `ptr`. Name the signature once with `cfn` and the pointer is callable with C's calling convention wherever it is stored:
+
+```aether,fragment
+extern get_proc_address(name: string) -> ptr
+
+cfn GenBuffers(n: int, ids: ptr)
+
+var gl_gen_buffers: GenBuffers = null
+
+load() { gl_gen_buffers = get_proc_address("glGenBuffers") as GenBuffers }
+gen(ids: ptr) { gl_gen_buffers(1, ids) }
+```
+
+`cfn Name(a: T1, b: T2) -> R` is `fn(T1, T2) -> R` under a name and lowers the same way: `void*` storage, a typed cast at each call, no C `typedef` emitted. Argument and return types are the ones `extern` accepts, `*StructName` pointers included. See [§ Named C function-pointer types](language-reference.md#named-c-function-pointer-types-cfn-namea-t1-b-t2---r) in the language reference.
+
 ## Linking External Libraries
 
 Use `link_flags` in your `aether.toml` to link external C libraries:

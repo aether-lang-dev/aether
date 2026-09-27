@@ -614,3 +614,44 @@ TEST(codegen_release_builtin_on_non_string_is_a_reported_error) {
     aether_error_reset_counts();
     free(buf);
 }
+
+/* #2200: a call through a module-level `var` holding a function pointer
+ * carries the typed C cast, as a call through a local does. The global is
+ * never in the per-function registry, so it used to be emitted bare on a
+ * `void*`, which C rejects. */
+TEST(codegen_call_through_global_fnptr_var_emits_typed_cast) {
+    char* buf = generate_typechecked(
+        "extern getp() -> ptr\n"
+        "cfn GenBuffers(n: int, ids: ptr)\n"
+        "var gl_gen_buffers: GenBuffers = null\n"
+        "load() { gl_gen_buffers = getp() as GenBuffers }\n"
+        "gen(ids: ptr) { gl_gen_buffers(1, ids) }\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "static void* gl_gen_buffers = NULL;") != NULL);
+    ASSERT_TRUE(strstr(buf, "((void(*)(int, void*))(gl_gen_buffers))(1, ids)") != NULL);
+    free(buf);
+}
+
+/* A cfn-typed local, parameter and struct field lower exactly as their
+ * `fn(...)` spellings do: `void*` storage for the local, a real C
+ * function-pointer declarator for the parameter and the field, and a typed
+ * cast at each call. A cfn emits no typedef of its own. */
+TEST(codegen_cfn_local_param_and_field_lower_like_fn_types) {
+    char* buf = generate_typechecked(
+        "extern getp() -> ptr\n"
+        "cfn Scale(v: float, s: f32) -> float\n"
+        "struct Ops { scale: Scale }\n"
+        "apply(f: Scale, v: float) -> float { return f(v, 2.0) }\n"
+        "main() { sc = getp() as Scale\n"
+        "  r = sc(1.5, 4.0)\n"
+        "  o = Ops { scale: sc }\n"
+        "  r2 = o.scale(1.0, 1.0) + apply(sc, r) }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "void* sc = ((void*)(getp()))") != NULL);
+    ASSERT_TRUE(strstr(buf, "((double(*)(double, float))(sc))(1.5, 4.0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "double (*f)(double, float)") != NULL);
+    ASSERT_TRUE(strstr(buf, "double (*scale)(double, float)") != NULL);
+    ASSERT_TRUE(strstr(buf, "typedef") == NULL || strstr(buf, "Scale;") == NULL);
+    free(buf);
+}

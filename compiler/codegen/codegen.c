@@ -609,6 +609,25 @@ Type* lookup_fnptr_local(CodeGenerator* gen, const char* name) {
     return NULL;
 }
 
+/* #2200: the signature of a module-level `var name: fn(...) -> R` (or a
+ * `cfn`-typed one), the slot a GetProcAddress'd entry point is loaded into
+ * once and called from everywhere. Such a global is an AST_CONST_DECLARATION
+ * tagged "global_var"; it is never in the per-function local registry, so
+ * without this a call through it was emitted bare (`gl_gen_buffers(1, ids)`
+ * on a `void*`), which C rejects. NULL when `name` is not such a global. */
+Type* lookup_fnptr_global(CodeGenerator* gen, const char* name) {
+    if (!gen || !gen->program || !name) return NULL;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* c = gen->program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (!c || c->type != AST_CONST_DECLARATION || !c->value ||
+            !c->annotation || strcmp(c->annotation, "global_var") != 0) continue;
+        if (strcmp(c->value, name) != 0) continue;
+        return is_fnptr_type(c->node_type) ? c->node_type : NULL;
+    }
+    return NULL;
+}
+
 CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, const char* header_path) {
     CodeGenerator* gen = create_code_generator(output);
     gen->emit_header = 1;
@@ -6761,6 +6780,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             case AST_SUM_TYPE_DEF:
                 // #914: the tagged-union typedef was emitted in the hoisted
                 // type pass above; nothing to emit for the declaration here.
+                break;
+            case AST_CFN_TYPE_DEF:
+                // #2200: a named function-pointer type emits no C of its own.
+                // Every use was rewritten to its signature by the checker;
+                // storage is `void*` and each call site carries the cast.
                 break;
             case AST_MAIN_FUNCTION:
                 generate_main_function(gen, child);

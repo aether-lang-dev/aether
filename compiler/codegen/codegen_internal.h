@@ -282,6 +282,7 @@ int is_extern_func(CodeGenerator* gen, const char* func_name);
  * `fn(T1, T2, ...) -> R` (storage = void*; call-site emits typed cast). */
 void register_fnptr_local(CodeGenerator* gen, const char* name, Type* sig);
 Type* lookup_fnptr_local(CodeGenerator* gen, const char* name);
+Type* lookup_fnptr_global(CodeGenerator* gen, const char* name);   /* #2200 */
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the

@@ -694,6 +694,7 @@ const char* ast_node_type_to_string(ASTNodeType type) {
         case AST_NULL_COALESCE: return "NULL_COALESCE";     // #340
         case AST_OPTIONAL_CHAIN: return "OPTIONAL_CHAIN";   // #340
         case AST_SUM_TYPE_DEF: return "SUM_TYPE_DEF";       // #914
+        case AST_CFN_TYPE_DEF: return "CFN_TYPE_DEF";       // #2200
         default: return "UNKNOWN";
     }
 }

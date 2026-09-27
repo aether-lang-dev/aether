@@ -4172,6 +4172,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * call as the builtin instead, printed a type error for the
                  * argument, and still emitted a binary (#2211). */
                 Type* fnptr_sig = lookup_fnptr_local(gen, func_name);
+                if (!fnptr_sig) fnptr_sig = lookup_fnptr_global(gen, func_name);   /* #2200 */
                 if (fnptr_sig && fnptr_sig->kind == TYPE_FUNCTION &&
                     fnptr_sig->is_fnptr) {
                     generate_fnptr_local_call(gen, fnptr_sig, func_name, expr);
