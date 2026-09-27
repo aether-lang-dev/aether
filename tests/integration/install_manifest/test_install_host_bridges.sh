@@ -18,7 +18,8 @@
 # Verifies:
 #   1. install.sh ships every contrib/host/<lang>/aether_host_<lang>.c
 #      that exists in the source tree.
-#   2. No OTHER contrib .c file slips through (the carve-out is
+#   2. Every .c a module.ae names with @source ships too (#2208), and
+#      no OTHER contrib .c file slips through (the carve-out is
 #      surgical — broad `find -name '*.c'` cleanup still runs).
 #   3. The companion .h header and module.ae descriptor are
 #      present too (otherwise compiling the bridge would fail).
@@ -79,19 +80,41 @@ for src in $src_bridges; do
     fi
 done
 
+# The other .c files that must ship: each one a module.ae in the installed
+# tree compiles in with @source (contrib.vulkan, contrib.vulkan.vk,
+# contrib.d3d12, contrib.metal), resolved against that module's directory,
+# since an installed toolchain builds those modules from them (#2208).
+inst="$TMPDIR/share/aether/contrib"
+physical() {
+    ( cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")" )
+}
+sourced=$(find "$inst" -type f -name module.ae | while IFS= read -r mod; do
+    d=$(dirname "$mod")
+    sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$mod" | while IFS= read -r rel; do
+        case "$rel" in *.c) physical "$d/$rel" ;; esac
+    done
+done | sort -u)
+for f in $sourced; do
+    if [ ! -f "$f" ]; then
+        echo "  [FAIL] $f is named by a module.ae's @source but did not ship"
+        exit 1
+    fi
+done
+sourced_count=$(echo "$sourced" | grep -c . || true)
+
 # No OTHER contrib .c file should have slipped through (the carve-out
-# is surgical). The shipped .c set must equal the host-bridge set.
-shipped_c=$(find "$TMPDIR/share/aether/contrib" -type f -name '*.c' | sort)
-shipped_count=$(echo "$shipped_c" | grep -c . || true)
-non_bridge=$(echo "$shipped_c" | grep -v '/contrib/host/.*/aether_host_.*\.c$' || true)
-if [ -n "$non_bridge" ]; then
-    echo "  [FAIL] non-bridge .c files in install tree (the carve-out is too wide):"
-    echo "$non_bridge" | head -5
-    exit 1
-fi
-if [ "$shipped_count" -ne "$src_count" ]; then
-    echo "  [FAIL] shipped $shipped_count .c files; expected $src_count host bridges"
+# is surgical): what ships is the host bridges plus the @source'd files.
+shipped_c=$(find "$inst" -type f -name '*.c' | sort)
+extra=$(echo "$shipped_c" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in */contrib/host/*/aether_host_*.c) continue ;; esac
+    echo "$sourced" | grep -qxF -- "$(physical "$f")" && continue
+    echo "$f"
+done)
+if [ -n "$extra" ]; then
+    echo "  [FAIL] .c files in install tree that are neither host bridges nor @source'd (the carve-out is too wide):"
+    echo "$extra" | head -5
     exit 1
 fi
 
-echo "  [PASS] $src_count host bridge sources ship; no other contrib .c leaked"
+echo "  [PASS] $src_count host bridge sources and $sourced_count @source'd module sources ship; no other contrib .c leaked"
