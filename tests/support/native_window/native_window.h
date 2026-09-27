@@ -13,11 +13,15 @@
  *   macOS    an AppKit window's content view   kind 2, handle = NSView*
  *   Linux    an X11 window                     kind 3, handle = Window,
  *                                              display = Display*
+ *            or a Wayland xdg_toplevel         kind 4, handle = wl_surface*,
+ *                                              display = wl_display*
  *
  * The kinds are numbered as aether-ui's native_view_kind() numbers them.
- * Nothing links against a window-system library: X11 and AppKit are opened at
- * runtime, so a test builds everywhere and skips where there is no display.
- * A window is used from one thread; on macOS that is the main thread.
+ * Nothing links against a window-system library: X11, Wayland and AppKit are
+ * opened at runtime, so a test builds everywhere and skips where there is no
+ * display. On Linux X11 is tried first, then Wayland;
+ * AETHER_TEST_WINDOW_SYSTEM=x11 or =wayland picks one (#2197). A window is
+ * used from one thread; on macOS that is the main thread.
  */
 
 #ifndef AETHER_TEST_NATIVE_WINDOW_H
@@ -43,7 +47,8 @@ extern "C" {
 typedef struct TwWindow TwWindow;
 
 /* 1 when a window can be created here: always on Windows; on Linux when
- * libX11 loads and $DISPLAY opens; on macOS when AppKit loads. */
+ * libX11 loads and $DISPLAY opens, or libwayland-client loads and
+ * $WAYLAND_DISPLAY connects; on macOS when AppKit loads. */
 int tw_available(void);
 
 /* Text for the most recent failure on the calling thread; "" when none. */
@@ -67,7 +72,8 @@ int tw_take_resized(TwWindow* w);
 
 /* Asks for a client area of `width` x `height` pixels and waits, up to a
  * second, for the window system to apply it; read tw_width / tw_height for
- * what was granted. */
+ * what was granted. Under Wayland the client owns its size, so the request
+ * is recorded as granted and the next buffer at that size is the resize. */
 int tw_set_size(TwWindow* w, int width, int height);
 
 /* Minimises (1) or restores (0) the window. Only Win32 shrinks a minimised
@@ -77,13 +83,15 @@ int tw_set_minimized(TwWindow* w, int on);
 
 int   tw_kind(const TwWindow* w);
 void* tw_handle(const TwWindow* w);
-/* The X11 Display* for kind 3; NULL for the kinds that need no connection. */
+/* The X11 Display* for kind 3 and the wl_display* for kind 4; NULL for the
+ * kinds that need no connection. */
 void* tw_display(const TwWindow* w);
 
 /* The colour on screen at client pixel (x, y), packed 0xRRGGBB, or -1 with
  * the reason in tw_last_error. Windows and X11; macOS refuses, because
  * reading another layer's pixels off the screen needs the screen-recording
- * permission a test runner does not have. */
+ * permission a test runner does not have, and Wayland refuses, because a
+ * client cannot read the screen at all there. */
 int tw_pixel(TwWindow* w, int x, int y);
 
 #ifdef __cplusplus

@@ -197,12 +197,23 @@ main() {
             }
         }
     }
-    // Reading the screen back is what proves a frame arrived; on macOS the
-    // fixture cannot, so those cases say so instead of passing vacuously.
+    // Reading the screen back is what proves a frame arrived; on macOS and
+    // Wayland the fixture cannot (the screen-recording permission there, no
+    // way for a client to read the screen here), so those cases say so
+    // instead of passing vacuously. What those kinds still check is that
+    // every present succeeded and was counted.
     readable = 0
-    if ready == 1 && kind != vulkan.WINDOW_NSVIEW { readable = 1 }
+    if ready == 1 && kind != vulkan.WINDOW_NSVIEW && kind != vulkan.WINDOW_WAYLAND { readable = 1 }
     read_reason = reason
-    if ready == 1 && readable == 0 { read_reason = "the screen is not readable on macOS" }
+    if ready == 1 && readable == 0 { tw_ae_pixel(win, 0, 0); read_reason = "the screen is not readable here (${tw_ae_last_error()})" }
+    // Wayland leaves the size to the application, so a swapchain cannot
+    // notice the window growing on its own: swapchain_resize is the path.
+    grows = ready
+    grow_reason = reason
+    if ready == 1 && kind == vulkan.WINDOW_WAYLAND {
+        grows = 0
+        grow_reason = "Wayland leaves the size to the application; swapchain_resize is the path there"
+    }
 
     spec.describe(fw, "vulkan: swapchain over a window") {
         spec.it_when(ready, "takes the window's size", reason) callback {
@@ -214,6 +225,24 @@ main() {
         spec.it_when(ready, "refuses to present a target with no frame yet", reason) callback {
             spec.assert_eq(vulkan.present(sc, t), vulkan.ERR_ARG, "present before any draw")
             spec.assert_true(string.length(vulkan.last_error()) > 0, "explains why")
+        }
+
+        // Every kind, the ones whose screen cannot be read included: each
+        // present is counted as handed to the display, and the target keeps
+        // its frame readable afterwards.
+        spec.it_when(ready, "counts each frame handed to the display and leaves the target readable", reason) callback {
+            fill_triangle(t, 0.0, 1.0, 0.0)
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 1.0, 1.0), vulkan.OK, "draw")
+            before = vulkan.swapchain_presented(sc)
+            i = 0
+            while i < 3 {
+                spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present ${i}")
+                tw_ae_pump(win)
+                i = i + 1
+            }
+            spec.assert_eq(vulkan.swapchain_presented(sc), before + 3, "three more frames presented")
+            centre = vulkan.pixel(t, tw_ae_width(win) / 2, tw_ae_height(win) / 2) as int
+            spec.assert_eq((centre >> 8) & 0xFFFFFF, 0x00FF00, "the target still holds the green triangle (got ${centre})")
         }
 
         spec.it_when(readable, "shows the drawn frame in the window", read_reason) callback {
@@ -252,7 +281,7 @@ main() {
             spec.assert_eq(near_rgb(centre, 0xFF0000, 3), 1, "the centre (got ${centre})")
         }
 
-        spec.it_when(ready, "rebuilds by itself when the window outgrows it", reason) callback {
+        spec.it_when(grows, "rebuilds by itself when the window outgrows it", grow_reason) callback {
             spec.assert_eq(tw_ae_set_size(win, 200, 150), 0, "window resized")
             w = tw_ae_width(win)
             h = tw_ae_height(win)
