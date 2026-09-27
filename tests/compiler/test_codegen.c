@@ -5,6 +5,7 @@
 #include "../../compiler/codegen/codegen_internal.h"
 #include "../../compiler/analysis/typechecker.h"
 #include "../../compiler/analysis/derive.h"
+#include "../../compiler/aether_error.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -561,4 +562,55 @@ TEST(codegen_observable_survives_derive_pass) {
     free_parser(parser);
     for (int i = 0; i < count; i++) free_token(tokens[i]);
     free(tokens);
+}
+
+/* #2211: a local holding a function pointer shadows a builtin of the same
+ * name. The checker already resolved `release(state)` through the innermost
+ * symbol, but codegen's by-name builtin dispatch ran before its typed
+ * fn-pointer local branch, so the call lowered as the `release` builtin,
+ * printed a type error for the argument, and still produced a binary. */
+TEST(codegen_fnptr_local_named_release_shadows_builtin) {
+    char* buf = generate_typechecked(
+        "struct FreeHook { release: fn(ptr), state: ptr }\n"
+        "run(h: *FreeHook) { release = h.release\n"
+        "  state = h.state\n"
+        "  release(state) }\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "((void(*)(void*))(release))(state)") != NULL);
+    ASSERT_TRUE(strstr(buf, "string_release(state)") == NULL);
+    ASSERT_TRUE(strstr(buf, "release() type error") == NULL);
+    free(buf);
+}
+
+/* The same shape with `free`, a builtin that is also a libc symbol: the
+ * call must spell the local as its declaration did (`free`), not the
+ * libc-avoiding `ae_free`, or the emitted C names a variable that does
+ * not exist. */
+TEST(codegen_fnptr_local_named_free_shadows_builtin_and_keeps_its_spelling) {
+    char* buf = generate_typechecked(
+        "struct H { free: fn(ptr), state: ptr }\n"
+        "run(h: *H) { free = h.free\n"
+        "  state = h.state\n"
+        "  free(state) }\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "void* free = h->free;") != NULL);
+    ASSERT_TRUE(strstr(buf, "((void(*)(void*))(free))(state)") != NULL);
+    ASSERT_TRUE(strstr(buf, "ae_free") == NULL);
+    free(buf);
+}
+
+/* The other half of #2211: the builtin `release` on a non-string is a
+ * reported error, so the driver fails the build, rather than a stderr line
+ * beside an exit status of 0. */
+TEST(codegen_release_builtin_on_non_string_is_a_reported_error) {
+    aether_error_reset_counts();
+    char* buf = generate_typechecked(
+        "main() { n = 5\n"
+        "  release(n) }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(1, aether_error_count());
+    aether_error_reset_counts();
+    free(buf);
 }
