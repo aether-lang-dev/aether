@@ -1,0 +1,128 @@
+// Issue #2220: observable struct models — notify on field store, for
+// reactive UI binding.
+//
+// The bug (a gap): a UI toolkit binding a view to a model had no way to hear
+// that a field was assigned, so every app carried refresh_* methods and dirty
+// flags by hand. `struct T @observable` plus std.observe closes it: codegen
+// follows each field store on a T with aether_observe_notify(<object>), and
+// the closures registered on that object through observe.observe run.
+//
+// Pre-fix this file fails to compile: `@observable` after a struct name was a
+// parse error and std.observe did not exist. Each block below pins one part
+// of the contract: notification on value and pointer stores including the
+// desugared compound form, per-object registration and removal, nested value
+// stores notifying inner then outer, a store through a pointer field reaching
+// only the pointee, the per-object re-entrancy guard, removal from inside an
+// observer, and a plain struct staying silent.
+
+import std.observe
+
+extern exit(code: int)
+
+struct Inner @observable {
+    x: int
+}
+
+struct Plain {
+    y: int
+}
+
+struct Outer @observable {
+    n: int
+    plain: Plain
+    inner: Inner // not the first field on purpose: a first field shares
+    // its parent's address, so the two would be one object
+    link: *Inner
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    // ---- value and pointer stores, registration and removal ----
+    p = heap.new(Inner)
+    hits = 0
+    seen_x = -1
+    token = observe.observe(p, | obj: ptr | {
+            hits = hits + 1
+            seen_x = p.x // the store has landed when the observer runs
+        })
+    check(token > 0, "observe returns a token")
+    check(observe.observer_count(p) == 1, "one observer registered")
+
+    p.x = 5
+    check(hits == 1, "pointer store notifies")
+    check(seen_x == 5, "observer sees the stored value")
+    p.x += 1
+    check(hits == 2, "compound store notifies")
+    check(p.x == 6, "compound store lands")
+
+    check(observe.unobserve(p, token), "unobserve finds the token")
+    check(!observe.unobserve(p, token), "unobserve twice is false")
+    p.x = 7
+    check(hits == 2, "no notification after unobserve")
+    check(observe.observer_count(p) == 0, "no observers left")
+
+    // ---- nested value store: inner first, then the enclosing value ----
+    o = Outer { n: 0, plain: Plain { y: 0 }, inner: Inner { x: 0 }, link: heap.new(Inner) }
+    order = ""
+    t_outer = observe.observe(&o, | obj: ptr | { order = "${order}O" })
+    t_inner = observe.observe(&o.inner, | obj: ptr | { order = "${order}I" })
+    t_link = observe.observe(o.link, | obj: ptr | { order = "${order}L" })
+
+    o.n = 1
+    check(order == "O", "store on the outer value notifies the outer only")
+    o.inner.x = 2
+    check(order == "OIO", "nested value store notifies inner then outer")
+    o.plain.y = 3
+    check(order == "OIOO", "store into a plain nested value still changed the outer")
+    o.link.x = 4
+    check(order == "OIOOL", "store through a pointer field reaches the pointee only")
+
+    check(observe.unobserve(&o, t_outer), "unobserve outer")
+    check(observe.unobserve(&o.inner, t_inner), "unobserve inner")
+    check(observe.unobserve(o.link, t_link), "unobserve link")
+
+    // ---- re-entrancy guard: a store from inside the observer ----
+    q = heap.new(Inner)
+    passes = 0
+    _tq = observe.observe(q, | obj: ptr | {
+            passes = passes + 1
+            q.x = q.x + 100 // lands, but starts no nested pass
+        })
+    q.x = 1
+    check(passes == 1, "an observer's own store does not re-enter")
+    check(q.x == 101, "the observer's store landed")
+    check(observe.unobserve_all(q) == 1, "unobserve_all removes the one observer")
+
+    // ---- removal from inside the observer ----
+    r = heap.new(Inner)
+    self_hits = 0
+    _tr = observe.observe(r, | obj: ptr | {
+            self_hits = self_hits + 1
+            observe.unobserve_all(r)
+        })
+    r.x = 1
+    r.x = 2
+    check(self_hits == 1, "an observer that removes itself runs once")
+    check(observe.observer_count(r) == 0, "and is gone afterwards")
+
+    // ---- a plain struct is never notified, even if someone observes it ----
+    pl = heap.new(Plain)
+    plain_hits = 0
+    t_pl = observe.observe(pl, | obj: ptr | { plain_hits = plain_hits + 1 })
+    pl.y = 9
+    check(plain_hits == 0, "a struct without @observable emits no notification")
+    check(observe.unobserve(pl, t_pl), "unobserve plain")
+
+    heap.free(pl)
+    heap.free(r)
+    heap.free(q)
+    heap.free(o.link)
+    heap.free(p)
+    println("OK")
+}

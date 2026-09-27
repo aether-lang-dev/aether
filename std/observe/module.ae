@@ -1,0 +1,90 @@
+// std.observe — observable struct models (#2220)
+//
+// A struct declared `struct Model @observable { ... }` notifies, after every
+// field store on one of its values, the closures registered on that object
+// here. The toolkit (or any program) binds a re-render to a model once and
+// stops keeping dirty flags and refresh_* methods in step with each store:
+//
+//     import std.observe
+//
+//     struct Model @observable {
+//         count: int
+//         status: string
+//     }
+//
+//     main() {
+//         m = heap.new(Model)
+//         token = observe.observe(m, |obj: ptr| {
+//             println("changed")
+//         })
+//         m.count = 1          // prints "changed"
+//         observe.unobserve(m, token)
+//         m.count = 2          // silent
+//         heap.free(m)
+//     }
+//
+// The object is identified by its address. A `heap.new` box passes as it
+// is; a local struct value passes as `&m`. Observers run synchronously on
+// the storing thread, in registration order, with the observed address as
+// their one argument. A store an observer makes on the object it is being
+// told about does not start a nested pass (the re-entrancy guard), so an
+// observer may update the model it watches without recursing. Stores made
+// on another thread notify on that thread; marshal to the loop thread
+// yourself (std.worker's poster is the tool for that).
+//
+// Observers hold their closure environment for as long as they are
+// registered; unobserve / unobserve_all release it. Unobserve an object
+// before freeing it, or its address may be reused by an unrelated value
+// that then inherits the observers.
+//
+// One object is notified per store, never a field name: per-field
+// observation is deferred until a caller needs it. Nested value structs
+// notify inward-out: `a.b.c = v` with `a: Outer @observable` and
+// `b: Inner @observable` notifies `&a.b` then `&a`, because both values'
+// bytes changed. A store through a pointer field (`a.p.c = v`, `p: *Inner`)
+// notifies only the pointee: `a` itself did not change.
+
+exports(
+    aether_observe, aether_unobserve, aether_unobserve_all,
+    aether_observer_count, aether_observe_is_notifying,
+    observe, unobserve, unobserve_all, observer_count, is_notifying
+)
+
+// ---- raw externs (runtime/aether_observe.c) ----
+// `fn` lowers to the compiler's _AeClosure ({fn, env}); the runtime stores it
+// and invokes it as fn(env, obj) after each store on `obj`.
+extern aether_observe(obj: ptr, on_change: fn) -> long
+extern aether_unobserve(obj: ptr, token: long) -> int
+extern aether_unobserve_all(obj: ptr) -> int
+extern aether_observer_count(obj: ptr) -> int
+extern aether_observe_is_notifying(obj: ptr) -> int
+
+// ---- Aether-side wrappers ----
+
+// Register `on_change` to run after every field store on `obj`. Returns a
+// token for unobserve, or 0 when `obj` is null.
+observe(obj: ptr, on_change: fn) -> long {
+    return aether_observe(obj, on_change)
+}
+
+// Remove one registration. Returns true when the token was registered on
+// `obj`. Safe from inside the observer being removed.
+unobserve(obj: ptr, token: long) -> bool {
+    return aether_unobserve(obj, token) == 1
+}
+
+// Remove every observer of `obj`; call before freeing it. Returns how many
+// were removed.
+unobserve_all(obj: ptr) -> int {
+    return aether_unobserve_all(obj)
+}
+
+// How many observers `obj` has right now.
+observer_count(obj: ptr) -> int {
+    return aether_observer_count(obj)
+}
+
+// True while a notification pass for `obj` is running.
+is_notifying(obj: ptr) -> bool {
+    return aether_observe_is_notifying(obj) == 1
+}

@@ -4388,7 +4388,81 @@ static int call_yields_heap_box(CodeGenerator* gen, ASTNode* init) {
     return 0;
 }
 
+/* #2220 — observable struct models.
+ *
+ * A statement that stores into a field (`m.f = v`, `p.f = v`, `a.b.c = v`,
+ * and the compound forms the parser desugars to them) is followed by one
+ * `aether_observe_notify(<object>)` per observable object whose bytes the
+ * store changed, innermost first:
+ *   - a value-typed base (`m` : T, or `a.b` : T) is notified by address
+ *     (`&m`), and the walk continues outward because the enclosing value's
+ *     bytes changed too;
+ *   - a pointer-typed base (`p` : *T) is notified by the pointer itself, and
+ *     the walk stops: the holder of the pointer did not change.
+ * The hook runs after the statement was emitted whichever assignment path
+ * emitted it (heap-string tracking, @c_struct overlays, trailing-block
+ * builders), which is why it lives at the generate_statement boundary rather
+ * than inside each path. */
+static int struct_is_observable(CodeGenerator* gen, const char* struct_name) {
+    if (!gen || !struct_name) return 0;
+    ASTNode* sd = find_struct_definition_by_name(gen->program, struct_name);
+    return sd && annotation_has_marker(sd->annotation, "observable");
+}
+
+/* The field-store LHS of `stmt`, or NULL when the statement is not one. */
+static ASTNode* field_store_lhs(ASTNode* stmt) {
+    if (!stmt) return NULL;
+    ASTNode* lhs = NULL;
+    if (stmt->type == AST_ASSIGNMENT && stmt->child_count >= 2) {
+        lhs = stmt->children[0];
+    } else if (stmt->type == AST_EXPRESSION_STATEMENT && stmt->child_count > 0) {
+        ASTNode* inner = stmt->children[0];
+        if (inner && inner->type == AST_BINARY_EXPRESSION && inner->value &&
+            strcmp(inner->value, "=") == 0 && inner->child_count == 2) {
+            lhs = inner->children[0];
+        }
+    }
+    return (lhs && lhs->type == AST_MEMBER_ACCESS && lhs->child_count >= 1) ? lhs : NULL;
+}
+
+static void emit_observe_notify(CodeGenerator* gen, ASTNode* base, int by_address) {
+    print_indent(gen);
+    fprintf(gen->output, "aether_observe_notify(%s(", by_address ? "&" : "");
+    int saved = gen->generating_lvalue;
+    gen->generating_lvalue = 1;
+    generate_expression(gen, base);
+    gen->generating_lvalue = saved;
+    fprintf(gen->output, "));\n");
+}
+
+static void emit_observable_store_notify(CodeGenerator* gen, ASTNode* stmt) {
+    ASTNode* node = field_store_lhs(gen ? stmt : NULL);
+    while (node && node->type == AST_MEMBER_ACCESS && node->child_count >= 1) {
+        ASTNode* base = node->children[0];
+        Type* bt = base ? base->node_type : NULL;
+        if (bt && bt->kind == TYPE_STRUCT) {
+            if (struct_is_observable(gen, bt->struct_name)) emit_observe_notify(gen, base, 1);
+            node = base;   /* the enclosing value changed too */
+            continue;
+        }
+        if (bt && bt->kind == TYPE_PTR && bt->element_type &&
+            bt->element_type->kind == TYPE_STRUCT) {
+            if (struct_is_observable(gen, bt->element_type->struct_name))
+                emit_observe_notify(gen, base, 0);
+        }
+        break;
+    }
+}
+
+static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt);
+
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
+    if (!stmt) return;
+    generate_statement_body(gen, stmt);
+    emit_observable_store_notify(gen, stmt);
+}
+
+static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
     codegen_note_diag_pos(stmt);
@@ -7338,7 +7412,10 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         ASTNode as_assign = *inner;
                         as_assign.type = AST_ASSIGNMENT;
                         print_indent(gen);
-                        generate_statement(gen, &as_assign);
+                        /* The body, not the wrapper: the enclosing
+                         * generate_statement runs the observable-store
+                         * hook once for this statement (#2220). */
+                        generate_statement_body(gen, &as_assign);
                         break;
                     }
                 }

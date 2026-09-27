@@ -5850,6 +5850,30 @@ ASTNode* parse_struct_definition(Parser* parser) {
     
     /* Past this point the definition (and every field attached to it) belongs
      * to this function until it is returned, so each error path releases it. */
+
+    /* Zero or more `@`-attributes after the name, the same position an
+     * `extern struct` takes `@packed` (#747):
+     *   @observable — every field store on a value of this struct is
+     *                 followed by a runtime notification to the closures
+     *                 registered on that object through std.observe (#2220).
+     * Carried as a `;`-joined marker so a leading `@derive(...)` on the same
+     * struct keeps it. */
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
+        advance_token(parser);  // consume '@'
+        Token* attr = peek_token(parser);
+        if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+            strcmp(attr->value, "observable") == 0) {
+            advance_token(parser);
+            struct_def->annotation = annotation_add_marker(struct_def->annotation,
+                                                           "observable");
+        } else {
+            parser_error(parser,
+                "unknown struct attribute (expected @observable)");
+            free_ast_node(struct_def);
+            return NULL;
+        }
+    }
+
     if (!expect_token(parser, TOKEN_LEFT_BRACE)) { free_ast_node(struct_def); return NULL; }
 
     // Parse fields (types optional - will be inferred!)
@@ -6538,8 +6562,15 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     if (next_tok && next_tok->type == TOKEN_STRUCT) {
                         ASTNode* sd = parse_struct_definition(parser);
                         if (sd) {
-                            if (sd->annotation) free(sd->annotation);
+                            /* `derive:` has to lead the marker set (derive.c
+                             * keys on the prefix); markers the struct's own
+                             * attributes added (`@observable`) follow it. */
+                            char* own = sd->annotation;
                             sd->annotation = strdup(tag);
+                            if (own) {
+                                sd->annotation = annotation_add_marker(sd->annotation, own);
+                                free(own);
+                            }
                         }
                         node = sd;
                         break;

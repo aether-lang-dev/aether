@@ -4,6 +4,7 @@
 #include "../../compiler/codegen/codegen.h"
 #include "../../compiler/codegen/codegen_internal.h"
 #include "../../compiler/analysis/typechecker.h"
+#include "../../compiler/analysis/derive.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -431,4 +432,99 @@ TEST(interp_temp_c_type_matches_vararg_casts) {
     t = create_type(TYPE_FLOAT);    ASSERT_TRUE(strcmp("double", interp_temp_c_type(t)) == 0);      free_type(t);
     ASSERT_TRUE(strcmp("int", interp_temp_c_type(NULL)) == 0);
     t = create_type(TYPE_STRUCT);   ASSERT_NULL(interp_temp_c_type(t));                              free_type(t);
+}
+
+/* #2220 — observable struct models. A field store on a value whose struct is
+ * `@observable` is followed by `aether_observe_notify(<object>)`: by address
+ * for a value (`&(m)`), by the pointer itself for a `*T` (`(p)`). A nested
+ * value store notifies innermost first and then the enclosing value. A store
+ * on a struct without the attribute emits no call. */
+static int count_occurrences(const char* hay, const char* needle) {
+    int n = 0;
+    size_t len = strlen(needle);
+    for (const char* p = strstr(hay, needle); p; p = strstr(p + len, needle)) n++;
+    return n;
+}
+
+TEST(codegen_observable_value_store_notifies_by_address) {
+    char* buf = generate_typechecked(
+        "struct Model @observable { count: int }\n"
+        "main() { m = Model { count: 0 }\n  m.count = 1\n  m.count += 1 }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(2, count_occurrences(buf, "aether_observe_notify(&(m));"));
+    free(buf);
+}
+
+TEST(codegen_observable_pointer_store_notifies_pointer) {
+    char* buf = generate_typechecked(
+        "struct Model @observable { count: int }\n"
+        "main() { p = heap.new(Model)\n  p.count = 1\n  heap.free(p) }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(1, count_occurrences(buf, "aether_observe_notify((p));"));
+    free(buf);
+}
+
+TEST(codegen_plain_struct_store_emits_no_notify) {
+    char* buf = generate_typechecked(
+        "struct Model { count: int }\n"
+        "main() { m = Model { count: 0 }\n  m.count = 1\n"
+        "  p = heap.new(Model)\n  p.count = 2\n  heap.free(p) }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(0, count_occurrences(buf, "aether_observe_notify(&"));
+    ASSERT_EQ(0, count_occurrences(buf, "aether_observe_notify(("));
+    free(buf);
+}
+
+TEST(codegen_observable_nested_value_store_notifies_inner_then_outer) {
+    char* buf = generate_typechecked(
+        "struct Inner @observable { x: int }\n"
+        "struct Outer @observable { n: int, inner: Inner }\n"
+        "main() { o = Outer { n: 0, inner: Inner { x: 0 } }\n  o.inner.x = 1 }");
+    ASSERT_NOT_NULL(buf);
+    const char* inner = strstr(buf, "aether_observe_notify(&(o.inner));");
+    const char* outer = strstr(buf, "aether_observe_notify(&(o));");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(outer);
+    ASSERT_TRUE(inner < outer);
+    free(buf);
+}
+
+TEST(codegen_observable_store_through_pointer_field_notifies_pointee_only) {
+    char* buf = generate_typechecked(
+        "struct Inner @observable { x: int }\n"
+        "struct Outer @observable { n: int, link: *Inner }\n"
+        "main() { o = Outer { n: 0, link: heap.new(Inner) }\n  o.link.x = 1\n  heap.free(o.link) }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(1, count_occurrences(buf, "aether_observe_notify((o.link));"));
+    ASSERT_EQ(0, count_occurrences(buf, "aether_observe_notify(&(o));"));
+    free(buf);
+}
+
+TEST(codegen_observable_survives_derive_pass) {
+    int count;
+    Token** tokens = tokenize_source(
+        "@derive(eq)\nstruct Model @observable { count: int }\n"
+        "main() { m = Model { count: 0 }\n  m.count = 1 }", &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    ASSERT_NOT_NULL(ast);
+    ASSERT_EQ(0, derive_synthesize_pass(ast));
+    ASSERT_TRUE(typecheck_program(ast));
+
+    FILE* out = tmpfile();
+    ASSERT_NOT_NULL(out);
+    CodeGenerator* gen = create_code_generator(out);
+    generate_program(gen, ast);
+    char* buf = read_all(out);
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(1, count_occurrences(buf, "aether_observe_notify(&(m));"));
+    ASSERT_TRUE(strstr(buf, "Model_eq") != NULL);   /* derive still ran */
+    free(buf);
+
+    fclose(out);
+    free_code_generator(gen);
+    free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
 }
