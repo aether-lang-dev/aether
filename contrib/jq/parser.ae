@@ -35,7 +35,7 @@ exports(
     parse, free, dump
 )
 
-struct Parser {
+struct JqParser {
     toks: ptr,
     n: int,
     i: int,
@@ -60,7 +60,7 @@ const MAX_INTERPOLATION_DEPTH = 256
 
 // Strings the parser keeps are JSON strings (like the AST's names) so their
 // lifetime is explicit: released here, never by a generated destructor.
-_dispose(p: *Parser) {
+_dispose(p: *JqParser) {
     if p.err != null { json.json_free(p.err) }
     json.json_free(p.src)
     heap.free(p)
@@ -80,7 +80,7 @@ _parse_at(src: string, depth: int, interp: int) -> ptr! {
     if toks == null {
         return null, "syntax error: ${lerr}"
     }
-    p = heap.new(Parser)
+    p = heap.new(JqParser)
     p.toks = toks
     p.n = list.size(toks)
     p.i = 0
@@ -128,48 +128,48 @@ _line_of(src: string, pos: int) -> int {
 
 // --- token access ----------------------------------------------------
 
-_tok(p: *Parser) -> ptr {
+_tok(p: *JqParser) -> ptr {
     if p.i >= p.n { return list.get_raw(p.toks, p.n - 1) }
     return list.get_raw(p.toks, p.i)
 }
 
-_kind(p: *Parser) -> int { return lexer.token_kind(_tok(p)) }
-_text(p: *Parser) -> string { return lexer.token_text(_tok(p)) }
-_pos(p: *Parser) -> int { return lexer.token_pos(_tok(p)) }
+_kind(p: *JqParser) -> int { return lexer.token_kind(_tok(p)) }
+_text(p: *JqParser) -> string { return lexer.token_text(_tok(p)) }
+_pos(p: *JqParser) -> int { return lexer.token_pos(_tok(p)) }
 
-_kind_at(p: *Parser, off: int) -> int {
+_kind_at(p: *JqParser, off: int) -> int {
     at = p.i + off
     if at >= p.n { return lexer.TK_EOF }
     return lexer.token_kind(list.get_raw(p.toks, at))
 }
 
-_text_at(p: *Parser, off: int) -> string {
+_text_at(p: *JqParser, off: int) -> string {
     at = p.i + off
     if at >= p.n { return "" }
     return lexer.token_text(list.get_raw(p.toks, at))
 }
 
-_advance(p: *Parser) {
+_advance(p: *JqParser) {
     if p.i < p.n { p.i = p.i + 1 }
 }
 
-_is_op(p: *Parser, s: string) -> int {
+_is_op(p: *JqParser, s: string) -> int {
     if _kind(p) != lexer.TK_OP { return 0 }
     return string.equals(_text(p), s)
 }
 
-_is_op_at(p: *Parser, off: int, s: string) -> int {
+_is_op_at(p: *JqParser, off: int, s: string) -> int {
     if _kind_at(p, off) != lexer.TK_OP { return 0 }
     return string.equals(_text_at(p, off), s)
 }
 
-_is_kw(p: *Parser, s: string) -> int {
+_is_kw(p: *JqParser, s: string) -> int {
     if _kind(p) != lexer.TK_KEYWORD { return 0 }
     return string.equals(_text(p), s)
 }
 
 // A readable rendering of the current token for diagnostics.
-_describe(p: *Parser) -> string {
+_describe(p: *JqParser) -> string {
     k = _kind(p)
     if k == lexer.TK_EOF { return "end of input" }
     if k == lexer.TK_NUM { return value.num_to_string(lexer.token_num(_tok(p))) }
@@ -182,7 +182,7 @@ _describe(p: *Parser) -> string {
 
 // Record the first failure; always returns null so callers can
 // `return _fail(...)`.
-_fail(p: *Parser, msg: string) -> ptr {
+_fail(p: *JqParser, msg: string) -> ptr {
     if p.failed == 0 {
         p.failed = 1
         p.err = json.json_create_string(msg)
@@ -191,7 +191,7 @@ _fail(p: *Parser, msg: string) -> ptr {
     return null
 }
 
-_expect_op(p: *Parser, s: string) -> int {
+_expect_op(p: *JqParser, s: string) -> int {
     if _is_op(p, s) == 1 {
         _advance(p)
         return 1
@@ -200,7 +200,7 @@ _expect_op(p: *Parser, s: string) -> int {
     return 0
 }
 
-_expect_kw(p: *Parser, s: string) -> int {
+_expect_kw(p: *JqParser, s: string) -> int {
     if _is_kw(p, s) == 1 {
         _advance(p)
         return 1
@@ -209,7 +209,7 @@ _expect_kw(p: *Parser, s: string) -> int {
     return 0
 }
 
-_mk(p: *Parser, kind: int, a: ptr, b: ptr) -> ptr {
+_mk(p: *JqParser, kind: int, a: ptr, b: ptr) -> ptr {
     n = ast.new_node(kind, a, b)
     (n as *Node).pos = _pos(p)
     return n
@@ -217,7 +217,7 @@ _mk(p: *Parser, kind: int, a: ptr, b: ptr) -> ptr {
 
 // --- grammar ---------------------------------------------------------
 
-_parse_pipe(p: *Parser) -> ptr {
+_parse_pipe(p: *JqParser) -> ptr {
     if _is_kw(p, "def") == 1 {
         d = _parse_funcdef(p)
         if p.failed == 1 { return d }
@@ -235,7 +235,7 @@ _parse_pipe(p: *Parser) -> ptr {
     return left
 }
 
-_parse_comma(p: *Parser) -> ptr {
+_parse_comma(p: *JqParser) -> ptr {
     left = _parse_alt(p)
     while p.failed == 0 {
         if p.no_comma == 1 { break }
@@ -247,7 +247,7 @@ _parse_comma(p: *Parser) -> ptr {
     return left
 }
 
-_parse_alt(p: *Parser) -> ptr {
+_parse_alt(p: *JqParser) -> ptr {
     left = _parse_assign(p)
     if p.failed == 1 { return left }
     if _is_op(p, "//") == 1 {
@@ -260,7 +260,7 @@ _parse_alt(p: *Parser) -> ptr {
     return left
 }
 
-_assign_op(p: *Parser) -> int {
+_assign_op(p: *JqParser) -> int {
     if _kind(p) != lexer.TK_OP { return -1 }
     t = _text(p)
     if string.equals(t, "=") == 1 { return ast.OP_ASSIGN }
@@ -274,7 +274,7 @@ _assign_op(p: *Parser) -> int {
     return -1
 }
 
-_parse_assign(p: *Parser) -> ptr {
+_parse_assign(p: *JqParser) -> ptr {
     left = _parse_or(p)
     if p.failed == 1 { return left }
     op = _assign_op(p)
@@ -288,7 +288,7 @@ _parse_assign(p: *Parser) -> ptr {
     return left
 }
 
-_parse_or(p: *Parser) -> ptr {
+_parse_or(p: *JqParser) -> ptr {
     left = _parse_and(p)
     while p.failed == 0 {
         if _is_kw(p, "or") == 0 { break }
@@ -301,7 +301,7 @@ _parse_or(p: *Parser) -> ptr {
     return left
 }
 
-_parse_and(p: *Parser) -> ptr {
+_parse_and(p: *JqParser) -> ptr {
     left = _parse_cmp(p)
     while p.failed == 0 {
         if _is_kw(p, "and") == 0 { break }
@@ -314,7 +314,7 @@ _parse_and(p: *Parser) -> ptr {
     return left
 }
 
-_cmp_op(p: *Parser) -> int {
+_cmp_op(p: *JqParser) -> int {
     if _kind(p) != lexer.TK_OP { return -1 }
     t = _text(p)
     if string.equals(t, "==") == 1 { return ast.OP_EQ }
@@ -326,7 +326,7 @@ _cmp_op(p: *Parser) -> int {
     return -1
 }
 
-_parse_cmp(p: *Parser) -> ptr {
+_parse_cmp(p: *JqParser) -> ptr {
     left = _parse_add(p)
     if p.failed == 1 { return left }
     op = _cmp_op(p)
@@ -340,7 +340,7 @@ _parse_cmp(p: *Parser) -> ptr {
     return left
 }
 
-_parse_add(p: *Parser) -> ptr {
+_parse_add(p: *JqParser) -> ptr {
     left = _parse_mul(p)
     while p.failed == 0 {
         op = -1
@@ -356,7 +356,7 @@ _parse_add(p: *Parser) -> ptr {
     return left
 }
 
-_parse_mul(p: *Parser) -> ptr {
+_parse_mul(p: *JqParser) -> ptr {
     left = _parse_unary(p)
     while p.failed == 0 {
         op = -1
@@ -373,7 +373,7 @@ _parse_mul(p: *Parser) -> ptr {
     return left
 }
 
-_parse_unary(p: *Parser) -> ptr {
+_parse_unary(p: *JqParser) -> ptr {
     if _is_op(p, "-") == 1 {
         // A `-` chain recurses here, not through _parse_term, so guard it
         // here too: 80000 leading minuses would otherwise overflow the stack
@@ -393,7 +393,7 @@ _parse_unary(p: *Parser) -> ptr {
 
 // A term with its suffixes. `allow_as` is 0 for the source term of
 // `reduce` / `foreach`, whose own `as` belongs to that construct.
-_parse_postfix(p: *Parser, allow_as: int) -> ptr {
+_parse_postfix(p: *JqParser, allow_as: int) -> ptr {
     t = _parse_term(p)
     while p.failed == 0 {
         k = _kind(p)
@@ -437,7 +437,7 @@ _parse_postfix(p: *Parser, allow_as: int) -> ptr {
 }
 
 // `[`  ]  |  [e]  |  [e:]  |  [:e]  |  [e:e]   applied to target `t`.
-_parse_bracket_suffix(p: *Parser, t: ptr) -> ptr {
+_parse_bracket_suffix(p: *JqParser, t: ptr) -> ptr {
     _advance(p) // '['
     if _is_op(p, "]") == 1 {
         _advance(p)
@@ -476,13 +476,13 @@ _parse_bracket_suffix(p: *Parser, t: ptr) -> ptr {
     return _mk(p, ast.N_INDEX, t, e)
 }
 
-_string_literal(p: *Parser, s: string) -> ptr {
+_string_literal(p: *JqParser, s: string) -> ptr {
     n = _mk(p, ast.N_LITERAL, null, null)
     (n as *Node).val = json.json_create_string(s)
     return n
 }
 
-_number_literal(p: *Parser, d: float) -> ptr {
+_number_literal(p: *JqParser, d: float) -> ptr {
     n = _mk(p, ast.N_LITERAL, null, null)
     (n as *Node).val = value.make_number(d)
     return n
@@ -491,7 +491,7 @@ _number_literal(p: *Parser, d: float) -> ptr {
 // Every nesting level of the grammar passes through here (a pipe's next
 // stage, a call's argument, a constructor's element, an interpolation's
 // program), so this is where the recursion is guarded.
-_parse_term(p: *Parser) -> ptr {
+_parse_term(p: *JqParser) -> ptr {
     p.depth = p.depth + 1
     if guard.too_deep(p.depth, PARSE_RESERVE, PARSE_FALLBACK_MAX) == 1 {
         p.depth = p.depth - 1
@@ -502,7 +502,7 @@ _parse_term(p: *Parser) -> ptr {
     return t
 }
 
-_parse_term_kind(p: *Parser) -> ptr {
+_parse_term_kind(p: *JqParser) -> ptr {
     k = _kind(p)
     if k == lexer.TK_NUM {
         n = _number_literal(p, lexer.token_num(_tok(p)))
@@ -668,7 +668,7 @@ _parse_term_kind(p: *Parser) -> ptr {
 
 // The string token at the cursor, as an N_STRING node. Interpolated parts
 // are parsed with a fresh parser over their source text.
-_parse_string_token(p: *Parser, format: string) -> ptr {
+_parse_string_token(p: *JqParser, format: string) -> ptr {
     parts = lexer.token_parts(_tok(p))
     n = _mk(p, ast.N_STRING, null, null)
     if string.length(format) > 0 { ast.set_name(n, format) }
@@ -713,7 +713,7 @@ _parse_string_token(p: *Parser, format: string) -> ptr {
 }
 
 // `{` entries `}`
-_parse_object(p: *Parser) -> ptr {
+_parse_object(p: *JqParser) -> ptr {
     _advance(p) // '{'
     n = _mk(p, ast.N_OBJECT, null, null)
     entries = list.new()
@@ -737,7 +737,7 @@ _parse_object(p: *Parser) -> ptr {
 }
 
 // An object value: a pipe in which `,` is not an operator.
-_parse_object_value(p: *Parser) -> ptr {
+_parse_object_value(p: *JqParser) -> ptr {
     saved = p.no_comma
     p.no_comma = 1
     v = _parse_pipe(p)
@@ -745,7 +745,7 @@ _parse_object_value(p: *Parser) -> ptr {
     return v
 }
 
-_parse_object_entry(p: *Parser) -> ptr {
+_parse_object_entry(p: *JqParser) -> ptr {
     k = _kind(p)
     e = _mk(p, ast.N_OBJ_ENTRY, null, null)
     ep = e as *Node
@@ -820,7 +820,7 @@ _parse_object_entry(p: *Parser) -> ptr {
 }
 
 // if c then a (elif c then a)* (else b)? end
-_parse_if(p: *Parser) -> ptr {
+_parse_if(p: *JqParser) -> ptr {
     _advance(p) // 'if' or 'elif'
     cond = _parse_pipe(p)
     if _expect_kw(p, "then") == 0 { return cond }
@@ -841,7 +841,7 @@ _parse_if(p: *Parser) -> ptr {
 
 // reduce SRC as PAT (INIT; UPDATE)        (is_foreach = 0)
 // foreach SRC as PAT (INIT; UPDATE[; EXTRACT])
-_parse_reduce(p: *Parser, is_foreach: int) -> ptr {
+_parse_reduce(p: *JqParser, is_foreach: int) -> ptr {
     _advance(p)
     src = _parse_postfix(p, 0)
     kind = ast.N_REDUCE
@@ -869,7 +869,7 @@ _parse_reduce(p: *Parser, is_foreach: int) -> ptr {
 }
 
 // def name[(params)]: body;     The caller attaches the rest of the pipe.
-_parse_funcdef(p: *Parser) -> ptr {
+_parse_funcdef(p: *JqParser) -> ptr {
     _advance(p) // 'def'
     n = _mk(p, ast.N_FUNCDEF, null, null)
     params = list.new()
@@ -911,7 +911,7 @@ _parse_funcdef(p: *Parser) -> ptr {
 }
 
 // PAT (?// PAT)*
-_parse_patterns(p: *Parser) -> ptr {
+_parse_patterns(p: *JqParser) -> ptr {
     pats = list.new()
     list.list_add_raw(pats, _parse_pattern(p))
     while p.failed == 0 {
@@ -923,7 +923,7 @@ _parse_patterns(p: *Parser) -> ptr {
 }
 
 // $name | [p, ...] | {entries}
-_parse_pattern(p: *Parser) -> ptr {
+_parse_pattern(p: *JqParser) -> ptr {
     if _kind(p) == lexer.TK_VAR {
         n = _mk(p, ast.P_VAR, null, null)
         ast.set_name(n, _text(p))
@@ -968,7 +968,7 @@ _parse_pattern(p: *Parser) -> ptr {
 }
 
 // $name | $name: pat | ident: pat | "str": pat | (expr): pat
-_parse_pattern_entry(p: *Parser) -> ptr {
+_parse_pattern_entry(p: *JqParser) -> ptr {
     e = _mk(p, ast.P_ENTRY, null, null)
     ep = e as *Node
     k = _kind(p)

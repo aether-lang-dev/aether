@@ -1,0 +1,42 @@
+// #2255: contrib.jq and std.jsonpath each import a sibling file with a bare
+// `import parser`. The module registry is keyed by name, so whichever
+// package loaded first owned `parser` and the other ran against it: with
+// std.jsonpath first the program failed to compile ("'free' is not exported
+// from module 'parser'"); with contrib.jq first it compiled and
+// jsonpath.query silently failed. Each package's own files are now named by
+// their place in it (contrib.jq.parser, std.jsonpath.parser). This file
+// imports contrib.jq first; its sibling spec imports them the other way round.
+//
+// Run with:  ae run contrib/jq/test_with_jsonpath.ae
+
+import std.spec
+import std.json
+import contrib.jq
+import std.jsonpath
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "contrib.jq beside std.jsonpath, contrib.jq first") {
+        spec.it("jq runs a program with its own parser") callback {
+            out, err = jq.query(".a, (.b | length)", "{\"a\": 7, \"b\": [1, 2, 3]}")
+            spec.assert_str_eq(err, "", "no jq error")
+            spec.assert_str_eq(out, "7\n3", "jq output")
+        }
+        spec.it("jsonpath runs a query with its own parser") callback {
+            doc, jerr = json.parse("{\"b\": [1, 2, 3], \"c\": {\"d\": 4}}")
+            spec.assert_str_eq(jerr, "", "document parses")
+            r, err = jsonpath.query(doc, "$.b[*]")
+            spec.assert_str_eq(err, "", "no jsonpath error")
+            spec.assert_eq(jsonpath.result_size(r), 3, "three matches")
+            jsonpath.free_result(r)
+            r2, err2 = jsonpath.query(doc, "$..d")
+            spec.assert_str_eq(err2, "", "no jsonpath error on descent")
+            spec.assert_eq(jsonpath.result_size(r2), 1, "one match")
+            jsonpath.free_result(r2)
+            json.json_free(doc)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

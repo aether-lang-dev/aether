@@ -132,6 +132,10 @@ TESTS=(
   "jq/paths|contrib/jq/test_paths.ae||leak|"
   "jq/builtins|contrib/jq/test_builtins.ae||leak|"
   "jq/facade|contrib/jq/test_jq.ae||leak|"
+  # jq beside std.jsonpath, in both import orders: each package imports its
+  # own `parser`, and those must stay two modules (#2255).
+  "jq/with-jsonpath|contrib/jq/test_with_jsonpath.ae||leak|"
+  "jq/after-jsonpath|contrib/jq/test_after_jsonpath.ae||leak|"
   # Hostile-input specs: programs nested past the stack (nesting), values
   # nested past the depth cap and runaway recursion (depth), and numbers,
   # NUL, duplicate keys, regexes, unbounded work (hardening).

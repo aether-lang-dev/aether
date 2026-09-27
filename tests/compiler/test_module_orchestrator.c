@@ -387,6 +387,65 @@ TEST_CATEGORY(module_find_by_namespace_leaf_finds_shipped_module_over_renamed_lo
     module_registry_shutdown();
 }
 
+/* #2255: a module registered WITH its source: one `extern <name>`
+ * declaration, or (extern_name NULL) one Aether function. Whether a module
+ * keeps its leaf is read from these, not from the std./contrib. prefix. */
+static AetherModule* ns_register_with(const char* name, const char* extern_name) {
+    AetherModule* m = ns_register(name);
+    ASTNode* mod = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    if (extern_name) {
+        add_child(mod, create_ast_node(AST_EXTERN_FUNCTION, extern_name, 0, 0));
+    } else {
+        ASTNode* fn = create_ast_node(AST_FUNCTION_DEFINITION, "helper", 0, 0);
+        add_child(fn, create_ast_node(AST_BLOCK, NULL, 0, 0));
+        add_child(mod, fn);
+    }
+    m->ast = mod;
+    return m;
+}
+
+/* #2255: std.jsonpath and contrib.jq each have a pure-Aether `parser`.
+ * Neither's calls are bound to a `parser_` C symbol, so both take their
+ * full path rather than share `parser`. */
+TEST_CATEGORY(namespace_pure_aether_shipped_modules_sharing_a_leaf_both_move, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register_with("std.jsonpath.parser", NULL);
+    ns_register_with("contrib.jq.parser", NULL);
+    module_assign_namespaces();
+    ASSERT_STREQ("std_jsonpath_parser", module_namespace_of("std.jsonpath.parser"));
+    ASSERT_STREQ("contrib_jq_parser", module_namespace_of("contrib.jq.parser"));
+    module_registry_shutdown();
+}
+
+/* #2190 read from the source: std.math's `extern math_floor` is what ties it
+ * to `math`, and a local module with the same kind of externs is tied the
+ * same way; the other module in each pair moves. */
+TEST_CATEGORY(namespace_module_with_leaf_prefixed_externs_keeps_leaf, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register_with("pkg.math", NULL);
+    ns_register_with("std.math", "math_floor");
+    ns_register_with("mylib.gfx", "gfx_init");
+    ns_register_with("other.gfx", NULL);
+    module_assign_namespaces();
+    ASSERT_STREQ("math", module_namespace_of("std.math"));
+    ASSERT_STREQ("pkg_math", module_namespace_of("pkg.math"));
+    ASSERT_STREQ("gfx", module_namespace_of("mylib.gfx"));
+    ASSERT_STREQ("other_gfx", module_namespace_of("other.gfx"));
+    module_registry_shutdown();
+}
+
+/* Only a `<leaf>_` extern ties a module to its leaf: contrib.jq.value's
+ * externs are `aether_jq_*`, and `valuer_x` merely starts with the leaf. */
+TEST_CATEGORY(namespace_extern_without_leaf_prefix_does_not_pin, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register_with("contrib.jq.value", "aether_jq_num_to_str");
+    ns_register_with("std.cfg.value", "valuer_x");
+    module_assign_namespaces();
+    ASSERT_STREQ("contrib_jq_value", module_namespace_of("contrib.jq.value"));
+    ASSERT_STREQ("std_cfg_value", module_namespace_of("std.cfg.value"));
+    module_registry_shutdown();
+}
+
 /* A module AST holding one function `fn_name` with an empty body. */
 static ASTNode* ns_module_ast(const char* fn_name) {
     ASTNode* mod = create_ast_node(AST_PROGRAM, NULL, 0, 0);
