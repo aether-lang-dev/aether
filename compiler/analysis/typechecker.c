@@ -43,11 +43,9 @@ static int enum_has_member(const char* ename, const char* member);
 // Get the last component of a module path for namespace
 // "mypackage.utils" -> "utils"
 static const char* get_namespace_from_path(const char* module_path) {
-    const char* last_dot = strrchr(module_path, '.');
-    if (last_dot) {
-        return last_dot + 1;
-    }
-    return module_path;
+    /* #2209: the merger's namespace for this module — its last segment
+     * unless another loaded module ends the same way. */
+    return module_namespace_of(module_path);
 }
 
 // Symbol table functions
@@ -558,16 +556,9 @@ static int is_export_blocked(const char* namespace, const char* symbol) {
  * exports gate keeps an ambiguous leaf from resolving anything the
  * matched module doesn't explicitly export. (#1035) */
 static AetherModule* module_find_by_name_or_leaf(const char* name) {
-    if (!global_module_registry || !name) return NULL;
-    AetherModule* m = module_find(name);
-    if (m) return m;
-    for (int i = 0; i < global_module_registry->module_count; i++) {
-        AetherModule* cand = global_module_registry->modules[i];
-        if (!cand || !cand->name) continue;
-        const char* last_dot = strrchr(cand->name, '.');
-        if (last_dot && strcmp(last_dot + 1, name) == 0) return cand;
-    }
-    return NULL;
+    /* #2209: a qualified use now carries the module's assigned namespace,
+     * which is the leaf unless two loaded modules share one. */
+    return module_find_by_namespace(name);
 }
 
 int is_imported_namespace(const char* name) {
@@ -643,12 +634,12 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
              * `fn`. No local `hub_fn` symbol exists; redirect to the
              * defining module's `<origin>_fn`. */
             if (!sym && global_module_registry) {
-                AetherModule* hub = module_find(prefix);
+                AetherModule* hub = module_find_by_namespace(prefix);
                 AetherModule* origin = module_resolve_reexport(hub, suffix);
                 if (origin && origin->name) {
                     char c_origin[512];
                     snprintf(c_origin, sizeof(c_origin), "%s_%s",
-                             origin->name, suffix);
+                             module_namespace_of(origin->name), suffix);
                     sym = lookup_symbol(table, c_origin);
                 }
             }
@@ -4162,19 +4153,16 @@ int typecheck_program(ASTNode* program) {
 
                 // Handle stdlib imports: import std.X (or std.X.Y, std.X.Y.Z, ...)
                 if (strncmp(module_path, "std.", 4) == 0) {
-                    // For selective-import filter purposes we still want
-                    // the substring after `std.` ("fs", "http.client", ...).
-                    const char* module_name = module_path + 4;
-
                     // The qualified-call namespace prefix is the LEAF
                     // component (the bit after the last dot), not the
                     // whole sub-path. For `std.http.client` callers
                     // write `client.foo(...)`, not `http.client.foo(...)`.
                     // This matches what the orchestrator's merger uses
                     // when it prefixes wrapper function names — see
-                    // module_get_namespace() in aether_module.c.
-                    const char* last_dot = strrchr(module_name, '.');
-                    const char* ns_leaf  = last_dot ? last_dot + 1 : module_name;
+                    // module_get_namespace() in aether_module.c (#2209:
+                    // the full path, underscored, when two loaded modules
+                    // share a leaf).
+                    const char* ns_leaf  = get_namespace_from_path(module_path);
 
                     // Register namespace for qualified calls (e.g., string.new)
                     register_namespace(ns_leaf);
@@ -8464,11 +8452,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * doesn't exist; redirect to the defining module's symbol
                  * `<origin>_X`. */
                 if ((!sym || !sym->type) && global_module_registry) {
-                    AetherModule* hub = module_find(expr->children[0]->value);
+                    AetherModule* hub = module_find_by_namespace(expr->children[0]->value);
                     AetherModule* origin = module_resolve_reexport(hub, expr->value);
                     if (origin && origin->name) {
                         snprintf(qualified, sizeof(qualified), "%s_%s",
-                                 origin->name, expr->value);
+                                 module_namespace_of(origin->name), expr->value);
                         sym = lookup_symbol(table, qualified);
                     }
                 }

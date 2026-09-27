@@ -1,0 +1,25 @@
+// #2209, other import order: the library that imports gfx.vk comes first,
+// so gfx.vk is loaded before the program's own mine.vk. Before the fix this
+// order failed INSIDE pb ('SUCCESS' is not exported from module 'vk').
+// Also covers `import X as Y` at program level for a local package.
+
+import pb
+import mine.vk as ownvk
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${label}: expected ${want}, got ${got}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== test_module_leaf_collision_order ===")
+    check("pb's vk.SUCCESS is gfx.vk when pb loads first", pb.ok(), 0)
+    check("program alias reaches a function", ownvk.mine(), 7)
+    check("program alias reaches a const", ownvk.MINE_CODE, 7)
+    println("All module leaf-collision order cases pass")
+}

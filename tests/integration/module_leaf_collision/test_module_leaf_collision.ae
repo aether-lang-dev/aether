@@ -1,0 +1,42 @@
+// #2209: two modules whose paths end in the same segment (`gfx.vk`, imported
+// by library `pb`, and `mine.vk`, imported here) used to share one namespace
+// program-wide, so whichever was imported first answered for both and the
+// other's exports were reported missing. Each library's `vk.` now means the
+// module that library imported, and `import X as Y` works inside a library.
+//
+// This file imports the program's `vk` FIRST; the _order sibling imports
+// the library that pulls in the other `vk` first. The issue fails both ways.
+
+import mine.vk
+import pb
+import pa
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${label}: expected ${want}, got ${got}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== test_module_leaf_collision ===")
+    check("program's vk.mine() is mine.vk", vk.mine(), 7)
+    check("program's vk.MINE_CODE is mine.vk", vk.MINE_CODE, 7)
+    check("pb's vk.SUCCESS is gfx.vk", pb.ok(), 0)
+    if pb.name() != "gfx" {
+        println("FAIL: pb.name(): expected gfx, got ${pb.name()}")
+        exit(1)
+    }
+    println("  PASS: pb's vk.describe() is gfx.vk")
+    check("alias in a library module reaches a const", pa.ok(), 0)
+    if pa.name() != "gfx" {
+        println("FAIL: pa.name(): expected gfx, got ${pa.name()}")
+        exit(1)
+    }
+    println("  PASS: alias in a library module reaches a function")
+    check("a local named like the alias stays a value", pa.shadowed(), 42)
+    println("All module leaf-collision cases pass")
+}

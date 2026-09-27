@@ -276,3 +276,189 @@ TEST_CATEGORY(prune_local_in_one_function_does_not_hide_a_reference_in_another, 
     ASSERT_TRUE(prune_has(program, "ui_record"));
     free_ast_node(program);
 }
+
+/* #2209: a module's merged symbols are prefixed with its namespace. That is
+ * the last path segment unless another loaded module ends the same way, in
+ * which case each gets its full path with dots as underscores, so `mine.vk`
+ * and `contrib.vulkan.vk` never share `vk_<name>`. */
+
+static AetherModule* ns_register(const char* name) {
+    AetherModule* m = module_create(name, "/fake.ae");
+    module_register(m);
+    return m;
+}
+
+TEST_CATEGORY(namespace_is_last_segment_when_unshared, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register("mine.vk");
+    ns_register("std.json");
+    ns_register("mathmod");
+    module_assign_namespaces();
+    ASSERT_STREQ("vk", module_namespace_of("mine.vk"));
+    ASSERT_STREQ("json", module_namespace_of("std.json"));
+    ASSERT_STREQ("mathmod", module_namespace_of("mathmod"));
+    module_registry_shutdown();
+}
+
+TEST_CATEGORY(namespace_is_full_path_when_last_segment_shared, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register("mine.vk");
+    ns_register("contrib.vulkan.vk");
+    ns_register("std.json");
+    module_assign_namespaces();
+    ASSERT_STREQ("mine_vk", module_namespace_of("mine.vk"));
+    ASSERT_STREQ("contrib_vulkan_vk", module_namespace_of("contrib.vulkan.vk"));
+    ASSERT_STREQ("json", module_namespace_of("std.json"));
+    module_registry_shutdown();
+}
+
+TEST_CATEGORY(namespace_of_unregistered_path_is_last_segment, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    module_assign_namespaces();
+    ASSERT_STREQ("client", module_namespace_of("std.http.client"));
+    ASSERT_STREQ("solo", module_namespace_of("solo"));
+    module_registry_shutdown();
+}
+
+TEST_CATEGORY(module_find_by_namespace_prefers_assigned_namespace, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    AetherModule* first = ns_register("contrib.vulkan.vk");
+    AetherModule* second = ns_register("mine.vk");
+    AetherModule* json = ns_register("std.json");
+    module_assign_namespaces();
+    ASSERT_TRUE(module_find_by_namespace("mine_vk") == second);
+    ASSERT_TRUE(module_find_by_namespace("contrib_vulkan_vk") == first);
+    ASSERT_TRUE(module_find_by_namespace("json") == json);
+    ASSERT_TRUE(module_find_by_namespace("std.json") == json);
+    /* A bare shared leaf still finds a module, the first registered, for
+     * a use that was never rewritten. */
+    ASSERT_TRUE(module_find_by_namespace("vk") == first);
+    ASSERT_NULL(module_find_by_namespace("nope"));
+    module_registry_shutdown();
+}
+
+/* A module AST holding one function `fn_name` with an empty body. */
+static ASTNode* ns_module_ast(const char* fn_name) {
+    ASTNode* mod = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    ASTNode* fn = create_ast_node(AST_FUNCTION_DEFINITION, fn_name, 0, 0);
+    add_child(fn, create_ast_node(AST_BLOCK, NULL, 0, 0));
+    add_child(mod, fn);
+    return mod;
+}
+
+/* `import <path>` (optionally `as <alias>`) as the parser shapes it. */
+static ASTNode* ns_import(const char* path, const char* alias) {
+    ASTNode* imp = create_ast_node(AST_IMPORT_STATEMENT, path, 0, 0);
+    if (alias) {
+        ASTNode* a = create_ast_node(AST_IDENTIFIER, alias, 0, 0);
+        a->annotation = strdup("module_alias");
+        add_child(imp, a);
+    }
+    return imp;
+}
+
+/* main() { <call> } where the call is written `<qualified>()`; returns the
+ * call node so a test can read its rewritten name. */
+static ASTNode* ns_main_calling(const char* qualified, ASTNode** call_out) {
+    ASTNode* call = create_ast_node(AST_FUNCTION_CALL, qualified, 0, 0);
+    ASTNode* block = create_ast_node(AST_BLOCK, NULL, 0, 0);
+    add_child(block, call);
+    ASTNode* mainfn = create_ast_node(AST_MAIN_FUNCTION, "main", 0, 0);
+    add_child(mainfn, block);
+    *call_out = call;
+    return mainfn;
+}
+
+static int ns_program_has_function(ASTNode* program, const char* name) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_FUNCTION_DEFINITION && c->value &&
+            strcmp(c->value, name) == 0) return 1;
+    }
+    return 0;
+}
+
+TEST_CATEGORY(merge_rewrites_program_alias_to_module_namespace, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    AetherModule* m = ns_register("mine.vk");
+    m->ast = ns_module_ast("mine");
+    module_assign_namespaces();
+
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, ns_import("mine.vk", "ownvk"));
+    ASTNode* call = NULL;
+    add_child(program, ns_main_calling("ownvk.mine", &call));
+
+    module_merge_into_program(program);
+
+    /* An alias-only import is not a selection: the module's functions merge. */
+    ASSERT_TRUE(ns_program_has_function(program, "vk_mine"));
+    ASSERT_STREQ("vk.mine", call->value);
+
+    free_ast_node(program);
+    module_registry_shutdown();
+}
+
+TEST_CATEGORY(merge_rewrites_shared_leaf_to_full_path_namespace, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    AetherModule* mine = ns_register("mine.vk");
+    mine->ast = ns_module_ast("mine");
+    AetherModule* gfx = ns_register("gfx.vk");
+    gfx->ast = ns_module_ast("describe");
+    module_assign_namespaces();
+
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, ns_import("mine.vk", NULL));
+    ASTNode* call = NULL;
+    add_child(program, ns_main_calling("vk.mine", &call));
+
+    module_merge_into_program(program);
+
+    ASSERT_TRUE(ns_program_has_function(program, "mine_vk_mine"));
+    ASSERT_FALSE(ns_program_has_function(program, "vk_mine"));
+    ASSERT_STREQ("mine_vk.mine", call->value);
+
+    free_ast_node(program);
+    module_registry_shutdown();
+}
+
+TEST_CATEGORY(merge_rewrites_a_library_import_inside_its_cloned_body, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    AetherModule* mine = ns_register("mine.vk");
+    mine->ast = ns_module_ast("mine");
+    AetherModule* gfx = ns_register("gfx.vk");
+    gfx->ast = ns_module_ast("describe");
+    /* Library `pb` imports gfx.vk as `vkapi` and calls `vkapi.describe()`. */
+    AetherModule* pb = ns_register("pb");
+    pb->ast = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(pb->ast, ns_import("gfx.vk", "vkapi"));
+    ASTNode* pb_fn = create_ast_node(AST_FUNCTION_DEFINITION, "name", 0, 0);
+    ASTNode* pb_body = create_ast_node(AST_BLOCK, NULL, 0, 0);
+    add_child(pb_body, create_ast_node(AST_FUNCTION_CALL, "vkapi.describe", 0, 0));
+    add_child(pb_fn, pb_body);
+    add_child(pb->ast, pb_fn);
+    module_assign_namespaces();
+
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, ns_import("mine.vk", NULL));
+    add_child(program, ns_import("pb", NULL));
+    ASTNode* call = NULL;
+    add_child(program, ns_main_calling("pb.name", &call));
+
+    module_merge_into_program(program);
+
+    ASSERT_TRUE(ns_program_has_function(program, "pb_name"));
+    ASTNode* merged = NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_FUNCTION_DEFINITION && c->value &&
+            strcmp(c->value, "pb_name") == 0) merged = c;
+    }
+    ASSERT_NOT_NULL(merged);
+    ASSERT_STREQ("gfx_vk.describe", merged->children[0]->children[0]->value);
+    /* The library's own source is untouched: only the clone is rewritten. */
+    ASSERT_STREQ("vkapi.describe", pb_body->children[0]->value);
+
+    free_ast_node(program);
+    module_registry_shutdown();
+}

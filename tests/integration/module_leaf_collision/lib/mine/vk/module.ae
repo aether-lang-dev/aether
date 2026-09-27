@@ -1,0 +1,8 @@
+// The program's own `vk`: same last segment as gfx.vk, different module.
+exports ( mine, MINE_CODE )
+
+const MINE_CODE = 7
+
+mine() -> int {
+    return MINE_CODE
+}

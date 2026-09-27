@@ -36,6 +36,15 @@ main() {
 2. `X.func()` is resolved to the C function `X_func()`
 3. Dot-style calls: `string.new()`, `list.free()`, etc. (compiler translates to C-level `string_new`, `list_free`)
 
+A module's namespace is the last segment of its path. When two loaded
+modules end in the same segment (`mine.vk` and `contrib.vulkan.vk`, #2209),
+each instead gets its full path with dots as underscores (`mine_vk`,
+`contrib_vulkan_vk`), and the merger rewrites the prefix each program or
+library *wrote* (`vk.`, or an `import … as …` alias) to the module that scope
+imported. So a module's imports resolve in that module, by full path or
+alias, never program-wide by last segment; `import X as Y` works in a library
+module exactly as it does in a program.
+
 ### Module Orchestration Phase
 
 Before type checking, the compiler runs a module orchestration phase
