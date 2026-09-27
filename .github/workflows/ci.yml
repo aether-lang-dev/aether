@@ -609,6 +609,20 @@ jobs:
         # Vulkan entries render and present here instead of skipping.
         install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc
 
+    # #2256: on Mesa 26.2.3 every Vulkan contrib entry passes its specs and
+    # then exits 127 at teardown under lavapipe; 26.1.2 was green. Pin it
+    # back until that is understood. The install above still brings Mesa's
+    # dependencies; this replaces only the package, which is safe because
+    # both builds of vulkan_lvp.dll import the same DLLs (libLLVM-22.dll
+    # included). pacman checks the package's .sig from the repo. Remove this
+    # step when #2256 is fixed.
+    - name: Pin Mesa to 26.1.2 (#2256)
+      run: |
+        pacman -U --noconfirm https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-mesa-26.1.2-1-any.pkg.tar.zst
+        pacman -Q mingw-w64-x86_64-mesa | grep -qx 'mingw-w64-x86_64-mesa 26.1.2-1' || {
+          echo "Mesa pin did not take:"; pacman -Q mingw-w64-x86_64-mesa; exit 1; }
+        pacman -Q mingw-w64-x86_64-mesa
+
     # Windows Defender real-time scanning of every compiler-produced
     # file is the dominant Windows-CI tax: `make ci` builds ~585 separate
     # test executables, and AV-scanning each .c/.o/.exe as it is written
