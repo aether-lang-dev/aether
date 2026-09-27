@@ -279,8 +279,10 @@ TEST_CATEGORY(prune_local_in_one_function_does_not_hide_a_reference_in_another, 
 
 /* #2209: a module's merged symbols are prefixed with its namespace. That is
  * the last path segment unless another loaded module ends the same way, in
- * which case each gets its full path with dots as underscores, so `mine.vk`
- * and `contrib.vulkan.vk` never share `vk_<name>`. */
+ * which case a local module gets its full path with dots as underscores, so
+ * `mine.vk` and `gfx.vk` never share `vk_<name>`. #2190: a shipped module
+ * (`std.*`, `contrib.*`) keeps its last segment whatever collides with it,
+ * because its externs are compiled under that prefix (`math_floor`). */
 
 static AetherModule* ns_register(const char* name) {
     AetherModule* m = module_create(name, "/fake.ae");
@@ -303,12 +305,48 @@ TEST_CATEGORY(namespace_is_last_segment_when_unshared, TEST_CATEGORY_COMPILER) {
 TEST_CATEGORY(namespace_is_full_path_when_last_segment_shared, TEST_CATEGORY_COMPILER) {
     module_registry_init();
     ns_register("mine.vk");
-    ns_register("contrib.vulkan.vk");
+    ns_register("gfx.vk");
     ns_register("std.json");
     module_assign_namespaces();
     ASSERT_STREQ("mine_vk", module_namespace_of("mine.vk"));
-    ASSERT_STREQ("contrib_vulkan_vk", module_namespace_of("contrib.vulkan.vk"));
+    ASSERT_STREQ("gfx_vk", module_namespace_of("gfx.vk"));
     ASSERT_STREQ("json", module_namespace_of("std.json"));
+    module_registry_shutdown();
+}
+
+/* #2190: `noise` imports std.math and calls `math.floor`; the program also
+ * imports its own `pkg.math`. std.math's `math_floor` is a runtime extern,
+ * so std.math must keep `math` and pkg.math is the one that moves. */
+TEST_CATEGORY(namespace_std_module_keeps_leaf_when_local_module_collides, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register("pkg.math");
+    ns_register("std.math");
+    module_assign_namespaces();
+    ASSERT_STREQ("math", module_namespace_of("std.math"));
+    ASSERT_STREQ("pkg_math", module_namespace_of("pkg.math"));
+    module_registry_shutdown();
+}
+
+TEST_CATEGORY(namespace_contrib_module_keeps_leaf_when_local_module_collides, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register("contrib.vulkan.vk");
+    ns_register("mine.vk");
+    module_assign_namespaces();
+    ASSERT_STREQ("vk", module_namespace_of("contrib.vulkan.vk"));
+    ASSERT_STREQ("mine_vk", module_namespace_of("mine.vk"));
+    module_registry_shutdown();
+}
+
+/* Registration order does not decide who keeps the leaf. */
+TEST_CATEGORY(namespace_std_module_keeps_leaf_whichever_loads_first, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register("std.math");
+    ns_register("pkg.math");
+    ns_register("other.math");
+    module_assign_namespaces();
+    ASSERT_STREQ("math", module_namespace_of("std.math"));
+    ASSERT_STREQ("pkg_math", module_namespace_of("pkg.math"));
+    ASSERT_STREQ("other_math", module_namespace_of("other.math"));
     module_registry_shutdown();
 }
 
@@ -322,18 +360,30 @@ TEST_CATEGORY(namespace_of_unregistered_path_is_last_segment, TEST_CATEGORY_COMP
 
 TEST_CATEGORY(module_find_by_namespace_prefers_assigned_namespace, TEST_CATEGORY_COMPILER) {
     module_registry_init();
-    AetherModule* first = ns_register("contrib.vulkan.vk");
+    AetherModule* first = ns_register("gfx.vk");
     AetherModule* second = ns_register("mine.vk");
     AetherModule* json = ns_register("std.json");
     module_assign_namespaces();
     ASSERT_TRUE(module_find_by_namespace("mine_vk") == second);
-    ASSERT_TRUE(module_find_by_namespace("contrib_vulkan_vk") == first);
+    ASSERT_TRUE(module_find_by_namespace("gfx_vk") == first);
     ASSERT_TRUE(module_find_by_namespace("json") == json);
     ASSERT_TRUE(module_find_by_namespace("std.json") == json);
     /* A bare shared leaf still finds a module, the first registered, for
      * a use that was never rewritten. */
     ASSERT_TRUE(module_find_by_namespace("vk") == first);
     ASSERT_NULL(module_find_by_namespace("nope"));
+    module_registry_shutdown();
+}
+
+/* #2190: the leaf a shipped module kept is ITS namespace, so `math` finds
+ * std.math even when pkg.math registered first. */
+TEST_CATEGORY(module_find_by_namespace_leaf_finds_shipped_module_over_renamed_local, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    AetherModule* local = ns_register("pkg.math");
+    AetherModule* std_math = ns_register("std.math");
+    module_assign_namespaces();
+    ASSERT_TRUE(module_find_by_namespace("math") == std_math);
+    ASSERT_TRUE(module_find_by_namespace("pkg_math") == local);
     module_registry_shutdown();
 }
 

@@ -362,10 +362,21 @@ static const char* module_last_segment(const char* path);  /* defined below */
  * symbols were both `vk_<name>`, `module_find_by_name_or_leaf("vk")` returned
  * whichever loaded first, and the other's exports were reported as missing.
  * A module keeps the short last-segment namespace unless another loaded
- * module ends the same way; then each gets its full path, dots as
- * underscores (`mine_vk`, `contrib_vulkan_vk`). Written `vk.` / alias
- * prefixes are rewritten to these namespaces by the merger, in the scope
- * that wrote them, so nothing downstream sees the collision. */
+ * module ends the same way; then a local module gets its full path, dots as
+ * underscores (`mine_vk`). Written `vk.` / alias prefixes are rewritten to
+ * these namespaces by the merger, in the scope that wrote them, so nothing
+ * downstream sees the collision.
+ *
+ * #2190: a shipped module (`std.*`, `contrib.*`) is never renamed. Its API
+ * is largely raw externs the runtime library already compiled under the
+ * leaf prefix (`math_floor`, `sqlite_open`), which `math.floor` reaches as
+ * `<ns>_floor`; a namespace of `std_math` would look for `std_math_floor`
+ * and find nothing. So when a program's own `pkg.math` collides with a
+ * library's `std.math`, the local module is the one that moves. */
+static int module_is_shipped(const char* name) {
+    return name && (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0);
+}
+
 void module_assign_namespaces(void) {
     if (!global_module_registry) return;
     ModuleRegistry* reg = global_module_registry;
@@ -379,9 +390,10 @@ void module_assign_namespaces(void) {
             if (j == i || !o || !o->name) continue;
             shared = strcmp(module_last_segment(o->name), leaf) == 0;
         }
+        int renamed = shared && !module_is_shipped(m->name);
         free(m->ns);
-        m->ns = strdup(shared ? m->name : leaf);
-        if (shared) {
+        m->ns = strdup(renamed ? m->name : leaf);
+        if (renamed) {
             for (char* p = m->ns; *p; p++) if (*p == '.') *p = '_';
         }
     }
@@ -2440,8 +2452,8 @@ static void rename_aliased_import_refs(ASTNode* node, const char* alias,
 /* #2209: rewrite the qualified prefix a scope WROTE for an import to the
  * namespace the import's symbols actually carry after the merge.
  *
- *   import contrib.vulkan.vk            vk.SUCCESS     -> contrib_vulkan_vk.SUCCESS
- *   import contrib.vulkan.vk as vkapi   vkapi.ok()     -> contrib_vulkan_vk.ok()
+ *   import mine.vk                      vk.mine()      -> mine_vk.mine()
+ *   import gfx.vk as vkapi              vkapi.ok()     -> gfx_vk.ok()
  *
  * The rewrite is what makes a module's imports resolve IN THAT MODULE, by
  * their full path or alias, instead of program-wide by last segment: once

@@ -1,0 +1,31 @@
+// #2190: a library `noise` imports std.math and calls `math.floor`. When the
+// program ALSO imports its own `pkg.math`, the two modules end in the same
+// segment. std.math's functions are runtime externs compiled as `math_*`,
+// so std.math keeps the namespace `math` and the program's `pkg.math` is the
+// module that takes its full path. Each scope's `math.` still means the
+// module that scope imported.
+//
+// This file imports the program's `math` FIRST; the _order sibling imports
+// the library that pulls in std.math first.
+
+import pkg.math
+import noise
+import noise_alias
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${label}: expected ${want}, got ${got}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== test_std_leaf_collision ===")
+    check("program's math.add() is pkg.math", math.add(1, 2), 3)
+    check("noise's math.floor() is std.math", noise.cell(2.7), 2)
+    check("alias of std.math in a library reaches math_floor", noise_alias.cell(3.9), 3)
+    println("All std leaf-collision cases pass")
+}

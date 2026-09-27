@@ -1,0 +1,9 @@
+// Imports std.math by its last segment and calls a runtime extern through
+// it. `math.floor` is `math_floor`, a symbol the runtime library compiled,
+// so std.math's namespace must stay `math` whatever else ends in `math`.
+import std.math
+exports(cell)
+
+cell(x: float) -> int {
+    return math.floor(x) as int
+}

@@ -1,0 +1,8 @@
+// `import std.math as …` inside a library (#2190's second finding: the
+// alias produced "undefined function" instead of offering a workaround).
+import std.math as stdmath
+exports(cell)
+
+cell(x: float) -> int {
+    return stdmath.floor(x) as int
+}

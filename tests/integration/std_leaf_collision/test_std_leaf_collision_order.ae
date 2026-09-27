@@ -1,0 +1,25 @@
+// #2190, other import order: the library that imports std.math comes first,
+// so std.math is loaded before the program's own pkg.math. Also aliases
+// std.math at program level while pkg.math holds the bare `math`.
+
+import noise
+import pkg.math
+import std.math as stdmath
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${label}: expected ${want}, got ${got}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== test_std_leaf_collision_order ===")
+    check("noise's math.floor() is std.math when noise loads first", noise.cell(2.7), 2)
+    check("program's math.add() is pkg.math", math.add(2, 2), 4)
+    check("program alias of std.math reaches math_floor", stdmath.floor(5.5) as int, 5)
+    println("All std leaf-collision order cases pass")
+}
