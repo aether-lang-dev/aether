@@ -20,13 +20,29 @@ extern free(p: ptr)
 
 // A portability implementation (MoltenVK over Metal) is listed only to an
 // instance that enables VK_KHR_portability_enumeration and sets its flag, and
-// a device that offers VK_KHR_portability_subset must have it enabled. Both
-// arrived in registry 1.3.207, after the oldest registry the module is
-// generated from, so their name and flag are spelled here as the registry
-// gives them.
-const PORTABILITY_ENUMERATION = "VK_KHR_portability_enumeration"
-const PORTABILITY_SUBSET = "VK_KHR_portability_subset"
-const CREATE_ENUMERATE_PORTABILITY = 1   // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+// a device that offers VK_KHR_portability_subset must have it enabled. The
+// module spells both (vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME and
+// friends), although the registry it is generated from predates the first
+// and keeps the second provisional.
+
+// A vkGetInstanceProcAddr and a vkGetDeviceProcAddr of the test's own, each
+// counting the lookups it serves before answering with the loader's: what an
+// interposer such as Streamline is to a renderer (#2204). @c_callback gives
+// them the C symbol the module calls through.
+var instance_lookups: int = 0
+var device_lookups: int = 0
+
+@c_callback
+counting_gipa(instance: ptr, name: string) -> ptr {
+    instance_lookups = instance_lookups + 1
+    return vk.aevk_ae_instance_proc(instance, name)
+}
+
+@c_callback
+counting_gdpa(device: ptr, name: string) -> ptr {
+    device_lookups = device_lookups + 1
+    return vk.aevk_ae_device_proc(device, name)
+}
 
 // 1 when `name` is among the extension properties `props` lists.
 lists_extension(props: ptr, count: int, name: string) -> int {
@@ -52,11 +68,11 @@ create_instance() -> ptr {
     ci.pApplicationInfo = app as ptr
     names = calloc(1, 8)
     exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
-    if lists_extension(exts, ne, PORTABILITY_ENUMERATION) == 1 {
-        (names as string[])[0] = PORTABILITY_ENUMERATION
+    if lists_extension(exts, ne, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 1 {
+        (names as string[])[0] = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
         ci.enabledExtensionCount = 1
         ci.ppEnabledExtensionNames = names
-        ci.flags = CREATE_ENUMERATE_PORTABILITY
+        ci.flags = vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
     }
     vk.array_free(exts)
     out = calloc(1, 8)
@@ -96,6 +112,52 @@ graphics_family(gpu: ptr) -> int {
     }
     vk.array_free(props)
     return found
+}
+
+// A VkDevice on `gpu` with one queue of `family`, VK_KHR_portability_subset
+// enabled where the device offers it, or null with the VkResult printed.
+create_device(gpu: ptr, family: int) -> ptr {
+    priority = calloc(1, 4)
+    (priority as f32[])[0] = 1.0
+    qci = calloc(1, sizeof(VkDeviceQueueCreateInfo)) as *VkDeviceQueueCreateInfo
+    qci.sType = vk.STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
+    qci.queueFamilyIndex = family as uint32
+    qci.queueCount = 1
+    qci.pQueuePriorities = priority
+    dci = calloc(1, sizeof(VkDeviceCreateInfo)) as *VkDeviceCreateInfo
+    dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO
+    dci.queueCreateInfoCount = 1
+    dci.pQueueCreateInfos = qci as ptr
+    dev_names = calloc(1, 8)
+    dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+    if lists_extension(dexts, nde, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 1 {
+        (dev_names as string[])[0] = vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+        dci.enabledExtensionCount = 1
+        dci.ppEnabledExtensionNames = dev_names
+    }
+    vk.array_free(dexts)
+    out = calloc(1, 8)
+    r = vk.vkCreateDevice(gpu, dci as ptr, null, out)
+    device = (out as ptr[])[0]
+    free(out)
+    free(dev_names)
+    free(dci)
+    free(qci)
+    free(priority)
+    if r != vk.SUCCESS {
+        println("  vkCreateDevice returned ${r}")
+        return null
+    }
+    return device
+}
+
+// The device's first queue of `family`, or null.
+device_queue(device: ptr, family: int) -> ptr {
+    queue_out = calloc(1, 8)
+    vk.vkGetDeviceQueue(device, family as uint32, 0, queue_out)
+    queue = (queue_out as ptr[])[0]
+    free(queue_out)
+    return queue
 }
 
 main() {
@@ -237,44 +299,91 @@ main() {
             family = graphics_family(gpu)
             spec.assert_true(family >= 0, "a graphics queue family")
 
-            priority = calloc(1, 4)
-            (priority as f32[])[0] = 1.0
-            qci = calloc(1, sizeof(VkDeviceQueueCreateInfo)) as *VkDeviceQueueCreateInfo
-            qci.sType = vk.STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
-            qci.queueFamilyIndex = family as uint32
-            qci.queueCount = 1
-            qci.pQueuePriorities = priority
-            dci = calloc(1, sizeof(VkDeviceCreateInfo)) as *VkDeviceCreateInfo
-            dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO
-            dci.queueCreateInfoCount = 1
-            dci.pQueueCreateInfos = qci as ptr
-            dev_names = calloc(1, 8)
-            dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
-            if lists_extension(dexts, nde, PORTABILITY_SUBSET) == 1 {
-                (dev_names as string[])[0] = PORTABILITY_SUBSET
-                dci.enabledExtensionCount = 1
-                dci.ppEnabledExtensionNames = dev_names
-            }
-            vk.array_free(dexts)
-            out = calloc(1, 8)
-            spec.assert_eq(vk.vkCreateDevice(gpu, dci as ptr, null, out), vk.SUCCESS, "vkCreateDevice")
-            device = (out as ptr[])[0]
+            device = create_device(gpu, family)
+            spec.assert_true(device != null, "vkCreateDevice")
             spec.assert_true(vk.load_device(device) > 0, "device entry points resolved")
 
-            queue_out = calloc(1, 8)
-            vk.vkGetDeviceQueue(device, family as uint32, 0, queue_out)
-            spec.assert_true((queue_out as ptr[])[0] != null, "vkGetDeviceQueue")
-            spec.assert_eq(vk.vkQueueWaitIdle((queue_out as ptr[])[0]), vk.SUCCESS, "vkQueueWaitIdle")
+            queue = device_queue(device, family)
+            spec.assert_true(queue != null, "vkGetDeviceQueue")
+            spec.assert_eq(vk.vkQueueWaitIdle(queue), vk.SUCCESS, "vkQueueWaitIdle")
             spec.assert_eq(vk.vkDeviceWaitIdle(device), vk.SUCCESS, "vkDeviceWaitIdle")
             vk.vkDestroyDevice(device, null)
-
-            free(queue_out)
-            free(dev_names)
-            free(out)
-            free(dci)
-            free(qci)
-            free(priority)
+            vk.load_device(null)
             vk.vkDestroyInstance(instance, null)
+            vk.load_instance(null)
+        }
+    }
+
+    // A renderer under an interposer (Streamline for DLSS and Reflex) makes
+    // its instance and device through the interposer's vkGetInstanceProcAddr,
+    // so that present, swapchain and command-buffer calls pass through its
+    // hooks. The module must be able to adopt that one rather than the
+    // loader's, and the counting wrappers above show which one served.
+    spec.describe(fw, "vulkan.vk: a caller's vkGetInstanceProcAddr") {
+        spec.it_when(have_instance, "resolves the instance commands through the adopted one", instance_reason) callback {
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance")
+            instance_lookups = 0
+            n = vk.load_instance_with(counting_gipa, instance)
+            spec.assert_true(n > 0, "instance entry points resolved (${n})")
+            spec.assert_true(instance_lookups >= n, "every one was asked of the adopted loader (${instance_lookups} lookups for ${n})")
+            gpu = first_device(instance)
+            spec.assert_true(gpu != null, "a physical device through them")
+            props = calloc(1, sizeof(VkPhysicalDeviceProperties)) as *VkPhysicalDeviceProperties
+            vk.vkGetPhysicalDeviceProperties(gpu, props as ptr)
+            spec.assert_true(string.length(props.deviceName) > 0, "deviceName is set")
+            free(props)
+            // The same instance again through the loader's own: no lookup
+            // reaches the wrapper once it is dropped.
+            spec.assert_eq(vk.load_instance(instance), n, "load_instance resolves as many")
+            before = instance_lookups
+            devs, nd, _r = vk.vkEnumeratePhysicalDevices_all(instance)
+            vk.array_free(devs)
+            spec.assert_true(nd > 0, "the commands still work")
+            spec.assert_eq(instance_lookups, before, "and no longer go through the wrapper")
+            vk.vkDestroyInstance(instance, null)
+            vk.load_instance(null)
+        }
+        spec.it_when(ready, "makes the instance itself through the adopted one", reason) callback {
+            instance_lookups = 0
+            n = vk.load_instance_with(counting_gipa, null)
+            spec.assert_true(n > 0, "the global commands resolved (${n})")
+            spec.assert_true(instance_lookups >= n, "through the wrapper (${instance_lookups} lookups)")
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance through it")
+            spec.assert_true(vk.load_instance_with(counting_gipa, instance) > n, "then the instance-level commands")
+            vk.vkDestroyInstance(instance, null)
+            vk.load_instance(null)
+        }
+        spec.it_when(have_instance, "finds the device's entry points through it, or through a vkGetDeviceProcAddr given by hand", instance_reason) callback {
+            instance = create_instance()
+            spec.assert_true(instance != null, "vkCreateInstance")
+            vk.load_instance_with(counting_gipa, instance)
+            gpu = first_device(instance)
+            family = graphics_family(gpu)
+            device = create_device(gpu, family)
+            spec.assert_true(device != null, "vkCreateDevice")
+
+            // load_device takes vkGetDeviceProcAddr from the adopted loader:
+            // one lookup there, and the device's commands come from it.
+            before = instance_lookups
+            n = vk.load_device(device)
+            spec.assert_true(n > 0, "device entry points resolved (${n})")
+            spec.assert_eq(instance_lookups, before + 1, "vkGetDeviceProcAddr was asked of the adopted loader")
+            queue = device_queue(device, family)
+            spec.assert_true(queue != null, "vkGetDeviceQueue")
+            spec.assert_eq(vk.vkQueueWaitIdle(queue), vk.SUCCESS, "vkQueueWaitIdle")
+
+            // load_device_with takes one the caller holds.
+            device_lookups = 0
+            spec.assert_eq(vk.load_device_with(counting_gdpa, device), n, "load_device_with resolves as many")
+            spec.assert_true(device_lookups >= n, "every one was asked of the given vkGetDeviceProcAddr (${device_lookups})")
+            spec.assert_eq(vk.vkDeviceWaitIdle(device), vk.SUCCESS, "vkDeviceWaitIdle through them")
+
+            vk.vkDestroyDevice(device, null)
+            vk.load_device(null)
+            vk.vkDestroyInstance(instance, null)
+            vk.load_instance(null)
         }
     }
 

@@ -3635,20 +3635,63 @@ static const char* aevk_window_kind_name(int kind) {
     }
 }
 
-/* The surface for one window, by kind. The device lock need not be held: a
- * surface belongs to the instance, and creating one touches no queue. */
-static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* window,
-                             VkSurfaceKHR* out) {
+/* The instance extension a window kind's surface needs, "" for a kind that
+ * is none of 1..5. What a program driving contrib.vulkan.vk enables on its
+ * own instance before asking for a surface over that kind of window. */
+static const char* aevk_surface_extension(int kind) {
+    switch (kind) {
+        case AEVK_WINDOW_WIN32:       return "VK_KHR_win32_surface";
+        case AEVK_WINDOW_NSVIEW:
+        case AEVK_WINDOW_METAL_LAYER: return "VK_EXT_metal_surface";
+        case AEVK_WINDOW_X11:         return "VK_KHR_xlib_surface";
+        case AEVK_WINDOW_WAYLAND:     return "VK_KHR_wayland_surface";
+        default:                      return "";
+    }
+}
+
+/* The surface for one window on `inst`, by kind, through the platform create
+ * function `gipa` resolves on that instance (#2199): NULL when this build has
+ * no headers for the kind or the instance was created without its extension,
+ * which the failure names. Shared by the module's own swapchain and by
+ * contrib.vulkan.vk's surface_create, whose instance is the caller's. No
+ * device lock is needed: a surface belongs to the instance and touches no
+ * queue. */
+static int aevk_surface_for_instance(VkInstance inst, PFN_vkGetInstanceProcAddr gipa,
+                                     int kind, void* display, void* window,
+                                     VkSurfaceKHR* out) {
     /* Only the X11 and Wayland kinds take a display connection. */
     (void)display;
     if (kind < AEVK_WINDOW_WIN32 || kind > AEVK_WINDOW_METAL_LAYER) {
         return aevk_fail(AEVK_ERR_ARG, "window kind %d is not one of 1..5", kind);
     }
-    if (!(d->surface_kinds & (1u << kind))) {
-        return aevk_fail(AEVK_ERR_UNSUPPORTED, "this build and loader cannot present to %s",
-                         aevk_window_kind_name(kind));
-    }
+    if (!inst) return aevk_fail(AEVK_ERR_ARG, "instance is null");
     if (!window) return aevk_fail(AEVK_ERR_ARG, "window handle is null");
+    /* Resolved per call rather than kept: the instance is the caller's and
+     * a program may hold several. gipa(inst, name) is NULL both for an
+     * extension this build never compiled in and for one the instance did
+     * not enable, and the message covers both. */
+    PFN_vkVoidFunction create = NULL;
+    switch (kind) {
+#if defined(AEVK_HAVE_WIN32_SURFACE)
+        case AEVK_WINDOW_WIN32:       create = gipa(inst, "vkCreateWin32SurfaceKHR"); break;
+#endif
+#if defined(AEVK_HAVE_METAL_SURFACE)
+        case AEVK_WINDOW_NSVIEW:
+        case AEVK_WINDOW_METAL_LAYER: create = gipa(inst, "vkCreateMetalSurfaceEXT"); break;
+#endif
+#if defined(AEVK_HAVE_WAYLAND_SURFACE)
+        case AEVK_WINDOW_WAYLAND:     create = gipa(inst, "vkCreateWaylandSurfaceKHR"); break;
+#endif
+#if defined(AEVK_HAVE_XLIB_SURFACE)
+        case AEVK_WINDOW_X11:         create = gipa(inst, "vkCreateXlibSurfaceKHR"); break;
+#endif
+        default:                      break;
+    }
+    if (!create) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                         "cannot make a surface for %s: this build or instance has no %s",
+                         aevk_window_kind_name(kind), aevk_surface_extension(kind));
+    }
     VkResult r = VK_ERROR_EXTENSION_NOT_PRESENT;
     switch (kind) {
 #if defined(AEVK_HAVE_WIN32_SURFACE)
@@ -3657,7 +3700,7 @@ static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* windo
             ci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
             ci.hinstance = (HINSTANCE)GetWindowLongPtrW((HWND)window, GWLP_HINSTANCE);
             ci.hwnd = (HWND)window;
-            r = d->ia.vkCreateWin32SurfaceKHR(d->instance, &ci, NULL, out);
+            r = ((PFN_vkCreateWin32SurfaceKHR)create)(inst, &ci, NULL, out);
             break;
         }
 #endif
@@ -3676,7 +3719,7 @@ static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* windo
             VkMetalSurfaceCreateInfoEXT ci = {0};
             ci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
             ci.pLayer = (const CAMetalLayer*)layer;
-            r = d->ia.vkCreateMetalSurfaceEXT(d->instance, &ci, NULL, out);
+            r = ((PFN_vkCreateMetalSurfaceEXT)create)(inst, &ci, NULL, out);
             break;
         }
 #endif
@@ -3687,7 +3730,7 @@ static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* windo
             ci.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
             ci.display = (struct wl_display*)display;
             ci.surface = (struct wl_surface*)window;
-            r = d->ia.vkCreateWaylandSurfaceKHR(d->instance, &ci, NULL, out);
+            r = ((PFN_vkCreateWaylandSurfaceKHR)create)(inst, &ci, NULL, out);
             break;
         }
 #endif
@@ -3698,7 +3741,7 @@ static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* windo
             ci.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
             ci.dpy = (Display*)display;
             ci.window = (Window)(uintptr_t)window;
-            r = d->ia.vkCreateXlibSurfaceKHR(d->instance, &ci, NULL, out);
+            r = ((PFN_vkCreateXlibSurfaceKHR)create)(inst, &ci, NULL, out);
             break;
         }
 #endif
@@ -3710,6 +3753,21 @@ static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* windo
                          aevk_window_kind_name(kind), (int)r);
     }
     return AEVK_OK;
+}
+
+/* The surface for one window on the module's own device: its instance
+ * enabled every surface extension the loader offered, and `surface_kinds`
+ * records which kinds that made presentable. */
+static int aevk_make_surface(AevkDevice* d, int kind, void* display, void* window,
+                             VkSurfaceKHR* out) {
+    if (kind < AEVK_WINDOW_WIN32 || kind > AEVK_WINDOW_METAL_LAYER) {
+        return aevk_fail(AEVK_ERR_ARG, "window kind %d is not one of 1..5", kind);
+    }
+    if (!(d->surface_kinds & (1u << kind))) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "this build and loader cannot present to %s",
+                         aevk_window_kind_name(kind));
+    }
+    return aevk_surface_for_instance(d->instance, g_gipa, kind, display, window, out);
 }
 
 /* The image format, from what the surface offers: 8-bit BGRA or RGBA in the
@@ -5001,6 +5059,28 @@ void* aevk_ae_device_proc(void* device, const char* name) {
     if (!gdpa) return NULL;
     return (void*)gdpa((VkDevice)device, name);
 }
+
+/* A VkSurfaceKHR for `window` on the caller's `instance` (#2199), through
+ * `gipa` when the program adopted one (load_instance_with) and the loader's
+ * own vkGetInstanceProcAddr otherwise. NULL with the reason in last_error();
+ * a kind this build or the instance cannot serve names the missing
+ * extension, which aevk_ae_surface_extension spells for enabling it. */
+void* aevk_ae_surface_create(void* gipa, void* instance, int kind, void* display, void* window) {
+    aevk_clear_error();
+    PFN_vkGetInstanceProcAddr resolve = (PFN_vkGetInstanceProcAddr)gipa;
+    if (!resolve) {
+        if (aevk_load_library() != AEVK_OK) return NULL;
+        resolve = g_gipa;
+    }
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    if (aevk_surface_for_instance((VkInstance)instance, resolve, kind, display, window,
+                                  &surface) != AEVK_OK) {
+        return NULL;
+    }
+    return (void*)surface;
+}
+
+const char* aevk_ae_surface_extension(int kind) { return aevk_surface_extension(kind); }
 
 /* The arrays contrib.vulkan.vk's <command>_all helpers fill: zeroed, and
  * NULL when count * size overflows or memory runs out. */

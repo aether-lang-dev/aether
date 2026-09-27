@@ -16,6 +16,9 @@
 // that instance's and device's own entry points, which is also how an extension
 // command the loader does not export is reached. With no loader a command that
 // returns a VkResult returns ERROR_INITIALIZATION_FAILED, others 0 or null.
+// vk.load_instance_with(gipa, instance) resolves through a caller's own
+// vkGetInstanceProcAddr instead (an interposer, or a host's loader), and
+// vk.surface_create makes a VkSurfaceKHR over a window on the caller's instance.
 //
 // A command that fills an array another parameter counts also has a <command>_all
 // making both calls: devices, n, r = vk.vkEnumeratePhysicalDevices_all(instance).
@@ -48,6 +51,11 @@ exports (
     UUID_SIZE,
     MAX_MEMORY_TYPES,
     MAX_MEMORY_HEAPS,
+    KHR_PORTABILITY_ENUMERATION_SPEC_VERSION,
+    KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+    INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+    KHR_PORTABILITY_SUBSET_SPEC_VERSION,
+    KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
     ACCESS_INDIRECT_COMMAND_READ_BIT,
     ACCESS_INDEX_READ_BIT,
     ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
@@ -1554,9 +1562,17 @@ exports (
     aevk_ae_array_free,
     aevk_ae_handle_size,
     aevk_ae_cstr,
+    aevk_ae_last_error,
+    aevk_ae_surface_create,
+    aevk_ae_surface_extension,
     loader_available,
+    last_error,
     load_instance,
+    load_instance_with,
     load_device,
+    load_device_with,
+    surface_create,
+    surface_extension,
     array_free,
     vkCreateInstance,
     vkDestroyInstance,
@@ -1831,6 +1847,11 @@ const MAX_PHYSICAL_DEVICE_NAME_SIZE = 256
 const UUID_SIZE = 16
 const MAX_MEMORY_TYPES = 32
 const MAX_MEMORY_HEAPS = 16
+const KHR_PORTABILITY_ENUMERATION_SPEC_VERSION = 1
+const KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME = "VK_KHR_portability_enumeration"
+const INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR = 1
+const KHR_PORTABILITY_SUBSET_SPEC_VERSION = 1
+const KHR_PORTABILITY_SUBSET_EXTENSION_NAME = "VK_KHR_portability_subset"
 
 // VkAccessFlagBits
 const ACCESS_INDIRECT_COMMAND_READ_BIT = 0x1
@@ -6044,6 +6065,9 @@ extern aevk_ae_array_alloc(count: int, size: int) -> ptr
 extern aevk_ae_array_free(p: ptr)
 extern aevk_ae_handle_size(dispatchable: int) -> int
 extern aevk_ae_cstr(s: @aether string) -> ptr
+extern aevk_ae_last_error() -> string
+extern aevk_ae_surface_create(gipa: ptr, instance: ptr, kind: int, display: ptr, window: ptr) -> ptr
+extern aevk_ae_surface_extension(kind: int) -> string
 
 // Releases an array a <command>_all returned; null is ignored.
 array_free(items: ptr) { aevk_ae_array_free(items) }
@@ -6053,6 +6077,48 @@ loader_available() -> int {
     if aevk_ae_loader_proc("vkGetInstanceProcAddr") == null { return 0 }
     return 1
 }
+
+// Why the last surface_create or loader call failed, "" when it did not.
+last_error() -> string { return aevk_ae_last_error() }
+
+// The vkGetInstanceProcAddr the program adopted with load_instance_with, and
+// the instance it was last loaded for; null while the loader's own is in use.
+var adopted_gipa: ptr = null
+var adopted_instance: ptr = null
+
+// The entry point `name` on `instance` through `gipa`, or through the
+// loader's own vkGetInstanceProcAddr when gipa is null.
+instance_entry(gipa: ptr, instance: ptr, name: string) -> ptr {
+    if gipa == null { return aevk_ae_instance_proc(instance, name) }
+    f = gipa as fn(ptr, ptr) -> ptr
+    return f(instance, aevk_ae_cstr(name))
+}
+
+// The entry point `name` on `device` through `gdpa`, or through the loader's
+// own vkGetDeviceProcAddr when gdpa is null.
+device_entry(gdpa: ptr, device: ptr, name: string) -> ptr {
+    if gdpa == null { return aevk_ae_device_proc(device, name) }
+    f = gdpa as fn(ptr, ptr) -> ptr
+    return f(device, aevk_ae_cstr(name))
+}
+
+// A VkSurfaceKHR for `window` on the caller's `instance`, or null with the
+// reason in last_error(). `kind` is contrib.vulkan's WINDOW_* numbering, the
+// one aether-ui's native_view_kind() uses: 1 an HWND, 2 an NSView (given a
+// CAMetalLayer, on the main thread), 3 an X11 Window with `display` its
+// Display*, 4 a wl_surface* with `display` its wl_display*, 5 a CAMetalLayer*.
+// The instance must have been created with VK_KHR_surface and the kind's own
+// extension, which surface_extension(kind) names; a kind this build or the
+// instance cannot serve is refused with that extension named. The platform
+// create function is resolved on the instance through the adopted
+// vkGetInstanceProcAddr, if any. vkDestroySurfaceKHR releases it.
+surface_create(instance: ptr, kind: int, display: ptr, window: ptr) -> ptr {
+    return aevk_ae_surface_create(adopted_gipa, instance, kind, display, window)
+}
+
+// The instance extension a window kind's surface needs ("VK_KHR_xlib_surface"
+// for kind 3), "" for a kind that is none of 1..5.
+surface_extension(kind: int) -> string { return aevk_ae_surface_extension(kind) }
 
 var pfn_vkCreateInstance: ptr = null
 var got_vkCreateInstance: int = 0
@@ -8592,105 +8658,135 @@ vkAcquireNextImage2KHR(device: ptr, pAcquireInfo: ptr, pImageIndex: ptr) -> int 
 // into a dispatch slot the instance never filled. The pointers are the
 // program's, not the instance's: call it before other threads use the
 // commands, and with null after destroying the instance, which puts them
-// back on the loader's dispatch.
+// back on the loader's dispatch (and drops an adopted vkGetInstanceProcAddr).
 load_instance(instance: ptr) -> int {
+    return load_instance_with(null, instance)
+}
+
+// As load_instance, resolving through the caller's `gipa`, a
+// vkGetInstanceProcAddr of its own: an interposer's (NVIDIA Streamline, for
+// DLSS and Reflex, hooks the calls that pass through it) or a host's loader,
+// so there is one loader in the process. With a null `instance` the global
+// commands (vkCreateInstance among them) resolve through it, so the instance
+// itself is made through the interposer; call again with that instance for the
+// rest. The adoption holds until the next load_instance or load_instance_with:
+// load_device then finds the device's vkGetDeviceProcAddr through it, and
+// surface_create resolves the platform create function through it. A null
+// `gipa` is the loader's own.
+load_instance_with(gipa: ptr, instance: ptr) -> int {
     n = 0
     pin = 1
+    gpin = 1
     if instance == null { pin = 0 }
-    pfn_vkDestroyInstance = aevk_ae_instance_proc(instance, "vkDestroyInstance")
+    if gipa == null { gpin = 0 }
+    adopted_gipa = gipa
+    adopted_instance = instance
+    pfn_vkCreateInstance = instance_entry(gipa, null, "vkCreateInstance")
+    got_vkCreateInstance = gpin
+    if pfn_vkCreateInstance != null { n = n + 1 }
+    pfn_vkEnumerateInstanceExtensionProperties = instance_entry(gipa, null, "vkEnumerateInstanceExtensionProperties")
+    got_vkEnumerateInstanceExtensionProperties = gpin
+    if pfn_vkEnumerateInstanceExtensionProperties != null { n = n + 1 }
+    pfn_vkEnumerateInstanceLayerProperties = instance_entry(gipa, null, "vkEnumerateInstanceLayerProperties")
+    got_vkEnumerateInstanceLayerProperties = gpin
+    if pfn_vkEnumerateInstanceLayerProperties != null { n = n + 1 }
+    pfn_vkEnumerateInstanceVersion = instance_entry(gipa, null, "vkEnumerateInstanceVersion")
+    got_vkEnumerateInstanceVersion = gpin
+    if pfn_vkEnumerateInstanceVersion != null { n = n + 1 }
+    pfn_vkDestroyInstance = instance_entry(gipa, instance, "vkDestroyInstance")
     got_vkDestroyInstance = pin
     if pfn_vkDestroyInstance != null { n = n + 1 }
-    pfn_vkEnumeratePhysicalDevices = aevk_ae_instance_proc(instance, "vkEnumeratePhysicalDevices")
+    pfn_vkEnumeratePhysicalDevices = instance_entry(gipa, instance, "vkEnumeratePhysicalDevices")
     got_vkEnumeratePhysicalDevices = pin
     if pfn_vkEnumeratePhysicalDevices != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceFeatures = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceFeatures")
+    pfn_vkGetPhysicalDeviceFeatures = instance_entry(gipa, instance, "vkGetPhysicalDeviceFeatures")
     got_vkGetPhysicalDeviceFeatures = pin
     if pfn_vkGetPhysicalDeviceFeatures != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceFormatProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceFormatProperties")
+    pfn_vkGetPhysicalDeviceFormatProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceFormatProperties")
     got_vkGetPhysicalDeviceFormatProperties = pin
     if pfn_vkGetPhysicalDeviceFormatProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceImageFormatProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceImageFormatProperties")
+    pfn_vkGetPhysicalDeviceImageFormatProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceImageFormatProperties")
     got_vkGetPhysicalDeviceImageFormatProperties = pin
     if pfn_vkGetPhysicalDeviceImageFormatProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceProperties")
+    pfn_vkGetPhysicalDeviceProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceProperties")
     got_vkGetPhysicalDeviceProperties = pin
     if pfn_vkGetPhysicalDeviceProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceQueueFamilyProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceQueueFamilyProperties")
+    pfn_vkGetPhysicalDeviceQueueFamilyProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceQueueFamilyProperties")
     got_vkGetPhysicalDeviceQueueFamilyProperties = pin
     if pfn_vkGetPhysicalDeviceQueueFamilyProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceMemoryProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceMemoryProperties")
+    pfn_vkGetPhysicalDeviceMemoryProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceMemoryProperties")
     got_vkGetPhysicalDeviceMemoryProperties = pin
     if pfn_vkGetPhysicalDeviceMemoryProperties != null { n = n + 1 }
-    pfn_vkGetInstanceProcAddr = aevk_ae_instance_proc(instance, "vkGetInstanceProcAddr")
+    pfn_vkGetInstanceProcAddr = instance_entry(gipa, instance, "vkGetInstanceProcAddr")
     got_vkGetInstanceProcAddr = pin
     if pfn_vkGetInstanceProcAddr != null { n = n + 1 }
-    pfn_vkGetDeviceProcAddr = aevk_ae_instance_proc(instance, "vkGetDeviceProcAddr")
+    pfn_vkGetDeviceProcAddr = instance_entry(gipa, instance, "vkGetDeviceProcAddr")
     got_vkGetDeviceProcAddr = pin
     if pfn_vkGetDeviceProcAddr != null { n = n + 1 }
-    pfn_vkCreateDevice = aevk_ae_instance_proc(instance, "vkCreateDevice")
+    pfn_vkCreateDevice = instance_entry(gipa, instance, "vkCreateDevice")
     got_vkCreateDevice = pin
     if pfn_vkCreateDevice != null { n = n + 1 }
-    pfn_vkEnumerateDeviceExtensionProperties = aevk_ae_instance_proc(instance, "vkEnumerateDeviceExtensionProperties")
+    pfn_vkEnumerateDeviceExtensionProperties = instance_entry(gipa, instance, "vkEnumerateDeviceExtensionProperties")
     got_vkEnumerateDeviceExtensionProperties = pin
     if pfn_vkEnumerateDeviceExtensionProperties != null { n = n + 1 }
-    pfn_vkEnumerateDeviceLayerProperties = aevk_ae_instance_proc(instance, "vkEnumerateDeviceLayerProperties")
+    pfn_vkEnumerateDeviceLayerProperties = instance_entry(gipa, instance, "vkEnumerateDeviceLayerProperties")
     got_vkEnumerateDeviceLayerProperties = pin
     if pfn_vkEnumerateDeviceLayerProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceSparseImageFormatProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceSparseImageFormatProperties")
+    pfn_vkGetPhysicalDeviceSparseImageFormatProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceSparseImageFormatProperties")
     got_vkGetPhysicalDeviceSparseImageFormatProperties = pin
     if pfn_vkGetPhysicalDeviceSparseImageFormatProperties != null { n = n + 1 }
-    pfn_vkEnumeratePhysicalDeviceGroups = aevk_ae_instance_proc(instance, "vkEnumeratePhysicalDeviceGroups")
+    pfn_vkEnumeratePhysicalDeviceGroups = instance_entry(gipa, instance, "vkEnumeratePhysicalDeviceGroups")
     got_vkEnumeratePhysicalDeviceGroups = pin
     if pfn_vkEnumeratePhysicalDeviceGroups != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceFeatures2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceFeatures2")
+    pfn_vkGetPhysicalDeviceFeatures2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceFeatures2")
     got_vkGetPhysicalDeviceFeatures2 = pin
     if pfn_vkGetPhysicalDeviceFeatures2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceProperties2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceProperties2")
+    pfn_vkGetPhysicalDeviceProperties2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceProperties2")
     got_vkGetPhysicalDeviceProperties2 = pin
     if pfn_vkGetPhysicalDeviceProperties2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceFormatProperties2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceFormatProperties2")
+    pfn_vkGetPhysicalDeviceFormatProperties2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceFormatProperties2")
     got_vkGetPhysicalDeviceFormatProperties2 = pin
     if pfn_vkGetPhysicalDeviceFormatProperties2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceImageFormatProperties2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceImageFormatProperties2")
+    pfn_vkGetPhysicalDeviceImageFormatProperties2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceImageFormatProperties2")
     got_vkGetPhysicalDeviceImageFormatProperties2 = pin
     if pfn_vkGetPhysicalDeviceImageFormatProperties2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceQueueFamilyProperties2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceQueueFamilyProperties2")
+    pfn_vkGetPhysicalDeviceQueueFamilyProperties2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceQueueFamilyProperties2")
     got_vkGetPhysicalDeviceQueueFamilyProperties2 = pin
     if pfn_vkGetPhysicalDeviceQueueFamilyProperties2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceMemoryProperties2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceMemoryProperties2")
+    pfn_vkGetPhysicalDeviceMemoryProperties2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceMemoryProperties2")
     got_vkGetPhysicalDeviceMemoryProperties2 = pin
     if pfn_vkGetPhysicalDeviceMemoryProperties2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceSparseImageFormatProperties2 = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceSparseImageFormatProperties2")
+    pfn_vkGetPhysicalDeviceSparseImageFormatProperties2 = instance_entry(gipa, instance, "vkGetPhysicalDeviceSparseImageFormatProperties2")
     got_vkGetPhysicalDeviceSparseImageFormatProperties2 = pin
     if pfn_vkGetPhysicalDeviceSparseImageFormatProperties2 != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceExternalBufferProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceExternalBufferProperties")
+    pfn_vkGetPhysicalDeviceExternalBufferProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceExternalBufferProperties")
     got_vkGetPhysicalDeviceExternalBufferProperties = pin
     if pfn_vkGetPhysicalDeviceExternalBufferProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceExternalFenceProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceExternalFenceProperties")
+    pfn_vkGetPhysicalDeviceExternalFenceProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceExternalFenceProperties")
     got_vkGetPhysicalDeviceExternalFenceProperties = pin
     if pfn_vkGetPhysicalDeviceExternalFenceProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceExternalSemaphoreProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceExternalSemaphoreProperties")
+    pfn_vkGetPhysicalDeviceExternalSemaphoreProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceExternalSemaphoreProperties")
     got_vkGetPhysicalDeviceExternalSemaphoreProperties = pin
     if pfn_vkGetPhysicalDeviceExternalSemaphoreProperties != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceToolProperties = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceToolProperties")
+    pfn_vkGetPhysicalDeviceToolProperties = instance_entry(gipa, instance, "vkGetPhysicalDeviceToolProperties")
     got_vkGetPhysicalDeviceToolProperties = pin
     if pfn_vkGetPhysicalDeviceToolProperties != null { n = n + 1 }
-    pfn_vkDestroySurfaceKHR = aevk_ae_instance_proc(instance, "vkDestroySurfaceKHR")
+    pfn_vkDestroySurfaceKHR = instance_entry(gipa, instance, "vkDestroySurfaceKHR")
     got_vkDestroySurfaceKHR = pin
     if pfn_vkDestroySurfaceKHR != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceSurfaceSupportKHR = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceSurfaceSupportKHR")
+    pfn_vkGetPhysicalDeviceSurfaceSupportKHR = instance_entry(gipa, instance, "vkGetPhysicalDeviceSurfaceSupportKHR")
     got_vkGetPhysicalDeviceSurfaceSupportKHR = pin
     if pfn_vkGetPhysicalDeviceSurfaceSupportKHR != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceSurfaceCapabilitiesKHR = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")
+    pfn_vkGetPhysicalDeviceSurfaceCapabilitiesKHR = instance_entry(gipa, instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")
     got_vkGetPhysicalDeviceSurfaceCapabilitiesKHR = pin
     if pfn_vkGetPhysicalDeviceSurfaceCapabilitiesKHR != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceSurfaceFormatsKHR = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceSurfaceFormatsKHR")
+    pfn_vkGetPhysicalDeviceSurfaceFormatsKHR = instance_entry(gipa, instance, "vkGetPhysicalDeviceSurfaceFormatsKHR")
     got_vkGetPhysicalDeviceSurfaceFormatsKHR = pin
     if pfn_vkGetPhysicalDeviceSurfaceFormatsKHR != null { n = n + 1 }
-    pfn_vkGetPhysicalDeviceSurfacePresentModesKHR = aevk_ae_instance_proc(instance, "vkGetPhysicalDeviceSurfacePresentModesKHR")
+    pfn_vkGetPhysicalDeviceSurfacePresentModesKHR = instance_entry(gipa, instance, "vkGetPhysicalDeviceSurfacePresentModesKHR")
     got_vkGetPhysicalDeviceSurfacePresentModesKHR = pin
     if pfn_vkGetPhysicalDeviceSurfacePresentModesKHR != null { n = n + 1 }
-    pfn_vkGetPhysicalDevicePresentRectanglesKHR = aevk_ae_instance_proc(instance, "vkGetPhysicalDevicePresentRectanglesKHR")
+    pfn_vkGetPhysicalDevicePresentRectanglesKHR = instance_entry(gipa, instance, "vkGetPhysicalDevicePresentRectanglesKHR")
     got_vkGetPhysicalDevicePresentRectanglesKHR = pin
     if pfn_vkGetPhysicalDevicePresentRectanglesKHR != null { n = n + 1 }
     return n
@@ -8701,588 +8797,601 @@ load_instance(instance: ptr) -> int {
 // command the device does not provide then fails, as with load_instance.
 // One device at a time: a program driving several (on different drivers)
 // leaves the commands on the loader's dispatch, which serves any device.
-// With null, after destroying the device, they go back to it.
+// With null, after destroying the device, they go back to it. After
+// load_instance_with, the device's vkGetDeviceProcAddr comes from the adopted
+// vkGetInstanceProcAddr, so the device-level calls pass through it too.
 load_device(device: ptr) -> int {
+    gdpa = null
+    if adopted_gipa != null && device != null {
+        gdpa = instance_entry(adopted_gipa, adopted_instance, "vkGetDeviceProcAddr")
+    }
+    return load_device_with(gdpa, device)
+}
+
+// As load_device, resolving through the caller's `gdpa`, a vkGetDeviceProcAddr
+// of its own (an interposer's, or one taken from an adopted loader by hand).
+// A null `gdpa` is the loader's own.
+load_device_with(gdpa: ptr, device: ptr) -> int {
     n = 0
     pin = 1
     if device == null { pin = 0 }
-    pfn_vkDestroyDevice = aevk_ae_device_proc(device, "vkDestroyDevice")
+    pfn_vkDestroyDevice = device_entry(gdpa, device, "vkDestroyDevice")
     got_vkDestroyDevice = pin
     if pfn_vkDestroyDevice != null { n = n + 1 }
-    pfn_vkGetDeviceQueue = aevk_ae_device_proc(device, "vkGetDeviceQueue")
+    pfn_vkGetDeviceQueue = device_entry(gdpa, device, "vkGetDeviceQueue")
     got_vkGetDeviceQueue = pin
     if pfn_vkGetDeviceQueue != null { n = n + 1 }
-    pfn_vkQueueSubmit = aevk_ae_device_proc(device, "vkQueueSubmit")
+    pfn_vkQueueSubmit = device_entry(gdpa, device, "vkQueueSubmit")
     got_vkQueueSubmit = pin
     if pfn_vkQueueSubmit != null { n = n + 1 }
-    pfn_vkQueueWaitIdle = aevk_ae_device_proc(device, "vkQueueWaitIdle")
+    pfn_vkQueueWaitIdle = device_entry(gdpa, device, "vkQueueWaitIdle")
     got_vkQueueWaitIdle = pin
     if pfn_vkQueueWaitIdle != null { n = n + 1 }
-    pfn_vkDeviceWaitIdle = aevk_ae_device_proc(device, "vkDeviceWaitIdle")
+    pfn_vkDeviceWaitIdle = device_entry(gdpa, device, "vkDeviceWaitIdle")
     got_vkDeviceWaitIdle = pin
     if pfn_vkDeviceWaitIdle != null { n = n + 1 }
-    pfn_vkAllocateMemory = aevk_ae_device_proc(device, "vkAllocateMemory")
+    pfn_vkAllocateMemory = device_entry(gdpa, device, "vkAllocateMemory")
     got_vkAllocateMemory = pin
     if pfn_vkAllocateMemory != null { n = n + 1 }
-    pfn_vkFreeMemory = aevk_ae_device_proc(device, "vkFreeMemory")
+    pfn_vkFreeMemory = device_entry(gdpa, device, "vkFreeMemory")
     got_vkFreeMemory = pin
     if pfn_vkFreeMemory != null { n = n + 1 }
-    pfn_vkMapMemory = aevk_ae_device_proc(device, "vkMapMemory")
+    pfn_vkMapMemory = device_entry(gdpa, device, "vkMapMemory")
     got_vkMapMemory = pin
     if pfn_vkMapMemory != null { n = n + 1 }
-    pfn_vkUnmapMemory = aevk_ae_device_proc(device, "vkUnmapMemory")
+    pfn_vkUnmapMemory = device_entry(gdpa, device, "vkUnmapMemory")
     got_vkUnmapMemory = pin
     if pfn_vkUnmapMemory != null { n = n + 1 }
-    pfn_vkFlushMappedMemoryRanges = aevk_ae_device_proc(device, "vkFlushMappedMemoryRanges")
+    pfn_vkFlushMappedMemoryRanges = device_entry(gdpa, device, "vkFlushMappedMemoryRanges")
     got_vkFlushMappedMemoryRanges = pin
     if pfn_vkFlushMappedMemoryRanges != null { n = n + 1 }
-    pfn_vkInvalidateMappedMemoryRanges = aevk_ae_device_proc(device, "vkInvalidateMappedMemoryRanges")
+    pfn_vkInvalidateMappedMemoryRanges = device_entry(gdpa, device, "vkInvalidateMappedMemoryRanges")
     got_vkInvalidateMappedMemoryRanges = pin
     if pfn_vkInvalidateMappedMemoryRanges != null { n = n + 1 }
-    pfn_vkGetDeviceMemoryCommitment = aevk_ae_device_proc(device, "vkGetDeviceMemoryCommitment")
+    pfn_vkGetDeviceMemoryCommitment = device_entry(gdpa, device, "vkGetDeviceMemoryCommitment")
     got_vkGetDeviceMemoryCommitment = pin
     if pfn_vkGetDeviceMemoryCommitment != null { n = n + 1 }
-    pfn_vkBindBufferMemory = aevk_ae_device_proc(device, "vkBindBufferMemory")
+    pfn_vkBindBufferMemory = device_entry(gdpa, device, "vkBindBufferMemory")
     got_vkBindBufferMemory = pin
     if pfn_vkBindBufferMemory != null { n = n + 1 }
-    pfn_vkBindImageMemory = aevk_ae_device_proc(device, "vkBindImageMemory")
+    pfn_vkBindImageMemory = device_entry(gdpa, device, "vkBindImageMemory")
     got_vkBindImageMemory = pin
     if pfn_vkBindImageMemory != null { n = n + 1 }
-    pfn_vkGetBufferMemoryRequirements = aevk_ae_device_proc(device, "vkGetBufferMemoryRequirements")
+    pfn_vkGetBufferMemoryRequirements = device_entry(gdpa, device, "vkGetBufferMemoryRequirements")
     got_vkGetBufferMemoryRequirements = pin
     if pfn_vkGetBufferMemoryRequirements != null { n = n + 1 }
-    pfn_vkGetImageMemoryRequirements = aevk_ae_device_proc(device, "vkGetImageMemoryRequirements")
+    pfn_vkGetImageMemoryRequirements = device_entry(gdpa, device, "vkGetImageMemoryRequirements")
     got_vkGetImageMemoryRequirements = pin
     if pfn_vkGetImageMemoryRequirements != null { n = n + 1 }
-    pfn_vkGetImageSparseMemoryRequirements = aevk_ae_device_proc(device, "vkGetImageSparseMemoryRequirements")
+    pfn_vkGetImageSparseMemoryRequirements = device_entry(gdpa, device, "vkGetImageSparseMemoryRequirements")
     got_vkGetImageSparseMemoryRequirements = pin
     if pfn_vkGetImageSparseMemoryRequirements != null { n = n + 1 }
-    pfn_vkQueueBindSparse = aevk_ae_device_proc(device, "vkQueueBindSparse")
+    pfn_vkQueueBindSparse = device_entry(gdpa, device, "vkQueueBindSparse")
     got_vkQueueBindSparse = pin
     if pfn_vkQueueBindSparse != null { n = n + 1 }
-    pfn_vkCreateFence = aevk_ae_device_proc(device, "vkCreateFence")
+    pfn_vkCreateFence = device_entry(gdpa, device, "vkCreateFence")
     got_vkCreateFence = pin
     if pfn_vkCreateFence != null { n = n + 1 }
-    pfn_vkDestroyFence = aevk_ae_device_proc(device, "vkDestroyFence")
+    pfn_vkDestroyFence = device_entry(gdpa, device, "vkDestroyFence")
     got_vkDestroyFence = pin
     if pfn_vkDestroyFence != null { n = n + 1 }
-    pfn_vkResetFences = aevk_ae_device_proc(device, "vkResetFences")
+    pfn_vkResetFences = device_entry(gdpa, device, "vkResetFences")
     got_vkResetFences = pin
     if pfn_vkResetFences != null { n = n + 1 }
-    pfn_vkGetFenceStatus = aevk_ae_device_proc(device, "vkGetFenceStatus")
+    pfn_vkGetFenceStatus = device_entry(gdpa, device, "vkGetFenceStatus")
     got_vkGetFenceStatus = pin
     if pfn_vkGetFenceStatus != null { n = n + 1 }
-    pfn_vkWaitForFences = aevk_ae_device_proc(device, "vkWaitForFences")
+    pfn_vkWaitForFences = device_entry(gdpa, device, "vkWaitForFences")
     got_vkWaitForFences = pin
     if pfn_vkWaitForFences != null { n = n + 1 }
-    pfn_vkCreateSemaphore = aevk_ae_device_proc(device, "vkCreateSemaphore")
+    pfn_vkCreateSemaphore = device_entry(gdpa, device, "vkCreateSemaphore")
     got_vkCreateSemaphore = pin
     if pfn_vkCreateSemaphore != null { n = n + 1 }
-    pfn_vkDestroySemaphore = aevk_ae_device_proc(device, "vkDestroySemaphore")
+    pfn_vkDestroySemaphore = device_entry(gdpa, device, "vkDestroySemaphore")
     got_vkDestroySemaphore = pin
     if pfn_vkDestroySemaphore != null { n = n + 1 }
-    pfn_vkCreateEvent = aevk_ae_device_proc(device, "vkCreateEvent")
+    pfn_vkCreateEvent = device_entry(gdpa, device, "vkCreateEvent")
     got_vkCreateEvent = pin
     if pfn_vkCreateEvent != null { n = n + 1 }
-    pfn_vkDestroyEvent = aevk_ae_device_proc(device, "vkDestroyEvent")
+    pfn_vkDestroyEvent = device_entry(gdpa, device, "vkDestroyEvent")
     got_vkDestroyEvent = pin
     if pfn_vkDestroyEvent != null { n = n + 1 }
-    pfn_vkGetEventStatus = aevk_ae_device_proc(device, "vkGetEventStatus")
+    pfn_vkGetEventStatus = device_entry(gdpa, device, "vkGetEventStatus")
     got_vkGetEventStatus = pin
     if pfn_vkGetEventStatus != null { n = n + 1 }
-    pfn_vkSetEvent = aevk_ae_device_proc(device, "vkSetEvent")
+    pfn_vkSetEvent = device_entry(gdpa, device, "vkSetEvent")
     got_vkSetEvent = pin
     if pfn_vkSetEvent != null { n = n + 1 }
-    pfn_vkResetEvent = aevk_ae_device_proc(device, "vkResetEvent")
+    pfn_vkResetEvent = device_entry(gdpa, device, "vkResetEvent")
     got_vkResetEvent = pin
     if pfn_vkResetEvent != null { n = n + 1 }
-    pfn_vkCreateQueryPool = aevk_ae_device_proc(device, "vkCreateQueryPool")
+    pfn_vkCreateQueryPool = device_entry(gdpa, device, "vkCreateQueryPool")
     got_vkCreateQueryPool = pin
     if pfn_vkCreateQueryPool != null { n = n + 1 }
-    pfn_vkDestroyQueryPool = aevk_ae_device_proc(device, "vkDestroyQueryPool")
+    pfn_vkDestroyQueryPool = device_entry(gdpa, device, "vkDestroyQueryPool")
     got_vkDestroyQueryPool = pin
     if pfn_vkDestroyQueryPool != null { n = n + 1 }
-    pfn_vkGetQueryPoolResults = aevk_ae_device_proc(device, "vkGetQueryPoolResults")
+    pfn_vkGetQueryPoolResults = device_entry(gdpa, device, "vkGetQueryPoolResults")
     got_vkGetQueryPoolResults = pin
     if pfn_vkGetQueryPoolResults != null { n = n + 1 }
-    pfn_vkCreateBuffer = aevk_ae_device_proc(device, "vkCreateBuffer")
+    pfn_vkCreateBuffer = device_entry(gdpa, device, "vkCreateBuffer")
     got_vkCreateBuffer = pin
     if pfn_vkCreateBuffer != null { n = n + 1 }
-    pfn_vkDestroyBuffer = aevk_ae_device_proc(device, "vkDestroyBuffer")
+    pfn_vkDestroyBuffer = device_entry(gdpa, device, "vkDestroyBuffer")
     got_vkDestroyBuffer = pin
     if pfn_vkDestroyBuffer != null { n = n + 1 }
-    pfn_vkCreateBufferView = aevk_ae_device_proc(device, "vkCreateBufferView")
+    pfn_vkCreateBufferView = device_entry(gdpa, device, "vkCreateBufferView")
     got_vkCreateBufferView = pin
     if pfn_vkCreateBufferView != null { n = n + 1 }
-    pfn_vkDestroyBufferView = aevk_ae_device_proc(device, "vkDestroyBufferView")
+    pfn_vkDestroyBufferView = device_entry(gdpa, device, "vkDestroyBufferView")
     got_vkDestroyBufferView = pin
     if pfn_vkDestroyBufferView != null { n = n + 1 }
-    pfn_vkCreateImage = aevk_ae_device_proc(device, "vkCreateImage")
+    pfn_vkCreateImage = device_entry(gdpa, device, "vkCreateImage")
     got_vkCreateImage = pin
     if pfn_vkCreateImage != null { n = n + 1 }
-    pfn_vkDestroyImage = aevk_ae_device_proc(device, "vkDestroyImage")
+    pfn_vkDestroyImage = device_entry(gdpa, device, "vkDestroyImage")
     got_vkDestroyImage = pin
     if pfn_vkDestroyImage != null { n = n + 1 }
-    pfn_vkGetImageSubresourceLayout = aevk_ae_device_proc(device, "vkGetImageSubresourceLayout")
+    pfn_vkGetImageSubresourceLayout = device_entry(gdpa, device, "vkGetImageSubresourceLayout")
     got_vkGetImageSubresourceLayout = pin
     if pfn_vkGetImageSubresourceLayout != null { n = n + 1 }
-    pfn_vkCreateImageView = aevk_ae_device_proc(device, "vkCreateImageView")
+    pfn_vkCreateImageView = device_entry(gdpa, device, "vkCreateImageView")
     got_vkCreateImageView = pin
     if pfn_vkCreateImageView != null { n = n + 1 }
-    pfn_vkDestroyImageView = aevk_ae_device_proc(device, "vkDestroyImageView")
+    pfn_vkDestroyImageView = device_entry(gdpa, device, "vkDestroyImageView")
     got_vkDestroyImageView = pin
     if pfn_vkDestroyImageView != null { n = n + 1 }
-    pfn_vkCreateShaderModule = aevk_ae_device_proc(device, "vkCreateShaderModule")
+    pfn_vkCreateShaderModule = device_entry(gdpa, device, "vkCreateShaderModule")
     got_vkCreateShaderModule = pin
     if pfn_vkCreateShaderModule != null { n = n + 1 }
-    pfn_vkDestroyShaderModule = aevk_ae_device_proc(device, "vkDestroyShaderModule")
+    pfn_vkDestroyShaderModule = device_entry(gdpa, device, "vkDestroyShaderModule")
     got_vkDestroyShaderModule = pin
     if pfn_vkDestroyShaderModule != null { n = n + 1 }
-    pfn_vkCreatePipelineCache = aevk_ae_device_proc(device, "vkCreatePipelineCache")
+    pfn_vkCreatePipelineCache = device_entry(gdpa, device, "vkCreatePipelineCache")
     got_vkCreatePipelineCache = pin
     if pfn_vkCreatePipelineCache != null { n = n + 1 }
-    pfn_vkDestroyPipelineCache = aevk_ae_device_proc(device, "vkDestroyPipelineCache")
+    pfn_vkDestroyPipelineCache = device_entry(gdpa, device, "vkDestroyPipelineCache")
     got_vkDestroyPipelineCache = pin
     if pfn_vkDestroyPipelineCache != null { n = n + 1 }
-    pfn_vkGetPipelineCacheData = aevk_ae_device_proc(device, "vkGetPipelineCacheData")
+    pfn_vkGetPipelineCacheData = device_entry(gdpa, device, "vkGetPipelineCacheData")
     got_vkGetPipelineCacheData = pin
     if pfn_vkGetPipelineCacheData != null { n = n + 1 }
-    pfn_vkMergePipelineCaches = aevk_ae_device_proc(device, "vkMergePipelineCaches")
+    pfn_vkMergePipelineCaches = device_entry(gdpa, device, "vkMergePipelineCaches")
     got_vkMergePipelineCaches = pin
     if pfn_vkMergePipelineCaches != null { n = n + 1 }
-    pfn_vkCreateGraphicsPipelines = aevk_ae_device_proc(device, "vkCreateGraphicsPipelines")
+    pfn_vkCreateGraphicsPipelines = device_entry(gdpa, device, "vkCreateGraphicsPipelines")
     got_vkCreateGraphicsPipelines = pin
     if pfn_vkCreateGraphicsPipelines != null { n = n + 1 }
-    pfn_vkCreateComputePipelines = aevk_ae_device_proc(device, "vkCreateComputePipelines")
+    pfn_vkCreateComputePipelines = device_entry(gdpa, device, "vkCreateComputePipelines")
     got_vkCreateComputePipelines = pin
     if pfn_vkCreateComputePipelines != null { n = n + 1 }
-    pfn_vkDestroyPipeline = aevk_ae_device_proc(device, "vkDestroyPipeline")
+    pfn_vkDestroyPipeline = device_entry(gdpa, device, "vkDestroyPipeline")
     got_vkDestroyPipeline = pin
     if pfn_vkDestroyPipeline != null { n = n + 1 }
-    pfn_vkCreatePipelineLayout = aevk_ae_device_proc(device, "vkCreatePipelineLayout")
+    pfn_vkCreatePipelineLayout = device_entry(gdpa, device, "vkCreatePipelineLayout")
     got_vkCreatePipelineLayout = pin
     if pfn_vkCreatePipelineLayout != null { n = n + 1 }
-    pfn_vkDestroyPipelineLayout = aevk_ae_device_proc(device, "vkDestroyPipelineLayout")
+    pfn_vkDestroyPipelineLayout = device_entry(gdpa, device, "vkDestroyPipelineLayout")
     got_vkDestroyPipelineLayout = pin
     if pfn_vkDestroyPipelineLayout != null { n = n + 1 }
-    pfn_vkCreateSampler = aevk_ae_device_proc(device, "vkCreateSampler")
+    pfn_vkCreateSampler = device_entry(gdpa, device, "vkCreateSampler")
     got_vkCreateSampler = pin
     if pfn_vkCreateSampler != null { n = n + 1 }
-    pfn_vkDestroySampler = aevk_ae_device_proc(device, "vkDestroySampler")
+    pfn_vkDestroySampler = device_entry(gdpa, device, "vkDestroySampler")
     got_vkDestroySampler = pin
     if pfn_vkDestroySampler != null { n = n + 1 }
-    pfn_vkCreateDescriptorSetLayout = aevk_ae_device_proc(device, "vkCreateDescriptorSetLayout")
+    pfn_vkCreateDescriptorSetLayout = device_entry(gdpa, device, "vkCreateDescriptorSetLayout")
     got_vkCreateDescriptorSetLayout = pin
     if pfn_vkCreateDescriptorSetLayout != null { n = n + 1 }
-    pfn_vkDestroyDescriptorSetLayout = aevk_ae_device_proc(device, "vkDestroyDescriptorSetLayout")
+    pfn_vkDestroyDescriptorSetLayout = device_entry(gdpa, device, "vkDestroyDescriptorSetLayout")
     got_vkDestroyDescriptorSetLayout = pin
     if pfn_vkDestroyDescriptorSetLayout != null { n = n + 1 }
-    pfn_vkCreateDescriptorPool = aevk_ae_device_proc(device, "vkCreateDescriptorPool")
+    pfn_vkCreateDescriptorPool = device_entry(gdpa, device, "vkCreateDescriptorPool")
     got_vkCreateDescriptorPool = pin
     if pfn_vkCreateDescriptorPool != null { n = n + 1 }
-    pfn_vkDestroyDescriptorPool = aevk_ae_device_proc(device, "vkDestroyDescriptorPool")
+    pfn_vkDestroyDescriptorPool = device_entry(gdpa, device, "vkDestroyDescriptorPool")
     got_vkDestroyDescriptorPool = pin
     if pfn_vkDestroyDescriptorPool != null { n = n + 1 }
-    pfn_vkResetDescriptorPool = aevk_ae_device_proc(device, "vkResetDescriptorPool")
+    pfn_vkResetDescriptorPool = device_entry(gdpa, device, "vkResetDescriptorPool")
     got_vkResetDescriptorPool = pin
     if pfn_vkResetDescriptorPool != null { n = n + 1 }
-    pfn_vkAllocateDescriptorSets = aevk_ae_device_proc(device, "vkAllocateDescriptorSets")
+    pfn_vkAllocateDescriptorSets = device_entry(gdpa, device, "vkAllocateDescriptorSets")
     got_vkAllocateDescriptorSets = pin
     if pfn_vkAllocateDescriptorSets != null { n = n + 1 }
-    pfn_vkFreeDescriptorSets = aevk_ae_device_proc(device, "vkFreeDescriptorSets")
+    pfn_vkFreeDescriptorSets = device_entry(gdpa, device, "vkFreeDescriptorSets")
     got_vkFreeDescriptorSets = pin
     if pfn_vkFreeDescriptorSets != null { n = n + 1 }
-    pfn_vkUpdateDescriptorSets = aevk_ae_device_proc(device, "vkUpdateDescriptorSets")
+    pfn_vkUpdateDescriptorSets = device_entry(gdpa, device, "vkUpdateDescriptorSets")
     got_vkUpdateDescriptorSets = pin
     if pfn_vkUpdateDescriptorSets != null { n = n + 1 }
-    pfn_vkCreateFramebuffer = aevk_ae_device_proc(device, "vkCreateFramebuffer")
+    pfn_vkCreateFramebuffer = device_entry(gdpa, device, "vkCreateFramebuffer")
     got_vkCreateFramebuffer = pin
     if pfn_vkCreateFramebuffer != null { n = n + 1 }
-    pfn_vkDestroyFramebuffer = aevk_ae_device_proc(device, "vkDestroyFramebuffer")
+    pfn_vkDestroyFramebuffer = device_entry(gdpa, device, "vkDestroyFramebuffer")
     got_vkDestroyFramebuffer = pin
     if pfn_vkDestroyFramebuffer != null { n = n + 1 }
-    pfn_vkCreateRenderPass = aevk_ae_device_proc(device, "vkCreateRenderPass")
+    pfn_vkCreateRenderPass = device_entry(gdpa, device, "vkCreateRenderPass")
     got_vkCreateRenderPass = pin
     if pfn_vkCreateRenderPass != null { n = n + 1 }
-    pfn_vkDestroyRenderPass = aevk_ae_device_proc(device, "vkDestroyRenderPass")
+    pfn_vkDestroyRenderPass = device_entry(gdpa, device, "vkDestroyRenderPass")
     got_vkDestroyRenderPass = pin
     if pfn_vkDestroyRenderPass != null { n = n + 1 }
-    pfn_vkGetRenderAreaGranularity = aevk_ae_device_proc(device, "vkGetRenderAreaGranularity")
+    pfn_vkGetRenderAreaGranularity = device_entry(gdpa, device, "vkGetRenderAreaGranularity")
     got_vkGetRenderAreaGranularity = pin
     if pfn_vkGetRenderAreaGranularity != null { n = n + 1 }
-    pfn_vkCreateCommandPool = aevk_ae_device_proc(device, "vkCreateCommandPool")
+    pfn_vkCreateCommandPool = device_entry(gdpa, device, "vkCreateCommandPool")
     got_vkCreateCommandPool = pin
     if pfn_vkCreateCommandPool != null { n = n + 1 }
-    pfn_vkDestroyCommandPool = aevk_ae_device_proc(device, "vkDestroyCommandPool")
+    pfn_vkDestroyCommandPool = device_entry(gdpa, device, "vkDestroyCommandPool")
     got_vkDestroyCommandPool = pin
     if pfn_vkDestroyCommandPool != null { n = n + 1 }
-    pfn_vkResetCommandPool = aevk_ae_device_proc(device, "vkResetCommandPool")
+    pfn_vkResetCommandPool = device_entry(gdpa, device, "vkResetCommandPool")
     got_vkResetCommandPool = pin
     if pfn_vkResetCommandPool != null { n = n + 1 }
-    pfn_vkAllocateCommandBuffers = aevk_ae_device_proc(device, "vkAllocateCommandBuffers")
+    pfn_vkAllocateCommandBuffers = device_entry(gdpa, device, "vkAllocateCommandBuffers")
     got_vkAllocateCommandBuffers = pin
     if pfn_vkAllocateCommandBuffers != null { n = n + 1 }
-    pfn_vkFreeCommandBuffers = aevk_ae_device_proc(device, "vkFreeCommandBuffers")
+    pfn_vkFreeCommandBuffers = device_entry(gdpa, device, "vkFreeCommandBuffers")
     got_vkFreeCommandBuffers = pin
     if pfn_vkFreeCommandBuffers != null { n = n + 1 }
-    pfn_vkBeginCommandBuffer = aevk_ae_device_proc(device, "vkBeginCommandBuffer")
+    pfn_vkBeginCommandBuffer = device_entry(gdpa, device, "vkBeginCommandBuffer")
     got_vkBeginCommandBuffer = pin
     if pfn_vkBeginCommandBuffer != null { n = n + 1 }
-    pfn_vkEndCommandBuffer = aevk_ae_device_proc(device, "vkEndCommandBuffer")
+    pfn_vkEndCommandBuffer = device_entry(gdpa, device, "vkEndCommandBuffer")
     got_vkEndCommandBuffer = pin
     if pfn_vkEndCommandBuffer != null { n = n + 1 }
-    pfn_vkResetCommandBuffer = aevk_ae_device_proc(device, "vkResetCommandBuffer")
+    pfn_vkResetCommandBuffer = device_entry(gdpa, device, "vkResetCommandBuffer")
     got_vkResetCommandBuffer = pin
     if pfn_vkResetCommandBuffer != null { n = n + 1 }
-    pfn_vkCmdBindPipeline = aevk_ae_device_proc(device, "vkCmdBindPipeline")
+    pfn_vkCmdBindPipeline = device_entry(gdpa, device, "vkCmdBindPipeline")
     got_vkCmdBindPipeline = pin
     if pfn_vkCmdBindPipeline != null { n = n + 1 }
-    pfn_vkCmdSetViewport = aevk_ae_device_proc(device, "vkCmdSetViewport")
+    pfn_vkCmdSetViewport = device_entry(gdpa, device, "vkCmdSetViewport")
     got_vkCmdSetViewport = pin
     if pfn_vkCmdSetViewport != null { n = n + 1 }
-    pfn_vkCmdSetScissor = aevk_ae_device_proc(device, "vkCmdSetScissor")
+    pfn_vkCmdSetScissor = device_entry(gdpa, device, "vkCmdSetScissor")
     got_vkCmdSetScissor = pin
     if pfn_vkCmdSetScissor != null { n = n + 1 }
-    pfn_vkCmdSetLineWidth = aevk_ae_device_proc(device, "vkCmdSetLineWidth")
+    pfn_vkCmdSetLineWidth = device_entry(gdpa, device, "vkCmdSetLineWidth")
     got_vkCmdSetLineWidth = pin
     if pfn_vkCmdSetLineWidth != null { n = n + 1 }
-    pfn_vkCmdSetDepthBias = aevk_ae_device_proc(device, "vkCmdSetDepthBias")
+    pfn_vkCmdSetDepthBias = device_entry(gdpa, device, "vkCmdSetDepthBias")
     got_vkCmdSetDepthBias = pin
     if pfn_vkCmdSetDepthBias != null { n = n + 1 }
-    pfn_vkCmdSetBlendConstants = aevk_ae_device_proc(device, "vkCmdSetBlendConstants")
+    pfn_vkCmdSetBlendConstants = device_entry(gdpa, device, "vkCmdSetBlendConstants")
     got_vkCmdSetBlendConstants = pin
     if pfn_vkCmdSetBlendConstants != null { n = n + 1 }
-    pfn_vkCmdSetDepthBounds = aevk_ae_device_proc(device, "vkCmdSetDepthBounds")
+    pfn_vkCmdSetDepthBounds = device_entry(gdpa, device, "vkCmdSetDepthBounds")
     got_vkCmdSetDepthBounds = pin
     if pfn_vkCmdSetDepthBounds != null { n = n + 1 }
-    pfn_vkCmdSetStencilCompareMask = aevk_ae_device_proc(device, "vkCmdSetStencilCompareMask")
+    pfn_vkCmdSetStencilCompareMask = device_entry(gdpa, device, "vkCmdSetStencilCompareMask")
     got_vkCmdSetStencilCompareMask = pin
     if pfn_vkCmdSetStencilCompareMask != null { n = n + 1 }
-    pfn_vkCmdSetStencilWriteMask = aevk_ae_device_proc(device, "vkCmdSetStencilWriteMask")
+    pfn_vkCmdSetStencilWriteMask = device_entry(gdpa, device, "vkCmdSetStencilWriteMask")
     got_vkCmdSetStencilWriteMask = pin
     if pfn_vkCmdSetStencilWriteMask != null { n = n + 1 }
-    pfn_vkCmdSetStencilReference = aevk_ae_device_proc(device, "vkCmdSetStencilReference")
+    pfn_vkCmdSetStencilReference = device_entry(gdpa, device, "vkCmdSetStencilReference")
     got_vkCmdSetStencilReference = pin
     if pfn_vkCmdSetStencilReference != null { n = n + 1 }
-    pfn_vkCmdBindDescriptorSets = aevk_ae_device_proc(device, "vkCmdBindDescriptorSets")
+    pfn_vkCmdBindDescriptorSets = device_entry(gdpa, device, "vkCmdBindDescriptorSets")
     got_vkCmdBindDescriptorSets = pin
     if pfn_vkCmdBindDescriptorSets != null { n = n + 1 }
-    pfn_vkCmdBindIndexBuffer = aevk_ae_device_proc(device, "vkCmdBindIndexBuffer")
+    pfn_vkCmdBindIndexBuffer = device_entry(gdpa, device, "vkCmdBindIndexBuffer")
     got_vkCmdBindIndexBuffer = pin
     if pfn_vkCmdBindIndexBuffer != null { n = n + 1 }
-    pfn_vkCmdBindVertexBuffers = aevk_ae_device_proc(device, "vkCmdBindVertexBuffers")
+    pfn_vkCmdBindVertexBuffers = device_entry(gdpa, device, "vkCmdBindVertexBuffers")
     got_vkCmdBindVertexBuffers = pin
     if pfn_vkCmdBindVertexBuffers != null { n = n + 1 }
-    pfn_vkCmdDraw = aevk_ae_device_proc(device, "vkCmdDraw")
+    pfn_vkCmdDraw = device_entry(gdpa, device, "vkCmdDraw")
     got_vkCmdDraw = pin
     if pfn_vkCmdDraw != null { n = n + 1 }
-    pfn_vkCmdDrawIndexed = aevk_ae_device_proc(device, "vkCmdDrawIndexed")
+    pfn_vkCmdDrawIndexed = device_entry(gdpa, device, "vkCmdDrawIndexed")
     got_vkCmdDrawIndexed = pin
     if pfn_vkCmdDrawIndexed != null { n = n + 1 }
-    pfn_vkCmdDrawIndirect = aevk_ae_device_proc(device, "vkCmdDrawIndirect")
+    pfn_vkCmdDrawIndirect = device_entry(gdpa, device, "vkCmdDrawIndirect")
     got_vkCmdDrawIndirect = pin
     if pfn_vkCmdDrawIndirect != null { n = n + 1 }
-    pfn_vkCmdDrawIndexedIndirect = aevk_ae_device_proc(device, "vkCmdDrawIndexedIndirect")
+    pfn_vkCmdDrawIndexedIndirect = device_entry(gdpa, device, "vkCmdDrawIndexedIndirect")
     got_vkCmdDrawIndexedIndirect = pin
     if pfn_vkCmdDrawIndexedIndirect != null { n = n + 1 }
-    pfn_vkCmdDispatch = aevk_ae_device_proc(device, "vkCmdDispatch")
+    pfn_vkCmdDispatch = device_entry(gdpa, device, "vkCmdDispatch")
     got_vkCmdDispatch = pin
     if pfn_vkCmdDispatch != null { n = n + 1 }
-    pfn_vkCmdDispatchIndirect = aevk_ae_device_proc(device, "vkCmdDispatchIndirect")
+    pfn_vkCmdDispatchIndirect = device_entry(gdpa, device, "vkCmdDispatchIndirect")
     got_vkCmdDispatchIndirect = pin
     if pfn_vkCmdDispatchIndirect != null { n = n + 1 }
-    pfn_vkCmdCopyBuffer = aevk_ae_device_proc(device, "vkCmdCopyBuffer")
+    pfn_vkCmdCopyBuffer = device_entry(gdpa, device, "vkCmdCopyBuffer")
     got_vkCmdCopyBuffer = pin
     if pfn_vkCmdCopyBuffer != null { n = n + 1 }
-    pfn_vkCmdCopyImage = aevk_ae_device_proc(device, "vkCmdCopyImage")
+    pfn_vkCmdCopyImage = device_entry(gdpa, device, "vkCmdCopyImage")
     got_vkCmdCopyImage = pin
     if pfn_vkCmdCopyImage != null { n = n + 1 }
-    pfn_vkCmdBlitImage = aevk_ae_device_proc(device, "vkCmdBlitImage")
+    pfn_vkCmdBlitImage = device_entry(gdpa, device, "vkCmdBlitImage")
     got_vkCmdBlitImage = pin
     if pfn_vkCmdBlitImage != null { n = n + 1 }
-    pfn_vkCmdCopyBufferToImage = aevk_ae_device_proc(device, "vkCmdCopyBufferToImage")
+    pfn_vkCmdCopyBufferToImage = device_entry(gdpa, device, "vkCmdCopyBufferToImage")
     got_vkCmdCopyBufferToImage = pin
     if pfn_vkCmdCopyBufferToImage != null { n = n + 1 }
-    pfn_vkCmdCopyImageToBuffer = aevk_ae_device_proc(device, "vkCmdCopyImageToBuffer")
+    pfn_vkCmdCopyImageToBuffer = device_entry(gdpa, device, "vkCmdCopyImageToBuffer")
     got_vkCmdCopyImageToBuffer = pin
     if pfn_vkCmdCopyImageToBuffer != null { n = n + 1 }
-    pfn_vkCmdUpdateBuffer = aevk_ae_device_proc(device, "vkCmdUpdateBuffer")
+    pfn_vkCmdUpdateBuffer = device_entry(gdpa, device, "vkCmdUpdateBuffer")
     got_vkCmdUpdateBuffer = pin
     if pfn_vkCmdUpdateBuffer != null { n = n + 1 }
-    pfn_vkCmdFillBuffer = aevk_ae_device_proc(device, "vkCmdFillBuffer")
+    pfn_vkCmdFillBuffer = device_entry(gdpa, device, "vkCmdFillBuffer")
     got_vkCmdFillBuffer = pin
     if pfn_vkCmdFillBuffer != null { n = n + 1 }
-    pfn_vkCmdClearColorImage = aevk_ae_device_proc(device, "vkCmdClearColorImage")
+    pfn_vkCmdClearColorImage = device_entry(gdpa, device, "vkCmdClearColorImage")
     got_vkCmdClearColorImage = pin
     if pfn_vkCmdClearColorImage != null { n = n + 1 }
-    pfn_vkCmdClearDepthStencilImage = aevk_ae_device_proc(device, "vkCmdClearDepthStencilImage")
+    pfn_vkCmdClearDepthStencilImage = device_entry(gdpa, device, "vkCmdClearDepthStencilImage")
     got_vkCmdClearDepthStencilImage = pin
     if pfn_vkCmdClearDepthStencilImage != null { n = n + 1 }
-    pfn_vkCmdClearAttachments = aevk_ae_device_proc(device, "vkCmdClearAttachments")
+    pfn_vkCmdClearAttachments = device_entry(gdpa, device, "vkCmdClearAttachments")
     got_vkCmdClearAttachments = pin
     if pfn_vkCmdClearAttachments != null { n = n + 1 }
-    pfn_vkCmdResolveImage = aevk_ae_device_proc(device, "vkCmdResolveImage")
+    pfn_vkCmdResolveImage = device_entry(gdpa, device, "vkCmdResolveImage")
     got_vkCmdResolveImage = pin
     if pfn_vkCmdResolveImage != null { n = n + 1 }
-    pfn_vkCmdSetEvent = aevk_ae_device_proc(device, "vkCmdSetEvent")
+    pfn_vkCmdSetEvent = device_entry(gdpa, device, "vkCmdSetEvent")
     got_vkCmdSetEvent = pin
     if pfn_vkCmdSetEvent != null { n = n + 1 }
-    pfn_vkCmdResetEvent = aevk_ae_device_proc(device, "vkCmdResetEvent")
+    pfn_vkCmdResetEvent = device_entry(gdpa, device, "vkCmdResetEvent")
     got_vkCmdResetEvent = pin
     if pfn_vkCmdResetEvent != null { n = n + 1 }
-    pfn_vkCmdWaitEvents = aevk_ae_device_proc(device, "vkCmdWaitEvents")
+    pfn_vkCmdWaitEvents = device_entry(gdpa, device, "vkCmdWaitEvents")
     got_vkCmdWaitEvents = pin
     if pfn_vkCmdWaitEvents != null { n = n + 1 }
-    pfn_vkCmdPipelineBarrier = aevk_ae_device_proc(device, "vkCmdPipelineBarrier")
+    pfn_vkCmdPipelineBarrier = device_entry(gdpa, device, "vkCmdPipelineBarrier")
     got_vkCmdPipelineBarrier = pin
     if pfn_vkCmdPipelineBarrier != null { n = n + 1 }
-    pfn_vkCmdBeginQuery = aevk_ae_device_proc(device, "vkCmdBeginQuery")
+    pfn_vkCmdBeginQuery = device_entry(gdpa, device, "vkCmdBeginQuery")
     got_vkCmdBeginQuery = pin
     if pfn_vkCmdBeginQuery != null { n = n + 1 }
-    pfn_vkCmdEndQuery = aevk_ae_device_proc(device, "vkCmdEndQuery")
+    pfn_vkCmdEndQuery = device_entry(gdpa, device, "vkCmdEndQuery")
     got_vkCmdEndQuery = pin
     if pfn_vkCmdEndQuery != null { n = n + 1 }
-    pfn_vkCmdResetQueryPool = aevk_ae_device_proc(device, "vkCmdResetQueryPool")
+    pfn_vkCmdResetQueryPool = device_entry(gdpa, device, "vkCmdResetQueryPool")
     got_vkCmdResetQueryPool = pin
     if pfn_vkCmdResetQueryPool != null { n = n + 1 }
-    pfn_vkCmdWriteTimestamp = aevk_ae_device_proc(device, "vkCmdWriteTimestamp")
+    pfn_vkCmdWriteTimestamp = device_entry(gdpa, device, "vkCmdWriteTimestamp")
     got_vkCmdWriteTimestamp = pin
     if pfn_vkCmdWriteTimestamp != null { n = n + 1 }
-    pfn_vkCmdCopyQueryPoolResults = aevk_ae_device_proc(device, "vkCmdCopyQueryPoolResults")
+    pfn_vkCmdCopyQueryPoolResults = device_entry(gdpa, device, "vkCmdCopyQueryPoolResults")
     got_vkCmdCopyQueryPoolResults = pin
     if pfn_vkCmdCopyQueryPoolResults != null { n = n + 1 }
-    pfn_vkCmdPushConstants = aevk_ae_device_proc(device, "vkCmdPushConstants")
+    pfn_vkCmdPushConstants = device_entry(gdpa, device, "vkCmdPushConstants")
     got_vkCmdPushConstants = pin
     if pfn_vkCmdPushConstants != null { n = n + 1 }
-    pfn_vkCmdBeginRenderPass = aevk_ae_device_proc(device, "vkCmdBeginRenderPass")
+    pfn_vkCmdBeginRenderPass = device_entry(gdpa, device, "vkCmdBeginRenderPass")
     got_vkCmdBeginRenderPass = pin
     if pfn_vkCmdBeginRenderPass != null { n = n + 1 }
-    pfn_vkCmdNextSubpass = aevk_ae_device_proc(device, "vkCmdNextSubpass")
+    pfn_vkCmdNextSubpass = device_entry(gdpa, device, "vkCmdNextSubpass")
     got_vkCmdNextSubpass = pin
     if pfn_vkCmdNextSubpass != null { n = n + 1 }
-    pfn_vkCmdEndRenderPass = aevk_ae_device_proc(device, "vkCmdEndRenderPass")
+    pfn_vkCmdEndRenderPass = device_entry(gdpa, device, "vkCmdEndRenderPass")
     got_vkCmdEndRenderPass = pin
     if pfn_vkCmdEndRenderPass != null { n = n + 1 }
-    pfn_vkCmdExecuteCommands = aevk_ae_device_proc(device, "vkCmdExecuteCommands")
+    pfn_vkCmdExecuteCommands = device_entry(gdpa, device, "vkCmdExecuteCommands")
     got_vkCmdExecuteCommands = pin
     if pfn_vkCmdExecuteCommands != null { n = n + 1 }
-    pfn_vkBindBufferMemory2 = aevk_ae_device_proc(device, "vkBindBufferMemory2")
+    pfn_vkBindBufferMemory2 = device_entry(gdpa, device, "vkBindBufferMemory2")
     got_vkBindBufferMemory2 = pin
     if pfn_vkBindBufferMemory2 != null { n = n + 1 }
-    pfn_vkBindImageMemory2 = aevk_ae_device_proc(device, "vkBindImageMemory2")
+    pfn_vkBindImageMemory2 = device_entry(gdpa, device, "vkBindImageMemory2")
     got_vkBindImageMemory2 = pin
     if pfn_vkBindImageMemory2 != null { n = n + 1 }
-    pfn_vkGetDeviceGroupPeerMemoryFeatures = aevk_ae_device_proc(device, "vkGetDeviceGroupPeerMemoryFeatures")
+    pfn_vkGetDeviceGroupPeerMemoryFeatures = device_entry(gdpa, device, "vkGetDeviceGroupPeerMemoryFeatures")
     got_vkGetDeviceGroupPeerMemoryFeatures = pin
     if pfn_vkGetDeviceGroupPeerMemoryFeatures != null { n = n + 1 }
-    pfn_vkCmdSetDeviceMask = aevk_ae_device_proc(device, "vkCmdSetDeviceMask")
+    pfn_vkCmdSetDeviceMask = device_entry(gdpa, device, "vkCmdSetDeviceMask")
     got_vkCmdSetDeviceMask = pin
     if pfn_vkCmdSetDeviceMask != null { n = n + 1 }
-    pfn_vkCmdDispatchBase = aevk_ae_device_proc(device, "vkCmdDispatchBase")
+    pfn_vkCmdDispatchBase = device_entry(gdpa, device, "vkCmdDispatchBase")
     got_vkCmdDispatchBase = pin
     if pfn_vkCmdDispatchBase != null { n = n + 1 }
-    pfn_vkGetImageMemoryRequirements2 = aevk_ae_device_proc(device, "vkGetImageMemoryRequirements2")
+    pfn_vkGetImageMemoryRequirements2 = device_entry(gdpa, device, "vkGetImageMemoryRequirements2")
     got_vkGetImageMemoryRequirements2 = pin
     if pfn_vkGetImageMemoryRequirements2 != null { n = n + 1 }
-    pfn_vkGetBufferMemoryRequirements2 = aevk_ae_device_proc(device, "vkGetBufferMemoryRequirements2")
+    pfn_vkGetBufferMemoryRequirements2 = device_entry(gdpa, device, "vkGetBufferMemoryRequirements2")
     got_vkGetBufferMemoryRequirements2 = pin
     if pfn_vkGetBufferMemoryRequirements2 != null { n = n + 1 }
-    pfn_vkGetImageSparseMemoryRequirements2 = aevk_ae_device_proc(device, "vkGetImageSparseMemoryRequirements2")
+    pfn_vkGetImageSparseMemoryRequirements2 = device_entry(gdpa, device, "vkGetImageSparseMemoryRequirements2")
     got_vkGetImageSparseMemoryRequirements2 = pin
     if pfn_vkGetImageSparseMemoryRequirements2 != null { n = n + 1 }
-    pfn_vkTrimCommandPool = aevk_ae_device_proc(device, "vkTrimCommandPool")
+    pfn_vkTrimCommandPool = device_entry(gdpa, device, "vkTrimCommandPool")
     got_vkTrimCommandPool = pin
     if pfn_vkTrimCommandPool != null { n = n + 1 }
-    pfn_vkGetDeviceQueue2 = aevk_ae_device_proc(device, "vkGetDeviceQueue2")
+    pfn_vkGetDeviceQueue2 = device_entry(gdpa, device, "vkGetDeviceQueue2")
     got_vkGetDeviceQueue2 = pin
     if pfn_vkGetDeviceQueue2 != null { n = n + 1 }
-    pfn_vkCreateSamplerYcbcrConversion = aevk_ae_device_proc(device, "vkCreateSamplerYcbcrConversion")
+    pfn_vkCreateSamplerYcbcrConversion = device_entry(gdpa, device, "vkCreateSamplerYcbcrConversion")
     got_vkCreateSamplerYcbcrConversion = pin
     if pfn_vkCreateSamplerYcbcrConversion != null { n = n + 1 }
-    pfn_vkDestroySamplerYcbcrConversion = aevk_ae_device_proc(device, "vkDestroySamplerYcbcrConversion")
+    pfn_vkDestroySamplerYcbcrConversion = device_entry(gdpa, device, "vkDestroySamplerYcbcrConversion")
     got_vkDestroySamplerYcbcrConversion = pin
     if pfn_vkDestroySamplerYcbcrConversion != null { n = n + 1 }
-    pfn_vkCreateDescriptorUpdateTemplate = aevk_ae_device_proc(device, "vkCreateDescriptorUpdateTemplate")
+    pfn_vkCreateDescriptorUpdateTemplate = device_entry(gdpa, device, "vkCreateDescriptorUpdateTemplate")
     got_vkCreateDescriptorUpdateTemplate = pin
     if pfn_vkCreateDescriptorUpdateTemplate != null { n = n + 1 }
-    pfn_vkDestroyDescriptorUpdateTemplate = aevk_ae_device_proc(device, "vkDestroyDescriptorUpdateTemplate")
+    pfn_vkDestroyDescriptorUpdateTemplate = device_entry(gdpa, device, "vkDestroyDescriptorUpdateTemplate")
     got_vkDestroyDescriptorUpdateTemplate = pin
     if pfn_vkDestroyDescriptorUpdateTemplate != null { n = n + 1 }
-    pfn_vkUpdateDescriptorSetWithTemplate = aevk_ae_device_proc(device, "vkUpdateDescriptorSetWithTemplate")
+    pfn_vkUpdateDescriptorSetWithTemplate = device_entry(gdpa, device, "vkUpdateDescriptorSetWithTemplate")
     got_vkUpdateDescriptorSetWithTemplate = pin
     if pfn_vkUpdateDescriptorSetWithTemplate != null { n = n + 1 }
-    pfn_vkGetDescriptorSetLayoutSupport = aevk_ae_device_proc(device, "vkGetDescriptorSetLayoutSupport")
+    pfn_vkGetDescriptorSetLayoutSupport = device_entry(gdpa, device, "vkGetDescriptorSetLayoutSupport")
     got_vkGetDescriptorSetLayoutSupport = pin
     if pfn_vkGetDescriptorSetLayoutSupport != null { n = n + 1 }
-    pfn_vkCmdDrawIndirectCount = aevk_ae_device_proc(device, "vkCmdDrawIndirectCount")
+    pfn_vkCmdDrawIndirectCount = device_entry(gdpa, device, "vkCmdDrawIndirectCount")
     got_vkCmdDrawIndirectCount = pin
     if pfn_vkCmdDrawIndirectCount != null { n = n + 1 }
-    pfn_vkCmdDrawIndexedIndirectCount = aevk_ae_device_proc(device, "vkCmdDrawIndexedIndirectCount")
+    pfn_vkCmdDrawIndexedIndirectCount = device_entry(gdpa, device, "vkCmdDrawIndexedIndirectCount")
     got_vkCmdDrawIndexedIndirectCount = pin
     if pfn_vkCmdDrawIndexedIndirectCount != null { n = n + 1 }
-    pfn_vkCreateRenderPass2 = aevk_ae_device_proc(device, "vkCreateRenderPass2")
+    pfn_vkCreateRenderPass2 = device_entry(gdpa, device, "vkCreateRenderPass2")
     got_vkCreateRenderPass2 = pin
     if pfn_vkCreateRenderPass2 != null { n = n + 1 }
-    pfn_vkCmdBeginRenderPass2 = aevk_ae_device_proc(device, "vkCmdBeginRenderPass2")
+    pfn_vkCmdBeginRenderPass2 = device_entry(gdpa, device, "vkCmdBeginRenderPass2")
     got_vkCmdBeginRenderPass2 = pin
     if pfn_vkCmdBeginRenderPass2 != null { n = n + 1 }
-    pfn_vkCmdNextSubpass2 = aevk_ae_device_proc(device, "vkCmdNextSubpass2")
+    pfn_vkCmdNextSubpass2 = device_entry(gdpa, device, "vkCmdNextSubpass2")
     got_vkCmdNextSubpass2 = pin
     if pfn_vkCmdNextSubpass2 != null { n = n + 1 }
-    pfn_vkCmdEndRenderPass2 = aevk_ae_device_proc(device, "vkCmdEndRenderPass2")
+    pfn_vkCmdEndRenderPass2 = device_entry(gdpa, device, "vkCmdEndRenderPass2")
     got_vkCmdEndRenderPass2 = pin
     if pfn_vkCmdEndRenderPass2 != null { n = n + 1 }
-    pfn_vkResetQueryPool = aevk_ae_device_proc(device, "vkResetQueryPool")
+    pfn_vkResetQueryPool = device_entry(gdpa, device, "vkResetQueryPool")
     got_vkResetQueryPool = pin
     if pfn_vkResetQueryPool != null { n = n + 1 }
-    pfn_vkGetSemaphoreCounterValue = aevk_ae_device_proc(device, "vkGetSemaphoreCounterValue")
+    pfn_vkGetSemaphoreCounterValue = device_entry(gdpa, device, "vkGetSemaphoreCounterValue")
     got_vkGetSemaphoreCounterValue = pin
     if pfn_vkGetSemaphoreCounterValue != null { n = n + 1 }
-    pfn_vkWaitSemaphores = aevk_ae_device_proc(device, "vkWaitSemaphores")
+    pfn_vkWaitSemaphores = device_entry(gdpa, device, "vkWaitSemaphores")
     got_vkWaitSemaphores = pin
     if pfn_vkWaitSemaphores != null { n = n + 1 }
-    pfn_vkSignalSemaphore = aevk_ae_device_proc(device, "vkSignalSemaphore")
+    pfn_vkSignalSemaphore = device_entry(gdpa, device, "vkSignalSemaphore")
     got_vkSignalSemaphore = pin
     if pfn_vkSignalSemaphore != null { n = n + 1 }
-    pfn_vkGetBufferDeviceAddress = aevk_ae_device_proc(device, "vkGetBufferDeviceAddress")
+    pfn_vkGetBufferDeviceAddress = device_entry(gdpa, device, "vkGetBufferDeviceAddress")
     got_vkGetBufferDeviceAddress = pin
     if pfn_vkGetBufferDeviceAddress != null { n = n + 1 }
-    pfn_vkGetBufferOpaqueCaptureAddress = aevk_ae_device_proc(device, "vkGetBufferOpaqueCaptureAddress")
+    pfn_vkGetBufferOpaqueCaptureAddress = device_entry(gdpa, device, "vkGetBufferOpaqueCaptureAddress")
     got_vkGetBufferOpaqueCaptureAddress = pin
     if pfn_vkGetBufferOpaqueCaptureAddress != null { n = n + 1 }
-    pfn_vkGetDeviceMemoryOpaqueCaptureAddress = aevk_ae_device_proc(device, "vkGetDeviceMemoryOpaqueCaptureAddress")
+    pfn_vkGetDeviceMemoryOpaqueCaptureAddress = device_entry(gdpa, device, "vkGetDeviceMemoryOpaqueCaptureAddress")
     got_vkGetDeviceMemoryOpaqueCaptureAddress = pin
     if pfn_vkGetDeviceMemoryOpaqueCaptureAddress != null { n = n + 1 }
-    pfn_vkCreatePrivateDataSlot = aevk_ae_device_proc(device, "vkCreatePrivateDataSlot")
+    pfn_vkCreatePrivateDataSlot = device_entry(gdpa, device, "vkCreatePrivateDataSlot")
     got_vkCreatePrivateDataSlot = pin
     if pfn_vkCreatePrivateDataSlot != null { n = n + 1 }
-    pfn_vkDestroyPrivateDataSlot = aevk_ae_device_proc(device, "vkDestroyPrivateDataSlot")
+    pfn_vkDestroyPrivateDataSlot = device_entry(gdpa, device, "vkDestroyPrivateDataSlot")
     got_vkDestroyPrivateDataSlot = pin
     if pfn_vkDestroyPrivateDataSlot != null { n = n + 1 }
-    pfn_vkSetPrivateData = aevk_ae_device_proc(device, "vkSetPrivateData")
+    pfn_vkSetPrivateData = device_entry(gdpa, device, "vkSetPrivateData")
     got_vkSetPrivateData = pin
     if pfn_vkSetPrivateData != null { n = n + 1 }
-    pfn_vkGetPrivateData = aevk_ae_device_proc(device, "vkGetPrivateData")
+    pfn_vkGetPrivateData = device_entry(gdpa, device, "vkGetPrivateData")
     got_vkGetPrivateData = pin
     if pfn_vkGetPrivateData != null { n = n + 1 }
-    pfn_vkCmdSetEvent2 = aevk_ae_device_proc(device, "vkCmdSetEvent2")
+    pfn_vkCmdSetEvent2 = device_entry(gdpa, device, "vkCmdSetEvent2")
     got_vkCmdSetEvent2 = pin
     if pfn_vkCmdSetEvent2 != null { n = n + 1 }
-    pfn_vkCmdResetEvent2 = aevk_ae_device_proc(device, "vkCmdResetEvent2")
+    pfn_vkCmdResetEvent2 = device_entry(gdpa, device, "vkCmdResetEvent2")
     got_vkCmdResetEvent2 = pin
     if pfn_vkCmdResetEvent2 != null { n = n + 1 }
-    pfn_vkCmdWaitEvents2 = aevk_ae_device_proc(device, "vkCmdWaitEvents2")
+    pfn_vkCmdWaitEvents2 = device_entry(gdpa, device, "vkCmdWaitEvents2")
     got_vkCmdWaitEvents2 = pin
     if pfn_vkCmdWaitEvents2 != null { n = n + 1 }
-    pfn_vkCmdPipelineBarrier2 = aevk_ae_device_proc(device, "vkCmdPipelineBarrier2")
+    pfn_vkCmdPipelineBarrier2 = device_entry(gdpa, device, "vkCmdPipelineBarrier2")
     got_vkCmdPipelineBarrier2 = pin
     if pfn_vkCmdPipelineBarrier2 != null { n = n + 1 }
-    pfn_vkCmdWriteTimestamp2 = aevk_ae_device_proc(device, "vkCmdWriteTimestamp2")
+    pfn_vkCmdWriteTimestamp2 = device_entry(gdpa, device, "vkCmdWriteTimestamp2")
     got_vkCmdWriteTimestamp2 = pin
     if pfn_vkCmdWriteTimestamp2 != null { n = n + 1 }
-    pfn_vkQueueSubmit2 = aevk_ae_device_proc(device, "vkQueueSubmit2")
+    pfn_vkQueueSubmit2 = device_entry(gdpa, device, "vkQueueSubmit2")
     got_vkQueueSubmit2 = pin
     if pfn_vkQueueSubmit2 != null { n = n + 1 }
-    pfn_vkCmdCopyBuffer2 = aevk_ae_device_proc(device, "vkCmdCopyBuffer2")
+    pfn_vkCmdCopyBuffer2 = device_entry(gdpa, device, "vkCmdCopyBuffer2")
     got_vkCmdCopyBuffer2 = pin
     if pfn_vkCmdCopyBuffer2 != null { n = n + 1 }
-    pfn_vkCmdCopyImage2 = aevk_ae_device_proc(device, "vkCmdCopyImage2")
+    pfn_vkCmdCopyImage2 = device_entry(gdpa, device, "vkCmdCopyImage2")
     got_vkCmdCopyImage2 = pin
     if pfn_vkCmdCopyImage2 != null { n = n + 1 }
-    pfn_vkCmdCopyBufferToImage2 = aevk_ae_device_proc(device, "vkCmdCopyBufferToImage2")
+    pfn_vkCmdCopyBufferToImage2 = device_entry(gdpa, device, "vkCmdCopyBufferToImage2")
     got_vkCmdCopyBufferToImage2 = pin
     if pfn_vkCmdCopyBufferToImage2 != null { n = n + 1 }
-    pfn_vkCmdCopyImageToBuffer2 = aevk_ae_device_proc(device, "vkCmdCopyImageToBuffer2")
+    pfn_vkCmdCopyImageToBuffer2 = device_entry(gdpa, device, "vkCmdCopyImageToBuffer2")
     got_vkCmdCopyImageToBuffer2 = pin
     if pfn_vkCmdCopyImageToBuffer2 != null { n = n + 1 }
-    pfn_vkCmdBlitImage2 = aevk_ae_device_proc(device, "vkCmdBlitImage2")
+    pfn_vkCmdBlitImage2 = device_entry(gdpa, device, "vkCmdBlitImage2")
     got_vkCmdBlitImage2 = pin
     if pfn_vkCmdBlitImage2 != null { n = n + 1 }
-    pfn_vkCmdResolveImage2 = aevk_ae_device_proc(device, "vkCmdResolveImage2")
+    pfn_vkCmdResolveImage2 = device_entry(gdpa, device, "vkCmdResolveImage2")
     got_vkCmdResolveImage2 = pin
     if pfn_vkCmdResolveImage2 != null { n = n + 1 }
-    pfn_vkCmdBeginRendering = aevk_ae_device_proc(device, "vkCmdBeginRendering")
+    pfn_vkCmdBeginRendering = device_entry(gdpa, device, "vkCmdBeginRendering")
     got_vkCmdBeginRendering = pin
     if pfn_vkCmdBeginRendering != null { n = n + 1 }
-    pfn_vkCmdEndRendering = aevk_ae_device_proc(device, "vkCmdEndRendering")
+    pfn_vkCmdEndRendering = device_entry(gdpa, device, "vkCmdEndRendering")
     got_vkCmdEndRendering = pin
     if pfn_vkCmdEndRendering != null { n = n + 1 }
-    pfn_vkCmdSetCullMode = aevk_ae_device_proc(device, "vkCmdSetCullMode")
+    pfn_vkCmdSetCullMode = device_entry(gdpa, device, "vkCmdSetCullMode")
     got_vkCmdSetCullMode = pin
     if pfn_vkCmdSetCullMode != null { n = n + 1 }
-    pfn_vkCmdSetFrontFace = aevk_ae_device_proc(device, "vkCmdSetFrontFace")
+    pfn_vkCmdSetFrontFace = device_entry(gdpa, device, "vkCmdSetFrontFace")
     got_vkCmdSetFrontFace = pin
     if pfn_vkCmdSetFrontFace != null { n = n + 1 }
-    pfn_vkCmdSetPrimitiveTopology = aevk_ae_device_proc(device, "vkCmdSetPrimitiveTopology")
+    pfn_vkCmdSetPrimitiveTopology = device_entry(gdpa, device, "vkCmdSetPrimitiveTopology")
     got_vkCmdSetPrimitiveTopology = pin
     if pfn_vkCmdSetPrimitiveTopology != null { n = n + 1 }
-    pfn_vkCmdSetViewportWithCount = aevk_ae_device_proc(device, "vkCmdSetViewportWithCount")
+    pfn_vkCmdSetViewportWithCount = device_entry(gdpa, device, "vkCmdSetViewportWithCount")
     got_vkCmdSetViewportWithCount = pin
     if pfn_vkCmdSetViewportWithCount != null { n = n + 1 }
-    pfn_vkCmdSetScissorWithCount = aevk_ae_device_proc(device, "vkCmdSetScissorWithCount")
+    pfn_vkCmdSetScissorWithCount = device_entry(gdpa, device, "vkCmdSetScissorWithCount")
     got_vkCmdSetScissorWithCount = pin
     if pfn_vkCmdSetScissorWithCount != null { n = n + 1 }
-    pfn_vkCmdBindVertexBuffers2 = aevk_ae_device_proc(device, "vkCmdBindVertexBuffers2")
+    pfn_vkCmdBindVertexBuffers2 = device_entry(gdpa, device, "vkCmdBindVertexBuffers2")
     got_vkCmdBindVertexBuffers2 = pin
     if pfn_vkCmdBindVertexBuffers2 != null { n = n + 1 }
-    pfn_vkCmdSetDepthTestEnable = aevk_ae_device_proc(device, "vkCmdSetDepthTestEnable")
+    pfn_vkCmdSetDepthTestEnable = device_entry(gdpa, device, "vkCmdSetDepthTestEnable")
     got_vkCmdSetDepthTestEnable = pin
     if pfn_vkCmdSetDepthTestEnable != null { n = n + 1 }
-    pfn_vkCmdSetDepthWriteEnable = aevk_ae_device_proc(device, "vkCmdSetDepthWriteEnable")
+    pfn_vkCmdSetDepthWriteEnable = device_entry(gdpa, device, "vkCmdSetDepthWriteEnable")
     got_vkCmdSetDepthWriteEnable = pin
     if pfn_vkCmdSetDepthWriteEnable != null { n = n + 1 }
-    pfn_vkCmdSetDepthCompareOp = aevk_ae_device_proc(device, "vkCmdSetDepthCompareOp")
+    pfn_vkCmdSetDepthCompareOp = device_entry(gdpa, device, "vkCmdSetDepthCompareOp")
     got_vkCmdSetDepthCompareOp = pin
     if pfn_vkCmdSetDepthCompareOp != null { n = n + 1 }
-    pfn_vkCmdSetDepthBoundsTestEnable = aevk_ae_device_proc(device, "vkCmdSetDepthBoundsTestEnable")
+    pfn_vkCmdSetDepthBoundsTestEnable = device_entry(gdpa, device, "vkCmdSetDepthBoundsTestEnable")
     got_vkCmdSetDepthBoundsTestEnable = pin
     if pfn_vkCmdSetDepthBoundsTestEnable != null { n = n + 1 }
-    pfn_vkCmdSetStencilTestEnable = aevk_ae_device_proc(device, "vkCmdSetStencilTestEnable")
+    pfn_vkCmdSetStencilTestEnable = device_entry(gdpa, device, "vkCmdSetStencilTestEnable")
     got_vkCmdSetStencilTestEnable = pin
     if pfn_vkCmdSetStencilTestEnable != null { n = n + 1 }
-    pfn_vkCmdSetStencilOp = aevk_ae_device_proc(device, "vkCmdSetStencilOp")
+    pfn_vkCmdSetStencilOp = device_entry(gdpa, device, "vkCmdSetStencilOp")
     got_vkCmdSetStencilOp = pin
     if pfn_vkCmdSetStencilOp != null { n = n + 1 }
-    pfn_vkCmdSetRasterizerDiscardEnable = aevk_ae_device_proc(device, "vkCmdSetRasterizerDiscardEnable")
+    pfn_vkCmdSetRasterizerDiscardEnable = device_entry(gdpa, device, "vkCmdSetRasterizerDiscardEnable")
     got_vkCmdSetRasterizerDiscardEnable = pin
     if pfn_vkCmdSetRasterizerDiscardEnable != null { n = n + 1 }
-    pfn_vkCmdSetDepthBiasEnable = aevk_ae_device_proc(device, "vkCmdSetDepthBiasEnable")
+    pfn_vkCmdSetDepthBiasEnable = device_entry(gdpa, device, "vkCmdSetDepthBiasEnable")
     got_vkCmdSetDepthBiasEnable = pin
     if pfn_vkCmdSetDepthBiasEnable != null { n = n + 1 }
-    pfn_vkCmdSetPrimitiveRestartEnable = aevk_ae_device_proc(device, "vkCmdSetPrimitiveRestartEnable")
+    pfn_vkCmdSetPrimitiveRestartEnable = device_entry(gdpa, device, "vkCmdSetPrimitiveRestartEnable")
     got_vkCmdSetPrimitiveRestartEnable = pin
     if pfn_vkCmdSetPrimitiveRestartEnable != null { n = n + 1 }
-    pfn_vkGetDeviceBufferMemoryRequirements = aevk_ae_device_proc(device, "vkGetDeviceBufferMemoryRequirements")
+    pfn_vkGetDeviceBufferMemoryRequirements = device_entry(gdpa, device, "vkGetDeviceBufferMemoryRequirements")
     got_vkGetDeviceBufferMemoryRequirements = pin
     if pfn_vkGetDeviceBufferMemoryRequirements != null { n = n + 1 }
-    pfn_vkGetDeviceImageMemoryRequirements = aevk_ae_device_proc(device, "vkGetDeviceImageMemoryRequirements")
+    pfn_vkGetDeviceImageMemoryRequirements = device_entry(gdpa, device, "vkGetDeviceImageMemoryRequirements")
     got_vkGetDeviceImageMemoryRequirements = pin
     if pfn_vkGetDeviceImageMemoryRequirements != null { n = n + 1 }
-    pfn_vkGetDeviceImageSparseMemoryRequirements = aevk_ae_device_proc(device, "vkGetDeviceImageSparseMemoryRequirements")
+    pfn_vkGetDeviceImageSparseMemoryRequirements = device_entry(gdpa, device, "vkGetDeviceImageSparseMemoryRequirements")
     got_vkGetDeviceImageSparseMemoryRequirements = pin
     if pfn_vkGetDeviceImageSparseMemoryRequirements != null { n = n + 1 }
-    pfn_vkCreateSwapchainKHR = aevk_ae_device_proc(device, "vkCreateSwapchainKHR")
+    pfn_vkCreateSwapchainKHR = device_entry(gdpa, device, "vkCreateSwapchainKHR")
     got_vkCreateSwapchainKHR = pin
     if pfn_vkCreateSwapchainKHR != null { n = n + 1 }
-    pfn_vkDestroySwapchainKHR = aevk_ae_device_proc(device, "vkDestroySwapchainKHR")
+    pfn_vkDestroySwapchainKHR = device_entry(gdpa, device, "vkDestroySwapchainKHR")
     got_vkDestroySwapchainKHR = pin
     if pfn_vkDestroySwapchainKHR != null { n = n + 1 }
-    pfn_vkGetSwapchainImagesKHR = aevk_ae_device_proc(device, "vkGetSwapchainImagesKHR")
+    pfn_vkGetSwapchainImagesKHR = device_entry(gdpa, device, "vkGetSwapchainImagesKHR")
     got_vkGetSwapchainImagesKHR = pin
     if pfn_vkGetSwapchainImagesKHR != null { n = n + 1 }
-    pfn_vkAcquireNextImageKHR = aevk_ae_device_proc(device, "vkAcquireNextImageKHR")
+    pfn_vkAcquireNextImageKHR = device_entry(gdpa, device, "vkAcquireNextImageKHR")
     got_vkAcquireNextImageKHR = pin
     if pfn_vkAcquireNextImageKHR != null { n = n + 1 }
-    pfn_vkQueuePresentKHR = aevk_ae_device_proc(device, "vkQueuePresentKHR")
+    pfn_vkQueuePresentKHR = device_entry(gdpa, device, "vkQueuePresentKHR")
     got_vkQueuePresentKHR = pin
     if pfn_vkQueuePresentKHR != null { n = n + 1 }
-    pfn_vkGetDeviceGroupPresentCapabilitiesKHR = aevk_ae_device_proc(device, "vkGetDeviceGroupPresentCapabilitiesKHR")
+    pfn_vkGetDeviceGroupPresentCapabilitiesKHR = device_entry(gdpa, device, "vkGetDeviceGroupPresentCapabilitiesKHR")
     got_vkGetDeviceGroupPresentCapabilitiesKHR = pin
     if pfn_vkGetDeviceGroupPresentCapabilitiesKHR != null { n = n + 1 }
-    pfn_vkGetDeviceGroupSurfacePresentModesKHR = aevk_ae_device_proc(device, "vkGetDeviceGroupSurfacePresentModesKHR")
+    pfn_vkGetDeviceGroupSurfacePresentModesKHR = device_entry(gdpa, device, "vkGetDeviceGroupSurfacePresentModesKHR")
     got_vkGetDeviceGroupSurfacePresentModesKHR = pin
     if pfn_vkGetDeviceGroupSurfacePresentModesKHR != null { n = n + 1 }
-    pfn_vkAcquireNextImage2KHR = aevk_ae_device_proc(device, "vkAcquireNextImage2KHR")
+    pfn_vkAcquireNextImage2KHR = device_entry(gdpa, device, "vkAcquireNextImage2KHR")
     got_vkAcquireNextImage2KHR = pin
     if pfn_vkAcquireNextImage2KHR != null { n = n + 1 }
     return n
