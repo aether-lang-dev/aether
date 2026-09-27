@@ -14,6 +14,19 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.729.0]
+
+### Added
+
+- **`contrib.jq` runs jq programs.** A port of gojq (MIT) that runs the jq 1.7
+  language over `std.json` values: paths and every assignment operator,
+  `reduce`/`foreach`, `try`/`catch`, `label`/`break`, destructuring with `?//`,
+  user functions, `@format` strings, regular expressions through `std.regex`,
+  dates, and the builtin library. `jq.query(program, json_text)` runs one in a
+  call, `jq.compile`/`jq.run` reuse a compiled program, and
+  `contrib/jq/example_jq.ae` is a `jq` command line with jq's flags and exit
+  codes (#2066).
+
 ## [0.728.0]
 
 ### Fixed
