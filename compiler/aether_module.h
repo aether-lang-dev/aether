@@ -19,7 +19,9 @@ typedef struct {
     // #2209: the namespace this module's merged symbols are prefixed with
     // (`<ns>_<name>`). The last path segment when no other loaded module
     // shares it, else the full path with dots as underscores, so two
-    // modules ending in `vk` never share one namespace. Assigned by
+    // modules ending in `vk` never share one namespace. A shipped module
+    // (`std.*`, `contrib.*`) always keeps its last segment: its C symbols
+    // are compiled under that prefix and cannot move (#2190). Assigned by
     // module_assign_namespaces once every module is loaded; NULL before.
     char* ns;
 } AetherModule;

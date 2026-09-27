@@ -1,0 +1,7 @@
+// The program's own `math`: same last segment as std.math, different module.
+// Stands in for the reporter's `pkg.math` in issue #2190.
+exports(add)
+
+add(a: int, b: int) -> int {
+    return a + b
+}
