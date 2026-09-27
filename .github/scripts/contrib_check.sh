@@ -390,9 +390,12 @@ for entry in "${TESTS[@]}"; do
       sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log" | head -25
     elif [ "$code" = "124" ]; then
       printf '  FAIL  %-22s (timeout — did not terminate)\n' "$label"
+      tail -40 "$log"
     else
       printf '  FAIL  %-22s (run, exit %s)\n' "$label" "$code"
-      grep -iE "fail" "$log" | head -5
+      # Loader errors and crash diagnostics need not contain "fail".
+      # Keep the last completed spec and the actual termination message.
+      tail -40 "$log"
     fi
     rc=1
   fi
