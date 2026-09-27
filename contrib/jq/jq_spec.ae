@@ -1,0 +1,34 @@
+// Spec support shared by contrib.jq's behaviour specs (test_eval.ae,
+// test_paths.ae, test_builtins.ae): run a program the way the jq command
+// line would and give back what it printed, so an expectation reads like a
+// jq manual example. Not part of the module's API.
+
+import std.string
+import contrib.jq
+
+exports(
+    yields, fails_with
+)
+
+// The program's outputs against the JSON text `input`, compact, one per
+// line; "ERR: <diagnostic>" when it fails to compile or raises.
+yields(prog: string, input: string) -> string {
+    out, err = jq.query(prog, input)
+    if err != "" { return "ERR: ${err}" }
+    return out
+}
+
+// The error a program raises (without the "jq: error: " prefix), or
+// "no error: <outputs>" when it does not raise.
+fails_with(prog: string, input: string) -> string {
+    out, err = jq.query(prog, input)
+    if err == "" { return "no error: ${out}" }
+    return string_after_prefix(err, "jq: error: ")
+}
+
+string_after_prefix(s: string, prefix: string) -> string {
+    n = string.length(s)
+    m = string.length(prefix)
+    if string.starts_with(s, prefix) == 1 { return string.substring_n(s, n, m, n) }
+    return string.substring_n(s, n, 0, n)
+}

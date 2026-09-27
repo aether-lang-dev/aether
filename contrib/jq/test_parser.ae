@@ -1,0 +1,178 @@
+// Parser specs for contrib.jq: the SHAPE of the tree each program parses
+// to, asserted through the S-expression dump, plus the programs that must
+// be rejected. Evaluation semantics live in test_eval.ae and friends.
+//
+// Run with:  ae run contrib/jq/test_parser.ae
+
+import std.spec
+import std.string
+import parser
+
+// The dump of a parse, or "ERR: <diagnostic>".
+ast_of(src: string) -> string {
+    n, err = parser.parse(src)
+    if n == null { return "ERR: ${err}" }
+    out = parser.dump(n)
+    parser.free(n)
+    return out
+}
+
+// 1 when the program is rejected.
+rejects(src: string) -> int {
+    n, _ = parser.parse(src)
+    if n == null { return 1 }
+    parser.free(n)
+    return 0
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "terms") {
+        spec.it("parses identity, recurse and fields") callback {
+            spec.assert_str_eq(ast_of("."), ".", "identity")
+            spec.assert_str_eq(ast_of(".."), "..", "recurse")
+            spec.assert_str_eq(ast_of(".foo"), "(index . \"foo\")", "field")
+            spec.assert_str_eq(ast_of(".foo.bar"), "(index (index . \"foo\") \"bar\")", "chain")
+            spec.assert_str_eq(ast_of(".\"a b\""), "(index . (str \"a b\"))", "quoted field")
+            spec.assert_str_eq(ast_of(".foo.\"bar\""), "(index (index . \"foo\") (str \"bar\"))", "quoted suffix")
+            spec.assert_str_eq(ast_of(".end"), "(index . \"end\")", "keyword as field")
+        }
+        spec.it("parses brackets: index, slice, iterate") callback {
+            spec.assert_str_eq(ast_of(".[0]"), "(index . 0)", "index")
+            spec.assert_str_eq(ast_of(".a[1:2]"), "(slice (index . \"a\") 1 2)", "slice")
+            spec.assert_str_eq(ast_of(".[:2]"), "(slice . _ 2)", "open start")
+            spec.assert_str_eq(ast_of(".[1:]"), "(slice . 1 _)", "open end")
+            spec.assert_str_eq(ast_of(".[]"), "(each .)", "iterate")
+            spec.assert_str_eq(ast_of(".a[]"), "(each (index . \"a\"))", "iterate a field")
+            spec.assert_str_eq(ast_of(".a.[0]"), "(index (index . \"a\") 0)", "dot before bracket")
+            spec.assert_str_eq(ast_of("$x[0]"), "(index $x 0)", "variable indexed")
+            spec.assert_str_eq(ast_of(".[\"a\",\"b\"]"), "(index . (comma (str \"a\") (str \"b\")))", "comma inside brackets")
+        }
+        spec.it("parses literals") callback {
+            spec.assert_str_eq(ast_of("1"), "1", "int")
+            spec.assert_str_eq(ast_of("1.5"), "1.5", "float")
+            spec.assert_str_eq(ast_of("1e3"), "1000", "exponent")
+            spec.assert_str_eq(ast_of("\"hi\""), "(str \"hi\")", "string")
+            spec.assert_str_eq(ast_of("null"), "null", "null is a literal")
+            spec.assert_str_eq(ast_of("[]"), "(array)", "empty array")
+            spec.assert_str_eq(ast_of("[1,2]"), "(array (comma 1 2))", "array")
+            spec.assert_str_eq(ast_of("{}"), "(object)", "empty object")
+        }
+        spec.it("parses string interpolation and formats") callback {
+            spec.assert_str_eq(ast_of("\"a\\(.x)b\""), "(str \"a\" (index . \"x\") \"b\")", "interpolation")
+            spec.assert_str_eq(ast_of("\"\\(\"n\\(1)\")\""), "(str (str \"n\" 1))", "nested")
+            spec.assert_str_eq(ast_of("@base64"), "@base64", "format filter")
+            spec.assert_str_eq(ast_of("@json \"x\\(.)\""), "(str @json \"x\" .)", "format string")
+            spec.assert_str_eq(ast_of("\"\\u00e9\\ud83d\\ude00\""), "(str \"é😀\")", "unicode escapes")
+        }
+        spec.it("parses object construction") callback {
+            spec.assert_str_eq(ast_of("{a: 1}"), "(object (\"a\" 1))", "key value")
+            spec.assert_str_eq(ast_of("{a}"), "(object (\"a\" (index . \"a\")))", "shorthand")
+            spec.assert_str_eq(ast_of("{$x}"), "(object (\"x\" $x))", "variable shorthand")
+            spec.assert_str_eq(ast_of("{\"a b\"}"), "(object ((str \"a b\") (index . (str \"a b\"))))", "string shorthand")
+            spec.assert_str_eq(ast_of("{(.k): .v}"), "(object ((index . \"k\") (index . \"v\")))", "computed key")
+            spec.assert_str_eq(ast_of("{a: 1, b: 2}"), "(object (\"a\" 1) (\"b\" 2))", "two entries")
+            spec.assert_str_eq(ast_of("{a: 1 | 2}"), "(object (\"a\" (pipe 1 2)))", "pipe in value")
+            spec.assert_str_eq(ast_of("{a: (1, 2)}"), "(object (\"a\" (comma 1 2)))", "parenthesised comma")
+            spec.assert_str_eq(ast_of("{if: 1}"), "(object (\"if\" 1))", "keyword key")
+            spec.assert_str_eq(ast_of("{\"x\\(1)\": 2}"), "(object ((str \"x\" 1) 2))", "interpolated key")
+        }
+        spec.it("parses calls") callback {
+            spec.assert_str_eq(ast_of("length"), "(call length)", "no args")
+            spec.assert_str_eq(ast_of("map(.a)"), "(call map (index . \"a\"))", "one arg")
+            spec.assert_str_eq(ast_of("range(0; 3)"), "(call range 0 3)", "two args")
+            spec.assert_str_eq(ast_of("f(1, 2)"), "(call f (comma 1 2))", "comma inside an argument")
+            spec.assert_str_eq(ast_of("$__loc__"), "$__loc__", "loc")
+        }
+    }
+
+    spec.describe(fw, "operators and precedence") {
+        spec.it("pipe is lowest and right associative") callback {
+            spec.assert_str_eq(ast_of(".a | .b | .c"), "(pipe (index . \"a\") (pipe (index . \"b\") (index . \"c\")))", "right assoc")
+            spec.assert_str_eq(ast_of("1, 2 | 3"), "(pipe (comma 1 2) 3)", "comma binds tighter than pipe")
+        }
+        spec.it("arithmetic groups as usual") callback {
+            spec.assert_str_eq(ast_of("1 + 2 * 3"), "(+ 1 (* 2 3))", "mul over add")
+            spec.assert_str_eq(ast_of("1 - 2 - 3"), "(- (- 1 2) 3)", "left assoc")
+            spec.assert_str_eq(ast_of("-1 + 2"), "(+ (neg 1) 2)", "unary minus")
+            spec.assert_str_eq(ast_of("8 / 2 % 3"), "(% (/ 8 2) 3)", "div mod left assoc")
+        }
+        spec.it("comparison, and, or") callback {
+            spec.assert_str_eq(ast_of(".a == 1 and .b < 2 or .c"), "(or (and (== (index . \"a\") 1) (< (index . \"b\") 2)) (index . \"c\"))", "and over or")
+            spec.assert_str_eq(ast_of("1 + 1 == 2"), "(== (+ 1 1) 2)", "add over compare")
+            spec.assert_true(rejects("1 < 2 < 3"), "comparison is non-associative")
+        }
+        spec.it("alternative and assignment") callback {
+            spec.assert_str_eq(ast_of(".a // .b // .c"), "(// (index . \"a\") (// (index . \"b\") (index . \"c\")))", "// right assoc")
+            spec.assert_str_eq(ast_of(".a = 1"), "(= (index . \"a\") 1)", "assign")
+            spec.assert_str_eq(ast_of(".a |= . + 1"), "(|= (index . \"a\") (+ . 1))", "update")
+            spec.assert_str_eq(ast_of(".a += 1, .b"), "(comma (+= (index . \"a\") 1) (index . \"b\"))", "assignment binds tighter than comma")
+            spec.assert_str_eq(ast_of(".a = 1 // 2"), "(// (= (index . \"a\") 1) 2)", "assignment binds tighter than //")
+            spec.assert_str_eq(ast_of(".a //= 1"), "(//= (index . \"a\") 1)", "alternative assignment")
+        }
+        spec.it("postfix ? and try") callback {
+            spec.assert_str_eq(ast_of(".a?"), "(try (index . \"a\"))", "optional")
+            spec.assert_str_eq(ast_of(".a[]?"), "(try (each (index . \"a\")))", "optional iterate")
+            spec.assert_str_eq(ast_of("try .a catch .b"), "(try (index . \"a\") (index . \"b\"))", "try catch")
+            spec.assert_str_eq(ast_of("try .a | .b"), "(pipe (try (index . \"a\")) (index . \"b\"))", "try binds tighter than pipe")
+            spec.assert_str_eq(ast_of("try error(\"x\") catch . + 1"), "(+ (try (call error (str \"x\")) .) 1)", "catch body is a term")
+        }
+    }
+
+    spec.describe(fw, "binding and control flow") {
+        spec.it("parses as-bindings") callback {
+            spec.assert_str_eq(ast_of(".a as $x | $x"), "(as (index . \"a\") ($x) $x)", "simple")
+            spec.assert_str_eq(ast_of("1, 2 as $x | $x"), "(comma 1 (as 2 ($x) $x))", "as takes a term")
+            spec.assert_str_eq(ast_of(". as [$a, $b] | $a"), "(as . ([$a $b]) $a)", "array pattern")
+            spec.assert_str_eq(ast_of(". as {a: $a, $b, \"c\": [$c], (.k): $d} | 1"), "(as . ({(\"a\" $a) ($b) ((str \"c\") [$c]) ((index . \"k\") $d)}) 1)", "object pattern")
+            spec.assert_str_eq(ast_of(". as {$a: [$b]} | 1"), "(as . ({($a [$b])}) 1)", "variable with sub-pattern")
+            spec.assert_str_eq(ast_of(". as [$a] ?// $a | 1"), "(as . ([$a] $a) 1)", "destructuring alternatives")
+        }
+        spec.it("parses reduce and foreach") callback {
+            spec.assert_str_eq(ast_of("reduce .[] as $x (0; . + $x)"), "(reduce (each .) $x 0 (+ . $x))", "reduce")
+            spec.assert_str_eq(ast_of("foreach .[] as $x (0; . + $x; [$x, .])"), "(foreach (each .) $x 0 (+ . $x) (array (comma $x .)))", "foreach 3")
+            spec.assert_str_eq(ast_of("foreach .[] as [$a] (0; . + $a)"), "(foreach (each .) [$a] 0 (+ . $a))", "foreach 2")
+            spec.assert_str_eq(ast_of("reduce range(3) as $x (0; . + 1) | . * 2"), "(pipe (reduce (call range 3) $x 0 (+ . 1)) (* . 2))", "reduce is a term")
+        }
+        spec.it("parses if / elif / else") callback {
+            spec.assert_str_eq(ast_of("if . then 1 else 2 end"), "(if . 1 2)", "if else")
+            spec.assert_str_eq(ast_of("if . then 1 end"), "(if . 1 _)", "no else")
+            spec.assert_str_eq(ast_of("if .a then 1 elif .b then 2 else 3 end"), "(if (index . \"a\") 1 (if (index . \"b\") 2 3))", "elif")
+            spec.assert_true(rejects("if . then 1"), "missing end")
+        }
+        spec.it("parses definitions") callback {
+            spec.assert_str_eq(ast_of("def f: 1; f"), "(def f () 1 (call f))", "no params")
+            spec.assert_str_eq(ast_of("def f(g; $x): g + $x; f(.; 1)"), "(def f (g $x) (+ (call g) $x) (call f . 1))", "params")
+            spec.assert_str_eq(ast_of("def f: 1; f | f"), "(def f () 1 (pipe (call f) (call f)))", "def scopes over the rest")
+            spec.assert_str_eq(ast_of("1, def f: 2; f"), "(comma 1 (def f () 2 (call f)))", "def in term position")
+            spec.assert_str_eq(ast_of("def f: def g: 3; g; f"), "(def f () (def g () 3 (call g)) (call f))", "nested def")
+        }
+        spec.it("parses label and break") callback {
+            spec.assert_str_eq(ast_of("label $out | 1, break $out"), "(label out (comma 1 (break out)))", "label")
+        }
+    }
+
+    spec.describe(fw, "rejections") {
+        spec.it("reports syntax errors with a position") callback {
+            spec.assert_true(rejects(".a |"), "dangling pipe")
+            spec.assert_true(rejects("[1, 2"), "unclosed array")
+            spec.assert_true(rejects("{a: }"), "missing value")
+            spec.assert_true(rejects("\"abc"), "unterminated string")
+            spec.assert_true(rejects("\"\\q\""), "bad escape")
+            spec.assert_true(rejects("def : 1; ."), "def without a name")
+            spec.assert_true(rejects("reduce . as $x (0)"), "reduce missing update")
+            spec.assert_true(rejects(". as 1 | ."), "non-pattern after as")
+            spec.assert_true(rejects("{1: 2}"), "numeric object key")
+            spec.assert_true(rejects("$"), "bare dollar")
+            e = ast_of("1 +")
+            spec.assert_true(string.starts_with(e, "ERR: syntax error"), "diagnostic prefix: ${e}")
+            spec.assert_true(string.contains(e, "line 1"), "line number in diagnostic")
+        }
+        spec.it("skips comments and whitespace") callback {
+            spec.assert_str_eq(ast_of("# a comment\n  .a  # trailing\n| .b"), "(pipe (index . \"a\") (index . \"b\"))", "comments")
+        }
+    }
+
+    spec.run_summary(fw)
+}

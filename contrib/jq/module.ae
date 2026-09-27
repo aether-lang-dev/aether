@@ -1,0 +1,275 @@
+// contrib.jq — the jq language, in Aether.
+// Import with: import contrib.jq
+//
+// A port of gojq (github.com/itchyny/gojq, MIT), itself a Go
+// implementation of jq. The pieces are:
+//
+//   value.ae    jq's view of JSON: total order, deep copy, serialisation
+//   lexer.ae    tokens
+//   parser.ae   recursive descent to ast.ae nodes
+//   prelude.ae  the builtins jq defines in jq itself
+//   eval.ae     the evaluator and the native builtins
+//   module.ae   this facade
+//
+// Values are std.json JsonValues, so a program's inputs and outputs plug
+// straight into the rest of the standard library.
+//
+//   import std.json
+//   import contrib.jq
+//
+//   main() {
+//       prog, err = jq.compile(".[] | select(.age > 30) | .name")
+//       if err != "" { println(err); return }
+//       input, _ = json.parse("[{\"name\":\"ann\",\"age\":41},{\"name\":\"bob\",\"age\":7}]")
+//       out, err = jq.run_json(prog, input)     // one line per output
+//       print(out)                              // "ann"
+//       json.json_free(input)
+//       jq.free(prog)
+//   }
+//
+// `run` gives the outputs as JSON values (owned by the caller) in a std.list;
+// `run_json` renders them. `input`/`inputs` inside the program read from
+// the optional `inputs` list handed to `run_with_inputs`. See README.md for
+// what of jq 1.7 is and is not covered.
+
+import std.json
+import std.list
+import std.string
+import std.strbuilder
+import eval
+import value
+
+exports(
+    compile, free, set_var,
+    run, run_with_inputs, run_json, run_json_opts, query, render,
+    parse_stream, free_values,
+    RESULT_OK, RESULT_ERROR, RESULT_HALT,
+    to_json, to_json_indent, error_message
+)
+
+const RESULT_OK = 0
+const RESULT_ERROR = 1
+const RESULT_HALT = 2
+
+// Compile a jq program. Returns (program, "") or (null, diagnostic).
+compile(src: string) -> ptr! {
+    return eval.new_program(src)
+}
+
+free(prog: ptr) {
+    eval.free_program(prog)
+}
+
+// Bind `$name` for the program (jq's --arg / --argjson). The value is
+// donated to the program.
+set_var(prog: ptr, name: string, v: ptr) {
+    eval.program_set_var(prog, name, v)
+}
+
+// Run `prog` against `input` (borrowed), appending every output (owned) to
+// `out` (a std.list). Returns (RESULT_*, code, error value or null): on
+// RESULT_ERROR the error value is jq's (a string for `error("msg")`, or
+// whatever `error(x)` raised); on RESULT_HALT `code` is the exit code
+// and the value is halt_error's message, or null for a plain `halt`.
+// The error value, when non-null, is owned by the caller.
+run(prog: ptr, input: ptr, out: ptr) -> (int, int, ptr) {
+    return run_with_inputs(prog, input, null, out)
+}
+
+// As `run`, with `inputs` (a std.list of borrowed values) feeding the
+// program's `input` and `inputs` builtins. They consume from the front of
+// the list, so afterwards it holds only what the program did not read.
+run_with_inputs(prog: ptr, input: ptr, inputs: ptr, out: ptr) -> (int, int, ptr) {
+    own_inputs = inputs
+    if own_inputs == null { own_inputs = list.new() }
+    ctx = eval.new_ctx(prog, own_inputs)
+    eval.run_collect(ctx, input, out)
+    status = eval.ctx_status(ctx)
+    code = eval.ctx_halt_code(ctx)
+    err = eval.ctx_take_error(ctx)
+    eval.free_ctx(ctx)
+    if inputs == null { list.free(own_inputs) }
+    if status == eval.ST_ERROR { return RESULT_ERROR, 5, err }
+    if status == eval.ST_HALT { return RESULT_HALT, code, err }
+    if err != null { json.json_free(err) }
+    return RESULT_OK, 0, null
+}
+
+// Run and render: every output as compact JSON on its own line. Returns
+// (text, "") or (text so far, "jq: error: ...").
+run_json(prog: ptr, input: ptr) -> string! {
+    return run_json_opts(prog, input, 0, 0, 0)
+}
+
+// `indent` spaces per level (0 = compact), `sort_keys` = 1 for --sort-keys,
+// `raw` = 1 to print string outputs without quotes (--raw-output).
+run_json_opts(prog: ptr, input: ptr, indent: int, sort_keys: int, raw: int) -> string! {
+    out = list.new()
+    status, code, err = run(prog, input, out)
+    msg = _diagnostic(status, code, err)
+    if err != null { json.json_free(err) }
+    // Returned straight from the call so the string stays caller-owned.
+    return render(out, indent, sort_keys, raw), msg
+}
+
+// The one-line diagnostic for a run's outcome ("" when it succeeded).
+_diagnostic(status: int, code: int, err: ptr) -> string {
+    if status == RESULT_ERROR { return "jq: error: ${error_message(err)}" }
+    if status == RESULT_HALT {
+        if err != null { return "${error_message(err)}" }
+        if code != 0 { return "jq: halted with exit code ${code}" }
+    }
+    return ""
+}
+
+// One-shot: compile `src`, run it against the JSON text `input_text`, and
+// return the outputs as compact JSON separated by newlines (no trailing
+// newline). On a compile, input or runtime error the second value is the
+// diagnostic and the first holds the outputs produced before the error.
+//
+//   out, err = jq.query(".a[] * 2", "{\"a\":[1,2]}")   // "2\n4", ""
+query(src: string, input_text: string) -> string! {
+    prog, cerr = compile(src)
+    if prog == null { return "", "jq: error: ${cerr}" }
+    input, jerr = json.parse(input_text)
+    if input == null {
+        free(prog)
+        return "", "jq: error: invalid JSON input: ${jerr}"
+    }
+    text, rerr = run_json(prog, input)
+    json.json_free(input)
+    free(prog)
+    return _chomp(text), "${rerr}"
+}
+
+// `s` without its final newline, as a fresh string.
+_chomp(s: string) -> string {
+    n = string.length(s)
+    m = n
+    if n > 0 && string.char_at_n(s, n, n - 1) == 10 { m = n - 1 }
+    return string.substring_n(s, n, 0, m)
+}
+
+// Render a std.list of owned outputs, one per line, freeing them.
+render(out: ptr, indent: int, sort_keys: int, raw: int) -> string {
+    sb = strbuilder.new(64)
+    n = list.size(out)
+    i = 0
+    while i < n {
+        v = list.get_raw(out, i)
+        if raw == 1 && value.type_of(v) == value.T_STRING {
+            strbuilder.append(sb, value.string_value(v))
+        } else {
+            strbuilder.append(sb, value.to_json_indent(v, indent, sort_keys))
+        }
+        strbuilder.append_byte(sb, 10)
+        json.json_free(v)
+        list.set(out, i, null)
+        i = i + 1
+    }
+    list.free(out)
+    return strbuilder.finish(sb)
+}
+
+// Parse a stream of whitespace-separated JSON texts (what the jq command
+// reads: `1 2 {"a":3}`, or JSON Lines) into a std.list of owned values.
+// Returns (list, "") or (null, diagnostic naming the failing text's offset).
+// Free the list with free_values.
+parse_stream(text: string) -> ptr! {
+    out = list.new()
+    n = string.length(text)
+    i = 0
+    while i < n {
+        while i < n && _is_ws(string.char_at_n(text, n, i)) == 1 { i = i + 1 }
+        if i < n {
+            start = i
+            i = _value_end(text, n, i)
+            v, err = json.parse(string.substring_n(text, n, start, i))
+            if v == null {
+                free_values(out)
+                return null, "${err} (in the JSON text at byte ${start})"
+            }
+            list.list_add_raw(out, v)
+        }
+    }
+    return out, ""
+}
+
+// Free a list of owned JSON values and the list.
+free_values(l: ptr) {
+    if l == null { return }
+    n = list.size(l)
+    i = 0
+    while i < n {
+        v = list.get_raw(l, i)
+        if v != null { json.json_free(v) }
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+}
+
+_is_ws(c: int) -> int {
+    if c == 32 || c == 9 || c == 10 || c == 13 { return 1 }
+    return 0
+}
+
+// The offset just past the JSON value starting at `i`: containers are
+// matched bracket by bracket (skipping strings), strings to their closing
+// quote, scalars to the next whitespace or delimiter. Malformed text still
+// ends somewhere; json.parse then reports what is wrong with it.
+_value_end(s: string, n: int, i: int) -> int {
+    c = string.char_at_n(s, n, i)
+    if c == 34 { return _string_end(s, n, i) }
+    if c == 123 || c == 91 {
+        depth = 0
+        while i < n {
+            d = string.char_at_n(s, n, i)
+            if d == 34 {
+                i = _string_end(s, n, i)
+            } else {
+                if d == 123 || d == 91 { depth = depth + 1 }
+                if d == 125 || d == 93 { depth = depth - 1 }
+                i = i + 1
+                if depth == 0 { return i }
+            }
+        }
+        return n
+    }
+    while i < n {
+        d = string.char_at_n(s, n, i)
+        if _is_ws(d) == 1 || d == 123 || d == 91 || d == 34 || d == 125 || d == 93 { return i }
+        i = i + 1
+    }
+    return n
+}
+
+// Past the closing quote of the string starting at `i`.
+_string_end(s: string, n: int, i: int) -> int {
+    i = i + 1
+    while i < n {
+        d = string.char_at_n(s, n, i)
+        if d == 92 {
+            i = i + 2
+        } else {
+            i = i + 1
+            if d == 34 { return i }
+        }
+    }
+    return n
+}
+
+to_json(v: ptr) -> string {
+    return value.to_json(v)
+}
+
+to_json_indent(v: ptr, indent: int, sort_keys: int) -> string {
+    return value.to_json_indent(v, indent, sort_keys)
+}
+
+// jq's rendering of an error value: the string itself, or JSON with a
+// "(not a string)" suffix.
+error_message(err: ptr) -> string {
+    if err == null { return "" }
+    return eval.error_message(err)
+}

@@ -1,0 +1,216 @@
+// example_jq — a `jq` command line over contrib.jq.
+//
+//   echo '{"a":[1,2,3]}' | ae run contrib/jq/example_jq.ae -- '.a | map(. * 2)'
+//
+// Reads a stream of JSON texts from stdin (whitespace-separated, so JSON
+// Lines works too) and runs the filter against each, printing every output.
+// Flags follow jq's spelling:
+//
+//   -n  --null-input      run once against null; the texts feed input/inputs
+//   -s  --slurp           run once against an array of all the texts
+//   -c  --compact-output  one line per output
+//   -r  --raw-output      strings without quotes
+//   -j  --join-output     like -r, and no newline after each output
+//   -S  --sort-keys       object keys in order
+//   -e  --exit-status     exit 1 when the last output is false or null,
+//                         4 when there was none
+//       --indent n        spaces per level (default 2; 0 = compact)
+//       --arg name value  $name bound to the string
+//       --argjson name v  $name bound to the parsed JSON text
+//
+// Exit codes are jq's: 2 usage, 3 compile error, 5 runtime error,
+// halt_error's own code, and -e's 1 / 4.
+
+import std.io
+import std.json
+import std.list
+import std.os
+import std.string
+import std.strbuilder
+import contrib.jq
+
+// Everything on stdin.
+read_stdin() -> string {
+    sb = strbuilder.new(4096)
+    while 1 == 1 {
+        chunk, got, err = io.fd_read_n(0, 65536)
+        if err != "" || got <= 0 { break }
+        strbuilder.append(sb, chunk)
+    }
+    return strbuilder.finish(sb)
+}
+
+fail(code: int, msg: string) {
+    io.stderr_write("${msg}\n")
+    os.exit(code)
+}
+
+// -s: the texts as one array (a single text in the stream).
+slurped(texts: ptr) -> ptr {
+    arr = json.json_create_array()
+    n = list.size(texts)
+    i = 0
+    while i < n {
+        json.json_array_add_raw(arr, list.get_raw(texts, i))
+        list.set(texts, i, null)
+        i = i + 1
+    }
+    list.free(texts)
+    one = list.new()
+    list.list_add_raw(one, arr)
+    return one
+}
+
+usage() {
+    fail(2, "Usage: example_jq [-n] [-s] [-c] [-r] [-j] [-S] [-e] [--indent n] [--arg name value] [--argjson name json] FILTER")
+}
+
+main() {
+    null_input = 0
+    slurp = 0
+    indent = 2
+    raw = 0
+    join = 0
+    sort_keys = 0
+    exit_status = 0
+    filter = ""
+    have_filter = 0
+    prog = null
+    // --arg / --argjson are bound once the filter has compiled; collect them.
+    var_names = list.new()
+    var_values = list.new()
+
+    argc = os.args_count()
+    i = 1
+    while i < argc {
+        a = os.args_get(i)
+        if string.equals(a, "-n") == 1 || string.equals(a, "--null-input") == 1 { null_input = 1 }
+        else if string.equals(a, "-s") == 1 || string.equals(a, "--slurp") == 1 { slurp = 1 }
+        else if string.equals(a, "-c") == 1 || string.equals(a, "--compact-output") == 1 { indent = 0 }
+        else if string.equals(a, "-r") == 1 || string.equals(a, "--raw-output") == 1 { raw = 1 }
+        else if string.equals(a, "-j") == 1 || string.equals(a, "--join-output") == 1 {
+            raw = 1
+            join = 1
+        }
+        else if string.equals(a, "-S") == 1 || string.equals(a, "--sort-keys") == 1 { sort_keys = 1 }
+        else if string.equals(a, "-e") == 1 || string.equals(a, "--exit-status") == 1 { exit_status = 1 }
+        else if string.equals(a, "--indent") == 1 {
+            if i + 1 >= argc { usage() }
+            w, werr = string.to_int(os.args_get(i + 1))
+            if werr != "" { usage() }
+            indent = w
+            i = i + 1
+        }
+        else if string.equals(a, "--arg") == 1 || string.equals(a, "--argjson") == 1 {
+            if i + 2 >= argc { usage() }
+            list.list_add_raw(var_names, json.json_create_string(os.args_get(i + 1)))
+            if string.equals(a, "--arg") == 1 {
+                list.list_add_raw(var_values, json.json_create_string(os.args_get(i + 2)))
+            } else {
+                v, verr = json.parse(os.args_get(i + 2))
+                if v == null { fail(2, "example_jq: invalid JSON text passed to --argjson: ${verr}") }
+                list.list_add_raw(var_values, v)
+            }
+            i = i + 2
+        }
+        else if have_filter == 0 {
+            filter = a
+            have_filter = 1
+        }
+        else { usage() }
+        i = i + 1
+    }
+    if have_filter == 0 { usage() }
+
+    compiled, cerr = jq.compile(filter)
+    if compiled == null { fail(3, "jq: error: ${cerr}\njq: 1 compile error") }
+    prog = compiled
+    k = 0
+    while k < list.size(var_names) {
+        jq.set_var(prog, json.json_get_string_raw(list.get_raw(var_names, k)), list.get_raw(var_values, k))
+        list.set(var_values, k, null) // donated to the program
+        k = k + 1
+    }
+    jq.free_values(var_names)
+    list.free(var_values)
+
+    texts, perr = jq.parse_stream(read_stdin())
+    if texts == null { fail(2, "jq: error (at <stdin>): ${perr}") }
+    if slurp == 1 { texts = slurped(texts) }
+
+    // The texts form a queue: each run takes the next one as `.` (unless
+    // -n), and `input` / `inputs` inside the filter pop further ones.
+    queue = list.new()
+    k = 0
+    while k < list.size(texts) {
+        list.list_add_raw(queue, list.get_raw(texts, k))
+        k = k + 1
+    }
+    code = 0
+    outputs = 0
+    last_truthy = 0
+    runs = 0
+    while (null_input == 1 && runs == 0) || (null_input == 0 && list.size(queue) > 0) {
+        runs = runs + 1
+        nothing = json.json_create_null()
+        input = nothing
+        if null_input == 0 {
+            input = list.get_raw(queue, 0)
+            list.set(queue, 0, null)
+            list.remove(queue, 0)
+        }
+        out = list.new()
+        status, hcode, err = jq.run_with_inputs(prog, input, queue, out)
+        json.json_free(nothing)
+        n = list.size(out)
+        if n > 0 { last_truthy = truthy(list.get_raw(out, n - 1)) }
+        outputs = outputs + n
+        text = jq.render(out, indent, sort_keys, raw)
+        if join == 1 { text = string.replace_all(text, "\n", "") }
+        io.stdout_write(text)
+        if status == jq.RESULT_ERROR {
+            io.stderr_write("jq: error (at <stdin>:${runs}): ${jq.error_message(err)}\n")
+            code = 5
+        }
+        if status == jq.RESULT_HALT {
+            // halt_error prints a string message as is, anything else as JSON
+            if err != null {
+                if json.json_type(err) == 3 {
+                    io.stderr_write(json.json_get_string_raw(err))
+                } else {
+                    io.stderr_write("${jq.to_json(err)}\n")
+                }
+                json.json_free(err)
+            }
+            finish(queue, texts, prog)
+            os.exit(hcode)
+        }
+        if err != null { json.json_free(err) }
+    }
+    finish(queue, texts, prog)
+    if code == 0 && exit_status == 1 {
+        if outputs == 0 { code = 4 } else if last_truthy == 0 { code = 1 }
+    }
+    if code != 0 { os.exit(code) }
+}
+
+// jq truth: everything but null and false.
+truthy(v: ptr) -> int {
+    t = json.json_type(v)
+    if t == 0 { return 0 }
+    if t == 1 { return json.json_get_bool(v) }
+    return 1
+}
+
+// Release the queue (which only aliases), the texts and the program.
+finish(queue: ptr, texts: ptr, prog: ptr) {
+    n = list.size(queue)
+    i = 0
+    while i < n {
+        list.set(queue, i, null)
+        i = i + 1
+    }
+    list.free(queue)
+    jq.free_values(texts)
+    jq.free(prog)
+}

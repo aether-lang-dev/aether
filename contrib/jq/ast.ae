@@ -1,0 +1,202 @@
+// jq.ast — the syntax tree of a jq program.
+//
+// One node struct for every construct, carrying an integer kind and the
+// union of the payload fields, the way std.jsonpath's model does: Aether has
+// no sum types, and one shape means one constructor and one teardown walk.
+// Patterns (the `as [$a, {b: $c}]` destructuring forms), object entries and
+// function parameters are nodes too, so `free_node` reclaims a whole tree
+// without knowing which list holds which.
+//
+// Strings the tree owns (field names, literal text, function names) are
+// held as JSON string values (std.json's json_create_string) rather than
+// Aether strings: their lifetime is then exactly the node's, released by
+// json_free in free_node, with no per-field ownership flags to keep right.
+//
+// The node kinds mirror gojq's ast.go (Term/Query/Pattern types), flattened.
+
+import std.json
+import std.list
+
+exports(
+    // Node kinds
+    N_IDENTITY, N_RECURSE, N_INDEX, N_SLICE, N_ITERATE, N_LITERAL, N_STRING,
+    N_FORMAT, N_ARRAY, N_OBJECT, N_OBJ_ENTRY, N_NEG, N_PIPE, N_COMMA, N_BINOP,
+    N_ASSIGN, N_IF, N_TRY, N_REDUCE, N_FOREACH, N_FUNCDEF, N_PARAM, N_CALL,
+    N_VAR, N_BIND, N_LABEL, N_BREAK, N_STR_PART, N_LOC,
+    P_VAR, P_ARRAY, P_OBJECT, P_ENTRY,
+    // Operators (N_BINOP / N_ASSIGN op field)
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT,
+    OP_GE, OP_AND, OP_OR, OP_ALT,
+    OP_ASSIGN, OP_UPDATE, OP_ADD_ASSIGN, OP_SUB_ASSIGN, OP_MUL_ASSIGN,
+    OP_DIV_ASSIGN, OP_MOD_ASSIGN, OP_ALT_ASSIGN,
+    Node,
+    new_node, new_leaf, set_name, name_of, free_node, free_node_list,
+    op_name
+)
+
+// --- Node kinds ----------------------------------------------------
+const N_IDENTITY = 0 // .
+const N_RECURSE = 1 // ..
+const N_INDEX = 2 // a[b]        a: target, b: index expression
+const N_SLICE = 3 // a[b:c]      b / c may be null
+const N_ITERATE = 4 // a[]
+const N_LITERAL = 5 // number / true / false / null   val
+const N_STRING = 6 // "..." with \(...) parts        list: N_STR_PART, name: format or null
+const N_FORMAT = 7 // @base64 as a filter            name
+const N_ARRAY = 8 // [a]                            a may be null
+const N_OBJECT = 9 // {entries}                      list: N_OBJ_ENTRY
+const N_OBJ_ENTRY = 10 // a: key expression, b: value expression
+const N_NEG = 11 // -a
+const N_PIPE = 12 // a | b
+const N_COMMA = 13 // a, b
+const N_BINOP = 14 // a op b                          op
+const N_ASSIGN = 15 // a op= b                         op
+const N_IF = 16 // if a then b else c end           c may be null
+const N_TRY = 17 // try a catch b                    b may be null (also `a?`)
+const N_REDUCE = 18 // reduce a as b (c; d)
+const N_FOREACH = 19 // foreach a as b (c; d; e)         e may be null
+const N_FUNCDEF = 20 // def name(params): a; b         name, list: N_PARAM, a: body, b: rest
+const N_PARAM = 21 // name, op = 1 when declared `$name`
+const N_CALL = 22 // name(args)                     name, list: arguments
+const N_VAR = 23 // $name                           name
+const N_BIND = 24 // a as patterns | c              list: patterns (several for ?//)
+const N_LABEL = 25 // label $name | a                name
+const N_BREAK = 26 // break $name                    name
+const N_STR_PART = 27 // literal text (val) or an interpolated expression (a)
+const N_LOC = 28 // $__loc__                        val: {"file","line"}
+
+// --- Pattern kinds -------------------------------------------------
+const P_VAR = 40 // $name                           name
+const P_ARRAY = 41 // [p, p]                         list
+const P_OBJECT = 42 // {entries}                      list: P_ENTRY
+const P_ENTRY = 43 // a: key expression (or null with name = $var), b: value pattern (or null)
+
+// --- Operators -----------------------------------------------------
+const OP_ADD = 0
+const OP_SUB = 1
+const OP_MUL = 2
+const OP_DIV = 3
+const OP_MOD = 4
+const OP_EQ = 5
+const OP_NE = 6
+const OP_LT = 7
+const OP_LE = 8
+const OP_GT = 9
+const OP_GE = 10
+const OP_AND = 11
+const OP_OR = 12
+const OP_ALT = 13 // //
+const OP_ASSIGN = 20 // =
+const OP_UPDATE = 21 // |=
+const OP_ADD_ASSIGN = 22
+const OP_SUB_ASSIGN = 23
+const OP_MUL_ASSIGN = 24
+const OP_DIV_ASSIGN = 25
+const OP_MOD_ASSIGN = 26
+const OP_ALT_ASSIGN = 27 // //=
+
+struct Node {
+    kind: int,
+    op: int,
+    a: ptr, // child nodes, meaning per kind (see the table above)
+    b: ptr,
+    c: ptr,
+    d: ptr,
+    e: ptr,
+    list: ptr, // std.list of child nodes, or null
+    val: ptr, // an owned JSON value (literals, string parts, $__loc__)
+    name: ptr, // an owned JSON string (names)
+    pos: int // byte offset in the source, for diagnostics
+}
+
+// A node with up to two children; the caller fills the rest.
+new_node(kind: int, a: ptr, b: ptr) -> ptr {
+    n = heap.new(Node)
+    n.kind = kind
+    n.op = 0
+    n.a = a
+    n.b = b
+    n.c = null
+    n.d = null
+    n.e = null
+    n.list = null
+    n.val = null
+    n.name = null
+    n.pos = 0
+    return n
+}
+
+new_leaf(kind: int) -> ptr {
+    return new_node(kind, null, null)
+}
+
+// Give the node an owned copy of `name`.
+set_name(n: ptr, name: string) {
+    p = n as *Node
+    if p.name != null { json.json_free(p.name) }
+    p.name = json.json_create_string(name)
+}
+
+// The node's name, borrowed ("" when it has none).
+name_of(n: ptr) -> string {
+    p = n as *Node
+    if p.name == null { return "" }
+    return json.json_get_string_raw(p.name)
+}
+
+// Release a tree. Every child pointer is a node and every list holds nodes,
+// so one walk covers every kind. List slots are nulled before list.free so
+// std.list does not sniff the freed node memory for strings.
+free_node(n: ptr) {
+    if n == null { return }
+    p = n as *Node
+    free_node(p.a)
+    free_node(p.b)
+    free_node(p.c)
+    free_node(p.d)
+    free_node(p.e)
+    free_node_list(p.list)
+    if p.val != null { json.json_free(p.val) }
+    if p.name != null { json.json_free(p.name) }
+    heap.free(n)
+}
+
+free_node_list(l: ptr) {
+    if l == null { return }
+    n = list.size(l)
+    i = 0
+    while i < n {
+        free_node(list.get_raw(l, i))
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+}
+
+// The operator's spelling, for diagnostics and the AST dump the parser
+// specs assert on.
+op_name(op: int) -> string {
+    if op == OP_ADD { return "+" }
+    if op == OP_SUB { return "-" }
+    if op == OP_MUL { return "*" }
+    if op == OP_DIV { return "/" }
+    if op == OP_MOD { return "%" }
+    if op == OP_EQ { return "==" }
+    if op == OP_NE { return "!=" }
+    if op == OP_LT { return "<" }
+    if op == OP_LE { return "<=" }
+    if op == OP_GT { return ">" }
+    if op == OP_GE { return ">=" }
+    if op == OP_AND { return "and" }
+    if op == OP_OR { return "or" }
+    if op == OP_ALT { return "//" }
+    if op == OP_ASSIGN { return "=" }
+    if op == OP_UPDATE { return "|=" }
+    if op == OP_ADD_ASSIGN { return "+=" }
+    if op == OP_SUB_ASSIGN { return "-=" }
+    if op == OP_MUL_ASSIGN { return "*=" }
+    if op == OP_DIV_ASSIGN { return "/=" }
+    if op == OP_MOD_ASSIGN { return "%=" }
+    if op == OP_ALT_ASSIGN { return "//=" }
+    return "?"
+}

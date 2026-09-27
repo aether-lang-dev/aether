@@ -121,6 +121,17 @@ TESTS=(
   "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c std/unicode/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
   # png: pure Aether over std.zlib; its test decodes what it encoded.
   "png/encode|contrib/png/test_png.ae||leak|"
+  # jq: a port of gojq. Pure Aether over std.json and std.regex; its one C
+  # file (aether_jq.c) is pulled in by value.ae's @source, so no --extra.
+  # Unit specs (value, lexer, parser) through behaviour (eval, paths,
+  # builtins) to the facade (jq); every one is written leak-clean.
+  "jq/value|contrib/jq/test_value.ae||leak|"
+  "jq/lexer|contrib/jq/test_lexer.ae||leak|"
+  "jq/parser|contrib/jq/test_parser.ae||leak|"
+  "jq/eval|contrib/jq/test_eval.ae||leak|"
+  "jq/paths|contrib/jq/test_paths.ae||leak|"
+  "jq/builtins|contrib/jq/test_builtins.ae||leak|"
+  "jq/facade|contrib/jq/test_jq.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
   # and SKIPs itself at runtime when no driver is installed.
   #

@@ -1,0 +1,204 @@
+// Value-layer specs for contrib.jq: ordering, equality, copying, number
+// normalisation, serialisation and codepoint arithmetic, each checked
+// without the parser or evaluator in the loop.
+//
+// Run with:  ae run contrib/jq/test_value.ae
+
+import std.json
+import std.list
+import std.spec
+import std.string
+import value
+
+// Parse a JSON literal, or crash the spec loudly.
+j(src: string) -> ptr {
+    v, err = json.parse(src)
+    if err != "" { println("bad fixture ${src}: ${err}") }
+    return v
+}
+
+// cmp of two JSON literals.
+cmp_of(a: string, b: string) -> int {
+    va = j(a)
+    vb = j(b)
+    c = value.cmp(va, vb)
+    json.json_free(va)
+    json.json_free(vb)
+    return c
+}
+
+// A literal, deep-copied, serialised compactly.
+roundtrip(src: string) -> string {
+    v = j(src)
+    c = value.copy(v)
+    json.json_free(v)
+    out = value.to_json(c)
+    json.json_free(c)
+    return out
+}
+
+// The serialised sort of a JSON array literal.
+sorted(src: string) -> string {
+    v = j(src)
+    l = list.new()
+    n = json.json_array_size(v)
+    i = 0
+    while i < n {
+        list.list_add_raw(l, value.copy(json.json_array_get_raw(v, i)))
+        i = i + 1
+    }
+    json.json_free(v)
+    value.sort_list(l, null)
+    out = json.json_create_array()
+    i = 0
+    while i < n {
+        json.json_array_add_raw(out, list.get_raw(l, i))
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+    s = value.to_json(out)
+    json.json_free(out)
+    return s
+}
+
+// Kept out of the spec closure so the entry string is released at the end
+// of an ordinary function scope.
+entry_has_equals(i: int) -> int {
+    e = value.environ_entry(i)
+    if string.index_of(e, "=") > 0 { return 1 }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "jq total order") {
+        spec.it("orders the types null < false < true < number < string < array < object") callback {
+            spec.assert_eq(cmp_of("null", "false"), -1, "null < false")
+            spec.assert_eq(cmp_of("false", "true"), -1, "false < true")
+            spec.assert_eq(cmp_of("true", "0"), -1, "true < 0")
+            spec.assert_eq(cmp_of("-1", "\"\""), -1, "number < string")
+            spec.assert_eq(cmp_of("\"z\"", "[]"), -1, "string < array")
+            spec.assert_eq(cmp_of("[1]", "{}"), -1, "array < object")
+            spec.assert_eq(cmp_of("{}", "null"), 1, "object > null")
+        }
+        spec.it("compares numbers by value whatever their spelling") callback {
+            spec.assert_eq(cmp_of("1", "1.0"), 0, "1 == 1.0")
+            spec.assert_eq(cmp_of("1.5", "2"), -1, "1.5 < 2")
+            spec.assert_eq(cmp_of("10", "9"), 1, "10 > 9")
+        }
+        spec.it("compares strings by codepoint") callback {
+            spec.assert_eq(cmp_of("\"abc\"", "\"abd\""), -1, "abc < abd")
+            spec.assert_eq(cmp_of("\"ab\"", "\"abc\""), -1, "prefix sorts first")
+            spec.assert_eq(cmp_of("\"é\"", "\"z\""), 1, "U+00E9 > z")
+        }
+        spec.it("compares arrays elementwise then by length") callback {
+            spec.assert_eq(cmp_of("[1,2]", "[1,3]"), -1, "second element decides")
+            spec.assert_eq(cmp_of("[1,2]", "[1,2,0]"), -1, "shorter first")
+            spec.assert_eq(cmp_of("[2]", "[1,9,9]"), 1, "first element decides")
+        }
+        spec.it("compares objects by sorted key set, then values") callback {
+            spec.assert_eq(cmp_of("{\"a\":1}", "{\"b\":0}"), -1, "keys first")
+            spec.assert_eq(cmp_of("{\"a\":1}", "{\"a\":2}"), -1, "then values")
+            spec.assert_eq(cmp_of("{\"b\":1,\"a\":2}", "{\"a\":2,\"b\":1}"), 0, "order-insensitive")
+            spec.assert_eq(cmp_of("{\"a\":1,\"b\":1}", "{\"a\":1}"), 1, "more keys sorts after")
+        }
+    }
+
+    spec.describe(fw, "copy and serialise") {
+        spec.it("round-trips every type") callback {
+            spec.assert_str_eq(roundtrip("{\"a\":[1,2.5,\"x\",null,true,false,{}]}"), "{\"a\":[1,2.5,\"x\",null,true,false,{}]}", "copy")
+        }
+        spec.it("keeps key insertion order") callback {
+            spec.assert_str_eq(roundtrip("{\"b\":1,\"a\":2}"), "{\"b\":1,\"a\":2}", "order")
+        }
+        spec.it("normalises integral doubles to integers") callback {
+            spec.assert_str_eq(roundtrip("3.0"), "3", "3.0 prints as 3")
+            spec.assert_str_eq(roundtrip("1e2"), "100", "1e2 prints as 100")
+            spec.assert_str_eq(roundtrip("1e17"), "100000000000000000", "large integral")
+            spec.assert_str_eq(roundtrip("-0.0"), "-0", "negative zero")
+        }
+        spec.it("prints the shortest round-trip decimal") callback {
+            spec.assert_str_eq(value.num_to_string(0.1 + 0.2), "0.30000000000000004", "0.1+0.2")
+            spec.assert_str_eq(value.num_to_string(1.0 / 3.0), "0.3333333333333333", "1/3")
+            spec.assert_str_eq(value.num_to_string(2.5), "2.5", "2.5")
+            spec.assert_str_eq(value.num_to_string(1.0e100), "1e+100", "1e100")
+        }
+        spec.it("escapes strings the way jq does") callback {
+            spec.assert_str_eq(roundtrip("\"a\\\"b\\\\c\\n\\t\\u0001é\""), "\"a\\\"b\\\\c\\n\\t\\u0001é\"", "escapes")
+        }
+        spec.it("indents and sorts keys on request") callback {
+            v = j("{\"b\":[1,{}],\"a\":{}}")
+            out = value.to_json_indent(v, 2, 1)
+            json.json_free(v)
+            spec.assert_str_eq(out, "{\n  \"a\": {},\n  \"b\": [\n    1,\n    {}\n  ]\n}", "pretty")
+        }
+    }
+
+    spec.describe(fw, "sorting") {
+        spec.it("sorts mixed values into jq order") callback {
+            spec.assert_str_eq(sorted("[3,\"a\",null,[1],true,{},1,false]"), "[null,false,true,1,3,\"a\",[1],{}]", "sort")
+        }
+        spec.it("is stable") callback {
+            spec.assert_str_eq(sorted("[[1,\"b\"],[0,\"z\"],[1,\"a\"]]"), "[[0,\"z\"],[1,\"a\"],[1,\"b\"]]", "arrays")
+        }
+        spec.it("sorts many elements") callback {
+            spec.assert_str_eq(sorted("[9,8,7,6,5,4,3,2,1,0,10,11]"), "[0,1,2,3,4,5,6,7,8,9,10,11]", "12 numbers")
+        }
+        spec.it("sorted_keys is by codepoint") callback {
+            v = j("{\"b\":1,\"a\":2,\"B\":3}")
+            k = value.sorted_keys(v)
+            spec.assert_str_eq(value.to_json(k), "[\"B\",\"a\",\"b\"]", "keys")
+            json.json_free(k)
+            json.json_free(v)
+        }
+    }
+
+    spec.describe(fw, "codepoints") {
+        spec.it("counts codepoints, not bytes") callback {
+            spec.assert_eq(value.codepoint_count("héllo"), 5, "é is one")
+            spec.assert_eq(value.codepoint_count(""), 0, "empty")
+            spec.assert_eq(value.codepoint_count("日本語"), 3, "CJK")
+        }
+        spec.it("explodes and implodes") callback {
+            e = value.explode("aé€😀")
+            spec.assert_str_eq(value.to_json(e), "[97,233,8364,128512]", "explode")
+            s, err = value.implode(e)
+            spec.assert_str_eq(err, "", "implode ok")
+            spec.assert_str_eq(s, "aé€😀", "implode")
+            json.json_free(e)
+        }
+        spec.it("slices by codepoint") callback {
+            spec.assert_str_eq(value.codepoint_slice("héllo", 1, 3), "él", "middle")
+            spec.assert_str_eq(value.codepoint_slice("héllo", 3, 5), "lo", "tail")
+            spec.assert_eq(value.codepoint_of_byte("héllo", 3), 2, "byte 3 is codepoint 2")
+        }
+    }
+
+    spec.describe(fw, "structural edits") {
+        spec.it("drops a key") callback {
+            v = j("{\"a\":1,\"b\":2,\"c\":3}")
+            w = value.without_key(v, "b")
+            spec.assert_str_eq(value.to_json(w), "{\"a\":1,\"c\":3}", "without b")
+            json.json_free(w)
+            json.json_free(v)
+        }
+        spec.it("slices an array") callback {
+            v = j("[0,1,2,3,4]")
+            w = value.array_slice(v, 1, 3)
+            spec.assert_str_eq(value.to_json(w), "[1,2]", "1..3")
+            json.json_free(w)
+            json.json_free(v)
+        }
+    }
+
+    spec.describe(fw, "environment") {
+        spec.it("enumerates KEY=VALUE entries") callback {
+            spec.assert_true(value.environ_count() > 0, "some environment")
+            spec.assert_true(entry_has_equals(0) == 1, "has an equals sign")
+        }
+    }
+
+    spec.run_summary(fw)
+}

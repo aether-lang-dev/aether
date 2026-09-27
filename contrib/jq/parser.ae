@@ -1,0 +1,1152 @@
+// jq.parser — recursive descent over the token stream, producing ast nodes.
+//
+// Ported from gojq's parser.go, with the precedence table taken from jq's
+// own parser.y so the two agree on the corners (`a // b = c` groups as
+// `(a // b) = c`? no: `=` binds tighter than `//`, so it is `a // (b = c)`;
+// `try a | b` is `(try a) | b`; `-1 + 2` is `(-1) + 2`). Lowest to highest:
+//
+//   def … ;      (a definition scopes over the whole rest of the pipe)
+//   |            right associative
+//   ,            left
+//   //           right
+//   = |= += -= *= /= %= //=     non-associative
+//   or           left
+//   and          left
+//   == != < <= > >=              non-associative
+//   + -          left
+//   * / %        left
+//   unary -
+//   postfix: .name  [e]  [a:b]  []  ?  and `as`
+//
+// Parse failure is a sentinel: functions return null and set p.failed with
+// the first diagnostic; the entry point turns that into a (null, message)
+// tuple. The same shape as std.jsonpath's parser.
+
+import std.json
+import std.list
+import std.string
+import std.strbuilder
+import ast
+import lexer
+import value
+
+exports(
+    parse, free, dump
+)
+
+struct Parser {
+    toks: ptr,
+    n: int,
+    i: int,
+    failed: int,
+    err: ptr, // owned JSON string: the first diagnostic, or null
+    err_pos: int,
+    no_comma: int, // 1 while parsing an object value, where `,` ends the entry
+    src: ptr // owned JSON string copy of the source, for $__loc__ line numbers
+}
+
+// Strings the parser keeps are JSON strings (like the AST's names) so their
+// lifetime is explicit: released here, never by a generated destructor.
+_dispose(p: *Parser) {
+    if p.err != null { json.json_free(p.err) }
+    json.json_free(p.src)
+    heap.free(p)
+}
+
+// Parse a jq program. Returns (ast, "") or (null, diagnostic).
+parse(src: string) -> ptr! {
+    toks, lerr = lexer.tokenize(src)
+    if toks == null {
+        return null, "syntax error: ${lerr}"
+    }
+    p = heap.new(Parser)
+    p.toks = toks
+    p.n = list.size(toks)
+    p.i = 0
+    p.failed = 0
+    p.err = null
+    p.err_pos = 0
+    p.no_comma = 0
+    p.src = json.json_create_string(src)
+    node = _parse_pipe(p)
+    if p.failed == 0 {
+        if _kind(p) != lexer.TK_EOF {
+            _fail(p, "unexpected token '${_describe(p)}'")
+        }
+    }
+    if p.failed == 1 {
+        ast.free_node(node)
+        line = _line_of(src, p.err_pos)
+        msg = "syntax error: ${json.json_get_string_raw(p.err)} at line ${line}, position ${p.err_pos}"
+        lexer.free_tokens(toks)
+        _dispose(p)
+        return null, msg
+    }
+    lexer.free_tokens(toks)
+    _dispose(p)
+    return node, ""
+}
+
+free(node: ptr) {
+    ast.free_node(node)
+}
+
+_line_of(src: string, pos: int) -> int {
+    n = string.length(src)
+    if pos > n { pos = n }
+    line = 1
+    i = 0
+    while i < pos {
+        if string.char_at_n(src, n, i) == 10 { line = line + 1 }
+        i = i + 1
+    }
+    return line
+}
+
+// --- token access ----------------------------------------------------
+
+_tok(p: *Parser) -> ptr {
+    if p.i >= p.n { return list.get_raw(p.toks, p.n - 1) }
+    return list.get_raw(p.toks, p.i)
+}
+
+_kind(p: *Parser) -> int { return lexer.token_kind(_tok(p)) }
+_text(p: *Parser) -> string { return lexer.token_text(_tok(p)) }
+_pos(p: *Parser) -> int { return lexer.token_pos(_tok(p)) }
+
+_kind_at(p: *Parser, off: int) -> int {
+    at = p.i + off
+    if at >= p.n { return lexer.TK_EOF }
+    return lexer.token_kind(list.get_raw(p.toks, at))
+}
+
+_text_at(p: *Parser, off: int) -> string {
+    at = p.i + off
+    if at >= p.n { return "" }
+    return lexer.token_text(list.get_raw(p.toks, at))
+}
+
+_advance(p: *Parser) {
+    if p.i < p.n { p.i = p.i + 1 }
+}
+
+_is_op(p: *Parser, s: string) -> int {
+    if _kind(p) != lexer.TK_OP { return 0 }
+    return string.equals(_text(p), s)
+}
+
+_is_op_at(p: *Parser, off: int, s: string) -> int {
+    if _kind_at(p, off) != lexer.TK_OP { return 0 }
+    return string.equals(_text_at(p, off), s)
+}
+
+_is_kw(p: *Parser, s: string) -> int {
+    if _kind(p) != lexer.TK_KEYWORD { return 0 }
+    return string.equals(_text(p), s)
+}
+
+// A readable rendering of the current token for diagnostics.
+_describe(p: *Parser) -> string {
+    k = _kind(p)
+    if k == lexer.TK_EOF { return "end of input" }
+    if k == lexer.TK_NUM { return value.num_to_string(lexer.token_num(_tok(p))) }
+    if k == lexer.TK_STR { return "string" }
+    if k == lexer.TK_FIELD { return ".${_text(p)}" }
+    if k == lexer.TK_VAR { return "$${_text(p)}" }
+    if k == lexer.TK_FORMAT { return "@${_text(p)}" }
+    return _text(p)
+}
+
+// Record the first failure; always returns null so callers can
+// `return _fail(...)`.
+_fail(p: *Parser, msg: string) -> ptr {
+    if p.failed == 0 {
+        p.failed = 1
+        p.err = json.json_create_string(msg)
+        p.err_pos = _pos(p)
+    }
+    return null
+}
+
+_expect_op(p: *Parser, s: string) -> int {
+    if _is_op(p, s) == 1 {
+        _advance(p)
+        return 1
+    }
+    _fail(p, "expected '${s}' but found '${_describe(p)}'")
+    return 0
+}
+
+_expect_kw(p: *Parser, s: string) -> int {
+    if _is_kw(p, s) == 1 {
+        _advance(p)
+        return 1
+    }
+    _fail(p, "expected '${s}' but found '${_describe(p)}'")
+    return 0
+}
+
+_mk(p: *Parser, kind: int, a: ptr, b: ptr) -> ptr {
+    n = ast.new_node(kind, a, b)
+    (n as *Node).pos = _pos(p)
+    return n
+}
+
+// --- grammar ---------------------------------------------------------
+
+_parse_pipe(p: *Parser) -> ptr {
+    if _is_kw(p, "def") == 1 {
+        d = _parse_funcdef(p)
+        if p.failed == 1 { return d }
+        rest = _parse_pipe(p)
+        (d as *Node).b = rest
+        return d
+    }
+    left = _parse_comma(p)
+    if p.failed == 1 { return left }
+    if _is_op(p, "|") == 1 {
+        _advance(p)
+        right = _parse_pipe(p)
+        return _mk(p, ast.N_PIPE, left, right)
+    }
+    return left
+}
+
+_parse_comma(p: *Parser) -> ptr {
+    left = _parse_alt(p)
+    while p.failed == 0 {
+        if p.no_comma == 1 { break }
+        if _is_op(p, ",") == 0 { break }
+        _advance(p)
+        right = _parse_alt(p)
+        left = _mk(p, ast.N_COMMA, left, right)
+    }
+    return left
+}
+
+_parse_alt(p: *Parser) -> ptr {
+    left = _parse_assign(p)
+    if p.failed == 1 { return left }
+    if _is_op(p, "//") == 1 {
+        _advance(p)
+        right = _parse_alt(p)
+        n = _mk(p, ast.N_BINOP, left, right)
+        (n as *Node).op = ast.OP_ALT
+        return n
+    }
+    return left
+}
+
+_assign_op(p: *Parser) -> int {
+    if _kind(p) != lexer.TK_OP { return -1 }
+    t = _text(p)
+    if string.equals(t, "=") == 1 { return ast.OP_ASSIGN }
+    if string.equals(t, "|=") == 1 { return ast.OP_UPDATE }
+    if string.equals(t, "+=") == 1 { return ast.OP_ADD_ASSIGN }
+    if string.equals(t, "-=") == 1 { return ast.OP_SUB_ASSIGN }
+    if string.equals(t, "*=") == 1 { return ast.OP_MUL_ASSIGN }
+    if string.equals(t, "/=") == 1 { return ast.OP_DIV_ASSIGN }
+    if string.equals(t, "%=") == 1 { return ast.OP_MOD_ASSIGN }
+    if string.equals(t, "//=") == 1 { return ast.OP_ALT_ASSIGN }
+    return -1
+}
+
+_parse_assign(p: *Parser) -> ptr {
+    left = _parse_or(p)
+    if p.failed == 1 { return left }
+    op = _assign_op(p)
+    if op >= 0 {
+        _advance(p)
+        right = _parse_or(p)
+        n = _mk(p, ast.N_ASSIGN, left, right)
+        (n as *Node).op = op
+        return n
+    }
+    return left
+}
+
+_parse_or(p: *Parser) -> ptr {
+    left = _parse_and(p)
+    while p.failed == 0 {
+        if _is_kw(p, "or") == 0 { break }
+        _advance(p)
+        right = _parse_and(p)
+        n = _mk(p, ast.N_BINOP, left, right)
+        (n as *Node).op = ast.OP_OR
+        left = n
+    }
+    return left
+}
+
+_parse_and(p: *Parser) -> ptr {
+    left = _parse_cmp(p)
+    while p.failed == 0 {
+        if _is_kw(p, "and") == 0 { break }
+        _advance(p)
+        right = _parse_cmp(p)
+        n = _mk(p, ast.N_BINOP, left, right)
+        (n as *Node).op = ast.OP_AND
+        left = n
+    }
+    return left
+}
+
+_cmp_op(p: *Parser) -> int {
+    if _kind(p) != lexer.TK_OP { return -1 }
+    t = _text(p)
+    if string.equals(t, "==") == 1 { return ast.OP_EQ }
+    if string.equals(t, "!=") == 1 { return ast.OP_NE }
+    if string.equals(t, "<") == 1 { return ast.OP_LT }
+    if string.equals(t, "<=") == 1 { return ast.OP_LE }
+    if string.equals(t, ">") == 1 { return ast.OP_GT }
+    if string.equals(t, ">=") == 1 { return ast.OP_GE }
+    return -1
+}
+
+_parse_cmp(p: *Parser) -> ptr {
+    left = _parse_add(p)
+    if p.failed == 1 { return left }
+    op = _cmp_op(p)
+    if op >= 0 {
+        _advance(p)
+        right = _parse_add(p)
+        n = _mk(p, ast.N_BINOP, left, right)
+        (n as *Node).op = op
+        return n
+    }
+    return left
+}
+
+_parse_add(p: *Parser) -> ptr {
+    left = _parse_mul(p)
+    while p.failed == 0 {
+        op = -1
+        if _is_op(p, "+") == 1 { op = ast.OP_ADD }
+        if _is_op(p, "-") == 1 { op = ast.OP_SUB }
+        if op < 0 { break }
+        _advance(p)
+        right = _parse_mul(p)
+        n = _mk(p, ast.N_BINOP, left, right)
+        (n as *Node).op = op
+        left = n
+    }
+    return left
+}
+
+_parse_mul(p: *Parser) -> ptr {
+    left = _parse_unary(p)
+    while p.failed == 0 {
+        op = -1
+        if _is_op(p, "*") == 1 { op = ast.OP_MUL }
+        if _is_op(p, "/") == 1 { op = ast.OP_DIV }
+        if _is_op(p, "%") == 1 { op = ast.OP_MOD }
+        if op < 0 { break }
+        _advance(p)
+        right = _parse_unary(p)
+        n = _mk(p, ast.N_BINOP, left, right)
+        (n as *Node).op = op
+        left = n
+    }
+    return left
+}
+
+_parse_unary(p: *Parser) -> ptr {
+    if _is_op(p, "-") == 1 {
+        _advance(p)
+        operand = _parse_unary(p)
+        return _mk(p, ast.N_NEG, operand, null)
+    }
+    return _parse_postfix(p, 1)
+}
+
+// A term with its suffixes. `allow_as` is 0 for the source term of
+// `reduce` / `foreach`, whose own `as` belongs to that construct.
+_parse_postfix(p: *Parser, allow_as: int) -> ptr {
+    t = _parse_term(p)
+    while p.failed == 0 {
+        k = _kind(p)
+        if k == lexer.TK_FIELD {
+            key = _string_literal(p, _text(p))
+            _advance(p)
+            t = _mk(p, ast.N_INDEX, t, key)
+        } else if _is_op(p, ".") == 1 && _kind_at(p, 1) == lexer.TK_STR {
+            _advance(p)
+            key = _parse_string_token(p, "")
+            t = _mk(p, ast.N_INDEX, t, key)
+        } else if _is_op(p, ".") == 1 && _is_op_at(p, 1, "[") == 1 {
+            _advance(p)
+            t = _parse_bracket_suffix(p, t)
+        } else if _is_op(p, "[") == 1 {
+            t = _parse_bracket_suffix(p, t)
+        } else if _is_op(p, "?") == 1 {
+            _advance(p)
+            t = _mk(p, ast.N_TRY, t, null)
+        } else if allow_as == 1 && _is_kw(p, "as") == 1 {
+            _advance(p)
+            pats = _parse_patterns(p)
+            if p.failed == 1 {
+                ast.free_node_list(pats)
+                return t
+            }
+            if _expect_op(p, "|") == 0 {
+                ast.free_node_list(pats)
+                return t
+            }
+            body = _parse_pipe(p)
+            n = _mk(p, ast.N_BIND, t, null)
+            (n as *Node).c = body
+            (n as *Node).list = pats
+            return n
+        } else {
+            break
+        }
+    }
+    return t
+}
+
+// `[`  ]  |  [e]  |  [e:]  |  [:e]  |  [e:e]   applied to target `t`.
+_parse_bracket_suffix(p: *Parser, t: ptr) -> ptr {
+    _advance(p) // '['
+    if _is_op(p, "]") == 1 {
+        _advance(p)
+        return _mk(p, ast.N_ITERATE, t, null)
+    }
+    saved = p.no_comma
+    p.no_comma = 0
+    if _is_op(p, ":") == 1 {
+        _advance(p)
+        to = _parse_pipe(p)
+        p.no_comma = saved
+        _expect_op(p, "]")
+        n = _mk(p, ast.N_SLICE, t, null)
+        (n as *Node).c = to
+        return n
+    }
+    e = _parse_pipe(p)
+    if p.failed == 1 {
+        p.no_comma = saved
+        return _mk(p, ast.N_INDEX, t, e)
+    }
+    if _is_op(p, ":") == 1 {
+        _advance(p)
+        to = null
+        if _is_op(p, "]") == 0 {
+            to = _parse_pipe(p)
+        }
+        p.no_comma = saved
+        _expect_op(p, "]")
+        n = _mk(p, ast.N_SLICE, t, e)
+        (n as *Node).c = to
+        return n
+    }
+    p.no_comma = saved
+    _expect_op(p, "]")
+    return _mk(p, ast.N_INDEX, t, e)
+}
+
+_string_literal(p: *Parser, s: string) -> ptr {
+    n = _mk(p, ast.N_LITERAL, null, null)
+    (n as *Node).val = json.json_create_string(s)
+    return n
+}
+
+_number_literal(p: *Parser, d: float) -> ptr {
+    n = _mk(p, ast.N_LITERAL, null, null)
+    (n as *Node).val = value.make_number(d)
+    return n
+}
+
+_parse_term(p: *Parser) -> ptr {
+    k = _kind(p)
+    if k == lexer.TK_NUM {
+        n = _number_literal(p, lexer.token_num(_tok(p)))
+        _advance(p)
+        return n
+    }
+    if k == lexer.TK_STR {
+        return _parse_string_token(p, "")
+    }
+    if k == lexer.TK_FORMAT {
+        name = _text(p)
+        _advance(p)
+        if _kind(p) == lexer.TK_STR {
+            return _parse_string_token(p, name)
+        }
+        n = _mk(p, ast.N_FORMAT, null, null)
+        ast.set_name(n, name)
+        return n
+    }
+    if k == lexer.TK_FIELD {
+        key = _string_literal(p, _text(p))
+        _advance(p)
+        return _mk(p, ast.N_INDEX, _mk(p, ast.N_IDENTITY, null, null), key)
+    }
+    if k == lexer.TK_VAR {
+        name = _text(p)
+        if string.equals(name, "__loc__") == 1 {
+            n = _mk(p, ast.N_LOC, null, null)
+            loc = json.json_create_object()
+            json.json_object_set_raw(loc, "file", json.json_create_string("<stdin>"))
+            json.json_object_set_raw(loc, "line", json.json_create_int(_line_of(json.json_get_string_raw(p.src), _pos(p)) as long))
+            (n as *Node).val = loc
+            _advance(p)
+            return n
+        }
+        n = _mk(p, ast.N_VAR, null, null)
+        ast.set_name(n, name)
+        _advance(p)
+        return n
+    }
+    if k == lexer.TK_OP {
+        if _is_op(p, ".") == 1 {
+            _advance(p)
+            if _kind(p) == lexer.TK_STR {
+                key = _parse_string_token(p, "")
+                return _mk(p, ast.N_INDEX, _mk(p, ast.N_IDENTITY, null, null), key)
+            }
+            return _mk(p, ast.N_IDENTITY, null, null)
+        }
+        if _is_op(p, "..") == 1 {
+            _advance(p)
+            return _mk(p, ast.N_RECURSE, null, null)
+        }
+        if _is_op(p, "(") == 1 {
+            _advance(p)
+            saved = p.no_comma
+            p.no_comma = 0
+            e = _parse_pipe(p)
+            p.no_comma = saved
+            _expect_op(p, ")")
+            return e
+        }
+        if _is_op(p, "[") == 1 {
+            _advance(p)
+            if _is_op(p, "]") == 1 {
+                _advance(p)
+                return _mk(p, ast.N_ARRAY, null, null)
+            }
+            saved = p.no_comma
+            p.no_comma = 0
+            e = _parse_pipe(p)
+            p.no_comma = saved
+            _expect_op(p, "]")
+            return _mk(p, ast.N_ARRAY, e, null)
+        }
+        if _is_op(p, "{") == 1 {
+            return _parse_object(p)
+        }
+        if _is_op(p, "-") == 1 {
+            return _parse_unary(p)
+        }
+        return _fail(p, "unexpected token '${_describe(p)}'")
+    }
+    if k == lexer.TK_KEYWORD {
+        if _is_kw(p, "if") == 1 { return _parse_if(p) }
+        if _is_kw(p, "try") == 1 {
+            _advance(p)
+            body = _parse_postfix(p, 0)
+            handler = null
+            if _is_kw(p, "catch") == 1 {
+                _advance(p)
+                handler = _parse_postfix(p, 0)
+            }
+            return _mk(p, ast.N_TRY, body, handler)
+        }
+        if _is_kw(p, "reduce") == 1 { return _parse_reduce(p, 0) }
+        if _is_kw(p, "foreach") == 1 { return _parse_reduce(p, 1) }
+        if _is_kw(p, "label") == 1 {
+            _advance(p)
+            if _kind(p) != lexer.TK_VAR {
+                return _fail(p, "expected a label name after 'label'")
+            }
+            name = _text(p)
+            _advance(p)
+            if _expect_op(p, "|") == 0 { return null }
+            body = _parse_pipe(p)
+            n = _mk(p, ast.N_LABEL, body, null)
+            ast.set_name(n, name)
+            return n
+        }
+        if _is_kw(p, "def") == 1 {
+            d = _parse_funcdef(p)
+            if p.failed == 1 { return d }
+            (d as *Node).b = _parse_pipe(p)
+            return d
+        }
+        return _fail(p, "unexpected keyword '${_text(p)}'")
+    }
+    if k == lexer.TK_IDENT {
+        name = _text(p)
+        // true / false / null are literals, not calls (jq reserves them).
+        if string.equals(name, "null") == 1 || string.equals(name, "true") == 1 || string.equals(name, "false") == 1 {
+            _advance(p)
+            n = _mk(p, ast.N_LITERAL, null, null)
+            if string.equals(name, "null") == 1 {
+                (n as *Node).val = json.json_create_null()
+            } else {
+                (n as *Node).val = json.json_create_bool(string.equals(name, "true"))
+            }
+            return n
+        }
+        if string.equals(name, "break") == 1 && _kind_at(p, 1) == lexer.TK_VAR {
+            _advance(p)
+            n = _mk(p, ast.N_BREAK, null, null)
+            ast.set_name(n, _text(p))
+            _advance(p)
+            return n
+        }
+        _advance(p)
+        n = _mk(p, ast.N_CALL, null, null)
+        ast.set_name(n, name)
+        args = list.new()
+        (n as *Node).list = args
+        if _is_op(p, "(") == 1 {
+            _advance(p)
+            saved = p.no_comma
+            p.no_comma = 0
+            while p.failed == 0 {
+                list.list_add_raw(args, _parse_pipe(p))
+                if _is_op(p, ";") == 1 {
+                    _advance(p)
+                } else {
+                    break
+                }
+            }
+            p.no_comma = saved
+            _expect_op(p, ")")
+        }
+        return n
+    }
+    return _fail(p, "unexpected token '${_describe(p)}'")
+}
+
+// The string token at the cursor, as an N_STRING node. Interpolated parts
+// are parsed with a fresh parser over their source text.
+_parse_string_token(p: *Parser, format: string) -> ptr {
+    parts = lexer.token_parts(_tok(p))
+    n = _mk(p, ast.N_STRING, null, null)
+    if string.length(format) > 0 { ast.set_name(n, format) }
+    l = list.new()
+    (n as *Node).list = l
+    count = json.json_array_size(parts)
+    i = 0
+    while i < count {
+        part = json.json_array_get_raw(parts, i)
+        pn = _mk(p, ast.N_STR_PART, null, null)
+        if json.json_type(part) == 3 {
+            (pn as *Node).val = json.json_create_string(json.json_get_string_raw(part))
+        } else {
+            src = json.json_get_string_raw(json.json_array_get_raw(part, 0))
+            sub, err = parse(src)
+            if sub == null {
+                ast.free_node(pn)
+                _fail(p, "in string interpolation: ${err}")
+                _advance(p)
+                return n
+            }
+            (pn as *Node).a = sub
+        }
+        list.list_add_raw(l, pn)
+        i = i + 1
+    }
+    _advance(p)
+    return n
+}
+
+// `{` entries `}`
+_parse_object(p: *Parser) -> ptr {
+    _advance(p) // '{'
+    n = _mk(p, ast.N_OBJECT, null, null)
+    entries = list.new()
+    (n as *Node).list = entries
+    if _is_op(p, "}") == 1 {
+        _advance(p)
+        return n
+    }
+    while p.failed == 0 {
+        e = _parse_object_entry(p)
+        if e != null { list.list_add_raw(entries, e) }
+        if p.failed == 1 { break }
+        if _is_op(p, ",") == 1 {
+            _advance(p)
+        } else {
+            _expect_op(p, "}")
+            break
+        }
+    }
+    return n
+}
+
+// An object value: a pipe in which `,` is not an operator.
+_parse_object_value(p: *Parser) -> ptr {
+    saved = p.no_comma
+    p.no_comma = 1
+    v = _parse_pipe(p)
+    p.no_comma = saved
+    return v
+}
+
+_parse_object_entry(p: *Parser) -> ptr {
+    k = _kind(p)
+    e = _mk(p, ast.N_OBJ_ENTRY, null, null)
+    ep = e as *Node
+    if k == lexer.TK_VAR {
+        name = _text(p)
+        ep.a = _string_literal(p, name)
+        if string.equals(name, "__loc__") == 1 {
+            ep.b = _parse_term(p)
+        } else {
+            v = _mk(p, ast.N_VAR, null, null)
+            ast.set_name(v, name)
+            _advance(p)
+            ep.b = v
+        }
+        return e
+    }
+    if k == lexer.TK_IDENT || k == lexer.TK_KEYWORD {
+        name = _text(p)
+        _advance(p)
+        ep.a = _string_literal(p, name)
+        if _is_op(p, ":") == 1 {
+            _advance(p)
+            ep.b = _parse_object_value(p)
+        } else {
+            ep.b = _mk(p, ast.N_INDEX, _mk(p, ast.N_IDENTITY, null, null), _string_literal(p, name))
+        }
+        return e
+    }
+    if k == lexer.TK_STR || k == lexer.TK_FORMAT {
+        format = ""
+        if k == lexer.TK_FORMAT {
+            format = _text(p)
+            _advance(p)
+            if _kind(p) != lexer.TK_STR {
+                ast.free_node(e)
+                return _fail(p, "expected a string after '@${format}' in object key")
+            }
+        }
+        key_tok = p.i
+        ep.a = _parse_string_token(p, format)
+        if _is_op(p, ":") == 1 {
+            _advance(p)
+            ep.b = _parse_object_value(p)
+        } else {
+            // `{"a"}` is `{"a": .a}`: build the key node a second time
+            // from the same token for the value's index expression.
+            resume = p.i
+            p.i = key_tok
+            key_again = _parse_string_token(p, format)
+            p.i = resume
+            ep.b = _mk(p, ast.N_INDEX, _mk(p, ast.N_IDENTITY, null, null), key_again)
+        }
+        return e
+    }
+    if _is_op(p, "(") == 1 {
+        _advance(p)
+        saved = p.no_comma
+        p.no_comma = 0
+        ep.a = _parse_pipe(p)
+        p.no_comma = saved
+        if _expect_op(p, ")") == 0 { return e }
+        if _expect_op(p, ":") == 0 { return e }
+        ep.b = _parse_object_value(p)
+        return e
+    }
+    if k == lexer.TK_NUM {
+        ast.free_node(e)
+        return _fail(p, "object keys must be strings")
+    }
+    ast.free_node(e)
+    return _fail(p, "unexpected token '${_describe(p)}' in object construction")
+}
+
+// if c then a (elif c then a)* (else b)? end
+_parse_if(p: *Parser) -> ptr {
+    _advance(p) // 'if' or 'elif'
+    cond = _parse_pipe(p)
+    if _expect_kw(p, "then") == 0 { return cond }
+    then_ = _parse_pipe(p)
+    n = _mk(p, ast.N_IF, cond, then_)
+    if p.failed == 1 { return n }
+    if _is_kw(p, "elif") == 1 {
+        (n as *Node).c = _parse_if(p)
+        return n
+    }
+    if _is_kw(p, "else") == 1 {
+        _advance(p)
+        (n as *Node).c = _parse_pipe(p)
+    }
+    _expect_kw(p, "end")
+    return n
+}
+
+// reduce SRC as PAT (INIT; UPDATE)        (is_foreach = 0)
+// foreach SRC as PAT (INIT; UPDATE[; EXTRACT])
+_parse_reduce(p: *Parser, is_foreach: int) -> ptr {
+    _advance(p)
+    src = _parse_postfix(p, 0)
+    kind = ast.N_REDUCE
+    if is_foreach == 1 { kind = ast.N_FOREACH }
+    n = _mk(p, kind, src, null)
+    np = n as *Node
+    if _expect_kw(p, "as") == 0 { return n }
+    np.list = _parse_patterns(p)
+    if _expect_op(p, "(") == 0 { return n }
+    saved = p.no_comma
+    p.no_comma = 0
+    np.c = _parse_pipe(p)
+    if _expect_op(p, ";") == 0 {
+        p.no_comma = saved
+        return n
+    }
+    np.d = _parse_pipe(p)
+    if is_foreach == 1 && _is_op(p, ";") == 1 {
+        _advance(p)
+        np.e = _parse_pipe(p)
+    }
+    p.no_comma = saved
+    _expect_op(p, ")")
+    return n
+}
+
+// def name[(params)]: body;     The caller attaches the rest of the pipe.
+_parse_funcdef(p: *Parser) -> ptr {
+    _advance(p) // 'def'
+    n = _mk(p, ast.N_FUNCDEF, null, null)
+    params = list.new()
+    (n as *Node).list = params
+    if _kind(p) != lexer.TK_IDENT {
+        _fail(p, "expected a function name after 'def'")
+        return n
+    }
+    ast.set_name(n, _text(p))
+    _advance(p)
+    if _is_op(p, "(") == 1 {
+        _advance(p)
+        while p.failed == 0 {
+            k = _kind(p)
+            if k != lexer.TK_IDENT && k != lexer.TK_VAR {
+                _fail(p, "expected a parameter name")
+                return n
+            }
+            prm = _mk(p, ast.N_PARAM, null, null)
+            ast.set_name(prm, _text(p))
+            if k == lexer.TK_VAR { (prm as *Node).op = 1 }
+            list.list_add_raw(params, prm)
+            _advance(p)
+            if _is_op(p, ";") == 1 {
+                _advance(p)
+            } else {
+                break
+            }
+        }
+        if _expect_op(p, ")") == 0 { return n }
+    }
+    if _expect_op(p, ":") == 0 { return n }
+    saved = p.no_comma
+    p.no_comma = 0
+    (n as *Node).a = _parse_pipe(p)
+    p.no_comma = saved
+    _expect_op(p, ";")
+    return n
+}
+
+// PAT (?// PAT)*
+_parse_patterns(p: *Parser) -> ptr {
+    pats = list.new()
+    list.list_add_raw(pats, _parse_pattern(p))
+    while p.failed == 0 {
+        if _is_op(p, "?//") == 0 { break }
+        _advance(p)
+        list.list_add_raw(pats, _parse_pattern(p))
+    }
+    return pats
+}
+
+// $name | [p, ...] | {entries}
+_parse_pattern(p: *Parser) -> ptr {
+    if _kind(p) == lexer.TK_VAR {
+        n = _mk(p, ast.P_VAR, null, null)
+        ast.set_name(n, _text(p))
+        _advance(p)
+        return n
+    }
+    if _is_op(p, "[") == 1 {
+        _advance(p)
+        n = _mk(p, ast.P_ARRAY, null, null)
+        l = list.new()
+        (n as *Node).list = l
+        while p.failed == 0 {
+            list.list_add_raw(l, _parse_pattern(p))
+            if _is_op(p, ",") == 1 {
+                _advance(p)
+            } else {
+                break
+            }
+        }
+        _expect_op(p, "]")
+        return n
+    }
+    if _is_op(p, "{") == 1 {
+        _advance(p)
+        n = _mk(p, ast.P_OBJECT, null, null)
+        l = list.new()
+        (n as *Node).list = l
+        while p.failed == 0 {
+            e = _parse_pattern_entry(p)
+            if e != null { list.list_add_raw(l, e) }
+            if p.failed == 1 { break }
+            if _is_op(p, ",") == 1 {
+                _advance(p)
+            } else {
+                break
+            }
+        }
+        _expect_op(p, "}")
+        return n
+    }
+    return _fail(p, "expected a pattern but found '${_describe(p)}'")
+}
+
+// $name | $name: pat | ident: pat | "str": pat | (expr): pat
+_parse_pattern_entry(p: *Parser) -> ptr {
+    e = _mk(p, ast.P_ENTRY, null, null)
+    ep = e as *Node
+    k = _kind(p)
+    if k == lexer.TK_VAR {
+        ast.set_name(e, _text(p))
+        _advance(p)
+        if _is_op(p, ":") == 1 {
+            _advance(p)
+            ep.b = _parse_pattern(p)
+        }
+        return e
+    }
+    if k == lexer.TK_IDENT || k == lexer.TK_KEYWORD {
+        ep.a = _string_literal(p, _text(p))
+        _advance(p)
+    } else if k == lexer.TK_STR {
+        ep.a = _parse_string_token(p, "")
+    } else if _is_op(p, "(") == 1 {
+        _advance(p)
+        saved = p.no_comma
+        p.no_comma = 0
+        ep.a = _parse_pipe(p)
+        p.no_comma = saved
+        if _expect_op(p, ")") == 0 { return e }
+    } else {
+        ast.free_node(e)
+        return _fail(p, "unexpected token '${_describe(p)}' in object pattern")
+    }
+    if _expect_op(p, ":") == 0 { return e }
+    ep.b = _parse_pattern(p)
+    return e
+}
+
+// --- dump --------------------------------------------------------------
+//
+// An S-expression rendering of a tree, for the parser specs and for
+// `ae run example_jq.ae --ast`. Literals print as JSON.
+
+dump(n: ptr) -> string {
+    sb = strbuilder.new(64)
+    _dump(sb, n)
+    return strbuilder.finish(sb)
+}
+
+_dump_child(sb: ptr, n: ptr) {
+    strbuilder.append_byte(sb, 32)
+    if n == null {
+        strbuilder.append(sb, "_")
+    } else {
+        _dump(sb, n)
+    }
+}
+
+_dump_list(sb: ptr, l: ptr) {
+    if l == null { return }
+    n = list.size(l)
+    i = 0
+    while i < n {
+        _dump_child(sb, list.get_raw(l, i))
+        i = i + 1
+    }
+}
+
+_dump_form(sb: ptr, head: string, a: ptr, b: ptr) {
+    strbuilder.append_byte(sb, 40)
+    strbuilder.append(sb, head)
+    _dump_child(sb, a)
+    if b != null { _dump_child(sb, b) }
+    strbuilder.append_byte(sb, 41)
+}
+
+_dump(sb: ptr, n: ptr) {
+    p = n as *Node
+    k = p.kind
+    if k == ast.N_IDENTITY { strbuilder.append(sb, ".") }
+    else if k == ast.N_RECURSE { strbuilder.append(sb, "..") }
+    else if k == ast.N_INDEX { _dump_form(sb, "index", p.a, p.b) }
+    else if k == ast.N_ITERATE { _dump_form(sb, "each", p.a, null) }
+    else if k == ast.N_SLICE {
+        strbuilder.append(sb, "(slice")
+        _dump_child(sb, p.a)
+        _dump_child(sb, p.b)
+        _dump_child(sb, p.c)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_LITERAL { strbuilder.append(sb, value.to_json(p.val)) }
+    else if k == ast.N_STRING {
+        strbuilder.append(sb, "(str")
+        if p.name != null {
+            strbuilder.append(sb, " @")
+            strbuilder.append(sb, ast.name_of(n))
+        }
+        _dump_list(sb, p.list)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_STR_PART {
+        if p.val != null {
+            strbuilder.append(sb, value.to_json(p.val))
+        } else {
+            _dump(sb, p.a)
+        }
+    }
+    else if k == ast.N_FORMAT {
+        strbuilder.append(sb, "@")
+        strbuilder.append(sb, ast.name_of(n))
+    }
+    else if k == ast.N_ARRAY {
+        strbuilder.append(sb, "(array")
+        if p.a != null { _dump_child(sb, p.a) }
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_OBJECT {
+        strbuilder.append(sb, "(object")
+        _dump_list(sb, p.list)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_OBJ_ENTRY || k == ast.P_ENTRY {
+        strbuilder.append_byte(sb, 40)
+        if p.name != null {
+            strbuilder.append(sb, "$")
+            strbuilder.append(sb, ast.name_of(n))
+        } else {
+            _dump(sb, p.a)
+        }
+        if p.b != null { _dump_child(sb, p.b) }
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_NEG { _dump_form(sb, "neg", p.a, null) }
+    else if k == ast.N_PIPE { _dump_form(sb, "pipe", p.a, p.b) }
+    else if k == ast.N_COMMA { _dump_form(sb, "comma", p.a, p.b) }
+    else if k == ast.N_BINOP || k == ast.N_ASSIGN { _dump_form(sb, ast.op_name(p.op), p.a, p.b) }
+    else if k == ast.N_IF {
+        strbuilder.append(sb, "(if")
+        _dump_child(sb, p.a)
+        _dump_child(sb, p.b)
+        _dump_child(sb, p.c)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_TRY {
+        strbuilder.append(sb, "(try")
+        _dump_child(sb, p.a)
+        if p.b != null { _dump_child(sb, p.b) }
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_REDUCE || k == ast.N_FOREACH {
+        if k == ast.N_REDUCE { strbuilder.append(sb, "(reduce") } else { strbuilder.append(sb, "(foreach") }
+        _dump_child(sb, p.a)
+        if list.size(p.list) == 1 {
+            _dump_child(sb, list.get_raw(p.list, 0))
+        } else {
+            strbuilder.append(sb, " (")
+            _dump_list(sb, p.list)
+            strbuilder.append_byte(sb, 41)
+        }
+        _dump_child(sb, p.c)
+        _dump_child(sb, p.d)
+        if p.e != null { _dump_child(sb, p.e) }
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_FUNCDEF {
+        strbuilder.append(sb, "(def ")
+        strbuilder.append(sb, ast.name_of(n))
+        strbuilder.append(sb, " (")
+        cnt = list.size(p.list)
+        i = 0
+        while i < cnt {
+            if i > 0 { strbuilder.append_byte(sb, 32) }
+            prm = list.get_raw(p.list, i) as *Node
+            if prm.op == 1 { strbuilder.append(sb, "$") }
+            strbuilder.append(sb, ast.name_of(list.get_raw(p.list, i)))
+            i = i + 1
+        }
+        strbuilder.append_byte(sb, 41)
+        _dump_child(sb, p.a)
+        _dump_child(sb, p.b)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_CALL {
+        strbuilder.append(sb, "(call ")
+        strbuilder.append(sb, ast.name_of(n))
+        _dump_list(sb, p.list)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_VAR || k == ast.P_VAR {
+        strbuilder.append(sb, "$")
+        strbuilder.append(sb, ast.name_of(n))
+    }
+    else if k == ast.N_LOC { strbuilder.append(sb, "$__loc__") }
+    else if k == ast.N_BIND {
+        strbuilder.append(sb, "(as")
+        _dump_child(sb, p.a)
+        strbuilder.append(sb, " (")
+        cnt = list.size(p.list)
+        i = 0
+        while i < cnt {
+            if i > 0 { strbuilder.append_byte(sb, 32) }
+            _dump(sb, list.get_raw(p.list, i))
+            i = i + 1
+        }
+        strbuilder.append_byte(sb, 41)
+        _dump_child(sb, p.c)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_LABEL {
+        strbuilder.append(sb, "(label ")
+        strbuilder.append(sb, ast.name_of(n))
+        _dump_child(sb, p.a)
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.N_BREAK {
+        strbuilder.append(sb, "(break ")
+        strbuilder.append(sb, ast.name_of(n))
+        strbuilder.append_byte(sb, 41)
+    }
+    else if k == ast.P_ARRAY {
+        strbuilder.append(sb, "[")
+        cnt = list.size(p.list)
+        i = 0
+        while i < cnt {
+            if i > 0 { strbuilder.append_byte(sb, 32) }
+            _dump(sb, list.get_raw(p.list, i))
+            i = i + 1
+        }
+        strbuilder.append(sb, "]")
+    }
+    else if k == ast.P_OBJECT {
+        strbuilder.append(sb, "{")
+        cnt = list.size(p.list)
+        i = 0
+        while i < cnt {
+            if i > 0 { strbuilder.append_byte(sb, 32) }
+            _dump(sb, list.get_raw(p.list, i))
+            i = i + 1
+        }
+        strbuilder.append(sb, "}")
+    }
+    else {
+        strbuilder.append(sb, "?")
+    }
+}

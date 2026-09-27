@@ -1,0 +1,4322 @@
+// jq.eval — the interpreter.
+//
+// Ported from gojq's compiler.go / execute.go / func.go, but not as a
+// bytecode VM: gojq compiles to a stack machine with fork/backtrack
+// instructions, which is the shape a Go implementation wants. Here the
+// generator semantics of jq (every expression yields zero or more values)
+// are done in continuation-passing style: `ev(node, input, env, sink)`
+// evaluates `node` against `input` and calls `emit` on `sink` once per
+// output, synchronously. A pipe `a | b` is therefore "evaluate a with a
+// sink that evaluates b"; `,` is two evaluations into the same sink;
+// `[f]` is an evaluation into a collecting sink. No closures are needed,
+// so no heap-allocated frames outlive the call that made them: every
+// Sink and Env frame is created by an `ev` and released before it returns.
+//
+// Ownership. std.json values are arena-owned trees, so a value cannot be
+// shared between two containers. The rule here is: an emitted value is
+// owned by whoever receives it (the sink frees it or stores it), and the
+// `input` of an evaluation is borrowed. Identity therefore emits a copy.
+// This is O(size) per pipe stage, which is fine for jq programs of the
+// kind a `jq` command line runs and keeps every lifetime local.
+//
+// Control flow. `error`, `break $label`, `halt` and early exits (`limit`,
+// `first`) all unwind through `ctx.status`: every loop checks it after each
+// `emit` and returns. `try` needs to know whether an error came from its
+// body or from downstream (jq does not catch the latter), so the sink it
+// interposes marks itself when the error passed through it.
+//
+// Path expressions. `path(f)`, assignment and `del` evaluate `f` in path
+// mode: every emitted value travels with the JSON path it was read from
+// (`p`), extended by `.a`, `.[i]`, `.[]`, `getpath`; anything that is not a
+// path expression errors, as jq does ("Invalid path expression").
+
+import std.json
+import std.list
+import std.math
+import std.string
+import std.strbuilder
+import std.regex
+import std.encoding
+import std.os
+import std.io
+import ast
+import parser
+import prelude
+import value
+
+exports(
+    ST_OK, ST_ERROR, ST_BREAK, ST_HALT,
+    Ctx, Program,
+    new_program, free_program, program_set_var,
+    new_ctx, free_ctx, ctx_status, ctx_error, ctx_take_error, ctx_halt_code,
+    run_collect, run_each_to_json,
+    error_message
+)
+
+// External helpers from aether_jq.c (see there).
+extern aether_jq_math1(op: int, x: float) -> float
+extern aether_jq_math2(op: int, x: float, y: float) -> float
+extern aether_jq_math3(op: int, x: float, y: float, z: float) -> float
+extern aether_jq_frexp_exp(x: float) -> int
+extern aether_jq_modf_int(x: float) -> float
+extern aether_jq_stack_remaining() -> long
+
+const ST_OK = 0
+const ST_ERROR = 1 // ctx.err holds the error value
+const ST_BREAK = 2 // ctx.break_id names the label (or limit) being unwound to
+const ST_HALT = 3 // `halt` / `halt_error`: ctx.halt_code, ctx.err the message
+
+// Sink kinds
+const SK_COLLECT = 0 // append to `list` (and paths to `plist`)
+const SK_PIPE = 1 // evaluate `node` against the value, into `next`
+const SK_LIMIT = 2 // pass `count` values on, then break out with `id`
+const SK_TRY = 3 // pass on; remember (flag) whether downstream raised
+const SK_ALT = 4 // `a // b`: pass truthy values on, counting them in `count`
+const SK_BIND = 5 // `a as $x | body`: bind the patterns, evaluate `node`
+const SK_REDUCE = 6 // fold: `val`/`path` is the state, `node` the update, `list` the pattern(s)
+const SK_FOREACH = 7 // like reduce, emitting each state (through `node3` when given)
+const SK_LAST = 8 // keep only the last value in `val`/`path` (reduce's update)
+const SK_OBJKEY = 9 // object construction: key values
+const SK_OBJVAL = 10 // object construction: value values
+const SK_BINOP_R = 11 // `a op b`: right operand values (outer loop)
+const SK_BINOP_L = 12 // `a op b`: left operand values (inner loop)
+const SK_STRPART = 13 // string interpolation parts
+const SK_ISEMPTY = 14 // first value ends the generator, flag = 1
+const SK_PATHS_OF = 15 // collect only paths (for assignment)
+const SK_INDEX_KEY = 16 // `.[k]`: k values
+const SK_SLICE_FROM = 17 // `.[a:b]`: a values
+const SK_SLICE_TO = 18 // `.[a:b]`: b values
+const SK_NEG = 19 // unary minus
+const SK_ASSIGN_RHS = 20 // `=` / `op=` right-hand side values
+const SK_IF = 21 // condition values
+const SK_GETPATH = 22 // getpath(p): p values, extending the current path in path mode
+const SK_PATH_OUT = 23 // `path(f)`: emit the path as the value
+
+struct Sink {
+    kind: int,
+    next: ptr, // downstream sink
+    node: ptr, // per kind: the node to evaluate next
+    node2: ptr,
+    node3: ptr,
+    env: ptr, // the env to evaluate `node` in
+    list: ptr, // SK_COLLECT values; otherwise the node list a kind walks
+    plist: ptr, // SK_COLLECT paths, or null when not tracking paths
+    val: ptr, // an owned value (fold state, held operand, key)
+    path: ptr, // the owned path travelling with `val`
+    count: int,
+    id: int,
+    flag: int,
+    name: string, // SK_STRPART: the @format name (borrowed from the AST)
+    input: ptr, // borrowed: the `.` the surrounding expression saw
+    ipath: ptr // borrowed: its path when tracking
+}
+
+// Env frame kinds
+const E_VAR = 0 // $name = val (owned)
+const E_FUNC = 1 // def name(params): body — node is the N_FUNCDEF, env its lexical scope
+const E_CLOSURE = 2 // a filter argument: name/0, node is the argument expression, env the caller's
+const E_LABEL = 3 // label $name with id
+
+struct Env {
+    kind: int,
+    name: string, // borrowed from the AST (names live as long as the program)
+    arity: int,
+    node: ptr,
+    env: ptr, // E_FUNC: the scope the def was evaluated in; E_CLOSURE: the caller's
+    val: ptr, // E_VAR: owned value
+    id: int, // E_LABEL
+    parent: ptr,
+    owned_name: ptr // a JSON string holding `name` when the frame owns it (program_set_var)
+}
+
+struct Ctx {
+    status: int,
+    err: ptr, // owned JSON (ST_ERROR value, ST_HALT message or null)
+    break_id: int,
+    next_id: int,
+    halt_code: int,
+    prog: ptr, // *Program
+    inputs: ptr, // queue (std.list) of borrowed JSON values that `input` pops
+    env_obj: ptr, // cached $ENV, owned
+    depth: int
+}
+
+// A compiled program: its AST, the prelude's, and the root environment
+// holding the prelude's definitions plus any --arg variables.
+struct Program {
+    tree: ptr,
+    prelude_tree: ptr,
+    root: ptr, // the Env chain (top frame)
+    frames: ptr // std.list of every frame allocated for root, for teardown
+}
+
+// ---------------------------------------------------------------------------
+// Program lifecycle
+// ---------------------------------------------------------------------------
+
+// Parse `src` and the prelude. Returns (program, "") or (null, message).
+new_program(src: string) -> ptr! {
+    // Diagnostics are re-minted rather than passed through: a returned
+    // error string that escapes on one path is otherwise never released on
+    // the success path.
+    tree, err = parser.parse(src)
+    if tree == null { return null, "${err}" }
+    ptree, perr = parser.parse(prelude.SOURCE)
+    if ptree == null {
+        parser.free(tree)
+        return null, "internal error: prelude does not parse: ${perr}"
+    }
+    prog = heap.new(Program)
+    prog.tree = tree
+    prog.prelude_tree = ptree
+    prog.root = null
+    prog.frames = list.new()
+    // Install the prelude: it is a chain of `def ...; def ...; .`.
+    n = ptree
+    while n != null {
+        nn = n as *Node
+        if nn.kind != ast.N_FUNCDEF { break }
+        f = _new_frame(E_FUNC, ast.name_of(n), list.size(nn.list), prog.root)
+        f.node = n
+        prog.root = f
+        list.list_add_raw(prog.frames, f)
+        n = nn.b
+    }
+    // Prelude definitions see each other regardless of order (jq's own
+    // builtin.jq is carefully ordered; this spares the port that).
+    i = 0
+    while i < list.size(prog.frames) {
+        (list.get_raw(prog.frames, i) as *Env).env = prog.root
+        i = i + 1
+    }
+    return prog, ""
+}
+
+free_program(p: ptr) {
+    if p == null { return }
+    prog = p as *Program
+    n = list.size(prog.frames)
+    i = 0
+    while i < n {
+        f = list.get_raw(prog.frames, i) as *Env
+        if f.val != null { json.json_free(f.val) }
+        if f.owned_name != null { json.json_free(f.owned_name) }
+        heap.free(f)
+        list.set(prog.frames, i, null)
+        i = i + 1
+    }
+    list.free(prog.frames)
+    parser.free(prog.tree)
+    parser.free(prog.prelude_tree)
+    heap.free(p)
+}
+
+// Bind `$name` to `v` (owned by the program from now on) for every run:
+// jq's --arg / --argjson.
+program_set_var(p: ptr, name: string, v: ptr) {
+    prog = p as *Program
+    // The caller's name may not outlive this call: keep a copy.
+    owned = json.json_create_string(name)
+    f = _new_frame(E_VAR, json.json_get_string_raw(owned), 0, prog.root)
+    f.owned_name = owned
+    f.val = v
+    prog.root = f
+    list.list_add_raw(prog.frames, f)
+}
+
+_new_frame(kind: int, name: string, arity: int, parent: ptr) -> *Env {
+    f = heap.new(Env)
+    f.kind = kind
+    f.name = name
+    f.arity = arity
+    f.node = null
+    f.env = null
+    f.val = null
+    f.id = 0
+    f.parent = parent
+    f.owned_name = null
+    return f
+}
+
+// ---------------------------------------------------------------------------
+// Ctx lifecycle. One Ctx per run of the program against one input.
+// `inputs` (a borrowed list of borrowed values) feeds `input` / `inputs`,
+// which remove what they read from its front: the caller sees what is left.
+// ---------------------------------------------------------------------------
+
+new_ctx(prog: ptr, inputs: ptr) -> *Ctx {
+    c = heap.new(Ctx)
+    c.status = ST_OK
+    c.err = null
+    c.break_id = 0
+    c.next_id = 1
+    c.halt_code = 0
+    c.prog = prog
+    c.inputs = inputs
+    c.env_obj = null
+    c.depth = 0
+    return c
+}
+
+free_ctx(c: ptr) {
+    ctx = c as *Ctx
+    if ctx.err != null { json.json_free(ctx.err) }
+    if ctx.env_obj != null { json.json_free(ctx.env_obj) }
+    heap.free(c)
+}
+
+ctx_status(c: ptr) -> int {
+    return (c as *Ctx).status
+}
+
+// The error value, borrowed (null when the run succeeded).
+ctx_error(c: ptr) -> ptr {
+    return (c as *Ctx).err
+}
+
+// Take ownership of the error value and reset the context to ST_OK.
+ctx_take_error(c: ptr) -> ptr {
+    ctx = c as *Ctx
+    e = ctx.err
+    ctx.err = null
+    ctx.status = ST_OK
+    return e
+}
+
+ctx_halt_code(c: ptr) -> int {
+    return (c as *Ctx).halt_code
+}
+
+// jq's rendering of an error value for the terminal.
+error_message(err: ptr) -> string {
+    if value.type_of(err) == value.T_STRING { return value.string_value(err) }
+    return "${value.to_json(err)} (not a string)"
+}
+
+// Evaluate the program against `input` (borrowed), collecting every output
+// (owned) into `out` (a std.list). Check ctx_status afterwards: on
+// ST_ERROR the outputs produced before the error are still in `out`.
+run_collect(c: ptr, input: ptr, out: ptr) {
+    ctx = c as *Ctx
+    prog = ctx.prog as *Program
+    sink = _new_sink(SK_COLLECT, null)
+    sink.list = out
+    ev(ctx, prog.tree, input, prog.root, sink, null)
+    heap.free(sink)
+}
+
+// Convenience for specs and the CLI: outputs as one string, each value on
+// its own line, in jq's serialisation.
+run_each_to_json(c: ptr, input: ptr, indent: int, sort_keys: int) -> string {
+    out = list.new()
+    run_collect(c, input, out)
+    sb = strbuilder.new(64)
+    n = list.size(out)
+    i = 0
+    while i < n {
+        v = list.get_raw(out, i)
+        strbuilder.append(sb, value.to_json_indent(v, indent, sort_keys))
+        strbuilder.append_byte(sb, 10)
+        json.json_free(v)
+        list.set(out, i, null)
+        i = i + 1
+    }
+    list.free(out)
+    return strbuilder.finish(sb)
+}
+
+// ---------------------------------------------------------------------------
+// Errors and control flow
+// ---------------------------------------------------------------------------
+
+_fail(ctx: *Ctx, msg: string) {
+    _fail_val(ctx, json.json_create_string(msg))
+}
+
+// Raise `v` (owned) as the error value. A raise while already unwinding
+// keeps the first one.
+_fail_val(ctx: *Ctx, v: ptr) {
+    if ctx.status != ST_OK {
+        json.json_free(v)
+        return
+    }
+    ctx.status = ST_ERROR
+    ctx.err = v
+}
+
+_fresh_id(ctx: *Ctx) -> int {
+    id = ctx.next_id
+    ctx.next_id = id + 1
+    return id
+}
+
+_new_sink(kind: int, next: ptr) -> *Sink {
+    s = heap.new(Sink)
+    s.kind = kind
+    s.next = next
+    s.node = null
+    s.node2 = null
+    s.node3 = null
+    s.env = null
+    s.list = null
+    s.plist = null
+    s.val = null
+    s.path = null
+    s.count = 0
+    s.id = 0
+    s.flag = 0
+    s.name = ""
+    s.input = null
+    s.ipath = null
+    return s
+}
+
+_free_val(v: ptr) {
+    if v != null { json.json_free(v) }
+}
+
+// Extend an owned path with an owned key. Returns the (new) owned path.
+_path_add(p: ptr, key: ptr) -> ptr {
+    json.json_array_add_raw(p, key)
+    return p
+}
+
+_copy_path(p: ptr) -> ptr {
+    if p == null { return null }
+    return value.copy(p)
+}
+
+// The error jq raises for a non-path expression in path mode.
+_not_a_path(ctx: *Ctx, v: ptr) {
+    _fail(ctx, "Invalid path expression with result ${value.to_json(v)}")
+}
+
+// ---------------------------------------------------------------------------
+// emit: hand an owned value (and its owned path, or null) to a sink.
+// ---------------------------------------------------------------------------
+
+emit(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
+    if ctx.status != ST_OK {
+        _free_val(v)
+        _free_val(p)
+        return
+    }
+    k = s.kind
+    if k == SK_COLLECT {
+        list.list_add_raw(s.list, v)
+        if s.plist != null {
+            list.list_add_raw(s.plist, p)
+        } else {
+            _free_val(p)
+        }
+        return
+    }
+    if k == SK_PIPE {
+        ev(ctx, s.node, v, s.env, s.next as *Sink, p)
+        json.json_free(v)
+        _free_val(p)
+        return
+    }
+    if k == SK_LIMIT {
+        s.count = s.count - 1
+        remaining = s.count
+        emit(ctx, s.next as *Sink, v, p)
+        if remaining <= 0 {
+            if ctx.status == ST_OK {
+                ctx.status = ST_BREAK
+                ctx.break_id = s.id
+            }
+        }
+        return
+    }
+    if k == SK_TRY {
+        emit(ctx, s.next as *Sink, v, p)
+        if ctx.status == ST_ERROR { s.flag = 1 }
+        if ctx.status == ST_BREAK { s.flag = 1 }
+        return
+    }
+    if k == SK_ALT {
+        if value.truthy(v) == 1 {
+            s.count = s.count + 1
+            emit(ctx, s.next as *Sink, v, p)
+            if ctx.status != ST_OK { s.flag = 1 }
+        } else {
+            json.json_free(v)
+            _free_val(p)
+        }
+        return
+    }
+    if k == SK_LAST {
+        _free_val(s.val)
+        _free_val(s.path)
+        s.val = v
+        s.path = p
+        s.flag = 1
+        return
+    }
+    if k == SK_ISEMPTY {
+        json.json_free(v)
+        _free_val(p)
+        s.flag = 1
+        ctx.status = ST_BREAK
+        ctx.break_id = s.id
+        return
+    }
+    if k == SK_PATHS_OF {
+        json.json_free(v)
+        if p == null {
+            _fail(ctx, "Invalid path expression")
+            return
+        }
+        list.list_add_raw(s.list, p)
+        return
+    }
+    if k == SK_BIND { _emit_bind(ctx, s, v, p); return }
+    if k == SK_REDUCE { _emit_reduce(ctx, s, v, p); return }
+    if k == SK_FOREACH { _emit_reduce(ctx, s, v, p); return }
+    if k == SK_INDEX_KEY { _emit_index_key(ctx, s, v, p); return }
+    if k == SK_SLICE_FROM { _emit_slice_from(ctx, s, v, p); return }
+    if k == SK_SLICE_TO { _emit_slice_to(ctx, s, v, p); return }
+    if k == SK_BINOP_R { _emit_binop_r(ctx, s, v, p); return }
+    if k == SK_BINOP_L { _emit_binop_l(ctx, s, v, p); return }
+    if k == SK_NEG { _emit_neg(ctx, s, v, p); return }
+    if k == SK_IF { _emit_if(ctx, s, v, p); return }
+    if k == SK_OBJKEY { _emit_objkey(ctx, s, v, p); return }
+    if k == SK_OBJVAL { _emit_objval(ctx, s, v, p); return }
+    if k == SK_STRPART { _emit_strpart(ctx, s, v, p); return }
+    if k == SK_ASSIGN_RHS { _emit_assign_rhs(ctx, s, v, p); return }
+    if k == SK_GETPATH { _emit_getpath(ctx, s, v, p); return }
+    if k == SK_PATH_OUT {
+        json.json_free(v)
+        if p == null {
+            _fail(ctx, "Invalid path expression")
+            return
+        }
+        emit(ctx, s.next as *Sink, p, null)
+        return
+    }
+    json.json_free(v)
+    _free_val(p)
+    _fail(ctx, "internal error: unknown sink kind ${k}")
+}
+
+// ---------------------------------------------------------------------------
+// ev: the dispatcher.
+// ---------------------------------------------------------------------------
+
+ev(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if ctx.status != ST_OK { return }
+    n = node as *Node
+    k = n.kind
+    if k == ast.N_IDENTITY {
+        emit(ctx, sink, value.copy(input), _copy_path(p))
+        return
+    }
+    if k == ast.N_PIPE {
+        s = _new_sink(SK_PIPE, sink)
+        s.node = n.b
+        s.env = env
+        ev(ctx, n.a, input, env, s, p)
+        heap.free(s)
+        return
+    }
+    if k == ast.N_COMMA {
+        ev(ctx, n.a, input, env, sink, p)
+        ev(ctx, n.b, input, env, sink, p)
+        return
+    }
+    if k == ast.N_LITERAL {
+        if p != null {
+            _not_a_path(ctx, n.val)
+            return
+        }
+        emit(ctx, sink, value.copy(n.val), null)
+        return
+    }
+    if k == ast.N_INDEX { _ev_index(ctx, n, input, env, sink, p); return }
+    if k == ast.N_SLICE { _ev_slice(ctx, n, input, env, sink, p); return }
+    if k == ast.N_ITERATE { _ev_iterate(ctx, n, input, env, sink, p); return }
+    if k == ast.N_RECURSE {
+        _recurse_all(ctx, input, p, sink)
+        return
+    }
+    if k == ast.N_ARRAY {
+        if p != null {
+            _fail(ctx, "Invalid path expression with result [...]")
+            return
+        }
+        s = _new_sink(SK_COLLECT, null)
+        s.list = list.new()
+        if n.a != null { ev(ctx, n.a, input, env, s, null) }
+        arr = json.json_create_array()
+        _drain_into_array(s.list, arr)
+        heap.free(s)
+        if ctx.status != ST_OK {
+            json.json_free(arr)
+            return
+        }
+        emit(ctx, sink, arr, null)
+        return
+    }
+    if k == ast.N_OBJECT { _ev_object(ctx, n, input, env, sink, p); return }
+    if k == ast.N_STRING { _ev_string(ctx, n, input, env, sink, p); return }
+    if k == ast.N_FORMAT {
+        if p != null {
+            _fail(ctx, "Invalid path expression")
+            return
+        }
+        out, err = _format(ast.name_of(node), input)
+        if out == null {
+            _fail(ctx, err)
+            return
+        }
+        emit(ctx, sink, out, null)
+        return
+    }
+    if k == ast.N_NEG {
+        s = _new_sink(SK_NEG, sink)
+        ev(ctx, n.a, input, env, s, null)
+        heap.free(s)
+        return
+    }
+    if k == ast.N_BINOP { _ev_binop(ctx, n, input, env, sink, p); return }
+    if k == ast.N_ASSIGN { _ev_assign(ctx, n, input, env, sink, p); return }
+    if k == ast.N_IF {
+        s = _new_sink(SK_IF, sink)
+        s.node = n.b
+        s.node2 = n.c
+        s.env = env
+        s.input = input
+        s.ipath = p
+        ev(ctx, n.a, input, env, s, null)
+        heap.free(s)
+        return
+    }
+    if k == ast.N_TRY { _ev_try(ctx, n, input, env, sink, p); return }
+    if k == ast.N_REDUCE { _ev_reduce(ctx, n, input, env, sink, p, 0); return }
+    if k == ast.N_FOREACH { _ev_reduce(ctx, n, input, env, sink, p, 1); return }
+    if k == ast.N_FUNCDEF {
+        f = _new_frame(E_FUNC, ast.name_of(node), list.size(n.list), env)
+        f.node = node
+        f.env = f // the body sees the definition itself (recursion) and what precedes it
+        ev(ctx, n.b, input, f, sink, p)
+        heap.free(f)
+        return
+    }
+    if k == ast.N_CALL { _ev_call(ctx, n, node, input, env, sink, p); return }
+    if k == ast.N_VAR { _ev_var(ctx, node, input, env, sink, p); return }
+    if k == ast.N_LOC {
+        if p != null {
+            _not_a_path(ctx, n.val)
+            return
+        }
+        emit(ctx, sink, value.copy(n.val), null)
+        return
+    }
+    if k == ast.N_BIND {
+        s = _new_sink(SK_BIND, sink)
+        s.node = n.c
+        s.list = n.list
+        s.env = env
+        s.input = input
+        s.ipath = p
+        ev(ctx, n.a, input, env, s, null)
+        heap.free(s)
+        return
+    }
+    if k == ast.N_LABEL {
+        id = _fresh_id(ctx)
+        f = _new_frame(E_LABEL, ast.name_of(node), 0, env)
+        f.id = id
+        ev(ctx, n.a, input, f, sink, p)
+        heap.free(f)
+        if ctx.status == ST_BREAK {
+            if ctx.break_id == id { ctx.status = ST_OK }
+        }
+        return
+    }
+    if k == ast.N_BREAK {
+        f = _lookup(env, E_LABEL, ast.name_of(node), 0)
+        if f == null {
+            _fail(ctx, "$*label-${ast.name_of(node)} is not defined")
+            return
+        }
+        ctx.status = ST_BREAK
+        ctx.break_id = f.id
+        return
+    }
+    _fail(ctx, "internal error: cannot evaluate node kind ${k}")
+}
+
+// Move every value of a std.list into a JSON array, emptying the list.
+_drain_into_array(l: ptr, arr: ptr) {
+    n = list.size(l)
+    i = 0
+    while i < n {
+        json.json_array_add_raw(arr, list.get_raw(l, i))
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+}
+
+// Free every value of a std.list and the list.
+_free_list(l: ptr) {
+    if l == null { return }
+    n = list.size(l)
+    i = 0
+    while i < n {
+        _free_val(list.get_raw(l, i))
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+}
+
+// Find the innermost frame of `kind` named `name` (with `arity` for
+// functions and closures).
+_lookup(env: ptr, kind: int, name: string, arity: int) -> *Env {
+    e = env
+    while e != null {
+        f = e as *Env
+        if f.kind == kind || (kind == E_FUNC && f.kind == E_CLOSURE) {
+            if f.arity == arity {
+                if string.equals(f.name, name) == 1 { return f }
+            }
+        }
+        e = f.parent
+    }
+    return null
+}
+
+// ---------------------------------------------------------------------------
+// Indexing: .[k], .[a:b], .[]
+// ---------------------------------------------------------------------------
+
+_ev_index(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    // Target values first (outer loop); for each, the key values, which are
+    // evaluated against the ORIGINAL input, not the target value.
+    t = _new_sink(SK_INDEX_KEY, sink)
+    t.node = n.b
+    t.env = env
+    t.input = input
+    t.ipath = p
+    // Outer loop: target values (with their paths when tracking).
+    outer = _new_sink(SK_COLLECT, null)
+    outer.list = list.new()
+    if p != null { outer.plist = list.new() }
+    ev(ctx, n.a, input, env, outer, p)
+    cnt = list.size(outer.list)
+    i = 0
+    while i < cnt {
+        if ctx.status == ST_OK {
+            t.val = list.get_raw(outer.list, i)
+            t.path = null
+            if outer.plist != null { t.path = list.get_raw(outer.plist, i) }
+            ev(ctx, n.b, input, env, t, null)
+        }
+        i = i + 1
+    }
+    _free_list(outer.list)
+    _free_list(outer.plist)
+    heap.free(outer)
+    heap.free(t)
+}
+
+// A key value arrived for the target held in s.val / s.path.
+_emit_index_key(ctx: *Ctx, s: *Sink, key: ptr, kp: ptr) {
+    _free_val(kp)
+    out, err = _index(s.val, key)
+    if out == null {
+        json.json_free(key)
+        _fail(ctx, err)
+        return
+    }
+    np = null
+    if s.path != null {
+        np = value.copy(s.path)
+        json.json_array_add_raw(np, key)
+    } else {
+        json.json_free(key)
+    }
+    emit(ctx, s.next as *Sink, out, np)
+}
+
+// jq's `.[k]` on a value. Returns (owned result, "") or (null, message).
+_index(v: ptr, key: ptr) -> ptr! {
+    tv = value.type_of(v)
+    tk = value.type_of(key)
+    if tv == value.T_NULL {
+        if tk == value.T_STRING || tk == value.T_NUMBER || tk == value.T_OBJECT {
+            return json.json_create_null(), ""
+        }
+        if tk == value.T_NULL { return json.json_create_null(), "" }
+    }
+    if tv == value.T_OBJECT && tk == value.T_STRING {
+        got = json.json_object_get_raw(v, value.string_value(key))
+        if got == null { return json.json_create_null(), "" }
+        return value.copy(got), ""
+    }
+    if tv == value.T_ARRAY && tk == value.T_NUMBER {
+        d = value.number_of(key)
+        if d != d { return json.json_create_null(), "" }
+        len = json.json_array_size(v)
+        idx = (math.floor(d)) as int
+        if idx < 0 { idx = idx + len }
+        if idx < 0 || idx >= len { return json.json_create_null(), "" }
+        return value.copy(json.json_array_get_raw(v, idx)), ""
+    }
+    if tv == value.T_ARRAY && tk == value.T_ARRAY {
+        return _indices_of(v, key), ""
+    }
+    if tk == value.T_OBJECT {
+        if tv == value.T_ARRAY || tv == value.T_STRING || tv == value.T_NULL {
+            res1, rerr1 = _slice(v, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
+            if res1 == null { return null, "${rerr1}" }
+            return res1, ""
+        }
+    }
+    return null, _index_error(tv, key, tk)
+}
+
+_index_error(tv: int, key: ptr, tk: int) -> string {
+    if tk == value.T_STRING {
+        return "Cannot index ${_tname(tv)} with \"${value.string_value(key)}\""
+    }
+    return "Cannot index ${_tname(tv)} with ${_tname(tk)}"
+}
+
+_tname(t: int) -> string {
+    if t == value.T_NULL { return "null" }
+    if t == value.T_BOOL { return "boolean" }
+    if t == value.T_NUMBER { return "number" }
+    if t == value.T_STRING { return "string" }
+    if t == value.T_ARRAY { return "array" }
+    return "object"
+}
+
+// `[1,2,1,2] | .[[1,2]]` → [0, 2]: the start positions of the sub-array.
+_indices_of(v: ptr, sub: ptr) -> ptr {
+    out = json.json_create_array()
+    n = json.json_array_size(v)
+    m = json.json_array_size(sub)
+    if m == 0 { return out }
+    i = 0
+    while i + m <= n {
+        j = 0
+        ok = 1
+        while j < m {
+            if value.eq(json.json_array_get_raw(v, i + j), json.json_array_get_raw(sub, j)) == 0 {
+                ok = 0
+                j = m
+            }
+            j = j + 1
+        }
+        if ok == 1 { json.json_array_add_raw(out, json.json_create_int(i as long)) }
+        i = i + 1
+    }
+    return out
+}
+
+// Resolve jq's slice bounds against a length: null means the end, negative
+// counts from the end, fractions round outwards, everything clamps.
+_slice_bounds(len: int, from: ptr, to: ptr) -> (int, int) {
+    a = 0
+    b = len
+    if from != null {
+        if value.type_of(from) != value.T_NULL {
+            d = value.number_of(from)
+            if d < 0.0 { d = d + (len as float) }
+            a = (math.floor(d)) as int
+        }
+    }
+    if to != null {
+        if value.type_of(to) != value.T_NULL {
+            d = value.number_of(to)
+            if d < 0.0 { d = d + (len as float) }
+            b = (math.ceil(d)) as int
+        }
+    }
+    if a < 0 { a = 0 }
+    if a > len { a = len }
+    if b > len { b = len }
+    if b < a { b = a }
+    return a, b
+}
+
+_slice(v: ptr, from: ptr, to: ptr) -> ptr! {
+    tv = value.type_of(v)
+    if from != null {
+        tf = value.type_of(from)
+        if tf != value.T_NULL && tf != value.T_NUMBER { return null, "Start and end indices of an array slice must be numbers" }
+    }
+    if to != null {
+        tt = value.type_of(to)
+        if tt != value.T_NULL && tt != value.T_NUMBER { return null, "Start and end indices of an array slice must be numbers" }
+    }
+    if tv == value.T_NULL { return json.json_create_null(), "" }
+    if tv == value.T_ARRAY {
+        a, b = _slice_bounds(json.json_array_size(v), from, to)
+        return value.array_slice(v, a, b), ""
+    }
+    if tv == value.T_STRING {
+        s = value.string_value(v)
+        a, b = _slice_bounds(value.codepoint_count(s), from, to)
+        return json.json_create_string(value.codepoint_slice(s, a, b)), ""
+    }
+    return null, "Cannot index ${_tname(tv)} with object"
+}
+
+_ev_slice(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    outer = _new_sink(SK_COLLECT, null)
+    outer.list = list.new()
+    if p != null { outer.plist = list.new() }
+    ev(ctx, n.a, input, env, outer, p)
+    cnt = list.size(outer.list)
+    i = 0
+    while i < cnt {
+        if ctx.status == ST_OK {
+            t = _new_sink(SK_SLICE_TO, sink)
+            t.val = list.get_raw(outer.list, i)
+            t.path = null
+            if outer.plist != null { t.path = list.get_raw(outer.plist, i) }
+            t.node = n.b // from
+            t.env = env
+            t.input = input
+            // jq evaluates the upper bound as the outer loop.
+            if n.c == null {
+                _emit_slice_to(ctx, t, json.json_create_null(), null)
+            } else {
+                ev(ctx, n.c, input, env, t, null)
+            }
+            heap.free(t)
+        }
+        i = i + 1
+    }
+    _free_list(outer.list)
+    _free_list(outer.plist)
+    heap.free(outer)
+}
+
+// `to` arrived; now the `from` values.
+_emit_slice_to(ctx: *Ctx, s: *Sink, to: ptr, tp: ptr) {
+    _free_val(tp)
+    f = _new_sink(SK_SLICE_FROM, s.next)
+    f.val = s.val
+    f.path = s.path
+    f.node2 = to // borrowed while the from-values flow
+    if s.node == null {
+        _emit_slice_from(ctx, f, json.json_create_null(), null)
+    } else {
+        ev(ctx, s.node, s.input, s.env, f, null)
+    }
+    heap.free(f)
+    json.json_free(to)
+}
+
+_emit_slice_from(ctx: *Ctx, s: *Sink, from: ptr, fp: ptr) {
+    _free_val(fp)
+    to = s.node2
+    out, err = _slice(s.val, from, to)
+    if out == null {
+        json.json_free(from)
+        _fail(ctx, err)
+        return
+    }
+    np = null
+    if s.path != null {
+        np = value.copy(s.path)
+        key = json.json_create_object()
+        json.json_object_set_raw(key, "start", from)
+        json.json_object_set_raw(key, "end", value.copy(to))
+        json.json_array_add_raw(np, key)
+    } else {
+        json.json_free(from)
+    }
+    emit(ctx, s.next as *Sink, out, np)
+}
+
+_ev_iterate(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    outer = _new_sink(SK_COLLECT, null)
+    outer.list = list.new()
+    if p != null { outer.plist = list.new() }
+    ev(ctx, n.a, input, env, outer, p)
+    cnt = list.size(outer.list)
+    i = 0
+    while i < cnt {
+        if ctx.status == ST_OK {
+            vp = null
+            if outer.plist != null { vp = list.get_raw(outer.plist, i) }
+            _iterate(ctx, list.get_raw(outer.list, i), vp, sink)
+        }
+        i = i + 1
+    }
+    _free_list(outer.list)
+    _free_list(outer.plist)
+    heap.free(outer)
+}
+
+// Emit every element (array) or member value (object) of `v` (borrowed).
+_iterate(ctx: *Ctx, v: ptr, vp: ptr, sink: *Sink) {
+    t = value.type_of(v)
+    if t == value.T_ARRAY {
+        n = json.json_array_size(v)
+        i = 0
+        while i < n {
+            if ctx.status != ST_OK { return }
+            np = null
+            if vp != null {
+                np = value.copy(vp)
+                json.json_array_add_raw(np, json.json_create_int(i as long))
+            }
+            emit(ctx, sink, value.copy(json.json_array_get_raw(v, i)), np)
+            i = i + 1
+        }
+        return
+    }
+    if t == value.T_OBJECT {
+        n = json.json_object_size_raw(v)
+        i = 0
+        while i < n {
+            if ctx.status != ST_OK { return }
+            np = null
+            if vp != null {
+                np = value.copy(vp)
+                json.json_array_add_raw(np, json.json_create_string(json.json_object_key_at(v, i)))
+            }
+            emit(ctx, sink, value.copy(json.json_object_value_at(v, i)), np)
+            i = i + 1
+        }
+        return
+    }
+    if t == value.T_NULL {
+        _fail(ctx, "Cannot iterate over null")
+        return
+    }
+    _fail(ctx, "Cannot iterate over ${_tname(t)} (${value.to_json(v)})")
+}
+
+// `..`: the value, then recursively every child, pre-order.
+_recurse_all(ctx: *Ctx, v: ptr, p: ptr, sink: *Sink) {
+    if ctx.status != ST_OK { return }
+    emit(ctx, sink, value.copy(v), _copy_path(p))
+    t = value.type_of(v)
+    if t == value.T_ARRAY {
+        n = json.json_array_size(v)
+        i = 0
+        while i < n {
+            np = null
+            if p != null {
+                np = value.copy(p)
+                json.json_array_add_raw(np, json.json_create_int(i as long))
+            }
+            _recurse_all(ctx, json.json_array_get_raw(v, i), np, sink)
+            _free_val(np)
+            i = i + 1
+        }
+    } else if t == value.T_OBJECT {
+        n = json.json_object_size_raw(v)
+        i = 0
+        while i < n {
+            np = null
+            if p != null {
+                np = value.copy(p)
+                json.json_array_add_raw(np, json.json_create_string(json.json_object_key_at(v, i)))
+            }
+            _recurse_all(ctx, json.json_object_value_at(v, i), np, sink)
+            _free_val(np)
+            i = i + 1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operators
+// ---------------------------------------------------------------------------
+
+_emit_neg(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
+    _free_val(p)
+    if value.type_of(v) != value.T_NUMBER {
+        msg = "${_tname(value.type_of(v))} (${value.to_json(v)}) cannot be negated"
+        json.json_free(v)
+        _fail(ctx, msg)
+        return
+    }
+    d = value.number_of(v)
+    json.json_free(v)
+    emit(ctx, s.next as *Sink, value.make_number(0.0 - d), null)
+}
+
+_ev_binop(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    op = n.op
+    if op == ast.OP_AND || op == ast.OP_OR {
+        _ev_logical(ctx, n, input, env, sink)
+        return
+    }
+    if op == ast.OP_ALT {
+        _ev_alt(ctx, n, input, env, sink, p)
+        return
+    }
+    if p != null {
+        _fail(ctx, "Invalid path expression")
+        return
+    }
+    // jq evaluates the right operand as the outer loop.
+    r = _new_sink(SK_BINOP_R, sink)
+    r.node = n.a
+    r.env = env
+    r.input = input
+    r.id = op
+    ev(ctx, n.b, input, env, r, null)
+    heap.free(r)
+}
+
+_emit_binop_r(ctx: *Ctx, s: *Sink, rv: ptr, rp: ptr) {
+    _free_val(rp)
+    l = _new_sink(SK_BINOP_L, s.next)
+    l.val = rv
+    l.id = s.id
+    ev(ctx, s.node, s.input, s.env, l, null)
+    heap.free(l)
+    json.json_free(rv)
+}
+
+_emit_binop_l(ctx: *Ctx, s: *Sink, lv: ptr, lp: ptr) {
+    _free_val(lp)
+    out, err = _binop(s.id, lv, s.val)
+    json.json_free(lv)
+    if out == null {
+        _fail(ctx, err)
+        return
+    }
+    emit(ctx, s.next as *Sink, out, null)
+}
+
+// a op b for the arithmetic and comparison operators. Both borrowed;
+// returns an owned result or (null, message).
+_binop(op: int, a: ptr, b: ptr) -> ptr! {
+    if op == ast.OP_EQ { return json.json_create_bool(value.eq(a, b)), "" }
+    if op == ast.OP_NE { return json.json_create_bool(1 - value.eq(a, b)), "" }
+    if op == ast.OP_LT { return json.json_create_bool(_b(value.cmp(a, b) < 0)), "" }
+    if op == ast.OP_LE { return json.json_create_bool(_b(value.cmp(a, b) <= 0)), "" }
+    if op == ast.OP_GT { return json.json_create_bool(_b(value.cmp(a, b) > 0)), "" }
+    if op == ast.OP_GE { return json.json_create_bool(_b(value.cmp(a, b) >= 0)), "" }
+    ta = value.type_of(a)
+    tb = value.type_of(b)
+    if op == ast.OP_ADD {
+        if ta == value.T_NULL { return value.copy(b), "" }
+        if tb == value.T_NULL { return value.copy(a), "" }
+        if ta == value.T_NUMBER && tb == value.T_NUMBER {
+            return value.make_number(value.number_of(a) + value.number_of(b)), ""
+        }
+        if ta == value.T_STRING && tb == value.T_STRING {
+            return json.json_create_string("${value.string_value(a)}${value.string_value(b)}"), ""
+        }
+        if ta == value.T_ARRAY && tb == value.T_ARRAY {
+            out = value.copy(a)
+            n = json.json_array_size(b)
+            i = 0
+            while i < n {
+                json.json_array_add_raw(out, value.copy(json.json_array_get_raw(b, i)))
+                i = i + 1
+            }
+            return out, ""
+        }
+        if ta == value.T_OBJECT && tb == value.T_OBJECT {
+            return _merge_shallow(a, b), ""
+        }
+        return null, _arith_error(a, b, "added")
+    }
+    if op == ast.OP_SUB {
+        if ta == value.T_NUMBER && tb == value.T_NUMBER {
+            return value.make_number(value.number_of(a) - value.number_of(b)), ""
+        }
+        if ta == value.T_ARRAY && tb == value.T_ARRAY {
+            out = json.json_create_array()
+            n = json.json_array_size(a)
+            i = 0
+            while i < n {
+                e = json.json_array_get_raw(a, i)
+                if _array_contains_eq(b, e) == 0 { json.json_array_add_raw(out, value.copy(e)) }
+                i = i + 1
+            }
+            return out, ""
+        }
+        return null, _arith_error(a, b, "subtracted")
+    }
+    if op == ast.OP_MUL {
+        if ta == value.T_NUMBER && tb == value.T_NUMBER {
+            return value.make_number(value.number_of(a) * value.number_of(b)), ""
+        }
+        if ta == value.T_STRING && tb == value.T_NUMBER { return _repeat_string(a, b), "" }
+        if ta == value.T_NUMBER && tb == value.T_STRING { return _repeat_string(b, a), "" }
+        if ta == value.T_OBJECT && tb == value.T_OBJECT { return _merge_deep(a, b), "" }
+        return null, _arith_error(a, b, "multiplied")
+    }
+    if op == ast.OP_DIV {
+        if ta == value.T_NUMBER && tb == value.T_NUMBER {
+            if value.number_of(b) == 0.0 {
+                return null, "${_tname(ta)} (${value.to_json(a)}) and ${_tname(tb)} (${value.to_json(b)}) cannot be divided because the divisor is zero"
+            }
+            return value.make_number(value.number_of(a) / value.number_of(b)), ""
+        }
+        if ta == value.T_STRING && tb == value.T_STRING {
+            return _split_string(value.string_value(a), value.string_value(b)), ""
+        }
+        return null, _arith_error(a, b, "divided")
+    }
+    if op == ast.OP_MOD {
+        if ta == value.T_NUMBER && tb == value.T_NUMBER {
+            x = value.number_of(a)
+            y = value.number_of(b)
+            if x != x || y != y { return value.make_number(x), "" }
+            xi = _to_int_trunc(x)
+            yi = _to_int_trunc(y)
+            if yi == 0 {
+                return null, "${_tname(ta)} (${value.to_json(a)}) and ${_tname(tb)} (${value.to_json(b)}) cannot be divided because the divisor is zero"
+            }
+            if yi < 0 { yi = 0 - yi }
+            r = xi % yi
+            return json.json_create_int(r), ""
+        }
+        return null, _arith_error(a, b, "divided")
+    }
+    return null, "internal error: unknown operator"
+}
+
+_b(cond: int) -> int {
+    if cond != 0 { return 1 }
+    return 0
+}
+
+// jq truncates the operands of % towards zero (into 64-bit ints; huge
+// values clamp, which is what jq does too).
+_to_int_trunc(d: float) -> long {
+    if d != d { return 0 }
+    if d >= 9.2e18 { return 9223372036854775807 }
+    if d <= -9.2e18 { return -9223372036854775807 }
+    return d as long
+}
+
+_arith_error(a: ptr, b: ptr, verb: string) -> string {
+    return "${_tname(value.type_of(a))} (${value.to_json(a)}) and ${_tname(value.type_of(b))} (${value.to_json(b)}) cannot be ${verb}"
+}
+
+_array_contains_eq(arr: ptr, e: ptr) -> int {
+    n = json.json_array_size(arr)
+    i = 0
+    while i < n {
+        if value.eq(json.json_array_get_raw(arr, i), e) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// {a} + {b}: b's members win, in a's key order first.
+_merge_shallow(a: ptr, b: ptr) -> ptr {
+    out = value.copy(a)
+    n = json.json_object_size_raw(b)
+    i = 0
+    while i < n {
+        json.json_object_set_raw(out, json.json_object_key_at(b, i), value.copy(json.json_object_value_at(b, i)))
+        i = i + 1
+    }
+    return out
+}
+
+// {a} * {b}: recursive merge where both sides are objects.
+_merge_deep(a: ptr, b: ptr) -> ptr {
+    out = value.copy(a)
+    n = json.json_object_size_raw(b)
+    i = 0
+    while i < n {
+        k = json.json_object_key_at(b, i)
+        bv = json.json_object_value_at(b, i)
+        av = json.json_object_get_raw(a, k)
+        if av != null && value.type_of(av) == value.T_OBJECT && value.type_of(bv) == value.T_OBJECT {
+            json.json_object_set_raw(out, k, _merge_deep(av, bv))
+        } else {
+            json.json_object_set_raw(out, k, value.copy(bv))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// "ab" * 3 → "ababab"; n <= 0 → null (jq 1.7 semantics: repeat count
+// below one yields null).
+_repeat_string(s: ptr, n: ptr) -> ptr {
+    d = value.number_of(n)
+    if d <= 0.0 || d != d { return json.json_create_null() }
+    count = (math.ceil(d)) as int
+    if d < 1.0 { count = 1 }
+    sb = strbuilder.new(16)
+    i = 0
+    while i < count {
+        strbuilder.append(sb, value.string_value(s))
+        i = i + 1
+    }
+    return json.json_create_string(strbuilder.finish(sb))
+}
+
+// "a,b" / "," → ["a","b"]; an empty separator splits into codepoints... no:
+// jq splits "abc" / "" into [] for the empty string and per-character
+// otherwise? jq: "abc" / "" → ["a","b","c"]; "" / "," → [].
+_split_string(s: string, sep: string) -> ptr {
+    out = json.json_create_array()
+    n = string.length(s)
+    if n == 0 { return out }
+    m = string.length(sep)
+    if m == 0 {
+        // one element per codepoint
+        cps = value.explode(s)
+        count = json.json_array_size(cps)
+        i = 0
+        while i < count {
+            single = json.json_create_array()
+            json.json_array_add_raw(single, value.copy(json.json_array_get_raw(cps, i)))
+            piece, _e = value.implode(single)
+            json.json_array_add_raw(out, json.json_create_string(piece))
+            json.json_free(single)
+            i = i + 1
+        }
+        json.json_free(cps)
+        return out
+    }
+    start = 0
+    while start <= n {
+        idx = string.index_of_from(s, sep, start)
+        if idx < 0 {
+            json.json_array_add_raw(out, json.json_create_string(string.substring_n(s, n, start, n)))
+            return out
+        }
+        json.json_array_add_raw(out, json.json_create_string(string.substring_n(s, n, start, idx)))
+        start = idx + m
+    }
+    return out
+}
+
+// `a and b`, `a or b`: short-circuit, a outer.
+_ev_logical(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink) {
+    left = _new_sink(SK_COLLECT, null)
+    left.list = list.new()
+    ev(ctx, n.a, input, env, left, null)
+    cnt = list.size(left.list)
+    i = 0
+    while i < cnt {
+        if ctx.status == ST_OK {
+            lt = value.truthy(list.get_raw(left.list, i))
+            if n.op == ast.OP_AND && lt == 0 {
+                emit(ctx, sink, json.json_create_bool(0), null)
+            } else if n.op == ast.OP_OR && lt == 1 {
+                emit(ctx, sink, json.json_create_bool(1), null)
+            } else {
+                right = _new_sink(SK_COLLECT, null)
+                right.list = list.new()
+                ev(ctx, n.b, input, env, right, null)
+                rc = list.size(right.list)
+                j = 0
+                while j < rc {
+                    if ctx.status == ST_OK {
+                        emit(ctx, sink, json.json_create_bool(value.truthy(list.get_raw(right.list, j))), null)
+                    }
+                    j = j + 1
+                }
+                _free_list(right.list)
+                heap.free(right)
+            }
+        }
+        i = i + 1
+    }
+    _free_list(left.list)
+    heap.free(left)
+}
+
+// `a // b`: the truthy outputs of a (errors in a end a's stream quietly);
+// if there were none, every output of b.
+_ev_alt(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    s = _new_sink(SK_ALT, sink)
+    ev(ctx, n.a, input, env, s, p)
+    if ctx.status == ST_ERROR && s.flag == 0 {
+        // the error was a's, not downstream's
+        ctx.status = ST_OK
+        json.json_free(ctx.err)
+        ctx.err = null
+    }
+    count = s.count
+    heap.free(s)
+    if ctx.status != ST_OK { return }
+    if count == 0 { ev(ctx, n.b, input, env, sink, p) }
+}
+
+_emit_if(ctx: *Ctx, s: *Sink, cond: ptr, cp: ptr) {
+    _free_val(cp)
+    t = value.truthy(cond)
+    json.json_free(cond)
+    if t == 1 {
+        ev(ctx, s.node, s.input, s.env, s.next as *Sink, s.ipath)
+    } else if s.node2 != null {
+        ev(ctx, s.node2, s.input, s.env, s.next as *Sink, s.ipath)
+    } else {
+        emit(ctx, s.next as *Sink, value.copy(s.input), _copy_path(s.ipath))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constructors: {…} and "…\(…)…"
+// ---------------------------------------------------------------------------
+
+// Object construction is a cartesian product over the entries, in order:
+// entry 0's keys outermost, then its values, then entry 1's keys, ...
+// The partial object under construction travels in s.val.
+_ev_object(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if p != null {
+        _fail(ctx, "Invalid path expression with result {...}")
+        return
+    }
+    _object_entry(ctx, n.list, 0, json.json_create_object(), input, env, sink)
+}
+
+// Continue building `partial` (owned) from entry `i` onwards.
+_object_entry(ctx: *Ctx, entries: ptr, i: int, partial: ptr, input: ptr, env: ptr, sink: *Sink) {
+    if ctx.status != ST_OK {
+        json.json_free(partial)
+        return
+    }
+    if i >= list.size(entries) {
+        emit(ctx, sink, partial, null)
+        return
+    }
+    e = list.get_raw(entries, i) as *Node
+    s = _new_sink(SK_OBJKEY, sink)
+    s.val = partial
+    s.node = e.b // value expression
+    s.list = entries
+    s.count = i
+    s.env = env
+    s.input = input
+    ev(ctx, e.a, input, env, s, null)
+    heap.free(s)
+    json.json_free(partial)
+}
+
+_emit_objkey(ctx: *Ctx, s: *Sink, key: ptr, kp: ptr) {
+    _free_val(kp)
+    if value.type_of(key) != value.T_STRING {
+        msg = "Object keys must be strings"
+        if value.type_of(key) != value.T_NULL {
+            msg = "Object keys must be strings"
+        }
+        json.json_free(key)
+        _fail(ctx, msg)
+        return
+    }
+    v = _new_sink(SK_OBJVAL, s.next)
+    v.val = s.val
+    v.path = key // the key travels here (owned by this frame)
+    v.list = s.list
+    v.count = s.count
+    v.env = s.env
+    v.input = s.input
+    ev(ctx, s.node, s.input, s.env, v, null)
+    heap.free(v)
+    json.json_free(key)
+}
+
+_emit_objval(ctx: *Ctx, s: *Sink, val: ptr, vp: ptr) {
+    _free_val(vp)
+    next_partial = value.copy(s.val)
+    json.json_object_set_raw(next_partial, value.string_value(s.path), val)
+    _object_entry(ctx, s.list, s.count + 1, next_partial, s.input, s.env, s.next as *Sink)
+}
+
+// String interpolation: parts left to right, each interpolation a
+// generator, earlier parts outer. The text so far travels in s.val.
+_ev_string(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if p != null {
+        _fail(ctx, "Invalid path expression")
+        return
+    }
+    _string_part(ctx, n.list, 0, ast.name_of(n as ptr), json.json_create_string(""), input, env, sink)
+}
+
+_string_part(ctx: *Ctx, parts: ptr, i: int, fmt: string, sofar: ptr, input: ptr, env: ptr, sink: *Sink) {
+    if ctx.status != ST_OK {
+        json.json_free(sofar)
+        return
+    }
+    if i >= list.size(parts) {
+        emit(ctx, sink, sofar, null)
+        return
+    }
+    part = list.get_raw(parts, i) as *Node
+    if part.val != null {
+        next = json.json_create_string("${value.string_value(sofar)}${value.string_value(part.val)}")
+        json.json_free(sofar)
+        _string_part(ctx, parts, i + 1, fmt, next, input, env, sink)
+        return
+    }
+    s = _new_sink(SK_STRPART, sink)
+    s.val = sofar
+    s.list = parts
+    s.count = i
+    s.name = fmt
+    s.env = env
+    s.input = input
+    ev(ctx, part.a, input, env, s, null)
+    heap.free(s)
+    json.json_free(sofar)
+}
+
+_emit_strpart(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
+    _free_val(vp)
+    text = null
+    if string.length(s.name) == 0 {
+        text = _tostring(v)
+    } else {
+        f, err = _format(s.name, v)
+        if f == null {
+            json.json_free(v)
+            _fail(ctx, err)
+            return
+        }
+        text = f
+    }
+    json.json_free(v)
+    next = json.json_create_string("${value.string_value(s.val)}${value.string_value(text)}")
+    json.json_free(text)
+    _string_part(ctx, s.list, s.count + 1, s.name, next, s.input, s.env, s.next as *Sink)
+}
+
+// `tostring`: strings as they are, everything else as JSON. Owned result.
+_tostring(v: ptr) -> ptr {
+    if value.type_of(v) == value.T_STRING { return value.copy(v) }
+    return json.json_create_string(value.to_json(v))
+}
+
+// ---------------------------------------------------------------------------
+// try / catch, reduce / foreach, `as` bindings
+// ---------------------------------------------------------------------------
+
+_ev_try(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    s = _new_sink(SK_TRY, sink)
+    ev(ctx, n.a, input, env, s, p)
+    escaped = s.flag
+    heap.free(s)
+    if ctx.status == ST_ERROR && escaped == 0 {
+        err = ctx.err
+        ctx.err = null
+        ctx.status = ST_OK
+        // A bare `try` / `?` swallows the error; a handler sees the error
+        // value as its input.
+        if n.b != null { ev(ctx, n.b, err, env, sink, null) }
+        json.json_free(err)
+    }
+}
+
+// reduce SRC as PAT (INIT; UPDATE)        (mode 0)
+// foreach SRC as PAT (INIT; UPDATE; EXTRACT)  (mode 1)
+// INIT is a generator: one fold per initial value.
+_ev_reduce(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr, mode: int) {
+    inits = _new_sink(SK_COLLECT, null)
+    inits.list = list.new()
+    if p != null { inits.plist = list.new() }
+    ev(ctx, n.c, input, env, inits, p)
+    cnt = list.size(inits.list)
+    i = 0
+    while i < cnt {
+        if ctx.status == ST_OK {
+            s = _new_sink(SK_REDUCE, sink)
+            if mode == 1 { s.kind = SK_FOREACH }
+            s.val = value.copy(list.get_raw(inits.list, i))
+            s.path = null
+            if inits.plist != null { s.path = value.copy(list.get_raw(inits.plist, i)) }
+            s.node = n.d // update
+            s.list = n.list // the pattern(s), alternatives for ?//
+            s.node3 = n.e // extract (foreach) or null
+            s.env = env
+            s.input = input
+            ev(ctx, n.a, input, env, s, null)
+            if mode == 0 && ctx.status == ST_OK {
+                emit(ctx, sink, s.val, s.path)
+            } else {
+                _free_val(s.val)
+                _free_val(s.path)
+            }
+            heap.free(s)
+        }
+        i = i + 1
+    }
+    _free_list(inits.list)
+    _free_list(inits.plist)
+    heap.free(inits)
+}
+
+// One source value for a fold: bind it, run the update on the state.
+_emit_reduce(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
+    _free_val(vp)
+    // Bind the pattern (possibly generating several environments), and for
+    // each environment run one fold step.
+    _bind_alternatives(ctx, s.list, v, s.env, s, 1)
+    json.json_free(v)
+}
+
+// One fold step in environment `env`: state = last(update(state)).
+_fold_step(ctx: *Ctx, s: *Sink, env: ptr) {
+    if ctx.status != ST_OK { return }
+    if s.kind == SK_REDUCE {
+        last = _new_sink(SK_LAST, null)
+        ev(ctx, s.node, s.val, env, last, s.path)
+        if last.flag == 1 {
+            _free_val(s.val)
+            _free_val(s.path)
+            s.val = last.val
+            s.path = last.path
+        } else {
+            // `reduce` with an update yielding empty: the state becomes null
+            _free_val(s.val)
+            _free_val(s.path)
+            s.val = json.json_create_null()
+            s.path = null
+        }
+        heap.free(last)
+        return
+    }
+    // foreach: every update output becomes the state and is extracted
+    outs = _new_sink(SK_COLLECT, null)
+    outs.list = list.new()
+    if s.path != null { outs.plist = list.new() }
+    ev(ctx, s.node, s.val, env, outs, s.path)
+    cnt = list.size(outs.list)
+    i = 0
+    while i < cnt {
+        if ctx.status == ST_OK {
+            _free_val(s.val)
+            _free_val(s.path)
+            s.val = list.get_raw(outs.list, i)
+            list.set(outs.list, i, null)
+            s.path = null
+            if outs.plist != null {
+                s.path = list.get_raw(outs.plist, i)
+                list.set(outs.plist, i, null)
+            }
+            if s.node3 == null {
+                emit(ctx, s.next as *Sink, value.copy(s.val), _copy_path(s.path))
+            } else {
+                ev(ctx, s.node3, s.val, env, s.next as *Sink, s.path)
+            }
+        }
+        i = i + 1
+    }
+    _free_list(outs.list)
+    _free_list(outs.plist)
+    heap.free(outs)
+}
+
+// `a as PATTERNS | body`: a value of `a` arrived.
+_emit_bind(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
+    _free_val(vp)
+    _bind_alternatives(ctx, s.list, v, s.env, s, 0)
+    json.json_free(v)
+}
+
+// Destructuring alternatives `p1 ?// p2 ?// p3`: try each pattern in turn;
+// an error while binding OR while running the body moves on to the next
+// alternative (jq's rule), and all variables of all patterns exist in every
+// body (unmatched ones are null).
+_bind_alternatives(ctx: *Ctx, patterns: ptr, v: ptr, env: ptr, s: *Sink, fold: int) {
+    n = list.size(patterns)
+    if n == 1 {
+        _bind_patterns(ctx, list.get_raw(patterns, 0), v, env, s, fold)
+        return
+    }
+    // Pre-bind every variable named in any alternative to null.
+    names = list.new()
+    i = 0
+    while i < n {
+        _collect_pattern_vars(list.get_raw(patterns, i), names)
+        i = i + 1
+    }
+    base = env
+    frames = list.new()
+    i = 0
+    while i < list.size(names) {
+        f = _new_frame(E_VAR, ast.name_of(list.get_raw(names, i)), 0, base)
+        f.val = json.json_create_null()
+        list.list_add_raw(frames, f)
+        base = f
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        _bind_patterns(ctx, list.get_raw(patterns, i), v, base, s, fold)
+        if ctx.status == ST_ERROR && i + 1 < n {
+            json.json_free(ctx.err)
+            ctx.err = null
+            ctx.status = ST_OK
+        } else {
+            i = n
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < list.size(frames) {
+        f = list.get_raw(frames, i) as *Env
+        json.json_free(f.val)
+        heap.free(f)
+        list.set(frames, i, null)
+        i = i + 1
+    }
+    list.free(frames)
+    list.free(names)
+}
+
+// The P_VAR / P_ENTRY-with-$name nodes of a pattern, appended to `names`.
+_collect_pattern_vars(pat: ptr, names: ptr) {
+    pn = pat as *Node
+    if pn.kind == ast.P_VAR {
+        list.list_add_raw(names, pat)
+        return
+    }
+    if pn.kind == ast.P_ARRAY {
+        n = list.size(pn.list)
+        i = 0
+        while i < n {
+            _collect_pattern_vars(list.get_raw(pn.list, i), names)
+            i = i + 1
+        }
+        return
+    }
+    if pn.kind == ast.P_OBJECT {
+        n = list.size(pn.list)
+        i = 0
+        while i < n {
+            e = list.get_raw(pn.list, i) as *Node
+            if e.name != null { list.list_add_raw(names, e as ptr) }
+            if e.b != null { _collect_pattern_vars(e.b, names) }
+            i = i + 1
+        }
+    }
+}
+
+// Bind `pat` to `v` on top of `env`, then run the continuation: the body
+// (fold == 0: s.node in s.env with s.input) or a fold step (fold == 1).
+// Object patterns whose key expressions generate several keys make this a
+// generator, hence continuation style again.
+_bind_patterns(ctx: *Ctx, pat: ptr, v: ptr, env: ptr, s: *Sink, fold: int) {
+    if ctx.status != ST_OK { return }
+    pn = pat as *Node
+    if pn.kind == ast.P_VAR {
+        f = _new_frame(E_VAR, ast.name_of(pat), 0, env)
+        f.val = value.copy(v)
+        _bind_continue(ctx, s, f, fold)
+        json.json_free(f.val)
+        heap.free(f)
+        return
+    }
+    if pn.kind == ast.P_ARRAY {
+        if value.type_of(v) != value.T_ARRAY && value.type_of(v) != value.T_NULL {
+            _fail(ctx, "Cannot index ${_tname(value.type_of(v))} with number")
+            return
+        }
+        _bind_array_elems(ctx, pn.list, 0, v, env, s, fold)
+        return
+    }
+    if pn.kind == ast.P_OBJECT {
+        _bind_object_entries(ctx, pn.list, 0, v, env, s, fold)
+        return
+    }
+    _fail(ctx, "internal error: bad pattern")
+}
+
+_bind_array_elems(ctx: *Ctx, elems: ptr, i: int, v: ptr, env: ptr, s: *Sink, fold: int) {
+    if ctx.status != ST_OK { return }
+    if i >= list.size(elems) {
+        _bind_continue(ctx, s, env, fold)
+        return
+    }
+    elem = json.json_create_null()
+    if value.type_of(v) == value.T_ARRAY {
+        if i < json.json_array_size(v) {
+            json.json_free(elem)
+            elem = value.copy(json.json_array_get_raw(v, i))
+        }
+    }
+    // Bind this element's sub-pattern, continuing with the remaining elements.
+    c = _new_sink(SK_BIND, null)
+    c.list = elems
+    c.count = i + 1
+    c.val = v // borrowed
+    c.node2 = s as ptr
+    c.id = fold
+    _bind_sub(ctx, list.get_raw(elems, i), elem, env, c, 2)
+    heap.free(c)
+    json.json_free(elem)
+}
+
+_bind_object_entries(ctx: *Ctx, entries: ptr, i: int, v: ptr, env: ptr, s: *Sink, fold: int) {
+    if ctx.status != ST_OK { return }
+    if i >= list.size(entries) {
+        _bind_continue(ctx, s, env, fold)
+        return
+    }
+    e = list.get_raw(entries, i) as *Node
+    if e.name != null {
+        // {$name} or {$name: pattern}
+        key = ast.name_of(e as ptr)
+        got, err = _index_by_string(v, key)
+        if got == null {
+            _fail(ctx, err)
+            return
+        }
+        f = _new_frame(E_VAR, key, 0, env)
+        f.val = got
+        if e.b != null {
+            c = _new_sink(SK_BIND, null)
+            c.list = entries
+            c.count = i + 1
+            c.val = v
+            c.node2 = s as ptr
+            c.id = fold
+            _bind_sub(ctx, e.b, got, f, c, 3)
+            heap.free(c)
+        } else {
+            _bind_object_entries(ctx, entries, i + 1, v, f, s, fold)
+        }
+        json.json_free(f.val)
+        heap.free(f)
+        return
+    }
+    // {(expr): pattern} / {"lit": pattern} / {"\(x)": pattern}: the key
+    // expression is a generator, evaluated against the ORIGINAL `.`
+    // (s.input) with the variables bound so far.
+    keys = _new_sink(SK_COLLECT, null)
+    keys.list = list.new()
+    ev(ctx, e.a, s.input, env, keys, null)
+    cnt = list.size(keys.list)
+    j = 0
+    while j < cnt {
+        if ctx.status == ST_OK {
+            kv = list.get_raw(keys.list, j)
+            if value.type_of(kv) != value.T_STRING {
+                _fail(ctx, "Cannot index ${_tname(value.type_of(v))} with ${_tname(value.type_of(kv))}")
+            } else {
+                got, err = _index_by_string(v, value.string_value(kv))
+                if got == null {
+                    _fail(ctx, err)
+                } else {
+                    c = _new_sink(SK_BIND, null)
+                    c.list = entries
+                    c.count = i + 1
+                    c.val = v
+                    c.node2 = s as ptr
+                    c.id = fold
+                    _bind_sub(ctx, e.b, got, env, c, 3)
+                    heap.free(c)
+                    json.json_free(got)
+                }
+            }
+        }
+        j = j + 1
+    }
+    _free_list(keys.list)
+    heap.free(keys)
+}
+
+// `.key` for destructuring: null → null, object → member or null, else error.
+_index_by_string(v: ptr, key: string) -> ptr! {
+    t = value.type_of(v)
+    if t == value.T_NULL { return json.json_create_null(), "" }
+    if t == value.T_OBJECT {
+        got = json.json_object_get_raw(v, key)
+        if got == null { return json.json_create_null(), "" }
+        return value.copy(got), ""
+    }
+    return null, "Cannot index ${_tname(t)} with \"${key}\""
+}
+
+// Bind a sub-pattern, then resume the enclosing array/object walk held in
+// `c` (kind 2 = array elements, 3 = object entries).
+_bind_sub(ctx: *Ctx, pat: ptr, v: ptr, env: ptr, c: *Sink, which: int) {
+    if ctx.status != ST_OK { return }
+    pn = pat as *Node
+    if pn.kind == ast.P_VAR {
+        f = _new_frame(E_VAR, ast.name_of(pat), 0, env)
+        f.val = value.copy(v)
+        _bind_resume(ctx, c, f, which)
+        json.json_free(f.val)
+        heap.free(f)
+        return
+    }
+    // Nested array / object pattern: walk it with a continuation that
+    // resumes `c` when the nested pattern is fully bound.
+    inner = _new_sink(SK_BIND, null)
+    inner.node2 = c as ptr
+    inner.id = which
+    inner.count = -1 // marks "resume the outer walk" in _bind_continue
+    inner.input = (c.node2 as *Sink).input
+    if pn.kind == ast.P_ARRAY {
+        if value.type_of(v) != value.T_ARRAY && value.type_of(v) != value.T_NULL {
+            _fail(ctx, "Cannot index ${_tname(value.type_of(v))} with number")
+        } else {
+            _bind_array_elems(ctx, pn.list, 0, v, env, inner, 0)
+        }
+    } else {
+        _bind_object_entries(ctx, pn.list, 0, v, env, inner, 0)
+    }
+    heap.free(inner)
+}
+
+_bind_resume(ctx: *Ctx, c: *Sink, env: ptr, which: int) {
+    outer = c.node2 as *Sink
+    if which == 2 {
+        _bind_array_elems(ctx, c.list, c.count, c.val, env, outer, c.id)
+    } else {
+        _bind_object_entries(ctx, c.list, c.count, c.val, env, outer, c.id)
+    }
+}
+
+// The pattern is fully bound in `env`: run the body / fold step, or resume
+// an enclosing walk when `s` is a nested-pattern continuation.
+_bind_continue(ctx: *Ctx, s: *Sink, env: ptr, fold: int) {
+    if s.count == -1 {
+        _bind_resume(ctx, s.node2 as *Sink, env, s.id)
+        return
+    }
+    if fold == 1 {
+        _fold_step(ctx, s, env)
+        return
+    }
+    ev(ctx, s.node, s.input, env, s.next as *Sink, s.ipath)
+}
+
+// ---------------------------------------------------------------------------
+// Variables and function calls
+// ---------------------------------------------------------------------------
+
+_ev_var(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    name = ast.name_of(node)
+    f = _lookup(env, E_VAR, name, 0)
+    v = null
+    if f != null {
+        v = f.val
+    } else if string.equals(name, "ENV") == 1 {
+        v = _env_object(ctx)
+    } else if string.equals(name, "__prog_args") == 1 {
+        v = null
+    } else {
+        _fail(ctx, "$${name} is not defined")
+        return
+    }
+    if p != null {
+        _not_a_path(ctx, v)
+        return
+    }
+    emit(ctx, sink, value.copy(v), null)
+}
+
+// $ENV, built once per run from the process environment.
+_env_object(ctx: *Ctx) -> ptr {
+    if ctx.env_obj != null { return ctx.env_obj }
+    o = json.json_create_object()
+    n = value.environ_count()
+    i = 0
+    while i < n {
+        entry = value.environ_entry(i)
+        eq = string.index_of(entry, "=")
+        if eq > 0 {
+            len = string.length(entry)
+            json.json_object_set_raw(o, string.substring_n(entry, len, 0, eq), json.json_create_string(string.substring_n(entry, len, eq + 1, len)))
+        }
+        i = i + 1
+    }
+    ctx.env_obj = o
+    return o
+}
+
+// Runaway recursion must end in a jq error, not a C stack overflow. The
+// evaluator recurses on the C stack, about 2 KiB per jq call, so the guard
+// is the stack the thread has left: it stops while STACK_RESERVE bytes
+// remain for the error's own unwinding. Only where the platform cannot say
+// how much stack is left does a fixed call count stand in, set low enough
+// for a 1 MiB stack.
+const STACK_RESERVE = 262144
+const FALLBACK_MAX_DEPTH = 300
+
+_too_deep(depth: int) -> int {
+    left = aether_jq_stack_remaining()
+    if left < 0 {
+        if depth > FALLBACK_MAX_DEPTH { return 1 }
+        return 0
+    }
+    if left < STACK_RESERVE { return 1 }
+    return 0
+}
+
+_ev_call(ctx: *Ctx, n: *Node, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    name = ast.name_of(node)
+    arity = 0
+    if n.list != null { arity = list.size(n.list) }
+    f = _lookup(env, E_FUNC, name, arity)
+    if f == null {
+        _native(ctx, name, arity, n.list, input, env, sink, p)
+        return
+    }
+    if f.kind == E_CLOSURE {
+        if f.node == null {
+            // a `$param` used as a filter: its bound value
+            if p != null {
+                _not_a_path(ctx, f.val)
+                return
+            }
+            emit(ctx, sink, value.copy(f.val), null)
+            return
+        }
+        ev(ctx, f.node, input, f.env, sink, p)
+        return
+    }
+    ctx.depth = ctx.depth + 1
+    if _too_deep(ctx.depth) != 0 {
+        ctx.depth = ctx.depth - 1
+        _fail(ctx, "function call depth exceeded in ${name}/${arity}")
+        return
+    }
+    def = f.node as *Node
+    _call_bind(ctx, def, 0, f.env, env, n.list, input, sink, p)
+    ctx.depth = ctx.depth - 1
+}
+
+// Bind parameter `i` of `def` and continue; `callee` is the env the body
+// runs in so far (starting at the def's own frame), `caller` the env the
+// arguments are evaluated in.
+_call_bind(ctx: *Ctx, def: *Node, i: int, callee: ptr, caller: ptr, args: ptr, input: ptr, sink: *Sink, p: ptr) {
+    if ctx.status != ST_OK { return }
+    nparams = 0
+    if def.list != null { nparams = list.size(def.list) }
+    if i >= nparams {
+        ev(ctx, def.a, input, callee, sink, p)
+        return
+    }
+    param = list.get_raw(def.list, i) as *Node
+    pname = ast.name_of(param as ptr)
+    arg = list.get_raw(args, i)
+    if param.op == 0 {
+        // a filter parameter: a closure over the caller's environment
+        c = _new_frame(E_CLOSURE, pname, 0, callee)
+        c.node = arg
+        c.env = caller
+        _call_bind(ctx, def, i + 1, c as ptr, caller, args, input, sink, p)
+        heap.free(c)
+        return
+    }
+    // `$name`: evaluate the argument (a generator) against the caller's `.`
+    // and bind each value in turn; `name` as a filter yields the value too.
+    vals = _new_sink(SK_COLLECT, null)
+    vals.list = list.new()
+    ev(ctx, arg, input, caller, vals, null)
+    cnt = list.size(vals.list)
+    j = 0
+    while j < cnt {
+        if ctx.status == ST_OK {
+            v = list.get_raw(vals.list, j)
+            fv = _new_frame(E_VAR, pname, 0, callee)
+            fv.val = v
+            fc = _new_frame(E_CLOSURE, pname, 0, fv as ptr)
+            fc.node = null
+            fc.val = v
+            _call_bind(ctx, def, i + 1, fc as ptr, caller, args, input, sink, p)
+            heap.free(fc)
+            heap.free(fv)
+        }
+        j = j + 1
+    }
+    _free_list(vals.list)
+    heap.free(vals)
+}
+
+// ---------------------------------------------------------------------------
+// Paths: getpath / setpath / delpaths and the assignment operators
+// ---------------------------------------------------------------------------
+
+// The value at `path` (borrowed array) inside `v` (borrowed), from index i.
+// Missing members read as null; a type mismatch is an error.
+_getpath(v: ptr, path: ptr, i: int) -> ptr! {
+    n = json.json_array_size(path)
+    if i >= n { return value.copy(v), "" }
+    if value.type_of(v) == value.T_NULL { return json.json_create_null(), "" }
+    child, err = _index(v, json.json_array_get_raw(path, i))
+    if child == null { return null, "${err}" }
+    out, err2 = _getpath(child, path, i + 1)
+    json.json_free(child)
+    return out, "${err2}"
+}
+
+// A copy of `v` with `newv` (owned) at `path` from index i. On error the
+// result is null and `newv` has been released.
+_setpath(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
+    n = json.json_array_size(path)
+    if i >= n { return newv, "" }
+    key = json.json_array_get_raw(path, i)
+    tv = value.type_of(v)
+    tk = value.type_of(key)
+    if tk == value.T_STRING {
+        if tv != value.T_NULL && tv != value.T_OBJECT {
+            json.json_free(newv)
+            return null, _index_error(tv, key, tk)
+        }
+        k = value.string_value(key)
+        child = null
+        if tv == value.T_OBJECT { child = json.json_object_get_raw(v, k) }
+        sub, err = _setpath(child, path, i + 1, newv)
+        if sub == null { return null, "${err}" }
+        out = json.json_create_object()
+        if tv == value.T_OBJECT { json.json_free(out); out = value.copy(v) }
+        json.json_object_set_raw(out, k, sub)
+        return out, ""
+    }
+    if tk == value.T_NUMBER {
+        if tv != value.T_NULL && tv != value.T_ARRAY {
+            json.json_free(newv)
+            return null, _index_error(tv, key, tk)
+        }
+        len = 0
+        if tv == value.T_ARRAY { len = json.json_array_size(v) }
+        idx = (math.floor(value.number_of(key))) as int
+        if idx < 0 { idx = idx + len }
+        if idx < 0 {
+            json.json_free(newv)
+            return null, "Out of bounds negative array index"
+        }
+        child = null
+        if idx < len { child = json.json_array_get_raw(v, idx) }
+        sub, err = _setpath(child, path, i + 1, newv)
+        if sub == null { return null, "${err}" }
+        out = json.json_create_array()
+        j = 0
+        while j < len || j <= idx {
+            if j == idx {
+                json.json_array_add_raw(out, sub)
+            } else if j < len {
+                json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j)))
+            } else {
+                json.json_array_add_raw(out, json.json_create_null())
+            }
+            j = j + 1
+        }
+        return out, ""
+    }
+    if tk == value.T_OBJECT {
+        if tv != value.T_NULL && tv != value.T_ARRAY {
+            json.json_free(newv)
+            return null, "Cannot update field at object index of ${_tname(tv)}"
+        }
+        len = 0
+        if tv == value.T_ARRAY { len = json.json_array_size(v) }
+        a, b = _slice_bounds(len, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
+        child = json.json_create_array()
+        if tv == value.T_ARRAY { json.json_free(child); child = value.array_slice(v, a, b) }
+        sub, err = _setpath(child, path, i + 1, newv)
+        json.json_free(child)
+        if sub == null { return null, "${err}" }
+        if value.type_of(sub) != value.T_ARRAY {
+            json.json_free(sub)
+            return null, "A slice of an array can only be assigned another array"
+        }
+        out = json.json_create_array()
+        j = 0
+        while j < a {
+            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j)))
+            j = j + 1
+        }
+        m = json.json_array_size(sub)
+        j = 0
+        while j < m {
+            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(sub, j)))
+            j = j + 1
+        }
+        json.json_free(sub)
+        j = b
+        while j < len {
+            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j)))
+            j = j + 1
+        }
+        return out, ""
+    }
+    json.json_free(newv)
+    return null, "Invalid path component of type ${_tname(tk)}"
+}
+
+// A copy of `v` without the member at `path` (from index i). Deleting a
+// missing member is a no-op; deleting the root gives null.
+_delpath(v: ptr, path: ptr, i: int) -> ptr! {
+    n = json.json_array_size(path)
+    if n == 0 { return json.json_create_null(), "" }
+    tv = value.type_of(v)
+    if tv == value.T_NULL { return json.json_create_null(), "" }
+    key = json.json_array_get_raw(path, i)
+    tk = value.type_of(key)
+    if i < n - 1 {
+        child, err = _index(v, key)
+        if child == null { return null, "${err}" }
+        if value.type_of(child) == value.T_NULL {
+            json.json_free(child)
+            return value.copy(v), ""
+        }
+        sub, err2 = _delpath(child, path, i + 1)
+        json.json_free(child)
+        if sub == null { return null, "${err2}" }
+        one = json.json_create_array()
+        json.json_array_add_raw(one, value.copy(key))
+        out, err3 = _setpath(v, one, 0, sub)
+        json.json_free(one)
+        return out, "${err3}"
+    }
+    if tv == value.T_OBJECT {
+        if tk != value.T_STRING { return null, "Cannot delete field at ${_tname(tk)} index of object" }
+        return value.without_key(v, value.string_value(key)), ""
+    }
+    if tv == value.T_ARRAY {
+        len = json.json_array_size(v)
+        if tk == value.T_NUMBER {
+            idx = (math.floor(value.number_of(key))) as int
+            if idx < 0 { idx = idx + len }
+            if idx < 0 { return null, "Out of bounds negative array index" }
+            if idx >= len { return value.copy(v), "" }
+            out = json.json_create_array()
+            j = 0
+            while j < len {
+                if j != idx { json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j))) }
+                j = j + 1
+            }
+            return out, ""
+        }
+        if tk == value.T_OBJECT {
+            a, b = _slice_bounds(len, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
+            out = json.json_create_array()
+            j = 0
+            while j < len {
+                if j < a || j >= b { json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j))) }
+                j = j + 1
+            }
+            return out, ""
+        }
+        return null, "Cannot delete field at ${_tname(tk)} index of array"
+    }
+    return null, "Cannot delete field at index of ${_tname(tv)}"
+}
+
+// delpaths: sort the paths and delete from the last one back, so an
+// earlier deletion never shifts a later index.
+_delpaths(v: ptr, paths: ptr) -> ptr! {
+    if value.type_of(paths) != value.T_ARRAY { return null, "Paths must be specified as an array" }
+    l = list.new()
+    n = json.json_array_size(paths)
+    i = 0
+    while i < n {
+        pth = json.json_array_get_raw(paths, i)
+        if value.type_of(pth) != value.T_ARRAY {
+            list.free(l)
+            return null, "Path must be specified as an array"
+        }
+        list.list_add_raw(l, pth)
+        i = i + 1
+    }
+    value.sort_list(l, null)
+    out = value.copy(v)
+    i = n - 1
+    while i >= 0 {
+        next, err = _delpath(out, list.get_raw(l, i), 0)
+        json.json_free(out)
+        if next == null {
+            _clear_aliases(l)
+            return null, "${err}"
+        }
+        out = next
+        i = i - 1
+    }
+    _clear_aliases(l)
+    return out, ""
+}
+
+// Free a list that only holds borrowed pointers.
+_clear_aliases(l: ptr) {
+    n = list.size(l)
+    i = 0
+    while i < n {
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+}
+
+// The paths of `f` against `input`, as a std.list of owned JSON arrays.
+_paths_of(ctx: *Ctx, f: ptr, input: ptr, env: ptr) -> ptr {
+    s = _new_sink(SK_PATHS_OF, null)
+    s.list = list.new()
+    root = json.json_create_array()
+    ev(ctx, f, input, env, s, root)
+    json.json_free(root)
+    l = s.list
+    heap.free(s)
+    return l
+}
+
+_ev_assign(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if p != null {
+        _fail(ctx, "Invalid path expression")
+        return
+    }
+    paths = _paths_of(ctx, n.a, input, env)
+    if ctx.status != ST_OK {
+        _free_list(paths)
+        return
+    }
+    if n.op == ast.OP_UPDATE {
+        _update_paths(ctx, paths, n.b, input, env, sink)
+        _free_list(paths)
+        return
+    }
+    // `=` and `op=`: the right-hand side is evaluated against `.`, once,
+    // and each of its values gives one result.
+    s = _new_sink(SK_ASSIGN_RHS, sink)
+    s.list = paths
+    s.id = n.op
+    s.input = input
+    ev(ctx, n.b, input, env, s, null)
+    heap.free(s)
+    _free_list(paths)
+}
+
+_emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
+    _free_val(rp)
+    result = value.copy(s.input)
+    n = list.size(s.list)
+    i = 0
+    while i < n {
+        pth = list.get_raw(s.list, i)
+        newv = null
+        if s.id == ast.OP_ASSIGN {
+            newv = value.copy(rhs)
+        } else {
+            cur, err = _getpath(result, pth, 0)
+            if cur == null {
+                json.json_free(result)
+                json.json_free(rhs)
+                _fail(ctx, err)
+                return
+            }
+            if s.id == ast.OP_ALT_ASSIGN {
+                if value.truthy(cur) == 1 {
+                    newv = cur
+                } else {
+                    json.json_free(cur)
+                    newv = value.copy(rhs)
+                }
+            } else {
+                op = ast.OP_ADD
+                if s.id == ast.OP_SUB_ASSIGN { op = ast.OP_SUB }
+                if s.id == ast.OP_MUL_ASSIGN { op = ast.OP_MUL }
+                if s.id == ast.OP_DIV_ASSIGN { op = ast.OP_DIV }
+                if s.id == ast.OP_MOD_ASSIGN { op = ast.OP_MOD }
+                combined, berr = _binop(op, cur, rhs)
+                json.json_free(cur)
+                if combined == null {
+                    json.json_free(result)
+                    json.json_free(rhs)
+                    _fail(ctx, berr)
+                    return
+                }
+                newv = combined
+            }
+        }
+        next, serr = _setpath(result, pth, 0, newv)
+        json.json_free(result)
+        if next == null {
+            json.json_free(rhs)
+            _fail(ctx, serr)
+            return
+        }
+        result = next
+        i = i + 1
+    }
+    json.json_free(rhs)
+    emit(ctx, s.next as *Sink, result, null)
+}
+
+// `a |= f`: for each path, replace the value with the FIRST output of f;
+// no output deletes the path (all deletions applied at the end, so earlier
+// ones do not shift later array indices).
+_update_paths(ctx: *Ctx, paths: ptr, f: ptr, input: ptr, env: ptr, sink: *Sink) {
+    result = value.copy(input)
+    dels = json.json_create_array()
+    n = list.size(paths)
+    i = 0
+    while i < n {
+        if ctx.status != ST_OK { i = n }
+        if i < n {
+            pth = list.get_raw(paths, i)
+            cur, err = _getpath(result, pth, 0)
+            if cur == null {
+                _fail(ctx, err)
+            } else {
+                id = _fresh_id(ctx)
+                lim = _new_sink(SK_LIMIT, null)
+                lim.count = 1
+                lim.id = id
+                last = _new_sink(SK_LAST, null)
+                lim.next = last as ptr
+                ev(ctx, f, cur, env, lim, null)
+                json.json_free(cur)
+                if ctx.status == ST_BREAK && ctx.break_id == id { ctx.status = ST_OK }
+                if ctx.status == ST_OK {
+                    if last.flag == 1 {
+                        next, serr = _setpath(result, pth, 0, last.val)
+                        last.val = null
+                        json.json_free(result)
+                        result = next
+                        if next == null {
+                            result = json.json_create_null()
+                            _fail(ctx, serr)
+                        }
+                    } else {
+                        json.json_array_add_raw(dels, value.copy(pth))
+                    }
+                }
+                _free_val(last.val)
+                _free_val(last.path)
+                heap.free(last)
+                heap.free(lim)
+            }
+        }
+        i = i + 1
+    }
+    if ctx.status == ST_OK && json.json_array_size(dels) > 0 {
+        next, derr = _delpaths(result, dels)
+        json.json_free(result)
+        result = next
+        if next == null {
+            result = json.json_create_null()
+            _fail(ctx, derr)
+        }
+    }
+    json.json_free(dels)
+    if ctx.status == ST_OK {
+        emit(ctx, sink, result, null)
+    } else {
+        json.json_free(result)
+    }
+}
+
+// getpath in path mode: the result's path is the current path plus P.
+_emit_getpath(ctx: *Ctx, s: *Sink, pth: ptr, pp: ptr) {
+    _free_val(pp)
+    if value.type_of(pth) != value.T_ARRAY {
+        json.json_free(pth)
+        _fail(ctx, "Path must be specified as an array")
+        return
+    }
+    out, err = _getpath(s.input, pth, 0)
+    if out == null {
+        json.json_free(pth)
+        _fail(ctx, err)
+        return
+    }
+    np = null
+    if s.ipath != null {
+        np = value.copy(s.ipath)
+        m = json.json_array_size(pth)
+        j = 0
+        while j < m {
+            json.json_array_add_raw(np, value.copy(json.json_array_get_raw(pth, j)))
+            j = j + 1
+        }
+    }
+    json.json_free(pth)
+    emit(ctx, s.next as *Sink, out, np)
+}
+
+// ---------------------------------------------------------------------------
+// Native builtins: dispatch
+// ---------------------------------------------------------------------------
+
+// Functions that take filters (closures) or are generators go through the
+// first block; everything else evaluates its arguments to values (cartesian
+// product, first argument outermost) and calls _apply.
+_native(ctx: *Ctx, name: string, arity: int, args: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if arity == 0 {
+        if string.equals(name, "empty") == 1 { return }
+        if string.equals(name, "error") == 1 {
+            _fail_val(ctx, value.copy(input))
+            return
+        }
+        if string.equals(name, "inputs") == 1 {
+            if p != null { _fail(ctx, "Invalid path expression"); return }
+            while list.size(ctx.inputs) > 0 {
+                if ctx.status != ST_OK { return }
+                emit(ctx, sink, _take_input(ctx), null)
+            }
+            return
+        }
+        if string.equals(name, "input") == 1 {
+            if p != null { _fail(ctx, "Invalid path expression"); return }
+            if list.size(ctx.inputs) == 0 {
+                _fail(ctx, "No more inputs")
+                return
+            }
+            emit(ctx, sink, _take_input(ctx), null)
+            return
+        }
+        if string.equals(name, "debug") == 1 {
+            io.stderr_write("[\"DEBUG:\",${value.to_json(input)}]\n")
+            emit(ctx, sink, value.copy(input), _copy_path(p))
+            return
+        }
+        if string.equals(name, "stderr") == 1 {
+            io.stderr_write(value.to_json(input))
+            emit(ctx, sink, value.copy(input), _copy_path(p))
+            return
+        }
+        if string.equals(name, "halt") == 1 {
+            ctx.status = ST_HALT
+            ctx.halt_code = 0
+            return
+        }
+    }
+    if arity == 1 {
+        f = list.get_raw(args, 0)
+        if string.equals(name, "path") == 1 {
+            if p != null { _fail(ctx, "Invalid path expression"); return }
+            s = _new_sink(SK_PATH_OUT, sink)
+            root = json.json_create_array()
+            ev(ctx, f, input, env, s, root)
+            json.json_free(root)
+            heap.free(s)
+            return
+        }
+        if string.equals(name, "first") == 1 {
+            _limit(ctx, 1, f, input, env, sink, p)
+            return
+        }
+        if string.equals(name, "isempty") == 1 {
+            if p != null { _fail(ctx, "Invalid path expression"); return }
+            s = _new_sink(SK_ISEMPTY, null)
+            s.id = _fresh_id(ctx)
+            ev(ctx, f, input, env, s, null)
+            if ctx.status == ST_BREAK && ctx.break_id == s.id { ctx.status = ST_OK }
+            empty = 1 - s.flag
+            heap.free(s)
+            if ctx.status != ST_OK { return }
+            emit(ctx, sink, json.json_create_bool(empty), null)
+            return
+        }
+        if string.equals(name, "repeat") == 1 {
+            _loop(ctx, 2, null, f, input, env, sink, p)
+            return
+        }
+        if string.equals(name, "getpath") == 1 {
+            s = _new_sink(SK_GETPATH, sink)
+            s.input = input
+            s.ipath = p
+            ev(ctx, f, input, env, s, null)
+            heap.free(s)
+            return
+        }
+        if string.equals(name, "sort_by") == 1 || string.equals(name, "group_by") == 1 || string.equals(name, "min_by") == 1 || string.equals(name, "max_by") == 1 {
+            if p != null { _fail(ctx, "Invalid path expression"); return }
+            _by(ctx, name, f, input, env, sink)
+            return
+        }
+    }
+    if arity == 2 {
+        if string.equals(name, "limit") == 1 {
+            if p != null { _fail(ctx, "Invalid path expression"); return }
+            counts = _new_sink(SK_COLLECT, null)
+            counts.list = list.new()
+            ev(ctx, list.get_raw(args, 0), input, env, counts, null)
+            cnt = list.size(counts.list)
+            i = 0
+            while i < cnt {
+                if ctx.status == ST_OK {
+                    nv = list.get_raw(counts.list, i)
+                    if value.type_of(nv) != value.T_NUMBER {
+                        _fail(ctx, "Invalid limit: ${value.to_json(nv)}")
+                    } else {
+                        _limit(ctx, (math.ceil(value.number_of(nv))) as int, list.get_raw(args, 1), input, env, sink, null)
+                    }
+                }
+                i = i + 1
+            }
+            _free_list(counts.list)
+            heap.free(counts)
+            return
+        }
+        if string.equals(name, "until") == 1 {
+            _loop(ctx, 0, list.get_raw(args, 0), list.get_raw(args, 1), input, env, sink, p)
+            return
+        }
+        if string.equals(name, "while") == 1 {
+            _loop(ctx, 1, list.get_raw(args, 0), list.get_raw(args, 1), input, env, sink, p)
+            return
+        }
+    }
+    if _is_value_native(name, arity) == 0 {
+        _fail(ctx, "${name}/${arity} is not defined")
+        return
+    }
+    if p != null {
+        _fail(ctx, "Invalid path expression")
+        return
+    }
+    vals = list.new()
+    _args_step(ctx, name, arity, args, 0, vals, input, env, sink)
+    _clear_aliases(vals)
+}
+
+// Pop the next input off the queue (a copy: the queue's values are the
+// caller's).
+_take_input(ctx: *Ctx) -> ptr {
+    v = list.get_raw(ctx.inputs, 0)
+    list.set(ctx.inputs, 0, null)
+    list.remove(ctx.inputs, 0)
+    return value.copy(v)
+}
+
+// The first `n` outputs of f.
+_limit(ctx: *Ctx, n: int, f: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if n <= 0 { return }
+    s = _new_sink(SK_LIMIT, sink)
+    s.count = n
+    s.id = _fresh_id(ctx)
+    ev(ctx, f, input, env, s, p)
+    if ctx.status == ST_BREAK && ctx.break_id == s.id { ctx.status = ST_OK }
+    heap.free(s)
+}
+
+// until (mode 0), while (mode 1), repeat (mode 2), iteratively but in the
+// exact depth-first order the recursive jq definitions produce. The work
+// list holds owned values; an item with a pending condition value is a
+// pair (value, cond) kept in two parallel lists.
+_loop(ctx: *Ctx, mode: int, cond: ptr, update: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+    if p != null {
+        _fail(ctx, "Invalid path expression")
+        return
+    }
+    work = list.new()
+    conds = list.new() // parallel: null = "evaluate the condition", else the cond value
+    list.list_add_raw(work, value.copy(input))
+    list.list_add_raw(conds, null)
+    while list.size(work) > 0 {
+        if ctx.status != ST_OK { break }
+        top = list.size(work) - 1
+        v = list.get_raw(work, top)
+        c = list.get_raw(conds, top)
+        list.set(work, top, null)
+        list.set(conds, top, null)
+        list.remove(work, top)
+        list.remove(conds, top)
+        if mode == 2 {
+            emit(ctx, sink, value.copy(v), null)
+            if ctx.status == ST_OK { _push_updates(ctx, update, v, env, work, conds) }
+        } else if c == null {
+            cs = _new_sink(SK_COLLECT, null)
+            cs.list = list.new()
+            ev(ctx, cond, v, env, cs, null)
+            k = list.size(cs.list) - 1
+            while k >= 0 {
+                list.list_add_raw(work, value.copy(v))
+                list.list_add_raw(conds, list.get_raw(cs.list, k))
+                list.set(cs.list, k, null)
+                k = k - 1
+            }
+            list.free(cs.list)
+            heap.free(cs)
+        } else {
+            t = value.truthy(c)
+            json.json_free(c)
+            if mode == 0 {
+                if t == 1 {
+                    emit(ctx, sink, value.copy(v), null)
+                } else {
+                    _push_updates(ctx, update, v, env, work, conds)
+                }
+            } else {
+                if t == 1 {
+                    emit(ctx, sink, value.copy(v), null)
+                    if ctx.status == ST_OK { _push_updates(ctx, update, v, env, work, conds) }
+                }
+            }
+        }
+        json.json_free(v)
+    }
+    _free_list(work)
+    _free_list(conds)
+}
+
+_push_updates(ctx: *Ctx, update: ptr, v: ptr, env: ptr, work: ptr, conds: ptr) {
+    us = _new_sink(SK_COLLECT, null)
+    us.list = list.new()
+    ev(ctx, update, v, env, us, null)
+    k = list.size(us.list) - 1
+    while k >= 0 {
+        list.list_add_raw(work, list.get_raw(us.list, k))
+        list.list_add_raw(conds, null)
+        list.set(us.list, k, null)
+        k = k - 1
+    }
+    list.free(us.list)
+    heap.free(us)
+}
+
+// sort_by / group_by / min_by / max_by: the key of each element is the
+// array of f's outputs on it, compared with jq's total order.
+_by(ctx: *Ctx, name: string, f: ptr, input: ptr, env: ptr, sink: *Sink) {
+    if value.type_of(input) != value.T_ARRAY {
+        _fail(ctx, "Cannot index ${_tname(value.type_of(input))} with number")
+        return
+    }
+    n = json.json_array_size(input)
+    vals = list.new()
+    keys = list.new()
+    i = 0
+    while i < n {
+        if ctx.status == ST_OK {
+            e = json.json_array_get_raw(input, i)
+            ks = _new_sink(SK_COLLECT, null)
+            ks.list = list.new()
+            ev(ctx, f, e, env, ks, null)
+            key = json.json_create_array()
+            _drain_into_array(ks.list, key)
+            heap.free(ks)
+            list.list_add_raw(vals, value.copy(e))
+            list.list_add_raw(keys, key)
+        }
+        i = i + 1
+    }
+    if ctx.status != ST_OK {
+        _free_list(vals)
+        _free_list(keys)
+        return
+    }
+    if string.equals(name, "min_by") == 1 || string.equals(name, "max_by") == 1 {
+        want_max = string.equals(name, "max_by")
+        best = -1
+        i = 0
+        while i < n {
+            if best < 0 {
+                best = i
+            } else {
+                c = value.cmp(list.get_raw(keys, i), list.get_raw(keys, best))
+                if want_max == 1 {
+                    if c >= 0 { best = i }
+                } else {
+                    if c < 0 { best = i }
+                }
+            }
+            i = i + 1
+        }
+        out = json.json_create_null()
+        if best >= 0 {
+            json.json_free(out)
+            out = list.get_raw(vals, best)
+            list.set(vals, best, null)
+        }
+        _free_list(vals)
+        _free_list(keys)
+        emit(ctx, sink, out, null)
+        return
+    }
+    value.sort_list(vals, keys)
+    out = json.json_create_array()
+    if string.equals(name, "sort_by") == 1 {
+        _drain_into_array(vals, out)
+        _free_list(keys)
+        emit(ctx, sink, out, null)
+        return
+    }
+    // group_by: runs of equal keys, each run its own array
+    group = json.json_create_array()
+    i = 0
+    while i < n {
+        if i > 0 && value.eq(list.get_raw(keys, i), list.get_raw(keys, i - 1)) == 0 {
+            json.json_array_add_raw(out, group)
+            group = json.json_create_array()
+        }
+        json.json_array_add_raw(group, list.get_raw(vals, i))
+        list.set(vals, i, null)
+        i = i + 1
+    }
+    if n > 0 {
+        json.json_array_add_raw(out, group)
+    } else {
+        json.json_free(group)
+    }
+    _free_list(vals)
+    _free_list(keys)
+    emit(ctx, sink, out, null)
+}
+
+// Cartesian evaluation of value arguments, first argument outermost.
+_args_step(ctx: *Ctx, name: string, arity: int, args: ptr, i: int, vals: ptr, input: ptr, env: ptr, sink: *Sink) {
+    if ctx.status != ST_OK { return }
+    if i >= arity {
+        _apply(ctx, name, arity, vals, input, sink)
+        return
+    }
+    coll = _new_sink(SK_COLLECT, null)
+    coll.list = list.new()
+    ev(ctx, list.get_raw(args, i), input, env, coll, null)
+    cnt = list.size(coll.list)
+    j = 0
+    while j < cnt {
+        if ctx.status == ST_OK {
+            if list.size(vals) <= i {
+                list.list_add_raw(vals, list.get_raw(coll.list, j))
+            } else {
+                list.set(vals, i, list.get_raw(coll.list, j))
+            }
+            _args_step(ctx, name, arity, args, i + 1, vals, input, env, sink)
+        }
+        j = j + 1
+    }
+    if list.size(vals) > i { list.set(vals, i, null) }
+    _free_list(coll.list)
+    heap.free(coll)
+}
+
+// Apply a value native. Generators among them (range) emit directly;
+// the rest produce one owned value or an error message.
+_apply(ctx: *Ctx, name: string, arity: int, vals: ptr, input: ptr, sink: *Sink) {
+    if arity >= 2 && string.equals(name, "range") == 1 {
+        _range(ctx, vals, arity, sink)
+        return
+    }
+    if arity == 1 && string.equals(name, "halt_error") == 1 {
+        code = list.get_raw(vals, 0)
+        if value.type_of(code) != value.T_NUMBER {
+            _fail(ctx, "halt_error/1: number required")
+            return
+        }
+        ctx.status = ST_HALT
+        ctx.halt_code = (value.number_of(code)) as int
+        ctx.err = value.copy(input)
+        return
+    }
+    if arity == 1 && string.equals(name, "error") == 1 {
+        _fail_val(ctx, value.copy(list.get_raw(vals, 0)))
+        return
+    }
+    // Each arity destructures into its own locals: an error string that is
+    // reassigned across branches is not released by the generated cleanup.
+    if arity == 0 {
+        out0, err0 = _apply0(ctx, name, input)
+        _deliver(ctx, sink, out0, err0)
+    } else if arity == 1 {
+        out1, err1 = _apply1(name, input, list.get_raw(vals, 0))
+        _deliver(ctx, sink, out1, err1)
+    } else if arity == 2 {
+        out2, err2 = _apply2(name, input, list.get_raw(vals, 0), list.get_raw(vals, 1))
+        _deliver(ctx, sink, out2, err2)
+    } else {
+        out3, err3 = _apply3(name, input, list.get_raw(vals, 0), list.get_raw(vals, 1), list.get_raw(vals, 2))
+        _deliver(ctx, sink, out3, err3)
+    }
+}
+
+// Emit a native's result, or raise its error.
+_deliver(ctx: *Ctx, sink: *Sink, out: ptr, err: string) {
+    if out == null {
+        _fail(ctx, err)
+        return
+    }
+    emit(ctx, sink, out, null)
+}
+
+_range(ctx: *Ctx, vals: ptr, arity: int, sink: *Sink) {
+    a = list.get_raw(vals, 0)
+    b = list.get_raw(vals, 1)
+    if value.type_of(a) != value.T_NUMBER || value.type_of(b) != value.T_NUMBER {
+        _fail(ctx, "Range bounds must be numeric")
+        return
+    }
+    step = 1.0
+    if arity == 3 {
+        c = list.get_raw(vals, 2)
+        if value.type_of(c) != value.T_NUMBER {
+            _fail(ctx, "Range bounds must be numeric")
+            return
+        }
+        step = value.number_of(c)
+    }
+    x = value.number_of(a)
+    end = value.number_of(b)
+    if step > 0.0 {
+        while x < end {
+            if ctx.status != ST_OK { return }
+            emit(ctx, sink, value.make_number(x), null)
+            x = x + step
+        }
+    } else if step < 0.0 {
+        while x > end {
+            if ctx.status != ST_OK { return }
+            emit(ctx, sink, value.make_number(x), null)
+            x = x + step
+        }
+    } else {
+        // jq: a zero step repeats the start forever (stopped by limit/first)
+        while x < end {
+            if ctx.status != ST_OK { return }
+            emit(ctx, sink, value.make_number(x), null)
+        }
+    }
+}
+
+// The value natives, as "name/arity" spellings. `builtins` reports these
+// plus the prelude's definitions.
+const NATIVES0 = "length utf8bytelength keys keys_unsorted type infinite nan isinfinite isnan isnormal sort min max unique reverse tojson fromjson tostring tonumber explode implode trim ltrim rtrim now mktime gmtime localtime input_filename builtins frexp modf floor ceil round trunc rint fabs sqrt cbrt exp exp2 exp10 pow10 expm1 log log2 log10 log1p sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh tgamma lgamma gamma lgamma_r nearbyint logb"
+const NATIVES1 = "has contains indices flatten startswith endswith ltrimstr rtrimstr trimstr split strftime strflocaltime strptime delpaths halt_error error bsearch"
+const NATIVES2 = "range setpath _match_impl pow atan2 fmin fmax fmod fdim hypot copysign nextafter ldexp scalb scalbln drem remainder"
+const NATIVES3 = "range _match_impl fma"
+
+_is_value_native(name: string, arity: int) -> int {
+    table = NATIVES0
+    if arity == 1 { table = NATIVES1 }
+    if arity == 2 { table = NATIVES2 }
+    if arity == 3 { table = NATIVES3 }
+    if arity > 3 { return 0 }
+    return _word_in(table, name)
+}
+
+// Is `word` one of the space-separated words of `table`?
+_word_in(table: string, word: string) -> int {
+    n = string.length(table)
+    w = string.length(word)
+    if w == 0 { return 0 }
+    pos = 0
+    while pos < n {
+        idx = string.index_of_from(table, word, pos)
+        if idx < 0 { return 0 }
+        before_ok = 0
+        if idx == 0 { before_ok = 1 } else if string.char_at_n(table, n, idx - 1) == 32 { before_ok = 1 }
+        after_ok = 0
+        if idx + w == n { after_ok = 1 } else if string.char_at_n(table, n, idx + w) == 32 { after_ok = 1 }
+        if before_ok == 1 && after_ok == 1 { return 1 }
+        pos = idx + 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Value natives, arity 0
+// ---------------------------------------------------------------------------
+
+// The op number aether_jq_math1 uses for `name`, or -1.
+_math1_op(name: string) -> int {
+    if string.equals(name, "floor") == 1 { return 0 }
+    if string.equals(name, "ceil") == 1 { return 1 }
+    if string.equals(name, "round") == 1 { return 2 }
+    if string.equals(name, "trunc") == 1 { return 3 }
+    if string.equals(name, "rint") == 1 { return 4 }
+    if string.equals(name, "fabs") == 1 { return 5 }
+    if string.equals(name, "sqrt") == 1 { return 6 }
+    if string.equals(name, "cbrt") == 1 { return 7 }
+    if string.equals(name, "exp") == 1 { return 8 }
+    if string.equals(name, "exp2") == 1 { return 9 }
+    if string.equals(name, "exp10") == 1 || string.equals(name, "pow10") == 1 { return 10 }
+    if string.equals(name, "expm1") == 1 { return 11 }
+    if string.equals(name, "log") == 1 { return 12 }
+    if string.equals(name, "log2") == 1 { return 13 }
+    if string.equals(name, "log10") == 1 { return 14 }
+    if string.equals(name, "log1p") == 1 { return 15 }
+    if string.equals(name, "sin") == 1 { return 16 }
+    if string.equals(name, "cos") == 1 { return 17 }
+    if string.equals(name, "tan") == 1 { return 18 }
+    if string.equals(name, "asin") == 1 { return 19 }
+    if string.equals(name, "acos") == 1 { return 20 }
+    if string.equals(name, "atan") == 1 { return 21 }
+    if string.equals(name, "sinh") == 1 { return 22 }
+    if string.equals(name, "cosh") == 1 { return 23 }
+    if string.equals(name, "tanh") == 1 { return 24 }
+    if string.equals(name, "asinh") == 1 { return 25 }
+    if string.equals(name, "acosh") == 1 { return 26 }
+    if string.equals(name, "atanh") == 1 { return 27 }
+    if string.equals(name, "tgamma") == 1 || string.equals(name, "gamma") == 1 { return 28 }
+    if string.equals(name, "lgamma") == 1 || string.equals(name, "lgamma_r") == 1 { return 29 }
+    if string.equals(name, "nearbyint") == 1 { return 31 }
+    if string.equals(name, "logb") == 1 { return 32 }
+    return -1
+}
+
+_math2_op(name: string) -> int {
+    if string.equals(name, "pow") == 1 { return 0 }
+    if string.equals(name, "atan2") == 1 { return 1 }
+    if string.equals(name, "fmod") == 1 { return 2 }
+    if string.equals(name, "fmin") == 1 { return 3 }
+    if string.equals(name, "fmax") == 1 { return 4 }
+    if string.equals(name, "fdim") == 1 { return 5 }
+    if string.equals(name, "hypot") == 1 { return 6 }
+    if string.equals(name, "copysign") == 1 { return 7 }
+    if string.equals(name, "nextafter") == 1 { return 8 }
+    if string.equals(name, "ldexp") == 1 { return 9 }
+    if string.equals(name, "scalb") == 1 || string.equals(name, "scalbln") == 1 { return 10 }
+    if string.equals(name, "drem") == 1 || string.equals(name, "remainder") == 1 { return 11 }
+    return -1
+}
+
+_num_required(name: string, v: ptr) -> string {
+    return "${_tname(value.type_of(v))} (${value.to_json(v)}) number required"
+}
+
+_apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
+    t = value.type_of(v)
+    op = _math1_op(name)
+    if op >= 0 {
+        if t != value.T_NUMBER { return null, _num_required(name, v) }
+        return value.make_number(aether_jq_math1(op, value.number_of(v))), ""
+    }
+    if string.equals(name, "length") == 1 {
+        if t == value.T_NULL { return json.json_create_int(0), "" }
+        if t == value.T_BOOL { return null, "boolean (${value.to_json(v)}) has no length" }
+        if t == value.T_NUMBER { return value.make_number(math.abs_float(value.number_of(v))), "" }
+        if t == value.T_STRING { return json.json_create_int(value.codepoint_count(value.string_value(v)) as long), "" }
+        if t == value.T_ARRAY { return json.json_create_int(json.json_array_size(v) as long), "" }
+        return json.json_create_int(json.json_object_size_raw(v) as long), ""
+    }
+    if string.equals(name, "utf8bytelength") == 1 {
+        if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) only strings have UTF-8 byte length" }
+        return json.json_create_int(string.length(value.string_value(v)) as long), ""
+    }
+    if string.equals(name, "type") == 1 { return json.json_create_string(_tname(t)), "" }
+    if string.equals(name, "keys") == 1 || string.equals(name, "keys_unsorted") == 1 {
+        if t == value.T_OBJECT {
+            if string.equals(name, "keys") == 1 { return value.sorted_keys(v), "" }
+            out = json.json_create_array()
+            n = json.json_object_size_raw(v)
+            i = 0
+            while i < n {
+                json.json_array_add_raw(out, json.json_create_string(json.json_object_key_at(v, i)))
+                i = i + 1
+            }
+            return out, ""
+        }
+        if t == value.T_ARRAY {
+            out = json.json_create_array()
+            n = json.json_array_size(v)
+            i = 0
+            while i < n {
+                json.json_array_add_raw(out, json.json_create_int(i as long))
+                i = i + 1
+            }
+            return out, ""
+        }
+        return null, "${_tname(t)} (${value.to_json(v)}) has no keys"
+    }
+    if string.equals(name, "infinite") == 1 { return json.json_create_number(1.0 / 0.0), "" }
+    if string.equals(name, "nan") == 1 { return json.json_create_number(0.0 / 0.0), "" }
+    if string.equals(name, "isinfinite") == 1 {
+        if t != value.T_NUMBER { return null, _num_required(name, v) }
+        d = value.number_of(v)
+        return json.json_create_bool(_b(d == 1.0 / 0.0 || d == -1.0 / 0.0)), ""
+    }
+    if string.equals(name, "isnan") == 1 {
+        if t != value.T_NUMBER { return null, _num_required(name, v) }
+        d = value.number_of(v)
+        return json.json_create_bool(_b(d != d)), ""
+    }
+    if string.equals(name, "isnormal") == 1 {
+        if t != value.T_NUMBER { return null, _num_required(name, v) }
+        d = value.number_of(v)
+        normal = 1
+        if d != d || d == 0.0 || d == 1.0 / 0.0 || d == -1.0 / 0.0 { normal = 0 }
+        if math.abs_float(d) < 2.2250738585072014e-308 { normal = 0 }
+        return json.json_create_bool(normal), ""
+    }
+    if string.equals(name, "sort") == 1 {
+        if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be sorted, as it is not an array" }
+        l = _array_to_list(v)
+        value.sort_list(l, null)
+        out = json.json_create_array()
+        _drain_into_array(l, out)
+        return out, ""
+    }
+    if string.equals(name, "unique") == 1 {
+        if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be sorted, as it is not an array" }
+        l = _array_to_list(v)
+        value.sort_list(l, null)
+        out = json.json_create_array()
+        n = list.size(l)
+        i = 0
+        while i < n {
+            e = list.get_raw(l, i)
+            if i > 0 && value.eq(e, json.json_array_get_raw(out, json.json_array_size(out) - 1)) == 1 {
+                json.json_free(e)
+            } else {
+                json.json_array_add_raw(out, e)
+            }
+            list.set(l, i, null)
+            i = i + 1
+        }
+        list.free(l)
+        return out, ""
+    }
+    if string.equals(name, "min") == 1 || string.equals(name, "max") == 1 {
+        if t != value.T_ARRAY { return null, "Cannot index ${_tname(t)} with number" }
+        n = json.json_array_size(v)
+        if n == 0 { return json.json_create_null(), "" }
+        best = 0
+        i = 1
+        while i < n {
+            c = value.cmp(json.json_array_get_raw(v, i), json.json_array_get_raw(v, best))
+            if string.equals(name, "min") == 1 {
+                if c < 0 { best = i }
+            } else {
+                if c >= 0 { best = i }
+            }
+            i = i + 1
+        }
+        return value.copy(json.json_array_get_raw(v, best)), ""
+    }
+    if string.equals(name, "reverse") == 1 {
+        if t == value.T_NULL { return json.json_create_array(), "" }
+        if t == value.T_STRING {
+            cps = value.explode(value.string_value(v))
+            rev = json.json_create_array()
+            i = json.json_array_size(cps) - 1
+            while i >= 0 {
+                json.json_array_add_raw(rev, value.copy(json.json_array_get_raw(cps, i)))
+                i = i - 1
+            }
+            json.json_free(cps)
+            s, _e = value.implode(rev)
+            json.json_free(rev)
+            return json.json_create_string(s), ""
+        }
+        if t != value.T_ARRAY { return null, "Cannot reverse ${_tname(t)}" }
+        out = json.json_create_array()
+        i = json.json_array_size(v) - 1
+        while i >= 0 {
+            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, i)))
+            i = i - 1
+        }
+        return out, ""
+    }
+    if string.equals(name, "tojson") == 1 { return json.json_create_string(value.to_json(v)), "" }
+    if string.equals(name, "tostring") == 1 { return _tostring(v), "" }
+    if string.equals(name, "fromjson") == 1 {
+        if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be parsed as JSON" }
+        parsed, perr = _fromjson(value.string_value(v))
+        if parsed == null { return null, "${perr}" }
+        return parsed, ""
+    }
+    if string.equals(name, "tonumber") == 1 {
+        if t == value.T_NUMBER { return value.copy(v), "" }
+        if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be parsed as a number" }
+        s = value.string_value(v)
+        d, err = _parse_number(s)
+        if err != "" { return null, "Cannot parse '${s}' as JSON" }
+        return value.make_number(d), ""
+    }
+    if string.equals(name, "explode") == 1 {
+        if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be exploded" }
+        return value.explode(value.string_value(v)), ""
+    }
+    if string.equals(name, "implode") == 1 {
+        s, err = value.implode(v)
+        if err != "" { return null, "${err}" }
+        return json.json_create_string(s), ""
+    }
+    if string.equals(name, "trim") == 1 || string.equals(name, "ltrim") == 1 || string.equals(name, "rtrim") == 1 {
+        if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be trimmed" }
+        return json.json_create_string(_trim(value.string_value(v), name)), ""
+    }
+    if string.equals(name, "now") == 1 {
+        return json.json_create_number((os.wall_seconds() as float) + (os.wall_micros() as float) / 1000000.0), ""
+    }
+    if string.equals(name, "mktime") == 1 {
+        secs, merr = _mktime(v)
+        if secs == null { return null, "${merr}" }
+        return secs, ""
+    }
+    if string.equals(name, "gmtime") == 1 || string.equals(name, "localtime") == 1 {
+        if t != value.T_NUMBER { return null, "${name}() requires a number" }
+        return _gmtime(value.number_of(v)), ""
+    }
+    if string.equals(name, "input_filename") == 1 { return json.json_create_null(), "" }
+    if string.equals(name, "builtins") == 1 { return _builtins(), "" }
+    if string.equals(name, "frexp") == 1 {
+        if t != value.T_NUMBER { return null, _num_required(name, v) }
+        d = value.number_of(v)
+        out = json.json_create_array()
+        json.json_array_add_raw(out, value.make_number(aether_jq_math1(33, d)))
+        json.json_array_add_raw(out, json.json_create_int(aether_jq_frexp_exp(d) as long))
+        return out, ""
+    }
+    if string.equals(name, "modf") == 1 {
+        if t != value.T_NUMBER { return null, _num_required(name, v) }
+        d = value.number_of(v)
+        ip = aether_jq_modf_int(d)
+        out = json.json_create_array()
+        json.json_array_add_raw(out, value.make_number(d - ip))
+        json.json_array_add_raw(out, value.make_number(ip))
+        return out, ""
+    }
+    return null, "${name}/0 is not defined"
+}
+
+_array_to_list(arr: ptr) -> ptr {
+    l = list.new()
+    n = json.json_array_size(arr)
+    i = 0
+    while i < n {
+        list.list_add_raw(l, value.copy(json.json_array_get_raw(arr, i)))
+        i = i + 1
+    }
+    return l
+}
+
+// Parse `s` with std.json (jq's fromjson). `nan` and friends are not JSON
+// and are not accepted here either.
+_fromjson(s: string) -> ptr! {
+    v, err = json.parse(s)
+    if v == null {
+        return null, "${err} (while parsing '${s}')"
+    }
+    out = _normalise_numbers(v)
+    return out, ""
+}
+
+// std.json keeps integral literals as ints and the rest as doubles; jq
+// prints both alike, but re-copy through make_number so 1.0 prints as 1.
+_normalise_numbers(v: ptr) -> ptr {
+    out = value.copy(v)
+    json.json_free(v)
+    return out
+}
+
+// jq's tonumber accepts exactly what a JSON number literal (plus a leading
+// sign) is: no surrounding whitespace, no hex, no trailing junk.
+_parse_number(s: string) -> (float, string) {
+    n = string.length(s)
+    if n == 0 { return 0.0, "empty" }
+    i = 0
+    c = string.char_at_n(s, n, 0)
+    if c == 45 || c == 43 { i = 1 }
+    digits = 0
+    while i < n && string.char_at_n(s, n, i) >= 48 && string.char_at_n(s, n, i) <= 57 {
+        i = i + 1
+        digits = digits + 1
+    }
+    if i < n && string.char_at_n(s, n, i) == 46 {
+        i = i + 1
+        while i < n && string.char_at_n(s, n, i) >= 48 && string.char_at_n(s, n, i) <= 57 {
+            i = i + 1
+            digits = digits + 1
+        }
+    }
+    if digits == 0 { return 0.0, "not a number" }
+    if i < n && (string.char_at_n(s, n, i) == 101 || string.char_at_n(s, n, i) == 69) {
+        i = i + 1
+        if i < n && (string.char_at_n(s, n, i) == 45 || string.char_at_n(s, n, i) == 43) { i = i + 1 }
+        ed = 0
+        while i < n && string.char_at_n(s, n, i) >= 48 && string.char_at_n(s, n, i) <= 57 {
+            i = i + 1
+            ed = ed + 1
+        }
+        if ed == 0 { return 0.0, "bad exponent" }
+    }
+    if i != n { return 0.0, "trailing characters" }
+    d, err = string.to_double(s)
+    if err != "" { return 0.0, err }
+    return d, ""
+}
+
+_is_space(c: int) -> int {
+    if c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11 { return 1 }
+    return 0
+}
+
+_trim(s: string, which: string) -> string {
+    n = string.length(s)
+    a = 0
+    b = n
+    if string.equals(which, "rtrim") == 0 {
+        while a < n && _is_space(string.char_at_n(s, n, a)) == 1 { a = a + 1 }
+    }
+    if string.equals(which, "ltrim") == 0 {
+        while b > a && _is_space(string.char_at_n(s, n, b - 1)) == 1 { b = b - 1 }
+    }
+    return string.substring_n(s, n, a, b)
+}
+
+// `builtins`: every native and prelude definition as "name/arity".
+_builtins() -> ptr {
+    out = json.json_create_array()
+    _add_words(out, NATIVES0, 0)
+    _add_words(out, NATIVES1, 1)
+    _add_words(out, NATIVES2, 2)
+    _add_words(out, NATIVES3, 3)
+    _add_words(out, "empty error inputs input debug stderr halt", 0)
+    _add_words(out, "path first isempty repeat getpath sort_by group_by min_by max_by", 1)
+    _add_words(out, "limit until while", 2)
+    // The prelude's definitions: scan its source for `def name(params):`.
+    src = prelude.SOURCE
+    n = string.length(src)
+    pos = 0
+    while pos < n {
+        idx = string.index_of_from(src, "def ", pos)
+        if idx < 0 { pos = n } else {
+            j = idx + 4
+            start = j
+            while j < n && string.char_at_n(src, n, j) != 58 && string.char_at_n(src, n, j) != 40 && string.char_at_n(src, n, j) != 32 { j = j + 1 }
+            fname = string.substring_n(src, n, start, j)
+            arity = 0
+            if j < n && string.char_at_n(src, n, j) == 40 {
+                arity = 1
+                k = j
+                depth = 0
+                while k < n {
+                    ch = string.char_at_n(src, n, k)
+                    if ch == 40 { depth = depth + 1 }
+                    if ch == 41 {
+                        depth = depth - 1
+                        if depth == 0 { k = n }
+                    }
+                    if ch == 59 && depth == 1 { arity = arity + 1 }
+                    k = k + 1
+                }
+            }
+            if string.length(fname) > 0 && string.char_at_n(fname, string.length(fname), 0) != 95 {
+                json.json_array_add_raw(out, json.json_create_string("${fname}/${arity}"))
+            }
+            pos = j
+        }
+    }
+    return out
+}
+
+_add_words(out: ptr, table: string, arity: int) {
+    n = string.length(table)
+    start = 0
+    i = 0
+    while i <= n {
+        if i == n || string.char_at_n(table, n, i) == 32 {
+            if i > start {
+                w = string.substring_n(table, n, start, i)
+                if string.char_at_n(w, string.length(w), 0) != 95 {
+                    json.json_array_add_raw(out, json.json_create_string("${w}/${arity}"))
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Value natives, arity 1..3
+// ---------------------------------------------------------------------------
+
+_apply1(name: string, v: ptr, a: ptr) -> ptr! {
+    t = value.type_of(v)
+    ta = value.type_of(a)
+    if string.equals(name, "has") == 1 {
+        if t == value.T_OBJECT && ta == value.T_STRING {
+            return json.json_create_bool(json.json_object_has(v, value.string_value(a))), ""
+        }
+        if t == value.T_ARRAY && ta == value.T_NUMBER {
+            d = value.number_of(a)
+            return json.json_create_bool(_b(d >= 0.0 && d < (json.json_array_size(v) as float))), ""
+        }
+        return null, "Cannot check whether ${_tname(t)} has a ${_tname(ta)} key"
+    }
+    if string.equals(name, "contains") == 1 {
+        if t != ta {
+            return null, "${_tname(t)} (${value.to_json(v)}) and ${_tname(ta)} (${value.to_json(a)}) cannot have their containment checked"
+        }
+        return json.json_create_bool(_contains(v, a)), ""
+    }
+    if string.equals(name, "indices") == 1 {
+        if t == value.T_NULL || ta == value.T_NULL { return json.json_create_null(), "" }
+        if t == value.T_STRING && ta == value.T_STRING { return _str_indices(value.string_value(v), value.string_value(a)), "" }
+        if t == value.T_ARRAY && ta == value.T_ARRAY { return _indices_of(v, a), "" }
+        if t == value.T_ARRAY {
+            one = json.json_create_array()
+            json.json_array_add_raw(one, value.copy(a))
+            out = _indices_of(v, one)
+            json.json_free(one)
+            return out, ""
+        }
+        return null, "Cannot determine indices of ${_tname(ta)} in ${_tname(t)}"
+    }
+    if string.equals(name, "flatten") == 1 {
+        if ta != value.T_NUMBER { return null, "flatten depth must not be negative" }
+        if value.number_of(a) < 0.0 { return null, "flatten depth must not be negative" }
+        if t != value.T_ARRAY { return null, "Cannot iterate over ${_tname(t)}" }
+        out = json.json_create_array()
+        _flatten_into(out, v, (value.number_of(a)) as int)
+        return out, ""
+    }
+    if string.equals(name, "startswith") == 1 {
+        if t != value.T_STRING || ta != value.T_STRING { return null, "startswith() requires string inputs" }
+        return json.json_create_bool(string.starts_with(value.string_value(v), value.string_value(a))), ""
+    }
+    if string.equals(name, "endswith") == 1 {
+        if t != value.T_STRING || ta != value.T_STRING { return null, "endswith() requires string inputs" }
+        return json.json_create_bool(string.ends_with(value.string_value(v), value.string_value(a))), ""
+    }
+    if string.equals(name, "ltrimstr") == 1 || string.equals(name, "rtrimstr") == 1 || string.equals(name, "trimstr") == 1 {
+        if t != value.T_STRING || ta != value.T_STRING { return value.copy(v), "" }
+        s = value.string_value(v)
+        pre = value.string_value(a)
+        n = string.length(s)
+        m = string.length(pre)
+        from = 0
+        to = n
+        if string.equals(name, "rtrimstr") == 0 {
+            if string.starts_with(s, pre) == 1 { from = m }
+        }
+        if string.equals(name, "ltrimstr") == 0 {
+            if string.ends_with(s, pre) == 1 && n - m >= from { to = n - m }
+        }
+        return json.json_create_string(string.substring_n(s, n, from, to)), ""
+    }
+    if string.equals(name, "split") == 1 {
+        if t != value.T_STRING || ta != value.T_STRING { return null, "split input and separator must be strings" }
+        return _split_string(value.string_value(v), value.string_value(a)), ""
+    }
+    if string.equals(name, "strftime") == 1 || string.equals(name, "strflocaltime") == 1 {
+        if ta != value.T_STRING { return null, "${name}/1 requires a string format" }
+        res2, rerr2 = _strftime(v, value.string_value(a), name)
+        if res2 == null { return null, "${rerr2}" }
+        return res2, ""
+    }
+    if string.equals(name, "strptime") == 1 {
+        if t != value.T_STRING || ta != value.T_STRING { return null, "strptime/1 requires string inputs and arguments" }
+        res3, rerr3 = _strptime(value.string_value(v), value.string_value(a))
+        if res3 == null { return null, "${rerr3}" }
+        return res3, ""
+    }
+    if string.equals(name, "delpaths") == 1 {
+        res4, rerr4 = _delpaths(v, a)
+        if res4 == null { return null, "${rerr4}" }
+        return res4, ""
+    }
+    if string.equals(name, "bsearch") == 1 {
+        if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be searched from" }
+        lo = 0
+        hi = json.json_array_size(v) - 1
+        while lo <= hi {
+            mid = (lo + hi) / 2
+            c = value.cmp(json.json_array_get_raw(v, mid), a)
+            if c == 0 { return json.json_create_int(mid as long), "" }
+            if c < 0 { lo = mid + 1 } else { hi = mid - 1 }
+        }
+        return json.json_create_int((0 - 1 - lo) as long), ""
+    }
+    return null, "${name}/1 is not defined"
+}
+
+_apply2(name: string, v: ptr, a: ptr, b: ptr) -> ptr! {
+    op = _math2_op(name)
+    if op >= 0 {
+        if value.type_of(a) != value.T_NUMBER { return null, _num_required(name, a) }
+        if value.type_of(b) != value.T_NUMBER { return null, _num_required(name, b) }
+        return value.make_number(aether_jq_math2(op, value.number_of(a), value.number_of(b))), ""
+    }
+    if string.equals(name, "setpath") == 1 {
+        if value.type_of(a) != value.T_ARRAY { return null, "Path must be specified as an array" }
+        res5, rerr5 = _setpath(v, a, 0, value.copy(b))
+        if res5 == null { return null, "${rerr5}" }
+        return res5, ""
+    }
+    if string.equals(name, "_match_impl") == 1 {
+        res6, rerr6 = _match_impl(v, a, b, json.json_create_bool(0), 1)
+        if res6 == null { return null, "${rerr6}" }
+        return res6, ""
+    }
+    return null, "${name}/2 is not defined"
+}
+
+_apply3(name: string, v: ptr, a: ptr, b: ptr, c: ptr) -> ptr! {
+    if string.equals(name, "fma") == 1 {
+        if value.type_of(a) != value.T_NUMBER || value.type_of(b) != value.T_NUMBER || value.type_of(c) != value.T_NUMBER {
+            return null, "fma/3: number required"
+        }
+        return value.make_number(aether_jq_math3(0, value.number_of(a), value.number_of(b), value.number_of(c))), ""
+    }
+    if string.equals(name, "_match_impl") == 1 {
+        res7, rerr7 = _match_impl(v, a, b, c, 0)
+        if res7 == null { return null, "${rerr7}" }
+        return res7, ""
+    }
+    return null, "${name}/3 is not defined"
+}
+
+// jq's `contains`: strings by substring, arrays if every element of b is
+// contained in some element of a, objects key by key, scalars by equality.
+_contains(a: ptr, b: ptr) -> int {
+    ta = value.type_of(a)
+    tb = value.type_of(b)
+    if ta != tb { return 0 }
+    if ta == value.T_OBJECT {
+        n = json.json_object_size_raw(b)
+        i = 0
+        while i < n {
+            av = json.json_object_get_raw(a, json.json_object_key_at(b, i))
+            if av == null { return 0 }
+            if _contains(av, json.json_object_value_at(b, i)) == 0 { return 0 }
+            i = i + 1
+        }
+        return 1
+    }
+    if ta == value.T_ARRAY {
+        n = json.json_array_size(b)
+        i = 0
+        while i < n {
+            be = json.json_array_get_raw(b, i)
+            m = json.json_array_size(a)
+            j = 0
+            found = 0
+            while j < m {
+                if _contains(json.json_array_get_raw(a, j), be) == 1 {
+                    found = 1
+                    j = m
+                }
+                j = j + 1
+            }
+            if found == 0 { return 0 }
+            i = i + 1
+        }
+        return 1
+    }
+    if ta == value.T_STRING {
+        return string.contains(value.string_value(a), value.string_value(b))
+    }
+    return value.eq(a, b)
+}
+
+// Codepoint offsets of every occurrence of `sub` in `s` (overlapping).
+_str_indices(s: string, sub: string) -> ptr {
+    out = json.json_create_array()
+    m = string.length(sub)
+    if m == 0 { return json.json_create_null() }
+    start = 0
+    while 1 == 1 {
+        idx = string.index_of_from(s, sub, start)
+        if idx < 0 { return out }
+        json.json_array_add_raw(out, json.json_create_int(value.codepoint_of_byte(s, idx) as long))
+        start = idx + 1
+    }
+    return out
+}
+
+_flatten_into(out: ptr, arr: ptr, depth: int) {
+    n = json.json_array_size(arr)
+    i = 0
+    while i < n {
+        e = json.json_array_get_raw(arr, i)
+        if value.type_of(e) == value.T_ARRAY && depth > 0 {
+            _flatten_into(out, e, depth - 1)
+        } else {
+            json.json_array_add_raw(out, value.copy(e))
+        }
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regular expressions: _match_impl(re; flags; test)
+// ---------------------------------------------------------------------------
+
+// The array of match objects for `test`/`match`/`capture`/`scan`/`sub`.
+// Offsets and lengths are in codepoints, as jq reports them. Global
+// matching takes the spans from std.regex's find_all (so anchors behave)
+// and re-runs a capturing match on each span's suffix for the groups.
+_match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
+    if value.type_of(v) != value.T_STRING {
+        return null, "${_tname(value.type_of(v))} (${value.to_json(v)}) cannot be matched, as it is not a string"
+    }
+    if value.type_of(re) != value.T_STRING {
+        return null, "${_tname(value.type_of(re))} (${value.to_json(re)}) cannot be matched, as it is not a string"
+    }
+    global = 0
+    skip_empty = 0
+    opts = 0
+    if value.type_of(flags) == value.T_STRING {
+        fs = value.string_value(flags)
+        n = string.length(fs)
+        i = 0
+        while i < n {
+            c = string.char_at_n(fs, n, i)
+            if c == 103 { global = 1 }
+            else if c == 110 { skip_empty = 1 }
+            else if c == 105 { opts = opts | regex.FLAG_CASELESS }
+            else if c == 120 { opts = opts | regex.FLAG_EXTENDED }
+            else if c == 115 { opts = opts | regex.FLAG_DOTALL }
+            else if c == 108 || c == 112 { opts = opts }
+            else { return null, "${fs} is not a valid modifier string" }
+            i = i + 1
+        }
+    } else if value.type_of(flags) != value.T_NULL {
+        return null, "${value.to_json(flags)} is not a string"
+    }
+    pattern = value.string_value(re)
+    compiled, cerr = regex.compile_flags(pattern, opts)
+    if compiled == null {
+        return null, "${pattern} (at offset 0) is not a valid regex: ${cerr}"
+    }
+    s = value.string_value(v)
+    slen = string.length(s)
+    out = json.json_create_array()
+    is_test = value.truthy(test)
+    if global == 0 {
+        caps, _e = regex.captures(compiled, s)
+        if caps != null {
+            if is_test == 1 {
+                json.json_free(out)
+                out = json.json_create_bool(1)
+            } else {
+                json.json_array_add_raw(out, _match_object(s, 0, caps, pattern))
+            }
+            regex.captures_free(caps)
+        } else if is_test == 1 {
+            json.json_free(out)
+            out = json.json_create_bool(0)
+        }
+        regex.free(compiled)
+        return out, ""
+    }
+    fa, _ferr = regex.find_all(compiled, s)
+    if fa != null {
+        count = regex.find_all_count(fa)
+        i = 0
+        while i < count {
+            st = regex.find_all_start(fa, i)
+            en = regex.find_all_end(fa, i)
+            if en == st && skip_empty == 1 {
+                i = i + 1
+            } else {
+                suffix = string.substring_n(s, slen, st, slen)
+                caps, _e2 = regex.captures(compiled, suffix)
+                if caps != null {
+                    json.json_array_add_raw(out, _match_object(s, st, caps, pattern))
+                    regex.captures_free(caps)
+                }
+                i = i + 1
+            }
+        }
+        regex.find_all_free(fa)
+    }
+    regex.free(compiled)
+    if is_test == 1 {
+        found = _b(json.json_array_size(out) > 0)
+        json.json_free(out)
+        return json.json_create_bool(found), ""
+    }
+    return out, ""
+}
+
+// One jq match object from a captures handle whose byte offsets are
+// relative to s[base:].
+_match_object(s: string, base: int, caps: ptr, pattern: string) -> ptr {
+    slen = string.length(s)
+    st = base + regex.capture_start(caps, 0)
+    en = base + regex.capture_end(caps, 0)
+    m = json.json_create_object()
+    json.json_object_set_raw(m, "offset", json.json_create_int(value.codepoint_of_byte(s, st) as long))
+    json.json_object_set_raw(m, "length", json.json_create_int((value.codepoint_of_byte(s, en) - value.codepoint_of_byte(s, st)) as long))
+    json.json_object_set_raw(m, "string", json.json_create_string(string.substring_n(s, slen, st, en)))
+    // The group count comes from the pattern: PCRE2 leaves unset trailing
+    // groups out of its count, but jq reports every group.
+    names = _group_names(pattern)
+    arr = json.json_create_array()
+    n = json.json_array_size(names) + 1
+    have = regex.capture_count(caps)
+    g = 1
+    while g < n {
+        c = json.json_create_object()
+        gs = -1
+        ge = -1
+        if g < have {
+            gs = regex.capture_start(caps, g)
+            ge = regex.capture_end(caps, g)
+        }
+        if gs < 0 {
+            json.json_object_set_raw(c, "offset", json.json_create_int(-1))
+            json.json_object_set_raw(c, "length", json.json_create_int(0))
+            json.json_object_set_raw(c, "string", json.json_create_null())
+        } else {
+            gs = gs + base
+            ge = ge + base
+            json.json_object_set_raw(c, "offset", json.json_create_int(value.codepoint_of_byte(s, gs) as long))
+            json.json_object_set_raw(c, "length", json.json_create_int((value.codepoint_of_byte(s, ge) - value.codepoint_of_byte(s, gs)) as long))
+            json.json_object_set_raw(c, "string", json.json_create_string(string.substring_n(s, slen, gs, ge)))
+        }
+        nm = json.json_create_null()
+        if g - 1 < json.json_array_size(names) {
+            given = json.json_array_get_raw(names, g - 1)
+            if value.type_of(given) == value.T_STRING {
+                json.json_free(nm)
+                nm = value.copy(given)
+            }
+        }
+        json.json_object_set_raw(c, "name", nm)
+        json.json_array_add_raw(arr, c)
+        g = g + 1
+    }
+    json.json_free(names)
+    json.json_object_set_raw(m, "captures", arr)
+    return m
+}
+
+// The names of the capturing groups of `pattern`, in group order (null for
+// an unnamed group), read off the pattern text: `(?<name>`, `(?P<name>` or
+// `(?'name'`; `(?:` and the other `(?` forms do not capture; `\(` and
+// parens inside [...] are literal.
+_group_names(pattern: string) -> ptr {
+    out = json.json_create_array()
+    n = string.length(pattern)
+    i = 0
+    in_class = 0
+    while i < n {
+        c = string.char_at_n(pattern, n, i)
+        if c == 92 {
+            i = i + 2
+        } else if in_class == 1 {
+            if c == 93 { in_class = 0 }
+            i = i + 1
+        } else if c == 91 {
+            in_class = 1
+            i = i + 1
+        } else if c == 40 {
+            if i + 1 < n && string.char_at_n(pattern, n, i + 1) == 63 {
+                // (?...
+                j = i + 2
+                if j < n && string.char_at_n(pattern, n, j) == 80 { j = j + 1 } // (?P<
+                if j < n && (string.char_at_n(pattern, n, j) == 60 || string.char_at_n(pattern, n, j) == 39) {
+                    open = string.char_at_n(pattern, n, j)
+                    close = 62
+                    if open == 39 { close = 39 }
+                    k = j + 1
+                    if k < n && (string.char_at_n(pattern, n, k) == 61 || string.char_at_n(pattern, n, k) == 33) {
+                        // lookbehind (?<= (?<!
+                        i = i + 1
+                    } else {
+                        while k < n && string.char_at_n(pattern, n, k) != close { k = k + 1 }
+                        json.json_array_add_raw(out, json.json_create_string(string.substring_n(pattern, n, j + 1, k)))
+                        i = k + 1
+                    }
+                } else {
+                    i = i + 1
+                }
+            } else {
+                json.json_array_add_raw(out, json.json_create_null())
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// @formats
+// ---------------------------------------------------------------------------
+
+// Apply format `name` to `v`. Returns an owned string value or (null, msg).
+_format(name: string, v: ptr) -> ptr! {
+    t = value.type_of(v)
+    if string.equals(name, "text") == 1 { return _tostring(v), "" }
+    if string.equals(name, "json") == 1 { return json.json_create_string(value.to_json(v)), "" }
+    if string.equals(name, "html") == 1 {
+        s = _tostring(v)
+        out = _escape_html(value.string_value(s))
+        json.json_free(s)
+        return json.json_create_string(out), ""
+    }
+    if string.equals(name, "uri") == 1 {
+        s = _tostring(v)
+        out = _escape_uri(value.string_value(s))
+        json.json_free(s)
+        return json.json_create_string(out), ""
+    }
+    if string.equals(name, "csv") == 1 || string.equals(name, "tsv") == 1 {
+        if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be ${name}-formatted, only an array can be" }
+        res8, rerr8 = _format_row(v, name)
+        if res8 == null { return null, "${rerr8}" }
+        return res8, ""
+    }
+    if string.equals(name, "sh") == 1 {
+        res9, rerr9 = _format_sh(v)
+        if res9 == null { return null, "${rerr9}" }
+        return res9, ""
+    }
+    if string.equals(name, "base64") == 1 {
+        s = _tostring(v)
+        out = encoding.base64_encode_padded(value.string_value(s), string.length(value.string_value(s)))
+        json.json_free(s)
+        return json.json_create_string(out), ""
+    }
+    if string.equals(name, "base64d") == 1 {
+        s = _tostring(v)
+        out, err = encoding.base64_decode(value.string_value(s))
+        if err != "" {
+            msg = "${value.to_json(s)} is not valid base64 data"
+            json.json_free(s)
+            return null, msg
+        }
+        json.json_free(s)
+        return json.json_create_string(out), ""
+    }
+    if string.equals(name, "base32") == 1 {
+        s = _tostring(v)
+        out = encoding.base32_encode(value.string_value(s), string.length(value.string_value(s)))
+        json.json_free(s)
+        return json.json_create_string(out), ""
+    }
+    if string.equals(name, "base32d") == 1 {
+        s = _tostring(v)
+        out, err = encoding.base32_decode(value.string_value(s))
+        if err != "" {
+            msg = "${value.to_json(s)} is not valid base32 data"
+            json.json_free(s)
+            return null, msg
+        }
+        json.json_free(s)
+        return json.json_create_string(out), ""
+    }
+    return null, "${name} is not a valid format"
+}
+
+_escape_html(s: string) -> string {
+    sb = strbuilder.new(32)
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if c == 60 { strbuilder.append(sb, "&lt;") }
+        else if c == 62 { strbuilder.append(sb, "&gt;") }
+        else if c == 38 { strbuilder.append(sb, "&amp;") }
+        else if c == 39 { strbuilder.append(sb, "&#39;") }
+        else if c == 34 { strbuilder.append(sb, "&quot;") }
+        else { strbuilder.append_byte(sb, c) }
+        i = i + 1
+    }
+    return strbuilder.finish(sb)
+}
+
+_escape_uri(s: string) -> string {
+    sb = strbuilder.new(32)
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        keep = 0
+        if c >= 48 && c <= 57 { keep = 1 }
+        if c >= 65 && c <= 90 { keep = 1 }
+        if c >= 97 && c <= 122 { keep = 1 }
+        if c == 45 || c == 95 || c == 46 || c == 126 { keep = 1 }
+        if keep == 1 {
+            strbuilder.append_byte(sb, c)
+        } else {
+            strbuilder.append_byte(sb, 37)
+            strbuilder.append_byte(sb, _hex_upper(c / 16))
+            strbuilder.append_byte(sb, _hex_upper(c % 16))
+        }
+        i = i + 1
+    }
+    return strbuilder.finish(sb)
+}
+
+_hex_upper(nibble: int) -> int {
+    if nibble < 10 { return 48 + nibble }
+    return 55 + nibble
+}
+
+_format_row(v: ptr, kind: string) -> ptr! {
+    sb = strbuilder.new(32)
+    n = json.json_array_size(v)
+    i = 0
+    while i < n {
+        if i > 0 {
+            if string.equals(kind, "csv") == 1 { strbuilder.append_byte(sb, 44) } else { strbuilder.append_byte(sb, 9) }
+        }
+        e = json.json_array_get_raw(v, i)
+        t = value.type_of(e)
+        if t == value.T_NUMBER {
+            strbuilder.append(sb, value.num_to_string(value.number_of(e)))
+        } else if t == value.T_BOOL {
+            strbuilder.append(sb, value.to_json(e))
+        } else if t == value.T_STRING {
+            s = value.string_value(e)
+            m = string.length(s)
+            if string.equals(kind, "csv") == 1 {
+                strbuilder.append_byte(sb, 34)
+                j = 0
+                while j < m {
+                    c = string.char_at_n(s, m, j)
+                    if c == 34 { strbuilder.append_byte(sb, 34) }
+                    strbuilder.append_byte(sb, c)
+                    j = j + 1
+                }
+                strbuilder.append_byte(sb, 34)
+            } else {
+                j = 0
+                while j < m {
+                    c = string.char_at_n(s, m, j)
+                    if c == 9 { strbuilder.append(sb, "\\t") }
+                    else if c == 10 { strbuilder.append(sb, "\\n") }
+                    else if c == 13 { strbuilder.append(sb, "\\r") }
+                    else if c == 92 { strbuilder.append(sb, "\\\\") }
+                    else { strbuilder.append_byte(sb, c) }
+                    j = j + 1
+                }
+            }
+        } else if t != value.T_NULL {
+            strbuilder.free(sb)
+            return null, "${_tname(t)} (${value.to_json(e)}) is not valid in a ${kind} row"
+        }
+        i = i + 1
+    }
+    return json.json_create_string(strbuilder.finish(sb)), ""
+}
+
+_format_sh(v: ptr) -> ptr! {
+    sb = strbuilder.new(32)
+    if value.type_of(v) == value.T_ARRAY {
+        n = json.json_array_size(v)
+        i = 0
+        while i < n {
+            if i > 0 { strbuilder.append_byte(sb, 32) }
+            err = _sh_quote(sb, json.json_array_get_raw(v, i))
+            if err != "" {
+                strbuilder.free(sb)
+                return null, "${err}"
+            }
+            i = i + 1
+        }
+        return json.json_create_string(strbuilder.finish(sb)), ""
+    }
+    err = _sh_quote(sb, v)
+    if err != "" {
+        strbuilder.free(sb)
+        return null, "${err}"
+    }
+    return json.json_create_string(strbuilder.finish(sb)), ""
+}
+
+_sh_quote(sb: ptr, e: ptr) -> string {
+    t = value.type_of(e)
+    if t == value.T_ARRAY || t == value.T_OBJECT {
+        return "${_tname(t)} (${value.to_json(e)}) can not be escaped for shell"
+    }
+    if t != value.T_STRING {
+        strbuilder.append(sb, value.to_json(e))
+        return ""
+    }
+    s = value.string_value(e)
+    n = string.length(s)
+    strbuilder.append_byte(sb, 39)
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if c == 39 { strbuilder.append(sb, "'\\''") } else { strbuilder.append_byte(sb, c) }
+        i = i + 1
+    }
+    strbuilder.append_byte(sb, 39)
+    return ""
+}
+
+// ---------------------------------------------------------------------------
+// Dates. jq's broken-down time is [year, month(0-11), mday, hours, minutes,
+// seconds, wday, yday], always UTC here (localtime is gmtime: the
+// container this runs in has no timezone database worth consulting).
+// Civil-date arithmetic after Howard Hinnant's algorithms.
+// ---------------------------------------------------------------------------
+
+_days_from_civil(y: long, m: long, d: long) -> long {
+    if m <= 2 { y = y - 1 }
+    era = y / 400
+    if y < 0 && (y % 400) != 0 { era = era - 1 }
+    yoe = y - era * 400
+    mp = m - 3
+    if m <= 2 { mp = m + 9 }
+    doy = (153 * mp + 2) / 5 + d - 1
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+// (year, month 1-12, day) of a day count since 1970-01-01.
+_civil_from_days(z: long) -> (long, long, long) {
+    z = z + 719468
+    era = z / 146097
+    if z < 0 && (z % 146097) != 0 { era = era - 1 }
+    doe = z - era * 146097
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    mp = (5 * doy + 2) / 153
+    d = doy - (153 * mp + 2) / 5 + 1
+    m = mp + 3
+    if mp >= 10 { m = mp - 9 }
+    if m <= 2 { y = y + 1 }
+    return y, m, d
+}
+
+_floor_div(a: long, b: long) -> long {
+    q = a / b
+    if (a % b) != 0 && ((a < 0) != (b < 0)) { q = q - 1 }
+    return q
+}
+
+// Seconds since the epoch → broken-down time (seconds keep their fraction).
+_gmtime(secs: float) -> ptr {
+    whole = (math.floor(secs)) as long
+    frac = secs - (whole as float)
+    days = _floor_div(whole, 86400)
+    rem = whole - days * 86400
+    y, m, d = _civil_from_days(days)
+    out = json.json_create_array()
+    json.json_array_add_raw(out, json.json_create_int(y))
+    json.json_array_add_raw(out, json.json_create_int(m - 1))
+    json.json_array_add_raw(out, json.json_create_int(d))
+    json.json_array_add_raw(out, json.json_create_int(rem / 3600))
+    json.json_array_add_raw(out, json.json_create_int((rem % 3600) / 60))
+    json.json_array_add_raw(out, value.make_number(((rem % 60) as float) + frac))
+    wday = (days + 4) % 7
+    if wday < 0 { wday = wday + 7 }
+    json.json_array_add_raw(out, json.json_create_int(wday))
+    json.json_array_add_raw(out, json.json_create_int(days - _days_from_civil(y, 1, 1)))
+    return out
+}
+
+// Broken-down time → seconds since the epoch.
+_mktime(v: ptr) -> ptr! {
+    if value.type_of(v) != value.T_ARRAY { return null, "mktime requires array of 6 numbers" }
+    if json.json_array_size(v) < 6 { return null, "mktime requires array of 6 numbers" }
+    i = 0
+    while i < 6 {
+        if value.type_of(json.json_array_get_raw(v, i)) != value.T_NUMBER { return null, "mktime requires parsed datetime inputs" }
+        i = i + 1
+    }
+    y = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 0)))
+    mo = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 1)))
+    d = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 2)))
+    h = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 3)))
+    mi = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 4)))
+    s = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 5)))
+    // normalise the month into 0..11, carrying into the year
+    y = y + _floor_div(mo, 12)
+    mo = mo - _floor_div(mo, 12) * 12
+    days = _days_from_civil(y, mo + 1, 1) + d - 1
+    return json.json_create_int(days * 86400 + h * 3600 + mi * 60 + s), ""
+}
+
+// A broken-down time (or a number, converted first) as its fields.
+_broken_down(v: ptr, what: string) -> ptr! {
+    if value.type_of(v) == value.T_NUMBER { return _gmtime(value.number_of(v)), "" }
+    if value.type_of(v) != value.T_ARRAY { return null, "${what} requires parsed datetime inputs" }
+    if json.json_array_size(v) < 6 { return null, "${what} requires parsed datetime inputs" }
+    i = 0
+    while i < json.json_array_size(v) {
+        if value.type_of(json.json_array_get_raw(v, i)) != value.T_NUMBER { return null, "${what} requires parsed datetime inputs" }
+        i = i + 1
+    }
+    return value.copy(v), ""
+}
+
+_bd_field(bd: ptr, i: int) -> long {
+    if i >= json.json_array_size(bd) { return 0 }
+    return _to_int_trunc(value.number_of(json.json_array_get_raw(bd, i)))
+}
+
+const DAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday"
+const MONTH_NAMES = "January February March April May June July August September October November December"
+
+_nth_word(table: string, idx: int) -> string {
+    n = string.length(table)
+    start = 0
+    k = 0
+    i = 0
+    while i <= n {
+        if i == n || string.char_at_n(table, n, i) == 32 {
+            if k == idx { return string.substring_n(table, n, start, i) }
+            k = k + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+_pad2(sb: ptr, v: long) {
+    if v < 10 && v >= 0 { strbuilder.append_byte(sb, 48) }
+    strbuilder.append_long(sb, v)
+}
+
+_strftime(v: ptr, fmt: string, what: string) -> ptr! {
+    bd, err = _broken_down(v, "${what}/1")
+    if bd == null { return null, "${err}" }
+    year = _bd_field(bd, 0)
+    mon = _bd_field(bd, 1)
+    mday = _bd_field(bd, 2)
+    hour = _bd_field(bd, 3)
+    minute = _bd_field(bd, 4)
+    sec = _bd_field(bd, 5)
+    wday = _bd_field(bd, 6)
+    yday = _bd_field(bd, 7)
+    json.json_free(bd)
+    // the epoch seconds, for %s
+    days = _days_from_civil(year, mon + 1, 1) + mday - 1
+    epoch = days * 86400 + hour * 3600 + minute * 60 + sec
+    sb = strbuilder.new(32)
+    n = string.length(fmt)
+    i = 0
+    while i < n {
+        c = string.char_at_n(fmt, n, i)
+        if c != 37 || i + 1 >= n {
+            strbuilder.append_byte(sb, c)
+            i = i + 1
+        } else {
+            d = string.char_at_n(fmt, n, i + 1)
+            i = i + 2
+            if d == 89 { strbuilder.append_long(sb, year) }
+            else if d == 67 { _pad2(sb, year / 100) }
+            else if d == 121 { _pad2(sb, year % 100) }
+            else if d == 109 { _pad2(sb, mon + 1) }
+            else if d == 100 { _pad2(sb, mday) }
+            else if d == 101 {
+                if mday < 10 { strbuilder.append_byte(sb, 32) }
+                strbuilder.append_long(sb, mday)
+            }
+            else if d == 72 { _pad2(sb, hour) }
+            else if d == 73 {
+                h12 = hour % 12
+                if h12 == 0 { h12 = 12 }
+                _pad2(sb, h12)
+            }
+            else if d == 77 { _pad2(sb, minute) }
+            else if d == 83 { _pad2(sb, sec) }
+            else if d == 106 {
+                if yday + 1 < 100 { strbuilder.append_byte(sb, 48) }
+                _pad2(sb, yday + 1)
+            }
+            else if d == 90 { strbuilder.append(sb, "UTC") }
+            else if d == 122 { strbuilder.append(sb, "+0000") }
+            else if d == 115 { strbuilder.append_long(sb, epoch) }
+            else if d == 117 {
+                u = wday
+                if u == 0 { u = 7 }
+                strbuilder.append_long(sb, u)
+            }
+            else if d == 119 { strbuilder.append_long(sb, wday) }
+            else if d == 97 { strbuilder.append(sb, string.substring_n(_nth_word(DAY_NAMES, wday as int), string.length(_nth_word(DAY_NAMES, wday as int)), 0, 3)) }
+            else if d == 65 { strbuilder.append(sb, _nth_word(DAY_NAMES, wday as int)) }
+            else if d == 98 || d == 104 { strbuilder.append(sb, string.substring_n(_nth_word(MONTH_NAMES, mon as int), string.length(_nth_word(MONTH_NAMES, mon as int)), 0, 3)) }
+            else if d == 66 { strbuilder.append(sb, _nth_word(MONTH_NAMES, mon as int)) }
+            else if d == 112 {
+                if hour < 12 { strbuilder.append(sb, "AM") } else { strbuilder.append(sb, "PM") }
+            }
+            else if d == 84 {
+                _pad2(sb, hour)
+                strbuilder.append_byte(sb, 58)
+                _pad2(sb, minute)
+                strbuilder.append_byte(sb, 58)
+                _pad2(sb, sec)
+            }
+            else if d == 82 {
+                _pad2(sb, hour)
+                strbuilder.append_byte(sb, 58)
+                _pad2(sb, minute)
+            }
+            else if d == 68 {
+                _pad2(sb, mon + 1)
+                strbuilder.append_byte(sb, 47)
+                _pad2(sb, mday)
+                strbuilder.append_byte(sb, 47)
+                _pad2(sb, year % 100)
+            }
+            else if d == 70 {
+                strbuilder.append_long(sb, year)
+                strbuilder.append_byte(sb, 45)
+                _pad2(sb, mon + 1)
+                strbuilder.append_byte(sb, 45)
+                _pad2(sb, mday)
+            }
+            else if d == 110 { strbuilder.append_byte(sb, 10) }
+            else if d == 116 { strbuilder.append_byte(sb, 9) }
+            else if d == 37 { strbuilder.append_byte(sb, 37) }
+            else {
+                strbuilder.append_byte(sb, 37)
+                strbuilder.append_byte(sb, d)
+            }
+        }
+    }
+    return json.json_create_string(strbuilder.finish(sb)), ""
+}
+
+// Parse `s` against `fmt` into a broken-down time. Supports the numeric
+// directives, the month/day names, %Z (ignored), %z (applied), %s, %T,
+// %%; %T, %R, %F and %D expand to their components first; whitespace in
+// the format matches any run of whitespace.
+_strptime(s: string, fmt: string) -> ptr! {
+    n = string.length(s)
+    m = string.length(fmt)
+    long year = 1900
+    long mon = 0
+    long mday = 1
+    long hour = 0
+    long minute = 0
+    long sec = 0
+    long offset = 0
+    epoch_set = 0
+    long epoch = 0
+    i = 0
+    j = 0
+    orig_fmt = fmt
+    fmt = string.replace_all(fmt, "%T", "%H:%M:%S")
+    fmt = string.replace_all(fmt, "%R", "%H:%M")
+    fmt = string.replace_all(fmt, "%F", "%Y-%m-%d")
+    fmt = string.replace_all(fmt, "%D", "%m/%d/%y")
+    m = string.length(fmt)
+    while j < m {
+        c = string.char_at_n(fmt, m, j)
+        if _is_space(c) == 1 {
+            while i < n && _is_space(string.char_at_n(s, n, i)) == 1 { i = i + 1 }
+            j = j + 1
+        } else if c != 37 || j + 1 >= m {
+            if i >= n || string.char_at_n(s, n, i) != c { return null, _strptime_fail(s, orig_fmt) }
+            i = i + 1
+            j = j + 1
+        } else {
+            d = string.char_at_n(fmt, m, j + 1)
+            j = j + 2
+            if d == 37 {
+                if i >= n || string.char_at_n(s, n, i) != 37 { return null, _strptime_fail(s, orig_fmt) }
+                i = i + 1
+            } else if d == 89 {
+                val, next = _read_int(s, n, i, 4, 1)
+                if next < 0 { return null, _strptime_fail(s, orig_fmt) }
+                year = val
+                i = next
+            } else if d == 109 || d == 100 || d == 101 || d == 72 || d == 77 || d == 83 || d == 121 || d == 106 || d == 73 {
+                while d == 101 && i < n && string.char_at_n(s, n, i) == 32 { i = i + 1 }
+                width = 2
+                if d == 106 { width = 3 }
+                val, next = _read_int(s, n, i, width, 0)
+                if next < 0 { return null, _strptime_fail(s, orig_fmt) }
+                i = next
+                if d == 109 { mon = val - 1 }
+                else if d == 100 || d == 101 { mday = val }
+                else if d == 72 || d == 73 { hour = val }
+                else if d == 77 { minute = val }
+                else if d == 83 { sec = val }
+                else if d == 121 {
+                    year = val + 1900
+                    if val < 69 { year = val + 2000 }
+                }
+                else if d == 106 { mday = val }
+            } else if d == 115 {
+                val, next = _read_int(s, n, i, 20, 1)
+                if next < 0 { return null, _strptime_fail(s, orig_fmt) }
+                epoch = val
+                epoch_set = 1
+                i = next
+            } else if d == 90 {
+                while i < n && _is_alpha(string.char_at_n(s, n, i)) == 1 { i = i + 1 }
+            } else if d == 122 {
+                if i < n && string.char_at_n(s, n, i) == 90 {
+                    i = i + 1
+                } else {
+                    if i >= n { return null, _strptime_fail(s, orig_fmt) }
+                    sign = string.char_at_n(s, n, i)
+                    if sign != 43 && sign != 45 { return null, _strptime_fail(s, orig_fmt) }
+                    hh, next = _read_int(s, n, i + 1, 2, 0)
+                    if next < 0 { return null, _strptime_fail(s, orig_fmt) }
+                    i = next
+                    if i < n && string.char_at_n(s, n, i) == 58 { i = i + 1 }
+                    mm, next2 = _read_int(s, n, i, 2, 0)
+                    if next2 < 0 { return null, _strptime_fail(s, orig_fmt) }
+                    i = next2
+                    offset = hh * 3600 + mm * 60
+                    if sign == 45 { offset = 0 - offset }
+                }
+            } else if d == 97 || d == 65 || d == 98 || d == 66 || d == 104 {
+                table = DAY_NAMES
+                if d == 98 || d == 66 || d == 104 { table = MONTH_NAMES }
+                idx, next = _read_name(s, n, i, table)
+                if next < 0 { return null, _strptime_fail(s, orig_fmt) }
+                if d == 98 || d == 66 || d == 104 { mon = idx }
+                i = next
+            } else if d == 112 {
+                if i + 2 > n { return null, _strptime_fail(s, orig_fmt) }
+                ap = string.to_upper(string.substring_n(s, n, i, i + 2))
+                if string.equals(ap, "PM") == 1 && hour < 12 { hour = hour + 12 }
+                if string.equals(ap, "AM") == 1 && hour == 12 { hour = 0 }
+                i = i + 2
+            } else {
+                return null, _strptime_fail(s, orig_fmt)
+            }
+        }
+    }
+    if i < n { return null, _strptime_fail(s, orig_fmt) }
+    if epoch_set == 1 { return _gmtime(epoch as float), "" }
+    days = _days_from_civil(year, mon + 1, 1) + mday - 1
+    secs = days * 86400 + hour * 3600 + minute * 60 + sec - offset
+    return _gmtime(secs as float), ""
+}
+
+_strptime_fail(s: string, fmt: string) -> string {
+    return "date \"${s}\" does not match format \"${fmt}\""
+}
+
+_is_alpha(c: int) -> int {
+    if c >= 65 && c <= 90 { return 1 }
+    if c >= 97 && c <= 122 { return 1 }
+    return 0
+}
+
+// Up to `width` digits (with an optional sign when `signed`) at s[i].
+// Returns (value, next index) or (0, -1) when no digit is there.
+_read_int(s: string, n: int, i: int, width: int, signed: int) -> (long, int) {
+    neg = 0
+    if signed == 1 && i < n {
+        c = string.char_at_n(s, n, i)
+        if c == 45 || c == 43 {
+            if c == 45 { neg = 1 }
+            i = i + 1
+        }
+    }
+    v = 0
+    k = 0
+    while k < width && i < n {
+        c = string.char_at_n(s, n, i)
+        if c < 48 || c > 57 { k = width } else {
+            v = v * 10 + (c - 48)
+            i = i + 1
+            k = k + 1
+        }
+    }
+    if k == 0 { return 0, -1 }
+    if neg == 1 { v = 0 - v }
+    return v, i
+}
+
+// A full or three-letter name from `table` at s[i], case-insensitively.
+_read_name(s: string, n: int, i: int, table: string) -> (int, int) {
+    idx = 0
+    while idx < 12 {
+        w = _nth_word(table, idx)
+        wl = string.length(w)
+        if wl > 0 {
+            if i + wl <= n && string.equals(string.to_lower(string.substring_n(s, n, i, i + wl)), string.to_lower(w)) == 1 {
+                return idx, i + wl
+            }
+            if i + 3 <= n && string.equals(string.to_lower(string.substring_n(s, n, i, i + 3)), string.to_lower(string.substring_n(w, wl, 0, 3))) == 1 {
+                return idx, i + 3
+            }
+        }
+        idx = idx + 1
+    }
+    return 0, -1
+}

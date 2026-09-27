@@ -1,0 +1,617 @@
+// jq.value — jq's view of a JSON value.
+//
+// The data model is std.json's JsonValue, unchanged. What jq adds on top is
+// here: the total order every comparison and `sort` uses, deep equality,
+// deep copy (the evaluator owns every value it emits, so a value read out of
+// an input document is copied on the way out), jq's number normalisation
+// (an integral double is an integer), the serialiser (jq escapes and prints
+// numbers differently from std.json's compact encoder), and the codepoint
+// arithmetic that `length`, `explode`, `implode` and string slicing need.
+//
+// Ported from gojq (github.com/itchyny/gojq, MIT): compare.go, encoder.go
+// and the number handling in func.go. Where jq 1.7 and gojq differ, gojq's
+// behaviour is the one kept, since the port is of gojq.
+
+@source("aether_jq.c")
+
+import std.json
+import std.list
+import std.math
+import std.string
+import std.strbuilder
+
+exports(
+    T_NULL, T_BOOL, T_NUMBER, T_STRING, T_ARRAY, T_OBJECT,
+    type_of, type_name, truthy,
+    make_number, make_int, number_of, is_integral,
+    copy, eq, cmp,
+    sorted_keys, sort_list,
+    to_json, to_json_indent, num_to_string,
+    codepoint_count, explode, implode, codepoint_slice, codepoint_of_byte,
+    without_key, array_slice,
+    environ_count, environ_entry,
+    new_string, string_value
+)
+
+// The two C helpers this module ships (see aether_jq.c).
+extern aether_jq_num_to_str(d: float) -> string @heap
+extern aether_jq_environ_count() -> int
+extern aether_jq_environ_get(i: int) -> string @heap
+
+// JsonType, as std.json numbers them. The order is jq's sort order too:
+// null < false < true < numbers < strings < arrays < objects.
+const T_NULL = 0
+const T_BOOL = 1
+const T_NUMBER = 2
+const T_STRING = 3
+const T_ARRAY = 4
+const T_OBJECT = 5
+
+type_of(v: ptr) -> int {
+    if v == null { return T_NULL }
+    return json.json_type(v)
+}
+
+// The name `type` reports.
+type_name(v: ptr) -> string {
+    t = type_of(v)
+    if t == T_NULL { return "null" }
+    if t == T_BOOL { return "boolean" }
+    if t == T_NUMBER { return "number" }
+    if t == T_STRING { return "string" }
+    if t == T_ARRAY { return "array" }
+    return "object"
+}
+
+// jq truth: everything but null and false.
+truthy(v: ptr) -> int {
+    t = type_of(v)
+    if t == T_NULL { return 0 }
+    if t == T_BOOL { return json.json_get_bool(v) }
+    return 1
+}
+
+is_integral(d: float) -> int {
+    if d != math.floor(d) { return 0 }
+    return 1
+}
+
+// A number the evaluator produced. jq has one numeric type, the double;
+// std.json has an integer flavour that prints without a decimal point, so
+// an integral result within int64 is stored that way and prints as jq
+// prints it (3, not 3.0). Anything else keeps its double.
+make_number(d: float) -> ptr {
+    if d != d { return json.json_create_number(d) } // NaN
+    if d == 0.0 {
+        // -0 stays a double so it still prints as -0, as jq prints it.
+        if (1.0 / d) < 0.0 { return json.json_create_number(d) }
+    }
+    if is_integral(d) == 1 {
+        if math.abs_float(d) < 9.0e18 {
+            return json.json_create_int(d as long)
+        }
+    }
+    return json.json_create_number(d)
+}
+
+make_int(n: long) -> ptr {
+    return json.json_create_int(n)
+}
+
+number_of(v: ptr) -> float {
+    return json.json_get_number(v)
+}
+
+new_string(s: string) -> ptr {
+    return json.json_create_string(s)
+}
+
+// The bytes of a JSON string, borrowed from the value.
+string_value(v: ptr) -> string {
+    return json.json_get_string_raw(v)
+}
+
+// Deep copy. Owned by the caller; free with json.json_free.
+copy(v: ptr) -> ptr {
+    t = type_of(v)
+    if t == T_NULL { return json.json_create_null() }
+    if t == T_BOOL { return json.json_create_bool(json.json_get_bool(v)) }
+    if t == T_NUMBER { return make_number(json.json_get_number(v)) }
+    if t == T_STRING { return json.json_create_string(json.json_get_string_raw(v)) }
+    if t == T_ARRAY {
+        a = json.json_create_array()
+        n = json.json_array_size(v)
+        i = 0
+        while i < n {
+            json.json_array_add_raw(a, copy(json.json_array_get_raw(v, i)))
+            i = i + 1
+        }
+        return a
+    }
+    o = json.json_create_object()
+    n = json.json_object_size_raw(v)
+    i = 0
+    while i < n {
+        json.json_object_set_raw(o, json.json_object_key_at(v, i), copy(json.json_object_value_at(v, i)))
+        i = i + 1
+    }
+    return o
+}
+
+// Deep equality: numbers by value, objects regardless of key order.
+eq(a: ptr, b: ptr) -> int {
+    if cmp(a, b) == 0 { return 1 }
+    return 0
+}
+
+// jq's total order, -1 / 0 / 1. Types order as T_* does; arrays compare
+// element by element then by length; objects compare their sorted key
+// sets first, then the values key by key in that order.
+cmp(a: ptr, b: ptr) -> int {
+    ta = type_of(a)
+    tb = type_of(b)
+    if ta == T_BOOL {
+        if tb == T_BOOL {
+            return _cmp_int(json.json_get_bool(a), json.json_get_bool(b))
+        }
+    }
+    if ta != tb { return _cmp_int(ta, tb) }
+    if ta == T_NULL { return 0 }
+    if ta == T_NUMBER {
+        x = json.json_get_number(a)
+        y = json.json_get_number(b)
+        // NaN sorts below every number, and equal to itself, so sort is total.
+        if x != x {
+            if y != y { return 0 }
+            return -1
+        }
+        if y != y { return 1 }
+        if x < y { return -1 }
+        if x > y { return 1 }
+        return 0
+    }
+    if ta == T_STRING {
+        return _sign(string.compare(json.json_get_string_raw(a), json.json_get_string_raw(b)))
+    }
+    if ta == T_ARRAY {
+        na = json.json_array_size(a)
+        nb = json.json_array_size(b)
+        n = na
+        if nb < n { n = nb }
+        i = 0
+        while i < n {
+            c = cmp(json.json_array_get_raw(a, i), json.json_array_get_raw(b, i))
+            if c != 0 { return c }
+            i = i + 1
+        }
+        return _cmp_int(na, nb)
+    }
+    // objects
+    ka = sorted_keys(a)
+    kb = sorted_keys(b)
+    c = cmp(ka, kb)
+    if c == 0 {
+        n = json.json_array_size(ka)
+        i = 0
+        while i < n {
+            if c == 0 {
+                k = json.json_get_string_raw(json.json_array_get_raw(ka, i))
+                c = cmp(json.json_object_get_raw(a, k), json.json_object_get_raw(b, k))
+            }
+            i = i + 1
+        }
+    }
+    json.json_free(ka)
+    json.json_free(kb)
+    return c
+}
+
+_cmp_int(a: int, b: int) -> int {
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+
+_sign(d: int) -> int {
+    if d < 0 { return -1 }
+    if d > 0 { return 1 }
+    return 0
+}
+
+// The keys of an object as a fresh JSON array of strings, sorted by
+// codepoint (byte order on UTF-8 is codepoint order), which is what `keys`
+// returns and what object comparison and sorted output use.
+sorted_keys(obj: ptr) -> ptr {
+    l = list.new()
+    n = json.json_object_size_raw(obj)
+    i = 0
+    while i < n {
+        list.list_add_raw(l, json.json_create_string(json.json_object_key_at(obj, i)))
+        i = i + 1
+    }
+    sort_list(l, null)
+    out = json.json_create_array()
+    i = 0
+    while i < n {
+        json.json_array_add_raw(out, list.get_raw(l, i))
+        list.set(l, i, null)
+        i = i + 1
+    }
+    list.free(l)
+    return out
+}
+
+// Stable merge sort of a std.list of JSON values, in place. When `keys` is
+// given it is a parallel list of the sort keys (for sort_by / group_by):
+// keys decide the order and travel with their values. Stability matters:
+// jq's sort_by keeps equal-keyed elements in input order.
+sort_list(vals: ptr, keys: ptr) {
+    n = list.size(vals)
+    if n < 2 { return }
+    tmp_v = list.new()
+    tmp_k = list.new()
+    i = 0
+    while i < n {
+        list.list_add_raw(tmp_v, null)
+        if keys != null { list.list_add_raw(tmp_k, null) }
+        i = i + 1
+    }
+    width = 1
+    while width < n {
+        lo = 0
+        while lo < n {
+            mid = lo + width
+            if mid > n { mid = n }
+            hi = lo + width + width
+            if hi > n { hi = n }
+            _merge(vals, keys, tmp_v, tmp_k, lo, mid, hi)
+            lo = lo + width + width
+        }
+        // copy back
+        i = 0
+        while i < n {
+            list.set(vals, i, list.get_raw(tmp_v, i))
+            if keys != null { list.set(keys, i, list.get_raw(tmp_k, i)) }
+            i = i + 1
+        }
+        width = width + width
+    }
+    // The scratch lists only ever held aliases; clear them so list.free
+    // does not sniff (and release) values the real list still owns.
+    i = 0
+    while i < n {
+        list.set(tmp_v, i, null)
+        if keys != null { list.set(tmp_k, i, null) }
+        i = i + 1
+    }
+    list.free(tmp_v)
+    list.free(tmp_k)
+}
+
+_merge(vals: ptr, keys: ptr, tmp_v: ptr, tmp_k: ptr, lo: int, mid: int, hi: int) {
+    i = lo
+    j = mid
+    k = lo
+    while k < hi {
+        take_left = 0
+        if i < mid {
+            if j >= hi {
+                take_left = 1
+            } else {
+                a = list.get_raw(vals, i)
+                b = list.get_raw(vals, j)
+                if keys != null {
+                    a = list.get_raw(keys, i)
+                    b = list.get_raw(keys, j)
+                }
+                if cmp(a, b) <= 0 { take_left = 1 }
+            }
+        }
+        if take_left == 1 {
+            list.set(tmp_v, k, list.get_raw(vals, i))
+            if keys != null { list.set(tmp_k, k, list.get_raw(keys, i)) }
+            i = i + 1
+        } else {
+            list.set(tmp_v, k, list.get_raw(vals, j))
+            if keys != null { list.set(tmp_k, k, list.get_raw(keys, j)) }
+            j = j + 1
+        }
+        k = k + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serialisation
+// ---------------------------------------------------------------------------
+
+// The shortest decimal that reads back as the same double; integral values
+// as plain integers. See aether_jq.c.
+num_to_string(d: float) -> string {
+    return aether_jq_num_to_str(d)
+}
+
+// Compact JSON, jq style: no spaces, keys in insertion order.
+to_json(v: ptr) -> string {
+    return to_json_indent(v, 0, 0)
+}
+
+// `indent` spaces per level (0 = compact, jq's default output is 2);
+// `sort_keys` = 1 for `--sort-keys`.
+to_json_indent(v: ptr, indent: int, sort_keys: int) -> string {
+    sb = strbuilder.new(64)
+    _emit(sb, v, indent, sort_keys, 0)
+    return strbuilder.finish(sb)
+}
+
+_newline_indent(sb: ptr, indent: int, level: int) {
+    strbuilder.append_byte(sb, 10)
+    i = 0
+    while i < indent * level {
+        strbuilder.append_byte(sb, 32)
+        i = i + 1
+    }
+}
+
+_emit(sb: ptr, v: ptr, indent: int, sort_keys: int, level: int) {
+    t = type_of(v)
+    if t == T_NULL {
+        strbuilder.append(sb, "null")
+        return
+    }
+    if t == T_BOOL {
+        if json.json_get_bool(v) == 1 {
+            strbuilder.append(sb, "true")
+        } else {
+            strbuilder.append(sb, "false")
+        }
+        return
+    }
+    if t == T_NUMBER {
+        s = num_to_string(json.json_get_number(v))
+        strbuilder.append(sb, s)
+        return
+    }
+    if t == T_STRING {
+        _emit_string(sb, json.json_get_string_raw(v))
+        return
+    }
+    if t == T_ARRAY {
+        n = json.json_array_size(v)
+        strbuilder.append_byte(sb, 91)
+        if n == 0 {
+            strbuilder.append_byte(sb, 93)
+            return
+        }
+        i = 0
+        while i < n {
+            if i > 0 { strbuilder.append_byte(sb, 44) }
+            if indent > 0 { _newline_indent(sb, indent, level + 1) }
+            _emit(sb, json.json_array_get_raw(v, i), indent, sort_keys, level + 1)
+            i = i + 1
+        }
+        if indent > 0 { _newline_indent(sb, indent, level) }
+        strbuilder.append_byte(sb, 93)
+        return
+    }
+    n = json.json_object_size_raw(v)
+    strbuilder.append_byte(sb, 123)
+    if n == 0 {
+        strbuilder.append_byte(sb, 125)
+        return
+    }
+    keys = null
+    if sort_keys == 1 { keys = sorted_keys(v) }
+    i = 0
+    while i < n {
+        if i > 0 { strbuilder.append_byte(sb, 44) }
+        if indent > 0 { _newline_indent(sb, indent, level + 1) }
+        k = json.json_object_key_at(v, i)
+        val = json.json_object_value_at(v, i)
+        if keys != null {
+            k = json.json_get_string_raw(json.json_array_get_raw(keys, i))
+            val = json.json_object_get_raw(v, k)
+        }
+        _emit_string(sb, k)
+        strbuilder.append_byte(sb, 58)
+        if indent > 0 { strbuilder.append_byte(sb, 32) }
+        _emit(sb, val, indent, sort_keys, level + 1)
+        i = i + 1
+    }
+    if keys != null { json.json_free(keys) }
+    if indent > 0 { _newline_indent(sb, indent, level) }
+    strbuilder.append_byte(sb, 125)
+}
+
+// jq's string escaping: the short escapes for the usual control characters,
+// \u00XX for the rest below 0x20 and for DEL, everything else (UTF-8
+// included) verbatim.
+_emit_string(sb: ptr, s: string) {
+    n = string.length(s)
+    strbuilder.append_byte(sb, 34)
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if c == 34 {
+            strbuilder.append(sb, "\\\"")
+        } else if c == 92 {
+            strbuilder.append(sb, "\\\\")
+        } else if c == 10 {
+            strbuilder.append(sb, "\\n")
+        } else if c == 9 {
+            strbuilder.append(sb, "\\t")
+        } else if c == 13 {
+            strbuilder.append(sb, "\\r")
+        } else if c == 8 {
+            strbuilder.append(sb, "\\b")
+        } else if c == 12 {
+            strbuilder.append(sb, "\\f")
+        } else if c < 32 || c == 127 {
+            strbuilder.append(sb, "\\u00")
+            strbuilder.append_hex(sb, c as long, 2)
+        } else {
+            strbuilder.append_byte(sb, c)
+        }
+        i = i + 1
+    }
+    strbuilder.append_byte(sb, 34)
+}
+
+// ---------------------------------------------------------------------------
+// Codepoints. jq measures and slices strings in codepoints, not bytes.
+// ---------------------------------------------------------------------------
+
+// Number of codepoints (a continuation byte 10xxxxxx does not start one).
+codepoint_count(s: string) -> int {
+    n = string.length(s)
+    count = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if (c & 192) != 128 { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// Byte offset of the `cp`-th codepoint (clamped to the string's length).
+_byte_of_codepoint(s: string, n: int, cp: int) -> int {
+    count = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if (c & 192) != 128 {
+            if count == cp { return i }
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// The codepoint index a byte offset falls in (regex spans are bytes, jq
+// reports offsets in codepoints).
+codepoint_of_byte(s: string, byte_off: int) -> int {
+    n = string.length(s)
+    if byte_off > n { byte_off = n }
+    count = 0
+    i = 0
+    while i < byte_off {
+        c = string.char_at_n(s, n, i)
+        if (c & 192) != 128 { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// Codepoints from..to (exclusive), already clamped by the caller.
+codepoint_slice(s: string, from: int, to: int) -> string {
+    n = string.length(s)
+    a = _byte_of_codepoint(s, n, from)
+    b = _byte_of_codepoint(s, n, to)
+    if b < a { b = a }
+    return string.substring_n(s, n, a, b)
+}
+
+// Decode one codepoint at byte `i`; returns it and advances `*next`.
+_decode(s: string, n: int, i: int) -> (int, int) {
+    c = string.char_at_n(s, n, i)
+    if c < 128 { return c, i + 1 }
+    if (c & 224) == 192 {
+        if i + 1 < n {
+            return ((c & 31) << 6) | (string.char_at_n(s, n, i + 1) & 63), i + 2
+        }
+    }
+    if (c & 240) == 224 {
+        if i + 2 < n {
+            return ((c & 15) << 12) | ((string.char_at_n(s, n, i + 1) & 63) << 6) | (string.char_at_n(s, n, i + 2) & 63), i + 3
+        }
+    }
+    if (c & 248) == 240 {
+        if i + 3 < n {
+            return ((c & 7) << 18) | ((string.char_at_n(s, n, i + 1) & 63) << 12) | ((string.char_at_n(s, n, i + 2) & 63) << 6) | (string.char_at_n(s, n, i + 3) & 63), i + 4
+        }
+    }
+    // A stray or truncated sequence decodes as U+FFFD, the way jq does.
+    return 65533, i + 1
+}
+
+// `explode`: the string's codepoints as a JSON array of numbers.
+explode(s: string) -> ptr {
+    out = json.json_create_array()
+    n = string.length(s)
+    i = 0
+    while i < n {
+        cp, next = _decode(s, n, i)
+        json.json_array_add_raw(out, json.json_create_int(cp as long))
+        i = next
+    }
+    return out
+}
+
+// `implode`: a JSON array of codepoints back to a string. Errors on a
+// non-array or a non-numeric element, as jq does.
+implode(arr: ptr) -> string! {
+    if type_of(arr) != T_ARRAY {
+        return "", "implode input must be an array"
+    }
+    sb = strbuilder.new(16)
+    n = json.json_array_size(arr)
+    i = 0
+    while i < n {
+        e = json.json_array_get_raw(arr, i)
+        if type_of(e) != T_NUMBER {
+            strbuilder.free(sb)
+            return "", "Unicode codepoint must be numeric"
+        }
+        cp = json.json_get_int(e)
+        if cp < 0 || cp > 1114111 { cp = 65533 }
+        if cp >= 55296 && cp <= 57343 { cp = 65533 } // a lone surrogate
+        strbuilder.append_codepoint(sb, cp)
+        i = i + 1
+    }
+    return strbuilder.finish(sb), ""
+}
+
+// ---------------------------------------------------------------------------
+// Structural edits. std.json containers cannot drop a member, so a deletion
+// rebuilds the container without it. Both return a fresh copy.
+// ---------------------------------------------------------------------------
+
+without_key(obj: ptr, key: string) -> ptr {
+    o = json.json_create_object()
+    n = json.json_object_size_raw(obj)
+    i = 0
+    while i < n {
+        k = json.json_object_key_at(obj, i)
+        if string.equals(k, key) == 0 {
+            json.json_object_set_raw(o, k, copy(json.json_object_value_at(obj, i)))
+        }
+        i = i + 1
+    }
+    return o
+}
+
+// Elements from..to (exclusive) of an array, as a fresh array. Indices are
+// already clamped by the caller.
+array_slice(arr: ptr, from: int, to: int) -> ptr {
+    out = json.json_create_array()
+    i = from
+    while i < to {
+        json.json_array_add_raw(out, copy(json.json_array_get_raw(arr, i)))
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Environment, for `$ENV` and `env`.
+// ---------------------------------------------------------------------------
+
+environ_count() -> int {
+    return aether_jq_environ_count()
+}
+
+// The i-th "KEY=VALUE" entry, owned by the caller.
+environ_entry(i: int) -> string {
+    return aether_jq_environ_get(i)
+}

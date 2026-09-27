@@ -1,0 +1,188 @@
+// Evaluator specs for contrib.jq: the core language — generators and the
+// order jq produces their products in, pipes, variables and destructuring,
+// reduce/foreach, functions and closures, errors and their handling,
+// labels, and the optional/alternative operators. Paths and assignment are
+// in test_paths.ae, the builtin library in test_builtins.ae.
+//
+// Expectations follow jq 1.7 / gojq; each reads as `program <<< input`.
+//
+// Run with:  ae run contrib/jq/test_eval.ae
+
+import std.spec
+import jq_spec
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "basic filters") {
+        spec.it("identity, fields and indexing") callback {
+            spec.assert_str_eq(jq_spec.yields(".", "{\"a\":1}"), "{\"a\":1}", "identity")
+            spec.assert_str_eq(jq_spec.yields(".a.b", "{\"a\":{\"b\":2}}"), "2", "nested field")
+            spec.assert_str_eq(jq_spec.yields(".a", "null"), "null", "field of null")
+            spec.assert_str_eq(jq_spec.yields(".[\"a b\"]", "{\"a b\":3}"), "3", "bracketed key")
+            spec.assert_str_eq(jq_spec.yields(".[1], .[-1], .[9]", "[1,2,3]"), "2\n3\nnull", "array index")
+            spec.assert_str_eq(jq_spec.yields(".[1.7]", "[1,2,3]"), "2", "fractional index floors")
+        }
+        spec.it("slices arrays and strings by codepoint") callback {
+            spec.assert_str_eq(jq_spec.yields(".[1:3], .[:-1], .[-2:]", "[1,2,3,4]"), "[2,3]\n[1,2,3]\n[3,4]", "array slices")
+            spec.assert_str_eq(jq_spec.yields(".[1:3]", "\"héllo\""), "\"él\"", "string slice counts codepoints")
+            spec.assert_str_eq(jq_spec.yields(".[2:1]", "[1,2,3]"), "[]", "empty when reversed")
+        }
+        spec.it("iterates arrays and objects") callback {
+            spec.assert_str_eq(jq_spec.yields(".[]", "[1,[2]]"), "1\n[2]", "array")
+            spec.assert_str_eq(jq_spec.yields(".[]", "{\"a\":1,\"b\":2}"), "1\n2", "object values in order")
+            spec.assert_str_eq(jq_spec.yields("..", "[[1]]"), "[[1]]\n[1]\n1", "recursive descent is pre-order")
+        }
+        spec.it("literals and constructors") callback {
+            spec.assert_str_eq(jq_spec.yields("[1, \"a\", null, true, {}]", "null"), "[1,\"a\",null,true,{}]", "array literal")
+            spec.assert_str_eq(jq_spec.yields("{a: 1, \"b\": 2, (\"c\"): 3, $__loc__}", "null"), "{\"a\":1,\"b\":2,\"c\":3,\"__loc__\":{\"file\":\"<stdin>\",\"line\":1}}", "object keys")
+            spec.assert_str_eq(jq_spec.yields("{a, b}", "{\"a\":1,\"b\":2,\"c\":3}"), "{\"a\":1,\"b\":2}", "shorthand fields")
+            spec.assert_str_eq(jq_spec.yields("\"x\\(1 + 2)y\"", "null"), "\"x3y\"", "interpolation")
+            spec.assert_str_eq(jq_spec.yields("[]", "null"), "[]", "empty array")
+        }
+    }
+
+    spec.describe(fw, "generators") {
+        spec.it("comma and pipe") callback {
+            spec.assert_str_eq(jq_spec.yields("1, 2 | . * 10", "null"), "10\n20", "comma binds tighter than pipe")
+            spec.assert_str_eq(jq_spec.yields("[.[] | . + 1]", "[1,2]"), "[2,3]", "collect")
+            spec.assert_str_eq(jq_spec.yields("empty, 1", "null"), "1", "empty yields nothing")
+        }
+        spec.it("binary operators take the right operand as the outer loop") callback {
+            spec.assert_str_eq(jq_spec.yields("[(1,2) + (10,20)]", "null"), "[11,12,21,22]", "cartesian order")
+        }
+        spec.it("object construction is a product over its entries") callback {
+            spec.assert_str_eq(jq_spec.yields("{a: (1,2), b: (3,4)}", "null"), "{\"a\":1,\"b\":3}\n{\"a\":1,\"b\":4}\n{\"a\":2,\"b\":3}\n{\"a\":2,\"b\":4}", "product order")
+            spec.assert_str_eq(jq_spec.yields("{(\"a\",\"b\"): 1}", "null"), "{\"a\":1}\n{\"b\":1}", "generated keys")
+        }
+        spec.it("string interpolation is a product over its parts") callback {
+            spec.assert_str_eq(jq_spec.yields("\"\\(1,2)-\\(3,4)\"", "null"), "\"1-3\"\n\"1-4\"\n\"2-3\"\n\"2-4\"", "product order")
+        }
+    }
+
+    spec.describe(fw, "arithmetic and comparison") {
+        spec.it("numbers") callback {
+            spec.assert_str_eq(jq_spec.yields("1 + 2 * 3, 7 / 2, 7 % 3, -7 % 3, -(1)", "null"), "7\n3.5\n1\n-1\n-1", "arithmetic")
+            spec.assert_str_eq(jq_spec.yields("0.1 + 0.2, 1 / 3, 1e17, 1e21", "null"), "0.30000000000000004\n0.3333333333333333\n100000000000000000\n1e+21", "shortest round-trip formatting")
+            spec.assert_str_eq(jq_spec.fails_with("1 / 0", "null"), "number (1) and number (0) cannot be divided because the divisor is zero", "divide by zero")
+        }
+        spec.it("strings, arrays and objects") callback {
+            spec.assert_str_eq(jq_spec.yields("\"a\" + \"b\", \"ab\" * 2, \"a,b\" / \",\"", "null"), "\"ab\"\n\"abab\"\n[\"a\",\"b\"]", "strings")
+            spec.assert_str_eq(jq_spec.yields("[1,2] + [3], [1,2,1] - [1]", "null"), "[1,2,3]\n[2]", "arrays")
+            spec.assert_str_eq(jq_spec.yields("{a:1} + {b:2}, {a:{b:1}} * {a:{c:2}}", "null"), "{\"a\":1,\"b\":2}\n{\"a\":{\"b\":1,\"c\":2}}", "objects")
+            spec.assert_str_eq(jq_spec.yields("null + 1, 1 + null", "null"), "1\n1", "null is the additive identity")
+            spec.assert_str_eq(jq_spec.fails_with("{} + 1", "null"), "object ({}) and number (1) cannot be added", "type error")
+        }
+        spec.it("orders all values totally") callback {
+            spec.assert_str_eq(jq_spec.yields("[null, false, true, 0, \"\", [], {}] | . == sort", "null"), "true", "type order")
+            spec.assert_str_eq(jq_spec.yields("[1,2] < [1,3], {a:1} == {a:1.0}, \"a\" < \"b\"", "null"), "true\ntrue\ntrue", "structural")
+        }
+        spec.it("and / or short-circuit") callback {
+            spec.assert_str_eq(jq_spec.yields("false and error(\"x\"), true or error(\"x\")", "null"), "false\ntrue", "short-circuit")
+            spec.assert_str_eq(jq_spec.yields("[(true, false) and (true, false)]", "null"), "[true,false,false]", "generators")
+            spec.assert_str_eq(jq_spec.yields("[.[] | not]", "[null, 0]"), "[true,false]", "not")
+        }
+    }
+
+    spec.describe(fw, "conditionals and alternatives") {
+        spec.it("if / elif / else") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] | if . == 1 then \"one\" elif . == 2 then \"two\" else \"many\" end]", "[1,2,3]"), "[\"one\",\"two\",\"many\"]", "chain")
+            spec.assert_str_eq(jq_spec.yields("if . then 1 end", "false"), "false", "else defaults to identity")
+            spec.assert_str_eq(jq_spec.yields("if (true, false) then 1 else 2 end", "null"), "1\n2", "generator condition")
+        }
+        spec.it("// takes the truthy outputs of the left, else the right") callback {
+            spec.assert_str_eq(jq_spec.yields(".a // \"d\", .b // \"d\"", "{\"a\":0,\"b\":false}"), "0\n\"d\"", "falsy")
+            spec.assert_str_eq(jq_spec.yields("(null, 1, false, 2) // 3", "null"), "1\n2", "keeps every truthy output")
+            spec.assert_str_eq(jq_spec.yields("error(\"x\") // 1", "null"), "1", "errors on the left are ignored")
+        }
+        spec.it("? suppresses errors") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] | .a?]", "[{\"a\":1}, 2]"), "[1]", "optional index")
+            spec.assert_str_eq(jq_spec.yields("[.[]?]", "5"), "[]", "optional iterate")
+        }
+    }
+
+    spec.describe(fw, "variables and destructuring") {
+        spec.it("binds each value of the source") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] as $x | $x * 2]", "[1,2]"), "[2,4]", "as")
+            spec.assert_str_eq(jq_spec.yields(". as $d | .a | $d.b", "{\"a\":1,\"b\":2}"), "2", "outer input")
+            spec.assert_str_eq(jq_spec.fails_with("$nope", "null"), "$nope is not defined", "undefined variable")
+        }
+        spec.it("destructures arrays and objects") callback {
+            spec.assert_str_eq(jq_spec.yields(". as [$a, [$b]] | $a + $b", "[1,[2]]"), "3", "array pattern")
+            spec.assert_str_eq(jq_spec.yields(". as {$a, b: {c: $c}} | [$a, $c]", "{\"a\":1,\"b\":{\"c\":3}}"), "[1,3]", "object pattern")
+            spec.assert_str_eq(jq_spec.yields(". as [$a, $b] | [$a, $b]", "[1]"), "[1,null]", "missing elements are null")
+            spec.assert_str_eq(jq_spec.yields(". as {(\"a\",\"b\"): $v} | $v", "{\"a\":1,\"b\":2}"), "1\n2", "generated keys")
+        }
+        spec.it("?// tries alternative patterns") callback {
+            spec.assert_str_eq(jq_spec.yields("[.[] as [$a] ?// $a | $a]", "[[1],2]"), "[1,2]", "alternatives")
+            spec.assert_str_eq(jq_spec.yields("[.[] as [$a] ?// $a | if ($a | type) == \"array\" then error(\"arr\") else $a end]", "[[1],2]"), "[1,2]", "an error in the body moves to the next pattern")
+        }
+    }
+
+    spec.describe(fw, "reduce and foreach") {
+        spec.it("reduce folds") callback {
+            spec.assert_str_eq(jq_spec.yields("reduce .[] as $x (0; . + $x)", "[1,2,3]"), "6", "sum")
+            spec.assert_str_eq(jq_spec.yields("reduce empty as $x (0; . + 1)", "null"), "0", "no items")
+            spec.assert_str_eq(jq_spec.yields("reduce .[] as [$k, $v] ({}; .[$k] = $v)", "[[\"a\",1],[\"b\",2]]"), "{\"a\":1,\"b\":2}", "pattern")
+        }
+        spec.it("foreach emits each state, or the extract") callback {
+            spec.assert_str_eq(jq_spec.yields("[foreach .[] as $x (0; . + $x)]", "[1,2,3]"), "[1,3,6]", "states")
+            spec.assert_str_eq(jq_spec.yields("[foreach .[] as $x (0; . + $x; [$x, .])]", "[1,2]"), "[[1,1],[2,3]]", "extract")
+        }
+    }
+
+    spec.describe(fw, "functions") {
+        spec.it("defines and calls, overloaded by arity") callback {
+            spec.assert_str_eq(jq_spec.yields("def f: 1; def f(x): 2; def f(x; y): 3; [f, f(0), f(0; 0)]", "null"), "[1,2,3]", "arity")
+            spec.assert_str_eq(jq_spec.yields("def inc(x): x + 1; [.[] | inc(.)]", "[1,2]"), "[2,3]", "filter argument")
+        }
+        spec.it("filter parameters are closures over the caller") callback {
+            spec.assert_str_eq(jq_spec.yields("def f(g): [g, g]; 3 as $x | f($x)", "null"), "[3,3]", "captures variables")
+            spec.assert_str_eq(jq_spec.yields("def g: 5; def f(g): g; f(1)", "null"), "1", "parameter shadows definition")
+            spec.assert_str_eq(jq_spec.yields("def f(x): x | x; 2 | f(. * 3)", "null"), "18", "re-evaluated per use")
+        }
+        spec.it("$parameters bind each value") callback {
+            spec.assert_str_eq(jq_spec.yields("def f($a; $b): $a + $b; [f(1, 2; 10)]", "null"), "[11,12]", "cartesian")
+            spec.assert_str_eq(jq_spec.yields("def f($a): a; f(7)", "null"), "7", "usable as a filter")
+        }
+        spec.it("recursion, and nested definitions") callback {
+            spec.assert_str_eq(jq_spec.yields("def fac: if . <= 1 then 1 else . * (. - 1 | fac) end; [range(1; 6) | fac]", "null"), "[1,2,6,24,120]", "recursion")
+            spec.assert_str_eq(jq_spec.yields("def f: def g: 3; g * 2; f", "null"), "6", "nested def")
+            spec.assert_str_eq(jq_spec.yields("def f: if . < 200 then . + 1 | f else . end; f", "0"), "200", "bounded recursion runs to the end")
+            spec.assert_str_eq(jq_spec.fails_with("def f: . + 1 | f; f", "0"), "function call depth exceeded in f/0", "runaway recursion is an error, not a crash")
+            spec.assert_str_eq(jq_spec.fails_with("[recurse(. + 1)] | length", "0"), "function call depth exceeded in r/0", "a runaway prelude recursion is an error too")
+        }
+        spec.it("unknown functions are errors") callback {
+            spec.assert_str_eq(jq_spec.fails_with("nosuch(1)", "null"), "nosuch/1 is not defined", "unknown")
+        }
+    }
+
+    spec.describe(fw, "errors") {
+        spec.it("error raises any value") callback {
+            spec.assert_str_eq(jq_spec.fails_with("error(\"boom\")", "null"), "boom", "string")
+            spec.assert_str_eq(jq_spec.fails_with("error({a: 1})", "null"), "{\"a\":1} (not a string)", "non-string")
+            spec.assert_str_eq(jq_spec.fails_with(".[]", "5"), "Cannot iterate over number (5)", "runtime error")
+        }
+        spec.it("try / catch") callback {
+            spec.assert_str_eq(jq_spec.yields("try error(\"x\") catch .", "null"), "\"x\"", "catch sees the error")
+            spec.assert_str_eq(jq_spec.yields("[.[] | try (if . == 2 then error(\"two\") else . end) catch \"e\"]", "[1,2,3]"), "[1,\"e\",3]", "per item")
+            spec.assert_str_eq(jq_spec.yields("try (1, error(\"x\"), 3) catch \"c\"", "null"), "1\n\"c\"", "stops the body at the error")
+            spec.assert_str_eq(jq_spec.yields("[.[] | try error(.)]", "[1]"), "[]", "try without catch")
+            spec.assert_str_eq(jq_spec.yields("try (try error(\"x\") catch error(\"y\")) catch .", "null"), "\"y\"", "rethrow")
+        }
+        spec.it("does not catch errors raised downstream of the try") callback {
+            spec.assert_str_eq(jq_spec.fails_with("(try 1 catch 0) | error(\"after\")", "null"), "after", "downstream")
+        }
+    }
+
+    spec.describe(fw, "label and limits") {
+        spec.it("break leaves the labelled generator") callback {
+            spec.assert_str_eq(jq_spec.yields("[label $out | 1, 2, break $out, 3]", "null"), "[1,2]", "break")
+            spec.assert_str_eq(jq_spec.yields("[range(3) as $i | label $skip | if $i == 1 then break $skip else $i end]", "null"), "[0,2]", "per iteration")
+            spec.assert_str_eq(jq_spec.yields("[limit(3; range(10))], first(range(5; 10))", "null"), "[0,1,2]\n5", "limit and first")
+            spec.assert_str_eq(jq_spec.yields("[first(1, error(\"never\"))]", "null"), "[1]", "first stops before later outputs")
+        }
+    }
+
+    spec.run_summary(fw)
+}
