@@ -504,22 +504,82 @@ int tw_pixel(TwWindow* w, int x, int y) {
 }
 
 /* ======================================================================== */
-/* Linux and the BSDs: X11, opened at runtime                                */
+/* Linux and the BSDs: X11 or Wayland, each opened at runtime                */
 /* ======================================================================== */
 #else
+
+#include <dlfcn.h>
+#include <poll.h>
+#include <time.h>
 
 #if defined(__has_include)
 #  if __has_include(<X11/Xlib.h>) && __has_include(<X11/Xutil.h>)
 #    define TW_HAVE_X11 1
 #  endif
+#  if __has_include(<wayland-client-core.h>)
+#    define TW_HAVE_WAYLAND 1
+#  endif
 #endif
 
+/* One window struct for both backends: the shared accessors at the bottom
+ * read width, height and resized, and `kind` says which backend's fields
+ * below are live. */
 #if defined(TW_HAVE_X11)
-
-#include <dlfcn.h>
-#include <time.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#endif
+#if defined(TW_HAVE_WAYLAND)
+#include <wayland-client-core.h>
+#endif
+
+struct TwWindow {
+    int kind;
+    int width, height;
+    int resized;
+    int close_requested;
+#if defined(TW_HAVE_X11)
+    struct {
+        Display* dpy;          /* one connection per window, owned */
+        Window   win;
+        Atom     wm_delete;
+        int      mapped;
+    } x;
+#endif
+#if defined(TW_HAVE_WAYLAND)
+    struct {
+        struct wl_display*  display;   /* one connection per window, owned */
+        struct wl_proxy*    registry;
+        struct wl_proxy*    compositor;
+        struct wl_proxy*    wm_base;
+        struct wl_proxy*    surface;
+        struct wl_proxy*    xdg_surface;
+        struct wl_proxy*    toplevel;
+        int                 configured;
+    } w;
+#endif
+};
+
+static void tw_sleep_ms(int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+/* Which window system to use, from AETHER_TEST_WINDOW_SYSTEM: "x11" or
+ * "wayland". Unset, X11 comes first, because its screen can be read back
+ * and Xwayland makes it reachable on a Wayland desktop too; Wayland is tried
+ * when X11 is not there. The Wayland CI leg sets it to run the wl_surface
+ * path on purpose. */
+static const char* tw_requested_system(void) {
+    const char* s = getenv("AETHER_TEST_WINDOW_SYSTEM");
+    return s && s[0] ? s : "";
+}
+
+/* ------------------------------------------------------------------------ */
+/* X11                                                                       */
+/* ------------------------------------------------------------------------ */
+#if defined(TW_HAVE_X11)
 
 /* The libX11 entry points this module calls, fetched with dlsym so the build
  * needs only the headers and the binary starts where there is no libX11. */
@@ -576,20 +636,10 @@ static int tw_x11_load(void) {
     return 1;
 }
 
-struct TwWindow {
-    Display* dpy;          /* one connection per window, owned */
-    Window   win;
-    Atom     wm_delete;
-    int      width, height;
-    int      mapped;
-    int      close_requested;
-    int      resized;
-};
-
 static void tw_x11_handle(TwWindow* w, const XEvent* ev) {
     switch (ev->type) {
         case MapNotify:
-            w->mapped = 1;
+            w->x.mapped = 1;
             break;
         case ConfigureNotify:
             if (ev->xconfigure.width != w->width || ev->xconfigure.height != w->height) {
@@ -599,7 +649,7 @@ static void tw_x11_handle(TwWindow* w, const XEvent* ev) {
             }
             break;
         case ClientMessage:
-            if ((Atom)ev->xclient.data.l[0] == w->wm_delete) w->close_requested = 1;
+            if ((Atom)ev->xclient.data.l[0] == w->x.wm_delete) w->close_requested = 1;
             break;
         case DestroyNotify:
             w->close_requested = 1;
@@ -610,21 +660,14 @@ static void tw_x11_handle(TwWindow* w, const XEvent* ev) {
 }
 
 static void tw_x11_drain(TwWindow* w) {
-    while (g_x11.XPending(w->dpy) > 0) {
+    while (g_x11.XPending(w->x.dpy) > 0) {
         XEvent ev;
-        g_x11.XNextEvent(w->dpy, &ev);
+        g_x11.XNextEvent(w->x.dpy, &ev);
         tw_x11_handle(w, &ev);
     }
 }
 
-static void tw_sleep_ms(int ms) {
-    struct timespec ts;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
-}
-
-int tw_available(void) {
+static int tw_x11_available(void) {
     if (!tw_x11_load()) return 0;
     Display* d = g_x11.XOpenDisplay(NULL);
     if (!d) {
@@ -636,60 +679,64 @@ int tw_available(void) {
     return 1;
 }
 
-TwWindow* tw_create(const char* title, int width, int height) {
-    tw_clear_error();
-    if (width <= 0 || height <= 0) {
-        tw_fail(TW_ERR_ARG, "window size must be positive, got %dx%d", width, height);
-        return NULL;
+static void tw_x11_destroy(TwWindow* w) {
+    if (w->x.dpy) {
+        if (w->x.win) g_x11.XDestroyWindow(w->x.dpy, w->x.win);
+        g_x11.XCloseDisplay(w->x.dpy);
     }
+    free(w);
+}
+
+static TwWindow* tw_x11_create(const char* title, int width, int height) {
     if (!tw_x11_load()) return NULL;
 
     TwWindow* w = (TwWindow*)calloc(1, sizeof(*w));
     if (!w) { tw_fail(TW_ERR_OOM, "out of memory"); return NULL; }
-    w->dpy = g_x11.XOpenDisplay(NULL);
-    if (!w->dpy) {
+    w->kind = TW_KIND_X11;
+    w->x.dpy = g_x11.XOpenDisplay(NULL);
+    if (!w->x.dpy) {
         tw_fail(TW_ERR_UNAVAILABLE, "cannot open the X display (DISPLAY=%s)",
                    getenv("DISPLAY") ? getenv("DISPLAY") : "");
         free(w);
         return NULL;
     }
-    int screen = g_x11.XDefaultScreen(w->dpy);
-    Window root = g_x11.XRootWindow(w->dpy, screen);
-    unsigned long black = g_x11.XBlackPixel(w->dpy, screen);
-    w->win = g_x11.XCreateSimpleWindow(w->dpy, root, 0, 0, (unsigned)width,
-                                       (unsigned)height, 0, black, black);
-    if (!w->win) {
-        g_x11.XCloseDisplay(w->dpy);
+    int screen = g_x11.XDefaultScreen(w->x.dpy);
+    Window root = g_x11.XRootWindow(w->x.dpy, screen);
+    unsigned long black = g_x11.XBlackPixel(w->x.dpy, screen);
+    w->x.win = g_x11.XCreateSimpleWindow(w->x.dpy, root, 0, 0, (unsigned)width,
+                                         (unsigned)height, 0, black, black);
+    if (!w->x.win) {
+        g_x11.XCloseDisplay(w->x.dpy);
         free(w);
         tw_fail(TW_ERR_SYSTEM, "XCreateSimpleWindow failed");
         return NULL;
     }
     /* No background: the server would otherwise repaint it over whatever
      * the GPU presented each time the window is exposed. */
-    g_x11.XSetWindowBackgroundPixmap(w->dpy, w->win, None);
-    g_x11.XSelectInput(w->dpy, w->win, StructureNotifyMask | ExposureMask);
-    g_x11.XStoreName(w->dpy, w->win, title ? title : "");
-    w->wm_delete = g_x11.XInternAtom(w->dpy, "WM_DELETE_WINDOW", False);
-    g_x11.XSetWMProtocols(w->dpy, w->win, &w->wm_delete, 1);
+    g_x11.XSetWindowBackgroundPixmap(w->x.dpy, w->x.win, None);
+    g_x11.XSelectInput(w->x.dpy, w->x.win, StructureNotifyMask | ExposureMask);
+    g_x11.XStoreName(w->x.dpy, w->x.win, title ? title : "");
+    w->x.wm_delete = g_x11.XInternAtom(w->x.dpy, "WM_DELETE_WINDOW", False);
+    g_x11.XSetWMProtocols(w->x.dpy, w->x.win, &w->x.wm_delete, 1);
     w->width = width;
     w->height = height;
-    g_x11.XMapWindow(w->dpy, w->win);
-    g_x11.XSync(w->dpy, False);
+    g_x11.XMapWindow(w->x.dpy, w->x.win);
+    g_x11.XSync(w->x.dpy, False);
 
     /* Wait for the map, so the window is viewable before anything presents
      * into it. Bounded: a server that never maps it is reported, not waited
      * on forever. */
-    for (int waited = 0; !w->mapped && waited < 2000; waited += 5) {
+    for (int waited = 0; !w->x.mapped && waited < 2000; waited += 5) {
         tw_x11_drain(w);
-        if (!w->mapped) tw_sleep_ms(5);
+        if (!w->x.mapped) tw_sleep_ms(5);
     }
-    if (!w->mapped) {
-        tw_destroy(w);
+    if (!w->x.mapped) {
+        tw_x11_destroy(w);
         tw_fail(TW_ERR_SYSTEM, "the X server did not map the window within 2 s");
         return NULL;
     }
     XWindowAttributes attrs;
-    if (g_x11.XGetWindowAttributes(w->dpy, w->win, &attrs)) {
+    if (g_x11.XGetWindowAttributes(w->x.dpy, w->x.win, &attrs)) {
         w->width = attrs.width;
         w->height = attrs.height;
     }
@@ -697,29 +744,15 @@ TwWindow* tw_create(const char* title, int width, int height) {
     return w;
 }
 
-void tw_destroy(TwWindow* w) {
-    if (!w) return;
-    if (w->dpy) {
-        if (w->win) g_x11.XDestroyWindow(w->dpy, w->win);
-        g_x11.XCloseDisplay(w->dpy);
-    }
-    free(w);
-}
-
-int tw_pump(TwWindow* w) {
-    if (!w || !w->dpy) return 0;
+static int tw_x11_pump(TwWindow* w) {
+    if (!w->x.dpy) return 0;
     tw_x11_drain(w);
     return w->close_requested ? 0 : 1;
 }
 
-int tw_set_size(TwWindow* w, int width, int height) {
-    tw_clear_error();
-    if (!w) return tw_fail(TW_ERR_ARG, "window is null");
-    if (width <= 0 || height <= 0) {
-        return tw_fail(TW_ERR_ARG, "window size must be positive, got %dx%d", width, height);
-    }
-    g_x11.XResizeWindow(w->dpy, w->win, (unsigned)width, (unsigned)height);
-    g_x11.XSync(w->dpy, False);
+static int tw_x11_set_size(TwWindow* w, int width, int height) {
+    g_x11.XResizeWindow(w->x.dpy, w->x.win, (unsigned)width, (unsigned)height);
+    g_x11.XSync(w->x.dpy, False);
     /* The ConfigureNotify carries the size the server (or a window manager)
      * actually granted; wait for one, bounded. */
     for (int waited = 0; waited < 1000; waited += 5) {
@@ -728,7 +761,7 @@ int tw_set_size(TwWindow* w, int width, int height) {
         tw_sleep_ms(5);
     }
     XWindowAttributes attrs;
-    if (g_x11.XGetWindowAttributes(w->dpy, w->win, &attrs) &&
+    if (g_x11.XGetWindowAttributes(w->x.dpy, w->x.win, &attrs) &&
         (attrs.width != w->width || attrs.height != w->height)) {
         w->width = attrs.width;
         w->height = attrs.height;
@@ -736,15 +769,6 @@ int tw_set_size(TwWindow* w, int width, int height) {
     }
     return TW_OK;
 }
-
-int tw_set_minimized(TwWindow* w, int on) {
-    (void)w; (void)on;
-    return tw_fail(TW_ERR_UNSUPPORTED, "an iconified X11 window keeps its size");
-}
-
-int   tw_kind(const TwWindow* w)    { return w ? TW_KIND_X11 : TW_KIND_NONE; }
-void* tw_handle(const TwWindow* w)  { return w ? (void*)(uintptr_t)w->win : NULL; }
-void* tw_display(const TwWindow* w) { return w ? (void*)w->dpy : NULL; }
 
 /* The shift that brings a visual's channel mask down to bit 0, and the
  * channel's width, so any TrueColor depth packs to 8 bits a channel. */
@@ -757,15 +781,9 @@ static unsigned tw_channel(unsigned long pixel, unsigned long mask) {
     return (unsigned)((v * 255ul + bits / 2ul) / bits);
 }
 
-int tw_pixel(TwWindow* w, int x, int y) {
-    tw_clear_error();
-    if (!w) { tw_fail(TW_ERR_ARG, "window is null"); return -1; }
-    if (x < 0 || y < 0 || x >= w->width || y >= w->height) {
-        tw_fail(TW_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, w->width, w->height);
-        return -1;
-    }
-    g_x11.XSync(w->dpy, False);
-    XImage* img = g_x11.XGetImage(w->dpy, w->win, x, y, 1, 1, AllPlanes, ZPixmap);
+static int tw_x11_pixel(TwWindow* w, int x, int y) {
+    g_x11.XSync(w->x.dpy, False);
+    XImage* img = g_x11.XGetImage(w->x.dpy, w->x.win, x, y, 1, 1, AllPlanes, ZPixmap);
     if (!img) { tw_fail(TW_ERR_SYSTEM, "XGetImage failed"); return -1; }
     unsigned long p = XGetPixel(img, 0, 0);
     unsigned r = tw_channel(p, img->red_mask);
@@ -775,42 +793,526 @@ int tw_pixel(TwWindow* w, int x, int y) {
     return (int)((r << 16) | (g << 8) | b);
 }
 
-#else  /* no X11 headers at build time */
+#endif /* TW_HAVE_X11 */
 
-/* The fields the shared accessors below read; nothing ever creates one. */
-struct TwWindow {
-    int width, height;
-    int resized;
+/* ------------------------------------------------------------------------ */
+/* Wayland (#2197): wl_compositor + xdg_wm_base through libwayland-client   */
+/* ------------------------------------------------------------------------ */
+#if defined(TW_HAVE_WAYLAND)
+
+/* The libwayland-client entry points this module calls, fetched with dlsym
+ * like libX11's, plus the four core interfaces it exports: the fixture
+ * links nothing and starts where there is no libwayland. */
+#define TW_WL_FNS(X)                                                                   \
+    X(wl_display_connect, struct wl_display*, (const char*))                           \
+    X(wl_display_disconnect, void, (struct wl_display*))                               \
+    X(wl_display_roundtrip, int, (struct wl_display*))                                 \
+    X(wl_display_flush, int, (struct wl_display*))                                     \
+    X(wl_display_get_fd, int, (struct wl_display*))                                    \
+    X(wl_display_dispatch_pending, int, (struct wl_display*))                          \
+    X(wl_display_prepare_read, int, (struct wl_display*))                              \
+    X(wl_display_read_events, int, (struct wl_display*))                               \
+    X(wl_display_cancel_read, void, (struct wl_display*))                              \
+    X(wl_proxy_marshal, void, (struct wl_proxy*, uint32_t, ...))                       \
+    X(wl_proxy_marshal_constructor, struct wl_proxy*,                                  \
+      (struct wl_proxy*, uint32_t, const struct wl_interface*, ...))                   \
+    X(wl_proxy_marshal_constructor_versioned, struct wl_proxy*,                        \
+      (struct wl_proxy*, uint32_t, const struct wl_interface*, uint32_t, ...))         \
+    X(wl_proxy_add_listener, int, (struct wl_proxy*, void (**)(void), void*))          \
+    X(wl_proxy_destroy, void, (struct wl_proxy*))
+
+static struct {
+    int   loaded;           /* 0 unprobed, 1 usable, -1 not */
+    void* lib;
+#define TW_WL_DECL(name, ret, args) ret (*name) args;
+    TW_WL_FNS(TW_WL_DECL)
+#undef TW_WL_DECL
+    const struct wl_interface* registry;
+    const struct wl_interface* compositor;
+    const struct wl_interface* surface;
+} g_wl;
+
+/* xdg-shell, the part a top-level window needs, spelled as wayland-scanner
+ * would generate it from xdg-shell.xml (stable, version 1). Only the
+ * requests this fixture sends carry argument types; the rest keep their
+ * signature so the opcodes line up, with no types, since they are never
+ * marshalled. xdg_wm_base is bound at version 1, so the compositor sends
+ * only the events listed here. */
+static const struct wl_interface* tw_no_types[8];
+static const struct wl_interface tw_xdg_surface_interface;
+static const struct wl_interface tw_xdg_toplevel_interface;
+
+static const struct wl_interface* tw_get_xdg_surface_types[2] = { &tw_xdg_surface_interface, NULL };
+static const struct wl_interface* tw_get_toplevel_types[1]    = { &tw_xdg_toplevel_interface };
+
+static const struct wl_message tw_xdg_wm_base_requests[] = {
+    { "destroy",           "",   tw_no_types },
+    { "create_positioner", "n",  tw_no_types },
+    { "get_xdg_surface",   "no", tw_get_xdg_surface_types },
+    { "pong",              "u",  tw_no_types },
+};
+static const struct wl_message tw_xdg_wm_base_events[] = {
+    { "ping", "u", tw_no_types },
+};
+static const struct wl_interface tw_xdg_wm_base_interface = {
+    "xdg_wm_base", 1, 4, tw_xdg_wm_base_requests, 1, tw_xdg_wm_base_events,
 };
 
-static int tw_no_x11(void) {
-    return tw_fail(TW_ERR_UNAVAILABLE,
-                      "built without the X11 headers (install libx11-dev and rebuild)");
+static const struct wl_message tw_xdg_surface_requests[] = {
+    { "destroy",             "",     tw_no_types },
+    { "get_toplevel",        "n",    tw_get_toplevel_types },
+    { "get_popup",           "n?oo", tw_no_types },
+    { "set_window_geometry", "iiii", tw_no_types },
+    { "ack_configure",       "u",    tw_no_types },
+};
+static const struct wl_message tw_xdg_surface_events[] = {
+    { "configure", "u", tw_no_types },
+};
+static const struct wl_interface tw_xdg_surface_interface = {
+    "xdg_surface", 1, 5, tw_xdg_surface_requests, 1, tw_xdg_surface_events,
+};
+
+static const struct wl_message tw_xdg_toplevel_requests[] = {
+    { "destroy",          "",     tw_no_types },
+    { "set_parent",       "?o",   tw_no_types },
+    { "set_title",        "s",    tw_no_types },
+    { "set_app_id",       "s",    tw_no_types },
+    { "show_window_menu", "ouii", tw_no_types },
+    { "move",             "ou",   tw_no_types },
+    { "resize",           "ouu",  tw_no_types },
+    { "set_max_size",     "ii",   tw_no_types },
+    { "set_min_size",     "ii",   tw_no_types },
+    { "set_maximized",    "",     tw_no_types },
+    { "unset_maximized",  "",     tw_no_types },
+    { "set_fullscreen",   "?o",   tw_no_types },
+    { "unset_fullscreen", "",     tw_no_types },
+    { "set_minimized",    "",     tw_no_types },
+};
+static const struct wl_message tw_xdg_toplevel_events[] = {
+    { "configure", "iia", tw_no_types },
+    { "close",     "",    tw_no_types },
+};
+static const struct wl_interface tw_xdg_toplevel_interface = {
+    "xdg_toplevel", 1, 14, tw_xdg_toplevel_requests, 2, tw_xdg_toplevel_events,
+};
+
+/* Opcodes of the core requests this fixture sends. */
+#define TW_WL_DISPLAY_GET_REGISTRY      1
+#define TW_WL_REGISTRY_BIND             0
+#define TW_WL_COMPOSITOR_CREATE_SURFACE 0
+#define TW_WL_SURFACE_DESTROY           0
+#define TW_WL_SURFACE_COMMIT            6
+#define TW_XDG_WM_BASE_DESTROY          0
+#define TW_XDG_WM_BASE_GET_XDG_SURFACE  2
+#define TW_XDG_WM_BASE_PONG             3
+#define TW_XDG_SURFACE_DESTROY          0
+#define TW_XDG_SURFACE_GET_TOPLEVEL     1
+#define TW_XDG_SURFACE_ACK_CONFIGURE    4
+#define TW_XDG_TOPLEVEL_DESTROY         0
+#define TW_XDG_TOPLEVEL_SET_TITLE       2
+#define TW_XDG_TOPLEVEL_SET_APP_ID      3
+
+static int tw_wl_load(void) {
+    if (g_wl.loaded) return g_wl.loaded > 0;
+    g_wl.loaded = -1;
+    g_wl.lib = dlopen("libwayland-client.so.0", RTLD_NOW | RTLD_GLOBAL);
+    if (!g_wl.lib) g_wl.lib = dlopen("libwayland-client.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!g_wl.lib) {
+        tw_fail(TW_ERR_UNAVAILABLE, "cannot load libwayland-client: %s", dlerror());
+        return 0;
+    }
+#define TW_WL_LOAD(name, ret, args)                                              \
+    g_wl.name = (ret (*) args)dlsym(g_wl.lib, #name);                              \
+    if (!g_wl.name) {                                                               \
+        tw_fail(TW_ERR_UNAVAILABLE, "libwayland-client has no %s", #name);       \
+        return 0;                                                                   \
+    }
+    TW_WL_FNS(TW_WL_LOAD)
+#undef TW_WL_LOAD
+    g_wl.registry   = (const struct wl_interface*)dlsym(g_wl.lib, "wl_registry_interface");
+    g_wl.compositor = (const struct wl_interface*)dlsym(g_wl.lib, "wl_compositor_interface");
+    g_wl.surface    = (const struct wl_interface*)dlsym(g_wl.lib, "wl_surface_interface");
+    if (!g_wl.registry || !g_wl.compositor || !g_wl.surface) {
+        tw_fail(TW_ERR_UNAVAILABLE, "libwayland-client exports no core interfaces");
+        return 0;
+    }
+    tw_get_xdg_surface_types[1] = g_wl.surface;
+    g_wl.loaded = 1;
+    return 1;
 }
 
-int tw_available(void) { tw_no_x11(); return 0; }
+/* Listeners. Each proxy carries its TwWindow as user data. */
+static void tw_wl_on_global(void* data, struct wl_proxy* registry, uint32_t name,
+                            const char* interface, uint32_t version) {
+    TwWindow* w = (TwWindow*)data;
+    if (strcmp(interface, "wl_compositor") == 0 && !w->w.compositor) {
+        uint32_t v = version < 4 ? version : 4;
+        w->w.compositor = g_wl.wl_proxy_marshal_constructor_versioned(
+            registry, TW_WL_REGISTRY_BIND, g_wl.compositor, v, name, g_wl.compositor->name, v, NULL);
+    } else if (strcmp(interface, "xdg_wm_base") == 0 && !w->w.wm_base) {
+        w->w.wm_base = g_wl.wl_proxy_marshal_constructor_versioned(
+            registry, TW_WL_REGISTRY_BIND, &tw_xdg_wm_base_interface, 1, name, "xdg_wm_base", 1, NULL);
+    }
+}
+static void tw_wl_on_global_remove(void* data, struct wl_proxy* registry, uint32_t name) {
+    (void)data; (void)registry; (void)name;
+}
+static void (*tw_wl_registry_listener[])(void) = {
+    (void (*)(void))tw_wl_on_global,
+    (void (*)(void))tw_wl_on_global_remove,
+};
+
+static void tw_wl_on_ping(void* data, struct wl_proxy* wm_base, uint32_t serial) {
+    (void)data;
+    g_wl.wl_proxy_marshal(wm_base, TW_XDG_WM_BASE_PONG, serial);
+}
+static void (*tw_wl_wm_base_listener[])(void) = { (void (*)(void))tw_wl_on_ping };
+
+static void tw_wl_on_configure(void* data, struct wl_proxy* xdg_surface, uint32_t serial) {
+    TwWindow* w = (TwWindow*)data;
+    g_wl.wl_proxy_marshal(xdg_surface, TW_XDG_SURFACE_ACK_CONFIGURE, serial);
+    w->w.configured = 1;
+}
+static void (*tw_wl_xdg_surface_listener[])(void) = { (void (*)(void))tw_wl_on_configure };
+
+/* A compositor that wants the window at a size says so here; 0 x 0 leaves
+ * the size to the client, which keeps what it asked for. */
+static void tw_wl_on_toplevel_configure(void* data, struct wl_proxy* toplevel,
+                                        int32_t width, int32_t height, struct wl_array* states) {
+    (void)toplevel; (void)states;
+    TwWindow* w = (TwWindow*)data;
+    if (width > 0 && height > 0 && (width != w->width || height != w->height)) {
+        w->width = width;
+        w->height = height;
+        w->resized = 1;
+    }
+}
+static void tw_wl_on_toplevel_close(void* data, struct wl_proxy* toplevel) {
+    (void)toplevel;
+    ((TwWindow*)data)->close_requested = 1;
+}
+static void (*tw_wl_toplevel_listener[])(void) = {
+    (void (*)(void))tw_wl_on_toplevel_configure,
+    (void (*)(void))tw_wl_on_toplevel_close,
+};
+
+/* Handles what the compositor has sent without blocking: the read pattern
+ * libwayland documents for a client that shares the connection with
+ * another consumer (here the Vulkan WSI, on its own queue). */
+static void tw_wl_drain(TwWindow* w) {
+    struct wl_display* d = w->w.display;
+    while (g_wl.wl_display_prepare_read(d) != 0) g_wl.wl_display_dispatch_pending(d);
+    g_wl.wl_display_flush(d);
+    struct pollfd pfd;
+    pfd.fd = g_wl.wl_display_get_fd(d);
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) g_wl.wl_display_read_events(d);
+    else g_wl.wl_display_cancel_read(d);
+    g_wl.wl_display_dispatch_pending(d);
+}
+
+static int tw_wl_available(void) {
+    if (!tw_wl_load()) return 0;
+    struct wl_display* d = g_wl.wl_display_connect(NULL);
+    if (!d) {
+        tw_fail(TW_ERR_UNAVAILABLE, "cannot connect to the Wayland display (WAYLAND_DISPLAY=%s)",
+                getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "");
+        return 0;
+    }
+    g_wl.wl_display_disconnect(d);
+    return 1;
+}
+
+static void tw_wl_destroy(TwWindow* w) {
+    if (w->w.toplevel)    { g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_DESTROY); g_wl.wl_proxy_destroy(w->w.toplevel); }
+    if (w->w.xdg_surface) { g_wl.wl_proxy_marshal(w->w.xdg_surface, TW_XDG_SURFACE_DESTROY); g_wl.wl_proxy_destroy(w->w.xdg_surface); }
+    if (w->w.surface)     { g_wl.wl_proxy_marshal(w->w.surface, TW_WL_SURFACE_DESTROY); g_wl.wl_proxy_destroy(w->w.surface); }
+    if (w->w.wm_base)     { g_wl.wl_proxy_marshal(w->w.wm_base, TW_XDG_WM_BASE_DESTROY); g_wl.wl_proxy_destroy(w->w.wm_base); }
+    if (w->w.compositor)  g_wl.wl_proxy_destroy(w->w.compositor);
+    if (w->w.registry)    g_wl.wl_proxy_destroy(w->w.registry);
+    if (w->w.display) {
+        g_wl.wl_display_flush(w->w.display);
+        g_wl.wl_display_disconnect(w->w.display);
+    }
+    free(w);
+}
+
+static TwWindow* tw_wl_create(const char* title, int width, int height) {
+    if (!tw_wl_load()) return NULL;
+
+    TwWindow* w = (TwWindow*)calloc(1, sizeof(*w));
+    if (!w) { tw_fail(TW_ERR_OOM, "out of memory"); return NULL; }
+    w->kind = TW_KIND_WAYLAND;
+    w->width = width;
+    w->height = height;
+    w->w.display = g_wl.wl_display_connect(NULL);
+    if (!w->w.display) {
+        tw_fail(TW_ERR_UNAVAILABLE, "cannot connect to the Wayland display (WAYLAND_DISPLAY=%s)",
+                getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "");
+        free(w);
+        return NULL;
+    }
+    w->w.registry = g_wl.wl_proxy_marshal_constructor((struct wl_proxy*)w->w.display,
+                                                      TW_WL_DISPLAY_GET_REGISTRY, g_wl.registry, NULL);
+    if (!w->w.registry) {
+        tw_wl_destroy(w);
+        tw_fail(TW_ERR_SYSTEM, "wl_display.get_registry failed");
+        return NULL;
+    }
+    g_wl.wl_proxy_add_listener(w->w.registry, tw_wl_registry_listener, w);
+    g_wl.wl_display_roundtrip(w->w.display);   /* the globals */
+    if (!w->w.compositor || !w->w.wm_base) {
+        tw_wl_destroy(w);
+        tw_fail(TW_ERR_UNSUPPORTED, "the compositor offers no %s",
+                !w->w.compositor ? "wl_compositor" : "xdg_wm_base");
+        return NULL;
+    }
+    g_wl.wl_proxy_add_listener(w->w.wm_base, tw_wl_wm_base_listener, w);
+
+    w->w.surface = g_wl.wl_proxy_marshal_constructor(w->w.compositor, TW_WL_COMPOSITOR_CREATE_SURFACE,
+                                                     g_wl.surface, NULL);
+    w->w.xdg_surface = w->w.surface
+        ? g_wl.wl_proxy_marshal_constructor(w->w.wm_base, TW_XDG_WM_BASE_GET_XDG_SURFACE,
+                                            &tw_xdg_surface_interface, NULL, w->w.surface)
+        : NULL;
+    w->w.toplevel = w->w.xdg_surface
+        ? g_wl.wl_proxy_marshal_constructor(w->w.xdg_surface, TW_XDG_SURFACE_GET_TOPLEVEL,
+                                            &tw_xdg_toplevel_interface, NULL)
+        : NULL;
+    if (!w->w.toplevel) {
+        tw_wl_destroy(w);
+        tw_fail(TW_ERR_SYSTEM, "cannot make an xdg_toplevel");
+        return NULL;
+    }
+    g_wl.wl_proxy_add_listener(w->w.xdg_surface, tw_wl_xdg_surface_listener, w);
+    g_wl.wl_proxy_add_listener(w->w.toplevel, tw_wl_toplevel_listener, w);
+    g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_SET_TITLE, title ? title : "");
+    g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_SET_APP_ID, "aether-contrib-test");
+    /* The initial commit, with no buffer, asks for the first configure;
+     * only after acknowledging it may anything attach a buffer, which is
+     * what the Vulkan swapchain will do. */
+    g_wl.wl_proxy_marshal(w->w.surface, TW_WL_SURFACE_COMMIT);
+    g_wl.wl_display_flush(w->w.display);
+    for (int waited = 0; !w->w.configured && waited < 2000; waited += 5) {
+        tw_wl_drain(w);
+        if (!w->w.configured) tw_sleep_ms(5);
+    }
+    if (!w->w.configured) {
+        tw_wl_destroy(w);
+        tw_fail(TW_ERR_SYSTEM, "the compositor did not configure the window within 2 s");
+        return NULL;
+    }
+    w->resized = 0;
+    return w;
+}
+
+static int tw_wl_pump(TwWindow* w) {
+    if (!w->w.display) return 0;
+    tw_wl_drain(w);
+    return w->close_requested ? 0 : 1;
+}
+
+/* Under xdg-shell the client owns its size: the next buffer it attaches at
+ * the new size is the resize, so the fixture only records what was asked. */
+static int tw_wl_set_size(TwWindow* w, int width, int height) {
+    if (width != w->width || height != w->height) {
+        w->width = width;
+        w->height = height;
+        w->resized = 1;
+    }
+    tw_wl_drain(w);
+    return TW_OK;
+}
+
+#endif /* TW_HAVE_WAYLAND */
+
+/* ------------------------------------------------------------------------ */
+/* The public entry points, dispatching on the window system in use          */
+/* ------------------------------------------------------------------------ */
+
+#if defined(TW_HAVE_X11) || defined(TW_HAVE_WAYLAND)
+
+/* The backend the environment asks for and this build has; TW_KIND_NONE
+ * with the reason set when neither can open a window here. */
+static int tw_pick_system(void) {
+    const char* want = tw_requested_system();
+    int want_x11 = strcmp(want, "x11") == 0;
+    int want_wl  = strcmp(want, "wayland") == 0;
+    if (want[0] && !want_x11 && !want_wl) {
+        tw_fail(TW_ERR_ARG, "AETHER_TEST_WINDOW_SYSTEM=%s is neither x11 nor wayland", want);
+        return TW_KIND_NONE;
+    }
+#if defined(TW_HAVE_X11)
+    if (!want_wl && tw_x11_available()) return TW_KIND_X11;
+    if (want_x11) return TW_KIND_NONE;
+#else
+    if (want_x11) {
+        tw_fail(TW_ERR_UNAVAILABLE, "built without the X11 headers (install libx11-dev and rebuild)");
+        return TW_KIND_NONE;
+    }
+#endif
+#if defined(TW_HAVE_WAYLAND)
+    if (tw_wl_available()) return TW_KIND_WAYLAND;
+#else
+    if (want_wl) tw_fail(TW_ERR_UNAVAILABLE, "built without the Wayland headers (install libwayland-dev and rebuild)");
+#endif
+    return TW_KIND_NONE;
+}
+
+int tw_available(void) { return tw_pick_system() != TW_KIND_NONE; }
+
+TwWindow* tw_create(const char* title, int width, int height) {
+    tw_clear_error();
+    if (width <= 0 || height <= 0) {
+        tw_fail(TW_ERR_ARG, "window size must be positive, got %dx%d", width, height);
+        return NULL;
+    }
+    switch (tw_pick_system()) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     return tw_x11_create(title, width, height);
+#endif
+#if defined(TW_HAVE_WAYLAND)
+        case TW_KIND_WAYLAND: return tw_wl_create(title, width, height);
+#endif
+        default:              return NULL;
+    }
+}
+
+void tw_destroy(TwWindow* w) {
+    if (!w) return;
+    switch (w->kind) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     tw_x11_destroy(w); return;
+#endif
+#if defined(TW_HAVE_WAYLAND)
+        case TW_KIND_WAYLAND: tw_wl_destroy(w); return;
+#endif
+        default:              free(w); return;
+    }
+}
+
+int tw_pump(TwWindow* w) {
+    if (!w) return 0;
+    switch (w->kind) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     return tw_x11_pump(w);
+#endif
+#if defined(TW_HAVE_WAYLAND)
+        case TW_KIND_WAYLAND: return tw_wl_pump(w);
+#endif
+        default:              return 0;
+    }
+}
+
+int tw_set_size(TwWindow* w, int width, int height) {
+    tw_clear_error();
+    if (!w) return tw_fail(TW_ERR_ARG, "window is null");
+    if (width <= 0 || height <= 0) {
+        return tw_fail(TW_ERR_ARG, "window size must be positive, got %dx%d", width, height);
+    }
+    switch (w->kind) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     return tw_x11_set_size(w, width, height);
+#endif
+#if defined(TW_HAVE_WAYLAND)
+        case TW_KIND_WAYLAND: return tw_wl_set_size(w, width, height);
+#endif
+        default:              return tw_fail(TW_ERR_ARG, "not a window");
+    }
+}
+
+int tw_set_minimized(TwWindow* w, int on) {
+    (void)on;
+    if (!w) return tw_fail(TW_ERR_ARG, "window is null");
+    if (w->kind == TW_KIND_WAYLAND) {
+        return tw_fail(TW_ERR_UNSUPPORTED, "xdg-shell has no request to restore a minimised window");
+    }
+    return tw_fail(TW_ERR_UNSUPPORTED, "an iconified X11 window keeps its size");
+}
+
+int   tw_kind(const TwWindow* w)    { return w ? w->kind : TW_KIND_NONE; }
+
+void* tw_handle(const TwWindow* w) {
+    if (!w) return NULL;
+    switch (w->kind) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     return (void*)(uintptr_t)w->x.win;
+#endif
+#if defined(TW_HAVE_WAYLAND)
+        case TW_KIND_WAYLAND: return (void*)w->w.surface;
+#endif
+        default:              return NULL;
+    }
+}
+
+void* tw_display(const TwWindow* w) {
+    if (!w) return NULL;
+    switch (w->kind) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     return (void*)w->x.dpy;
+#endif
+#if defined(TW_HAVE_WAYLAND)
+        case TW_KIND_WAYLAND: return (void*)w->w.display;
+#endif
+        default:              return NULL;
+    }
+}
+
+int tw_pixel(TwWindow* w, int x, int y) {
+    tw_clear_error();
+    if (!w) { tw_fail(TW_ERR_ARG, "window is null"); return -1; }
+    if (x < 0 || y < 0 || x >= w->width || y >= w->height) {
+        tw_fail(TW_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, w->width, w->height);
+        return -1;
+    }
+    switch (w->kind) {
+#if defined(TW_HAVE_X11)
+        case TW_KIND_X11:     return tw_x11_pixel(w, x, y);
+#endif
+        case TW_KIND_WAYLAND:
+            /* A Wayland client cannot read another surface, its own on
+             * screen included; a compositor's screenshot protocol is its
+             * own. What was presented is checked from the swapchain's
+             * count and the target's readback instead. */
+            tw_fail(TW_ERR_UNSUPPORTED, "the screen is not readable on Wayland");
+            return -1;
+        default:
+            tw_fail(TW_ERR_ARG, "not a window");
+            return -1;
+    }
+}
+
+#else  /* neither the X11 nor the Wayland headers at build time */
+
+static int tw_no_system(void) {
+    return tw_fail(TW_ERR_UNAVAILABLE,
+                      "built without the X11 or Wayland headers (install libx11-dev or libwayland-dev and rebuild)");
+}
+
+int tw_available(void) { tw_no_system(); return 0; }
 TwWindow* tw_create(const char* title, int width, int height) {
     (void)title; (void)width; (void)height;
-    tw_no_x11();
+    tw_no_system();
     return NULL;
 }
 void  tw_destroy(TwWindow* w) { (void)w; }
 int   tw_pump(TwWindow* w) { (void)w; return 0; }
 int   tw_set_size(TwWindow* w, int width, int height) {
     (void)w; (void)width; (void)height;
-    return tw_no_x11();
+    return tw_no_system();
 }
-int   tw_set_minimized(TwWindow* w, int on) { (void)w; (void)on; return tw_no_x11(); }
+int   tw_set_minimized(TwWindow* w, int on) { (void)w; (void)on; return tw_no_system(); }
 int   tw_kind(const TwWindow* w)    { (void)w; return TW_KIND_NONE; }
 void* tw_handle(const TwWindow* w)  { (void)w; return NULL; }
 void* tw_display(const TwWindow* w) { (void)w; return NULL; }
 int   tw_pixel(TwWindow* w, int x, int y) {
     (void)w; (void)x; (void)y;
-    tw_no_x11();
+    tw_no_system();
     return -1;
 }
 
-#endif /* TW_HAVE_X11 */
+#endif /* TW_HAVE_X11 || TW_HAVE_WAYLAND */
 #endif /* platform */
 
 /* ======================================================================== */

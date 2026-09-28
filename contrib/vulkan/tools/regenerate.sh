@@ -31,8 +31,12 @@ REGISTRY=""
 # listed command is outside the selection.
 DISPATCH_API=1.0
 DISPATCH_EXTENSIONS=VK_KHR_surface,VK_KHR_swapchain,VK_KHR_win32_surface,VK_KHR_xlib_surface,VK_KHR_wayland_surface,VK_EXT_metal_surface
+# The module adds ray queries (#2203): VK_KHR_acceleration_structure and
+# VK_KHR_ray_query, with VK_KHR_deferred_host_operations, which acceleration
+# structures require. VK_KHR_portability_enumeration postdates registry
+# 1.3.204, so vkgen spells its name and flag by hand instead.
 MODULE_API=1.3
-MODULE_EXTENSIONS=VK_KHR_surface,VK_KHR_swapchain
+MODULE_EXTENSIONS=VK_KHR_surface,VK_KHR_swapchain,VK_KHR_deferred_host_operations,VK_KHR_acceleration_structure,VK_KHR_ray_query
 
 while [ $# -gt 0 ]; do
     case "$1" in

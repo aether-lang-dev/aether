@@ -16,7 +16,11 @@
 import std.fs
 import std.string
 import contrib.vulkan
+import contrib.vulkan.vk
 import std.spec
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
 
 extern tw_ae_available() -> int
 extern tw_ae_last_error() -> string
@@ -69,6 +73,72 @@ wait_for_colour(win: ptr, x: int, y: int, want: int) -> int {
         tries = tries + 1
     }
     return got
+}
+
+// 1 when `name` is among the extension properties `props` lists.
+lists_extension(props: ptr, count: int, name: string) -> int {
+    i = 0
+    while i < count {
+        e = (props + i * sizeof(VkExtensionProperties)) as *VkExtensionProperties
+        if string.equals(e.extensionName, name) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// An instance of the program's own through contrib.vulkan.vk, with
+// VK_KHR_surface and `kind`'s surface extension enabled when the loader
+// offers them (and portability enumeration, for MoltenVK); `with_surface`
+// 0 asks for neither, an instance that can make no surface. Null when
+// vkCreateInstance fails.
+create_vk_instance(kind: int, with_surface: int) -> ptr {
+    app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
+    app.sType = vk.STRUCTURE_TYPE_APPLICATION_INFO
+    app.pApplicationName = "test_vulkan_present"
+    app.apiVersion = (1 << 22) | (1 << 12)
+    ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+    ci.pApplicationInfo = app as ptr
+    names = calloc(3, 8)
+    n = 0
+    exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
+    if lists_extension(exts, ne, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 1 {
+        (names as string[])[n] = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+        n = n + 1
+        ci.flags = vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+    }
+    if with_surface == 1 && lists_extension(exts, ne, vk.KHR_SURFACE_EXTENSION_NAME) == 1 {
+        (names as string[])[n] = vk.KHR_SURFACE_EXTENSION_NAME
+        n = n + 1
+        if lists_extension(exts, ne, vk.surface_extension(kind)) == 1 {
+            (names as string[])[n] = vk.surface_extension(kind)
+            n = n + 1
+        }
+    }
+    vk.array_free(exts)
+    ci.enabledExtensionCount = n as uint32
+    ci.ppEnabledExtensionNames = names
+    out = calloc(1, 8)
+    r = vk.vkCreateInstance(ci as ptr, null, out)
+    instance = (out as ptr[])[0]
+    free(out)
+    free(names)
+    free(ci)
+    free(app)
+    if r != vk.SUCCESS {
+        println("  vkCreateInstance returned ${r}")
+        return null
+    }
+    return instance
+}
+
+// The instance's first physical device, or null.
+first_vk_device(instance: ptr) -> ptr {
+    devs, n, r = vk.vkEnumeratePhysicalDevices_all(instance)
+    found = null
+    if r == vk.SUCCESS && n > 0 { found = (devs as ptr[])[0] }
+    vk.array_free(devs)
+    return found
 }
 
 // A whole-target triangle in one colour, drawn over a clear of another, so
@@ -127,12 +197,23 @@ main() {
             }
         }
     }
-    // Reading the screen back is what proves a frame arrived; on macOS the
-    // fixture cannot, so those cases say so instead of passing vacuously.
+    // Reading the screen back is what proves a frame arrived; on macOS and
+    // Wayland the fixture cannot (the screen-recording permission there, no
+    // way for a client to read the screen here), so those cases say so
+    // instead of passing vacuously. What those kinds still check is that
+    // every present succeeded and was counted.
     readable = 0
-    if ready == 1 && kind != vulkan.WINDOW_NSVIEW { readable = 1 }
+    if ready == 1 && kind != vulkan.WINDOW_NSVIEW && kind != vulkan.WINDOW_WAYLAND { readable = 1 }
     read_reason = reason
-    if ready == 1 && readable == 0 { read_reason = "the screen is not readable on macOS" }
+    if ready == 1 && readable == 0 { tw_ae_pixel(win, 0, 0); read_reason = "the screen is not readable here (${tw_ae_last_error()})" }
+    // Wayland leaves the size to the application, so a swapchain cannot
+    // notice the window growing on its own: swapchain_resize is the path.
+    grows = ready
+    grow_reason = reason
+    if ready == 1 && kind == vulkan.WINDOW_WAYLAND {
+        grows = 0
+        grow_reason = "Wayland leaves the size to the application; swapchain_resize is the path there"
+    }
 
     spec.describe(fw, "vulkan: swapchain over a window") {
         spec.it_when(ready, "takes the window's size", reason) callback {
@@ -144,6 +225,24 @@ main() {
         spec.it_when(ready, "refuses to present a target with no frame yet", reason) callback {
             spec.assert_eq(vulkan.present(sc, t), vulkan.ERR_ARG, "present before any draw")
             spec.assert_true(string.length(vulkan.last_error()) > 0, "explains why")
+        }
+
+        // Every kind, the ones whose screen cannot be read included: each
+        // present is counted as handed to the display, and the target keeps
+        // its frame readable afterwards.
+        spec.it_when(ready, "counts each frame handed to the display and leaves the target readable", reason) callback {
+            fill_triangle(t, 0.0, 1.0, 0.0)
+            spec.assert_eq(vulkan.draw(t, pipe, 0.0, 0.0, 1.0, 1.0), vulkan.OK, "draw")
+            before = vulkan.swapchain_presented(sc)
+            i = 0
+            while i < 3 {
+                spec.assert_eq(vulkan.present(sc, t), vulkan.OK, "present ${i}")
+                tw_ae_pump(win)
+                i = i + 1
+            }
+            spec.assert_eq(vulkan.swapchain_presented(sc), before + 3, "three more frames presented")
+            centre = vulkan.pixel(t, tw_ae_width(win) / 2, tw_ae_height(win) / 2) as int
+            spec.assert_eq((centre >> 8) & 0xFFFFFF, 0x00FF00, "the target still holds the green triangle (got ${centre})")
         }
 
         spec.it_when(readable, "shows the drawn frame in the window", read_reason) callback {
@@ -182,7 +281,7 @@ main() {
             spec.assert_eq(near_rgb(centre, 0xFF0000, 3), 1, "the centre (got ${centre})")
         }
 
-        spec.it_when(ready, "rebuilds by itself when the window outgrows it", reason) callback {
+        spec.it_when(grows, "rebuilds by itself when the window outgrows it", grow_reason) callback {
             spec.assert_eq(tw_ae_set_size(win, 200, 150), 0, "window resized")
             w = tw_ae_width(win)
             h = tw_ae_height(win)
@@ -314,6 +413,62 @@ main() {
         spec.it(fw, "tolerates destroying a null swapchain") callback {
             vulkan.swapchain_destroy(null)
             spec.assert_eq(vulkan.present(null, null), vulkan.ERR_ARG, "present(null) refused")
+        }
+    }
+
+    // A program that drives the API itself through contrib.vulkan.vk (a
+    // renderer with its own instance) gets a VkSurfaceKHR over the toolkit's
+    // window handle from vk.surface_create (#2199): the platform create
+    // functions live in the same C as the swapchain's, resolved on the
+    // caller's instance rather than the module's device.
+    spec.describe(fw, "vulkan.vk: a surface on the program's own instance") {
+        spec.it_when(ready, "makes one over the window and queries its capabilities", reason) callback {
+            instance = create_vk_instance(kind, 1)
+            spec.assert_true(instance != null, "an instance with ${vk.surface_extension(kind)}")
+            vk.load_instance(instance)
+            surface = vk.surface_create(instance, kind, tw_ae_display(win), tw_ae_handle(win))
+            spec.assert_true(surface != null, "surface_create (${vk.last_error()})")
+            gpu = first_vk_device(instance)
+            spec.assert_true(gpu != null, "a physical device")
+            caps = calloc(1, sizeof(VkSurfaceCapabilitiesKHR)) as *VkSurfaceCapabilitiesKHR
+            spec.assert_eq(vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surface, caps as ptr), vk.SUCCESS,
+                           "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")
+            spec.assert_true(caps.minImageCount >= 1, "at least one image (minImageCount ${caps.minImageCount})")
+            // Win32, X11 and AppKit report the window's size; Wayland leaves
+            // it to the application (0xFFFFFFFF).
+            w = caps.currentExtent.width as int
+            spec.assert_true(w == tw_ae_width(win) || w == -1 || w == 0xFFFFFFFF,
+                             "currentExtent is the window's width or undefined (got ${w} for ${tw_ae_width(win)})")
+            free(caps)
+            vk.vkDestroySurfaceKHR(instance, surface, null)
+            vk.vkDestroyInstance(instance, null)
+            vk.load_instance(null)
+        }
+        spec.it_when(ready, "names the extension an instance without it lacks", reason) callback {
+            bare = create_vk_instance(kind, 0)
+            spec.assert_true(bare != null, "an instance with no surface extension")
+            surface = vk.surface_create(bare, kind, tw_ae_display(win), tw_ae_handle(win))
+            spec.assert_true(surface == null, "refused")
+            spec.assert_true(string.index_of(vk.last_error(), vk.surface_extension(kind)) >= 0,
+                             "names ${vk.surface_extension(kind)} (got: ${vk.last_error()})")
+            vk.vkDestroyInstance(bare, null)
+        }
+        spec.it_when(have_dev, "refuses an unknown kind, a null instance and a null window", reason) callback {
+            instance = create_vk_instance(kind, 1)
+            spec.assert_true(vk.surface_create(instance, 9, null, tw_ae_handle(win)) == null, "kind 9")
+            spec.assert_true(string.index_of(vk.last_error(), "1..5") >= 0, "says which kinds exist (${vk.last_error()})")
+            spec.assert_true(vk.surface_create(null, kind, tw_ae_display(win), tw_ae_handle(win)) == null, "null instance")
+            spec.assert_true(vk.surface_create(instance, kind, tw_ae_display(win), null) == null, "null window")
+            spec.assert_true(string.length(vk.last_error()) > 0, "explains why")
+            vk.vkDestroyInstance(instance, null)
+        }
+        spec.it(fw, "names each kind's surface extension") callback {
+            spec.assert_eq(string.equals(vk.surface_extension(vulkan.WINDOW_WIN32), "VK_KHR_win32_surface"), 1, "Win32")
+            spec.assert_eq(string.equals(vk.surface_extension(vulkan.WINDOW_NSVIEW), "VK_EXT_metal_surface"), 1, "NSView")
+            spec.assert_eq(string.equals(vk.surface_extension(vulkan.WINDOW_X11), "VK_KHR_xlib_surface"), 1, "X11")
+            spec.assert_eq(string.equals(vk.surface_extension(vulkan.WINDOW_WAYLAND), "VK_KHR_wayland_surface"), 1, "Wayland")
+            spec.assert_eq(string.equals(vk.surface_extension(vulkan.WINDOW_METAL_LAYER), "VK_EXT_metal_surface"), 1, "CAMetalLayer")
+            spec.assert_eq(string.length(vk.surface_extension(0)), 0, "kind 0 has none")
         }
     }
 

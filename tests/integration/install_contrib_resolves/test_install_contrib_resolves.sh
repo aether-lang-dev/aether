@@ -10,11 +10,15 @@
 #      had one in the source tree.
 #   2. install.sh trims the source-tree noise (.c, .m, tests/,
 #      benchmarks/, example_*.ae, test_*.sh, build.sh, ci.sh) — the
-#      install layout is descriptor-+-header only, with one
-#      explicit carve-out: contrib/host/<lang>/aether_host_<lang>.c
+#      install layout is descriptor-+-header only, with two
+#      explicit carve-outs: contrib/host/<lang>/aether_host_<lang>.c
 #      DOES ship (plain `make install` doesn't build the matching
 #      libaether_host_<lang>.a, so downstream apps that
-#      `import contrib.host.<lang>` compile the bridge from source).
+#      `import contrib.host.<lang>` compile the bridge from source),
+#      and so does any .c a module.ae names with @source (#2208):
+#      contrib.vulkan, contrib.vulkan.vk, contrib.d3d12 and
+#      contrib.metal compile theirs into the program, so an installed
+#      toolchain without it cannot build them at all.
 #      See docs/install-layout.md "What does NOT ship".
 #   3. The module.ae files are syntactically what the resolver looks
 #      for: a non-empty file at the documented path.
@@ -28,6 +32,40 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR" || true' EXIT
 
 cd "$ROOT"
+
+# The .c files an installed contrib tree must still hold: each one a
+# module.ae in the SOURCE tree names with @source, at the same relative
+# path. Printed relative to contrib/ (vulkan/aether_vulkan.c).
+sourced_c_files() {
+    for mod in $(find contrib -name 'module.ae' | sort); do
+        moddir="$(dirname "$mod")"
+        sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$mod" | while IFS= read -r rel; do
+            ( cd "$moddir/$(dirname "$rel")" 2>/dev/null && printf '%s/%s\n' "$(pwd)" "$(basename "$rel")" ) \
+                | sed "s|^$(pwd)/contrib/||"
+        done
+    done | sort -u
+}
+
+# The .c files an installed tree may hold: the @source'd ones above (as
+# `find` prints them, under $1) and, when $2 is "host", the host bridges.
+# Anything else `find` lists is noise the trim step let through.
+unexpected_c_files() {
+    allowed="$(sourced_c_files | sed "s|^|$1/|")"
+    find "$1" -type f -name '*.c' 2>/dev/null | while IFS= read -r f; do
+        case "$2:$f" in host:*/contrib/host/*/aether_host_*.c) continue ;; esac
+        printf '%s\n' "$allowed" | grep -qxF -- "$f" || printf '%s\n' "$f"
+    done
+}
+
+# Every @source'd .c must be there; this is what #2208 was about.
+assert_sourced_c_present() {
+    for rel in $(sourced_c_files); do
+        if [ ! -f "$1/$rel" ]; then
+            echo "  [FAIL] $2: $rel is named by a module's @source but was trimmed from the install"
+            exit 1
+        fi
+    done
+}
 
 # Run install.sh against the temp prefix. Quiet — we only care about
 # the resulting layout.
@@ -69,9 +107,8 @@ fi
 # Source-tree noise must NOT have been copied. Hits would be
 # regression of the trim step.
 unwanted_count=$( {
-    # `.c` files: everything except the host-bridge carve-out.
-    find "$CONTRIB_INSTALL" -type f -name '*.c' \
-        ! -path '*/contrib/host/*/aether_host_*.c' 2>/dev/null
+    # `.c` files: everything except the host-bridge and @source carve-outs.
+    unexpected_c_files "$CONTRIB_INSTALL" host
     find "$CONTRIB_INSTALL" -type f -name '*.m'         2>/dev/null
     find "$CONTRIB_INSTALL" -type d -name tests         2>/dev/null
     find "$CONTRIB_INSTALL" -type d -name benchmarks    2>/dev/null
@@ -84,8 +121,7 @@ unwanted_count=$( {
 if [ "$unwanted_count" -ne 0 ]; then
     echo "  [FAIL] install layout still contains source-tree noise:"
     {
-        find "$CONTRIB_INSTALL" -type f -name '*.c' \
-            ! -path '*/contrib/host/*/aether_host_*.c'
+        unexpected_c_files "$CONTRIB_INSTALL" host
         find "$CONTRIB_INSTALL" -type f -name '*.m'
         find "$CONTRIB_INSTALL" -type d -name tests
         find "$CONTRIB_INSTALL" -type d -name benchmarks
@@ -96,6 +132,8 @@ if [ "$unwanted_count" -ne 0 ]; then
     } | head -10
     exit 1
 fi
+
+assert_sourced_c_present "$CONTRIB_INSTALL" "install.sh"
 
 # Spot-check a flagship module the issue called out by name.
 for canary in sqlite tinyweb host/python; do
@@ -162,8 +200,7 @@ fi
 # install.sh, plus test_*.ae which the Makefile install trim now
 # filters too).
 make_unwanted=$( {
-    find "$MAKE_CONTRIB_INSTALL" -type f -name '*.c' \
-        ! -path '*/contrib/host/*/aether_host_*.c' 2>/dev/null
+    unexpected_c_files "$MAKE_CONTRIB_INSTALL" archives
     find "$MAKE_CONTRIB_INSTALL" -type f -name '*.m'          2>/dev/null
     find "$MAKE_CONTRIB_INSTALL" -type d -name tests          2>/dev/null
     find "$MAKE_CONTRIB_INSTALL" -type d -name benchmarks     2>/dev/null
@@ -177,8 +214,7 @@ make_unwanted=$( {
 if [ "$make_unwanted" -ne 0 ]; then
     echo "  [FAIL] make install-contrib layout still contains source-tree noise:"
     {
-        find "$MAKE_CONTRIB_INSTALL" -type f -name '*.c' \
-            ! -path '*/contrib/host/*/aether_host_*.c'
+        unexpected_c_files "$MAKE_CONTRIB_INSTALL" archives
         find "$MAKE_CONTRIB_INSTALL" -type f -name '*.m'
         find "$MAKE_CONTRIB_INSTALL" -type d -name tests
         find "$MAKE_CONTRIB_INSTALL" -type d -name benchmarks
@@ -190,6 +226,8 @@ if [ "$make_unwanted" -ne 0 ]; then
     } | head -10
     exit 1
 fi
+
+assert_sourced_c_present "$MAKE_CONTRIB_INSTALL" "make install-contrib"
 
 # Same canary set as install.sh's check above — pinning the two
 # install paths to a matching ship-list defeats the tinyweb-trim

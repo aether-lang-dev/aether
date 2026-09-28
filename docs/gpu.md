@@ -148,7 +148,7 @@ a toolkit that is itself built with this compiler.
 
 | CI leg | Runs | On |
 |---|---|---|
-| Linux contrib | `contrib.vulkan`, and the generated declarations against the installed registry | lavapipe (Mesa's CPU Vulkan), with Xvfb as the display |
+| Linux contrib | `contrib.vulkan`, and the generated declarations against the installed registry | lavapipe (Mesa's CPU Vulkan), with Xvfb as the display, and weston's headless backend for the Wayland surface |
 | Windows | `contrib.vulkan` and `contrib.d3d12` | lavapipe from MSYS2, and WARP |
 | macOS contrib | `contrib.metal`, and `contrib.vulkan` through MoltenVK | the runner's Metal device |
 
@@ -164,6 +164,4 @@ Each gap has an issue:
 | Missing | Issue |
 |---|---|
 | Sampling a target's colour or depth in a later pass, 3D textures, indirect draws, dynamic uniform offsets, GPU timestamps, and a second vertex stream for per-instance data, in all three modules | [#2198](https://github.com/aether-lang-dev/aether/issues/2198) |
-| Making a `VkSurfaceKHR` from a window handle on a program's own instance, for `contrib.vulkan.vk` | [#2199](https://github.com/aether-lang-dev/aether/issues/2199) |
-| Running Wayland presentation in CI | [#2197](https://github.com/aether-lang-dev/aether/issues/2197) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

@@ -451,8 +451,10 @@ jobs:
         sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers vulkan-tools
         # The presentation test opens a real window and reads the screen
         # back: Xvfb is the display, the X11 headers let the window fixture
-        # and contrib/vulkan's VK_KHR_xlib_surface arm compile.
-        sudo apt-get install -y xvfb libx11-dev
+        # and contrib/vulkan's VK_KHR_xlib_surface arm compile. The Wayland
+        # headers give the fixture its Wayland backend, and weston's headless
+        # backend is the compositor it presents to below (#2197).
+        sudo apt-get install -y xvfb libx11-dev libwayland-dev weston
 
     - name: Report the Vulkan implementation in use
       run: |
@@ -490,6 +492,44 @@ jobs:
             exit 1
           fi
         done
+
+    # The Wayland presentation path (#2197): the same present binary, told to
+    # open a wl_surface, against weston's headless backend. A Wayland client
+    # cannot read the screen, so the cases that check pixels on screen skip
+    # and say so, and the window's size is the application's, so the case
+    # where the window outgrows the swapchain skips too; the rest must pass,
+    # and the output must say it went through Wayland, not X11.
+    - name: Present to a Wayland surface (weston headless)
+      env:
+        VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        XDG_RUNTIME_DIR: /tmp/aether-xdg-runtime
+        WAYLAND_DISPLAY: aether-ci
+        AETHER_TEST_WINDOW_SYSTEM: wayland
+      run: |
+        mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+        weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" \
+               --width=1280 --height=1024 --idle-time=0 > weston.log 2>&1 &
+        for i in $(seq 1 100); do
+          [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break
+          sleep 0.1
+        done
+        if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+          echo "weston did not come up"; cat weston.log; exit 1
+        fi
+        out="$(cd build/contrib-check/vulkan_present.rundir && ../vulkan_present 2>&1 || true)"
+        echo "$out"
+        passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+        skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+        failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+        if ! printf '%s' "$out" | grep -q "not readable on Wayland"; then
+          echo "contrib/vulkan present did not go through Wayland; weston and libwayland should be present on this leg"
+          exit 1
+        fi
+        if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt 7 ]; then
+          echo "contrib/vulkan present did not run against the Wayland surface"
+          echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+          exit 1
+        fi
 
     # contrib/vulkan's files generated from the Vulkan registry, checked
     # against the registry libvulkan-dev installs: the dispatch header must be
