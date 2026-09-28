@@ -14,6 +14,50 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.735.0]
+
+### Added
+
+- **`contrib.vulkan` presents to a Wayland surface in CI.** The window fixture
+  the presentation tests use gained a Wayland backend (`wl_compositor` and
+  `xdg_wm_base` through `libwayland-client`, opened at runtime like libX11),
+  chosen with `AETHER_TEST_WINDOW_SYSTEM=wayland`, and the Linux contrib leg
+  runs the presentation test against weston's headless backend and fails if
+  it skipped. A Wayland client cannot read the screen back, so the cases that
+  check pixels on screen skip there; each present is still checked to succeed
+  and be counted, and the target read back.
+
+- **`contrib.vulkan.vk` declares acceleration structures and ray queries.**
+  `VK_KHR_acceleration_structure`, `VK_KHR_ray_query` and
+  `VK_KHR_deferred_host_operations` join the generated selection: the five
+  build and query commands, every `VkAccelerationStructure*` struct, enum and
+  flag, and the feature and property structs. A new test builds a one-triangle
+  BLAS and a one-instance TLAS through the module and traces a hit and a miss
+  from a compute shader, skipping on a device without the feature.
+
+- **`contrib.vulkan.vk` adopts a caller's `vkGetInstanceProcAddr` and makes a
+  surface on the caller's instance.** `vk.load_instance_with(gipa, instance)`
+  resolves the commands through a loader or interposer the program holds
+  (NVIDIA Streamline, whose hooks DLSS and Reflex need), with a null instance
+  routing `vkCreateInstance` itself through it; `vk.load_device` then takes the
+  device's `vkGetDeviceProcAddr` from it, and `vk.load_device_with(gdpa, device)`
+  takes one by hand. `vk.surface_create(instance, kind, display, window)` makes
+  a `VkSurfaceKHR` over a toolkit's window handle (the five kinds
+  `contrib.vulkan` presents to) on a program's own instance, with
+  `vk.surface_extension(kind)` naming what to enable and `vk.last_error()`
+  the reason for a refusal. The module also spells
+  `VK_KHR_portability_enumeration` and `VK_KHR_portability_subset`.
+
+### Fixed
+
+- **An installed toolchain builds `contrib.vulkan`, `contrib.vulkan.vk`,
+  `contrib.d3d12` and `contrib.metal` again.** `install.sh` and the Makefile's
+  install targets deleted every `.c` under `share/aether/contrib` except the
+  host bridges, and those four modules compile theirs into the program with
+  `@source` rather than linking an archive, so the installed module named a
+  file that was not there (E0100). The trim now keeps every file a `module.ae`
+  in the tree names with `@source`.
+
 ## [0.734.0]
 
 ### Fixed
