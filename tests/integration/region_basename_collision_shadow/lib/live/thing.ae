@@ -2,7 +2,7 @@
 // last segment with lib/geo/thing.ae, so module_assign_namespaces renames
 // both off "thing" the moment a scope loads both.
 
-exports (thing_kind, THING_CONST)
+exports(thing_kind, THING_CONST)
 
 const THING_CONST: int = 42
 

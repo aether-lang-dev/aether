@@ -12,8 +12,8 @@
 //      entirely, for both a function call and a constant read shaped like
 //      member access.
 
-import consumer1 (use_both)
-import consumer2 (wrap_call, wrap_const)
+import consumer1(use_both)
+import consumer2(wrap_call, wrap_const)
 
 extern exit(code: int)
 
