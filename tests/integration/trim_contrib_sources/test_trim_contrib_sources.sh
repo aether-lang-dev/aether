@@ -71,11 +71,18 @@ sh "$TRIM" "$TMP/contrib" || fail "exited non-zero on the ../ case"
 present "$TMP/contrib/vulkan/aether_vulkan.c"        "a @source climbing out of vk/"
 
 # --- behind a symlinked prefix, as ~/.aether may be ------------------------
+# Only where `ln -s` makes a symlink. MSYS2 without winsymlinks copies the
+# directory instead, so trimming through "link" would clean a copy and leave
+# "real" untouched; that is not the case being tested.
 make_tree "$TMP/real/contrib"
-ln -s "$TMP/real" "$TMP/link"
-sh "$TRIM" "$TMP/link/contrib" || fail "exited non-zero through a symlink"
-present "$TMP/real/contrib/vulkan/aether_vulkan.c"   "symlinked prefix: @source kept"
-gone    "$TMP/real/contrib/vulkan/scratch.c"         "symlinked prefix: noise removed"
+ln -s "$TMP/real" "$TMP/link" 2>/dev/null || true
+if [ -L "$TMP/link" ]; then
+    sh "$TRIM" "$TMP/link/contrib" || fail "exited non-zero through a symlink"
+    present "$TMP/real/contrib/vulkan/aether_vulkan.c"   "symlinked prefix: @source kept"
+    gone    "$TMP/real/contrib/vulkan/scratch.c"         "symlinked prefix: noise removed"
+else
+    echo "  (trim_contrib_sources: no symlinks here, symlinked-prefix case not run)"
+fi
 
 # --- a directory that is not there is not an error -------------------------
 sh "$TRIM" "$TMP/nowhere" || fail "exited non-zero on a missing directory"
