@@ -175,8 +175,9 @@ jobs:
       if: matrix.name == 'macOS / Clang (ARM64)'
       # Hard step cap as a backstop to the per-test timeouts inside
       # run_macos_leaks.sh: the gate can never hold a runner indefinitely.
-      # 20 min is generous for 16 instrumented programs (leaks +
-      # MallocStackLogging is ~10x slower than the bare run).
+      # The gate covers the whole tests/regression suite (about 350
+      # programs, each ~10x slower under leaks + MallocStackLogging), so it
+      # checks them one per core; one at a time it had grown past this cap.
       timeout-minutes: 20
       run: make test-macos-leaks
 

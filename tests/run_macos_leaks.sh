@@ -27,7 +27,9 @@
 #
 # MallocStackLogging adds ~10x runtime, so the full sweep is slower than
 # the old curated subset — but it is the only way a new leak in an
-# un-curated program fails locally rather than slipping to CI.
+# un-curated program fails locally rather than slipping to CI. The
+# programs are checked side by side, one per core (LEAKS_JOBS to choose),
+# which is what keeps the sweep inside CI's time cap as the suite grows.
 #
 # Skips cleanly (exit 0) on non-Darwin hosts.
 
@@ -69,13 +71,6 @@ is_excluded() {
     grep -qE "^[[:space:]]*$1[[:space:]]*$" "$EXCLUDE_FILE"
 }
 
-echo "=================================================="
-echo "macOS leaks(1) gate — full regression suite"
-echo "=================================================="
-
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-
 # Per-step timeout with a PROCESS-GROUP kill so a stuck step can't hang
 # the whole CI job until the 6-hour ceiling. This must kill the group,
 # not just the direct child: `leaks --atExit -- prog` forks `prog`, and a
@@ -109,36 +104,41 @@ run_bounded() {
 BUILD_TIMEOUT=240
 LEAKS_TIMEOUT=120
 
-fails=0
-covered=0
-excluded=0
-for t in $TESTS; do
+# Build and leak-check one regression program. Prints its progress line at
+# once and its verdict as one block when done, and leaves a marker in
+# $tmpdir -- pass_<t>, fail_<t> or skip_<t> -- for the parent to count.
+check_one() {
+    t="$1"
     src="$REG/$t.ae"
     if [ ! -f "$src" ]; then
         echo "  [MISS] $t.ae not found — skipping"
-        continue
+        return
     fi
     if is_excluded "$t"; then
         echo "  [SKIP] $t: excluded (forks subprocesses — leak-checked on Linux CI)"
-        excluded=$((excluded + 1))
-        continue
+        : >"$tmpdir/skip_$t"
+        return
     fi
     bin="$tmpdir/$t"
+    report="$tmpdir/report_$t"
     # Newline-terminated progress line (NOT \r) so it flushes and is
-    # visible in the non-TTY CI log — the in-flight test is always named,
-    # so a slow/stuck step is obvious from the live output.
+    # visible in the non-TTY CI log — every test in flight is named, so a
+    # slow/stuck step is obvious from the live output.
     echo "  [ .. ] $t: build + leak-check ..."
-    run_bounded "$BUILD_TIMEOUT" "$AE" build "$src" -o "$bin" >"$tmpdir/build.log" 2>&1
+    run_bounded "$BUILD_TIMEOUT" "$AE" build "$src" -o "$bin" >"$tmpdir/build_$t.log" 2>&1
     brc=$?
     if [ "$brc" -eq 124 ]; then
         echo "  [FAIL] $t: build TIMED OUT (>${BUILD_TIMEOUT}s)"
-        fails=$((fails + 1))
-        continue
+        : >"$tmpdir/fail_$t"
+        return
     elif [ "$brc" -ne 0 ]; then
-        echo "  [FAIL] $t: build failed"
-        sed 's/^/      /' "$tmpdir/build.log" | tail -10
-        fails=$((fails + 1))
-        continue
+        {
+            echo "  [FAIL] $t: build failed"
+            sed 's/^/      /' "$tmpdir/build_$t.log" | tail -10
+        } >"$report"
+        cat "$report"
+        : >"$tmpdir/fail_$t"
+        return
     fi
     # Capture via a FILE, not a `$(...)` pipe: with a pipe, a leaks(1) run
     # whose target program doesn't exit would orphan the program holding
@@ -148,7 +148,6 @@ for t in $TESTS; do
     lk_out="$tmpdir/leaks_$t.out"
     MallocStackLogging=1 run_bounded "$LEAKS_TIMEOUT" leaks --atExit -- "$bin" >"$lk_out" 2>&1
     lrc=$?
-    covered=$((covered + 1))
     if [ "$lrc" -eq 124 ]; then
         # `leaks` runs the target in its own process group, so the
         # run_bounded group-kill above won't reach an orphaned target —
@@ -156,8 +155,8 @@ for t in $TESTS; do
         # run. (Harmless if already gone.)
         pkill -9 -f "$bin" 2>/dev/null || true
         echo "  [FAIL] $t: leaks(1) TIMED OUT (>${LEAKS_TIMEOUT}s) — program did not exit"
-        fails=$((fails + 1))
-        continue
+        : >"$tmpdir/fail_$t"
+        return
     fi
     # `leaks` prints "Process N: K leaks for B total leaked bytes."
     count="$(sed -nE 's/.*: ([0-9]+) leaks for [0-9]+ total.*/\1/p' "$lk_out" | head -1)"
@@ -169,17 +168,50 @@ for t in $TESTS; do
         else
             echo "  [PASS] $t: 0 leaks"
         fi
+        : >"$tmpdir/pass_$t"
     else
-        echo "  [FAIL] $t: $count leaks (allowed ≤ $allow)"
-        grep -E "ROOT LEAK|leaks for" "$lk_out" | head -12 | sed 's/^/      /'
-        fails=$((fails + 1))
+        {
+            echo "  [FAIL] $t: $count leaks (allowed ≤ $allow)"
+            grep -E "ROOT LEAK|leaks for" "$lk_out" | head -12 | sed 's/^/      /'
+        } >"$report"
+        cat "$report"
+        : >"$tmpdir/fail_$t"
     fi
-done
+    rm -f "$bin" "$lk_out" "$tmpdir/build_$t.log"
+}
+
+# A worker: `run_macos_leaks.sh --one TEST TMPDIR`, one per program, run
+# by the fan-out below.
+if [ "${1:-}" = "--one" ]; then
+    tmpdir="$3"
+    check_one "$2"
+    exit 0
+fi
+
+echo "=================================================="
+echo "macOS leaks(1) gate — full regression suite"
+echo "=================================================="
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+# The programs are independent, so they are checked side by side, one per
+# core: the suite is several hundred programs and leaks(1) with
+# MallocStackLogging is ~10x the bare run, so one at a time outgrows the
+# step's time cap as the suite grows. LEAKS_JOBS overrides the count.
+jobs="${LEAKS_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 2)}"
+echo "$(printf '%s\n' $TESTS | wc -l | tr -d ' ') programs, $jobs at a time"
+printf '%s\n' $TESTS | xargs -P "$jobs" -I{} sh "$0" --one {} "$tmpdir"
+
+covered=$(ls "$tmpdir" | grep -c '^pass_\|^fail_')
+excluded=$(ls "$tmpdir" | grep -c '^skip_')
+fails=$(ls "$tmpdir" | grep -c '^fail_')
 
 echo "--------------------------------------------------"
 echo "covered $covered programs, $excluded excluded, $fails over budget"
 if [ "$fails" -ne 0 ]; then
-    echo "FAIL: macOS leaks gate found leaks above the audited budget"
+    echo "FAIL: macOS leaks gate found leaks above the audited budget:"
+    ls "$tmpdir" | sed -n 's/^fail_/  /p'
     exit 1
 fi
 echo "PASS: macOS leaks gate clean (within tests/leaks_known.txt budget)"
