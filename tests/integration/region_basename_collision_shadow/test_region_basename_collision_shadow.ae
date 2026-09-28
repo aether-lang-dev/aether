@@ -1,0 +1,34 @@
+// Two bugs found rebuilding aether-ui's apps/frames_demo against latest
+// aether, both from module_assign_namespaces renaming two same-last-segment
+// modules (lib/geo/thing.ae and lib/thing.ae here) off their shared leaf
+// "thing":
+//
+//   1. A scope whose own imports reduce to the SAME written prefix twice
+//      (consumer1: geo.thing selective + thing whole-module) had the first
+//      import's rewrite claim every "thing.name" in the body, including
+//      the second import's own calls.
+//   2. A parameter/local named identically to the module it forwards to
+//      (consumer2's `thing: int`) blocked the qualified-call rewrite
+//      entirely, for both a function call and a constant read shaped like
+//      member access.
+
+import consumer1(use_both)
+import consumer2(wrap_call, wrap_const)
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${label}: expected ${want}, got ${got}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== test_region_basename_collision_shadow ===")
+    check("ambiguous same-prefix imports resolve to the right module each", use_both(), 11)
+    check("qualified call survives parameter shadowing its own module name", wrap_call(5), 6)
+    check("qualified constant read survives parameter shadowing", wrap_const(41), 1)
+    println("All region basename-collision-shadow cases pass")
+}

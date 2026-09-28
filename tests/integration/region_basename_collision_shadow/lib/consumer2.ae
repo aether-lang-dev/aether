@@ -1,0 +1,23 @@
+// Shadow case: a parameter named identically to the module it forwards to --
+// a same-named forwarding wrapper, the aether-ui `region_set_animated`
+// pattern. No prefix ambiguity here (this scope imports only `thing`
+// unaliased), but the collision elsewhere in the program still renames
+// `thing`'s namespace, so the qualified calls below need rewriting despite
+// "thing" also being this function's own parameter name.
+
+import live.thing
+
+// AST_FUNCTION_CALL: `thing.thing_kind(thing)` -- must rewrite regardless of
+// the parameter shadowing "thing".
+wrap_call(thing: int) -> int {
+    return thing.thing_kind(thing)
+}
+
+// AST_MEMBER_ACCESS shaped like a qualified constant read: `thing.THING_CONST`
+// through the same shadowing parameter. An opaque `int` has no real field
+// named THING_CONST, so this can only be the qualified constant -- and must
+// resolve as one even though "thing" is shadowed here too.
+wrap_const(thing: int) -> int {
+    if thing.thing_kind(thing) == thing.THING_CONST { return 1 }
+    return 0
+}

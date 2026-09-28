@@ -1,0 +1,9 @@
+// The module every consumer here means by a bare `import thing`. Shares its
+// last segment with lib/geo/thing.ae, so module_assign_namespaces renames
+// both off "thing" the moment a scope loads both.
+
+exports(thing_kind, THING_CONST)
+
+const THING_CONST: int = 42
+
+thing_kind(x: int) -> int { return x + 1 }
