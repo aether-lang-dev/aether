@@ -1,0 +1,15 @@
+// Ambiguous-prefix case: this scope's own imports reduce to the SAME
+// written prefix "thing" twice -- geo.thing selectively (never meant to bind
+// a bare prefix at all) and thing as a whole module (the only reason
+// anything here writes "thing." unaliased). Before the fix, whichever import
+// rewrite_import_prefixes processed first claimed every "thing.name" in this
+// file, including calls the OTHER import meant.
+
+import geo.thing (make_thing)
+import live.thing
+
+use_both() -> int {
+    base = make_thing()             // geo.thing, via its selective name -- untouched by the bug
+    bumped = thing.thing_kind(base) // meant for lib/thing.ae -- this is what broke
+    return bumped
+}

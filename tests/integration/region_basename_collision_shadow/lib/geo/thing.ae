@@ -1,0 +1,7 @@
+// The colliding sibling: shares the last segment "thing" with
+// lib/live/thing.ae, imported SELECTIVELY everywhere it's used, so it never
+// intends to bind the bare "thing." prefix for qualified access.
+
+exports (make_thing)
+
+make_thing() -> int { return 10 }

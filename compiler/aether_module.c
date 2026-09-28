@@ -2604,13 +2604,29 @@ static void rename_aliased_import_refs(ASTNode* node, const char* alias,
  * module body (apply_inherited_selective_imports), before the typechecker
  * sees either.
  *
- * `from` is skipped inside any function or closure that binds it as a
- * parameter or local: `vk.field` on a local struct is a field read, the
- * same shadowing rule rename_intra_module_refs and the typechecker apply. */
+ * `from` is skipped on AST_MEMBER_ACCESS when it binds a parameter or local
+ * there AND the target module doesn't export a member of that name: `vk.field`
+ * on a local struct is a field read, the same shadowing rule
+ * rename_intra_module_refs and the typechecker apply. But a real struct field
+ * and a module's export list are never the same query — `region.LIVE_RASTER`
+ * with `region: ptr` a parameter can't be a field of an opaque pointer, and
+ * IS how this codebase spells a qualified constant reference through a
+ * same-named wrapper — so when `to`'s module exports the member name, that
+ * reading wins over the shadow guard. AST_FUNCTION_CALL and AST_IDENTIFIER
+ * are different: the parser only ever produces a dotted `from.suffix` value
+ * for those two node types from literal qualified-call syntax
+ * (`from.suffix(...)` or a bare reference to it as a value) — Aether has no
+ * method-call sugar that would let a local value named `from` change what
+ * that syntax means — so those two rewrite unconditionally. A local or
+ * parameter named identically to a module is a real, common pattern here
+ * (`region_set_animated(region: ptr, on: int) { region.region_set_animated(region, on) }`,
+ * a same-named forwarding wrapper): skipping the whole node for it used to
+ * be harmless because no rename was needed without a collision, but a
+ * collision-driven rename now needs exactly this call rewritten, and used
+ * to skip it, leaving `region.` unrewritten and misresolved. */
 static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char* to,
                                      const char** local_names, int local_count) {
     if (!node) return;
-    if (name_in_list(from, local_names, local_count)) return;
     size_t from_len = strlen(from);
 
     if ((node->type == AST_FUNCTION_CALL || node->type == AST_IDENTIFIER) &&
@@ -2624,10 +2640,13 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
             node->value = renamed;
         }
     }
-    if (node->type == AST_MEMBER_ACCESS && node->child_count > 0) {
+    if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->value) {
         ASTNode* base = node->children[0];
+        int shadowed = name_in_list(from, local_names, local_count);
+        int target_exports_it = shadowed &&
+            module_exports_symbol(module_find_by_namespace(to), node->value);
         if (base && base->type == AST_IDENTIFIER && base->value &&
-            strcmp(base->value, from) == 0) {
+            strcmp(base->value, from) == 0 && (!shadowed || target_exports_it)) {
             free(base->value);
             base->value = strdup(to);
         }
@@ -2652,6 +2671,85 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
     }
 }
 
+/* Same job as rewrite_qualified_prefix, for the case where TWO OR MORE of a
+ * scope's imports reduce to the SAME written prefix (two same-last-segment
+ * modules, at least one imported unaliased, neither aliased to tell them
+ * apart in the source text). rewrite_qualified_prefix alone would let
+ * whichever import rewrite_import_prefixes processes first claim every
+ * `written.name` in the body — including ones the OTHER import's qualified
+ * calls meant — silently misrouting them to a module that never defined
+ * them (E0303/E0301 naming the wrong module, or worse, a same-named export
+ * on the wrong side going uncaught). Each occurrence is instead resolved by
+ * which CANDIDATE actually exports that specific suffix name; first match
+ * among `candidates` wins (declaration order), and an occurrence none of
+ * them export is left as written, so it fails with the ORIGINAL prefix in
+ * its diagnostic rather than one silently swapped in for it. */
+static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
+                                               AetherModule** candidates, int ncandidates,
+                                               const char** local_names, int local_count) {
+    if (!node) return;
+    size_t from_len = strlen(from);
+
+    /* Same reasoning as rewrite_qualified_prefix: a dotted AST_FUNCTION_CALL/
+     * AST_IDENTIFIER value is qualified-call syntax the parser committed to,
+     * unaffected by `from` also being a local/parameter here, so no shadow
+     * check gates this branch. */
+    if ((node->type == AST_FUNCTION_CALL || node->type == AST_IDENTIFIER) &&
+        node->value && strncmp(node->value, from, from_len) == 0 &&
+        node->value[from_len] == '.') {
+        const char* suffix = node->value + from_len + 1;
+        for (int i = 0; i < ncandidates; i++) {
+            if (!candidates[i] || !module_exports_symbol(candidates[i], suffix)) continue;
+            const char* to = module_namespace_of(candidates[i]->name);
+            size_t len = strlen(to) + strlen(node->value + from_len) + 1;
+            char* renamed = malloc(len);
+            if (renamed) {
+                snprintf(renamed, len, "%s%s", to, node->value + from_len);
+                free(node->value);
+                node->value = renamed;
+            }
+            break;
+        }
+    }
+    if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->value) {
+        ASTNode* base = node->children[0];
+        if (base && base->type == AST_IDENTIFIER && base->value &&
+            strcmp(base->value, from) == 0) {
+            int shadowed = name_in_list(from, local_names, local_count);
+            for (int i = 0; i < ncandidates; i++) {
+                if (!candidates[i]) continue;
+                if (shadowed && !module_exports_symbol(candidates[i], node->value)) continue;
+                free(base->value);
+                base->value = strdup(module_namespace_of(candidates[i]->name));
+                break;
+            }
+            /* A shadowed base none of the candidates export the member of is
+             * left as written — same policy as an unmatched suffix above and
+             * as rewrite_qualified_prefix's shadow guard: it's a real field
+             * read on the local, not a qualified reference. */
+        }
+    }
+
+    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_CLOSURE) {
+        const char* scope_locals[128];
+        int scope_count = 0;
+        collect_local_names(node, scope_locals, &scope_count, 128);
+        for (int i = 0; i < local_count && scope_count < 128; i++) {
+            if (!name_in_list(local_names[i], scope_locals, scope_count))
+                scope_locals[scope_count++] = local_names[i];
+        }
+        for (int i = 0; i < node->child_count; i++) {
+            rewrite_qualified_prefix_ambiguous(node->children[i], from, candidates, ncandidates,
+                                               scope_locals, scope_count);
+        }
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        rewrite_qualified_prefix_ambiguous(node->children[i], from, candidates, ncandidates,
+                                           local_names, local_count);
+    }
+}
+
 /* The prefix a scope writes for one of its imports: the `as` alias when
  * there is one, else the import path's last segment. */
 static const char* import_written_prefix(ASTNode* imp) {
@@ -2670,11 +2768,23 @@ static const char* import_written_prefix(ASTNode* imp) {
  * loaded module shares). `self_name` is the module `scope_ast` belongs to,
  * NULL for the entry program: an import written with the module's OWN last
  * segment (module `audio` importing `std.audio`, #1780) is left alone, so
- * `audio.x` there keeps resolving to the module itself, as documented. */
+ * `audio.x` there keeps resolving to the module itself, as documented.
+ *
+ * Collected into one pass, rather than rewritten import-by-import, so a
+ * SCOPE that writes two same-last-segment imports unaliased (`vg.geom.region`
+ * and `vg.region`, both renamed off "region" by module_assign_namespaces)
+ * doesn't have the first one's rewrite blindly consume every "region.name"
+ * in the body before the second's ever runs — see
+ * rewrite_qualified_prefix_ambiguous. */
 static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
                                     const char* self_name) {
     if (!body || !scope_ast) return;
-    for (int i = 0; i < scope_ast->child_count; i++) {
+
+#define REWRITE_MAX_IMPORTS 64
+    const char* writtens[REWRITE_MAX_IMPORTS];
+    AetherModule* mods[REWRITE_MAX_IMPORTS];
+    int n = 0;
+    for (int i = 0; i < scope_ast->child_count && n < REWRITE_MAX_IMPORTS; i++) {
         ASTNode* imp = scope_ast->children[i];
         if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
         if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
@@ -2682,8 +2792,31 @@ static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
         const char* ns = module_namespace_of(imp->value);
         if (strcmp(written, ns) == 0) continue;
         if (self_name && strcmp(written, module_last_segment(self_name)) == 0) continue;
-        rewrite_qualified_prefix(body, written, ns, NULL, 0);
+        writtens[n] = written;
+        mods[n] = module_find(imp->value);
+        n++;
     }
+
+    int done[REWRITE_MAX_IMPORTS] = {0};
+    for (int i = 0; i < n; i++) {
+        if (done[i]) continue;
+        AetherModule* candidates[REWRITE_MAX_IMPORTS];
+        int ncand = 0;
+        candidates[ncand++] = mods[i];
+        done[i] = 1;
+        for (int j = i + 1; j < n; j++) {
+            if (!done[j] && strcmp(writtens[i], writtens[j]) == 0) {
+                candidates[ncand++] = mods[j];
+                done[j] = 1;
+            }
+        }
+        if (ncand == 1) {
+            if (mods[i]) rewrite_qualified_prefix(body, writtens[i], module_namespace_of(mods[i]->name), NULL, 0);
+        } else {
+            rewrite_qualified_prefix_ambiguous(body, writtens[i], candidates, ncand, NULL, 0);
+        }
+    }
+#undef REWRITE_MAX_IMPORTS
 }
 
 /* The registered module whose parsed AST is `mod_ast`, or NULL. */
