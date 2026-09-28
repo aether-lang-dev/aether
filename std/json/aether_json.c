@@ -1338,6 +1338,10 @@ int json_is_null(JsonValue* v) {
     return !v || v->type == JSON_NULL;
 }
 
+int json_is_integer(JsonValue* v) {
+    return v && v->type == JSON_NUMBER && (v->flags & JV_FLAG_INTEGER) != 0;
+}
+
 int json_get_bool(JsonValue* v) {
     return (v && v->type == JSON_BOOL) ? v->data.boolean : 0;
 }

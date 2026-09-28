@@ -15,7 +15,7 @@
 
 exports(
     json_parse_raw, json_last_error, json_stringify_raw, json_free,
-    json_type, json_is_null,
+    json_type, json_is_null, json_is_integer,
     json_get_bool, json_get_number, json_get_int, json_get_long, json_get_string_raw,
     json_object_get_raw, json_object_set_raw, json_object_has,
     json_object_size_raw, json_object_key_at, json_object_value_at,
@@ -56,6 +56,10 @@ extern json_free(value: ptr)
 // ---- type introspection (infallible, no wrapper needed) ----
 extern json_type(value: ptr) -> int
 extern json_is_null(value: ptr) -> int
+// 1 for a number written as an integer within int64 (or built with
+// json_create_int / from_int), 0 for one with a fraction or exponent and
+// for anything that is not a number: whether `42` or `42.0` was written.
+extern json_is_integer(value: ptr) -> int
 
 // ---- typed getters (infallible — sentinel 0/0.0 on wrong type) ----
 // get_int is 32-bit and clamps to +/-2147483647 on overflow; use get_long

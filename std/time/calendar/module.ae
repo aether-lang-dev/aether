@@ -1,0 +1,645 @@
+// std.time.calendar — civil date/time over Unix epoch seconds (UTC), with
+// no clock.
+//
+// The canonical value is Unix epoch SECONDS (a `long`); civil fields
+// (year/month/day/hour/min/sec + weekday/year-day) are derived from it and
+// vice versa with an exact, dependency-free proleptic-Gregorian algorithm
+// (Howard Hinnant's `days_from_civil` / `civil_from_days`, public domain —
+// http://howardhinnant.github.io/date_algorithms.html), so results are
+// deterministic and testable without libc timezone state. All times are UTC.
+//
+// The calendar algorithm and the ISO-8601 shape mirror C3's `std::time`
+// (MIT, Copyright (c) 2022-2026 Christoffer Lernö and contributors) at the
+// capability level, re-expressed in Aether's idiom (free functions +
+// tuples/struct rather than methods/operators). Duration is measured in
+// whole seconds here; sub-second precision is a later extension.
+//
+// std.time is this module plus the clock (`now`, `now_ms`), which it reads
+// through std.os. Code that only converts, computes and formats dates --
+// a template engine, a parser -- imports this module instead, and so needs
+// no `--with=os` under `--emit=lib`.
+
+import std.string
+import std.strbuilder
+
+exports(
+    DateTime,
+    from_civil,
+    from_unix, to_unix,
+    weekday, day_of_year, is_leap_year, days_in_month,
+    add_seconds, add_minutes, add_hours, add_days,
+    diff_seconds, is_before, is_after,
+    to_iso8601, parse_iso8601, parse_iso8601_offset,
+    strftime, strftime_at
+)
+
+// A civil UTC date/time. `epoch` (epoch seconds) is canonical; the civil
+// fields are a decoded view of it. Build with from_civil / from_unix (or
+// std.time's now); read fields directly.
+struct DateTime {
+    epoch: long // canonical: seconds since 1970-01-01T00:00:00Z
+    year: int
+    month: int // 1..12
+    day: int // 1..31
+    hour: int // 0..23
+    minute: int // 0..59
+    second: int // 0..59
+    wday: int // 0=Sunday .. 6=Saturday
+    yday: int // 1..366
+}
+
+// ---- calendar core (Hinnant's algorithms) --------------------------------
+
+is_leap_year(y: int) -> bool {
+    if y % 4 != 0 { return false }
+    if y % 100 != 0 { return true }
+    return y % 400 == 0
+}
+
+days_in_month(y: int, m: int) -> int {
+    if m == 2 {
+        if is_leap_year(y) { return 29 }
+        return 28
+    }
+    // Apr, Jun, Sep, Nov -> 30; the rest 31.
+    if m == 4 || m == 6 || m == 9 || m == 11 { return 30 }
+    return 31
+}
+
+// Days since 1970-01-01 for a civil y/m/d (proleptic Gregorian). Exact for
+// all years; `m` in 1..12, `d` in 1..31.
+fn days_from_civil(y: int, m: int, d: int) -> long {
+    yy = y
+    if m <= 2 { yy = yy - 1 }
+    era = yy
+    if era < 0 { era = era - 399 }
+    era = era / 400
+    yoe = yy - era * 400 // [0, 399]
+    mp = m + 9
+    if m > 2 { mp = m - 3 } // [0, 11]
+    doy = (153 * mp + 2) / 5 + d - 1 // [0, 365]
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy // [0, 146096]
+    return (era as long) * 146097 + (doe as long) - 719468
+}
+
+// Inverse: civil y/m/d from days-since-epoch. Returns (year, month, day).
+fn civil_from_days(z: long) -> (int, int, int) {
+    zz = z + 719468
+    era = zz
+    if era < 0 { era = era - 146096 }
+    era = era / 146097
+    doe = zz - era * 146097 // [0, 146096]
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365 // [0, 399]
+    y = (yoe as int) + (era as int) * 400
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100) // [0, 365]
+    mp = (5 * (doy as int) + 2) / 153 // [0, 11]
+    d = (doy as int) - (153 * mp + 2) / 5 + 1 // [1, 31]
+    m = mp + 3
+    if mp >= 10 { m = mp - 9 } // [1, 12]
+    yr = y
+    if m <= 2 { yr = y + 1 }
+    return yr, m, d
+}
+
+// ---- construction --------------------------------------------------------
+
+const SECS_PER_DAY = 86400
+const SECS_PER_HOUR = 3600
+const SECS_PER_MIN = 60
+
+// Build a DateTime from an epoch-seconds value, decoding civil fields.
+from_unix(epoch: long) -> DateTime {
+    // Floor-divide into days + intraday seconds (handles negatives).
+    days = epoch / SECS_PER_DAY
+    rem = epoch - days * SECS_PER_DAY
+    if rem < 0 {
+        rem = rem + SECS_PER_DAY
+        days = days - 1
+    }
+    y, mo, d = civil_from_days(days)
+    secs = rem as int
+    hh = secs / SECS_PER_HOUR
+    mm = (secs - hh * SECS_PER_HOUR) / SECS_PER_MIN
+    ss = secs - hh * SECS_PER_HOUR - mm * SECS_PER_MIN
+    // Weekday: 1970-01-01 was a Thursday (=4). days can be negative.
+    w = ((days + 4) % 7) as int
+    if w < 0 { w = w + 7 }
+    // Day of year (1-based).
+    yd = (days - days_from_civil(y, 1, 1)) as int + 1
+    dt = DateTime {
+        epoch: epoch, year: y, month: mo, day: d,
+        hour: hh, minute: mm, second: ss, wday: w, yday: yd
+    }
+    return dt
+}
+
+// Build a DateTime from civil UTC fields (normalising via epoch seconds).
+from_civil(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime {
+    days = days_from_civil(year, month, day)
+    intraday = (hour as long) * SECS_PER_HOUR + (minute as long) * SECS_PER_MIN + (second as long)
+    epoch = days * SECS_PER_DAY + intraday
+    return from_unix(epoch)
+}
+
+// The canonical epoch-seconds value of a DateTime.
+to_unix(dt: DateTime) -> long {
+    return dt.epoch
+}
+
+// ---- field accessors (also available directly on the struct) -------------
+
+weekday(dt: DateTime) -> int { return dt.wday }
+day_of_year(dt: DateTime) -> int { return dt.yday }
+
+// ---- arithmetic (returns a fresh normalised DateTime) --------------------
+
+add_seconds(dt: DateTime, s: long) -> DateTime { return from_unix(dt.epoch + s) }
+add_minutes(dt: DateTime, m: long) -> DateTime { return from_unix(dt.epoch + m * SECS_PER_MIN) }
+add_hours(dt: DateTime, h: long) -> DateTime { return from_unix(dt.epoch + h * SECS_PER_HOUR) }
+add_days(dt: DateTime, d: long) -> DateTime { return from_unix(dt.epoch + d * SECS_PER_DAY) }
+
+// Signed difference a - b in whole seconds.
+diff_seconds(a: DateTime, b: DateTime) -> long { return a.epoch - b.epoch }
+
+is_before(a: DateTime, b: DateTime) -> bool { return a.epoch < b.epoch }
+is_after(a: DateTime, b: DateTime) -> bool { return a.epoch > b.epoch }
+
+// ---- ISO-8601 / RFC-3339 (UTC, "Z") --------------------------------------
+
+fn pad2(buf: ptr, off: int, v: int) -> int {
+    // write v (0..99) as two ASCII digits at off
+    bytes_set2(buf, off, 48 + (v / 10) % 10, 48 + v % 10)
+    return off + 2
+}
+
+// Format as "YYYY-MM-DDTHH:MM:SSZ" (RFC-3339 UTC). Years are zero-padded to
+// at least 4 digits.
+to_iso8601(dt: DateTime) -> string {
+    // YYYY (4) - (1) MM (2) - (1) DD (2) T (1) HH (2) : MM : SS Z  = 20 chars
+    buf = bytes_new(20)
+    y = dt.year
+    if y < 0 { y = 0 }
+    bytes_set(buf, 0, 48 + (y / 1000) % 10)
+    bytes_set(buf, 1, 48 + (y / 100) % 10)
+    bytes_set(buf, 2, 48 + (y / 10) % 10)
+    bytes_set(buf, 3, 48 + y % 10)
+    bytes_set(buf, 4, 45) // '-'
+    pad2(buf, 5, dt.month)
+    bytes_set(buf, 7, 45) // '-'
+    pad2(buf, 8, dt.day)
+    bytes_set(buf, 10, 84) // 'T'
+    pad2(buf, 11, dt.hour)
+    bytes_set(buf, 13, 58) // ':'
+    pad2(buf, 14, dt.minute)
+    bytes_set(buf, 16, 58) // ':'
+    pad2(buf, 17, dt.second)
+    bytes_set(buf, 19, 90) // 'Z'
+    return bytes_finish(buf, 20)
+}
+
+// Parse "YYYY-MM-DDTHH:MM:SS" with an optional trailing 'Z' (UTC). A space
+// may replace the 'T'. Returns the DateTime, or a non-empty error on a
+// malformed shape / out-of-range field.
+parse_iso8601(s: string) -> (DateTime, string) {
+    n = string.length(s)
+    if n < 19 { return zero_dt(), "time: string too short for ISO-8601" }
+    y = digits4(s, n, 0)
+    mo = digits2(s, n, 5)
+    d = digits2(s, n, 8)
+    hh = digits2(s, n, 11)
+    mm = digits2(s, n, 14)
+    ss = digits2(s, n, 17)
+    if y < 0 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
+    hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59 {
+        return zero_dt(), "time: invalid ISO-8601 field"
+    }
+    // Separators must be '-','-','T'|' ',':',':'.
+    if (string.char_at_n(s, n, 4) & 255) != 45 { return zero_dt(), "time: bad date separator" }
+    if (string.char_at_n(s, n, 7) & 255) != 45 { return zero_dt(), "time: bad date separator" }
+    sep = string.char_at_n(s, n, 10) & 255
+    if sep != 84 && sep != 32 { return zero_dt(), "time: bad date/time separator" }
+    if (string.char_at_n(s, n, 13) & 255) != 58 { return zero_dt(), "time: bad time separator" }
+    if (string.char_at_n(s, n, 16) & 255) != 58 { return zero_dt(), "time: bad time separator" }
+    if d > days_in_month(y, mo) { return zero_dt(), "time: day out of range for month" }
+    return from_civil(y, mo, d, hh, mm, ss), ""
+}
+
+// Parse an ISO-8601 date or date-time as it is commonly written: the date
+// `YYYY-MM-DD`, then optionally `T` (or one space) and `HH:MM` with an
+// optional `:SS`, a fraction (`.fff` or `,fff`, dropped: a DateTime holds
+// whole seconds) and a zone -- `Z`, `UTC`, or an offset `+HH:MM`, `+HHMM`
+// or `+HH` (`-` west of UTC), optionally after one space. A date alone is
+// midnight, and no zone is UTC.
+//
+// Returns the instant as a UTC DateTime, the offset it was written with in
+// seconds east of UTC (0 when there was none), and "" -- or the epoch, 0 and
+// the reason it is not a date. The offset is what strftime_at takes to
+// print the time as it was written.
+parse_iso8601_offset(s: string) -> (DateTime, int, string) {
+    n = string.length(s)
+    if n < 10 { return zero_dt(), 0, "time: expected YYYY-MM-DD" }
+    y = digits4(s, n, 0)
+    mo = digits2(s, n, 5)
+    d = digits2(s, n, 8)
+    if y < 0 || mo < 1 || mo > 12 || d < 1 || byte_at(s, n, 4) != 45 || byte_at(s, n, 7) != 45 {
+        return zero_dt(), 0, "time: expected YYYY-MM-DD"
+    }
+    if d > days_in_month(y, mo) { return zero_dt(), 0, "time: day out of range for month" }
+    hh = 0
+    mi = 0
+    ss = 0
+    p = 10
+    if p < n && (byte_at(s, n, p) == 84 || byte_at(s, n, p) == 116 ||
+        (byte_at(s, n, p) == 32 && p + 3 < n && byte_at(s, n, p + 3) == 58)) {
+        // `T`, `t`, or a space that a clock follows (`2024-01-02 10:00`).
+        hh = digits2(s, n, p + 1)
+        mi = digits2(s, n, p + 4)
+        if hh < 0 || hh > 23 || byte_at(s, n, p + 3) != 58 || mi < 0 || mi > 59 {
+            return zero_dt(), 0, "time: expected HH:MM after the date"
+        }
+        p = p + 6
+        if p < n && byte_at(s, n, p) == 58 {
+            ss = digits2(s, n, p + 1)
+            if ss < 0 || ss > 59 { return zero_dt(), 0, "time: expected seconds after HH:MM:" }
+            p = p + 3
+            if p < n && (byte_at(s, n, p) == 46 || byte_at(s, n, p) == 44) {
+                q = p + 1
+                while q < n && byte_at(s, n, q) >= 48 && byte_at(s, n, q) <= 57 { q = q + 1 }
+                if q == p + 1 { return zero_dt(), 0, "time: expected digits after the decimal mark" }
+                p = q
+            }
+        }
+    }
+    offset, zerr = parse_zone(s, n, p)
+    if zerr != "" { return zero_dt(), 0, zerr }
+    local = from_civil(y, mo, d, hh, mi, ss)
+    return from_unix(local.epoch - (offset as long)), offset, ""
+}
+
+// The zone at `p` to the end of `s`: nothing (UTC), `Z`, `UTC`, or `+HH:MM`,
+// `+HHMM`, `+HH` with `-` for west, each optionally after one space.
+// Returns (seconds east of UTC, error).
+fn parse_zone(s: string, n: int, p: int) -> (int, string) {
+    if p >= n { return 0, "" }
+    q = p
+    if byte_at(s, n, q) == 32 { q = q + 1 }
+    rest = n - q
+    if rest == 1 && (byte_at(s, n, q) == 90 || byte_at(s, n, q) == 122) { return 0, "" }
+    if rest == 3 && byte_at(s, n, q) == 85 && byte_at(s, n, q + 1) == 84 && byte_at(s, n, q + 2) == 67 {
+        return 0, ""
+    }
+    sign = byte_at(s, n, q)
+    if (sign == 43 || sign == 45) && (rest == 3 || rest == 5 || rest == 6) {
+        oh = digits2(s, n, q + 1)
+        om = 0
+        if rest == 5 { om = digits2(s, n, q + 3) }
+        if rest == 6 {
+            if byte_at(s, n, q + 3) != 58 { return 0, "time: expected +HH:MM for the offset" }
+            om = digits2(s, n, q + 4)
+        }
+        if oh < 0 || oh > 23 || om < 0 || om > 59 { return 0, "time: offset out of range" }
+        secs = oh * SECS_PER_HOUR + om * SECS_PER_MIN
+        if sign == 45 { secs = 0 - secs }
+        return secs, ""
+    }
+    return 0, "time: unexpected text after the time"
+}
+
+// ---- strftime --------------------------------------------------------------
+//
+// strftime(dt, fmt) writes a UTC DateTime through a strftime pattern, and
+// strftime_at(dt, offset, fmt) writes the same instant as a clock `offset`
+// seconds east of UTC reads it (what parse_iso8601_offset returns). The
+// conversions are Ruby's Time#strftime set:
+//
+//   %Y year (at least 4 digits)  %C century  %y year % 100
+//   %m month 01..12  %B January  %b / %h Jan
+//   %d day 01..31  %e day, blank-padded  %j day of year 001..366
+//   %H hour 00..23  %k hour, blank-padded  %I hour 01..12  %l hour 1..12,
+//   blank-padded  %p AM/PM  %P am/pm  %M minute  %S second
+//   %L milliseconds  %N nanoseconds (zero: a DateTime has whole seconds)
+//   %z +hhmm  %:z +hh:mm  %::z +hh:mm:ss  %Z UTC (empty at another offset)
+//   %A Sunday  %a Sun  %u weekday 1..7 from Monday  %w weekday 0..6 from Sunday
+//   %U week of the year from Sunday  %W from Monday  %V ISO week  %G ISO year
+//   %g ISO year % 100  %s seconds since the epoch
+//   %c %a %b %e %H:%M:%S %Y   %D / %x %m/%d/%y   %F %Y-%m-%d   %T / %X %H:%M:%S
+//   %R %H:%M   %r %I:%M:%S %p   %+ %a %b %e %H:%M:%S %Z %Y
+//   %n newline  %t tab  %% percent
+//
+// Between the `%` and the conversion come Ruby's flags -- `-` no padding,
+// `_` pad with spaces, `0` pad with zeros, `^` upper case, `#` change case
+// -- and a minimum width (`%-d` is `7`, `%3N` is `000`). A conversion it
+// does not know is written as it stands, `%` included.
+
+strftime(dt: DateTime, fmt: string) -> string {
+    return strftime_at(dt, 0, fmt)
+}
+
+strftime_at(dt: DateTime, offset: int, fmt: string) -> string {
+    sb = strbuilder.new(string.length(fmt) + 16)
+    local = from_unix(dt.epoch + (offset as long))
+    format_into(sb, local, dt.epoch, offset, fmt)
+    return strbuilder.finish(sb)
+}
+
+fn format_into(sb: ptr, t: DateTime, epoch: long, offset: int, fmt: string) {
+    n = string.length(fmt)
+    i = 0
+    while i < n {
+        c = byte_at(fmt, n, i)
+        if c != 37 || i == n - 1 {
+            strbuilder.append_byte(sb, c)
+            i = i + 1
+            continue
+        }
+        // Flags, width and colons, then the conversion.
+        j = i + 1
+        pad = 0 // 0 the conversion's own, 45 none, 95 spaces, 48 zeros
+        upper = 0
+        swap = 0
+        while j < n {
+            f = byte_at(fmt, n, j)
+            if f == 45 || f == 95 || f == 48 { pad = f }
+            else if f == 94 { upper = 1 }
+            else if f == 35 { swap = 1 }
+            else { break }
+            j = j + 1
+        }
+        width = -1
+        while j < n && byte_at(fmt, n, j) >= 48 && byte_at(fmt, n, j) <= 57 {
+            if width < 0 { width = 0 }
+            width = width * 10 + byte_at(fmt, n, j) - 48
+            j = j + 1
+        }
+        colons = 0
+        while j < n && byte_at(fmt, n, j) == 58 {
+            colons = colons + 1
+            j = j + 1
+        }
+        if j >= n {
+            strbuilder.append(sb, string.substring_n(fmt, n, i, n))
+            return
+        }
+        known = format_one(sb, t, epoch, offset, byte_at(fmt, n, j), pad, upper, swap, width, colons)
+        if known == 0 { strbuilder.append(sb, string.substring_n(fmt, n, i, j + 1)) }
+        i = j + 1
+    }
+}
+
+// Write one conversion `conv`. Returns 0 when it is not one strftime knows.
+fn format_one(sb: ptr, t: DateTime, epoch: long, offset: int, conv: int,
+    pad: int, upper: int, swap: int, width: int, colons: int) -> int {
+    if conv == 89 { put_num(sb, t.year as long, 4, 48, pad, width); return 1 } // Y
+    if conv == 67 { put_num(sb, floor_div(t.year, 100) as long, 2, 48, pad, width); return 1 } // C
+    if conv == 121 { put_num(sb, floor_mod(t.year, 100) as long, 2, 48, pad, width); return 1 } // y
+    if conv == 109 { put_num(sb, t.month as long, 2, 48, pad, width); return 1 } // m
+    if conv == 100 { put_num(sb, t.day as long, 2, 48, pad, width); return 1 } // d
+    if conv == 101 { put_num(sb, t.day as long, 2, 32, pad, width); return 1 } // e
+    if conv == 106 { put_num(sb, t.yday as long, 3, 48, pad, width); return 1 } // j
+    if conv == 72 { put_num(sb, t.hour as long, 2, 48, pad, width); return 1 } // H
+    if conv == 107 { put_num(sb, t.hour as long, 2, 32, pad, width); return 1 } // k
+    if conv == 73 { put_num(sb, hour12(t.hour) as long, 2, 48, pad, width); return 1 } // I
+    if conv == 108 { put_num(sb, hour12(t.hour) as long, 2, 32, pad, width); return 1 } // l
+    if conv == 77 { put_num(sb, t.minute as long, 2, 48, pad, width); return 1 } // M
+    if conv == 83 { put_num(sb, t.second as long, 2, 48, pad, width); return 1 } // S
+    if conv == 117 { // u
+        u = t.wday
+        if u == 0 { u = 7 }
+        put_num(sb, u as long, 1, 48, pad, width)
+        return 1
+    }
+    if conv == 119 { put_num(sb, t.wday as long, 1, 48, pad, width); return 1 } // w
+    if conv == 85 { put_num(sb, ((t.yday - 1 + 7 - t.wday) / 7) as long, 2, 48, pad, width); return 1 } // U
+    if conv == 87 { put_num(sb, ((t.yday - 1 + 7 - (t.wday + 6) % 7) / 7) as long, 2, 48, pad, width); return 1 } // W
+    if conv == 86 || conv == 71 || conv == 103 { // V G g
+        iy, iw = iso_week(t)
+        if conv == 86 { put_num(sb, iw as long, 2, 48, pad, width) }
+        else if conv == 71 { put_num(sb, iy as long, 4, 48, pad, width) }
+        else { put_num(sb, floor_mod(iy, 100) as long, 2, 48, pad, width) }
+        return 1
+    }
+    if conv == 115 { put_num(sb, epoch, 1, 48, pad, width); return 1 } // s
+    if conv == 76 || conv == 78 { // L N
+        digits = 3
+        if conv == 78 { digits = 9 }
+        if width > 0 { digits = width }
+        k = 0
+        while k < digits { strbuilder.append_byte(sb, 48); k = k + 1 }
+        return 1
+    }
+    if conv == 66 { put_text(sb, month_name(t.month), pad, upper, swap, width); return 1 } // B
+    if conv == 98 || conv == 104 { // b h
+        put_text(sb, string.substring_n(month_name(t.month), string.length(month_name(t.month)), 0, 3),
+            pad, upper, swap, width)
+        return 1
+    }
+    if conv == 65 { put_text(sb, day_name(t.wday), pad, upper, swap, width); return 1 } // A
+    if conv == 97 { // a
+        put_text(sb, string.substring_n(day_name(t.wday), string.length(day_name(t.wday)), 0, 3),
+            pad, upper, swap, width)
+        return 1
+    }
+    if conv == 112 || conv == 80 { // p P
+        ap = "AM"
+        if t.hour >= 12 { ap = "PM" }
+        // %P, and %p with `#`, are lower case.
+        if conv == 80 || swap == 1 { ap = string.to_lower(ap) }
+        put_text(sb, ap, pad, upper, 0, width)
+        return 1
+    }
+    if conv == 90 { // Z
+        z = ""
+        if offset == 0 { z = "UTC" }
+        if swap == 1 { z = string.to_lower(z) }
+        put_text(sb, z, pad, upper, 0, width)
+        return 1
+    }
+    if conv == 122 { put_offset(sb, offset, colons); return 1 } // z
+    if conv == 110 { strbuilder.append_byte(sb, 10); return 1 } // n
+    if conv == 116 { strbuilder.append_byte(sb, 9); return 1 } // t
+    if conv == 37 { strbuilder.append_byte(sb, 37); return 1 } // %
+    // The combinations, written as the pattern they stand for.
+    combo = ""
+    if conv == 99 { combo = "%a %b %e %H:%M:%S %Y" } // c
+    else if conv == 68 || conv == 120 { combo = "%m/%d/%y" } // D x
+    else if conv == 70 { combo = "%Y-%m-%d" } // F
+    else if conv == 84 || conv == 88 { combo = "%H:%M:%S" } // T X
+    else if conv == 82 { combo = "%H:%M" } // R
+    else if conv == 114 { combo = "%I:%M:%S %p" } // r
+    else if conv == 43 { combo = "%a %b %e %H:%M:%S %Z %Y" } // +
+    else { return 0 }
+    part = strbuilder.new(32)
+    format_into(part, t, epoch, offset, combo)
+    put_text(sb, strbuilder.finish(part), pad, upper, swap, width)
+    return 1
+}
+
+// A number, at least `digits` wide, padded with `fill` (48 '0' or 32 ' ')
+// unless a flag says otherwise; a negative one keeps its sign in front.
+fn put_num(sb: ptr, v: long, digits: int, fill: int, pad: int, width: int) {
+    w = digits
+    if width >= 0 { w = width }
+    f = fill
+    if pad == 95 { f = 32 }
+    if pad == 48 { f = 48 }
+    if pad == 45 { w = 0 }
+    neg = v < 0
+    mag = v
+    if neg { mag = 0 - v }
+    text = string.from_long(mag)
+    len = string.length(text)
+    if neg && f == 48 {
+        strbuilder.append_byte(sb, 45)
+        len = len + 1
+    }
+    while len < w {
+        strbuilder.append_byte(sb, f)
+        len = len + 1
+    }
+    if neg && f != 48 { strbuilder.append_byte(sb, 45) }
+    strbuilder.append(sb, text)
+}
+
+// A word, cased as the flags say and padded on the left to `width`.
+fn put_text(sb: ptr, s: string, pad: int, upper: int, swap: int, width: int) {
+    out = s
+    if upper == 1 || swap == 1 { out = string.to_upper(s) }
+    f = 32
+    if pad == 48 { f = 48 }
+    len = string.length(out)
+    if pad != 45 {
+        while len < width {
+            strbuilder.append_byte(sb, f)
+            len = len + 1
+        }
+    }
+    strbuilder.append(sb, out)
+}
+
+// The offset as +hhmm, or with one colon +hh:mm, with two +hh:mm:ss.
+fn put_offset(sb: ptr, offset: int, colons: int) {
+    mag = offset
+    if offset < 0 {
+        strbuilder.append_byte(sb, 45)
+        mag = 0 - offset
+    } else {
+        strbuilder.append_byte(sb, 43)
+    }
+    put_num(sb, (mag / SECS_PER_HOUR) as long, 2, 48, 0, -1)
+    if colons >= 1 { strbuilder.append_byte(sb, 58) }
+    put_num(sb, ((mag % SECS_PER_HOUR) / SECS_PER_MIN) as long, 2, 48, 0, -1)
+    if colons >= 2 {
+        strbuilder.append_byte(sb, 58)
+        put_num(sb, (mag % SECS_PER_MIN) as long, 2, 48, 0, -1)
+    }
+}
+
+fn hour12(h: int) -> int {
+    r = h % 12
+    if r == 0 { return 12 }
+    return r
+}
+
+// Division and remainder rounded toward negative infinity, so a year before
+// 1 AD still has a century and a two-digit year in range.
+fn floor_div(a: int, b: int) -> int {
+    q = a / b
+    if (a % b != 0) && ((a < 0) != (b < 0)) { q = q - 1 }
+    return q
+}
+
+fn floor_mod(a: int, b: int) -> int {
+    return a - floor_div(a, b) * b
+}
+
+// The ISO 8601 week-numbering year and week of `t`: weeks start on Monday,
+// and week 1 is the one holding the year's first Thursday.
+fn iso_week(t: DateTime) -> (int, int) {
+    u = t.wday
+    if u == 0 { u = 7 }
+    w = (t.yday - u + 10) / 7
+    if w < 1 { return t.year - 1, iso_weeks_in(t.year - 1) }
+    if w > iso_weeks_in(t.year) { return t.year + 1, 1 }
+    return t.year, w
+}
+
+// 53 when the year starts on a Thursday, or is a leap year that starts on a
+// Wednesday; 52 otherwise.
+fn iso_weeks_in(y: int) -> int {
+    jan1 = from_civil(y, 1, 1, 0, 0, 0)
+    if jan1.wday == 4 || (jan1.wday == 3 && is_leap_year(y)) { return 53 }
+    return 52
+}
+
+fn month_name(m: int) -> string {
+    if m == 1 { return "January" }
+    if m == 2 { return "February" }
+    if m == 3 { return "March" }
+    if m == 4 { return "April" }
+    if m == 5 { return "May" }
+    if m == 6 { return "June" }
+    if m == 7 { return "July" }
+    if m == 8 { return "August" }
+    if m == 9 { return "September" }
+    if m == 10 { return "October" }
+    if m == 11 { return "November" }
+    return "December"
+}
+
+fn day_name(w: int) -> string {
+    if w == 0 { return "Sunday" }
+    if w == 1 { return "Monday" }
+    if w == 2 { return "Tuesday" }
+    if w == 3 { return "Wednesday" }
+    if w == 4 { return "Thursday" }
+    if w == 5 { return "Friday" }
+    return "Saturday"
+}
+
+// ---- helpers -------------------------------------------------------------
+
+// The byte at `i`, 0..255.
+fn byte_at(s: string, n: int, i: int) -> int {
+    return string.char_at_n(s, n, i) & 255
+}
+
+fn zero_dt() -> DateTime {
+    return from_unix(0)
+}
+
+// Parse a run of ASCII digits; returns the value or -1 if any char in the
+// window is not a digit.
+fn digits2(s: string, n: int, off: int) -> int {
+    if off + 2 > n { return -1 }
+    a = (string.char_at_n(s, n, off) & 255) - 48
+    b = (string.char_at_n(s, n, off + 1) & 255) - 48
+    if a < 0 || a > 9 || b < 0 || b > 9 { return -1 }
+    return a * 10 + b
+}
+
+fn digits4(s: string, n: int, off: int) -> int {
+    if off + 4 > n { return -1 }
+    v = 0
+    i = 0
+    while i < 4 {
+        c = (string.char_at_n(s, n, off + i) & 255) - 48
+        if c < 0 || c > 9 { return -1 }
+        v = v * 10 + c
+        i = i + 1
+    }
+    return v
+}
+
+// bytes wrappers (direct externs so the heap-string classifier recognises
+// bytes_finish by name for a leak-clean owned return).
+extern aether_bytes_new(initial_capacity: int) -> ptr
+extern aether_bytes_set(b: ptr, index: int, value: int) -> int
+extern aether_bytes_finish(b: ptr, length: int) -> string @heap
+
+fn bytes_new(cap: int) -> ptr { return aether_bytes_new(cap) }
+fn bytes_set(b: ptr, i: int, v: int) -> int { return aether_bytes_set(b, i, v) }
+fn bytes_set2(b: ptr, i: int, v0: int, v1: int) -> int {
+    aether_bytes_set(b, i, v0)
+    return aether_bytes_set(b, i + 1, v1)
+}
+fn bytes_finish(b: ptr, len: int) -> string { return aether_bytes_finish(b, len) }

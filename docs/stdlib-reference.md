@@ -42,7 +42,7 @@ header comment is the authoritative description.
 | `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
-| `std.json` | JSON parsing, building and serialisation. | 54 | [full section](#json-stdjson) |
+| `std.json` | JSON parsing, building and serialisation. | 55 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
@@ -80,7 +80,7 @@ header comment is the authoritative description.
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 32 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 39 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
-| `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
+| `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
 | `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [guide](../std/tsid/README.md) · [source](../std/tsid/module.ae) |
 | `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [guide](../std/ulid/README.md) · [source](../std/ulid/module.ae) |
@@ -1545,6 +1545,7 @@ The `parse_strict` shape is the std.fs structured-error pilot extended to a seco
 **Type Checking:**
 - `json.type(value)` - Get type constant (0-5)
 - `json.is_null(value)` - Check if null (returns 1/0)
+- `json.is_integer(value)` - Check if a number was written as an integer within int64 (`42`, not `42.0` or `4e1`) (returns 1/0)
 
 **Value Getters:**
 - `json.get_number(value)` - Get float value (lossy past 2^53)
@@ -3168,9 +3169,15 @@ seconds between: 2592000
 - `time.add_seconds(dt, n)` / `add_minutes` / `add_hours` / `add_days` → `DateTime` - Arithmetic
 - `time.diff_seconds(a, b)` → `long`, `time.is_before(a, b)` / `time.is_after(a, b)` → `bool` - Comparison
 - `time.to_iso8601(dt)` → `string`, `time.parse_iso8601(s)` → `(DateTime, string)` - ISO-8601 round trip
+- `time.parse_iso8601_offset(s)` → `(DateTime, int, string)` - ISO-8601 as commonly written (a date alone, `T` or a space, optional seconds and fraction, a `Z`, `UTC` or `+HH:MM` zone): the instant and the offset it was written at, in seconds east of UTC
+- `time.strftime(dt, fmt)` / `time.strftime_at(dt, offset, fmt)` → `string` - Ruby's `Time#strftime` conversions and flags, at UTC or at an offset
 
 Duration is measured in whole seconds; sub-second precision is a later
 extension.
+
+Every function but `now` and `now_ms` is also `std.time.calendar`, which reads
+no clock and so imports no `std.os`: code built with `--emit=lib` uses it
+without `--with=os`.
 
 ## Unsigned bit operations (`std.bits`)
 

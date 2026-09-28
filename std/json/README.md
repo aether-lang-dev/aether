@@ -54,7 +54,7 @@ you trust it, see `std/schema`.
 ## Exports
 
 `parse`, `parse_strict`, `stringify`, `json_free`, `json_type`, `json_is_null`,
-`json_get_bool`, `json_get_number`, `json_get_int`, `json_get_long`,
+`json_is_integer`, `json_get_bool`, `json_get_number`, `json_get_int`, `json_get_long`,
 `get_string`, `object_get`, `object_set`, `object_size`, `object_entry`,
 `json_object_has`, `json_object_key_at`, `json_object_value_at`, `array_get`,
 `array_add`, `json_array_size`, `obj`, `arr`, `str`, `num`, `from_int`,

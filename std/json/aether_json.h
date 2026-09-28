@@ -54,6 +54,11 @@ void json_free(JsonValue* value);
 
 JsonType json_type(JsonValue* value);
 int json_is_null(JsonValue* value);
+// 1 for a number written as an integer (`42`, `-7`) within int64, or built
+// with json_create_int; 0 for one with a fraction or exponent (`42.0`,
+// `4e1`), one past int64, `-0` (kept as a double, sign and all), and
+// anything that is not a number.
+int json_is_integer(JsonValue* value);
 
 int json_get_bool(JsonValue* value);
 double json_get_number(JsonValue* value);
