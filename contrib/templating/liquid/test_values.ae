@@ -5,11 +5,14 @@
 // test_syntax.ae for why the shell wrappers were retired.
 //
 // This file is the "what a variable holds and how it gets bound" half:
-// the typed value constructors, the `{% assign %}` tag, and `{% capture %}`.
+// the typed value constructors, arrays and objects in the context (#2177),
+// variable paths into them (#2178), the `{% assign %}` tag, and
+// `{% capture %}`.
 
 import contrib.templating.liquid
 import std.spec
 import std.string
+import std.json
 
 render_one(src: string, ctx: ptr) -> string {
     t, _ = liquid.parse_string(src)
@@ -29,6 +32,39 @@ render_err(src: string) -> string {
     t, _ = liquid.parse_string(src)
     _, e = liquid.render(t, liquid.context_new())
     return e
+}
+
+// A context with `key` bound to the JSON `text` (context_put_json_text).
+json_ctx(key: string, text: string) -> ptr {
+    ctx = liquid.context_new()
+    err = liquid.context_put_json_text(ctx, key, text)
+    if err != "" { println("fixture ${key} is not JSON: ${err}") }
+    return ctx
+}
+
+// Render `src` against `ctx`: the output, or "ERR <message>".
+render_in(src: string, ctx: ptr) -> string {
+    t, perr = liquid.parse_string(src)
+    if perr != "" { return string.concat("PARSE ", perr) }
+    out, err = liquid.render(t, ctx)
+    liquid.template_free(t)
+    if err != "" { return string.concat("ERR ", err) }
+    return out
+}
+
+// Render `src` against a context with `key` bound to the JSON `text`.
+render_json(src: string, key: string, text: string) -> string {
+    ctx = json_ctx(key, text)
+    out = render_in(src, ctx)
+    liquid.context_free(ctx)
+    return out
+}
+
+// The object the path specs read.
+const USER = "{\"name\": \"Ada\", \"first name\": \"A\", \"tags\": [\"x\", \"y\", \"z\"], \"n\": 42, \"f\": 2.5, \"ok\": true, \"no\": false, \"none\": null, \"size\": 7, \"addr\": {\"city\": \"Paris\", \"zip\": [7, 5, 0, 0, 1]}}"
+
+render_user(src: string) -> string {
+    return render_json(src, "user", USER)
 }
 
 main() {
@@ -174,7 +210,7 @@ main() {
 
         spec.it(fw, "still errors on an unsupported tag") callback {
             spec.assert_not_eq(
-                string.length(render_err("{% for x in coll %}b{% endfor %}")), 0,
+                string.length(render_err("{% nosuchtag x %}b")), 0,
                 "10 unsupported tag: expected error")
         }
     }
@@ -265,6 +301,231 @@ main() {
             spec.assert_str_eq(
                 render_bare("a   {%- capture m -%}   body   {%- endcapture -%}   b{{ m }}"),
                 "abbody", "13 whitespace control around capture")
+        }
+    }
+
+    spec.describe(fw, "liquid: arrays and objects (#2177)") {
+        spec.it(fw, "prints an array's elements one after another") callback {
+            spec.assert_str_eq(render_json("{{ xs }}", "xs", "[1, \"a\", null, true, 2.5]"),
+                "1atrue2.5", "1 array output")
+        }
+
+        spec.it(fw, "flattens a nested array when printing it") callback {
+            spec.assert_str_eq(render_json("{{ xs }}", "xs", "[[1, 2], [3, [4]]]"),
+                "1234", "2 nested array output")
+        }
+
+        spec.it(fw, "prints an object as Liquid inspects a hash") callback {
+            spec.assert_str_eq(
+                render_json("{{ o }}", "o", "{\"a\": 1, \"b\": \"x\", \"c\": null, \"d\": [1, \"y\"], \"e\": {}}"),
+                "{\"a\"=>1, \"b\"=>\"x\", \"c\"=>nil, \"d\"=>[1, \"y\"], \"e\"=>{}}", "3 object output")
+        }
+
+        spec.it(fw, "escapes a string inside an inspected value as Ruby does") callback {
+            spec.assert_str_eq(render_json("{{ o }}", "o", "{\"q\": \"a\\\"b\\\\c\\nd#{e\"}"),
+                "{\"q\"=>\"a\\\"b\\\\c\\nd\\#{e\"}", "4 inspect escapes")
+        }
+
+        spec.it(fw, "keeps integers and floats as JSON wrote them") callback {
+            spec.assert_str_eq(render_json("{% for v in xs %}{{ v }};{% endfor %}", "xs", "[42, 42.0, 2.5, 1e2, -7]"),
+                "42;42.0;2.5;100.0;-7;", "5 JSON numbers")
+        }
+
+        spec.it(fw, "copies a JSON tree, so the caller may free it first") callback {
+            tree = json.arr()
+            json.push(tree, json.str("kept"))
+            json.push(tree, json.from_int(3))
+            ctx = liquid.context_new()
+            spec.assert_str_eq(liquid.context_put_json(ctx, "t", tree), "", "6a bound")
+            json.json_free(tree)
+            spec.assert_str_eq(render_in("{{ t[0] }}{{ t[1] }}", ctx), "kept3", "6b read after the tree is freed")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "reports JSON it cannot parse") callback {
+            ctx = liquid.context_new()
+            spec.assert_not_eq(string.length(liquid.context_put_json_text(ctx, "x", "[1, ")), 0,
+                "7 parse error reported")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "refuses a tree nested deeper than 256 levels") callback {
+            // Built from the inside out: a pushed array goes in as it is then.
+            root = json.arr()
+            k = 0
+            while k < 300 {
+                outer = json.arr()
+                json.push(outer, root)
+                root = outer
+                k = k + 1
+            }
+            ctx = liquid.context_new()
+            spec.assert_not_eq(string.length(liquid.context_put_json(ctx, "deep", root)), 0,
+                "8 too deep reported")
+            json.json_free(root)
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "lets a JSON binding shadow a bare string one") callback {
+            ctx = liquid.context_new()
+            liquid.context_put_string(ctx, "x", "bare")
+            liquid.context_put_json_text(ctx, "x", "[1, 2]")
+            spec.assert_str_eq(render_in("{{ x }}", ctx), "12", "9 typed wins")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "treats only nil and false as false") callback {
+            spec.assert_str_eq(
+                render_json("{% if v.e %}E{% endif %}{% if v.s %}S{% endif %}{% if v.z %}Z{% endif %}{% if v.f %}F{% endif %}{% if v.o %}O{% endif %}{% if v.zero %}0{% endif %}",
+                    "v", "{\"e\": [], \"s\": \"\", \"z\": null, \"f\": false, \"o\": {}, \"zero\": 0}"),
+                "ESO0", "10 truthiness")
+        }
+
+        spec.it(fw, "treats an empty bare string as true, as Liquid does") callback {
+            ctx = liquid.context_new()
+            liquid.context_put_string(ctx, "b", "")
+            spec.assert_str_eq(render_in("{% if b %}B{% else %}-{% endif %}", ctx), "B", "11 empty string is true")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "tests emptiness with == empty") callback {
+            spec.assert_str_eq(
+                render_json("{% if v.e == empty %}1{% endif %}{% if v.a == empty %}2{% endif %}{% if v.o == empty %}3{% endif %}{% if v.s == empty %}4{% endif %}{% if v.a != empty %}5{% endif %}{% if empty == v.e %}6{% endif %}",
+                    "v", "{\"e\": [], \"a\": [1], \"o\": {}, \"s\": \"\"}"),
+                "13456", "12 empty")
+        }
+
+        spec.it(fw, "tests blankness with == blank") callback {
+            spec.assert_str_eq(
+                render_json("{% if v.z == blank %}1{% endif %}{% if v.w == blank %}2{% endif %}{% if v.f == blank %}3{% endif %}{% if v.e == blank %}4{% endif %}{% if v.t == blank %}5{% endif %}{% if missing == blank %}6{% endif %}",
+                    "v", "{\"z\": null, \"w\": \"  \", \"f\": false, \"e\": [], \"t\": \"x\"}"),
+                "12346", "13 blank")
+        }
+
+        spec.it(fw, "finds an element with contains, and an object's key") callback {
+            spec.assert_str_eq(
+                render_json("{% if v.a contains \"x\" %}1{% endif %}{% if v.a contains 2 %}2{% endif %}{% if v.a contains \"z\" %}3{% endif %}{% if v.o contains \"k\" %}4{% endif %}{% if v.o contains \"q\" %}5{% endif %}",
+                    "v", "{\"a\": [\"x\", 2], \"o\": {\"k\": 1}}"),
+                "124", "14 contains")
+        }
+
+        spec.it(fw, "compares arrays and objects element by element") callback {
+            spec.assert_str_eq(
+                render_json("{% if v.a == v.b %}1{% endif %}{% if v.a == v.c %}2{% endif %}{% if v.o == v.p %}3{% endif %}{% if v.a != v.c %}4{% endif %}{% if v.o == v.q %}5{% endif %}",
+                    "v", "{\"a\": [1, [2]], \"b\": [1, [2]], \"c\": [1, 2], \"o\": {\"x\": 1}, \"p\": {\"x\": 1}, \"q\": {\"x\": 2}}"),
+                "134", "15 deep equality")
+        }
+
+        spec.it(fw, "compares numbers as numbers") callback {
+            spec.assert_str_eq(
+                render_json("{% if v.i == v.f %}1{% endif %}{% if v.i == 42 %}2{% endif %}{% if v.f < 42.5 %}3{% endif %}{% if v.i == nil %}4{% endif %}",
+                    "v", "{\"i\": 42, \"f\": 42.0}"),
+                "123", "16 numeric equality")
+        }
+
+        spec.it(fw, "refuses to order an array against a number") callback {
+            spec.assert_true(string.starts_with(render_json("{% if a > 1 %}x{% endif %}", "a", "[1]"), "ERR") == 1,
+                "17 ordering an array is an error")
+        }
+
+        spec.it(fw, "reclaims what renders make and keeps what a binding holds") callback {
+            ctx = liquid.context_new()
+            spec.assert_str_eq(render_in("{% assign keep = \"p,q\" | split: \",\" %}", ctx), "", "18a assign")
+            i = 0
+            while i < 500 {
+                render_in("{{ \"a,b,c\" | split: \",\" | reverse | join }}", ctx)
+                i = i + 1
+            }
+            // 500 renders made 1,000 arrays; a binding holds one.
+            spec.assert_true(liquid.context_value_nodes(ctx) < 200, "18b made arrays reclaimed")
+            spec.assert_str_eq(render_in("{{ keep[1] }}{{ keep.size }}", ctx), "q2", "18c bound array kept")
+            liquid.context_free(ctx)
+        }
+    }
+
+    spec.describe(fw, "liquid: variable paths (#2178)") {
+        spec.it(fw, "reads an object's key with a dot") callback {
+            spec.assert_str_eq(render_user("{{ user.name }}"), "Ada", "1 dot")
+        }
+
+        spec.it(fw, "reads nested keys") callback {
+            spec.assert_str_eq(render_user("{{ user.addr.city }}"), "Paris", "2 nested")
+        }
+
+        spec.it(fw, "indexes an array from the front and from the end") callback {
+            spec.assert_str_eq(render_user("{{ user.tags[0] }}{{ user.tags[2] }}{{ user.tags[-1] }}{{ user.tags[-3] }}"),
+                "xzzx", "3 index")
+        }
+
+        spec.it(fw, "reads a key with a space through brackets") callback {
+            spec.assert_str_eq(render_user("{{ user['first name'] }}{{ user[\"first name\"] }}"), "AA",
+                "4 quoted key")
+        }
+
+        spec.it(fw, "takes an index or a key from a variable") callback {
+            ctx = json_ctx("user", USER)
+            liquid.context_put_int(ctx, "i", 1)
+            liquid.context_put_string(ctx, "k", "name")
+            spec.assert_str_eq(render_in("{{ user.tags[i] }} {{ user[k] }} {{ user.tags[user.addr.zip[3]] }}", ctx),
+                "y Ada x", "5 variable segment")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "chains brackets and dots") callback {
+            spec.assert_str_eq(render_user("{{ user.addr.zip[0] }}{{ user.addr['zip'][-1] }}"), "71", "6 chain")
+        }
+
+        spec.it(fw, "gives an array's size, first and last") callback {
+            spec.assert_str_eq(render_user("{{ user.tags.size }} {{ user.tags.first }} {{ user.tags.last }}"),
+                "3 x z", "7 array commands")
+        }
+
+        spec.it(fw, "gives a string's size and its first and last character") callback {
+            ctx = json_ctx("user", USER)
+            liquid.context_put_string(ctx, "w", "élan été")
+            spec.assert_str_eq(render_in("{{ user.name.size }} {{ user.name.first }}{{ user.name.last }} {{ w.first }}{{ w.last }}", ctx),
+                "3 Aa éé", "8 string commands")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "counts an object's keys, unless it has a size key") callback {
+            spec.assert_str_eq(render_user("{{ user.addr.size }} {{ user.size }}"), "2 7", "9 object size")
+        }
+
+        spec.it(fw, "renders a missing key, index or segment as nothing") callback {
+            spec.assert_str_eq(render_user("[{{ user.nope }}][{{ user.tags[9] }}][{{ user.none.deeper }}][{{ nobody.x.y }}][{{ user.n.size }}]"),
+                "[][][][][]", "10 missing")
+        }
+
+        spec.it(fw, "resolves a path in a condition") callback {
+            spec.assert_str_eq(render_user("{% if user.ok and user.tags.size == 3 %}Y{% endif %}{% if user.no %}N{% endif %}{% unless user.none %}U{% endunless %}"),
+                "YU", "11 condition")
+        }
+
+        spec.it(fw, "resolves a path on the right of assign") callback {
+            spec.assert_str_eq(render_user("{% assign c = user.addr.city | upcase %}{{ c }}"), "PARIS", "12 assign")
+        }
+
+        spec.it(fw, "resolves a path as a filter argument") callback {
+            spec.assert_str_eq(render_user("{{ \"hi \" | append: user.name }} {{ user.n | plus: user.addr.zip[0] }}"),
+                "hi Ada 49", "13 filter argument")
+        }
+
+        spec.it(fw, "resolves a path as a case subject and in a when") callback {
+            spec.assert_str_eq(render_user("{% case user.tags.first %}{% when user.tags[0] %}same{% else %}diff{% endcase %}"),
+                "same", "14 case")
+        }
+
+        spec.it(fw, "still finds a name bound whole with its dots") callback {
+            ctx = liquid.context_new()
+            liquid.context_put_string(ctx, "site.title", "Blog")
+            spec.assert_str_eq(render_in("{{ site.title }}", ctx), "Blog", "15 dotted name")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "keeps an array an array through assign") callback {
+            spec.assert_str_eq(render_bare("{% assign parts = \"q,r,s\" | split: \",\" %}{{ parts[1] }}{{ parts.size }}"),
+                "r3", "16 assigned array")
         }
     }
 

@@ -342,7 +342,7 @@ main() {
     // so this accepts a clear error from either.
     spec.describe(fw, "liquid: unsupported tags") {
         spec.it(fw, "reports an unsupported tag at lex or render time") callback {
-            t7, e7 = liquid.parse_string("a {% for x in coll %}b{% endfor %} c")
+            t7, e7 = liquid.parse_string("a {% nosuchtag x %}b{% endnosuchtag %} c")
             if string.length(e7) != 0 {
                 spec.assert_not_eq(string.length(e7), 0,
                     "7 unsupported tag reported at lex time")
