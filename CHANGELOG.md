@@ -14,6 +14,90 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.736.0]
+
+### Added
+
+- **contrib.templating.liquid binds arrays and objects (#2177).**
+  `context_put_json(ctx, key, tree)` copies a `std.json` tree into the
+  context, and `context_put_json_text` parses JSON text first. A number
+  written as an integer stays an integer, and the caller's tree is its
+  own to free. Arrays and objects live in a store the context owns, and a
+  packed value names one by number, checked at every use. The reserved raw
+  pointer form it replaces could be forged by a bound string. Arrays and
+  objects a render makes and no binding keeps are reclaimed as an
+  outermost render returns, so a reused context does not grow. `{{ array }}`
+  prints its elements, `{{ object }}` prints as Liquid inspects a hash, and
+  `==` compares both element by element. `contains` finds an element or a
+  key, and `x == empty` / `x == blank` test x as Liquid does.
+
+- **contrib.templating.liquid reads variable paths (#2178).** `user.name`,
+  `items[0]`, `items[-1]`, `user["first name"]` and `items[i]` walk objects
+  and arrays, and `size`, `first` and `last` work on arrays, strings and
+  objects. A path works everywhere a value can appear: output, conditions,
+  `assign`, `for` sources, `case`/`when`, filter arguments, `{% render %}`
+  arguments, and `limit` / `offset`. A missing segment renders as nothing,
+  and a name bound whole with its dots is still found under that name.
+
+- **contrib.templating.liquid's `for` iterates arrays, objects and strings
+  (#2179).** An object iterates as `[key, value]` pairs, in key order.
+  nil and an empty collection iterate zero times and render the loop's new
+  `{% else %}` branch. `limit` / `offset` take variables, and
+  `forloop.name` and `forloop.parentloop` are bound. `tablerow` takes the
+  same sources. A loop over an unbound name used to be a render error, and
+  now renders nothing, as in Liquid. The scan for a block's branches now
+  steps over every block nested inside it, so an `{% else %}` of an inner
+  `if`, `case` or `for` is no longer taken for the outer block's.
+
+- **contrib.templating.liquid has the array filters (#2180).** `split`,
+  `join`, `first`, `last`, `size`, `sort`, `sort_natural`, `uniq`, `map`,
+  `where`, `compact`, `concat` and `reverse` work on arrays, read their input
+  as Liquid's InputIterator does, and follow Ruby's semantics: `split` drops
+  empty strings at the end, and `sort` puts nil last and refuses to order
+  numbers against strings. An array flows through a chain unstringified
+  (`s | split: "," | sort | join: "-"`). `default` also fires on false and
+  on an empty array or object. Filters used to pass these names through
+  silently as unknown.
+
+- **Dates: `std.time.strftime`, ISO-8601 with offsets, and Liquid's `date`
+  (#2181).** `time.strftime(dt, fmt)` and `time.strftime_at(dt, offset,
+  fmt)` implement Ruby's `Time#strftime` conversions and flags, ISO weeks
+  included. `time.parse_iso8601_offset(s)` reads a date alone, `T` or a
+  space, optional seconds and fraction, and a `Z`, `UTC` or `+HH:MM` zone,
+  and returns the offset the time was written with. The calendar is now
+  also `std.time.calendar`, which reads no clock and so needs no
+  `--with=os` under `--emit=lib`; std.time keeps every name it had.
+  contrib.templating.liquid's `date: format` reads ISO dates and Unix
+  timestamps through it. `now` is the time the host gives with
+  `context_set_now`, so a render stays deterministic.
+
+- **`json.is_integer(value)` tells `42` from `42.0`.** It is 1 for a number
+  written as an integer within int64 (or built with `from_int`), and 0 for
+  one written with a fraction or exponent, `-0`, and anything that is not
+  a number. The parser already kept this. A consumer that must print `3`
+  and `3.0` as they were written, as Liquid does, can now read it.
+
+### Changed
+
+- **contrib.templating.liquid follows Liquid's truthiness, and hides its
+  own state from templates.** Only nil and false are false now. The empty
+  string, and a bound string reading `"false"`, `"nil"` or `"null"`, are
+  true, as they are in Liquid. The string-only context treated them as
+  false because it had no booleans, and `context_put_bool` gives a real
+  one. The include root and depth, the counters and the cycle positions
+  were kept under `_`-prefixed names a template could read and assign
+  (`{{ _inc_root }}` printed the include root). They now sit under keys
+  that start with a control character, which no template can spell.
+
+### Fixed
+
+- **The ray-query test writes its instance's whole transform.** It set only
+  the diagonal of the 3x4 matrix, and `vkAllocateMemory` does not clear
+  memory: lavapipe hands back host memory that held earlier data, so the
+  instance sometimes carried a stray translation and the ray through the
+  origin missed. Every element is written now, and the test passes on every
+  run at every llvmpipe thread count, where it had failed about half of them.
+
 ## [0.735.0]
 
 ### Added
