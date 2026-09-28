@@ -541,7 +541,16 @@ main() {
             inst = buf_create(sizeof(VkAccelerationStructureInstanceKHR),
                               vk.BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR)
             spec.assert_true(inst.mapped != null, "an instance buffer")
+            // Every element of the 3x4 row-major transform is written, not
+            // just the diagonal: vkAllocateMemory does not clear memory, and
+            // lavapipe hands back host memory that held earlier data, so an
+            // unwritten translation moves the instance off the ray.
             m = inst.mapped as f32[]
+            e = 0
+            while e < 12 {
+                m[e] = 0.0
+                e = e + 1
+            }
             m[0] = 1.0; m[5] = 1.0; m[10] = 1.0
             words = (inst.mapped + 48) as uint32[]
             words[0] = 0 | (255 << 24)                       // customIndex 0, mask 0xFF

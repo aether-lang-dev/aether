@@ -175,8 +175,9 @@ jobs:
       if: matrix.name == 'macOS / Clang (ARM64)'
       # Hard step cap as a backstop to the per-test timeouts inside
       # run_macos_leaks.sh: the gate can never hold a runner indefinitely.
-      # 20 min is generous for 16 instrumented programs (leaks +
-      # MallocStackLogging is ~10x slower than the bare run).
+      # The gate covers the whole tests/regression suite (about 350
+      # programs, each ~10x slower under leaks + MallocStackLogging), so it
+      # checks them one per core; one at a time it had grown past this cap.
       timeout-minutes: 20
       run: make test-macos-leaks
 
@@ -482,15 +483,18 @@ jobs:
           name="${t%%:*}"
           allowed_skips="${t##*:}"
           out="$(cd build/contrib-check/vulkan_${name}.rundir && xvfb-run -a -s "-screen 0 1280x1024x24" ../vulkan_${name} 2>&1 || true)"
-          echo "$out" | tail -4
           passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
           skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
           failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
           if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt "$allowed_skips" ]; then
+            # All of it: each skipped case prints the reason it skipped, and
+            # the reason is what tells a missing driver from a broken setup.
+            echo "$out"
             echo "contrib/vulkan ${name} did not run; lavapipe and Xvfb should be present on this leg"
             echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
             exit 1
           fi
+          echo "$out" | tail -4
         done
 
     # The Wayland presentation path (#2197): the same present binary, told to

@@ -103,10 +103,12 @@ shorthand pattern.
 
 ## `contrib.templating.liquid`
 
-Shipped. `contrib/templating/liquid/README.md` lists what it supports and,
-under "What's not supported yet", the issue for each thing it does not do
-(#2177 through #2184). The build log that used to live here described the
-first slice, and the module has since outgrown every line of it.
+Shipped. `contrib/templating/liquid/README.md` lists what it supports. The
+limitations #1558 split into their own issues (#2177 through #2184) are all
+closed: arrays and objects, paths, `for` over them, the array filters,
+`date`, variable filter arguments, layout chains and the partial cache. The
+build log that used to live here described the first slice, and the module
+has since outgrown every line of it.
 
 ## Other parked work
 

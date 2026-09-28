@@ -48,6 +48,7 @@ stage_fixtures(root: string) -> (string, string, string, string) {
     put_fixture(inc, "loop.liquid", "x{% include 'loop' %}")
     put_fixture(inc, "outer.liquid", "outer-start {% include 'inner' %} outer-end")
     put_fixture(inc, "pair.liquid", "a={{ a }}|b={{ b }}")
+    put_fixture(inc, "each_tag.liquid", "{% for t in tags %}<{{ t }}>{% endfor %}{{ \"now\" | date: \"%Y\" }}")
 
     lay = string.concat(root, "/layout_block")
     put_fixture(lay, "base.liquid",
@@ -221,9 +222,30 @@ main() {
                 "Hello lit!", "14 render quoted literal")
         }
 
+        // An array argument is read from the store the fresh context shares
+        // with the outer one, and the host's time goes with it (#2177, #2181).
+        spec.it(fw, "passes an array by path, and the host's time") callback {
+            t18, _ = liquid.parse_string("{% render 'each_tag', tags: product.tags %}")
+            ctx18 = liquid.context_new()
+            liquid.context_set_include_root(ctx18, inc)
+            liquid.context_put_json_text(ctx18, "product", "{\"tags\": [\"a\", \"b\"]}")
+            liquid.context_set_now(ctx18, 1234567890)
+            out18, err18 = liquid.render(t18, ctx18)
+            spec.assert_str_eq(err18, "", "18a no error")
+            spec.assert_str_eq(out18, "<a><b>2009", "18b render with an array argument")
+            liquid.context_free(ctx18)
+        }
+
         spec.it(fw, "errors on a missing partial") callback {
             spec.assert_not_eq(string.length(render_rooted_err("{% render 'nope' %}", inc)), 0,
                 "15 missing render partial: expected error")
+        }
+
+        // The include root and depth are the context's own state, under keys
+        // no Liquid name can spell, so a template can neither read nor set them.
+        spec.it(fw, "keeps the include root and depth out of a template's reach") callback {
+            spec.assert_str_eq(render_rooted("{% assign _inc_depth = 500 %}[{{ _inc_root }}]{% include 'inner' %}", inc),
+                "[]INNER", "19 internal keys unreachable")
         }
 
         spec.it(fw, "caps recursion the same way include does") callback {

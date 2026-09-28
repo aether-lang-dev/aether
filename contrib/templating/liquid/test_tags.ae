@@ -6,9 +6,10 @@
 // retired.
 //
 // This file is the "tags that decide what renders and how often" half:
-// `{% for %}` over ranges (with forloop.*, limit/offset/reversed,
-// break/continue), the conditionals, `{% tablerow %}`, and the stateful
-// `{% increment %}` / `{% decrement %}` / `{% cycle %}` tags.
+// `{% for %}` over ranges, arrays and objects (with forloop.*,
+// limit/offset/reversed, break/continue, else), the conditionals,
+// `{% tablerow %}`, and the stateful `{% increment %}` / `{% decrement %}` /
+// `{% cycle %}` tags.
 //
 // The comment and raw tags live in test_syntax.ae instead — they are
 // lexical, resolved before any of this runs.
@@ -36,6 +37,32 @@ render_err(src: string) -> string {
     t, _ = liquid.parse_string(src)
     _, e = liquid.render(t, liquid.context_new())
     return e
+}
+
+// A context with `key` bound to the JSON `text`.
+json_ctx(key: string, text: string) -> ptr {
+    ctx = liquid.context_new()
+    err = liquid.context_put_json_text(ctx, key, text)
+    if err != "" { println("fixture ${key} is not JSON: ${err}") }
+    return ctx
+}
+
+// Render `src` against `ctx`: the output, or "ERR <message>".
+render_in(src: string, ctx: ptr) -> string {
+    t, perr = liquid.parse_string(src)
+    if perr != "" { return string.concat("PARSE ", perr) }
+    out, err = liquid.render(t, ctx)
+    liquid.template_free(t)
+    if err != "" { return string.concat("ERR ", err) }
+    return out
+}
+
+// Render `src` against a context with `key` bound to the JSON `text`.
+render_json(src: string, key: string, text: string) -> string {
+    ctx = json_ctx(key, text)
+    out = render_in(src, ctx)
+    liquid.context_free(ctx)
+    return out
 }
 
 main() {
@@ -226,12 +253,13 @@ main() {
                 "28 stray endfor: expected error")
         }
 
-        // Only ranges are iterable in this slice; anything else must say so
-        // rather than silently rendering an empty body.
-        spec.it(fw, "rejects a non-range iterable") callback {
-            spec.assert_not_eq(
-                string.length(render_err("{% for x in mylist %}{{ x }}{% endfor %}")), 0,
-                "29 non-range iterable: expected error")
+        // An unbound name is nil, and nil iterates zero times, as in Liquid
+        // (arrays and objects are #2179's, below).
+        spec.it(fw, "iterates nothing over an unbound name") callback {
+            spec.assert_str_eq(render_empty("[{% for x in mylist %}{{ x }}{% endfor %}]"), "[]",
+                "29 unbound iterable")
+            spec.assert_str_eq(render_err("{% for x in mylist %}{{ x }}{% endfor %}"), "",
+                "29 unbound iterable: no error")
         }
     }
 
@@ -484,10 +512,11 @@ main() {
                 "11 var restored")
         }
 
-        spec.it(fw, "rejects a non-range iterable") callback {
-            spec.assert_not_eq(
-                string.length(render_err("{% tablerow x in mylist %}{{ x }}{% endtablerow %}")), 0,
-                "12 non-range iterable: expected error")
+        spec.it(fw, "emits an empty row for an unbound name") callback {
+            spec.assert_str_eq(render_empty("{% tablerow x in mylist %}{{ x }}{% endtablerow %}"),
+                "<tr class=\"row1\">
+</tr>
+", "12 unbound iterable")
         }
 
         spec.it(fw, "rejects an unclosed tablerow") callback {
@@ -679,6 +708,120 @@ main() {
 
         spec.it(fw, "is a no-op when empty") callback {
             spec.assert_str_eq(render_empty("a{% liquid\n%}b"), "ab", "14 empty liquid is no-op")
+        }
+    }
+
+    spec.describe(fw, "liquid: for over arrays and objects (#2179)") {
+        spec.it(fw, "iterates an array") callback {
+            spec.assert_str_eq(render_json("{% for t in xs %}[{{ t }}]{% endfor %}", "xs", "[\"a\", 2, true]"),
+                "[a][2][true]", "1 array")
+        }
+
+        spec.it(fw, "iterates an object as [key, value] pairs, in key order") callback {
+            spec.assert_str_eq(render_json("{% for p in o %}{{ p[0] }}={{ p[1] }};{% endfor %}", "o", "{\"b\": 1, \"a\": [2, 3]}"),
+                "b=1;a=23;", "2 object pairs")
+        }
+
+        spec.it(fw, "iterates a string once, as itself, and nil not at all") callback {
+            spec.assert_str_eq(render_json("{% for c in v.s %}({{ c }}){% endfor %}|{% for c in v.z %}X{% endfor %}|{% for c in v.e %}X{% endfor %}", "v", "{\"s\": \"abc\", \"z\": null, \"e\": \"\"}"),
+                "(abc)||", "3 string and nil")
+        }
+
+        spec.it(fw, "binds forloop over an array") callback {
+            spec.assert_str_eq(render_json("{% for t in xs %}{{ forloop.index }}/{{ forloop.index0 }}/{{ forloop.rindex }}/{{ forloop.rindex0 }}/{{ forloop.first }}/{{ forloop.last }}/{{ forloop.length }};{% endfor %}", "xs", "[\"a\", \"b\"]"),
+                "1/0/2/1/true/false/2;2/1/1/0/false/true/2;", "4 forloop")
+        }
+
+        spec.it(fw, "names the loop in forloop.name") callback {
+            spec.assert_str_eq(render_json("{% for t in xs %}{{ forloop.name }}{% endfor %}", "xs", "[1]"),
+                "t-xs", "5 forloop.name")
+        }
+
+        spec.it(fw, "applies offset, limit and reversed to an array") callback {
+            spec.assert_str_eq(render_json("{% for t in xs offset:1 limit:3 %}{{ t }}{% endfor %}|{% for t in xs reversed %}{{ t }}{% endfor %}|{% for t in xs limit:2 reversed %}{{ t }}{% endfor %}", "xs", "[1, 2, 3, 4, 5]"),
+                "234|54321|21", "6 modifiers")
+        }
+
+        spec.it(fw, "takes limit and offset from variables") callback {
+            ctx = json_ctx("xs", "[1, 2, 3, 4, 5]")
+            liquid.context_put_int(ctx, "n", 2)
+            spec.assert_str_eq(render_in("{% for t in xs limit: n offset: n %}{{ t }}{% endfor %}", ctx), "34",
+                "7 variable modifiers")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "breaks and continues in an array loop") callback {
+            spec.assert_str_eq(render_json("{% for t in xs %}{% if t == 2 %}{% continue %}{% endif %}{% if t == 4 %}{% break %}{% endif %}{{ t }}{% endfor %}", "xs", "[1, 2, 3, 4, 5]"),
+                "13", "8 break/continue")
+        }
+
+        spec.it(fw, "renders the else branch for nothing to iterate") callback {
+            spec.assert_str_eq(render_json("{% for t in v.e %}X{% else %}empty{% endfor %}|{% for t in v.none %}X{% else %}nil{% endfor %}|{% for t in v.a offset:5 %}X{% else %}past{% endfor %}|{% for t in (3..1) %}X{% else %}range{% endfor %}", "v", "{\"e\": [], \"none\": null, \"a\": [1]}"),
+                "empty|nil|past|range", "9 else")
+        }
+
+        spec.it(fw, "skips the else branch when there is something to iterate") callback {
+            spec.assert_str_eq(render_json("{% for t in xs %}{{ t }}{% else %}empty{% endfor %}", "xs", "[1, 2]"),
+                "12", "10 no else")
+        }
+
+        spec.it(fw, "keeps an if's else inside the body its own") callback {
+            spec.assert_str_eq(render_json("{% for t in xs %}{% if t == 1 %}one{% else %}other{% endif %};{% endfor %}", "xs", "[1, 2]"),
+                "one;other;", "11 nested if/else")
+        }
+
+        spec.it(fw, "reaches the enclosing loop through forloop.parentloop") callback {
+            spec.assert_str_eq(render_json("{% for a in xs %}{% for b in xs %}{{ forloop.parentloop.index }}{{ forloop.index }} {% endfor %}{% endfor %}", "xs", "[1, 2]"),
+                "11 12 21 22 ", "12 parentloop")
+        }
+
+        spec.it(fw, "restores the loop variable and forloop afterwards") callback {
+            ctx = json_ctx("xs", "[1, 2]")
+            liquid.context_put_string(ctx, "t", "outer")
+            spec.assert_str_eq(render_in("{% for t in xs %}{{ t }}{% endfor %}-{{ t }}-[{{ forloop.index }}]", ctx),
+                "12-outer-[]", "13 restored")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "takes range bounds from variables and paths") callback {
+            ctx = json_ctx("xs", "[\"a\", \"b\", \"c\"]")
+            liquid.context_put_int(ctx, "n", 2)
+            spec.assert_str_eq(render_in("{% for i in (1..n) %}{{ i }}{% endfor %}|{% for i in (0..xs.size) %}{{ i }}{% endfor %}", ctx),
+                "12|0123", "14 range bounds")
+            liquid.context_free(ctx)
+        }
+
+        spec.it(fw, "binds the range's numbers as integers") callback {
+            spec.assert_str_eq(render_empty("{% for i in (1..3) %}{% if i == 2 %}two{% endif %}{{ i | plus: 10 }};{% endfor %}"),
+                "11;two12;13;", "15 integer loop variable")
+        }
+
+        spec.it(fw, "tablerows over an array") callback {
+            spec.assert_str_eq(render_json("{% tablerow t in xs cols:2 %}{{ t }}{% endtablerow %}", "xs", "[\"a\", \"b\", \"c\"]"),
+                "<tr class=\"row1\">\n<td class=\"col1\">a</td><td class=\"col2\">b</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">c</td></tr>\n",
+                "16 tablerow array")
+        }
+    }
+
+    spec.describe(fw, "liquid: blocks nested in a branch") {
+        spec.it(fw, "keeps a case's else inside an if its own") callback {
+            spec.assert_str_eq(render_with("{% if true %}{% case x %}{% when \"1\" %}one{% else %}other{% endcase %}{% else %}no{% endif %}", "x", "2"),
+                "other", "1 case in if")
+        }
+
+        spec.it(fw, "keeps an if's else inside a when its own") callback {
+            spec.assert_str_eq(render_with("{% case x %}{% when \"1\" %}{% if false %}a{% else %}b{% endif %}{% else %}c{% endcase %}", "x", "1"),
+                "b", "2 if in case")
+        }
+
+        spec.it(fw, "keeps a for's else inside an if its own") callback {
+            spec.assert_str_eq(render_empty("{% if true %}{% for i in (2..1) %}x{% else %}none{% endfor %}{% else %}no{% endif %}"),
+                "none", "3 for in if")
+        }
+
+        spec.it(fw, "rejects another block's closer where this one's belongs") callback {
+            spec.assert_not_eq(string.length(render_err("{% if true %}a{% endfor %}")), 0,
+                "4 mismatched closer: expected error")
         }
     }
 

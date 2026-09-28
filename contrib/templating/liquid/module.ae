@@ -4,21 +4,22 @@
 // (https://shopify.github.io/liquid/). Sandbox-friendly: no reflection,
 // no eval, filter set is explicit.
 //
-// What it supports -- output, filters, the control-flow and iteration tags,
-// includes and layouts -- is listed in README.md beside this file, and so
-// is each thing it does not do yet, with the issue that tracks it.
+// What it supports -- output, variable paths, filters, the control-flow and
+// iteration tags, includes and layouts -- is listed in README.md beside
+// this file.
 //
 // Surface:
 //
 //   import contrib.templating.liquid
 //
-//   t, err = liquid.parse_string("Hello {{ name }}!")
+//   t, err = liquid.parse_string("Hello {{ user.name }}! {{ tags | join: \", \" }}")
 //
 //   ctx = liquid.context_new()
-//   liquid.context_put_string(ctx, "name", "alice")
+//   liquid.context_put_json_text(ctx, "user", "{\"name\": \"alice\"}")
+//   liquid.context_put_json_text(ctx, "tags", "[\"a\", \"b\"]")
 //
 //   out, _ = liquid.render(t, ctx)
-//   // → "Hello alice!"
+//   // → "Hello alice! a, b"
 
 import std.string
 import std.strbuilder
@@ -28,13 +29,16 @@ import std.cryptography
 import std.encoding
 import std.fs
 import std.path
-import std.mem
 import std.bignum
+import std.json
+import std.time.calendar
 
-exports (
+exports(
     parse_string, parse_file,
     context_new, context_put_string,
     context_put_int, context_put_float, context_put_bool, context_put_nil,
+    // Arrays and objects (#2177), and the time `date` reads as now (#2181)
+    context_put_json, context_put_json_text, context_set_now, context_value_nodes,
     context_free,
     context_set_include_root,
     value_nil, value_bool, value_int, value_float, value_str,
@@ -65,19 +69,19 @@ exports (
 // through without parsing — future tag support is purely renderer-side
 // growth.
 
-const TOK_TEXT   = "TEXT"
+const TOK_TEXT = "TEXT"
 const TOK_OUTPUT = "OUTPUT"
-const TOK_TAG    = "TAG"
+const TOK_TAG = "TAG"
 
 // Find the next `{{` OR `{%` starting at `p`. Returns (offset, kind)
 // where kind is "{{" or "{%". Returns (-1, "") if none found.
 find_next_delim(src: string, n: int, p: int) -> (int, string) {
     i = p
     while i < n - 1 {
-        if string.char_at_n(src, n, i) == 123 {       // '{'
+        if string.char_at_n(src, n, i) == 123 { // '{'
             nxt = string.char_at_n(src, n, i + 1)
             if nxt == 123 { return i, "{{" }
-            if nxt == 37  { return i, "{%" }
+            if nxt == 37 { return i, "{%" }
         }
         i = i + 1
     }
@@ -88,8 +92,8 @@ find_next_delim(src: string, n: int, p: int) -> (int, string) {
 find_output_close(src: string, n: int, p: int) -> int {
     i = p
     while i < n - 1 {
-        if string.char_at_n(src, n, i) == 125 {       // '}'
-            if string.char_at_n(src, n, i + 1) == 125 {  // '}'
+        if string.char_at_n(src, n, i) == 125 { // '}'
+            if string.char_at_n(src, n, i + 1) == 125 { // '}'
                 return i
             }
         }
@@ -102,8 +106,8 @@ find_output_close(src: string, n: int, p: int) -> int {
 find_tag_close(src: string, n: int, p: int) -> int {
     i = p
     while i < n - 1 {
-        if string.char_at_n(src, n, i) == 37 {        // '%'
-            if string.char_at_n(src, n, i + 1) == 125 {  // '}'
+        if string.char_at_n(src, n, i) == 37 { // '%'
+            if string.char_at_n(src, n, i + 1) == 125 { // '}'
                 return i
             }
         }
@@ -210,7 +214,7 @@ trim(s: string) -> string {
 peel_left_dash(s: string) -> (string, int) {
     n = string_length(s)
     if n == 0 { return s, 0 }
-    if string.char_at_n(s, n, 0) == 45 {   // '-'
+    if string.char_at_n(s, n, 0) == 45 { // '-'
         return string.substring_n(s, n, 1, n), 1
     }
     return s, 0
@@ -221,7 +225,7 @@ peel_left_dash(s: string) -> (string, int) {
 peel_right_dash(s: string) -> (string, int) {
     n = string_length(s)
     if n == 0 { return s, 0 }
-    if string.char_at_n(s, n, n - 1) == 45 {   // '-'
+    if string.char_at_n(s, n, n - 1) == 45 { // '-'
         return string.substring_n(s, n, 0, n - 1), 1
     }
     return s, 0
@@ -263,7 +267,7 @@ ltrim(s: string) -> string {
 // `%}`. The body lives at `[close_open + 2, close_after - 2)`.
 closer_dashes(src: string, n: int, close_open: int, close_after: int) -> (int, int) {
     body_start = close_open + 2
-    body_end   = close_after - 2
+    body_end = close_after - 2
     if body_end <= body_start { return 0, 0 }
     raw = string.substring_n(src, n, body_start, body_end)
     _, ls = peel_left_dash(raw)
@@ -332,7 +336,7 @@ loc_suffix(src: string, n: int, off: int) -> string {
 }
 
 lex(src: string) -> (ptr, string) {
-    kinds    = string_list_new()
+    kinds = string_list_new()
     contents = string_list_new()
     n = string_length(src)
     pos = 0
@@ -427,7 +431,7 @@ lex(src: string) -> (ptr, string) {
                 // applied to the preceding text (via `ls`); the closer's
                 // right-strip carries to the next TEXT.
                 if string_length(body) > 0 &&
-                   string.char_at_n(body, string_length(body), 0) == 35 {   // '#'
+                string.char_at_n(body, string_length(body), 0) == 35 { // '#'
                     if rs == 1 { strip_next = 1 }
                     pos = pos_after
                     continue
@@ -514,7 +518,7 @@ find_block_end(src: string, n: int, p: int, endkw: string) -> (int, int) {
     i = p
     while i < n - 1 {
         if string.char_at_n(src, n, i) == 123 &&
-           string.char_at_n(src, n, i + 1) == 37 {
+        string.char_at_n(src, n, i + 1) == 37 {
             // Found `{%`. Read its body and check for the matching endXX.
             body_start = i + 2
             close_at = find_tag_close(src, n, body_start)
@@ -544,20 +548,14 @@ find_block_end(src: string, n: int, p: int, endkw: string) -> (int, int) {
 // The OUTPUT body is `expr (| filter[:arg[,arg]*])*`. We split on top-level
 // `|` first (respecting quoted strings so a literal `|` inside `"a|b"`
 // stays intact), then each filter stage on top-level `:` between name and
-// args, then args on top-level `,`. Single- and double-quoted string
-// literals are supported; an unquoted arg is rejected as an error in this
-// slice (variable / number args arrive with Layer 2).
+// args, then args on top-level `,`. An argument is a literal or a variable
+// path, like any value.
 //
-// Implemented filters (string-only in/out for this slice):
-//
-//   no-arg:  upcase  downcase  capitalize  strip  lstrip  rstrip
-//            reverse size
-//   1 arg:   append:"s"  prepend:"s"  default:"s"  truncate:N
-//   2 args:  replace:"old","new"
-//
-// `truncate:N` parses the int from its single string arg
-// (`truncate:"5"` works; bare `truncate:5` requires Layer 2 expression
-// support and is rejected here). `size` returns a numeric string.
+// Two kinds of filter (apply_filter_in): the text filters (apply_filter_args)
+// work on their input's text and give text or a number; the value filters
+// (value_filter) -- the array filters, `size`, `first`, `last`, `reverse`,
+// `default` and `date` -- take and give values of any kind, so an array
+// flows from `split` through `sort` to `join`. README.md lists them all.
 
 // Find the next byte in `s` (length `n`) at or after `p` that matches
 // `target` AND is not inside a single- or double-quoted string. Returns
@@ -572,11 +570,11 @@ find_outside_quotes(s: string, n: int, p: int, target: int) -> int {
     while i < n {
         c = string.char_at_n(s, n, i)
         if in_s == 1 {
-            if c == 39 { in_s = 0 }   // '\''
+            if c == 39 { in_s = 0 } // '\''
         } else if in_d == 1 {
-            if c == 34 { in_d = 0 }   // '"'
+            if c == 34 { in_d = 0 } // '"'
         } else {
-            if c == 39      { in_s = 1 }
+            if c == 39 { in_s = 1 }
             else if c == 34 { in_d = 1 }
             else if c == target { return i }
         }
@@ -593,7 +591,7 @@ split_pipes(body: string) -> ptr {
     n = string_length(body)
     p = 0
     while p <= n {
-        cut = find_outside_quotes(body, n, p, 124)   // '|'
+        cut = find_outside_quotes(body, n, p, 124) // '|'
         if cut < 0 {
             string_list_add(out, trim(string.substring_n(body, n, p, n)))
             return out
@@ -608,7 +606,7 @@ split_pipes(body: string) -> ptr {
 // ("name", "") for an arg-less filter.
 split_name_args(stage: string) -> (string, string) {
     n = string_length(stage)
-    cut = find_outside_quotes(stage, n, 0, 58)   // ':'
+    cut = find_outside_quotes(stage, n, 0, 58) // ':'
     if cut < 0 {
         return trim(stage), ""
     }
@@ -625,7 +623,7 @@ split_commas(args: string) -> ptr {
     if n == 0 { return out }
     p = 0
     while p <= n {
-        cut = find_outside_quotes(args, n, p, 44)   // ','
+        cut = find_outside_quotes(args, n, p, 44) // ','
         if cut < 0 {
             string_list_add(out, trim(string.substring_n(args, n, p, n)))
             return out
@@ -671,7 +669,7 @@ unquote_arg(a: string) -> (string, string) {
         return "", string.concat("filter arg must be a quoted string or a number: ", a)
     }
     first = string.char_at_n(a, n, 0)
-    last  = string.char_at_n(a, n, n - 1)
+    last = string.char_at_n(a, n, n - 1)
     if (first == 34 && last == 34) || (first == 39 && last == 39) {
         return string.substring_n(a, n, 1, n - 1), ""
     }
@@ -781,12 +779,12 @@ filter_escape(s: string) -> string {
     i = 0
     while i < n {
         c = string.char_at_n(s, n, i)
-        if c == 38      { strbuilder.append(sb, "&amp;") }      // &
-        else if c == 60 { strbuilder.append(sb, "&lt;") }       // <
-        else if c == 62 { strbuilder.append(sb, "&gt;") }       // >
-        else if c == 34 { strbuilder.append(sb, "&quot;") }     // "
-        else if c == 39 { strbuilder.append(sb, "&#39;") }      // '
-        else            { strbuilder.append(sb, string.from_char(c)) }
+        if c == 38 { strbuilder.append(sb, "&amp;") } // &
+        else if c == 60 { strbuilder.append(sb, "&lt;") } // <
+        else if c == 62 { strbuilder.append(sb, "&gt;") } // >
+        else if c == 34 { strbuilder.append(sb, "&quot;") } // "
+        else if c == 39 { strbuilder.append(sb, "&#39;") } // '
+        else { strbuilder.append(sb, string.from_char(c)) }
         i = i + 1
     }
     return strbuilder.finish(sb)
@@ -797,7 +795,7 @@ filter_escape(s: string) -> string {
 // `escape_once` to detect already-encoded text.
 is_html_entity_at(s: string, n: int, i: int) -> int {
     if i >= n { return 0 }
-    if string.char_at_n(s, n, i) != 38 { return 0 }   // '&'
+    if string.char_at_n(s, n, i) != 38 { return 0 } // '&'
     // Scan for the terminating `;` within a reasonable distance.
     // HTML5 caps named entities around 32 chars; numeric refs are short.
     j = i + 1
@@ -817,12 +815,12 @@ is_html_entity_at(s: string, n: int, i: int) -> int {
     }
     while j < limit {
         c = string.char_at_n(s, n, j)
-        if c == 59 { return 1 }   // ';'
+        if c == 59 { return 1 } // ';'
         if is_num == 1 {
             // numeric: digits OR `x`/`X` allowed immediately after `#`
-            if (c >= 48 && c <= 57) { j = j + 1 ; continue }
-            if (c == 120 || c == 88) && j == i + 2 { j = j + 1 ; continue }
-            if (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { j = j + 1 ; continue }
+            if (c >= 48 && c <= 57) { j = j + 1; continue }
+            if (c == 120 || c == 88) && j == i + 2 { j = j + 1; continue }
+            if (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { j = j + 1; continue }
             return 0
         } else {
             // named: ASCII alnum
@@ -856,7 +854,7 @@ filter_escape_once(s: string) -> string {
         else if c == 62 { strbuilder.append(sb, "&gt;") }
         else if c == 34 { strbuilder.append(sb, "&quot;") }
         else if c == 39 { strbuilder.append(sb, "&#39;") }
-        else            { strbuilder.append(sb, string.from_char(c)) }
+        else { strbuilder.append(sb, string.from_char(c)) }
         i = i + 1
     }
     return strbuilder.finish(sb)
@@ -880,9 +878,9 @@ filter_url_encode(s: string) -> string {
         c = string.char_at_n(s, n, i)
         // Unreserved per RFC 3986: A-Z a-z 0-9 - _ . ~
         if (c >= 48 && c <= 57) ||
-           (c >= 65 && c <= 90) ||
-           (c >= 97 && c <= 122) ||
-           c == 45 || c == 95 || c == 46 || c == 126 {
+        (c >= 65 && c <= 90) ||
+        (c >= 97 && c <= 122) ||
+        c == 45 || c == 95 || c == 46 || c == 126 {
             strbuilder.append(sb, string.from_char(c))
         } else if c == 32 {
             strbuilder.append(sb, "+")
@@ -900,8 +898,8 @@ filter_url_encode(s: string) -> string {
 
 // Parse a single hex digit byte; returns -1 if not a hex digit.
 parse_hex(c: int) -> int {
-    if c >= 48 && c <= 57  { return c - 48 }
-    if c >= 65 && c <= 70  { return c - 55 }
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 65 && c <= 70 { return c - 55 }
     if c >= 97 && c <= 102 { return c - 87 }
     return -1
 }
@@ -1017,12 +1015,12 @@ filter_escape_xml(s: string) -> string {
     i = 0
     while i < n {
         c = string.char_at_n(s, n, i)
-        if c == 38      { strbuilder.append(sb, "&amp;") }
+        if c == 38 { strbuilder.append(sb, "&amp;") }
         else if c == 60 { strbuilder.append(sb, "&lt;") }
         else if c == 62 { strbuilder.append(sb, "&gt;") }
         else if c == 34 { strbuilder.append(sb, "&quot;") }
         else if c == 39 { strbuilder.append(sb, "&apos;") }
-        else            { strbuilder.append(sb, string.from_char(c)) }
+        else { strbuilder.append(sb, string.from_char(c)) }
         i = i + 1
     }
     return strbuilder.finish(sb)
@@ -1041,10 +1039,10 @@ filter_json_escape(s: string) -> string {
     i = 0
     while i < n {
         c = string.char_at_n(s, n, i)
-        if c == 92      { strbuilder.append(sb, "\\\\") }
+        if c == 92 { strbuilder.append(sb, "\\\\") }
         else if c == 34 { strbuilder.append(sb, "\\\"") }
-        else if c == 8  { strbuilder.append(sb, "\\b") }
-        else if c == 9  { strbuilder.append(sb, "\\t") }
+        else if c == 8 { strbuilder.append(sb, "\\b") }
+        else if c == 9 { strbuilder.append(sb, "\\t") }
         else if c == 10 { strbuilder.append(sb, "\\n") }
         else if c == 12 { strbuilder.append(sb, "\\f") }
         else if c == 13 { strbuilder.append(sb, "\\r") }
@@ -1072,10 +1070,10 @@ filter_strip_html(s: string) -> string {
     while i < n {
         c = string.char_at_n(s, n, i)
         if in_tag == 1 {
-            if c == 62 { in_tag = 0 }   // '>'
+            if c == 62 { in_tag = 0 } // '>'
         } else {
-            if c == 60 { in_tag = 1 }   // '<'
-            else       { strbuilder.append(sb, string.from_char(c)) }
+            if c == 60 { in_tag = 1 } // '<'
+            else { strbuilder.append(sb, string.from_char(c)) }
         }
         i = i + 1
     }
@@ -1235,7 +1233,7 @@ round_digits(idigits: string, fdigits: string, places: int) -> (string, string) 
     fn_ = string_length(fdigits)
     if fn_ <= places { return idigits, fdigits }
     keep = string.substring_n(fdigits, fn_, 0, places)
-    up = string.char_at_n(fdigits, fn_, places) >= 53     // '5'
+    up = string.char_at_n(fdigits, fn_, places) >= 53 // '5'
     if up == false { return idigits, keep }
     if places == 0 { return digits_inc(idigits), "" }
     joined = digits_inc(string.concat(idigits, keep))
@@ -1327,7 +1325,6 @@ dcmp(a: string, b: string) -> int {
     if c > 0 { return 1 }
     return 0
 }
-
 
 // a + b for digit strings.
 dadd(a: string, b: string) -> string {
@@ -1550,7 +1547,7 @@ ruby_float_text(v: float) -> string {
             body = string.concat(dshift(digits, decpt - dn), ".0")
         } else {
             body = string.concat(string.concat(string.substring_n(digits, dn, 0, decpt), "."),
-                                 string.substring_n(digits, dn, decpt, dn))
+                string.substring_n(digits, dn, decpt, dn))
         }
     } else if decpt <= 0 && decpt > -4 {
         zeros = ""
@@ -1566,7 +1563,7 @@ ruby_float_text(v: float) -> string {
         etext = string.from_int(e)
         if e < 10 { etext = string.concat("0", etext) }
         body = string.concat(string.concat(string.concat(string.concat(
-            string.substring_n(digits, dn, 0, 1), "."), frac), string.concat("e", esign)), etext)
+                        string.substring_n(digits, dn, 0, 1), "."), frac), string.concat("e", esign)), etext)
     }
     return string.concat(sign, body)
 }
@@ -1671,51 +1668,10 @@ filter_arith(name: string, lhs_text: string, rhs_text: string) -> (string, strin
     return int_text(rn, r), ""
 }
 
-// Does a filter argument name a variable (`qty`, `line.price`) rather
-// than being a quoted string, a number, or a `key: value` option?
-names_variable(a: string) -> int {
-    n = string_length(a)
-    if n == 0 { return 0 }
-    c0 = string.char_at_n(a, n, 0)
-    if c0 == 34 || c0 == 39 { return 0 }
-    if is_number_literal(a) == 1 { return 0 }
-    i = 0
-    while i < n {
-        c = string.char_at_n(a, n, i)
-        ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 46 ||
-             (i > 0 && c >= 48 && c <= 57)
-        if ok == false { return 0 }
-        i = i + 1
-    }
-    return 1
-}
-
-// Apply one filter stage in the render context: an argument that names a
-// variable is resolved first, the way a condition's operands are
-// (resolve_atom), so `{{ price | times: qty }}` multiplies by qty's value
-// (#2182). The value is passed on quoted; unquote_arg strips just the
-// outer pair, so any quote inside the value is kept.
-apply_filter_in(ctx: ptr, val: string, name: string, args: string) -> (string, string) {
-    raw = split_commas(args)
-    n = string_list_size(raw)
-    resolved = string_list_new()
-    i = 0
-    while i < n {
-        a = string_list_get(raw, i)
-        if names_variable(a) == 1 {
-            v, _t, rerr = resolve_atom(ctx, a)
-            if rerr != "" { return "", rerr }
-            string_list_add(resolved, string.concat(string.concat("\"", v), "\""))
-        } else {
-            string_list_add(resolved, a)
-        }
-        i = i + 1
-    }
-    return apply_filter_args(val, name, resolved)
-}
-
-// Apply one filter stage to the current value, its arguments already split.
-// Returns (new_value, "") or ("", error).
+// Apply one text filter (filter_kind) to the text `val`, its arguments
+// already split and any variable among them resolved to its text. Returns
+// (new_text, "") or ("", error). `size`, `reverse`, `default` and the other
+// filters that act on values are value_filter's.
 apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) {
     argc = string_list_size(arg_list)
 
@@ -1743,14 +1699,6 @@ apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) 
         if argc != 0 { return "", "rstrip takes no args" }
         return filter_rstrip(val), ""
     }
-    if string.equals(name, "reverse") == 1 {
-        if argc != 0 { return "", "reverse takes no args" }
-        return filter_reverse(val), ""
-    }
-    if string.equals(name, "size") == 1 {
-        if argc != 0 { return "", "size takes no args" }
-        return string.from_int(string_length(val)), ""
-    }
     if string.equals(name, "append") == 1 {
         if argc != 1 { return "", "append needs exactly 1 arg" }
         s, err = unquote_arg(string_list_get(arg_list, 0))
@@ -1762,59 +1710,6 @@ apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) 
         s, err = unquote_arg(string_list_get(arg_list, 0))
         if err != "" { return "", err }
         return string.concat(s, val), ""
-    }
-    if string.equals(name, "default") == 1 {
-        // Shopify signature: default: VAL [, allow_false: BOOL]
-        // Aether's filter-arg parser is positional and string-keyed, so
-        // the second arg is whatever the user wrote — typically
-        // `allow_false:"true"` (a quoted "true") or just `"true"`.
-        // Without the typed value model in resolve_atom's filter
-        // pipeline (Phase 2), the fallback set on a legacy string is
-        // {"", "false", "nil", "null"} when allow_false fires, and just
-        // {""} otherwise. With a typed binding the legacy `lookup`
-        // already stringifies via value_to_string, so a typed LV_NIL
-        // lands here as "" and an LV_BOOL(false) as "false".
-        if argc != 1 && argc != 2 { return "", "default needs 1 or 2 args" }
-        s, err = unquote_arg(string_list_get(arg_list, 0))
-        if err != "" { return "", err }
-        allow_false = 0
-        if argc == 2 {
-            // The second arg may carry a `key:value` shape
-            // (`allow_false:true`) or just a bare value
-            // (`"true"`). We accept either.
-            raw2 = string_list_get(arg_list, 1)
-            // Strip optional `allow_false:` prefix.
-            n2 = string_length(raw2)
-            af_pref = "allow_false:"
-            afn = string_length(af_pref)
-            payload2 = raw2
-            if n2 >= afn {
-                head2 = string.substring_n(raw2, n2, 0, afn)
-                if string.equals(head2, af_pref) == 1 {
-                    payload2 = trim(string.substring_n(raw2, n2, afn, n2))
-                }
-            }
-            // Now payload2 is either a quoted "true"/"false" or a bare
-            // true/false. unquote_arg handles the quoted form; we
-            // accept bare true/false too.
-            unq, uerr = unquote_arg(payload2)
-            if uerr != "" {
-                unq = payload2
-            }
-            if string.equals(unq, "true") == 1 { allow_false = 1 }
-        }
-        // Compute falsy verdict on `val`. With allow_false the
-        // string-only falsy set widens to {"", "false", "nil", "null"};
-        // otherwise just {""}.
-        falsy = 0
-        if string_length(val) == 0 { falsy = 1 }
-        if allow_false == 1 {
-            if string.equals(val, "false") == 1 { falsy = 1 }
-            if string.equals(val, "nil")   == 1 { falsy = 1 }
-            if string.equals(val, "null")  == 1 { falsy = 1 }
-        }
-        if falsy == 1 { return s, "" }
-        return val, ""
     }
     if string.equals(name, "truncate") == 1 {
         // Shopify Liquid signature: truncate: N [, ellipsis]
@@ -1918,12 +1813,12 @@ apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) 
     // computed int). When val is empty/non-numeric, Liquid coerces to
     // 0 — we follow.
     if string.equals(name, "plus") == 1 ||
-       string.equals(name, "minus") == 1 ||
-       string.equals(name, "times") == 1 ||
-       string.equals(name, "divided_by") == 1 ||
-       string.equals(name, "modulo") == 1 ||
-       string.equals(name, "at_least") == 1 ||
-       string.equals(name, "at_most") == 1 {
+    string.equals(name, "minus") == 1 ||
+    string.equals(name, "times") == 1 ||
+    string.equals(name, "divided_by") == 1 ||
+    string.equals(name, "modulo") == 1 ||
+    string.equals(name, "at_least") == 1 ||
+    string.equals(name, "at_most") == 1 {
         if argc != 1 { return "", string.concat(name, " needs exactly 1 arg") }
         s, e1 = unquote_arg(string_list_get(arg_list, 0))
         if e1 != "" { return "", e1 }
@@ -2001,23 +1896,620 @@ apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) 
     return val, ""
 }
 
-// Render an OUTPUT body. `body` is the trimmed contents of `{{ ... }}`.
-// Splits on `|`, looks up the variable as the first segment, then
-// applies each filter stage. Returns (value, "") or ("", error).
+// A filter argument written `name: value` -- a keyword argument, as
+// default's `allow_false: true`: (name, value text). ("", "") for a
+// positional argument.
+keyword_arg(a: string) -> (string, string) {
+    n = string_length(a)
+    colon = find_outside_quotes(a, n, 0, 58)
+    if colon <= 0 { return "", "" }
+    name = trim(string.substring_n(a, n, 0, colon))
+    nn = string_length(name)
+    if nn == 0 || is_name_byte(string.char_at_n(name, nn, 0), 1) == 0 { return "", "" }
+    i = 1
+    while i < nn {
+        if is_name_byte(string.char_at_n(name, nn, i), 0) == 0 { return "", "" }
+        i = i + 1
+    }
+    return name, trim(string.substring_n(a, n, colon + 1, n))
+}
+
+// What kind of filter `name` is: FILTER_VALUE for the filters that take and
+// give values of any kind (value_filter: the array filters (#2180),
+// `default`, `date` (#2181), and `size`, `first`, `last`, `reverse`, which
+// act on an array when handed one); FILTER_NUMBER for a text filter whose
+// result is a number; FILTER_TEXT for the other text filters
+// (apply_filter_args); FILTER_NONE for a name Liquid does not have, which
+// passes its input through unchanged, as Shopify's Liquid does. Switched on
+// the first byte, so a name costs a compare or two however many filters
+// there are.
+const FILTER_NONE = 0
+const FILTER_VALUE = 1
+const FILTER_NUMBER = 2
+const FILTER_TEXT = 3
+
+filter_kind(name: string) -> int {
+    n = string_length(name)
+    if n == 0 { return FILTER_NONE }
+    c = string.char_at_n(name, n, 0)
+    if c == 97 { // a
+        if string.equals(name, "append") == 1 { return FILTER_TEXT }
+        if string.equals(name, "abs") == 1 || string.equals(name, "at_least") == 1 ||
+        string.equals(name, "at_most") == 1 { return FILTER_NUMBER }
+    } else if c == 98 { // b
+        if string.equals(name, "base64_encode") == 1 || string.equals(name, "base64_decode") == 1 {
+            return FILTER_TEXT
+        }
+    } else if c == 99 { // c
+        if string.equals(name, "capitalize") == 1 { return FILTER_TEXT }
+        if string.equals(name, "ceil") == 1 { return FILTER_NUMBER }
+        if string.equals(name, "compact") == 1 || string.equals(name, "concat") == 1 { return FILTER_VALUE }
+    } else if c == 100 { // d
+        if string.equals(name, "downcase") == 1 { return FILTER_TEXT }
+        if string.equals(name, "divided_by") == 1 { return FILTER_NUMBER }
+        if string.equals(name, "default") == 1 || string.equals(name, "date") == 1 { return FILTER_VALUE }
+    } else if c == 101 { // e
+        if string.equals(name, "escape") == 1 || string.equals(name, "escape_once") == 1 ||
+        string.equals(name, "escape_xml") == 1 { return FILTER_TEXT }
+    } else if c == 102 { // f
+        if string.equals(name, "first") == 1 { return FILTER_VALUE }
+        if string.equals(name, "floor") == 1 { return FILTER_NUMBER }
+    } else if c == 106 { // j
+        if string.equals(name, "join") == 1 { return FILTER_VALUE }
+        if string.equals(name, "json_escape") == 1 { return FILTER_TEXT }
+    } else if c == 108 { // l
+        if string.equals(name, "lstrip") == 1 { return FILTER_TEXT }
+        if string.equals(name, "last") == 1 { return FILTER_VALUE }
+    } else if c == 109 { // m
+        if string.equals(name, "minus") == 1 || string.equals(name, "modulo") == 1 { return FILTER_NUMBER }
+        if string.equals(name, "map") == 1 { return FILTER_VALUE }
+        if string.equals(name, "md5") == 1 { return FILTER_TEXT }
+    } else if c == 110 { // n
+        if string.equals(name, "newline_to_br") == 1 { return FILTER_TEXT }
+    } else if c == 112 { // p
+        if string.equals(name, "prepend") == 1 { return FILTER_TEXT }
+        if string.equals(name, "plus") == 1 { return FILTER_NUMBER }
+    } else if c == 114 { // r
+        if string.equals(name, "reverse") == 1 { return FILTER_VALUE }
+        if string.equals(name, "round") == 1 { return FILTER_NUMBER }
+        if string.equals(name, "rstrip") == 1 || string.equals(name, "replace") == 1 ||
+        string.equals(name, "replace_first") == 1 || string.equals(name, "remove") == 1 ||
+        string.equals(name, "remove_first") == 1 { return FILTER_TEXT }
+    } else if c == 115 { // s
+        if string.equals(name, "size") == 1 || string.equals(name, "split") == 1 ||
+        string.equals(name, "sort") == 1 || string.equals(name, "sort_natural") == 1 {
+            return FILTER_VALUE
+        }
+        if string.equals(name, "strip") == 1 || string.equals(name, "slice") == 1 ||
+        string.equals(name, "strip_html") == 1 || string.equals(name, "strip_newlines") == 1 ||
+        string.equals(name, "sha1") == 1 || string.equals(name, "sha256") == 1 { return FILTER_TEXT }
+    } else if c == 116 { // t
+        if string.equals(name, "times") == 1 { return FILTER_NUMBER }
+        if string.equals(name, "truncate") == 1 || string.equals(name, "truncatewords") == 1 {
+            return FILTER_TEXT
+        }
+    } else if c == 117 { // u
+        if string.equals(name, "uniq") == 1 { return FILTER_VALUE }
+        if string.equals(name, "upcase") == 1 || string.equals(name, "url_encode") == 1 ||
+        string.equals(name, "url_decode") == 1 { return FILTER_TEXT }
+    } else if c == 119 { // w
+        if string.equals(name, "where") == 1 { return FILTER_VALUE }
+    }
+    return FILTER_NONE
+}
+
+// Apply one filter stage in the render context. A text filter gets its
+// input's text and each argument that is a variable path or a keyword
+// literal resolved to its text (#2182); a value filter gets the values
+// themselves. An unknown filter passes the value through unchanged.
+apply_filter_in(ctx: ptr, val: string, name: string, args: string) -> (string, string) {
+    kind = filter_kind(name)
+    if kind == FILTER_NONE { return val, "" }
+    raw = split_commas(args)
+    if kind == FILTER_VALUE {
+        out, verr = apply_value_filter(ctx, val, name, raw)
+        string_list_free(raw)
+        return out, verr
+    }
+    // Each argument that names a value is replaced, in the list, by that
+    // value's text, quoted: unquote_arg strips just the outer pair, so a
+    // quote inside the value is kept.
+    n = string_list_size(raw)
+    i = 0
+    while i < n {
+        a = string_list_get(raw, i)
+        if is_path_text(a) == 1 || string.equals(a, "true") == 1 || string.equals(a, "false") == 1 ||
+        string.equals(a, "nil") == 1 || string.equals(a, "null") == 1 ||
+        string.equals(a, "empty") == 1 || string.equals(a, "blank") == 1 {
+            v, rerr = eval_value(ctx, a)
+            if rerr != "" {
+                string_list_free(raw)
+                return value_nil(), rerr
+            }
+            string_list_set(raw, i, string.concat(string.concat("\"", value_text(ctx, v)), "\""))
+        }
+        i = i + 1
+    }
+    input = value_text(ctx, val)
+    text, err = apply_filter_args(input, name, raw)
+    string_list_free(raw)
+    if err != "" { return value_nil(), err }
+    if kind == FILTER_NUMBER { return value_number(text), "" }
+    return value_str(text), ""
+}
+
+// ---- Array filters (#2180) -------------------------------------------------
+//
+// As Liquid's InputIterator reads a filter's input: an array is its
+// elements with any nested array flattened into them, nil is no elements,
+// and any other value -- an object included -- is the one element.
+
+// Append `v`'s elements to `out` (a string_list of values).
+iter_into(ctx: ptr, out: ptr, v: string, depth: int) {
+    k = value_kind(v)
+    if k == LV_ARR {
+        nd = node_of(ctx, v)
+        if nd == null { return }
+        n = arr_len(nd)
+        i = 0
+        while i < n {
+            e = arr_at(nd, i)
+            if value_kind(e) == LV_ARR && depth < MAX_VALUE_DEPTH {
+                iter_into(ctx, out, e, depth + 1)
+            } else {
+                string_list_add(out, e)
+            }
+            i = i + 1
+        }
+        return
+    }
+    if k == LV_NIL && depth == 0 { return }
+    string_list_add(out, v)
+}
+
+// `v`'s elements, as iter_into reads them, in a new string_list.
+iter_items(ctx: ptr, v: string) -> ptr {
+    out = string_list_new()
+    iter_into(ctx, out, v, 0)
+    return out
+}
+
+// A new array holding the values in `items` (a string_list).
+array_of(ctx: ptr, items: ptr) -> string {
+    av, an = node_new(ctx, LV_ARR)
+    n = string_list_size(items)
+    i = 0
+    while i < n {
+        arr_push(an, string_list_get(items, i))
+        i = i + 1
+    }
+    return av
+}
+
+// `item[property]`: an object's value for the key, nil for anything else.
+item_property(ctx: ptr, item: string, property: string) -> string {
+    if value_kind(item) != LV_OBJ { return value_nil() }
+    nd = node_of(ctx, item)
+    if nd == null { return value_nil() }
+    v, _found = obj_get(nd, property)
+    return v
+}
+
+// Is `c` whitespace as Ruby's `split(" ")` reads it?
+is_split_space(c: int) -> int {
+    if c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13 { return 1 }
+    return 0
+}
+
+// `split: pattern`, as Ruby's String#split: a single space splits on runs of
+// whitespace and ignores it at either end; the empty pattern splits into
+// characters; any other pattern splits on each occurrence, and the empty
+// strings at the end are dropped ("a,b,,".split(",") is ["a", "b"]).
+filter_split(ctx: ptr, s: string, pattern: string) -> string {
+    av, an = node_new(ctx, LV_ARR)
+    n = string_length(s)
+    if n == 0 { return av }
+    pn = string_length(pattern)
+    if string.equals(pattern, " ") == 1 {
+        i = 0
+        while i < n {
+            while i < n && is_split_space(string.char_at_n(s, n, i)) == 1 { i = i + 1 }
+            if i >= n { break }
+            j = i
+            while j < n && is_split_space(string.char_at_n(s, n, j)) == 0 { j = j + 1 }
+            arr_push(an, value_str(string.substring_n(s, n, i, j)))
+            i = j
+        }
+        return av
+    }
+    if pn == 0 {
+        i = 0
+        while i < n {
+            k = utf8_len(string.char_at_n(s, n, i))
+            if i + k > n { k = n - i }
+            arr_push(an, value_str(string.substring_n(s, n, i, i + k)))
+            i = i + k
+        }
+        return av
+    }
+    parts = string_list_new()
+    p = 0
+    while p <= n {
+        cut = string.index_of_from_n(s, n, pattern, p)
+        if cut < 0 {
+            string_list_add(parts, string.substring_n(s, n, p, n))
+            break
+        }
+        string_list_add(parts, string.substring_n(s, n, p, cut))
+        p = cut + pn
+    }
+    keep = string_list_size(parts)
+    while keep > 0 && string_length(string_list_get(parts, keep - 1)) == 0 { keep = keep - 1 }
+    i = 0
+    while i < keep {
+        arr_push(an, value_str(string_list_get(parts, i)))
+        i = i + 1
+    }
+    string_list_free(parts)
+    return av
+}
+
+// The value `sort` orders an element by: the element, or its `property`.
+sort_key(ctx: ptr, item: string, property: string, has_property: int) -> string {
+    if has_property == 1 { return item_property(ctx, item, property) }
+    return item
+}
+
+// How `sort` orders two elements (`natural` 1 for sort_natural): nil after
+// everything else; sort_natural by text, ignoring case; sort numbers as
+// numbers and strings byte by byte.
+sort_cmp(ctx: ptr, a: string, b: string, property: string, has_property: int, natural: int) -> int {
+    ka = sort_key(ctx, a, property, has_property)
+    kb = sort_key(ctx, b, property, has_property)
+    na = value_kind(ka) == LV_NIL
+    nb = value_kind(kb) == LV_NIL
+    if na && nb { return 0 }
+    if na { return 1 }
+    if nb { return -1 }
+    if natural == 1 {
+        return string.compare(string.to_lower(value_text(ctx, ka)), string.to_lower(value_text(ctx, kb)))
+    }
+    if is_number_value(ka) == 1 && is_number_value(kb) == 1 {
+        return number_cmp(value_payload(ka), value_payload(kb))
+    }
+    return string.compare(value_text(ctx, ka), value_text(ctx, kb))
+}
+
+// `sort` / `sort_natural`, with an optional property to sort objects by.
+// Numbers with strings, and booleans, arrays or objects, do not order
+// against each other, and `sort` says so as Liquid does; nil goes last.
+filter_sort(ctx: ptr, val: string, property: string, has_property: int, natural: int) -> (string, string) {
+    items = iter_items(ctx, val)
+    n = string_list_size(items)
+    if natural == 0 {
+        numbers = 0
+        strings = 0
+        others = 0
+        i = 0
+        while i < n {
+            k = value_kind(sort_key(ctx, string_list_get(items, i), property, has_property))
+            if k == LV_INT || k == LV_FLOAT { numbers = numbers + 1 }
+            else if k == LV_STR { strings = strings + 1 }
+            else if k != LV_NIL { others = others + 1 }
+            i = i + 1
+        }
+        if (numbers > 0 && strings > 0) || (others > 0 && numbers + strings + others > 1) {
+            string_list_free(items)
+            return value_nil(), "sort: cannot sort values of incompatible types"
+        }
+    }
+    string_list_sort(items, | a: string, b: string | {
+            return sort_cmp(ctx, a, b, property, has_property, natural)
+        })
+    out = array_of(ctx, items)
+    string_list_free(items)
+    return out, ""
+}
+
+// The filters that take and give values of any kind (filter_kind's
+// FILTER_VALUE).
+apply_value_filter(ctx: ptr, val: string, name: string, raw: ptr) -> (string, string) {
+    // The positional arguments' values, and default's allow_false.
+    args = string_list_new()
+    allow_false = 0
+    rn = string_list_size(raw)
+    i = 0
+    while i < rn {
+        a = string_list_get(raw, i)
+        kw, kv_text = keyword_arg(a)
+        if string_length(kw) > 0 {
+            kv, kerr = eval_value(ctx, kv_text)
+            if kerr != "" { string_list_free(args); return value_nil(), kerr }
+            if string.equals(kw, "allow_false") == 1 && string.equals(value_to_string(kv), "true") == 1 {
+                allow_false = 1
+            }
+        } else {
+            v, verr = eval_value(ctx, a)
+            if verr != "" { string_list_free(args); return value_nil(), verr }
+            string_list_add(args, v)
+        }
+        i = i + 1
+    }
+    out, err = value_filter(ctx, val, name, args, allow_false)
+    string_list_free(args)
+    return out, err
+}
+
+value_filter(ctx: ptr, val: string, name: string, args: ptr, allow_false: int) -> (string, string) {
+    argc = string_list_size(args)
+    k = value_kind(val)
+    if string.equals(name, "split") == 1 {
+        if argc != 1 { return value_nil(), "split needs exactly 1 arg" }
+        return filter_split(ctx, value_text(ctx, val), value_text(ctx, string_list_get(args, 0))), ""
+    }
+    if string.equals(name, "join") == 1 {
+        if argc > 1 { return value_nil(), "join takes at most 1 arg" }
+        glue = " "
+        if argc == 1 { glue = value_text(ctx, string_list_get(args, 0)) }
+        items = iter_items(ctx, val)
+        n = string_list_size(items)
+        sb = strbuilder.new(32)
+        j = 0
+        while j < n {
+            if j > 0 { strbuilder.append(sb, glue) }
+            strbuilder.append(sb, value_text(ctx, string_list_get(items, j)))
+            j = j + 1
+        }
+        string_list_free(items)
+        return value_str(strbuilder.finish(sb)), ""
+    }
+    if string.equals(name, "first") == 1 || string.equals(name, "last") == 1 {
+        if argc != 0 { return value_nil(), string.concat(name, " takes no args") }
+        want_first = string.equals(name, "first")
+        if k == LV_ARR {
+            nd = node_of(ctx, val)
+            if nd == null || arr_len(nd) == 0 { return value_nil(), "" }
+            if want_first == 1 { return arr_at(nd, 0), "" }
+            return arr_at(nd, arr_len(nd) - 1), ""
+        }
+        if k == LV_STR {
+            if want_first == 1 { return value_str(first_char(value_payload(val))), "" }
+            return value_str(last_char(value_payload(val))), ""
+        }
+        if k == LV_OBJ && want_first == 1 {
+            nd = node_of(ctx, val)
+            if nd != null && obj_len(nd) > 0 { return obj_pair(ctx, nd, 0), "" }
+        }
+        return value_nil(), ""
+    }
+    if string.equals(name, "size") == 1 {
+        if argc != 0 { return value_nil(), "size takes no args" }
+        if k == LV_ARR || k == LV_OBJ {
+            nd = node_of(ctx, val)
+            if nd == null { return value_int(0), "" }
+            return value_int(string_list_size((nd as *LiquidNode).items)), ""
+        }
+        return value_int(string_length(value_to_string(val))), ""
+    }
+    if string.equals(name, "reverse") == 1 {
+        if argc != 0 { return value_nil(), "reverse takes no args" }
+        if k != LV_ARR { return value_str(filter_reverse(value_text(ctx, val))), "" }
+        items = iter_items(ctx, val)
+        rv, rn = node_new(ctx, LV_ARR)
+        j = string_list_size(items) - 1
+        while j >= 0 {
+            arr_push(rn, string_list_get(items, j))
+            j = j - 1
+        }
+        string_list_free(items)
+        return rv, ""
+    }
+    if string.equals(name, "sort") == 1 || string.equals(name, "sort_natural") == 1 {
+        if argc > 1 { return value_nil(), string.concat(name, " takes at most 1 arg") }
+        property = ""
+        if argc == 1 { property = value_text(ctx, string_list_get(args, 0)) }
+        return filter_sort(ctx, val, property, argc, string.equals(name, "sort_natural"))
+    }
+    if string.equals(name, "map") == 1 {
+        if argc != 1 { return value_nil(), "map needs exactly 1 arg" }
+        property = value_text(ctx, string_list_get(args, 0))
+        items = iter_items(ctx, val)
+        mv, mn = node_new(ctx, LV_ARR)
+        n = string_list_size(items)
+        j = 0
+        while j < n {
+            arr_push(mn, item_property(ctx, string_list_get(items, j), property))
+            j = j + 1
+        }
+        string_list_free(items)
+        return mv, ""
+    }
+    if string.equals(name, "where") == 1 {
+        if argc != 1 && argc != 2 { return value_nil(), "where needs 1 or 2 args" }
+        property = value_text(ctx, string_list_get(args, 0))
+        items = iter_items(ctx, val)
+        wv, wn = node_new(ctx, LV_ARR)
+        n = string_list_size(items)
+        j = 0
+        while j < n {
+            item = string_list_get(items, j)
+            pv = item_property(ctx, item, property)
+            keep = 0
+            if argc == 1 { keep = value_truthy(pv) } else { keep = values_equal(ctx, pv, string_list_get(args, 1)) }
+            if keep == 1 { arr_push(wn, item) }
+            j = j + 1
+        }
+        string_list_free(items)
+        return wv, ""
+    }
+    if string.equals(name, "uniq") == 1 || string.equals(name, "compact") == 1 {
+        if argc > 1 { return value_nil(), string.concat(name, " takes at most 1 arg") }
+        property = ""
+        if argc == 1 { property = value_text(ctx, string_list_get(args, 0)) }
+        items = iter_items(ctx, val)
+        ov, on = node_new(ctx, LV_ARR)
+        seen = map_new()
+        n = string_list_size(items)
+        j = 0
+        while j < n {
+            item = string_list_get(items, j)
+            key = sort_key(ctx, item, property, argc)
+            if string.equals(name, "compact") == 1 {
+                if value_kind(key) != LV_NIL { arr_push(on, item) }
+            } else {
+                id = value_identity(ctx, key)
+                if map_has(seen, id) == 0 {
+                    map_put(seen, id, "1")
+                    arr_push(on, item)
+                }
+            }
+            j = j + 1
+        }
+        map_free(seen)
+        string_list_free(items)
+        return ov, ""
+    }
+    if string.equals(name, "concat") == 1 {
+        if argc != 1 { return value_nil(), "concat needs exactly 1 arg" }
+        other = string_list_get(args, 0)
+        on = node_of(ctx, other)
+        if value_kind(other) != LV_ARR || on == null {
+            return value_nil(), "concat filter requires an array argument"
+        }
+        items = iter_items(ctx, val)
+        cv, cn = node_new(ctx, LV_ARR)
+        n = string_list_size(items)
+        j = 0
+        while j < n {
+            arr_push(cn, string_list_get(items, j))
+            j = j + 1
+        }
+        string_list_free(items)
+        m = arr_len(on)
+        j = 0
+        while j < m {
+            arr_push(cn, arr_at(on, j))
+            j = j + 1
+        }
+        return cv, ""
+    }
+    if string.equals(name, "default") == 1 {
+        if argc != 1 && argc != 2 { return value_nil(), "default needs 1 or 2 args" }
+        // The second argument, positional, is allow_false written bare.
+        af = allow_false
+        if argc == 2 && string.equals(value_to_string(string_list_get(args, 1)), "true") == 1 { af = 1 }
+        fire = 0
+        if k == LV_NIL { fire = 1 }
+        else if k == LV_BOOL {
+            // false fires it, as in Liquid, unless allow_false keeps it.
+            if value_truthy(val) == 0 && af == 0 { fire = 1 }
+        }
+        else if k == LV_ARR || k == LV_OBJ { fire = value_is_empty(ctx, val) }
+        else if k == LV_STR {
+            // A string fires the default when it is empty and, with
+            // allow_false, when it is one of the string-context spellings of
+            // a missing value: "false", "nil", "null".
+            s = value_payload(val)
+            if string_length(s) == 0 { fire = 1 }
+            if af == 1 && (string.equals(s, "false") == 1 || string.equals(s, "nil") == 1 ||
+                string.equals(s, "null") == 1) { fire = 1 }
+        }
+        // The fallback is copied out: `args` is freed once this returns.
+        if fire == 1 { return string.copy(string_list_get(args, 0)), "" }
+        return val, ""
+    }
+    if string.equals(name, "date") == 1 {
+        if argc != 1 { return value_nil(), "date needs exactly 1 arg" }
+        return filter_date(ctx, val, value_text(ctx, string_list_get(args, 0)))
+    }
+    return val, ""
+}
+
+// ---- The date filter (#2181) -----------------------------------------------
+//
+// `date: format` reads its input as a time -- an ISO-8601 date or date-time
+// (`2024-01-02`, `2024-01-02T10:20:30Z`, `2024-01-02 10:20:30 +0530`), a
+// Unix timestamp (an integer, or a string of digits), or `now` / `today`,
+// the time the host gave with context_set_now -- and writes it through the
+// strftime pattern `format` (std.time.calendar's strftime). A time written
+// with an offset prints at that offset; any other prints at UTC. Input it
+// cannot read as a time, and an empty format, give the input back
+// unchanged, as Liquid does.
+
+// Is `s` a non-empty run of ASCII digits?
+all_digits(s: string) -> int {
+    n = string_length(s)
+    if n == 0 { return 0 }
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if c < 48 || c > 57 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+filter_date(ctx: ptr, val: string, format: string) -> (string, string) {
+    if string_length(format) == 0 { return val, "" }
+    k = value_kind(val)
+    epoch = 0 as long
+    offset = 0
+    if k == LV_INT {
+        e, eerr = string.to_long(value_payload(val))
+        if eerr != "" { return val, "" }
+        epoch = e
+    } else if k == LV_STR {
+        s = trim(value_payload(val))
+        low = string.to_lower(s)
+        if string.equals(low, "now") == 1 || string.equals(low, "today") == 1 {
+            if map_has(ctx, KEY_NOW) == 0 {
+                return value_nil(), "date: \"now\" needs the time: call context_set_now first"
+            }
+            e, _nerr = string.to_long(map_get_raw(ctx, KEY_NOW))
+            epoch = e
+        } else if all_digits(s) == 1 {
+            e, eerr = string.to_long(s)
+            if eerr != "" { return val, "" }
+            epoch = e
+        } else {
+            dt, off, perr = calendar.parse_iso8601_offset(s)
+            if perr != "" { return val, "" }
+            epoch = calendar.to_unix(dt)
+            offset = off
+        }
+    } else {
+        return val, ""
+    }
+    return value_str(calendar.strftime_at(calendar.from_unix(epoch), offset, format)), ""
+}
+
+// Evaluate an OUTPUT body -- the trimmed contents of `{{ ... }}`, or an
+// assign's right-hand side: a value (eval_value), then each `| filter`
+// stage in turn. Returns (value, "") or (nil, error).
 render_output(ctx: ptr, body: string) -> (string, string) {
     stages = split_pipes(body)
     sn = string_list_size(stages)
-    if sn == 0 { return "", "" }
-    head = string_list_get(stages, 0)
-    val, _, _ = resolve_atom(ctx, head)
+    if sn == 0 {
+        string_list_free(stages)
+        return value_nil(), ""
+    }
+    val, verr = eval_value(ctx, string_list_get(stages, 0))
+    if verr != "" {
+        string_list_free(stages)
+        return value_nil(), verr
+    }
     i = 1
     while i < sn {
         name, args = split_name_args(string_list_get(stages, i))
         v2, err = apply_filter_in(ctx, val, name, args)
-        if err != "" { return "", err }
+        if err != "" {
+            string_list_free(stages)
+            return value_nil(), err
+        }
         val = v2
         i = i + 1
     }
+    string_list_free(stages)
     return val, ""
 }
 
@@ -2049,60 +2541,21 @@ tag_head(body: string) -> (string, string) {
     return head, rest
 }
 
-// `{% assign NAME = EXPR %}` — bind NAME in ctx. EXPR follows the same
-// rules as an OUTPUT expression: a single source (string literal OR
-// variable name) followed by zero or more filter stages. String literals
-// short-circuit the variable lookup; everything else is passed through
-// `render_output` (which treats unquoted bare names as variable
-// lookups).
+// `{% assign NAME = EXPR %}` — bind NAME in ctx to EXPR's value: a
+// literal or a variable path, then any filter stages (render_output). An
+// array stays an array (`{% assign parts = s | split: "," %}`).
 exec_assign(ctx: ptr, rest: string) -> string {
     n = string_length(rest)
-    eq = find_outside_quotes(rest, n, 0, 61)   // '='
+    eq = find_outside_quotes(rest, n, 0, 61) // '='
     if eq < 0 { return "assign: missing `=`" }
     name = trim(string.substring_n(rest, n, 0, eq))
     expr = trim(string.substring_n(rest, n, eq + 1, n))
     if string_length(name) == 0 {
         return "assign: missing name before `=`"
     }
-    // Split the EXPR into source + filter chain. The source can be a
-    // quoted string literal (which lookup would not find), so detect
-    // and unwrap it before deferring to render_output.
-    en = string_length(expr)
-    pipe = find_outside_quotes(expr, en, 0, 124)   // '|'
-    src_end = en
-    if pipe >= 0 { src_end = pipe }
-    src = trim(string.substring_n(expr, en, 0, src_end))
-    if string_length(src) > 0 {
-        first = string.char_at_n(src, string_length(src), 0)
-        if first == 34 || first == 39 {
-            // Quoted literal — bind it in a temp under a fresh key,
-            // then run render_output via a rewritten expression that
-            // references that key. Simpler: just stage the literal as
-            // the current value and apply remaining filters directly.
-            lit, lerr = unquote_arg(src)
-            if lerr != "" { return lerr }
-            val = lit
-            if pipe >= 0 {
-                // Apply each filter stage after the first pipe.
-                rest_stages = split_pipes(string.substring_n(expr, en, pipe + 1, en))
-                rn = string_list_size(rest_stages)
-                k = 0
-                while k < rn {
-                    fname, fargs = split_name_args(string_list_get(rest_stages, k))
-                    v2, ferr = apply_filter_in(ctx, val, fname, fargs)
-                    if ferr != "" { return ferr }
-                    val = v2
-                    k = k + 1
-                }
-            }
-            map_put(ctx, name, val)
-            return ""
-        }
-    }
-    // Variable source (with optional filter chain) → reuse render_output.
     v, err = render_output(ctx, expr)
     if err != "" { return err }
-    map_put(ctx, name, v)
+    bind_value(ctx, name, v)
     return ""
 }
 
@@ -2122,8 +2575,9 @@ exec_tag(ctx: ptr, body: string) -> string {
 // A parsed template is the token list itself, walked directly at render
 // time; there is no AST between the lexer and the renderer.
 //
-// A context is a `std.map` of string -> string. Typed scalars are packed
-// strings (the value_* functions below); arrays and objects are #2177.
+// A context is a `std.map` from names to bare strings (context_put_string),
+// with a map of packed typed values (see "Typed value model" below) and a
+// store for its arrays and objects.
 
 // Parse a Liquid source string. Returns (template_handle, "") on success
 // or (null, error) on a syntax problem.
@@ -2178,8 +2632,8 @@ template_free(t: ptr) {
 // include root at every use, cached or not.
 
 struct PartialCache {
-    by_path: ptr     // resolved path -> parsed template
-    owned: ptr       // every template the cache holds, for freeing
+    by_path: ptr // resolved path -> parsed template
+    owned: ptr // every template the cache holds, for freeing
 }
 
 // Partials read and parsed since the program started, cached or not: what
@@ -2257,12 +2711,15 @@ load_partial(ctx: ptr, resolved: string) -> (ptr, string, string, int) {
     return t, "", "", 1
 }
 
-// Build a fresh string→string context.
+// A new, empty context. Bind values into it with the context_put_*
+// functions; free it, and every value in it, with context_free.
 context_new() -> ptr {
-    return map_new()
+    ctx = map_new()
+    map_put(ctx, KEY_TYPED, map_new())
+    map_put(ctx, KEY_VALUES, store_new())
+    return ctx
 }
 
-// Bind `key` to `value` in the context. Replaces any prior binding for `key`.
 // Configure where `{% include %}` / `{% render %}` look for partials.
 // `root` MUST be set before `render(t, ctx)` if the template uses
 // either of those tags — without it the tag errors at render time
@@ -2273,35 +2730,71 @@ context_set_include_root(ctx: ptr, root: string) {
     map_put(ctx, KEY_INCLUDE_ROOT, root)
 }
 
+// Bind `key` to the string `value`. A typed binding of the same name
+// (context_put_int, context_put_json, ...) wins over it. The string is
+// kept packed (value_str), so reading it is a lookup and no copy.
 context_put_string(ctx: ptr, key: string, value: string) {
-    map_put(ctx, key, value)
+    map_put(ctx, key, value_str(value))
 }
 
-// Free the context's storage.
+// The time the `date` filter reads `"now"` and `"today"` as, in seconds
+// since the epoch. A render reads no clock of its own, so the same template,
+// context and time render the same text; a template that asks for the time
+// before the host has given one gets a render error that says so.
+context_set_now(ctx: ptr, unix_seconds: long) {
+    map_put(ctx, KEY_NOW, string.from_long(unix_seconds))
+}
+
+// Free the context: its bindings, and every array and object it holds.
 context_free(ctx: ptr) {
+    if map_has(ctx, KEY_VALUES) == 1 { store_free(map_get_raw(ctx, KEY_VALUES)) }
+    bindings_free(ctx)
+}
+
+// Free a context's own maps -- its bare and its typed bindings -- but not a
+// value store it may share (a `{% render %}` context's is its caller's).
+bindings_free(ctx: ptr) {
+    if map_has(ctx, KEY_TYPED) == 1 { map_free(map_get_raw(ctx, KEY_TYPED)) }
     map_free(ctx)
 }
 
-// Look up `name` in the context. Returns the empty string for an unbound
-// name — Shopify Liquid's documented behaviour for `{{ undefined }}`.
-//
-// Phase-1 typed bindings live under `v:<name>`; a typed binding takes
-// precedence over a legacy one. We stringify the typed value via
-// `value_to_string` so existing call sites — which assume a plain
-// string return — see a consistent stringified form whether the
-// binding was set via `context_put_string` or the typed setters.
-lookup(ctx: ptr, name: string) -> string {
-    // An internal key (the partial cache's) is not a Liquid name.
+// The map of `ctx`'s typed bindings (name -> packed value), made on first use.
+typed_of(ctx: ptr) -> ptr {
+    have = map_get_raw(ctx, KEY_TYPED)
+    if have != null { return have }
+    typed = map_new()
+    map_put(ctx, KEY_TYPED, typed)
+    return typed
+}
+
+// Bind `name` to the packed value `v`, over whatever it was bound to.
+bind_value(ctx: ptr, name: string, v: string) {
+    map_put_string_owned(typed_of(ctx), name, v)
+}
+
+// Drop the typed binding of `name`, so a bare string binding it shadowed
+// shows again.
+unbind_value(ctx: ptr, name: string) {
+    map_remove(typed_of(ctx), name)
+}
+
+// The value `name` is bound to: its typed binding, else its bare string
+// binding as a string, else nil -- which renders as nothing, Liquid's
+// behaviour for `{{ undefined }}`. A name that starts with a control
+// character is one of the context's internal keys, never a Liquid name.
+lookup_value(ctx: ptr, name: string) -> string {
     nn = string_length(name)
-    if nn > 0 && string.char_at_n(name, nn, 0) < 32 { return "" }
-    typed_key = string.concat("v:", name)
-    if map_has(ctx, typed_key) == 1 {
-        return value_to_string(map_get_raw(ctx, typed_key))
+    if nn == 0 || string.char_at_n(name, nn, 0) < 32 { return value_nil() }
+    // A stored value is never null, so a null from map_get_raw is "not
+    // bound" -- one hash lookup a step rather than map_has and then a get.
+    typed = map_get_raw(ctx, KEY_TYPED)
+    if typed != null {
+        v = map_get_raw(typed, name)
+        if v != null { return v }
     }
-    if map_has(ctx, name) == 0 {
-        return ""
-    }
-    return map_get_raw(ctx, name)
+    bare = map_get_raw(ctx, name)
+    if bare != null { return bare }
+    return value_nil()
 }
 
 // `{% increment %}` and `{% decrement %}` share a namespace SEPARATE
@@ -2314,7 +2807,7 @@ lookup(ctx: ptr, name: string) -> string {
 //   - First `decrement x` emits "-1" and binds x = -1
 //   - Subsequent ops increment / decrement from the stored count
 bump_counter(ctx: ptr, name: string, direction: int) -> (string, string) {
-    key = string.concat("_inc:", name)
+    key = string.concat("\x01inc:", name)
     if map_has(ctx, key) == 0 {
         if direction > 0 {
             map_put(ctx, key, "1")
@@ -2347,10 +2840,10 @@ bump_counter(ctx: ptr, name: string, direction: int) -> (string, string) {
 // `group: args` form falls out by keying on the FULL `body` after the
 // `cycle` head, which is what we receive in `rest`.
 //
-// State key: `_cyc:` + the cycle's identifier (the `rest` body). That
-// keeps two `{% cycle 'a','b' %}` invocations in lock-step (Shopify
-// behaviour for identical arg lists) and lets `{% cycle 'g1': ... %}`
-// vs `{% cycle 'g2': ... %}` advance independently.
+// State key: an internal `\x01cyc:` prefix + the cycle's identifier (the
+// `rest` body). That keeps two `{% cycle 'a','b' %}` invocations in
+// lock-step (Shopify behaviour for identical arg lists) and lets
+// `{% cycle 'g1': ... %}` vs `{% cycle 'g2': ... %}` advance independently.
 cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
     args_body = trim(rest)
     if string_length(args_body) == 0 {
@@ -2359,7 +2852,7 @@ cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
     // Optional `name: a,b,c` form — split on the first top-level `:`.
     items_str = args_body
     abn = string_length(args_body)
-    colon = find_outside_quotes(args_body, abn, 0, 58)   // ':'
+    colon = find_outside_quotes(args_body, abn, 0, 58) // ':'
     if colon >= 0 {
         items_str = trim(string.substring_n(args_body, abn, colon + 1, abn))
     }
@@ -2368,7 +2861,7 @@ cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
     if ic == 0 {
         return "", "cycle: empty arg list"
     }
-    key = string.concat("_cyc:", full_body)
+    key = string.concat("\x01cyc:", full_body)
     pos = 0
     if map_has(ctx, key) == 1 {
         cur, err = string.to_int(map_get_raw(ctx, key))
@@ -2385,6 +2878,247 @@ cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
 }
 
 // ---------------------------------------------------------------------------
+// Expressions: literals and variable paths (#2178)
+// ---------------------------------------------------------------------------
+//
+// A value in a template is a literal -- a quoted string, a number, `true`,
+// `false`, `nil` / `null`, `empty`, `blank` -- or a variable path: a name,
+// then any number of `.name` and `[expr]` segments (`user.name`, `items[0]`,
+// `items[-1]`, `user["first name"]`, `items[i]`, `a.b[c.d].e`). On an
+// object a segment is a key. On an array it is an integer index, negative
+// from the end. `size`, `first` and `last` work on arrays, on strings (the
+// first and last character), and on an object that has no such key (`size`
+// is its key count, `first` its first [key, value] pair). Anything missing
+// along the way is nil, which renders as nothing.
+
+// Can byte `c` be part of a name? Liquid names hold letters, digits, `_`,
+// `-` and a trailing `?`; a byte of a UTF-8 sequence counts as a letter.
+// `first` is 1 for the name's first byte, which must not be a digit, `-` or
+// `?`.
+is_name_byte(c: int, first: int) -> int {
+    b = c & 255
+    if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 || b >= 128 { return 1 }
+    if first == 1 { return 0 }
+    if (b >= 48 && b <= 57) || b == 45 || b == 63 { return 1 }
+    return 0
+}
+
+// The offset just past the `]` that closes the `[` at `p`, nested brackets
+// and quoted strings inside it skipped; -1 when it is not closed.
+bracket_end(s: string, n: int, p: int) -> int {
+    depth = 0
+    quote = 0
+    i = p
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if quote != 0 {
+            if c == quote { quote = 0 }
+        } else if c == 34 || c == 39 {
+            quote = c
+        } else if c == 91 {
+            depth = depth + 1
+        } else if c == 93 {
+            depth = depth - 1
+            if depth == 0 { return i + 1 }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The end of the variable path that starts at `p` in `s` (length `n`): past
+// its name, or a bracketed head (`["key"]`), and every `.name` and `[...]`
+// after it. Returns `p` when no path starts there.
+path_end(s: string, n: int, p: int) -> int {
+    i = p
+    if i >= n { return p }
+    if string.char_at_n(s, n, i) == 91 {
+        i = bracket_end(s, n, i)
+        if i < 0 { return p }
+    } else {
+        if is_name_byte(string.char_at_n(s, n, i), 1) == 0 { return p }
+        while i < n && is_name_byte(string.char_at_n(s, n, i), 0) == 1 { i = i + 1 }
+    }
+    while i < n {
+        c = string.char_at_n(s, n, i)
+        if c == 46 {
+            // `.name`, where a name may also be all digits (`pair.0`).
+            j = i + 1
+            while j < n && is_name_byte(string.char_at_n(s, n, j), 0) == 1 { j = j + 1 }
+            if j == i + 1 { return i }
+            i = j
+        } else if c == 91 {
+            j = bracket_end(s, n, i)
+            if j < 0 { return i }
+            i = j
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+// Is all of `a` a variable path (and not a keyword literal)?
+is_path_text(a: string) -> int {
+    n = string_length(a)
+    if n == 0 || path_end(a, n, 0) != n { return 0 }
+    if string.equals(a, "true") == 1 || string.equals(a, "false") == 1 ||
+    string.equals(a, "nil") == 1 || string.equals(a, "null") == 1 ||
+    string.equals(a, "empty") == 1 || string.equals(a, "blank") == 1 { return 0 }
+    return 1
+}
+
+// Evaluate a literal or a variable path. Returns (value, error); text that
+// is neither is nil, as an unbound name is.
+eval_value(ctx: ptr, text: string) -> (string, string) {
+    a = trim(text)
+    n = string_length(a)
+    if n == 0 { return value_nil(), "" }
+    if string.equals(a, "true") == 1 { return value_bool(1), "" }
+    if string.equals(a, "false") == 1 { return value_bool(0), "" }
+    if string.equals(a, "nil") == 1 || string.equals(a, "null") == 1 { return value_nil(), "" }
+    // As values, `empty` and `blank` are the empty string; compared against,
+    // they test the other side (compare_values).
+    if string.equals(a, "empty") == 1 || string.equals(a, "blank") == 1 { return value_str(""), "" }
+    // `block.super` inside a layout child block is the parent's content for
+    // that block; outside an override it is nil, not an error.
+    if string.equals(a, "block.super") == 1 {
+        if map_has(ctx, KEY_BLOCK_SUPER) == 1 { return value_str(map_get_raw(ctx, KEY_BLOCK_SUPER)), "" }
+        return value_nil(), ""
+    }
+    // A number literal keeps the text it was written with.
+    if is_number_literal(a) == 1 { return value_number(a), "" }
+    first = string.char_at_n(a, n, 0)
+    if first == 34 || first == 39 {
+        lit, err = unquote_arg(a)
+        if err != "" { return value_nil(), err }
+        return value_str(lit), ""
+    }
+    if path_end(a, n, 0) == n { return eval_path(ctx, a, n) }
+    return value_nil(), ""
+}
+
+// Walk the variable path `a` (length `n`, a whole path by path_end).
+eval_path(ctx: ptr, a: string, n: int) -> (string, string) {
+    cur = value_nil()
+    i = 0
+    if string.char_at_n(a, n, 0) == 91 {
+        j = bracket_end(a, n, 0)
+        kv, kerr = eval_value(ctx, string.substring_n(a, n, 1, j - 1))
+        if kerr != "" { return value_nil(), kerr }
+        cur = lookup_value(ctx, value_text(ctx, kv))
+        i = j
+    } else {
+        while i < n && is_name_byte(string.char_at_n(a, n, i), 0) == 1 { i = i + 1 }
+        if i == n { return lookup_value(ctx, a), "" }
+        cur = lookup_value(ctx, string.substring_n(a, n, 0, i))
+        // A name bound whole, dots and all -- context_put_string(ctx,
+        // "user.name", ...) -- is still found under that name when the
+        // path's head is not bound.
+        if i < n && value_kind(cur) == LV_NIL {
+            flat = lookup_value(ctx, a)
+            if value_kind(flat) != LV_NIL { return flat, "" }
+        }
+    }
+    while i < n && value_kind(cur) != LV_NIL {
+        if string.char_at_n(a, n, i) == 46 {
+            j = i + 1
+            while j < n && is_name_byte(string.char_at_n(a, n, j), 0) == 1 { j = j + 1 }
+            cur = path_step(ctx, cur, value_str(string.substring_n(a, n, i + 1, j)))
+            i = j
+        } else {
+            j = bracket_end(a, n, i)
+            kv, kerr = eval_value(ctx, string.substring_n(a, n, i + 1, j - 1))
+            if kerr != "" { return value_nil(), kerr }
+            cur = path_step(ctx, cur, kv)
+            i = j
+        }
+    }
+    return cur, ""
+}
+
+// The byte length of the UTF-8 sequence that `lead` starts (1 for a byte
+// that starts none, so a malformed string still advances).
+utf8_len(lead: int) -> int {
+    b = lead & 255
+    if b >= 240 && b < 248 { return 4 }
+    if b >= 224 && b < 240 { return 3 }
+    if b >= 192 && b < 224 { return 2 }
+    return 1
+}
+
+// The first and the last character of a string, as whole UTF-8 sequences.
+first_char(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return "" }
+    k = utf8_len(string.char_at_n(s, n, 0))
+    if k > n { k = n }
+    return string.substring_n(s, n, 0, k)
+}
+
+last_char(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return "" }
+    // Step back over continuation bytes (10xxxxxx) to the sequence's lead.
+    i = n - 1
+    while i > 0 && n - i < 4 && (string.char_at_n(s, n, i) & 192) == 128 { i = i - 1 }
+    return string.substring_n(s, n, i, n)
+}
+
+// The [key, value] pair for an object's entry `i`, as `for` over an object
+// and `first` hand one out.
+obj_pair(ctx: ptr, nd: ptr, i: int) -> string {
+    key = obj_key_at(nd, i)
+    v, _found = obj_get(nd, key)
+    pv, pn = node_new(ctx, LV_ARR)
+    arr_push(pn, value_str(key))
+    arr_push(pn, v)
+    return pv
+}
+
+// One step along a path: the segment `key` (a value) applied to `cur`.
+path_step(ctx: ptr, cur: string, key: string) -> string {
+    k = value_kind(cur)
+    kk = value_kind(key)
+    if k == LV_OBJ {
+        nd = node_of(ctx, cur)
+        if nd == null { return value_nil() }
+        name = value_text(ctx, key)
+        v, found = obj_get(nd, name)
+        if found == 1 { return v }
+        if string.equals(name, "size") == 1 { return value_int(obj_len(nd)) }
+        if string.equals(name, "first") == 1 && obj_len(nd) > 0 { return obj_pair(ctx, nd, 0) }
+        return value_nil()
+    }
+    if k == LV_ARR {
+        nd = node_of(ctx, cur)
+        if nd == null { return value_nil() }
+        len = arr_len(nd)
+        if kk == LV_INT {
+            at = value_get_int(key)
+            if at < 0 { at = at + len }
+            if at < 0 || at >= len { return value_nil() }
+            return arr_at(nd, at)
+        }
+        if kk == LV_STR {
+            name = value_payload(key)
+            if string.equals(name, "size") == 1 { return value_int(len) }
+            if string.equals(name, "first") == 1 && len > 0 { return arr_at(nd, 0) }
+            if string.equals(name, "last") == 1 && len > 0 { return arr_at(nd, len - 1) }
+        }
+        return value_nil()
+    }
+    if k == LV_STR && kk == LV_STR {
+        s = value_payload(cur)
+        name = value_payload(key)
+        if string.equals(name, "size") == 1 { return value_int(string_length(s)) }
+        if string.equals(name, "first") == 1 { return value_str(first_char(s)) }
+        if string.equals(name, "last") == 1 { return value_str(last_char(s)) }
+    }
+    return value_nil()
+}
+
+// ---------------------------------------------------------------------------
 // Condition evaluation — `{% if %}`, `{% unless %}`, `{% case %}/{% when %}`
 // ---------------------------------------------------------------------------
 //
@@ -2394,18 +3128,12 @@ cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
 // disjunct on top-level `and`, then each conjunct is `LHS OP RHS` or
 // just an atom (truthy test).
 //
-// Operators (longest match first): `==` `!=` `<=` `>=` `<` `>` `contains`.
+// Operators (longest match first): `==` `!=` `<=` `>=` `<` `>` `contains`;
+// what each compares is compare_values'.
 //
-// Truthiness rules (string-only context):
-//   - The keyword `nil` / `null` / `false` is falsy
-//   - The keyword `true` is truthy
-//   - An unbound variable name resolves to "" which is FALSY here
-//     because there's no way to distinguish "missing" from "empty
-//     string" in the v0 ctx. (Shopify's rule "" is truthy applies once
-//     the value model is std.json — we'll relax this then.)
-//   - A bound variable resolves to its string; "" is falsy, all
-//     non-empty strings are truthy.
-//   - A quoted string literal is truthy if non-empty.
+// Truthiness is Liquid's (#2177): nil and false are falsy -- an unbound
+// name is nil -- and every other value is truthy, the empty string, zero
+// and an empty array included. `x == empty` and `x == blank` test x.
 
 // Find the next occurrence of keyword `kw` in `s` (length `n`) at or
 // after `p`, only when the match is a whole word (delimited by
@@ -2429,8 +3157,8 @@ find_word_outside_quotes(s: string, n: int, p: int, kw: string) -> int {
             i = i + 1
             continue
         }
-        if c == 39 { in_s = 1 ; i = i + 1 ; continue }
-        if c == 34 { in_d = 1 ; i = i + 1 ; continue }
+        if c == 39 { in_s = 1; i = i + 1; continue }
+        if c == 34 { in_d = 1; i = i + 1; continue }
         // Boundary on the left.
         ok = 0
         if i == 0 { ok = 1 }
@@ -2452,57 +3180,6 @@ find_word_outside_quotes(s: string, n: int, p: int, kw: string) -> int {
         i = i + 1
     }
     return -1
-}
-
-// Resolve an atom (a single condition term that isn't an operator
-// expression) to its string value AND a "is-truthy" hint. The boolean
-// keywords `true` / `false` / `nil` / `null` short-circuit; everything
-// else is either a quoted literal or a variable name. Returns
-// (value, truthy_int, error).
-resolve_atom(ctx: ptr, atom: string) -> (string, int, string) {
-    a = trim(atom)
-    n = string_length(a)
-    if n == 0 { return "", 0, "" }
-    if string.equals(a, "true") == 1 { return "true", 1, "" }
-    if string.equals(a, "false") == 1 { return "false", 0, "" }
-    if string.equals(a, "nil") == 1   { return "", 0, "" }
-    if string.equals(a, "null") == 1  { return "", 0, "" }
-    if string.equals(a, "empty") == 1 { return "", 0, "" }
-    if string.equals(a, "blank") == 1 { return "", 0, "" }
-    // `block.super` inside a layout child block returns the parent's
-    // default content. Outside an override (no `_block_super` key set)
-    // it returns the empty string — matches Shopify's "no super exists"
-    // case rather than erroring.
-    if string.equals(a, "block.super") == 1 {
-        if map_has(ctx, KEY_BLOCK_SUPER) == 1 {
-            v = map_get_raw(ctx, KEY_BLOCK_SUPER)
-            truthy = 0
-            if string_length(v) > 0 { truthy = 1 }
-            return v, truthy, ""
-        }
-        return "", 0, ""
-    }
-    first = string.char_at_n(a, n, 0)
-    // A number literal, integer or decimal, is its own text. Truthy: Liquid
-    // treats every number, 0 included, as true. (A decimal used to fall
-    // through to a variable lookup of the name "3.7" and render empty.)
-    if is_number_literal(a) == 1 { return a, 1, "" }
-    if first == 34 || first == 39 {
-        lit, err = unquote_arg(a)
-        if err != "" { return "", 0, err }
-        if string_length(lit) > 0 { return lit, 1, "" }
-        return "", 0, ""
-    }
-    // Variable lookup. Unbound → "" → falsy (see truthiness rules above).
-    // In the string-only context model we encode booleans as the strings
-    // "true" / "false", so a value of "false" must be treated as falsy
-    // even though it is a non-empty string. Same for "nil" / "null".
-    v = lookup(ctx, a)
-    if string_length(v) == 0 { return "", 0, "" }
-    if string.equals(v, "false") == 1 { return v, 0, "" }
-    if string.equals(v, "nil") == 1   { return v, 0, "" }
-    if string.equals(v, "null") == 1  { return v, 0, "" }
-    return v, 1, ""
 }
 
 // Parse the operator at `[lhs ... rhs]` boundary. Returns (op_token,
@@ -2536,7 +3213,7 @@ find_operator(s: string, n: int) -> (string, int, int) {
         k = k + 1
     }
     // Single-char `<` / `>` — only counted if not part of `<=` / `>=`.
-    off_lt = find_outside_quotes(s, n, 0, 60)   // '<'
+    off_lt = find_outside_quotes(s, n, 0, 60) // '<'
     if off_lt >= 0 {
         // Skip if it's actually `<=`.
         if off_lt + 1 < n && string.char_at_n(s, n, off_lt + 1) == 61 {
@@ -2547,7 +3224,7 @@ find_operator(s: string, n: int) -> (string, int, int) {
             best_len = 1
         }
     }
-    off_gt = find_outside_quotes(s, n, 0, 62)   // '>'
+    off_gt = find_outside_quotes(s, n, 0, 62) // '>'
     if off_gt >= 0 {
         if off_gt + 1 < n && string.char_at_n(s, n, off_gt + 1) == 61 {
             // It's >= — handled above.
@@ -2585,52 +3262,84 @@ find_outside_quotes_str(s: string, n: int, p: int, target: string) -> int {
             i = i + 1
             continue
         }
-        if c == 39 { in_s = 1 ; i = i + 1 ; continue }
-        if c == 34 { in_d = 1 ; i = i + 1 ; continue }
+        if c == 39 { in_s = 1; i = i + 1; continue }
+        if c == 34 { in_d = 1; i = i + 1; continue }
         if string.index_of_from_n(s, n, target, i) == i { return i }
         i = i + 1
     }
     return -1
 }
 
-// Compare two resolved string values under operator `op`. Returns
-// (truthy_int, error). For numeric operators (`<` `>` `<=` `>=`) both
-// sides are int-parsed; non-numeric strings compare as 0.
-compare_values(lhs: string, rhs: string, op: string) -> (int, string) {
-    if string.equals(op, "==") == 1 {
-        if string.equals(lhs, rhs) == 1 { return 1, "" }
-        return 0, ""
-    }
-    if string.equals(op, "!=") == 1 {
-        if string.equals(lhs, rhs) == 1 { return 0, "" }
-        return 1, ""
-    }
+// Compare two values under operator `op`. Returns (truthy_int, error).
+//
+//   `==` / `!=`  values_equal: arrays and objects element by element,
+//                numbers as numbers, nil only to nil, other scalars by text
+//   `contains`   a string holds the text as a substring; an array holds an
+//                element equal to it; an object has it as a key
+//   `<` `>` `<=` `>=`  numbers, each side read as Liquid reads a number
+//                ("10" > "9"; text that is no number reads as 0); an array
+//                or object on either side is an error
+compare_values(ctx: ptr, lhs: string, rhs: string, op: string) -> (int, string) {
+    if string.equals(op, "==") == 1 { return values_equal(ctx, lhs, rhs), "" }
+    if string.equals(op, "!=") == 1 { return 1 - values_equal(ctx, lhs, rhs), "" }
+    lk = value_kind(lhs)
     if string.equals(op, "contains") == 1 {
-        if string_length(rhs) == 0 { return 1, "" }
-        if string.contains(lhs, rhs) == 1 { return 1, "" }
-        return 0, ""
+        if lk == LV_ARR {
+            nd = node_of(ctx, lhs)
+            if nd == null { return 0, "" }
+            n = arr_len(nd)
+            i = 0
+            while i < n {
+                if values_equal(ctx, arr_at(nd, i), rhs) == 1 { return 1, "" }
+                i = i + 1
+            }
+            return 0, ""
+        }
+        if lk == LV_OBJ {
+            nd = node_of(ctx, lhs)
+            if nd == null { return 0, "" }
+            _v, found = obj_get(nd, value_text(ctx, rhs))
+            return found, ""
+        }
+        needle = value_text(ctx, rhs)
+        if string_length(needle) == 0 { return 1, "" }
+        return string.contains(value_text(ctx, lhs), needle), ""
     }
-    // Ordering ops — parse as ints (Liquid is permissive; non-numeric
-    // strings compare as 0).
-    li, _ = string.to_int(lhs)
-    ri, _ = string.to_int(rhs)
-    if string.equals(op, "<") == 1 {
-        if li < ri  { return 1, "" }
-        return 0, ""
+    if string.equals(op, "<") == 0 && string.equals(op, ">") == 0 &&
+    string.equals(op, "<=") == 0 && string.equals(op, ">=") == 0 {
+        return 0, string.concat("unknown comparison op: ", op)
     }
-    if string.equals(op, ">") == 1 {
-        if li > ri  { return 1, "" }
-        return 0, ""
+    if is_node_value(lhs) == 1 || is_node_value(rhs) == 1 {
+        return 0, string.concat(string.concat("cannot order ", value_text(ctx, lhs)),
+            string.concat(" and ", value_text(ctx, rhs)))
     }
-    if string.equals(op, "<=") == 1 {
-        if li <= ri { return 1, "" }
-        return 0, ""
+    c = number_cmp(value_to_string(lhs), value_to_string(rhs))
+    if string.equals(op, "<") == 1 && c < 0 { return 1, "" }
+    if string.equals(op, ">") == 1 && c > 0 { return 1, "" }
+    if string.equals(op, "<=") == 1 && c <= 0 { return 1, "" }
+    if string.equals(op, ">=") == 1 && c >= 0 { return 1, "" }
+    return 0, ""
+}
+
+// `x == empty` / `x == blank` (either side, `!=` too): Liquid's emptiness
+// and blankness tests of the other side. Returns (handled, truthy).
+compare_keyword(ctx: ptr, lhs_str: string, rhs_str: string, lhs: string, rhs: string, op: string) -> (int, int) {
+    if string.equals(op, "==") == 0 && string.equals(op, "!=") == 0 { return 0, 0 }
+    other = ""
+    word = ""
+    if string.equals(rhs_str, "empty") == 1 || string.equals(rhs_str, "blank") == 1 {
+        word = rhs_str
+        other = lhs
+    } else if string.equals(lhs_str, "empty") == 1 || string.equals(lhs_str, "blank") == 1 {
+        word = lhs_str
+        other = rhs
+    } else {
+        return 0, 0
     }
-    if string.equals(op, ">=") == 1 {
-        if li >= ri { return 1, "" }
-        return 0, ""
-    }
-    return 0, string.concat("unknown comparison op: ", op)
+    hit = 0
+    if string.equals(word, "empty") == 1 { hit = value_is_empty(ctx, other) } else { hit = value_is_blank(ctx, other) }
+    if string.equals(op, "!=") == 1 { hit = 1 - hit }
+    return 1, hit
 }
 
 // Evaluate a single conjunct: either `LHS OP RHS` or a bare atom
@@ -2641,17 +3350,19 @@ eval_term(ctx: ptr, term: string) -> (int, string) {
     if n == 0 { return 0, "" }
     op, off, oplen = find_operator(t, n)
     if string_length(op) == 0 {
-        // Truthy test on a single atom.
-        _, truthy, err = resolve_atom(ctx, t)
-        return truthy, err
+        v, err = eval_value(ctx, t)
+        if err != "" { return 0, err }
+        return value_truthy(v), ""
     }
     lhs_str = trim(string.substring_n(t, n, 0, off))
     rhs_str = trim(string.substring_n(t, n, off + oplen, n))
-    lhs_val, _, e1 = resolve_atom(ctx, lhs_str)
+    lhs, e1 = eval_value(ctx, lhs_str)
     if e1 != "" { return 0, e1 }
-    rhs_val, _, e2 = resolve_atom(ctx, rhs_str)
+    rhs, e2 = eval_value(ctx, rhs_str)
     if e2 != "" { return 0, e2 }
-    return compare_values(lhs_val, rhs_val, op)
+    handled, hit = compare_keyword(ctx, lhs_str, rhs_str, lhs, rhs, op)
+    if handled == 1 { return hit, "" }
+    return compare_values(ctx, lhs, rhs, op)
 }
 
 // Evaluate a full condition expression with Liquid's flat-left
@@ -2704,17 +3415,18 @@ eval_condition(ctx: ptr, expr: string) -> (int, string) {
 }
 
 // Scan tokens [start, end) for the matching `end_kw` of a block tag,
-// tracking nesting via inner `open_kw` openers. Also stops at top-level
-// `branch_kws` (e.g. `else`, `elsif`, `when`) — returns the token
-// index of whichever match comes first. The result tuple is
-// (token_index, head, ""). Token index is -1 on unterminated.
+// stepping over every block nested inside it (block_nesting). Also stops
+// at top-level `branch_kws` (e.g. `else`, `elsif`, `when`) — returns the
+// token index of whichever match comes first. The result tuple is
+// (token_index, head, ""). Token index is -1 on unterminated, or on a
+// closer of another block where this one's belongs.
 //
 // `branch_kws` is passed as a pipe-separated string (e.g. "else|elsif"
 // or "when|else") because we don't have a string-list literal in
 // Aether. Pass "" to disable branching.
 find_block_branch(kinds: ptr, contents: ptr, start: int, end: int,
-                  open_kw: string, end_kw: string, branch_kws: string)
-                  -> (int, string, string) {
+    open_kw: string, end_kw: string, branch_kws: string)
+-> (int, string, string) {
     depth = 1
     i = start
     // Pre-split branch_kws on '|'.
@@ -2733,19 +3445,29 @@ find_block_branch(kinds: ptr, contents: ptr, start: int, end: int,
         }
     }
     bcount = string_list_size(branches)
+    // Every block inside this one is stepped over whole -- not only another
+    // `open_kw` -- so an `else` of an `if` or a `for` nested in the body is
+    // that block's, not this one's.
     while i < end {
         kind = string_list_get(kinds, i)
         if string.equals(kind, TOK_TAG) == 1 {
             head, _ = tag_head(string_list_get(contents, i))
-            if string.equals(head, open_kw) == 1 {
+            nest = block_nesting(head)
+            if nest > 0 {
                 depth = depth + 1
-            } else if string.equals(head, end_kw) == 1 {
+            } else if nest < 0 {
                 depth = depth - 1
-                if depth == 0 { return i, end_kw, "" }
+                if depth == 0 {
+                    string_list_free(branches)
+                    if string.equals(head, end_kw) == 1 { return i, end_kw, "" }
+                    return -1, "", string.concat(string.concat("unexpected `{% ", head),
+                        string.concat(" %}` inside `{% ", string.concat(open_kw, " %}`")))
+                }
             } else if depth == 1 {
                 k = 0
                 while k < bcount {
                     if string.equals(head, string_list_get(branches, k)) == 1 {
+                        string_list_free(branches)
                         return i, head, ""
                     }
                     k = k + 1
@@ -2754,6 +3476,7 @@ find_block_branch(kinds: ptr, contents: ptr, start: int, end: int,
         }
         i = i + 1
     }
+    string_list_free(branches)
     return -1, "", string.concat("unterminated `{% ", string.concat(open_kw, " %}`"))
 }
 
@@ -2781,7 +3504,7 @@ render_range(kinds: ptr, contents: ptr, start: int, end: int, ctx: ptr) -> (stri
             if err != "" {
                 return strbuilder.finish(sb), err
             }
-            strbuilder.append(sb, v)
+            write_output(ctx, sb, v, 0)
         } else {
             // TAG. Special-case `capture NAME` here (block tag) since
             // it needs the token-stream view that exec_tag does not have.
@@ -2799,7 +3522,7 @@ render_range(kinds: ptr, contents: ptr, start: int, end: int, ctx: ptr) -> (stri
                 if ierr != "" {
                     return strbuilder.finish(sb), ierr
                 }
-                map_put(ctx, name, inner)
+                bind_value(ctx, name, value_str(inner))
                 i = end_at
             } else if string.equals(head, "endcapture") == 1 {
                 // A stray endcapture at this level is a structural error
@@ -2865,19 +3588,19 @@ render_range(kinds: ptr, contents: ptr, start: int, end: int, ctx: ptr) -> (stri
             } else if string.equals(head, "continue") == 1 {
                 return strbuilder.finish(sb), "__continue__"
             } else if string.equals(head, "elsif") == 1 ||
-                   string.equals(head, "else") == 1 ||
-                   string.equals(head, "endif") == 1 ||
-                   string.equals(head, "endunless") == 1 ||
-                   string.equals(head, "endcase") == 1 ||
-                   string.equals(head, "endfor") == 1 ||
-                   string.equals(head, "endtablerow") == 1 ||
-                   string.equals(head, "endblock") == 1 ||
-                   string.equals(head, "block") == 1 ||
-                   string.equals(head, "layout") == 1 ||
-                   string.equals(head, "extends") == 1 ||
-                   string.equals(head, "when") == 1 {
+            string.equals(head, "else") == 1 ||
+            string.equals(head, "endif") == 1 ||
+            string.equals(head, "endunless") == 1 ||
+            string.equals(head, "endcase") == 1 ||
+            string.equals(head, "endfor") == 1 ||
+            string.equals(head, "endtablerow") == 1 ||
+            string.equals(head, "endblock") == 1 ||
+            string.equals(head, "block") == 1 ||
+            string.equals(head, "layout") == 1 ||
+            string.equals(head, "extends") == 1 ||
+            string.equals(head, "when") == 1 {
                 return strbuilder.finish(sb),
-                    string.concat("stray `{% ", string.concat(head, " %}` outside its block"))
+                string.concat("stray `{% ", string.concat(head, " %}` outside its block"))
             } else {
                 terr = exec_tag(ctx, body)
                 if terr != "" {
@@ -2920,15 +3643,15 @@ find_capture_end(kinds: ptr, contents: ptr, start: int, end: int) -> (int, strin
 // Appends the chosen branch's output to `sb`. Returns
 // (after_endif_index, "") on success or (start, error).
 render_if_block(kinds: ptr, contents: ptr, start: int, end: int,
-                ctx: ptr, sb: ptr, first_cond: string, invert: int)
-                -> (int, string) {
+    ctx: ptr, sb: ptr, first_cond: string, invert: int)
+-> (int, string) {
     open_kw = "if"
-    end_kw  = "endif"
+    end_kw = "endif"
     branch_kws = "elsif|else"
     if invert == 1 {
         open_kw = "unless"
-        end_kw  = "endunless"
-        branch_kws = "else"   // unless supports `else` but not `elsif`
+        end_kw = "endunless"
+        branch_kws = "else" // unless supports `else` but not `elsif`
     }
     // First branch: evaluate `first_cond` (negated when invert).
     cur_cond = trim(first_cond)
@@ -2939,14 +3662,14 @@ render_if_block(kinds: ptr, contents: ptr, start: int, end: int,
     // decide whether this branch is the active one.
     while 1 == 1 {
         nxt, head, ferr = find_block_branch(kinds, contents, branch_start, end,
-                                            open_kw, end_kw, branch_kws)
+            open_kw, end_kw, branch_kws)
         if ferr != "" { return start, ferr }
         // Test the current branch's condition (skip the test if a prior
         // branch already matched — we just need to skip to endif).
         if matched == 0 {
             take = 0
             if string.equals(head, end_kw) == 1 || string.equals(head, "else") == 1 ||
-               string.equals(head, "elsif") == 1 {
+            string.equals(head, "elsif") == 1 {
                 tv = 0
                 if string_length(cur_cond) > 0 {
                     v, cerr = eval_condition(ctx, cur_cond)
@@ -2992,24 +3715,24 @@ render_if_block(kinds: ptr, contents: ptr, start: int, end: int,
 // comma-separated alternatives: `{% when 1, 2, 3 %}` matches if subject
 // equals any of them. `else` is the default branch.
 render_case_block(kinds: ptr, contents: ptr, start: int, end: int,
-                  ctx: ptr, sb: ptr, subject_expr: string)
-                  -> (int, string) {
+    ctx: ptr, sb: ptr, subject_expr: string)
+-> (int, string) {
     subject_str = trim(subject_expr)
     if string_length(subject_str) == 0 {
         return start, "case: missing subject"
     }
-    subject_val, _, serr = resolve_atom(ctx, subject_str)
+    subject_val, serr = eval_value(ctx, subject_str)
     if serr != "" { return start, serr }
     branch_start = start + 1
     matched = 0
-    cur_alts = ""   // "" means "skip until first branch"; "*else*" means else
+    cur_alts = "" // "" means "skip until first branch"; "*else*" means else
     is_else = 0
     // The first scan finds the first `when` or `else`. We accept TEXT
     // tokens between `case` and the first `when` as whitespace-only
     // padding (Shopify is forgiving here).
     while 1 == 1 {
         nxt, head, ferr = find_block_branch(kinds, contents, branch_start, end,
-                                            "case", "endcase", "when|else")
+            "case", "endcase", "when|else")
         if ferr != "" { return start, ferr }
         // If we're currently INSIDE a branch (cur_alts set), render its
         // body when this branch matched.
@@ -3023,9 +3746,9 @@ render_case_block(kinds: ptr, contents: ptr, start: int, end: int,
                 ac = string_list_size(alts)
                 k = 0
                 while k < ac {
-                    av, _, aerr = resolve_atom(ctx, string_list_get(alts, k))
+                    av, aerr = eval_value(ctx, string_list_get(alts, k))
                     if aerr != "" { return start, aerr }
-                    if string.equals(subject_val, av) == 1 {
+                    if values_equal(ctx, subject_val, av) == 1 {
                         take = 1
                         break
                     }
@@ -3057,11 +3780,11 @@ render_case_block(kinds: ptr, contents: ptr, start: int, end: int,
     return start, "unreachable"
 }
 
-// Parse an integer modifier `limit:N` / `offset:N` style from a tag's
+// Parse an integer modifier `limit:N` / `offset:N` / `cols:N` from a tag's
 // trailing argument string. `head` is the bare keyword to look for
-// (without the trailing colon). Returns (value, found, error).
-// Accepted forms: `limit:5`, `limit: 5`, `limit:"5"` (quoted).
-parse_int_modifier(rest: string, head: string) -> (int, int, string) {
+// (without the trailing colon). N is a number, a quoted number, or a
+// variable path holding one (`limit: n`). Returns (value, found, error).
+parse_int_modifier(ctx: ptr, rest: string, head: string) -> (int, int, string) {
     rn = string_length(rest)
     needle = string.concat(head, ":")
     nn = string_length(needle)
@@ -3094,6 +3817,15 @@ parse_int_modifier(rest: string, head: string) -> (int, int, string) {
         if ierr != "" { return 0, 0, string.concat(head, " value not an integer: ${s}") }
         return v, 1, ""
     }
+    // A variable path: its value, which must be an integer.
+    pe = path_end(rest, rn, q)
+    if pe > q {
+        pv, perr = eval_value(ctx, string.substring_n(rest, rn, q, pe))
+        if perr != "" { return 0, 0, perr }
+        v, verr = string.to_int(value_to_string(pv))
+        if verr != "" { return 0, 0, string.concat(head, " value not an integer: ${value_to_string(pv)}") }
+        return v, 1, ""
+    }
     // Bare digits (with optional leading `-`).
     r = q
     if r < rn && string.char_at_n(rest, rn, r) == 45 { r = r + 1 }
@@ -3116,323 +3848,372 @@ has_reversed(rest: string) -> int {
     return 0
 }
 
-// Save the current binding of `key` (or empty if unbound) so the for
-// loop can restore it on exit. Returns (prior_value, was_bound).
-save_binding(ctx: ptr, key: string) -> (string, int) {
-    if map_has(ctx, key) == 0 { return "", 0 }
-    return map_get_raw(ctx, key), 1
+// The typed binding of `name` (a copy: the binding is about to be
+// overwritten) and whether there was one, so a loop can put it back after.
+save_value(ctx: ptr, name: string) -> (string, int) {
+    typed = typed_of(ctx)
+    if map_has(typed, name) == 0 { return "", 0 }
+    return string.copy(map_get_raw(typed, name)), 1
 }
 
-// Inverse of save_binding.
-restore_binding(ctx: ptr, key: string, prior: string, was_bound: int) {
+// Inverse of save_value.
+restore_value(ctx: ptr, name: string, prior: string, was_bound: int) {
     if was_bound == 1 {
-        map_put(ctx, key, prior)
+        bind_value(ctx, name, prior)
     } else {
-        // We don't have a `map_remove` exposed via std.collections. The
-        // best we can do is bind to "" — which `lookup` reports the same
-        // as missing. This matches Shopify in that the loop variable
-        // is meaningless after the loop; the only observable difference
-        // is `{% if VAR %}` which goes from "missing → falsy" before to
-        // "empty → falsy" after, both falsy. Acceptable in v0.
-        map_put(ctx, key, "")
+        unbind_value(ctx, name)
     }
 }
 
-// Render a `{% for VAR in (LO..HI) [limit:N] [offset:N] [reversed] %}
-// ...body...{% endfor %}` block.
-//
-// This slice supports ONLY the range form `(LO..HI)` (inclusive on
-// both ends, per Liquid). Array / list iteration waits for the value
-// model. Inside the body, `VAR`, `forloop.index`, `forloop.index0`,
-// `forloop.first`, `forloop.last`, `forloop.length`, `forloop.rindex`,
-// `forloop.rindex0` are bound in ctx.
-//
-// `break` / `continue` propagate up via sentinel error strings
-// `__break__` and `__continue__`; this function catches them.
-//
-// Returns (index_of_endfor_token, "") on success or (start, error).
-render_for_block(kinds: ptr, contents: ptr, start: int, end: int,
-                 ctx: ptr, sb: ptr, rest: string)
-                 -> (int, string) {
-    // Find matching endfor first so we know the body span.
-    body_start = start + 1
-    end_at, ferr = find_for_end(kinds, contents, body_start, end)
-    if ferr != "" { return start, ferr }
+// +1 for a tag that opens a block, -1 for one that closes one, 0 for any
+// other: how a scan for one block's branches steps over the blocks inside it.
+block_nesting(head: string) -> int {
+    if string.equals(head, "if") == 1 || string.equals(head, "unless") == 1 ||
+    string.equals(head, "case") == 1 || string.equals(head, "for") == 1 ||
+    string.equals(head, "tablerow") == 1 || string.equals(head, "capture") == 1 ||
+    string.equals(head, "block") == 1 {
+        return 1
+    }
+    if string.equals(head, "endif") == 1 || string.equals(head, "endunless") == 1 ||
+    string.equals(head, "endcase") == 1 || string.equals(head, "endfor") == 1 ||
+    string.equals(head, "endtablerow") == 1 || string.equals(head, "endcapture") == 1 ||
+    string.equals(head, "endblock") == 1 {
+        return -1
+    }
+    return 0
+}
 
-    // Parse the head: `VAR in EXPR [modifiers...]`.
+// The `{% else %}` of the loop whose body is [start, end), nested blocks
+// stepped over; -1 when it has none.
+find_loop_else(kinds: ptr, contents: ptr, start: int, end: int) -> int {
+    depth = 0
+    i = start
+    while i < end {
+        if string.equals(string_list_get(kinds, i), TOK_TAG) == 1 {
+            head, _ = tag_head(string_list_get(contents, i))
+            nest = block_nesting(head)
+            if nest > 0 {
+                depth = depth + 1
+            } else if nest < 0 {
+                depth = depth - 1
+            } else if depth == 0 && string.equals(head, "else") == 1 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// Iteration: `{% for %}` and `{% tablerow %}` (#2179)
+// ---------------------------------------------------------------------------
+//
+// `{% for x in SOURCE [limit: N] [offset: N] [reversed] %}` iterates a range
+// `(lo..hi)` (inclusive; the bounds may be variables), an array, an object
+// (as [key, value] pairs, in key order), or a non-empty string once, as
+// itself. nil, an empty string and an empty collection iterate zero times,
+// and then the loop's `{% else %}`, if it has one, renders instead. `offset`
+// drops elements from the front, `limit` keeps at most that many of the
+// rest, and `reversed` runs what is left from the end. Inside the body `x`
+// and `forloop` are bound -- forloop's `index`, `index0`, `rindex`,
+// `rindex0`, `first`, `last`, `length`, `name`, and `parentloop` in a
+// nested loop -- and both are put back afterwards. `tablerow` takes the
+// same sources and modifiers, and `cols: N`.
+
+struct LiquidLoop {
+    kind: int // LOOP_RANGE, LOOP_ARRAY, LOOP_OBJECT or LOOP_ONE
+    source: string // the collection or the single value (an owned copy)
+    lo: int // a range's first number
+    start: int // the first element taken, after offset
+    count: int // the elements taken, after offset and limit
+    reversed: int
+}
+
+const LOOP_RANGE = 0
+const LOOP_ARRAY = 1
+const LOOP_OBJECT = 2
+const LOOP_ONE = 3
+
+// Split a loop tag's `VAR in SOURCE ...` into (VAR, what follows `in`, error).
+loop_head(rest: string, tag: string) -> (string, string, string) {
     rn = string_length(rest)
     in_off = find_word_outside_quotes(rest, rn, 0, "in")
-    if in_off < 0 {
-        return start, "for: missing `in` keyword"
-    }
+    if in_off < 0 { return "", "", string.concat(tag, ": missing `in` keyword") }
     var_name = trim(string.substring_n(rest, rn, 0, in_off))
-    if string_length(var_name) == 0 {
-        return start, "for: missing loop variable"
-    }
+    if string_length(var_name) == 0 { return "", "", string.concat(tag, ": missing loop variable") }
     after_in = trim(string.substring_n(rest, rn, in_off + 2, rn))
-    an = string_length(after_in)
-    if an == 0 { return start, "for: missing iterable" }
-    // Expect `(LO..HI)` followed by optional modifiers.
-    if string.char_at_n(after_in, an, 0) != 40 {   // '('
-        return start, "for: only `(LO..HI)` range iteration is supported in this slice"
-    }
-    close_paren = string.index_of_from_n(after_in, an, ")", 0)
-    if close_paren < 0 { return start, "for: missing `)` in range" }
-    range_body = string.substring_n(after_in, an, 1, close_paren)
-    rbn = string_length(range_body)
-    dotdot = string.index_of_from_n(range_body, rbn, "..", 0)
-    if dotdot < 0 { return start, "for: range needs `LO..HI`" }
-    lo_str = trim(string.substring_n(range_body, rbn, 0, dotdot))
-    hi_str = trim(string.substring_n(range_body, rbn, dotdot + 2, rbn))
-    lo_val, _, lerr = resolve_atom(ctx, lo_str)
-    if lerr != "" { return start, lerr }
-    hi_val, _, herr = resolve_atom(ctx, hi_str)
-    if herr != "" { return start, herr }
-    lo, lierr = string.to_int(lo_val)
-    if lierr != "" { return start, string.concat("for: LO not an integer: ", lo_str) }
-    hi, hierr = string.to_int(hi_val)
-    if hierr != "" { return start, string.concat("for: HI not an integer: ", hi_str) }
-    // Trailing modifiers.
-    mods = trim(string.substring_n(after_in, an, close_paren + 1, an))
-    limit_n, has_limit, e_lim = parse_int_modifier(mods, "limit")
-    if e_lim != "" { return start, e_lim }
-    offset_n, has_offset, e_off = parse_int_modifier(mods, "offset")
-    if e_off != "" { return start, e_off }
-    reversed = has_reversed(mods)
+    if string_length(after_in) == 0 { return "", "", string.concat(tag, ": missing iterable") }
+    return var_name, after_in, ""
+}
 
-    // Materialize the iteration list as ints. Range is inclusive at both ends.
-    // If HI < LO, Shopify yields nothing.
-    if hi < lo {
-        return end_at, ""
+// A range bound's value as an integer (a number, or text that is one).
+range_bound(ctx: ptr, text: string, tag: string, which: string) -> (int, string) {
+    v, err = eval_value(ctx, text)
+    if err != "" { return 0, err }
+    n, nerr = string.to_int(value_to_string(v))
+    if nerr != "" {
+        return 0, string.concat(string.concat(tag, string.concat(": ", which)), string.concat(" not an integer: ", text))
     }
-    base_len = hi - lo + 1
-    // Apply offset (drop from the front).
+    return n, ""
+}
+
+// Read a loop's SOURCE and modifiers (`after_in`: what follows `in`) into a
+// LiquidLoop. Returns (loop, modifiers, error); the caller frees the loop
+// with heap.free.
+loop_open(ctx: ptr, after_in: string, tag: string) -> (ptr, string, string) {
+    an = string_length(after_in)
+    lp = heap.new(LiquidLoop)
+    total = 0
+    src_end = 0
+    if string.char_at_n(after_in, an, 0) == 40 { // '('
+        close_paren = string.index_of_from_n(after_in, an, ")", 0)
+        if close_paren < 0 { return lp as ptr, "", string.concat(tag, ": missing `)` in range") }
+        range_body = string.substring_n(after_in, an, 1, close_paren)
+        rbn = string_length(range_body)
+        dotdot = string.index_of_from_n(range_body, rbn, "..", 0)
+        if dotdot < 0 { return lp as ptr, "", string.concat(tag, ": range needs `LO..HI`") }
+        lo, lerr = range_bound(ctx, trim(string.substring_n(range_body, rbn, 0, dotdot)), tag, "LO")
+        if lerr != "" { return lp as ptr, "", lerr }
+        hi, herr = range_bound(ctx, trim(string.substring_n(range_body, rbn, dotdot + 2, rbn)), tag, "HI")
+        if herr != "" { return lp as ptr, "", herr }
+        lp.kind = LOOP_RANGE
+        lp.lo = lo
+        if hi >= lo { total = hi - lo + 1 }
+        src_end = close_paren + 1
+    } else {
+        first = string.char_at_n(after_in, an, 0)
+        if first == 34 || first == 39 {
+            src_end = 1
+            while src_end < an && string.char_at_n(after_in, an, src_end) != first { src_end = src_end + 1 }
+            src_end = src_end + 1
+            if src_end > an { return lp as ptr, "", string.concat(tag, ": unterminated string") }
+        } else {
+            src_end = path_end(after_in, an, 0)
+            if src_end == 0 { return lp as ptr, "", string.concat(tag, ": cannot iterate `${after_in}`") }
+        }
+        v, verr = eval_value(ctx, string.substring_n(after_in, an, 0, src_end))
+        if verr != "" { return lp as ptr, "", verr }
+        k = value_kind(v)
+        nd = node_of(ctx, v)
+        if k == LV_ARR && nd != null {
+            lp.kind = LOOP_ARRAY
+            total = arr_len(nd)
+        } else if k == LV_OBJ && nd != null {
+            lp.kind = LOOP_OBJECT
+            total = obj_len(nd)
+        } else if k == LV_STR && string_length(value_payload(v)) > 0 {
+            lp.kind = LOOP_ONE
+            total = 1
+        } else {
+            lp.kind = LOOP_ONE
+            total = 0
+        }
+        lp.source = string.copy(v)
+    }
+    mods = trim(string.substring_n(after_in, an, src_end, an))
+    limit_n, has_limit, e_lim = parse_int_modifier(ctx, mods, "limit")
+    if e_lim != "" { return lp as ptr, mods, e_lim }
+    offset_n, has_offset, e_off = parse_int_modifier(ctx, mods, "offset")
+    if e_off != "" { return lp as ptr, mods, e_off }
     off_v = 0
     if has_offset == 1 {
         off_v = offset_n
         if off_v < 0 { off_v = 0 }
-        if off_v > base_len { off_v = base_len }
+        if off_v > total { off_v = total }
     }
-    eff_len = base_len - off_v
+    count = total - off_v
     if has_limit == 1 {
         if limit_n < 0 { limit_n = 0 }
-        if limit_n < eff_len { eff_len = limit_n }
+        if limit_n < count { count = limit_n }
     }
-    if eff_len <= 0 {
+    if count < 0 { count = 0 }
+    lp.start = off_v
+    lp.count = count
+    lp.reversed = has_reversed(mods)
+    return lp as ptr, mods, ""
+}
+
+// The loop's `k`-th value (0-based, in the order the loop runs).
+loop_item(ctx: ptr, lp: ptr, k: int) -> string {
+    l = lp as *LiquidLoop
+    at = l.start + k
+    if l.reversed == 1 { at = l.start + (l.count - 1 - k) }
+    if l.kind == LOOP_RANGE { return value_int(l.lo + at) }
+    if l.kind == LOOP_ONE { return l.source }
+    nd = node_of(ctx, l.source)
+    if nd == null { return value_nil() }
+    if l.kind == LOOP_ARRAY { return arr_at(nd, at) }
+    return obj_pair(ctx, nd, at)
+}
+
+// A `forloop` object for a loop of `length` iterations called `name`, with
+// the enclosing loop's forloop (or nil) as `parentloop`.
+forloop_new(ctx: ptr, name: string, length: int, parent: string) -> (string, ptr) {
+    fv, fnode = node_new(ctx, LV_OBJ)
+    obj_set(fnode, "name", value_str(name))
+    obj_set(fnode, "length", value_int(length))
+    obj_set(fnode, "parentloop", parent)
+    obj_set(fnode, "index", value_nil())
+    obj_set(fnode, "index0", value_nil())
+    obj_set(fnode, "rindex", value_nil())
+    obj_set(fnode, "rindex0", value_nil())
+    obj_set(fnode, "first", value_nil())
+    obj_set(fnode, "last", value_nil())
+    return fv, fnode
+}
+
+// Point `forloop` at iteration `k` of `length`.
+forloop_at(fnode: ptr, k: int, length: int) {
+    obj_replace(fnode, "index", value_int(k + 1))
+    obj_replace(fnode, "index0", value_int(k))
+    obj_replace(fnode, "rindex", value_int(length - k))
+    obj_replace(fnode, "rindex0", value_int(length - 1 - k))
+    is_first = 0
+    if k == 0 { is_first = 1 }
+    is_last = 0
+    if k == length - 1 { is_last = 1 }
+    obj_replace(fnode, "first", value_bool(is_first))
+    obj_replace(fnode, "last", value_bool(is_last))
+}
+
+// Render a `{% for VAR in SOURCE [modifiers] %}...[{% else %}...]{% endfor %}`
+// block. `break` / `continue` arrive from the body as the sentinel errors
+// `__break__` and `__continue__`, which this catches. Returns
+// (index_of_endfor_token, "") on success or (start, error).
+render_for_block(kinds: ptr, contents: ptr, start: int, end: int,
+    ctx: ptr, sb: ptr, rest: string)
+-> (int, string) {
+    body_start = start + 1
+    end_at, ferr = find_for_end(kinds, contents, body_start, end)
+    if ferr != "" { return start, ferr }
+    var_name, after_in, herr = loop_head(rest, "for")
+    if herr != "" { return start, herr }
+    lp, _mods, lerr = loop_open(ctx, after_in, "for")
+    l = lp as *LiquidLoop
+    if lerr != "" {
+        heap.free(l)
+        return start, lerr
+    }
+    count = l.count
+    else_at = find_loop_else(kinds, contents, body_start, end_at)
+    body_end = end_at
+    if else_at >= 0 { body_end = else_at }
+
+    if count == 0 {
+        heap.free(l)
+        if else_at >= 0 {
+            inner, ierr = render_range(kinds, contents, else_at + 1, end_at, ctx)
+            if ierr != "" { return start, ierr }
+            strbuilder.append(sb, inner)
+        }
         return end_at, ""
     }
 
-    // Save prior bindings we will overwrite.
-    prior_var, prior_var_bound = save_binding(ctx, var_name)
-    prior_idx,    pb_idx    = save_binding(ctx, "forloop.index")
-    prior_idx0,   pb_idx0   = save_binding(ctx, "forloop.index0")
-    prior_first,  pb_first  = save_binding(ctx, "forloop.first")
-    prior_last,   pb_last   = save_binding(ctx, "forloop.last")
-    prior_len,    pb_len    = save_binding(ctx, "forloop.length")
-    prior_rindex, pb_rindex = save_binding(ctx, "forloop.rindex")
-    prior_rindex0,pb_rindex0= save_binding(ctx, "forloop.rindex0")
-
-    // Length seen INSIDE the body is the post-offset/limit count
-    // (Shopify behaviour).
-    len_s = string.from_int(eff_len)
-    map_put(ctx, "forloop.length", len_s)
-
+    prior_var, had_var = save_value(ctx, var_name)
+    prior_loop, had_loop = save_value(ctx, "forloop")
+    parent = value_nil()
+    if had_loop == 1 { parent = prior_loop }
+    loop_name = string.concat(string.concat(var_name, "-"), after_in)
+    fv, fnode = forloop_new(ctx, loop_name, count, parent)
+    bind_value(ctx, "forloop", fv)
+    err = ""
+    typed = typed_of(ctx)
     k = 0
-    while k < eff_len {
-        idx0 = k
-        slot = lo + off_v + k
-        if reversed == 1 {
-            slot = lo + off_v + (eff_len - 1 - k)
-        }
-        map_put(ctx, var_name, string.from_int(slot))
-        map_put(ctx, "forloop.index",  string.from_int(idx0 + 1))
-        map_put(ctx, "forloop.index0", string.from_int(idx0))
-        first_s = "false"
-        if idx0 == 0 { first_s = "true" }
-        last_s = "false"
-        if idx0 == eff_len - 1 { last_s = "true" }
-        map_put(ctx, "forloop.first", first_s)
-        map_put(ctx, "forloop.last",  last_s)
-        map_put(ctx, "forloop.rindex",  string.from_int(eff_len - idx0))
-        map_put(ctx, "forloop.rindex0", string.from_int(eff_len - 1 - idx0))
-
-        inner, ierr = render_range(kinds, contents, body_start, end_at, ctx)
-        // Catch break/continue sentinels.
+    while k < count {
+        map_put_string_owned(typed, var_name, loop_item(ctx, lp, k))
+        forloop_at(fnode, k, count)
+        inner, ierr = render_range(kinds, contents, body_start, body_end, ctx)
         if string.equals(ierr, "__break__") == 1 {
             strbuilder.append(sb, inner)
             break
         }
-        if string.equals(ierr, "__continue__") == 1 {
-            strbuilder.append(sb, inner)
-            k = k + 1
-            continue
-        }
-        if ierr != "" {
-            // Real error — restore bindings before bubbling out.
-            restore_binding(ctx, var_name, prior_var, prior_var_bound)
-            restore_binding(ctx, "forloop.index",   prior_idx,    pb_idx)
-            restore_binding(ctx, "forloop.index0",  prior_idx0,   pb_idx0)
-            restore_binding(ctx, "forloop.first",   prior_first,  pb_first)
-            restore_binding(ctx, "forloop.last",    prior_last,   pb_last)
-            restore_binding(ctx, "forloop.length",  prior_len,    pb_len)
-            restore_binding(ctx, "forloop.rindex",  prior_rindex, pb_rindex)
-            restore_binding(ctx, "forloop.rindex0", prior_rindex0,pb_rindex0)
-            return start, ierr
+        if ierr != "" && string.equals(ierr, "__continue__") == 0 {
+            err = ierr
+            break
         }
         strbuilder.append(sb, inner)
         k = k + 1
     }
-
-    // Restore prior bindings.
-    restore_binding(ctx, var_name, prior_var, prior_var_bound)
-    restore_binding(ctx, "forloop.index",   prior_idx,    pb_idx)
-    restore_binding(ctx, "forloop.index0",  prior_idx0,   pb_idx0)
-    restore_binding(ctx, "forloop.first",   prior_first,  pb_first)
-    restore_binding(ctx, "forloop.last",    prior_last,   pb_last)
-    restore_binding(ctx, "forloop.length",  prior_len,    pb_len)
-    restore_binding(ctx, "forloop.rindex",  prior_rindex, pb_rindex)
-    restore_binding(ctx, "forloop.rindex0", prior_rindex0,pb_rindex0)
+    restore_value(ctx, var_name, prior_var, had_var)
+    restore_value(ctx, "forloop", prior_loop, had_loop)
+    heap.free(l)
+    if err != "" { return start, err }
     return end_at, ""
 }
 
-// Render a `{% tablerow VAR in (LO..HI) [cols:N] [limit:N] [offset:N]
+// Render a `{% tablerow VAR in SOURCE [cols:N] [limit:N] [offset:N]
 // [reversed] %}...{% endtablerow %}` block.
 //
 // Shopify wraps the iteration in HTML rows and cells: each iteration
 // emits `<td class="colN">...body...</td>`, and after every `cols`
 // items a new `<tr class="rowM">` opens (the first opens immediately).
 // With no `cols`, all items go in one row. Inside the body the same
-// `forloop.*` variables that `for` exposes are bound. Range form only
-// (matches `for`).
+// variable and `forloop` that `for` binds are bound.
 render_tablerow_block(kinds: ptr, contents: ptr, start: int, end: int,
-                      ctx: ptr, sb: ptr, rest: string)
-                      -> (int, string) {
+    ctx: ptr, sb: ptr, rest: string)
+-> (int, string) {
     body_start = start + 1
     end_at, ferr = find_tablerow_end(kinds, contents, body_start, end)
     if ferr != "" { return start, ferr }
-
-    rn = string_length(rest)
-    in_off = find_word_outside_quotes(rest, rn, 0, "in")
-    if in_off < 0 {
-        return start, "tablerow: missing `in` keyword"
-    }
-    var_name = trim(string.substring_n(rest, rn, 0, in_off))
-    if string_length(var_name) == 0 {
-        return start, "tablerow: missing loop variable"
-    }
-    after_in = trim(string.substring_n(rest, rn, in_off + 2, rn))
-    an = string_length(after_in)
-    if an == 0 { return start, "tablerow: missing iterable" }
-    if string.char_at_n(after_in, an, 0) != 40 {
-        return start, "tablerow: only `(LO..HI)` range iteration is supported in this slice"
-    }
-    close_paren = string.index_of_from_n(after_in, an, ")", 0)
-    if close_paren < 0 { return start, "tablerow: missing `)` in range" }
-    range_body = string.substring_n(after_in, an, 1, close_paren)
-    rbn = string_length(range_body)
-    dotdot = string.index_of_from_n(range_body, rbn, "..", 0)
-    if dotdot < 0 { return start, "tablerow: range needs `LO..HI`" }
-    lo_str = trim(string.substring_n(range_body, rbn, 0, dotdot))
-    hi_str = trim(string.substring_n(range_body, rbn, dotdot + 2, rbn))
-    lo_val, _, lerr = resolve_atom(ctx, lo_str)
-    if lerr != "" { return start, lerr }
-    hi_val, _, herr = resolve_atom(ctx, hi_str)
+    var_name, after_in, herr = loop_head(rest, "tablerow")
     if herr != "" { return start, herr }
-    lo, lierr = string.to_int(lo_val)
-    if lierr != "" { return start, string.concat("tablerow: LO not an integer: ", lo_str) }
-    hi, hierr = string.to_int(hi_val)
-    if hierr != "" { return start, string.concat("tablerow: HI not an integer: ", hi_str) }
-
-    mods = trim(string.substring_n(after_in, an, close_paren + 1, an))
-    cols_n,  has_cols,   e_cols = parse_int_modifier(mods, "cols")
-    if e_cols != "" { return start, e_cols }
-    limit_n, has_limit,  e_lim  = parse_int_modifier(mods, "limit")
-    if e_lim != "" { return start, e_lim }
-    offset_n, has_offset, e_off = parse_int_modifier(mods, "offset")
-    if e_off != "" { return start, e_off }
-    reversed = has_reversed(mods)
-
-    if hi < lo {
+    lp, mods, lerr = loop_open(ctx, after_in, "tablerow")
+    l = lp as *LiquidLoop
+    if lerr != "" {
+        heap.free(l)
+        return start, lerr
+    }
+    cols_n, has_cols, e_cols = parse_int_modifier(ctx, mods, "cols")
+    if e_cols != "" {
+        heap.free(l)
+        return start, e_cols
+    }
+    count = l.count
+    if count == 0 {
+        heap.free(l)
         // Shopify still emits an empty <tr> row.
         strbuilder.append(sb, "<tr class=\"row1\">\n</tr>\n")
         return end_at, ""
     }
-    base_len = hi - lo + 1
-    off_v = 0
-    if has_offset == 1 {
-        off_v = offset_n
-        if off_v < 0 { off_v = 0 }
-        if off_v > base_len { off_v = base_len }
-    }
-    eff_len = base_len - off_v
-    if has_limit == 1 {
-        if limit_n < 0 { limit_n = 0 }
-        if limit_n < eff_len { eff_len = limit_n }
-    }
-    if eff_len <= 0 {
-        strbuilder.append(sb, "<tr class=\"row1\">\n</tr>\n")
-        return end_at, ""
-    }
-
-    cols = eff_len
+    cols = count
     if has_cols == 1 {
-        if cols_n <= 0 { return start, "tablerow: cols must be > 0" }
+        if cols_n <= 0 {
+            heap.free(l)
+            return start, "tablerow: cols must be > 0"
+        }
         cols = cols_n
     }
 
-    // Save prior bindings (same set as `for`).
-    prior_var, prior_var_bound = save_binding(ctx, var_name)
-    prior_idx,    pb_idx    = save_binding(ctx, "forloop.index")
-    prior_idx0,   pb_idx0   = save_binding(ctx, "forloop.index0")
-    prior_first,  pb_first  = save_binding(ctx, "forloop.first")
-    prior_last,   pb_last   = save_binding(ctx, "forloop.last")
-    prior_len,    pb_len    = save_binding(ctx, "forloop.length")
-    prior_rindex, pb_rindex = save_binding(ctx, "forloop.rindex")
-    prior_rindex0,pb_rindex0= save_binding(ctx, "forloop.rindex0")
-
-    map_put(ctx, "forloop.length", string.from_int(eff_len))
-
+    prior_var, had_var = save_value(ctx, var_name)
+    prior_loop, had_loop = save_value(ctx, "forloop")
+    parent = value_nil()
+    if had_loop == 1 { parent = prior_loop }
+    loop_name = string.concat(string.concat(var_name, "-"), after_in)
+    fv, fnode = forloop_new(ctx, loop_name, count, parent)
+    bind_value(ctx, "forloop", fv)
+    err = ""
     row = 1
     col = 1
     strbuilder.append(sb, "<tr class=\"row1\">\n")
+    typed = typed_of(ctx)
     k = 0
-    while k < eff_len {
-        slot = lo + off_v + k
-        if reversed == 1 { slot = lo + off_v + (eff_len - 1 - k) }
-        map_put(ctx, var_name, string.from_int(slot))
-        map_put(ctx, "forloop.index",  string.from_int(k + 1))
-        map_put(ctx, "forloop.index0", string.from_int(k))
-        first_s = "false"
-        if k == 0 { first_s = "true" }
-        last_s = "false"
-        if k == eff_len - 1 { last_s = "true" }
-        map_put(ctx, "forloop.first", first_s)
-        map_put(ctx, "forloop.last",  last_s)
-        map_put(ctx, "forloop.rindex",  string.from_int(eff_len - k))
-        map_put(ctx, "forloop.rindex0", string.from_int(eff_len - 1 - k))
-
-        // Open the cell.
+    while k < count {
+        map_put_string_owned(typed, var_name, loop_item(ctx, lp, k))
+        forloop_at(fnode, k, count)
         strbuilder.append(sb, "<td class=\"col")
         strbuilder.append(sb, string.from_int(col))
         strbuilder.append(sb, "\">")
         inner, ierr = render_range(kinds, contents, body_start, end_at, ctx)
         if ierr != "" {
-            restore_binding(ctx, var_name, prior_var, prior_var_bound)
-            restore_binding(ctx, "forloop.index",   prior_idx,    pb_idx)
-            restore_binding(ctx, "forloop.index0",  prior_idx0,   pb_idx0)
-            restore_binding(ctx, "forloop.first",   prior_first,  pb_first)
-            restore_binding(ctx, "forloop.last",    prior_last,   pb_last)
-            restore_binding(ctx, "forloop.length",  prior_len,    pb_len)
-            restore_binding(ctx, "forloop.rindex",  prior_rindex, pb_rindex)
-            restore_binding(ctx, "forloop.rindex0", prior_rindex0,pb_rindex0)
-            return start, ierr
+            err = ierr
+            break
         }
         strbuilder.append(sb, inner)
         strbuilder.append(sb, "</td>")
-
         col = col + 1
         // Open a new row if we've filled `cols` and there are more items.
-        if col > cols && k < eff_len - 1 {
+        if col > cols && k < count - 1 {
             row = row + 1
             col = 1
             strbuilder.append(sb, "</tr>\n<tr class=\"row")
@@ -3441,16 +4222,11 @@ render_tablerow_block(kinds: ptr, contents: ptr, start: int, end: int,
         }
         k = k + 1
     }
+    restore_value(ctx, var_name, prior_var, had_var)
+    restore_value(ctx, "forloop", prior_loop, had_loop)
+    heap.free(l)
+    if err != "" { return start, err }
     strbuilder.append(sb, "</tr>\n")
-
-    restore_binding(ctx, var_name, prior_var, prior_var_bound)
-    restore_binding(ctx, "forloop.index",   prior_idx,    pb_idx)
-    restore_binding(ctx, "forloop.index0",  prior_idx0,   pb_idx0)
-    restore_binding(ctx, "forloop.first",   prior_first,  pb_first)
-    restore_binding(ctx, "forloop.last",    prior_last,   pb_last)
-    restore_binding(ctx, "forloop.length",  prior_len,    pb_len)
-    restore_binding(ctx, "forloop.rindex",  prior_rindex, pb_rindex)
-    restore_binding(ctx, "forloop.rindex0", prior_rindex0,pb_rindex0)
     return end_at, ""
 }
 
@@ -3516,15 +4292,19 @@ find_for_end(kinds: ptr, contents: ptr, start: int, end: int) -> (int, string) {
 // the resolved path must be inside the include-root after `fs.clean`.
 //
 // Recursion depth is capped (default 100, matches Shopify). The depth
-// counter lives in the context under the internal key `_inc_depth`.
+// counter lives in the context under the internal key KEY_INCLUDE_DEPTH.
 
 const MAX_INCLUDE_DEPTH = 100
 
-// Internal context keys (use a `_` prefix so they cannot collide with
-// user-supplied identifiers).
-const KEY_INCLUDE_ROOT  = "_inc_root"
-const KEY_INCLUDE_DEPTH = "_inc_depth"
-const KEY_BLOCK_SUPER   = "_block_super"
+// Internal context keys. Each starts with a control character, which the
+// lexer refuses inside a tag, so no template can name one to read or
+// write it (lookup_value refuses such names as well).
+const KEY_INCLUDE_ROOT = "\x01inc_root"
+const KEY_INCLUDE_DEPTH = "\x01inc_depth"
+const KEY_BLOCK_SUPER = "\x01block_super"
+// The time `date` reads as "now" (context_set_now); like the value store's
+// key, it starts with a control character, so no template can name it.
+const KEY_NOW = "\x01now"
 
 // Read the include-root from ctx. Returns ("", 0) when unset.
 get_include_root(ctx: ptr) -> (string, int) {
@@ -3567,12 +4347,17 @@ resolve_partial_path(root: string, name: string) -> (string, string) {
 // Parse a `render`-style key:value argument list.
 //   `, k1: v1, k2: v2`
 //   `, k: 'lit'`
-//   `, k: outer_var`
-// Returns the populated ctx, or ("", err). Each value is resolved
-// through `resolve_atom` against the OUTER ctx so a caller can pass
-// in a variable's current value: `{% render 'p', name: name %}`.
+//   `, k: outer.path`
+// Returns a fresh context holding just those names, or (null, err). Each
+// value is evaluated against the OUTER ctx, so a caller passes a
+// variable's current value -- an array or object included, which the
+// fresh context reads from the store it shares with the outer one:
+// `{% render 'p', items: product.variants %}`. The fresh context owns no
+// store; free it with bindings_free once the partial has rendered.
 parse_render_args(outer_ctx: ptr, body: string, start_after_name: int) -> (ptr, string) {
     fresh = map_new()
+    map_put(fresh, KEY_TYPED, map_new())
+    map_put(fresh, KEY_VALUES, store_of(outer_ctx))
     n = string_length(body)
     if start_after_name >= n { return fresh, "" }
     // Walk pairs of `key: value`, separated by top-level commas
@@ -3587,17 +4372,26 @@ parse_render_args(outer_ctx: ptr, body: string, start_after_name: int) -> (ptr, 
         if p >= n { break }
         // Read until `:` (outside quotes).
         colon = find_outside_quotes(body, n, p, 58)
-        if colon < 0 { return 0, "render: missing `:` in args" }
+        if colon < 0 {
+            bindings_free(fresh)
+            return null, "render: missing `:` in args"
+        }
         key = trim(string.substring_n(body, n, p, colon))
-        if string_length(key) == 0 { return 0, "render: missing arg name" }
+        if string_length(key) == 0 {
+            bindings_free(fresh)
+            return null, "render: missing arg name"
+        }
         // Read until next top-level comma (or end).
         comma = find_outside_quotes(body, n, colon + 1, 44)
         end_off = n
         if comma >= 0 { end_off = comma }
         raw_val = trim(string.substring_n(body, n, colon + 1, end_off))
-        val, _, verr = resolve_atom(outer_ctx, raw_val)
-        if verr != "" { return 0, verr }
-        map_put(fresh, key, val)
+        val, verr = eval_value(outer_ctx, raw_val)
+        if verr != "" {
+            bindings_free(fresh)
+            return null, verr
+        }
+        bind_value(fresh, key, val)
         if comma < 0 { break }
         p = comma + 1
     }
@@ -3622,7 +4416,7 @@ render_include_tag(outer_ctx: ptr, rest: string, strict: int) -> (string, string
     close_q = -1
     j = 1
     while j < rn {
-        if string.char_at_n(rest, rn, j) == first { close_q = j ; break }
+        if string.char_at_n(rest, rn, j) == first { close_q = j; break }
         j = j + 1
     }
     if close_q < 0 {
@@ -3663,16 +4457,19 @@ render_include_tag(outer_ctx: ptr, rest: string, strict: int) -> (string, string
         child = args_ctx
         // Carry the include-root through so `render` inside `render`
         // works without forcing the caller to set it twice -- and the
-        // partial cache, so the fresh context shares it.
+        // partial cache, so the fresh context shares it, and the time the
+        // host gave, so `date` reads the same "now".
         map_put(child, KEY_INCLUDE_ROOT, root)
         pkey = partial_cache_key()
         if map_has(outer_ctx, pkey) == 1 { map_put(child, pkey, map_get_raw(outer_ctx, pkey)) }
+        if map_has(outer_ctx, KEY_NOW) == 1 { map_put(child, KEY_NOW, string.copy(map_get_raw(outer_ctx, KEY_NOW))) }
     }
     // Bump depth on the child ctx for both forms.
     map_put(child, KEY_INCLUDE_DEPTH, string.from_int(depth + 1))
 
     out, rerr = render(t, child)
     if owned == 1 { template_free(t) }
+    if strict == 1 { bindings_free(child) }
 
     // Restore outer_ctx's depth (only needed for `include`, since
     // child==outer_ctx there). For `render` the child ctx is dropped.
@@ -3712,7 +4509,7 @@ first_meaningful_token(kinds: ptr, contents: ptr, start: int, end: int) -> int {
                 }
                 j = j + 1
             }
-            if all_ws == 1 { i = i + 1 ; continue }
+            if all_ws == 1 { i = i + 1; continue }
             return i
         }
         return i
@@ -3797,7 +4594,7 @@ layout_target(kinds: ptr, contents: ptr, n: int) -> (int, string, string) {
     close_q = -1
     j = 1
     while j < rn {
-        if string.char_at_n(rest, rn, j) == first { close_q = j ; break }
+        if string.char_at_n(rest, rn, j) == first { close_q = j; break }
         j = j + 1
     }
     if close_q < 0 { return -1, "", "layout: unterminated parent name" }
@@ -3812,9 +4609,9 @@ layout_target(kinds: ptr, contents: ptr, n: int) -> (int, string, string) {
 // next level up defines it, and so on down to the base's own default
 // (`base_lo..base_hi` in the base's token stream).
 render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, levels: int,
-                  from: int, name: string,
-                  base_kinds: ptr, base_contents: ptr, base_lo: int, base_hi: int,
-                  ctx: ptr) -> (string, string) {
+    from: int, name: string,
+    base_kinds: ptr, base_contents: ptr, base_lo: int, base_hi: int,
+    ctx: ptr) -> (string, string) {
     lv = from
     while lv < levels {
         if map_has(list_get_raw(chain_blocks, lv), name) == 1 { break }
@@ -3824,8 +4621,8 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
         return render_range(base_kinds, base_contents, base_lo, base_hi, ctx)
     }
     super_text, serr = render_block_from(chain_kinds, chain_contents, chain_blocks, levels,
-                                         lv + 1, name, base_kinds, base_contents,
-                                         base_lo, base_hi, ctx)
+        lv + 1, name, base_kinds, base_contents,
+        base_lo, base_hi, ctx)
     if serr != "" { return "", serr }
     packed = map_get_raw(list_get_raw(chain_blocks, lv), name)
     pn = string_length(packed)
@@ -3837,7 +4634,7 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
     if had_prior == 1 { prior = map_get_raw(ctx, KEY_BLOCK_SUPER) }
     map_put(ctx, KEY_BLOCK_SUPER, super_text)
     inner, rerr = render_range(list_get_raw(chain_kinds, lv), list_get_raw(chain_contents, lv),
-                               lo, hi, ctx)
+        lo, hi, ctx)
     if had_prior == 1 {
         map_put(ctx, KEY_BLOCK_SUPER, prior)
     } else {
@@ -3850,8 +4647,8 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
 // resolved through the chain (render_block_from). The chain's levels are
 // the templates below the base, most derived first.
 render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
-                       chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
-                       levels: int, ctx: ptr) -> (string, string) {
+    chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
+    levels: int, ctx: ptr) -> (string, string) {
     sb = strbuilder.new(64)
     i = 0
     while i < base_n {
@@ -3865,7 +4662,7 @@ render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
         if string.equals(kind, TOK_OUTPUT) == 1 {
             v, err = render_output(ctx, body)
             if err != "" { return strbuilder.finish(sb), err }
-            strbuilder.append(sb, v)
+            write_output(ctx, sb, v, 0)
             i = i + 1
             continue
         }
@@ -3879,7 +4676,7 @@ render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
             eb, err = find_block_end_tag(base_kinds, base_contents, body_start, base_n)
             if err != "" { return strbuilder.finish(sb), err }
             inner, rerr = render_block_from(chain_kinds, chain_contents, chain_blocks, levels, 0,
-                                            name, base_kinds, base_contents, body_start, eb, ctx)
+                name, base_kinds, base_contents, body_start, eb, ctx)
             if rerr != "" { return strbuilder.finish(sb), rerr }
             strbuilder.append(sb, inner)
             i = eb + 1
@@ -3903,7 +4700,7 @@ render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
 // the parents it parsed without a partial cache (a cached parent belongs to
 // the cache, and level 0 is the caller's template).
 free_layout_chain(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
-                  seen: ptr, owned: ptr) {
+    seen: ptr, owned: ptr) {
     nb = list_size(chain_blocks)
     i = 0
     while i < nb {
@@ -3933,7 +4730,7 @@ free_layout_chain(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
 // `context_set_include_root`; rejects path traversal; a parent reached
 // twice is a cycle; the whole chain counts against the depth-100 budget.
 render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
-                       lay_idx: int, parent_name: string, ctx: ptr) -> (string, string) {
+    lay_idx: int, parent_name: string, ctx: ptr) -> (string, string) {
     root, has_root = get_include_root(ctx)
     if has_root == 0 {
         return "", "layout: no include-root set — call context_set_include_root() first"
@@ -4015,7 +4812,7 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
     // so an include inside any level sees the depth below it.
     map_put(ctx, KEY_INCLUDE_DEPTH, string.from_int(depth + levels))
     out, rerr = render_base_with_chain(cur_kinds, cur_contents, cur_n,
-                                       chain_kinds, chain_contents, chain_blocks, levels, ctx)
+        chain_kinds, chain_contents, chain_blocks, levels, ctx)
     map_put(ctx, KEY_INCLUDE_DEPTH, string.from_int(depth))
     free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
     if rerr != "" {
@@ -4033,9 +4830,24 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
 //
 // If the first meaningful token is `{% layout 'parent' %}`, this
 // dispatches to the layout/block engine; otherwise it walks the
-// stream linearly via `render_range`.
+// stream linearly via `render_range`. When the outermost render over the
+// context's value store returns -- not an include or a `{% render %}`
+// inside it -- the arrays and objects it made that no binding reaches are
+// reclaimed (store_collect), once enough have been made to be worth it.
 render(t: ptr, ctx: ptr) -> (string, string) {
-    kinds    = list_get_raw(t, 0)
+    sp = store_of(ctx)
+    st = sp as *LiquidStore
+    st.depth = st.depth + 1
+    out, err = render_template(t, ctx)
+    st.depth = st.depth - 1
+    if st.depth == 0 && st.made >= 64 && st.made >= st.live - st.made {
+        store_collect(ctx, sp)
+    }
+    return out, err
+}
+
+render_template(t: ptr, ctx: ptr) -> (string, string) {
+    kinds = list_get_raw(t, 0)
     contents = list_get_raw(t, 1)
     n = string_list_size(kinds)
 
@@ -4071,31 +4883,33 @@ render_to_strbuilder(t: ptr, ctx: ptr, sb: ptr) -> string {
 }
 
 // ---------------------------------------------------------------------------
-// Typed value model (Phase 1)
+// Typed value model
 // ---------------------------------------------------------------------------
 //
-// Values are packed strings with a 2-byte kind prefix:
+// Every value the renderer works with is a packed string: a kind letter and
+// a colon in front of its payload.
+//
 //   "n:"          LV_NIL    nil
 //   "b:1"/"b:0"   LV_BOOL   boolean
-//   "i:42"        LV_INT    int (decimal text payload)
-//   "f:3.14"      LV_FLOAT  float (decimal text payload)
+//   "i:42"        LV_INT    integer, as decimal text (unbounded)
+//   "f:3.14"      LV_FLOAT  float, as Ruby writes it
 //   "s:hello"     LV_STR    string
-//   "a:<ptr>"     LV_ARR    string_list of packed values (ptr-as-long)
-//   "o:<ptr>"     LV_OBJ    std.map of string -> packed value (ptr-as-long)
+//   "a:<id>"      LV_ARR    array: node <id> of the context's value store
+//   "o:<id>"      LV_OBJ    object: node <id> of the context's value store
 //
-// Typed bindings live under `v:<key>` in the context map, alongside
-// legacy string bindings under `<key>`. A typed binding takes
-// precedence over a same-named legacy one (see `lookup_path` head
-// resolution). Legacy callers' `lookup(ctx, name)` is unchanged in
-// Phase 1 — they still see the legacy slot directly.
+// Typed bindings live in a map of their own (KEY_TYPED), beside the bare
+// strings context_put_string binds in the context map; a typed binding wins
+// whichever was bound last. The renderer packs a bare string as a string the
+// moment it reads one, and packs everything it makes, so no text a host or a
+// template supplies can pass for an array or an object.
 
-const LV_NIL    = 0
-const LV_BOOL   = 1
-const LV_INT    = 2
-const LV_FLOAT  = 3
-const LV_STR    = 4
-const LV_ARR    = 5
-const LV_OBJ    = 6
+const LV_NIL = 0
+const LV_BOOL = 1
+const LV_INT = 2
+const LV_FLOAT = 3
+const LV_STR = 4
+const LV_ARR = 5
+const LV_OBJ = 6
 
 // Scalar narrowing/widening — Aether has no C-style cast (`(int)f`),
 // so wrap the implicit narrow/widen as a one-arg call where the
@@ -4127,12 +4941,18 @@ value_str(s: string) -> string {
     return string.concat("s:", s)
 }
 
-value_arr(lst: ptr) -> string {
-    return string.concat("a:", string.from_long(mem.ptr_to_long(lst)))
-}
-
-value_obj(m: ptr) -> string {
-    return string.concat("o:", string.from_long(mem.ptr_to_long(m)))
+// A number's text -- an arithmetic filter's result, a literal -- as the kind
+// it reads as: an integer when it has no point, exponent or infinity in it,
+// a float otherwise.
+value_number(text: string) -> string {
+    n = string_length(text)
+    i = 0
+    while i < n {
+        c = string.char_at_n(text, n, i)
+        if c == 46 || c == 101 || c == 73 || c == 78 { return string.concat("f:", text) }
+        i = i + 1
+    }
+    return string.concat("i:", text)
 }
 
 // Classify a packed value. Returns LV_STR for bare strings (legacy
@@ -4144,11 +4964,11 @@ value_kind(v: string) -> int {
     if string.char_at_n(v, n, 1) != 58 { return LV_STR }
     c = string.char_at_n(v, n, 0)
     if c == 110 { return LV_NIL }
-    if c == 98  { return LV_BOOL }
+    if c == 98 { return LV_BOOL }
     if c == 105 { return LV_INT }
     if c == 102 { return LV_FLOAT }
     if c == 115 { return LV_STR }
-    if c == 97  { return LV_ARR }
+    if c == 97 { return LV_ARR }
     if c == 111 { return LV_OBJ }
     return LV_STR
 }
@@ -4203,48 +5023,574 @@ value_get_float(v: string) -> float {
     return 0.0
 }
 
-value_get_arr(v: string) -> ptr {
-    if value_kind(v) != LV_ARR { return 0 }
-    long_v, _ = string.to_long(value_payload(v))
-    return mem.long_to_ptr(long_v)
-}
-
-value_get_obj(v: string) -> ptr {
-    if value_kind(v) != LV_OBJ { return 0 }
-    long_v, _ = string.to_long(value_payload(v))
-    return mem.long_to_ptr(long_v)
-}
-
-// Canonical stringification. LV_NIL → "", LV_BOOL → "true"/"false",
-// LV_INT/LV_FLOAT/LV_STR → payload, LV_ARR → "[v1, v2, …]" recursive,
-// LV_OBJ → "{object}" placeholder (Phase 2 will iterate keys).
+// A scalar's text: nil is "", a boolean "true" or "false", a number or a
+// string its payload. An array or an object belongs to a context, so its
+// text comes from rendering it (value_text); here it is "".
 value_to_string(v: string) -> string {
     k = value_kind(v)
-    if k == LV_NIL { return "" }
+    if k == LV_NIL || k == LV_ARR || k == LV_OBJ { return "" }
     if k == LV_BOOL {
         if string.equals(value_payload(v), "1") == 1 { return "true" }
         return "false"
     }
-    if k == LV_INT { return value_payload(v) }
-    if k == LV_FLOAT { return value_payload(v) }
-    if k == LV_STR { return value_payload(v) }
-    if k == LV_ARR {
-        lst = value_get_arr(v)
-        if lst == 0 { return "[]" }
-        len = string_list_size(lst)
-        sb = strbuilder.new(16)
-        strbuilder.append(sb, "[")
+    return value_payload(v)
+}
+
+// ---- The value store (#2177) ---------------------------------------------
+//
+// Arrays and objects are nodes in a store the context owns. context_put_json
+// copies a JSON tree into it; the array filters, `split`, and `for` over an
+// object make new nodes as a template renders. A packed "a:<id>" / "o:<id>"
+// names a node by number, and every use looks the number up in the store
+// and checks the node's kind, so no value can reach memory the store does
+// not hold.
+//
+// Ownership: the context owns what is bound into it and what its renders
+// make, and context_free releases all of it; a caller's own JSON tree stays
+// the caller's. Nodes a render made that no binding reaches any more are
+// reclaimed as an outermost render returns: the collector marks from the
+// context's typed bindings and frees the rest. It runs once the nodes made
+// since it last ran are at least as many as the ones held before them, so
+// its work stays in proportion to what the renders made.
+
+const KEY_VALUES = "\x01values"
+
+// The context key of its typed bindings: a map from name to packed value.
+const KEY_TYPED = "\x01typed"
+
+struct LiquidNode {
+    kind: int // LV_ARR or LV_OBJ
+    items: ptr // string_list: an array's elements, or an object's keys in insertion order
+    fields: ptr // map: an object's key -> packed value; null for an array
+    marked: int // reached by the collection in progress
+}
+
+struct LiquidStore {
+    nodes: ptr // list: id -> *LiquidNode, null for an id that is free
+    free_ids: ptr // intarr used as a stack of the free ids
+    free_len: int
+    free_cap: int
+    live: int // nodes held
+    made: int // nodes made since the last collection
+    depth: int // renders in progress over the contexts sharing this store
+}
+
+store_new() -> ptr {
+    st = heap.new(LiquidStore)
+    st.nodes = list_new()
+    st.free_cap = 16
+    st.free_ids = intarr_new_raw(16)
+    return st as ptr
+}
+
+// The store `ctx` keeps its arrays and objects in, made on first use.
+store_of(ctx: ptr) -> ptr {
+    have = map_get_raw(ctx, KEY_VALUES)
+    if have != null { return have }
+    st = store_new()
+    map_put(ctx, KEY_VALUES, st)
+    return st
+}
+
+node_free(p: ptr) {
+    nd = p as *LiquidNode
+    string_list_free(nd.items)
+    if nd.fields != null { map_free(nd.fields) }
+    heap.free(nd)
+}
+
+store_free(p: ptr) {
+    st = p as *LiquidStore
+    n = list_size(st.nodes)
+    i = 0
+    while i < n {
+        nd = list_get_raw(st.nodes, i)
+        if nd != null { node_free(nd) }
+        i = i + 1
+    }
+    list_free(st.nodes)
+    intarr_free(st.free_ids)
+    heap.free(st)
+}
+
+// A new, empty array (LV_ARR) or object (LV_OBJ) in `ctx`'s store. Returns
+// its packed value and the node.
+node_new(ctx: ptr, kind: int) -> (string, ptr) {
+    st = store_of(ctx) as *LiquidStore
+    nd = heap.new(LiquidNode)
+    nd.kind = kind
+    nd.items = string_list_new()
+    if kind == LV_OBJ { nd.fields = map_new() }
+    id = 0
+    if st.free_len > 0 {
+        st.free_len = st.free_len - 1
+        id = intarr_get_raw(st.free_ids, st.free_len)
+        list_set(st.nodes, id, nd as ptr)
+    } else {
+        id = list_size(st.nodes)
+        list_add_raw(st.nodes, nd as ptr)
+    }
+    st.live = st.live + 1
+    st.made = st.made + 1
+    if kind == LV_OBJ { return string.concat("o:", string.from_int(id)), nd as ptr }
+    return string.concat("a:", string.from_int(id)), nd as ptr
+}
+
+// The node an array or object value names in store `sp`, or null for any
+// other value and for an id the store does not hold with that kind.
+store_node(sp: ptr, v: string) -> ptr {
+    k = value_kind(v)
+    if k != LV_ARR && k != LV_OBJ { return null }
+    if sp == null { return null }
+    st = sp as *LiquidStore
+    id, err = string.to_int(value_payload(v))
+    if err != "" || id < 0 || id >= list_size(st.nodes) { return null }
+    p = list_get_raw(st.nodes, id)
+    if p == null { return null }
+    nd = p as *LiquidNode
+    if nd.kind != k { return null }
+    return p
+}
+
+// The node `v` names in `ctx`'s store (store_node).
+node_of(ctx: ptr, v: string) -> ptr {
+    return store_node(map_get_raw(ctx, KEY_VALUES), v)
+}
+
+arr_len(nd: ptr) -> int { return string_list_size((nd as *LiquidNode).items) }
+arr_at(nd: ptr, i: int) -> string { return string_list_get((nd as *LiquidNode).items, i) }
+arr_push(nd: ptr, v: string) { string_list_add((nd as *LiquidNode).items, v) }
+
+obj_len(nd: ptr) -> int { return string_list_size((nd as *LiquidNode).items) }
+obj_key_at(nd: ptr, i: int) -> string { return string_list_get((nd as *LiquidNode).items, i) }
+
+// Set `key` to `v`: a new key goes after the others, an existing one keeps
+// its place. (obj_replace, for a key the object already has.)
+obj_set(nd: ptr, key: string, v: string) {
+    o = nd as *LiquidNode
+    if map_has(o.fields, key) == 0 { string_list_add(o.items, key) }
+    map_put_string_owned(o.fields, key, v)
+}
+
+// Set `key`, which the object already has, to `v`.
+obj_replace(nd: ptr, key: string, v: string) {
+    map_put_string_owned((nd as *LiquidNode).fields, key, v)
+}
+
+// (value, 1) for a key the object has, (nil, 0) otherwise.
+obj_get(nd: ptr, key: string) -> (string, int) {
+    o = nd as *LiquidNode
+    v = map_get_raw(o.fields, key)
+    if v == null { return value_nil(), 0 }
+    return v, 1
+}
+
+// Keep `id` for the next node.
+store_push_free(st: *LiquidStore, id: int) {
+    if st.free_len == st.free_cap {
+        grown = intarr_new_raw(st.free_cap * 2)
         i = 0
-        while i < len {
-            if i > 0 { strbuilder.append(sb, ", ") }
-            strbuilder.append(sb, value_to_string(string_list_get(lst, i)))
+        while i < st.free_len {
+            intarr_set_raw(grown, i, intarr_get_raw(st.free_ids, i))
             i = i + 1
         }
-        strbuilder.append(sb, "]")
+        intarr_free(st.free_ids)
+        st.free_ids = grown
+        st.free_cap = st.free_cap * 2
+    }
+    intarr_set_raw(st.free_ids, st.free_len, id)
+    st.free_len = st.free_len + 1
+}
+
+// Is `v` an array or an object, a value the collector traces?
+is_node_value(v: string) -> int {
+    k = value_kind(v)
+    if k == LV_ARR || k == LV_OBJ { return 1 }
+    return 0
+}
+
+// Free every node of `ctx`'s store that no typed binding of `ctx` reaches.
+store_collect(ctx: ptr, sp: ptr) {
+    st = sp as *LiquidStore
+    pending = string_list_new()
+    typed = typed_of(ctx)
+    keys = map_keys_raw(typed)
+    nk = map_keys_size_raw(keys)
+    i = 0
+    while i < nk {
+        v = map_get_raw(typed, map_keys_get_raw(keys, i))
+        if is_node_value(v) == 1 { string_list_add(pending, v) }
+        i = i + 1
+    }
+    map_keys_free(keys)
+    while string_list_size(pending) > 0 {
+        last = string_list_size(pending) - 1
+        p = store_node(sp, string_list_get(pending, last))
+        string_list_remove(pending, last)
+        if p != null {
+            nd = p as *LiquidNode
+            if nd.marked == 0 {
+                nd.marked = 1
+                n = string_list_size(nd.items)
+                j = 0
+                while j < n {
+                    if nd.kind == LV_OBJ {
+                        fv, _found = obj_get(p, string_list_get(nd.items, j))
+                        if is_node_value(fv) == 1 { string_list_add(pending, fv) }
+                    } else {
+                        ev = string_list_get(nd.items, j)
+                        if is_node_value(ev) == 1 { string_list_add(pending, ev) }
+                    }
+                    j = j + 1
+                }
+            }
+        }
+    }
+    string_list_free(pending)
+    live = 0
+    total = list_size(st.nodes)
+    id = 0
+    while id < total {
+        q = list_get_raw(st.nodes, id)
+        if q != null {
+            held = q as *LiquidNode
+            if held.marked == 1 {
+                held.marked = 0
+                live = live + 1
+            } else {
+                node_free(q)
+                list_set(st.nodes, id, null)
+                store_push_free(st, id)
+            }
+        }
+        id = id + 1
+    }
+    st.live = live
+    st.made = 0
+}
+
+// Arrays and objects `ctx` holds right now: what it was given, what its
+// renders made that a binding still reaches, and what they made since the
+// last collection. For measuring; a template never needs it.
+context_value_nodes(ctx: ptr) -> int {
+    if map_has(ctx, KEY_VALUES) == 0 { return 0 }
+    return (map_get_raw(ctx, KEY_VALUES) as *LiquidStore).live
+}
+
+// ---- Reading values: text, output, truthiness, equality, order -------------
+
+// Nesting a value may have and still be printed; past it an array prints as
+// `[...]` and an object as `{...}`. A value has no cycles, so this bounds
+// only the depth of what the host bound.
+const MAX_VALUE_DEPTH = 256
+
+// A value's text where Liquid calls to_s on it -- a string filter's input,
+// a comparison's operand, a filter argument: an array or an object as
+// Liquid inspects it (`["a", 1]`, `{"k"=>"v"}`), anything else as
+// value_to_string writes it.
+value_text(ctx: ptr, v: string) -> string {
+    if is_node_value(v) == 1 {
+        sb = strbuilder.new(32)
+        write_inspect(ctx, sb, v, 0)
         return strbuilder.finish(sb)
     }
-    if k == LV_OBJ { return "{object}" }
+    return value_to_string(v)
+}
+
+// Append what `{{ v }}` prints: nil nothing, an array each element in turn
+// (a nested array flattened into it), an object as Liquid inspects it, any
+// other value its text.
+write_output(ctx: ptr, sb: ptr, v: string, depth: int) {
+    k = value_kind(v)
+    if k == LV_ARR {
+        nd = node_of(ctx, v)
+        if nd == null { return }
+        if depth >= MAX_VALUE_DEPTH { strbuilder.append(sb, "[...]"); return }
+        n = arr_len(nd)
+        i = 0
+        while i < n {
+            write_output(ctx, sb, arr_at(nd, i), depth + 1)
+            i = i + 1
+        }
+        return
+    }
+    if k == LV_OBJ {
+        write_inspect(ctx, sb, v, depth)
+        return
+    }
+    strbuilder.append(sb, value_to_string(v))
+}
+
+// Append `s` as a Ruby string literal: double quotes, and a backslash escape
+// for a quote, a backslash, `#{` and the control characters.
+write_quoted(sb: ptr, s: string) {
+    n = string_length(s)
+    strbuilder.append_byte(sb, 34)
+    i = 0
+    while i < n {
+        c = string.char_at_n(s, n, i) & 255
+        if c == 34 { strbuilder.append(sb, "\\\"") }
+        else if c == 92 { strbuilder.append(sb, "\\\\") }
+        else if c == 10 { strbuilder.append(sb, "\\n") }
+        else if c == 9 { strbuilder.append(sb, "\\t") }
+        else if c == 13 { strbuilder.append(sb, "\\r") }
+        else if c == 12 { strbuilder.append(sb, "\\f") }
+        else if c == 11 { strbuilder.append(sb, "\\v") }
+        else if c == 8 { strbuilder.append(sb, "\\b") }
+        else if c == 7 { strbuilder.append(sb, "\\a") }
+        else if c == 27 { strbuilder.append(sb, "\\e") }
+        else if c == 35 && i + 1 < n && (string.char_at_n(s, n, i + 1) == 123 ||
+            string.char_at_n(s, n, i + 1) == 36 ||
+            string.char_at_n(s, n, i + 1) == 64) {
+            strbuilder.append(sb, "\\#")
+        } else if c < 32 || c == 127 {
+            strbuilder.append(sb, "\\u00")
+            strbuilder.append_byte(sb, hex_digit(c / 16))
+            strbuilder.append_byte(sb, hex_digit(c % 16))
+        } else {
+            strbuilder.append_byte(sb, c)
+        }
+        i = i + 1
+    }
+    strbuilder.append_byte(sb, 34)
+}
+
+// Append Liquid's inspect of `v`: a string quoted, nil as `nil`, an array
+// as `[a, b]`, an object as `{"k"=>v}`.
+write_inspect(ctx: ptr, sb: ptr, v: string, depth: int) {
+    k = value_kind(v)
+    if k == LV_NIL { strbuilder.append(sb, "nil"); return }
+    if k == LV_STR { write_quoted(sb, value_payload(v)); return }
+    if k == LV_ARR {
+        nd = node_of(ctx, v)
+        if nd == null { strbuilder.append(sb, "[]"); return }
+        if depth >= MAX_VALUE_DEPTH { strbuilder.append(sb, "[...]"); return }
+        strbuilder.append_byte(sb, 91)
+        n = arr_len(nd)
+        i = 0
+        while i < n {
+            if i > 0 { strbuilder.append(sb, ", ") }
+            write_inspect(ctx, sb, arr_at(nd, i), depth + 1)
+            i = i + 1
+        }
+        strbuilder.append_byte(sb, 93)
+        return
+    }
+    if k == LV_OBJ {
+        nd = node_of(ctx, v)
+        if nd == null { strbuilder.append(sb, "{}"); return }
+        if depth >= MAX_VALUE_DEPTH { strbuilder.append(sb, "{...}"); return }
+        strbuilder.append_byte(sb, 123)
+        n = obj_len(nd)
+        i = 0
+        while i < n {
+            if i > 0 { strbuilder.append(sb, ", ") }
+            key = obj_key_at(nd, i)
+            write_quoted(sb, key)
+            strbuilder.append(sb, "=>")
+            fv, _found = obj_get(nd, key)
+            write_inspect(ctx, sb, fv, depth + 1)
+            i = i + 1
+        }
+        strbuilder.append_byte(sb, 125)
+        return
+    }
+    strbuilder.append(sb, value_to_string(v))
+}
+
+// Liquid's truthiness: nil and false are false, and every other value --
+// the empty string, zero, an empty array -- is true.
+value_truthy(v: string) -> int {
+    k = value_kind(v)
+    if k == LV_NIL { return 0 }
+    if k == LV_BOOL {
+        if string.equals(value_payload(v), "1") == 1 { return 1 }
+        return 0
+    }
+    return 1
+}
+
+// Liquid's `empty`: an empty string, array or object.
+value_is_empty(ctx: ptr, v: string) -> int {
+    k = value_kind(v)
+    if k == LV_STR {
+        if string_length(value_payload(v)) == 0 { return 1 }
+        return 0
+    }
+    if k == LV_ARR || k == LV_OBJ {
+        nd = node_of(ctx, v)
+        if nd == null || string_list_size((nd as *LiquidNode).items) == 0 { return 1 }
+    }
+    return 0
+}
+
+// Liquid's `blank`: nil, false, a string of nothing but whitespace, or an
+// empty array or object.
+value_is_blank(ctx: ptr, v: string) -> int {
+    k = value_kind(v)
+    if k == LV_NIL { return 1 }
+    if k == LV_BOOL { return 1 - value_truthy(v) }
+    if k == LV_STR {
+        if string_length(trim(value_payload(v))) == 0 { return 1 }
+        return 0
+    }
+    return value_is_empty(ctx, v)
+}
+
+// Is `v` a number (an integer or a float)?
+is_number_value(v: string) -> int {
+    k = value_kind(v)
+    if k == LV_INT || k == LV_FLOAT { return 1 }
+    return 0
+}
+
+// The value of `t` when it is a plain integer that fits a long (`-?digits`,
+// at most 18 digits): (value, 1). (0, 0) for any other text.
+small_int(t: string) -> (long, int) {
+    n = string_length(t)
+    i = 0
+    neg = 0
+    if n > 0 && string.char_at_n(t, n, 0) == 45 {
+        neg = 1
+        i = 1
+    }
+    if i >= n || n - i > 18 { return 0 as long, 0 }
+    v = 0 as long
+    while i < n {
+        c = string.char_at_n(t, n, i)
+        if c < 48 || c > 57 { return 0 as long, 0 }
+        v = v * 10 + ((c - 48) as long)
+        i = i + 1
+    }
+    if neg == 1 { v = 0 - v }
+    return v, 1
+}
+
+// Compare two numbers' texts as Liquid reads numbers (dparse: "12px" is 12,
+// "abc" is 0, a decimal exactly): -1, 0 or 1. Two plain integers, the
+// common case, compare as longs.
+number_cmp(a: string, b: string) -> int {
+    av, aok = small_int(a)
+    bv, bok = small_int(b)
+    if aok == 1 && bok == 1 {
+        if av < bv { return -1 }
+        if av > bv { return 1 }
+        return 0
+    }
+    _ad, an, am, ascale = dparse(a)
+    _bd, bn, bm, bscale = dparse(b)
+    if an != bn {
+        if an == 1 { return -1 }
+        return 1
+    }
+    scale = ascale
+    if bscale > scale { scale = bscale }
+    c = dcmp(dshift(am, scale - ascale), dshift(bm, scale - bscale))
+    if an == 1 { return 0 - c }
+    return c
+}
+
+// `==` between two values. Arrays and objects are equal when their elements
+// (their keys and values) are; two numbers when they are the same number
+// (`1 == 1.0`); nil only to nil. Other scalars compare by their text, as
+// the string-typed context always has (`3 == "3"`).
+values_equal(ctx: ptr, a: string, b: string) -> int {
+    ka = value_kind(a)
+    kb = value_kind(b)
+    if ka == LV_ARR || ka == LV_OBJ || kb == LV_ARR || kb == LV_OBJ {
+        if ka != kb { return 0 }
+        na = node_of(ctx, a)
+        nb = node_of(ctx, b)
+        if na == null || nb == null { return 0 }
+        if na == nb { return 1 }
+        n = string_list_size((na as *LiquidNode).items)
+        if n != string_list_size((nb as *LiquidNode).items) { return 0 }
+        i = 0
+        while i < n {
+            if ka == LV_ARR {
+                if values_equal(ctx, arr_at(na, i), arr_at(nb, i)) == 0 { return 0 }
+            } else {
+                key = obj_key_at(na, i)
+                bv, found = obj_get(nb, key)
+                if found == 0 { return 0 }
+                av, _f = obj_get(na, key)
+                if values_equal(ctx, av, bv) == 0 { return 0 }
+            }
+            i = i + 1
+        }
+        return 1
+    }
+    if ka == LV_NIL || kb == LV_NIL {
+        if ka == kb { return 1 }
+        return 0
+    }
+    if is_number_value(a) == 1 && is_number_value(b) == 1 {
+        if number_cmp(value_payload(a), value_payload(b)) == 0 { return 1 }
+        return 0
+    }
+    return string.equals(value_to_string(a), value_to_string(b))
+}
+
+// A key under which equal values meet and unequal ones do not, as `uniq`
+// tells elements apart: the kind with the text, so `1` and `"1"` stay two.
+value_identity(ctx: ptr, v: string) -> string {
+    k = value_kind(v)
+    if k == LV_ARR || k == LV_OBJ {
+        sb = strbuilder.new(32)
+        strbuilder.append_byte(sb, string.char_at_n(v, string_length(v), 0))
+        write_inspect(ctx, sb, v, 0)
+        return strbuilder.finish(sb)
+    }
+    if k == LV_FLOAT {
+        _d, neg, m, scale = dparse(value_payload(v))
+        return string.concat("f:", dtext(neg, m, scale))
+    }
+    if k == LV_STR { return string.concat("s:", value_payload(v)) }
     return v
+}
+
+// ---- Values from JSON (#2177) --------------------------------------------
+
+// A std.json value as a Liquid value, an array or object copied into
+// `ctx`'s store. A number written with no fraction or exponent is an
+// integer, any other a float. Returns (value, error): nesting deeper than
+// std.json's own limit of 256 levels is an error.
+json_to_value(ctx: ptr, jv: ptr, depth: int) -> (string, string) {
+    if depth > 256 { return value_nil(), "nested deeper than 256 levels" }
+    t = json.json_type(jv)
+    if t == 1 { return value_bool(json.json_get_bool(jv)), "" }
+    if t == 2 {
+        if json.json_is_integer(jv) == 1 {
+            return string.concat("i:", string.from_long(json.json_get_long(jv))), ""
+        }
+        return value_float(json.json_get_number(jv)), ""
+    }
+    if t == 3 { return string.concat("s:", json.json_get_string_raw(jv)), "" }
+    if t == 4 {
+        av, an = node_new(ctx, LV_ARR)
+        n = json.json_array_size(jv)
+        i = 0
+        while i < n {
+            ev, eerr = json_to_value(ctx, json.json_array_get_raw(jv, i), depth + 1)
+            if eerr != "" { return value_nil(), eerr }
+            arr_push(an, ev)
+            i = i + 1
+        }
+        return av, ""
+    }
+    if t == 5 {
+        ov, on = node_new(ctx, LV_OBJ)
+        n = json.json_object_size_raw(jv)
+        i = 0
+        while i < n {
+            fv, ferr = json_to_value(ctx, json.json_object_value_at(jv, i), depth + 1)
+            if ferr != "" { return value_nil(), ferr }
+            obj_set(on, json.json_object_key_at(jv, i), fv)
+            i = i + 1
+        }
+        return ov, ""
+    }
+    return value_nil(), ""
 }
 
 // ---------------------------------------------------------------------------
@@ -4252,17 +5598,38 @@ value_to_string(v: string) -> string {
 // ---------------------------------------------------------------------------
 
 context_put_int(ctx: ptr, key: string, value: int) {
-    map_put(ctx, string.concat("v:", key), value_int(value))
+    map_put(typed_of(ctx), key, value_int(value))
 }
 
 context_put_float(ctx: ptr, key: string, value: float) {
-    map_put(ctx, string.concat("v:", key), value_float(value))
+    map_put(typed_of(ctx), key, value_float(value))
 }
 
 context_put_bool(ctx: ptr, key: string, value: int) {
-    map_put(ctx, string.concat("v:", key), value_bool(value))
+    map_put(typed_of(ctx), key, value_bool(value))
 }
 
 context_put_nil(ctx: ptr, key: string) {
-    map_put(ctx, string.concat("v:", key), value_nil())
+    map_put(typed_of(ctx), key, value_nil())
+}
+
+// Bind `key` to a copy of the std.json tree `value` -- an array, object,
+// string, number, boolean or null. The context keeps its own copy, so the
+// caller frees `value` whenever it likes, and context_free releases the
+// copy. Returns "" or why the tree could not be bound.
+context_put_json(ctx: ptr, key: string, value: ptr) -> string {
+    v, err = json_to_value(ctx, value, 0)
+    if err != "" { return string.concat("context_put_json: ", err) }
+    bind_value(ctx, key, v)
+    return ""
+}
+
+// Parse `text` as JSON and bind the result as context_put_json does. Returns
+// "" or the parse error.
+context_put_json_text(ctx: ptr, key: string, text: string) -> string {
+    root, kind, msg = json.parse_strict(text)
+    if kind != json.KIND_OK { return string.concat("context_put_json_text: ", msg) }
+    err = context_put_json(ctx, key, root)
+    json.json_free(root)
+    return err
 }

@@ -90,6 +90,64 @@ main() {
     fails = fails + ck(neg.year == 1969 && neg.month == 12 && neg.day == 31, "pre-epoch date")
     fails = fails + ck(neg.hour == 23 && neg.minute == 59 && neg.second == 59, "pre-epoch time")
 
+    // ---- strftime: every conversion over 2009-02-13T23:31:30Z (a Friday) ----
+    fails = fails + ck(time.strftime(t, "%Y-%m-%d %H:%M:%S") == "2009-02-13 23:31:30", "strftime basic")
+    fails = fails + ck(time.strftime(t, "%B %b %h %A %a") == "February Feb Feb Friday Fri", "strftime names")
+    fails = fails + ck(time.strftime(t, "%C %y %j %e") == "20 09 044 13", "strftime century/yday/e")
+    fails = fails + ck(time.strftime(t, "%I %l %p %P %k") == "11 11 PM pm 23", "strftime 12-hour")
+    fails = fails + ck(time.strftime(t, "%u %w %U %W %V %G %g") == "5 5 06 06 07 2009 09", "strftime weeks")
+    fails = fails + ck(time.strftime(t, "%s %L %N %3N") == "1234567890 000 000000000 000", "strftime epoch/fraction")
+    fails = fails + ck(time.strftime(t, "%z %:z %::z %Z") == "+0000 +00:00 +00:00:00 UTC", "strftime zone at UTC")
+    fails = fails + ck(time.strftime(t, "%F|%T|%D|%R|%r") == "2009-02-13|23:31:30|02/13/09|23:31|11:31:30 PM",
+        "strftime combinations")
+    fails = fails + ck(time.strftime(t, "%c") == "Fri Feb 13 23:31:30 2009", "strftime %c")
+    fails = fails + ck(time.strftime(t, "%%|%Q|100%") == "%|%Q|100%", "strftime literal percent and unknown")
+
+    // flags and widths: 2024-03-05T07:04:09Z
+    f = time.from_civil(2024, 3, 5, 7, 4, 9)
+    fails = fails + ck(time.strftime(f, "%-d/%-m %-H:%M %e|%-e") == "5/3 7:04  5|5", "strftime - flag")
+    fails = fails + ck(time.strftime(f, "%_m %0e %^B %^a %#p %10A") == " 3 05 MARCH TUE am    Tuesday",
+        "strftime _ 0 ^ # flags and width")
+
+    // ISO weeks at the year boundaries: 2021-01-03 is in 2020-W53, 2024-12-30 in 2025-W01.
+    w1 = time.from_civil(2021, 1, 3, 0, 0, 0)
+    fails = fails + ck(time.strftime(w1, "%G-W%V-%u") == "2020-W53-7", "iso week before new year")
+    w2 = time.from_civil(2024, 12, 30, 0, 0, 0)
+    fails = fails + ck(time.strftime(w2, "%G-W%V-%u") == "2025-W01-1", "iso week after new year")
+
+    // A clock east of UTC: the same instant, read at +05:30.
+    fails = fails + ck(time.strftime_at(t, 19800, "%Y-%m-%d %H:%M %z %:z|%Z|") == "2009-02-14 05:01 +0530 +05:30||",
+        "strftime_at east")
+    fails = fails + ck(time.strftime_at(t, -18000, "%H:%M %z") == "18:31 -0500", "strftime_at west")
+
+    // ---- parse_iso8601_offset ----
+    z, zo, ze = time.parse_iso8601_offset("2009-02-13T23:31:30Z")
+    fails = fails + ck(ze == "" && z.epoch == 1234567890 && zo == 0, "offset parse Z")
+    dd, ddo, dde = time.parse_iso8601_offset("2024-01-02")
+    fails = fails + ck(dde == "" && dd.epoch == 1704153600 && ddo == 0, "offset parse date only")
+    hm, _hmo, hme = time.parse_iso8601_offset("2024-01-02T10:20")
+    fails = fails + ck(hme == "" && hm.hour == 10 && hm.minute == 20 && hm.second == 0, "offset parse HH:MM")
+    fr, _fro, fre = time.parse_iso8601_offset("2009-02-13T23:31:30.987654Z")
+    fails = fails + ck(fre == "" && fr.epoch == 1234567890, "offset parse fraction dropped")
+    ea, eao, eae = time.parse_iso8601_offset("2009-02-14T05:01:30+05:30")
+    fails = fails + ck(eae == "" && ea.epoch == 1234567890 && eao == 19800, "offset parse +05:30")
+    wb, wbo, wbe = time.parse_iso8601_offset("2009-02-13 18:31:30 -0500")
+    fails = fails + ck(wbe == "" && wb.epoch == 1234567890 && wbo == -18000, "offset parse Ruby Time#to_s form")
+    uu, uuo, uue = time.parse_iso8601_offset("2009-02-13 23:31:30 UTC")
+    fails = fails + ck(uue == "" && uu.epoch == 1234567890 && uuo == 0, "offset parse UTC suffix")
+    hh, hho, hhe = time.parse_iso8601_offset("2009-02-14T01:31:30+02")
+    fails = fails + ck(hhe == "" && hh.epoch == 1234567890 && hho == 7200, "offset parse +HH")
+    _, _o1, x1 = time.parse_iso8601_offset("2024-02-30")
+    fails = fails + ck(x1 != "", "offset parse rejects Feb 30")
+    _, _o2, x2 = time.parse_iso8601_offset("2024-01-02T25:00")
+    fails = fails + ck(x2 != "", "offset parse rejects hour 25")
+    _, _o3, x3 = time.parse_iso8601_offset("2024-01-02 tomorrow")
+    fails = fails + ck(x3 != "", "offset parse rejects trailing text")
+    _, _o4, x4 = time.parse_iso8601_offset("2024-01-02T10:00+05:3")
+    fails = fails + ck(x4 != "", "offset parse rejects a short offset")
+    _, _o5, x5 = time.parse_iso8601_offset("Jan 2, 2024")
+    fails = fails + ck(x5 != "", "offset parse rejects a non-ISO date")
+
     if fails != 0 {
         println("time: ${fails} failure(s)")
         exit(1)

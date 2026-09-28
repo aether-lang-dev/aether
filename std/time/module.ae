@@ -1,19 +1,16 @@
-// std.time — civil date/time over Unix epoch seconds (UTC).
+// std.time — civil date/time over Unix epoch seconds (UTC), and the clock.
 //
-// The canonical value is Unix epoch SECONDS (a `long`); civil fields
-// (year/month/day/hour/min/sec + weekday/year-day) are derived from it and
-// vice versa with an exact, dependency-free proleptic-Gregorian algorithm
-// (Howard Hinnant's `days_from_civil` / `civil_from_days`, public domain —
-// http://howardhinnant.github.io/date_algorithms.html), so results are
-// deterministic and testable without libc timezone state. All times are UTC.
+// The calendar -- DateTime, the conversions, the arithmetic, ISO-8601 and
+// strftime -- is std.time.calendar, which reads no clock; see that module
+// for how the civil fields are derived (Howard Hinnant's algorithms, all
+// times UTC). This module adds the current time, which it reads through
+// std.os, and offers the calendar's functions under the same names, so a
+// program that wants both imports one module.
 //
-// The calendar algorithm and the ISO-8601 shape mirror C3's `std::time`
-// (MIT, Copyright (c) 2022-2026 Christoffer Lernö and contributors) at the
-// capability level, re-expressed in Aether's idiom (free functions +
-// tuples/struct rather than methods/operators). Duration is measured in
-// whole seconds here; sub-second precision is a later extension.
+// A module that must not depend on the clock -- and so on std.os, which
+// `--emit=lib` gates behind `--with=os` -- imports std.time.calendar.
 
-import std.string
+import std.time.calendar
 import std.os
 
 exports(
@@ -24,120 +21,15 @@ exports(
     weekday, day_of_year, is_leap_year, days_in_month,
     add_seconds, add_minutes, add_hours, add_days,
     diff_seconds, is_before, is_after,
-    to_iso8601, parse_iso8601
+    to_iso8601, parse_iso8601, parse_iso8601_offset,
+    strftime, strftime_at
 )
 
-// A civil UTC date/time. `epoch` (epoch seconds) is canonical; the civil
-// fields are a decoded view of it. Build with from_civil / from_unix / now;
-// read fields directly.
-struct DateTime {
-    epoch: long // canonical: seconds since 1970-01-01T00:00:00Z
-    year: int
-    month: int // 1..12
-    day: int // 1..31
-    hour: int // 0..23
-    minute: int // 0..59
-    second: int // 0..59
-    wday: int // 0=Sunday .. 6=Saturday
-    yday: int // 1..366
-}
-
-// ---- calendar core (Hinnant's algorithms) --------------------------------
-
-is_leap_year(y: int) -> bool {
-    if y % 4 != 0 { return false }
-    if y % 100 != 0 { return true }
-    return y % 400 == 0
-}
-
-days_in_month(y: int, m: int) -> int {
-    if m == 2 {
-        if is_leap_year(y) { return 29 }
-        return 28
-    }
-    // Apr, Jun, Sep, Nov -> 30; the rest 31.
-    if m == 4 || m == 6 || m == 9 || m == 11 { return 30 }
-    return 31
-}
-
-// Days since 1970-01-01 for a civil y/m/d (proleptic Gregorian). Exact for
-// all years; `m` in 1..12, `d` in 1..31.
-fn days_from_civil(y: int, m: int, d: int) -> long {
-    yy = y
-    if m <= 2 { yy = yy - 1 }
-    era = yy
-    if era < 0 { era = era - 399 }
-    era = era / 400
-    yoe = yy - era * 400 // [0, 399]
-    mp = m + 9
-    if m > 2 { mp = m - 3 } // [0, 11]
-    doy = (153 * mp + 2) / 5 + d - 1 // [0, 365]
-    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy // [0, 146096]
-    return (era as long) * 146097 + (doe as long) - 719468
-}
-
-// Inverse: civil y/m/d from days-since-epoch. Returns (year, month, day).
-fn civil_from_days(z: long) -> (int, int, int) {
-    zz = z + 719468
-    era = zz
-    if era < 0 { era = era - 146096 }
-    era = era / 146097
-    doe = zz - era * 146097 // [0, 146096]
-    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365 // [0, 399]
-    y = (yoe as int) + (era as int) * 400
-    doy = doe - (365 * yoe + yoe / 4 - yoe / 100) // [0, 365]
-    mp = (5 * (doy as int) + 2) / 153 // [0, 11]
-    d = (doy as int) - (153 * mp + 2) / 5 + 1 // [1, 31]
-    m = mp + 3
-    if mp >= 10 { m = mp - 9 } // [1, 12]
-    yr = y
-    if m <= 2 { yr = y + 1 }
-    return yr, m, d
-}
-
-// ---- construction --------------------------------------------------------
-
-const SECS_PER_DAY = 86400
-const SECS_PER_HOUR = 3600
-const SECS_PER_MIN = 60
-
-// Build a DateTime from an epoch-seconds value, decoding civil fields.
-from_unix(epoch: long) -> DateTime {
-    // Floor-divide into days + intraday seconds (handles negatives).
-    days = epoch / SECS_PER_DAY
-    rem = epoch - days * SECS_PER_DAY
-    if rem < 0 {
-        rem = rem + SECS_PER_DAY
-        days = days - 1
-    }
-    y, mo, d = civil_from_days(days)
-    secs = rem as int
-    hh = secs / SECS_PER_HOUR
-    mm = (secs - hh * SECS_PER_HOUR) / SECS_PER_MIN
-    ss = secs - hh * SECS_PER_HOUR - mm * SECS_PER_MIN
-    // Weekday: 1970-01-01 was a Thursday (=4). days can be negative.
-    w = ((days + 4) % 7) as int
-    if w < 0 { w = w + 7 }
-    // Day of year (1-based).
-    yd = (days - days_from_civil(y, 1, 1)) as int + 1
-    dt = DateTime {
-        epoch: epoch, year: y, month: mo, day: d,
-        hour: hh, minute: mm, second: ss, wday: w, yday: yd
-    }
-    return dt
-}
-
-// Build a DateTime from civil UTC fields (normalising via epoch seconds).
-from_civil(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime {
-    days = days_from_civil(year, month, day)
-    intraday = (hour as long) * SECS_PER_HOUR + (minute as long) * SECS_PER_MIN + (second as long)
-    epoch = days * SECS_PER_DAY + intraday
-    return from_unix(epoch)
-}
+// ---- the clock -------------------------------------------------------------
 
 // Current UTC time (whole seconds).
 now() -> DateTime {
-    return from_unix(now_ms() / 1000)
+    return calendar.from_unix(now_ms() / 1000)
 }
 
 // Current Unix time in milliseconds (raw, no civil decode).
@@ -145,128 +37,32 @@ now_ms() -> long {
     return os.now_unix_ms()
 }
 
-// The canonical epoch-seconds value of a DateTime.
-to_unix(dt: DateTime) -> long {
-    return dt.epoch
+// ---- the calendar, as std.time.calendar has it -----------------------------
+
+from_unix(epoch: long) -> DateTime { return calendar.from_unix(epoch) }
+
+from_civil(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime {
+    return calendar.from_civil(year, month, day, hour, minute, second)
 }
 
-// ---- field accessors (also available directly on the struct) -------------
+to_unix(dt: DateTime) -> long { return calendar.to_unix(dt) }
+weekday(dt: DateTime) -> int { return calendar.weekday(dt) }
+day_of_year(dt: DateTime) -> int { return calendar.day_of_year(dt) }
+is_leap_year(y: int) -> bool { return calendar.is_leap_year(y) }
+days_in_month(y: int, m: int) -> int { return calendar.days_in_month(y, m) }
 
-weekday(dt: DateTime) -> int { return dt.wday }
-day_of_year(dt: DateTime) -> int { return dt.yday }
+add_seconds(dt: DateTime, s: long) -> DateTime { return calendar.add_seconds(dt, s) }
+add_minutes(dt: DateTime, m: long) -> DateTime { return calendar.add_minutes(dt, m) }
+add_hours(dt: DateTime, h: long) -> DateTime { return calendar.add_hours(dt, h) }
+add_days(dt: DateTime, d: long) -> DateTime { return calendar.add_days(dt, d) }
 
-// ---- arithmetic (returns a fresh normalised DateTime) --------------------
+diff_seconds(a: DateTime, b: DateTime) -> long { return calendar.diff_seconds(a, b) }
+is_before(a: DateTime, b: DateTime) -> bool { return calendar.is_before(a, b) }
+is_after(a: DateTime, b: DateTime) -> bool { return calendar.is_after(a, b) }
 
-add_seconds(dt: DateTime, s: long) -> DateTime { return from_unix(dt.epoch + s) }
-add_minutes(dt: DateTime, m: long) -> DateTime { return from_unix(dt.epoch + m * SECS_PER_MIN) }
-add_hours(dt: DateTime, h: long) -> DateTime { return from_unix(dt.epoch + h * SECS_PER_HOUR) }
-add_days(dt: DateTime, d: long) -> DateTime { return from_unix(dt.epoch + d * SECS_PER_DAY) }
+to_iso8601(dt: DateTime) -> string { return calendar.to_iso8601(dt) }
+parse_iso8601(s: string) -> (DateTime, string) { return calendar.parse_iso8601(s) }
+parse_iso8601_offset(s: string) -> (DateTime, int, string) { return calendar.parse_iso8601_offset(s) }
 
-// Signed difference a - b in whole seconds.
-diff_seconds(a: DateTime, b: DateTime) -> long { return a.epoch - b.epoch }
-
-is_before(a: DateTime, b: DateTime) -> bool { return a.epoch < b.epoch }
-is_after(a: DateTime, b: DateTime) -> bool { return a.epoch > b.epoch }
-
-// ---- ISO-8601 / RFC-3339 (UTC, "Z") --------------------------------------
-
-fn pad2(buf: ptr, off: int, v: int) -> int {
-    // write v (0..99) as two ASCII digits at off
-    bytes_set2(buf, off, 48 + (v / 10) % 10, 48 + v % 10)
-    return off + 2
-}
-
-// Format as "YYYY-MM-DDTHH:MM:SSZ" (RFC-3339 UTC). Years are zero-padded to
-// at least 4 digits.
-to_iso8601(dt: DateTime) -> string {
-    // YYYY (4) - (1) MM (2) - (1) DD (2) T (1) HH (2) : MM : SS Z  = 20 chars
-    buf = bytes_new(20)
-    y = dt.year
-    if y < 0 { y = 0 }
-    bytes_set(buf, 0, 48 + (y / 1000) % 10)
-    bytes_set(buf, 1, 48 + (y / 100) % 10)
-    bytes_set(buf, 2, 48 + (y / 10) % 10)
-    bytes_set(buf, 3, 48 + y % 10)
-    bytes_set(buf, 4, 45) // '-'
-    pad2(buf, 5, dt.month)
-    bytes_set(buf, 7, 45) // '-'
-    pad2(buf, 8, dt.day)
-    bytes_set(buf, 10, 84) // 'T'
-    pad2(buf, 11, dt.hour)
-    bytes_set(buf, 13, 58) // ':'
-    pad2(buf, 14, dt.minute)
-    bytes_set(buf, 16, 58) // ':'
-    pad2(buf, 17, dt.second)
-    bytes_set(buf, 19, 90) // 'Z'
-    return bytes_finish(buf, 20)
-}
-
-// Parse "YYYY-MM-DDTHH:MM:SS" with an optional trailing 'Z' (UTC). A space
-// may replace the 'T'. Returns the DateTime, or a non-empty error on a
-// malformed shape / out-of-range field.
-parse_iso8601(s: string) -> (DateTime, string) {
-    n = string.length(s)
-    if n < 19 { return zero_dt(), "time: string too short for ISO-8601" }
-    y = digits4(s, n, 0)
-    mo = digits2(s, n, 5)
-    d = digits2(s, n, 8)
-    hh = digits2(s, n, 11)
-    mm = digits2(s, n, 14)
-    ss = digits2(s, n, 17)
-    if y < 0 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
-    hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59 {
-        return zero_dt(), "time: invalid ISO-8601 field"
-    }
-    // Separators must be '-','-','T'|' ',':',':'.
-    if (string.char_at_n(s, n, 4) & 255) != 45 { return zero_dt(), "time: bad date separator" }
-    if (string.char_at_n(s, n, 7) & 255) != 45 { return zero_dt(), "time: bad date separator" }
-    sep = string.char_at_n(s, n, 10) & 255
-    if sep != 84 && sep != 32 { return zero_dt(), "time: bad date/time separator" }
-    if (string.char_at_n(s, n, 13) & 255) != 58 { return zero_dt(), "time: bad time separator" }
-    if (string.char_at_n(s, n, 16) & 255) != 58 { return zero_dt(), "time: bad time separator" }
-    if d > days_in_month(y, mo) { return zero_dt(), "time: day out of range for month" }
-    return from_civil(y, mo, d, hh, mm, ss), ""
-}
-
-// ---- helpers -------------------------------------------------------------
-
-fn zero_dt() -> DateTime {
-    return from_unix(0)
-}
-
-// Parse a run of ASCII digits; returns the value or -1 if any char in the
-// window is not a digit.
-fn digits2(s: string, n: int, off: int) -> int {
-    if off + 2 > n { return -1 }
-    a = (string.char_at_n(s, n, off) & 255) - 48
-    b = (string.char_at_n(s, n, off + 1) & 255) - 48
-    if a < 0 || a > 9 || b < 0 || b > 9 { return -1 }
-    return a * 10 + b
-}
-
-fn digits4(s: string, n: int, off: int) -> int {
-    if off + 4 > n { return -1 }
-    v = 0
-    i = 0
-    while i < 4 {
-        c = (string.char_at_n(s, n, off + i) & 255) - 48
-        if c < 0 || c > 9 { return -1 }
-        v = v * 10 + c
-        i = i + 1
-    }
-    return v
-}
-
-// bytes wrappers (direct externs so the heap-string classifier recognises
-// bytes_finish by name for a leak-clean owned return).
-extern aether_bytes_new(initial_capacity: int) -> ptr
-extern aether_bytes_set(b: ptr, index: int, value: int) -> int
-extern aether_bytes_finish(b: ptr, length: int) -> string @heap
-
-fn bytes_new(cap: int) -> ptr { return aether_bytes_new(cap) }
-fn bytes_set(b: ptr, i: int, v: int) -> int { return aether_bytes_set(b, i, v) }
-fn bytes_set2(b: ptr, i: int, v0: int, v1: int) -> int {
-    aether_bytes_set(b, i, v0)
-    return aether_bytes_set(b, i + 1, v1)
-}
-fn bytes_finish(b: ptr, len: int) -> string { return aether_bytes_finish(b, len) }
+strftime(dt: DateTime, fmt: string) -> string { return calendar.strftime(dt, fmt) }
+strftime_at(dt: DateTime, offset: int, fmt: string) -> string { return calendar.strftime_at(dt, offset, fmt) }

@@ -34,6 +34,32 @@ TEST_CATEGORY(json_parse_number, TEST_CATEGORY_STDLIB) {
     json_free(value);
 }
 
+TEST_CATEGORY(json_is_integer_tells_integers_from_decimals, TEST_CATEGORY_STDLIB) {
+    JsonValue* whole = json_parse_raw("[42, -7, 9223372036854775807, -9223372036854775808]");
+    ASSERT_NOT_NULL(whole);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ(1, json_is_integer(json_array_get_raw(whole, i)));
+    }
+    json_free(whole);
+
+    // A fraction, an exponent, a magnitude past int64 and -0 are doubles.
+    JsonValue* frac = json_parse_raw("[42.0, 4e1, 9223372036854775808, -0]");
+    ASSERT_NOT_NULL(frac);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ(0, json_is_integer(json_array_get_raw(frac, i)));
+    }
+    json_free(frac);
+
+    JsonValue* built = json_create_int(5);
+    ASSERT_EQ(1, json_is_integer(built));
+    json_free(built);
+
+    JsonValue* text = json_parse_raw("\"42\"");
+    ASSERT_EQ(0, json_is_integer(text));
+    json_free(text);
+    ASSERT_EQ(0, json_is_integer(NULL));
+}
+
 TEST_CATEGORY(json_parse_string, TEST_CATEGORY_STDLIB) {
     JsonValue* value = json_parse_raw("\"hello world\"");
 
