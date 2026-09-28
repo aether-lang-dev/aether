@@ -649,18 +649,36 @@ jobs:
         # Vulkan entries render and present here instead of skipping.
         install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc
 
-    # #2256: on Mesa 26.2.3 every Vulkan contrib entry passes its specs and
-    # then exits 127 at teardown under lavapipe; 26.1.2 was green. Pin it
-    # back until that is understood. The install above still brings Mesa's
-    # dependencies; this replaces only the package, which is safe because
-    # both builds of vulkan_lvp.dll import the same DLLs (libLLVM-22.dll
-    # included). pacman checks the package's .sig from the repo. Remove this
-    # step when #2256 is fixed.
-    - name: Pin Mesa to 26.1.2 (#2256)
+    # #2256: Mesa 26.2.3's lavapipe frees every vkAllocateMemory block with
+    # the wrong free on Windows. llvmpipe_allocate_memory takes the block from
+    # os_malloc_aligned, which without posix_memalign returns a pointer INTO a
+    # larger malloc, and llvmpipe_free_memory handed that to plain free()
+    # (Mesa 2d794898097, first shipped in 26.2.3). ntdll detects the damaged
+    # heap and ends the process with STATUS_HEAP_CORRUPTION (0xC0000374),
+    # which bash reports as exit 127. So every Vulkan entry that allocates
+    # device memory dies at its first vkFreeMemory, after the specs before it
+    # passed, and vulkan/raw, which allocates none, passes. Linux is not
+    # affected: posix_memalign memory is free()-able. Mesa fixed it in
+    # 8ace865d958b ("llvmpipe: use os_free_aligned for non-vma case",
+    # 2026-09-17), nominated for 26.2.4.
+    #
+    # Only a Mesa in the broken range is replaced with 26.1.2, the last MSYS2
+    # build before it (same dependencies and DLL imports, libLLVM-22 included;
+    # pacman checks the package's .sig). Any other version runs as installed,
+    # so the first MSYS2 package carrying the fix runs the Vulkan entries
+    # unpinned and this step becomes a no-op to delete. Should 26.2.4 ship
+    # without the fix, widen the upper bound.
+    - name: Pin Mesa to 26.1.2 when the installed build has the #2256 free() bug
       run: |
-        pacman -U --noconfirm https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-mesa-26.1.2-1-any.pkg.tar.zst
-        pacman -Q mingw-w64-x86_64-mesa | grep -qx 'mingw-w64-x86_64-mesa 26.1.2-1' || {
-          echo "Mesa pin did not take:"; pacman -Q mingw-w64-x86_64-mesa; exit 1; }
+        ver="$(pacman -Q mingw-w64-x86_64-mesa | awk '{print $2}')"
+        if [ "$(vercmp "$ver" 26.2.3)" -ge 0 ] && [ "$(vercmp "$ver" 26.2.4)" -lt 0 ]; then
+          echo "Mesa $ver frees aligned device memory with free() (#2256); installing 26.1.2-1"
+          pacman -U --noconfirm https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-mesa-26.1.2-1-any.pkg.tar.zst
+          pacman -Q mingw-w64-x86_64-mesa | grep -qx 'mingw-w64-x86_64-mesa 26.1.2-1' || {
+            echo "Mesa pin did not take:"; pacman -Q mingw-w64-x86_64-mesa; exit 1; }
+        else
+          echo "Mesa $ver is outside the #2256 range; running it as installed"
+        fi
         pacman -Q mingw-w64-x86_64-mesa
 
     # Windows Defender real-time scanning of every compiler-produced
