@@ -141,9 +141,11 @@ TESTS=(
   # NUL, duplicate keys, regexes, unbounded work (hardening).
   #
   # nesting's chains are tens of thousands deep, to trip a STACK-size guard
-  # on every runner. It was run-only until #2277: setpath built a
-  # 100000-deep value quadratically before refusing it, 76 s natively on a
-  # stack big enough to hold the walk, and far more under valgrind.
+  # on every runner, which makes it the slowest entry under valgrind: about
+  # 58 s on the Linux runner, build included (depth: 49 s). It was run-only
+  # until #2277: setpath built a 100000-deep value quadratically before
+  # refusing it, 76 s natively on a stack big enough to hold the walk, and
+  # far more under valgrind.
   "jq/nesting|contrib/jq/test_nesting.ae||leak|"
   "jq/depth|contrib/jq/test_depth.ae||leak|"
   "jq/hardening|contrib/jq/test_hardening.ae||leak|"
