@@ -223,8 +223,11 @@ jobs:
         changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
 
         # Only shipped code counts. Docs, tests and CI plumbing can land
-        # without a user-visible entry.
-        code=$(printf '%s\n' "$changed" | grep -E '^(std|runtime|compiler|contrib|tools)/' || true)
+        # without a user-visible entry -- the co-located specs among them
+        # (std/**/test_*.ae, contrib/**/test_*.ae), which `make install`
+        # deletes rather than ships.
+        code=$(printf '%s\n' "$changed" | grep -E '^(std|runtime|compiler|contrib|tools)/' \
+               | grep -vE '^(std|contrib)/(.*/)?test_[^/]*\.ae$' || true)
         if [ -z "$code" ]; then
           echo "No shipped-code changes; nothing to record."
           exit 0

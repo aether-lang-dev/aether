@@ -275,9 +275,13 @@ jobs:
             CHANGED=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || true)
           fi
           # Everything that is not shipped to a user of the language: docs,
-          # tests, benchmarks, CI, and the changelog itself.
+          # tests, benchmarks, CI, and the changelog itself. The co-located
+          # specs (std/**/test_*.ae, contrib/**/test_*.ae) are tests too:
+          # `make install` deletes them. Counting them as shipping failed the
+          # run for a merge that only fixed a spec (0.738.0, after #2273).
           SHIPPING=$(printf '%s\n' "$CHANGED" \
                      | grep -vE '^(docs/|tests/|benchmarks/|examples/|\.github/)' \
+                     | grep -vE '^(std|contrib)/(.*/)?test_[^/]*\.ae$' \
                      | grep -vE '(^|/)[^/]*\.md$' \
                      | grep -vE '^$' | head -1)
 
