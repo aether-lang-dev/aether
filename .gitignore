@@ -125,3 +125,4 @@ compiler/codegen/aether_stdlib_symbols.h
 # Python bytecode from the doc/index checkers in tests/scripts
 __pycache__/
 *.pyc
+compiler/aether_frontend_id.h

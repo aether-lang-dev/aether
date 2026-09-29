@@ -2,6 +2,8 @@
 #include "codegen/optimizer.h"   // resolve_when_statements (#2275)
 #include "aether_error.h"
 #include "aether_strmap.h"
+#include "aether_aea.h"
+#include "aether_defines.h"
 #include "parser/lexer.h"
 #include "parser/parser.h"
 #include "analysis/typechecker.h"
@@ -1149,15 +1151,13 @@ char* module_resolve_local_path(const char* module_path) {
     return NULL;
 }
 
-// Parse a module file into an AST. Saves/restores lexer state.
-ASTNode* module_parse_file(const char* file_path) {
-    FILE* f = fopen(file_path, "r");
+/* Reads a whole file. Returns a malloc'd, NUL-terminated buffer and sets
+ * *len, or NULL when the file cannot be read. `mode` is "r" for source text
+ * (Windows folds CRLF, as the lexer has always seen it) and "rb" for an
+ * artifact, whose payload length and hash count raw bytes. */
+static char* module_read_file(const char* path, const char* mode, size_t* len) {
+    FILE* f = fopen(path, mode);
     if (!f) return NULL;
-    /* This file's CONTENTS drive codegen, so a `read` entry (content-hashed on
-     * a warm run) is the correct dependency, upgrading whatever `probe` the
-     * resolver already recorded for it. */
-    module_dep_record_read(file_path);
-
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -1170,16 +1170,70 @@ ASTNode* module_parse_file(const char* file_path) {
         return NULL;
     }
 
-    char* source = malloc((size_t)size + 1);
-    if (!source) {
+    char* data = malloc((size_t)size + 1);
+    if (!data) {
         fclose(f);
         return NULL;
     }
-
-    size_t bytes_read = fread(source, 1, size, f);
+    size_t bytes_read = fread(data, 1, (size_t)size, f);
     fclose(f);
-    source[bytes_read] = '\0';
+    data[bytes_read] = '\0';
+    *len = bytes_read;
+    return data;
+}
 
+#ifndef AETHER_VERSION
+#define AETHER_VERSION "0.0.0-dev"
+#endif
+
+static int env_flag(const char* name) {
+    const char* v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+
+/* #1746: an installed module may carry a compiled artifact beside its
+ * source. Returns the artifact's AST when there is one and it was built from
+ * exactly this source by this front end with the same `defined(...)`
+ * answers; NULL sends the caller to the ordinary parse. Nothing here is an
+ * error: a missing, stale or damaged artifact only costs the parse it would
+ * have saved. AETHER_NO_AEA=1 turns artifacts off; AETHER_AEA_TRACE=1 says
+ * on stderr which modules came from an artifact and why others did not. */
+static ASTNode* module_load_artifact(const char* file_path, const char* source,
+                                     size_t source_len) {
+    if (env_flag("AETHER_NO_AEA")) return NULL;
+    char* source_rel = NULL;
+    char* artifact = aea_artifact_path_for(file_path, &source_rel);
+    if (!artifact) return NULL;
+
+    ASTNode* ast = NULL;
+    /* Probed, so a build cache that saw no artifact is invalidated when one
+     * is installed later. */
+    if (module_probe(artifact)) {
+        size_t len = 0;
+        char* data = module_read_file(artifact, "rb", &len);
+        if (data) {
+            module_dep_record_read(artifact);
+            AeaConsumer consumer = {
+                AETHER_VERSION, aea_frontend_id(), source_rel,
+                source, source_len, aether_define_is_set
+            };
+            const char* why = NULL;
+            ast = aea_decode(data, len, &consumer, &why);
+            if (env_flag("AETHER_AEA_TRACE")) {
+                if (ast) fprintf(stderr, "aea: using %s\n", artifact);
+                else     fprintf(stderr, "aea: not using %s: %s\n", artifact, why ? why : "?");
+            }
+            free(data);
+        }
+    }
+    free(artifact);
+    free(source_rel);
+    return ast;
+}
+
+/* Lexes and parses `source` as the module at `file_path`. Saves/restores
+ * the global lexer state. */
+static ASTNode* module_parse_source(const char* file_path, char* source) {
     // Save lexer state (lexer is global)
     LexerState saved;
     lexer_save(&saved);
@@ -1188,9 +1242,10 @@ ASTNode* module_parse_file(const char* file_path) {
     // duration of its parse, so any parse error names the module's own
     // file and renders from the module's own buffer — not the importing
     // file's, which would mislabel the location and print an unrelated
-    // source snippet (#646). Restored before `source` is freed below so
-    // the context never dangles; nested imports save/restore correctly
-    // because each call frame keeps its caller's context on the stack.
+    // source snippet (#646). Restored before `source` is freed by the
+    // caller so the context never dangles; nested imports save/restore
+    // correctly because each call frame keeps its caller's context on the
+    // stack.
     const char* saved_err_filename = NULL;
     const char* saved_err_source = NULL;
     aether_error_get_source(&saved_err_filename, &saved_err_source);
@@ -1200,24 +1255,88 @@ ASTNode* module_parse_file(const char* file_path) {
     Token** tokens = lexer_tokenize(source, &token_count);
     if (!tokens) {
         aether_error_set_source(saved_err_filename, saved_err_source);
-        free(source);
         lexer_restore(&saved);
         return NULL;
     }
 
-    // Parse
     Parser* parser = create_parser(tokens, token_count);
     ASTNode* ast = parse_program(parser);
 
-    // Restore the caller's diagnostic source context before freeing this
-    // module's source buffer (which current_source would otherwise point
-    // into).
     aether_error_set_source(saved_err_filename, saved_err_source);
+    free_tokens(tokens, token_count);
+    free_parser(parser);
+    lexer_restore(&saved);
+    return ast;
+}
+
+char* module_build_artifact(const char* source_path, const char* source_rel,
+                            size_t* out_len, const char** err) {
+    static const char* unused;
+    if (!err) err = &unused;
+    *err = NULL;
+    size_t size = 0;
+    char* source = module_read_file(source_path, "r", &size);
+    if (!source) { *err = "cannot read the source file"; return NULL; }
+
+    int errors_before = aether_error_count();
+    int warnings_before = aether_warning_count();
+    aether_define_record_queries(1);
+    ASTNode* ast = module_parse_source(source_path, source);
+    aether_define_record_queries(0);
+
+    char* out = NULL;
+    if (!ast || aether_error_count() != errors_before) {
+        *err = "the module does not parse";
+    } else if (aether_warning_count() != warnings_before) {
+        /* An importer of the artifact would not see these warnings, so the
+         * artifact would not compile the same as the source. */
+        *err = "the module parses with warnings";
+    } else if (aether_define_query_overflowed()) {
+        *err = "the module tests more build symbols than an artifact records";
+    } else {
+        int n = aether_define_query_count();
+        AeaDefine* defines = n ? calloc((size_t)n, sizeof(AeaDefine)) : NULL;
+        if (n && !defines) {
+            *err = "out of memory";
+        } else {
+            for (int i = 0; i < n; i++) {
+                defines[i].name = aether_define_query_name(i);
+                defines[i].value = aether_define_query_value(i);
+            }
+            ast_stamp_source_file(ast, source_path);
+            AeaProducer producer = {
+                AETHER_VERSION, aea_frontend_id(), source_rel,
+                source, size, defines, n
+            };
+            out = aea_encode(ast, &producer, out_len, err);
+            free(defines);
+        }
+    }
+    free_ast_node(ast);
+    free(source);
+    return out;
+}
+
+// Parse a module file into an AST, from its compiled artifact when a
+// compatible one is installed beside it (#1746), else from the text.
+ASTNode* module_parse_file(const char* file_path) {
+    size_t size = 0;
+    char* source = module_read_file(file_path, "r", &size);
+    if (!source) return NULL;
+    /* This file's CONTENTS drive codegen, so a `read` entry (content-hashed on
+     * a warm run) is the correct dependency, upgrading whatever `probe` the
+     * resolver already recorded for it. */
+    module_dep_record_read(file_path);
+
+    ASTNode* ast = module_load_artifact(file_path, source, size);
+    if (!ast) ast = module_parse_source(file_path, source);
 
     // Stamp every node with the source path before this AST gets
     // cloned into the merged program. The clone preserves
     // source_file, so codegen can emit `#line N "path"` directives
-    // pointing at the right .ae file even after module merging.
+    // pointing at the right .ae file even after module merging. An
+    // artifact's AST carries no path, so it gets the same one a parse of
+    // this file would have.
     if (ast) ast_stamp_source_file(ast, file_path);
 
     // #2275: resolve the module's compile-time `when`s now, as the entry
@@ -1230,20 +1349,20 @@ ASTNode* module_parse_file(const char* file_path) {
     // compile-time constant is reported against this file and fails the
     // build with the module's other errors (see the check after
     // module_orchestrate).
+    //
+    // Tokenizing and parser cleanup now live in module_parse_source (#1746),
+    // so this function frees only `source`; the error-source is saved and
+    // restored here rather than by an outer scope.
     if (ast) {
+        const char* saved_err_filename = NULL;
+        const char* saved_err_source = NULL;
+        aether_error_get_source(&saved_err_filename, &saved_err_source);
         aether_error_set_source(file_path, source);
         resolve_when_statements(ast);
         aether_error_set_source(saved_err_filename, saved_err_source);
     }
 
-    // Cleanup
-    free_tokens(tokens, token_count);
-    free_parser(parser);
     free(source);
-
-    // Restore lexer state
-    lexer_restore(&saved);
-
     return ast;
 }
 

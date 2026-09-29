@@ -9172,6 +9172,9 @@ static void print_usage(void) {
     printf("\nEnvironment:\n");
     printf("  AETHER_HOME          Aether installation directory\n");
     printf("  AETHER_LIB_DIR       Same shape as --lib; PATH-style list of module search dirs\n");
+    printf("  AETHER_NO_AEA=1      Parse installed std modules from source, ignoring their\n");
+    printf("                       compiled artifacts in lib/aether/modules/\n");
+    printf("  AETHER_AEA_TRACE=1   Say on stderr which modules came from a compiled artifact\n");
 }
 
 // `ae lib-info <path>` — dump the symbol catalog embedded in a

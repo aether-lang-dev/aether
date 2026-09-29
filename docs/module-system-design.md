@@ -66,7 +66,9 @@ Before type checking, the compiler runs a module orchestration phase
 
 1. **Scan**: Walk the main program AST for `import` statements
 2. **Resolve**: Map each import to a file path (stdlib, lib/, src/ paths)
-3. **Parse**: Lex and parse each module file into an AST
+3. **Parse**: Lex and parse each module file into an AST, or, for an
+   installed module with a compatible compiled artifact, read the AST from it
+   ([compiled-module-artifacts.md](compiled-module-artifacts.md))
 4. **Cache**: Store the parsed AST in `global_module_registry`
 5. **Recurse**: Process each module's own imports (transitive dependencies)
 6. **Cycle Check**: Build a dependency graph and detect circular imports via DFS

@@ -40,12 +40,56 @@ int aether_define_add(const char* name) {
     return 1;
 }
 
+static int  g_recording = 0;
+static int  g_query_overflow = 0;
+static int  g_query_count = 0;
+static char g_query_names[AETHER_MAX_DEFINES][AETHER_MAX_DEFINE_LEN];
+static int  g_query_values[AETHER_MAX_DEFINES];
+
+static void record_query(const char* name, int value) {
+    for (int i = 0; i < g_query_count; i++) {
+        if (strcmp(g_query_names[i], name) == 0) return;
+    }
+    if (g_query_count >= AETHER_MAX_DEFINES || strlen(name) >= AETHER_MAX_DEFINE_LEN) {
+        g_query_overflow = 1;
+        return;
+    }
+    strncpy(g_query_names[g_query_count], name, AETHER_MAX_DEFINE_LEN - 1);
+    g_query_names[g_query_count][AETHER_MAX_DEFINE_LEN - 1] = '\0';
+    g_query_values[g_query_count] = value;
+    g_query_count++;
+}
+
 int aether_define_is_set(const char* name) {
     if (!name) return 0;
+    int value = 0;
     for (int i = 0; i < g_define_count; i++) {
-        if (strcmp(g_defines[i], name) == 0) return 1;
+        if (strcmp(g_defines[i], name) == 0) { value = 1; break; }
     }
-    return 0;
+    if (g_recording) record_query(name, value);
+    return value;
+}
+
+void aether_define_record_queries(int on) {
+    g_recording = on ? 1 : 0;
+    if (on) {
+        g_query_count = 0;
+        g_query_overflow = 0;
+    }
+}
+
+int aether_define_query_count(void) { return g_query_count; }
+
+int aether_define_query_overflowed(void) { return g_query_overflow; }
+
+const char* aether_define_query_name(int index) {
+    if (index < 0 || index >= g_query_count) return NULL;
+    return g_query_names[index];
+}
+
+int aether_define_query_value(int index) {
+    if (index < 0 || index >= g_query_count) return 0;
+    return g_query_values[index];
 }
 
 int aether_define_count(void) { return g_define_count; }
