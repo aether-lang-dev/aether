@@ -434,7 +434,7 @@ main() {
 }
 ```
 
-Constants are emitted as `#define` in generated C, zero runtime cost.
+Constants cost nothing at run time: each is a file-scope `static const` in the generated C. A program's own constants are emitted under the reserved name `ae_const_<NAME>`, so no C header can claim the name: a constant may be called `SIZE`, `NEAR` or `MAX_PATH` on every platform, although `windows.h` owns all three (#2292). A parameter or local named like a constant is still that parameter or local. An imported module's constants carry the module's prefix instead.
 
 #### Module-level constant arrays, lookup tables
 
@@ -446,7 +446,7 @@ const CRC16TAB: uint16[256] = [ 0x0000, 0x1021, /* ... */ ]   // element type pi
 ```
 
 - `const NAME[] = [...]` infers the element type from the literals (`int` for integer literals).
-- `const NAME: T[N] = [...]` pins the C element type, `T` may be `uint8` / `uint16` / `uint32` / `uint64` / `int` / `long` so e.g. a CRC16 table emits `static const uint16_t NAME[256]` rather than a 4×-wider `int[]`, and matches a C header that expects the packed type. Integer literals narrow to the chosen element type (the explicit, compile-time-constant intent, like `byte b = 5`). Indexed access (`NAME[i]`) emits `NAME[i]`; the array is read-only.
+- `const NAME: T[N] = [...]` pins the C element type, `T` may be `uint8` / `uint16` / `uint32` / `uint64` / `int` / `long` so e.g. a CRC16 table emits `static const uint16_t NAME[256]` rather than a 4×-wider `int[]`, and matches a C header that expects the packed type. Integer literals narrow to the chosen element type (the explicit, compile-time-constant intent, like `byte b = 5`). Indexed access (`NAME[i]`) reads the table directly; the array is read-only.
 
 **The RHS of `const` must be a compile-time constant expression.** Allowed forms: literals (int / float / bool / string / null), other consts referenced by name, unary / binary expressions over those, and string interpolation where every interpolated value is itself const. **Function calls are rejected** at typecheck time:
 

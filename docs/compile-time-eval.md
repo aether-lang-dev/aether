@@ -74,10 +74,13 @@ is itself a const.
   `optimize_constant_folding` in `compiler/codegen/optimizer.c`. Runs
   after typecheck, before codegen. The two lists are kept byte-for-byte
   in sync (`is_whitelisted_string_call` ↔ the typechecker whitelist).
-- **Lowering:** a folded scalar const lowers to `#define NAME (value)`; a
-  const array lowers to `static const T NAME[] = {…}`
+- **Lowering:** a folded scalar const lowers to `static const T NAME =
+  (value)`; a const array lowers to `static const T NAME[] = {…}`
   (`compiler/codegen/codegen_stmt.c` for locals,
-  `compiler/codegen/codegen.c` for module-level).
+  `compiler/codegen/codegen.c` for module-level). A module-level constant
+  of the program itself is emitted as `ae_const_NAME`, out of the way of
+  any C header's names (#2292); an imported module's carries its module
+  prefix.
 
 ## Phase-1 scope
 
