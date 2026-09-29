@@ -154,7 +154,11 @@ main() {
     fw = spec.init()
 
     ready = 0
+    // `reason` is a literal unless an interpolation below built it; that one
+    // is allocated, and freed once the specs that print it have run (a
+    // skipped setup must not fail the leak gate).
     reason = "no Vulkan driver"
+    reason_owned = 0
     dev = null
     win = null
     sc = null
@@ -168,31 +172,39 @@ main() {
 
     if vulkan.available() != 1 {
         reason = "no Vulkan driver (${vulkan.last_error()})"
+        reason_owned = 1
     } else if tw_ae_available() != 1 {
         reason = "no display to open a window on (${tw_ae_last_error()})"
+        reason_owned = 1
     } else {
         dev = vulkan.device_create()
         vert, vert_len = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
         frag, frag_len = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
         if dev == null {
             reason = "device_create failed (${vulkan.last_error()})"
+            reason_owned = 1
         } else if vert_len == 0 || frag_len == 0 {
             reason = "SPIR-V shaders not built"
         } else {
             win = tw_ae_create("contrib.vulkan present test", 160, 120)
             if win == null {
                 reason = "cannot open a window (${tw_ae_last_error()})"
+                reason_owned = 1
             } else {
                 kind = tw_ae_kind(win)
                 sc = vulkan.swapchain_create(dev, kind, tw_ae_display(win), tw_ae_handle(win),
                                              tw_ae_width(win), tw_ae_height(win))
                 if sc == null {
                     reason = "this driver cannot present here (${vulkan.last_error()})"
+                    reason_owned = 1
                 } else {
                     t = vulkan.target_create(dev, tw_ae_width(win), tw_ae_height(win))
                     pipe = vulkan.pipeline_create(dev, t, vert, vert_len, frag, frag_len)
                     if t != null && pipe != null { ready = 1 }
-                    if ready == 0 { reason = "target or pipeline failed (${vulkan.last_error()})" }
+                    if ready == 0 {
+                        reason = "target or pipeline failed (${vulkan.last_error()})"
+                        reason_owned = 1
+                    }
                 }
             }
         }
@@ -205,7 +217,12 @@ main() {
     readable = 0
     if ready == 1 && kind != vulkan.WINDOW_NSVIEW && kind != vulkan.WINDOW_WAYLAND { readable = 1 }
     read_reason = reason
-    if ready == 1 && readable == 0 { tw_ae_pixel(win, 0, 0); read_reason = "the screen is not readable here (${tw_ae_last_error()})" }
+    read_owned = 0
+    if ready == 1 && readable == 0 {
+        tw_ae_pixel(win, 0, 0)
+        read_reason = "the screen is not readable here (${tw_ae_last_error()})"
+        read_owned = 1
+    }
     // Wayland leaves the size to the application, so a swapchain cannot
     // notice the window growing on its own: swapchain_resize is the path.
     grows = ready
@@ -474,6 +491,8 @@ main() {
 
     _rc = spec.run_summary(fw)
 
+    if reason_owned == 1 { string.free(reason) }
+    if read_owned == 1 { string.free(read_reason) }
     if pipe != null { vulkan.pipeline_destroy(pipe) }
     if t != null { vulkan.target_destroy(t) }
     if sc != null { vulkan.swapchain_destroy(sc) }
