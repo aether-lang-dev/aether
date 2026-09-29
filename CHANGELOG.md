@@ -14,6 +14,18 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.740.0]
+
+### Added
+
+- **Packed-float performance follow-up (#1986):** add a repeatable, checksum-validated LangArena comparison against same-machine Go, and an actor-parallel matmul example using typed messages, borrowed float-array views, disjoint output rows, and full-matrix validation.
+  Already in 0.739.0, whose notes were cut before this merged (#2282).
+
+### Fixed
+
+- **Actor pools spawned from main can use all scheduler cores (#1986).** x86 detection now uses the OS's online processor count instead of treating CPUID's per-package count as the machine total. Main-thread spawns without a core hint reach the scheduler's existing placement balancing instead of forcing core 0; explicit hints and scheduler-thread parent locality remain intact. A checked 900×900 matmul example measured about 4× scaling from one to eight workers on the test host.
+  Already in 0.739.0, whose notes were cut before this merged (#2282).
+
 ## [0.739.0]
 
 ### Fixed
