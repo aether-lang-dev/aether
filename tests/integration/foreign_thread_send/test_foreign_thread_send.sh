@@ -17,6 +17,12 @@
 # mode, as spawning a second actor does, and sends through the scheduler;
 # the inline step holds the actor's step_lock so the switch is safe.
 #
+# A third: an inline send checked that the mode was on and then wrote the
+# mailbox, and a switch landing between the two let scheduler deliveries
+# in ahead of the inline message, whose stack payload a scheduler thread
+# then freed (#2266, free(): invalid pointer). The check and the enqueue
+# are now one step with respect to every switch out of the mode.
+#
 # Two worker threads and the main thread each send `PER` Bump messages to
 # one counter actor at the same time; the counter must end at 3 * PER.
 # Run twice: with the counter as the only actor (main-thread mode on:
@@ -111,20 +117,38 @@ main() {
     println("counted ${got} of ${3 * PER}")
 }
 AE
+# The switch out of main-thread mode happens once per process, at the
+# first worker's send, and the race that corrupted the heap there (#2266)
+# needed the main thread to be between its mode check and its mailbox
+# write at that moment: about one CI run in thirty. So each mode is built
+# once and its program run several times, the one-actor mode more.
 fail=0
 for mode in 0 1; do
-    sed "s/@MODE@/$mode/" "$tmp/main.ae" > "$tmp/run.ae"
-    out="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/run.ae" 2>&1)"
-    got="$(printf '%s\n' "$out" | tail -1)"
-    if [ "$got" != "counted 60000 of 60000" ]; then
-        if [ "$mode" = 0 ]; then
-            echo "  [FAIL] foreign_thread_send: with one actor (main-thread mode) sends from worker threads were lost or crashed"
-        else
-            echo "  [FAIL] foreign_thread_send: with two actors (scheduler mode) sends from worker threads were lost or crashed"
-        fi
+    sed "s/@MODE@/$mode/" "$tmp/main.ae" > "$tmp/run$mode.ae"
+    if ! out="$(AETHER_HOME="$ROOT" "$AE" build "$tmp/run$mode.ae" -o "$tmp/run$mode" 2>&1)"; then
+        echo "  [FAIL] foreign_thread_send: the mode $mode program did not build"
         printf '%s\n' "$out" | tail -4 | sed 's/^/        /'
         fail=1
+        continue
     fi
+    runs=5
+    [ "$mode" = 0 ] && runs=20
+    i=0
+    while [ "$i" -lt "$runs" ]; do
+        i=$((i + 1))
+        out="$("$tmp/run$mode" 2>&1)"
+        got="$(printf '%s\n' "$out" | tail -1)"
+        if [ "$got" != "counted 60000 of 60000" ]; then
+            if [ "$mode" = 0 ]; then
+                echo "  [FAIL] foreign_thread_send: with one actor (main-thread mode) sends from worker threads were lost or crashed (run $i of $runs)"
+            else
+                echo "  [FAIL] foreign_thread_send: with two actors (scheduler mode) sends from worker threads were lost or crashed (run $i of $runs)"
+            fi
+            printf '%s\n' "$out" | tail -4 | sed 's/^/        /'
+            fail=1
+            break
+        fi
+    done
 done
 if [ "$fail" = 0 ]; then
     echo "  [PASS] foreign_thread_send: sends from worker threads and the main thread all arrive, in both runtime modes"

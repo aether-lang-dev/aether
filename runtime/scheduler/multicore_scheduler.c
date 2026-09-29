@@ -113,7 +113,37 @@ int aether_on_main_mode_thread(void) {
     return aether_tid_equal(aether_tid_self(), g_main_mode_thread);
 }
 
+/* Leaving main-thread mode starts the scheduler threads, and from then on
+ * the actor's core delivers into its mailbox, which takes one producer at a
+ * time. An inline send checks that the mode is on and then writes that
+ * mailbox itself, so a switch landing between the two gave the mailbox two
+ * producers, and put scheduler deliveries ahead of the inline message: the
+ * one step that follows consumed a delivered message instead, and left the
+ * inline message -- its payload on the sender's stack -- for a scheduler
+ * thread to process and free() after that frame was gone (#2266). This
+ * lock makes "the mode is on, enqueue" and every switch out of the mode
+ * exclusive. It is held across the enqueue only, never across a step, so a
+ * thread leaving the mode never waits on a handler. */
+static atomic_flag g_main_mode_lock = ATOMIC_FLAG_INIT;
+
+static inline void main_mode_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_main_mode_lock, memory_order_acquire)) AETHER_PAUSE();
+}
+
+static inline void main_mode_unlock(void) {
+    atomic_flag_clear_explicit(&g_main_mode_lock, memory_order_release);
+}
+
+int aether_main_mode_enqueue(ActorBase* actor, Message msg) {
+    main_mode_lock();
+    int on = aether_main_thread_mode_active();
+    if (on) mailbox_send(&actor->mailbox, msg);
+    main_mode_unlock();
+    return on;
+}
+
 void aether_leave_main_thread_mode(void) {
+    main_mode_lock();
     ActorBase* main_actor = (ActorBase*)g_aether_config.main_actor;
     atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_release);
     g_aether_config.main_actor = NULL;
@@ -121,6 +151,7 @@ void aether_leave_main_thread_mode(void) {
      * so clearing main_thread_only cannot let a scheduler thread step the
      * actor concurrently with a step still on the main thread's stack. */
     if (main_actor) atomic_store_explicit(&main_actor->main_thread_only, 0, memory_order_release);
+    main_mode_unlock();
     scheduler_ensure_threads_running();
 }
 
@@ -1801,12 +1832,15 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     // the scheduler (#2083).
     if (unlikely(aether_main_thread_mode_active())) {
         if (aether_on_main_mode_thread()) {
-            mailbox_send(&actor->mailbox, msg);
-            aether_step_inline(actor);
-            AETHER_STAT_INC(inline_sends);
-            return;
+            if (aether_main_mode_enqueue(actor, msg)) {
+                aether_step_inline(actor);
+                AETHER_STAT_INC(inline_sends);
+                return;
+            }
+            // The mode ended before the enqueue: the scheduler takes it.
+        } else {
+            aether_leave_main_thread_mode();
         }
-        aether_leave_main_thread_mode();
     }
 
     // Per-core sent counter - no atomic contention on hot path!
@@ -1950,12 +1984,15 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     // Main Thread Mode = synchronous processing, zero queue overhead
     if (aether_main_thread_mode_active()) {
         if (aether_on_main_mode_thread()) {
-            mailbox_send(&actor->mailbox, msg);
-            aether_step_inline(actor);
-            AETHER_STAT_INC(inline_sends);
-            return;
+            if (aether_main_mode_enqueue(actor, msg)) {
+                aether_step_inline(actor);
+                AETHER_STAT_INC(inline_sends);
+                return;
+            }
+            // The mode ended before the enqueue: the batch path takes it.
+        } else {
+            aether_leave_main_thread_mode();
         }
-        aether_leave_main_thread_mode();
     }
 
     // BATCH PATH: Multi-actor fan-out optimization
@@ -2104,7 +2141,11 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     // Get previous count and main_actor BEFORE aether_on_actor_spawn modifies them
     int prev_count = atomic_load_explicit(&g_aether_config.actor_count, memory_order_relaxed);
     ActorBase* prev_main_actor = (ActorBase*)g_aether_config.main_actor;
+    // A second actor ends main-thread mode: under the lock an inline
+    // enqueue holds, like every switch out of the mode (#2266).
+    main_mode_lock();
     aether_on_actor_spawn();
+    main_mode_unlock();
 
     // MAIN THREAD MODE handling
     if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled)) {

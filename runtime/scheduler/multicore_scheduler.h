@@ -219,6 +219,12 @@ void scheduler_ensure_threads_running(void);  // Start threads if not already st
  * does, and the send goes through the scheduler. */
 int  aether_on_main_mode_thread(void);
 void aether_leave_main_thread_mode(void);
+/* Put `msg` in `actor`'s mailbox for an inline step, if the runtime is still
+ * in main-thread mode: the check and the enqueue are one step with respect
+ * to leaving the mode, so no scheduler delivery can come between or ahead
+ * of them (#2266). Returns 1 when enqueued, 0 when the mode has ended and
+ * the caller must send through the scheduler instead. */
+int  aether_main_mode_enqueue(ActorBase* actor, Message msg);
 /* The inline (main-thread-mode) step holds the actor's step_lock, and a
  * handler that sends to its own actor steps again on the same thread:
  * acquire returns 0 when this thread already holds the lock (nothing to
