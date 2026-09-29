@@ -811,7 +811,7 @@ STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.
 # because aetherc does not link the runtime scheduler, but included in
 # libaether.a and user programs where the runtime is present.
 STD_REACTOR_SRC = std/net/aether_actor_bridge.c
-COLLECTIONS_SRC = std/collections/aether_set.c std/collections/aether_pqueue.c std/collections/aether_intarr.c std/collections/aether_floatarr.c std/collections/aether_longarr.c std/collections/aether_strarr.c std/collections/aether_bits.c std/collections/aether_stringlist.c std/collections/aether_stringseq.c
+COLLECTIONS_SRC = std/collections/aether_set.c std/collections/aether_pqueue.c std/collections/aether_intmap.c std/collections/aether_intarr.c std/collections/aether_floatarr.c std/collections/aether_longarr.c std/collections/aether_strarr.c std/collections/aether_bits.c std/collections/aether_stringlist.c std/collections/aether_stringseq.c
 
 # I/O poller backends (needed by both compiler and runtime targets)
 IO_POLLER_SRC = runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c
@@ -874,6 +874,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_main.c \
            tests/runtime/test_64bit.c \
            tests/runtime/test_runtime_collections.c \
+           tests/runtime/test_runtime_intmap.c \
            tests/runtime/test_runtime_strings.c \
            tests/runtime/test_runtime_strbuilder.c \
            tests/runtime/test_runtime_math.c \

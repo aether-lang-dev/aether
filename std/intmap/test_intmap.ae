@@ -1,0 +1,196 @@
+// Regression test for std.intmap, the hash map from long keys to long
+// values (#1986).
+//
+// What this test guards:
+//   1. put stores, get reads back, and an absent key reads as (0, false)
+//   2. get_or returns the fallback only for an absent key
+//   3. add counts an absent key from 0 and returns the running value
+//   4. Full 64-bit keys survive: two keys differing above bit 31 are distinct
+//   5. remove reports presence and leaves the rest readable
+//   6. clear empties the map but leaves it usable
+//   7. keys and values snapshot in the same order and read via std.longarr
+//   8. Growth past the initial capacity keeps every entry
+//   9. Null-map calls are safe and report empty rather than crashing
+
+import std.intmap
+import std.longarr
+import std.sort
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    m = intmap.new()
+    if m == null {
+        fail("intmap.new returned null")
+    }
+
+    // 1. put / get
+    if !intmap.put(m, 7, 70) {
+        fail("put should report true")
+    }
+    v, found = intmap.get(m, 7)
+    if !found || v != 70 {
+        fail("get(7) should be (70, true), got (${v}, ${found})")
+    }
+    v, found = intmap.get(m, 8)
+    if found || v != 0 {
+        fail("get(8) should be (0, false), got (${v}, ${found})")
+    }
+    intmap.put(m, 7, 71)
+    if intmap.size(m) != 1 {
+        fail("overwrite must not add an entry")
+    }
+    println("PASS 1: put stores and get reads back")
+
+    // 2. get_or
+    if intmap.get_or(m, 7, -1) != 71 {
+        fail("get_or on a present key should return the stored value")
+    }
+    if intmap.get_or(m, 8, -1) != -1 {
+        fail("get_or on an absent key should return the fallback")
+    }
+    intmap.put(m, 0, 0)
+    if !intmap.has(m, 0) || intmap.get_or(m, 0, -1) != 0 {
+        fail("a zero key with a zero value is an ordinary entry")
+    }
+    println("PASS 2: get_or falls back only when absent")
+
+    // 3. add counts from zero
+    if intmap.add(m, 100, 1) != 1 {
+        fail("first add should return 1")
+    }
+    if intmap.add(m, 100, 1) != 2 {
+        fail("second add should return 2")
+    }
+    if intmap.add(m, 100, -5) != -3 {
+        fail("negative delta should apply")
+    }
+    if intmap.get_or(m, 100, 0) != -3 {
+        fail("add must store the running value")
+    }
+    println("PASS 3: add counts an absent key from 0")
+
+    // 4. keys are 64-bit
+    long low = 5
+    long high = 5 + (1 << 40)
+    intmap.put(m, low, 1)
+    intmap.put(m, high, 2)
+    if intmap.get_or(m, low, 0) != 1 || intmap.get_or(m, high, 0) != 2 {
+        fail("keys differing above bit 31 must be distinct")
+    }
+    println("PASS 4: full 64-bit keys are distinct")
+
+    // 5. remove
+    if !intmap.remove(m, low) {
+        fail("remove of a present key should report true")
+    }
+    if intmap.remove(m, low) {
+        fail("remove of an absent key should report false")
+    }
+    if intmap.has(m, low) {
+        fail("removed key should be absent")
+    }
+    if intmap.get_or(m, high, 0) != 2 {
+        fail("removing one key must not disturb another")
+    }
+    println("PASS 5: remove reports presence and keeps the rest")
+
+    // 6. clear
+    intmap.clear(m)
+    if intmap.size(m) != 0 {
+        fail("size should be 0 after clear")
+    }
+    intmap.put(m, 1, 10)
+    if intmap.get_or(m, 1, 0) != 10 {
+        fail("map should still be usable after clear")
+    }
+    println("PASS 6: clear empties but keeps the map usable")
+
+    // 7. keys / values snapshots
+    intmap.put(m, 2, 20)
+    intmap.put(m, 3, 30)
+    ks, kerr = intmap.keys(m)
+    if kerr != "" || ks == null {
+        fail("keys returned error: ${kerr}")
+    }
+    vs, verr = intmap.values(m)
+    if verr != "" || vs == null {
+        fail("values returned error: ${verr}")
+    }
+    n = longarr.longarr_size(ks)
+    if n != 3 || longarr.longarr_size(vs) != 3 {
+        fail("snapshots should hold 3 entries")
+    }
+    i = 0
+    while i < n {
+        k = longarr.longarr_get_raw(ks, i)
+        if longarr.longarr_get_raw(vs, i) != k * 10 {
+            fail("values[${i}] should line up with keys[${i}]")
+        }
+        i = i + 1
+    }
+    sort.longs(longarr.array(ks))
+    if longarr.longarr_get_raw(ks, 0) != 1 || longarr.longarr_get_raw(ks, 2) != 3 {
+        fail("sorted keys should be 1, 2, 3")
+    }
+    longarr.longarr_free(ks)
+    longarr.longarr_free(vs)
+    println("PASS 7: keys and values snapshot in step")
+
+    // 8. growth
+    intmap.clear(m)
+    long j = 0
+    while j < 5000 {
+        intmap.put(m, j * 7919, j)
+        j = j + 1
+    }
+    if intmap.size(m) != 5000 {
+        fail("expected 5000 entries after growth")
+    }
+    j = 0
+    while j < 5000 {
+        if intmap.get_or(m, j * 7919, -1) != j {
+            fail("entry ${j} lost during growth")
+        }
+        j = j + 1
+    }
+    println("PASS 8: growth keeps every entry")
+
+    intmap.free(m)
+
+    // 9. null map
+    if intmap.put(null, 1, 1) {
+        fail("put on null should report false")
+    }
+    v, found = intmap.get(null, 1)
+    if found {
+        fail("get on null should report absent")
+    }
+    if intmap.get_or(null, 1, 9) != 9 {
+        fail("get_or on null should return the fallback")
+    }
+    if intmap.add(null, 1, 1) != 0 {
+        fail("add on null should return 0")
+    }
+    if intmap.remove(null, 1) {
+        fail("remove on null should report false")
+    }
+    if intmap.size(null) != 0 {
+        fail("size on null should be 0")
+    }
+    nk, nerr = intmap.keys(null)
+    if nk != null || nerr == "" {
+        fail("keys on null should error")
+    }
+    intmap.clear(null)
+    intmap.free(null)
+    println("PASS 9: null-map calls are safe")
+
+    println("ALL PASS")
+}

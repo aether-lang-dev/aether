@@ -1,0 +1,101 @@
+// Distance::NGram shape from LangArena (#1986): count every 4-gram of a
+// text, keyed as an integer, and compare std.map (the key rendered to a
+// string, as the port did) against std.intmap (the key hashed as itself).
+//
+//     ./build/ae build benchmarks/langarena/ngram_intmap.ae -o /tmp/ngram
+//     /tmp/ngram 2000000 3
+//
+// Arguments are text length in bytes and repetitions. The text is a
+// deterministic pseudo-random walk over a 26-letter alphabet, so the two
+// maps see the same keys and the distinct-count check below asserts the
+// two agree. Timings are observations, never test gates.
+
+import std.os
+import std.string
+import std.map
+import std.intmap
+import std.mem
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+// Four bytes packed into one key, most significant first.
+// Bytes come through std.mem so no per-call strlen hides in the loop.
+gram_at(text: ptr, i: int) -> long {
+    long key = mem.get_byte(text, i) * 16777216
+    key = key + mem.get_byte(text, i + 1) * 65536
+    key = key + mem.get_byte(text, i + 2) * 256
+    key = key + mem.get_byte(text, i + 3)
+    return key
+}
+
+count_with_map(text: ptr, n: int) -> int {
+    m = map.map_new()
+    i = 0
+    while i + 4 <= n {
+        key = string.string_from_long(gram_at(text, i))
+        prior = mem.ptr_to_long(map.map_get_raw(m, key))
+        map.map_put_raw(m, key, mem.long_to_ptr(prior + 1))
+        i = i + 1
+    }
+    distinct = map.map_size(m)
+    map.map_free(m)
+    return distinct
+}
+
+count_with_intmap(text: ptr, n: int) -> int {
+    m = intmap.new()
+    i = 0
+    while i + 4 <= n {
+        intmap.add(m, gram_at(text, i), 1)
+        i = i + 1
+    }
+    distinct = intmap.size(m)
+    intmap.free(m)
+    return distinct
+}
+
+// argv[index] as an int, or `fallback` when absent or not a number.
+arg_or(index: int, fallback: int) -> int {
+    if os.args_count() <= index { return fallback }
+    value, err = string.to_int(os.args_get(index))
+    if err != "" { return fallback }
+    return value
+}
+
+main() {
+    n = 2000000
+    reps = 3
+    n = arg_or(1, n)
+    reps = arg_or(2, reps)
+
+    // Deterministic text: a 31-bit linear congruential walk over 'a'..'z',
+    // so 456976 distinct 4-grams are possible and the tables have to grow.
+    long seed = 12345
+    text = malloc(n + 1)
+    i = 0
+    while i < n {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        mem.set_byte(text, i, 97 + (seed / 65536) % 26)
+        i = i + 1
+    }
+    mem.set_byte(text, n, 0)
+
+    println("4-gram counting over ${n} bytes, ${reps} repetitions")
+    r = 0
+    while r < reps {
+        t0 = os.now_monotonic_ms()
+        with_map = count_with_map(text, n)
+        t1 = os.now_monotonic_ms()
+        with_intmap = count_with_intmap(text, n)
+        t2 = os.now_monotonic_ms()
+        if with_map != with_intmap {
+            println("MISMATCH: std.map counted ${with_map} distinct, std.intmap ${with_intmap}")
+            exit(1)
+        }
+        println("  std.map ${t1 - t0} ms, std.intmap ${t2 - t1} ms (${with_map} distinct)")
+        r = r + 1
+    }
+    free(text)
+}

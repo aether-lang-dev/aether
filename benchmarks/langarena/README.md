@@ -71,3 +71,24 @@ barrier; allocation, transpose, pool construction, and validation are outside
 it. This is a concurrency example, **not a replacement LangArena timing**:
 LangArena includes transpose and allocation in its matmul run. No speedup is
 asserted; available cores, scheduling, matrix size, and machine load matter.
+
+## Integer-keyed counting (Distance::NGram)
+
+The issue's one non-float outlier, Distance::NGram at 26.6× Go, keyed a
+`std.map` by 4-grams rendered with `string.from_int`, so every n-gram paid an
+allocation, a byte-wise hash and a `memcmp`. `std.intmap` hashes a `long`
+key as itself and counts in one probe. [`ngram_intmap.ae`](ngram_intmap.ae)
+runs the same counting loop both ways over a deterministic text:
+
+```sh
+./build/ae build benchmarks/langarena/ngram_intmap.ae -o /tmp/ngram
+/tmp/ngram 2000000 3
+```
+
+Arguments are text length in bytes and repetitions; both maps must report
+the same distinct count or the program exits non-zero. On the 2026-09-29
+cloud container (KVM, GCC, `-O2`), 2 000 000 bytes and 451 274 distinct
+4-grams: `std.map` 1.19–1.27 s, `std.intmap` 0.10–0.30 s per repetition, the
+first `intmap` pass being slower while its table first grows. Timings are
+observations, not gates; the LangArena port itself has not been re-run
+with the new map.

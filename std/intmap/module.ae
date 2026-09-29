@@ -1,0 +1,135 @@
+// std.intmap - hash map from `long` keys to `long` values
+//
+// std.map keys every entry by a string. An integer key has to be rendered
+// (an allocation), hashed byte by byte and compared with memcmp, which is
+// the whole cost of a counting loop such as n-gram frequencies. This map
+// hashes the integer itself and keeps key and value inline in an
+// open-addressing table, so a lookup touches one cache line and a count
+// increment is one probe.
+//
+//     import std.intmap
+//
+//     main() {
+//         counts = intmap.new()
+//         intmap.add(counts, 42, 1)           // absent key counts from 0
+//         intmap.add(counts, 42, 1)
+//         println(intmap.get_or(counts, 42, 0))   // 2
+//         intmap.free(counts)
+//     }
+//
+// A value is a bare integer the map never interprets: store an int, a
+// long, or a pointer via std.mem.ptr_to_long. Nothing is freed on the
+// caller's behalf.
+//
+// API shape:
+//   - Raw externs mirror the C entry points and use C-style int returns.
+//   - Aether-native wrappers (below) return bools and Go-style
+//     `(value, found)` tuples.
+
+exports(
+    aether_intmap_new, aether_intmap_put, aether_intmap_get_or, aether_intmap_has,
+    aether_intmap_add, aether_intmap_remove, aether_intmap_size, aether_intmap_clear,
+    aether_intmap_free, aether_intmap_keys, aether_intmap_values,
+    new, put, get, get_or, has, add, remove, size, clear, free, keys, values
+)
+
+// ---- raw externs (std/collections/aether_intmap.c) ----
+extern aether_intmap_new() -> ptr
+extern aether_intmap_put(map: ptr, key: long, value: long) -> int
+extern aether_intmap_get_or(map: ptr, key: long, fallback: long) -> long
+extern aether_intmap_has(map: ptr, key: long) -> int
+extern aether_intmap_add(map: ptr, key: long, delta: long) -> long
+extern aether_intmap_remove(map: ptr, key: long) -> int
+extern aether_intmap_size(map: ptr) -> int
+extern aether_intmap_clear(map: ptr)
+extern aether_intmap_free(map: ptr)
+extern aether_intmap_keys(map: ptr) -> ptr
+extern aether_intmap_values(map: ptr) -> ptr
+
+// ---- Aether-side wrappers ----
+
+// Create an empty map. Returns null on allocation failure.
+new() -> ptr {
+    return aether_intmap_new()
+}
+
+// Insert or overwrite. Returns false on a null map or allocation failure.
+put(map: ptr, key: long, value: long) -> bool {
+    return aether_intmap_put(map, key, value) == 1
+}
+
+// Look up a key. Returns (value, true) when present and (0, false) when
+// absent or the map is null. Prefer get_or on a hot path: it is one probe
+// with no tuple.
+get(map: ptr, key: long) -> {
+    if !has(map, key) {
+        return 0, false
+    }
+    return aether_intmap_get_or(map, key, 0), true
+}
+
+// The value under `key`, or `fallback` when the key is absent.
+get_or(map: ptr, key: long, fallback: long) -> long {
+    return aether_intmap_get_or(map, key, fallback)
+}
+
+// Membership test. False for a null map.
+has(map: ptr, key: long) -> bool {
+    return aether_intmap_has(map, key) == 1
+}
+
+// Add `delta` to the value under `key`, counting an absent key from 0,
+// and return the new value. This is the counting idiom: one probe, no
+// separate has/get/put. On a null map or an allocation failure nothing is
+// stored and 0 comes back; check `has` afterwards if that matters.
+add(map: ptr, key: long, delta: long) -> long {
+    return aether_intmap_add(map, key, delta)
+}
+
+// Drop a key. Returns true if it was present; an absent key is a no-op.
+remove(map: ptr, key: long) -> bool {
+    return aether_intmap_remove(map, key) == 1
+}
+
+// Number of entries. 0 for a null map.
+size(map: ptr) -> int {
+    return aether_intmap_size(map)
+}
+
+// Drop every entry, keeping the map usable.
+clear(map: ptr) {
+    aether_intmap_clear(map)
+}
+
+// Release the map. Values are bare integers, so there is nothing else to
+// free; a pointer stored via std.mem is still the caller's to release.
+free(map: ptr) {
+    aether_intmap_free(map)
+}
+
+// Snapshot of the keys as a std.longarr, released with longarr.longarr_free.
+// Order is unspecified; sort the buffer for a deterministic listing.
+// Returns (buffer, "") or (null, error).
+keys(map: ptr) -> {
+    if map == null {
+        return null, "null map"
+    }
+    k = aether_intmap_keys(map)
+    if k == null {
+        return null, "allocation failed"
+    }
+    return k, ""
+}
+
+// Snapshot of the values, in the same order `keys` gives while the map is
+// not mutated between the two calls. Same contract as `keys`.
+values(map: ptr) -> {
+    if map == null {
+        return null, "null map"
+    }
+    v = aether_intmap_values(map)
+    if v == null {
+        return null, "allocation failed"
+    }
+    return v, ""
+}

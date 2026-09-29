@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (84 modules)
+## Module index (85 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -40,6 +40,7 @@ header comment is the authoritative description.
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 165 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
+| `std.intmap` | Hash map from `long` keys to `long` values, with a one-probe counting `add`. | 23 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 55 | [full section](#json-stdjson) |
@@ -309,6 +310,50 @@ main() {
 - `map.free(map)` - Free map memory
 
 Raw extern: `map_put_raw` (returns 1/0).
+
+### Integer-keyed map (`std.intmap`)
+
+Hash map from `long` keys to `long` values. Where `std.map` renders an
+integer key to a string and hashes the bytes, this table hashes the integer
+itself and stores key and value inline, so a lookup is one probe and a count
+increment is one call.
+
+```aether
+import std.intmap
+
+main() {
+    hits = intmap.new()
+    defer intmap.free(hits)
+
+    intmap.add(hits, 404, 1)            // absent key counts from 0
+    intmap.add(hits, 404, 1)
+    intmap.put(hits, 200, 10)
+
+    println("404s: ${intmap.get_or(hits, 404, 0)}")
+    if intmap.has(hits, 500) {
+        println("never printed")
+    }
+}
+```
+
+**Functions:**
+- `intmap.new()` → `ptr` - Create a new map (null on allocation failure)
+- `intmap.put(map, key, value)` → `bool` - Insert or overwrite; false on a null map or allocation failure
+- `intmap.get(map, key)` → `(long, bool)` - The value and whether the key was present
+- `intmap.get_or(map, key, fallback)` → `long` - The value, or `fallback` when the key is absent
+- `intmap.has(map, key)` → `bool` - Membership test
+- `intmap.add(map, key, delta)` → `long` - Add to the value (an absent key counts from 0) and return the new value
+- `intmap.remove(map, key)` → `bool` - Drop a key; true if it was present
+- `intmap.size(map)` → `int` - Number of entries
+- `intmap.clear(map)` - Drop every entry, keeping the map usable
+- `intmap.free(map)` - Release the map (values are bare integers, nothing else is freed)
+- `intmap.keys(map)` → `(ptr, string)` - Snapshot of the keys as a `std.longarr`; release with `longarr.longarr_free`
+- `intmap.values(map)` → `(ptr, string)` - Snapshot of the values, in the same order as `keys`
+
+Calls on a null map are safe: `size` reports 0, `has` reports false, and
+`get_or` returns its fallback.
+
+Raw externs are the `aether_intmap_*` entry points, which return C-style ints.
 
 ### Set (`std.set`)
 
