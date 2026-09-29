@@ -51,6 +51,38 @@ For **building**, the `obj`/`arr`/`str`/`num` constructors compose a tree that
 `stringify` serialises. For validating an untyped map against a schema before
 you trust it, see `std/schema`.
 
+`stringify` writes a number so that parsing it gives back the same value. An
+integer built with `from_int`, or parsed as a bare integer, is written as that
+integer over the full `long` range. Any other number is written with as few
+digits as reading it back to the same double needs: 15 when those suffice,
+else 16, else 17. So `0.1` is `0.1` and `0.061234567891` keeps every digit.
+A NaN or an infinity has no JSON form and is written as `null`, as
+JavaScript's `JSON.stringify` writes it.
+
+```aether,run
+import std.json
+
+main() {
+    value = 0.061234567891
+    node = json.num(value)
+    text, _ = json.stringify(node)
+    back, _ = json.parse(text)
+    same = json.json_get_number(back) == value
+    println("${text} reads back as the same double: ${same}")
+    json.json_free(node)
+    json.json_free(back)
+
+    tenth = json.num(0.1)
+    short, _ = json.stringify(tenth)
+    println(short)
+    json.json_free(tenth)
+}
+```
+```output
+0.061234567891 reads back as the same double: true
+0.1
+```
+
 ## Exports
 
 `parse`, `parse_strict`, `stringify`, `json_free`, `json_type`, `json_is_null`,

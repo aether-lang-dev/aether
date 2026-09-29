@@ -51,6 +51,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <math.h>
 
 // ---------------------------------------------------------------------------
 // Thread-local storage portability shim
@@ -512,11 +513,12 @@ enum {
     JV_FLAG_HEAP_STRUCT = 0x02u,
     // Marks a JSON_NUMBER whose value originated as an integer (via
     // json_create_int / json.from_int) — the serializer emits it as a
-    // bare integer (`%lld`) instead of `%g`. Without this flag,
-    // `json_create_number(53248000.0)` serialises to `5.3248e+07`,
-    // which is lossy past 2^53 and wrong for consumers expecting a
-    // plain integer count (e.g. byte-totals, IDs). Sourced from
-    // `stdlib-json-integer-value-ask.md` (fbs-core /metrics handler).
+    // bare integer (`%lld`), over the full int64 range. A double is
+    // written in its round-trip form (json_format_double), which is
+    // exact only to 2^53 and turns to exponent form at 1e15: wrong for
+    // consumers expecting a plain integer count (e.g. byte-totals, IDs).
+    // Sourced from `stdlib-json-integer-value-ask.md` (fbs-core /metrics
+    // handler).
     JV_FLAG_INTEGER     = 0x04u
 };
 
@@ -1902,6 +1904,39 @@ static void sb_emit_object(StrBuf* b, JsonValue* v, int depth) {
     sb_append_char(b, '}');
 }
 
+/* A double as a decimal that parses back to exactly the same double
+ * (#2290), in `nb` (at least 32 bytes); returns its length.
+ *
+ * %.15g if that reads back as `x`, else %.16g, else %.17g, which always
+ * does. %g trims trailing zeros, so a value that needs few digits gets few:
+ * 0.1 is "0.1", and 0.061234567891 keeps all twelve of its digits instead
+ * of the six plain %g kept. For a normal double this is the shortest
+ * round-trip form, what JavaScript and Python's repr write, except where a
+ * 16-digit form exists only on the wide side of a power of two (17 digits
+ * are written there). A subnormal gets at least 15 digits. Most values take
+ * one format and one parse.
+ *
+ * The check parses with aether_c_strtod, correctly rounded like this
+ * module's own parser, so the text reads back as `x` here too.
+ *
+ * A NaN or an infinity has no JSON spelling ("nan" is not a JSON value);
+ * it is written as null, as JSON.stringify writes it. */
+static int json_format_double(char* nb, size_t cap, double x) {
+    if (!isfinite(x)) {
+        memcpy(nb, "null", 5);
+        return 4;
+    }
+    static const char* const fmts[] = { "%.15g", "%.16g", "%.17g" };
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        n = aether_c_snprintf_double(nb, cap, fmts[i], x);
+        if (n <= 0 || (size_t)n >= cap) return n;
+        if (i < 2 && aether_c_strtod(nb, NULL) != x) continue;
+        break;
+    }
+    return n;
+}
+
 static void sb_emit_value(StrBuf* b, JsonValue* v, int depth) {
     if (!v || depth > JSON_MAX_DEPTH) {
         sb_append(b, "null", 4);
@@ -1921,9 +1956,10 @@ static void sb_emit_value(StrBuf* b, JsonValue* v, int depth) {
                  * past ~1e7. */
                 n = snprintf(nb, sizeof(nb), "%lld", v->data.integer);
             } else {
-                // Locale-pinned: RFC 8259 mandates '.', so this must not
-                // emit "3,14" just because the host set a European locale.
-                n = aether_c_snprintf_double(nb, sizeof(nb), "%g", v->data.number);
+                // Shortest round-trip form, locale-pinned: RFC 8259
+                // mandates '.', so this must not emit "3,14" just because
+                // the host set a European locale.
+                n = json_format_double(nb, sizeof(nb), v->data.number);
             }
             if (n > 0) sb_append(b, nb, (size_t)n);
             break;
