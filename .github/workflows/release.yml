@@ -13,10 +13,14 @@ name: Release
 #   2a. Tag EXISTS   → bump job computes next version, opens a release PR;
 #                      while that PR is open, each later push to main
 #                      rebuilds its branch from the new HEAD (#2282)
-#   2b. Tag MISSING  → tag job creates vX.Y.Z tag from HEAD
+#   2b. Tag MISSING  → tag job tags the release commit (the one that set
+#                      VERSION), so the tag holds what its notes describe
 #   3. Tag push → build + publish jobs create the GitHub Release
 #
 # This is robust regardless of merge strategy (squash, merge commit, rebase).
+# With a merge commit the release commit is the release PR's head; with a
+# squash or rebase it is the commit on main that carries the bump, which
+# also carries anything merged ahead of it, as before.
 
 on:
   push:
@@ -94,6 +98,19 @@ jobs:
             exit 0
           fi
 
+          # This version's release PR may already have merged while its tag
+          # run waits behind this one (runs are serialized): this push came
+          # first, so its VERSION is still the old one, the branch is gone
+          # with the merge, and the tag is not made yet. Bumping here opened
+          # a second PR for a version about to be tagged (#2285). Checked
+          # whether or not the branch still exists.
+          MERGED_PR=$(gh pr list --head "$BRANCH" --state merged --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+          if [ -n "$MERGED_PR" ]; then
+            echo "Release PR #$MERGED_PR for $BRANCH has merged; its tag run follows -- skipping"
+            echo "action=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # If the branch exists, decide based on its PR state — not branch
           # existence alone. Previous logic skipped on branch existence,
           # which left the workflow permanently stuck whenever a release PR
@@ -103,13 +120,12 @@ jobs:
 
             case "$PR_STATE" in
               OPEN)
-                # The tag is cut from main's HEAD when this PR merges, so
-                # the PR's notes must cover everything on main by then. A
-                # skip here froze them at the commit the PR was cut from,
-                # and a merge in between shipped in the tag with no entry:
-                # 0.738.0 carried #2277 and #2278 that way (#2282). So a
+                # Keep the open PR level with main, so a change merged while
+                # it waits ships in this release rather than the next. A
                 # push the branch does not already contain rebuilds it from
                 # this commit, the same version by the same steps as a bump.
+                # (The tag is the release commit itself, so the notes match
+                # the tag either way; see the tag job and #2282.)
                 if git merge-base --is-ancestor HEAD "origin/$BRANCH"; then
                   echo "Release PR for $BRANCH is OPEN and already covers $(git rev-parse --short HEAD) -- skipping (waiting on merge)"
                   echo "action=skip" >> "$GITHUB_OUTPUT"
@@ -119,14 +135,6 @@ jobs:
                 echo "action=refresh"   >> "$GITHUB_OUTPUT"
                 echo "version=$NEW"     >> "$GITHUB_OUTPUT"
                 echo "tag=$NEW_TAG"     >> "$GITHUB_OUTPUT"
-                exit 0
-                ;;
-              MERGED)
-                # Should not normally hit here: a merged release PR would have
-                # bumped VERSION on main, so the outer "tag exists" check
-                # would have flipped us to action=tag. Treat as skip to be safe.
-                echo "Release PR for $BRANCH is MERGED but VERSION not advanced -- skipping"
-                echo "action=skip" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
               CLOSED|"")
@@ -336,14 +344,24 @@ jobs:
         # Refresh: the open PR follows its branch, so replacing the branch
         # is the whole update. The lease is the branch as this job fetched
         # it, so a push to it from anywhere else fails this run rather than
-        # being overwritten.
+        # being overwritten. The one expected loser is a PR merged while
+        # this job rebuilt it: the merge deleted the branch, the release
+        # goes out as merged, and this push's change waits for the next.
         if [ "${{ needs.prepare.outputs.action }}" = "refresh" ]; then
-          git push --force-with-lease="${BRANCH}:$(git rev-parse "origin/${BRANCH}")" origin "$BRANCH"
+          if ! git push --force-with-lease="${BRANCH}:$(git rev-parse "origin/${BRANCH}")" origin "$BRANCH"; then
+            MERGED_PR=$(gh pr list --head "$BRANCH" --state merged --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+            if [ -n "$MERGED_PR" ]; then
+              echo "::notice::Release PR #$MERGED_PR merged while this run rebuilt it; $(git rev-parse --short HEAD~1) goes to the next release."
+              exit 0
+            fi
+            echo "::error::Could not replace ${BRANCH}: it changed since this run fetched it."
+            exit 1
+          fi
           {
             echo "### Release PR rebuilt"
             echo ""
-            echo "\`${BRANCH}\` now starts from \`$(git rev-parse --short HEAD~1)\`, so its notes"
-            echo "cover every change merging it will tag."
+            echo "\`${BRANCH}\` now starts from \`$(git rev-parse --short HEAD~1)\`, so this"
+            echo "release includes every change on main up to that commit."
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
@@ -389,7 +407,30 @@ jobs:
         git config user.name  "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-        git tag "$TAG"
+        # Tag the release commit itself: the one that set VERSION to this
+        # version, which is the release PR's head (from the merge, git log
+        # follows the side whose VERSION matches). Its CHANGELOG section was
+        # written for exactly that tree. main's HEAD can hold more: a change
+        # merged just before the release PR, too late for its rebuild,
+        # shipped in the tag with no entry when HEAD was tagged (0.738.0,
+        # 0.739.0; #2282). Tagged here, it goes to the next release with its
+        # entry. With nothing merged in between, the two trees are the same.
+        REL=$(git log -1 --format=%H HEAD -- VERSION)
+        if [ -z "$REL" ] || [ "$(git show "${REL}:VERSION" | tr -d '[:space:]')" != "$VERSION" ]; then
+          echo "::error::No commit in HEAD's history sets VERSION to ${VERSION}."
+          exit 1
+        fi
+        LATER=$(git rev-list --count "${REL}..HEAD" --no-merges)
+        if [ "$LATER" != "0" ]; then
+          {
+            echo "### ${TAG} is the release commit, not main's HEAD"
+            echo ""
+            echo "${LATER} commit(s) on main after \`$(git rev-parse --short "$REL")\` are not in"
+            echo "this release; they go to the next one with their entries."
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        git tag "$TAG" "$REL"
         git push origin "$TAG"
 
         echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
