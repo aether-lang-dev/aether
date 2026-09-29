@@ -658,7 +658,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
     if (needs_arr) {
         print_indent(gen);
         fprintf(gen->output, "int* _match_arr = ");
-        generate_expression(gen, match_expr);
+        generate_expression_as_elem_ptr(gen, match_expr);   /* #1286 */
         fprintf(gen->output, ";\n");
     }
 
@@ -682,7 +682,10 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
             if (expr_references_var(body, tail->value)) {
-                print_line(gen, "int* %s = &_match_arr[1];", tail->value);
+                /* #1286: the tail is a `T[]` slice over the rest; `_len`
+                 * is kept for code that still reads the companion. */
+                print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
+                           tail->value, len_name);
                 print_line(gen, "int %s_len = %s - 1;", tail->value, len_name);
             }
         }
@@ -5660,9 +5663,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
 
                     // Detect if initializer is an array literal (type system may not tag empty arrays)
-                    int is_array_init = (stmt->child_count > 0 &&
-                                         stmt->children[0] &&
-                                         stmt->children[0]->type == AST_ARRAY_LITERAL);
+                    /* #1286: a literal into a `T[]` binding arrives wrapped
+                     * in the typechecker's slice coercion; look through it. */
+                    ASTNode* init_lit = (stmt->child_count > 0) ? stmt->children[0] : NULL;
+                    if (init_lit && init_lit->type == AST_SLICE_FROM_ARRAY &&
+                        init_lit->child_count > 0 &&
+                        init_lit->children[0]->type == AST_ARRAY_LITERAL)
+                        init_lit = init_lit->children[0];
+                    int is_array_init = (init_lit && init_lit->type == AST_ARRAY_LITERAL);
+                    /* #1286: >= 0 when a `T[]` local takes an array literal
+                     * (the literal's length; the slice views a hidden array). */
+                    int slice_lit_len = -1;
 
                     // Handle array types specially (C syntax: int name[size])
                     /* Issue #501 follow-up: volatile prefix for
@@ -5676,8 +5687,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             fprintf(gen->output, "%s%s %s[%d]", vq, elem_type,
                                     stmt->value, stmt->node_type->array_size);
                         } else {
-                            // Dynamic/empty array - use pointer
-                            fprintf(gen->output, "%s%s* %s", vq, elem_type, stmt->value);
+                            /* #1286: a `T[]` local is a slice. A literal
+                             * initializer lands in a hidden fixed array the
+                             * slice then views. */
+                            if (is_array_init && init_lit->child_count > 0) {
+                                slice_lit_len = init_lit->child_count;
+                                fprintf(gen->output, "%s _ae_slit_%s[%d] = ",
+                                        elem_type, stmt->value, slice_lit_len);
+                                generate_expression(gen, init_lit);
+                                fprintf(gen->output, ";\n");
+                                print_indent(gen);
+                            } else if (is_array_init) {
+                                slice_lit_len = 0;
+                            }
+                            fprintf(gen->output, "%sAetherSlice %s", vq, stmt->value);
                         }
                     } else if (is_array_init) {
                         // Type system missed array type but initializer is array literal
@@ -5823,7 +5846,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                               strcmp(di->value, stmt->value) != 0 &&
                                               alias_source_must_copy(gen, di->value));
                             fprintf(gen->output, " = ");
-                            if (copy_alias) {
+                            if (slice_lit_len == 0) {
+                                fprintf(gen->output, "aether_slice_make((void*)0, 0)");
+                            } else if (slice_lit_len > 0) {
+                                fprintf(gen->output, "aether_slice_make(_ae_slit_%s, %d)",
+                                        stmt->value, slice_lit_len);
+                            } else if (copy_alias) {
                                 fprintf(gen->output, "aether_uniform_heap_str(");
                                 generate_expression(gen, di);
                                 fprintf(gen->output, ", 0)");
@@ -6677,6 +6705,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "StringSeq* %s = ", len_name);
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ";\n");
+                } else if (uses_list_patterns && type_is_slice(match_expr->node_type)) {
+                    /* #1286: a slice carries its own length. */
+                    print_indent(gen);
+                    fprintf(gen->output, "int %s = (int)aether_slice_len(", len_name);
+                    generate_expression(gen, match_expr);
+                    fprintf(gen->output, ");\n");
                 } else if (uses_list_patterns) {
                     print_indent(gen);
                     fprintf(gen->output, "int %s = ", len_name);

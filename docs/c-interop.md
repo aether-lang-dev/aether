@@ -916,7 +916,7 @@ main() {
 
 **What you get**
 
-- C lowering: `arr = raw as int[]` emits `int* arr = ((int*)(raw));`. Subsequent `arr[i]` emits `arr[i]` which C scales by `sizeof(int) == 4`.
+- C lowering (#1286): `arr = raw as int[]` emits `AetherSlice arr = aether_slice_view((void*)(raw));`, an *unbounded* slice (`.len` is `-1`). Subsequent `arr[i]` emits `*(int*)aether_slice_at(arr, i, sizeof(int), …)`, which scales by `sizeof(int) == 4` and, because the view is unbounded, performs no range check. `arr[0..n]` turns it into a bounded, checked slice.
 - Covered element types: `int`, `long`, `byte`, `ptr`, `float` (and struct types, though for those you usually want `*Struct` member-access instead).
 - The `[]` syntax (no size) reads as "I don't know the bound, trust me to index inside it." A fixed-size `as int[10]` parses too but adds no extra checking; useful only as documentation.
 - Like `as *StructName`, this is a **view**. It does NOT allocate, free, or bounds-check. The buffer's lifetime stays with whoever produced the original `ptr`.
@@ -930,7 +930,17 @@ main() {
 **When NOT to reach for it**
 
 - For Aether-owned data; prefer fixed-size stack arrays (`int[5] arr`) or the higher-level collections in `std.collections`. The `as T[]` cast is the systems-programming escape hatch, not the everyday array.
-- When you want bounds-checked storage. There is none here.
+- When you want bounds-checked storage. Sub-slice the view with an explicit end (`(raw as int[])[0..n]`) or start from a `T[N]` array / `make([]T, n)`; a bare view has no length to check against.
+
+**Slices at the C boundary.** An Aether `T[]` is `AetherSlice { void* ptr; uint64_t len; }` by value (`runtime/aether_slice.h`, included by every generated program). The extern ABI does not see that struct:
+
+| Position | C sees | The compiler emits |
+|---|---|---|
+| `extern f(data: byte[])` parameter | `unsigned char*` | the argument's `.ptr` (the length is dropped; pass it separately, `f(data, data.len)`) |
+| `extern g() -> int[]` return | `int*` | `aether_slice_view(g())`: an unbounded slice |
+| `extern struct S { buf: byte[] }` field | `unsigned char buf[]` (last field) / `unsigned char*` | a read of `s.buf` is an unbounded view; `s.buf + i` is a `ptr` |
+| a `T[]` passed to a `ptr` parameter, `free(s)`, `s == null`, `s + n` | `void*` / `T*` | `.ptr` |
+| an Aether function's `T[]` parameter, return, struct field | `AetherSlice` | the whole fat pointer |
 
 ### `@c_struct` typed overlays, width-correct field access over a raw `ptr`
 

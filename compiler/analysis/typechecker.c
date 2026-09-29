@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "typechecker.h"
+#include "slice_coerce.h"
 #include "hoist.h"
 #include "type_inference.h"
 #include "../aether_strmap.h"
@@ -2298,6 +2299,34 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             return expr->node_type ? clone_type(expr->node_type)
                                    : create_type(TYPE_UNKNOWN);
 
+        case AST_SLICE_FROM_ARRAY:
+        case AST_SLICE_TO_PTR:
+            /* #1286 coercion nodes carry the type they coerce to. */
+            return expr->node_type ? clone_type(expr->node_type)
+                                   : create_type(TYPE_UNKNOWN);
+
+        case AST_SLICE_EXPR: {
+            /* #1286 `s[lo..hi]`: a non-owning sub-slice of a `T[]` slice or a
+             * `T[N]` array. The result is a `T[]` over the same elements. */
+            if (expr->child_count == 0 || !expr->children[0])
+                return create_type(TYPE_UNKNOWN);
+            Type* base = infer_type(expr->children[0], table);
+            if (!base) return create_type(TYPE_UNKNOWN);
+            if (base->kind == TYPE_UNKNOWN) { free_type(base); return create_type(TYPE_UNKNOWN); }
+            if (base->kind != TYPE_ARRAY || !base->element_type) {
+                char msg[200];
+                snprintf(msg, sizeof(msg),
+                         "`[..]` sub-slicing is defined for a `T[]` slice or a "
+                         "`T[N]` array, not for %s", type_name(base));
+                free_type(base);
+                type_error(msg, expr->line, expr->column);
+                return create_type(TYPE_UNKNOWN);
+            }
+            Type* out = create_array_type(clone_type(base->element_type), -1);
+            free_type(base);
+            return out;
+        }
+
         case AST_PTR_AS_ARRAY_CAST: {
             /* `expr as T[]` — view the operand as a typed C array.
              * Operand must be ptr-typed. Result type is the TYPE_ARRAY
@@ -2431,6 +2460,11 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                                   get_token_type_from_string(expr->value));
             
         case AST_FUNCTION_CALL: {
+            /* #1286 `make([]T, n)` is a `T[]` slice of n elements; the parser
+             * stamped the array type on the call. */
+            if (expr->value && strcmp(expr->value, "make") == 0 &&
+                expr->node_type && expr->node_type->kind == TYPE_ARRAY)
+                return clone_type(expr->node_type);
             /* select(...) yields whatever its branches yield. Nothing inferred
              * it before, so it fell to unresolved and codegen defaulted to int:
              * a select over strings assigned a pointer into an int slot and
@@ -2569,6 +2603,16 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                          expr->value, expr->children[0]->value);
                 type_error(msg, expr->line, expr->column);
                 return create_type(TYPE_UNKNOWN);
+            }
+            /* #1286: `s.len` on a slice or array is its element count, an
+             * int (-1 for a view over a bare `ptr`, whose extent the
+             * compiler cannot know). */
+            if (expr->child_count > 0 && expr->children[0] && expr->value &&
+                strcmp(expr->value, "len") == 0) {
+                Type* obj = infer_type(expr->children[0], table);
+                int is_arr = obj && obj->kind == TYPE_ARRAY;
+                if (obj) free_type(obj);
+                if (is_arr) return create_type(TYPE_INT);
             }
             /* #2146: `v.x` / `.y` / `.z` / `.w` on a lane value is that
              * lane's scalar — an f32 from an f32x4, a float from an f64x2,
@@ -6695,18 +6739,23 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                      * initializer (`x = [1,2,3]`) is NOT an identifier, so it
                      * still binds a real array; only a named-array lvalue
                      * decays. */
-                    if (init_type && init_type->kind == TYPE_ARRAY &&
+                    if (init_type && type_is_sized_array(init_type) &&
                         init && init->type == AST_IDENTIFIER) {
                         stmt->node_type = create_type(TYPE_PTR);
                     } else {
                         stmt->node_type = clone_type(init_type);
                     }
+                } else if (init && init->type == AST_NULL_LITERAL && type_is_slice(stmt->node_type)) {
+                    /* #1286: `T[] s = null` is the empty slice. */
                 } else if (!array_const_int_narrow && !is_assignable(init_type, stmt->node_type)) {
                     // Has explicit type but initializer doesn't match
                     free_type(init_type);
                     type_error("Type mismatch in variable initialization", stmt->line, stmt->column);
                     return 0;
                 }
+                /* #1286: `T[N]` / `null` into a `T[]` binding becomes a slice. */
+                if (stmt->child_count > 0 && stmt->node_type)
+                    slice_coerce_slot(&stmt->children[0], stmt->node_type, 0);
                 // #1044 enum-indexed array `[E]T`: the index type must be a real
                 // enum, and a literal initializer supplies one value per member,
                 // in declaration order (an empty `[]` zero-initialises every
@@ -6855,7 +6904,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 coerce_bare_enum_member(right, symbol->type, table);
 
                 Type* right_type = infer_type(right, table);
-                if (!is_assignable(right_type, symbol->type)) {
+                /* #1286: a `T[N]` array or `null` into a `T[]` binding. */
+                int null_into_slice = right->type == AST_NULL_LITERAL &&
+                                      type_is_slice(symbol->type);
+                if (null_into_slice || is_assignable(right_type, symbol->type))
+                    slice_coerce_slot(&stmt->children[1], symbol->type, 0);
+                if (!null_into_slice && !is_assignable(right_type, symbol->type)) {
                     char error_msg[256];
                     snprintf(error_msg, sizeof(error_msg),
                              "Type mismatch in assignment to '%s': expected %s, got %s",
@@ -7736,6 +7790,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 coerce_bare_enum_member(stmt->children[i], g_tc_return_type, table);
                 typecheck_node(stmt->children[i], table);
             }
+            /* #1286: `return arr` from a `-> T[]` function returns a slice. */
+            if (stmt->child_count == 1 && g_tc_return_type)
+                slice_coerce_slot(&stmt->children[0], g_tc_return_type, 0);
             /* #2054: `return call(f, ...)` through an erased fn takes the
              * function's declared result type, as a typed binding would;
              * the declaration is the annotation. */
@@ -8170,6 +8227,31 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             expr->node_type = infer_type(expr, table);
             return 1;
 
+        case AST_SLICE_FROM_ARRAY:
+        case AST_SLICE_TO_PTR:
+            if (expr->child_count > 0) typecheck_expression(expr->children[0], table);
+            return 1;
+
+        case AST_SLICE_EXPR: {
+            /* #1286: base must be a slice or array; each bound an integer. */
+            for (int i = 0; i < expr->child_count; i++)
+                typecheck_expression(expr->children[i], table);
+            for (int i = 1; i < expr->child_count; i++) {
+                Type* bt = infer_type(expr->children[i], table);
+                if (bt && bt->kind != TYPE_INT && bt->kind != TYPE_INT64 &&
+                    bt->kind != TYPE_UNKNOWN) {
+                    char msg[160];
+                    snprintf(msg, sizeof(msg),
+                             "slice bound must be an integer, got %s", type_name(bt));
+                    type_error(msg, expr->children[i]->line, expr->children[i]->column);
+                }
+                if (bt) free_type(bt);
+            }
+            Type* t = infer_type(expr, table);
+            set_node_type(expr, t);
+            return 1;
+        }
+
         case AST_PTR_AS_ARRAY_CAST:
             /* Walk the operand; keep the parser-populated node_type
              * (TYPE_ARRAY with element_type) so codegen emits the
@@ -8473,14 +8555,34 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             }
             return 1;
 
-        case AST_STRUCT_LITERAL:
+        case AST_STRUCT_LITERAL: {
             // Type check struct literal field initializers
+            Symbol* sdef_sym = expr->value ? lookup_symbol(table, expr->value) : NULL;
+            ASTNode* sdef = (sdef_sym && sdef_sym->node &&
+                             sdef_sym->node->type == AST_STRUCT_DEFINITION)
+                            ? sdef_sym->node : NULL;
+            int sdef_is_extern = sdef && sdef->annotation &&
+                                 strncmp(sdef->annotation, "extern", 6) == 0;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
                 if (field_init && field_init->type == AST_ASSIGNMENT && field_init->child_count > 0) {
                     typecheck_expression(field_init->children[0], table);
+                    /* #1286: an array into a `T[]` field becomes a slice; an
+                     * `extern struct` field is C's `T*`, so a slice decays. */
+                    if (sdef && field_init->value) {
+                        for (int f = 0; f < sdef->child_count; f++) {
+                            ASTNode* fd = sdef->children[f];
+                            if (fd && fd->type == AST_STRUCT_FIELD && fd->value &&
+                                strcmp(fd->value, field_init->value) == 0) {
+                                slice_coerce_slot(&field_init->children[0], fd->node_type,
+                                                  sdef_is_extern);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
+        }
             // Struct literal type is already set during type inference
             return 1;
             
@@ -8495,6 +8597,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * type-checked as one — doing so reported every qualified
                  * call as an undefined variable. */
                 Type* lt = infer_type(expr->children[0], table);
+                if (lt && lt->kind == TYPE_ARRAY && strcmp(expr->value, "len") == 0) {
+                    /* #1286 `s.len` */
+                    free_type(lt);
+                    typecheck_expression(expr->children[0], table);
+                    set_node_type(expr, create_type(TYPE_INT));
+                    return 1;
+                }
                 if (lt && is_lane_type(lt->kind)) {
                     int idx = lane_accessor_index(lt->kind, expr->value);
                     TypeKind elem = lane_scalar_kind(lt->kind);
@@ -8867,6 +8976,38 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     Type* right_type = infer_type(right, table);
 
     AeTokenType operator = get_token_type_from_string(expr->value);
+
+    /* #1286: a slice meets a raw pointer. `s == null`, `s != p`, `s + n`
+     * and `s - n` all act on the slice's pointer (`s + n` scales by the
+     * element size, as the `T*` it used to be did); `a.buf = arr` / `x[i] =
+     * arr` into a `T[]` slot takes a slice. The wrapped child is
+     * re-read below so the rest of this function sees the new shape. */
+    {
+        int l_arr = left_type && left_type->kind == TYPE_ARRAY;
+        int r_arr = right_type && right_type->kind == TYPE_ARRAY;
+        int l_ptrish = left->type == AST_NULL_LITERAL || (left_type && left_type->kind == TYPE_PTR);
+        int r_ptrish = right->type == AST_NULL_LITERAL || (right_type && right_type->kind == TYPE_PTR);
+        int l_int = left_type && (left_type->kind == TYPE_INT || left_type->kind == TYPE_INT64);
+        int r_int = right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_INT64);
+        int changed = 0;
+        if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
+            if (l_arr && r_ptrish) changed |= slice_coerce_to_ptr(&expr->children[0]);
+            if (r_arr && l_ptrish) changed |= slice_coerce_to_ptr(&expr->children[1]);
+        } else if (operator == TOKEN_PLUS || operator == TOKEN_MINUS) {
+            if (l_arr && r_int) changed |= slice_coerce_to_ptr(&expr->children[0]);
+            if (r_arr && l_int) changed |= slice_coerce_to_ptr(&expr->children[1]);
+        } else if (operator == TOKEN_ASSIGN && left_type) {
+            changed |= slice_coerce_slot(&expr->children[1], left_type, 0);
+        }
+        if (changed) {
+            left = expr->children[0];
+            right = expr->children[1];
+            free_type(left_type);
+            free_type(right_type);
+            left_type = infer_type(left, table);
+            right_type = infer_type(right, table);
+        }
+    }
 
     // #340: equality with `none` / between optionals — `m == none`,
     // `none == m`, `a? == b?` all yield bool. Pin a bare `none` operand to the
@@ -10154,6 +10295,13 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     if (aa) free_type(aa);
                 }
             }
+
+            /* #1286: a `T[N]` array into a `T[]` parameter becomes a slice; a
+             * slice into a `ptr` parameter, or into any parameter of an
+             * extern C function, decays to its pointer. */
+            if (param_type)
+                slice_coerce_slot(&call->children[arg_slot], param_type,
+                                  symbol->node->type == AST_EXTERN_FUNCTION);
 
             if (!param_type || param_type->kind != TYPE_DURATION) continue;
 

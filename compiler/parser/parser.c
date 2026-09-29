@@ -2035,15 +2035,39 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             if (operator_starts_newline(parser, op)) {
                 break;
             }
-            // Array indexing: expr[index]
+            // Array indexing: expr[index] — or a sub-slice (#1286):
+            // expr[lo..hi], expr[lo..], expr[..hi], expr[..]. The range
+            // end is exclusive, as in `for i in 0..n`.
             advance_token(parser); // consume '['
-            ASTNode* index = parse_expression(parser);
-            if (!index) return NULL;
+            ASTNode* lo = NULL;
+            Token* after_open = peek_token(parser);
+            if (!(after_open && after_open->type == TOKEN_DOTDOT)) {
+                lo = parse_expression(parser);
+                if (!lo) return NULL;
+            }
+            Token* sep = peek_token(parser);
+            if (sep && sep->type == TOKEN_DOTDOT) {
+                advance_token(parser); // consume '..'
+                ASTNode* hi = NULL;
+                Token* after_dots = peek_token(parser);
+                if (!(after_dots && after_dots->type == TOKEN_RIGHT_BRACKET)) {
+                    hi = parse_expression(parser);
+                    if (!hi) return NULL;
+                }
+                if (!expect_token(parser, TOKEN_RIGHT_BRACKET)) return NULL;
+                const char* shape = lo ? (hi ? "lo..hi" : "lo..") : (hi ? "..hi" : "..");
+                ASTNode* slice = create_ast_node(AST_SLICE_EXPR, shape, op->line, op->column);
+                add_child(slice, expr);
+                if (lo) add_child(slice, lo);
+                if (hi) add_child(slice, hi);
+                expr = slice;
+                continue;
+            }
             if (!expect_token(parser, TOKEN_RIGHT_BRACKET)) return NULL;
 
             ASTNode* array_access = create_ast_node(AST_ARRAY_ACCESS, NULL, op->line, op->column);
             add_child(array_access, expr);  // array expression
-            add_child(array_access, index); // index expression
+            add_child(array_access, lo);    // index expression
             expr = array_access;
             continue;
         }

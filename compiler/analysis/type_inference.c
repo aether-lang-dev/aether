@@ -499,7 +499,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                          * emits `void* ids`, not an array declarator. An array
                          * LITERAL is not an identifier, so it still binds an
                          * array. */
-                        if (init_type->kind == TYPE_ARRAY &&
+                        if (type_is_sized_array(init_type) &&
                             node->children[0]->type == AST_IDENTIFIER) {
                             free_type(node->node_type);
                             node->node_type = create_type(TYPE_PTR);
@@ -665,8 +665,14 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 // Get the base expression's type
                 Type* base_type = base_expr->node_type;
                 
+                // #1286: `s.len` on a slice / array is an int.
+                if (base_type && base_type->kind == TYPE_ARRAY &&
+                    strcmp(node->value, "len") == 0) {
+                    free_type(node->node_type);
+                    node->node_type = create_type(TYPE_INT);
+                }
                 // Handle Message type member access
-                if (base_type && base_type->kind == TYPE_MESSAGE) {
+                else if (base_type && base_type->kind == TYPE_MESSAGE) {
                     // Message has fields: type (int), sender_id (int), payload_int (int), payload_ptr (void*)
                     if (strcmp(node->value, "type") == 0 || 
                         strcmp(node->value, "sender_id") == 0 || 
@@ -720,6 +726,19 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             }
             break;
             
+        case AST_SLICE_EXPR:
+            /* #1286 `s[lo..hi]`: a `T[]` over the base's elements. */
+            for (int i = 0; i < node->child_count; i++)
+                collect_constraints(node->children[i], ctx);
+            if (node->child_count >= 1 && node->children[0]) {
+                Type* bt = node->children[0]->node_type;
+                if (bt && bt->kind == TYPE_ARRAY && bt->element_type) {
+                    free_type(node->node_type);
+                    node->node_type = create_array_type(clone_type(bt->element_type), -1);
+                }
+            }
+            break;
+
         case AST_ARRAY_ACCESS:
             // Array access: arr[index]
             // Infer element type from array type

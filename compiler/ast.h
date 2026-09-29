@@ -124,6 +124,23 @@ typedef enum {
                             // Result type is TYPE_PTR with element_type
                             // = TYPE_STRUCT{name}; member-access codegen
                             // emits `->field` not `.field`.
+    AST_SLICE_EXPR,         // #1286 `s[lo..hi]` / `s[lo..]` / `s[..hi]` /
+                            // `s[..]`. children[0] is the base (a `T[]`
+                            // slice or a `T[N]` array); `value` spells which
+                            // bounds are present ("lo..hi", "lo..", "..hi",
+                            // ".."), and the present bounds follow the base
+                            // in that order. node_type is the element's
+                            // unsized TYPE_ARRAY: a non-owning slice sharing
+                            // the base's storage, no copy, no allocation.
+    AST_SLICE_FROM_ARRAY,   // #1286 coercion node the typechecker inserts
+                            // where a `T[N]` array (or `null`) flows into a
+                            // `T[]` slot: children[0] is the array, `value`
+                            // is its length. Lowers to aether_slice_make.
+    AST_SLICE_TO_PTR,       // #1286 coercion node inserted where a `T[]`
+                            // slice flows into a raw-pointer slot (a `ptr`
+                            // parameter, an extern's `T[]` parameter, `free`,
+                            // pointer arithmetic, a null comparison):
+                            // children[0] is the slice. Lowers to `.ptr`.
     AST_PTR_AS_ARRAY_CAST,  // `expr as T[]` — view a raw ptr as a typed
                             // C array (element_type[]). children[0] = expr
                             // (must be ptr-typed); node_type carries
@@ -549,6 +566,11 @@ typedef struct ASTNode {
 // Type functions
 Type* create_type(TypeKind kind);
 Type* create_array_type(Type* element_type, int size);
+/* #1286: is `t` a slice — an unsized `T[]` (array_size <= 0) that is not an
+ * enum-indexed `[E]T` (whose size is filled in by the typechecker)? */
+int type_is_slice(const Type* t);
+/* #1286: is `t` a fixed-size `T[N]` array (array_size > 0, or `[E]T`)? */
+int type_is_sized_array(const Type* t);
 Type* create_optional_type(Type* inner);   // #340 `T?`
 Type* create_actor_ref_type(Type* actor_type);
 Type* create_tuple_type(int count, ...);  // create_tuple_type(2, type_a, type_b)

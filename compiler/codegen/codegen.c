@@ -2453,7 +2453,8 @@ const char* get_c_type(Type* type) {
             if (type->array_size > 0) {
                 snprintf(buffer, 256, "%s[%d]", element_type, type->array_size);
             } else {
-                snprintf(buffer, 256, "%s*", element_type);
+                /* #1286: an unsized `T[]` is a slice, `{ ptr, len }`. */
+                snprintf(buffer, 256, "AetherSlice");
             }
             return buffer;
         }
@@ -5030,6 +5031,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <time.h>");
     print_line(gen, "#include <setjmp.h>");
     print_line(gen, "#include \"aether_panic.h\"");
+    print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
     /* Cons-cell sequence type — std.collections.string_seq.
      *
      * We include the header unconditionally rather than gating on

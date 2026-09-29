@@ -157,6 +157,7 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
         }
     }
     gen->extern_registry[idx].param_count = ext->child_count;
+    gen->extern_registry[idx].ret_type = ext->node_type;
     gen->extern_registry[idx].params = NULL;
     gen->extern_registry[idx].param_full = NULL;
     gen->extern_registry[idx].params_aether = NULL;
@@ -585,6 +586,12 @@ Type* lookup_extern_param_type(CodeGenerator* gen, const char* func_name, int pa
     return NULL;
 }
 
+Type* lookup_extern_return_type(CodeGenerator* gen, const char* func_name) {
+    int idx = find_extern_registry_index(gen, func_name);
+    if (idx < 0) return NULL;
+    return gen->extern_registry[idx].ret_type;
+}
+
 // Returns 1 if the nth parameter of `func_name` was declared with the
 // `@aether` annotation (`name: @aether string`), 0 otherwise. Used by
 // call-site codegen to suppress the aether_string_data() unwrap on
@@ -804,6 +811,14 @@ void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
                 // it's already in scope here. Issue #271.
                 fprintf(gen->output, "%s", get_c_type(ext->node_type));
                 break;
+            case TYPE_ARRAY:
+                /* #1286: a C function hands back a bare `T*`; the call
+                 * site wraps it into an (unbounded) slice view. */
+                if (type_is_slice(ext->node_type) && ext->node_type->element_type)
+                    fprintf(gen->output, "%s*", get_c_type(ext->node_type->element_type));
+                else
+                    generate_type(gen, ext->node_type);
+                break;
             default:
                 generate_type(gen, ext->node_type);
                 break;
@@ -865,6 +880,13 @@ void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
                          * return. The typedef is synthesized in codegen.c's
                          * pre-scan, so it's already in scope here. */
                         fprintf(gen->output, "%s", get_c_type(param->node_type));
+                        break;
+                    case TYPE_ARRAY:
+                        /* #1286: C sees `T*`; the call site passes `.ptr`. */
+                        if (type_is_slice(param->node_type) && param->node_type->element_type)
+                            fprintf(gen->output, "%s*", get_c_type(param->node_type->element_type));
+                        else
+                            generate_type(gen, param->node_type);
                         break;
                     default:
                         generate_type(gen, param->node_type);
@@ -2001,8 +2023,11 @@ static void generate_extern_struct_field(CodeGenerator* gen, ASTNode* field,
             fprintf(gen->output, "%s %s[%d];\n", element_type, field->value, field->node_type->array_size);
         } else if (is_extern && is_last_in_parent) {
             fprintf(gen->output, "%s %s[];\n", element_type, field->value);
-        } else {
+        } else if (is_extern) {
             fprintf(gen->output, "%s* %s;\n", element_type, field->value);
+        } else {
+            /* #1286: an Aether struct's `T[]` field is a slice. */
+            fprintf(gen->output, "AetherSlice %s;\n", field->value);
         }
     } else if (field->bit_width > 0) {
         generate_type(gen, field->node_type);

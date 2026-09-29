@@ -309,6 +309,53 @@ main() {
 4 5 0
 ```
 
+### Slices (`T[]`)
+
+A **slice** is a non-owning view over a run of elements: one value carrying a pointer *and* a length (`{ ptr, len }`, a fat pointer). It is spelled `T[]`, the unsized array type. Where a fixed `T[N]` array owns its storage, a slice only points into someone else's, so passing one costs two words and copies nothing.
+
+```aether,run
+sum(xs: int[]) -> int {
+    total = 0
+    for i in 0..xs.len {
+        total = total + xs[i]
+    }
+    return total
+}
+
+main() {
+    arr = [10, 20, 30, 40, 50]
+    println("${sum(arr)}")          // a T[N] array flows into a T[] parameter with its length
+    mid = arr[1..4]                 // a sub-slice: shares arr's storage, no copy
+    mid[0] = 99
+    println("${mid.len} ${arr[1]} ${sum(mid)}")
+    println("${arr[..2].len} ${arr[3..].len} ${arr[..].len}")
+}
+```
+```output
+150
+3 99 169
+2 2 5
+```
+
+- **`s.len`** is the element count, an `int`.
+- **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer.
+- **`s[lo..hi]`** is the half-open sub-slice `[lo, hi)`, checked the same way (`lo <= hi <= s.len`). `s[lo..]` runs to the end, `s[..hi]` from the start, `s[..]` is the whole thing. The base may be a slice or a `T[N]` array; the result is always a `T[]` over the *same* elements, so a write through it is visible through the original.
+- **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null` converts to the empty slice (`.len` is `0`, and it compares equal to `null`).
+- **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). The length is dropped at that boundary; nothing else about the extern ABI changes.
+- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
+- A slice does not own its elements. It is valid for exactly as long as the storage it views: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it.
+
+**Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
+
+```aether,fragment
+extern malloc(sz: long) -> ptr
+raw = malloc(64)
+view = raw as byte[]            // view.len == -1, view[i] is unchecked
+bytes = view[0..64]             // bytes.len == 64, bytes[i] is checked
+```
+
+In C the slice is `AetherSlice { void* ptr; uint64_t len; }` (`runtime/aether_slice.h`). A `T[]` parameter or return of an *Aether* function is that struct by value; a `T[]` parameter or return of an `extern` C function, and a `T[]` field of an `extern struct`, stay the bare `T*` C declares. See [c-interop.md](c-interop.md#typed-array-view-expr-as-t) for the boundary rules.
+
 ### Sequence Types (`*StringSeq`)
 
 `*StringSeq` is a cons-cell linked list of strings, Erlang/Elixir-shaped, with O(1) head/tail/cons/length and refcount-based structural sharing. Empty list is the `NULL` pointer; each cell carries a cached length.
@@ -393,7 +440,7 @@ Aether has **no general-purpose cast operator**. The `as` keyword is reserved fo
 - `expr as *StructName` pointer-overlay struct cast (a leading `*` then a struct name; see [§ Pointer-to-struct type](#pointer-to-struct-type-structname-and-expr-as-structname) below)
 - `expr as fn(T1, T2, ...) -> R` function-pointer cast (call a stored pointer with type checking; see [§ Function-pointer parameters](#function-pointer-parameters-fnt1-t2---r) below)
 - `expr as Name` where `Name` is a named function-pointer type (`type Name = fn(...) -> R` or `cfn Name(...) -> R`), the same function-pointer cast under a name (see [§ Named C function-pointer types](#named-c-function-pointer-types-type-name--fnt1-t2---r) below)
-- `expr as T[]` typed-array view cast (reinterpret a raw pointer as a `T[]`)
+- `expr as T[]` typed-array view cast (reinterpret a raw pointer as an unbounded `T[]` slice; see [§ Slices](#slices-t))
 
 After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too. Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
 

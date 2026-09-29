@@ -224,3 +224,4 @@ tests/integration/http_query_param_multi/
 tests/integration/http_serve_static_range/
 tests/integration/http_server_h2/
 tests/integration/http_sse_upgrade/
+tests/integration/slice_bounds/
