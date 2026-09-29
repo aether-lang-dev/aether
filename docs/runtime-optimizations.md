@@ -484,24 +484,29 @@ When the codegen is in a main-function context (`gen->current_actor == NULL`), i
 Detects `while` loops of the form:
 
 ```aether,fragment
-while counter < N {
-    acc1 = acc1 + C1   // loop-invariant addend
-    acc2 = acc2 + C2
-    counter = counter + step
+while counter < N {          // or <=
+    acc1 = acc1 + C1         // loop-invariant addend
+    acc2 = acc2 + counter    // or counter * K: a linear sum
+    counter = counter + step // a positive integer literal
 }
 ```
 
-And replaces them with O(1) closed-form assignments:
+and replaces them with the closed form. With `c0` the counter on entry and `T` the trip count, `ceil((N - c0) / step)` for `<` and `floor((N - c0) / step) + 1` for `<=`:
 
 ```c
 if ((counter) < (N)) {
-    acc1 = acc1 + (C1) * ((N) - counter);
-    acc2 = acc2 + (C2) * ((N) - counter);
-    counter = (N);
+    /* T computed from the distance N - c0 and the step */
+    acc1 = acc1 + C1 * T;
+    acc2 = acc2 + (T*c0 + step * T*(T-1)/2);   /* T*(T+1)/2 if acc2's statement follows the increment */
+    counter = c0 + step * T;
 }
 ```
 
-The guard prevents the collapsed form from running when the loop would not have executed at all (counter ≥ bound). The formula `(N - counter)` computes remaining trip count correctly for any initial counter value.
+The guard keeps everything unchanged when the loop would not run at all. `N` can be any side-effect-free expression, runtime values included, and the counter can start anywhere.
+
+**Only integer loops are collapsed.** The counter, the bound, every accumulator and every addend must be `int` or `long`. Those wrap (`-fwrapv`), and the closed form is computed in `uint64_t`, where each step is exact modulo 2^64, then narrowed to each variable's type, so the result is the loop's to the bit, wrapped accumulators included. A float series is left as a loop: repeated addition rounds at every step and a product does not, so no closed form gives the same answer. Before #2271 a float loop went through `(int64_t)` and ended at its bound (`while a < 0.0 { a = a + 6.28 }` from -0.51 left `0.0`), and an integer step that did not divide the distance stopped at the bound as well.
+
+**The one wrap the closed form cannot follow** is the counter's own last step: when `c0 + step*T` passes the counter type's maximum, the loop wraps round and carries on. That is checked at run time, and the loop then runs as written.
 
 **What this handles that the C compiler cannot:**
 
@@ -514,12 +519,13 @@ The guard prevents the collapsed form from running when the loop would not have 
 For constant-bound loops the Aether collapse is redundant with clang's scalar evolution pass, so both emit equivalent O(1) code. The unique value is for *variable-bound* loops, which clang cannot analyze without the semantics that Aether's type system provides (no aliasing, no pointers, no side effects in the body).
 
 **Detection requirements (all must hold):**
-1. Condition is `var < bound` or `var <= bound`
+1. Condition is `var < bound` or `var <= bound`, both `int` or `long`
 2. Every body statement is `target = target + expr` (no other forms)
-3. One statement increments the counter variable by a positive literal step
-4. All addend expressions are loop-invariant (no reference to counter or other modified variables)
-5. Bound expression is not modified by any loop body statement
-6. No function calls or actor sends in the loop body (sends get batch-send treatment instead)
+3. Exactly one statement increments the counter, by a positive integer literal
+4. Every accumulator and addend is `int` or `long`
+5. Invariant addends do not reference the counter or any other modified variable
+6. Bound expression is not modified by any loop body statement
+7. No function calls or actor sends in the loop body (sends get batch-send treatment instead)
 
 **Pure counter elimination** is a subcase handled automatically (zero accumulators):
 
@@ -527,7 +533,7 @@ For constant-bound loops the Aether collapse is redundant with clang's scalar ev
 i = 0
 while i < n { i = i + 1 }   // n can be a runtime variable
 ```
-→ `if ((i) < (n)) { i = (n); }` clang can collapse only when `n` is a compile-time constant.
+→ `i` becomes `i + T` without a loop; clang can collapse this only when `n` is a compile-time constant.
 
 **Reported in optimization stats:**
 ```
@@ -550,18 +556,18 @@ while j < N {
 }
 ```
 
-Replaced with the **triangular-number closed form**:
+Replaced with the closed form of the sum of the values the statement sees:
 
 ```c
 if ((j) < (N)) {
-    total = total + ((N) * ((N) - 1) / 2 - j * (j - 1) / 2);
-    j = (N);
+    total = total + (T*j0 + step * T*(T-1)/2);
+    j = j0 + step * T;
 }
 ```
 
-This is the sum Σ(i = j₀ to N−1) i = N(N−1)/2 − j₀(j₀−1)/2.
+That is Σ(k = 0 … T−1) (j₀ + k·step). When the accumulator's statement comes after the increment it sees the stepped value, and the sum runs k = 1 … T, so `T*(T+1)/2`. Any positive integer step works. `T*(T±1)/2` halves whichever factor is even, so it stays exact modulo 2^64 without a 128-bit product.
 
-Also handles a scaled counter: `total = total + j * 3` → scale factor applied to the formula.
+Also handles a scaled counter: `total = total + j * 3` multiplies the sum by 3. The loop computes `j * 3` in the product's own type, so a scaled sum is collapsed only when that product is at least as wide as the accumulator (an `int` product feeding a `long` accumulator could wrap where the sum does not).
 
 **Why clang cannot do this:** LLVM's Scalar Evolution (SCEV) identifies induction variables but does not synthesize the triangular-number closed form in the code generator. Polly (an optional LLVM extension, rarely enabled) can do affine loop transformations but is not part of the standard `-O2` pipeline.
 

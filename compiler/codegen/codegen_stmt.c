@@ -5,6 +5,8 @@
 #include "../analysis/typechecker.h"
 #include "../analysis/hoist.h"
 #include "../aether_error.h"
+#include <limits.h>
+#include <stdint.h>
 
 // Is `name` the variable name of a known closure? If yes, also returns the
 // closure id via *out_id. Used by return-site Bug B protection.
@@ -73,23 +75,40 @@ static void collect_returned_closures(CodeGenerator* gen, ASTNode* expr,
 // ARITHMETIC SERIES LOOP COLLAPSE
 //
 // Detects while loops of the form:
-//   while counter < bound {
+//   while counter < bound {              // or <=
 //       acc1 = acc1 + invariant_expr1    // any number of accumulators
-//       acc2 = acc2 + invariant_expr2
-//       counter = counter + step         // must be a positive literal step
+//       acc2 = acc2 + counter            // or counter * C: a linear sum
+//       counter = counter + step         // a positive integer literal
 //   }
 //
-// And replaces them with closed-form O(1) expressions:
-//   acc1 = acc1 + invariant_expr1 * (bound - counter);
-//   acc2 = acc2 + invariant_expr2 * (bound - counter);
-//   counter = bound;
+// and replaces them with the closed form. With c0 the counter on entry and
+// T the trip count,
+//   T = ceil((bound - c0) / step)          for <
+//   T = floor((bound - c0) / step) + 1     for <=
+// the loop leaves
+//   acc     = acc + invariant * T
+//   acc     = acc + C * (T*c0 + step * T*(T-1)/2)
+//             (T*(T+1)/2 when the accumulator follows the increment and so
+//             adds the stepped value)
+//   counter = c0 + step * T
 //
-// Works for any starting value of counter and any bound expression (even
-// runtime variables) — the formula (bound - counter) computes remaining
-// iterations correctly regardless of initial state.
+// Works for any starting value and any bound expression, runtime ones
+// included; a guard keeps the accumulators unchanged when the loop would
+// not run at all.
 //
-// Also handles "counter <= bound" (adds one extra iteration).
-// Also handles step != 1 via division.
+// Only integer loops are collapsed: an `int` or `long` counter, bound,
+// accumulators and addends. Those wrap (-fwrapv), and every step of the
+// closed form is exact modulo 2^64, so the result is the loop's to the
+// bit. A float series is left alone: repeated addition rounds at every step
+// and the product does not. (Before #2271 a float loop went through
+// (int64_t) and ended at its bound: `while a < 0.0 { a = a + 6.28 }` from
+// -0.51 left 0.0, and an integer step that did not divide the distance was
+// truncated the same way.)
+//
+// The one wrap the closed form cannot follow is the counter's own last
+// step: when c0 + step*T passes the counter type's maximum, the loop wraps
+// round and carries on. That is checked at run time, and the loop then
+// runs as written.
 // ============================================================================
 
 #define MAX_SERIES_ACCUMULATORS 16
@@ -167,10 +186,35 @@ static int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
 }
 
 
+/* Bit width of an integer the series collapse is exact for: Aether's
+ * wrapping `int` (C int) and `long` (int64_t); 0 for anything else. */
+static int series_int_width(const ASTNode* n) {
+    if (!n || !n->node_type) return 0;
+    if (n->node_type->kind == TYPE_INT) return 32;
+    if (n->node_type->kind == TYPE_INT64) return 64;
+    return 0;
+}
+
+/* The value of a literal written in plain decimal digits; 0 when the literal
+ * is anything else (a float, another base, a separator) or does not fit. */
+static int series_decimal_literal(const ASTNode* n, unsigned long long* out) {
+    if (!n || n->type != AST_LITERAL || !n->value || !n->value[0]) return 0;
+    unsigned long long v = 0;
+    for (const char* c = n->value; *c; c++) {
+        if (*c < '0' || *c > '9') return 0;
+        unsigned d = (unsigned)(*c - '0');
+        if (v > (ULLONG_MAX - d) / 10) return 0;
+        v = v * 10 + d;
+    }
+    *out = v;
+    return 1;
+}
+
 // Try to detect and emit a collapsed arithmetic series loop.
 // Returns 1 if the loop was collapsed and emitted; 0 otherwise (caller emits normally).
 static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     if (!while_node || while_node->child_count < 2) return 0;
+    if (gen->series_collapse_off) return 0;
 
     ASTNode* condition = while_node->children[0];
     ASTNode* body      = while_node->children[1];
@@ -187,6 +231,10 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
 
     if (!cond_left || cond_left->type != AST_IDENTIFIER || !cond_left->value) return 0;
     const char* counter_var = cond_left->value;
+
+    // Integer counter and bound only: the closed form is exact for nothing else.
+    int counter_width = series_int_width(cond_left);
+    if (!counter_width || !series_int_width(cond_right)) return 0;
 
     // Bound must not have side effects
     if (codegen_expr_has_side_effects(cond_right)) return 0;
@@ -209,13 +257,15 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     if (stmt_count == 0) return 0;
 
     // 3. Parse each statement
-    const char* acc_vars[MAX_SERIES_ACCUMULATORS];
-    ASTNode*    acc_addends[MAX_SERIES_ACCUMULATORS];
-    int         acc_is_linear[MAX_SERIES_ACCUMULATORS];   // 1 = addend is counter (linear sum)
-    double      acc_linear_scale[MAX_SERIES_ACCUMULATORS]; // scale for counter*C pattern
-    int         acc_count        = 0;
-    int         found_counter    = 0;
-    double      counter_step     = 1.0;
+    const char*        acc_vars[MAX_SERIES_ACCUMULATORS];
+    ASTNode*           acc_addends[MAX_SERIES_ACCUMULATORS];
+    int                acc_width[MAX_SERIES_ACCUMULATORS];
+    int                acc_is_linear[MAX_SERIES_ACCUMULATORS];  // addend is counter or counter*C
+    unsigned long long acc_scale[MAX_SERIES_ACCUMULATORS];      // C for a linear addend
+    int                acc_stmt[MAX_SERIES_ACCUMULATORS];       // position in the body
+    int                acc_count   = 0;
+    int                counter_idx = -1;
+    unsigned long long counter_step = 0;
 
     // Also collect the set of target variable names for later checks.
     const char* stmt_targets[MAX_SERIES_ACCUMULATORS + 1];  // +1 for counter
@@ -249,25 +299,34 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
                             rhs_right->value && strcmp(rhs_right->value, target) == 0;
         if (!left_is_self && !right_is_self) return 0;
 
+        ASTNode* self   = left_is_self ? rhs_left : rhs_right;
         ASTNode* addend = left_is_self ? rhs_right : rhs_left;
+        if (!addend) return 0;
 
         // Track this target for bound-mutation check later
-        if (stmt_target_count < MAX_SERIES_ACCUMULATORS + 1)
-            stmt_targets[stmt_target_count++] = target;
+        if (stmt_target_count >= MAX_SERIES_ACCUMULATORS + 1) return 0;
+        stmt_targets[stmt_target_count++] = target;
 
         if (strcmp(target, counter_var) == 0) {
-            // Counter increment: must be a positive literal step
-            if (addend->type != AST_LITERAL || !addend->value) return 0;
-            counter_step = atof(addend->value);
-            if (counter_step <= 0.0) return 0;
-            found_counter = 1;
+            // Counter increment: one of them, by a positive integer literal
+            // that fits the counter's type.
+            if (counter_idx >= 0) return 0;
+            unsigned long long step;
+            if (!series_decimal_literal(addend, &step) || step == 0) return 0;
+            if (step > (counter_width == 32 ? (unsigned long long)INT32_MAX
+                                             : (unsigned long long)INT64_MAX)) return 0;
+            counter_step = step;
+            counter_idx = i;
         } else {
-            // Accumulator: addend is either loop-invariant (constant series)
-            // or the counter variable itself / counter*C (linear sum: Σ i = n*(n-1)/2).
+            // Accumulator: an integer variable, adding either a loop-invariant
+            // integer (constant series) or the counter itself / counter*C
+            // (linear sum).
             if (acc_count >= MAX_SERIES_ACCUMULATORS) return 0;
+            int width = series_int_width(self);
+            if (!width) return 0;
 
             int addend_is_counter = 0;
-            double linear_scale = 1.0;
+            unsigned long long scale = 1;
 
             if (addend->type == AST_IDENTIFIER && addend->value &&
                 strcmp(addend->value, counter_var) == 0) {
@@ -280,41 +339,37 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
                 ASTNode* mr = addend->children[1];
                 if (ml && ml->type == AST_IDENTIFIER && ml->value &&
                     strcmp(ml->value, counter_var) == 0 &&
-                    mr && mr->type == AST_LITERAL && mr->value) {
+                    series_decimal_literal(mr, &scale)) {
                     addend_is_counter = 1;
-                    linear_scale = atof(mr->value);
                 } else if (mr && mr->type == AST_IDENTIFIER && mr->value &&
                            strcmp(mr->value, counter_var) == 0 &&
-                           ml && ml->type == AST_LITERAL && ml->value) {
+                           series_decimal_literal(ml, &scale)) {
                     addend_is_counter = 1;
-                    linear_scale = atof(ml->value);
                 }
+                // The loop computes i * C in the product's own type, which
+                // wraps there. That matches the closed form modulo 2^width
+                // only when the product is at least as wide as the
+                // accumulator.
+                if (addend_is_counter && series_int_width(addend) < width) return 0;
             }
 
-            if (addend_is_counter) {
-                acc_vars[acc_count]          = target;
-                acc_addends[acc_count]       = addend;
-                acc_is_linear[acc_count]     = 1;
-                acc_linear_scale[acc_count]  = linear_scale;
-            } else {
-                // Regular invariant addend: must not reference counter
+            if (!addend_is_counter) {
+                // Invariant addend: an integer that does not depend on the counter
+                if (!series_int_width(addend)) return 0;
                 if (expr_references_var(addend, counter_var)) return 0;
                 if (codegen_expr_has_side_effects(addend)) return 0;
-                acc_vars[acc_count]          = target;
-                acc_addends[acc_count]       = addend;
-                acc_is_linear[acc_count]     = 0;
-                acc_linear_scale[acc_count]  = 0.0;
             }
+            acc_vars[acc_count]      = target;
+            acc_addends[acc_count]   = addend;
+            acc_width[acc_count]     = width;
+            acc_is_linear[acc_count] = addend_is_counter;
+            acc_scale[acc_count]     = scale;
+            acc_stmt[acc_count]      = i;
             acc_count++;
         }
     }
 
-    if (!found_counter) return 0;
-
-    // Linear sums require step = 1 (the triangular formula doesn't generalize cleanly to other steps).
-    for (int i = 0; i < acc_count; i++) {
-        if (acc_is_linear[i] && counter_step != 1.0) return 0;
-    }
+    if (counter_idx < 0) return 0;
 
     // 3b. Bound-mutation check: if any loop body statement assigns to a variable
     // referenced in the bound expression, the bound changes per-iteration.
@@ -333,76 +388,93 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
         }
     }
 
-    // 4. Emit collapsed form, wrapped in a guard matching the original condition.
-    // The guard is needed so that when counter >= bound (loop would not execute
-    // at all), the accumulators are left unchanged — without it, the formula
-    // (bound - counter) is zero or negative and could corrupt the accumulator.
+    // 4. Emit the closed form, guarded by the loop's own condition so a loop
+    // that would not run leaves everything unchanged. Inside, the trip count
+    // is at least 1. All arithmetic is in uint64_t, where it is exact modulo
+    // 2^64; each result is then narrowed to its variable's type, which is
+    // what the loop's wrapping additions produce.
+    const char* counter_ctype = counter_width == 32 ? "int" : "int64_t";
+    const char* counter_max   = counter_width == 32 ? "INT32_MAX" : "INT64_MAX";
+
     print_indent(gen);
     fprintf(gen->output, "if ((%s) %s (", counter_var, is_lte ? "<=" : "<");
     generate_expression(gen, cond_right);
     fprintf(gen->output, ")) {\n");
     indent(gen);
 
-    // Emit each accumulator update.
-    // Constant addend: acc = acc + addend * trip_count
-    // Linear addend:   acc = acc + scale * (bound*(bound±1)/2 - counter*(counter-1)/2)
+    // Distance to the bound, and how many steps the counter has before it
+    // passes its type's maximum.
+    print_indent(gen);
+    fprintf(gen->output, "uint64_t _ae_sd = (uint64_t)(int64_t)(");
+    generate_expression(gen, cond_right);
+    fprintf(gen->output, ") - (uint64_t)(int64_t)%s;\n", counter_var);
+    print_indent(gen);
+    fprintf(gen->output, "uint64_t _ae_sh = ((uint64_t)%s - (uint64_t)(int64_t)%s) / %lluULL;\n",
+            counter_max, counter_var, counter_step);
+
+    // The trip count, when the counter's last step does not wrap.
+    print_indent(gen);
+    if (is_lte) {
+        fprintf(gen->output, "if (_ae_sd / %lluULL < _ae_sh) {\n", counter_step);
+    } else {
+        fprintf(gen->output, "if (_ae_sd / %lluULL + (_ae_sd %% %lluULL != 0) <= _ae_sh) {\n",
+                counter_step, counter_step);
+    }
+    indent(gen);
+    print_indent(gen);
+    if (is_lte) {
+        fprintf(gen->output, "uint64_t _ae_sn = _ae_sd / %lluULL + 1;\n", counter_step);
+    } else {
+        fprintf(gen->output, "uint64_t _ae_sn = _ae_sd / %lluULL + (_ae_sd %% %lluULL != 0);\n",
+                counter_step, counter_step);
+    }
+
     int emitted_linear = 0;
     for (int i = 0; i < acc_count; i++) {
+        const char* acc_ctype = acc_width[i] == 32 ? "int" : "int64_t";
         print_indent(gen);
         if (acc_is_linear[i]) {
-            // Triangular-number closed form:
-            //   Σ(j = counter .. bound-1) j  =  bound*(bound-1)/2 - counter*(counter-1)/2
-            //   Σ(j = counter .. bound)   j  =  bound*(bound+1)/2 - counter*(counter-1)/2
-            if (acc_linear_scale[i] != 1.0) {
-                fprintf(gen->output, "%s = %s + %g * (", acc_vars[i], acc_vars[i], acc_linear_scale[i]);
-            } else {
-                fprintf(gen->output, "%s = %s + (", acc_vars[i], acc_vars[i]);
-            }
-            // Cast to int64_t to prevent overflow for large N.
-            // e.g., N=100000: N*(N-1)/2 = 4999950000 which exceeds int32 max.
-            fprintf(gen->output, "(int64_t)(");
-            generate_expression(gen, cond_right);
-            if (is_lte) {
-                fprintf(gen->output, ") * ((int64_t)(");
-                generate_expression(gen, cond_right);
-                fprintf(gen->output, ") + 1)");
-            } else {
-                fprintf(gen->output, ") * ((int64_t)(");
-                generate_expression(gen, cond_right);
-                fprintf(gen->output, ") - 1)");
-            }
-            fprintf(gen->output, " / 2 - (int64_t)%s * ((int64_t)%s - 1) / 2);\n", counter_var, counter_var);
+            // Sum of the counter values the statement sees: c0 + k*step for
+            // k = 0..T-1, or k = 1..T when it follows the increment.
+            //   T*c0 + step * T*(T-1)/2     or     T*c0 + step * T*(T+1)/2
+            // T*(T±1)/2 halves whichever factor is even, so it is exact
+            // modulo 2^64 without a 128-bit product.
+            int after = acc_stmt[i] > counter_idx;
+            const char* tri = after
+                ? "(_ae_sn % 2 == 0 ? (_ae_sn / 2) * (_ae_sn + 1) : _ae_sn * (_ae_sn / 2 + 1))"
+                : "(_ae_sn % 2 == 0 ? (_ae_sn / 2) * (_ae_sn - 1) : _ae_sn * ((_ae_sn - 1) / 2))";
+            fprintf(gen->output,
+                    "%s = (%s)((uint64_t)(int64_t)%s + %lluULL * ((uint64_t)(int64_t)%s * _ae_sn + %lluULL * ",
+                    acc_vars[i], acc_ctype, acc_vars[i], acc_scale[i], counter_var, counter_step);
+            fputs(tri, gen->output);
+            fprintf(gen->output, "));\n");
             emitted_linear = 1;
         } else {
-            // Constant addend: multiply by trip count (int64 to prevent overflow)
-            fprintf(gen->output, "%s = %s + (int64_t)(", acc_vars[i], acc_vars[i]);
+            // Invariant addend: added once per trip.
+            fprintf(gen->output, "%s = (%s)((uint64_t)(int64_t)%s + (uint64_t)(int64_t)(",
+                    acc_vars[i], acc_ctype, acc_vars[i]);
             generate_expression(gen, acc_addends[i]);
-            fprintf(gen->output, ") * (");
-            if (counter_step == 1.0) {
-                fprintf(gen->output, "(int64_t)(");
-                generate_expression(gen, cond_right);
-                fprintf(gen->output, ") - %s", counter_var);
-            } else {
-                fprintf(gen->output, "((int64_t)(");
-                generate_expression(gen, cond_right);
-                fprintf(gen->output, ") - %s) / %g", counter_var, counter_step);
-            }
-            if (is_lte) {
-                fprintf(gen->output, " + 1");
-            }
-            fprintf(gen->output, ");\n");
+            fprintf(gen->output, ") * _ae_sn);\n");
         }
     }
 
-    // counter = bound (or bound + step for <=)
+    // counter = c0 + step * T
     print_indent(gen);
-    fprintf(gen->output, "%s = (", counter_var);
-    generate_expression(gen, cond_right);
-    if (is_lte) {
-        fprintf(gen->output, ") + %g;\n", counter_step);
-    } else {
-        fprintf(gen->output, ");\n");
-    }
+    fprintf(gen->output, "%s = (%s)((uint64_t)(int64_t)%s + _ae_sn * %lluULL);\n",
+            counter_var, counter_ctype, counter_var, counter_step);
+
+    unindent(gen);
+    print_indent(gen);
+    fprintf(gen->output, "} else {\n");
+    indent(gen);
+    // The counter would wrap on its last step: run the loop as written.
+    gen->series_collapse_off++;
+    print_indent(gen);
+    generate_statement(gen, while_node);
+    gen->series_collapse_off--;
+    unindent(gen);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
 
     unindent(gen);
     print_indent(gen);
