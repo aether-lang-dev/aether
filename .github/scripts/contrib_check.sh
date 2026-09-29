@@ -37,6 +37,14 @@ LSAN_SUPP="$(pwd)/.github/scripts/lsan-contrib.supp"
 LSAN_KEEP_SRC="$(pwd)/.github/scripts/lsan_keep_modules.c"
 LSAN_KEEP_SO="$(pwd)/build/contrib-check/lsan_keep_modules.so"
 
+# On macOS a test that dies from a signal leaves a crash report behind, and the
+# exit code alone ("exit 139") does not say where it died. The helper prints
+# the report's crashed thread into the log (#2287).
+CRASH_REPORT=""
+if [ "$(uname -s)" = "Darwin" ] && command -v python3 >/dev/null 2>&1; then
+  CRASH_REPORT="python3 $(pwd)/.github/scripts/print_crash_report.py"
+fi
+
 # A hard timeout per test, so a hung server test can never wedge the run:
 # GNU coreutils `timeout` on Linux and MSYS2, `gtimeout` on macOS (coreutils
 # via brew), none on a macOS without coreutils, where tests run unbounded.
@@ -377,6 +385,7 @@ for entry in "${TESTS[@]}"; do
     [ "$top" = "build" ] && continue
     ln -s "$(pwd)/$top" "$rundir/$top" 2>/dev/null || true
   done
+  started=$(date +%s)
   if ( cd "$rundir" && env $lsan_env $TO $runner > "$log" 2>&1 < /dev/null ); then
     if [ "$use_vg" = "1" ]; then
       printf '  PASS  %-22s (run + valgrind)\n' "$label"
@@ -410,6 +419,10 @@ for entry in "${TESTS[@]}"; do
       # Loader errors and crash diagnostics need not contain "fail".
       # Keep the last completed spec and the actual termination message.
       tail -40 "$log"
+      # Killed by a signal (exit 128+N): print where, where the OS recorded it.
+      if [ "$code" -gt 128 ] && [ -n "$CRASH_REPORT" ]; then
+        $CRASH_REPORT "$(basename "$out")" "$started"
+      fi
     fi
     rc=1
   fi
