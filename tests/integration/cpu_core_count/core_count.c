@@ -51,6 +51,18 @@ static int mock_sysctl(int *mib, unsigned n, void *out, size_t *len, void *in, s
     return 0;
 }
 #define sysctl mock_sysctl
+// cpu_recommend_cores' macOS fallback (when the detector reports < 1 core)
+// asks sysctlbyname("hw.perflevel0.physicalcpu"). Left real it would read
+// the host's P-core count, so the "OS query failed -> 1" case would see
+// live hardware instead of the mock. Fail it in lockstep with mock_sysctl.
+static int mock_sysctlbyname(const char *name, void *out, size_t *len,
+                             void *in, size_t inlen) {
+    (void)name; (void)len; (void)in; (void)inlen;
+    if (online_count < 1) return -1;
+    *(int *)out = online_count;
+    return 0;
+}
+#define sysctlbyname mock_sysctlbyname
 #elif defined(_SC_NPROCESSORS_ONLN)
 static long mock_sysconf(int name) {
     assert(name == _SC_NPROCESSORS_ONLN);

@@ -64,7 +64,12 @@ static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t* eax, uint32_t* ebx,
 #elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
     __cpuid_count(leaf, subleaf, *eax, *ebx, *ecx, *edx);
 #else
-    // ARM or other architecture - return zeros
+    // ARM or other architecture - return zeros. leaf/subleaf are x86-only;
+    // mark them used so a strict -Wunused-parameter build (a consumer that
+    // #includes this file with -Werror -Wextra, like the cpu_core_count
+    // test) compiles on non-x86.
+    (void)leaf;
+    (void)subleaf;
     *eax = 0;
     *ebx = 0;
     *ecx = 0;
