@@ -173,18 +173,22 @@ static inline int AETHER_HOT aether_send_message_sync(ActorBase* actor, void* me
     // mode meanwhile (a send from a std.worker or std.http thread, #2083),
     // and the scheduler threads it starts take this lock before stepping,
     // so they can neither step the actor while it is on this stack nor
-    // pick the stack-allocated payload out of the mailbox and free it. If
-    // the mode went off while we waited for the lock, the payload must be
-    // a heap copy: hand the send back to the caller's standard path.
+    // pick the stack-allocated payload out of the mailbox and free it.
     // (The self-send transition inside step() used to set the lock
     // itself; it finds it already held.)
     int locked = aether_inline_lock_acquire(actor);
-    if (locked && !aether_main_thread_mode_active()) {
-        aether_inline_lock_release(actor);
+    // The mode check and the enqueue are one step with respect to leaving
+    // the mode, so this message is the only one in the mailbox and the
+    // step below is the one that takes it (#2266). If the mode ended, the
+    // payload must be a heap copy: hand the send back to the caller's
+    // standard path.
+    if (!aether_main_mode_enqueue(actor, msg)) {
+        if (locked) aether_inline_lock_release(actor);
         return 0;
     }
-#endif
+#else
     mailbox_send(&actor->mailbox, msg);
+#endif
 
 #if AETHER_HAS_THREADS
     // Tell aether_free_message to skip freeing the initial (stack-allocated) message.
@@ -242,17 +246,16 @@ void aether_send_message(void* actor_ptr, void* message_data, size_t message_siz
         if (g_sync_step_actor != NULL) {
             // Self-send from a handler: disable main-thread mode so the
             // scheduler takes over message processing for this actor.
-            atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_release);
-            g_aether_config.main_actor = NULL;
-            atomic_store_explicit(&actor->main_thread_only, 0, memory_order_release);
             // Hold step_lock while the main thread's step() is still on the
-            // call stack.  Without this, the scheduler threads (started below)
-            // could call step() concurrently — a data race on actor state.
-            // aether_send_message_sync releases the lock after step() returns.
+            // call stack.  Without this, the scheduler threads (started by
+            // the switch below) could call step() concurrently — a data
+            // race on actor state. aether_send_message_sync releases the
+            // lock after step() returns.
             atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire);
-            // Start scheduler threads if they were never created (main-thread
-            // mode skips thread creation in scheduler_start()).
-            scheduler_ensure_threads_running();
+            // The switch every other path makes: under the lock an inline
+            // enqueue holds (#2266), and it starts the scheduler threads
+            // that main-thread mode never created.
+            aether_leave_main_thread_mode();
             // Fall through to the standard multi-actor send path below.
         } else if (!aether_on_main_mode_thread()) {
             // A thread that is not main (a std.worker / std.http pool
