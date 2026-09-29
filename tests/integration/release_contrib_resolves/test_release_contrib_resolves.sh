@@ -16,7 +16,14 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-AE="$ROOT/build/ae"
+# On the MSYS2 Windows leg the binaries are ae.exe / aetherc.exe. The sweep
+# passes EXE_EXT; fall back to detecting the suffix from what is on disk so
+# the test does not depend on that being exported.
+EXE="${EXE_EXT:-}"
+if [ -z "$EXE" ] && [ ! -x "$ROOT/build/ae" ] && [ -x "$ROOT/build/ae.exe" ]; then
+    EXE=".exe"
+fi
+AE="$ROOT/build/ae$EXE"
 
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] release_contrib_resolves: build/ae not built"
@@ -28,7 +35,7 @@ trap 'rm -rf "$TMPDIR" || true' EXIT
 rel="$TMPDIR/release"
 mkdir -p "$rel/bin" "$rel/share/aether" "$rel/include/aether"
 
-cp "$ROOT/build/aetherc" "$ROOT/build/ae" "$rel/bin/"
+cp "$ROOT/build/aetherc$EXE" "$ROOT/build/ae$EXE" "$rel/bin/"
 cp -r "$ROOT/runtime" "$ROOT/std" "$rel/share/aether/"
 [ -f "$ROOT/build/MANIFEST" ] && cp "$ROOT/build/MANIFEST" "$rel/share/aether/"
 cp "$ROOT/include"/*.h "$rel/include/aether/" 2>/dev/null || true
@@ -50,7 +57,7 @@ cat > "$TMPDIR/png_consumer.ae" <<'AE'
 import contrib.png
 main() { println("png import ok") }
 AE
-if ! ( cd "$TMPDIR" && AETHER_HOME="$rel" "$rel/bin/ae" build png_consumer.ae -o "$TMPDIR/png" ) \
+if ! ( cd "$TMPDIR" && AETHER_HOME="$rel" "$rel/bin/ae$EXE" build png_consumer.ae -o "$TMPDIR/png" ) \
         > "$TMPDIR/png.log" 2>&1; then
     echo "  [FAIL] release_contrib_resolves: contrib.png did not build against the release layout"
     tail -8 "$TMPDIR/png.log" | sed 's/^/        /'
@@ -67,13 +74,13 @@ main() {
     if err != "" { println("ERR: ${err}") } else { println("jq=${out}") }
 }
 AE
-if ! ( cd "$TMPDIR" && AETHER_HOME="$rel" "$rel/bin/ae" build jq_consumer.ae -o "$TMPDIR/jq" ) \
+if ! ( cd "$TMPDIR" && AETHER_HOME="$rel" "$rel/bin/ae$EXE" build jq_consumer.ae -o "$TMPDIR/jq" ) \
         > "$TMPDIR/jq.log" 2>&1; then
     echo "  [FAIL] release_contrib_resolves: contrib.jq did not build against the release layout"
     tail -8 "$TMPDIR/jq.log" | sed 's/^/        /'
     exit 1
 fi
-got="$("$TMPDIR/jq" 2>&1 || true)"
+got="$("$TMPDIR/jq$EXE" 2>&1 || true)"
 if [ "$got" != "jq=20" ]; then
     echo "  [FAIL] release_contrib_resolves: contrib.jq ran wrong: expected 'jq=20', got '$got'"
     exit 1
