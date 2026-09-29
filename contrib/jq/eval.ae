@@ -2131,20 +2131,34 @@ const MAX_ARRAY_INDEX = 67108863
 // and `newv` has been released. Refused when the result would nest past
 // value.MAX_DEPTH, which a long path builds without any constructor.
 _setpath(v: ptr, path: ptr, newv: ptr) -> ptr! {
-    out, err = _setpath_at(v, path, 0, newv)
+    out, err = _setpath_at(v, path, 0, 0, newv)
     if out == null { return null, "${err}" }
-    if value.deeper_than(out, value.MAX_DEPTH) == 1 {
-        json.json_free(out)
-        return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
-    }
     return out, ""
 }
 
-_setpath_at(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
+// The depth is settled on the way down, before anything is built. `above`
+// counts the containers the result holds over position `i`: each field or
+// index step adds one, and a slice step adds none (it splices). So the
+// result nests `above` containers over `newv`, and every member it copies
+// from `v` keeps the depth it had in `v`, within the cap like every value
+// here. A step that would make container MAX_DEPTH + 1 is refused where it
+// stands, and `newv`'s own depth is weighed at the end of the path. Both
+// are exact: nothing that fits is refused. Measuring the finished result
+// instead cost a path far past the cap a value that deep, built bottom-up
+// with each level deep-copying the one below into its container, which is
+// quadratic: 76 s for a 100000-step path wherever the stack let the walk
+// get that far (#2277).
+_setpath_at(v: ptr, path: ptr, i: int, above: int, newv: ptr) -> ptr! {
     n = json.json_array_size(path)
-    if i >= n { return newv, "" }
-    // One frame per path element: a 100000-element path would overflow
-    // the stack before the result's depth could be measured.
+    if i >= n {
+        if value.deeper_than(newv, value.MAX_DEPTH - above) == 1 {
+            json.json_free(newv)
+            return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
+        }
+        return newv, ""
+    }
+    // One frame per path element. The depth cap bounds field and index
+    // steps, but not slices, which add no depth.
     if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 {
         json.json_free(newv)
         return null, "path nested too deeply"
@@ -2157,10 +2171,14 @@ _setpath_at(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
             json.json_free(newv)
             return null, _index_error(tv, key, tk)
         }
+        if above >= value.MAX_DEPTH {
+            json.json_free(newv)
+            return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
+        }
         k = value.string_value(key)
         child = null
         if tv == value.T_OBJECT { child = json.json_object_get_raw(v, k) }
-        sub, err = _setpath_at(child, path, i + 1, newv)
+        sub, err = _setpath_at(child, path, i + 1, above + 1, newv)
         if sub == null { return null, "${err}" }
         out = json.json_create_object()
         if tv == value.T_OBJECT { json.json_free(out); out = value.copy(v) }
@@ -2185,9 +2203,13 @@ _setpath_at(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
             json.json_free(newv)
             return null, "Array index too large"
         }
+        if above >= value.MAX_DEPTH {
+            json.json_free(newv)
+            return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
+        }
         child = null
         if idx < len { child = json.json_array_get_raw(v, idx) }
-        sub, err = _setpath_at(child, path, i + 1, newv)
+        sub, err = _setpath_at(child, path, i + 1, above + 1, newv)
         if sub == null { return null, "${err}" }
         out = json.json_create_array()
         j = 0
@@ -2213,7 +2235,9 @@ _setpath_at(v: ptr, path: ptr, i: int, newv: ptr) -> ptr! {
         a, b = _slice_bounds(len, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
         child = json.json_create_array()
         if tv == value.T_ARRAY { json.json_free(child); child = value.array_slice(v, a, b) }
-        sub, err = _setpath_at(child, path, i + 1, newv)
+        // `sub` stands where `out` does: its members are spliced into
+        // `out`, so the rest of the path starts at this same depth.
+        sub, err = _setpath_at(child, path, i + 1, above, newv)
         json.json_free(child)
         if sub == null { return null, "${err}" }
         if value.type_of(sub) != value.T_ARRAY {

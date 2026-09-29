@@ -128,8 +128,11 @@ clock. These are the bounds; `test_nesting.ae`, `test_depth.ae` and
   evaluator has less than 128 KiB left (`expression nested too deeply`).
 - A value a program builds may nest 512 deep (`value nesting depth exceeds
   limit of 512`), checked where containers are built: `[…]`, `{…}`,
-  `setpath` and the assignment operators, `group_by`. The recursive value
-  operations (copy, compare, serialise) are sized for that on a 1 MiB stack.
+  `setpath` and the assignment operators, `group_by`. `setpath` counts the
+  containers a path makes (one per field or index step; a slice step makes
+  none) before it builds any, so a path of any length past the limit fails
+  at once. The recursive value operations (copy, compare, serialise) are
+  sized for that on a 1 MiB stack.
   Values handed to `run` by the caller are not checked.
 - Every index and count taken from a number saturates at the `int` range
   instead of overflowing: `.[1e300]` is null, `.[1e300:]` is empty,

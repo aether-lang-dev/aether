@@ -2805,7 +2805,7 @@ msg = "Hello, ${name}!"         // msg is a ptr (char*), not an int
 tcp_send_raw(conn, msg)          // can be passed to any function expecting ptr
 ```
 
-When used directly inside `print`/`println`, the compiler optimizes to a `printf` call (no allocation).
+When used directly inside `print`/`println`, the compiler optimizes to a `printf` call (no allocation). `print` flushes stdout after it writes, interpolated or not, so partial-line output appears at once and survives a process that is killed or leaves through `_exit`; `println` leaves stdout's buffering to the C library.
 
 **Evaluation order.** The `${expr}` segments of one interpolated string are
 evaluated left to right, in source order, on every C compiler and

@@ -1,0 +1,12 @@
+// A print flushes what it wrote, interpolated or not. The program leaves
+// through _exit, which skips the stdio flush at exit, so each text reaches
+// stdout only if its print flushed it.
+
+extern _exit(code: int)
+
+main() {
+    n = 42
+    print("literal, ")
+    print("interpolated ${n}")
+    _exit(0)
+}

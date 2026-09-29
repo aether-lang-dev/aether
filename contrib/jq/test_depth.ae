@@ -79,6 +79,15 @@ main() {
             spec.assert_str_eq(jq_spec.fails_with("[range(513) | 0] as $p | null | getpath($p) = 1", "null"), "value nesting depth exceeds limit of 512", "assignment")
             spec.assert_str_eq(jq_spec.fails_with("reduce range(64) as $i (0; [[[[[[[[.]]]]]]]]) | group_by(.)", "null"), "value nesting depth exceeds limit of 512", "group_by wraps once more")
         }
+        // setpath settles the depth before it builds anything: each field or
+        // index step is one container, a slice step splices instead, and the
+        // value set at the end brings its own depth.
+        spec.it("are refused by setpath before it builds them") callback {
+            spec.assert_str_eq(jq_spec.yields("setpath([range(510) | 0]; [[1]]) | tojson | length", "null"), "1025", "510 steps over a 2-deep value is 512")
+            spec.assert_str_eq(jq_spec.fails_with("setpath([range(511) | 0]; [[1]])", "null"), "value nesting depth exceeds limit of 512", "511 steps over a 2-deep value")
+            spec.assert_str_eq(jq_spec.yields("setpath([{\"start\": 0, \"end\": 0}] + [range(512) | 0]; 1) | tojson | length", "null"), "1025", "a slice step adds no depth")
+            spec.assert_str_eq(jq_spec.fails_with("setpath([0, 0, \"a\"] + [range(600) | 0]; 1)", "[[1]]"), "Cannot index number with \"a\"", "an error met before the limit is the one reported")
+        }
         spec.it("can be caught, and the program goes on") callback {
             spec.assert_str_eq(jq_spec.yields("[try (reduce range(65) as $i (0; [[[[[[[[.]]]]]]]])) catch \"deep\", 1]", "null"), "[\"deep\",1]", "caught")
         }
