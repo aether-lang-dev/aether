@@ -1,0 +1,6 @@
+import whenmod
+
+main() {
+    p = whenmod.pid()
+    println("${whenmod.arm()} ${whenmod.ARM_CODE} ${whenmod.gated()} ${p > 0}")
+}

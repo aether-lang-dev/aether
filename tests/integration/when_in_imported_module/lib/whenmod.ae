@@ -1,0 +1,26 @@
+// A module whose declarations are chosen per platform by top-level `when`,
+// as an entry file's can be (#2275). Each arm declares an extern, a function
+// and a constant; the module's own functions use them, and the importer
+// reaches them through the module.
+
+exports(pid, arm, ARM_CODE, gated)
+
+when target.os == "windows" {
+    extern _getpid() -> int
+    pid() -> int { return _getpid() }
+    arm() -> string { return "windows" }
+    const ARM_CODE = 1
+} else {
+    extern getpid() -> int
+    pid() -> int { return getpid() }
+    arm() -> string { return "posix" }
+    const ARM_CODE = 2
+}
+
+// Dead on every platform: if this arm were kept, the extern would not link.
+when target.os == "nonexistent_platform_2275" {
+    extern never_linked_symbol_2275(x: int) -> int
+    gated() -> int { return never_linked_symbol_2275(7) }
+} else {
+    gated() -> int { return 42 }
+}

@@ -1,4 +1,5 @@
 #include "aether_module.h"
+#include "codegen/optimizer.h"   // resolve_when_statements (#2275)
 #include "aether_error.h"
 #include "aether_strmap.h"
 #include "parser/lexer.h"
@@ -1218,6 +1219,22 @@ ASTNode* module_parse_file(const char* file_path) {
     // source_file, so codegen can emit `#line N "path"` directives
     // pointing at the right .ae file even after module merging.
     if (ast) ast_stamp_source_file(ast, file_path);
+
+    // #2275: resolve the module's compile-time `when`s now, as the entry
+    // file's are resolved. A top-level `when` is not a declaration the merge
+    // copies, so its surviving arm (the externs, functions and consts it
+    // declares for this platform) never reached the program, and the
+    // module's own functions reported them undefined. Resolved here, the
+    // arm's declarations are the module's top level for every later step:
+    // its imports, its exports, the merge. A condition that is not a
+    // compile-time constant is reported against this file and fails the
+    // build with the module's other errors (see the check after
+    // module_orchestrate).
+    if (ast) {
+        aether_error_set_source(file_path, source);
+        resolve_when_statements(ast);
+        aether_error_set_source(saved_err_filename, saved_err_source);
+    }
 
     // Cleanup
     free_tokens(tokens, token_count);

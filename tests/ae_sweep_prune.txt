@@ -204,6 +204,7 @@ tests/integration/ufcs_cross_module/
 tests/integration/varargs_forward/
 tests/integration/wasi_panic_link/
 tests/integration/wasm_emit_lib_exports/
+tests/integration/when_in_imported_module/
 tests/integration/where_clause/
 tests/integration/ws_client_loopback/
 tests/integration/ws_client_nonblocking/
