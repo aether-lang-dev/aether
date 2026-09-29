@@ -5211,6 +5211,42 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         strcmp(stmt->children[0]->value, stmt->value) == 0) {
                         break;
                     }
+                    /* #2289: an array literal bound to a fixed-size array
+                     * that is already declared -- hoisted out of the loop
+                     * or branch it is written in, or bound earlier -- is
+                     * stored element by element, in order: C accepts
+                     * `{...}` only in a declaration. Elements past the
+                     * literal's are zeroed, as the declaration's
+                     * initializer zeroes them, so the array holds exactly
+                     * the new value. */
+                    if (stmt->child_count > 0 && stmt->children[0] &&
+                        stmt->children[0]->type == AST_ARRAY_LITERAL &&
+                        hoisted && hoisted->kind == TYPE_ARRAY && hoisted->array_size > 0) {
+                        ASTNode* lit = stmt->children[0];
+                        if (lit->child_count > hoisted->array_size) {
+                            char msg[300];
+                            snprintf(msg, sizeof(msg),
+                                     "array literal of %d elements assigned to '%s', which holds %d: an array keeps the size of its first binding",
+                                     lit->child_count, stmt->value, hoisted->array_size);
+                            AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column, msg,
+                                              NULL, NULL, AETHER_ERR_TYPE_MISMATCH };
+                            aether_error_report(&e);
+                            break;
+                        }
+                        for (int ei = 0; ei < lit->child_count; ei++) {
+                            if (ei > 0) print_indent(gen);
+                            fprintf(gen->output, "%s[%d] = ", stmt->value, ei);
+                            generate_expression(gen, lit->children[ei]);
+                            fprintf(gen->output, ";\n");
+                        }
+                        if (lit->child_count < hoisted->array_size) {
+                            if (lit->child_count > 0) print_indent(gen);
+                            fprintf(gen->output, "memset(&%s[%d], 0, sizeof(%s[0]) * %d);\n",
+                                    stmt->value, lit->child_count, stmt->value,
+                                    hoisted->array_size - lit->child_count);
+                        }
+                        break;
+                    }
                     // Already declared - generate assignment only.
                     //
                     // For string-tracked variables (issue #405) the
@@ -5602,7 +5638,26 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                 } else {
                     // First declaration - generate type + variable
-                    mark_var_declared(gen, stmt->value);
+                    /* #2289: a fixed-size array records its type, so a
+                     * later binding of an array literal to the same name
+                     * knows how many elements the C array holds. */
+                    {
+                        Type* arr_decl = NULL;
+                        int arr_owned = 0;
+                        if (stmt->node_type && stmt->node_type->kind == TYPE_ARRAY) {
+                            if (stmt->node_type->array_size > 0) arr_decl = stmt->node_type;
+                        } else if (stmt->child_count > 0 && stmt->children[0] &&
+                                   stmt->children[0]->type == AST_ARRAY_LITERAL &&
+                                   stmt->children[0]->child_count > 0) {
+                            /* The `int name[N]` declaration below, for an
+                             * initializer the type system left untyped. */
+                            arr_decl = create_array_type(create_type(TYPE_INT),
+                                                         stmt->children[0]->child_count);
+                            arr_owned = 1;
+                        }
+                        mark_var_declared_typed(gen, stmt->value, arr_decl);
+                        if (arr_owned) free_type(arr_decl);
+                    }
 
                     // Detect if initializer is an array literal (type system may not tag empty arrays)
                     int is_array_init = (stmt->child_count > 0 &&

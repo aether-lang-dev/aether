@@ -1,0 +1,97 @@
+// Regression: an array literal bound to an array that is already declared
+// builds and holds the new value (#2289).
+//
+// A local first bound inside a loop body or branch is declared once at the
+// top of the function, so its binding in the body became a C assignment,
+// `kinds = {1, 2, 3}`, which C rejects: an initializer list is only valid in
+// a declaration. A second binding of an array at function scope had the same
+// shape. Each is now stored element by element, and elements past a shorter
+// literal's are zeroed.
+
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) -> int {
+    if got == want {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+// #2289's program: the literal is bound inside the loop body.
+in_loop() -> int {
+    d = 0
+    total = 0
+    while d < 2 {
+        kinds = [1, 2, 3]
+        total = total + kinds[d]
+        d = d + 1
+    }
+    return total
+}
+
+// Elements that depend on the loop variable are evaluated each time round.
+per_iteration() -> int {
+    d = 0
+    total = 0
+    while d < 4 {
+        row = [d, d * 10, d * 100]
+        total = total + row[0] + row[1] + row[2]
+        d = d + 1
+    }
+    return total
+}
+
+// Bound twice at function scope.
+rebound() -> int {
+    a = [1, 2, 3]
+    first = a[0] + a[1] + a[2]
+    a = [40, 50, 60]
+    return first + a[0] + a[1] + a[2]
+}
+
+// Bound in both branches of an if.
+in_branches(flag: int) -> int {
+    if flag == 1 {
+        v = [7, 8, 9]
+        return v[0] + v[1] + v[2]
+    } else {
+        v = [1, 1, 1]
+        return v[0] + v[1] + v[2]
+    }
+}
+
+// Floats and strings take the same path.
+floats_and_strings() -> int {
+    i = 0
+    total = 0.0
+    names_len = 0
+    while i < 3 {
+        weights = [0.5, 1.5, 2.5]
+        names = ["a", "bb", "ccc"]
+        total = total + weights[i]
+        names_len = names_len + string.length(names[i])
+        i = i + 1
+    }
+    if total != 4.5 { return 0 - 1 }
+    return names_len
+}
+
+main() {
+    fails = 0
+    println("array literal bound to a declared array")
+    fails = fails + check("#2289 literal in a loop body", in_loop(), 3)
+    fails = fails + check("elements from the loop variable", per_iteration(), 666)
+    fails = fails + check("bound twice at function scope", rebound(), 156)
+    fails = fails + check("bound in the then branch", in_branches(1), 24)
+    fails = fails + check("bound in the else branch", in_branches(0), 3)
+    fails = fails + check("float and string arrays in a loop", floats_and_strings(), 6)
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("all passed")
+}

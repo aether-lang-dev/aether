@@ -287,6 +287,28 @@ main() {
 2.5
 ```
 
+**Binding an array literal to an array that already exists stores its elements.** The array keeps the size of its first binding: a shorter literal zeroes the elements past its own, and a longer one is a compile error. This is also what happens to an array first bound inside a loop body or a branch, since such a local is one variable for the whole function: each pass through the loop stores the literal again, its elements evaluated in order.
+
+```aether,run
+main() {
+    total = 0
+    d = 0
+    while d < 3 {
+        row = [ d, d * 10, d * 100 ]
+        total = total + row[0] + row[1] + row[2]
+        d = d + 1
+    }
+    println("${total}")
+    a = [ 1, 2, 3 ]
+    a = [ 4, 5 ]
+    println("${a[0]} ${a[1]} ${a[2]}")
+}
+```
+```output
+333
+4 5 0
+```
+
 ### Sequence Types (`*StringSeq`)
 
 `*StringSeq` is a cons-cell linked list of strings, Erlang/Elixir-shaped, with O(1) head/tail/cons/length and refcount-based structural sharing. Empty list is the `NULL` pointer; each cell carries a cached length.
