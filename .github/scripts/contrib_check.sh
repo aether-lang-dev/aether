@@ -140,13 +140,13 @@ TESTS=(
   # nested past the depth cap and runaway recursion (depth), and numbers,
   # NUL, duplicate keys, regexes, unbounded work (hardening).
   #
-  # nesting is run-only: to trip a STACK-size guard on every runner its
-  # chains must be tens of thousands deep, which is ~9.4M allocations and
-  # ~485 MB. That runs in a second natively but ~30x slower under valgrind,
-  # past the 120 s entry timeout on a loaded CI runner. Its error/free paths
-  # are the same ones depth and hardening exercise at a volume valgrind can
-  # afford, so those two stay leak-gated and cover the leak surface.
-  "jq/nesting|contrib/jq/test_nesting.ae||run|"
+  # nesting's chains are tens of thousands deep, to trip a STACK-size guard
+  # on every runner, which makes it the slowest entry under valgrind: about
+  # 58 s on the Linux runner, build included (depth: 49 s). It was run-only
+  # until #2277: setpath built a 100000-deep value quadratically before
+  # refusing it, 76 s natively on a stack big enough to hold the walk, and
+  # far more under valgrind.
+  "jq/nesting|contrib/jq/test_nesting.ae||leak|"
   "jq/depth|contrib/jq/test_depth.ae||leak|"
   "jq/hardening|contrib/jq/test_hardening.ae||leak|"
   # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
