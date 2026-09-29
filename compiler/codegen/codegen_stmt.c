@@ -7673,12 +7673,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (stmt->child_count > 0) {
                 ASTNode* first_arg = stmt->children[0];
 
-                // Interpolated string: delegate directly to expression codegen (emits printf(...))
+                // Interpolated string: delegate directly to expression codegen (emits printf(...)),
+                // then flush like every other print below.
                 if (stmt->child_count == 1 && first_arg->type == AST_STRING_INTERP) {
                     gen->interp_as_printf = 1;
                     generate_expression(gen, first_arg);
                     gen->interp_as_printf = 0;
                     fprintf(gen->output, ";\n");
+                    fprintf(gen->output, "fflush(stdout);\n");
                     break;
                 }
 

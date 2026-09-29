@@ -105,9 +105,12 @@ main() {
             spec.assert_true(bounded_or_caught(jq_spec.yields("${rep("try ", 30000)}1", "null"), "1"), "try chain")
         }
         spec.it("stop paths longer than the stack can follow") callback {
-            // A 100000-deep path exhausts the path walker's stack or the
-            // 512-level value-depth cap first, depending on the runner.
-            spec.assert_true(is_nesting_diagnostic(jq_spec.fails_with("setpath([range(100000) | 0]; 1)", "null")), "setpath")
+            // Each field or index step adds a container, so the value-depth
+            // cap refuses this path at step 513, whatever the stack. Slice
+            // steps add none: the walker's stack guard stops those, or the
+            // whole path fits.
+            spec.assert_str_eq(jq_spec.fails_with("setpath([range(100000) | 0]; 1)", "null"), "value nesting depth exceeds limit of 512", "setpath")
+            spec.assert_true(bounded(jq_spec.yields("setpath([range(100000) | {\"start\": 0, \"end\": 0}]; [])", "null"), "[]"), "setpath through slices")
             spec.assert_str_eq(jq_spec.yields("getpath([range(100000) | 0])", "null"), "null", "getpath walks fields and indexes iteratively")
         }
         spec.it("still run programs of a depth real code reaches") callback {
