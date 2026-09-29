@@ -80,23 +80,25 @@ for src in $src_bridges; do
     fi
 done
 
-# The other .c files that must ship: each one a module.ae in the installed
-# tree compiles in with @source (contrib.vulkan, contrib.vulkan.vk,
-# contrib.d3d12, contrib.metal), resolved against that module's directory,
-# since an installed toolchain builds those modules from them (#2208).
+# The other .c files that must ship: each one a module compiles in with
+# @source (contrib.vulkan, contrib.vulkan.vk, contrib.d3d12, contrib.metal,
+# and contrib.jq, whose value.ae @sources aether_jq.c), resolved against the
+# @source'ing file's own directory, since an installed toolchain builds
+# those modules from them (#2208). Scan every .ae, not just module.ae:
+# contrib.jq's C file is named from a sibling of its facade.
 inst="$TMPDIR/share/aether/contrib"
 physical() {
     ( cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")" )
 }
-sourced=$(find "$inst" -type f -name module.ae | while IFS= read -r mod; do
-    d=$(dirname "$mod")
-    sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$mod" | while IFS= read -r rel; do
+sourced=$(find "$inst" -type f -name '*.ae' | while IFS= read -r aef; do
+    d=$(dirname "$aef")
+    sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$aef" | while IFS= read -r rel; do
         case "$rel" in *.c) physical "$d/$rel" ;; esac
     done
 done | sort -u)
 for f in $sourced; do
     if [ ! -f "$f" ]; then
-        echo "  [FAIL] $f is named by a module.ae's @source but did not ship"
+        echo "  [FAIL] $f is named by a module's @source but did not ship"
         exit 1
     fi
 done

@@ -32,10 +32,15 @@ physical() {
 
 keep="$(mktemp)"
 trap 'rm -f "$keep"' EXIT
-find "$dir" -type f -name module.ae | while IFS= read -r mod; do
-    moddir="$(dirname "$mod")"
-    sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$mod" | while IFS= read -r rel; do
-        physical "$moddir/$rel" >> "$keep" || true
+# Any .ae can carry @source, not just module.ae: contrib.jq compiles
+# aether_jq.c in with @source from value.ae, a sibling of its module.ae.
+# Scanning module.ae alone deleted that .c and left an installed jq that
+# could not build (#2208). @source resolves against the file's OWN
+# directory, so keep dirname per matching .ae, not per module.
+find "$dir" -type f -name '*.ae' | while IFS= read -r aef; do
+    aedir="$(dirname "$aef")"
+    sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$aef" | while IFS= read -r rel; do
+        physical "$aedir/$rel" >> "$keep" || true
     done
 done
 

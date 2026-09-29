@@ -30,6 +30,13 @@ make_tree() {
     : > "$1/metal/aether_metal_extra.m"
     printf '// links libaether_sqlite.a\n' > "$1/sqlite/module.ae"
     : > "$1/sqlite/aether_sqlite.c"
+    # A package whose C file is @source'd from a sibling .ae, not module.ae
+    # (contrib.jq's value.ae names aether_jq.c). The trim must scan every
+    # .ae, not just module.ae, or it deletes this file (#2208).
+    mkdir -p "$1/jq"
+    printf '// facade, no @source here\n' > "$1/jq/module.ae"
+    printf '@source("aether_jq.c")\n' > "$1/jq/value.ae"
+    : > "$1/jq/aether_jq.c"
     : > "$1/host/python/module.ae"
     : > "$1/host/python/aether_host_python.c"
     : > "$1/host/python/aether_host_python.h"
@@ -47,6 +54,7 @@ make_tree "$TMP/contrib"
 sh "$TRIM" "$TMP/contrib" --keep-host-bridges || fail "exited non-zero with --keep-host-bridges"
 present "$TMP/contrib/vulkan/aether_vulkan.c"        "keep-host: @source in the same directory"
 present "$TMP/contrib/metal/aether_metal.c"          "keep-host: @source with leading spaces"
+present "$TMP/contrib/jq/aether_jq.c"                "keep-host: @source from a sibling .ae, not module.ae"
 present "$TMP/contrib/host/python/aether_host_python.c" "keep-host: host bridge"
 present "$TMP/contrib/host/lua/aether_host_lua.c"    "keep-host: host bridge without a module.ae"
 present "$TMP/contrib/vulkan/aether_vulkan.h"        "keep-host: headers untouched"
