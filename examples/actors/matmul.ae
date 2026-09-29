@@ -1,0 +1,151 @@
+// Actor-parallel packed-float matmul (#1986).
+// ae run examples/actors/matmul.ae -- 256 4 3
+// Arguments: matrix dimension, worker actors, repetitions.
+import std.floatarr
+import std.list
+import std.os
+import std.string
+
+// Views borrow the buffers owned by main. Inputs are read-only while work
+// is in flight; each worker owns a disjoint range of output rows. main
+// waits for completion before reading, reusing, or freeing those buffers.
+message MultiplyRows {
+    a: float[], bt: float[], c: float[], n: int, first: int, last: int
+}
+
+multiply_rows(a: float[], bt: float[], c: float[], n: int, first: int, last: int) {
+    i = first
+    while i < last {
+        j = 0
+        while j < n {
+            sum = 0.0
+            k = 0
+            while k < n {
+                sum = sum + a[i * n + k] * bt[j * n + k]
+                k = k + 1
+            }
+            c[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+actor MatmulWorker {
+    receive {
+        MultiplyRows(a, bt, c, n, first, last) -> {
+            multiply_rows(a, bt, c, n, first, last)
+        }
+    }
+}
+
+argument(index: int, fallback: int) -> int {
+    if os.args_count() <= index { return fallback }
+    value, err = string.to_int(os.args_get(index))
+    if err != "" || value < 1 {
+        println("arguments must be positive integers")
+        exit(1)
+    }
+    return value
+}
+
+buffer(size: int) -> ptr {
+    value, err = floatarr.new(size)
+    if err != "" {
+        println(err)
+        exit(1)
+    }
+    return value
+}
+
+main() {
+    n = argument(1, 256)
+    count = argument(2, 4)
+    repeats = argument(3, 3)
+    // Bound n*n and partition arithmetic, and avoid accidental huge runs.
+    if n > 4096 || count > 256 {
+        println("dimension must be <= 4096 and workers <= 256")
+        exit(1)
+    }
+    ah = buffer(n * n)
+    bh = buffer(n * n)
+    th = buffer(n * n)
+    ch = buffer(n * n)
+    rh = buffer(n * n)
+    a = floatarr.array(ah)
+    b = floatarr.array(bh)
+    bt = floatarr.array(th)
+    c = floatarr.array(ch)
+    reference = floatarr.array(rh)
+    i = 0
+    while i < n * n {
+        a[i] = ((i * 7 + 3) % 19 - 9) as float / 16.0
+        b[i] = ((i * 11 + 5) % 23 - 11) as float / 16.0
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        j = 0
+        while j < n {
+            bt[j * n + i] = b[i * n + j]
+            // Independent reference also checks the transpose, not just
+            // worker partitioning. Dyadic inputs make sums exact here.
+            sum = 0.0
+            k = 0
+            while k < n {
+                sum = sum + a[i * n + k] * b[k * n + j]
+                k = k + 1
+            }
+            reference[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+    workers = list.new()
+    if workers == null { exit(1) }
+    w = 0
+    while w < count {
+        worker = spawn(MatmulWorker())
+        err = list.add(workers, worker)
+        if err != "" { exit(1) }
+        w = w + 1
+    }
+
+    // Pool creation, input generation, transpose, and validation are outside
+    // timing. Dispatch and the completion barrier are included. A worker
+    // count is an actor count; the runtime chooses the scheduler threads.
+    println("dimension,workers,repeat,elapsed_ns")
+    repeat = 0
+    while repeat < repeats {
+        floatarr.floatarr_fill(ch, 123456789.0)
+        start = os.now_monotonic_ns()
+        w = 0
+        while w < count {
+            worker = list.list_get_raw(workers, w)
+            worker ! MultiplyRows {
+                a: a, bt: bt, c: c, n: n,
+                first: w * n / count, last: (w + 1) * n / count
+            }
+            w = w + 1
+        }
+        wait_for_idle()
+        elapsed = os.now_monotonic_ns() - start
+        i = 0
+        while i < n * n {
+            if c[i] != reference[i] {
+                println("FAIL: output cell ${i}")
+                exit(1)
+            }
+            i = i + 1
+        }
+        println("${n},${count},${repeat},${elapsed}")
+        repeat = repeat + 1
+    }
+    list.free(workers)
+    floatarr.floatarr_free(rh)
+    floatarr.floatarr_free(ch)
+    floatarr.floatarr_free(th)
+    floatarr.floatarr_free(bh)
+    floatarr.floatarr_free(ah)
+    println("PASS: every output cell matches the serial reference")
+}
