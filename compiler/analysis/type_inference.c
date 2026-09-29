@@ -1251,6 +1251,9 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
                 if (elem_type && elem_type->kind != TYPE_UNKNOWN) {
                     // Create array type with dynamic size (-1)
                     Type* array_type = create_array_type(clone_type(elem_type), node->child_count);
+                    /* The parser (and an earlier pass) may have stamped the
+                     * literal already; constraints clone, so replace it. */
+                    if (node->node_type) free_type(node->node_type);
                     node->node_type = array_type;
                     add_constraint(ctx, node, array_type, "array literal type inference");
                 }
