@@ -159,6 +159,38 @@ void test_scheduler_init_cleanup(void) {
     scheduler_cleanup();
 }
 
+void test_scheduler_spawn_placement(void) {
+    scheduler_init(4);
+    ActorBase* actors[10];
+    int placements[4] = {0};
+    for (int i = 0; i < 8; i++) {
+        actors[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                          sizeof(CounterActor));
+        ASSERT_NOT_NULL(actors[i]);
+        int core = atomic_load(&actors[i]->assigned_core);
+        ASSERT_TRUE(core >= 0 && core < 4);
+        placements[core]++;
+    }
+    // Explicit placement and scheduler-thread child locality still win
+    // over balancing. No messages are sent, so placement cannot migrate.
+    actors[8] = scheduler_spawn_actor(3, (void (*)(void*))counter_step,
+                                      sizeof(CounterActor));
+    ASSERT_NOT_NULL(actors[8]);
+    aether_core_id_set(2);
+    actors[9] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                       sizeof(CounterActor));
+    aether_core_id_set(-1);
+    ASSERT_NOT_NULL(actors[9]);
+    int explicit_core = atomic_load(&actors[8]->assigned_core);
+    int child_core = atomic_load(&actors[9]->assigned_core);
+    scheduler_shutdown();
+    for (int i = 0; i < 10; i++) scheduler_release_actor(actors[i]);
+    scheduler_cleanup();
+    for (int i = 0; i < 4; i++) ASSERT_EQ(2, placements[i]);
+    ASSERT_EQ(3, explicit_core);
+    ASSERT_EQ(2, child_core);
+}
+
 void test_scheduler_basic_messaging(void) {
     scheduler_init(2);
     
@@ -484,6 +516,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Mailbox overflow handling", test_mailbox_overflow, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler init/cleanup", test_scheduler_init_cleanup, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler spawn placement", test_scheduler_spawn_placement, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler cross-core messaging", test_scheduler_cross_core, TEST_CATEGORY_RUNTIME);

@@ -64,7 +64,12 @@ static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t* eax, uint32_t* ebx,
 #elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
     __cpuid_count(leaf, subleaf, *eax, *ebx, *ecx, *edx);
 #else
-    // ARM or other architecture - return zeros
+    // ARM or other architecture - return zeros. leaf/subleaf are x86-only;
+    // mark them used so a strict -Wunused-parameter build (a consumer that
+    // #includes this file with -Werror -Wextra, like the cpu_core_count
+    // test) compiles on non-x86.
+    (void)leaf;
+    (void)subleaf;
     *eax = 0;
     *ebx = 0;
     *ecx = 0;
@@ -226,6 +231,27 @@ void cpu_detect_features(CPUInfo* info) {
         info->avx2_supported = (ebx & (1 << 5)) != 0;      // AVX2
         info->avx512f_supported = (ebx & (1 << 16)) != 0;  // AVX-512 Foundation
     }
+
+    // CPUID leaf 1 counts logical processors in ONE package, not the
+    // machine. A VM with 12 single-core sockets reports 1 there (#1986),
+    // silently serialising every actor pool. Prefer the OS's online count;
+    // retain CPUID as a fallback if the OS query fails or is unavailable.
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetNativeSystemInfo(&si);
+    if (si.dwNumberOfProcessors > 0)
+        info->num_cores = (int)si.dwNumberOfProcessors;
+#elif defined(__APPLE__) || defined(__MACOS__)
+    int mib[2] = {CTL_HW, HW_NCPU};
+    unsigned int ncpu = 0;
+    size_t len = sizeof(ncpu);
+    if (sysctl(mib, 2, &ncpu, &len, NULL, 0) == 0 && ncpu > 0)
+        info->num_cores = (int)ncpu;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nprocs > 0)
+        info->num_cores = (int)nprocs;
+#endif
 #endif
 }
 

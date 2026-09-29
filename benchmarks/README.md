@@ -12,6 +12,10 @@ The benchmark suite compares Aether's actor implementation against C, C++, Go, R
 
 **Full documentation:** [benchmarks/cross-language/README.md](cross-language/README.md)
 
+**Packed-float throughput:** [LangArena follow-up](langarena/README.md) re-runs
+the Matmul/Nbody/NeuralNet/Spectralnorm cluster against same-machine Go and
+includes an actor-parallel matmul example.
+
 **Concurrent cache designs:** [`concurrent-cache/concurrent_cache_bench.ae`](concurrent-cache/concurrent_cache_bench.ae): single-owner-actor vs. sharded-actor-map vs. COW snapshot cell, across read/write workload mixes (see [`docs/concurrent-cache-benchmark.md`](../docs/design/concurrent-cache-benchmark.md)).
 
 ## Directory Structure

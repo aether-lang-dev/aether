@@ -2106,15 +2106,16 @@ void scheduler_send_batch_flush(void) {
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     if (preferred_core < 0 || preferred_core >= num_cores) {
         // Spawn on caller's core so parent→child messaging stays local.
-        // Main thread (current_core_id == -1) defaults to core 0.
-        preferred_core = (current_core_id >= 0) ? current_core_id : 0;
+        // Main-thread spawns have no parent core: keep -1 so registration
+        // balances the pool instead of pinning every worker to core 0.
+        preferred_core = current_core_id;
     }
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
     ActorBase* actor = NULL;
 
     {
-        int numa_node = aether_numa_node_of_cpu(preferred_core);
+        int numa_node = aether_numa_node_of_cpu(preferred_core >= 0 ? preferred_core : 0);
         actor = aether_numa_alloc(actor_size, numa_node);
         if (!actor) return NULL;
         mailbox_init(&actor->mailbox);
