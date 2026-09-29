@@ -37,9 +37,13 @@ cd "$ROOT"
 # module.ae in the SOURCE tree names with @source, at the same relative
 # path. Printed relative to contrib/ (vulkan/aether_vulkan.c).
 sourced_c_files() {
-    for mod in $(find contrib -name 'module.ae' | sort); do
-        moddir="$(dirname "$mod")"
-        sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$mod" | while IFS= read -r rel; do
+    # Every .ae, not just module.ae: contrib.jq @sources aether_jq.c from
+    # value.ae, a sibling of its facade (#2208). @source resolves against
+    # the @source'ing file's own directory.
+    for aef in $(find contrib -name '*.ae' | sort); do
+        moddir="$(dirname "$aef")"
+        sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$aef" | while IFS= read -r rel; do
+            case "$rel" in *.c) ;; *) continue ;; esac
             ( cd "$moddir/$(dirname "$rel")" 2>/dev/null && printf '%s/%s\n' "$(pwd)" "$(basename "$rel")" ) \
                 | sed "s|^$(pwd)/contrib/||"
         done
