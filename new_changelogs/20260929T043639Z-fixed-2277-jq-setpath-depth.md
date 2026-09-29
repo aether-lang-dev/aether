@@ -8,3 +8,4 @@
   set brings its own depth. The same path now fails in milliseconds, with
   the same error on every stack, where a small stack used to answer "path
   nested too deeply".
+  Already in 0.738.0, whose notes were cut before this merged (#2282).

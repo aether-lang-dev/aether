@@ -4,3 +4,4 @@
   or ended with `_exit` lost it. `std.spec` prints its result lines this
   way, so a spec file killed by a timeout lost the line for the last spec
   that passed.
+  Already in 0.738.0, whose notes were cut before this merged (#2282).

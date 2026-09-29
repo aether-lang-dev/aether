@@ -10,7 +10,9 @@ name: Release
 #
 # Flow (state-based, no commit message parsing):
 #   1. Push to main → prepare job reads VERSION and checks if vX.Y.Z tag exists
-#   2a. Tag EXISTS   → bump job computes next version, opens a release PR
+#   2a. Tag EXISTS   → bump job computes next version, opens a release PR;
+#                      while that PR is open, each later push to main
+#                      rebuilds its branch from the new HEAD (#2282)
 #   2b. Tag MISSING  → tag job creates vX.Y.Z tag from HEAD
 #   3. Tag push → build + publish jobs create the GitHub Release
 #
@@ -101,8 +103,22 @@ jobs:
 
             case "$PR_STATE" in
               OPEN)
-                echo "Release PR for $BRANCH is OPEN -- skipping (waiting on merge)"
-                echo "action=skip" >> "$GITHUB_OUTPUT"
+                # The tag is cut from main's HEAD when this PR merges, so
+                # the PR's notes must cover everything on main by then. A
+                # skip here froze them at the commit the PR was cut from,
+                # and a merge in between shipped in the tag with no entry:
+                # 0.738.0 carried #2277 and #2278 that way (#2282). So a
+                # push the branch does not already contain rebuilds it from
+                # this commit, the same version by the same steps as a bump.
+                if git merge-base --is-ancestor HEAD "origin/$BRANCH"; then
+                  echo "Release PR for $BRANCH is OPEN and already covers $(git rev-parse --short HEAD) -- skipping (waiting on merge)"
+                  echo "action=skip" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                echo "Release PR for $BRANCH is OPEN and main has moved -- rebuilding it from $(git rev-parse --short HEAD)"
+                echo "action=refresh"   >> "$GITHUB_OUTPUT"
+                echo "version=$NEW"     >> "$GITHUB_OUTPUT"
+                echo "tag=$NEW_TAG"     >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
               MERGED)
@@ -136,12 +152,12 @@ jobs:
         fi
 
   # ================================================================== #
-  # BUMP — open a version-bump PR                                      #
+  # BUMP — open a version-bump PR, or rebuild the open one (refresh)   #
   # ================================================================== #
   bump:
     name: Auto-bump version
     needs: prepare
-    if: needs.prepare.outputs.action == 'bump'
+    if: needs.prepare.outputs.action == 'bump' || needs.prepare.outputs.action == 'refresh'
     runs-on: ubuntu-latest
 
     permissions:
@@ -316,6 +332,22 @@ jobs:
         fi
 
         git commit -m "chore: release ${VERSION}"
+
+        # Refresh: the open PR follows its branch, so replacing the branch
+        # is the whole update. The lease is the branch as this job fetched
+        # it, so a push to it from anywhere else fails this run rather than
+        # being overwritten.
+        if [ "${{ needs.prepare.outputs.action }}" = "refresh" ]; then
+          git push --force-with-lease="${BRANCH}:$(git rev-parse "origin/${BRANCH}")" origin "$BRANCH"
+          {
+            echo "### Release PR rebuilt"
+            echo ""
+            echo "\`${BRANCH}\` now starts from \`$(git rev-parse --short HEAD~1)\`, so its notes"
+            echo "cover every change merging it will tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
         git push origin "$BRANCH"
 
         gh pr create \
