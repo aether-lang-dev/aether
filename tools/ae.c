@@ -73,6 +73,7 @@ extern char** environ;
 #include "apkg/toml_parser.h"
 #include "ae_help.h"
 #include "ae_fmt.h"
+#include "ae_sha256.h"
 #include "ae_bindgen.h"
 
 // Version is set by Makefile from VERSION file
@@ -8216,7 +8217,7 @@ static const char* ae_pkg_basename(const char* package) {
  */
 static int ae_verify_sha256(const char* archive, const char* url_base,
                             const char* asset, const char* tmp_dir) {
-    char sum_url[2048], sum_path[1024], cmd[4096];
+    char sum_url[2048], sum_path[1024];
     /* Refused rather than reported as unpublished: a caller told there is no
      * checksum carries on with an unverified artifact, and that is not what
      * happened here. */
@@ -8238,39 +8239,15 @@ static int ae_verify_sha256(const char* archive, const char* url_base,
     fclose(sf);
     remove(sum_path);
 
-    /* Hash the artifact. run_cmd* exec a tokenized argv rather than a
-     * shell, so pipelines and $(...) are not available here — write the
-     * digest to a file and read it back. */
-    char got_path[1024];
-    if (ae_sprintf(got_path, sizeof(got_path), "%s/.ae_sha256.out", tmp_dir) != 0) {
-        fprintf(stderr, "error: digest path under %s does not fit\n", tmp_dir);
+    /* Hash the artifact in-process (#2322). Shelling out to sha256sum /
+     * shasum went through system(), which on Windows is cmd.exe: MSYS's
+     * /usr/bin is not on its PATH, no hasher was found, and every binary
+     * package was refused as unverifiable. */
+    char got_hex[65];
+    if (ae_sha256_file_hex(archive, got_hex) != 0) {
+        fprintf(stderr, "error: cannot read %s to verify its checksum\n", archive);
         return -1;
     }
-    remove(got_path);
-
-    const char* hashers[2] = { "sha256sum", "shasum -a 256" };
-    int hashed = 0;
-    for (int h = 0; h < 2 && !hashed; h++) {
-        snprintf(cmd, sizeof(cmd), "%s \"%s\" > \"%s\" 2>/dev/null",
-                 hashers[h], archive, got_path);
-        /* This one DOES need a shell (redirection), so go through
-         * system() rather than the tokenizing runner. */
-        if (system(cmd) == 0 && path_exists(got_path)) hashed = 1;
-    }
-    if (!hashed) {
-        fprintf(stderr, "Warning: no sha256sum/shasum available; skipping checksum verification.\n");
-        remove(got_path);
-        return 0;
-    }
-
-    char got_hex[128] = {0};
-    FILE* gf = fopen(got_path, "r");
-    if (!gf) { remove(got_path); return 0; }
-    int ok_read = (fscanf(gf, "%127s", got_hex) == 1);
-    fclose(gf);
-    remove(got_path);
-    if (!ok_read) return 0;
-
     return (strcasecmp(want_hex, got_hex) == 0) ? 1 : -1;
 }
 

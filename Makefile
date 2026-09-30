@@ -799,7 +799,7 @@ TOOLS_CFLAGS = -O2 -Itools -MMD -MP \
     $(if $(AETHER_ENABLE_LLM),-DAETHER_ENABLE_LLM=1)
 TOOLS_SRC = tools/ae.c tools/ae_help.c tools/ae_fmt.c tools/ae_bindgen.c \
             tools/ae_cross.c tools/ae_repl.c tools/ae_version.c \
-            tools/ae_cache.c tools/ae_checksec.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
+            tools/ae_cache.c tools/ae_checksec.c tools/ae_sha256.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
 TOOLS_OBJS = $(TOOLS_SRC:%.c=$(OBJ_DIR)/%.o)
 COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(OBJ_DIR)/%.o)
 RUNTIME_OBJS = $(RUNTIME_SRC:%.c=$(OBJ_DIR)/%.o)
@@ -844,6 +844,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
            tests/runtime/test_runtime_schema.c \
+           tests/runtime/test_tools_sha256.c tools/ae_sha256.c \
            tests/runtime/test_scheduler.c \
            tests/runtime/test_scheduler_stress.c \
            tests/runtime/test_zerocopy.c \
