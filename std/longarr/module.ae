@@ -138,13 +138,21 @@ set(arr: ptr, i: int, value: long) -> {
 // inlines to, so the readable spelling costs nothing. `std.strarr` has had
 // this shape since it was written.
 //
-// BORROWED, not owned: valid until the handle is freed, and bounds are the
-// caller's to respect exactly as they are for the unchecked accessors.
+// The view is bounded by the array's size (#2301): `v.len` is `longarr.size(a)`
+// and `v[i]` outside it is the slice bounds panic, not a read past the
+// buffer. Pass it to std.sort (`sort.longs(v)`), or any `long[]` parameter,
+// whole or as a sub-slice. A null handle is the empty slice.
+//
+// BORROWED, not owned: valid until the handle is freed. For the unchecked
+// load in a hot loop, `longarr_get_unchecked` is still there.
 longarr_array(arr: ptr) -> long[] {
-    return longarr_data(arr)
+    if arr == null {
+        return null
+    }
+    return longarr_data(arr)[0..longarr_size(arr)]
 }
 
 // The short name, beside new / get / set: `longarr.array(a)`.
 array(arr: ptr) -> long[] {
-    return longarr_data(arr)
+    return longarr_array(arr)
 }

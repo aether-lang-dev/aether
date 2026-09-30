@@ -10301,8 +10301,10 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                             "Argument %d '%s' of '%s': expected %s, got a bare "
                             "ptr. A ptr does not carry an array length or layout, "
                             "so indexing it as %s would read past the object and "
-                            "crash. Cast it explicitly with `as %s` only if you "
-                            "know it points at a contiguous buffer of that type.",
+                            "crash. A container handle (intarr, longarr, floatarr, "
+                            "strarr) is not its buffer: pass its bounded `array()` "
+                            "view. Cast with `as %s` only if the ptr points at a "
+                            "contiguous buffer of that type.",
                             arg_slot + 1, param->value ? param->value : "?",
                             call->value ? call->value : "?",
                             aty, aty, aty);

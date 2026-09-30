@@ -1,5 +1,5 @@
-// std.sort regression — in-place ascending sort + binary search over the
-// concrete numeric array types. Vectors ported from C3's stdlib unit tests
+// std.sort regression — in-place ascending sort + binary search over
+// slices: the packed arrays' bounded views, fixed arrays and sub-slices. Vectors ported from C3's stdlib unit tests
 // (test/unit/stdlib/sort/{quicksort,binarysearch}.c3) — Copyright (c)
 // 2022-2026 Christoffer Lernö and contributors, MIT — re-expressed for
 // Aether's concrete intarr/longarr/floatarr.
@@ -8,7 +8,6 @@ import std.intarr
 import std.longarr
 import std.floatarr
 import std.sort
-import std.string
 import std.string
 
 extern exit(code: int)
@@ -34,6 +33,12 @@ cmp_desc(a: string, b: string) -> int {
     return 0 - string.compare(a, b)
 }
 
+cmp_float_desc(a: float, b: float) -> int {
+    if a > b { return -1 }
+    if a < b { return 1 }
+    return 0
+}
+
 cmp_abs(a: int, b: int) -> int {
     x = a
     y = b
@@ -53,7 +58,7 @@ main() {
     intarr.set(a, 2, 100)
     intarr.set(a, 3, 1)
     intarr.set(a, 4, 2)
-    sort.ints(a)
+    sort.ints(intarr.array(a))
     v0, _ = intarr.get(a, 0)
     v1, _ = intarr.get(a, 1)
     v2, _ = intarr.get(a, 2)
@@ -64,19 +69,19 @@ main() {
     // {3, 2, 1} and {2, 1, 3} -> sorted
     b, _ = intarr.new_filled(3, 0)
     intarr.set(b, 0, 3); intarr.set(b, 1, 2); intarr.set(b, 2, 1)
-    sort.ints(b)
+    sort.ints(intarr.array(b))
     fails = fails + ck(is_sorted_int(b, 3), "int {3,2,1} sorted")
     c, _ = intarr.new_filled(3, 0)
     intarr.set(c, 0, 2); intarr.set(c, 1, 1); intarr.set(c, 2, 3)
-    sort.ints(c)
+    sort.ints(intarr.array(c))
     fails = fails + ck(is_sorted_int(c, 3), "int {2,1,3} sorted")
 
     // empty + single are no-ops (must not crash)
     e0, _ = intarr.new_filled(0, 0)
-    sort.ints(e0)
+    sort.ints(intarr.array(e0))
     e1, _ = intarr.new_filled(1, 0)
     intarr.set(e1, 0, 42)
-    sort.ints(e1)
+    sort.ints(intarr.array(e1))
     s1, _ = intarr.get(e1, 0)
     fails = fails + ck(s1 == 42, "int single unchanged")
 
@@ -84,22 +89,22 @@ main() {
     big, _ = intarr.new_filled(50, 0)
     i = 0
     while i < 50 { intarr.set(big, i, (i * 37) % 50); i = i + 1 }
-    sort.ints(big)
+    sort.ints(intarr.array(big))
     fails = fails + ck(is_sorted_int(big, 50), "int 50-element sorted")
 
     // ---- binary search (C3 binarysearch vectors) ----
     // {1,2,3}: search 1->0, 2->1, 3->2, 4->3 (insertion point)
     srt, _ = intarr.new_filled(3, 0)
     intarr.set(srt, 0, 1); intarr.set(srt, 1, 2); intarr.set(srt, 2, 3)
-    fails = fails + ck(sort.int_search(srt, 1) == 0, "search 1 -> 0")
-    fails = fails + ck(sort.int_search(srt, 2) == 1, "search 2 -> 1")
-    fails = fails + ck(sort.int_search(srt, 3) == 2, "search 3 -> 2")
-    fails = fails + ck(sort.int_search(srt, 4) == 3, "search 4 -> 3 (insert)")
+    fails = fails + ck(sort.int_search(intarr.array(srt), 1) == 0, "search 1 -> 0")
+    fails = fails + ck(sort.int_search(intarr.array(srt), 2) == 1, "search 2 -> 1")
+    fails = fails + ck(sort.int_search(intarr.array(srt), 3) == 2, "search 3 -> 2")
+    fails = fails + ck(sort.int_search(intarr.array(srt), 4) == 3, "search 4 -> 3 (insert)")
     // {10,20,30}: 14 -> 1, 26 -> 2 (insertion points)
     srt2, _ = intarr.new_filled(3, 0)
     intarr.set(srt2, 0, 10); intarr.set(srt2, 1, 20); intarr.set(srt2, 2, 30)
-    fails = fails + ck(sort.int_search(srt2, 14) == 1, "search 14 -> 1")
-    fails = fails + ck(sort.int_search(srt2, 26) == 2, "search 26 -> 2")
+    fails = fails + ck(sort.int_search(intarr.array(srt2), 14) == 1, "search 14 -> 1")
+    fails = fails + ck(sort.int_search(intarr.array(srt2), 26) == 2, "search 26 -> 2")
 
     // ---- longarr ----
     la, _ = longarr.new_filled(5, 0)
@@ -108,12 +113,12 @@ main() {
     longarr.set(la, 2, 501)
     longarr.set(la, 3, 1)
     longarr.set(la, 4, 250)
-    sort.longs(la)
+    sort.longs(longarr.array(la))
     l0, _ = longarr.get(la, 0)
     l4, _ = longarr.get(la, 4)
     l2, _ = longarr.get(la, 2)
     fails = fails + ck(l0 == 1 && l2 == 250 && l4 == 501, "long sort order")
-    fails = fails + ck(sort.long_search(la, 500) == 3, "long search")
+    fails = fails + ck(sort.long_search(longarr.array(la), 500) == 3, "long search")
 
     // ---- floatarr ----
     fa, _ = floatarr.new_filled(4, 0.0)
@@ -121,11 +126,11 @@ main() {
     floatarr.set(fa, 1, 1.25)
     floatarr.set(fa, 2, 2.75)
     floatarr.set(fa, 3, 0.5)
-    sort.floats(fa)
+    sort.floats(floatarr.array(fa))
     f0, _ = floatarr.get(fa, 0)
     f3, _ = floatarr.get(fa, 3)
     fails = fails + ck(f0 < 0.6 && f3 > 3.4, "float sort endpoints")
-    fails = fails + ck(sort.float_search(fa, 2.75) == 2, "float search")
+    fails = fails + ck(sort.float_search(floatarr.array(fa), 2.75) == 2, "float search")
 
     // Reclaim the arrays (std.sort itself allocates nothing — it sorts in
     // place — so the only heap here is the test's own arrays).
@@ -141,40 +146,47 @@ main() {
     floatarr.free(fa)
 
     // ---- strings (#1722) --------------------------------------------------
-    // `string[]` carries no length, so these take an explicit count.
+    // The slice carries its length; a prefix sorts as `xs[..n]` (#2301).
     ss_mixed = ["pear", "apple", "fig", "banana", "apple"]
-    sort.strings(ss_mixed, 5)
+    sort.strings(ss_mixed)
     fails = fails + ck(string.compare(ss_mixed[0], "apple") == 0, "string sort first")
     fails = fails + ck(string.compare(ss_mixed[1], "apple") == 0, "string sort duplicate kept")
     fails = fails + ck(string.compare(ss_mixed[4], "pear") == 0, "string sort last")
 
     // Already sorted, and reverse sorted, both land in the same order.
     ss_sorted = ["a", "b", "c"]
-    sort.strings(ss_sorted, 3)
+    sort.strings(ss_sorted)
     fails = fails + ck(string.compare(ss_sorted[0], "a") == 0 && string.compare(ss_sorted[2], "c") == 0,
         "string sort already-sorted")
     ss_rev = ["c", "b", "a"]
-    sort.strings(ss_rev, 3)
+    sort.strings(ss_rev)
     fails = fails + ck(string.compare(ss_rev[0], "a") == 0 && string.compare(ss_rev[2], "c") == 0,
         "string sort reverse-sorted")
 
-    // n < 2 must be a no-op, not a read past the end.
+    // Fewer than two elements is a no-op, not a read past the end.
     ss_one = ["only"]
-    sort.strings(ss_one, 1)
+    sort.strings(ss_one)
     fails = fails + ck(string.compare(ss_one[0], "only") == 0, "string sort single element")
     ss_zero = ["x"]
-    sort.strings(ss_zero, 0)
-    fails = fails + ck(string.compare(ss_zero[0], "x") == 0, "string sort empty count")
+    sort.strings(ss_zero[..0])
+    fails = fails + ck(string.compare(ss_zero[0], "x") == 0, "string sort empty slice")
+
+    // A sub-slice sorts only its own run.
+    ss_part = ["d", "c", "b", "a"]
+    sort.strings(ss_part[1..3])
+    fails = fails + ck(string.compare(ss_part[0], "d") == 0 && string.compare(ss_part[1], "b") == 0 &&
+        string.compare(ss_part[2], "c") == 0 && string.compare(ss_part[3], "a") == 0,
+        "string sort sub-slice")
 
     // Lower bound: present, absent-before-all, absent-after-all.
-    fails = fails + ck(sort.string_search(ss_mixed, 5, "fig") == 3, "string search present")
-    fails = fails + ck(sort.string_search(ss_mixed, 5, "aaa") == 0, "string search before all")
-    fails = fails + ck(sort.string_search(ss_mixed, 5, "zzz") == 5, "string search after all")
+    fails = fails + ck(sort.string_search(ss_mixed, "fig") == 3, "string search present")
+    fails = fails + ck(sort.string_search(ss_mixed, "aaa") == 0, "string search before all")
+    fails = fails + ck(sort.string_search(ss_mixed, "zzz") == 5, "string search after all")
 
     // ---- comparator forms (#1722) -----------------------------------------
     // Descending strings, the case a natural-order comparator generalises.
     ss_desc = ["pear", "apple", "fig"]
-    sort.strings_by(ss_desc, 3, cmp_desc)
+    sort.strings_by(ss_desc, cmp_desc)
     fails = fails + ck(string.compare(ss_desc[0], "pear") == 0 && string.compare(ss_desc[2], "apple") == 0,
         "strings_by descending")
 
@@ -185,12 +197,47 @@ main() {
         _ = intarr.set(ab, 1, 3)
         _ = intarr.set(ab, 2, -1)
         _ = intarr.set(ab, 3, 5)
-        sort.ints_by(ab, cmp_abs)
+        sort.ints_by(intarr.array(ab), cmp_abs)
         v0, _ = intarr.get(ab, 0)
         v3, _ = intarr.get(ab, 3)
         fails = fails + ck(v0 == -1 && v3 == -7, "ints_by absolute value")
         intarr.free(ab)
     }
+
+    // ---- slices of every origin (#2301) -----------------------------------
+    // A fixed array, a prefix of it, and a make buffer sort the same way.
+    fixed = [5, 3, 9, 1, 7]
+    sort.ints(fixed[..3])
+    fails = fails + ck(fixed[0] == 3 && fixed[1] == 5 && fixed[2] == 9 && fixed[3] == 1, "int prefix sort")
+    sort.ints(fixed)
+    fails = fails + ck(fixed[0] == 1 && fixed[4] == 9, "int fixed-array sort")
+    fails = fails + ck(sort.int_search(fixed, 7) == 3, "int search on a fixed array")
+    lh, _ = longarr.new_filled(4, 0)
+    lv = longarr.array(lh)
+    lv[0] = 40
+    lv[1] = 10
+    lv[2] = 30
+    lv[3] = 20
+    sort.longs(lv[1..])
+    fails = fails + ck(lv[0] == 40 && lv[1] == 10 && lv[2] == 20 && lv[3] == 30, "long suffix sort")
+    fails = fails + ck(sort.long_search(lv[1..3], 20) == 1, "long search on a sub-slice")
+    longarr.free(lh)
+    fl = [2.5, -1.0, 0.25]
+    sort.floats_by(fl, cmp_float_desc)
+    fails = fails + ck(fl[0] == 2.5 && fl[2] == -1.0, "floats_by descending")
+
+    // An unbounded view has no length to sort: it panics rather than
+    // sorting nothing, or reading past a buffer it cannot see the end of.
+    uh, _ = intarr.new_filled(3, 0)
+    raw = intarr.intarr_data(uh) // the C accessor: a view with no bound
+    caught = 0
+    try {
+        sort.ints(raw)
+    } catch e {
+        caught = 1
+    }
+    fails = fails + ck(caught == 1, "an unbounded view panics")
+    intarr.free(uh)
 
     if fails != 0 {
         println("sort: ${fails} failure(s)")

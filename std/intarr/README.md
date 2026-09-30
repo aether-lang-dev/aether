@@ -53,10 +53,13 @@ total = total + v[3]
 ```
 
 The view *is* the buffer, not a copy, so writes through it are writes to
-the array and the accessors see them (and vice versa). `v[i]` lowers to the
-same load `intarr_get_unchecked` inlines to, so the readable spelling
-costs nothing. It borrows: valid until the handle is freed, and bounds are
-yours to respect, exactly as for the unchecked accessors.
+the array and the accessors see them (and vice versa). It is bounded by the
+array's size (#2301): `v.len` is `intarr.size(a)`, and `v[i]` outside it is
+the slice bounds panic rather than a read past the buffer. It passes to any
+`int[]` parameter, std.sort included (`sort.ints(v)`, or
+`sort.ints(v[..n])` for a prefix). A null handle is the empty slice. It
+borrows: valid until the handle is freed. `intarr_get_unchecked` is still
+the load with no check, for a hot loop that has proved its own bounds.
 
 ## Exports
 

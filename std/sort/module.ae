@@ -1,56 +1,48 @@
-// std.sort — in-place ascending sort + binary search over the concrete
-// numeric array types (std.intarr / std.longarr / std.floatarr).
+// std.sort — in-place ascending sort and binary search over slices:
+// `int[]`, `long[]`, `float[]` and `string[]`.
+//
+// Every entry point takes a slice, so the length travels with the elements
+// and no call takes a separate count: a whole array sorts as `sort.ints(a)`,
+// a prefix as `sort.ints(a[..n])`, any run as `sort.ints(a[lo..hi])`. The
+// packed-array handles give their elements as a slice (`intarr.array(h)`,
+// `longarr.array(h)`, `floatarr.array(h)`, `strarr.array(h)`), as do a
+// `T[N]` array, a `make([]T, n)` buffer and a bounded view of C memory
+// (`(p as int[])[0..n]`). A view with no bound (`p as int[]`, `.len` -1)
+// has no length to sort and panics.
 //
 // Scoped to concrete types by design (see docs/cross-references/
 // c3-stdlib-gaps.md §2.3): C3's `std::sort` is generics-first, which
 // Aether lowers differently; here each element type gets a direct sort so
 // there is no generic machinery to reason about. The default order is
 // ascending. Sorts are IN PLACE and stable is not guaranteed (shell sort).
+// The slice's bound is checked once, on entry; the loops index an unchecked
+// view of the same elements, so a sort costs what it did over the raw
+// buffer.
 //
 // The algorithm choice (shell sort with the Ciura gap sequence) and the
 // binary-search contract follow C3's `std::sort` at the capability level
 // (MIT, Copyright (c) 2022-2026 Christoffer Lernö and contributors),
 // re-expressed for Aether's concrete array types.
+//
+// Ordering: numbers by `<`; strings by std.string.compare, lexicographic
+// BYTE order, binary-safe (embedded NULs take part), the default C, Go and
+// Zig use. Locale-aware collation is a different question and stays in
+// contrib/i18n.
 
 exports(
-    ints, longs, floats,
-    int_search, long_search, float_search,
-    strings, string_search,
+    ints, longs, floats, strings,
+    int_search, long_search, float_search, string_search,
     ints_by, longs_by, floats_by, strings_by
 )
 
 import std.string
 
-// ---- array externs (bound to the same C the array modules use) -----------
-extern intarr_size(arr: ptr) -> int
-@c_include("aether_arr_inline.h")
-// #1986: the unchecked accessors are `static inline` in that header,
-// so an element access is the load it names rather than a call the C
-// compiler cannot see through. A module that declares them must pull
-// the header in and mark them @c_import, or its own prototype
-// collides with the header's definition.
-extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
-extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
-
-extern longarr_size(arr: ptr) -> int
-extern longarr_get_unchecked(arr: ptr, i: int) -> long @c_import
-extern longarr_set_unchecked(arr: ptr, i: int, value: long) @c_import
-
-extern floatarr_size(arr: ptr) -> int
-extern floatarr_get_unchecked(arr: ptr, i: int) -> double @c_import
-extern floatarr_set_unchecked(arr: ptr, i: int, value: double) @c_import
-
 // Ciura's gap sequence, extended by *2.25 for larger n. A module-level
 // const array of the fixed prefix; larger gaps are computed on the fly.
 const CIURA[] = [1, 4, 10, 23, 57, 132, 301, 701]
 
-// ---- intarr ---------------------------------------------------------------
-
-// Sort an intarr ascending, in place.
-ints(arr: ptr) {
-    n = intarr_size(arr)
-    if n < 2 { return }
-    // Build the largest starting gap <= n/2 (Ciura, then *2.25 growth).
+// The largest starting gap <= n/2: Ciura's, then *2.25 growth.
+fn first_gap(n: int) -> int {
     gap = 1
     idx = 0
     while idx < 8 && CIURA[idx] < n {
@@ -60,331 +52,346 @@ ints(arr: ptr) {
     while gap < n / 2 {
         gap = (gap * 9) / 4 // ~*2.25
     }
-    // Shell sort with the descending gap chain.
+    return gap
+}
+
+// The next gap down the chain; 0 after the final gap-1 pass.
+fn next_gap(gap: int) -> int {
+    if gap == 1 {
+        return 0
+    }
+    next = (gap * 4) / 9
+    if next < 1 {
+        return 1
+    }
+    return next
+}
+
+// A view with no bound (`p as T[]`) has no length to sort or search.
+fn unbounded(fname: string) {
+    panic("sort.${fname}: the slice has no bound (.len -1); give it one, as `(p as T[])[0..n]`")
+}
+
+// The comparator forms (`*_by`): `cmp` must be a strict weak ordering. An
+// inconsistent comparator gives an unspecified permutation, not a crash, but
+// not a sorted slice either. They are separate names rather than an optional
+// argument so the default path keeps a direct comparison instead of an
+// indirect call per element: these sorts are in place and hot, and the
+// natural order is what almost every caller wants. Not stable, like every
+// sort in this module.
+
+// ---- int[] -------------------------------------------------------------------
+
+// Sort `xs` ascending, in place.
+ints(xs: int[]) {
+    n = xs.len
+    if n < 0 {
+        unbounded("ints")
+    }
+    if n < 2 {
+        return
+    }
+    v = xs as ptr as int[] // bound checked above; the loops index unchecked
+    gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = intarr_get_unchecked(arr, i)
+            tmp = v[i]
             j = i
-            while j >= gap && intarr_get_unchecked(arr, j - gap) > tmp {
-                intarr_set_unchecked(arr, j, intarr_get_unchecked(arr, j - gap))
+            while j >= gap && v[j - gap] > tmp {
+                v[j] = v[j - gap]
                 j = j - gap
             }
-            intarr_set_unchecked(arr, j, tmp)
+            v[j] = tmp
             i = i + 1
         }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
+        gap = next_gap(gap)
     }
 }
 
-// Binary search a SORTED intarr for `x`. Returns the index of `x` if
-// present, otherwise the insertion point (the index where `x` would be
-// inserted to keep the array sorted) — matching C3's binarysearch contract.
-int_search(arr: ptr, x: int) -> int {
+// Binary search a SORTED `xs` for `x`: the index of the first element not
+// ordered before `x`, which is `x`'s index when present and otherwise where
+// it would be inserted to keep `xs` sorted (`xs.len` when every element
+// sorts before it). C3's binarysearch contract.
+int_search(xs: int[], x: int) -> int {
+    if xs.len < 0 {
+        unbounded("int_search")
+    }
+    v = xs as ptr as int[]
     lo = 0
-    hi = intarr_size(arr)
+    hi = xs.len
     while lo < hi {
         mid = lo + (hi - lo) / 2
-        v = intarr_get_unchecked(arr, mid)
-        if v < x { lo = mid + 1 } else { hi = mid }
+        if v[mid] < x {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
     }
     return lo
 }
 
-// ---- longarr --------------------------------------------------------------
-
-longs(arr: ptr) {
-    n = longarr_size(arr)
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
+// Sort `xs` in place by `cmp`, which returns <0 when its first argument
+// sorts before its second, 0 when they tie, >0 when it sorts after.
+ints_by(xs: int[], cmp: fn(int, int) -> int) {
+    n = xs.len
+    if n < 0 {
+        unbounded("ints_by")
     }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
+    if n < 2 {
+        return
     }
+    v = xs as ptr as int[]
+    gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = longarr_get_unchecked(arr, i)
+            tmp = v[i]
             j = i
-            while j >= gap && longarr_get_unchecked(arr, j - gap) > tmp {
-                longarr_set_unchecked(arr, j, longarr_get_unchecked(arr, j - gap))
+            while j >= gap && cmp(v[j - gap], tmp) > 0 {
+                v[j] = v[j - gap]
                 j = j - gap
             }
-            longarr_set_unchecked(arr, j, tmp)
+            v[j] = tmp
             i = i + 1
         }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
+        gap = next_gap(gap)
     }
 }
 
-long_search(arr: ptr, x: long) -> int {
+// ---- long[] ------------------------------------------------------------------
+
+// Sort `xs` ascending, in place.
+longs(xs: long[]) {
+    n = xs.len
+    if n < 0 {
+        unbounded("longs")
+    }
+    if n < 2 {
+        return
+    }
+    v = xs as ptr as long[] // bound checked above; the loops index unchecked
+    gap = first_gap(n)
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = v[i]
+            j = i
+            while j >= gap && v[j - gap] > tmp {
+                v[j] = v[j - gap]
+                j = j - gap
+            }
+            v[j] = tmp
+            i = i + 1
+        }
+        gap = next_gap(gap)
+    }
+}
+
+// Binary search a SORTED `xs` for `x`: the index of the first element not
+// ordered before `x`, which is `x`'s index when present and otherwise where
+// it would be inserted to keep `xs` sorted (`xs.len` when every element
+// sorts before it). C3's binarysearch contract.
+long_search(xs: long[], x: long) -> int {
+    if xs.len < 0 {
+        unbounded("long_search")
+    }
+    v = xs as ptr as long[]
     lo = 0
-    hi = longarr_size(arr)
+    hi = xs.len
     while lo < hi {
         mid = lo + (hi - lo) / 2
-        v = longarr_get_unchecked(arr, mid)
-        if v < x { lo = mid + 1 } else { hi = mid }
+        if v[mid] < x {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
     }
     return lo
 }
 
-// ---- floatarr -------------------------------------------------------------
-
-floats(arr: ptr) {
-    n = floatarr_size(arr)
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
+// Sort `xs` in place by `cmp`, which returns <0 when its first argument
+// sorts before its second, 0 when they tie, >0 when it sorts after.
+longs_by(xs: long[], cmp: fn(long, long) -> int) {
+    n = xs.len
+    if n < 0 {
+        unbounded("longs_by")
     }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
+    if n < 2 {
+        return
     }
+    v = xs as ptr as long[]
+    gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = floatarr_get_unchecked(arr, i)
+            tmp = v[i]
             j = i
-            while j >= gap && floatarr_get_unchecked(arr, j - gap) > tmp {
-                floatarr_set_unchecked(arr, j, floatarr_get_unchecked(arr, j - gap))
+            while j >= gap && cmp(v[j - gap], tmp) > 0 {
+                v[j] = v[j - gap]
                 j = j - gap
             }
-            floatarr_set_unchecked(arr, j, tmp)
+            v[j] = tmp
             i = i + 1
         }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
+        gap = next_gap(gap)
     }
 }
 
-float_search(arr: ptr, x: double) -> int {
+// ---- float[] -----------------------------------------------------------------
+
+// Sort `xs` ascending, in place.
+floats(xs: float[]) {
+    n = xs.len
+    if n < 0 {
+        unbounded("floats")
+    }
+    if n < 2 {
+        return
+    }
+    v = xs as ptr as float[] // bound checked above; the loops index unchecked
+    gap = first_gap(n)
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = v[i]
+            j = i
+            while j >= gap && v[j - gap] > tmp {
+                v[j] = v[j - gap]
+                j = j - gap
+            }
+            v[j] = tmp
+            i = i + 1
+        }
+        gap = next_gap(gap)
+    }
+}
+
+// Binary search a SORTED `xs` for `x`: the index of the first element not
+// ordered before `x`, which is `x`'s index when present and otherwise where
+// it would be inserted to keep `xs` sorted (`xs.len` when every element
+// sorts before it). C3's binarysearch contract.
+float_search(xs: float[], x: float) -> int {
+    if xs.len < 0 {
+        unbounded("float_search")
+    }
+    v = xs as ptr as float[]
     lo = 0
-    hi = floatarr_size(arr)
+    hi = xs.len
     while lo < hi {
         mid = lo + (hi - lo) / 2
-        v = floatarr_get_unchecked(arr, mid)
-        if v < x { lo = mid + 1 } else { hi = mid }
+        if v[mid] < x {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
     }
     return lo
 }
 
-// ---- strings --------------------------------------------------------------
-//
-// `string[]` is a bare C array with no carried length, unlike the intarr /
-// longarr / floatarr handles above, so these take an explicit element count.
-// Passing a count larger than the array reads out of bounds exactly as it
-// would in C -- the array does not know its own size and cannot check.
-//
-// Ordering is std.string.compare: lexicographic BYTE order, binary-safe
-// (embedded NULs take part). That is the same default C, Go and Zig use.
-// Locale-aware collation is a different question and stays in contrib/i18n.
-
-strings(arr: string[], n: int) {
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
+// Sort `xs` in place by `cmp`, which returns <0 when its first argument
+// sorts before its second, 0 when they tie, >0 when it sorts after.
+floats_by(xs: float[], cmp: fn(float, float) -> int) {
+    n = xs.len
+    if n < 0 {
+        unbounded("floats_by")
     }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
+    if n < 2 {
+        return
     }
+    v = xs as ptr as float[]
+    gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = arr[i]
+            tmp = v[i]
             j = i
-            while j >= gap && string.compare(arr[j - gap], tmp) > 0 {
-                arr[j] = arr[j - gap]
+            while j >= gap && cmp(v[j - gap], tmp) > 0 {
+                v[j] = v[j - gap]
                 j = j - gap
             }
-            arr[j] = tmp
+            v[j] = tmp
             i = i + 1
         }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
+        gap = next_gap(gap)
     }
 }
 
-// Lower bound: the index of the first element not ordered before `x`, which
-// is where `x` would be inserted to keep the array sorted. Equal to `n` when
-// every element sorts before `x`. Same contract as int_search.
-string_search(arr: string[], n: int, x: string) -> int {
+// ---- string[] ----------------------------------------------------------------
+
+// Sort `xs` ascending, in place.
+strings(xs: string[]) {
+    n = xs.len
+    if n < 0 {
+        unbounded("strings")
+    }
+    if n < 2 {
+        return
+    }
+    v = xs as ptr as string[] // bound checked above; the loops index unchecked
+    gap = first_gap(n)
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = v[i]
+            j = i
+            while j >= gap && string.compare(v[j - gap], tmp) > 0 {
+                v[j] = v[j - gap]
+                j = j - gap
+            }
+            v[j] = tmp
+            i = i + 1
+        }
+        gap = next_gap(gap)
+    }
+}
+
+// Binary search a SORTED `xs` for `x`: the index of the first element not
+// ordered before `x`, which is `x`'s index when present and otherwise where
+// it would be inserted to keep `xs` sorted (`xs.len` when every element
+// sorts before it). C3's binarysearch contract.
+string_search(xs: string[], x: string) -> int {
+    if xs.len < 0 {
+        unbounded("string_search")
+    }
+    v = xs as ptr as string[]
     lo = 0
-    hi = n
+    hi = xs.len
     while lo < hi {
         mid = lo + (hi - lo) / 2
-        if string.compare(arr[mid], x) < 0 { lo = mid + 1 } else { hi = mid }
+        if string.compare(v[mid], x) < 0 {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
     }
     return lo
 }
 
-// ---- comparator forms -----------------------------------------------------
-//
-// `cmp(a, b)` returns <0 when a sorts before b, 0 when they tie, >0 when a
-// sorts after. It must be a strict weak ordering: an inconsistent comparator
-// gives an unspecified permutation, not a crash, but not a sorted array
-// either.
-//
-// Separate names rather than an optional argument on `ints`/`strings` so the
-// default path keeps a direct comparison instead of an indirect call per
-// element -- these sorts are in place and hot, and the natural order is what
-// almost every caller wants.
-//
-// Not stable, like every sort in this module.
-
-ints_by(arr: ptr, cmp: fn(int, int) -> int) {
-    n = intarr_size(arr)
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
+// Sort `xs` in place by `cmp`, which returns <0 when its first argument
+// sorts before its second, 0 when they tie, >0 when it sorts after.
+strings_by(xs: string[], cmp: fn(string, string) -> int) {
+    n = xs.len
+    if n < 0 {
+        unbounded("strings_by")
     }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
+    if n < 2 {
+        return
     }
+    v = xs as ptr as string[]
+    gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = intarr_get_unchecked(arr, i)
+            tmp = v[i]
             j = i
-            while j >= gap && cmp(intarr_get_unchecked(arr, j - gap), tmp) > 0 {
-                intarr_set_unchecked(arr, j, intarr_get_unchecked(arr, j - gap))
+            while j >= gap && cmp(v[j - gap], tmp) > 0 {
+                v[j] = v[j - gap]
                 j = j - gap
             }
-            intarr_set_unchecked(arr, j, tmp)
+            v[j] = tmp
             i = i + 1
         }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
-    }
-}
-
-longs_by(arr: ptr, cmp: fn(long, long) -> int) {
-    n = longarr_size(arr)
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
-    }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
-    }
-    while gap >= 1 {
-        i = gap
-        while i < n {
-            tmp = longarr_get_unchecked(arr, i)
-            j = i
-            while j >= gap && cmp(longarr_get_unchecked(arr, j - gap), tmp) > 0 {
-                longarr_set_unchecked(arr, j, longarr_get_unchecked(arr, j - gap))
-                j = j - gap
-            }
-            longarr_set_unchecked(arr, j, tmp)
-            i = i + 1
-        }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
-    }
-}
-
-floats_by(arr: ptr, cmp: fn(double, double) -> int) {
-    n = floatarr_size(arr)
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
-    }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
-    }
-    while gap >= 1 {
-        i = gap
-        while i < n {
-            tmp = floatarr_get_unchecked(arr, i)
-            j = i
-            while j >= gap && cmp(floatarr_get_unchecked(arr, j - gap), tmp) > 0 {
-                floatarr_set_unchecked(arr, j, floatarr_get_unchecked(arr, j - gap))
-                j = j - gap
-            }
-            floatarr_set_unchecked(arr, j, tmp)
-            i = i + 1
-        }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
-    }
-}
-
-strings_by(arr: string[], n: int, cmp: fn(string, string) -> int) {
-    if n < 2 { return }
-    gap = 1
-    idx = 0
-    while idx < 8 && CIURA[idx] < n {
-        gap = CIURA[idx]
-        idx = idx + 1
-    }
-    while gap < n / 2 {
-        gap = (gap * 9) / 4
-    }
-    while gap >= 1 {
-        i = gap
-        while i < n {
-            tmp = arr[i]
-            j = i
-            while j >= gap && cmp(arr[j - gap], tmp) > 0 {
-                arr[j] = arr[j - gap]
-                j = j - gap
-            }
-            arr[j] = tmp
-            i = i + 1
-        }
-        if gap == 1 {
-            gap = 0
-        } else {
-            gap = (gap * 4) / 9
-            if gap < 1 { gap = 1 }
-        }
+        gap = next_gap(gap)
     }
 }

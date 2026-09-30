@@ -2,16 +2,18 @@
 
 A growable array of string pointers whose backing **is** a `string[]`.
 
-`string[]` in Aether is a compile-time literal (`["a", "b"]`) — a bare C array
-with no carried length. But the strings you actually want to sort usually arrive
-at runtime and in another shape: `string.split` hands back an opaque array
-handle, `fs.glob` a `dir_list`. There was no way to build a `string[]` of
-runtime-determined length to pass to `std.sort`.
+A `string[]` literal (`["a", "b"]`) has a length fixed when it is written. But
+the strings you actually want to sort usually arrive at runtime and in another
+shape: `string.split` hands back an opaque array handle, `fs.glob` a
+`dir_list`. There was no way to build a `string[]` of runtime-determined length
+to pass to `std.sort`.
 
 `strarr` fills that gap. It is the string companion to `std.intarr` /
 `std.longarr` / `std.floatarr`, except it **grows** (`push`) — the whole point
-is a count you don't know up front. Its `array()` view is a real `string[]`, so
-`std.sort.strings_by` (and `strings` / `string_search`) sort it in place.
+is a count you don't know up front. Its `array()` view is a `string[]` bounded
+by the current size (#2301), so `std.sort.strings_by` (and `strings` /
+`string_search`) sort it in place, and `v[i]` past the end is the slice
+bounds panic. A push may reallocate: take the view after the last push.
 
 **Ownership:** `push` *borrows* — exactly like a `string[]` literal, which
 points at strings the caller owns — so keep the pushed strings alive for as long
@@ -37,7 +39,7 @@ main() {
     _b = strarr.push(sa, "app-1.12.0.jar")
     _c = strarr.push(sa, "app-1.11.jar")
 
-    sort.strings_by(strarr.array(sa), strarr.size(sa), _by_version)
+    sort.strings_by(strarr.array(sa), _by_version)
 
     newest = strarr.get(sa, strarr.size(sa) - 1)
     println("newest = ${newest}")

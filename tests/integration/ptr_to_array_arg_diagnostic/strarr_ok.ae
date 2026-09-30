@@ -7,7 +7,7 @@ main() {
     _a = strarr.push(sa, "1.9")
     _b = strarr.push(sa, "1.10")
     _c = strarr.push(sa, "1.2")
-    sort.strings_by(strarr.array(sa), strarr.size(sa), _vc)
+    sort.strings_by(strarr.array(sa), _vc)
     println("${strarr.get(sa, 0)} ${strarr.get(sa, 2)}")
     strarr.free(sa)
     return 0

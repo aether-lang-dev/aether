@@ -17,7 +17,7 @@
 //         _p = strarr.push(sa, dir.name_at(jars, i))
 //         i = i + 1
 //     }
-//     sort.strings_by(strarr.array(sa), strarr.size(sa), _by_version)
+//     sort.strings_by(strarr.array(sa), _by_version)
 //     newest = strarr.get(sa, strarr.size(sa) - 1)   // strings_by sorts in place
 //     strarr.free(sa)
 //
@@ -114,9 +114,16 @@ size(arr: ptr) -> int {
     return strarr_size(arr)
 }
 
-// The `string[]` view for std.sort (sorts in place) / std.sort.string_search.
+// The elements as a `string[]` bounded by the size (#2301), for std.sort
+// (`sort.strings_by(strarr.array(sa), cmp)` sorts them in place) or any
+// `string[]` parameter. `v[i]` outside it is the slice bounds panic. Valid
+// until the next push (which may reallocate) or free. A null handle is the
+// empty slice.
 array(arr: ptr) -> string[] {
-    return strarr_data(arr)
+    if arr == null {
+        return null
+    }
+    return strarr_data(arr)[0..strarr_size(arr)]
 }
 
 // Free the spine.
