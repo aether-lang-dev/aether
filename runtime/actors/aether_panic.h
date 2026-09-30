@@ -49,7 +49,9 @@ extern "C" {
 //   - POSIX (Linux, macOS, BSDs): use _setjmp/_longjmp explicitly.
 //     Both are in POSIX.1-2001 XSI, and they skip the signal-mask
 //     save unconditionally. This is the fast path.
-//   - Windows / Emscripten / freestanding: plain setjmp/longjmp.
+//   - mingw-w64 x86_64: _setjmp(buf, NULL), the non-unwinding form (see
+//     its arm below for why the default SEH-unwinding setjmp is wrong here).
+//   - Other Windows / Emscripten / freestanding: plain setjmp/longjmp.
 //     Win32 has no POSIX signal semantics so setjmp is already fast;
 //     wasm and bare-metal have no sigjmp_buf at all.
 //
@@ -95,6 +97,17 @@ typedef jmp_buf aether_sigjmp_buf;
    * that never runs is visible; one that runs on a corrupt stack is not. */
   #define AETHER_SIGSETJMP(buf, savemask) ((void)(buf), 0)
   #define AETHER_SIGLONGJMP(buf, val)     (((void)(buf)), ((void)(val)), abort())
+#elif defined(__MINGW32__) && defined(__x86_64__)
+  /* mingw-w64 on x86_64: setjmp is `_setjmp(buf, __builtin_frame_address(0))`,
+   * and a non-NULL frame makes longjmp a structured-exception unwind
+   * (RtlUnwind walking every frame back to the setjmp). A panic needs no
+   * unwind: cleanup is the allocation journal's, as on POSIX. And the unwind
+   * itself faulted intermittently inside RtlVirtualUnwind2, crashing a
+   * caught panic (std/sort/test_sort.ae, about one run in seven under load).
+   * A NULL frame is mingw-w64's documented request for the plain register
+   * restore, the same semantics _setjmp/_longjmp give on POSIX. */
+  #define AETHER_SIGSETJMP(buf, savemask) _setjmp((buf), NULL)
+  #define AETHER_SIGLONGJMP(buf, val)     longjmp((buf), (val))
 #elif defined(_WIN32) || defined(__EMSCRIPTEN__) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
   #define AETHER_SIGSETJMP(buf, savemask) setjmp(buf)
   #define AETHER_SIGLONGJMP(buf, val)     longjmp((buf), (val))
