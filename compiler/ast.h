@@ -330,7 +330,17 @@ typedef enum {
     // once and called with C's calling convention everywhere. Emits no C of
     // its own: storage stays `void*` and each call site carries the typed
     // cast, exactly as the anonymous spelling does. Appended at the enum END.
-    AST_CFN_TYPE_DEF
+    AST_CFN_TYPE_DEF,
+    // #2298 `@derive(schema)`. AST_FIELD_ATTRIBUTE is one `@name(args)`
+    // written after a struct field's type: `value` is the name, each child an
+    // AST_LITERAL argument whose node_type is TYPE_INT, TYPE_FLOAT,
+    // TYPE_STRING or TYPE_BOOL (a leading `-` is folded into the literal's
+    // text). They are the only children an AST_STRUCT_FIELD has; the
+    // schema table carries them. AST_SCHEMA_OF is never parsed: the derive
+    // pass synthesizes `T_schema() -> ptr { return <AST_SCHEMA_OF T> }`, and
+    // codegen lowers it to the address of T's static table. `value` is T.
+    AST_FIELD_ATTRIBUTE,
+    AST_SCHEMA_OF
 } ASTNodeType;
 
 typedef enum {

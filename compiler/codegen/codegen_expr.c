@@ -3389,6 +3389,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             fprintf(gen->output, "((int)sizeof(struct %s))", expr->value);
             break;
 
+        case AST_SCHEMA_OF:
+            // #2298: the body of a synthesized `T_schema()`: the address of
+            // T's static field table (codegen_schema.c emits the getter).
+            fprintf(gen->output, "((void*)_ae_schema_%s())", expr->value);
+            break;
+
         case AST_OFFSETOF:
             // offsetof(TypeName, field) → C offsetof(struct TypeName, field).
             if (expr->child_count >= 1 && expr->children[0]->value) {

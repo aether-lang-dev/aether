@@ -2186,6 +2186,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             // Compile-time layout builtins; both lower to a C int.
             return create_type(TYPE_INT);
 
+        case AST_SCHEMA_OF:        // #2298: a synthesized T_schema()'s body.
+            return create_type(TYPE_PTR);
+
         case AST_BITSET_LITERAL:   // #1046 `bit_set[E]{...}`; the parser set the
             return expr->node_type ? clone_type(expr->node_type)  // TYPE_BITSET.
                                    : create_type(TYPE_UNKNOWN);
@@ -8125,6 +8128,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             set_node_type(expr, create_type(TYPE_INT));
             return 1;
 
+        case AST_SCHEMA_OF:
+            // #2298: synthesized by the derive pass, never written; the
+            // address of a struct's field table.
+            set_node_type(expr, create_type(TYPE_PTR));
+            return 1;
+
         case AST_BITSET_LITERAL: {
             // #1046 `bit_set[E]{ E.A, E.B }`. The element type must resolve to an
             // enum (resolve_enum_types rewrites TYPE_STRUCT{E} -> TYPE_ENUM), and
@@ -10423,8 +10432,14 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
      * type, and a bare assignment orphans it: one leaked function type per
      * call in the program, which was most of what the compiler leaked
      * (#1667). */
-    set_node_type(call, symbol->type ? clone_type(symbol->type)
-                                     : create_type(TYPE_UNKNOWN));
+    /* #2314: `make([]T, n)` carries the `T[]` the parser stamped on it; the
+     * `make` symbol's type is only a placeholder that marks it as a known
+     * builtin, and stamping it here turned every make into a bare `ptr`. */
+    int keeps_own_type = call->value && strcmp(call->value, "make") == 0 &&
+                         call->node_type && call->node_type->kind == TYPE_ARRAY;
+    if (!keeps_own_type)
+        set_node_type(call, symbol->type ? clone_type(symbol->type)
+                                         : create_type(TYPE_UNKNOWN));
     if (call->value && strcmp(call->value, "call") == 0) {
         set_node_type(call, call_builtin_result_type(call, table));
     }

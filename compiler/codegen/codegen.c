@@ -6211,6 +6211,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
     }
 
+    // #1044: first-class enum typedefs, ahead of the struct bodies (#2308):
+    // a struct may hold an enum by value (`d: Dir`), and C needs the typedef
+    // before the field. An enum depends on no other type, so nothing has to
+    // precede it. Still before the function forward decls, so `Name` and its
+    // member constants are in scope everywhere they are used.
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* ed = program->children[i];
+        if (ed && ed->type == AST_ENUM_DEFINITION) {
+            emit_enum_typedef(gen, ed);
+        }
+    }
+
     // Hoist FULL struct body emission to the top of the file (right
     // after forward typedefs), before any function bodies that might
     // do `view->field` member access against an imported or locally-
@@ -6294,16 +6306,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
     }
 
-    // #1044: first-class enum typedefs. Emitted here (with the other type
-    // definitions, before function forward decls) so `Name` and its member
-    // constants are in scope everywhere they are used.
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* ed = program->children[i];
-        if (ed && ed->type == AST_ENUM_DEFINITION) {
-            emit_enum_typedef(gen, ed);
-        }
-    }
-
     // #1132: bitstructs. Register the layout (so field access can lower to
     // shift/mask) and emit `typedef <backing> Name;`. There is deliberately no C
     // struct and no C bitfield here — the backing integer IS the value.
@@ -6382,6 +6384,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     }
     // #340: emit optional typedefs (after struct bodies, before fn fwd-decls).
     collect_optional_typedefs(gen, program);
+
+    // #2298: `@derive(schema)` field tables. Here because offsetof/sizeof
+    // need every field's type complete, and T_schema()'s body (a function)
+    // needs the getter declared.
+    emit_schema_tables(gen, program);
 
     // Hoist top-level constants the same way.  Imported constants
     // (via `import mod` → cloned into the consumer's AST as

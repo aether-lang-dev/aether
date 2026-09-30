@@ -25,7 +25,7 @@ The load-bearing features:
 - **Polyglot host, both directions**: run Lua / Python / Perl / Ruby / Tcl / JS in-process under the same grant list, or embed Aether into Python, Java, and Ruby through `--emit=lib` typed SDKs with per-guest memory and deadline caps. See [Embedding & emit=lib](docs/emit-lib.md).
 - **Production networking in the stdlib**: an HTTP server with TLS, HTTP/2, WebSocket, SSE, and zero-copy `sendfile(2)`, plus an nginx-class reverse proxy. See [HTTP Server](docs/http-server.md) and [Reverse Proxy](docs/http-reverse-proxy.md).
 - **A deliberate memory model**: manual-first with `defer`, automatic string-ownership tracking, and `requires`/`ensures` contracts that compile out at zero cost. See [Memory Management](docs/memory-management.md).
-- **Ergonomics**: type inference, `(value, err)` multi-value returns, `@derive(eq)`, and a single `ae` command for build, run, test, fmt and packages. See [Language Reference](docs/language-reference.md).
+- **Ergonomics**: type inference, `(value, err)` multi-value returns, `@derive(eq)` and `@derive(schema)`, and a single `ae` command for build, run, test, fmt and packages. See [Language Reference](docs/language-reference.md).
 - **Portability as a feature**: Linux, macOS, Windows, FreeBSD, WebAssembly, and embedded targets; cross-compile with `ae build --target=<triple>`. See [Architecture](docs/architecture.md).
 
 ## Benchmarks

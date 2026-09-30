@@ -54,6 +54,7 @@ tests/integration/cryptography_v2/
 tests/integration/default_arguments/
 tests/integration/defer_conditional_warn/
 tests/integration/derive_eq/
+tests/integration/derive_schema_cross_module/
 tests/integration/distinct_types/
 tests/integration/dsl_receiver_scoping/
 tests/integration/dsl_receiver_scoping_edge/

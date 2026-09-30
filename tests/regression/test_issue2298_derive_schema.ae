@@ -1,0 +1,198 @@
+// Issue #2298: @derive(schema) — a struct's fields, as a table, at compile
+// time.
+//
+// The gap: an engine's inspector, save file and replicator walk a
+// component's fields by name, and the only way to give them the fields was
+// a second, hand-kept copy of the struct (`component.float_field(k, "rate",
+// offsetof(Bob, rate), 2.0)` per field). `@derive(schema)` makes the
+// compiler emit the table, `T_schema()` returns it, std.reflect reads it,
+// and `@attr(...)` after a field's type carries per-field metadata into it.
+//
+// Pre-fix this file fails to compile: `schema` was an unknown derive, `@` after
+// a field's type was a parse error, and std.reflect did not exist. Each block
+// pins one part of the contract: the struct's name and size, every field's
+// offset and size against the compiler's own offsetof/sizeof, kinds and type
+// spellings (an enum field included), arrays and slices, nested tables (by value, through a pointer
+// back to the struct itself, and for array elements), the string ownership
+// flag's offset, attributes of each argument kind, a store through the table,
+// the empty struct, @derive(eq) beside it, and null-safe reads.
+
+import std.reflect
+import std.mem
+
+extern exit(code: int)
+
+enum Dir { North, East, South, West }
+
+struct Vec {
+    x: float
+    y: float
+}
+
+@derive(schema)
+struct Node {
+    id: int @key
+    next: *Node
+    pos: Vec
+    tags: int[4]
+    corners: Vec[2]
+    path: Vec[]
+    label: string @tooltip("the \"name\"\n") @max_len(0x20)
+    speed: float @range(-1.5, 10.0) @default(2.0)
+    alive: bool @default(true)
+    big: long @default(-42) @hidden
+    small: f32
+    b: byte
+    raw: ptr
+    hook: fn(int) -> int
+    dir: Dir
+}
+
+@derive(eq, schema)
+struct Pair {
+    a: int
+    b: int
+}
+
+@derive(schema)
+struct Empty {
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    s = Node_schema()
+
+    // ---- the struct ----
+    check(reflect.name(s) == "Node", "the struct's name")
+    check(reflect.size(s) == sizeof(Node), "the struct's size is sizeof")
+    check(reflect.field_count(s) == 15, "every field is listed")
+
+    // ---- fields, in declaration order, at the compiler's own offsets ----
+    check(reflect.field_index(s, "id") == 0, "the first field is 0")
+    check(reflect.field_index(s, "dir") == 14, "the last field is 14")
+    check(reflect.field_index(s, "nope") == -1, "a missing name is -1")
+    check(reflect.field_offset(s, 0) == offsetof(Node, id), "offset of id")
+    check(reflect.field_offset(s, 2) == offsetof(Node, pos), "offset of pos")
+    check(reflect.field_offset(s, 7) == offsetof(Node, speed), "offset of speed")
+    check(reflect.field_offset(s, 13) == offsetof(Node, hook), "offset of hook")
+    check(reflect.field_size(s, 0) == 4, "an int is 4 bytes")
+    check(reflect.field_size(s, 2) == sizeof(Vec), "a struct value's size")
+    check(reflect.field_size(s, 3) == 16, "an int[4] is 16 bytes")
+    check(reflect.field_size(s, 10) == 4, "an f32 is 4 bytes")
+    check(reflect.field_size(s, 11) == 1, "a byte is 1 byte")
+
+    // ---- kinds and spellings ----
+    check(reflect.field_kind(s, 0) == reflect.KIND_INT, "int kind")
+    check(reflect.field_kind(s, 1) == reflect.KIND_PTR, "*Node kind")
+    check(reflect.field_type(s, 1) == "*Node", "*Node spelling")
+    check(reflect.field_kind(s, 2) == reflect.KIND_STRUCT, "struct kind")
+    check(reflect.field_type(s, 2) == "Vec", "struct spelling")
+    check(reflect.field_kind(s, 3) == reflect.KIND_ARRAY, "array kind")
+    check(reflect.field_type(s, 3) == "int[4]", "array spelling")
+    check(reflect.field_elem_kind(s, 3) == reflect.KIND_INT, "array element kind")
+    check(reflect.field_len(s, 3) == 4, "array length")
+    check(reflect.field_kind(s, 4) == reflect.KIND_ARRAY, "array of structs")
+    check(reflect.field_elem_kind(s, 4) == reflect.KIND_STRUCT, "its element kind")
+    check(reflect.field_kind(s, 5) == reflect.KIND_SLICE, "slice kind")
+    check(reflect.field_type(s, 5) == "Vec[]", "slice spelling")
+    check(reflect.field_len(s, 5) == 0, "a slice has no fixed length")
+    check(reflect.field_kind(s, 6) == reflect.KIND_STRING, "string kind")
+    check(reflect.field_kind(s, 7) == reflect.KIND_FLOAT, "float kind")
+    check(reflect.field_kind(s, 8) == reflect.KIND_BOOL, "bool kind")
+    check(reflect.field_kind(s, 9) == reflect.KIND_LONG, "long kind")
+    check(reflect.field_kind(s, 10) == reflect.KIND_F32, "f32 kind")
+    check(reflect.field_kind(s, 11) == reflect.KIND_BYTE, "byte kind")
+    check(reflect.field_kind(s, 12) == reflect.KIND_PTR, "ptr kind")
+    check(reflect.field_type(s, 12) == "ptr", "ptr spelling")
+    check(reflect.field_kind(s, 13) == reflect.KIND_FN, "fn kind")
+    check(reflect.field_kind(s, 14) == reflect.KIND_ENUM, "enum kind")
+    check(reflect.field_type(s, 14) == "Dir", "enum spelling")
+    check(reflect.field_offset(s, 14) == offsetof(Node, dir), "offset of an enum field")
+    check(reflect.field_size(s, 14) == 4, "an enum is 4 bytes")
+    check(reflect.kind_name(reflect.field_kind(s, 7)) == "float", "kind_name")
+
+    // ---- nested tables ----
+    v = reflect.field_schema(s, 2)
+    check(reflect.name(v) == "Vec", "a struct field names its struct's table")
+    check(reflect.field_count(v) == 2, "a nested table is complete")
+    check(reflect.field_offset(v, 1) == offsetof(Vec, y), "nested offsets")
+    check(reflect.field_schema(s, 1) == s, "a pointer back to the struct is its own table")
+    check(reflect.name(reflect.field_schema(s, 4)) == "Vec", "an array of structs names the element's table")
+    check(reflect.name(reflect.field_schema(s, 5)) == "Vec", "a slice of structs names the element's table")
+    check(reflect.field_schema(s, 3) == null, "an int array has no table")
+    check(reflect.field_schema(s, 12) == null, "a bare ptr has no table")
+
+    // ---- a string field's ownership flag ----
+    h = reflect.field_heap_offset(s, 6)
+    check(h > reflect.field_offset(s, 6), "the flag follows the string")
+    check(h < reflect.field_offset(s, 7), "and precedes the next field")
+    check(reflect.field_heap_offset(s, 0) == -1, "only a string has one")
+
+    // ---- attributes ----
+    check(reflect.attr_count(s, 0) == 1, "@key")
+    check(reflect.attr_name(s, 0, 0) == "key", "@key's name")
+    check(reflect.attr_arg_count(s, 0, 0) == 0, "@key has no arguments")
+    check(reflect.has_attr(s, 9, "hidden"), "has_attr")
+    check(!reflect.has_attr(s, 9, "key"), "has_attr on a missing attribute")
+    check(reflect.attr_count(s, 1) == 0, "a field without attributes")
+
+    t = reflect.attr_index(s, 6, "tooltip")
+    check(t == 0, "attributes are indexed in order")
+    check(reflect.attr_arg_kind(s, 6, t, 0) == reflect.ARG_STRING, "a string argument")
+    check(reflect.attr_text(s, 6, t, 0) == "the \"name\"\n", "a string argument's value, escapes and all")
+    m = reflect.attr_index(s, 6, "max_len")
+    check(reflect.attr_arg_kind(s, 6, m, 0) == reflect.ARG_INT, "a hex int argument")
+    check(reflect.attr_int(s, 6, m, 0) == 32, "0x20 is 32")
+
+    r = reflect.attr_index(s, 7, "range")
+    check(reflect.attr_arg_count(s, 7, r) == 2, "@range has two arguments")
+    check(reflect.attr_arg_kind(s, 7, r, 0) == reflect.ARG_FLOAT, "a float argument")
+    check(reflect.attr_float(s, 7, r, 0) == -1.5, "a negative float")
+    check(reflect.attr_float(s, 7, r, 1) == 10.0, "the upper bound")
+    check(reflect.attr_text(s, 7, r, 1) == "10.0", "a number's text as written")
+    check(reflect.attr_int(s, 7, r, 0) == -1, "a float's integer reading truncates")
+
+    d = reflect.attr_index(s, 8, "default")
+    check(reflect.attr_arg_kind(s, 8, d, 0) == reflect.ARG_BOOL, "a bool argument")
+    check(reflect.attr_int(s, 8, d, 0) == 1, "true reads as 1")
+    check(reflect.attr_int(s, 9, 0, 0) == -42, "a negative int")
+    check(reflect.attr_float(s, 9, 0, 0) == -42.0, "an int's float reading")
+
+    // ---- a generic writer: defaults applied through the table ----
+    node = heap.new(Node)
+    i = 0
+    while i < reflect.field_count(s) {
+        di = reflect.attr_index(s, i, "default")
+        if di >= 0 && reflect.field_kind(s, i) == reflect.KIND_FLOAT {
+            mem.set_float64(node, reflect.field_offset(s, i), reflect.attr_float(s, i, di, 0))
+        }
+        i = i + 1
+    }
+    check(node.speed == 2.0, "a store at the table's offset lands in the field")
+    heap.free(node)
+
+    // ---- @derive(eq) beside it, and the empty struct ----
+    p = Pair_schema()
+    check(reflect.field_count(p) == 2, "eq and schema together")
+    check(Pair_eq(Pair { a: 1, b: 2 }, Pair { a: 1, b: 2 }) == 1, "eq still derived")
+    e = Empty_schema()
+    check(reflect.name(e) == "Empty", "the empty struct has a table")
+    check(reflect.field_count(e) == 0, "with no fields")
+
+    // ---- reads past the end, and of no table at all ----
+    check(reflect.field_name(s, 99) == "", "a field out of range reads as empty")
+    check(reflect.field_offset(s, -1) == -1, "a negative index")
+    check(reflect.attr_name(s, 0, 5) == "", "an attribute out of range")
+    check(reflect.attr_arg_kind(s, 7, r, 9) == 0, "an argument out of range")
+    check(reflect.attr_float(s, 7, r, 9) == 0.0, "and its value")
+    check(reflect.name(null) == "", "a null table's name")
+    check(reflect.field_count(null) == 0, "a null table has no fields")
+    check(reflect.field_schema(null, 0) == null, "nor nested tables")
+    println("OK")
+}
