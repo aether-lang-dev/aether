@@ -68,4 +68,4 @@ it costs one `memmove` of the content and no allocation.
 
 `append_slice(b, s)` appends a `byte[]`'s bytes as they are, embedded NULs
 included, with the length the slice carries (#2301). `append_n` takes a
-`string` and an explicit count, for a prefix of a string.
+string and an explicit count, for a prefix of that string.
