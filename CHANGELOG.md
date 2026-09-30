@@ -14,6 +14,67 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.742.0]
+
+### Fixed
+
+- **A `while` loop the compiler collapses into a closed form now ends where
+  the loop does (#2271).** The arithmetic-series collapse set the counter to
+  the bound, which is right only for an integer step that divides the
+  distance. `while a < 0.0 { a = a + 6.28 }` from -0.51 left `0.0`, and an
+  integer stepping by 2 from -3 stopped at 0 instead of 1. It also truncated
+  float counters, bounds and addends through `(int64_t)`, and summed an
+  accumulator placed after the increment from the counter's old value. Only
+  integer loops are collapsed now, with the exact trip count, any positive
+  step, and the statement order respected. The arithmetic is exact modulo
+  2^64, so a wrapping `int` accumulator ends where the loop leaves it. A
+  float series runs as a loop, and so does an integer loop whose counter
+  would wrap on its last step.
+
+- **An array literal bound inside a loop body or branch builds (#2289).**
+  Such a local is declared once for the whole function, so its binding in
+  the body became `kinds = {1, 2, 3}`, a C initializer used as an
+  expression, and the build failed with "expected expression before '{'".
+  A second binding of an array at function scope failed the same way. The
+  literal is now stored element by element, in order, and a shorter literal
+  zeroes the rest of the array. A longer one is a compile error naming both
+  sizes, since an array keeps the size of its first binding.
+
+- **`std.json` writes a double so that parsing it gives back the same double
+  (#2290).** `stringify` wrote numbers with `%g`, six significant digits, so
+  `0.061234567891` came back as `0.0612346` and `3.141592653589793` as
+  `3.14159`. It now writes `%.15g` when that reads back as the same double,
+  else `%.16g`, else `%.17g`, which always does. A value that needs few
+  digits still gets few (`0.1` is `0.1`), and a number below 1e15 stays in
+  fixed notation (`1e10` is written `10000000000`). A NaN or an infinity,
+  which JSON cannot spell, is written as `null` instead of the invalid `nan`
+  or `inf`.
+
+- **A top-level `when` in an imported module keeps its surviving arm
+  (#2275).** A module's top-level `when` was left for the merge, which
+  copies only declarations, so the selected arm's externs, functions and
+  constants never reached the program, and the module's own functions
+  reported them undefined. The same `when` in the entry file worked. A
+  module's `when`s are now resolved as soon as it is parsed, so the
+  surviving arm is the module's top level for its imports, its exports and
+  the merge. A `when` condition that is not a compile-time constant is
+  reported against the file it is in and fails the build.
+
+- **A constant may be named like anything a C header declares (#2292).**
+  The program's constants were file-scope statics under their own names, so
+  on Windows `const ACCEL = 4.0` collided with winuser.h's `ACCEL` type and
+  `const NEAR = 20.0` with a windef.h macro, and the generated C did not
+  compile. `SIZE`, `POINT`, `RECT` and `MAX_PATH` failed the same way; the
+  last one silently, where a reference compiled against the header's value.
+  The program's constants are now emitted as `ae_const_<NAME>` with their
+  references, so no header can collide with them on any platform. A
+  parameter, local, closure parameter or actor state named like a constant
+  is still that binding. The symbol catalog of an `--emit=lib` build still
+  names constants as written. The program's own C translation unit also
+  leaves USER and GDI out of `windows.h`, since it calls only a few kernel32
+  functions. That removes `ACCEL`, `MSG` and every `CreateWindow` /
+  `SendMessage` / `GetObject` macro from its scope.
+
 ## [0.741.0]
 
 ### Fixed
