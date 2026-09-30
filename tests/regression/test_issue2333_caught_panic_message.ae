@@ -10,13 +10,15 @@
 // Pre-fix the round check fails: each caught panic kept its message, 16
 // bytes or more. The measure compares rounds of built messages with rounds
 // of the same shapes throwing literals (which own nothing), so what the
-// allocator or the platform keeps per panic -- Wine's heap bookkeeping
-// grows by about a byte per caught panic -- cancels out. The value checks
+// platform keeps per panic cancels out; the bound left over is std.mem's
+// leak-free tolerance, which cached small blocks stay under (Wine's heap
+// counts about 2 KB of them as in use). The value checks
 // cover each way a binding can leave its handler; a literal message
 // returned through the same paths must stay freeable by the caller.
 
 import std.mem
 import std.list
+import std.string
 
 extern exit(code: int)
 
@@ -147,6 +149,9 @@ main() {
     stash(l, 9)
     v, _gerr = list.get(l, 0)
     check(v == "bad value 9", "stored in a list")
+    // A raw list add does not own its element: the test releases both.
+    string.release(v)
+    list.free(l)
 
     // ---- nothing is left behind ----
     if mem.heap_in_use() < 0 {
@@ -157,7 +162,10 @@ main() {
     round(LITERAL)
     literal = two_rounds(LITERAL)
     built = two_rounds(0)
-    if built - literal > 1024 {
+    // std.mem's leak-free tolerance (its README): allocators may keep a
+    // few KB of cached blocks, which Wine's heap reports as in use. One
+    // leaking shape alone keeps 400 messages here, 6400 bytes or more.
+    if built - literal > 4096 {
         println("FAIL: two rounds of built messages kept ${built} bytes, literals ${literal}")
         exit(1)
     }
