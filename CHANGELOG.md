@@ -14,6 +14,62 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.745.0]
+
+### Added
+
+- **`std.observe` names the field that changed, and reports stores the
+  compiler cannot see.** An observer registered with `observe.observe_fields`
+  receives the stored field's index in declaration order,
+  `|obj: ptr, field: int|`, so a replicator can send a changed-field bitmask
+  and an undo log can record the one field a store touched; a nested store
+  carries each level's own field to that level's observers. A store made by
+  offset through `std.mem` is reported with `observe.notify_field(obj, field)`
+  or `observe.notify(obj)` (field `observe.ANY_FIELD`), which run the same
+  pass a compiler-emitted store runs. Plain `observe` observers are
+  unchanged (#2299).
+
+- **`@derive(schema)`: a struct's field table at compile time, and
+  `std.reflect` to read it.** The compiler emits, as static constant data,
+  the struct's name and size and each field's name, type, kind, offset and
+  size (C's own `offsetof`/`sizeof`), and `T_schema()` returns it. Attributes
+  written after a field's type (`rate: float @range(0.0, 10.0) @default(2.0)`)
+  are carried into the table. Nested structs name their own tables, a string
+  field gives its ownership flag's offset for generic writers, and module
+  structs work from the module and from importers. An inspector, save file or
+  replicator walks a struct's fields by name instead of keeping a hand-written
+  copy of the struct beside it (#2298).
+
+### Changed
+
+- **`std.sort` takes slices; the packed arrays' `array()` views are
+  bounded.** `intarr.array`, `longarr.array`, `floatarr.array` and
+  `strarr.array` return their elements bounded by the size, so `v.len` is
+  the size and `v[i]` past the end is the slice bounds panic instead of a
+  read past the buffer; a null handle is the empty slice. Every `std.sort`
+  entry point takes a slice and no separate count: `sort.ints(intarr.array(h))`,
+  `sort.strings(words)`, `sort.strings_by(xs[..n], cmp)`, and a fixed array,
+  a `make` buffer or any sub-slice sorts the same way. A view with no bound
+  panics rather than sorting nothing. Migration: `sort.ints(h)` becomes
+  `sort.ints(intarr.array(h))` (likewise longs, floats and the `_by` and
+  `_search` forms), and `sort.strings(a, n)` becomes `sort.strings(a[..n])`.
+  Passing a container handle where a slice is expected now names its
+  `array()` view in the diagnostic (#2301).
+
+### Fixed
+
+- **A struct with an enum-typed field compiles.** Codegen emitted every
+  struct body before the enum typedefs, so `struct P { d: Dir }` named a type
+  C had not seen yet ("unknown type name 'Dir'"). Enum typedefs now come
+  ahead of the struct bodies; an enum depends on no other type (#2308).
+
+- **`make([]T, n)` typechecks as the `T[]` it is.** The call was stamped
+  with the `make` builtin's placeholder type, a bare `ptr`, so
+  `m = make([]int, 4)` failed with "Type mismatch in variable
+  initialization" and passing one to a `T[]` parameter was rejected as a
+  bare ptr. It is now the bounded, zeroed slice the language reference
+  describes, for every element type (#2314).
+
 ## [0.744.0]
 
 ### Fixed
