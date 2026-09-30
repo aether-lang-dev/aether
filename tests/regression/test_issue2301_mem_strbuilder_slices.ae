@@ -1,0 +1,85 @@
+// Issue #2301 (Foundations): std.mem and std.strbuilder take byte[] slices.
+//
+// The gap: std.mem's endian accessors and bulk copies took a raw pointer and
+// trusted every offset, so a field read at the end of a buffer read past it;
+// std.strbuilder's append_n took a separately carried count and read its
+// argument as a string. The slice forms carry the bound and check the whole
+// field, and append_slice copies the bytes as they are.
+//
+// Pre-fix this file fails to compile: none of these calls existed. The blocks
+// cover each width and byte order round-tripping, a field one byte past the
+// end, an overlapping copy, fill, and a binary append.
+
+import std.mem
+import std.bytes
+import std.strbuilder
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn read_panics(s: byte[], off: int) -> bool {
+    caught = false
+    try {
+        _v = mem.read_u32_le(s, off)
+    } catch e {
+        caught = true
+    }
+    return caught
+}
+
+main() {
+    buf = bytes.new(16)
+    bytes.set_length(buf, 16)
+    s = bytes.view(buf)
+
+    // ---- each width and byte order ----
+    mem.write_u16_le(s, 0, 0x1234)
+    check(s[0] == 0x34 && s[1] == 0x12, "u16 little-endian layout")
+    check(mem.read_u16_le(s, 0) == 0x1234, "u16 le round trip")
+    mem.write_u16_be(s, 2, 0x1234)
+    check(s[2] == 0x12 && s[3] == 0x34, "u16 big-endian layout")
+    check(mem.read_u16_be(s, 2) == 0x1234, "u16 be round trip")
+    mem.write_u32_le(s, 4, 0xDEADBEEF)
+    check(mem.read_u32_le(s, 4) == 0xDEADBEEF, "u32 le round trip")
+    mem.write_u32_be(s, 4, 0x01020304)
+    check(s[4] == 1 && s[7] == 4 && mem.read_u32_be(s, 4) == 0x01020304, "u32 be")
+    mem.write_u64_le(s, 8, 0x0102030405060708)
+    check(s[8] == 8 && s[15] == 1, "u64 little-endian layout")
+    check(mem.read_u64_le(s, 8) == 0x0102030405060708, "u64 le round trip")
+    mem.write_u64_be(s, 8, 0x0102030405060708)
+    check(mem.read_u64_be(s, 8) == 0x0102030405060708 && s[8] == 1, "u64 be")
+
+    // ---- the whole field must be inside the slice ----
+    check(!read_panics(s, 12), "the last whole u32 reads")
+    check(read_panics(s, 13), "a u32 one byte past the end panics")
+    check(read_panics(s, -1), "a negative offset panics")
+    check(read_panics(s[0..3], 0), "a u32 in a 3-byte sub-slice panics")
+
+    // ---- copy (overlapping) and fill ----
+    for i in 0..8 {
+        s[i] = i
+    }
+    check(mem.copy_slice(s[2..], s[0..6]) == 6, "copy returns the count")
+    check(s[2] == 0 && s[3] == 1 && s[7] == 5, "an overlapping copy moves the bytes intact")
+    mem.fill_slice(s[10..14], 0xAB)
+    check(s[9] != 0xAB && s[10] == 0xAB && s[13] == 0xAB && s[14] != 0xAB, "fill stays inside its slice")
+
+    // ---- a binary append ----
+    sb = strbuilder.new(4)
+    s[0] = 104
+    s[1] = 0
+    s[2] = 105
+    check(strbuilder.append_slice(sb, s[0..3]) == 1, "append_slice")
+    out = strbuilder.finish(sb)
+    check(string.length(out) == 3, "the embedded NUL is kept")
+
+    bytes.free(buf)
+    println("OK")
+}

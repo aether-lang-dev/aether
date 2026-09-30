@@ -173,6 +173,25 @@ what the OS charges the process, page-granular and including mappings the
 allocator does not see, `std.os` has `memory_resident()` and
 `memory_private()`.
 
+## Fields in a `byte[]` (#2301)
+
+The pointer accessors trust every offset. When the bytes are a slice (a
+`std.bytes` buffer's `view()`, a sub-slice, a fixed array), the slice forms
+check that the whole field lies inside it, and a field that does not is a
+panic naming the offset, the width and the length:
+
+```aether,fragment
+v = bytes.view(frame)
+kind = mem.read_u16_be(v, 0)
+size = mem.read_u32_le(v, 2)      // panics if fewer than 6 bytes
+mem.write_u64_be(v, 8, stamp)
+mem.copy_slice(v[16..], payload)  // overlap-safe; panics if it does not fit
+mem.fill_slice(v[40..48], 0)
+```
+
+`read_u16_le` through `write_u64_be` have the widths and byte order of
+`get_u16_le` through `set_u64_be`.
+
 ## Exports
 
 `get_byte`, `set_byte`, `get_int`, `set_int`, `get_long`, `set_long`,
@@ -183,4 +202,5 @@ endian pairs `get_u16_le` through `set_u64_be`; `bits_of_float`,
 `float_from_bits`, `clz32`, `clz64`, `udiv64_32`; `copy`, `move`, `compare`,
 `set`, `copy_at`, `move_at`, `fill_at`, `compare_at`; `get_byte_sz`,
 `set_byte_sz`; `ptr_to_long`, `long_to_ptr`; `call_fn3_int`, `call_fn3_void`,
-`call_fn2_void`; `heap_in_use`.
+`call_fn2_void`; `heap_in_use`; the slice forms `read_u16_le` through
+`write_u64_be`, `copy_slice` and `fill_slice`.

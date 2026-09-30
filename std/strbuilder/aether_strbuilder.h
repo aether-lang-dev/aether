@@ -53,6 +53,13 @@ int aether_strbuilder_append(AetherStrBuilder* b, const void* s);
  * (negative n, NULL s, OOM, etc.). n == 0 is a no-op success. */
 int aether_strbuilder_append_n(AetherStrBuilder* b, const void* s, int n);
 
+/* Append `n` raw bytes from `data` (#2301): the landing point for a `byte[]`
+ * slice. Unlike append_n, `data` is never read as an AetherString, so binary
+ * bytes that happen to look like a string header are copied as they are.
+ * Returns 1 on success, 0 on failure (NULL builder or data, negative n,
+ * OOM). */
+int aether_strbuilder_append_bytes(AetherStrBuilder* b, const void* data, int n);
+
 /* Append a single byte (low 8 bits of `c`). Useful for separators
  * ('\n', ',', 0x02, ...). Returns 1 on success, 0 on failure. */
 int aether_strbuilder_append_byte(AetherStrBuilder* b, int c);

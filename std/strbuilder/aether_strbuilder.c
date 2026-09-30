@@ -100,6 +100,17 @@ int aether_strbuilder_append_n(AetherStrBuilder* b, const void* s, int n) {
     return 1;
 }
 
+int aether_strbuilder_append_bytes(AetherStrBuilder* b, const void* data, int n) {
+    if (!b || n < 0 || (!data && n > 0)) return 0;
+    if (n == 0) return 1;
+    size_t need = b->length + (size_t)n;
+    if (need < b->length) return 0;  /* overflow */
+    if (!strbuilder_reserve(b, need)) return 0;
+    memcpy(b->data + b->length, data, (size_t)n);
+    b->length = need;
+    return 1;
+}
+
 int aether_strbuilder_append_byte(AetherStrBuilder* b, int c) {
     if (!b) return 0;
     size_t need = b->length + 1;

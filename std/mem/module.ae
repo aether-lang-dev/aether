@@ -73,6 +73,8 @@ exports(
     get_u16_le, get_u16_be, set_u16_le, set_u16_be,
     get_u32_le, get_u32_be, set_u32_le, set_u32_be,
     get_u64_le, get_u64_be, set_u64_le, set_u64_be,
+    read_u16_le, write_u16_le, read_u16_be, write_u16_be, read_u32_le, write_u32_le,
+    read_u32_be, write_u32_be, read_u64_le, write_u64_le, read_u64_be, write_u64_be, copy_slice, fill_slice,
     aether_heap_in_use, heap_in_use
 )
 
@@ -392,4 +394,95 @@ extern aether_heap_in_use() -> long
 // before/after is not zero even when nothing leaks.
 heap_in_use() -> long {
     return aether_heap_in_use()
+}
+
+// ---- slices (#2301) ----
+// The raw accessors above take a pointer and trust the offset. These take a
+// `byte[]` and check that the whole field lies inside it: an access past
+// either end is a panic naming the offset, the width and the length, where
+// the pointer form would read or write past the buffer. Widths and byte
+// order are the pointer forms' (u32 reads come back as a long).
+
+fn slice_span(fname: string, s: byte[], off: int, width: int) {
+    if s.len < 0 {
+        panic("mem.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+    if off < 0 || off > s.len - width {
+        panic("mem.${fname}: ${width} bytes at offset ${off} are outside a slice of ${s.len}")
+    }
+}
+
+read_u16_le(s: byte[], off: int) -> int {
+    slice_span("read_u16_le", s, off, 2)
+    return aether_mem_get_u16_le(s, off)
+}
+
+write_u16_le(s: byte[], off: int, value: int) {
+    slice_span("write_u16_le", s, off, 2)
+    aether_mem_set_u16_le(s, off, value)
+}
+
+read_u16_be(s: byte[], off: int) -> int {
+    slice_span("read_u16_be", s, off, 2)
+    return aether_mem_get_u16_be(s, off)
+}
+
+write_u16_be(s: byte[], off: int, value: int) {
+    slice_span("write_u16_be", s, off, 2)
+    aether_mem_set_u16_be(s, off, value)
+}
+
+read_u32_le(s: byte[], off: int) -> long {
+    slice_span("read_u32_le", s, off, 4)
+    return aether_mem_get_u32_le(s, off)
+}
+
+write_u32_le(s: byte[], off: int, value: long) {
+    slice_span("write_u32_le", s, off, 4)
+    aether_mem_set_u32_le(s, off, value)
+}
+
+read_u32_be(s: byte[], off: int) -> long {
+    slice_span("read_u32_be", s, off, 4)
+    return aether_mem_get_u32_be(s, off)
+}
+
+write_u32_be(s: byte[], off: int, value: long) {
+    slice_span("write_u32_be", s, off, 4)
+    aether_mem_set_u32_be(s, off, value)
+}
+
+read_u64_le(s: byte[], off: int) -> long {
+    slice_span("read_u64_le", s, off, 8)
+    return aether_mem_get_u64_le(s, off)
+}
+
+write_u64_le(s: byte[], off: int, value: long) {
+    slice_span("write_u64_le", s, off, 8)
+    aether_mem_set_u64_le(s, off, value)
+}
+
+read_u64_be(s: byte[], off: int) -> long {
+    slice_span("read_u64_be", s, off, 8)
+    return aether_mem_get_u64_be(s, off)
+}
+
+write_u64_be(s: byte[], off: int, value: long) {
+    slice_span("write_u64_be", s, off, 8)
+    aether_mem_set_u64_be(s, off, value)
+}
+
+// Copy all of `src` to the start of `dst` (the two may overlap, as within one
+// buffer). `dst` must be at least as long as `src`. Returns src.len.
+copy_slice(dst: byte[], src: byte[]) -> int {
+    slice_span("copy_slice", src, 0, src.len)
+    slice_span("copy_slice", dst, 0, src.len)
+    aether_mem_move(dst, src, src.len)
+    return src.len
+}
+
+// Set every byte of `s` to `value` (its low 8 bits).
+fill_slice(s: byte[], value: int) {
+    slice_span("fill_slice", s, 0, s.len)
+    aether_mem_set_bulk(s, value, s.len)
 }
