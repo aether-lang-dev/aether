@@ -6210,6 +6210,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
     }
 
+    // #1044: first-class enum typedefs, ahead of the struct bodies (#2308):
+    // a struct may hold an enum by value (`d: Dir`), and C needs the typedef
+    // before the field. An enum depends on no other type, so nothing has to
+    // precede it. Still before the function forward decls, so `Name` and its
+    // member constants are in scope everywhere they are used.
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* ed = program->children[i];
+        if (ed && ed->type == AST_ENUM_DEFINITION) {
+            emit_enum_typedef(gen, ed);
+        }
+    }
+
     // Hoist FULL struct body emission to the top of the file (right
     // after forward typedefs), before any function bodies that might
     // do `view->field` member access against an imported or locally-
@@ -6290,16 +6302,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         ASTNode* sd = program->children[i];
         if (sd && sd->type == AST_SUM_TYPE_DEF) {
             emit_sum_typedef(gen, sd);
-        }
-    }
-
-    // #1044: first-class enum typedefs. Emitted here (with the other type
-    // definitions, before function forward decls) so `Name` and its member
-    // constants are in scope everywhere they are used.
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* ed = program->children[i];
-        if (ed && ed->type == AST_ENUM_DEFINITION) {
-            emit_enum_typedef(gen, ed);
         }
     }
 
