@@ -77,7 +77,9 @@ main() {
 
     print("\nExponent boundaries:\n")
     fails = fails + check("1e0", "1", "1e0 → 1")
-    fails = fails + check("1e10", "1e+10", "small positive exp")
+    // 15-digit precision keeps fixed notation below 1e15, as JavaScript
+    // writes it (#2290).
+    fails = fails + check("1e10", "10000000000", "small positive exp")
     fails = fails + check("1e22", "1e+22", "fast-path exponent ceiling")
     fails = fails + check("1e23", "1e+23", "past fast path → fallback strtod")
     fails = fails + check("1e-10", "1e-10", "small negative exp")

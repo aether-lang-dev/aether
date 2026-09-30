@@ -109,14 +109,22 @@ inside a `when` condition.
 ## Semantics: only the selected arm is type-checked and emitted
 
 The condition is evaluated by a pre-typecheck pass
-(`resolve_when_statements`, in `compiler/codegen/optimizer.c`, invoked from
-`compiler/aetherc.c` between parse and type-check). That pass:
+(`resolve_when_statements`, in `compiler/codegen/optimizer.c`), run on the
+entry file between parse and type-check and on each imported module as soon
+as it is parsed. That pass:
 
 1. Const-evaluates each `when` condition.
 2. Replaces the `when` node, in place, with the contents of its selected
    arm (splicing top-level declarations to top level, statement arms into
    the enclosing block).
 3. Frees the unselected arm entirely.
+
+A top-level `when` in an imported module therefore behaves as it does in
+the entry file: the selected arm's externs, functions, constants and imports
+are the module's own, visible to the module's functions and to its
+importers through `exports`. (Before #2275 a module's top-level `when` was
+left for the merge, which copies only declarations, so the arm never
+arrived and its externs were undefined.)
 
 Because this runs **before** type-checking and symbol collection, the
 unselected arm is never type-checked, never collects symbols, and is never
@@ -166,4 +174,8 @@ than a cosmetic `if` that still requires the dead branch to compile.
   in `compiler/codegen/optimizer.c`.
 - **Driver wiring:** `compiler/aetherc.c` calls `resolve_when_statements`
   after module merge and the `@derive` pass, and before the `--emit=lib`
-  import gate and `typecheck_program`.
+  import gate and `typecheck_program`. `module_parse_file` in
+  `compiler/aether_module.c` calls it on each imported module right after
+  parsing, before the module's imports are followed or its declarations
+  merged. A condition that is not a compile-time constant is an error
+  against the file it is in.

@@ -1,0 +1,106 @@
+// Regression: a constant may be named like anything a C header declares
+// (#2292).
+//
+// The entry program's constants were file-scope statics under their own
+// names, so on Windows `const ACCEL = 4.0` collided with winuser.h's ACCEL
+// typedef and `const NEAR = 20.0` with a windef.h macro; the generated C did
+// not compile. Constants are now emitted under a reserved C name, with every
+// reference that resolves to them, so none of these can collide on any
+// platform. A parameter, local, closure parameter or actor state that shadows
+// a constant still resolves to itself.
+
+import std.string
+
+extern exit(code: int)
+
+const ACCEL = 4.0
+const NEAR = 20.0
+const FAR = 3
+const SIZE = 64
+const POINT = 7
+const RECT = 11
+const MAX_PATH = 1024
+const INFINITE = 99
+const DELETE = 4
+const EOF_MARK = "eof"
+const BUFSIZ = 8
+const DOUBLE_SIZE = SIZE * 2
+const WEIGHTS[] = [1, 2, 3]
+
+message Probe { reps: int }
+
+actor Counter {
+    state SIZE = 5
+    receive {
+        Probe(reps) -> { reply SIZE + reps }
+    }
+}
+
+check(label: string, got: int, want: int) -> int {
+    if got == want {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+// A parameter named like a constant is the parameter.
+param_shadows(SIZE: int) -> int {
+    return SIZE * 3
+}
+
+// So is a local.
+local_shadows() -> int {
+    POINT = 100
+    return POINT + 1
+}
+
+// A constant read inside a closure.
+closure_reads() -> int {
+    add = | x: int | { return x + MAX_PATH }
+    return add(1)
+}
+
+// A closure parameter named like a constant is the parameter.
+closure_param_shadows() -> int {
+    twice = | RECT: int | { return RECT * 2 }
+    return twice(21)
+}
+
+// Constants as match labels.
+classify(n: int) -> int {
+    match n {
+        POINT -> { return 1 }
+        RECT -> { return 2 }
+        _ -> { return 0 }
+    }
+}
+
+main() {
+    fails = 0
+    println("constants named like C header names")
+    fails = fails + check("float consts ACCEL + NEAR", (ACCEL + NEAR) as int, 24)
+    fails = fails + check("FAR", FAR, 3)
+    fails = fails + check("SIZE", SIZE, 64)
+    fails = fails + check("const built from a const", DOUBLE_SIZE, 128)
+    fails = fails + check("INFINITE + DELETE + BUFSIZ", INFINITE + DELETE + BUFSIZ, 111)
+    fails = fails + check("array const", WEIGHTS[0] + WEIGHTS[1] + WEIGHTS[2], 6)
+    fails = fails + check("string const", string.length(EOF_MARK), 3)
+    fails = fails + check("interpolated", string.length("${SIZE}${POINT}"), 3)
+    fails = fails + check("parameter shadows SIZE", param_shadows(5), 15)
+    fails = fails + check("local shadows POINT", local_shadows(), 101)
+    fails = fails + check("closure reads MAX_PATH", closure_reads(), 1025)
+    fails = fails + check("closure parameter shadows RECT", closure_param_shadows(), 42)
+    fails = fails + check("match on POINT", classify(7), 1)
+    fails = fails + check("match on RECT", classify(11), 2)
+    c = spawn(Counter())
+    got = c ? Probe { reps: 1 }
+    fails = fails + check("actor state shadows SIZE", got, 6)
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("all passed")
+    exit(0)
+}

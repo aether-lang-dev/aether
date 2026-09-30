@@ -741,13 +741,19 @@ static void resolve_when_in_children(ASTNode* node) {
             WhenEvalResult r = when_eval_condition(cond);
             if (r == WHEN_EVAL_ERROR) {
                 g_when_error_count++;
-                fprintf(stderr,
-                    "Error: `when` condition at line %d is not a compile-time "
-                    "constant.\n"
-                    "       Supported forms: target.os == \"<os>\", "
-                    "target.os != \"<os>\", target.arch == \"<arch>\",\n"
-                    "       a bool literal, and combinations with && / || / !.\n",
-                    child->line);
+                /* Through the error system, against the file the `when` is
+                 * in: an imported module's `when` is resolved when the module
+                 * is parsed (#2275), and the error must name that file and
+                 * fail the build like any other of its errors. */
+                AetherError e = {
+                    child->source_file, NULL, child->line, child->column,
+                    "`when` condition is not a compile-time constant",
+                    "use target.os == \"<os>\", target.os != \"<os>\", "
+                    "target.arch == \"<arch>\", a bool literal, or those "
+                    "combined with && / || / !",
+                    NULL, AETHER_ERR_TYPE_MISMATCH
+                };
+                aether_error_report(&e);
                 // Leave the node in place but neutralise it so we don't
                 // descend into a half-built arm; it won't survive anyway
                 // because the build fails. Skip it.

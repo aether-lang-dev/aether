@@ -1,0 +1,260 @@
+// Regression: the arithmetic-series loop collapse gives the loop's own result
+// (#2271).
+//
+// The collapse replaced `while c < bound { acc = acc + a; c = c + step }` with
+// `c = bound`, which is right only for an integer counter whose step divides
+// the distance: `while a < 0.0 { a = a + 6.28 }` from -0.51 left 0.0, and an
+// integer stepping by 2 from -3 stopped at 0 instead of 1. It also truncated
+// float counters, bounds and addends through (int64_t), and summed a linear
+// accumulator from the counter's pre-increment value even when the statement
+// came after the increment.
+//
+// Each case runs a loop the collapse takes next to the same loop with a
+// statement it does not take (`if never { ... }`), so the second is the loop
+// as written. The two must agree. The #2271 examples are also checked against
+// their exact values.
+
+extern exit(code: int)
+
+check_int(label: string, got: long, want: long) -> int {
+    if got == want {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+check_float(label: string, got: float, want: float) -> int {
+    if got == want {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+// Integer counter, invariant addend, `<`, stepping by `step` from `start`.
+series_lt(start: int, bound: int, step: int, add: int) -> (int, int) {
+    c = start
+    acc = 7
+    if step == 2 {
+        while c < bound { acc = acc + add; c = c + 2 }
+    } else if step == 3 {
+        while c < bound { acc = acc + add; c = c + 3 }
+    } else {
+        while c < bound { acc = acc + add; c = c + 1 }
+    }
+    return c, acc
+}
+
+// The same loops, written so the collapse does not apply.
+series_lt_ref(start: int, bound: int, step: int, add: int) -> (int, int) {
+    never = 0
+    c = start
+    acc = 7
+    while c < bound {
+        acc = acc + add
+        c = c + step
+        if never == 1 { acc = 0 }
+    }
+    return c, acc
+}
+
+series_le(start: int, bound: int, add: int) -> (int, int) {
+    c = start
+    acc = 0
+    while c <= bound { acc = acc + add; c = c + 3 }
+    return c, acc
+}
+
+series_le_ref(start: int, bound: int, add: int) -> (int, int) {
+    never = 0
+    c = start
+    acc = 0
+    while c <= bound {
+        acc = acc + add
+        c = c + 3
+        if never == 1 { acc = 0 }
+    }
+    return c, acc
+}
+
+// Linear sums: the accumulator adds the counter, before or after the step.
+linear_before(start: int, bound: int) -> (int, int, int) {
+    i = start
+    s = 0
+    t = 0
+    while i < bound { s = s + i; t = t + i * 5; i = i + 3 }
+    return i, s, t
+}
+
+linear_before_ref(start: int, bound: int) -> (int, int, int) {
+    never = 0
+    i = start
+    s = 0
+    t = 0
+    while i < bound {
+        s = s + i
+        t = t + i * 5
+        i = i + 3
+        if never == 1 { s = 0 }
+    }
+    return i, s, t
+}
+
+linear_after(start: int, bound: int) -> (int, int) {
+    i = start
+    s = 0
+    while i < bound { i = i + 1; s = s + i }
+    return i, s
+}
+
+linear_after_ref(start: int, bound: int) -> (int, int) {
+    never = 0
+    i = start
+    s = 0
+    while i < bound {
+        i = i + 1
+        s = s + i
+        if never == 1 { s = 0 }
+    }
+    return i, s
+}
+
+// An `int` accumulator that wraps: the loop's wrapping additions and the
+// closed form must land on the same value.
+wrapping(n: int) -> (int, int) {
+    i = 0
+    acc = 0
+    lin = 0
+    while i < n { acc = acc + 1000003; lin = lin + i * 70001; i = i + 1 }
+    return acc, lin
+}
+
+wrapping_ref(n: int) -> (int, int) {
+    never = 0
+    i = 0
+    acc = 0
+    lin = 0
+    while i < n {
+        acc = acc + 1000003
+        lin = lin + i * 70001
+        i = i + 1
+        if never == 1 { acc = 0 }
+    }
+    return acc, lin
+}
+
+// A `long` counter and accumulator.
+long_series(start: long, bound: long) -> (long, long) {
+    c = start
+    long acc = 0
+    while c < bound { acc = acc + c; c = c + 7 }
+    return c, acc
+}
+
+long_series_ref(start: long, bound: long) -> (long, long) {
+    never = 0
+    c = start
+    long acc = 0
+    while c < bound {
+        acc = acc + c
+        c = c + 7
+        if never == 1 { acc = 0 }
+    }
+    return c, acc
+}
+
+// The counter's last step lands exactly on the type's maximum: no wrap, so
+// the closed form applies and must reach it.
+to_int_max(start: int) -> int {
+    c = start
+    while c < 2147483647 { c = c + 10 }
+    return c
+}
+
+// Float loops are never collapsed; these are #2271's examples.
+wrap_angle(a0: float) -> float {
+    a = a0
+    while a < 0.0 { a = a + 6.2831853 }
+    return a
+}
+
+wrap_hour(h0: float) -> float {
+    h = h0
+    while h < 0.0 { h = h + 24.0 }
+    while h >= 24.0 { h = h - 24.0 }
+    return h
+}
+
+main() {
+    fails = 0
+    println("series collapse: integer loops agree with the loop as written")
+    starts = [0 - 3, 0, 1, 5, 40, 41]
+    bounds = [0, 1, 7, 40, 41, 100]
+    si = 0
+    while si < 6 {
+        bi = 0
+        while bi < 6 {
+            st = 1
+            while st <= 3 {
+                c1, a1 = series_lt(starts[si], bounds[bi], st, 11)
+                c2, a2 = series_lt_ref(starts[si], bounds[bi], st, 11)
+                if c1 != c2 || a1 != a2 {
+                    println("  FAIL series < from ${starts[si]} to ${bounds[bi]} step ${st}: ${c1},${a1} vs ${c2},${a2}")
+                    fails = fails + 1
+                }
+                st = st + 1
+            }
+            l1, la1 = series_le(starts[si], bounds[bi], 5)
+            l2, la2 = series_le_ref(starts[si], bounds[bi], 5)
+            if l1 != l2 || la1 != la2 {
+                println("  FAIL series <= from ${starts[si]} to ${bounds[bi]}: ${l1},${la1} vs ${l2},${la2}")
+                fails = fails + 1
+            }
+            i1, s1, t1 = linear_before(starts[si], bounds[bi])
+            i2, s2, t2 = linear_before_ref(starts[si], bounds[bi])
+            if i1 != i2 || s1 != s2 || t1 != t2 {
+                println("  FAIL linear before from ${starts[si]} to ${bounds[bi]}: ${i1},${s1},${t1} vs ${i2},${s2},${t2}")
+                fails = fails + 1
+            }
+            j1, u1 = linear_after(starts[si], bounds[bi])
+            j2, u2 = linear_after_ref(starts[si], bounds[bi])
+            if j1 != j2 || u1 != u2 {
+                println("  FAIL linear after from ${starts[si]} to ${bounds[bi]}: ${j1},${u1} vs ${j2},${u2}")
+                fails = fails + 1
+            }
+            bi = bi + 1
+        }
+        si = si + 1
+    }
+    if fails == 0 { println("  PASS 6 starts x 6 bounds x (<, <=, linear before and after the step)") }
+
+    c, _a = series_lt(0 - 3, 0, 2, 1)
+    fails = fails + check_int("#2271 int step 2 from -3", c, 1)
+
+    w1, wl1 = wrapping(50000)
+    w2, wl2 = wrapping_ref(50000)
+    fails = fails + check_int("wrapping int accumulator", w1, w2)
+    fails = fails + check_int("wrapping int linear accumulator", wl1, wl2)
+
+    lc1, ls1 = long_series(0 - 5000000000, 5000000000)
+    lc2, ls2 = long_series_ref(0 - 5000000000, 5000000000)
+    fails = fails + check_int("long counter", lc1, lc2)
+    fails = fails + check_int("long accumulator", ls1, ls2)
+
+    fails = fails + check_int("last step lands on int max", to_int_max(2147483637), 2147483647)
+
+    x = 0.25
+    while x < 1.0 { x = x + 0.5 }
+    fails = fails + check_float("#2271 float step 0.5 from 0.25", x, 1.25)
+    fails = fails + check_float("#2271 wrap an angle", wrap_angle(0.0 - 0.51), 0.0 - 0.51 + 6.2831853)
+    fails = fails + check_float("#2271 wrap an hour", wrap_hour(0.0 - 1.0), 23.0)
+
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("all passed")
+}

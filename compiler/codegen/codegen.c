@@ -9,6 +9,9 @@
 #include "../aether_error.h"
 #include "../analysis/actor_reply.h"
 
+/* #2292: defined with the constant rename, used by the symbol catalog. */
+static const char* const_public_name(const ASTNode* cd);
+
 /* Set of struct names declared `extern struct Name @c_import`.
  * aetherc does not emit typedefs for these because the C header owns the
  * layout. Some headers, such as <time.h> for `struct tm`, also do not ship
@@ -481,6 +484,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
     gen->preempt_loops = 0;
+    gen->series_collapse_off = 0;
     gen->in_string_closure = 0;
     gen->current_func_return_type = NULL;
     gen->current_function = NULL;
@@ -3184,7 +3188,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (has_exports_list) {
             int listed = 0;
             for (int k = 0; k < export_name_count; k++) {
-                if (strcmp(export_names[k], cd->value) == 0) { listed = 1; break; }
+                if (strcmp(export_names[k], const_public_name(cd)) == 0) { listed = 1; break; }
             }
             if (!listed) continue;
         }
@@ -3432,7 +3436,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         for (int i = 0; i < const_count; i++) {
             ASTNode* cd = consts[i];
             fprintf(gen->output, "    { ");
-            emit_lib_metadata_c_string_literal(gen->output, cd->value);
+            emit_lib_metadata_c_string_literal(gen->output, const_public_name(cd));
             fprintf(gen->output, ", ");
             emit_lib_metadata_c_string_literal(gen->output, const_type[i]);
             fprintf(gen->output, ", ");
@@ -3584,7 +3588,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             ASTNode* lit = cd->child_count > 0 ? cd->children[0] : NULL;
             const char* val = (lit && lit->type == AST_LITERAL && lit->value) ? lit->value : "";
             fputs(i == 0 ? "\n" : ",\n", j);
-            fputs("    { \"name\": ", j);   emit_json_string(j, cd->value);
+            fputs("    { \"name\": ", j);   emit_json_string(j, const_public_name(cd));
             fputs(", \"type\": ", j);       emit_json_string(j, const_type[i]);
             fputs(", \"value\": ", j);      emit_json_string(j, val);
             fputs(" }", j);
@@ -4307,6 +4311,170 @@ static void mangle_keyword_value_idents(ASTNode* program) {
     mangle_value_idents_in(program, program);
 }
 
+/* #2292: the prefix the entry program's constants are emitted under. Unlike
+ * the `ae_` of a keyword mangle, it marks a constant, so a local the keyword
+ * pass renames can never take a constant's C name. */
+#define AE_CONST_PREFIX "ae_const_"
+
+/* The entry program's own top-level constant `cd` (unwrapped from `export`),
+ * or NULL: not an imported one (the merge already namespace-prefixed it), not
+ * one a C header owns (c_import), not a module `var` (a global that bare
+ * writes in function bodies reach by name). */
+static ASTNode* entry_const_decl(ASTNode* child) {
+    ASTNode* cd = child;
+    if (cd && cd->type == AST_EXPORT_STATEMENT && cd->child_count > 0) cd = cd->children[0];
+    if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value || cd->is_imported) return NULL;
+    if (cd->annotation && (strcmp(cd->annotation, "c_import_const") == 0 ||
+                           strcmp(cd->annotation, "global_var") == 0)) return NULL;
+    return cd;
+}
+
+static void prefix_value(ASTNode* node) {
+    char buf[300];
+    snprintf(buf, sizeof(buf), AE_CONST_PREFIX "%s", node->value);
+    char* dup = strdup(buf);
+    if (!dup) return;
+    free(node->value);
+    node->value = dup;
+}
+
+/* The entry constants renamed, by their source names. */
+typedef struct {
+    const char** names;
+    int count;
+} EntryConsts;
+
+/* Node kinds that carry a name without binding one: a reference, a call, a
+ * field, an operator, a literal's text. Every other kind carrying `name` is
+ * taken to bind it: a parameter, a local, a pattern or closure parameter,
+ * actor state, a catch or loop variable, and any kind not listed here. */
+static int node_names_without_binding(const ASTNode* n) {
+    switch (n->type) {
+        case AST_IDENTIFIER:
+        case AST_LITERAL:
+        case AST_FUNCTION_CALL:
+        case AST_MEMBER_ACCESS:
+        case AST_FIELD_INIT:
+        case AST_NAMED_ARG:
+        case AST_MESSAGE_CONSTRUCTOR:
+        case AST_STRUCT_LITERAL:
+        case AST_BINARY_EXPRESSION:
+        case AST_UNARY_EXPRESSION:
+        case AST_STRING_INTERP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Mark in `bound` (parallel to ec->names) each entry constant's name that
+ * something in `node`'s subtree other than `self` may bind. */
+static void collect_bound_consts(const ASTNode* node, const ASTNode* self,
+                                 const EntryConsts* ec, char* bound) {
+    if (!node) return;
+    if (node != self && node->value && !node_names_without_binding(node)) {
+        for (int i = 0; i < ec->count; i++) {
+            if (!bound[i] && strcmp(ec->names[i], node->value) == 0) bound[i] = 1;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        collect_bound_consts(node->children[i], self, ec, bound);
+    }
+}
+
+/* Rename each reference to an entry constant that the enclosing top-level
+ * declaration does not bind (`bound`). A name the declaration does bind (a
+ * parameter or local named like the constant, anywhere in the function,
+ * its closures or its actor) is left as written, as it always was: C
+ * resolves it to that binding, so no reference is ever pointed at the
+ * constant that did not mean it. */
+static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const char* bound) {
+    if (!node) return;
+    switch (node->type) {
+        /* Identifiers here are names, not values: an export or import
+         * list, a `hide`/`seal` list, a sum type's variants, the type or
+         * field `sizeof`/`offsetof` measures. */
+        case AST_EXPORTS_LIST:
+        case AST_IMPORT_STATEMENT:
+        case AST_HIDE_DIRECTIVE:
+        case AST_SEAL_DIRECTIVE:
+        case AST_SUM_TYPE_DEF:
+        case AST_SIZEOF:
+        case AST_OFFSETOF:
+            return;
+        default:
+            break;
+    }
+    if (node->type == AST_IDENTIFIER && node->value) {
+        for (int i = 0; i < ec->count; i++) {
+            if (!bound[i] && strcmp(ec->names[i], node->value) == 0) {
+                prefix_value(node);
+                break;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        rename_const_refs_in(node->children[i], ec, bound);
+    }
+}
+
+/* #2292: the entry program's top-level constants are file-scope statics in
+ * the generated C, and a header the program never asked for may own the
+ * name at file scope: `const ACCEL = 4.0` collided with winuser.h's ACCEL
+ * typedef, `const NEAR = 20.0` with a windef.h macro, and a POSIX header
+ * could do the same with EOF. Imported constants were already safe behind
+ * their module prefix. Each such constant is now emitted as
+ * `ae_const_<NAME>`, with its references, so no header can collide with it
+ * on any platform and no list of header names is needed.
+ *
+ * A reference is renamed where nothing in its top-level declaration binds
+ * the name; that is where it can only mean the constant. Where something
+ * does (a parameter, local, closure parameter or actor state named like
+ * the constant) it is left as written, as it always was. The rule reads
+ * the tree codegen emits, so it covers every reference, whether or not
+ * the typechecker walked it. The source name is kept for what speaks the
+ * source language: the symbol catalog and export lists
+ * (const_public_name). */
+static void rename_entry_constants(ASTNode* program) {
+    EntryConsts ec = { NULL, 0 };
+    for (int i = 0; i < program->child_count; i++) {
+        if (entry_const_decl(program->children[i])) ec.count++;
+    }
+    if (ec.count == 0) return;
+    ec.names = malloc(sizeof(char*) * (size_t)ec.count);
+    if (!ec.names) return;
+    ec.count = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* cd = entry_const_decl(program->children[i]);
+        if (!cd) continue;
+        if (!cd->source_name) cd->source_name = strdup(cd->value);
+        if (!cd->source_name) continue;
+        ec.names[ec.count++] = cd->source_name;
+    }
+    /* References first, against the names as written; then the
+     * declarations themselves. */
+    char* bound = calloc((size_t)ec.count, 1);
+    if (!bound) { free(ec.names); return; }
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        memset(bound, 0, (size_t)ec.count);
+        collect_bound_consts(child, entry_const_decl(child), &ec, bound);
+        rename_const_refs_in(child, &ec, bound);
+    }
+    free(bound);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* cd = entry_const_decl(program->children[i]);
+        if (cd) prefix_value(cd);
+    }
+    free(ec.names);
+}
+
+/* The name a constant was declared with: what the symbol catalog records and
+ * an export list names (#2292). */
+static const char* const_public_name(const ASTNode* cd) {
+    return cd->source_name ? cd->source_name : cd->value;
+}
+
 static int stdlib_symbol_cmp(const void* key, const void* elem) {
     return strcmp((const char*)key, *(const char* const*)elem);
 }
@@ -4816,6 +4984,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     emit_source_requirements(gen, program);
     emit_c_include_dirs(gen, program);
     emit_entry_point(gen, program);
+    // #2292: the entry program's constants get a reserved C name, before any
+    // other pass reads or rewrites the names.
+    rename_entry_constants(program);
     // #976: rewrite C-keyword value identifiers to a valid C spelling before
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).
@@ -4895,6 +5066,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "extern void __aether_abort_call(void);");
     }
     print_line(gen, "#ifdef _WIN32");
+    /* The program TU calls a handful of kernel32 functions (console code
+     * pages, the performance counter, SwitchToThread) and nothing from USER
+     * or GDI, so it leaves those out. That drops winuser.h and wingdi.h: a
+     * third of the names windows.h puts in the TU, among them ACCEL, MSG
+     * and every CreateWindow / SendMessage / GetObject A-or-W macro, which
+     * a program's own function could otherwise be renamed into (#2292).
+     * The runtime compiles separately with whatever it needs. */
+    print_line(gen, "#ifndef WIN32_LEAN_AND_MEAN");
+    print_line(gen, "#define WIN32_LEAN_AND_MEAN");
+    print_line(gen, "#endif");
+    print_line(gen, "#define NOUSER");
+    print_line(gen, "#define NOGDI");
     print_line(gen, "#define NOMINMAX");
     print_line(gen, "#include <windows.h>");
     print_line(gen, "#include <io.h>      // _setmode, _fileno");
@@ -4926,6 +5109,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#undef small");
     print_line(gen, "#undef near");
     print_line(gen, "#undef far");
+    /* NEAR and FAR spell near and far, 16-bit pointer qualifiers that expand
+     * to nothing now (#2292). */
+    print_line(gen, "#undef NEAR");
+    print_line(gen, "#undef FAR");
     print_line(gen, "#elif defined(__EMSCRIPTEN__)");
     print_line(gen, "#include <emscripten.h>");
     print_line(gen, "#else");

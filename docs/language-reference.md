@@ -287,6 +287,28 @@ main() {
 2.5
 ```
 
+**Binding an array literal to an array that already exists stores its elements.** The array keeps the size of its first binding: a shorter literal zeroes the elements past its own, and a longer one is a compile error. This is also what happens to an array first bound inside a loop body or a branch, since such a local is one variable for the whole function: each pass through the loop stores the literal again, its elements evaluated in order.
+
+```aether,run
+main() {
+    total = 0
+    d = 0
+    while d < 3 {
+        row = [ d, d * 10, d * 100 ]
+        total = total + row[0] + row[1] + row[2]
+        d = d + 1
+    }
+    println("${total}")
+    a = [ 1, 2, 3 ]
+    a = [ 4, 5 ]
+    println("${a[0]} ${a[1]} ${a[2]}")
+}
+```
+```output
+333
+4 5 0
+```
+
 ### Sequence Types (`*StringSeq`)
 
 `*StringSeq` is a cons-cell linked list of strings, Erlang/Elixir-shaped, with O(1) head/tail/cons/length and refcount-based structural sharing. Empty list is the `NULL` pointer; each cell carries a cached length.
@@ -412,7 +434,7 @@ main() {
 }
 ```
 
-Constants are emitted as `#define` in generated C, zero runtime cost.
+Constants cost nothing at run time: each is a file-scope `static const` in the generated C. A program's own constants are emitted under the reserved name `ae_const_<NAME>`, so no C header can claim the name: a constant may be called `SIZE`, `NEAR` or `MAX_PATH` on every platform, although `windows.h` owns all three (#2292). A parameter or local named like a constant is still that parameter or local. An imported module's constants carry the module's prefix instead.
 
 #### Module-level constant arrays, lookup tables
 
@@ -424,7 +446,7 @@ const CRC16TAB: uint16[256] = [ 0x0000, 0x1021, /* ... */ ]   // element type pi
 ```
 
 - `const NAME[] = [...]` infers the element type from the literals (`int` for integer literals).
-- `const NAME: T[N] = [...]` pins the C element type, `T` may be `uint8` / `uint16` / `uint32` / `uint64` / `int` / `long` so e.g. a CRC16 table emits `static const uint16_t NAME[256]` rather than a 4×-wider `int[]`, and matches a C header that expects the packed type. Integer literals narrow to the chosen element type (the explicit, compile-time-constant intent, like `byte b = 5`). Indexed access (`NAME[i]`) emits `NAME[i]`; the array is read-only.
+- `const NAME: T[N] = [...]` pins the C element type, `T` may be `uint8` / `uint16` / `uint32` / `uint64` / `int` / `long` so e.g. a CRC16 table emits `static const uint16_t NAME[256]` rather than a 4×-wider `int[]`, and matches a C header that expects the packed type. Integer literals narrow to the chosen element type (the explicit, compile-time-constant intent, like `byte b = 5`). Indexed access (`NAME[i]`) reads the table directly; the array is read-only.
 
 **The RHS of `const` must be a compile-time constant expression.** Allowed forms: literals (int / float / bool / string / null), other consts referenced by name, unary / binary expressions over those, and string interpolation where every interpolated value is itself const. **Function calls are rejected** at typecheck time:
 

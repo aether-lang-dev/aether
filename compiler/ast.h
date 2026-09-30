@@ -539,6 +539,11 @@ typedef struct ASTNode {
      * queried, i.e. more than once) reports at most once. Zero-initialized by
      * create_ast_node. */
     int warned;
+
+    /* #2292: on a constant codegen renamed, the name it was declared with;
+     * NULL otherwise. The symbol catalog and export lists speak the source
+     * language, so they read this rather than the emitted C name. */
+    char* source_name;
 } ASTNode;
 
 // Type functions

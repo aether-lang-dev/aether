@@ -273,6 +273,10 @@ typedef struct {
     // Cooperative preemption: insert sched_yield() at loop back-edges
     int preempt_loops;
 
+    // Nonzero while the series collapse emits the loop it could not replace
+    // (its overflow fallback), so that loop is emitted as written (#2271).
+    int series_collapse_off;
+
     // Current function's return type (for multi-return codegen)
     Type* current_func_return_type;
 
