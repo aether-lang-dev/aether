@@ -654,6 +654,11 @@ jobs:
         # and this workflow reimplements that staging without the line.
         cp include/*.h release/include/aether/ 2>/dev/null || true
         cp build/MANIFEST release/share/aether/
+        # Compiled module artifacts (#1746), made by the aetherc this release
+        # ships, so an import of an installed std module skips its parse.
+        # The FreeBSD cross-build below cannot run its aetherc here and ships
+        # without them; its imports parse the sources, as before.
+        sh scripts/build_module_artifacts.sh build/aetherc . release/lib/aether/modules
         cp LICENSE README.md VERSION release/
         cd release && tar -czf ../aether-${VERSION}-${{ matrix.target }}.tar.gz *
 
@@ -716,6 +721,11 @@ jobs:
         # and this workflow reimplements that staging without the line.
         cp include/*.h release/include/aether/ 2>/dev/null || true
         cp build/MANIFEST release/share/aether/
+        # Compiled module artifacts (#1746), made by the aetherc this release
+        # ships, so an import of an installed std module skips its parse.
+        # The FreeBSD cross-build below cannot run its aetherc here and ships
+        # without them; its imports parse the sources, as before.
+        sh scripts/build_module_artifacts.sh build/aetherc.exe . release/lib/aether/modules
         cp LICENSE README.md VERSION release/
         cd release && zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
 

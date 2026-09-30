@@ -31,4 +31,18 @@ const char* aether_define_at(int index);
 /* Drops every symbol. Tests and the LSP reuse one process across builds. */
 void aether_defines_clear(void);
 
+/* Query recording (#1746). A `when defined(NAME)` region is decided while
+ * parsing, so a parsed module depends on the answer to every name its parse
+ * asked about. A compiled module artifact records those answers and is only
+ * reused by a build that would answer them the same way. Turning recording
+ * on starts an empty log; each distinct name asked is kept once, with the
+ * answer it got. When more distinct names are asked than the log holds,
+ * aether_define_query_overflowed() says so and the log is incomplete, which
+ * a caller must treat as "cannot tell". */
+void        aether_define_record_queries(int on);
+int         aether_define_query_count(void);
+int         aether_define_query_overflowed(void);
+const char* aether_define_query_name(int index);
+int         aether_define_query_value(int index);
+
 #endif /* AETHER_DEFINES_H */

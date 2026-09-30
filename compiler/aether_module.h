@@ -147,6 +147,13 @@ int module_orchestrate(ASTNode* program);
 // Parse a single module file into an AST. Saves/restores lexer state.
 ASTNode* module_parse_file(const char* file_path);
 
+/* #1746: parses the module at `source_path` and encodes it as a compiled
+ * module artifact recording `source_rel` (its install-relative path, e.g.
+ * std/cryptography/md2/module.ae). Returns the malloc'd artifact bytes, or
+ * NULL with *err set when the module does not parse cleanly. */
+char* module_build_artifact(const char* source_path, const char* source_rel,
+                            size_t* out_len, const char** err);
+
 // --- Dependency recording (issue #1882, depfile cache key) --------------------
 // The resolver records every path it PROBES (whether the file was there or not)
 // and every file it PARSES, so `aetherc --emit-deps` can write an exact
