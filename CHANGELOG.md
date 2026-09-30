@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.747.0]
+
+### Added
+
+- **Installed std modules ship pre-parsed as compiled module artifacts (`.aea`), so importers skip the parse (#1746).** `make install`, `install.sh` and the release archives now build `lib/aether/modules/std/…/<module>.aea` beside the installed sources with the new `aetherc --emit=aea`, and an import that resolves to an installed module reads its AST from the artifact. The import path, the resolver's precedence, the generated C and every diagnostic are unchanged, which the new integration test checks byte for byte. An artifact is used only when it matches the compiler version, a build-time fingerprint of the lexer/parser/AST sources, the module's source path and text, and every `when defined(...)` answer its parse depended on; otherwise the source is parsed as before. `AETHER_NO_AEA=1` turns artifacts off and `AETHER_AEA_TRACE=1` reports which were used. Type checking and codegen still run whole-program, so the typed IR and object caches the proposal also describes remain open (see docs/compiled-module-artifacts.md).
+
 ## [0.746.0]
 
 ### Added
