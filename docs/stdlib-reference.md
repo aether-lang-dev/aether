@@ -53,7 +53,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 108 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 110 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -61,7 +61,7 @@ header comment is the authoritative description.
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 10 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 81 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 85 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
@@ -2841,6 +2841,8 @@ main() {
 - `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build — a bug that passes every local check.
 - `os.unsetenv(name)` → `string` - Unset environment variable, returns "" on success or an error string. Same C-side function as `io.unsetenv`.
 - `os.getpid()` → `int` - Process identifier of the current process. POSIX `getpid(2)`; Windows `_getpid()`. Useful for tmpfile names (`/tmp/myprog.${os.getpid()}.tmp`), per-process locks, log prefixes, and stable tagging across forked children. Returns 0 on platforms compiled without filesystem support.
+- `os.memory_resident()` → `long` - The process's resident set in bytes, shared pages included (Windows working set, macOS `task_info`, Linux `/proc/self/statm`, FreeBSD `kinfo_proc`). `-1` where the platform does not report it.
+- `os.memory_private()` → `long` - Bytes the process alone is charged for: Windows private usage, macOS physical footprint (Activity Monitor's Memory), Linux resident minus shared. Page-granular, and counts mappings the allocator does not see; for the bytes the program holds on the heap, exact to the allocation, use `mem.heap_in_use()`. `-1` where the platform does not report it (FreeBSD).
 - `os.user_id()` → `int` - Effective user id of the calling process (POSIX `geteuid(2)`). Windows has no numeric uid model and returns -1, so treat any negative result as "unavailable" rather than as a uid. Mainly for building per-user runtime paths like `/run/user/${os.user_id()}/`.
 - `os.now_utc_iso8601()` → `string` - Current UTC time as ISO-8601 (`YYYY-MM-DDThh:mm:ssZ`). Returns `""` (never null) on clock/format failure. Thread-safe.
 - `os.wall_seconds()` → `long` - Whole seconds since the Unix epoch (POSIX `gettimeofday`; Windows `GetSystemTimeAsFileTime`). NTP-jumpable, pair with `wall_micros` for sub-second precision, or use the monotonic accessors below for elapsed-time measurements.

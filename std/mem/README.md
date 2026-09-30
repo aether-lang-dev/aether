@@ -101,6 +101,75 @@ because none exists in the offset-less forms.
 within its own buffer is an overlapping interior copy; `copy_at` is `memcpy`
 and is undefined there, exactly as in C.
 
+## How much the heap holds
+
+`mem.heap_in_use()` is the bytes the C allocator has handed out and not taken
+back, read from the allocator's own statistics: every malloc in the process
+counts, Aether's (`heap.new`, strings, closure environments, collections) and
+the ones C code reached through an extern makes. It is exact to the
+allocation, so a same-process leak check works on every platform, locally and
+in seconds, not only under a leak tool on one CI leg.
+
+Run the workload a few rounds and compare two later rounds: the growth is
+what a round leaks. Allocators keep a small cache of freed blocks that some
+count as in use, so a single before/after is not zero even when nothing
+leaks; between steady rounds it is.
+
+```aether,run
+import std.mem
+
+struct Blob {
+    words: long[32]
+}
+
+extern malloc(n: long) -> ptr
+extern free(p: ptr)
+
+round(keep: ptr, leak: bool) {
+    i = 0
+    while i < 100 {
+        b = heap.new(Blob)
+        if leak {
+            mem.set_ptr(keep, i * 8, b)
+        } else {
+            free(b)
+        }
+        i = i + 1
+    }
+}
+
+main() {
+    keep = malloc(800)
+    round(keep, false)
+    round(keep, false)
+    steady = mem.heap_in_use()
+    round(keep, false)
+    println("no leak: ${mem.heap_in_use() - steady < 4096}")
+
+    before = mem.heap_in_use()
+    round(keep, true)
+    println("leaked at least 100 blocks: ${mem.heap_in_use() - before >= 12800}")
+
+    i = 0
+    while i < 100 {
+        free(mem.get_ptr(keep, i * 8))
+        i = i + 1
+    }
+    free(keep)
+}
+```
+```output
+no leak: true
+leaked at least 100 blocks: true
+```
+
+The source per platform: glibc `mallinfo2`, macOS's malloc zones, Windows
+`HeapSummary` over the process's heaps, FreeBSD jemalloc's
+`stats.allocated`, and the sanitizer's allocator when built with one. It is
+`-1` where the allocator keeps no statistics (musl). For what the OS charges
+the process, page-granular and including mappings the allocator does not
+see, `std.os` has `memory_resident()` and `memory_private()`.
+
 ## Exports
 
 `get_byte`, `set_byte`, `get_int`, `set_int`, `get_long`, `set_long`,
@@ -111,4 +180,4 @@ endian pairs `get_u16_le` through `set_u64_be`; `bits_of_float`,
 `float_from_bits`, `clz32`, `clz64`, `udiv64_32`; `copy`, `move`, `compare`,
 `set`, `copy_at`, `move_at`, `fill_at`, `compare_at`; `get_byte_sz`,
 `set_byte_sz`; `ptr_to_long`, `long_to_ptr`; `call_fn3_int`, `call_fn3_void`,
-`call_fn2_void`.
+`call_fn2_void`; `heap_in_use`.

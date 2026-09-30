@@ -28,7 +28,9 @@ exports(
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
-    os_chdir_raw, os_getcwd_raw, chdir, getcwd
+    os_chdir_raw, os_getcwd_raw, chdir, getcwd,
+    aether_process_resident, aether_process_private,
+    memory_resident, memory_private
 )
 
 // Run a shell command, returns exit code (0 = success)
@@ -717,6 +719,26 @@ extern exit(code: int)
 
 getpid() -> int {
     return os_getpid_raw()
+}
+
+// ---- the process's memory, as the OS charges it (#2310) ----
+// runtime/aether_process_mem.c. For the bytes the program itself holds on
+// the heap, exact to the allocation, see std.mem's heap_in_use().
+extern aether_process_resident() -> long
+extern aether_process_private() -> long
+
+// The resident set: bytes of the process in physical memory, shared pages
+// included. -1 where the platform does not report it.
+memory_resident() -> long {
+    return aether_process_resident()
+}
+
+// Private memory: what the process alone is charged for (Windows private
+// usage, macOS physical footprint, Linux resident minus shared). Counts
+// mappings the allocator does not see, at page granularity. -1 where the
+// platform does not report it (FreeBSD).
+memory_private() -> long {
+    return aether_process_private()
 }
 
 // Effective user id of the calling process (POSIX geteuid). Returns -1 on

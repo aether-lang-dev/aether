@@ -1,0 +1,101 @@
+// Issue #2310: a same-process measure of what the program holds, for a leak
+// check that runs on every platform.
+//
+// The gap: aether_caps_used_bytes() was the only in-process number, and it
+// counts only the allocators that consult the resource cap (collections,
+// arenas, pools): a leaked heap.new box or string moved it by 0. std.mem's
+// heap_in_use() reads the C allocator's own statistics instead, so every
+// malloc counts, Aether's and C's alike; std.os's memory_resident() and
+// memory_private() give what the OS charges the process.
+//
+// Pre-fix this file fails to compile: neither module had these calls. The
+// check is the one an editor's bounded run makes: run the workload in
+// rounds and compare two later rounds. A round that leaks nothing grows by
+// (close to) nothing; a round that leaks heap.new boxes and C blocks grows
+// by at least half of what it leaked (allocators may hand out blocks they
+// cached, which some already count as in use); freeing them gives the
+// bytes back. A platform whose allocator keeps no statistics reports -1.
+
+import std.mem
+import std.os
+
+extern exit(code: int)
+extern malloc(n: long) -> ptr
+extern free(p: ptr)
+
+struct Blob {
+    words: long[32] // 256 bytes
+}
+
+const PER_ROUND = 200
+const ROUNDS = 4
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// One round of churn that leaks nothing: every block is freed.
+fn churn() {
+    i = 0
+    while i < PER_ROUND {
+        b = heap.new(Blob)
+        c = malloc(256)
+        free(c)
+        free(b)
+        i = i + 1
+    }
+}
+
+main() {
+    check(os.memory_resident() != 0, "resident is reported or -1")
+    check(os.memory_private() != 0, "private is reported or -1")
+    if mem.heap_in_use() < 0 {
+        println("OK") // an allocator without statistics (musl)
+        return
+    }
+
+    // ---- no leak: two later rounds hold the same ----
+    churn()
+    churn()
+    quiet_2 = mem.heap_in_use()
+    churn()
+    churn()
+    quiet_4 = mem.heap_in_use()
+    check(quiet_4 - quiet_2 < 16384, "rounds that leak nothing hold steady (grew ${quiet_4 - quiet_2})")
+
+    // ---- a leak of heap.new boxes and C blocks shows ----
+    kept = malloc(8 * PER_ROUND * ROUNDS * 2)
+    n = 0
+    long after_2 = 0
+    round = 1
+    while round <= ROUNDS {
+        i = 0
+        while i < PER_ROUND {
+            mem.set_ptr(kept, n * 8, heap.new(Blob))
+            mem.set_ptr(kept, (n + 1) * 8, malloc(256))
+            n = n + 2
+            i = i + 1
+        }
+        if round == 2 {
+            after_2 = mem.heap_in_use()
+        }
+        round = round + 1
+    }
+    after_4 = mem.heap_in_use()
+    leaked = 2 * PER_ROUND * 2 * 256 // two rounds, two blocks per step
+    check(after_4 - after_2 >= leaked / 2, "two leaking rounds grow by what they leak (${after_4 - after_2} of ${leaked})")
+
+    // ---- freeing gives the bytes back ----
+    i = 0
+    while i < n {
+        free(mem.get_ptr(kept, i * 8))
+        i = i + 1
+    }
+    free(kept)
+    freed = mem.heap_in_use()
+    check(after_4 - freed >= leaked, "freeing returns the leaked bytes (${after_4 - freed})")
+    println("OK")
+}
