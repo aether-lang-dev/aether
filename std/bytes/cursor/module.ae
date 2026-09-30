@@ -27,7 +27,9 @@ exports(
     bytes_cursor_pos, bytes_cursor_seek, bytes_cursor_free,
     new, read_u8, read_be_u16, read_be_u32, read_be_u64,
     read_le_u16, read_le_u32, read_le_u64, read_slice,
-    remaining, peek, eof, pos, seek, free
+    remaining, peek, eof, pos, seek, free,
+    bytes_cursor_new_from_ptr, bytes_cursor_read_view,
+    from_slice, read_view
 )
 
 // ---- Raw externs ----
@@ -81,6 +83,11 @@ extern bytes_cursor_seek(c: ptr, pos: int)
 // Free the cursor struct only — NOT the borrowed AetherBytes.
 // Idempotent on null.
 extern bytes_cursor_free(c: ptr)
+// A cursor over `len` bytes of raw memory (a slice's backing). Borrows it.
+extern bytes_cursor_new_from_ptr(data: ptr, len: int) -> ptr
+// The address of the next `n` bytes, advancing past them, without copying.
+// Null (cursor unchanged) when fewer than `n` remain.
+extern bytes_cursor_read_view(c: ptr, n: int) -> ptr
 
 // ---- Go-style / friendly wrappers ----
 
@@ -95,6 +102,39 @@ new(b: ptr) -> {
         return null, "allocation failed"
     }
     return c, ""
+}
+
+// ---- slices (#2301) ----
+
+// A cursor over a `byte[]` slice: any bounded byte view (a bytes buffer's
+// view(), a sub-slice, a fixed array), not only a whole bytes buffer. Borrows
+// the slice's memory, which must outlive the cursor. Returns (ptr, "") or
+// (null, error) for a slice with no bound or allocation failure.
+from_slice(s: byte[]) -> {
+    if s.len < 0 {
+        return null, "the slice has no bound (.len -1); give it one, as (p as byte[])[0..n]"
+    }
+    c = bytes_cursor_new_from_ptr(s, s.len)
+    if c == null {
+        return null, "allocation failed"
+    }
+    return c, ""
+}
+
+// The next `n` bytes as a borrowed `byte[]`, advancing past them, without
+// copying (read_slice copies into a fresh buffer the caller frees). The view
+// is valid as long as the memory the cursor reads: its slice, or its bytes
+// buffer until that grows or is freed. Returns (view, "") or, when fewer than
+// `n` bytes remain, (empty, "short read") with the cursor unchanged.
+read_view(c: ptr, n: int) -> {
+    p = bytes_cursor_read_view(c, n)
+    got = n
+    err = ""
+    if p == null {
+        got = 0
+        err = "short read"
+    }
+    return (p as byte[])[0..got], err
 }
 
 // Read one byte (0..255), advancing by 1. -1 at EOF.

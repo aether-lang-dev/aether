@@ -1,0 +1,77 @@
+// Issue #2301 (Foundations): std.bytes.cursor reads slices.
+//
+// The gap: a cursor walked only a whole std.bytes buffer, and read_slice
+// always copied into a fresh buffer the caller had to free. from_slice makes a
+// cursor over any bounded `byte[]` (a sub-slice of a buffer's view, a fixed
+// array), and read_view hands the next bytes back as a borrowed sub-slice
+// without copying.
+//
+// Pre-fix this file fails to compile: from_slice and read_view did not exist.
+// The blocks cover a length-prefixed field parsed out of a sub-slice, the
+// fixed-width readers on a slice-backed cursor, a short read leaving the
+// cursor in place, read_view on a buffer-backed cursor, read_slice (the
+// copying form) on a slice-backed one, and a slice with no bound.
+
+import std.bytes
+import std.bytes.cursor
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    // A frame: [junk][len=5]["hello"][be16 = 0x0102][le32 = 7]
+    buf = bytes.new(16)
+    vals = [255, 5, 104, 101, 108, 108, 111, 1, 2, 7, 0, 0, 0]
+    for i in 0..13 {
+        bytes.set(buf, i, vals[i])
+    }
+
+    // ---- a cursor over a sub-slice, skipping the junk byte ----
+    c, err = cursor.from_slice(bytes.view(buf)[1..])
+    check(err == "", "from_slice")
+    check(cursor.remaining(c) == 12, "it sees only the sub-slice")
+    n = cursor.read_u8(c)
+    check(n == 5, "the length prefix")
+    v, e = cursor.read_view(c, n)
+    check(e == "" && v.len == 5, "a borrowed view of the field")
+    check(bytes.string_from_slice(v) == "hello", "the view's bytes")
+    check(cursor.pos(c) == 6, "read_view advanced past the field")
+    check(cursor.read_be_u16(c) == 258, "a big-endian read on a slice")
+    check(cursor.read_le_u32(c) == 7, "a little-endian read on a slice")
+    check(cursor.eof(c) == 1, "at the end")
+
+    // ---- a short read leaves the cursor where it was ----
+    cursor.seek(c, 10)
+    w, e2 = cursor.read_view(c, 5)
+    check(e2 == "short read" && w.len == 0, "too few bytes is a short read")
+    check(cursor.pos(c) == 10, "and the cursor has not moved")
+    cursor.free(c)
+
+    // ---- read_view on a buffer-backed cursor ----
+    bc, _ = cursor.new(buf)
+    cursor.seek(bc, 2)
+    bv, _ = cursor.read_view(bc, 3)
+    check(bv.len == 3 && bv[0] == 104 && bv[2] == 108, "a view into a bytes buffer")
+    cursor.free(bc)
+
+    // ---- read_slice still copies, from a slice-backed cursor too ----
+    sc, _ = cursor.from_slice(bytes.view(buf)[2..7])
+    owned = cursor.read_slice(sc, 5)
+    check(bytes.length(owned) == 5 && bytes.get(owned, 4) == 111, "read_slice copies")
+    bytes.free(owned)
+    cursor.free(sc)
+
+    // ---- a slice with no bound is refused ----
+    raw = bytes.data(buf) as byte[]
+    rc, rerr = cursor.from_slice(raw)
+    check(rc == null && rerr != "", "an unbounded slice has no cursor")
+
+    bytes.free(buf)
+    println("OK")
+}

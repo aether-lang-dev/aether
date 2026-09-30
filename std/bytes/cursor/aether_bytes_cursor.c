@@ -12,10 +12,16 @@
 #include "../../../runtime/aether_resource_caps.h"
 
 struct BytesCursor {
-    AetherBytes* bytes;   /* borrowed; cursor must not outlive it */
-    int          len;     /* snapshot of the buffer's logical length */
-    int          pos;     /* current read offset, in [0, len]        */
+    AetherBytes*         bytes;  /* borrowed buffer, or NULL for a slice */
+    const unsigned char* data;   /* borrowed slice memory (#2301), or NULL */
+    int                  len;    /* snapshot of the logical length */
+    int                  pos;    /* current read offset, in [0, len] */
 };
+
+/* Byte `i` (known to be in range) of whichever backing the cursor has. */
+static int cursor_byte(const BytesCursor* c, int i) {
+    return c->data ? (int)c->data[i] : aether_bytes_get(c->bytes, i);
+}
 
 BytesCursor* bytes_cursor_new(AetherBytes* b) {
     if (!b) return NULL;
@@ -24,14 +30,36 @@ BytesCursor* bytes_cursor_new(AetherBytes* b) {
     BytesCursor* c = (BytesCursor*)aether_caps_malloc(sizeof(*c));
     if (!c) return NULL;
     c->bytes = b;
+    c->data = NULL;
     c->len = len;
     c->pos = 0;
     return c;
 }
 
+BytesCursor* bytes_cursor_new_from_ptr(const void* data, int len) {
+    if ((!data && len > 0) || len < 0) return NULL;
+    BytesCursor* c = (BytesCursor*)aether_caps_malloc(sizeof(*c));
+    if (!c) return NULL;
+    c->bytes = NULL;
+    c->data = (const unsigned char*)data;
+    c->len = len;
+    c->pos = 0;
+    return c;
+}
+
+const void* bytes_cursor_read_view(BytesCursor* c, int n) {
+    if (!c || n < 0 || n > c->len - c->pos) return NULL;
+    const unsigned char* base = c->data ? c->data
+                                        : (const unsigned char*)aether_bytes_data(c->bytes);
+    if (!base) return NULL;
+    const void* at = base + c->pos;
+    c->pos += n;
+    return at;
+}
+
 int bytes_cursor_read_u8(BytesCursor* c) {
     if (!c || c->pos >= c->len) return -1;
-    int v = aether_bytes_get(c->bytes, c->pos);
+    int v = cursor_byte(c, c->pos);
     if (v < 0) return -1;
     c->pos += 1;
     return v;
@@ -39,8 +67,8 @@ int bytes_cursor_read_u8(BytesCursor* c) {
 
 int bytes_cursor_read_be_u16(BytesCursor* c) {
     if (!c || c->pos + 2 > c->len) return -1;
-    int hi = aether_bytes_get(c->bytes, c->pos);
-    int lo = aether_bytes_get(c->bytes, c->pos + 1);
+    int hi = cursor_byte(c, c->pos);
+    int lo = cursor_byte(c, c->pos + 1);
     if (hi < 0 || lo < 0) return -1;
     c->pos += 2;
     return (hi << 8) | lo;
@@ -50,7 +78,7 @@ int bytes_cursor_read_be_u32(BytesCursor* c) {
     if (!c || c->pos + 4 > c->len) return -1;
     unsigned int v = 0;
     for (int i = 0; i < 4; i++) {
-        int b = aether_bytes_get(c->bytes, c->pos + i);
+        int b = cursor_byte(c, c->pos + i);
         if (b < 0) return -1;
         v = (v << 8) | (unsigned int)b;
     }
@@ -62,7 +90,7 @@ long long bytes_cursor_read_be_u64(BytesCursor* c) {
     if (!c || c->pos + 8 > c->len) return -1;
     unsigned long long v = 0;
     for (int i = 0; i < 8; i++) {
-        int b = aether_bytes_get(c->bytes, c->pos + i);
+        int b = cursor_byte(c, c->pos + i);
         if (b < 0) return -1;
         v = (v << 8) | (unsigned long long)b;
     }
@@ -72,8 +100,8 @@ long long bytes_cursor_read_be_u64(BytesCursor* c) {
 
 int bytes_cursor_read_le_u16(BytesCursor* c) {
     if (!c || c->pos + 2 > c->len) return -1;
-    int lo = aether_bytes_get(c->bytes, c->pos);
-    int hi = aether_bytes_get(c->bytes, c->pos + 1);
+    int lo = cursor_byte(c, c->pos);
+    int hi = cursor_byte(c, c->pos + 1);
     if (lo < 0 || hi < 0) return -1;
     c->pos += 2;
     return (hi << 8) | lo;
@@ -83,7 +111,7 @@ int bytes_cursor_read_le_u32(BytesCursor* c) {
     if (!c || c->pos + 4 > c->len) return -1;
     unsigned int v = 0;
     for (int i = 0; i < 4; i++) {
-        int b = aether_bytes_get(c->bytes, c->pos + i);
+        int b = cursor_byte(c, c->pos + i);
         if (b < 0) return -1;
         v |= (unsigned int)b << (8 * i);
     }
@@ -95,7 +123,7 @@ long long bytes_cursor_read_le_u64(BytesCursor* c) {
     if (!c || c->pos + 8 > c->len) return -1;
     unsigned long long v = 0;
     for (int i = 0; i < 8; i++) {
-        int b = aether_bytes_get(c->bytes, c->pos + i);
+        int b = cursor_byte(c, c->pos + i);
         if (b < 0) return -1;
         v |= (unsigned long long)b << (8 * i);
     }
@@ -108,7 +136,10 @@ AetherBytes* bytes_cursor_read_slice(BytesCursor* c, int n) {
     AetherBytes* out = aether_bytes_new(n);
     if (!out) return NULL;
     if (n > 0) {
-        if (!aether_bytes_copy_from_bytes(out, 0, c->bytes, c->pos, n)) {
+        int copied = c->data
+            ? aether_bytes_copy_from_ptr(out, 0, c->data + c->pos, n)
+            : aether_bytes_copy_from_bytes(out, 0, c->bytes, c->pos, n);
+        if (!copied) {
             aether_bytes_free(out);
             return NULL;
         }
@@ -124,7 +155,7 @@ int bytes_cursor_remaining(BytesCursor* c) {
 
 int bytes_cursor_peek(BytesCursor* c) {
     if (!c || c->pos >= c->len) return -1;
-    return aether_bytes_get(c->bytes, c->pos);
+    return cursor_byte(c, c->pos);
 }
 
 int bytes_cursor_eof(BytesCursor* c) {
@@ -145,7 +176,7 @@ void bytes_cursor_seek(BytesCursor* c, int pos) {
 
 void bytes_cursor_free(BytesCursor* c) {
     if (!c) return;
-    /* Cursor borrows its AetherBytes — do NOT free c->bytes here. Only
-     * the cursor struct is ours to reclaim. */
+    /* Cursor borrows its AetherBytes or slice: do NOT free either here.
+     * Only the cursor struct is ours to reclaim. */
     aether_caps_free(c, sizeof(*c));
 }
