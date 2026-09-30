@@ -1,0 +1,51 @@
+// Issue #2308: a struct with an enum-typed field does not compile.
+//
+// The bug: codegen emitted every struct body before the enum typedefs, so a
+// struct holding an enum by value (`d: Dir`) named a type C had not seen
+// yet: "unknown type name 'Dir'". An enum depends on no other type; its
+// typedef now comes ahead of the struct bodies.
+//
+// Pre-fix this file fails to build. The blocks cover an enum field, an array
+// of enums, a struct holding such a struct by value, and an explicit member
+// value.
+
+extern exit(code: int)
+
+enum Dir { North, East, South, West }
+
+enum Level {
+    Low = 10,
+    High = 20
+}
+
+struct Heading {
+    d: Dir
+    level: Level
+}
+
+struct Route {
+    id: int
+    start: Heading // a struct holding an enum field, by value
+    turns: Dir[3]
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    h = Heading { d: Dir.South, level: Level.High }
+    check(h.d == Dir.South, "an enum field holds its value")
+    check(h.level == Level.High, "an enum with explicit values")
+
+    r = Route { id: 7, start: h, turns: [Dir.East, Dir.West, Dir.North] }
+    check(r.start.d == Dir.South, "an enum field inside a nested struct")
+    check(r.turns[1] == Dir.West, "an array of enums")
+
+    r.start.d = Dir.East
+    check(r.start.d == Dir.East, "an enum field is assignable")
+    println("OK")
+}
