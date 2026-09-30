@@ -14,6 +14,29 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.746.0]
+
+### Added
+
+- **`mem.heap_in_use()`, `os.memory_resident()` and `os.memory_private()`:
+  a same-process measure of what a program holds.** `heap_in_use` reads the
+  C allocator's own statistics (glibc `mallinfo2`, macOS malloc zones,
+  Windows `HeapWalk`, FreeBSD jemalloc, the sanitizer allocator), so every
+  malloc counts: `heap.new`, strings, closure environments, collections, and
+  allocations C code makes through an extern. Comparing two later rounds of
+  a workload is a leak check that runs on every platform. The OS readings
+  give the resident set and private memory. `aether_caps_used_bytes()`,
+  which counts only the cap-aware allocators, now says so (#2310).
+
+### Fixed
+
+- **`ae fmt` writes the type prefixes tight.** It put a space after every
+  `]` followed by a word, so `make([]int, n)` became `make([] int, n)` and
+  an enum-indexed array `[Dir]string` became `[Dir] string`, unlike the
+  language reference. A `]` closing a prefix group (empty, or holding one
+  name) before a type name or `*` is now written tight; an index before a
+  word (`a[0] as long`) keeps its space (#2316).
+
 ## [0.745.0]
 
 ### Added
