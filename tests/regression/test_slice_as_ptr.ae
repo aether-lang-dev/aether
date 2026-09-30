@@ -1,0 +1,54 @@
+// Regression: `s as ptr` on a slice is its element pointer (#2304).
+//
+// A local made from `p as T[]` is an AetherSlice, a { ptr, len } pair, and
+// `slot as ptr` emitted a C cast of that struct, which gcc rejects ("cannot
+// convert to a pointer type"). It now yields the element pointer, as a slice
+// passed to any raw-pointer slot does, whether the cast is returned, bound
+// or compared, and for a sub-slice too.
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+check(label: string, ok: int) -> int {
+    if ok == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+// #2304's function: the slice goes back out as the pointer it views.
+handle(value: int) -> ptr {
+    slot = malloc(16) as int[]
+    slot[0] = value
+    return slot as ptr
+}
+
+main() {
+    fails = 0
+    println("slice as ptr")
+
+    h = handle(7)
+    got = (h as int[])[0]
+    fails = fails + check("returned as ptr reads back 7", if got == 7 { 1 } else { 0 })
+
+    view = h as int[]
+    bound = view as ptr
+    fails = fails + check("bound as ptr is the same pointer", if bound == h { 1 } else { 0 })
+
+    whole = view[0..2] as ptr
+    fails = fails + check("a sub-slice from 0 is the same pointer", if whole == h { 1 } else { 0 })
+
+    view[1] = 42
+    second = view[1..2] as ptr
+    fails = fails + check("a sub-slice from 1 points at element 1", if (second as int[])[0] == 42 { 1 } else { 0 })
+
+    free(h)
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("all passed")
+}
