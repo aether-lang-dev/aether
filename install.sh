@@ -413,6 +413,11 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     mkdir -p "$SRC_DIR"
     cp -r runtime "$SRC_DIR/" 2>/dev/null || true
     cp -r std     "$SRC_DIR/" 2>/dev/null || true
+    # std module specs are co-located beside the modules they cover
+    # (std/<mod>/test_*.ae, #1584): tests, not payload. Strip them the
+    # way `make install` and release.yml do, or every source install
+    # ships the stdlib's test corpus.
+    find "$SRC_DIR/std" -type f -name 'test_*.ae' -delete 2>/dev/null || true
     # Compiled module artifacts (#1746): each std module already parsed,
     # under lib/aether/modules/, so an importer skips the parse. Made by
     # the aetherc just installed, whose front-end fingerprint is the one

@@ -365,6 +365,9 @@ With neither variable set, `run_summary` writes no report and the human
 
 - Name test files `test_*.ae` or `*_test.ae` so `ae test` discovers them
   (pytest / Go convention).
+- A stdlib module's unit tests live beside it, `std/<mod>/test_*.ae`;
+  `make test-ae` sweeps them and every install strips them. See
+  "Where a std module's tests live" in CONTRIBUTING.md.
 - Keep test source canonically formatted; CI enforces it
   (`ae fmt tests`).
 - Assertions are soft — prefer several small `expect_`/`assert_` checks

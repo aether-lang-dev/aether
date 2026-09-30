@@ -622,6 +622,10 @@ jobs:
         # from source at all.
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        # std module specs (std/<mod>/test_*.ae, #1584) are tests, not
+        # payload: strip them as install.sh does. `make test-release-archive`
+        # asserts no test_*.ae survives under share/aether.
+        find release/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
         # contrib source, so `import contrib.X` resolves on a binary release
         # the way it does on a source install (#2208). The tarball shipped
         # runtime/ and std/ but not contrib/, so a project that got Aether
@@ -689,6 +693,10 @@ jobs:
         # from source at all.
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        # std module specs (std/<mod>/test_*.ae, #1584) are tests, not
+        # payload: strip them as install.sh does. `make test-release-archive`
+        # asserts no test_*.ae survives under share/aether.
+        find release/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
         # contrib source, so `import contrib.X` resolves on a binary release
         # the way it does on a source install (#2208). The tarball shipped
         # runtime/ and std/ but not contrib/, so a project that got Aether
@@ -855,6 +863,10 @@ jobs:
         done
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        # std module specs (std/<mod>/test_*.ae, #1584) are tests, not
+        # payload: strip them as install.sh does. `make test-release-archive`
+        # asserts no test_*.ae survives under share/aether.
+        find release/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
         # contrib source, so `import contrib.X` resolves on a binary release
         # the way it does on a source install (#2208). The tarball shipped
         # runtime/ and std/ but not contrib/, so a project that got Aether

@@ -1419,6 +1419,9 @@ test-install: compiler ae stdlib
 	  { echo "  install.sh failed:"; tail -30 "$$tmpdir/install.log" | sed 's/^/      /'; false; }; } && \
 	echo "  Testing ae version..." && \
 	AETHER_HOME="$$tmpdir" "$$tmpdir/bin/ae$(EXE_EXT)" version > /dev/null 2>&1 && \
+	echo "  Checking no co-located spec was installed..." && \
+	shipped_specs=$$(find "$$tmpdir/share/aether/std" -type f -name 'test_*.ae' 2>/dev/null | head -5) && \
+	{ test -z "$$shipped_specs" || (echo "  FAIL: install.sh shipped std/**/test_*.ae (#1584):"; echo "$$shipped_specs" | sed 's/^/        /'; exit 1); } && \
 	echo "  Testing ae init + ae run..." && \
 	projdir=$$(mktemp -d) && \
 	cd "$$projdir" && \
@@ -1508,6 +1511,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	cp include/*.h "$$reldir/include/aether/" 2>/dev/null; \
 	cp -r runtime "$$reldir/share/aether/" && \
 	cp -r std     "$$reldir/share/aether/" && \
+	find "$$reldir/share/aether/std" -type f -name 'test_*.ae' -delete && \
 	cp $(BUILD_DIR)/MANIFEST "$$reldir/share/aether/" && \
 	rm -rf "$$reldir/share/aether/runtime/examples" && \
 	echo "  Created release layout in $$reldir" && \
@@ -1523,6 +1527,8 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
 	test -s "$$verdir/share/aether/MANIFEST" || (echo "  FAIL: share/aether/MANIFEST missing; ae cannot build from source without it"; exit 1) && \
+	shipped_specs=$$(find "$$verdir/share/aether" -type f -name 'test_*.ae' | head -5) && \
+	{ test -z "$$shipped_specs" || (echo "  FAIL: co-located specs shipped in the archive (#1584); every copy site must strip std/**/test_*.ae:"; echo "$$shipped_specs" | sed 's/^/        /'; exit 1); } && \
 	echo "  Testing ae init + ae run from extracted archive..." && \
 	projdir=$$(mktemp -d) && \
 	cd "$$projdir" && \
@@ -2652,7 +2658,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -3006,6 +3012,9 @@ check-docs: compiler ae stdlib
 # only makes sense under a driver is not run standalone). Python, probed the
 # same way check-docs does; the checks read the tree, so they do not vary
 # by platform and the Linux/macOS legs cover a Windows box without Python.
+# Also the std module census (#1584): every module.ae under std/ has a
+# co-located std/<mod>/test_*.ae, or a central test that imports it, or a
+# waiver in check_module_specs.py; its own unit tests run first.
 # Test directories the default sweep leaves out because they cannot run
 # without a toolchain this repository does not provision (#2132 §3): a test
 # that can only "pass" by skipping is not a gate. They carry a
@@ -3043,7 +3052,9 @@ check-tests:
 	done; \
 	if [ -n "$$py" ]; then \
 	    $$py tests/scripts/check_test_verdicts.py && \
-	    $$py tests/scripts/check_sweep_prune.py; \
+	    $$py tests/scripts/check_sweep_prune.py && \
+	    $$py tests/scripts/test_check_module_specs.py && \
+	    $$py tests/scripts/check_module_specs.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
