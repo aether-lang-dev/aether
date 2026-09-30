@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.749.0]
+
+### Fixed
+
+- **Co-located std specs no longer ship in installs, and every std module must have a test.** `std/<mod>/test_*.ae` was stripped by `make install` but not by `install.sh` or the three `release.yml` archive arms, so a source install and every binary release carried the stdlib's test corpus; all copy sites now strip it and `make test-release-archive` / `make test-install` fail if a spec survives. `make check-tests` gains a census (`tests/scripts/check_module_specs.py`): each `module.ae` under `std/` has a co-located spec, a central test that imports it, or a one-line waiver. A shell test proves a co-located spec cannot be imported as a module. Closes #1584.
+
 ## [0.748.0]
 
 ### Added
