@@ -164,7 +164,7 @@ leaked at least 100 blocks: true
 ```
 
 The source per platform: glibc `mallinfo2`, macOS's malloc zones, Windows
-`HeapSummary` over the process's heaps, FreeBSD jemalloc's
+`HeapWalk` over the process's heaps, FreeBSD jemalloc's
 `stats.allocated`, and the sanitizer's allocator when built with one. It is
 `-1` where the allocator keeps no statistics (musl), and where the platform's
 allocator is not the one serving malloc (under valgrind, or with an allocator

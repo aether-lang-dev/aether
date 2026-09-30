@@ -18,7 +18,7 @@
  *
  * Each returns -1 where the platform does not provide it:
  *   heap_in_use: glibc (mallinfo2 / mallinfo), macOS (malloc zones),
- *                Windows (HeapSummary over the process's heaps), FreeBSD
+ *                Windows (HeapWalk over the process's heaps), FreeBSD
  *                (jemalloc stats.allocated), Emscripten (mallinfo), and a
  *                sanitizer's allocator. On glibc it is also -1 when glibc
  *                does not serve malloc: under valgrind, or with an

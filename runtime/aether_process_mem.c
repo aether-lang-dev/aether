@@ -89,15 +89,25 @@ int64_t aether_heap_in_use(void) {
         /* Heaps created in between: read the ones that fit. */
         if (got < n) n = got;
     }
+    /* The busy blocks of each heap, walked. HeapSummary gives the same
+     * number without the walk, but Wine exports it as a stub that aborts
+     * the process when called, so it cannot even be tried. The walk costs
+     * time in proportion to the heap's block count: a diagnostic read, not
+     * one for a hot path. */
     int64_t total = 0;
+    int read = 0;
     for (DWORD i = 0; i < n; i++) {
-        HEAP_SUMMARY hs;
-        ZeroMemory(&hs, sizeof(hs));
-        hs.cb = sizeof(hs);
-        if (HeapSummary(heaps[i], 0, &hs)) total += (int64_t)hs.cbAllocated;
+        if (!HeapLock(heaps[i])) continue;
+        PROCESS_HEAP_ENTRY e;
+        e.lpData = NULL;
+        while (HeapWalk(heaps[i], &e)) {
+            if (e.wFlags & PROCESS_HEAP_ENTRY_BUSY) total += (int64_t)e.cbData;
+            read = 1;
+        }
+        HeapUnlock(heaps[i]);
     }
     if (heaps != local) free(heaps);
-    return total;
+    return read ? total : -1;
 #elif defined(__APPLE__)
     malloc_statistics_t st;
     malloc_zone_statistics(NULL, &st);   /* NULL: every zone */
