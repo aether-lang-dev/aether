@@ -7796,6 +7796,16 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
                 slice_coerce_slot(&stmt->children[0], g_tc_return_type, 0);
+            /* A multi-value return into a tuple type coerces each value
+             * against its own position: `return null, "e"` from a
+             * `-> (long[], string)` function is the empty slice and a
+             * string, not a NULL written over the slice's fields. */
+            if (stmt->child_count > 1 && g_tc_return_type &&
+                g_tc_return_type->kind == TYPE_TUPLE &&
+                g_tc_return_type->tuple_count == stmt->child_count) {
+                for (int i = 0; i < stmt->child_count; i++)
+                    slice_coerce_slot(&stmt->children[i], g_tc_return_type->tuple_types[i], 0);
+            }
             /* #2054: `return call(f, ...)` through an erased fn takes the
              * function's declared result type, as a typed binding would;
              * the declaration is the annotation. */

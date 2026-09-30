@@ -1,0 +1,83 @@
+// Issue #2330: a slice slot's elements are the slice's own type.
+//
+// The bug: an array was accepted in a `U[]` slot whenever its element type
+// was merely compatible with U (int into long, int into byte), and the slice
+// then read the array's memory at the wrong width: an int[3] passed as a
+// long[] summed garbage read past the array's end. An array literal passed
+// directly was built as int[] and viewed the same way.
+//
+// Now an array literal in a slice slot is built with the slot's element type,
+// and any other array or slice must match it exactly (the error half is
+// tests/integration/slice_element_mismatch). This file pins the literal half,
+// in arguments, bindings and returns, plus a tuple return type holding a
+// slice, which did not parse (`-> (long[], string)`).
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn sum_longs(s: long[]) -> long {
+    long total = 0
+    for i in 0..s.len {
+        total = total + s[i]
+    }
+    return total
+}
+
+fn sum_bytes(s: byte[]) -> int {
+    total = 0
+    for i in 0..s.len {
+        total = total + s[i]
+    }
+    return total
+}
+
+fn sum_floats(s: float[]) -> float {
+    total = 0.0
+    for i in 0..s.len {
+        total = total + s[i]
+    }
+    return total
+}
+
+// A tuple return type whose first element is a slice.
+fn evens(n: int) -> (long[], string) {
+    if n <= 0 {
+        return null, "nothing"
+    }
+    out = make([]long, n)
+    for i in 0..n {
+        out[i] = i * 2
+    }
+    return out, ""
+}
+
+main() {
+    // ---- literals take the slot's element type ----
+    check(sum_longs([1, 2, 3]) == 6, "an int literal into long[]")
+    check(sum_longs([3000000000, 4000000000]) == 7000000000, "values past 32 bits")
+    check(sum_bytes([10, 20, 30]) == 60, "an int literal into byte[]")
+    check(sum_floats([1, 2.5]) == 3.5, "a mixed literal into float[]")
+
+    // ---- an array of the slot's own type still passes as it is ----
+    long[3] exact = [4, 5, 6]
+    check(sum_longs(exact) == 15, "a long[3] into long[]")
+    check(sum_longs(exact[1..]) == 11, "a sub-slice of it")
+
+    // ---- a literal in a slice binding ----
+    long[] bound = [7, 8]
+    check(bound.len == 2 && bound[1] == 8, "a literal into a long[] binding")
+
+    // ---- a tuple return holding a slice ----
+    xs, err = evens(4)
+    check(err == "" && xs.len == 4 && xs[3] == 6, "(long[], string) return")
+    free(xs)
+    ys, err2 = evens(0)
+    check(err2 == "nothing" && ys.len == 0, "the empty slice in a tuple")
+    println("OK")
+}

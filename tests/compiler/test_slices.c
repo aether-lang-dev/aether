@@ -293,7 +293,9 @@ TEST(slices_codegen_extern_param_and_aether_struct_field) {
     ASTNode* ast = parse_source(
         "extern take(p: byte[], n: int)\n"
         "struct Packet { payload: byte[] }\n"
-        "main() { buf = [1, 2]\n  p = Packet { payload: buf }\n  take(p.payload, p.payload.len) }");
+        /* byte[2], not a bare `[1, 2]`: an int[2] in a byte[] slot is
+         * refused since #2330, as it would be read as bytes of its ints. */
+        "main() { byte[2] buf = [1, 2]\n  p = Packet { payload: buf }\n  take(p.payload, p.payload.len) }");
     ASSERT_NOT_NULL(ast);
     ASSERT_EQ(1, typecheck_program(ast));
     char* c = generate_c(ast);

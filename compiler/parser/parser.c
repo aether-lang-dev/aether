@@ -5545,7 +5545,25 @@ ASTNode* parse_function_definition(Parser* parser) {
                     // peek (offset 0) = `(`, so the first inside-paren
                     // token is offset 1, and the comma after it is offset 2.
                     Token* inner = peek_ahead(parser, 1);
-                    Token* after_inner = peek_ahead(parser, 2);
+                    /* An array or slice suffix on the first element
+                     * (`(int[], string)`, `(byte[16], int)`, `(Vec[], int)`)
+                     * sits between it and the comma. After a type keyword
+                     * any `[...]` is a type; after an identifier only the
+                     * empty `[]` is, since `(a[1], b)` is an index
+                     * expression. */
+                    int comma_at = 2;
+                    Token* lb = peek_ahead(parser, 2);
+                    if (inner && lb && lb->type == TOKEN_LEFT_BRACKET) {
+                        Token* rb = peek_ahead(parser, 3);
+                        if (rb && rb->type == TOKEN_RIGHT_BRACKET) {
+                            comma_at = 4;
+                        } else if (inner->type != TOKEN_IDENTIFIER && rb &&
+                                   rb->type == TOKEN_NUMBER) {
+                            Token* rb2 = peek_ahead(parser, 4);
+                            if (rb2 && rb2->type == TOKEN_RIGHT_BRACKET) comma_at = 5;
+                        }
+                    }
+                    Token* after_inner = peek_ahead(parser, comma_at);
                     if (inner && after_inner && after_inner->type == TOKEN_COMMA) {
                         switch (inner->type) {
                             case TOKEN_INT:
