@@ -37,23 +37,41 @@
 // before freeing it, or its address may be reused by an unrelated value
 // that then inherits the observers.
 //
-// One object is notified per store, never a field name: per-field
-// observation is deferred until a caller needs it. Nested value structs
-// notify inward-out: `a.b.c = v` with `a: Outer @observable` and
-// `b: Inner @observable` notifies `&a.b` then `&a`, because both values'
-// bytes changed. A store through a pointer field (`a.p.c = v`, `p: *Inner`)
+// Each notification names the field that changed, by its index in the
+// struct's declaration order (0 for the first). An observer registered with
+// observe_fields takes it as a second argument, `|obj: ptr, field: int|`;
+// one registered with observe ignores it. Nested value structs notify
+// inward-out: `a.b.c = v` with `a: Outer @observable` and
+// `b: Inner @observable` notifies `&a.b` (field `c`) then `&a` (field `b`,
+// the outer field that holds what changed), because both values' bytes
+// changed. A store through a pointer field (`a.p.c = v`, `p: *Inner`)
 // notifies only the pointee: `a` itself did not change.
+//
+// A store the compiler cannot see, one made by offset through std.mem by a
+// generic inspector, loader or deserializer, is reported with notify(obj) or
+// notify_field(obj, field): the same pass a compiler-emitted store runs.
 
 exports(
-    aether_observe, aether_unobserve, aether_unobserve_all,
+    aether_observe, aether_observe_fields, aether_unobserve, aether_unobserve_all,
     aether_observer_count, aether_observe_is_notifying,
-    observe, unobserve, unobserve_all, observer_count, is_notifying
+    aether_observe_notify, aether_observe_notify_field,
+    ANY_FIELD,
+    observe, observe_fields, unobserve, unobserve_all, observer_count, is_notifying,
+    notify, notify_field
 )
+
+// The field a notification carries when it does not name one: notify(obj),
+// or a store whose field the compiler could not resolve.
+const ANY_FIELD = -1
 
 // ---- raw externs (runtime/aether_observe.c) ----
 // `fn` lowers to the compiler's _AeClosure ({fn, env}); the runtime stores it
-// and invokes it as fn(env, obj) after each store on `obj`.
+// and invokes it as fn(env, obj) after each store on `obj` (fn(env, obj,
+// field) when registered through aether_observe_fields).
 extern aether_observe(obj: ptr, on_change: fn) -> long
+extern aether_observe_fields(obj: ptr, on_change: fn) -> long
+extern aether_observe_notify(obj: ptr)
+extern aether_observe_notify_field(obj: ptr, field: int)
 extern aether_unobserve(obj: ptr, token: long) -> int
 extern aether_unobserve_all(obj: ptr) -> int
 extern aether_observer_count(obj: ptr) -> int
@@ -65,6 +83,25 @@ extern aether_observe_is_notifying(obj: ptr) -> int
 // token for unobserve, or 0 when `obj` is null.
 observe(obj: ptr, on_change: fn) -> long {
     return aether_observe(obj, on_change)
+}
+
+// As observe, for an observer that also takes the changed field's index:
+// `|obj: ptr, field: int|`. `field` is the stored field's position in the
+// struct's declaration order, or ANY_FIELD for a notify(obj) that named none.
+observe_fields(obj: ptr, on_change: fn) -> long {
+    return aether_observe_fields(obj, on_change)
+}
+
+// Run `obj`'s observers as a compiler-emitted store would, for a store the
+// compiler did not see (one made through std.mem). The field is ANY_FIELD.
+// A null `obj` is a no-op.
+notify(obj: ptr) {
+    aether_observe_notify(obj)
+}
+
+// As notify, naming the field that changed by its declaration index.
+notify_field(obj: ptr, field: int) {
+    aether_observe_notify_field(obj, field)
 }
 
 // Remove one registration. Returns true when the token was registered on
