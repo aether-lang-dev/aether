@@ -334,6 +334,10 @@ int has_return_value(ASTNode* node);
 int struct_has_heap_string_field(ASTNode* struct_def);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
 
+/* #2298: emit the `@derive(schema)` field tables and their getters
+ * (codegen_schema.c). */
+void emit_schema_tables(CodeGenerator* gen, ASTNode* program);
+
 /* @c_callback annotation helpers (#235). A function declared with
    `@c_callback aether_name(...)` (or `@c_callback("c_sym") aether_name(...)`)
    gets a stable, externally-visible C symbol so it can be passed across

@@ -23,6 +23,15 @@
  * Synthesized functions are static-equivalent in scope (no
  * `@export`); users wanting public derives wrap them or write
  * `@export` themselves in a follow-up commit's surface.
+ *
+ * `@derive(schema)` (#2298) synthesizes `T_schema() -> ptr`, whose body is
+ * the internal AST_SCHEMA_OF node: codegen emits T's field table as static
+ * constant data (runtime/aether_schema.h) and lowers the node to its
+ * address. The pass checks what the table carries: the `@attr(...)`
+ * attributes written after a field's type are accepted only on a struct
+ * that derives schema (anywhere else they would be silently dropped), and a
+ * field names each attribute once. It leaves a `schema` marker on the
+ * struct for codegen.
  */
 
 #include "derive.h"
@@ -38,6 +47,7 @@
 #define DERIVE_FORMAT  0x02
 #define DERIVE_CLONE   0x04
 #define DERIVE_HASH    0x08
+#define DERIVE_SCHEMA  0x10
 
 static int parse_derive_list(const char* annotation,
                               int* out_flags,
@@ -63,6 +73,8 @@ static int parse_derive_list(const char* annotation,
             *out_flags |= DERIVE_CLONE;
         } else if (len == 4 && memcmp(start, "hash", 4) == 0) {
             *out_flags |= DERIVE_HASH;
+        } else if (len == 6 && memcmp(start, "schema", 6) == 0) {
+            *out_flags |= DERIVE_SCHEMA;
         } else {
             /* Record the first unsupported derive name for the
              * diagnostic. Truncate gracefully on overflow. */
@@ -220,6 +232,87 @@ static ASTNode* synth_eq(ASTNode* struct_def) {
     return func;
 }
 
+/* The number of `@attr` children on a struct field. */
+static int field_attribute_count(const ASTNode* field) {
+    int n = 0;
+    for (int i = 0; i < field->child_count; i++) {
+        if (field->children[i] && field->children[i]->type == AST_FIELD_ATTRIBUTE) n++;
+    }
+    return n;
+}
+
+/* Report `@attr` written on a field of a struct that does not derive
+ * schema: nothing would carry it. Returns the number of errors. */
+static int check_attributes_have_a_schema(ASTNode* struct_def) {
+    int errors = 0;
+    for (int i = 0; i < struct_def->child_count; i++) {
+        ASTNode* field = struct_def->children[i];
+        if (!field || field->type != AST_STRUCT_FIELD) continue;
+        for (int a = 0; a < field->child_count; a++) {
+            ASTNode* attr = field->children[a];
+            if (!attr || attr->type != AST_FIELD_ATTRIBUTE) continue;
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                     "field attribute `@%.100s` on '%.100s.%.100s' needs `@derive(schema)` on "
+                     "the struct: the schema table is what carries it",
+                     attr->value ? attr->value : "?",
+                     struct_def->value ? struct_def->value : "?",
+                     field->value ? field->value : "?");
+            type_error(msg, attr->line, attr->column);
+            errors++;
+            break;   /* one report per field */
+        }
+    }
+    return errors;
+}
+
+/* Synthesize `T_schema() -> ptr { return <AST_SCHEMA_OF T>; }` after
+ * checking the fields' attributes. Returns NULL after reporting an error. */
+static ASTNode* synth_schema(ASTNode* struct_def) {
+    if (!struct_def || !struct_def->value) return NULL;
+    int line = struct_def->line;
+    int column = struct_def->column;
+    const char* type_name = struct_def->value;
+    int ok = 1;
+
+    for (int i = 0; i < struct_def->child_count; i++) {
+        ASTNode* field = struct_def->children[i];
+        if (!field || field->type != AST_STRUCT_FIELD) continue;
+        if (field_attribute_count(field) < 2) continue;
+        for (int a = 0; a < field->child_count; a++) {
+            ASTNode* x = field->children[a];
+            if (!x || x->type != AST_FIELD_ATTRIBUTE || !x->value) continue;
+            for (int b = a + 1; b < field->child_count; b++) {
+                ASTNode* y = field->children[b];
+                if (!y || y->type != AST_FIELD_ATTRIBUTE || !y->value) continue;
+                if (strcmp(x->value, y->value) != 0) continue;
+                char msg[512];
+                snprintf(msg, sizeof(msg),
+                         "field '%.120s.%.120s' has `@%.120s` twice; a field names each "
+                         "attribute once",
+                         type_name, field->value ? field->value : "?", x->value);
+                type_error(msg, y->line, y->column);
+                ok = 0;
+            }
+        }
+    }
+    if (!ok) return NULL;
+
+    char fname[256];
+    snprintf(fname, sizeof(fname), "%.240s_schema", type_name);
+    ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
+    func->node_type = create_type(TYPE_PTR);
+
+    ASTNode* ref = create_ast_node(AST_SCHEMA_OF, type_name, line, column);
+    ref->node_type = create_type(TYPE_PTR);
+    ASTNode* body = create_ast_node(AST_BLOCK, NULL, line, column);
+    ASTNode* ret = create_ast_node(AST_RETURN_STATEMENT, NULL, line, column);
+    add_child(ret, ref);
+    add_child(body, ret);
+    add_child(func, body);
+    return func;
+}
+
 int derive_synthesize_pass(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     int errors = 0;
@@ -234,19 +327,23 @@ int derive_synthesize_pass(ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child || child->type != AST_STRUCT_DEFINITION) continue;
-        if (!child->annotation || strncmp(child->annotation, "derive:", 7) != 0) continue;
+        if (!child->annotation || strncmp(child->annotation, "derive:", 7) != 0) {
+            errors += check_attributes_have_a_schema(child);
+            continue;
+        }
         int flags = 0;
         char unsupported[64];
         if (parse_derive_list(child->annotation, &flags, unsupported, sizeof(unsupported)) < 0) {
             char msg[256];
             snprintf(msg, sizeof(msg),
-                     "@derive: unknown derive '%s' (v1 supports: eq)",
+                     "@derive: unknown derive '%s' (supported: eq, schema)",
                      unsupported);
             type_error(msg, child->line, child->column);
             errors++;
             continue;
         }
-        if ((flags & ~DERIVE_EQ) != 0) {
+        if (!(flags & DERIVE_SCHEMA)) errors += check_attributes_have_a_schema(child);
+        if ((flags & ~(DERIVE_EQ | DERIVE_SCHEMA)) != 0) {
             /* Format / clone / hash flags asked but not yet
              * implemented. Surface a precise diagnostic so users
              * don't get silent omission. */
@@ -256,7 +353,7 @@ int derive_synthesize_pass(ASTNode* program) {
                               : "<unknown>";
             char msg[256];
             snprintf(msg, sizeof(msg),
-                     "@derive(%s): not yet supported in v1 (eq is supported; "
+                     "@derive(%s): not yet supported (eq and schema are; "
                      "format/clone/hash land in follow-up commits)",
                      unsup);
             type_error(msg, child->line, child->column);
@@ -289,13 +386,23 @@ int derive_synthesize_pass(ASTNode* program) {
             }
             add_child(program, fn);
         }
+        if (t.flags & DERIVE_SCHEMA) {
+            ASTNode* fn = synth_schema(t.sd);
+            if (!fn) {
+                errors++;
+                continue;
+            }
+            add_child(program, fn);
+        }
         /* Drop the `derive:` marker so re-running the pass is a no-op. The
          * markers after it (`observable`, #2220) belong to later passes and
-         * stay. */
+         * stay; `schema` is added for codegen, which emits the table. */
         char* rest = strchr(t.sd->annotation, ';');
         char* kept = rest ? strdup(rest + 1) : NULL;
         free(t.sd->annotation);
         t.sd->annotation = kept;
+        if (t.flags & DERIVE_SCHEMA)
+            t.sd->annotation = annotation_add_marker(t.sd->annotation, "schema");
     }
 
     free(tasks);

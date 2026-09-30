@@ -1,0 +1,263 @@
+// std.reflect — read the field tables `@derive(schema)` emits (#2298)
+//
+// `@derive(schema)` on a struct makes the compiler emit, as static constant
+// data, a table of the struct's fields: each one's name, type, offset and
+// size, and the `@attr(...)` attributes written after its type. `T_schema()`
+// returns it. This module reads it, so an inspector, a save file, a
+// replicator or an agent can walk a struct's fields by name without a
+// hand-written copy of the struct beside it:
+//
+//     import std.reflect
+//     import std.mem
+//
+//     @derive(schema)
+//     struct Bob {
+//         rate: float @range(0.0, 10.0) @default(2.0)
+//         height: float @default(6.0)
+//     }
+//
+//     main() {
+//         s = Bob_schema()
+//         b = heap.new(Bob)
+//         i = 0
+//         while i < reflect.field_count(s) {
+//             d = reflect.attr_index(s, i, "default")
+//             if d >= 0 {
+//                 mem.set_float64(b, reflect.field_offset(s, i), reflect.attr_float(s, i, d, 0))
+//             }
+//             i = i + 1
+//         }
+//         heap.free(b)
+//     }
+//
+// Fields are numbered in declaration order from 0, the same index a
+// std.observe field observer receives (#2299). Every accessor is safe on a
+// null table and on an index out of range: a name reads as "", a number as
+// 0, an index lookup as -1. The table is constant and lives as long as the
+// program; nothing is allocated or freed.
+
+exports(
+    aether_schema_name, aether_schema_size, aether_schema_field_count,
+    aether_schema_field_index, aether_schema_field_name, aether_schema_field_type,
+    aether_schema_field_kind, aether_schema_field_elem_kind, aether_schema_field_len,
+    aether_schema_field_offset, aether_schema_field_size, aether_schema_field_heap_offset,
+    aether_schema_field_schema, aether_schema_attr_count, aether_schema_attr_index,
+    aether_schema_attr_name, aether_schema_attr_arg_count, aether_schema_attr_arg_kind,
+    aether_schema_attr_int, aether_schema_attr_float, aether_schema_attr_text,
+    KIND_OTHER, KIND_BOOL, KIND_BYTE, KIND_INT, KIND_LONG, KIND_UINT8, KIND_UINT16,
+    KIND_UINT32, KIND_ULONG, KIND_FLOAT, KIND_F32, KIND_LONGDOUBLE, KIND_DURATION,
+    KIND_STRING, KIND_PTR, KIND_STRUCT, KIND_ARRAY, KIND_SLICE, KIND_ENUM, KIND_FN,
+    ARG_INT, ARG_FLOAT, ARG_STRING, ARG_BOOL,
+    name, size, field_count, field_index, field_name, field_type, field_kind,
+    field_elem_kind, field_len, field_offset, field_size, field_heap_offset,
+    field_schema, attr_count, attr_index, has_attr, attr_name, attr_arg_count,
+    attr_arg_kind, attr_int, attr_float, attr_text, kind_name
+)
+
+// ---- field kinds (runtime/aether_schema.h AETHER_SCHEMA_*) ----
+// The width of an integer or float kind is the field's size.
+const KIND_OTHER = 0 // optional, tuple, sum, bitset, SIMD, ...
+const KIND_BOOL = 1
+const KIND_BYTE = 2
+const KIND_INT = 3
+const KIND_LONG = 4
+const KIND_UINT8 = 5
+const KIND_UINT16 = 6
+const KIND_UINT32 = 7
+const KIND_ULONG = 8
+const KIND_FLOAT = 9 // a C double
+const KIND_F32 = 10 // a C float
+const KIND_LONGDOUBLE = 11
+const KIND_DURATION = 12 // signed 64-bit nanoseconds
+const KIND_STRING = 13 // see field_heap_offset
+const KIND_PTR = 14 // `ptr` or `*T`
+const KIND_STRUCT = 15 // a struct value
+const KIND_ARRAY = 16 // fixed `T[N]`
+const KIND_SLICE = 17 // `T[]`
+const KIND_ENUM = 18
+const KIND_FN = 19 // a closure or a C function pointer
+
+// ---- attribute argument kinds ----
+const ARG_INT = 1
+const ARG_FLOAT = 2
+const ARG_STRING = 3
+const ARG_BOOL = 4
+
+// ---- raw externs (runtime/aether_schema.c) ----
+// The C convention: a missing name is null. The wrappers below read it as "".
+extern aether_schema_name(s: ptr) -> string
+extern aether_schema_size(s: ptr) -> int
+extern aether_schema_field_count(s: ptr) -> int
+extern aether_schema_field_index(s: ptr, name: string) -> int
+extern aether_schema_field_name(s: ptr, field: int) -> string
+extern aether_schema_field_type(s: ptr, field: int) -> string
+extern aether_schema_field_kind(s: ptr, field: int) -> int
+extern aether_schema_field_elem_kind(s: ptr, field: int) -> int
+extern aether_schema_field_len(s: ptr, field: int) -> int
+extern aether_schema_field_offset(s: ptr, field: int) -> int
+extern aether_schema_field_size(s: ptr, field: int) -> int
+extern aether_schema_field_heap_offset(s: ptr, field: int) -> int
+extern aether_schema_field_schema(s: ptr, field: int) -> ptr
+extern aether_schema_attr_count(s: ptr, field: int) -> int
+extern aether_schema_attr_index(s: ptr, field: int, name: string) -> int
+extern aether_schema_attr_name(s: ptr, field: int, attr: int) -> string
+extern aether_schema_attr_arg_count(s: ptr, field: int, attr: int) -> int
+extern aether_schema_attr_arg_kind(s: ptr, field: int, attr: int, arg: int) -> int
+extern aether_schema_attr_int(s: ptr, field: int, attr: int, arg: int) -> long
+extern aether_schema_attr_float(s: ptr, field: int, attr: int, arg: int) -> float
+extern aether_schema_attr_text(s: ptr, field: int, attr: int, arg: int) -> string
+
+fn or_empty(s: string) -> string {
+    if s == null {
+        return ""
+    }
+    return s
+}
+
+// ---- the struct ----
+
+// The struct's name ("Bob").
+name(s: ptr) -> string {
+    return or_empty(aether_schema_name(s))
+}
+
+// sizeof the struct, in bytes: what heap.new allocates for it.
+size(s: ptr) -> int {
+    return aether_schema_size(s)
+}
+
+// How many fields it declares.
+field_count(s: ptr) -> int {
+    return aether_schema_field_count(s)
+}
+
+// The index of the field called `field_name`, or -1.
+field_index(s: ptr, field_name: string) -> int {
+    return aether_schema_field_index(s, field_name)
+}
+
+// ---- one field, by index ----
+
+field_name(s: ptr, field: int) -> string {
+    return or_empty(aether_schema_field_name(s, field))
+}
+
+// The field's type as written: "float", "string", "*Inner", "int[4]",
+// "Inner[]", "Dir".
+field_type(s: ptr, field: int) -> string {
+    return or_empty(aether_schema_field_type(s, field))
+}
+
+// One of the KIND_* constants.
+field_kind(s: ptr, field: int) -> int {
+    return aether_schema_field_kind(s, field)
+}
+
+// For a KIND_ARRAY or KIND_SLICE field, its element's kind; else KIND_OTHER.
+field_elem_kind(s: ptr, field: int) -> int {
+    return aether_schema_field_elem_kind(s, field)
+}
+
+// For a KIND_ARRAY field, its element count; else 0.
+field_len(s: ptr, field: int) -> int {
+    return aether_schema_field_len(s, field)
+}
+
+// The field's byte offset in the struct: the offset std.mem's accessors
+// take. -1 for an index out of range.
+field_offset(s: ptr, field: int) -> int {
+    return aether_schema_field_offset(s, field)
+}
+
+// The field's size in bytes (an array's whole size).
+field_size(s: ptr, field: int) -> int {
+    return aether_schema_field_size(s, field)
+}
+
+// For a KIND_STRING field, the offset of the int that records whether the
+// struct owns the string (1: a heap string it frees when the field is
+// reassigned or the struct is destroyed). A generic writer that stores a
+// heap string sets it to 1, and frees the old string first when it was 1.
+// -1 for every other kind.
+field_heap_offset(s: ptr, field: int) -> int {
+    return aether_schema_field_heap_offset(s, field)
+}
+
+// The table of the struct a field holds (KIND_STRUCT), points at
+// (KIND_PTR to `*T`), or holds an array of (KIND_ARRAY / KIND_SLICE of
+// structs), when that struct is an Aether struct; null otherwise.
+field_schema(s: ptr, field: int) -> ptr {
+    return aether_schema_field_schema(s, field)
+}
+
+// ---- a field's attributes ----
+
+// How many `@attr` the field carries.
+attr_count(s: ptr, field: int) -> int {
+    return aether_schema_attr_count(s, field)
+}
+
+// The index of the field's attribute called `attr_name`, or -1.
+attr_index(s: ptr, field: int, attr_name: string) -> int {
+    return aether_schema_attr_index(s, field, attr_name)
+}
+
+// True when the field carries `@attr_name`.
+has_attr(s: ptr, field: int, attr_name: string) -> bool {
+    return aether_schema_attr_index(s, field, attr_name) >= 0
+}
+
+attr_name(s: ptr, field: int, attr: int) -> string {
+    return or_empty(aether_schema_attr_name(s, field, attr))
+}
+
+// How many arguments the attribute was written with (`@hidden` has 0).
+attr_arg_count(s: ptr, field: int, attr: int) -> int {
+    return aether_schema_attr_arg_count(s, field, attr)
+}
+
+// One of the ARG_* constants; 0 for an argument that is not there.
+attr_arg_kind(s: ptr, field: int, attr: int, arg: int) -> int {
+    return aether_schema_attr_arg_kind(s, field, attr, arg)
+}
+
+// An argument as an integer: an ARG_INT's value, an ARG_FLOAT's truncation,
+// an ARG_BOOL's 0 or 1; 0 for a string.
+attr_int(s: ptr, field: int, attr: int, arg: int) -> long {
+    return aether_schema_attr_int(s, field, attr, arg)
+}
+
+// An argument as a float: an ARG_FLOAT's value, an ARG_INT's conversion, an
+// ARG_BOOL's 0.0 or 1.0; 0.0 for a string.
+attr_float(s: ptr, field: int, attr: int, arg: int) -> float {
+    return aether_schema_attr_float(s, field, attr, arg)
+}
+
+// An argument's text: an ARG_STRING's value, a number or bool as written.
+attr_text(s: ptr, field: int, attr: int, arg: int) -> string {
+    return or_empty(aether_schema_attr_text(s, field, attr, arg))
+}
+
+// A KIND_* constant's name, for a diagnostic or an inspector's label.
+kind_name(kind: int) -> string {
+    if kind == KIND_BOOL { return "bool" }
+    if kind == KIND_BYTE { return "byte" }
+    if kind == KIND_INT { return "int" }
+    if kind == KIND_LONG { return "long" }
+    if kind == KIND_UINT8 { return "uint8" }
+    if kind == KIND_UINT16 { return "uint16" }
+    if kind == KIND_UINT32 { return "uint32" }
+    if kind == KIND_ULONG { return "ulong" }
+    if kind == KIND_FLOAT { return "float" }
+    if kind == KIND_F32 { return "f32" }
+    if kind == KIND_LONGDOUBLE { return "longdouble" }
+    if kind == KIND_DURATION { return "duration" }
+    if kind == KIND_STRING { return "string" }
+    if kind == KIND_PTR { return "ptr" }
+    if kind == KIND_STRUCT { return "struct" }
+    if kind == KIND_ARRAY { return "array" }
+    if kind == KIND_SLICE { return "slice" }
+    if kind == KIND_ENUM { return "enum" }
+    if kind == KIND_FN { return "fn" }
+    return "other"
+}

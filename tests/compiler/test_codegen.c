@@ -701,3 +701,118 @@ TEST(codegen_fnptr_bool_return_reads_low_byte_when_used) {
     ASSERT_TRUE(strstr(buf, "(d.ready)(2);") != NULL);
     free(buf);
 }
+
+/* #2298 — @derive(schema). The derive pass runs between parse and typecheck,
+ * as in aetherc; this runs the same three steps and generates. NULL when the
+ * derive pass or the typechecker rejects the source. */
+static char* generate_derived(const char* source) {
+    int count;
+    Token** tokens = tokenize_source(source, &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    char* buf = NULL;
+    if (ast && derive_synthesize_pass(ast) == 0 && typecheck_program(ast)) {
+        FILE* out = tmpfile();
+        if (out) {
+            CodeGenerator* gen = create_code_generator(out);
+            generate_program(gen, ast);
+            buf = read_all(out);
+            fclose(out);
+            free_code_generator(gen);
+        }
+    }
+    if (ast) free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+    return buf;
+}
+
+TEST(parser_field_attributes_attach_to_the_field) {
+    int count;
+    Token** tokens = tokenize_source(
+        "struct Bob { rate: float @range(-1, 10.5) @hidden @tip(\"x\") @on(true) }", &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    ASSERT_NOT_NULL(ast);
+    ASTNode* sd = NULL;
+    for (int i = 0; i < ast->child_count; i++)
+        if (ast->children[i]->type == AST_STRUCT_DEFINITION) sd = ast->children[i];
+    ASSERT_NOT_NULL(sd);
+    ASTNode* field = sd->children[0];
+    ASSERT_EQ(AST_STRUCT_FIELD, field->type);
+    ASSERT_EQ(4, field->child_count);
+    ASTNode* range = field->children[0];
+    ASSERT_EQ(AST_FIELD_ATTRIBUTE, range->type);
+    ASSERT_STREQ("range", range->value);
+    ASSERT_EQ(2, range->child_count);
+    ASSERT_STREQ("-1", range->children[0]->value);          /* the sign folds in */
+    ASSERT_EQ(TYPE_INT, range->children[0]->node_type->kind);
+    ASSERT_EQ(TYPE_FLOAT, range->children[1]->node_type->kind);
+    ASSERT_EQ(0, field->children[1]->child_count);          /* @hidden */
+    ASSERT_EQ(TYPE_STRING, field->children[2]->children[0]->node_type->kind);
+    ASSERT_EQ(TYPE_BOOL, field->children[3]->children[0]->node_type->kind);
+
+    free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+}
+
+TEST(codegen_derive_schema_emits_a_static_table) {
+    char* buf = generate_derived(
+        "struct Vec { x: float }\n"
+        "@derive(schema)\n"
+        "struct Bob { rate: float @range(0.0, 10.0)\n  pos: Vec\n  name: string }\n"
+        "main() { s = Bob_schema()\n  println(\"${s == null}\") }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "#define AETHER_SCHEMA_LAYOUT_ONLY\n#include \"aether_schema.h\"") != NULL);
+    /* Offsets and sizes are C's own. */
+    ASSERT_TRUE(strstr(buf, "offsetof(struct Bob, rate), sizeof(((struct Bob*)0)->rate)") != NULL);
+    /* The attribute and its two float arguments. */
+    ASSERT_TRUE(strstr(buf, "_ae_schema_Bob_a0_0[] = { {2, \"0.0\", 0LL, 0.0}, {2, \"10.0\", 10LL, 10.0} };") != NULL);
+    ASSERT_TRUE(strstr(buf, "{\"range\", 2, _ae_schema_Bob_a0_0}") != NULL);
+    /* A struct reached by value gets its own table, named by its getter. */
+    ASSERT_TRUE(strstr(buf, "static const AetherSchema* _ae_schema_Vec(void) {") != NULL);
+    ASSERT_TRUE(strstr(buf, "\"pos\", \"Vec\", 15, 0, 0, offsetof(struct Bob, pos)") != NULL);
+    /* A string names its ownership flag. */
+    ASSERT_TRUE(strstr(buf, "(long)offsetof(struct Bob, _heap_name)") != NULL);
+    /* T_schema() returns the table's address. */
+    ASSERT_TRUE(strstr(buf, "((void*)_ae_schema_Bob())") != NULL);
+    free(buf);
+}
+
+TEST(codegen_no_schema_emits_no_table) {
+    char* buf = generate_derived(
+        "struct Bob { rate: float }\n"
+        "main() { b = Bob { rate: 1.0 }\n  println(\"${b.rate}\") }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "aether_schema.h") == NULL);
+    ASSERT_TRUE(strstr(buf, "_ae_schema_") == NULL);
+    free(buf);
+}
+
+/* The derive pass's verdict alone, for the rejected forms. */
+static int derive_result(const char* source) {
+    int count;
+    Token** tokens = tokenize_source(source, &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    int rc = ast ? derive_synthesize_pass(ast) : -2;
+    if (ast) free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+    return rc;
+}
+
+TEST(derive_rejects_field_attributes_without_schema) {
+    ASSERT_EQ(-1, derive_result("struct Bob { rate: float @range(0.0, 1.0) }\nmain() { }"));
+    ASSERT_EQ(-1, derive_result("@derive(eq)\nstruct Bob { rate: float @range(0.0, 1.0) }\nmain() { }"));
+    ASSERT_EQ(0, derive_result("@derive(eq, schema)\nstruct Bob { rate: float @range(0.0, 1.0) }\nmain() { }"));
+}
+
+TEST(derive_rejects_an_attribute_named_twice) {
+    ASSERT_EQ(-1, derive_result(
+        "@derive(schema)\nstruct Bob { rate: float @range(0.0, 1.0) @range(1.0, 2.0) }\nmain() { }"));
+}

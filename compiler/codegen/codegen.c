@@ -6385,6 +6385,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // #340: emit optional typedefs (after struct bodies, before fn fwd-decls).
     collect_optional_typedefs(gen, program);
 
+    // #2298: `@derive(schema)` field tables. Here because offsetof/sizeof
+    // need every field's type complete, and T_schema()'s body (a function)
+    // needs the getter declared.
+    emit_schema_tables(gen, program);
+
     // Hoist top-level constants the same way.  Imported constants
     // (via `import mod` → cloned into the consumer's AST as
     // AST_CONST_DECLARATION with `is_imported=1`) land at the end of
