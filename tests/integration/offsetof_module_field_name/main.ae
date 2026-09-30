@@ -1,0 +1,9 @@
+// Offsets read through an imported module agree with the consumer's own.
+import shade
+
+main() {
+    println("${shade.where_strength() == offsetof(Thing, strength)}")
+    println("${shade.where_limit() == offsetof(Thing, limit)}")
+    println("${shade.size_of_thing() == sizeof(Thing)}")
+    println("${shade.limit}")
+}

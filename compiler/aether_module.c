@@ -2153,6 +2153,11 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
                                       const char** local_names, int local_count) {
     if (!node) return;
 
+    /* #2320: `offsetof(T, f)` names `f` as a member of T, never as a
+     * reference, so no rename applies to it (a module function or const
+     * called `f` turned it into `<prefix>_f`, a member T does not have). */
+    if (node->type == AST_OFFSETOF) return;
+
     if (node->type == AST_FUNCTION_CALL && node->value) {
         // Check if this call targets a function defined in the same module
         int renamed = 0;
@@ -2593,6 +2598,7 @@ static int program_has_sum(ASTNode* program, const char* name) {
 static void rename_aliased_import_refs(ASTNode* node, const char* alias,
                                        const char* prefixed, int is_const) {
     if (!node) return;
+    if (node->type == AST_OFFSETOF) return;   /* #2320: its field is a member name */
     if (node->type == AST_FUNCTION_CALL && node->value &&
         strcmp(node->value, alias) == 0) {
         free(node->value);
