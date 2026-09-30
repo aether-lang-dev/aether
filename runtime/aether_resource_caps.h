@@ -77,7 +77,12 @@ int aether_caps_deadline_tripped(void);
  * deadline (which clears the flag). */
 void __aether_abort_call(void);
 
-/* Snapshot of currently-accounted bytes. Test/diagnostic helper. */
+/* Snapshot of currently-accounted bytes: what the cap-aware allocators
+ * above (collections, arenas, pools, the actor registry) hold, and only
+ * those. heap.new, strings and closure environments are plain mallocs the
+ * cap does not see, so this is not a measure of what the process holds;
+ * for a leak check use aether_heap_in_use() (runtime/aether_process_mem.h,
+ * std.mem's heap_in_use), which reads the allocator itself (#2310). */
 uint64_t aether_caps_used_bytes(void);
 
 /* ============================================================

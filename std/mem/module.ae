@@ -72,7 +72,8 @@ exports(
     copy_at, move_at, fill_at, compare_at,
     get_u16_le, get_u16_be, set_u16_le, set_u16_be,
     get_u32_le, get_u32_be, set_u32_le, set_u32_be,
-    get_u64_le, get_u64_be, set_u64_le, set_u64_be
+    get_u64_le, get_u64_be, set_u64_le, set_u64_be,
+    aether_heap_in_use, heap_in_use
 )
 
 // Read unsigned byte at offset `i` from raw pointer `p`. Returns
@@ -373,3 +374,22 @@ get_u64_le(p: ptr, offset: int) -> long { return aether_mem_get_u64_le(p, offset
 get_u64_be(p: ptr, offset: int) -> long { return aether_mem_get_u64_be(p, offset) }
 set_u64_le(p: ptr, offset: int, value: long) -> int { return aether_mem_set_u64_le(p, offset, value) }
 set_u64_be(p: ptr, offset: int, value: long) -> int { return aether_mem_set_u64_be(p, offset, value) }
+
+// ---- how much the heap holds (#2310; runtime/aether_process_mem.c) ----
+extern aether_heap_in_use() -> long
+
+// The bytes the C allocator has handed out and not taken back: every
+// malloc in the process, Aether's (heap.new, strings, closures,
+// collections) and the ones C code reached through an extern makes, from
+// the allocator's own statistics. -1 where the platform's allocator keeps
+// none (musl), and where the platform's allocator is not the one serving
+// malloc (under valgrind, or with an allocator preloaded in front of
+// glibc's): its statistics would stand still while the program allocates.
+//
+// For a same-process leak check, run the workload a few rounds and compare
+// two later rounds: the growth is what each round leaks. Allocators keep a
+// bounded cache of freed blocks that some count as in use, so a single
+// before/after is not zero even when nothing leaks.
+heap_in_use() -> long {
+    return aether_heap_in_use()
+}
