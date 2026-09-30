@@ -7,9 +7,13 @@
 // it. Now the catcher owns a built message: the binding is freed at the end
 // of the handler unless it is kept, returned, stored or re-raised.
 //
-// Pre-fix the round check fails (each round keeps ~50 bytes per panic). The
-// value checks cover each way a binding can leave its handler; a literal
-// message returned through the same paths must stay freeable by the caller.
+// Pre-fix the round check fails: each caught panic kept its message, 16
+// bytes or more. The measure compares rounds of built messages with rounds
+// of the same shapes throwing literals (which own nothing), so what the
+// allocator or the platform keeps per panic -- Wine's heap bookkeeping
+// grows by about a byte per caught panic -- cancels out. The value checks
+// cover each way a binding can leave its handler; a literal message
+// returned through the same paths must stay freeable by the caller.
 
 import std.mem
 import std.list
@@ -17,6 +21,8 @@ import std.list
 extern exit(code: int)
 
 const PER_ROUND = 200
+// Round offsets at or past LITERAL throw literal messages instead.
+const LITERAL = 1000000
 
 fn check(cond: bool, msg: string) {
     if !cond {
@@ -26,11 +32,17 @@ fn check(cond: bool, msg: string) {
 }
 
 fn boom(n: int) {
+    if n >= LITERAL {
+        panic("bad value")
+    }
     panic("bad value ${n}")
 }
 
 fn boom_local(n: int) {
-    msg = "local ${n}"
+    msg = "local"
+    if n < LITERAL {
+        msg = "local ${n}"
+    }
     panic(msg)
 }
 
@@ -97,19 +109,28 @@ fn stash(l: ptr, n: int) {
 }
 
 // One round through every shape; everything it builds is released.
-fn round() {
+fn round(base: int) {
     i = 0
     while i < PER_ROUND {
-        try { boom(i) } catch e {}
-        try { boom_local(i) } catch e {}
-        try { rethrow(i) } catch e {}
-        k = keep(i)
-        r = return_it(i)
+        n = base + i
+        try { boom(n) } catch e {}
+        try { boom_local(n) } catch e {}
+        try { rethrow(n) } catch e {}
+        k = keep(n)
+        r = return_it(n)
         l = return_it(-1)
-        _c, err = guarded(i)
-        _x = early(i)
+        _c, err = guarded(n)
+        _x = early(n)
         i = i + 1
     }
+}
+
+// What two rounds starting at `base` leave allocated.
+fn two_rounds(base: int) -> long {
+    before = mem.heap_in_use()
+    round(base)
+    round(base)
+    return mem.heap_in_use() - before
 }
 
 main() {
@@ -132,13 +153,12 @@ main() {
         println("OK") // no allocator statistics here (musl, valgrind)
         return
     }
-    round()
-    before = mem.heap_in_use()
-    round()
-    round()
-    grown = mem.heap_in_use() - before
-    if grown > 1024 {
-        println("FAIL: two rounds of caught panics kept ${grown} bytes")
+    round(0) // warm up: first-use allocations are not per panic
+    round(LITERAL)
+    literal = two_rounds(LITERAL)
+    built = two_rounds(0)
+    if built - literal > 1024 {
+        println("FAIL: two rounds of built messages kept ${built} bytes, literals ${literal}")
         exit(1)
     }
     println("OK")
