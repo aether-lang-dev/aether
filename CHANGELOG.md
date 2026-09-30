@@ -14,6 +14,26 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.744.0]
+
+### Fixed
+
+- **`s as ptr` on a slice gives its element pointer (#2304).** A local made
+  from `p as T[]` is a `{ ptr, len }` slice, and `slot as ptr` emitted a C
+  cast of that struct, which gcc rejects ("cannot convert to a pointer
+  type"). The cast now yields the element pointer, the same conversion a
+  slice gets in any `ptr` slot. It works in a `return`, in a binding, and
+  on a sub-slice.
+
+- **A slice bounds check names a Windows source path correctly (#2305).**
+  The check writes its source file into the generated C as a string
+  literal, and the path went in unescaped. A Windows path's backslashes
+  became escape sequences: gcc warned "unknown escape sequence" once per
+  checked access (about 1,200 warnings building ae3d, which fails a
+  warnings-as-errors build), and a `\a` in the path silently became a BEL
+  character in the panic message. The path is now escaped like any other
+  string in the generated C.
+
 ## [0.743.0]
 
 ### Added
