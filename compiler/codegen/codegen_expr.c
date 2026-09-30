@@ -2833,8 +2833,25 @@ static const char* slice_elem_c_type(const Type* t) {
            ? get_c_type(t->element_type) : "char";
 }
 
-static const char* slice_diag_file(const ASTNode* n) {
-    return (n && n->source_file) ? n->source_file : "?";
+/* The source path a bounds-check failure names, as a C string literal
+ * (#2305). A path is written into generated C, so it is escaped like any
+ * string: a Windows path's backslashes were emitted raw, and each `\G`,
+ * `\s`, `\d` became an unknown-escape warning per access (a `\a` a BEL in
+ * the message). Control characters are written as octal escapes. */
+static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
+    const char* path = (n && n->source_file) ? n->source_file : "?";
+    fputc('"', gen->output);
+    for (const unsigned char* c = (const unsigned char*)path; *c; c++) {
+        if (*c == '\\' || *c == '"') {
+            fputc('\\', gen->output);
+            fputc(*c, gen->output);
+        } else if (*c < 0x20 || *c == 0x7f) {
+            fprintf(gen->output, "\\%03o", *c);
+        } else {
+            fputc(*c, gen->output);
+        }
+    }
+    fputc('"', gen->output);
 }
 
 void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr) {
@@ -3769,8 +3786,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 generate_expression(gen, hi);
                 fprintf(gen->output, ")");
             }
-            fprintf(gen->output, ", sizeof(%s), \"%s\", %d)",
-                    elem, slice_diag_file(expr), expr->line);
+            fprintf(gen->output, ", sizeof(%s), ", elem);
+            emit_slice_diag_file(gen, expr);
+            fprintf(gen->output, ", %d)", expr->line);
             break;
         }
 
@@ -3816,7 +3834,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * get_c_type yields the base C type (no runtime cost). */
             if (expr->child_count > 0 && expr->node_type) {
                 fprintf(gen->output, "((%s)(", get_c_type(expr->node_type));
-                generate_expression(gen, expr->children[0]);
+                /* #2304: `s as ptr` on a slice is its element pointer, as a
+                 * slice passed to a `ptr` slot is; a C cast of the
+                 * AetherSlice struct itself does not compile. */
+                if (expr->node_type->kind == TYPE_PTR)
+                    generate_expression_as_elem_ptr(gen, expr->children[0]);
+                else
+                    generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, "))");
             } else if (expr->child_count > 0) {
                 generate_expression(gen, expr->children[0]);
@@ -6541,8 +6565,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     gen->generating_lvalue = saved_lvalue;
                     fprintf(gen->output, ", (int64_t)(");
                     generate_expression(gen, expr->children[1]);
-                    fprintf(gen->output, "), sizeof(%s), \"%s\", %d))",
-                            elem, slice_diag_file(expr), expr->line);
+                    fprintf(gen->output, "), sizeof(%s), ", elem);
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d))", expr->line);
                     break;
                 }
                 int str_base = base && base->node_type &&

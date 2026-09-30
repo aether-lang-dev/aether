@@ -8277,6 +8277,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * numeric (a numeric conversion). The target carries the result
              * type (distinct-resolved). */
             if (expr->child_count > 0) typecheck_expression(expr->children[0], table);
+            /* #2304: `s as ptr` on a slice is its element pointer, the
+             * coercion a slice gets in any raw-pointer slot. */
+            if (expr->child_count > 0 && expr->node_type &&
+                expr->node_type->kind == TYPE_PTR &&
+                type_is_slice(expr->children[0]->node_type)) {
+                slice_coerce_to_ptr(&expr->children[0]);
+            }
             Type* operand = expr->child_count > 0 ? infer_type(expr->children[0], table) : NULL;
             if (operand && expr->node_type) {
                 int same = (operand->kind == expr->node_type->kind);

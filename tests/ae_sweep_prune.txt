@@ -226,3 +226,4 @@ tests/integration/http_serve_static_range/
 tests/integration/http_server_h2/
 tests/integration/http_sse_upgrade/
 tests/integration/slice_bounds/
+tests/integration/slice_diag_path_escape/

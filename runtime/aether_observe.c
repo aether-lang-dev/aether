@@ -28,6 +28,7 @@
 typedef struct {
     long token;
     AetherObserverClosure cb;
+    int with_field;      /* registered through aether_observe_fields (#2299) */
     int dead;            /* unobserved while a pass on this object was running */
 } Observer;
 
@@ -165,7 +166,7 @@ static void obs_sweep_dead(Slot* s) {
     if (s->count == 0) obs_release_slot(s);
 }
 
-long aether_observe(void* obj, AetherObserverClosure cb) {
+static long obs_register(void* obj, AetherObserverClosure cb, int with_field) {
     if (!obj || !cb.fn) {
         /* The environment is ours from the call on, rejected or not: the
          * caller crossed an extern boundary and will not release it. */
@@ -185,6 +186,7 @@ long aether_observe(void* obj, AetherObserverClosure cb) {
             token = g_next_token++;
             s->items[s->count].token = token;
             s->items[s->count].cb = cb;
+            s->items[s->count].with_field = with_field;
             s->items[s->count].dead = 0;
             s->count++;
             obs_total_add(1);
@@ -195,6 +197,14 @@ long aether_observe(void* obj, AetherObserverClosure cb) {
     pthread_mutex_unlock(obs_lock());
     if (!token) aether_closure_env_free(cb.env);
     return token;
+}
+
+long aether_observe(void* obj, AetherObserverClosure cb) {
+    return obs_register(obj, cb, 0);
+}
+
+long aether_observe_fields(void* obj, AetherObserverClosure cb) {
+    return obs_register(obj, cb, 1);
 }
 
 /* Mark or remove one observer. Caller holds the lock. Returns 1 if found. */
@@ -273,6 +283,10 @@ int aether_observe_is_notifying(void* obj) {
 }
 
 void aether_observe_notify(void* obj) {
+    aether_observe_notify_field(obj, AETHER_OBSERVE_ANY_FIELD);
+}
+
+void aether_observe_notify_field(void* obj, int field) {
     /* Fast path: nothing observed anywhere. A stale read here can only miss
      * an observer registered concurrently with this very store, which no
      * caller can distinguish from the store having happened first. */
@@ -308,7 +322,10 @@ void aether_observe_notify(void* obj) {
         }
         pthread_mutex_unlock(obs_lock());
         if (!live) continue;
-        ((void (*)(void*, void*))snapshot[i].cb.fn)(snapshot[i].cb.env, obj);
+        if (snapshot[i].with_field)
+            ((void (*)(void*, void*, int))snapshot[i].cb.fn)(snapshot[i].cb.env, obj, field);
+        else
+            ((void (*)(void*, void*))snapshot[i].cb.fn)(snapshot[i].cb.env, obj);
     }
     free(snapshot);
 

@@ -1,0 +1,126 @@
+// Issue #2299: std.observe names the field that changed, and reports stores
+// the compiler cannot see.
+//
+// The bug (two gaps): an @observable notification carried only the object,
+// so a replicator sending a component's changed fields as a bitmask, or an
+// undo log recording the one field a store touched, could not tell which
+// field it was; and a store made by offset through std.mem (a generic
+// inspector, loader or deserializer) notified nobody, with no notify(obj) in
+// the module to call after it.
+//
+// Pre-fix this file fails to compile: std.observe exported no
+// observe_fields, notify, notify_field or ANY_FIELD. Each block below pins
+// one part of the contract: the declaration index on value and pointer
+// stores and the compound form, the outer field's index at each nesting
+// level, one-argument observers beside field observers, notify and
+// notify_field after a std.mem store, the re-entrancy guard applying to
+// notify, and a null object being a no-op.
+
+import std.observe
+import std.mem
+
+extern exit(code: int)
+
+struct Inner @observable {
+    a: int
+    b: int
+}
+
+struct Outer @observable {
+    tag: int
+    inner: Inner // not the first field, so it is its own object
+    link: *Inner
+    last: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    // ---- the declaration index, on pointer stores and compound stores ----
+    p = heap.new(Inner)
+    got = -9
+    count = 0
+    t_p = observe.observe_fields(p, | obj: ptr, field: int | {
+            got = field
+            count = count + 1
+        })
+    check(t_p > 0, "observe_fields returns a token")
+    p.a = 1
+    check(got == 0, "first field is index 0")
+    p.b = 2
+    check(got == 1, "second field is index 1")
+    p.b += 3
+    check(got == 1 && p.b == 5, "compound store names its field")
+    check(count == 3, "one notification per store")
+
+    // ---- a one-argument observer beside a field observer ----
+    plain_hits = 0
+    t_plain = observe.observe(p, | obj: ptr | { plain_hits = plain_hits + 1 })
+    p.a = 7
+    check(plain_hits == 1, "a plain observer still runs")
+    check(got == 0 && count == 4, "the field observer runs beside it")
+    check(observe.unobserve(p, t_plain), "unobserve the plain observer")
+
+    // ---- nested value stores: each level hears its own field ----
+    o = Outer { tag: 0, inner: Inner { a: 0, b: 0 }, link: heap.new(Inner), last: 0 }
+    trail = ""
+    t_o = observe.observe_fields(&o, | obj: ptr, field: int | { trail = "${trail}O${field}" })
+    t_i = observe.observe_fields(&o.inner, | obj: ptr, field: int | { trail = "${trail}I${field}" })
+    t_l = observe.observe_fields(o.link, | obj: ptr, field: int | { trail = "${trail}L${field}" })
+    o.last = 1
+    check(trail == "O3", "a direct store names the outer field")
+    o.inner.b = 2
+    check(trail == "O3I1O1", "a nested store: inner hears b, outer hears inner")
+    o.link.a = 3
+    check(trail == "O3I1O1L0", "a store through a pointer field reaches the pointee only")
+    observe.unobserve(&o, t_o)
+    observe.unobserve(&o.inner, t_i)
+    observe.unobserve(o.link, t_l)
+
+    // ---- stores the compiler cannot see: std.mem, then notify ----
+    s = heap.new(Inner)
+    seen = -9
+    value = 0
+    s_hits = 0
+    _ts = observe.observe_fields(s, | obj: ptr, field: int | {
+            seen = field
+            value = s.b // the store has landed when the observer runs
+            s_hits = s_hits + 1
+        })
+    mem.set_int(s, 4, 42) // field b, by offset
+    check(s_hits == 0, "a std.mem store is invisible to the compiler")
+    observe.notify_field(s, 1)
+    check(s_hits == 1 && seen == 1 && value == 42, "notify_field names the field")
+    observe.notify(s)
+    check(s_hits == 2 && seen == observe.ANY_FIELD, "notify carries ANY_FIELD")
+    check(observe.ANY_FIELD == -1, "ANY_FIELD is -1")
+
+    // ---- the re-entrancy guard covers notify ----
+    g = heap.new(Inner)
+    passes = 0
+    _tg = observe.observe(g, | obj: ptr | {
+            passes = passes + 1
+            observe.notify(g) // starts no nested pass
+        })
+    observe.notify(g)
+    check(passes == 1, "notify from inside the observer does not re-enter")
+
+    // ---- a null object is a no-op ----
+    observe.notify(null)
+    observe.notify_field(null, 0)
+    check(observe.observe_fields(null, | obj: ptr, field: int | {}) == 0, "observe_fields(null) is 0")
+
+    observe.unobserve_all(g)
+    observe.unobserve_all(s)
+    observe.unobserve_all(p)
+    heap.free(g)
+    heap.free(s)
+    heap.free(o.link)
+    heap.free(p)
+    println("OK")
+}

@@ -1,0 +1,10 @@
+// Indexes a slice past its end, so the bounds check panics and names this
+// file (#2305). Driven by test_slice_diag_path_escape.sh.
+
+get(s: int[], i: int) -> int {
+    return s[i]
+}
+
+main() {
+    println("${get([1, 2, 3], 5)}")
+}
