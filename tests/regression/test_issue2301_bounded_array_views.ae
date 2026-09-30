@@ -1,0 +1,101 @@
+// Issue #2301 (Immediate): the packed arrays hand over bounded slices, and
+// std.sort takes slices.
+//
+// The gap: `intarr.array(h)` (and longarr, floatarr, strarr) returned the C
+// data pointer as an unbounded view, `.len` -1, so `v[i]` past the end read
+// past the buffer, although each wrapper knew the size; and std.sort took a
+// handle or a separate count beside a `string[]`, so it could sort neither a
+// fixed array nor a sub-range.
+//
+// Pre-fix this file fails: `v.len` was -1 and the sort calls had other
+// signatures. The blocks cover each view's length and bounds panic, writes
+// through a view, the null handle, a strarr view after a push, and sorting
+// and searching views, sub-slices and fixed arrays.
+
+import std.intarr
+import std.longarr
+import std.floatarr
+import std.strarr
+import std.sort
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn panics_int(v: int[], i: int) -> bool {
+    caught = false
+    try {
+        _x = v[i]
+    } catch e {
+        caught = true
+    }
+    return caught
+}
+
+main() {
+    // ---- intarr: bounded, writable, checked ----
+    a, _ = intarr.new_filled(4, 7)
+    v = intarr.array(a)
+    check(v.len == 4, "intarr view length is the size")
+    v[1] = 3
+    got, _ = intarr.get(a, 1)
+    check(got == 3, "a write through the view lands in the array")
+    check(panics_int(v, 4), "intarr view index past the end panics")
+    check(panics_int(v, -1), "a negative index panics")
+    check(intarr.intarr_array(a).len == 4, "the long name is bounded too")
+    intarr.free(a)
+    check(intarr.array(null).len == 0, "a null intarr handle is the empty slice")
+
+    // ---- longarr and floatarr ----
+    la, _ = longarr.new_filled(3, 0)
+    lv = longarr.array(la)
+    check(lv.len == 3, "longarr view length")
+    lv[2] = 9000000000
+    check(lv[2] == 9000000000, "a 64-bit element through the view")
+    longarr.free(la)
+    fa, _ = floatarr.new_filled(2, 1.5)
+    fv = floatarr.array(fa)
+    check(fv.len == 2 && fv[1] == 1.5, "floatarr view length and element")
+    floatarr.free(fa)
+
+    // ---- strarr: bounded by the current size ----
+    sa = strarr.new()
+    strarr.push(sa, "b")
+    strarr.push(sa, "a")
+    strarr.push(sa, "c")
+    sv = strarr.array(sa)
+    check(sv.len == 3, "strarr view length is the size")
+    sort.strings(sv)
+    check(strarr.get(sa, 0) == "a" && strarr.get(sa, 2) == "c", "sorting the view sorts the array")
+    check(sort.string_search(sv, "b") == 1, "search the view")
+    strarr.free(sa)
+    check(strarr.array(null).len == 0, "a null strarr handle is the empty slice")
+
+    // ---- sort over views, sub-slices and fixed arrays ----
+    h, _ = intarr.new_filled(6, 0)
+    w = intarr.array(h)
+    w[0] = 6
+    w[1] = 5
+    w[2] = 4
+    w[3] = 3
+    w[4] = 2
+    w[5] = 1
+    sort.ints(w[2..5])
+    check(w[1] == 5 && w[2] == 2 && w[3] == 3 && w[4] == 4 && w[5] == 1, "a sub-slice sorts only its run")
+    sort.ints(w)
+    check(w[0] == 1 && w[5] == 6, "the whole view sorts")
+    check(sort.int_search(w, 4) == 3, "search the sorted view")
+    check(sort.int_search(w, 10) == 6, "a miss past the end is the length")
+    intarr.free(h)
+
+    fixed = ["kiwi", "fig", "pear", "apple"]
+    sort.strings_by(fixed[1..], string.compare)
+    check(fixed[0] == "kiwi" && fixed[1] == "apple" && fixed[3] == "pear", "strings_by over a sub-slice")
+    println("OK")
+}

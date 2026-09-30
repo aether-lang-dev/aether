@@ -714,28 +714,32 @@ _by_length(a: string, b: string) -> int {
 }
 
 main() {
-    // The intarr / floatarr / longarr forms take the handle and sort in
-    // place; they read its length themselves.
+    // Every entry point takes a slice, which carries its length. A packed
+    // array hands over its elements as one: `intarr.array(h)`.
     nums = intarr.intarr_new_raw(5)
-    i = 0
-    while i < 5 {
-        intarr.intarr_set_unchecked(nums, i, (i * 7) % 5)
-        i = i + 1
+    v = intarr.array(nums)
+    for i in 0..v.len {
+        v[i] = (i * 7) % 5
     }
-    sort.ints(nums)
-    println("${intarr.intarr_get_unchecked(nums, 0)}..${intarr.intarr_get_unchecked(nums, 4)}")
-    // A binary search over the sorted array. A miss returns the insertion
+    sort.ints(v)
+    println("${v[0]}..${v[4]}")
+    // A binary search over the sorted slice. A miss returns the insertion
     // point rather than -1, so it also answers "where would this go?".
-    println("3 is at ${sort.int_search(nums, 3)}")
+    println("3 is at ${sort.int_search(v, 3)}")
     intarr.intarr_free(nums)
 
-    // The `_by` forms take a `string[]` view plus its length and your own
-    // comparator: negative if a sorts first, as C's qsort expects.
+    // A prefix or any run sorts on its own: `xs[..n]`, `xs[lo..hi]`.
+    words = ["pear", "fig", "apple", "kiwi"]
+    sort.strings(words[..3])
+    println("${words[0]} ${words[1]} ${words[2]} ${words[3]}")
+
+    // The `_by` forms take your own comparator: negative if a sorts first,
+    // as C's qsort expects.
     sa = strarr.new()
     _p = strarr.push_copy(sa, "medium")
     _p = strarr.push_copy(sa, "xs")
     _p = strarr.push_copy(sa, "largest")
-    sort.strings_by(strarr.array(sa), strarr.size(sa), _by_length)
+    sort.strings_by(strarr.array(sa), _by_length)
     println(strarr.get(sa, 0))
     strarr.free(sa)
 }
@@ -743,16 +747,16 @@ main() {
 ```output
 0..4
 3 is at 3
+apple fig pear kiwi
 xs
 ```
 
-**Functions:**
-- `sort.ints(arr)` / `sort.longs(arr)` / `sort.floats(arr)` - Sort an `intarr` / `longarr` / `floatarr` handle ascending, in place
-- `sort.strings(arr, n)` - Sort a `string[]` view of `n` entries, lexicographically
-- `sort.ints_by(arr, cmp)` / `sort.longs_by(arr, cmp)` / `sort.floats_by(arr, cmp)` - Sort a handle with your own comparator
-- `sort.strings_by(arr, n, cmp)` - Sort a `string[]` view with your own comparator
-- `sort.int_search(arr, x)` / `sort.long_search(arr, x)` / `sort.float_search(arr, x)` → `int` - Binary search a sorted handle; returns the index or the insertion point
-- `sort.string_search(arr, n, x)` → `int` - The same over a `string[]` view
+**Functions** (every one takes a slice: a packed array's `array()` view, a
+`T[N]` array, a `make` buffer, or a sub-slice of any of them; a view with no
+bound, `.len` -1, panics):
+- `sort.ints(xs)` / `sort.longs(xs)` / `sort.floats(xs)` / `sort.strings(xs)` - Sort ascending, in place; strings lexicographically by byte
+- `sort.ints_by(xs, cmp)` / `sort.longs_by(xs, cmp)` / `sort.floats_by(xs, cmp)` / `sort.strings_by(xs, cmp)` - Sort with your own comparator
+- `sort.int_search(xs, x)` / `sort.long_search(xs, x)` / `sort.float_search(xs, x)` / `sort.string_search(xs, x)` → `int` - Binary search a sorted slice; returns the index or the insertion point
 
 The ordering algorithm is a Shell sort over Ciura's gap sequence: no
 allocation, no recursion, and no worst-case input that turns it quadratic

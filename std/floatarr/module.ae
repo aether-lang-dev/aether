@@ -136,13 +136,21 @@ set(arr: ptr, i: int, value: float) -> {
 // inlines to, so the readable spelling costs nothing. `std.strarr` has had
 // this shape since it was written.
 //
-// BORROWED, not owned: valid until the handle is freed, and bounds are the
-// caller's to respect exactly as they are for the unchecked accessors.
+// The view is bounded by the array's size (#2301): `v.len` is `floatarr.size(a)`
+// and `v[i]` outside it is the slice bounds panic, not a read past the
+// buffer. Pass it to std.sort (`sort.floats(v)`), or any `float[]` parameter,
+// whole or as a sub-slice. A null handle is the empty slice.
+//
+// BORROWED, not owned: valid until the handle is freed. For the unchecked
+// load in a hot loop, `floatarr_get_unchecked` is still there.
 floatarr_array(arr: ptr) -> float[] {
-    return floatarr_data(arr)
+    if arr == null {
+        return null
+    }
+    return floatarr_data(arr)[0..floatarr_size(arr)]
 }
 
 // The short name, beside new / get / set: `floatarr.array(a)`.
 array(arr: ptr) -> float[] {
-    return floatarr_data(arr)
+    return floatarr_array(arr)
 }

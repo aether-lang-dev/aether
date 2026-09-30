@@ -60,8 +60,8 @@ _glob_sorted_desc(newest_first: int) -> string {
     _p = strarr.push_copy(sa, "a-1.0")
     _p = strarr.push_copy(sa, "a-10.0")
     _p = strarr.push_copy(sa, "a-2.0")
-    if newest_first == 1 { sort.strings_by(strarr.array(sa), strarr.size(sa), _cmp_full) }
-    else { sort.strings_by(strarr.array(sa), strarr.size(sa), _cmp_base) }
+    if newest_first == 1 { sort.strings_by(strarr.array(sa), _cmp_full) }
+    else { sort.strings_by(strarr.array(sa), _cmp_base) }
     out = string.copy(strarr.get(sa, 0))
     strarr.free(sa)
     return out
@@ -86,7 +86,7 @@ main() {
     sa = strarr.new()
     _p = strarr.push_copy(sa, "a-10.0")
     _p = strarr.push_copy(sa, "a-2.0")
-    sort.strings_by(strarr.array(sa), strarr.size(sa), _by_version)
+    sort.strings_by(strarr.array(sa), _by_version)
     println(strarr.get(sa, 0))
     strarr.free(sa)
 }

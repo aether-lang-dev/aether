@@ -1,14 +1,22 @@
 # std.sort
 
-In-place ascending sort and binary search over the packed numeric arrays
-(`std.intarr`, `std.longarr`, `std.floatarr`).
+In-place ascending sort and binary search over slices: `int[]`, `long[]`,
+`float[]` and `string[]`.
 
-The array carries its own length, so neither the sort nor the search takes a
-count — passing one is a type error rather than a silent mismatch.
+Every entry point takes a slice, so the length travels with the elements and
+no call takes a separate count. A whole array sorts as `sort.ints(a)`, a
+prefix as `sort.ints(a[..n])`, any run as `sort.ints(a[lo..hi])`. The packed
+arrays hand over their elements as a bounded slice (`intarr.array(h)`,
+`longarr.array(h)`, `floatarr.array(h)`, `strarr.array(h)`), and a `T[N]`
+array, a `make([]T, n)` buffer or a bounded view of C memory
+(`(p as int[])[0..n]`) passes as it is. A view with no bound (`p as int[]`,
+whose `.len` is -1) has no length to sort, and panics.
 
-`*_search` requires an already-sorted array: it returns the index of `x`, or a
-negative value when absent. Searching an unsorted array is not an error, it
-just gives a meaningless answer, so sort first.
+`*_search` requires an already-sorted slice. It returns the index of the
+first element not ordered before `x`: `x`'s index when present, otherwise
+the insertion point (`xs.len` when every element sorts before it). Searching
+an unsorted slice is not an error, it just gives a meaningless answer, so
+sort first.
 
 ```aether,run
 import std.sort
@@ -16,19 +24,20 @@ import std.intarr
 
 main() {
     a, err = intarr.new_filled(5, 0)
-    intarr.set(a, 0, 5)
-    intarr.set(a, 1, 3)
-    intarr.set(a, 2, 9)
-    intarr.set(a, 3, 1)
-    intarr.set(a, 4, 7)
+    v = intarr.array(a)
+    v[0] = 5
+    v[1] = 3
+    v[2] = 9
+    v[3] = 1
+    v[4] = 7
 
-    sort.ints(a)
+    sort.ints(v)
+    println("sorted: ${v[0]} .. ${v[4]}")
+    println("index of 7: ${sort.int_search(v, 7)}")
 
-    first, _ = intarr.get(a, 0)
-    last, _ = intarr.get(a, 4)
-    println("sorted: ${first} .. ${last}")
-
-    println("index of 7: ${sort.int_search(a, 7)}")
+    fixed = [4, 2, 8, 6]
+    sort.ints(fixed[..2])
+    println("prefix: ${fixed[0]} ${fixed[1]} ${fixed[2]} ${fixed[3]}")
 
     intarr.free(a)
 }
@@ -36,15 +45,14 @@ main() {
 ```output
 sorted: 1 .. 9
 index of 7: 3
+prefix: 2 4 8 6
 ```
 
 ## Strings
 
-`string[]` is a bare C array with no carried length, so the string entry
-points take an explicit element count. Ordering is `std.string.compare`:
-lexicographic **byte** order, binary-safe. That matches the default in C, Go
-and Zig; locale-aware collation is a separate concern and lives in
-`contrib/i18n`.
+Ordering is `std.string.compare`: lexicographic **byte** order, binary-safe.
+That matches the default in C, Go and Zig; locale-aware collation is a
+separate concern and lives in `contrib/i18n`.
 
 ```aether,run
 import std.sort
@@ -52,9 +60,9 @@ import std.string
 
 main() {
     a = ["pear", "apple", "fig"]
-    sort.strings(a, 3)
+    sort.strings(a)
     println("${a[0]} ${a[1]} ${a[2]}")
-    println("fig at ${sort.string_search(a, 3, "fig")}")
+    println("fig at ${sort.string_search(a, "fig")}")
 }
 ```
 ```output
@@ -81,7 +89,7 @@ descending(a: string, b: string) -> int {
 
 main() {
     a = ["pear", "apple", "fig"]
-    sort.strings_by(a, 3, descending)
+    sort.strings_by(a, descending)
     println("${a[0]} ${a[1]} ${a[2]}")
 }
 ```

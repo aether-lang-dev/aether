@@ -140,13 +140,21 @@ set(arr: ptr, i: int, value: int) -> {
 // inlines to, so the readable spelling costs nothing. `std.strarr` has had
 // this shape since it was written.
 //
-// BORROWED, not owned: valid until the handle is freed, and bounds are the
-// caller's to respect exactly as they are for the unchecked accessors.
+// The view is bounded by the array's size (#2301): `v.len` is `intarr.size(a)`
+// and `v[i]` outside it is the slice bounds panic, not a read past the
+// buffer. Pass it to std.sort (`sort.ints(v)`), or any `int[]` parameter,
+// whole or as a sub-slice. A null handle is the empty slice.
+//
+// BORROWED, not owned: valid until the handle is freed. For the unchecked
+// load in a hot loop, `intarr_get_unchecked` is still there.
 intarr_array(arr: ptr) -> int[] {
-    return intarr_data(arr)
+    if arr == null {
+        return null
+    }
+    return intarr_data(arr)[0..intarr_size(arr)]
 }
 
 // The short name, beside new / get / set: `intarr.array(a)`.
 array(arr: ptr) -> int[] {
-    return intarr_data(arr)
+    return intarr_array(arr)
 }

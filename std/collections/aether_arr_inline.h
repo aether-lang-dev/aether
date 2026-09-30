@@ -120,8 +120,9 @@ AETHER_ARR_LONGARR_FN void longarr_set_unchecked(AetherLongArray* arr, int i, in
  * the same load the accessor inlines to. `std.strarr` has had exactly this
  * shape since it was written (`strarr.array` feeding `sort.strings_by`).
  *
- * The view borrows: it is valid until the handle is freed or resized, and
- * bounds are the caller's, as they are for the unchecked accessors. */
+ * This is the raw pointer, with no bound (an extern `T[]` result has
+ * `.len` -1); the Aether `array()` wrappers bound it by the size (#2301).
+ * The view borrows: it is valid until the handle is freed or resized. */
 AETHER_ARR_INTARR_FN int* intarr_data(AetherIntArray* arr) {
     return arr ? arr->data : NULL;
 }

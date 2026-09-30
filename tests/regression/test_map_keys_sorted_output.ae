@@ -48,7 +48,7 @@ main() {
         ordered[j] = map.keys_get(k, j)
         j = j + 1
     }
-    sort.strings(ordered, count)
+    sort.strings(ordered[..count])
 
     if string.compare(ordered[0], "apple") != 0 { fail("first key ${ordered[0]}, want apple") }
     if string.compare(ordered[1], "banana") != 0 { fail("second key ${ordered[1]}, want banana") }

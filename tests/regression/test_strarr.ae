@@ -25,7 +25,7 @@ main() {
     }
 
     // --- sort in place via the string[] view + version_compare ---------------
-    sort.strings_by(strarr.array(sa), strarr.size(sa), _by_version)
+    sort.strings_by(strarr.array(sa), _by_version)
     if string.equals(strarr.get(sa, 0), "clojure-1.9.jar") == 0 {
         println("FAIL oldest=${strarr.get(sa, 0)}"); exit(1)
     }
@@ -57,7 +57,7 @@ main() {
         i = i + 1
     }
     if strarr.size(big) != 20 { println("FAIL grow size=${strarr.size(big)}"); exit(1) }
-    sort.strings_by(strarr.array(big), strarr.size(big), _by_version)
+    sort.strings_by(strarr.array(big), _by_version)
     if string.equals(strarr.get(big, 0), "a") == 0 { println("FAIL grow lo=${strarr.get(big, 0)}"); exit(1) }
     if string.equals(strarr.get(big, 19), "z") == 0 { println("FAIL grow hi=${strarr.get(big, 19)}"); exit(1) }
     strarr.free(big)
@@ -88,7 +88,7 @@ main() {
     }
     string.array_free(sarr)
     string.seq_free(src) // the SOURCE is freed — push_copy must have copied
-    sort.strings_by(strarr.array(oc), strarr.size(oc), _by_version)
+    sort.strings_by(strarr.array(oc), _by_version)
     if string.equals(strarr.get(oc, 0), "a!") == 0 { println("FAIL copy lo=${strarr.get(oc, 0)}"); exit(1) }
     if string.equals(strarr.get(oc, 4), "z!") == 0 { println("FAIL copy hi=${strarr.get(oc, 4)}"); exit(1) }
     strarr.free(oc)
