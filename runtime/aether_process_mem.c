@@ -21,7 +21,12 @@
 #  endif
 #endif
 #ifdef AETHER_SANITIZER_ALLOCATOR
-#  include <sanitizer/allocator_interface.h>
+/* The sanitizer runtimes' public allocator statistic, declared here rather
+ * than through <sanitizer/allocator_interface.h>: GCC's packages do not
+ * always ship that header, while every ASan/TSan/MSan runtime exports the
+ * function. */
+#  include <stddef.h>
+size_t __sanitizer_get_current_allocated_bytes(void);
 #endif
 
 #if defined(_WIN32)
