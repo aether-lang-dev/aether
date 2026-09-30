@@ -212,7 +212,7 @@ Identifiers in the timeout **expression** resolve against actor state fields onl
 
 ## Panic and Stack Traces
 
-`panic("reason")` unwinds via `aether_panic`. If a `try { ... } catch e { ... }` block (or the scheduler's per-step barrier for actor handlers) is on the stack, the panic is caught and `e` binds to the reason. If no frame catches, the runtime prints the reason to stderr along with a filtered stack trace, then aborts:
+`panic("reason")` unwinds via `aether_panic`. If a `try { ... } catch e { ... }` block (or the scheduler's per-step barrier for actor handlers) is on the stack, the panic is caught and `e` binds to the reason. A reason built at run time (`panic("bad value ${n}")`, a concatenation, a string local) belongs to the catcher: `e` is freed when the handler ends unless the handler keeps it (`kept = e`), returns it, stores it or panics with it again, so catching in a loop does not accumulate messages. An actor killed by such a panic releases the reason after its death hook runs. If no frame catches, the runtime prints the reason to stderr along with a filtered stack trace, then aborts:
 
 ```text
 aether: panic outside any try/catch or actor: divide by zero
@@ -223,7 +223,7 @@ Stack trace (most recent call first):
   2: main
 ```
 
-The trace is captured at the call site (codegen wires `aether_panic_capture_stack` in front of every `aether_panic` call) so the user's caller frames survive `-O2` tail-call optimisation. Symbols starting with `aether_` are pretty-printed back to their dotted Aether names, `aether_std_string_concat` reads as `std.string.concat`. User-code symbols pass through verbatim.
+The trace is captured at the call site (codegen wires `aether_panic_capture_stack` in front of every `panic` it lowers) so the user's caller frames survive `-O2` tail-call optimisation. Symbols starting with `aether_` are pretty-printed back to their dotted Aether names, `aether_std_string_concat` reads as `std.string.concat`. User-code symbols pass through verbatim.
 
 The trace is **best-effort diagnostic info**. Under `-O2`, function inlining can fuse callers into one frame; a panic deep inside a chain of small helpers may show only `main`. For richer development-time traces, build with `ae build --quick`, which compiles at `-O0 -g` instead of the default `-O2`; the per-call frames return.
 

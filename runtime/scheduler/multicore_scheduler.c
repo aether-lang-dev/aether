@@ -196,6 +196,7 @@ static inline void aether_step_safe(ActorBase* actor) {
 
     // Unwound via panic or signal.
     const char* reason = f->reason;
+    void (*reason_release)(const void*) = f->reason_release;
     g_aether_in_actor_step = 0;
     g_aether_current_actor_id = -1;
     aether_try_pop();
@@ -251,6 +252,9 @@ static inline void aether_step_safe(ActorBase* actor) {
      * function, which returns before touching the lock at all, so it
      * never needed the lock released to make progress. */
     aether_fire_death_hook(actor->id, reason);
+    /* A heap-built panic message (aether_panic_owned) belongs to whoever
+     * caught it -- here, this barrier. The hook has seen it; release it. */
+    if (reason_release) reason_release(reason);
 }
 
 static inline void aether_step_inline(ActorBase* actor) {
