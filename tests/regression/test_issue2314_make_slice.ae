@@ -1,0 +1,103 @@
+// Issue #2314: make([]T, n) is a bounded T[] slice.
+//
+// The bug: the parser stamped `make([]T, n)` with `T[]`, and the call
+// typecheck then overwrote it with the `make` builtin's placeholder type, a
+// bare `ptr`. Every use failed: `m = make([]int, 4)` was "Type mismatch in
+// variable initialization", and passing one to an `int[]` parameter was
+// "expected int[], got a bare ptr".
+//
+// Pre-fix this file fails to compile. The blocks cover an inferred binding,
+// an annotated one, an argument, a return value, each element kind (int,
+// long, float, byte, string, a struct), zeroed contents, sub-slices, a
+// length from a variable and zero, and the bounds check.
+
+extern exit(code: int)
+
+struct Point {
+    x: int
+    y: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn total(xs: int[]) -> int {
+    t = 0
+    for i in 0..xs.len {
+        t = t + xs[i]
+    }
+    return t
+}
+
+fn squares(n: int) -> long[] {
+    out = make([] long, n)
+    for i in 0..n {
+        out[i] = i * i
+    }
+    return out
+}
+
+main() {
+    // ---- an inferred binding: bounded, zeroed, writable ----
+    m = make([] int, 4)
+    check(m.len == 4, "make gives n elements")
+    check(m[0] == 0 && m[3] == 0, "the elements start zeroed")
+    m[2] = 5
+    m[3] = 7
+    check(total(m) == 12, "a make slice flows into an int[] parameter")
+    check(total(make([] int, 3)) == 0, "a make call is an int[] argument")
+    check(total(m[2..]) == 12, "a sub-slice of it")
+    free(m)
+
+    // ---- an annotated binding ----
+    int[] a = make([] int, 2)
+    a[1] = 9
+    check(a.len == 2 && a[1] == 9, "an annotated int[] binding")
+    free(a)
+
+    // ---- a return value, and a length from a variable ----
+    n = 5
+    sq = squares(n)
+    check(sq.len == 5 && sq[4] == 16, "a make slice returned from a function")
+    free(sq)
+
+    // ---- each element kind ----
+    f = make([] float, 3)
+    f[1] = 2.5
+    check(f.len == 3 && f[0] == 0.0 && f[1] == 2.5, "float elements")
+    free(f)
+    b = make([] byte, 16)
+    b[15] = 255
+    check(b.len == 16 && b[15] == 255, "byte elements")
+    free(b)
+    s = make([] string, 2)
+    s[0] = "left"
+    s[1] = "right"
+    check(s.len == 2 && s[1] == "right", "string elements")
+    free(s)
+    pts = make([] Point, 3)
+    pts[2].y = 4
+    check(pts.len == 3 && pts[0].x == 0 && pts[2].y == 4, "struct elements")
+    free(pts)
+
+    // ---- zero elements ----
+    z = make([] int, 0)
+    check(z.len == 0, "make of zero is the empty slice")
+    free(z)
+
+    // ---- the bound is checked ----
+    c = make([] int, 2)
+    caught = 0
+    try {
+        c[2] = 1
+    } catch e {
+        caught = 1
+    }
+    check(caught == 1, "an index past the end is the bounds panic")
+    free(c)
+    println("OK")
+}

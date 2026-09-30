@@ -10423,8 +10423,14 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
      * type, and a bare assignment orphans it: one leaked function type per
      * call in the program, which was most of what the compiler leaked
      * (#1667). */
-    set_node_type(call, symbol->type ? clone_type(symbol->type)
-                                     : create_type(TYPE_UNKNOWN));
+    /* #2314: `make([]T, n)` carries the `T[]` the parser stamped on it; the
+     * `make` symbol's type is only a placeholder that marks it as a known
+     * builtin, and stamping it here turned every make into a bare `ptr`. */
+    int keeps_own_type = call->value && strcmp(call->value, "make") == 0 &&
+                         call->node_type && call->node_type->kind == TYPE_ARRAY;
+    if (!keeps_own_type)
+        set_node_type(call, symbol->type ? clone_type(symbol->type)
+                                         : create_type(TYPE_UNKNOWN));
     if (call->value && strcmp(call->value, "call") == 0) {
         set_node_type(call, call_builtin_result_type(call, table));
     }
