@@ -1,6 +1,6 @@
 // Observable struct models (#2220): the runtime side table, held to numbers
 // without a compiler in the loop. The codegen half (that a field store emits
-// the aether_observe_notify call) is tests/compiler/test_codegen.c; the two
+// the aether_observe_notify_field call) is tests/compiler/test_codegen.c; the two
 // together end to end are tests/regression/test_issue2220_observable_struct.ae.
 #include "test_harness.h"
 #include "../../runtime/aether_observe.h"
@@ -316,4 +316,55 @@ TEST_CATEGORY(observe_added_during_pass_runs_next_pass, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(1, aether_unobserve(&obj, added_token));
     ASSERT_EQ(2, freed);
     ASSERT_EQ(0, aether_observer_count(&obj));
+}
+
+/* #2299: an observer registered with aether_observe_fields is called with the
+ * field the notification names; aether_observe_notify names none
+ * (AETHER_OBSERVE_ANY_FIELD). A plain observer on the same object runs beside
+ * it with the object alone. */
+static void on_field(void* env, void* obj, int field) {
+    Env* e = (Env*)env;
+    (*e->hits)++;
+    e->last_obj = obj;
+    e->token = field;
+}
+
+TEST_CATEGORY(observe_fields_receives_the_field, TEST_CATEGORY_RUNTIME) {
+    int freed = 0, field_hits = 0, plain_hits = 0;
+    int obj = 0;
+    Env* f = make_env(&freed, &field_hits);
+    Env* p = make_env(&freed, &plain_hits);
+    AetherObserverClosure fc;
+    fc.fn = (void (*)(void))on_field;
+    fc.env = f;
+    long tf = aether_observe_fields(&obj, fc);
+    long tp = aether_observe(&obj, closure_of(on_change, p));
+    ASSERT_TRUE(tf > 0);
+    ASSERT_TRUE(tp > tf);
+
+    aether_observe_notify_field(&obj, 3);
+    ASSERT_EQ(1, field_hits);
+    ASSERT_EQ(1, plain_hits);
+    ASSERT_EQ(3, (int)f->token);
+    ASSERT_TRUE(f->last_obj == &obj);
+    ASSERT_TRUE(p->last_obj == &obj);
+
+    aether_observe_notify(&obj);
+    ASSERT_EQ(2, field_hits);
+    ASSERT_EQ(2, plain_hits);
+    ASSERT_EQ(AETHER_OBSERVE_ANY_FIELD, (int)f->token);
+
+    aether_observe_notify_field(NULL, 0);   /* no crash */
+    int spare_hits = 0;
+    AetherObserverClosure refused;
+    refused.fn = (void (*)(void))on_field;
+    refused.env = make_env(&freed, &spare_hits);
+    ASSERT_EQ(0, aether_observe_fields(NULL, refused));
+    ASSERT_EQ(1, freed);   /* a refused registration still releases the env */
+
+    ASSERT_EQ(1, aether_unobserve(&obj, tf));
+    ASSERT_EQ(1, aether_unobserve(&obj, tp));
+    ASSERT_EQ(3, freed);
+    ASSERT_EQ(0, aether_observer_count(&obj));
+    ASSERT_EQ(0, spare_hits);
 }

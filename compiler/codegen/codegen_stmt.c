@@ -4504,30 +4504,53 @@ static ASTNode* field_store_lhs(ASTNode* stmt) {
     return (lhs && lhs->type == AST_MEMBER_ACCESS && lhs->child_count >= 1) ? lhs : NULL;
 }
 
-static void emit_observe_notify(CodeGenerator* gen, ASTNode* base, int by_address) {
+/* The index of field `field` in struct `struct_name`, in declaration order
+ * (0 for the first), or -1 (any field) when it is not one of its fields. */
+static int observable_field_index(CodeGenerator* gen, const char* struct_name,
+                                  const char* field) {
+    ASTNode* sd = find_struct_definition_by_name(gen->program, struct_name);
+    if (!sd || !field) return -1;
+    int idx = 0;
+    for (int i = 0; i < sd->child_count; i++) {
+        ASTNode* f = sd->children[i];
+        if (!f || f->type != AST_STRUCT_FIELD) continue;
+        if (f->value && strcmp(f->value, field) == 0) return idx;
+        idx++;
+    }
+    return -1;
+}
+
+/* Notify `base`'s observers that its field `field` (an index) changed
+ * (#2299: the field, so a replicator or undo log knows which). */
+static void emit_observe_notify(CodeGenerator* gen, ASTNode* base, int by_address, int field) {
     print_indent(gen);
-    fprintf(gen->output, "aether_observe_notify(%s(", by_address ? "&" : "");
+    fprintf(gen->output, "aether_observe_notify_field(%s(", by_address ? "&" : "");
     int saved = gen->generating_lvalue;
     gen->generating_lvalue = 1;
     generate_expression(gen, base);
     gen->generating_lvalue = saved;
-    fprintf(gen->output, "));\n");
+    fprintf(gen->output, "), %d);\n", field);
 }
 
 static void emit_observable_store_notify(CodeGenerator* gen, ASTNode* stmt) {
     ASTNode* node = field_store_lhs(gen ? stmt : NULL);
+    /* At each level `node` is `base.field`: the field of `base` that holds
+     * what changed, so an outer object hears which of its own fields did. */
     while (node && node->type == AST_MEMBER_ACCESS && node->child_count >= 1) {
         ASTNode* base = node->children[0];
         Type* bt = base ? base->node_type : NULL;
         if (bt && bt->kind == TYPE_STRUCT) {
-            if (struct_is_observable(gen, bt->struct_name)) emit_observe_notify(gen, base, 1);
+            if (struct_is_observable(gen, bt->struct_name))
+                emit_observe_notify(gen, base, 1,
+                                    observable_field_index(gen, bt->struct_name, node->value));
             node = base;   /* the enclosing value changed too */
             continue;
         }
         if (bt && bt->kind == TYPE_PTR && bt->element_type &&
             bt->element_type->kind == TYPE_STRUCT) {
-            if (struct_is_observable(gen, bt->element_type->struct_name))
-                emit_observe_notify(gen, base, 0);
+            const char* sn = bt->element_type->struct_name;
+            if (struct_is_observable(gen, sn))
+                emit_observe_notify(gen, base, 0, observable_field_index(gen, sn, node->value));
         }
         break;
     }

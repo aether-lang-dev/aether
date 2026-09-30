@@ -2778,8 +2778,8 @@ Two things do not change from the anonymous spelling. Storage is a `void*`, and 
 field assignment at run time. After every store into a field of such a
 value (`m.count = 1`, `p.status = "ready"`, and the compound forms
 `m.count += 1` desugars to), the generated code calls the runtime with the
-object's address, and the closures registered on that object through
-`std.observe` run, synchronously, in registration order. Nothing changes in
+object's address and the stored field's index in declaration order, and the
+closures registered on that object through `std.observe` run, synchronously, in registration order. Nothing changes in
 the struct's layout: observers live in a runtime side table keyed by
 address, and a program that never observes pays one counter read per store.
 
@@ -2809,8 +2809,8 @@ The rules for which object hears about a store:
 - A `heap.new` box or any `*Name` pointer is the object; pass it as it is.
   A local value is its address: `observe.observe(&m, ...)`.
 - A store into a nested value (`a.b.c = v`, with `b: Inner`) notifies
-  `&a.b` and then `&a`, when each is observable, because both values'
-  bytes changed. A store through a pointer field (`a.p.c = v`, with
+  `&a.b` (field `c`) and then `&a` (field `b`, the outer field holding what
+  changed), when each is observable, because both values' bytes changed. A store through a pointer field (`a.p.c = v`, with
   `p: *Inner`) notifies only the pointee; `a` did not change.
 - A store an observer makes on the object it is being told about lands but
   starts no nested pass (the re-entrancy guard is per object). A store on
@@ -2821,7 +2821,14 @@ The rules for which object hears about a store:
   `&a` is observing one object. Order the struct so a nested observable
   value is not the first field when the two must be told apart.
 
-Notification is per object, not per field, and runs on the storing thread;
+An observer registered with `observe.observe_fields` receives the field
+index as a second argument (`|obj: ptr, field: int|`); one registered with
+`observe.observe` takes the object alone. A store made where the compiler
+cannot see it, by offset through `std.mem`, is reported with
+`observe.notify_field(obj, field)` or `observe.notify(obj)` (field
+`observe.ANY_FIELD`), which run the same pass.
+
+Notification runs on the storing thread;
 marshal to a loop thread yourself (`std.worker`'s poster is the tool). An
 observer holds its closure until `unobserve` / `unobserve_all` releases it;
 remove observers before freeing the object. The attribute combines with a

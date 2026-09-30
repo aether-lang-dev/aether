@@ -19,9 +19,14 @@
 extern "C" {
 #endif
 
-/* Layout-compatible view of codegen's `_AeClosure` ({fn, env}). The
- * observer is invoked as `fn(env, obj)` with the observed address. */
+/* Layout-compatible view of codegen's `_AeClosure` ({fn, env}). An
+ * observer registered with aether_observe is invoked as `fn(env, obj)`, one
+ * registered with aether_observe_fields as `fn(env, obj, field)`. */
 typedef struct { void (*fn)(void); void* env; } AetherObserverClosure;
+
+/* The field argument when a notification does not name one: a store the
+ * compiler could not see, reported with aether_observe_notify. */
+#define AETHER_OBSERVE_ANY_FIELD (-1)
 
 /* Register `cb` as an observer of `obj`. Returns a positive token that
  * identifies the registration, or 0 when `obj` is NULL, `cb.fn` is NULL, or
@@ -29,6 +34,12 @@ typedef struct { void (*fn)(void); void* env; } AetherObserverClosure;
  * call on: released by aether_unobserve / aether_unobserve_all, or at once
  * when the registration is refused. */
 long aether_observe(void* obj, AetherObserverClosure cb);
+
+/* As aether_observe, for an observer that also takes the changed field: it
+ * is invoked as `fn(env, obj, field)`, with `field` the stored field's index
+ * in declaration order (0 for the first), or AETHER_OBSERVE_ANY_FIELD when
+ * the notification did not name one (#2299). */
+long aether_observe_fields(void* obj, AetherObserverClosure cb);
 
 /* Remove the registration `token` made on `obj`. Returns 1 when it was
  * found and removed, 0 otherwise. Safe to call from inside the observer
@@ -42,9 +53,14 @@ int aether_unobserve_all(void* obj);
 /* Number of observers currently registered on `obj`. */
 int aether_observer_count(void* obj);
 
-/* Run every observer of `obj`, in registration order. Called by generated
- * code after a field store on an @observable struct. Cheap when nothing
- * is observed anywhere. */
+/* Run every observer of `obj`, in registration order, for a change to
+ * field `field` (its index in declaration order; AETHER_OBSERVE_ANY_FIELD
+ * when unknown). Called by generated code after a field store on an
+ * @observable struct, and by code that stores through std.mem where the
+ * compiler cannot see it (#2299). Cheap when nothing is observed anywhere. */
+void aether_observe_notify_field(void* obj, int field);
+
+/* aether_observe_notify_field(obj, AETHER_OBSERVE_ANY_FIELD). */
 void aether_observe_notify(void* obj);
 
 /* True while a notification pass for `obj` is running on some thread. Lets
