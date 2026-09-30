@@ -413,6 +413,16 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     mkdir -p "$SRC_DIR"
     cp -r runtime "$SRC_DIR/" 2>/dev/null || true
     cp -r std     "$SRC_DIR/" 2>/dev/null || true
+    # Compiled module artifacts (#1746): each std module already parsed,
+    # under lib/aether/modules/, so an importer skips the parse. Made by
+    # the aetherc just installed, whose front-end fingerprint is the one
+    # that checks them. Optional: without them every import parses the
+    # source above, exactly as before.
+    rm -rf "$LIB_DIR/modules"
+    if ! sh scripts/build_module_artifacts.sh "$BIN_DIR/aetherc${EXE}" . "$LIB_DIR/modules" >/dev/null 2>&1; then
+        rm -rf "$LIB_DIR/modules"
+        warn "Could not build compiled module artifacts; imports will parse installed sources"
+    fi
     # Contrib module.ae descriptors + headers (issue #334). With these
     # in place, `import contrib.X` resolves the same way `import std.X`
     # does — share/aether/contrib/<X>/module.ae sits next to

@@ -217,6 +217,10 @@ static bool emit_inspect_mode = false;
 // computed from the call graph (NOT author @no_* tags), fail-closed on
 // externs. Consumed by external auditors (aeb's supply-chain veto). Issue #889.
 static bool emit_effects_mode = false;
+// --emit=aea: parse one module and write its compiled module artifact
+// (issue #1746). No type check, no codegen: an artifact is the module's
+// parse, and the importing program checks and generates it as always.
+static bool emit_aea_mode = false;
 
 #ifdef _WIN32
     #include <windows.h>
@@ -2052,6 +2056,8 @@ void print_help(const char* program_name) {
     printf("  --emit=<exe|lib|both|csrc>       Output artifact (exe default; lib → .so/.dylib; csrc → portable .c + catalog .h + .catalog.json)\n");
     printf("  --emit=ast|inspect|effects       Analysis to stdout, no codegen: AST JSON / declaration\n");
     printf("                                   summary / derived per-function effect+purity JSON (#889)\n");
+    printf("  --emit=aea <mod.ae> <out.aea>    Write a module's compiled artifact: its parse, reused by\n");
+    printf("                                   importers of the installed module (#1746)\n");
     printf("  --emit-main=<func>               With --emit=lib: also emit a thin main(argc,argv) shim\n");
     printf("                                   that calls <func>(). Closes the exe/lib symmetry.\n");
     printf("  --emit-namespace-manifest        Print the manifest JSON for a manifest.ae and exit\n");
@@ -2075,6 +2081,41 @@ void print_help(const char* program_name) {
     printf("  %s --concat-ae a.ae b.ae -o all.ae   Merge sources for whole-program build\n", program_name);
     printf("  %s --verbose hello.ae hello.c    Compile with timing info\n", program_name);
     printf("  %s --emit-header hello.ae hello.c  Generate hello.h for C embedding\n", program_name);
+}
+
+/* Writes the compiled module artifact for `input` to `output` (#1746).
+ * Written to a temporary name and renamed, so a concurrent reader never sees
+ * half an artifact. Returns the process exit status. */
+static int emit_aea(const char* input, const char* output) {
+    char rel[4096];
+    const char* in = input;
+    while (in[0] == '.' && (in[1] == '/' || in[1] == '\\')) in += 2;
+    snprintf(rel, sizeof(rel), "%s", in);
+    for (char* p = rel; *p; p++) if (*p == '\\') *p = '/';
+
+    size_t len = 0;
+    const char* err = NULL;
+    char* data = module_build_artifact(input, rel, &len, &err);
+    if (!data) {
+        fprintf(stderr, "aetherc: no artifact for %s: %s\n", input, err ? err : "unknown error");
+        return 1;
+    }
+    char tmp[4200];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", output, (int)getpid());
+    FILE* f = fopen(tmp, "wb");
+    int ok = f && fwrite(data, 1, len, f) == len;
+    if (f && fclose(f) != 0) ok = 0;
+    free(data);
+    if (ok) {
+        remove(output);   /* rename() does not replace on Windows */
+        ok = rename(tmp, output) == 0;
+    }
+    if (!ok) {
+        remove(tmp);
+        fprintf(stderr, "aetherc: cannot write %s\n", output);
+        return 1;
+    }
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -2262,8 +2303,10 @@ int main(int argc, char *argv[]) {
                 // --emit=effects: derived per-function effect/purity JSON on
                 // stdout (issue #889). Like --emit=ast, bypasses codegen.
                 emit_effects_mode = true;
+            } else if (strcmp(val, "aea") == 0) {
+                emit_aea_mode = true;
             } else {
-                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects (got '%s')\n", val);
+                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea (got '%s')\n", val);
                 return 1;
             }
             arg_offset++;
@@ -2347,6 +2390,17 @@ int main(int argc, char *argv[]) {
                 "platform; aetherc only translates Aether to C (--emit=c).\n",
                 (argc - arg_offset >= 2) ? argv[arg_offset + 1] : "<input.ae>");
         return 1;
+    }
+
+    // --emit=aea <module.ae> <out.aea>: the input path, as written, is the
+    // module's install-relative path (std/x/module.ae), so run it from the
+    // directory that installs as share/aether/.
+    if (emit_aea_mode) {
+        if (argc - arg_offset < 2) {
+            fprintf(stderr, "Usage: aetherc --emit=aea <std/x/module.ae> <out.aea>\n");
+            return 1;
+        }
+        return emit_aea(argv[arg_offset], argv[arg_offset + 1]);
     }
 
     // --dump-ast only needs the input file

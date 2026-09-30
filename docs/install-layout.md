@@ -13,8 +13,11 @@ $PREFIX/
 │                                  # `make install` does not install it)
 │
 ├── lib/aether/
-│   └── libaether.a               # prebuilt static archive, link target for downstream
-│                                  # programs / libraries that compile against the runtime
+│   ├── libaether.a               # prebuilt static archive, link target for downstream
+│   │                              # programs / libraries that compile against the runtime
+│   └── modules/std/…/*.aea       # compiled module artifacts: each std module already
+│                                  # parsed, so importers skip the parse (see
+│                                  # compiled-module-artifacts.md)
 │
 ├── include/aether/               # public headers, mirrors source-tree layout
 │   ├── runtime/
