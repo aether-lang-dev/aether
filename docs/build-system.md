@@ -528,11 +528,16 @@ libraries and poison the target binary. Those std features ship as their
 "unavailable" stubs, exactly as in any build without the libraries. Vendored
 PCRE2 needs no host library, so `std.regex` survives.
 
-One `build/` tree holds one target's objects and archives — they are not
-interchangeable (ELF vs PE). The tree carries a `build/.build-target` stamp and
-a mismatching build stops immediately with an actionable error rather than
-failing deep in the link; `make clean` between targets is the fix (and `clean`
-itself is never blocked by the guard).
+Objects and archives of different targets are not interchangeable (ELF vs
+PE), so each target has its own tree. The native build stays flat in `build/`,
+where the tests, `ae` and the release packaging look for it; a cross build goes
+to `build/.alien/<target>/` (`build/.alien/windows-x86_64/ae.exe`,
+`build/.alien/freebsd-x86_64/libaether.a`). A warm native build and a warm
+cross build coexist, and switching between them rebuilds nothing (#2321).
+`make clean` removes `build/`, cross trees included. Each tree carries a
+`.build-target` stamp; a tree filled before the split (a flat `build/` that
+held a cross build) stops the next mismatching build with an actionable error,
+and `make clean` once resolves it.
 
 The cross build also carries no **application manifest**: a native MSYS2
 build compiles `runtime/windows/aether.manifest` with `windres` into

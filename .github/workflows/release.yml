@@ -804,47 +804,46 @@ jobs:
         echo "zig=$ZIG"       >> "$GITHUB_OUTPUT"
         echo "sysroot=$SR"    >> "$GITHUB_OUTPUT"
 
-    # A host `ae`, built and set aside BEFORE the cross-build overwrites
-    # build/ with FreeBSD binaries. The sysroot verification later in this
-    # job needs an `ae` that RUNS on this Linux runner, and by then build/ae
-    # is a FreeBSD ELF. Cheap: this job already compiles the tree once.
+    # A host `ae` for the sysroot verification later in this job, which needs
+    # one that RUNS on this Linux runner. The native build stays in build/ and
+    # the cross build below goes to build/.alien/freebsd-x86_64/ (#2321), so
+    # the two never overwrite each other.
     - name: Build a host ae for the sysroot check
       run: |
         make -s compiler ae stdlib
-        mkdir -p host-toolchain
-        cp build/ae build/aetherc host-toolchain/
-        file host-toolchain/ae
+        file build/ae
 
     - name: Cross-build (FREEBSD=1)
       run: |
-        make clean >/dev/null 2>&1 || true
         make compiler ae stdlib \
           FREEBSD=1 \
           ZIG="${{ steps.prov.outputs.zig }}" \
           AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}"
+        X=build/.alien/freebsd-x86_64
         # Confirm the artifacts really are FreeBSD ELFs before packaging — a
         # cross-build that silently produced Linux binaries would be worse
         # than no FreeBSD zip.
-        file build/aetherc build/ae
-        file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
+        file $X/aetherc $X/ae
+        file $X/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
         # #1402: the Unix and Windows legs get this through
         # test-release-archive, which this cross leg does not run. Without it a
         # cross-built archive could ship missing a symbol its own sources
         # define, and fail at the user's link step rather than here.
-        sh scripts/check_archive_exports.sh build/libaether.a
+        sh scripts/check_archive_exports.sh $X/libaether.a
 
     - name: Strip
-      run: strip build/aetherc build/ae 2>/dev/null || true
+      run: strip build/.alien/freebsd-x86_64/aetherc build/.alien/freebsd-x86_64/ae 2>/dev/null || true
 
     - name: Package
       run: |
         VERSION=$(cat VERSION | tr -d '[:space:]')
         TARGET=freebsd-x86_64
         mkdir -p release/bin release/lib release/share/aether release/include/aether
-        cp build/aetherc release/bin/
-        cp build/ae      release/bin/
+        X=build/.alien/freebsd-x86_64
+        cp $X/aetherc release/bin/
+        cp $X/ae      release/bin/
         chmod 755 release/bin/*
-        if [ -f build/libaether.a ]; then cp build/libaether.a release/lib/; fi
+        if [ -f $X/libaether.a ]; then cp $X/libaether.a release/lib/; fi
         for dir in runtime runtime/actors runtime/scheduler runtime/utils \
                    runtime/memory runtime/config std std/string std/io std/math \
                    std/net std/collections std/json std/fs std/log std/http \
@@ -887,7 +886,7 @@ jobs:
         # was fine: the Makefile's own staging has copied these since #1420,
         # and this workflow reimplements that staging without the line.
         cp include/*.h release/include/aether/ 2>/dev/null || true
-        cp build/MANIFEST release/share/aether/
+        cp $X/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         # Note the cross-build in the archive so downstream users know it was
         # not run through the test suite on FreeBSD.
@@ -981,10 +980,9 @@ jobs:
     # had, where the release looked fine because nothing exercised it.
     - name: Verify the sysroot cross-links a real program
       run: |
-        # build/ae is a FreeBSD ELF by now (this job cross-built it), so the
-        # check uses the host copy set aside before the cross-build. No
-        # fallback to build/ae: silently checking with a binary that cannot
-        # run would report success without testing anything.
+        # build/ae is the host ae (the cross build went to build/.alien/,
+        # #2321). The guard below still refuses a FreeBSD binary: checking with
+        # one that cannot run would report success without testing anything.
         # `ae` locates zig by running `zig version`, so the provisioned one
         # has to be ON PATH here. The build steps above never needed that --
         # they pass ZIG=<path> to make -- which is why this only showed when
@@ -995,7 +993,7 @@ jobs:
         export PATH
         zig version || { echo "::error::provisioned zig is not runnable at $ZIG_BIN"; exit 1; }
 
-        HOST_AE="$PWD/host-toolchain/ae"
+        HOST_AE="$PWD/build/ae"
         [ -x "$HOST_AE" ] || { echo "::error::host ae missing; cannot verify the sysroot"; exit 1; }
         file "$HOST_AE" | grep -q 'FreeBSD' \
           && { echo "::error::host ae is a FreeBSD binary; it cannot run here"; exit 1; }

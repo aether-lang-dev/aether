@@ -1,0 +1,30 @@
+// A module whose getter and constant share their names with the fields of
+// its struct, the shape a component module has (`strength(t)` reads
+// `t.strength`). `offsetof(Thing, strength)` names the member, and the
+// module merge must not rename it to the function `shade_strength` or the
+// constant `shade_limit` (#2320).
+exports(Thing, strength, limit, where_strength, where_limit, size_of_thing)
+
+const limit = 8
+
+struct Thing {
+    tag: int
+    strength: float
+    limit: int
+}
+
+strength(t: *Thing) -> float {
+    return t.strength
+}
+
+where_strength() -> int {
+    return offsetof(Thing, strength)
+}
+
+where_limit() -> int {
+    return offsetof(Thing, limit)
+}
+
+size_of_thing() -> int {
+    return sizeof(Thing)
+}

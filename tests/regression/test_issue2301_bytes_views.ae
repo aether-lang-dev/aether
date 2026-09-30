@@ -1,0 +1,104 @@
+// Issue #2301 (Foundations): std.bytes hands over its bytes as bounded
+// `byte[]` views and takes `byte[]` slices.
+//
+// The gap: a bytes buffer's contents were reachable only as a raw `data()`
+// pointer plus a separately carried length or capacity, and every copy in
+// or out took a pointer and a count. The views carry the bound, so an index
+// is checked, and the slice-taking helpers need no count.
+//
+// Pre-fix this file fails to compile: view, capacity_view, from_slice,
+// copy_from_slice and string_from_slice did not exist. The blocks cover the
+// live view and its bounds panic, writing through the capacity view and
+// publishing with set_length, copying a slice in (from another buffer, and
+// from the same buffer while it grows and moves), a binary-safe string, the
+// null handle, and a slice with no bound.
+
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn panics_at(v: byte[], i: int) -> bool {
+    caught = false
+    try {
+        _x = v[i]
+    } catch e {
+        caught = true
+    }
+    return caught
+}
+
+main() {
+    // ---- the live view: bounded by length, not capacity ----
+    b = bytes.new(8)
+    bytes.set(b, 0, 10)
+    bytes.set(b, 1, 20)
+    v = bytes.view(b)
+    check(v.len == 2, "view length is the live length")
+    check(v[0] == 10 && v[1] == 20, "view reads the bytes")
+    check(panics_at(v, 2), "an index past the live length panics")
+    v[1] = 21
+    check(bytes.get(b, 1) == 21, "a write through the view lands in the buffer")
+
+    // ---- the capacity view: write, then publish ----
+    cap = bytes.capacity_view(b)
+    check(cap.len == bytes.capacity(b), "capacity view length is the capacity")
+    cap[2] = 30
+    cap[3] = 40
+    check(bytes.length(b) == 2, "a direct write does not move the length")
+    check(bytes.set_length(b, 4) == 4, "set_length publishes it")
+    check(bytes.view(b).len == 4 && bytes.view(b)[3] == 40, "the published bytes are live")
+
+    // ---- slices in: from another buffer, a new buffer, a sub-slice ----
+    c = bytes.from_slice(bytes.view(b)[1..3])
+    check(bytes.length(c) == 2 && bytes.get(c, 0) == 21 && bytes.get(c, 1) == 30, "from_slice copies a sub-slice")
+    check(bytes.copy_from_slice(c, 5, bytes.view(b)) == 1, "copy_from_slice at an offset")
+    check(bytes.length(c) == 9, "it grows the buffer to the end of the copy")
+    check(bytes.get(c, 2) == 0 && bytes.get(c, 4) == 0, "the gap is zero-filled")
+    check(bytes.get(c, 5) == 10 && bytes.get(c, 8) == 40, "the copied bytes")
+
+    // ---- a buffer's own view copied into it while it grows and moves ----
+    d = bytes.new(4)
+    bytes.set(d, 0, 1)
+    bytes.set(d, 1, 2)
+    bytes.set(d, 2, 3)
+    bytes.set(d, 3, 4)
+    i = 0
+    while i < 6 {
+        // Each round appends the whole buffer to itself, past its capacity.
+        check(bytes.copy_from_slice(d, bytes.length(d), bytes.view(d)) == 1, "self-append")
+        i = i + 1
+    }
+    check(bytes.length(d) == 4 * 64, "six doublings of four bytes")
+    dv = bytes.view(d)
+    check(dv[0] == 1 && dv[255] == 4 && dv[128] == 1 && dv[131] == 4, "the self-copies read the right bytes after each move")
+
+    // ---- a binary-safe string from a slice ----
+    bytes.set(c, 2, 0)
+    s = bytes.string_from_slice(bytes.view(c)[1..4])
+    check(string.length(s) == 3, "the string keeps an embedded NUL")
+
+    // ---- the null handle, and a slice with no bound ----
+    check(bytes.view(null).len == 0, "a null handle's view is empty")
+    check(bytes.capacity_view(null).len == 0, "and its capacity view")
+    raw = bytes.data(b) as byte[]
+    caught = false
+    try {
+        _e = bytes.from_slice(raw)
+    } catch e {
+        caught = true
+    }
+    check(caught, "a slice with no bound panics")
+
+    bytes.free(d)
+    bytes.free(c)
+    bytes.free(b)
+    println("OK")
+}

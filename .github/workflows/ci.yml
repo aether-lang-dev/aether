@@ -359,8 +359,10 @@ jobs:
           ZIG="${{ steps.prov.outputs.zig }}" \
           AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}"
         # A cross-build that silently emitted Linux binaries would prove nothing.
-        file build/aetherc build/ae
-        file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
+        # It lands in build/.alien/<target>/ (#2321).
+        X=build/.alien/freebsd-x86_64
+        file $X/aetherc $X/ae
+        file $X/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
 
   # ============================================================
   # FreeBSD native build + test (#402)
@@ -975,14 +977,20 @@ jobs:
   ci-embedded:
     name: Embedded ARM (Cortex-M4)
     runs-on: ubuntu-22.04
+    # The job takes about a minute; a stalled mirror should fail it, not hold
+    # the PR for an hour (#2325).
+    timeout-minutes: 15
 
     steps:
     - uses: actions/checkout@v4
 
+    # --no-install-recommends: Recommends pulls libstdc++-arm-none-eabi-newlib,
+    # 347 MB of C++ library this C-only build never links, and a slow Azure
+    # mirror trickled it for over forty minutes (#2325).
     - name: Install ARM cross-compiler
       run: |
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y gcc make gcc-arm-none-eabi libnewlib-arm-none-eabi
+        sudo apt-get install -y --no-install-recommends gcc make gcc-arm-none-eabi libnewlib-arm-none-eabi
 
     - name: Run embedded CI
       run: make ci-embedded

@@ -1,0 +1,120 @@
+// std.intmap — a hash map from `long` keys to `long` values (#1986).
+//
+// std.map keys by string. A program counting integer keys (n-grams packed
+// into a long, ids, grid coordinates) had to render each key with
+// string.from_int, paying an allocation and a string hash per lookup:
+// LangArena's Distance::NGram ran at 26.6x Go on exactly that. An intmap
+// keys by the integer itself.
+//
+//     import std.intmap
+//
+//     main() {
+//         counts = intmap.new(0)
+//         intmap.add(counts, 42, 1)       // one probe per count
+//         intmap.add(counts, 42, 1)
+//         println("${intmap.get(counts, 42, 0)}")   // 2
+//         intmap.free(counts)
+//     }
+//
+// Open addressing with linear probing; keys are spread by the splitmix64
+// finalizer, so sequential and strided keys do not cluster. Values are
+// `long`; a pointer goes in through std.mem's ptr_to_long / long_to_ptr.
+// The map owns nothing a value points at.
+
+exports(
+    aether_intmap_new, aether_intmap_free, aether_intmap_put, aether_intmap_get,
+    aether_intmap_has, aether_intmap_add, aether_intmap_add_failed,
+    aether_intmap_remove, aether_intmap_size,
+    aether_intmap_clear, aether_intmap_next, aether_intmap_key_at, aether_intmap_value_at,
+    new, free, put, get, has, add, remove, size, clear, next, key_at, value_at
+)
+
+// ---- raw externs (std/intmap/aether_intmap.c) ----
+extern aether_intmap_new(capacity_hint: int) -> ptr
+extern aether_intmap_free(m: ptr)
+extern aether_intmap_put(m: ptr, key: long, value: long) -> int
+extern aether_intmap_get(m: ptr, key: long, missing: long) -> long
+extern aether_intmap_has(m: ptr, key: long) -> int
+extern aether_intmap_add(m: ptr, key: long, delta: long) -> long
+extern aether_intmap_add_failed(m: ptr) -> int
+extern aether_intmap_remove(m: ptr, key: long) -> int
+extern aether_intmap_size(m: ptr) -> int
+extern aether_intmap_clear(m: ptr)
+extern aether_intmap_next(m: ptr, slot: int) -> int
+extern aether_intmap_key_at(m: ptr, slot: int) -> long
+extern aether_intmap_value_at(m: ptr, slot: int) -> long
+
+// A map with room for about `capacity_hint` entries before it first grows
+// (0 for the default). Null on allocation failure.
+new(capacity_hint: int) -> ptr {
+    return aether_intmap_new(capacity_hint)
+}
+
+free(m: ptr) {
+    aether_intmap_free(m)
+}
+
+// Set `key` to `value`. 1 when the key was new, 0 when it replaced a value,
+// -1 on allocation failure or a null map.
+put(m: ptr, key: long, value: long) -> int {
+    return aether_intmap_put(m, key, value)
+}
+
+// The value at `key`, or `missing` when there is none.
+get(m: ptr, key: long, missing: long) -> long {
+    return aether_intmap_get(m, key, missing)
+}
+
+has(m: ptr, key: long) -> bool {
+    return aether_intmap_has(m, key) == 1
+}
+
+// Add `delta` to the value at `key` (an absent key starts at 0) and return
+// the new value, in one probe: the counting loop's call. Allocation failure
+// while inserting a new key panics, as `make` does.
+add(m: ptr, key: long, delta: long) -> long {
+    v = aether_intmap_add(m, key, delta)
+    // INT64_MIN is also a value a sum can reach; the flag tells them apart.
+    if v == -9223372036854775807 - 1 && aether_intmap_add_failed(m) == 1 {
+        panic("intmap.add: out of memory growing the map")
+    }
+    return v
+}
+
+// Remove `key`; true when it was present.
+remove(m: ptr, key: long) -> bool {
+    return aether_intmap_remove(m, key) == 1
+}
+
+// How many keys the map holds.
+size(m: ptr) -> int {
+    return aether_intmap_size(m)
+}
+
+clear(m: ptr) {
+    aether_intmap_clear(m)
+}
+
+// Iteration, in no particular order: the first occupied slot at or after
+// `slot`, or -1 when there are no more. Start at 0 and continue from the
+// returned slot + 1:
+//
+//     s = intmap.next(m, 0)
+//     while s >= 0 {
+//         println("${intmap.key_at(m, s)} = ${intmap.value_at(m, s)}")
+//         s = intmap.next(m, s + 1)
+//     }
+//
+// A put or add of a new key, or clear, may rebuild the table: finish the
+// walk (or collect the keys) before changing the map.
+next(m: ptr, slot: int) -> int {
+    return aether_intmap_next(m, slot)
+}
+
+key_at(m: ptr, slot: int) -> long {
+    return aether_intmap_key_at(m, slot)
+}
+
+value_at(m: ptr, slot: int) -> long {
+    return aether_intmap_value_at(m, slot)
+}

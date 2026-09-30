@@ -35,7 +35,9 @@ exports(
     set_le16, get_le16, set_le32, get_le32, set_le64, get_le64,
     set_be16, get_be16, set_be32, get_be32, set_be64, get_be64,
     copy_from_string, copy_from_bytes, copy_within, finish, to_string, free,
-    data, capacity, set_length, from_ptr, string_from_ptr
+    data, capacity, set_length, from_ptr, string_from_ptr,
+    aether_bytes_copy_from_ptr,
+    view, capacity_view, from_slice, copy_from_slice, string_from_slice
 )
 
 // ---- Raw externs ----
@@ -69,6 +71,8 @@ extern aether_bytes_copy_from_string(b: ptr, dst: int, src: string, src_len: int
 extern aether_bytes_copy_from_bytes(dst: ptr, dst_off: int, src: ptr, src_off: int, length: int) -> int
 // `length` here is the count of bytes to copy, not a buffer length.
 extern aether_bytes_copy_within(b: ptr, dst: int, src: int, length: int) -> int
+// Copy `length` bytes from raw memory into the buffer at `dst`, growing it.
+extern aether_bytes_copy_from_ptr(b: ptr, dst: int, src: ptr, length: int) -> int
 // `aether_bytes_finish` returns a freshly heap-owned AetherString
 // (`string_new_with_length` — see std/bytes/aether_bytes.c). The
 // `string @heap` return tells the heap-string tracker the caller
@@ -101,6 +105,62 @@ set_length(b: ptr, length: int) -> int { return aether_bytes_set_length(b, lengt
 
 new(initial_capacity: int) -> ptr {
     return aether_bytes_new(initial_capacity)
+}
+
+// ---- slices (#2301) ----
+// A buffer handle is not its data: these give its bytes as a bounded
+// `byte[]`, whose index is checked, and take a `byte[]` wherever a caller
+// used to pass a pointer and a count.
+
+// The live contents, `length(b)` bytes, as a borrowed `byte[]`. Valid until
+// the next call that can grow the buffer (it may move the storage) or free.
+// A null handle is the empty slice.
+view(b: ptr) -> byte[] {
+    if b == null {
+        return null
+    }
+    return (aether_bytes_data(b) as byte[])[0..aether_bytes_length(b)]
+}
+
+// The writable storage, `capacity(b)` bytes, as a borrowed `byte[]`: write
+// into it directly, then publish how much is live with set_length (a fresh
+// buffer's length is 0 whatever its capacity). Same validity as view().
+capacity_view(b: ptr) -> byte[] {
+    if b == null {
+        return null
+    }
+    return (aether_bytes_data(b) as byte[])[0..aether_bytes_capacity(b)]
+}
+
+// A slice with no bound (`p as byte[]`, `.len` -1) has no length to copy.
+fn unbounded(fname: string) {
+    panic("bytes.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+}
+
+// A fresh buffer holding a copy of `s`. Null on allocation failure.
+from_slice(s: byte[]) -> ptr {
+    if s.len < 0 {
+        unbounded("from_slice")
+    }
+    return aether_bytes_from_ptr(s, s.len)
+}
+
+// Copy `s` into the buffer at offset `dst`, growing it and zero-filling any
+// gap. `s` may be a view of the same buffer. Returns 1 on success, 0 on
+// failure (a null buffer, a negative offset, allocation failure).
+copy_from_slice(b: ptr, dst: int, s: byte[]) -> int {
+    if s.len < 0 {
+        unbounded("copy_from_slice")
+    }
+    return aether_bytes_copy_from_ptr(b, dst, s, s.len)
+}
+
+// A fresh string holding a copy of `s`'s bytes (binary-safe).
+string_from_slice(s: byte[]) -> string {
+    if s.len < 0 {
+        unbounded("string_from_slice")
+    }
+    return aether_bytes_string_from_ptr(s, s.len)
 }
 
 // One-call ptr -> bytes crossing: a fresh length-aware bytes holding a COPY of

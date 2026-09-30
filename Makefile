@@ -161,8 +161,6 @@ $(VERSION_HEADER): VERSION Makefile
 	  mv "$$tmp" "$(VERSION_HEADER)"; \
 	  echo "Generated $(VERSION_HEADER) (v$(VERSION))"; \
 	fi
-	@mkdir -p build 2>/dev/null || true
-	@echo "$(BUILD_TARGET_ID)" > "$(BUILD_TARGET_STAMP)"
 
 # Convenience phony alias for explicit regeneration (e.g. `make gen-version-header`).
 .PHONY: gen-version-header
@@ -231,13 +229,13 @@ $(FRONTEND_ID_HEADER): $(FRONTEND_ID_SRC) Makefile
 .PHONY: gen-frontend-id
 gen-frontend-id: $(FRONTEND_ID_HEADER)
 
-# #1746: compiled module artifacts for the std tree, into build/modules/ (the
+# #1746: compiled module artifacts for the std tree, into $(BUILD_DIR)/modules/ (the
 # layout `make install` puts under $(PREFIX)/lib/aether/modules/). Only an
 # installed toolchain reads artifacts; this target is for inspecting them.
 .PHONY: modules
 modules: compiler
-	@rm -rf build/modules
-	@sh scripts/build_module_artifacts.sh build/aetherc$(EXE_EXT) . build/modules
+	@rm -rf $(BUILD_DIR)/modules
+	@sh scripts/build_module_artifacts.sh $(BUILD_DIR)/aetherc$(EXE_EXT) . $(BUILD_DIR)/modules
 
 # Compiler configuration with ccache support.
 # FreeBSD base has no gcc at all (clang is installed as `cc`).
@@ -371,18 +369,9 @@ ifeq ($(WINDOWS),1)
   # cross-build + link of compiler/ae/stdlib.
 endif
 
-# A cross build OWNS build/ for the duration: build/obj holds PE objects and
-# build/libaether*.a become Windows archives, so a native build afterwards
-# links host code against Windows objects and dies deep in the link with
-# confusing errors. Rather than fork the whole tree layout (dozens of rules
-# reference build/libaether.a by literal path), stamp the tree with the
-# target it was last built for and fail loudly at the START of the next
-# mismatching build. `make clean` between targets is the fix; CI runners
-# build one target per job and never hit it.
-# Literal `build/` (not $(BUILD_DIR)): this block runs ahead of the
-# BUILD_DIR assignment further down, and the version-header rule that
-# writes the stamp is earlier still.
-BUILD_TARGET_STAMP := build/.build-target
+# Objects and archives of different targets do not mix (a native link against
+# PE objects dies deep in the link with confusing errors), so each target
+# builds into its own tree, named by BUILD_TARGET_ID.
 ifeq ($(WINDOWS),1)
   BUILD_TARGET_ID := windows-$(WINDOWS_CPU)
 else ifeq ($(FREEBSD),1)
@@ -390,6 +379,20 @@ else ifeq ($(FREEBSD),1)
 else
   BUILD_TARGET_ID := native-$(DETECTED_OS)
 endif
+# #2321: the native build stays flat in build/, where every test, `ae` and the
+# release packaging look for it; a cross build is quarantined under
+# build/.alien/<target>/, so a warm native build and a warm cross build coexist
+# and switching between them rebuilds nothing. Every path below goes through
+# $(BUILD_DIR), which is why this sits ahead of all of them.
+ifneq ($(filter native-%,$(BUILD_TARGET_ID)),)
+  BUILD_DIR := build
+else
+  BUILD_DIR := build/.alien/$(BUILD_TARGET_ID)
+endif
+# Each tree records the target it holds. With one tree per target the guard
+# below can only fire on a tree built before the split (a flat build/ that a
+# cross build filled), which `make clean` resolves.
+BUILD_TARGET_STAMP := $(BUILD_DIR)/.build-target
 _STAMPED := $(strip $(shell cat $(BUILD_TARGET_STAMP) 2>/dev/null))
 # The check runs at PARSE time, so it must not fire for the very goals that
 # resolve it: `make clean` (and clean-ish goals) would otherwise be
@@ -399,9 +402,9 @@ _CLEAN_ONLY := $(if $(strip $(filter-out clean distclean help,$(or $(MAKECMDGOAL
 ifneq ($(_STAMPED),)
 ifneq ($(_STAMPED),$(BUILD_TARGET_ID))
 ifneq ($(_CLEAN_ONLY),1)
-$(error build/ holds $(_STAMPED) artifacts but this is a $(BUILD_TARGET_ID) build. \
-Object and archive formats do not mix — run `make clean` first (or build the \
-other target in a separate checkout))
+$(error $(BUILD_DIR)/ holds $(_STAMPED) artifacts but this is a $(BUILD_TARGET_ID) build. \
+It was filled before cross builds moved to build/.alien/<target>/ \
+(#2321); run `make clean` once)
 endif
 endif
 endif
@@ -429,7 +432,7 @@ MANIFEST_OBJ :=
 ifdef IS_WINDOWS
   ifneq ($(WINDOWS),1)
     WINDRES ?= windres
-    MANIFEST_OBJ := build/aether_manifest.o
+    MANIFEST_OBJ := $(BUILD_DIR)/aether_manifest.o
   endif
 endif
 
@@ -783,7 +786,6 @@ endif
 endif
 
 # Zero warnings achieved - ready for -Werror
-BUILD_DIR = build
 OBJ_DIR = $(BUILD_DIR)/obj
 
 # Windows-specific: -static avoids libwinpthread/libgcc DLL dependencies.
@@ -805,7 +807,7 @@ endif
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c
-STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
+STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
 # g_sync_step_actor, current_core_id). Excluded from the compiler binary
 # because aetherc does not link the runtime scheduler, but included in
@@ -839,7 +841,7 @@ TOOLS_CFLAGS = -O2 -Itools -MMD -MP \
     $(if $(AETHER_ENABLE_LLM),-DAETHER_ENABLE_LLM=1)
 TOOLS_SRC = tools/ae.c tools/ae_help.c tools/ae_fmt.c tools/ae_bindgen.c \
             tools/ae_cross.c tools/ae_repl.c tools/ae_version.c \
-            tools/ae_cache.c tools/ae_checksec.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
+            tools/ae_cache.c tools/ae_checksec.c tools/ae_sha256.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
 TOOLS_OBJS = $(TOOLS_SRC:%.c=$(OBJ_DIR)/%.o)
 COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(OBJ_DIR)/%.o)
 RUNTIME_OBJS = $(RUNTIME_SRC:%.c=$(OBJ_DIR)/%.o)
@@ -884,6 +886,8 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
            tests/runtime/test_runtime_schema.c \
+           tests/runtime/test_runtime_intmap.c \
+           tests/runtime/test_tools_sha256.c tools/ae_sha256.c \
            tests/runtime/test_scheduler.c \
            tests/runtime/test_scheduler_stress.c \
            tests/runtime/test_zerocopy.c \
@@ -940,8 +944,14 @@ endif
 
 all: compiler ae stdlib
 
+# The target this tree holds (BUILD_TARGET_ID), read by the guard near the top.
+# Written once per tree by the goals that fill it.
+$(BUILD_TARGET_STAMP):
+	@mkdir -p $(BUILD_DIR) 2>/dev/null || true
+	@echo "$(BUILD_TARGET_ID)" > "$@"
+
 # Create object directories
-$(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime $(OBJ_DIR)/tools $(OBJ_DIR)/tools/apkg:
+$(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/intmap $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime $(OBJ_DIR)/tools $(OBJ_DIR)/tools/apkg:
 ifdef WINDOWS_NATIVE
 	@if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 else
@@ -981,7 +991,7 @@ $(BUILD_FLAGS_STAMP): build-flags-force
 	    printf '%s' "$$digest" > "$@"; \
 	  fi
 
-$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
+$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/intmap $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
 	@echo "Compiling $<..."
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -1081,13 +1091,13 @@ I18N_DIR := contrib/i18n
 .PHONY: contrib-i18n-check
 contrib-i18n-check: compiler ae stdlib
 	@echo "contrib-i18n: building collate test"
-	@./build/ae$(EXE_EXT) build $(I18N_DIR)/collate/test_collate.ae \
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build $(I18N_DIR)/collate/test_collate.ae \
 	  --extra $(I18N_DIR)/aether_i18n.c \
 	  --extra std/unicode/utf8proc/utf8proc.c \
 	  --extra $(I18N_DIR)/ducet/ducet_data.c \
-	  -o build/test_collate$(EXE_EXT)
+	  -o $(BUILD_DIR)/test_collate$(EXE_EXT)
 	@echo "contrib-i18n: running collate test"
-	@./build/test_collate$(EXE_EXT)
+	@./$(BUILD_DIR)/test_collate$(EXE_EXT)
 
 # contrib-check: build + RUN every contrib test_*.ae (not just type-check).
 # This is the runtime-coverage gate the nightly was missing — type-checking
@@ -1112,7 +1122,7 @@ contrib-check-lsan: compiler ae stdlib
 	@EXE_EXT='$(EXE_EXT)' LSAN=1 bash .github/scripts/contrib_check.sh
 
 # Compiler target (incremental build with object files)
-compiler: build/aetherc$(EXE_EXT)
+compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 
 # A FILE target, so an already-current tree relinks nothing. As a phony
 # `compiler` it relinked build/aetherc on every `make`, and anything that runs
@@ -1120,36 +1130,36 @@ compiler: build/aetherc$(EXE_EXT)
 # the binary other tests were executing at that moment: macOS kills a process
 # whose text file changed under it, which is a SIGKILL in a test that never
 # went near the build system.
-build/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
+$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds)
 compiler-fast: $(FRONTEND_ID_HEADER)
 ifdef WINDOWS_NATIVE
-	@if not exist "build" mkdir "build"
+	@if not exist "$(BUILD_DIR)" mkdir "$(BUILD_DIR)"
 else
-	@$(MKDIR) build
+	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
 	@echo "Building Test Suite ($(DETECTED_OS))"
 	@echo "==================================="
 	@echo "Linking test runner..."
-	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o $(BUILD_DIR)/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo ""
 	@echo "==================================="
 	@echo "Running Tests"
 	@echo "==================================="
 ifneq ($(findstring MINGW,$(DETECTED_OS)),)
-	@bash -c './build/test_runner$(EXE_EXT); exit $$?'
+	@bash -c './$(BUILD_DIR)/test_runner$(EXE_EXT); exit $$?'
 else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
-	@bash -c './build/test_runner$(EXE_EXT); exit $$?'
+	@bash -c './$(BUILD_DIR)/test_runner$(EXE_EXT); exit $$?'
 else
-	./build/test_runner$(EXE_EXT)
+	./$(BUILD_DIR)/test_runner$(EXE_EXT)
 endif
 
 # Fast test target (monolithic)
@@ -1157,12 +1167,12 @@ test-fast: compiler-fast
 	@echo "==================================="
 	@echo "Building Test Suite ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(TEST_SRC) $(COMPILER_LIB_SRC) $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -Icompiler -Istd -Istd/collections -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(TEST_SRC) $(COMPILER_LIB_SRC) $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -Icompiler -Istd -Istd/collections -o $(BUILD_DIR)/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo ""
 	@echo "==================================="
 	@echo "Running Tests"
 	@echo "==================================="
-	./build/test_runner$(EXE_EXT)
+	./$(BUILD_DIR)/test_runner$(EXE_EXT)
 
 # test-valgrind / test-asan / test-memory: link the test runner's own
 # main() from TEST_SRC against pre-built flavoured archives instead of
@@ -1175,8 +1185,8 @@ test-valgrind: compiler stdlib-dbg
 	@echo "==================================="
 	@echo "Running Tests with Valgrind"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) $(TEST_SRC) build/dbg/libaether_compiler.a build/dbg/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 ./build/test_runner$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) $(TEST_SRC) $(BUILD_DIR)/dbg/libaether_compiler.a $(BUILD_DIR)/dbg/libaether.a -Icompiler -Istd -Istd/collections -o $(BUILD_DIR)/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 ./$(BUILD_DIR)/test_runner$(EXE_EXT)
 
 # -----------------------------------------------------------------
 # ci-coverage — build with `gcc --coverage`, run the C-level test
@@ -1202,14 +1212,14 @@ ci-coverage: compiler ae stdlib-cov
 	@echo "  Building coverage-instrumented test runner"
 	@echo "==================================="
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) $(TEST_SRC) \
-		build/cov/libaether_compiler.a build/cov/libaether.a \
+		$(BUILD_DIR)/cov/libaether_compiler.a $(BUILD_DIR)/cov/libaether.a \
 		-Icompiler -Istd -Istd/collections \
-		-o build/test_runner_cov$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+		-o $(BUILD_DIR)/test_runner_cov$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo ""
 	@echo "==================================="
 	@echo "  [1/2] Running C-level tests with coverage counters"
 	@echo "==================================="
-	@./build/test_runner_cov$(EXE_EXT) || true
+	@./$(BUILD_DIR)/test_runner_cov$(EXE_EXT) || true
 	@echo ""
 	@echo "==================================="
 	@echo "  [2/2] Running .ae regression tests with coverage counters"
@@ -1223,10 +1233,10 @@ ci-coverage: compiler ae stdlib-cov
 
 ci-coverage-clean:
 	@echo "Cleaning coverage data..."
-	@find build/cov-obj -name '*.gcda' -delete 2>/dev/null || true
-	@find build -maxdepth 2 -name '*.gcda' -delete 2>/dev/null || true
-	@find build -maxdepth 2 -name '*.gcno' -delete 2>/dev/null || true
-	@$(RM) -r build/coverage 2>/dev/null || true
+	@find $(BUILD_DIR)/cov-obj -name '*.gcda' -delete 2>/dev/null || true
+	@find $(BUILD_DIR) -maxdepth 2 -name '*.gcda' -delete 2>/dev/null || true
+	@find $(BUILD_DIR) -maxdepth 2 -name '*.gcno' -delete 2>/dev/null || true
+	@$(RM) -r $(BUILD_DIR)/coverage 2>/dev/null || true
 	@echo "✓ Coverage data cleaned (cov-obj/.gcno files retained for reuse)"
 
 # ci-coverage-html — wraps ci-coverage with an HTML/JSON report via
@@ -1244,11 +1254,11 @@ test-asan: compiler stdlib-asan
 	@echo "==================================="
 	@echo "Running Tests with AddressSanitizer"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) $(TEST_SRC) build/asan/libaether_compiler.a build/asan/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner_asan$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) $(TEST_SRC) $(BUILD_DIR)/asan/libaether_compiler.a $(BUILD_DIR)/asan/libaether.a -Icompiler -Istd -Istd/collections -o $(BUILD_DIR)/test_runner_asan$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(shell uname -s),Linux)
-	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_runner_asan$(EXE_EXT)
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./$(BUILD_DIR)/test_runner_asan$(EXE_EXT)
 else
-	ASAN_OPTIONS=halt_on_error=1 ./build/test_runner_asan$(EXE_EXT)
+	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD_DIR)/test_runner_asan$(EXE_EXT)
 endif
 
 # macOS leaks(1) gate (#468). Builds a curated set of memory-
@@ -1265,14 +1275,14 @@ test-memory: compiler stdlib-memory
 	@echo "==================================="
 	@echo "Running Memory Tracking Tests"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(MEM_FLAGS) $(TEST_SRC) build/memory/libaether_compiler.a build/memory/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner_mem$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	./build/test_runner_mem$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(MEM_FLAGS) $(TEST_SRC) $(BUILD_DIR)/memory/libaether_compiler.a $(BUILD_DIR)/memory/libaether.a -Icompiler -Istd -Istd/collections -o $(BUILD_DIR)/test_runner_mem$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	./$(BUILD_DIR)/test_runner_mem$(EXE_EXT)
 
 test-manual-runtime: compiler
 	@echo "Building manual runtime test..."
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tests/runtime/test_runtime_manual.c $(RUNTIME_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o build/test_runtime_manual$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tests/runtime/test_runtime_manual.c $(RUNTIME_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/test_runtime_manual$(EXE_EXT)
 	@echo "Running manual runtime test..."
-	./build/test_runtime_manual$(EXE_EXT)
+	./$(BUILD_DIR)/test_runtime_manual$(EXE_EXT)
 
 # Cross-compilation smoke test (#1105): `ae build --target=<triple>` via
 # the zig cc backend. Self-skips when zig is not installed, so it is safe
@@ -1434,7 +1444,7 @@ check-archive-exports: stdlib
 	@echo "==================================="
 	@echo "  Archive Export Check"
 	@echo "==================================="
-	@sh scripts/check_archive_exports.sh build/libaether.a
+	@sh scripts/check_archive_exports.sh $(BUILD_DIR)/libaether.a
 
 # #2207: check-archive-exports above only ever ran on a host that HAS zlib
 # (every normal dev box and CI runner), so a symbol whose only definition
@@ -1464,7 +1474,7 @@ check-archive-exports-nozlib: stdlib
 	@[ -n "$(ZLIB_DEPENDENT_SRCS)" ] || { \
 	  echo "  [FAIL] no std source branches on AETHER_HAS_ZLIB; this check would test nothing"; exit 1; }
 	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
-	cp build/libaether.a "$$tmp/libaether.a" && \
+	cp $(BUILD_DIR)/libaether.a "$$tmp/libaether.a" && \
 	for src in $(ZLIB_DEPENDENT_SRCS); do \
 	  obj="$$tmp/$$(basename "$$src" .c).o"; \
 	  $(CC) $(filter-out -DAETHER_HAS_ZLIB,$(AETHER_REQUIRED_CFLAGS)) $(CFLAGS) \
@@ -1480,10 +1490,10 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	@tmpdir=$$(mktemp -d) && \
 	reldir="$$tmpdir/release" && \
 	mkdir -p "$$reldir/bin" "$$reldir/lib/aether" "$$reldir/share/aether" "$$reldir/include/aether" && \
-	cp build/aetherc$(EXE_EXT) "$$reldir/bin/" && \
-	cp build/ae$(EXE_EXT)      "$$reldir/bin/" && \
+	cp $(BUILD_DIR)/aetherc$(EXE_EXT) "$$reldir/bin/" && \
+	cp $(BUILD_DIR)/ae$(EXE_EXT)      "$$reldir/bin/" && \
 	chmod 755 "$$reldir/bin/"* && \
-	if [ -f build/libaether.a ]; then cp build/libaether.a "$$reldir/lib/aether/"; fi && \
+	if [ -f $(BUILD_DIR)/libaether.a ]; then cp $(BUILD_DIR)/libaether.a "$$reldir/lib/aether/"; fi && \
 	for dir in runtime runtime/actors runtime/scheduler runtime/utils \
 	           runtime/memory runtime/config std std/string std/io std/math \
 	           std/net std/collections std/json std/xml std/fs std/log std/http \
@@ -1498,7 +1508,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	cp include/*.h "$$reldir/include/aether/" 2>/dev/null; \
 	cp -r runtime "$$reldir/share/aether/" && \
 	cp -r std     "$$reldir/share/aether/" && \
-	cp build/MANIFEST "$$reldir/share/aether/" && \
+	cp $(BUILD_DIR)/MANIFEST "$$reldir/share/aether/" && \
 	rm -rf "$$reldir/share/aether/runtime/examples" && \
 	echo "  Created release layout in $$reldir" && \
 	echo "  Packing tarball..." && \
@@ -1695,12 +1705,12 @@ benchmark: compiler ae stdlib
 	@echo ""
 	@mkdir -p benchmarks/cross-language/build
 	@echo "Building benchmark runner (Aether)..."
-	@AETHER_HOME="" ./build/ae build benchmarks/cross-language/run_benchmarks.ae -o benchmarks/cross-language/build/bench_runner
-	@cd benchmarks/cross-language && ./build/bench_runner
+	@AETHER_HOME="" ./$(BUILD_DIR)/ae build benchmarks/cross-language/run_benchmarks.ae -o benchmarks/cross-language/build/bench_runner
+	@cd benchmarks/cross-language && ./$(BUILD_DIR)/bench_runner
 	@pkill -9 -f "benchmarks/cross-language/visualize/server" 2>/dev/null || true
 	@echo ""
 	@echo "Building Aether HTTP server..."
-	@AETHER_HOME="" ./build/ae build benchmarks/cross-language/visualize/server.ae -o benchmarks/cross-language/visualize/server
+	@AETHER_HOME="" ./$(BUILD_DIR)/ae build benchmarks/cross-language/visualize/server.ae -o benchmarks/cross-language/visualize/server
 	@echo "Server built successfully"
 	@echo ""
 	@echo "=========================================="
@@ -1792,15 +1802,15 @@ lsp: compiler stdlib
 	@echo "==================================="
 	@echo "Building Aether LSP Server ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c build/libaether_compiler.a build/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o build/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "✓ LSP Server built successfully: build/aether-lsp$(EXE_EXT)"
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o $(BUILD_DIR)/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@echo "✓ LSP Server built successfully: $(BUILD_DIR)/aether-lsp$(EXE_EXT)"
 
 apkg:
 	@echo "==================================="
 	@echo "Building Aether Package Manager ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o build/apkg$(EXE_EXT)
-	@echo "✓ Package Manager built successfully: build/apkg$(EXE_EXT)"
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/apkg$(EXE_EXT)
+	@echo "✓ Package Manager built successfully: $(BUILD_DIR)/apkg$(EXE_EXT)"
 
 # Per-object compile for the tools driver (#1221). Static pattern rule so it
 # wins over the generic $(OBJ_DIR)/%.o rule (which uses CFLAGS, wrong include
@@ -1809,30 +1819,30 @@ $(TOOLS_OBJS): $(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(OBJ_DIR)/tools $(OBJ
 	@echo "Compiling $<..."
 	@$(CC) $(TOOLS_CFLAGS) -c $< -o $@
 
-ae: build/ae$(EXE_EXT)
+ae: $(BUILD_DIR)/ae$(EXE_EXT) $(BUILD_TARGET_STAMP)
 
 # A file target for the same reason as build/aetherc: `ae` was phony, so every
 # `make` relinked the binary the rest of the test sweep is running.
-build/ae$(EXE_EXT): build/aetherc$(EXE_EXT) $(TOOLS_OBJS) $(MANIFEST_OBJ)
+$(BUILD_DIR)/ae$(EXE_EXT): $(BUILD_DIR)/aetherc$(EXE_EXT) $(TOOLS_OBJS) $(MANIFEST_OBJ)
 	@echo "==================================="
 	@echo "Building ae command-line tool ($(DETECTED_OS)) v$(VERSION)"
 	@echo "==================================="
-	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o build/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
-	@echo "✓ Built successfully: build/ae$(EXE_EXT)"
+	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
+	@echo "✓ Built successfully: $(BUILD_DIR)/ae$(EXE_EXT)"
 	@echo ""
 	@echo "Usage:"
-	@echo "  ./build/ae run file.ae       Run a program"
-	@echo "  ./build/ae build file.ae     Build an executable"
-	@echo "  ./build/ae init myproject    Create a new project"
-	@echo "  ./build/ae test              Run tests"
-	@echo "  ./build/ae help              Show all commands"
+	@echo "  ./$(BUILD_DIR)/ae run file.ae       Run a program"
+	@echo "  ./$(BUILD_DIR)/ae build file.ae     Build an executable"
+	@echo "  ./$(BUILD_DIR)/ae init myproject    Create a new project"
+	@echo "  ./$(BUILD_DIR)/ae test              Run tests"
+	@echo "  ./$(BUILD_DIR)/ae help              Show all commands"
 
 profiler:
 	@echo "==================================="
 	@echo "Building Aether Profiler Dashboard ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -DAETHER_PROFILING tools/profiler/profiler_server.c tools/profiler/profiler_demo.c $(RUNTIME_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o build/profiler_demo$(EXE_EXT)
-	@echo "✓ Profiler built successfully: build/profiler_demo$(EXE_EXT)"
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -DAETHER_PROFILING tools/profiler/profiler_server.c tools/profiler/profiler_demo.c $(RUNTIME_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/profiler_demo$(EXE_EXT)
+	@echo "✓ Profiler built successfully: $(BUILD_DIR)/profiler_demo$(EXE_EXT)"
 	@echo ""
 	@echo "Run the demo and open http://localhost:8081"
 
@@ -1840,43 +1850,43 @@ docgen:
 	@echo "==================================="
 	@echo "Building Documentation Generator ($(DETECTED_OS))"
 	@echo "==================================="
-	@$(MKDIR) build
-	$(CC) -O2 -Wall tools/docgen/docgen.c -o build/docgen$(EXE_EXT)
-	@echo "✓ Documentation generator built: build/docgen$(EXE_EXT)"
+	@$(MKDIR) $(BUILD_DIR)
+	$(CC) -O2 -Wall tools/docgen/docgen.c -o $(BUILD_DIR)/docgen$(EXE_EXT)
+	@echo "✓ Documentation generator built: $(BUILD_DIR)/docgen$(EXE_EXT)"
 	@echo ""
-	@echo "Usage: ./build/docgen std docs/api"
+	@echo "Usage: ./$(BUILD_DIR)/docgen std docs/api"
 
 docs-server: compiler
 	@echo "==================================="
 	@echo "Building Documentation Server ($(DETECTED_OS))"
 	@echo "==================================="
-	@./build/aetherc$(EXE_EXT) tools/docgen/server.ae build/docs_server_gen.c
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) tools/docgen/server.ae $(BUILD_DIR)/docs_server_gen.c
 	@# $(AETHER_REQUIRED_CFLAGS) for the same reason as the `release` target:
 	@# this line compiles $(STD_SRC) directly, so without it the capability
 	@# defines are absent and std/regex silently became no-op stubs.
-	@$(CC) $(AETHER_REQUIRED_CFLAGS) -O2 -o build/docs-server$(EXE_EXT) build/docs_server_gen.c tools/docgen/server_ffi.c \
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) -O2 -o $(BUILD_DIR)/docs-server$(EXE_EXT) $(BUILD_DIR)/docs_server_gen.c tools/docgen/server_ffi.c \
 		$(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@rm -f build/docs_server_gen.c
-	@echo "✓ Documentation server built: build/docs-server$(EXE_EXT)"
+	@rm -f $(BUILD_DIR)/docs_server_gen.c
+	@echo "✓ Documentation server built: $(BUILD_DIR)/docs-server$(EXE_EXT)"
 
 docs: docgen
 	@echo "==================================="
 	@echo "Generating API Documentation"
 	@echo "==================================="
 	@$(MKDIR) docs/api
-	./build/docgen$(EXE_EXT) std docs/api
+	./$(BUILD_DIR)/docgen$(EXE_EXT) std docs/api
 	@echo ""
 	@echo "✓ Documentation generated in docs/api/"
 	@echo "  Run 'make docs-serve' to view at http://localhost:3000"
 
 docs-serve: docs docs-server
 	@echo ""
-	./build/docs-server$(EXE_EXT)
+	./$(BUILD_DIR)/docs-server$(EXE_EXT)
 
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: build/libaether.a $(MANIFEST_OBJ)
+stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(BUILD_TARGET_STAMP)
 
-build/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
+$(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
 	@echo "Compiling the Windows application manifest..."
 	@$(WINDRES) -I runtime/windows runtime/windows/aether.rc -O coff -o $@
 
@@ -1891,12 +1901,12 @@ build/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manife
 # genuinely needed still must not be observable as a partial archive. `ar` is
 # also asked for a fresh archive rather than an update of the existing one, so
 # a removed object cannot survive as a stale member.
-build/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS) build/libaether_compiler.a build/MANIFEST | $(VERSION_HEADER)
+$(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS) $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/MANIFEST | $(VERSION_HEADER)
 	@echo "Creating precompiled stdlib archive..."
-	@rm -f build/libaether.a.tmp
-	@ar rcs build/libaether.a.tmp $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS)
-	@mv build/libaether.a.tmp build/libaether.a
-	@echo "✓ Stdlib archive created: build/libaether.a"
+	@rm -f $(BUILD_DIR)/libaether.a.tmp
+	@ar rcs $(BUILD_DIR)/libaether.a.tmp $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS)
+	@mv $(BUILD_DIR)/libaether.a.tmp $(BUILD_DIR)/libaether.a
+	@echo "✓ Stdlib archive created: $(BUILD_DIR)/libaether.a"
 
 # Authoritative MANIFEST — list of link-suitable runtime + stdlib
 # .c files for downstream consumers (aetherBuild and similar tools)
@@ -1907,7 +1917,7 @@ build/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME
 # Format: one path per non-comment, non-empty line. Paths are
 # relative to share/aether/ in the install layout (and to the repo
 # root in the source tree). Lines starting with `#` are comments.
-build/MANIFEST: Makefile | $(BUILD_DIR)
+$(BUILD_DIR)/MANIFEST: Makefile | $(BUILD_DIR)
 	@echo "Generating MANIFEST..."
 	@( \
 	  echo "# Aether MANIFEST — link-suitable C source files for"; \
@@ -1937,8 +1947,8 @@ build/MANIFEST: Makefile | $(BUILD_DIR)
 	  echo ""; \
 	  echo "# Reactor sources:"; \
 	  for f in $(STD_REACTOR_SRC); do echo "$$f"; done; \
-	) > build/MANIFEST
-	@echo "✓ MANIFEST: $$(grep -c -v -E '^(#|$$)' build/MANIFEST) link-suitable files"
+	) > $(BUILD_DIR)/MANIFEST
+	@echo "✓ MANIFEST: $$(grep -c -v -E '^(#|$$)' $(BUILD_DIR)/MANIFEST) link-suitable files"
 # Sandbox preload library (libaether_sandbox.so) — the LD_PRELOAD
 # interception layer used by spawn_sandboxed for cross-process
 # containment. Built on Linux and FreeBSD; both have an rtld that
@@ -1948,18 +1958,18 @@ build/MANIFEST: Makefile | $(BUILD_DIR)
 # path — spawn_sandboxed there is a stub.
 ifeq ($(shell uname -s),Linux)
 	@echo "Building sandbox preload library..."
-	@$(CC) -shared -fPIC -o build/libaether_sandbox.so runtime/libaether_sandbox_preload.c -ldl -lrt 2>/dev/null || true
-	@test -f build/libaether_sandbox.so && echo "✓ Sandbox preload: build/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
+	@$(CC) -shared -fPIC -o $(BUILD_DIR)/libaether_sandbox.so runtime/libaether_sandbox_preload.c -ldl -lrt 2>/dev/null || true
+	@test -f $(BUILD_DIR)/libaether_sandbox.so && echo "✓ Sandbox preload: $(BUILD_DIR)/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
 else ifeq ($(shell uname -s),FreeBSD)
 	@echo "Building sandbox preload library..."
-	@$(CC) -shared -fPIC -o build/libaether_sandbox.so runtime/libaether_sandbox_preload.c 2>/dev/null || true
-	@test -f build/libaether_sandbox.so && echo "✓ Sandbox preload: build/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
+	@$(CC) -shared -fPIC -o $(BUILD_DIR)/libaether_sandbox.so runtime/libaether_sandbox_preload.c 2>/dev/null || true
+	@test -f $(BUILD_DIR)/libaether_sandbox.so && echo "✓ Sandbox preload: $(BUILD_DIR)/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
 endif
 
 # Compiler-as-library archive — COMPILER_LIB_SRC without aetherc.c's main().
 # Consumed by the LSP server and the sanitizer test runners. Kept separate
 # from libaether.a because user programs never need the compiler embedded.
-build/libaether_compiler.a: $(COMPILER_LIB_OBJS)
+$(BUILD_DIR)/libaether_compiler.a: $(COMPILER_LIB_OBJS)
 	@echo "Creating compiler-as-library archive..."
 	@ar rcs $@ $(COMPILER_LIB_OBJS)
 	@echo "✓ Compiler-lib archive created: $@"
@@ -1990,9 +2000,9 @@ ASAN_OPT      := -O1 -g
 MEM_FLAGS     := -DAETHER_MEMORY_TRACKING
 DBG_OPT       := -O0 -g
 
-ASAN_OBJ_DIR := build/asan-obj
-MEM_OBJ_DIR  := build/memory-obj
-DBG_OBJ_DIR  := build/dbg-obj
+ASAN_OBJ_DIR := $(BUILD_DIR)/asan-obj
+MEM_OBJ_DIR  := $(BUILD_DIR)/memory-obj
+DBG_OBJ_DIR  := $(BUILD_DIR)/dbg-obj
 # Coverage variant — `gcc --coverage` is shorthand for
 # `-fprofile-arcs -ftest-coverage` at compile and `-lgcov` at link.
 # Produces .gcno files alongside .o (instrumentation) and .gcda
@@ -2001,7 +2011,7 @@ DBG_OBJ_DIR  := build/dbg-obj
 # `<file>.c.gcov` and the `.ae.gcov` we actually want.
 COV_FLAGS    := --coverage
 COV_OPT      := -O0 -g
-COV_OBJ_DIR  := build/cov-obj
+COV_OBJ_DIR  := $(BUILD_DIR)/cov-obj
 
 ASAN_LIB_OBJS = $(STD_SRC:%.c=$(ASAN_OBJ_DIR)/%.o) \
                 $(STD_REACTOR_SRC:%.c=$(ASAN_OBJ_DIR)/%.o) \
@@ -2043,42 +2053,42 @@ $(COV_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) -c $< -o $@
 
-build/asan/libaether.a: $(ASAN_LIB_OBJS)
-	@mkdir -p build/asan
+$(BUILD_DIR)/asan/libaether.a: $(ASAN_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/asan
 	@ar rcs $@ $(ASAN_LIB_OBJS)
 
-build/asan/libaether_compiler.a: $(ASAN_COMPILER_LIB_OBJS)
-	@mkdir -p build/asan
+$(BUILD_DIR)/asan/libaether_compiler.a: $(ASAN_COMPILER_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/asan
 	@ar rcs $@ $(ASAN_COMPILER_LIB_OBJS)
 
-build/memory/libaether.a: $(MEM_LIB_OBJS)
-	@mkdir -p build/memory
+$(BUILD_DIR)/memory/libaether.a: $(MEM_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/memory
 	@ar rcs $@ $(MEM_LIB_OBJS)
 
-build/memory/libaether_compiler.a: $(MEM_COMPILER_LIB_OBJS)
-	@mkdir -p build/memory
+$(BUILD_DIR)/memory/libaether_compiler.a: $(MEM_COMPILER_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/memory
 	@ar rcs $@ $(MEM_COMPILER_LIB_OBJS)
 
-build/dbg/libaether.a: $(DBG_LIB_OBJS)
-	@mkdir -p build/dbg
+$(BUILD_DIR)/dbg/libaether.a: $(DBG_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/dbg
 	@ar rcs $@ $(DBG_LIB_OBJS)
 
-build/dbg/libaether_compiler.a: $(DBG_COMPILER_LIB_OBJS)
-	@mkdir -p build/dbg
+$(BUILD_DIR)/dbg/libaether_compiler.a: $(DBG_COMPILER_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/dbg
 	@ar rcs $@ $(DBG_COMPILER_LIB_OBJS)
 
-build/cov/libaether.a: $(COV_LIB_OBJS)
-	@mkdir -p build/cov
+$(BUILD_DIR)/cov/libaether.a: $(COV_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/cov
 	@ar rcs $@ $(COV_LIB_OBJS)
 
-build/cov/libaether_compiler.a: $(COV_COMPILER_LIB_OBJS)
-	@mkdir -p build/cov
+$(BUILD_DIR)/cov/libaether_compiler.a: $(COV_COMPILER_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)/cov
 	@ar rcs $@ $(COV_COMPILER_LIB_OBJS)
 
-stdlib-asan: build/asan/libaether.a build/asan/libaether_compiler.a
-stdlib-memory: build/memory/libaether.a build/memory/libaether_compiler.a
-stdlib-dbg: build/dbg/libaether.a build/dbg/libaether_compiler.a
-stdlib-cov: build/cov/libaether.a build/cov/libaether_compiler.a
+stdlib-asan: $(BUILD_DIR)/asan/libaether.a $(BUILD_DIR)/asan/libaether_compiler.a
+stdlib-memory: $(BUILD_DIR)/memory/libaether.a $(BUILD_DIR)/memory/libaether_compiler.a
+stdlib-dbg: $(BUILD_DIR)/dbg/libaether.a $(BUILD_DIR)/dbg/libaether_compiler.a
+stdlib-cov: $(BUILD_DIR)/cov/libaether.a $(BUILD_DIR)/cov/libaether_compiler.a
 
 # Self-test: compiler on itself
 self-test: compiler
@@ -2087,7 +2097,7 @@ self-test: compiler
 	@echo "==================================="
 	@echo "Testing compiler on complex syntax..."
 	@if [ -f examples/showcase/chat_server.ae ]; then \
-		./build/aetherc$(EXE_EXT) examples/showcase/chat_server.ae build/test_compile.c && \
+		./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/showcase/chat_server.ae $(BUILD_DIR)/test_compile.c && \
 		echo "✓ Complex syntax compilation successful"; \
 	fi
 	@echo ""
@@ -2130,15 +2140,15 @@ release:
 	@$(MAKE) clean
 	@$(MAKE) release-build
 
-release-build: build/aetherc-release$(EXE_EXT)
+release-build: $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 
 # A file target as well, so `make install` on a current tree does not spend a
 # minute recompiling the whole compiler in one LTO link before copying.
-build/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
+$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
 	@echo "==================================="
 	@echo "Building Optimized Release"
 	@echo "==================================="
-	@$(MKDIR) build
+	@$(MKDIR) $(BUILD_DIR)
 	@echo "Compiling with -O3 -DNDEBUG $(LTO_FLAG) -Werror (parallel LTO; this can take a minute)..."
 	@# -DAETHER_VERSION baked in from the same $(VERSION) the rest of
 	@# the build uses (highest git tag → VERSION file fallback). Without
@@ -2160,16 +2170,16 @@ build/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) r
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
 		runtime/aether_locale_num.c $(MANIFEST_OBJ) \
-		-o build/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
-	@strip build/aetherc-release$(EXE_EXT)
+	@strip $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 else ifeq ($(DETECTED_OS),Darwin)
 	@echo "Stripping debug symbols..."
-	@strip -x build/aetherc-release$(EXE_EXT)
+	@strip -x $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 endif
-	@echo "✓ Release build complete: build/aetherc-release$(EXE_EXT)"
-	@ls -lh build/aetherc-release$(EXE_EXT)
+	@echo "✓ Release build complete: $(BUILD_DIR)/aetherc-release$(EXE_EXT)"
+	@ls -lh $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 
 # Install to system
 PREFIX ?= /usr/local
@@ -2187,10 +2197,10 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# box reports a healthy toolchain while every compile fails with the
 	@# misleading "Aether compiler not found ... set AETHER_HOME".
 	@# EXE_EXT is empty on POSIX, so this is a no-op there.
-	@install -m 755 build/ae$(EXE_EXT) $(PREFIX)/bin/ae$(EXE_EXT)
-	@install -m 755 build/aetherc-release$(EXE_EXT) $(PREFIX)/bin/aetherc$(EXE_EXT)
+	@install -m 755 $(BUILD_DIR)/ae$(EXE_EXT) $(PREFIX)/bin/ae$(EXE_EXT)
+	@install -m 755 $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(PREFIX)/bin/aetherc$(EXE_EXT)
 	@install -d $(PREFIX)/lib/aether
-	@install -m 644 build/libaether.a $(PREFIX)/lib/aether/
+	@install -m 644 $(BUILD_DIR)/libaether.a $(PREFIX)/lib/aether/
 	@# Version stamp next to libaether.a. `ae build` reads this and
 	@# compares it to the compiler's own version; a mismatch (the
 	@# classic split where a stale `current` symlink shadows a fresh
@@ -2263,7 +2273,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
 	@# Trim source-tree noise from the contrib install: tests, benchmarks,
-	@# example .ae, build/CI scripts, and the .c/.m files (those compile
+	@# example .ae, $(BUILD_DIR)/CI scripts, and the .c/.m files (those compile
 	@# into the libaether_<x>.a archives via `make contrib`; no value in
 	@# also shipping the source). Mirrors the same trim install-contrib
 	@# applies, kept here so `make install` alone yields a usable layout.
@@ -2281,7 +2291,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# fingerprint is the one that will check them. Removed first so an
 	@# artifact for a module this release dropped cannot linger.
 	@-$(RM_DIR) $(PREFIX)/lib/aether/modules
-	@sh scripts/build_module_artifacts.sh build/aetherc-release$(EXE_EXT) . $(PREFIX)/lib/aether/modules
+	@sh scripts/build_module_artifacts.sh $(BUILD_DIR)/aetherc-release$(EXE_EXT) . $(PREFIX)/lib/aether/modules
 	@find $(PREFIX)/share/aether/contrib -type f -name 'test_*.sh' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'build.sh'  -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
@@ -2305,11 +2315,11 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# Downstream consumers (aetherBuild's aeb-link et al.) read this
 	@# instead of guessing via `find runtime -name '*.c'` — the find
 	@# would naively pull in benchmarks / orphan poller hubs / etc.
-	@install -m 644 build/MANIFEST $(PREFIX)/share/aether/MANIFEST
-	@# Restore ownership of build/ to the invoking user when running
+	@install -m 644 $(BUILD_DIR)/MANIFEST $(PREFIX)/share/aether/MANIFEST
+	@# Restore ownership of $(BUILD_DIR)/ to the invoking user when running
 	@# under sudo. Otherwise `sudo make install` re-runs the `release ae
 	@# stdlib` build deps as root, leaving every object/archive/binary in
-	@# build/ root-owned — which then makes the next plain `make` fail
+	@# $(BUILD_DIR)/ root-owned — which then makes the next plain `make` fail
 	@# with "Permission denied" until the user manually chowns. SUDO_USER
 	@# is set by sudo on every platform we build on; absent (no sudo) →
 	@# this is a silent no-op. Failure (no chown perms, weird FS) → also
@@ -2422,13 +2432,13 @@ install-contrib: contrib
 	@echo "==================================="
 	@echo "Installing contrib modules to $(PREFIX)"
 	@echo "==================================="
-	@if [ ! -f build/contrib/MANIFEST ]; then \
+	@if [ ! -f $(BUILD_DIR)/contrib/MANIFEST ]; then \
 		echo "  No manifest — run 'make contrib' first."; exit 1; \
 	fi
 	@install -d $(PREFIX)/lib/aether
 	@install -d $(PREFIX)/share/aether/contrib
 	@# Install built archives. Manifest lines: <name> <path> (tab-separated).
-	@awk -F'\t' 'NF>=2 { print $$1, $$2 }' build/contrib/MANIFEST | \
+	@awk -F'\t' 'NF>=2 { print $$1, $$2 }' $(BUILD_DIR)/contrib/MANIFEST | \
 		while read -r name path; do \
 			[ -z "$$name" ] && continue; \
 			install -m 644 "$$path" "$(PREFIX)/lib/aether/libaether_$$name.a"; \
@@ -2473,11 +2483,11 @@ ifndef FILE
 	@exit 1
 endif
 	@echo "Compiling $(FILE) to C..."
-	@./build/aetherc$(EXE_EXT) $(FILE) build/output.c
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) $(FILE) $(BUILD_DIR)/output.c
 	@echo "Building executable..."
-	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) build/output.c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o build/output$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(BUILD_DIR)/output.c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o $(BUILD_DIR)/output$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running..."
-	@./build/output$(EXE_EXT)
+	@./$(BUILD_DIR)/output$(EXE_EXT)
 
 # Compile an Aether program to executable
 compile: compiler
@@ -2501,24 +2511,24 @@ ifndef OUTPUT
 	OUTPUT := $(basename $(notdir $(FILE)))
 endif
 	@echo "Compiling $(FILE) to C..."
-	@./build/aetherc$(EXE_EXT) $(FILE) build/$(OUTPUT).c
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) $(FILE) $(BUILD_DIR)/$(OUTPUT).c
 	@echo "Building executable..."
-	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) build/$(OUTPUT).c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o build/$(OUTPUT)$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "✓ Built: build/$(OUTPUT)$(EXE_EXT)"
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(BUILD_DIR)/$(OUTPUT).c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o $(BUILD_DIR)/$(OUTPUT)$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@echo "✓ Built: $(BUILD_DIR)/$(OUTPUT)$(EXE_EXT)"
 
 # Benchmark computed goto dispatch
 bench-dispatch:
 	@echo "Building computed goto benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_computed_goto.c -o build/bench_computed_goto$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) -O3 experiments/concurrency/bench_computed_goto.c -o $(BUILD_DIR)/bench_computed_goto$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running benchmark..."
-	@./build/bench_computed_goto$(EXE_EXT)
+	@./$(BUILD_DIR)/bench_computed_goto$(EXE_EXT)
 
 # Benchmark manual prefetch hints
 bench-prefetch:
 	@echo "Building prefetch benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_prefetch.c -o build/bench_prefetch$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) -O3 experiments/concurrency/bench_prefetch.c -o $(BUILD_DIR)/bench_prefetch$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running benchmark..."
-	@./build/bench_prefetch$(EXE_EXT)
+	@./$(BUILD_DIR)/bench_prefetch$(EXE_EXT)
 
 # Profile-Guided Optimization (PGO) - train the compiler's inliner and
 # branch-placement heuristics using a recorded workload. Run-time
@@ -2527,21 +2537,21 @@ pgo-generate:
 	@echo "==================================="
 	@echo "PGO Step 1: Building with instrumentation..."
 	@echo "==================================="
-	@$(CC) -O3 -fprofile-generate experiments/concurrency/pgo_workload.c -o build/pgo_workload$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) -O3 -fprofile-generate experiments/concurrency/pgo_workload.c -o $(BUILD_DIR)/pgo_workload$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running workload to collect profile data..."
-	@./build/pgo_workload$(EXE_EXT)
+	@./$(BUILD_DIR)/pgo_workload$(EXE_EXT)
 	@echo "Profile data collected in *.gcda files"
 
 pgo-build:
 	@echo "==================================="
 	@echo "PGO Step 2: Building with profile data..."
 	@echo "==================================="
-	@$(CC) -O3 -fprofile-use -D__PGO__ experiments/concurrency/bench_pgo.c -o build/bench_pgo_optimized$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) -O3 -fprofile-use -D__PGO__ experiments/concurrency/bench_pgo.c -o $(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "PGO-optimized benchmark built"
 
 pgo-baseline:
 	@echo "Building baseline (no PGO)..."
-	@$(CC) -O3 experiments/concurrency/bench_pgo.c -o build/bench_pgo_baseline$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) -O3 experiments/concurrency/bench_pgo.c -o $(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Baseline benchmark built"
 
 pgo-benchmark: pgo-baseline pgo-generate pgo-build
@@ -2550,22 +2560,22 @@ pgo-benchmark: pgo-baseline pgo-generate pgo-build
 	@echo "==================================="
 	@echo ""
 	@echo "Baseline (no PGO):"
-	@./build/bench_pgo_baseline$(EXE_EXT)
+	@./$(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT)
 	@echo ""
 	@echo "-----------------------------------"
 	@echo ""
 	@echo "PGO-Optimized:"
-	@./build/bench_pgo_optimized$(EXE_EXT)
+	@./$(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT)
 
 pgo-clean:
 	@echo "Cleaning PGO profile data..."
 	@$(RM) *.gcda *.gcno 2>/dev/null || true
-	@$(RM) build/pgo_workload$(EXE_EXT) build/bench_pgo_baseline$(EXE_EXT) build/bench_pgo_optimized$(EXE_EXT) 2>/dev/null || true
+	@$(RM) $(BUILD_DIR)/pgo_workload$(EXE_EXT) $(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT) $(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT) 2>/dev/null || true
 	@echo "✓ PGO data cleaned"
 
 # Interactive REPL — integrated into ae CLI, no external dependencies
 repl: ae
-	@./build/ae$(EXE_EXT) repl
+	@./$(BUILD_DIR)/ae$(EXE_EXT) repl
 
 # Build statistics
 stats:
@@ -2597,7 +2607,7 @@ test-parallel:
 	@echo "Testing by category..."
 	@for cat in compiler runtime collections network memory stdlib parser; do \
 		echo "  Testing $$cat..."; \
-		./build/test_runner$(EXE_EXT) --category=$$cat & \
+		./$(BUILD_DIR)/test_runner$(EXE_EXT) --category=$$cat & \
 	done; \
 	wait
 	@echo ""
@@ -2615,8 +2625,8 @@ help:
 	@echo ""
 	@echo "Quick Start:"
 	@echo "  make ae             - Build 'ae' CLI tool (recommended)"
-	@echo "  ./build/ae run file.ae      - Run a program (Go-style)"
-	@echo "  ./build/ae build file.ae    - Build executable"
+	@echo "  ./$(BUILD_DIR)/ae run file.ae      - Run a program (Go-style)"
+	@echo "  ./$(BUILD_DIR)/ae build file.ae    - Build executable"
 	@echo ""
 	@echo "Or use Make directly:"
 	@echo "  make                - Build compiler"
@@ -2691,7 +2701,7 @@ help:
 
 test-build: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "Building test runner..."
-	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o $(BUILD_DIR)/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 # Docker CI/CD targets
 docker-build-ci:
@@ -2712,15 +2722,15 @@ ci-windows: clean compiler
 	@echo "==================================="
 	@echo ""
 	@echo "[1/3] Generating C from all examples with native aetherc..."
-	@mkdir -p build/win
+	@mkdir -p $(BUILD_DIR)/win
 	@pass=0; fail=0; \
 	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' | grep -v '/ae-help-demo/' | sort); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		printf "  %-30s " "$$name"; \
-		mkdir -p "build/win/examples/$$(dirname $$name)"; \
-		out_c="build/win/examples/$$name.c"; \
+		mkdir -p "$(BUILD_DIR)/win/examples/$$(dirname $$name)"; \
+		out_c="$(BUILD_DIR)/win/examples/$$name.c"; \
 		rm -f "$$out_c"; \
-		if ./build/aetherc "$$src" "$$out_c" 2>/tmp/ae_err.txt && [ -f "$$out_c" ]; then \
+		if ./$(BUILD_DIR)/aetherc "$$src" "$$out_c" 2>/tmp/ae_err.txt && [ -f "$$out_c" ]; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -2756,7 +2766,7 @@ ci-windows: clean compiler
 	@pass=0; fail=0; \
 	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' | grep -v '/ae-help-demo/' | sort); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
-		out_c="build/win/examples/$$name.c"; \
+		out_c="$(BUILD_DIR)/win/examples/$$name.c"; \
 		printf "  %-30s " "$$name"; \
 		if [ ! -f "$$out_c" ]; then \
 			echo "SKIP"; \
@@ -2822,7 +2832,7 @@ ci: clean
 	@$(MAKE) test-install
 	@echo ""
 	@echo "[8/11] ae test smoke check..."
-	@AETHER_HOME="" ./build/ae test examples/basics/hello.ae 2>&1 | tail -1
+	@AETHER_HOME="" ./$(BUILD_DIR)/ae test examples/basics/hello.ae 2>&1 | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
 	@echo "[9/11] Differential test (lowering paths agree)..."
@@ -3055,7 +3065,7 @@ check-contrib-modules: compiler ae stdlib
 	@pass=0; fail=0; \
 	for m in $$(find contrib -name module.ae -not -path 'contrib/host/*' | sort); do \
 		printf '  %-44s ' "$$m"; \
-		if err="$$(AETHER_HOME="" ./build/ae$(EXE_EXT) check "$$m" 2>&1)"; then \
+		if err="$$(AETHER_HOME="" ./$(BUILD_DIR)/ae$(EXE_EXT) check "$$m" 2>&1)"; then \
 			echo "ok"; pass=$$((pass + 1)); \
 		else \
 			echo "FAIL"; \
@@ -3118,10 +3128,10 @@ contrib-host-check: compiler ae stdlib
 	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
 	      export AETHER_PERL_SONAME; }; ;; \
 	  esac; \
-	  if [ ! -f "build/contrib/libaether_host_$$lang.a" ]; then \
+	  if [ ! -f "$(BUILD_DIR)/contrib/libaether_host_$$lang.a" ]; then \
 	    MODULES="$$lang" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true; \
 	  fi; \
-	  if [ ! -f "build/contrib/libaether_host_$$lang.a" ]; then \
+	  if [ ! -f "$(BUILD_DIR)/contrib/libaether_host_$$lang.a" ]; then \
 	    if [ "$(CONTRIB_HOST_STRICT)" = "1" ]; then \
 	      echo "    FAIL: libaether_host_$$lang.a unavailable (CONTRIB_HOST_STRICT=1)"; \
 	      rc=1; \
@@ -3130,7 +3140,7 @@ contrib-host-check: compiler ae stdlib
 	    fi; \
 	    continue; \
 	  fi; \
-	  out="$$(./build/ae$(EXE_EXT) run "$$t" 2>&1)"; trc=$$?; \
+	  out="$$(./$(BUILD_DIR)/ae$(EXE_EXT) run "$$t" 2>&1)"; trc=$$?; \
 	  echo "$$out" | sed 's/^/  /'; \
 	  if [ "$$trc" -ne 0 ]; then rc=1; fi; \
 	done; \
@@ -3160,7 +3170,7 @@ valgrind-check: clean
 		--track-origins=yes \
 		--error-exitcode=1 \
 		--suppressions=.valgrind-suppressions \
-		./build/test_runner$(EXE_EXT) || (echo "Valgrind errors detected!" && exit 1)
+		./$(BUILD_DIR)/test_runner$(EXE_EXT) || (echo "Valgrind errors detected!" && exit 1)
 	@echo "✓ Valgrind clean — no leaks or uninitialised reads"
 
 asan-check: clean
@@ -3172,7 +3182,7 @@ asan-check: clean
 	@$(MAKE) test-build CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
 	                    LDFLAGS="-fsanitize=address -pthread -lm"
 	@ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1 \
-	  ./build/test_runner$(EXE_EXT) 2>&1 | tee asan.log; \
+	  ./$(BUILD_DIR)/test_runner$(EXE_EXT) 2>&1 | tee asan.log; \
 	  if grep -q "ERROR: AddressSanitizer" asan.log; then \
 	    echo "ERROR: AddressSanitizer detected errors!"; \
 	    exit 1; \
@@ -3211,7 +3221,7 @@ ci-coop: clean compiler ae
 	           examples/actors/cooperative-demo.ae \
 	           examples/basics/hello.ae; do \
 		printf "  %-50s " "$$src"; \
-		if AETHER_HOME="" ./build/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \
+		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \
 			echo "PASS"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -3227,7 +3237,7 @@ ci-coop: clean compiler ae
 	@echo "[3/4] Testing no-filesystem + no-networking stubs..."
 	@$(MAKE) stdlib EXTRA_CFLAGS="-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
 	@printf "  %-50s " "hello.ae (no-fs/no-net)"; \
-	if AETHER_HOME="" ./build/ae run examples/basics/hello.ae >/dev/null 2>&1; then \
+	if AETHER_HOME="" ./$(BUILD_DIR)/ae run examples/basics/hello.ae >/dev/null 2>&1; then \
 		echo "PASS"; \
 	else \
 		echo "FAIL"; \
@@ -3249,7 +3259,7 @@ ci-wasm: clean compiler ae
 	@echo "==================================="
 	@echo ""
 	@echo "[1/3] Generating C from test programs..."
-	@mkdir -p build/wasm
+	@mkdir -p $(BUILD_DIR)/wasm
 	@pass=0; fail=0; \
 	for src in examples/basics/hello.ae \
 	           examples/actors/counter.ae \
@@ -3257,7 +3267,7 @@ ci-wasm: clean compiler ae
 	           tests/syntax/test_coop_chain.ae; do \
 		name=$$(basename $$src .ae); \
 		printf "  %-40s " "$$name → .c"; \
-		if ./build/aetherc "$$src" "build/wasm/$$name.c" 2>/tmp/ae_wasm_err.txt; then \
+		if ./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/wasm/$$name.c" 2>/tmp/ae_wasm_err.txt; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -3294,12 +3304,12 @@ ci-wasm: clean compiler ae
 		std/os/aether_os.c \
 		std/collections/aether_set.c std/collections/aether_pqueue.c std/collections/aether_intarr.c std/collections/aether_longarr.c std/collections/aether_bits.c \
 		runtime/sandbox/capsicum_autosandbox.c"; \
-	for src in build/wasm/hello.c build/wasm/counter.c build/wasm/test_platform_caps.c \
-	           build/wasm/test_coop_chain.c; do \
+	for src in $(BUILD_DIR)/wasm/hello.c $(BUILD_DIR)/wasm/counter.c $(BUILD_DIR)/wasm/test_platform_caps.c \
+	           $(BUILD_DIR)/wasm/test_coop_chain.c; do \
 		name=$$(basename $$src .c); \
 		printf "  %-40s " "emcc $$name"; \
 		if emcc $$WASM_CFLAGS $$src $$RUNTIME_FILES \
-			-o "build/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
+			-o "$(BUILD_DIR)/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -3313,8 +3323,8 @@ ci-wasm: clean compiler ae
 	@echo ""
 	@echo "[3/3] Running WASM programs with Node.js..."
 	@pass=0; fail=0; \
-	for js in build/wasm/hello.js build/wasm/counter.js build/wasm/test_platform_caps.js \
-	          build/wasm/test_coop_chain.js; do \
+	for js in $(BUILD_DIR)/wasm/hello.js $(BUILD_DIR)/wasm/counter.js $(BUILD_DIR)/wasm/test_platform_caps.js \
+	          $(BUILD_DIR)/wasm/test_coop_chain.js; do \
 		name=$$(basename $$js .js); \
 		printf "  %-40s " "node $$name"; \
 		if node "$$js" >/tmp/wasm_out.txt 2>&1; then \
@@ -3378,12 +3388,12 @@ ci-embedded: clean compiler
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
 	@echo "[2/2] Generating and syntax-checking example programs..."
-	@mkdir -p build/embedded
+	@mkdir -p $(BUILD_DIR)/embedded
 	@pass=0; fail=0; \
 	for src in examples/basics/hello.ae examples/actors/counter.ae; do \
 		name=$$(basename $$src .ae); \
 		printf "  %-55s " "$$name → syntax-check"; \
-		./build/aetherc "$$src" "build/embedded/$$name.c" 2>/dev/null && \
+		./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/embedded/$$name.c" 2>/dev/null && \
 		if arm-none-eabi-gcc -fsyntax-only -O2 -mcpu=cortex-m4 -mthumb -ffreestanding \
 			-DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING \
 			-DAETHER_NO_GETENV -DAETHER_NO_SIMD -DAETHER_NO_AFFINITY -DAETHER_NO_NUMA \
@@ -3391,7 +3401,7 @@ ci-embedded: clean compiler
 			-Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json \
 			-Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 			-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label \
-			"build/embedded/$$name.c" 2>/tmp/emb_err.txt; then \
+			"$(BUILD_DIR)/embedded/$$name.c" 2>/tmp/emb_err.txt; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -3452,14 +3462,14 @@ ci-riscv64: clean
 	    OPENSSL=0 ZLIB=0 NGHTTP2=0 PCRE2=0 BROTLI=0 ZSTD=0
 	@echo ""
 	@echo "[2/3] Verifying cross-built binaries are riscv64 ELF..."
-	@file build/aetherc | grep -q "RISC-V" || { echo "  FAIL: aetherc not riscv64 ELF"; file build/aetherc; exit 1; }
-	@file build/ae      | grep -q "RISC-V" || { echo "  FAIL: ae not riscv64 ELF"; file build/ae;      exit 1; }
-	@echo "  build/aetherc and build/ae are riscv64 ELF — cross-compile worked"
+	@file $(BUILD_DIR)/aetherc | grep -q "RISC-V" || { echo "  FAIL: aetherc not riscv64 ELF"; file $(BUILD_DIR)/aetherc; exit 1; }
+	@file $(BUILD_DIR)/ae      | grep -q "RISC-V" || { echo "  FAIL: ae not riscv64 ELF"; file $(BUILD_DIR)/ae;      exit 1; }
+	@echo "  $(BUILD_DIR)/aetherc and $(BUILD_DIR)/ae are riscv64 ELF — cross-compile worked"
 	@echo ""
 	@echo "[3/3] Smoke-running aetherc --version under qemu-riscv64-static..."
-	@qemu-riscv64-static -L /usr/riscv64-linux-gnu ./build/aetherc --version || { \
+	@qemu-riscv64-static -L /usr/riscv64-linux-gnu ./$(BUILD_DIR)/aetherc --version || { \
 	    echo "  FAIL: cross-built aetherc could not run under qemu"; exit 1; }
-	@qemu-riscv64-static -L /usr/riscv64-linux-gnu ./build/ae --version 2>&1 | head -3 || { \
+	@qemu-riscv64-static -L /usr/riscv64-linux-gnu ./$(BUILD_DIR)/ae --version 2>&1 | head -3 || { \
 	    echo "  FAIL: cross-built ae could not run under qemu"; exit 1; }
 	@echo "  cross-built binaries run cleanly under qemu-riscv64-static"
 	@echo ""

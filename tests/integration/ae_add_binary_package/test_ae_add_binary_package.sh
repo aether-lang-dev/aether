@@ -4,9 +4,11 @@
 # or a git clone. The aether.toml's `modules = "."` puts the fetched lib on the
 # search path so the binary-import prepass can find it.
 #
-# Hermetic: a python http.server serves a fake forge whose layout mirrors a real
-# one (<pkg>/releases/download/<tag>/{aether.toml, <stem>-<tag>-<triple>.<ext>,
-# .sha256}); AE_RELEASE_BASE_URL points `ae add` at it. No public internet.
+# Hermetic: a file:// tree is a fake forge whose layout mirrors a real one
+# (<pkg>/releases/download/<tag>/{aether.toml, <stem>-<tag>-<triple>.<ext>,
+# .sha256}); AE_RELEASE_BASE_URL points `ae add` at it. No public internet and
+# no server, so it runs on Windows too (#2322), where the checksum step used to
+# fail: `ae` shelled out to sha256sum through cmd.exe, which cannot find it.
 #
 # Pinned properties:
 #   1. a released aether.toml with a `binary` key + a matching lib installs BOTH
@@ -24,7 +26,8 @@
 #       and `--target` with `--source` is rejected.
 #   5. end-to-end: a real installed lib actually imports + runs after ae add.
 #
-# HOME is redirected per-case so the real package cache is never touched.
+# HOME (and USERPROFILE, which ae reads on Windows) is redirected per-case so
+# the real package cache is never touched.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -32,8 +35,14 @@ AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
 
 [ -x "$AE" ] || { echo "  [SKIP] ae_add_binary_package: ae not built"; exit 0; }
-command -v python3 >/dev/null 2>&1 || { echo "  [SKIP] ae_add_binary_package: python3 needed"; exit 0; }
-command -v curl >/dev/null 2>&1 || { echo "  [SKIP] ae_add_binary_package: curl needed"; exit 0; }
+# ae fetches with curl (or wget) on POSIX and PowerShell on Windows; the
+# file:// forge needs curl on POSIX, since wget has no file:// scheme. The test
+# itself needs a hasher only to publish the fixtures' .sha256 files.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) command -v curl >/dev/null 2>&1 ||
+           { echo "  [SKIP] ae_add_binary_package: curl needed for the file:// forge"; exit 0; } ;;
+esac
 if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
 elif command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
 else echo "  [SKIP] ae_add_binary_package: no sha256 tool"; exit 0; fi
@@ -42,13 +51,18 @@ else echo "  [SKIP] ae_add_binary_package: no sha256 tool"; exit 0; fi
 # for, ae_host_triple() returns NULL and everything correctly falls to git.
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64|Linux-aarch64|Linux-arm64|Darwin-arm64|Darwin-x86_64|FreeBSD-*) ;;
+    MINGW*-x86_64|MSYS*-x86_64) ;;
     *) echo "  [SKIP] ae_add_binary_package: no release triple for this host"; exit 0 ;;
 esac
 
 TMP="$(mktemp -d)"
-SRV_PID=""
-cleanup() { [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null; rm -rf "$TMP"; return 0; }
+cleanup() { rm -rf "$TMP"; return 0; }
 trap cleanup EXIT
+
+# A path as the native ae sees it: on Windows a C:/... path, elsewhere as is.
+native() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
 
 fail() {
     echo "  [FAIL] ae_add_binary_package: $1"
@@ -61,6 +75,7 @@ case "$(uname -s)" in
     Linux)   OS_PART="linux";   EXT=".so" ;;
     Darwin)  OS_PART="macos";   EXT=".dylib" ;;
     FreeBSD) OS_PART="freebsd"; EXT=".so" ;;
+    MINGW*|MSYS*) OS_PART="windows"; EXT=".dll" ;;
 esac
 case "$(uname -m)" in
     x86_64)        ARCH_PART="x86_64" ;;
@@ -112,17 +127,12 @@ mk_binpkg v3.0.0 nobinkey
 mk_binpkg v4.0.0 badsum
 mk_binpkg v5.0.0 nosum
 
-# ---- serve on a free loopback port ---------------------------------------
-PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-( cd "$FORGE" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 ) &
-SRV_PID=$!
-ready=0; i=0
-while [ "$i" -lt 50 ]; do
-    if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then ready=1; break; fi
-    i=$((i + 1)); sleep 0.1
-done
-[ "$ready" = "1" ] || { echo "  [SKIP] ae_add_binary_package: fixture server did not start"; exit 0; }
-BASE="http://127.0.0.1:$PORT"
+# ---- the forge as a file:// URL ------------------------------------------
+FORGE_N="$(native "$FORGE")"
+case "$FORGE_N" in
+    /*) BASE="file://$FORGE_N" ;;    # file:///tmp/...
+    *)  BASE="file:///$FORGE_N" ;;   # file:///C:/...
+esac
 
 new_proj() {
     p="$TMP/proj_$1"; mkdir -p "$p/home"
@@ -132,7 +142,7 @@ new_proj() {
 
 # ---- Property 1: binary package installs lib + aether.toml, verified ------
 P="$(new_proj ok)"
-( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v1.0.0" ) \
+( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v1.0.0" ) \
     >"$TMP/ok.log" 2>&1 || fail "binary-package install exited non-zero" "$TMP/ok.log"
 grep -q "as a binary package" "$TMP/ok.log" || fail "did not report a binary-package install" "$TMP/ok.log"
 grep -q "Checksum verified" "$TMP/ok.log" || fail "lib was not checksum-verified" "$TMP/ok.log"
@@ -147,7 +157,7 @@ INST="$P/home/.aether/packages/$PKG"
 
 # ---- Property 2: binary declared but no lib for this host is FATAL --------
 P="$(new_proj nolib)"
-if ( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v2.0.0" ) \
+if ( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v2.0.0" ) \
         >"$TMP/nolib.log" 2>&1; then
     fail "a binary package with no lib for this host should have failed" "$TMP/nolib.log"
 fi
@@ -159,14 +169,14 @@ grep -q "declares a binary package but publishes no" "$TMP/nolib.log" \
 P="$(new_proj nobinkey)"
 # No lib is declared, so ae add must NOT treat it as a binary package; it falls
 # through to the archive path and then to git (which fails on the fake forge).
-( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v3.0.0" ) \
+( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v3.0.0" ) \
     >"$TMP/nobin.log" 2>&1
 grep -q "as a binary package" "$TMP/nobin.log" \
     && fail "an aether.toml with no binary key was wrongly installed as a binary package" "$TMP/nobin.log"
 
 # ---- Property 4: a mismatched lib checksum is fatal ----------------------
 P="$(new_proj badsum)"
-if ( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v4.0.0" ) \
+if ( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v4.0.0" ) \
         >"$TMP/badsum.log" 2>&1; then
     fail "a mismatched lib checksum should have failed" "$TMP/badsum.log"
 fi
@@ -178,7 +188,7 @@ grep -qi "checksum MISMATCH" "$TMP/badsum.log" || fail "mismatched checksum was 
 # path, which warns and installs unverified): a raw downloaded shared library
 # must be verifiable (#2105).
 P="$(new_proj nosum)"
-if ( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v5.0.0" ) \
+if ( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v5.0.0" ) \
         >"$TMP/nosum.log" 2>&1; then
     fail "a binary package with no .sha256 should have been refused" "$TMP/nosum.log"
 fi
@@ -195,16 +205,25 @@ case "$(uname -s)-$(uname -m)" in
     *)            FT="linux-x86_64"; FE=".so" ;;
 esac
 P="$(new_proj target)"
-( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v1.0.0" --target "$FT" ) \
+( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v1.0.0" --target "$FT" ) \
     >"$TMP/target.log" 2>&1 || fail "--target fetch of a foreign binary failed" "$TMP/target.log"
 [ -f "$P/home/.aether/packages/$PKG/$STEM$FE" ] \
     || fail "--target did not install the foreign lib under $STEM$FE" "$TMP/target.log"
 # --target with --source is rejected
-if ( cd "$(new_proj tconf)" && HOME="$TMP/proj_tconf/home" AE_RELEASE_BASE_URL="$BASE" \
+if ( cd "$(new_proj tconf)" && HOME="$TMP/proj_tconf/home" USERPROFILE="$(native "$TMP/proj_tconf/home")" AE_RELEASE_BASE_URL="$BASE" \
         "$AE" add "$PKG@v1.0.0" --target "$FT" --source ) >"$TMP/tconf.log" 2>&1; then
     fail "--target --source together should be rejected" "$TMP/tconf.log"
 fi
 grep -qi "mutually exclusive" "$TMP/tconf.log" || fail "--target/--source conflict not reported" "$TMP/tconf.log"
+
+# Importing a binary package is POSIX-only today: the prepass that reads a
+# lib's interface (dlopen) and links it (-rpath) has no Windows arm, which is
+# #2297. Everything above, the part `ae add` owns, runs on Windows.
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        echo "  [PASS] ae_add_binary_package: install, in-process checksum, require-checksum, --target foreign fetch, no fallback ladder (import of a binary package on Windows is #2297)"
+        exit 0 ;;
+esac
 
 # ---- Property 5: END-TO-END — a real installed lib actually IMPORTS + RUNS -
 # Properties 1-4 use a random payload (they exercise fetch/verify/install). This
@@ -228,11 +247,11 @@ cp "$TMP/libsrc/$BSTEM$EXT" "$BREL/$BASSET"
 
 P="$(new_proj e2e)"
 printf 'import %s\nmain() {\n    println("sum=${%s.add(2, 40)}")\n    return 0\n}\n' "$MOD" "$MOD" > "$P/main.ae"
-( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v5.0.0" ) \
+( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v5.0.0" ) \
     >"$TMP/e2e_add.log" 2>&1 || fail "e2e binary-package add failed" "$TMP/e2e_add.log"
 E2E="$P/home/.aether/packages/$PKG"
 [ -f "$E2E/$BSTEM$EXT" ] || fail "e2e lib not staged under $BSTEM$EXT" "$TMP/e2e_add.log"
-RUN=$( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" run main.ae 2>&1 )
+RUN=$( cd "$P" && HOME="$P/home" USERPROFILE="$(native "$P/home")" AE_RELEASE_BASE_URL="$BASE" "$AE" run main.ae 2>&1 )
 case "$RUN" in
     *sum=42*) ;;
     *) echo "  [FAIL] ae_add_binary_package: installed lib did not IMPORT+RUN (the install-name bug)"

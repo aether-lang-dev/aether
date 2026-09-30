@@ -135,12 +135,14 @@ jobs:
           -j"$(nproc)"
 
     # A cross build that silently emitted Linux binaries would prove nothing
-    # (mirrors the FreeBSD leg's `file | grep FreeBSD` guard).
+    # (mirrors the FreeBSD leg's `file | grep FreeBSD` guard). A cross build
+    # lands in build/.alien/<target>/ (#2321).
     - name: Verify the artifacts really are PE
       run: |
-        file build/aetherc.exe build/ae.exe
-        file build/ae.exe | grep -q 'PE32+' || { echo "ae.exe is not a PE binary"; exit 1; }
-        file build/aetherc.exe | grep -q 'PE32+' || { echo "aetherc.exe is not a PE binary"; exit 1; }
+        X=build/.alien/windows-x86_64
+        file $X/aetherc.exe $X/ae.exe
+        file $X/ae.exe | grep -q 'PE32+' || { echo "ae.exe is not a PE binary"; exit 1; }
+        file $X/aetherc.exe | grep -q 'PE32+' || { echo "aetherc.exe is not a PE binary"; exit 1; }
 
     - name: Upload cross-built binaries
       if: always()
@@ -148,8 +150,8 @@ jobs:
       with:
         name: aether-windows-cross-x86_64
         path: |
-          build/aetherc.exe
-          build/ae.exe
+          build/.alien/windows-x86_64/aetherc.exe
+          build/.alien/windows-x86_64/ae.exe
         retention-days: 7
 
   # ============================================================
@@ -281,8 +283,8 @@ jobs:
       with:
         name: aether-windows-${{ matrix.root }}
         path: |
-          build/aetherc.exe
-          build/ae.exe
+          build/.alien/windows-x86_64/aetherc.exe
+          build/.alien/windows-x86_64/ae.exe
         retention-days: 30
 
   # ============================================================
