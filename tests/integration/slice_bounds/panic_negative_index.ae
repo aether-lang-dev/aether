@@ -1,0 +1,6 @@
+main() {
+    arr = [1, 2, 3]
+    v = arr[..]
+    i = -1
+    println("${v[i]}")
+}

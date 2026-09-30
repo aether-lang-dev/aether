@@ -1,0 +1,102 @@
+// Test: first-class slices (#1286) — `T[]` is a fat pointer {ptr, len}.
+// Covers: `.len`, bounds-checked indexing, sub-slicing in all four shapes,
+//         slices as parameters and returns, a `T[N]` array flowing into a
+//         `T[]` slot, the `ptr as T[]` view (unbounded, `.len` == -1),
+//         bounding a view with `[0..n]`, a slice decaying to `ptr` for a C
+//         extern, a struct field of slice type, `null` as the empty slice,
+//         and list-pattern matching on a slice (no `_len` companion needed).
+
+extern malloc(sz: long) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+struct Packet { name: string, payload: byte[] }
+
+sum(xs: int[]) -> int {
+    total = 0
+    for i in 0..xs.len {
+        total = total + xs[i]
+    }
+    return total
+}
+
+middle(xs: int[]) -> int[] {
+    return xs[1..xs.len - 1]
+}
+
+fill(bs: byte[], v: byte) {
+    for i in 0..bs.len {
+        bs[i] = v
+    }
+}
+
+count_down(xs: int[]) -> int {
+    match (xs) {
+        [] -> { return 0 }
+        [h | t] -> { return 1 + count_down(t) }
+    }
+    return -1
+}
+
+main() {
+    println("=== test_slices ===")
+
+    arr = [10, 20, 30, 40, 50]
+
+    // A fixed array passed where a slice is expected carries its length.
+    if sum(arr) != 150 { println("  FAIL: sum over array"); exit(1) }
+
+    // Sub-slicing shares the backing store: no copy.
+    v = arr[1..4]
+    if v.len != 3 { println("  FAIL: v.len"); exit(1) }
+    if v[0] != 20 || v[2] != 40 { println("  FAIL: v elements"); exit(1) }
+    v[1] = 99
+    if arr[2] != 99 { println("  FAIL: sub-slice must alias the array"); exit(1) }
+
+    // The three shorthand shapes.
+    tail = v[1..]
+    if tail.len != 2 || tail[0] != 99 { println("  FAIL: v[1..]"); exit(1) }
+    head = v[..2]
+    if head.len != 2 || head[1] != 99 { println("  FAIL: v[..2]"); exit(1) }
+    all = arr[..]
+    if all.len != 5 || all[4] != 50 { println("  FAIL: arr[..]"); exit(1) }
+
+    // Slice of a slice, returned from a function.
+    m = middle(all)
+    if m.len != 3 || m[0] != 20 { println("  FAIL: middle()"); exit(1) }
+    mm = middle(m)
+    if mm.len != 1 || mm[0] != 99 { println("  FAIL: middle(middle())"); exit(1) }
+
+    // A view over a raw pointer has no known length: `.len` is -1 and
+    // indexing is unchecked, as `ptr as T[]` always was.
+    raw = malloc(64)
+    view = raw as byte[]
+    if view.len != -1 { println("  FAIL: view.len should be -1"); exit(1) }
+    view[63] = 7
+    if view[63] != 7 { println("  FAIL: view store"); exit(1) }
+
+    // Bounding the view gives a checked slice.
+    bounded = view[0..64]
+    if bounded.len != 64 { println("  FAIL: bounded.len"); exit(1) }
+    fill(bounded, 3)
+    if view[0] != 3 || view[63] != 3 { println("  FAIL: fill through bounded view"); exit(1) }
+
+    // Struct field of slice type, from a literal array and from null.
+    p = Packet { name: "hello", payload: bounded[..4] }
+    if p.payload.len != 4 || p.payload[3] != 3 { println("  FAIL: struct slice field"); exit(1) }
+    int[] absent = null
+    if absent.len != 0 { println("  FAIL: null slice has length 0"); exit(1) }
+    if absent != null { println("  FAIL: null slice compares equal to null"); exit(1) }
+
+    // A slice-typed local from a literal.
+    int[] lits = [1, 2, 3]
+    if lits.len != 3 || lits[2] != 3 { println("  FAIL: literal into slice"); exit(1) }
+
+    // List patterns read the slice's own length.
+    if count_down(m) != 3 { println("  FAIL: match on slice"); exit(1) }
+
+    // A slice hands its pointer to a C extern.
+    free(view)
+
+    println("=== PASS ===")
+}

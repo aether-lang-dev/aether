@@ -246,6 +246,9 @@ typedef struct {
                              //   map_put_raw's key. See #420 follow-up. NULL
                              //   when no param carries the annotation.
         int param_count;
+        Type* ret_type;      // #1286: the declared return type (borrowed from
+                             // the extern's AST), so a call returning `T[]`
+                             // can be wrapped into a slice view.
     }* extern_registry;
     int extern_registry_count;
     int extern_registry_capacity;

@@ -33,6 +33,14 @@ Type* create_type(TypeKind kind) {
     return type;
 }
 
+int type_is_slice(const Type* t) {
+    return t && t->kind == TYPE_ARRAY && t->array_size <= 0 && !t->index_enum_name;
+}
+
+int type_is_sized_array(const Type* t) {
+    return t && t->kind == TYPE_ARRAY && !type_is_slice(t);
+}
+
 Type* create_array_type(Type* element_type, int size) {
     Type* type = create_type(TYPE_ARRAY);
     type->element_type = element_type;
@@ -676,6 +684,9 @@ const char* ast_node_type_to_string(ASTNodeType type) {
         case AST_LITERAL: return "LITERAL";
         case AST_ARRAY_LITERAL: return "ARRAY_LITERAL";
         case AST_ARRAY_ACCESS: return "ARRAY_ACCESS";
+        case AST_SLICE_EXPR: return "SLICE_EXPR";
+        case AST_SLICE_FROM_ARRAY: return "SLICE_FROM_ARRAY";
+        case AST_SLICE_TO_PTR: return "SLICE_TO_PTR";
         case AST_MEMBER_ACCESS: return "MEMBER_ACCESS";
         case AST_STRUCT_LITERAL: return "STRUCT_LITERAL";
         case AST_TYPE_ANNOTATION: return "TYPE_ANNOTATION";

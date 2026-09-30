@@ -1,0 +1,5 @@
+main() {
+    arr = [1, 2, 3]
+    v = arr[0.."two"]
+    println("${v.len}")
+}

@@ -1,0 +1,5 @@
+main() {
+    n = 5
+    v = n[0..2]
+    println("${v.len}")
+}

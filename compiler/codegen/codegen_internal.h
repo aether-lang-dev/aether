@@ -288,6 +288,14 @@ TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int
  * or NULL. The kind alone can't drive tuple-param emission — packing the
  * by-value `_tuple_*` struct literal needs the element list (#1033). */
 Type* lookup_extern_param_type(CodeGenerator* gen, const char* func_name, int param_idx);
+/* #1286: the declared return type of a registered extern, or NULL. */
+Type* lookup_extern_return_type(CodeGenerator* gen, const char* func_name);
+/* #1286: emit `expr` as a C pointer to its first element (`T*`): a slice
+ * yields `(T*)(s).ptr`, anything else is emitted as-is. */
+void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr);
+/* #1286: emit `expr` as an AetherSlice: a `T[N]` array is wrapped with its
+ * static length, a slice is emitted as-is. */
+void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr);
 int is_aether_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
    declared `@retain`. Tells the escape walker to mark a heap-string

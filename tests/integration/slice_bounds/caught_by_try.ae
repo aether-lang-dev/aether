@@ -1,0 +1,12 @@
+// A failed bounds check is an ordinary panic: `try` catches it.
+main() {
+    arr = [1, 2, 3]
+    v = arr[..]
+    i = 9
+    try {
+        println("${v[i]}")
+        println("NOT REACHED")
+    } catch e {
+        println("caught: ${e}")
+    }
+}

@@ -2727,14 +2727,25 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
     // hoisted variable name instead of inlining the compound literal.
     // (Requires the pre-walk to have populated the map for this field.)
     if (rhs && rhs->type == AST_ARRAY_LITERAL && fdef && fdef->element_c_type) {
+        /* #1286: a `T[]` message field is a slice over the hoisted array. */
+        int as_slice = fdef->c_type && strcmp(fdef->c_type, "AetherSlice") == 0;
         int id = lookup_msg_arr_id(fdef->name);
         if (id >= 0) {
-            fprintf(gen->output, "_aether_arr_%d", id);
+            if (as_slice)
+                fprintf(gen->output, "aether_slice_make(_aether_arr_%d, %d)", id, rhs->child_count);
+            else
+                fprintf(gen->output, "_aether_arr_%d", id);
             return;
         }
         // Fall-through: no hoist set up (e.g. reply statement). Use a
         // compound literal — still wrong for cross-thread sends, but
         // fine for synchronous ask/reply where the sender stays alive.
+        if (as_slice) {
+            fprintf(gen->output, "aether_slice_make((%s[])", fdef->element_c_type);
+            generate_expression(gen, rhs);
+            fprintf(gen->output, ", %d)", rhs->child_count);
+            return;
+        }
         fprintf(gen->output, "(%s[])", fdef->element_c_type);
     }
     /* Cons-cell context: when the target field is `*StringSeq` and the
@@ -2815,10 +2826,104 @@ static int is_null_compare_operand(const ASTNode* n) {
     return strcmp(n->value, "0") == 0;
 }
 
+/* ---- #1286 first-class slices ------------------------------------------ */
+
+static const char* slice_elem_c_type(const Type* t) {
+    return (t && t->kind == TYPE_ARRAY && t->element_type)
+           ? get_c_type(t->element_type) : "char";
+}
+
+static const char* slice_diag_file(const ASTNode* n) {
+    return (n && n->source_file) ? n->source_file : "?";
+}
+
+void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr) {
+    if (expr && type_is_slice(expr->node_type)) {
+        fprintf(gen->output, "((%s*)(", slice_elem_c_type(expr->node_type));
+        generate_expression(gen, expr);
+        fprintf(gen->output, ").ptr)");
+        return;
+    }
+    generate_expression(gen, expr);
+}
+
+void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr) {
+    if (expr && type_is_sized_array(expr->node_type) && expr->node_type->array_size > 0) {
+        fprintf(gen->output, "aether_slice_make((void*)(");
+        generate_expression(gen, expr);
+        fprintf(gen->output, "), %d)", expr->node_type->array_size);
+        return;
+    }
+    generate_expression(gen, expr);
+}
+
+/* The struct definition a member access reads from, when its base is a
+ * struct value or a `*Struct` pointer; NULL otherwise. */
+static ASTNode* member_base_struct_def(CodeGenerator* gen, const ASTNode* macc) {
+    if (!gen || !gen->program || !macc || macc->child_count < 1) return NULL;
+    const Type* bt = macc->children[0] ? macc->children[0]->node_type : NULL;
+    if (!bt) return NULL;
+    const char* sname = NULL;
+    if (bt->kind == TYPE_STRUCT) sname = bt->struct_name;
+    else if (bt->kind == TYPE_PTR && bt->element_type &&
+             bt->element_type->kind == TYPE_STRUCT) sname = bt->element_type->struct_name;
+    if (!sname) return NULL;
+    return find_struct_definition_by_name(gen->program, sname);
+}
+
+static int struct_def_is_extern(const ASTNode* sdef) {
+    return sdef && sdef->annotation && strncmp(sdef->annotation, "extern", 6) == 0;
+}
+
+/* Does the C value of `expr` arrive as a bare `T*` although its Aether
+ * type is a `T[]` slice? True for a call into an extern C function
+ * declared `-> T[]`, and for a read of an `extern struct`'s `T[]` field.
+ * Such a value is wrapped into an unbounded slice view. */
+static int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
+    if (!expr || !type_is_slice(expr->node_type)) return 0;
+    if (expr->type == AST_FUNCTION_CALL && expr->value) {
+        const char* name = expr->value;
+        if (gen->program && find_function_definition_by_name(gen->program, name)) return 0;
+        Type* rt = lookup_extern_return_type(gen, name);
+        if (!rt) {
+            const char* dot = strrchr(name, '.');
+            if (dot && dot[1]) {
+                char norm[256];
+                snprintf(norm, sizeof norm, "%s", name);
+                for (char* q = norm; *q; q++) if (*q == '.') *q = '_';
+                if (gen->program && find_function_definition_by_name(gen->program, norm)) return 0;
+                rt = lookup_extern_return_type(gen, norm);
+                if (!rt) rt = lookup_extern_return_type(gen, dot + 1);
+            }
+        }
+        return rt && type_is_slice(rt);
+    }
+    if (expr->type == AST_MEMBER_ACCESS && !gen->generating_lvalue) {
+        return struct_def_is_extern(member_base_struct_def(gen, expr));
+    }
+    return 0;
+}
+
+/* Re-entrancy guard for the view wrap below: the node being wrapped is
+ * generated once more through the ordinary path. */
+static const ASTNode* g_slice_view_wrapping = NULL;
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
     codegen_note_diag_pos(expr);
+
+    /* #1286: a `T*` from C, read as a `T[]`, becomes an unbounded view. */
+    if (g_slice_view_wrapping != expr && expr_is_c_view_of_slice(gen, expr) &&
+        !arg_drain_lookup(expr)) {
+        const ASTNode* saved = g_slice_view_wrapping;
+        g_slice_view_wrapping = expr;
+        fprintf(gen->output, "aether_slice_view((void*)(");
+        generate_expression(gen, expr);
+        fprintf(gen->output, "))");
+        g_slice_view_wrapping = saved;
+        return;
+    }
 
     /* Argument-temp lifetime substitution. If this AST_FUNCTION_CALL
      * node has been hoisted by a parent-call wrap (see
@@ -3480,6 +3585,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_MEMBER_ACCESS:
             if (expr->child_count > 0) {
                 ASTNode* child = expr->children[0];
+                /* #1286: `s.len` — a slice's element count, an array's size. */
+                if (expr->value && strcmp(expr->value, "len") == 0 &&
+                    child->node_type && child->node_type->kind == TYPE_ARRAY) {
+                    if (type_is_slice(child->node_type)) {
+                        fprintf(gen->output, "((int)aether_slice_len(");
+                        generate_expression(gen, child);
+                        fprintf(gen->output, "))");
+                    } else {
+                        fprintf(gen->output, "(%d)", child->node_type->array_size);
+                    }
+                    break;
+                }
                 /* #2146: a lane read — `v.x` is the C vector's `v[0]`. */
                 if (child->node_type && expr->value) {
                     int lane = lane_accessor_index(child->node_type->kind, expr->value);
@@ -3621,18 +3738,66 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             break;
 
+        case AST_SLICE_EXPR: {
+            /* #1286 `s[lo..hi]` — a checked sub-slice sharing the backing
+             * store; `[..]` alone is the whole thing as a slice. */
+            if (expr->child_count < 1 || !expr->value) break;
+            ASTNode* base = expr->children[0];
+            const char* shape = expr->value;
+            const char* elem = slice_elem_c_type(expr->node_type);
+            ASTNode* lo = NULL; ASTNode* hi = NULL;
+            if (strcmp(shape, "lo..hi") == 0) { lo = expr->children[1]; hi = expr->children[2]; }
+            else if (strcmp(shape, "lo..") == 0) { lo = expr->children[1]; }
+            else if (strcmp(shape, "..hi") == 0) { hi = expr->children[1]; }
+            if (!lo && !hi) {
+                generate_expression_as_slice(gen, base);
+                break;
+            }
+            fprintf(gen->output, hi ? "aether_slice_sub(" : "aether_slice_from(");
+            generate_expression_as_slice(gen, base);
+            fprintf(gen->output, ", (int64_t)(");
+            if (lo) generate_expression(gen, lo); else fprintf(gen->output, "0");
+            fprintf(gen->output, ")");
+            if (hi) {
+                fprintf(gen->output, ", (int64_t)(");
+                generate_expression(gen, hi);
+                fprintf(gen->output, ")");
+            }
+            fprintf(gen->output, ", sizeof(%s), \"%s\", %d)",
+                    elem, slice_diag_file(expr), expr->line);
+            break;
+        }
+
+        case AST_SLICE_FROM_ARRAY:
+            /* #1286: a `T[N]` array (or `null`, length 0) into a `T[]` slot.
+             * An array LITERAL becomes a C compound literal, which lives as
+             * long as the enclosing block, the same as the `T[N]` it is. */
+            if (expr->child_count > 0) {
+                ASTNode* src = expr->children[0];
+                fprintf(gen->output, "aether_slice_make((void*)(");
+                if (src->type == AST_ARRAY_LITERAL && src->child_count > 0)
+                    fprintf(gen->output, "(%s[])", slice_elem_c_type(expr->node_type));
+                generate_expression(gen, src);
+                fprintf(gen->output, "), %s)", expr->value ? expr->value : "0");
+            }
+            break;
+
+        case AST_SLICE_TO_PTR:
+            /* #1286: a slice into a raw-pointer slot — its element pointer. */
+            if (expr->child_count > 0) generate_expression_as_elem_ptr(gen, expr->children[0]);
+            break;
+
         case AST_PTR_AS_ARRAY_CAST:
-            /* `expr as T[]` — emit `((T*)(expr))`.  The result is a
-             * typed C pointer that an enclosing AST_ARRAY_ACCESS lowers
-             * to `((T*)(expr))[i]` (C scales by sizeof(T) automatically).
-             * No allocation, no bounds check — same systems-programming
-             * escape hatch as `as *StructName`, just at a buffer-element
-             * granularity instead of a struct-header granularity. */
+            /* `expr as T[]` — an unbounded slice VIEW over a raw pointer
+             * (#1286): `aether_slice_view((void*)(expr))`. Indexing it is
+             * unchecked, as it always was for this cast; `.len` is -1;
+             * sub-slicing with an explicit end bounds it. No allocation.
+             * Same systems-programming escape hatch as `as *StructName`,
+             * just at a buffer-element granularity. */
             if (expr->child_count > 0 && expr->node_type &&
                 expr->node_type->kind == TYPE_ARRAY &&
                 expr->node_type->element_type) {
-                const char* elem = get_c_type(expr->node_type->element_type);
-                fprintf(gen->output, "((%s*)(", elem);
+                fprintf(gen->output, "aether_slice_view((void*)(");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, "))");
             }
@@ -4206,13 +4371,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
 
                 if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
-                    fprintf(gen->output, "(%s)malloc(", get_c_type(expr->node_type));
-                    if (expr->child_count > 0) {
-                        fprintf(gen->output, "(");
-                        generate_expression(gen, expr->children[0]);
-                        fprintf(gen->output, ") * sizeof(%s)", get_c_type(expr->node_type->element_type));
-                    }
-                    fprintf(gen->output, ")");
+                    /* #1286: `make([]T, n)` is a bounded slice over a fresh
+                     * zeroed buffer of n elements; `free(s)` releases it. */
+                    fprintf(gen->output, "aether_slice_alloc((int64_t)(");
+                    if (expr->child_count > 0) generate_expression(gen, expr->children[0]);
+                    else fprintf(gen->output, "0");
+                    fprintf(gen->output, "), sizeof(%s))", get_c_type(expr->node_type->element_type));
                 }
                 else if (strcmp(func_name, "typeof") == 0) {
                     fprintf(gen->output, "aether_typeof(");
@@ -4563,7 +4727,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1) {
                     fprintf(gen->output, "free((void*)");
-                    generate_expression(gen, expr->children[0]);
+                    generate_expression_as_elem_ptr(gen, expr->children[0]);   /* #1286 */
                     fprintf(gen->output, ")");
                 }
                 // release(X) — explicit release sugar for heap strings,
@@ -6357,6 +6521,24 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (expr->child_count >= 2) {
                 /* #1380: a string may be a char* or an AetherString*; index the payload. */
                 ASTNode* base = expr->children[0];
+                if (base && type_is_slice(base->node_type)) {
+                    /* #1286: bounds-checked element access on a slice. The
+                     * helper returns the element's address, so the result
+                     * stays an lvalue and the slice is evaluated once. */
+                    const char* elem = slice_elem_c_type(base->node_type);
+                    fprintf(gen->output, "(*(%s*)aether_slice_at(", elem);
+                    /* The base is READ even when `s[i]` is a store target,
+                     * so an extern-struct field there still becomes a view. */
+                    int saved_lvalue = gen->generating_lvalue;
+                    gen->generating_lvalue = 0;
+                    generate_expression(gen, base);
+                    gen->generating_lvalue = saved_lvalue;
+                    fprintf(gen->output, ", (int64_t)(");
+                    generate_expression(gen, expr->children[1]);
+                    fprintf(gen->output, "), sizeof(%s), \"%s\", %d))",
+                            elem, slice_diag_file(expr), expr->line);
+                    break;
+                }
                 int str_base = base && base->node_type &&
                                base->node_type->kind == TYPE_STRING;
                 if (str_base) fprintf(gen->output, "_aether_safe_str(");
