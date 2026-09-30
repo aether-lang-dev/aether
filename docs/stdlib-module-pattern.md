@@ -182,6 +182,8 @@ DSL builders) as described above.
 4. Add the "API shape" preamble comment.
 5. Add Go-style wrappers for every fallible extern.
 6. Add tests exercising both the success and error paths of each
-   wrapper.
+   wrapper, as a co-located `std/<name>/test_<name>.ae` (#1584): the
+   sweep runs it, the install strips it, and `make check-tests` fails a
+   module that has no test anywhere.
 7. Add an example under `examples/stdlib/<name>-demo.ae` showing
    idiomatic use of the Go-style API.

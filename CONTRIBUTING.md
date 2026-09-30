@@ -256,6 +256,36 @@ The in-tree `.ae` regression suite (`tests/regression/*.ae`, run by
 `fail()` + `exit(1)`; that idiom still works and `ae test` reads its exit
 code the same way. New Aether-level tests should prefer `std.spec`.
 
+### Where a std module's tests live (#1584)
+
+A stdlib module owns its unit tests: `std/<mod>/test_*.ae`, beside the
+`module.ae` they cover, written against `std.spec` (the older hand-rolled
+`fails = fails + ck(...)` shape still works). `make test-ae` sweeps them
+with the rest of the suite, and the PR that changes `std/<mod>` shows its
+tests in the adjacent hunk rather than three directories away.
+
+- **They are tests, not payload.** Every copy site that ships `std/` —
+  `make install`, `install.sh`, the three `release.yml` arms and
+  `make test-release-archive` — strips `std/**/test_*.ae` again, and
+  `test-release-archive` / `test-install` fail if one survives. Add a new
+  copy site and you add the strip.
+- **They are not modules.** The resolver only ever looks for
+  `<path>/module.ae`, so `import std.deque.test_deque` cannot resolve
+  (`tests/integration/std_spec_not_importable/` proves it). Never put a
+  `module.ae` in a test directory.
+- **Census or waiver.** `make check-tests` runs
+  `tests/scripts/check_module_specs.py`: every `module.ae` under `std/`
+  has a co-located spec, or a test under `tests/` that imports it, or a
+  one-line waiver in that script saying where it is covered. A new module
+  with none of the three fails the build. The waiver list only shrinks:
+  a waiver for a module that gained a spec is itself a failure.
+- **Adoption, not migration.** `tests/integration/` keeps everything
+  cross-module or harness-shaped (shell drivers, server/client fixtures,
+  ports), and the central regression files stay where they are — moving
+  them breaks `git log --follow` and doc links. A module you are touching
+  gains a co-located spec; `AE_SPECS_VERBOSE=1` on the census prints the
+  remaining backlog.
+
 ### Two marker files a shell-test directory can carry
 
 `make test-ae` hands each `tests/integration/<name>/` directory to a worker
