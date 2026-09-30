@@ -14,6 +14,66 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.748.0]
+
+### Added
+
+- **`std.bytes` gives and takes `byte[]` slices.** `bytes.view(b)` is the
+  live contents bounded by `length(b)` and `bytes.capacity_view(b)` the
+  writable storage bounded by `capacity(b)`, so an index past either end is
+  the slice bounds panic instead of a read past the buffer. `from_slice`,
+  `copy_from_slice` (which grows the buffer, and copies correctly from a view
+  of the same buffer that the growth moves) and `string_from_slice` take a
+  slice where the pointer-and-count forms took two arguments (#2301).
+
+- **`std.intmap`: a hash map from `long` keys to `long` values.** Counting
+  or looking up integer keys went through `std.map`, whose keys are strings,
+  so every key was rendered with `string.from_long` and hashed as text:
+  LangArena's Distance::NGram ran at 26.6x Go on it. `intmap.add(m, key, 1)`
+  counts in one probe (open addressing, splitmix64-spread keys, tombstone
+  rebuilds); two million 4-gram counts take 16 ms against 256 ms through
+  `std.map` (#1986).
+
+### Changed
+
+- **Cross builds go to `build/.alien/<target>/`; the native build stays in
+  `build/`.** A `WINDOWS=1` or `FREEBSD=1` build and a native build used to
+  share `build/`, and the Makefile refused the second until `make clean`, so
+  every switch was a full rebuild. Every Makefile path now goes through
+  `$(BUILD_DIR)`, which is `build` for the native build and
+  `build/.alien/windows-x86_64` / `build/.alien/freebsd-x86_64` for a cross
+  build: both stay warm and alternating rebuilds nothing. Native paths, the
+  tests and `ae` are unchanged; the Windows and FreeBSD cross legs and the
+  FreeBSD release packaging read the cross tree. `make clean` removes both
+  (#2321).
+
+### Fixed
+
+- **`offsetof(T, f)` in a module keeps `f` a member name.** The module
+  merge renamed a module's references to its own functions and constants,
+  and walked into `offsetof`'s field operand as well, so a module with a
+  getter named like a field (`strength(t)` beside `strength: float`) emitted
+  `offsetof(struct Thing, shade_strength)` and failed to compile. The field
+  operand is never renamed now (#2320).
+
+- **`ae add` verifies checksums in-process, so binary packages install on
+  Windows.** The `.sha256` check shelled out to `sha256sum` / `shasum`
+  through `system()`, which on Windows is `cmd.exe`: MSYS's `/usr/bin` is
+  not on its PATH, no hasher was found, and since a binary package requires
+  a verified checksum every install was refused. `ae` now computes SHA-256
+  itself (FIPS 180-4), with no tool, shell or PATH involved on any
+  platform. The binary-package integration test serves its fake forge as a
+  `file://` tree (no python server) and runs on Windows (#2322).
+
+- **A caught panic no longer crashes on Windows (mingw-w64 x64).** The
+  panic's longjmp used mingw's default `setjmp`, which makes msvcrt's
+  `longjmp` a structured-exception unwind through every frame back to the
+  `try`; that unwind faulted intermittently inside `RtlVirtualUnwind2`, so a
+  panic caught by `try` crashed the process (`std/sort/test_sort.ae`: 28 of
+  200 parallel runs under MINGW64). The panic now uses `_setjmp(buf, NULL)`,
+  mingw's non-unwinding form, the same register restore POSIX gets from
+  `_setjmp`/`_longjmp`; cleanup stays the allocation journal's (#2327).
+
 ## [0.747.0]
 
 ### Added
