@@ -353,6 +353,23 @@ int aether_bytes_copy_from_bytes(AetherBytes* dst, int dst_off,
     return 1;
 }
 
+int aether_bytes_copy_from_ptr(AetherBytes* b, int dst, const void* src, int length) {
+    if (!b || !src || dst < 0 || length < 0) return 0;
+    if (length == 0) return 1;
+    size_t needed = (size_t)dst + (size_t)length;
+    if (needed < (size_t)dst) return 0;  /* overflow */
+    /* A source inside b's own storage moves with it when the grow
+     * reallocates: remember where in the buffer it was. */
+    const char* s = (const char*)src;
+    int inside = b->data && s >= b->data && s < b->data + b->capacity;
+    size_t src_off = inside ? (size_t)(s - b->data) : 0;
+    if (!bytes_reserve(b, needed)) return 0;
+    if (inside) s = b->data + src_off;
+    memmove(b->data + dst, s, (size_t)length);
+    if (needed > b->length) b->length = needed;
+    return 1;
+}
+
 int aether_bytes_copy_within(AetherBytes* b, int dst, int src, int length) {
     if (is_aether_string(b)) return 0;
     if (!b || dst < 0 || src < 0 || length < 0) return 0;

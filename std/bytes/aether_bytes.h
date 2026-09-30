@@ -135,6 +135,14 @@ int aether_bytes_copy_from_bytes(AetherBytes* dst, int dst_off,
                                  AetherBytes* src, int src_off,
                                  int length);
 
+/* Copy `length` bytes from raw memory `src` into `b` at offset `dst`,
+ * growing the buffer (and zero-filling any gap) as needed: the landing
+ * point for a `byte[]` slice (#2301). `src` may point into `b`'s own
+ * storage (a view taken from it); the copy reads it from where it is after
+ * any growth. Returns 1 on success, 0 on failure (NULL buffer or source,
+ * negative offset or length, OOM). */
+int aether_bytes_copy_from_ptr(AetherBytes* b, int dst, const void* src, int length);
+
 /* Copy `length` bytes from offset `src` to offset `dst` *within the
  * same buffer*, forward byte-by-byte. Bytes already written in this
  * call are visible to subsequent reads inside it — the deliberate

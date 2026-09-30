@@ -68,12 +68,49 @@ silently clamped to the logical length, so a direct write finished to an empty
 string; that trap is gone.) `set_length` is still the way to publish a length
 for `bytes.length`/`get`/`copy_*` to see.
 
+## Slices (#2301)
+
+A buffer handle is not its data, and `data()` is a raw pointer with no
+length. `view(b)` gives the live contents as a `byte[]` bounded by
+`length(b)`, and `capacity_view(b)` the writable storage bounded by
+`capacity(b)`, so an index past either end is the slice bounds panic rather
+than a read past the buffer. Both borrow: they are valid until the next call
+that can grow the buffer (which may move its storage) or `free`.
+
+The slice-taking helpers need no separate count: `from_slice(s)` makes a
+buffer holding a copy of `s`, `copy_from_slice(b, dst, s)` copies `s` in at
+an offset (growing the buffer, and reading `s` correctly even when it is a
+view of the same buffer that the growth moves), and `string_from_slice(s)`
+makes a binary-safe string. A slice with no bound (`p as byte[]`) panics.
+
+```aether,run
+import std.bytes
+
+main() {
+    b = bytes.new(16)
+    w = bytes.capacity_view(b)       // write straight into the storage...
+    w[0] = 72
+    w[1] = 105
+    bytes.set_length(b, 2)           // ...then publish how much is live
+    v = bytes.view(b)
+    println("${v.len} bytes: ${bytes.string_from_slice(v)}")
+    bytes.copy_from_slice(b, 2, v)   // append the buffer to itself
+    println(bytes.string_from_slice(bytes.view(b)))
+    bytes.free(b)
+}
+```
+```output
+2 bytes: Hi
+HiHi
+```
+
 ## Exports
 
 `new`, `from_ptr`, `string_from_ptr`, `set`, `get`, `length`, `set_length`,
 `capacity`, `data`, `finish`, `to_string`, `free`, `copy_from_string`,
-`copy_from_bytes`, `copy_within`, and the fixed-width endian accessors
-`set_le16`/`get_le16` through `set_be64`/`get_be64`.
+`copy_from_bytes`, `copy_within`, the slice forms `view`, `capacity_view`,
+`from_slice`, `copy_from_slice`, `string_from_slice`, and the fixed-width
+endian accessors `set_le16`/`get_le16` through `set_be64`/`get_be64`.
 
 The endian accessors are the reason to reach for a `bytes` buffer over a
 string when building a wire format: `set_be32` writes the four bytes in
