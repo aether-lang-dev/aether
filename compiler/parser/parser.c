@@ -5934,6 +5934,100 @@ ASTNode* parse_main_function(Parser* parser) {
     return main;
 }
 
+/* A token spelled like an identifier: an attribute name may be a keyword
+ * (`@default(2.0)`), since it is only ever read as text. */
+static int token_spells_identifier(const Token* t) {
+    if (!t || !t->value || !t->value[0]) return 0;
+    if (!(isalpha((unsigned char)t->value[0]) || t->value[0] == '_')) return 0;
+    for (const char* c = t->value; *c; c++) {
+        if (!(isalnum((unsigned char)*c) || *c == '_')) return 0;
+    }
+    return 1;
+}
+
+/* One attribute argument: a number (optionally negated), a string, or
+ * true/false. Returns an AST_LITERAL typed TYPE_INT, TYPE_FLOAT, TYPE_STRING
+ * or TYPE_BOOL, or NULL after reporting the error. */
+static ASTNode* parse_field_attribute_arg(Parser* parser) {
+    Token* t = peek_token(parser);
+    int negative = 0;
+    if (t && t->type == TOKEN_MINUS) {
+        advance_token(parser);
+        negative = 1;
+        t = peek_token(parser);
+        if (!t || t->type != TOKEN_NUMBER) {
+            parser_error(parser, "expected a number after `-` in a field attribute");
+            return NULL;
+        }
+    }
+    if (!t || !(t->type == TOKEN_NUMBER || t->type == TOKEN_STRING_LITERAL ||
+                t->type == TOKEN_TRUE || t->type == TOKEN_FALSE)) {
+        parser_error(parser,
+            "a field attribute's arguments are literals: a number, a string, true or false");
+        return NULL;
+    }
+    advance_token(parser);
+    Type* ty = NULL;
+    char* text = NULL;
+    if (t->type == TOKEN_NUMBER) {
+        const char* v = t->value ? t->value : "0";
+        int radix = v[0] == '0' && (v[1] == 'x' || v[1] == 'X' || v[1] == 'o' ||
+                                    v[1] == 'O' || v[1] == 'b' || v[1] == 'B');
+        int is_float = 0;
+        for (const char* c = v; *c; c++) {
+            if (*c == '.' || (!radix && (*c == 'e' || *c == 'E'))) is_float = 1;
+            else if (!radix && isalpha((unsigned char)*c) && *c != 'e' && *c != 'E') {
+                parser_error(parser, "a duration is not a field attribute argument; "
+                                     "write the number of nanoseconds");
+                return NULL;
+            }
+        }
+        ty = create_type(is_float ? TYPE_FLOAT : TYPE_INT);
+        size_t n = strlen(v);
+        text = (char*)malloc(n + 2);
+        if (!text) { free_type(ty); return NULL; }
+        snprintf(text, n + 2, "%s%s", negative ? "-" : "", v);
+    } else if (t->type == TOKEN_STRING_LITERAL) {
+        ty = create_type(TYPE_STRING);
+    } else {
+        ty = create_type(TYPE_BOOL);
+    }
+    ASTNode* lit = create_ast_node(AST_LITERAL, text ? text : t->value, t->line, t->column);
+    free(text);
+    lit->node_type = ty;
+    return lit;
+}
+
+/* Zero or more `@name` / `@name(args)` after a struct field's type (#2298),
+ * attached to `field` as AST_FIELD_ATTRIBUTE children. Returns 0 after
+ * reporting a syntax error. */
+static int parse_field_attributes(Parser* parser, ASTNode* field) {
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
+        Token* at = advance_token(parser);
+        Token* name = peek_token(parser);
+        if (!token_spells_identifier(name)) {
+            parser_error(parser, "expected an attribute name after `@` on a struct field");
+            return 0;
+        }
+        advance_token(parser);
+        ASTNode* attr = create_ast_node(AST_FIELD_ATTRIBUTE, name->value, at->line, at->column);
+        if (match_token(parser, TOKEN_LEFT_PAREN)) {
+            if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
+                for (;;) {
+                    ASTNode* arg = parse_field_attribute_arg(parser);
+                    if (!arg) { free_ast_node(attr); return 0; }
+                    add_child(attr, arg);
+                    if (match_token(parser, TOKEN_COMMA)) continue;
+                    if (!expect_token(parser, TOKEN_RIGHT_PAREN)) { free_ast_node(attr); return 0; }
+                    break;
+                }
+            }
+        }
+        add_child(field, attr);
+    }
+    return 1;
+}
+
 ASTNode* parse_struct_definition(Parser* parser) {
     Token* struct_token = advance_token(parser); // consume 'struct'
     
@@ -6054,7 +6148,18 @@ ASTNode* parse_struct_definition(Parser* parser) {
             // No type - will be inferred from usage
             field->node_type = create_type(TYPE_UNKNOWN);
         }
-        
+
+        /* #2298: `@name` or `@name(literal, ...)` after the type, any number
+         * of them: metadata a `@derive(schema)` table carries per field
+         * (`rate: float @range(0.0, 10.0) @default(2.0)`). The compiler does
+         * not interpret them; the derive pass rejects them on a struct with
+         * no schema to carry them. */
+        if (!parse_field_attributes(parser, field)) {
+            free_ast_node(field);
+            free_ast_node(struct_def);
+            return NULL;
+        }
+
         add_child(struct_def, field);
         
         // Optional comma or semicolon

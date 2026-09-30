@@ -2186,6 +2186,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             // Compile-time layout builtins; both lower to a C int.
             return create_type(TYPE_INT);
 
+        case AST_SCHEMA_OF:        // #2298: a synthesized T_schema()'s body.
+            return create_type(TYPE_PTR);
+
         case AST_BITSET_LITERAL:   // #1046 `bit_set[E]{...}`; the parser set the
             return expr->node_type ? clone_type(expr->node_type)  // TYPE_BITSET.
                                    : create_type(TYPE_UNKNOWN);
@@ -8123,6 +8126,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // bad field is a hard C error), matching the trust-the-author
             // posture of the `as *Struct` cast.
             set_node_type(expr, create_type(TYPE_INT));
+            return 1;
+
+        case AST_SCHEMA_OF:
+            // #2298: synthesized by the derive pass, never written; the
+            // address of a struct's field table.
+            set_node_type(expr, create_type(TYPE_PTR));
             return 1;
 
         case AST_BITSET_LITERAL: {

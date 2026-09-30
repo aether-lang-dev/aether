@@ -2846,6 +2846,64 @@ Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, 
 
 `@derive(format)` / `clone` / `hash` and nested-struct fields surface a precise compile-time diagnostic, they're explicitly out of v1 scope and tracked for follow-up commits.
 
+### `@derive(schema)` a struct's field table, for inspectors, saves and replication
+
+`@derive(schema)` makes the compiler emit a table describing the struct, as
+static constant data: its name and size, and for each field its name, its
+type as written, a kind tag, its byte offset and size, and the attributes
+written after its type. `<StructName>_schema() -> ptr` returns the table and
+`std.reflect` reads it. An editor's inspector, a save file, a network
+replicator or an agent then walks the struct's fields by name, with no
+second, hand-kept copy of the struct beside it.
+
+```aether
+import std.reflect
+
+@derive(schema)
+struct Bob {
+    rate: float @range(0.0, 10.0) @default(2.0)
+    height: float @default(6.0)
+    label: string @tooltip("shown in the inspector")
+}
+
+main() {
+    s = Bob_schema()
+    i = 0
+    while i < reflect.field_count(s) {
+        println("${reflect.field_name(s, i)}: ${reflect.field_type(s, i)} at ${reflect.field_offset(s, i)}")
+        i = i + 1
+    }
+}
+```
+
+The table is what C's own `offsetof` and `sizeof` say about the struct the
+compiler emitted, so it cannot drift from the layout; nothing is built at run
+time. Fields are numbered in declaration order from 0, the index a
+`std.observe` field observer receives for the same field.
+
+- **Field attributes.** Any number of `@name` or `@name(arg, ...)` after a
+  field's type. The compiler does not interpret them; the table carries them
+  for the program to read (`reflect.attr_float(s, field, attr, arg)`). An
+  argument is a literal: a number (optionally negative; decimal, `0x`, `0o`
+  or `0b`), a string, `true` or `false`. A field names each attribute once,
+  and attributes on a struct without `@derive(schema)` are an error, since
+  nothing would carry them.
+- **Nested structs.** A field that holds an Aether struct by value, points at
+  one (`*T`), or is an array or slice of one names that struct's table
+  (`reflect.field_schema`), whether or not that struct derives schema itself.
+  A struct that points at itself names its own table.
+- **Strings.** A `string` field's table entry also gives the offset of the
+  flag recording whether the struct owns the string
+  (`reflect.field_heap_offset`), so a generic writer that stores a heap
+  string can hand it over the way a compiled `x.label = ...` does.
+- **Modules.** The derive pass runs after imported modules are merged, so a
+  module's own functions call `T_schema()` by its bare name, and an importer
+  calls it as `module.T_schema()` when the module lists it in `exports`.
+
+`@derive(schema)` combines with `@derive(eq)` (`@derive(eq, schema)`) and
+with `@observable`. The table's C layout is `runtime/aether_schema.h`, for a
+host that reads it without Aether.
+
 
 ---
 

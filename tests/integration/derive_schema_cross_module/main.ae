@@ -1,0 +1,14 @@
+// The consumer reaches the imported struct's table three ways: through the
+// module's own functions, by the qualified accessor the module exports, and
+// by its bare name.
+import comps
+import std.reflect
+
+main() {
+    println("${comps.field_total()}")
+    println("${comps.default_of("regen")}")
+    q = comps.Health_schema()
+    println("${reflect.name(q)} ${reflect.field_name(q, 1)} ${reflect.attr_int(q, 1, 0, 1)}")
+    b = Health_schema()
+    println("${b == q}")
+}

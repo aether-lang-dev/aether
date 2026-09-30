@@ -1,0 +1,22 @@
+// A component module: a struct deriving schema, an attribute on a field, and
+// functions that read the table from inside the module.
+import std.reflect
+
+exports(Health, Health_schema, field_total, default_of)
+
+@derive(schema)
+struct Health {
+    current: int @default(100)
+    max: int @range(1, 1000) @default(100)
+    regen: float @default(0.5)
+}
+
+field_total() -> int {
+    return reflect.field_count(Health_schema())
+}
+
+default_of(field_name: string) -> float {
+    s = Health_schema()
+    i = reflect.field_index(s, field_name)
+    return reflect.attr_float(s, i, reflect.attr_index(s, i, "default"), 0)
+}
