@@ -17,7 +17,7 @@ static void* volatile g_sink;
  * across the platforms this runs on. */
 TEST_CATEGORY(heap_in_use_sees_a_block_and_its_free, TEST_CATEGORY_RUNTIME) {
     int64_t before = aether_heap_in_use();
-    if (before < 0) return;   /* an allocator with no statistics (musl) */
+    if (before < 0) return;   /* no statistics: musl, or valgrind serving malloc */
     size_t n = 1u << 20;
     char* p = (char*)malloc(n);
     ASSERT_NOT_NULL(p);

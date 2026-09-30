@@ -166,9 +166,12 @@ leaked at least 100 blocks: true
 The source per platform: glibc `mallinfo2`, macOS's malloc zones, Windows
 `HeapSummary` over the process's heaps, FreeBSD jemalloc's
 `stats.allocated`, and the sanitizer's allocator when built with one. It is
-`-1` where the allocator keeps no statistics (musl). For what the OS charges
-the process, page-granular and including mappings the allocator does not
-see, `std.os` has `memory_resident()` and `memory_private()`.
+`-1` where the allocator keeps no statistics (musl), and where the platform's
+allocator is not the one serving malloc (under valgrind, or with an allocator
+preloaded in front of glibc's), since its numbers would stand still. For
+what the OS charges the process, page-granular and including mappings the
+allocator does not see, `std.os` has `memory_resident()` and
+`memory_private()`.
 
 ## Exports
 

@@ -19,7 +19,10 @@
  * Each returns -1 where the platform does not provide it:
  *   heap_in_use: glibc (mallinfo2 / mallinfo), macOS (malloc zones),
  *                Windows (HeapSummary over the process's heaps), FreeBSD
- *                (jemalloc stats.allocated), Emscripten (mallinfo).
+ *                (jemalloc stats.allocated), Emscripten (mallinfo), and a
+ *                sanitizer's allocator. On glibc it is also -1 when glibc
+ *                does not serve malloc: under valgrind, or with an
+ *                allocator preloaded in front of it.
  *   resident:    Linux, macOS, Windows, FreeBSD.
  *   private:     Linux (resident minus shared), macOS (physical
  *                footprint), Windows (private usage).

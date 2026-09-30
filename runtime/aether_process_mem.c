@@ -1,5 +1,12 @@
 /* aether_process_mem.c — how much memory the process holds (#2310).
  * The contract of each call is in aether_process_mem.h. */
+
+/* glibc's dlfcn.h declares RTLD_DEFAULT only under _GNU_SOURCE, and a
+ * feature macro counts only before the first system header. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE
+#endif
+
 #include "aether_process_mem.h"
 
 /* Under a sanitizer the sanitizer's allocator serves every malloc, and the
@@ -42,7 +49,26 @@
 #  include <unistd.h>
 #  if defined(__GLIBC__)
 #    include <malloc.h>
+#    include <dlfcn.h>
+#    include <stdlib.h>
+#    include <string.h>
 #  endif
+#endif
+
+#if defined(__linux__) && defined(__GLIBC__) && !defined(AETHER_SANITIZER_ALLOCATOR)
+/* glibc's statistics describe glibc's arenas, which is only the answer when
+ * glibc serves malloc. An allocator preloaded in front of it (jemalloc,
+ * tcmalloc, mimalloc) owns `malloc`, and valgrind redirects glibc's malloc
+ * to its own from a preload object named vgpreload_<tool>-<platform>.so;
+ * in both, glibc's numbers stand still while the program allocates. */
+static int glibc_serves_malloc(void) {
+    void* m = dlsym(RTLD_DEFAULT, "malloc");
+    void* libc_m = dlsym(RTLD_DEFAULT, "__libc_malloc");
+    if (m && libc_m && m != libc_m) return 0;
+    const char* preload = getenv("LD_PRELOAD");
+    if (preload && strstr(preload, "vgpreload")) return 0;
+    return 1;
+}
 #endif
 
 int64_t aether_heap_in_use(void) {
@@ -89,6 +115,7 @@ int64_t aether_heap_in_use(void) {
     struct mallinfo mi = mallinfo();
     return (int64_t)(unsigned)mi.uordblks;
 #elif defined(__linux__) && defined(__GLIBC__)
+    if (!glibc_serves_malloc()) return -1;
     /* In use = the arena's allocated chunks plus the chunks too large for
      * the arena, which glibc maps one by one. */
 #  if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)

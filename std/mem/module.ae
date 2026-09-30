@@ -382,7 +382,9 @@ extern aether_heap_in_use() -> long
 // malloc in the process, Aether's (heap.new, strings, closures,
 // collections) and the ones C code reached through an extern makes, from
 // the allocator's own statistics. -1 where the platform's allocator keeps
-// none (musl).
+// none (musl), and where the platform's allocator is not the one serving
+// malloc (under valgrind, or with an allocator preloaded in front of
+// glibc's): its statistics would stand still while the program allocates.
 //
 // For a same-process leak check, run the workload a few rounds and compare
 // two later rounds: the growth is what each round leaks. Allocators keep a

@@ -14,7 +14,8 @@
 // (close to) nothing; a round that leaks heap.new boxes and C blocks grows
 // by at least half of what it leaked (allocators may hand out blocks they
 // cached, which some already count as in use); freeing them gives the
-// bytes back. A platform whose allocator keeps no statistics reports -1.
+// bytes back. Where heap_in_use() has no answer (musl, or valgrind serving
+// malloc) it reports -1 and the check is skipped.
 
 import std.mem
 import std.os
@@ -53,7 +54,7 @@ main() {
     check(os.memory_resident() != 0, "resident is reported or -1")
     check(os.memory_private() != 0, "private is reported or -1")
     if mem.heap_in_use() < 0 {
-        println("OK") // an allocator without statistics (musl)
+        println("OK") // no statistics here: musl, or valgrind serving malloc
         return
     }
 
