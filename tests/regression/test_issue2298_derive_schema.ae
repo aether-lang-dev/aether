@@ -12,7 +12,7 @@
 // a field's type was a parse error, and std.reflect did not exist. Each block
 // pins one part of the contract: the struct's name and size, every field's
 // offset and size against the compiler's own offsetof/sizeof, kinds and type
-// spellings, arrays and slices, nested tables (by value, through a pointer
+// spellings (an enum field included), arrays and slices, nested tables (by value, through a pointer
 // back to the struct itself, and for array elements), the string ownership
 // flag's offset, attributes of each argument kind, a store through the table,
 // the empty struct, @derive(eq) beside it, and null-safe reads.
@@ -21,6 +21,8 @@ import std.reflect
 import std.mem
 
 extern exit(code: int)
+
+enum Dir { North, East, South, West }
 
 struct Vec {
     x: float
@@ -43,6 +45,7 @@ struct Node {
     b: byte
     raw: ptr
     hook: fn(int) -> int
+    dir: Dir
 }
 
 @derive(eq, schema)
@@ -68,11 +71,11 @@ main() {
     // ---- the struct ----
     check(reflect.name(s) == "Node", "the struct's name")
     check(reflect.size(s) == sizeof(Node), "the struct's size is sizeof")
-    check(reflect.field_count(s) == 14, "every field is listed")
+    check(reflect.field_count(s) == 15, "every field is listed")
 
     // ---- fields, in declaration order, at the compiler's own offsets ----
     check(reflect.field_index(s, "id") == 0, "the first field is 0")
-    check(reflect.field_index(s, "hook") == 13, "the last field is 13")
+    check(reflect.field_index(s, "dir") == 14, "the last field is 14")
     check(reflect.field_index(s, "nope") == -1, "a missing name is -1")
     check(reflect.field_offset(s, 0) == offsetof(Node, id), "offset of id")
     check(reflect.field_offset(s, 2) == offsetof(Node, pos), "offset of pos")
@@ -108,6 +111,10 @@ main() {
     check(reflect.field_kind(s, 12) == reflect.KIND_PTR, "ptr kind")
     check(reflect.field_type(s, 12) == "ptr", "ptr spelling")
     check(reflect.field_kind(s, 13) == reflect.KIND_FN, "fn kind")
+    check(reflect.field_kind(s, 14) == reflect.KIND_ENUM, "enum kind")
+    check(reflect.field_type(s, 14) == "Dir", "enum spelling")
+    check(reflect.field_offset(s, 14) == offsetof(Node, dir), "offset of an enum field")
+    check(reflect.field_size(s, 14) == 4, "an enum is 4 bytes")
     check(reflect.kind_name(reflect.field_kind(s, 7)) == "float", "kind_name")
 
     // ---- nested tables ----
