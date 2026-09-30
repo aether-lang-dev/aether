@@ -331,6 +331,23 @@ static int would_merge(const char* a, const char* b){
     return 0;
 }
 
+/* A name that can spell a type: an identifier that is not a keyword (a
+ * number or a string literal is a word token too, and is not one). */
+static int is_type_name(const char* t){
+    return (isalpha((unsigned char)t[0]) || t[0]=='_') && !is_keyword(t);
+}
+
+/* #2316: the type prefixes `[]T` (make's element type) and `[E]T` (an
+ * enum-indexed array) are written tight, as the language reference spells
+ * them. A `[` that does not follow a value opens a prefix group (after a
+ * value it is an index); when the group closes having held nothing or one
+ * name, and a type name or `*` comes next, that is a type prefix. An array
+ * literal is never followed by a bare type name, and `[x] as T` keeps its
+ * space because `as` is a keyword. */
+#define FMT_MAX_BRACKETS 256
+typedef struct { int prefix; int tokens; int one_name; } FmtBracket;
+enum { TP_NONE, TP_CLOSED, TP_STAR };   /* after a prefix `]`, after its `*` */
+
 static char* layout(Lexeme* lex, size_t n){
     Buf out; if(!buf_init(&out)) return NULL;
     if (n==0){ return out.data; }   // empty / whitespace-only input -> empty output
@@ -338,6 +355,9 @@ static char* layout(Lexeme* lex, size_t n){
     const char* prev=NULL, *prevprev=NULL;   // previous emitted TOKEN texts
     int line_started=0;                       // any code emitted on the current line
     int after_inline_comment=0;               // last emitted was an inline block comment
+    FmtBracket brackets[FMT_MAX_BRACKETS];    // open `[` groups, innermost last
+    int nbrackets=0;
+    int type_prefix=TP_NONE;                  // where the last tokens stand in `[]*T`
 
     for (size_t k=0;k<n;k++){
         Lexeme* L=&lex[k];
@@ -369,6 +389,10 @@ static char* layout(Lexeme* lex, size_t n){
                 sp = 1;                                     // token after inline block comment
             } else if (prev){
                 sp = spaces_before(prev, prevprev, L->text, L->space_before);
+                if (type_prefix==TP_CLOSED && (is_type_name(L->text) || eq(L->text,"*")))
+                    sp = 0;                             // `[]int`, `[Dir]string`, `[]*Node`
+                if (type_prefix==TP_STAR && is_type_name(L->text))
+                    sp = 0;                             // the `Node` of `[]*Node`
                 if (sp==0 && would_merge(prev, L->text)) sp=1;
             } else sp=0;
             buf_spaces(&out, sp);
@@ -379,6 +403,30 @@ static char* layout(Lexeme* lex, size_t n){
         if (L->kind==LX_TOKEN){
             if (is_open(L->text)) depth++;
             else if (is_close(L->text)){ depth--; if(depth<0) depth=0; }
+
+            /* Type-prefix tracking (#2316). */
+            int next_prefix = TP_NONE;
+            if (eq(L->text,"]") && nbrackets>0){
+                FmtBracket b = brackets[--nbrackets];
+                if (b.prefix && (b.tokens==0 || (b.tokens==1 && b.one_name)))
+                    next_prefix = TP_CLOSED;
+            } else {
+                if (nbrackets>0){
+                    FmtBracket* top = &brackets[nbrackets-1];
+                    top->tokens++;
+                    top->one_name = (top->tokens==1) && is_type_name(L->text);
+                }
+                if (eq(L->text,"[") && nbrackets<FMT_MAX_BRACKETS){
+                    int index = prev && (is_word_tok(prev) || is_close(prev));
+                    brackets[nbrackets].prefix = !index;
+                    brackets[nbrackets].tokens = 0;
+                    brackets[nbrackets].one_name = 0;
+                    nbrackets++;
+                }
+                if (type_prefix==TP_CLOSED && eq(L->text,"*")) next_prefix = TP_STAR;
+            }
+            type_prefix = next_prefix;
+
             prevprev=prev; prev=L->text;
             after_inline_comment=0;
         } else {

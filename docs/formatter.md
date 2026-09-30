@@ -40,7 +40,9 @@ It normalizes:
 - **Indentation**, by brace/bracket/paren nesting (4 spaces per level).
 - **Inter-token spacing**: one space around binary operators and after `,`/`:`;
   none before `,`/`;`/`:`, none inside `(`/`[` at their edges, one space before
-  a `{`. Struct and message literals read `Name { field: value }`.
+  a `{`. Struct and message literals read `Name { field: value }`. The type
+  prefixes are written tight: `make([]int, n)`, `make([]*Node, n)`,
+  `[Dir]string`; an index keeps its space before a word (`a[0] as int`).
 - **Blank lines**: runs of blank lines collapse to at most one, and a blank line
   is never left immediately after `{` or before `}`.
 - **Trailing whitespace** is stripped; the file ends in exactly one newline.
