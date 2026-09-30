@@ -1,0 +1,116 @@
+// std.intmap (#1986): a map from long keys to long values.
+//
+// Covers put / get / has / replace, add as a counter, remove and a key put
+// back after it, growth past many rebuilds, a churn of inserts and removes
+// that leaves tombstones behind, negative and extreme keys, iteration that
+// visits every key once, clear, and a null map.
+
+import std.intmap
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    m = intmap.new(0)
+    check(m != null, "new")
+    check(intmap.size(m) == 0, "empty")
+
+    // ---- put / get / has / replace ----
+    check(intmap.put(m, 7, 70) == 1, "put of a new key is 1")
+    check(intmap.put(m, 7, 71) == 0, "put over a key replaces it, 0")
+    check(intmap.get(m, 7, -1) == 71, "get reads the replacement")
+    check(intmap.get(m, 8, -1) == -1, "a missing key reads as the default")
+    check(intmap.has(m, 7) && !intmap.has(m, 8), "has")
+
+    // ---- add counts ----
+    check(intmap.add(m, 100, 1) == 1, "add to an absent key starts at 0")
+    check(intmap.add(m, 100, 1) == 2, "add again")
+    check(intmap.add(m, 100, -5) == -3, "add a negative delta")
+    check(intmap.size(m) == 2, "two keys")
+
+    // ---- remove, and a key put back after it ----
+    check(intmap.remove(m, 7), "remove a present key")
+    check(!intmap.remove(m, 7), "remove it twice is false")
+    check(!intmap.has(m, 7) && intmap.size(m) == 1, "gone")
+    check(intmap.put(m, 7, 5) == 1, "a removed key comes back as new")
+    check(intmap.get(m, 7, 0) == 5, "with its new value")
+
+    // ---- growth: many keys, strided so they would cluster unspread ----
+    n = 100000
+    i = 0
+    while i < n {
+        intmap.put(m, i * 1024, i)
+        i = i + 1
+    }
+    check(intmap.size(m) == n + 2, "all the strided keys are in")
+    ok = true
+    i = 0
+    while i < n {
+        if intmap.get(m, i * 1024, -1) != i {
+            ok = false
+        }
+        i = i + 1
+    }
+    check(ok, "every strided key reads back its value")
+
+    // ---- churn: remove and reinsert, leaving tombstones behind ----
+    round = 0
+    while round < 5 {
+        i = 0
+        while i < n {
+            intmap.remove(m, i * 1024)
+            i = i + 2
+        }
+        i = 0
+        while i < n {
+            intmap.put(m, i * 1024, i + round)
+            i = i + 2
+        }
+        round = round + 1
+    }
+    check(intmap.size(m) == n + 2, "churn keeps the count")
+    check(intmap.get(m, 0, -1) == 4 && intmap.get(m, 1024, -1) == 1, "churned and untouched values")
+
+    // ---- negative and extreme keys ----
+    big = 9223372036854775807
+    small = 0 - big - 1
+    intmap.put(m, -1, 11)
+    intmap.put(m, big, 12)
+    intmap.put(m, small, 13)
+    intmap.put(m, 0 - 1024, 14)
+    check(intmap.get(m, -1, 0) == 11, "a negative key")
+    check(intmap.get(m, big, 0) == 12, "the largest long")
+    check(intmap.get(m, small, 0) == 13, "the smallest long")
+    check(intmap.get(m, 0 - 1024, 0) == 14, "a negative strided key")
+
+    // ---- iteration visits every key once ----
+    count = 0
+    long key_sum = 0
+    s = intmap.next(m, 0)
+    while s >= 0 {
+        count = count + 1
+        if intmap.key_at(m, s) == 100 {
+            check(intmap.value_at(m, s) == -3, "the value beside its key")
+        }
+        s = intmap.next(m, s + 1)
+    }
+    check(count == intmap.size(m), "iteration visits size() slots")
+    check(intmap.next(m, -1) == -1, "a negative slot has no next")
+
+    // ---- clear, and a null map ----
+    intmap.clear(m)
+    check(intmap.size(m) == 0 && !intmap.has(m, 100), "clear empties it")
+    check(intmap.put(m, 3, 30) == 1 && intmap.get(m, 3, 0) == 30, "usable after clear")
+    intmap.free(m)
+
+    check(intmap.get(null, 1, -9) == -9, "a null map reads the default")
+    check(intmap.put(null, 1, 1) == -1, "put on a null map fails")
+    check(intmap.size(null) == 0 && intmap.next(null, 0) == -1, "a null map is empty")
+    println("PASS: std.intmap")
+}
