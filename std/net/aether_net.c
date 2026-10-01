@@ -14,6 +14,8 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* s, int m) {
     TcpReceiveResult out = { NULL, 0, "net unavailable" };
     return out;
 }
+int tcp_send_bytes_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return -1; }
+int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void)c; return TCP_RECV_CLOSED; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
 TcpServer* tcp_listen_raw(int p) { (void)p; return NULL; }
 TcpServer* tcp_listen_on_raw(const char* a, int p) { (void)a; (void)p; return NULL; }
@@ -245,6 +247,32 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
     out._1 = received;
     out._2 = "";
     return out;
+}
+
+/* Byte-buffer twin of tcp_send_n_raw for std.tcp's slice wrapper (#2301):
+ * the data is a `void*` the caller has already bounded, never a string.
+ * Returns the send(2) count, which may be short, or -1. */
+int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length) {
+    if (!sock || !sock->connected || length < 0) return -1;
+    if (length == 0) return 0;
+    if (!data) return -1;
+    int sent = send(sock->fd, (const char*)data, (size_t)length, 0);
+    return sent < 0 ? -1 : sent;
+}
+
+/* Receive into a caller-owned buffer of `cap` bytes (#2301): one recv(2)
+ * of at most `cap` bytes, nothing allocated. Returns the count (> 0),
+ * TCP_RECV_TIMEOUT for an idle peer (recv-timeout / would-block: the
+ * socket stays connected, as in tcp_receive_n_raw, #1092), or
+ * TCP_RECV_CLOSED for an orderly FIN, a hard error (both mark the socket
+ * dead), a null/closed handle or a bad buffer. */
+int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
+    if (!sock || !sock->connected || !buf || cap <= 0) return TCP_RECV_CLOSED;
+    int received = recv(sock->fd, (char*)buf, cap, 0);
+    if (received > 0) return received;
+    if (received < 0 && aether_net_wouldblock()) return TCP_RECV_TIMEOUT;
+    sock->connected = 0;
+    return TCP_RECV_CLOSED;
 }
 
 int tcp_close(TcpSocket* sock) {

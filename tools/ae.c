@@ -2196,48 +2196,120 @@ static const char* manifest_spelling(const char* path, char* buf, size_t buf_siz
     return buf;
 }
 
-/* Resolve [dependencies] from the project manifest onto the module search
- * path. Safe to call when there is no manifest and no dependencies. */
-void ae_resolve_dependencies(void) {
-    if (!path_exists(ae_manifest_path())) return;
-    TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return;
+/* ---- The dependency graph (#1901, #2335) ---------------------------------
+ *
+ * A dependency's own [dependencies] are resolved too, transitively, so a
+ * project lists only what it imports itself: a game that uses ae3d does not
+ * have to declare ae3d's physics package, nor patch it to a path inside
+ * ae3d's checkout. Walked breadth-first, so the project's direct
+ * dependencies join the search path first, in manifest order.
+ *
+ * Where a package resolves, highest first:
+ *   1. --override on the command line (a path from the cwd);
+ *   2. the project manifest's [patch] -- the consumer wins over any
+ *      dependency's patch for the same package;
+ *   3. the [patch] of the manifest that declares the dependency, a path
+ *      relative to THAT package's root;
+ *   4. the installed package under ~/.aether/packages.
+ *
+ * One package resolving to two places is an error naming both paths and
+ * who required each: building against whichever was reached first would be
+ * a silent wrong build. A package reached again at the same place (a
+ * diamond) and a cycle are both fine. */
 
-    int count = 0;
-    TomlKeyValue* deps = toml_get_section_entries(doc, "dependencies", &count);
-    if (!deps || count <= 0) { toml_free_document(doc); return; }
+#define DEP_GRAPH_MAX 256
 
-    char pkgroot[1024];
-    dep_packages_root(pkgroot, sizeof(pkgroot));
+typedef struct {
+    char name[512];
+    char root[2048];
+    char via[512];      /* the package that required it; "" for the project */
+} DepNode;
 
-    for (int i = 0; i < count; i++) {
-        /* Quoted keys keep their quotes through the parser, and a
-         * dependency name is a path with dots so it is ALWAYS quoted in
-         * practice. Strip them, or every lookup and every message carries
-         * literal quote characters. */
-        char name_buf[512];
-        {
-            const char* k = deps[i].key;
-            if (!k || !*k) continue;
-            size_t kl = strlen(k);
-            if (kl >= 2 && k[0] == '"' && k[kl-1] == '"') {
-                snprintf(name_buf, sizeof(name_buf), "%.*s", (int)(kl - 2), k + 1);
-            } else {
-                snprintf(name_buf, sizeof(name_buf), "%s", k);
-            }
-        }
-        const char* name = name_buf;
+static bool same_source_file(const char* a, const char* b);
+
+/* A dependency key as written, without the quotes the TOML parser keeps. */
+static void dep_key_name(const char* k, char* out, size_t osz) {
+    out[0] = '\0';
+    if (!k || !*k) return;
+    size_t kl = strlen(k);
+    if (kl >= 2 && k[0] == '"' && k[kl - 1] == '"') {
+        snprintf(out, osz, "%.*s", (int)(kl - 2), k + 1);
+    } else {
+        snprintf(out, osz, "%s", k);
+    }
+}
+
+/* The [patch] path `doc` gives `name`, or NULL. Keys are matched both bare
+ * and quoted, as dep_override_for does. */
+static const char* dep_patch_in(TomlDocument* doc, const char* name, char* buf, size_t bsz) {
+    if (!doc) return NULL;
+    const char* p = toml_get_value(doc, "patch", name);
+    if (!p || !*p) {
+        char quoted[520];
+        snprintf(quoted, sizeof(quoted), "\"%s\"", name);
+        p = toml_get_value(doc, "patch", quoted);
+    }
+    if (!p || !*p) return NULL;
+    return dep_unwrap_patch_value(p, buf, bsz, name);
+}
+
+/* Queue every [dependencies] entry of `doc`. `pkg_root` is the declaring
+ * package's root, NULL for the project manifest itself (`root_doc`).
+ * Returns -1 when a package resolves to two places, else 0. */
+static int dep_graph_enqueue(DepNode* nodes, int* count, TomlDocument* root_doc,
+                             TomlDocument* doc, const char* pkg_root,
+                             const char* via, const char* pkgroot) {
+    int n_entries = 0;
+    TomlKeyValue* deps = toml_get_section_entries(doc, "dependencies", &n_entries);
+    if (!deps || n_entries <= 0) return 0;
+    int status = 0;
+    for (int i = 0; i < n_entries; i++) {
+        char name[512];
+        dep_key_name(deps[i].key, name, sizeof(name));
         if (!*name) continue;
 
-        int ovr_from_manifest = 0;
-        const char* ovr = dep_override_for(doc, name, &ovr_from_manifest);
         char root[2048];
+        char rel[2048];
+        char unwrapped[1024];
+        int overridden = 1;
+        int from_manifest = 0;
+        const char* ovr = dep_override_for(root_doc, name, &from_manifest);
         if (ovr) {
-            /* A [patch] path is stated relative to the manifest, which may be
-             * an ancestor's under the no-chdir commands (#2148). */
-            char rel[2048];
+            /* The project's own [patch] is relative to the project manifest,
+             * which may be an ancestor's under the no-chdir commands (#2148);
+             * a --override path is the one the user typed at the cwd. */
             snprintf(root, sizeof(root), "%s",
-                     ovr_from_manifest ? manifest_relative(ovr, rel, sizeof(rel)) : ovr);
+                     from_manifest ? manifest_relative(ovr, rel, sizeof(rel)) : ovr);
+        } else if (pkg_root &&
+                   (ovr = dep_patch_in(doc, name, unwrapped, sizeof(unwrapped))) != NULL) {
+            if (path_is_absolute_any(ovr)) snprintf(root, sizeof(root), "%s", ovr);
+            else snprintf(root, sizeof(root), "%s/%s", pkg_root, ovr);
+        } else {
+            overridden = 0;
+            snprintf(root, sizeof(root), "%s/%s", pkgroot, name);
+        }
+
+        int seen = -1;
+        for (int j = 0; j < *count; j++) {
+            if (strcmp(nodes[j].name, name) == 0) { seen = j; break; }
+        }
+        if (seen >= 0) {
+            if (!same_source_file(nodes[seen].root, root)) {
+                fprintf(stderr,
+                    "Error: dependency '%s' resolves to two places:\n"
+                    "         %s (required by %s)\n"
+                    "         %s (required by %s)\n"
+                    "       One build can use only one. Patch it in the project's\n"
+                    "       aether.toml to choose: [patch] \"%s\" = \"<path>\"\n",
+                    name,
+                    nodes[seen].root, nodes[seen].via[0] ? nodes[seen].via : "the project",
+                    root, via[0] ? via : "the project", name);
+                status = -1;
+            }
+            continue;
+        }
+
+        if (overridden) {
             /* An overridden build MUST say so. The failure this prevents is a
              * green local run against a working copy CI does not have --
              * named explicitly in the reporting ask, and the reason Cargo
@@ -2248,20 +2320,72 @@ void ae_resolve_dependencies(void) {
                     "Error: override path for '%s' does not exist: %s\n", name, root);
                 continue;
             }
-        } else {
-            snprintf(root, sizeof(root), "%s/%s", pkgroot, name);
-            if (!dir_exists(root)) {
-                /* Name the missing dependency and the fix, rather than
-                 * letting it surface later as an unknown-module error. */
+        } else if (!dir_exists(root)) {
+            /* Name the missing dependency and the fix, rather than letting it
+             * surface later as an unknown-module error. */
+            if (via[0]) {
+                fprintf(stderr,
+                    "Error: dependency '%s' (required by %s) is not installed. Run:\n"
+                    "    ae add %s\n", name, via, name);
+            } else {
                 fprintf(stderr,
                     "Error: dependency '%s' is not installed. Run:\n"
                     "    ae add %s\n", name, name);
-                continue;
             }
+            continue;
         }
-        dep_append_module_roots(root, name);
+
+        if (*count >= DEP_GRAPH_MAX) {
+            fprintf(stderr, "Error: more than %d packages in the dependency graph\n",
+                    DEP_GRAPH_MAX);
+            return -1;
+        }
+        DepNode* node = &nodes[(*count)++];
+        snprintf(node->name, sizeof(node->name), "%s", name);
+        snprintf(node->root, sizeof(node->root), "%s", root);
+        snprintf(node->via, sizeof(node->via), "%s", via);
     }
+    return status;
+}
+
+/* Resolve [dependencies] from the project manifest, and each dependency's
+ * own, onto the module search path. Safe to call when there is no manifest
+ * and no dependencies. Returns -1 when the graph is inconsistent (a package
+ * resolving to two places); the caller stops rather than build against one
+ * of them. */
+int ae_resolve_dependencies(void) {
+    if (!path_exists(ae_manifest_path())) return 0;
+    TomlDocument* doc = toml_parse_file(ae_manifest_path());
+    if (!doc) return 0;
+
+    char pkgroot[1024];
+    dep_packages_root(pkgroot, sizeof(pkgroot));
+
+    DepNode* nodes = calloc(DEP_GRAPH_MAX, sizeof(DepNode));
+    if (!nodes) { toml_free_document(doc); return -1; }
+    int count = 0;
+    int status = dep_graph_enqueue(nodes, &count, doc, doc, NULL, "", pkgroot);
+
+    for (int i = 0; i < count; i++) {
+        dep_append_module_roots(nodes[i].root, nodes[i].name);
+        char manifest[2100];
+        snprintf(manifest, sizeof(manifest), "%s/aether.toml", nodes[i].root);
+        if (!path_exists(manifest)) continue;
+        TomlDocument* pdoc = toml_parse_file(manifest);
+        if (!pdoc) continue;
+        char via[512];
+        snprintf(via, sizeof(via), "%s", nodes[i].name);
+        char pkg_root[2048];
+        snprintf(pkg_root, sizeof(pkg_root), "%s", nodes[i].root);
+        if (dep_graph_enqueue(nodes, &count, doc, pdoc, pkg_root, via, pkgroot) < 0) {
+            status = -1;
+        }
+        toml_free_document(pdoc);
+    }
+
+    free(nodes);
     toml_free_document(doc);
+    return status;
 }
 
 /* The project's `[build] defines`, appended to whatever -D the command line
@@ -4515,7 +4639,7 @@ static int cmd_run(int argc, char** argv) {
 
     /* #1901: [dependencies] join the module search path, after the caller's
      * own --lib flags so an explicit path still wins. */
-    ae_resolve_dependencies();
+    if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
@@ -6793,7 +6917,7 @@ static int cmd_build(int argc, char** argv) {
      * flag handling. `ae build sub/thing.ae` from a subdirectory chdirs to
      * the project root here; resolving before that would read no manifest
      * (or the wrong one) and silently produce an empty search path. */
-    ae_resolve_dependencies();
+    if (ae_resolve_dependencies() < 0) return 1;
     /* The project's `[build] defines`, for the same reason: read before the
      * walk-up they were found only from the project root, so the same
      * `ae build src/app.ae` compiled a different program from `src/`. */
@@ -9236,7 +9360,7 @@ static int cmd_lib_path(int argc, char** argv) {
      * worst for the shell-script fallback above, which would silently hand
      * `--lib` an empty chain. */
     find_and_chdir_to_aether_toml(NULL);
-    ae_resolve_dependencies();
+    if (ae_resolve_dependencies() < 0) return 1;
     if (tc.lib_dir_count == 0) {
         fputs("lib\n", stdout);
         return 0;

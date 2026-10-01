@@ -98,6 +98,36 @@ retry.
 send buffer than the default. `set_broadcast(sock, true)` allows sends to a
 broadcast address for LAN discovery.
 
+## Datagrams in `byte[]` slices
+
+Each send and receive has a slice form that carries the length with the
+data instead of beside it: `send_slice_to(sock, host, port, s)` and
+`send_slice_to_addr(sock, addr, s)` send one datagram of exactly `s.len`
+bytes (zero bytes included; a sub-slice such as `frame[4..n]` works as it
+is), and `recv_slice_from(sock, buf)` and `recv_slice_from_into(sock, buf,
+addr)` receive into a caller-owned slice and return the count, the datagram
+being `buf[0..n]`. A receive never writes past `buf.len`. The errors are the
+pointer forms' (`"would block"` when idle), plus `"receive buffer is empty"`
+for an empty slice, which consumes nothing; a slice with no bound (`p as
+byte[]`, `.len` -1) panics.
+
+**Truncation.** A datagram longer than the receive slice delivers its first
+`buf.len` bytes and the OS discards the rest: it is not kept for the next
+receive, on Linux, macOS and Windows alike, and the count is `buf.len`. A
+receiver that must tell a full fit from a truncated packet sizes the slice
+one byte larger than the largest datagram it accepts and treats
+`n == buf.len` as too long.
+
+```aether,fragment
+peer = udp.addr_new()
+frame = bytes.capacity_view(buf)     // the buffer's whole storage, bounded
+while true {
+    n, err = udp.recv_slice_from_into(sock, frame, peer)
+    if err != "" { break }           // "would block": drained for this tick
+    handle(peer, frame[0..n])
+}
+```
+
 ## IPv4 and IPv6
 
 `bind("0.0.0.0", port)` (or `""`) takes every IPv4 interface, `bind("::", port)`
@@ -111,4 +141,5 @@ v4 and a v6 address.
 `bind`, `local_port`, `close`, `fd`, `poll`, `set_buffer_sizes`,
 `set_broadcast`, `resolve`, `addr_new`, `addr_clone`, `addr_free`,
 `addr_host`, `addr_port`, `addr_string`, `addr_equal`, `addr_hash`,
-`send_to`, `send_to_addr`, `recv_from`, `recv_from_into`.
+`send_to`, `send_to_addr`, `recv_from`, `recv_from_into`, `send_slice_to`,
+`send_slice_to_addr`, `recv_slice_from`, `recv_slice_from_into`.
