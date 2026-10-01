@@ -80,8 +80,8 @@ header comment is the authoritative description.
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 99 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 32 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
-| `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 39 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 36 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 43 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
 | `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [guide](../std/tsid/README.md) · [source](../std/tsid/module.ae) |
@@ -2629,12 +2629,26 @@ main() {
 - `tcp.write_n(sock, data, length)` → `(int, string)` - Length-aware write, return `(bytes_sent, err)`. Sends exactly the caller-supplied byte prefix, preserving embedded NUL bytes.
 - `tcp.read(sock, max)` → `(string, string)` - Read text-shaped data, return `(data, err)`. Use `tcp.read_n` for binary payloads.
 - `tcp.read_n(sock, max)` → `(string, int, string)` - Binary-safe read, return `(bytes, length, err)`. The returned length is authoritative for payloads with embedded NUL bytes.
+- `tcp.write_slice(sock, s: byte[])` → `(int, string)` - Send a slice's bytes, binary-safe (#2301). One `send(2)`: the count may be short, so loop on `s[sent..]`. A slice with no bound panics.
+- `tcp.read_into(sock, buf: byte[])` → `(int, string)` - One receive of at most `buf.len` bytes into a caller-owned slice, nothing allocated; the data is `buf[0..n]` (#2301). Errors as `read_n` (`"timeout"` keeps the socket), plus `"receive buffer is empty"` for an empty slice; a slice with no bound panics.
 - `tcp.listen(port)` → `(ptr, string)` - Create server socket
 - `tcp.accept(server)` → `(ptr, string)` - Accept connection
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-Raw externs: `tcp_connect_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+Raw externs: `tcp_connect_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+
+### UDP slices (`std.udp`)
+
+The datagram calls have `byte[]` forms (#2301), documented in full in
+[the module guide](../std/udp/README.md):
+
+- `udp.send_slice_to(sock, host, port, s: byte[])` → `(int, string)` - One datagram of exactly `s.len` bytes.
+- `udp.send_slice_to_addr(sock, addr, s: byte[])` → `(int, string)` - The same to a resolved address.
+- `udp.recv_slice_from(sock, buf: byte[])` → `(int, ptr, string)` - One datagram into `buf[0..n]`, with its sender (free with `addr_free`); `"would block"` when idle.
+- `udp.recv_slice_from_into(sock, buf: byte[], addr)` → `(int, string)` - The same, filling a caller-owned address.
+
+A receive never writes past `buf.len`. A datagram longer than the slice is truncated to `buf.len` bytes and the OS discards the rest on every platform, so size the slice one byte over the largest datagram accepted and treat `n == buf.len` as too long. An empty receive slice returns `"receive buffer is empty"` without consuming a datagram; a slice with no bound panics.
 
 ### Reactor-pattern async I/O (`await_io`)
 
