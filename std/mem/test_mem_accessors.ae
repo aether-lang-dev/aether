@@ -270,6 +270,49 @@ main() {
         }
     }
 
+    spec.describe(fw, "std.mem.compare_slice (#2301)") {
+        spec.it("compares equal slices as 0") callback {
+            a = make([]byte, 3)
+            a[0] = 1
+            a[1] = 2
+            a[2] = 3
+            b = make([]byte, 3)
+            b[0] = 1
+            b[1] = 2
+            b[2] = 3
+            spec.assert_eq(mem.compare_slice(a, b), 0, "identical slices")
+            free(a)
+            free(b)
+        }
+
+        spec.it("orders lexicographically on a byte difference") callback {
+            a = make([]byte, 3)
+            a[0] = 1
+            a[1] = 2
+            a[2] = 3
+            c = make([]byte, 3)
+            c[0] = 1
+            c[1] = 2
+            c[2] = 4
+            spec.assert_true(mem.compare_slice(a, c) < 0, "a sorts before c")
+            spec.assert_true(mem.compare_slice(c, a) > 0, "antisymmetric")
+            free(a)
+            free(c)
+        }
+
+        spec.it("never equates slices of different lengths") callback {
+            a = make([]byte, 3)
+            a[0] = 1
+            a[1] = 2
+            a[2] = 3
+            spec.assert_true(mem.compare_slice(a, a[0..2]) > 0,
+                "the longer slice, same shared prefix, sorts after")
+            spec.assert_true(mem.compare_slice(a[0..2], a) < 0,
+                "...and the shorter one sorts before it")
+            free(a)
+        }
+    }
+
     _rc = spec.run_summary(fw)
     arena.destroy(ar)
     return _rc

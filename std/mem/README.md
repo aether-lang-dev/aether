@@ -190,7 +190,11 @@ mem.fill_slice(v[40..48], 0)
 ```
 
 `read_u16_le` through `write_u64_be` have the widths and byte order of
-`get_u16_le` through `set_u64_be`.
+`get_u16_le` through `set_u64_be`. `compare_slice(a, b)` is `compare`'s
+slice form: lexicographic, comparing the overlapping prefix first and, if
+every shared byte matches, the shorter slice sorting first — two
+different-length slices are therefore never "equal" even when one is a
+prefix of the other.
 
 ## Exports
 
@@ -203,4 +207,4 @@ endian pairs `get_u16_le` through `set_u64_be`; `bits_of_float`,
 `set`, `copy_at`, `move_at`, `fill_at`, `compare_at`; `get_byte_sz`,
 `set_byte_sz`; `ptr_to_long`, `long_to_ptr`; `call_fn3_int`, `call_fn3_void`,
 `call_fn2_void`; `heap_in_use`; the slice forms `read_u16_le` through
-`write_u64_be`, `copy_slice` and `fill_slice`.
+`write_u64_be`, `copy_slice`, `fill_slice` and `compare_slice`.

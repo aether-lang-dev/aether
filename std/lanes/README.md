@@ -108,6 +108,30 @@ The packs take the hardware instruction (`packssdw` / `packuswb` on SSE2) where
 there is one and a clamped scalar loop otherwise; either way the result is the
 saturated value, never a wrapped one.
 
+## Slice-checked wrappers (#2301)
+
+Every load/store above takes a raw `ptr` and trusts the caller's bound, like
+`std.mem`'s accessors. The `_slice` siblings take a typed slice instead and
+check that the WHOLE vector width fits before decaying it to a pointer —
+`load4_slice`/`store4_slice` (`f32[]`), `load2_slice`/`store2_slice`
+(`float[]`), `i32load_slice`/`i32store_slice` (`int[]`),
+`i16load_slice`/`i16store_slice` (`uint16[]` — the lane width the array
+element type matches; there is no first-class signed 16-bit array element),
+and `pack_i16_u8_slice` (`out: byte[]`, needing room for all 16 bytes). An
+out-of-range call panics naming the lane count, the element index and the
+slice's length, rather than reading or writing past the buffer:
+
+```aether,fragment
+buf = make([]f32, 4)
+v = lanes.load4_slice(buf, 0) * lanes.splat4(0.5)
+lanes.store4_slice(buf, 0, v)
+lanes.load4_slice(buf, 1)   // panics: 4 lanes at element 1 need 5 elements, buf has 4
+```
+
+The raw `ptr` forms remain the right choice for a buffer that isn't an
+Aether slice at all — an external C buffer, or one reached through `std.mem`
+without going via `make`/a fixed array.
+
 ## Requirements
 
 The types lower to the GCC/Clang vector extensions
@@ -133,3 +157,7 @@ Integer: `i32x4`, `i32splat`, `i32load`, `i32store`, `i32lane`, `i32sum`,
 `i32max`; `i16x8`, `i16splat`, `i16load`, `i16store`, `i16lane`, `i16add`,
 `i16sub`, `i16mul`, `i16shl`, `i16shr`, `i16min`, `i16max`; `pack_i32_i16`,
 `pack_i16_u8`.
+
+Slice-checked: `load4_slice`, `store4_slice`, `load2_slice`, `store2_slice`,
+`i32load_slice`, `i32store_slice`, `i16load_slice`, `i16store_slice`,
+`pack_i16_u8_slice`.

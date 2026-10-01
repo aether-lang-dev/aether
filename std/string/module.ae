@@ -41,7 +41,8 @@ exports(
     strip_prefix, copy,
     string_format_list, format,
     string_glob_match_raw, glob_match, glob_match_pathname,
-    version_compare
+    version_compare,
+    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings
 )
 
 // String creation
@@ -759,4 +760,81 @@ version_compare(a: string, b: string) -> int {
     // Bases tie: the extensions break it (compare the FULL strings, as gnulib
     // does — the shared base re-compares as equal, then the extensions decide).
     return _verrevcmp(a, la, b, lb)
+}
+
+// ---- slice bridges (#2301) ----------------------------------------------
+
+// The raw data pointer behind `s`, whatever its representation (a plain
+// literal or a heap AetherString* — unwrapped the same way every other
+// FFI accessor in this module is). Exposed so `bytes()` below can bound it;
+// reach for `bytes(s)`, not this, unless you specifically need the bare
+// pointer.
+extern aether_string_raw_ptr(s: ptr) -> ptr
+
+// A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII
+// scanning (indexing, sub-slicing) without re-measuring the string on every
+// access the way string_char_at_n's separate known_length parameter does.
+// BORROWED: valid only as long as `s` itself is, exactly like any slice over
+// someone else's storage — do not free it, and do not write through it (an
+// AetherString's payload is shared via its refcount; a byte[] has no way to
+// mark that sharing const, so treat this view as read-only by convention).
+bytes(s: string) -> byte[] {
+    n = string_length(s)
+    if n <= 0 { return null }
+    return (aether_string_raw_ptr(s) as byte[])[0..n]
+}
+
+// A bounded, OWNED string[] snapshot of a native string-array handle's
+// contents (as returned by `string_split` et al.) — each element is an
+// independently owned, refcounted copy (the `string.concat(x, "")` idiom
+// documented above `string_array_get`), so the result safely outlives the
+// array: call `string_array_free(arr)` right after this returns. Prefer
+// `string_split_to_seq` when you don't need array/index shape at all; this
+// exists for call sites that do, without inheriting the array's borrowed-
+// pointer lifetime hazard.
+array_view(arr: ptr) -> string[] {
+    n = string_array_size(arr)
+    if n <= 0 { return null }
+    out = make([]string, n)
+    i = 0
+    while i < n {
+        out[i] = string_concat(string_array_get(arr, i), "")
+        i = i + 1
+    }
+    return out
+}
+
+// Build a *StringSeq from a plain string[] (e.g. a runtime slice that isn't
+// a `[...]` literal, where the compiler's own literal-to-seq lowering does
+// not apply). Built tail-first so the result preserves items' order;
+// string_seq_cons takes its own reference to each element, so items itself
+// is left untouched and may be freed/reused independently afterward.
+seq_from_strings(items: string[]) -> *StringSeq {
+    s = string_seq_empty()
+    i = items.len - 1
+    while i >= 0 {
+        s = string_seq_cons(items[i], s)
+        i = i - 1
+    }
+    return s
+}
+
+// The reverse: an OWNED string[] snapshot of a *StringSeq's elements, each
+// independently copied (same ownership idiom as array_view above), so the
+// result does not alias the sequence's own cells. Walks the seq directly —
+// it does not go through the AetherStringArray handle
+// string_seq_to_array returns, since that handle is its own opaque type,
+// not a raw string[].
+seq_to_strings(s: *StringSeq) -> string[] {
+    n = string_seq_length(s)
+    if n <= 0 { return null }
+    out = make([]string, n)
+    cur = s
+    i = 0
+    while i < n {
+        out[i] = string_concat(string_seq_head(cur), "")
+        cur = string_seq_tail(cur)
+        i = i + 1
+    }
+    return out
 }

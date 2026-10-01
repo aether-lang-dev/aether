@@ -8,6 +8,8 @@
 //     `err` returns and are the idiomatic way to call collections
 //     operations that can fail.
 
+import std.intarr
+
 exports(
     list_new, list_new_in, list_add_raw, list_get_raw, list_set, list_size,
     list_remove, list_clear, list_free,
@@ -16,7 +18,7 @@ exports(
     intarr_new_raw, intarr_new_filled_raw, intarr_size,
     intarr_get_raw, intarr_set_raw,
     intarr_get_unchecked, intarr_set_unchecked,
-    intarr_fill, intarr_free,
+    intarr_fill, intarr_free, intarr_view,
     string_list_new, string_list_add, string_list_get, string_list_set,
     string_list_size, string_list_remove, string_list_clear, string_list_free,
     string_list_sort, string_list_sort_lex,
@@ -86,6 +88,16 @@ extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
 extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
 extern intarr_fill(arr: ptr, value: int)
 extern intarr_free(arr: ptr)
+
+// A bounded int[] view of a native intarr handle, through this
+// compatibility facade (#2301) — the same bounded view std.intarr.array()
+// gives (v.len is intarr.size(arr), an out-of-range v[i] panics rather than
+// reading past the buffer), so a caller using only std.collections doesn't
+// need a second import to get it. BORROWED, not owned: valid until arr is
+// freed, same as array() itself.
+intarr_view(arr: ptr) -> int[] {
+    return intarr.array(arr)
+}
 
 // ---- StringList: refcount-aware list for AetherString values ----
 // The plain ArrayList stores items as raw `void*` and doesn't retain

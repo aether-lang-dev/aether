@@ -114,6 +114,24 @@ expect_match "Missing-import suggestion" \
     "is exported by std\.string|import std\.string" \
     "$AE" help "$TMPDIR/missing.ae"
 
+# Case 6b: the same suggestion for a name from the alphabetically LAST
+# std module. The export catalog used to be a fixed 2048-entry array
+# filled in readdir order, and std alone has over 2,300 exports, so
+# whatever the filesystem listed last was silently dropped — on NTFS,
+# where readdir is alphabetical, that was std.string's tail and all of
+# std.zstd, while ext4's hash order happened to keep them (#2338). A
+# name from the last module is the earliest casualty of any such cap,
+# whatever the ordering.
+cat > "$TMPDIR/missing_last.ae" <<EOF
+main() {
+    ok = zstd_backend_available()
+    println("\${ok}")
+}
+EOF
+expect_match "Missing-import suggestion from the last std module (catalog not truncated)" \
+    "is exported by std\.zstd|import std\.zstd" \
+    "$AE" help "$TMPDIR/missing_last.ae"
+
 # Case 7: --json output is valid JSON shape (starts with { ends with }).
 cat > "$TMPDIR/json.ae" <<EOF
 main() {

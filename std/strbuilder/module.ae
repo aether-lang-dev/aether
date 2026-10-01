@@ -205,12 +205,13 @@ finish(b: ptr) -> string {
 // protocol assembly (CBOR, msgpack, frames, packed records) where
 // the v1 `finish`'s NUL-terminated `string` would be truncated by a
 // strlen-based consumer downstream. The caller owns the returned
-// pointer and MUST free it with a raw libc free (e.g. via
-// `mem`-style handling) — position 0 is `ptr`, so it is not
-// codegen-heap-tracked. An empty builder yields a non-null buffer
-// with length 0. After this call `b` is invalid.
-finish_with_length(b: ptr) -> (ptr, int) {
-    return aether_strbuilder_finish_with_length(b)
+// slice and MUST free it with `free()` (it decays to the same raw
+// libc pointer `aether_strbuilder_finish_with_length` always
+// returned; still not codegen-heap-tracked). An empty builder yields
+// a non-null, zero-length slice. After this call `b` is invalid.
+finish_with_length(b: ptr) -> byte[] {
+    data, len = aether_strbuilder_finish_with_length(b)
+    return (data as byte[])[0..len]
 }
 
 // Discard the builder without producing a string. Idempotent on

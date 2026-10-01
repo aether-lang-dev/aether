@@ -1,0 +1,96 @@
+// std.lanes unit tests (#1584) — co-located with the module.
+//
+// Scoped to the slice-checked wrappers added for #2301: load4_slice,
+// store4_slice, load2_slice, store2_slice, i32load_slice, i32store_slice,
+// i16load_slice, i16store_slice and pack_i16_u8_slice. The raw-ptr lane
+// operations these wrap (f32x4/f64x2/i32x4/i16x8 arithmetic, masks, select,
+// the saturating packs) are exercised end-to-end by the shell-driven
+// integration suites at tests/integration/lane_types, lane_integer and
+// lane_math, which this file does not repeat.
+
+import std.spec
+import std.lanes
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.lanes slice-checked wrappers (#2301)") {
+        spec.it("store4_slice/load4_slice round-trip four f32 lanes") callback {
+            buf = make([]f32, 4)
+            lanes.store4_slice(buf, 0, lanes.f32x4(1.0, 2.0, 3.0, 4.0))
+            v = lanes.load4_slice(buf, 0)
+            spec.assert_true(lanes.sum4(v) == 10.0, "1+2+3+4")
+            free(buf)
+        }
+
+        spec.it("load4_slice panics when the vector does not fit") callback {
+            buf = make([]f32, 4)
+            caught = false
+            try {
+                _v = lanes.load4_slice(buf, 1) // needs elements 1..5, buf has 4
+            } catch e {
+                caught = true
+            }
+            spec.assert_true(caught, "4 lanes at element 1 do not fit a 4-element buffer")
+            free(buf)
+        }
+
+        spec.it("load4_slice panics on a negative index") callback {
+            buf = make([]f32, 4)
+            caught = false
+            try {
+                _v = lanes.load4_slice(buf, -1)
+            } catch e {
+                caught = true
+            }
+            spec.assert_true(caught, "a negative index is always out of range")
+            free(buf)
+        }
+
+        spec.it("store2_slice/load2_slice round-trip two f64 lanes") callback {
+            buf = make([]float, 2)
+            lanes.store2_slice(buf, 0, lanes.f64x2(1.5, 2.5))
+            v = lanes.load2_slice(buf, 0)
+            spec.assert_true(lanes.sum2(v) == 4.0, "1.5+2.5")
+            free(buf)
+        }
+
+        spec.it("i32store_slice/i32load_slice round-trip four int32 lanes") callback {
+            buf = make([]int, 4)
+            lanes.i32store_slice(buf, 0, lanes.i32x4(10, 20, 30, 40))
+            v = lanes.i32load_slice(buf, 0)
+            spec.assert_eq_long(lanes.i32sum(v), 100, "10+20+30+40")
+            free(buf)
+        }
+
+        spec.it("i16store_slice/i16load_slice round-trip eight int16 lanes") callback {
+            buf = make([]uint16, 8)
+            lanes.i16store_slice(buf, 0, lanes.i16splat(7))
+            v = lanes.i16load_slice(buf, 0)
+            spec.assert_eq_long(lanes.i16lane(v, 3), 7, "every lane splatted to 7")
+            free(buf)
+        }
+
+        spec.it("pack_i16_u8_slice writes both halves and saturates") callback {
+            out = make([]byte, 16)
+            lanes.pack_i16_u8_slice(lanes.i16splat(300), lanes.i16splat(5), out)
+            spec.assert_eq(out[0], 255, "300 saturates to 255 in the low half")
+            spec.assert_eq(out[8], 5, "5 passes through unsaturated in the high half")
+            free(out)
+        }
+
+        spec.it("pack_i16_u8_slice panics when `out` is too small") callback {
+            out = make([]byte, 15)
+            caught = false
+            try {
+                lanes.pack_i16_u8_slice(lanes.i16splat(1), lanes.i16splat(2), out)
+            } catch e {
+                caught = true
+            }
+            spec.assert_true(caught, "16 output bytes do not fit a 15-byte slice")
+            free(out)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

@@ -75,6 +75,7 @@ exports(
     get_u64_le, get_u64_be, set_u64_le, set_u64_be,
     read_u16_le, write_u16_le, read_u16_be, write_u16_be, read_u32_le, write_u32_le,
     read_u32_be, write_u32_be, read_u64_le, write_u64_le, read_u64_be, write_u64_be, copy_slice, fill_slice,
+    compare_slice,
     aether_heap_in_use, heap_in_use
 )
 
@@ -485,4 +486,19 @@ copy_slice(dst: byte[], src: byte[]) -> int {
 fill_slice(s: byte[], value: int) {
     slice_span("fill_slice", s, 0, s.len)
     aether_mem_set_bulk(s, value, s.len)
+}
+
+// Lexicographic byte comparison, <0 / 0 / >0 as mem.compare: compares the
+// overlapping prefix (the shorter of the two lengths) first, and if every
+// shared byte matches, the shorter slice sorts first. Two different-length
+// slices are therefore never "equal" even when one is a prefix of the
+// other — check `.len` yourself first if that is the equality you want.
+compare_slice(a: byte[], b: byte[]) -> int {
+    n = a.len
+    if b.len < n { n = b.len }
+    c = aether_mem_compare(a, b, n)
+    if c != 0 { return c }
+    if a.len < b.len { return -1 }
+    if a.len > b.len { return 1 }
+    return 0
 }

@@ -158,6 +158,18 @@ main() {
                 "the unchecked reader sees a checked write")
             collections.intarr_free(arr)
         }
+
+        spec.it("intarr_view gives the same bounded view as std.intarr.array() (#2301)") callback {
+            arr = collections.intarr_new_raw(3)
+            collections.intarr_set_raw(arr, 0, 10)
+            collections.intarr_set_raw(arr, 1, 20)
+            collections.intarr_set_raw(arr, 2, 30)
+            v = collections.intarr_view(arr)
+            spec.assert_eq(v.len, 3, "bounded by the real size")
+            spec.assert_eq(v[0], 10, "slot 0")
+            spec.assert_eq(v[2], 30, "slot 2")
+            collections.intarr_free(arr)
+        }
     }
 
     return spec.run_summary(fw)

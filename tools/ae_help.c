@@ -81,7 +81,7 @@
 #define AE_HELP_MAX_LINES       8192
 #define AE_HELP_MAX_LINE_LEN    1024
 #define AE_HELP_MAX_IMPORTS     64
-#define AE_HELP_MAX_EXPORTS     2048   /* All-stdlib + lib export catalog */
+#define AE_HELP_EXPORTS_INITIAL 4096   /* export catalog's first allocation; it grows */
 #define AE_HELP_NAME_LEN        64
 #define AE_HELP_PATH_LEN        1024
 #define AE_HELP_MSG_LEN         512
@@ -145,6 +145,20 @@ typedef struct {
     char module_name[AE_HELP_NAME_LEN]; /* "std.os" */
     char export_name[AE_HELP_NAME_LEN]; /* "exec" */
 } ExportEntry;
+
+/* Every `exports (...)` name from std/ plus the `--lib` directories.
+ * Growable and never capped: std alone is past 2,300 names, and the
+ * fixed 2048-entry array this replaced filled up in readdir order and
+ * silently dropped whatever the filesystem listed last. On NTFS that
+ * order is alphabetical, so std.string's tail (and all of std.zstd)
+ * went missing on Windows while ext4's hash order happened to keep
+ * them — one extra export in a module before `string` was enough to
+ * push `string_length` out (#2338). */
+typedef struct {
+    ExportEntry* items;
+    int count;
+    int cap;
+} ExportCatalog;
 
 /* CLI flags — packed for clarity. */
 typedef struct {
@@ -215,8 +229,8 @@ static void help_lib_append(const char* spec) {
 static int  load_source(const char* path, SourceFile* sf);
 static void free_source(SourceFile* sf);
 static int  scan_imports(SourceFile* sf, char imports[][AE_HELP_NAME_LEN], int max);
-static int  load_stdlib_export_catalog(ExportEntry* out, int max);
-static int  load_lib_export_catalog(ExportEntry* out, int max, int already);
+static void load_stdlib_export_catalog(ExportCatalog* cat);
+static void load_lib_export_catalog(ExportCatalog* cat);
 static int  run_aetherc_capture(const char* script_path, char* stderr_buf, size_t buf_size);
 static int  parse_aetherc_findings(const char* stderr_buf, Finding* findings, int max);
 static int  levenshtein(const char* a, const char* b);
@@ -405,17 +419,14 @@ int ae_help_main(int argc, char** argv) {
     /* Phase 3 — load stdlib export catalog. One scan over each
      * std/<module>/module.ae (~30 files, ~50 ms). Used for
      * Levenshtein scoring AND missing-import suggestions. */
-    ExportEntry* exports = malloc(sizeof(ExportEntry) * AE_HELP_MAX_EXPORTS);
-    if (!exports) {
-        fprintf(stderr, "ae help: out of memory\n");
-        free_source(&sf);
-        return 1;
-    }
-    int n_exports = load_stdlib_export_catalog(exports, AE_HELP_MAX_EXPORTS);
+    ExportCatalog catalog = { NULL, 0, 0 };
+    load_stdlib_export_catalog(&catalog);
     /* Extend the catalog with every `--lib` directory's modules, so
      * Levenshtein suggestions and missing-import detection draw on
      * project-library exports too — not just stdlib. */
-    n_exports = load_lib_export_catalog(exports, AE_HELP_MAX_EXPORTS, n_exports);
+    load_lib_export_catalog(&catalog);
+    ExportEntry* exports = catalog.items;   /* NULL only when nothing was found */
+    int n_exports = catalog.count;
 
     /* Phase 4 — invoke aetherc with stderr captured. Findings come
      * from its already-structured `error[Eabcd]:` lines. */
@@ -621,17 +632,38 @@ static int resolve_std_root(char* out, size_t out_size) {
     return -1;
 }
 
-/* Parse `exports ( ident, ident, ident )` blocks from `module_path`.
- * Block can span multiple lines. Comments (`//`) are stripped. */
-static int parse_module_exports(const char* module_path,
-                                const char* module_name,
-                                ExportEntry* out, int max, int already) {
+/* Append one export to the catalog, growing it by doubling. Returns -1
+ * only on allocation failure, in which case the catalog keeps what it
+ * already holds and the caller stops adding. */
+static int catalog_push(ExportCatalog* cat, const char* module_name,
+                        const char* name, size_t len) {
+    if (cat->count == cat->cap) {
+        int ncap = cat->cap ? cat->cap * 2 : AE_HELP_EXPORTS_INITIAL;
+        ExportEntry* grown = realloc(cat->items, sizeof(ExportEntry) * (size_t)ncap);
+        if (!grown) return -1;
+        cat->items = grown;
+        cat->cap = ncap;
+    }
+    ExportEntry* e = &cat->items[cat->count];
+    safe_strncpy(e->module_name, module_name, sizeof(e->module_name));
+    memcpy(e->export_name, name, len);
+    e->export_name[len] = '\0';
+    cat->count++;
+    return 0;
+}
+
+/* Parse `exports ( ident, ident, ident )` blocks from `module_path`
+ * into the catalog. Block can span multiple lines. Comments (`//`)
+ * are stripped. */
+static void parse_module_exports(const char* module_path,
+                                 const char* module_name,
+                                 ExportCatalog* cat) {
     FILE* f = fopen(module_path, "rb");
-    if (!f) return already;
+    if (!f) return;
     char line[AE_HELP_MAX_LINE_LEN];
     int in_exports = 0;
-    int n = already;
-    while (fgets(line, sizeof(line), f) && n < max) {
+    int oom = 0;
+    while (!oom && fgets(line, sizeof(line), f)) {
         /* Strip line comments. */
         char* c = strstr(line, "//");
         if (c) *c = '\0';
@@ -655,7 +687,7 @@ static int parse_module_exports(const char* module_path,
             }
         }
         /* Read identifiers separated by commas; terminate on `)`. */
-        while (*p && n < max) {
+        while (*p && !oom) {
             while (*p == ' ' || *p == '\t' || *p == ',') p++;
             if (*p == ')') { in_exports = 0; break; }
             if (!*p) break;
@@ -663,31 +695,26 @@ static int parse_module_exports(const char* module_path,
             while (*p && (isalnum((unsigned char)*p) || *p == '_')) p++;
             size_t len = (size_t)(p - s);
             if (len > 0 && len < AE_HELP_NAME_LEN) {
-                safe_strncpy(out[n].module_name, module_name, sizeof(out[n].module_name));
-                memcpy(out[n].export_name, s, len);
-                out[n].export_name[len] = '\0';
-                n++;
+                if (catalog_push(cat, module_name, s, len) != 0) oom = 1;
             }
         }
     }
     fclose(f);
-    return n;
 }
 
-static int load_stdlib_export_catalog(ExportEntry* out, int max) {
+static void load_stdlib_export_catalog(ExportCatalog* cat) {
     char root[AE_HELP_PATH_LEN];
-    if (resolve_std_root(root, sizeof(root)) != 0) return 0;
+    if (resolve_std_root(root, sizeof(root)) != 0) return;
 
     char std_dir[AE_HELP_PATH_LEN];
     if (path_format(std_dir, sizeof(std_dir), "%s%cstd", root, PATH_SEP) != 0) {
-        return 0;
+        return;
     }
     DIR* d = opendir(std_dir);
-    if (!d) return 0;
+    if (!d) return;
 
-    int n = 0;
     struct dirent* entry;
-    while ((entry = readdir(d)) != NULL && n < max) {
+    while ((entry = readdir(d)) != NULL) {
         if (entry->d_name[0] == '.') continue;
         /* Each std/<mod>/module.ae is the canonical export source. */
         char mod_path[AE_HELP_PATH_LEN];
@@ -702,10 +729,9 @@ static int load_stdlib_export_catalog(ExportEntry* out, int max) {
          * module has a name that long anyway. path_format returns -1 on
          * truncation, which we honour by skipping the entry. */
         if (path_format(mod_name, sizeof(mod_name), "std.%s", entry->d_name) != 0) continue;
-        n = parse_module_exports(mod_path, mod_name, out, max, n);
+        parse_module_exports(mod_path, mod_name, cat);
     }
     closedir(d);
-    return n;
 }
 
 /* Append the export catalogs of every `--lib` directory. For each
@@ -713,16 +739,15 @@ static int load_stdlib_export_catalog(ExportEntry* out, int max) {
  * parsed under the bare module name `<name>` — that is how a project
  * library is imported (`import build`, not `import std.build`), so
  * the Levenshtein / missing-import scopes match the script's call
- * sites. `already` carries the running count from the stdlib pass so
- * both catalogs share one array. */
-static int load_lib_export_catalog(ExportEntry* out, int max, int already) {
-    int n = already;
-    for (int li = 0; li < g_lib_count && n < max; li++) {
+ * sites. Appends to the catalog the stdlib pass filled, so both share
+ * one array. */
+static void load_lib_export_catalog(ExportCatalog* cat) {
+    for (int li = 0; li < g_lib_count; li++) {
         DIR* d = opendir(g_lib_dirs[li]);
         if (!d) continue;  /* a bad --lib dir is the wrapped aetherc's
                             * problem to report, not ours */
         struct dirent* entry;
-        while ((entry = readdir(d)) != NULL && n < max) {
+        while ((entry = readdir(d)) != NULL) {
             if (entry->d_name[0] == '.') continue;
             char mod_path[AE_HELP_PATH_LEN];
             if (path_format(mod_path, sizeof(mod_path), "%s%c%s%cmodule.ae",
@@ -730,11 +755,10 @@ static int load_lib_export_catalog(ExportEntry* out, int max, int already) {
                             PATH_SEP) != 0) continue;
             struct stat st;
             if (stat(mod_path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-            n = parse_module_exports(mod_path, entry->d_name, out, max, n);
+            parse_module_exports(mod_path, entry->d_name, cat);
         }
         closedir(d);
     }
-    return n;
 }
 
 /* === aetherc subprocess ============================================ */
