@@ -185,6 +185,13 @@ const char* string_to_cstr(const void* str);
 const char* aether_string_data(const void* s);
 size_t      aether_string_length(const void* s);
 
+// Same unwrap as aether_string_data, typed as a bare `void*` in both
+// directions (#2301) so it matches Aether's own `ptr` exactly — declaring
+// aether_string_data itself as an `extern` taking/returning `ptr` would
+// mismatch its real `const char*`/`const void*` C signature at the generated
+// call site. Used by std.string.bytes() to build a bounded byte[] view.
+void* aether_string_raw_ptr(const void* s);
+
 // Closure-capture ownership (#1398). capture_owned returns a pointer the
 // caller owns a reference to; release_captured gives it back.
 /* Allocates a refcounted string whose payload lives in the same block as its

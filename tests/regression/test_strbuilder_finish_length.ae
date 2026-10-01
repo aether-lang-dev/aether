@@ -92,11 +92,12 @@ main() {
         strbuilder.append_byte(b5, k % 256)
         k = k + 1
     }
-    raw, len5 = strbuilder.finish_with_length(b5)
+    raw = strbuilder.finish_with_length(b5)
+    len5 = raw.len
     ok5 = len5 == 300
     m = 0
     while m < 300 {
-        if mem.get_byte(raw, m) != m % 256 { ok5 = false }
+        if raw[m] != m % 256 { ok5 = false }
         m = m + 1
     }
     free(raw)

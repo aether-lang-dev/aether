@@ -24,7 +24,7 @@ header comment is the authoritative description.
 | `std.casper` | FreeBSD Casper service delegation. | 16 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
 | `std.cbor` | CBOR encoding and decoding (RFC 8949). | 45 | [guide](../std/cbor/README.md) · [source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
-| `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 43 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
+| `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 12 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
 | `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 47 | [full section](#cryptography-stdcryptography) |
 | `std.decimal` | Arbitrary-precision decimal fixed-point arithmetic with explicit rounding modes, for money math. | 43 | [guide](../std/decimal/README.md) · [source](../std/decimal/module.ae) |
@@ -47,14 +47,14 @@ header comment is the authoritative description.
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
-| `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 72 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
+| `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 81 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 16 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 124 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 125 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -77,7 +77,7 @@ header comment is the authoritative description.
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 35 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 94 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 99 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 32 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
@@ -897,6 +897,7 @@ main() {
 - `string.substring(str, start, end)` - Extract substring
 - `string.substring_n(str, str_len_bytes, start, end)` - Length-aware sibling. Caller threads the source length through; `str_len(s)` is not consulted internally. Reach for this when `str` arrived as a `string`-typed parameter at a function boundary AND the content may contain embedded NULs, see [c-interop.md § Passing string values into C externs (auto-unwrap)](c-interop.md#passing-string-values-into-c-externs-auto-unwrap). Without it, the auto-unwrap strips the AetherString header at the call site, `str_len` falls through to `strlen`, and binary content gets truncated at the first NUL.
 - `string.length_n(str, known_length)` - Identity helper that documents intent. In code that receives a `string` parameter plus an explicit length, the explicit length IS the truth, don't consult the AetherString header. `n = string.length_n(s, n)` reads as "yes I know my length" instead of looking like a forgotten `string.length(s)` that would have truncated at NUL.
+- `string.bytes(s)` → `byte[]` (#2301) - A bounded, read-only view of `s`'s own bytes, for binary/ASCII scanning by indexing (`v[i]`) or sub-slicing instead of repeated `char_at_n` calls. BORROWED: valid only as long as `s` is; never free it or write through it.
 - `string.to_upper(str)` - Convert to uppercase (returns new string)
 - `string.to_lower(str)` - Convert to lowercase (returns new string)
 - `string.trim(str)` - Remove leading/trailing whitespace
@@ -906,6 +907,7 @@ main() {
 - `string.array_size(arr)` - Get number of parts in split result
 - `string.array_get(arr, index)` - Get string at index from split result
 - `string.array_free(arr)` - Free split result array
+- `string.array_view(arr)` → `string[]` (#2301) - A bounded, OWNED snapshot of a split result: every element is an independently copied, refcounted string, so the returned slice safely outlives `arr` — call `string.array_free(arr)` right after this returns, unlike `string.array_get`'s borrowed pointers (see the lifetime warning in `std/string/module.ae`). Prefer `split_to_seq` when you don't need array/index shape at all.
 - `string.split_to_seq(str, delimiter)` - Split into a `*StringSeq` cons-cell list (Erlang/Elixir-shaped). Same split semantics as `string.split`, but returns the result as an O(1) head/tail/cons/length linked list with refcount-aware structural sharing. Use this when the result will be pattern-matched, walked recursively, or sent across an actor boundary as a message field. See [docs/sequences.md](sequences.md) for the full surface.
 - `string.strip_prefix(s, prefix)` → `(rest, stripped)` - If `s` starts with `prefix`, returns the remainder and 1. Otherwise returns `s` and 0. Cleaner than manual `starts_with` + `substring` length arithmetic.
 
@@ -925,6 +927,8 @@ main() {
 - `string.seq_free(s)` iterative spine walk; stops at shared cells
 - `string.seq_from_array(arr, count)` → `*StringSeq` build from an `AetherStringArray*` (the shape `string.split` returns)
 - `string.seq_to_array(s)` → `ptr` materialise as `AetherStringArray*` for legacy callers; free with `string.array_free`
+- `string.seq_from_strings(items)` → `*StringSeq` (#2301) build directly from a plain `string[]` — for a runtime slice that isn't a `[...]` literal, where the compiler's own literal-to-seq lowering doesn't apply. `items` itself is untouched; each element is independently retained into the new seq.
+- `string.seq_to_strings(s)` → `string[]` (#2301) the reverse: an owned `string[]` snapshot of a seq's elements (each independently copied), walking the seq directly rather than through the `AetherStringArray` handle `seq_to_array` returns.
 - `string.seq_reverse(s)` → `*StringSeq` O(n), fresh independent spine
 - `string.seq_concat(a, b)` → `*StringSeq` O(|a|), `a` copied, `b` shared via refcount bump
 - `string.seq_take(s, n)` → `*StringSeq` first `n` elements (clamped to length, negative yields empty); fresh independent spine

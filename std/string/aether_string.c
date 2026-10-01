@@ -793,6 +793,10 @@ const char* aether_string_data(const void* s) {
     return str_data(s);
 }
 
+void* aether_string_raw_ptr(const void* s) {
+    return (void*)str_data(s);
+}
+
 size_t aether_string_length(const void* s) {
     return str_len(s);
 }

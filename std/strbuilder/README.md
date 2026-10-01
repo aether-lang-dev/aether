@@ -54,10 +54,11 @@ input, a hang on a production-sized one, with the right answer throughout.)
 Because the length travels with the string, content appended with `append_n`
 that contains NUL bytes survives `finish` in full too.
 
-`finish_with_length` returns `(ptr, int)`: a raw buffer with no NUL terminator
-appended, for binary protocol assembly where the bytes are handed to C or
-freed by the caller. It shifts the content down over the block's header, so
-it costs one `memmove` of the content and no allocation.
+`finish_with_length` returns a bounded `byte[]` (#2301): a raw buffer with no
+NUL terminator appended, for binary protocol assembly where the bytes are
+handed to C or freed by the caller — `free(result)` decays to the same raw
+libc pointer it always returned. It shifts the content down over the block's
+header, so it costs one `memmove` of the content and no allocation.
 
 ## Exports
 

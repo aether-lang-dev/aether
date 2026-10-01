@@ -38,6 +38,12 @@ size:  2
 so a request-scoped container can be carved from an arena and freed in one
 `arena.reset` rather than element by element.
 
+`intarr_view(arr)` (#2301) gives the same bounded `int[]` view
+`std.intarr.array()` does — `v.len` is `intarr_size(arr)`, and an
+out-of-range `v[i]` panics rather than reading past the buffer — through this
+facade's own import, so a caller using only `std.collections` doesn't need a
+second import to get it. Borrowed, not owned: valid until `arr` is freed.
+
 ## Exports
 
 `list_new`, `list_new_in`, `list_add`, `list_add_raw`, `list_get`,
@@ -47,4 +53,5 @@ so a request-scoped container can be carved from an arena and freed in one
 `map_keys_free`, `map_free`; `string_list_new`, `string_list_add`,
 `string_list_get`, `string_list_set`, `string_list_size`,
 `string_list_remove`, `string_list_clear`, `string_list_sort`,
-`string_list_sort_lex`, `string_list_free`; and the `intarr_*` forms.
+`string_list_sort_lex`, `string_list_free`; the `intarr_*` forms and
+`intarr_view`.

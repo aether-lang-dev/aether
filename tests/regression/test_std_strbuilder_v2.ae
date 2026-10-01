@@ -80,7 +80,8 @@ main() {
     // of the multi-byte UTF-8 sequences (0xE2, 0xF0, …) compare
     // cleanly. (string.char_at returns a C `char`, which sign-extends
     // 0x80-0xFF bytes on platforms where `char` is signed.)
-    d3, l3 = strbuilder.finish_with_length(b3)
+    d3 = strbuilder.finish_with_length(b3)
+    l3 = d3.len
     if l3 != 10 {
         println("  FAIL 3: finished length=${l3}, expected 10")
         exit(1)
@@ -137,7 +138,8 @@ main() {
     strbuilder.append_byte(b5, 65) // 'A'
     strbuilder.append_byte(b5, 0) // NUL — content, not terminator
     strbuilder.append_byte(b5, 66) // 'B'
-    data5, len5 = strbuilder.finish_with_length(b5)
+    data5 = strbuilder.finish_with_length(b5)
+    len5 = data5.len
     if len5 != 3 {
         println("  FAIL 5: length=${len5}, expected 3")
         exit(1)
@@ -153,7 +155,8 @@ main() {
 
     // Case 6: finish_with_length on an empty builder — non-null, 0.
     b6 = strbuilder.new(8)
-    data6, len6 = strbuilder.finish_with_length(b6)
+    data6 = strbuilder.finish_with_length(b6)
+    len6 = data6.len
     if len6 != 0 {
         println("  FAIL 6: empty length=${len6}, expected 0")
         exit(1)

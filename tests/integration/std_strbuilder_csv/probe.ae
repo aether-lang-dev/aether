@@ -6,8 +6,8 @@
 //
 // Two assertions:
 //   1. Correctness — one CSV build, verified byte-for-byte against
-//      the expected output, read back through the raw (ptr, len)
-//      pair that finish_with_length returns.
+//      the expected output, read back through the bounded byte[]
+//      slice that finish_with_length returns (#2301).
 //   2. No leak — 2000 build / finish_with_length / free cycles with
 //      RSS bounded. finish_with_length hands the caller a raw libc-
 //      freeable buffer (NOT codegen-heap-tracked, unlike finish);
@@ -70,7 +70,8 @@ emit_csv(b: ptr) {
 emit_and_free() -> int {
     b = strbuilder.new(64)
     emit_csv(b)
-    data, len = strbuilder.finish_with_length(b)
+    data = strbuilder.finish_with_length(b)
+    len = data.len
     free(data)
     return len
 }
@@ -81,17 +82,18 @@ main() {
     expected = "id,name,score\n0,alice,100\n2,carol,88\n"
     exp_len = string.length(expected)
 
-    // Assertion 1: byte-exact correctness via the raw (ptr, len) pair.
+    // Assertion 1: byte-exact correctness via the bounded slice.
     b = strbuilder.new(64)
     emit_csv(b)
-    data, len = strbuilder.finish_with_length(b)
+    data = strbuilder.finish_with_length(b)
+    len = data.len
     if len != exp_len {
         println("  FAIL: length ${len}, expected ${exp_len}")
         exit(1)
     }
     i = 0
     while i < len {
-        if mem.get_byte(data, i) != string.char_at(expected, i) {
+        if data[i] != string.char_at(expected, i) {
             println("  FAIL: byte ${i} mismatch")
             exit(1)
         }
