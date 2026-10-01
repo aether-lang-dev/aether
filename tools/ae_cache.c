@@ -426,6 +426,67 @@ static unsigned long long fnv64_file(const char* path) {
     return h;
 }
 
+/* Fold the module archives in one directory into `acc`, order-independently
+ * (directory order is not stable). libaether.a is hashed on its own and
+ * libaether_compiler.a is never linked into a program, so both are skipped. */
+static void hash_archives_in(const char* dir, unsigned long long* acc) {
+    char p[1500];
+#ifdef _WIN32
+    char pattern[1300];
+    snprintf(pattern, sizeof(pattern), "%s\\*.a", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const char* name = fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+#else
+    DIR* d = opendir(dir);
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        const char* name = e->d_name;
+        size_t n = strlen(name);
+        if (n < 3 || strcmp(name + n - 2, ".a") != 0) continue;
+#endif
+        if (strcmp(name, "libaether.a") == 0 || strcmp(name, "libaether_compiler.a") == 0)
+            continue;
+        snprintf(p, sizeof(p), "%s%s%s", dir, PATH_SEP, name);
+        *acc += fnv64_str(name) ^ fnv64_file(p);
+#ifdef _WIN32
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    }
+    closedir(d);
+#endif
+}
+
+/* The module archives a program's @link can pull in (-laether_sqlite
+ * -lsqlite3): `make contrib` leaves them in <dir of libaether.a>/contrib,
+ * `make install-contrib` beside libaether.a itself. They change the binary
+ * without changing any source the key sees, so switching contrib.sqlite
+ * between the vendored amalgamation and the system library (#1372), or
+ * rebuilding a veneer, served the previous link's binary as a cache hit.
+ * 0 when there are none. */
+static unsigned long long hash_contrib_archives(const char* lib_path) {
+    char dir[1200];
+    snprintf(dir, sizeof(dir), "%s", lib_path);
+    char* cut = strrchr(dir, '/');
+#ifdef _WIN32
+    char* bcut = strrchr(dir, '\\');
+    if (!cut || (bcut && bcut > cut)) cut = bcut;
+#endif
+    if (!cut) return 0;
+    *cut = '\0';
+    unsigned long long acc = 0;
+    hash_archives_in(dir, &acc);
+    char sub[1300];
+    snprintf(sub, sizeof(sub), "%s%scontrib", dir, PATH_SEP);
+    hash_archives_in(sub, &acc);
+    return acc;
+}
+
 /* #1882: the exact-dependency cache key.
  *
  * On a warm run we prefer a depfile aetherc wrote on the previous (cold) build
@@ -690,6 +751,9 @@ unsigned long long compute_cache_key(const char* ae_file,
     if (tc.has_lib) {
         unsigned long long lib_hash = fnv64_file(tc.lib);
         if (lib_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=%016llx", lib_hash);
+        unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
+        if (contrib_hash)
+            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":contrib=%016llx", contrib_hash);
     }
 
     if (extra_files && extra_files[0]) {

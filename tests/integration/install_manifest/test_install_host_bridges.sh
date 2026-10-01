@@ -105,11 +105,15 @@ done
 sourced_count=$(echo "$sourced" | grep -c . || true)
 
 # No OTHER contrib .c file should have slipped through (the carve-out
-# is surgical): what ships is the host bridges plus the @source'd files.
+# is surgical): what ships is the host bridges, the @source'd files, and
+# contrib.sqlite's cross-build sources.
 shipped_c=$(find "$inst" -type f -name '*.c' | sort)
 extra=$(echo "$shipped_c" | while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in */contrib/host/*/aether_host_*.c) continue ;; esac
+    # contrib.sqlite's veneer and fetched amalgamation, which
+    # `ae build --target` compiles for the target (#1372).
+    case "$f" in */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;; esac
     echo "$sourced" | grep -qxF -- "$(physical "$f")" && continue
     echo "$f"
 done)

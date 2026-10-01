@@ -369,6 +369,71 @@ jobs:
   # Scoped to `make test`; the .ae suites would rebuild through the
   # freshly built toolchain and take hours inside the VM.
   # ============================================================
+  # ============================================================
+  # contrib.sqlite cross builds (#1372)
+  # `ae build --target` compiles the pinned SQLite amalgamation for the
+  # target, so a program using contrib.sqlite needs no libsqlite3 there.
+  # Builds the module's spec for two musl targets and runs it: natively on
+  # x86_64, under qemu-user on aarch64.
+  #
+  # The amalgamation object is kept in the ae cache, one slot per (target,
+  # source hash, compiler, flags). That directory is persisted here keyed by
+  # what decides the slots; restore-keys brings back the previous objects
+  # when only the driver changed, and any slot that no longer matches is
+  # simply never used. Split restore/save as for the miniaudio object.
+  # ============================================================
+  ci-sqlite-cross:
+    name: contrib.sqlite / self-contained cross builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils file qemu-user-static
+
+    - name: Restore zig + SQLite cross object cache
+      id: sqlite_xcache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          .zig
+          .ci-cache/ae-cross
+        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
+        restore-keys: |
+          sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'contrib/sqlite/amalgamation.lock') }}-
+
+    - name: Provision zig and the SQLite amalgamation
+      run: |
+        ZIG="$(./scripts/get-zig.sh "$GITHUB_WORKSPACE/.zig")"
+        echo "$(dirname "$ZIG")" >> "$GITHUB_PATH"
+        sh scripts/fetch-sqlite-amalgamation.sh
+
+    - name: Build the toolchain
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Cross-build and run contrib.sqlite
+      env:
+        AETHER_CACHE_DIR: ${{ github.workspace }}/.ci-cache/ae-cross
+      run: |
+        out="$(sh tests/integration/sqlite_vendored_cross/test_sqlite_vendored_cross.sh)"
+        echo "$out"
+        echo "$out" | grep -q '\[PASS\]'
+        # aarch64 must actually have run, not been skipped for want of qemu.
+        echo "$out" | grep -q 'aarch64-linux-musl: built, ran the spec'
+
+    - name: Save zig + SQLite cross object cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.sqlite_xcache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          .zig
+          .ci-cache/ae-cross
+        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
+
   ci-freebsd-native:
     name: FreeBSD / native build + unit tests
     runs-on: ubuntu-latest
@@ -475,10 +540,45 @@ jobs:
     # client: its close reset the server, and the window's own XOpenDisplay
     # sometimes landed in the reset -- the present test's setup failing as
     # "cannot open the X display" on roughly one run in thirty (#2267).
+    # contrib.sqlite compiles the pinned SQLite amalgamation into
+    # build/contrib/libsqlite3.a (#1372). Fetched explicitly so a failed
+    # download fails here, instead of contrib_build.sh quietly falling back to
+    # a system sqlite3 and the leg testing the wrong library.
+    - name: Fetch the pinned SQLite amalgamation
+      run: sh scripts/fetch-sqlite-amalgamation.sh
+
+    # The amalgamation's object costs most of a minute to compile; cache it the
+    # way the miniaudio object is cached. contrib_build.sh names each object by
+    # a hash of its source, compiler and flags, so a restored directory can
+    # only ever supply the right one. Split restore/save as above.
+    - name: Restore SQLite amalgamation object cache
+      id: sqlite_obj_cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .ci-cache/sqlite
+        key: sqlite-obj-ubuntu-22.04-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
+
     - name: Build + run all contrib tests (valgrind-gated where leak-clean)
       env:
         VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       run: xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" make contrib-check-valgrind
+
+    # The sqlite entry above passes against either SQLite; this is what proves
+    # the program linked the pinned amalgamation and needs no libsqlite3.
+    - name: contrib.sqlite links the vendored amalgamation
+      run: |
+        out="$(sh tests/integration/sqlite_vendored_native/test_sqlite_vendored_native.sh)"
+        echo "$out"
+        echo "$out" | grep -q '\[PASS\]'
+
+    - name: Save SQLite amalgamation object cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.sqlite_obj_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .ci-cache/sqlite
+        key: sqlite-obj-ubuntu-22.04-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
 
     # A driver is installed above, so contrib/vulkan skipping here would mean
     # the GPU path silently stopped being covered. Fail instead.
@@ -761,6 +861,15 @@ jobs:
     - name: Type-check every contrib module
       run: make check-contrib-modules
 
+    # The contrib series builds contrib.sqlite from the pinned amalgamation
+    # (#1372); keep its object between runs, as on the Linux contrib leg.
+    - name: Restore SQLite amalgamation object cache
+      id: sqlite_obj_cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .ci-cache/sqlite
+        key: sqlite-obj-windows-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
+
     - name: Build and run the contrib series
       # contrib_check.sh probes for each entry's libraries with pkg-config and
       # skips the entries whose dependency is absent, so this reports what this
@@ -788,6 +897,15 @@ jobs:
         echo "contrib/vulkan on this runner:"
         grep -E '^\s+(PASS|SKIP|FAIL)\s+vulkan/' contrib-windows.log || \
           echo "  no vulkan entries reported"
+
+    - name: Save SQLite amalgamation object cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.sqlite_obj_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .ci-cache/sqlite
+        key: sqlite-obj-windows-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
 
     # lavapipe is installed above, so a Vulkan entry that skipped would be
     # coverage silently lost. The same assertion as the Linux leg's.

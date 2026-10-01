@@ -21,8 +21,10 @@
 #   MODULES=python,lua                # build python AND lua; fail if either can't
 #   (unset)                           # build-all, tolerate skips
 #
-# Writes build/contrib/MANIFEST listing one line per built module:
-#     <module>\t<archive_path>
+# Writes build/contrib/MANIFEST listing one line per built archive:
+#     <module>\t<archive_path>[\t<installed name>]
+# The optional third column is the name to install it under, when that is not
+# libaether_<module>.a (the vendored SQLite, which stays libsqlite3.a).
 # `make install-contrib` reads this manifest to know what to ship.
 #
 # Called from `make contrib` (default mode) or
@@ -119,6 +121,86 @@ cross_dep_present() {   # <header-basename> [lib-basename-without-lib/.a]
     return 0
 }
 
+# --- SQLite: the pinned amalgamation, or the system library (#1372) ---------
+# contrib.sqlite prefers the amalgamation pinned in contrib/sqlite/
+# amalgamation.lock, compiled into build/contrib/libsqlite3.a beside the
+# veneer. `-laether_sqlite -lsqlite3` (the module's @link) then resolves
+# -lsqlite3 to that archive, because the -L for build/contrib is searched
+# before the system directories -- so the built program carries SQLite and
+# needs no libsqlite3 on the machine that runs it, and in cross mode no
+# libsqlite3 staged for the target either.
+#
+# The amalgamation is fetched on demand (checksum-verified, never committed).
+# When it cannot be had -- offline, no curl -- the veneer builds against the
+# system sqlite3 as it always did. SQLITE_SYSTEM=1 forces that path.
+SQLITE_AMAL_DIR="$ROOT/contrib/sqlite/amalgamation"
+SQLITE_VENDORED=""
+SQLITE_CFLAGS=""
+sqlite_requested() {
+    [ -z "${MODULES:-}" ] && return 0
+    case ",$MODULES," in *,sqlite,*) return 0 ;; esac
+    return 1
+}
+if [ "${SQLITE_SYSTEM:-}" != "1" ] && sqlite_requested; then
+    if sh "$ROOT/scripts/fetch-sqlite-amalgamation.sh" "$SQLITE_AMAL_DIR" >/dev/null; then
+        SQLITE_VENDORED=1
+        # shellcheck disable=SC1090
+        SQLITE_CFLAGS="$(. "$ROOT/contrib/sqlite/amalgamation.lock"; printf '%s' "$SQLITE_CFLAGS")"
+    else
+        echo "  sqlite: amalgamation unavailable -- falling back to the system library" >&2
+    fi
+fi
+
+# Compile sqlite3.c and archive it as build/contrib/libsqlite3.a. The object
+# is the expensive part (a ~260k-line TU, most of a minute at -O2), so it is
+# cached in $SQLITE_OBJ_CACHE_DIR under a name derived from everything that
+# changes it: the amalgamation's content, the compiler's identity, every flag,
+# and the target. A different input is a different file, so a hit is always
+# the right object and a miss always recompiles. CI persists the directory
+# with actions/cache the way it does the miniaudio object.
+SQLITE_OBJ_CACHE_DIR="${SQLITE_OBJ_CACHE_DIR:-$ROOT/.ci-cache/sqlite}"
+sha256_text() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+    else shasum -a 256 | cut -d' ' -f1; fi
+}
+build_vendored_sqlite() {
+    local AR="$1"
+    local flags="${BASE_CFLAGS[*]} -w $SQLITE_CFLAGS -I$SQLITE_AMAL_DIR"
+    local key
+    key=$( { cat "$SQLITE_AMAL_DIR/sqlite3.c" "$SQLITE_AMAL_DIR/sqlite3.h" | sha256_text
+             $CC --version 2>/dev/null | head -1
+             printf '%s\n%s\n' "$flags" "$CONTRIB_TARGET"; } | sha256_text )
+    local cached="$SQLITE_OBJ_CACHE_DIR/sqlite3-${key:0:16}.o"
+    local obj="$OUT/sqlite3.o"
+    if [ -f "$cached" ]; then
+        cp "$cached" "$obj"
+        printf "  %-18s cached object %s\n" "sqlite3" "${cached#"$ROOT"/}"
+    else
+        printf "  %-18s compiling the amalgamation (once per input set)\n" "sqlite3"
+        # shellcheck disable=SC2086
+        if ! $CC "${BASE_CFLAGS[@]}" -w $SQLITE_CFLAGS -I"$SQLITE_AMAL_DIR" \
+            -c "$SQLITE_AMAL_DIR/sqlite3.c" -o "$obj" 2>"$OUT/sqlite3.err"; then
+            printf "  %-18s FAIL (compile)\n" "sqlite3"
+            sed 's/^/      /' "$OUT/sqlite3.err" | head -10
+            return 2
+        fi
+        rm -f "$OUT/sqlite3.err"
+        mkdir -p "$SQLITE_OBJ_CACHE_DIR"
+        cp "$obj" "$cached.tmp.$$" && mv "$cached.tmp.$$" "$cached"
+    fi
+    rm -f "$OUT/libsqlite3.a"
+    if ! $AR rcs "$OUT/libsqlite3.a" "$obj"; then
+        printf "  %-18s FAIL (archive)\n" "sqlite3"
+        return 2
+    fi
+    printf "  %-18s OK   build/contrib/libsqlite3.a (SQLite %s, vendored)\n" "sqlite3" \
+        "$(sed -n 's/^SQLITE_VERSION=//p' "$ROOT/contrib/sqlite/amalgamation.lock")"
+    # Third column: the name to install it under. Every other archive installs
+    # as libaether_<name>.a; this one must stay libsqlite3.a for -lsqlite3.
+    echo -e "sqlite3\tbuild/contrib/libsqlite3.a\tlibsqlite3.a" >> "$OUT/MANIFEST.tmp"
+    return 0
+}
+
 # probe_<lang> echoes dev-include flags on stdout when the dep is
 # available. Returns 0 if available, 1 if not. (Mirror of the probe
 # helpers in contrib_host_demos.sh — kept in sync, not sourced, so
@@ -134,6 +216,12 @@ cross_dep_present() {   # <header-basename> [lib-basename-without-lib/.a]
 # now apt-installs the matching -dev kit per `--with=<lang>` layer.
 
 probe_sqlite() {
+    # The vendored amalgamation's header, so the veneer compiles against the
+    # same SQLite it links -- ahead of any system sqlite3.h.
+    if [ -n "$SQLITE_VENDORED" ]; then
+        echo "-I$SQLITE_AMAL_DIR"
+        return 0
+    fi
     # Cross mode: sqlite3 is Tier 3 (absent from the FreeBSD base and from
     # zig's bundled targets). It's "present" iff aether-crossbuild's
     # recipes/sqlite.sh staged libsqlite3.a + sqlite3.h into CROSSBUILD_SYSROOT.
@@ -347,7 +435,10 @@ probe_aether() {
 cross_class() {   # <module-name> -> echoes the class token
     case "$1" in
         tinyweb)               echo "tier1" ;;       # libc-only (SHA1+base64 inline)
-        sqlite)                echo "tier3:sqlite3.h:sqlite3" ;;
+        # The vendored amalgamation needs nothing from the target; without
+        # it, a libsqlite3 staged in CROSSBUILD_SYSROOT does.
+        sqlite)                if [ -n "$SQLITE_VENDORED" ]; then echo "vendored"
+                               else echo "tier3:sqlite3.h:sqlite3"; fi ;;
         # Header-only dlopen bridges: they load the runtime lib via dlopen at
         # RUNTIME ("dlopen, not -l<x>") but #include the language headers at
         # COMPILE time. Contrib archives are .o-only (no link), so the sysroot
@@ -382,6 +473,9 @@ build_module() {
         case "$class" in
             tier1)
                 incs=""
+                ;;
+            vendored)
+                incs="-I$SQLITE_AMAL_DIR"
                 ;;
             tier3:*)
                 local hdr="${class#tier3:}"; local lib="${hdr#*:}"; hdr="${hdr%%:*}"
@@ -441,6 +535,15 @@ build_module() {
 
     printf "  %-18s OK   build/contrib/libaether_%s.a\n" "$name" "$name"
     echo -e "$name\tbuild/contrib/libaether_$name.a" >> "$OUT/MANIFEST.tmp"
+    if [ "$name" = "sqlite" ]; then
+        if [ -n "$SQLITE_VENDORED" ]; then
+            build_vendored_sqlite "$AR" || return 2
+        else
+            # A libsqlite3.a left by an earlier vendored build would shadow
+            # the system library this veneer was just compiled against.
+            rm -f "$OUT/libsqlite3.a"
+        fi
+    fi
     return 0
 }
 

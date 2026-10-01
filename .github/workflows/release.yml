@@ -634,6 +634,12 @@ jobs:
         # and build scripts, keep every module.ae plus the host bridges and
         # the .c files a module.ae names with @source (vulkan/d3d12/metal),
         # which `ae build` recompiles into the consumer.
+        #
+        # The pinned SQLite amalgamation is fetched (checksum-verified) first,
+        # so it ships too: `ae build --target` compiles contrib.sqlite from it
+        # for any target, and an installed toolchain must not need the network
+        # to do so (#1372). A failed fetch fails the release.
+        sh scripts/fetch-sqlite-amalgamation.sh
         cp -r contrib release/share/aether/
         find release/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
         find release/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
@@ -705,6 +711,12 @@ jobs:
         # and build scripts, keep every module.ae plus the host bridges and
         # the .c files a module.ae names with @source (vulkan/d3d12/metal),
         # which `ae build` recompiles into the consumer.
+        #
+        # The pinned SQLite amalgamation is fetched (checksum-verified) first,
+        # so it ships too: `ae build --target` compiles contrib.sqlite from it
+        # for any target, and an installed toolchain must not need the network
+        # to do so (#1372). A failed fetch fails the release.
+        sh scripts/fetch-sqlite-amalgamation.sh
         cp -r contrib release/share/aether/
         find release/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
         find release/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
@@ -875,6 +887,12 @@ jobs:
         # and build scripts, keep every module.ae plus the host bridges and
         # the .c files a module.ae names with @source (vulkan/d3d12/metal),
         # which `ae build` recompiles into the consumer.
+        #
+        # The pinned SQLite amalgamation is fetched (checksum-verified) first,
+        # so it ships too: `ae build --target` compiles contrib.sqlite from it
+        # for any target, and an installed toolchain must not need the network
+        # to do so (#1372). A failed fetch fails the release.
+        sh scripts/fetch-sqlite-amalgamation.sh
         cp -r contrib release/share/aether/
         find release/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
         find release/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true

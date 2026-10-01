@@ -55,12 +55,12 @@ extra_sources = ["src/ffi_helpers.c", "src/renderer.c"]
 needs is declared by that module, with `@link` at the top of its `module.ae`:
 
 ```aether,fragment
-@link("-laether_sqlite -lsqlite3")
+@link("-laether_sqlite -lsqlite3 -lm")
 ```
 
 Codegen unions those declarations across the resolved import closure into a
 `// aether-link:` comment on the generated C, and `ae build` puts them on the
-link command (#1549). So `import contrib.sqlite` links libsqlite3 without any
+link command (#1549). So `import contrib.sqlite` links SQLite without any
 `aether.toml` entry, and it works transitively — a module three imports deep
 contributes its own dependencies.
 

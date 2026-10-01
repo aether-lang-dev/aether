@@ -67,7 +67,7 @@ is absent**, a skip is normal, not an error):
 
 | Contrib module | Needs | Probe |
 |---|---|---|
-| `sqlite` | `libsqlite3-dev` | `pkg-config sqlite3` / `<sqlite3.h>` |
+| `sqlite` | nothing: fetches the pinned amalgamation (#1372); `libsqlite3-dev` only when offline | `scripts/fetch-sqlite-amalgamation.sh`, else `pkg-config sqlite3` / `<sqlite3.h>` |
 | `host_lua` | `liblua5.4-dev` (or 5.3) | `pkg-config lua5.4\|lua5.3\|lua` |
 | `host_python` | `python3-dev` | `python3-config --includes` |
 | `host_ruby` | `ruby-dev` | `pkg-config ruby-3.x\|ruby` |
