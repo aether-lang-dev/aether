@@ -14,6 +14,53 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.752.0]
+
+### Added
+
+- **`std.tcp` and `std.udp` send and receive `byte[]` slices.**
+  `tcp.write_slice(sock, s)` sends a slice's bytes as they are, and
+  `tcp.read_into(sock, buf)` receives into a caller-owned slice without
+  allocating and returns the count, the data being `buf[0..n]`; both keep
+  TCP's short transfers and `read_n`'s "timeout" sentinel.
+  `udp.send_slice_to`, `send_slice_to_addr`, `recv_slice_from` and
+  `recv_slice_from_into` do the same for datagrams. A receive never writes
+  past the slice (the pointer forms trusted a separate capacity), a datagram
+  longer than the slice is truncated to it with the rest discarded, an empty
+  receive slice is refused without consuming anything, and a slice with no
+  bound panics (#2301).
+
+### Fixed
+
+- **A dependency's own dependencies resolve for the project that uses it.**
+  `ae` used to read only the project's manifest, so `app -> pkga -> pkgb`
+  failed with an unresolved import from `app`. The consumer had to declare
+  `pkgb` itself and patch it to a path inside `pkga`'s checkout. `ae run`,
+  `ae build` and `ae lib-path` now walk the graph. A dependency's `[patch]`
+  paths resolve against that dependency's own root, and the project's
+  `[patch]` wins for any package in the graph. A package that resolves to
+  two different places is an error naming both paths and who required
+  each, and a missing transitive dependency names the package that needs it
+  (#2335).
+
+- **`byte as int` converts, and a returned value is type-checked.** A
+  value cast accepted every numeric kind except `byte`, so assigning
+  `bytes[i] as int` was refused with E0200. The same cast compiled inside a
+  `return`, because a returned value went through the statement checker and
+  no expression rule ever ran on it. A `byte` now converts with `as` like
+  the `uint8` it is, in both directions (`n as byte` keeps the low 8 bits).
+  A returned value is checked as an expression, the same way a
+  declaration's initializer is, so an invalid cast such as `return (s as int)
+  & 255` with a string `s` is now an error. Before, it compiled to a
+  pointer-to-int conversion (#2337).
+
+- **An uncaught panic prints a message built at run time.** An
+  interpolated or otherwise heap-built panic message reached the runtime as
+  an `AetherString`, and the uncaught fallback printed it as a C string. The
+  line showed the string's header bytes instead of the text. The fallback and
+  an actor's death hook now take the text out of the string, and a literal
+  message prints as before (#2340).
+
 ## [0.751.0]
 
 ### Added
