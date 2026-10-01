@@ -14,6 +14,51 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.750.0]
+
+### Added
+
+- **`std.bytes.cursor`, `std.mem` and `std.strbuilder` take `byte[]`
+  slices.** `cursor.from_slice(s)` walks any bounded byte slice, and
+  `cursor.read_view(c, n)` returns the next bytes as a borrowed sub-slice
+  without copying. `mem.read_u16_le` through `mem.write_u64_be`, `copy_slice`
+  and `fill_slice` check that the whole field lies inside the slice (a panic
+  naming offset, width and length, where the pointer forms read past the
+  buffer). `strbuilder.append_slice` appends a slice's bytes as they are
+  (#2301).
+
+### Fixed
+
+- **`vulkan.available()` never reports a provisional "no Vulkan" to another
+  thread.** The probe stored "unavailable" before it had probed, so a second
+  actor calling `available()` (or `device_name()`) while the first was still
+  creating the probe instance was told there was no Vulkan; on arm64 a
+  settled answer could also be seen before the device name was fully
+  written. The probe now publishes its answer once, after it is final, with
+  release/acquire ordering (#2287).
+
+- **A slice reads its elements at their own width.** An array was accepted
+  in a `U[]` slot whenever its element type was merely compatible with `U`,
+  so an `int[3]` passed as a `long[]` was read as three 8-byte longs out of
+  12 bytes, and as a `byte[]` as the bytes of its first int; even
+  `g([1, 2, 3])` into a `long[]` parameter was built as `int[]`. An array
+  literal in a slice slot is now built with the slot's element type, and any
+  other array or slice must have exactly that element type or it is a
+  compile error naming both. A tuple return type may now hold a slice
+  (`-> (long[], string)`), and `return null, "e"` into it gives the empty
+  slice (#2330).
+
+- **A caught panic frees a message built at run time.** Before this fix,
+  every caught `panic("bad value ${n}")` leaked its message, because nothing
+  owned the pointer. A heap-tracked local passed to `panic(msg)` was worse:
+  the unwind journal freed it before the catch body read it. The catcher
+  now owns a built message. The `catch e` binding is freed when its handler
+  ends, unless the handler keeps it in an outer variable, returns it (alone
+  or in a tuple), stores it, or raises it again. An actor that dies on such a
+  panic releases the message after its death hook. The runtime gains
+  `aether_panic_owned(reason, release)` for this, and a death hook's
+  `reason` is now valid only during the call (#2333).
+
 ## [0.749.0]
 
 ### Fixed
