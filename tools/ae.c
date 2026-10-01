@@ -391,6 +391,21 @@ typedef struct {
 } _AeLibInfoConst;
 
 typedef struct {
+    const char* name;
+    const char* type;
+    const char* flags;
+} _AeLibInfoField;
+
+typedef struct {
+    const char* name;
+    const char* kind;
+    int         field_count;
+    const _AeLibInfoField* fields;
+    const char* source_file;
+    int         source_line;
+} _AeLibInfoStruct;
+
+typedef struct {
     const char* schema_version;
     const char* aether_version;
     const char* primary_source;
@@ -400,7 +415,18 @@ typedef struct {
     const _AeLibInfoClosure* closures;
     int         constant_count;
     const _AeLibInfoConst* constants;
+    int         struct_count;              /* schema >= 1.3 */
+    const _AeLibInfoStruct* structs;       /* schema >= 1.3 */
+    const char* const* source_signatures;  /* schema >= 1.3, parallel to functions */
 } _AeLibInfoMeta;
+
+/* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
+ * when the artifact's minor is at least the one that appended it: an older
+ * artifact's struct ends before the newer fields. */
+static int ae_lib_meta_minor(const _AeLibInfoMeta* m) {
+    if (!m || !m->schema_version || strncmp(m->schema_version, "1.", 2) != 0) return 0;
+    return atoi(m->schema_version + 2);
+}
 
 // --coverage: when set, build_gcc_cmd appends `--coverage` to the gcc
 // invocation so the resulting binary writes .gcda files when run, and
@@ -4081,11 +4107,64 @@ static int ae_generate_binimport_stub(const char* so_path, FILE* out) {
     fprintf(out, "import std.map\n\n");
 
     char params[1100], args[600], ret[160];
+    int minor = ae_lib_meta_minor(m);
+
+    // Struct records (schema >= 1.3, #2297) → the struct declarations the
+    // exports use, field for field. The importer's codegen lays them out
+    // exactly as the library's did, so values, typed pointers and field
+    // access all cross. Emitted first: the externs below name them.
+    for (int i = 0; minor >= 3 && i < m->struct_count && m->structs; i++) {
+        const _AeLibInfoStruct* st = &m->structs[i];
+        if (!st->name || !st->name[0]) continue;
+        const char* kind = st->kind ? st->kind : "";
+        if (strcmp(kind, "extern_packed") == 0)
+            fprintf(out, "\nextern struct %s @packed {\n", st->name);
+        else if (strcmp(kind, "extern") == 0)
+            fprintf(out, "\nextern struct %s {\n", st->name);
+        else
+            fprintf(out, "\nstruct %s {\n", st->name);
+        for (int k = 0; k < st->field_count && st->fields; k++) {
+            const _AeLibInfoField* fd = &st->fields[k];
+            if (!fd->name || !fd->name[0] || !fd->type) continue;
+            fprintf(out, "    %s%s: %s\n",
+                    (fd->flags && strcmp(fd->flags, "using") == 0) ? "using " : "",
+                    fd->name, fd->type);
+        }
+        fprintf(out, "}\n");
+    }
+    if (minor >= 3 && m->struct_count > 0) fprintf(out, "\n");
 
     // Function-table exports → `@extern("<c_symbol>") <name>(params) -> ret`.
     for (int i = 0; i < m->function_count && m->functions; i++) {
         const _AeLibInfoFn* f = &m->functions[i];
         if (!f->aether_name || !f->c_symbol) continue;
+        /* The source signature (schema >= 1.3) keeps typed pointers,
+         * structs and function pointers that the display signature
+         * flattens to `ptr`; it is already `(name: T, ...) -> R`. */
+        const char* ssig = (minor >= 3 && m->source_signatures)
+                           ? m->source_signatures[i] : NULL;
+        if (ssig && ssig[0] == '(') {
+            int depth = 0;
+            const char* close = NULL;
+            for (const char* q = ssig; *q; q++) {
+                if (*q == '(') depth++;
+                else if (*q == ')' && --depth == 0) { close = q; break; }
+            }
+            const char* arrow = close ? strstr(close, "->") : NULL;
+            if (close && arrow) {
+                const char* rt = arrow + 2;
+                while (*rt == ' ') rt++;
+                int plen = (int)(close - ssig - 1);
+                if (strcmp(rt, "void") == 0) {
+                    fprintf(out, "@extern(\"%s\") %s(%.*s)\n",
+                            f->c_symbol, f->aether_name, plen, ssig + 1);
+                } else {
+                    fprintf(out, "@extern(\"%s\") %s(%.*s) -> %s\n",
+                            f->c_symbol, f->aether_name, plen, ssig + 1, rt);
+                }
+                continue;
+            }
+        }
         ae_split_signature(f->signature, params, sizeof(params),
                             args, sizeof(args), ret, sizeof(ret));
         if (strcmp(ret, "void") == 0) {
@@ -9446,6 +9525,10 @@ static int cmd_lib_info(int argc, char** argv) {
     if (has_consts_field) {
         printf("  Constants:     %d\n", m->constant_count);
     }
+    int minor = ae_lib_meta_minor(m);
+    if (minor >= 3) {
+        printf("  Structs:       %d\n", m->struct_count);
+    }
     printf("\n");
 
     if (m->function_count > 0 && m->functions) {
@@ -9456,8 +9539,16 @@ static int cmd_lib_info(int argc, char** argv) {
             const char* sig   = f->signature   ? f->signature   : "(?) -> ?";
             const char* src   = (f->source_file && f->source_file[0])
                                 ? f->source_file : "<unknown>";
-            /* Format: name + signature + (c_symbol if different) + source. */
+            /* Format: name + signature + (c_symbol if different) + source.
+             * The source signature (schema >= 1.3) names typed pointers and
+             * structs the display one flattens; it gets a line of its own. */
+            const char* ssig = (minor >= 3 && m->source_signatures &&
+                                m->source_signatures[i] && m->source_signatures[i][0])
+                               ? m->source_signatures[i] : NULL;
             printf("  - %s%s\n", aname, sig);
+            if (ssig) {
+                printf("        as: %s%s\n", aname, ssig);
+            }
             if (strcmp(aname, csym) != 0) {
                 printf("        c_symbol: %s\n", csym);
             }
@@ -9507,6 +9598,27 @@ static int cmd_lib_info(int argc, char** argv) {
                    k->name  ? k->name  : "?",
                    k->type  ? k->type  : "?",
                    k->value ? k->value : "?");
+        }
+    }
+
+    /* v4 struct records (schema >= 1.3, #2297): the struct layouts an
+     * importer re-declares, field by field. */
+    if (minor >= 3 && m->struct_count > 0 && m->structs) {
+        printf("\n  Structs:\n");
+        for (int i = 0; i < m->struct_count; i++) {
+            const _AeLibInfoStruct* st = &m->structs[i];
+            const char* kind = (st->kind && st->kind[0]) ? st->kind : "";
+            printf("  - %s%s%s\n", st->name ? st->name : "?",
+                   kind[0] ? "  " : "", kind);
+            for (int k = 0; k < st->field_count && st->fields; k++) {
+                const _AeLibInfoField* fd = &st->fields[k];
+                printf("        %s%s: %s\n",
+                       (fd->flags && strcmp(fd->flags, "using") == 0) ? "using " : "",
+                       fd->name ? fd->name : "?", fd->type ? fd->type : "?");
+            }
+            printf("        @ %s:%d\n",
+                   (st->source_file && st->source_file[0]) ? st->source_file : "<unknown>",
+                   st->source_line);
         }
     }
 

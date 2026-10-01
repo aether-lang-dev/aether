@@ -591,6 +591,9 @@ Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
+/* #2297: `type` as Aether source that parse_type reads back to the same
+ * type. Returns 0 (and an empty buf) when it has no faithful spelling. */
+int type_to_aether_source(const Type* type, char* buf, size_t cap);
 int types_equal(Type* a, Type* b);
 /* The wider of two numeric types, as a fresh Type, or NULL when either is
  * not numeric: float kinds over integers, 64-bit over 32-bit, uint32 over

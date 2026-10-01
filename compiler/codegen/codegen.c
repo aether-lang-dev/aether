@@ -2600,8 +2600,23 @@ static const char* get_abi_type(Type* type) {
         case TYPE_STRING: return "const char*";
         case TYPE_VOID:   return "void";
         case TYPE_PTR:    return "AetherValue*";
+        /* #2297: a C function pointer (`fn(A) -> R`) is `void*` storage in
+         * the generated C, so it crosses as one; a closure (bare `fn`) is an
+         * _AeClosure and does not. */
+        case TYPE_FUNCTION: return type->is_fnptr ? "void*" : NULL;
+        /* #2297: a struct crosses BY VALUE under its own name. An Aether
+         * importer re-declares it from the catalog's struct records (same
+         * fields, same codegen, so the same C layout); a C consumer of an
+         * --emit=csrc header does not get the layout, so those prototypes
+         * are left out of the header (emit_lib_alias_stubs). */
+        case TYPE_STRUCT: return type->struct_name;
         default:          return NULL;
     }
+}
+
+/* #2297: does `t` cross the lib ABI as a by-value struct? */
+static int abi_is_struct_value(Type* t) {
+    return t && !t->c_alias && t->kind == TYPE_STRUCT && t->struct_name;
 }
 
 // Emit `aether_<name>` alias stubs after normal top-level function emission.
@@ -2716,7 +2731,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                      "function '%s' has a parameter type that isn't representable in the --emit=lib ABI; skipping alias stub",
                      fn->value);
             AetherError w = {NULL, NULL, fn->line, fn->column, msg,
-                             "use only int, int64, uint64, float, bool, string, or ptr in public API functions",
+                             "use int, long, uint64, float, bool, byte, string, ptr, a *Struct, a struct by value, or a fn(...) -> R function pointer in public API functions",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
             continue;
@@ -2753,8 +2768,24 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             }
         }
 
+        /* #2297: a by-value struct needs its layout, which a C header
+         * consumer does not have: keep the export (an Aether importer
+         * re-declares the struct from the catalog) but leave the prototype
+         * out of the --emit=csrc header, saying why. */
+        int sig_has_struct_value = abi_is_struct_value(fn->node_type);
+        for (int p = 0; p < fn->child_count && !sig_has_struct_value; p++) {
+            ASTNode* c = fn->children[p];
+            if (c && (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) &&
+                abi_is_struct_value(c->node_type))
+                sig_has_struct_value = 1;
+        }
+
         // #996 --emit=csrc: mirror the public prototype into the header.
-        if (gen->csrc_header_file) {
+        if (gen->csrc_header_file && sig_has_struct_value) {
+            fprintf(gen->csrc_header_file,
+                    "/* aether_%s passes a struct by value; its layout is in the\n"
+                    " * catalog's struct records, not in this header. */\n", fn->value);
+        } else if (gen->csrc_header_file) {
             fprintf(gen->csrc_header_file, "%s aether_%s(", ret_abi, fn->value);
             if (param_count == 0) {
                 fprintf(gen->csrc_header_file, "void");
@@ -2784,6 +2815,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
          * C callers (dlsym'd function pointers, etc.) read the bytes, not
          * the struct header. */
         if (ret_is_string) fprintf(gen->output, "aether_string_data((const void*)(");
+        /* #2297: a typed struct pointer returns as the opaque AetherValue*;
+         * cast, as the parameter side does, or GCC 14+ rejects the
+         * incompatible pointer under -Werror. */
+        int ret_is_typed_ptr = (fn->node_type && fn->node_type->kind == TYPE_PTR &&
+                                fn->node_type->element_type &&
+                                fn->node_type->element_type->kind == TYPE_STRUCT);
+        if (ret_is_typed_ptr) fprintf(gen->output, "(AetherValue*)");
         fprintf(gen->output, "%s(", fn->value);
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
@@ -3103,6 +3141,129 @@ static int emit_lib_const_value_literal(FILE* out, ASTNode* val, Type* t) {
     return 0;
 }
 
+/* ---- #2297: struct records and source signatures (schema 1.3) ----
+ *
+ * An importer of a binary library re-declares, from the catalog, the
+ * structs the library's exports use, so it can name them, pass them by
+ * value and reach their fields, with the C layout the library was built
+ * with (same fields, same codegen). A record carries each field's name and
+ * its type as Aether source (type_to_aether_source), which the importer's
+ * parser reads back to the same type. */
+
+static ASTNode* lib_struct_def_named(ASTNode* program, const char* name) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (d && d->type == AST_STRUCT_DEFINITION && d->value && strcmp(d->value, name) == 0)
+            return d;
+    }
+    return NULL;
+}
+
+/* Can `sd` be re-declared from a record? A plain Aether struct or an
+ * `extern struct` with a layout; not an opaque or header-imported one
+ * (no layout to carry), and every field an ordinary field whose type has
+ * a source spelling. `why` names the first obstacle. */
+static int lib_struct_recordable(ASTNode* sd, const char** why) {
+    if (sd->annotation &&
+        strcmp(sd->annotation, "extern") != 0 &&
+        strcmp(sd->annotation, "extern_packed") != 0) {
+        *why = "it is an opaque or header-defined type, with no layout to carry";
+        return 0;
+    }
+    char tbuf[512];
+    for (int f = 0; f < sd->child_count; f++) {
+        ASTNode* fld = sd->children[f];
+        if (!fld) continue;
+        if (fld->type != AST_STRUCT_FIELD) {
+            *why = "it has a union or nested anonymous field";
+            return 0;
+        }
+        if (fld->bit_width > 0) {
+            *why = "it has a bit-width field";
+            return 0;
+        }
+        if (!type_to_aether_source(fld->node_type, tbuf, sizeof(tbuf))) {
+            *why = "a field's type has no source spelling (an enum, sum or distinct type)";
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Add the struct `name` and, transitively, the structs its fields name. */
+static void lib_struct_collect(ASTNode* program, const char* name,
+                               ASTNode** out, int* count, int cap);
+
+static void lib_struct_collect_type(ASTNode* program, Type* t,
+                                    ASTNode** out, int* count, int cap) {
+    if (!t) return;
+    switch (t->kind) {
+        case TYPE_STRUCT:
+            if (t->struct_name) lib_struct_collect(program, t->struct_name, out, count, cap);
+            break;
+        case TYPE_PTR: case TYPE_ARRAY: case TYPE_OPTIONAL: case TYPE_ISOLATED:
+            lib_struct_collect_type(program, t->element_type, out, count, cap);
+            break;
+        case TYPE_FUNCTION:
+            for (int i = 0; i < t->param_count && t->param_types; i++)
+                lib_struct_collect_type(program, t->param_types[i], out, count, cap);
+            lib_struct_collect_type(program, t->return_type, out, count, cap);
+            break;
+        case TYPE_TUPLE:
+            for (int i = 0; i < t->tuple_count && t->tuple_types; i++)
+                lib_struct_collect_type(program, t->tuple_types[i], out, count, cap);
+            break;
+        default:
+            break;
+    }
+}
+
+static void lib_struct_collect(ASTNode* program, const char* name,
+                               ASTNode** out, int* count, int cap) {
+    for (int i = 0; i < *count; i++)
+        if (strcmp(out[i]->value, name) == 0) return;
+    ASTNode* sd = lib_struct_def_named(program, name);
+    if (!sd || *count >= cap) return;
+    out[(*count)++] = sd;
+    for (int f = 0; f < sd->child_count; f++) {
+        ASTNode* fld = sd->children[f];
+        if (fld && fld->type == AST_STRUCT_FIELD)
+            lib_struct_collect_type(program, fld->node_type, out, count, cap);
+    }
+}
+
+/* `(name: T, ...) -> R` in Aether source, or NULL when a type has no
+ * spelling. Malloc'd; the caller frees. */
+static char* fn_source_signature_string(ASTNode* fn) {
+    char buf[2048];
+    char tbuf[512];
+    size_t pos = 0;
+    buf[pos++] = '(';
+    int first = 1;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* c = fn->children[i];
+        if (!c) continue;
+        if (c->type == AST_BLOCK) break;
+        if (c->type != AST_PATTERN_VARIABLE && c->type != AST_VARIABLE_DECLARATION) continue;
+        if (!type_to_aether_source(c->node_type, tbuf, sizeof(tbuf))) return NULL;
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%s%s: %s",
+                         first ? "" : ", ", c->value ? c->value : "_", tbuf);
+        if (n < 0 || (size_t)n >= sizeof(buf) - pos) return NULL;
+        pos += (size_t)n;
+        first = 0;
+    }
+    const char* rt = "void";
+    if (fn->node_type && fn->node_type->kind != TYPE_UNKNOWN &&
+        fn->node_type->kind != TYPE_VOID) {
+        if (!type_to_aether_source(fn->node_type, tbuf, sizeof(tbuf))) return NULL;
+        rt = tbuf;
+    }
+    int n = snprintf(buf + pos, sizeof(buf) - pos, ") -> %s", rt);
+    if (n < 0 || (size_t)n >= sizeof(buf) - pos) return NULL;
+    return strdup(buf);
+}
+
 static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     if (!gen || !gen->emit_lib || !program) return;
 
@@ -3212,6 +3373,77 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         const_count++;
     }
 
+    /* --- v4 (schema 1.3): structs and source signatures (#2297) ---
+     * Records: every struct the library defines itself, plus every struct
+     * (its own or merged from an import) an exported signature reaches,
+     * transitively through fields. A struct that cannot be re-declared is
+     * left out with a warning naming why; an export that needs it is then
+     * still callable by its display signature, as before. */
+    int st_cap = program->child_count > 0 ? program->child_count : 1;
+    ASTNode** st_all = (ASTNode**)malloc(sizeof(ASTNode*) * st_cap);
+    int st_all_count = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (d && d->type == AST_STRUCT_DEFINITION && d->value && !d->is_imported)
+            lib_struct_collect(program, d->value, st_all, &st_all_count, st_cap);
+    }
+    for (int i = 0; i < fn_count; i++) {
+        ASTNode* fn = fns[i];
+        for (int p = 0; p < fn->child_count; p++) {
+            ASTNode* c = fn->children[p];
+            if (!c) continue;
+            if (c->type == AST_BLOCK) break;
+            if (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION)
+                lib_struct_collect_type(program, c->node_type, st_all, &st_all_count, st_cap);
+        }
+        lib_struct_collect_type(program, fn->node_type, st_all, &st_all_count, st_cap);
+    }
+    ASTNode** structs = (ASTNode**)malloc(sizeof(ASTNode*) * st_cap);
+    int struct_count = 0;
+    for (int i = 0; i < st_all_count; i++) {
+        const char* why = NULL;
+        if (lib_struct_recordable(st_all[i], &why)) {
+            structs[struct_count++] = st_all[i];
+        } else {
+            char msg[384];
+            snprintf(msg, sizeof(msg),
+                     "struct '%s' is left out of the --emit=lib catalog: %s",
+                     st_all[i]->value, why);
+            AetherError w = {NULL, NULL, st_all[i]->line, st_all[i]->column, msg,
+                             "an importer of the binary library cannot declare this struct; "
+                             "use it through `ptr` across the library boundary",
+                             NULL, AETHER_ERR_NONE};
+            aether_warning_report(&w);
+        }
+    }
+    free(st_all);
+    /* Source signatures, parallel to fns[]. Emitted only when the artifact
+     * has struct records or some export's source spelling differs from its
+     * display signature (a typed pointer, a struct, a function pointer), so
+     * an artifact with neither stays byte-identical to schema 1.2. */
+    char** src_sigs = (char**)calloc((size_t)(fn_count > 0 ? fn_count : 1), sizeof(char*));
+    int src_sig_needed = struct_count > 0;
+    for (int i = 0; i < fn_count; i++) {
+        src_sigs[i] = fn_source_signature_string(fns[i]);
+        if (!src_sig_needed && src_sigs[i]) {
+            ASTNode* fn = fns[i];
+            Type* rt = fn->node_type;
+            if (rt && ((rt->kind == TYPE_PTR && rt->element_type) || rt->kind == TYPE_STRUCT ||
+                       rt->kind == TYPE_FUNCTION)) src_sig_needed = 1;
+            for (int p = 0; p < fn->child_count && !src_sig_needed; p++) {
+                ASTNode* c = fn->children[p];
+                if (!c) continue;
+                if (c->type == AST_BLOCK) break;
+                if ((c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
+                    c->node_type &&
+                    ((c->node_type->kind == TYPE_PTR && c->node_type->element_type) ||
+                     c->node_type->kind == TYPE_STRUCT || c->node_type->kind == TYPE_FUNCTION))
+                    src_sig_needed = 1;
+            }
+        }
+    }
+
     fprintf(gen->output,
         "\n/* --- aether_lib_meta() symbol catalog (issue #403) --- */\n");
     fprintf(gen->output, "#include <stddef.h>\n");
@@ -3235,11 +3467,20 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "struct _AetherLibConst { const char* name; const char* type;\n"
         "    const char* value; };\n");
     fprintf(gen->output,
+        "struct _AetherLibField { const char* name; const char* type;\n"
+        "    const char* flags; };\n");
+    fprintf(gen->output,
+        "struct _AetherLibStruct { const char* name; const char* kind;\n"
+        "    int field_count; const struct _AetherLibField* fields;\n"
+        "    const char* source_file; int source_line; };\n");
+    fprintf(gen->output,
         "struct _AetherLibMeta { const char* schema_version; const char* aether_version;\n"
         "    const char* primary_source; int function_count;\n"
         "    const struct _AetherLibFn* functions;\n"
         "    int closure_count; const struct _AetherLibClosure* closures;\n"
-        "    int constant_count; const struct _AetherLibConst* constants; };\n\n");
+        "    int constant_count; const struct _AetherLibConst* constants;\n"
+        "    int struct_count; const struct _AetherLibStruct* structs;\n"
+        "    const char* const* source_signatures; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -3465,6 +3706,62 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         fprintf(gen->output, "};\n\n");
     }
 
+    /* --- v4 struct records and source signatures (schema 1.3) --- */
+    for (int i = 0; i < struct_count; i++) {
+        ASTNode* sd = structs[i];
+        char tbuf[512];
+        fprintf(gen->output,
+            "static const struct _AetherLibField _aether_lib_fields_%d[] = {\n", i);
+        int nf = 0;
+        for (int f = 0; f < sd->child_count; f++) {
+            ASTNode* fld = sd->children[f];
+            if (!fld || fld->type != AST_STRUCT_FIELD) continue;
+            type_to_aether_source(fld->node_type, tbuf, sizeof(tbuf));
+            fprintf(gen->output, "    { ");
+            emit_lib_metadata_c_string_literal(gen->output, fld->value);
+            fprintf(gen->output, ", ");
+            emit_lib_metadata_c_string_literal(gen->output, tbuf);
+            fprintf(gen->output, ", ");
+            emit_lib_metadata_c_string_literal(gen->output,
+                (fld->annotation && strcmp(fld->annotation, "using") == 0) ? "using" : "");
+            fprintf(gen->output, " },\n");
+            nf++;
+        }
+        /* An empty struct still needs an initialiser element in C. */
+        if (nf == 0) fprintf(gen->output, "    { \"\", \"\", \"\" },\n");
+        fprintf(gen->output, "};\n");
+    }
+    if (struct_count > 0) {
+        fprintf(gen->output,
+            "static const struct _AetherLibStruct _aether_lib_structs[] = {\n");
+        for (int i = 0; i < struct_count; i++) {
+            ASTNode* sd = structs[i];
+            int nf = 0;
+            for (int f = 0; f < sd->child_count; f++)
+                if (sd->children[f] && sd->children[f]->type == AST_STRUCT_FIELD) nf++;
+            fprintf(gen->output, "    { ");
+            emit_lib_metadata_c_string_literal(gen->output, sd->value);
+            fprintf(gen->output, ", ");
+            emit_lib_metadata_c_string_literal(gen->output,
+                sd->annotation ? sd->annotation : "");
+            fprintf(gen->output, ", %d, _aether_lib_fields_%d, ", nf, i);
+            emit_lib_metadata_c_string_literal(gen->output,
+                sd->source_file ? sd->source_file : "");
+            fprintf(gen->output, ", %d },\n", sd->line);
+        }
+        fprintf(gen->output, "};\n\n");
+    }
+    if (src_sig_needed && fn_count > 0) {
+        fprintf(gen->output,
+            "static const char* const _aether_lib_src_sigs[] = {\n");
+        for (int i = 0; i < fn_count; i++) {
+            fprintf(gen->output, "    ");
+            emit_lib_metadata_c_string_literal(gen->output, src_sigs[i] ? src_sigs[i] : "");
+            fprintf(gen->output, ",\n");
+        }
+        fprintf(gen->output, "};\n\n");
+    }
+
     /* Pull the primary source path off the first non-imported fn —
      * approximation of "the .ae the user passed to aetherc". The
      * artifact may bundle multiple sources (concat-ae); naming the
@@ -3486,7 +3783,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * function-only artifact byte-identical to v1 for existing readers. The
      * trailing slots are always written (the struct always has them); older
      * readers stop at the count/pointer they know. */
-    const char* schema = (const_count > 0) ? "1.2"
+    const char* schema = (struct_count > 0 || src_sig_needed) ? "1.3"
+                       : (const_count > 0) ? "1.2"
                        : (clo_count > 0)   ? "1.1"
                        : "1.0";
     fprintf(gen->output, "    \"%s\", \"", schema);
@@ -3496,8 +3794,12 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     fprintf(gen->output, ", %d, _aether_lib_fns, ", fn_count);
     if (clo_count > 0) fprintf(gen->output, "%d, _aether_lib_closures, ", clo_count);
     else               fprintf(gen->output, "0, NULL, ");
-    if (const_count > 0) fprintf(gen->output, "%d, _aether_lib_consts\n};\n\n", const_count);
-    else                 fprintf(gen->output, "0, NULL\n};\n\n");
+    if (const_count > 0) fprintf(gen->output, "%d, _aether_lib_consts, ", const_count);
+    else                 fprintf(gen->output, "0, NULL, ");
+    if (struct_count > 0) fprintf(gen->output, "%d, _aether_lib_structs, ", struct_count);
+    else                  fprintf(gen->output, "0, NULL, ");
+    if (src_sig_needed && fn_count > 0) fprintf(gen->output, "_aether_lib_src_sigs\n};\n\n");
+    else                                fprintf(gen->output, "NULL\n};\n\n");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -3550,6 +3852,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             fputs("    { \"aether_name\": ", j);  emit_json_string(j, fn->value);
             fputs(", \"c_symbol\": ", j);         emit_json_string(j, c_sym);
             fputs(", \"signature\": ", j);        emit_json_string(j, sig);
+            if (src_sig_needed && src_sigs[i]) {
+                fputs(", \"source_signature\": ", j); emit_json_string(j, src_sigs[i]);
+            }
             fputs(", \"source_file\": ", j);      emit_json_string(j, fn->source_file ? fn->source_file : "");
             fprintf(j, ", \"source_line\": %d }", fn->line);
             free(sig);
@@ -3608,11 +3913,42 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             fputs(", \"value\": ", j);      emit_json_string(j, val);
             fputs(" }", j);
         }
-        fputs(const_count ? "\n  ]\n" : "]\n", j);
-        fputs("}\n", j);
+        fputs(const_count ? "\n  ]" : "]", j);
+        /* structs (schema 1.3) */
+        if (struct_count > 0) {
+            fputs(",\n  \"structs\": [", j);
+            for (int i = 0; i < struct_count; i++) {
+                ASTNode* sd = structs[i];
+                char tbuf[512];
+                fputs(i == 0 ? "\n" : ",\n", j);
+                fputs("    { \"name\": ", j);  emit_json_string(j, sd->value);
+                fputs(", \"kind\": ", j);      emit_json_string(j, sd->annotation ? sd->annotation : "");
+                fputs(", \"fields\": [", j);
+                int nf = 0;
+                for (int f = 0; f < sd->child_count; f++) {
+                    ASTNode* fld = sd->children[f];
+                    if (!fld || fld->type != AST_STRUCT_FIELD) continue;
+                    type_to_aether_source(fld->node_type, tbuf, sizeof(tbuf));
+                    if (nf++) fputs(", ", j);
+                    fputs("{ \"name\": ", j);  emit_json_string(j, fld->value);
+                    fputs(", \"type\": ", j);  emit_json_string(j, tbuf);
+                    fputs(", \"flags\": ", j);
+                    emit_json_string(j, (fld->annotation && strcmp(fld->annotation, "using") == 0) ? "using" : "");
+                    fputs(" }", j);
+                }
+                fputs("]", j);
+                fputs(", \"source_file\": ", j);  emit_json_string(j, sd->source_file ? sd->source_file : "");
+                fprintf(j, ", \"source_line\": %d }", sd->line);
+            }
+            fputs("\n  ]", j);
+        }
+        fputs("\n}\n", j);
     }
 
     for (int r = 0; r < clo_count; r++) free(rec_sig[r]);
+    for (int i = 0; i < fn_count; i++) free(src_sigs[i]);
+    free(src_sigs);
+    free(structs);
     free(cfns);
     free(lit_ci); free(cap_arr_id); free(rec_name); free(rec_role);
     free(rec_encl); free(rec_sig); free(rec_src); free(rec_line);
