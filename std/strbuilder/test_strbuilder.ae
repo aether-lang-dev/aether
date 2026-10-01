@@ -180,5 +180,31 @@ main() {
     }
     println("  PASS: 200 new/append/finish cycles, no state bleed")
 
+    // Case 10: finish_with_length returns a bounded byte[] (#2301), not a
+    // (ptr, int) tuple — .len replaces the second return value, and the
+    // slice decays to the same raw, libc-freeable pointer it always did.
+    b10 = strbuilder.new(8)
+    strbuilder.append_byte(b10, 65) // 'A'
+    strbuilder.append_byte(b10, 0) // embedded NUL — content, not a terminator
+    strbuilder.append_byte(b10, 66) // 'B'
+    fwl10 = strbuilder.finish_with_length(b10)
+    if fwl10.len != 3 {
+        println("  FAIL 10: length=${fwl10.len}, expected 3")
+        exit(1)
+    }
+    if fwl10[0] != 65 || fwl10[1] != 0 || fwl10[2] != 66 {
+        println("  FAIL 10: bytes wrong")
+        exit(1)
+    }
+    free(fwl10)
+    b10e = strbuilder.new(4)
+    fwl10e = strbuilder.finish_with_length(b10e)
+    if fwl10e.len != 0 {
+        println("  FAIL 10: empty builder length=${fwl10e.len}, expected 0")
+        exit(1)
+    }
+    free(fwl10e) // still a real, freeable pointer at length 0
+    println("  PASS: finish_with_length returns a bounded byte[]")
+
     println("=== All cases passed ===")
 }

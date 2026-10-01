@@ -1,0 +1,62 @@
+// std.string unit tests (#1584) — co-located with the module.
+//
+// Scoped to the slice bridges added for #2301: bytes, array_view,
+// seq_from_strings and seq_to_strings. std.string's much larger existing
+// surface (construction, search, case, split, format, ...) is already
+// covered by the many tests/regression/test_string_*.ae files; this is the
+// module's first co-located spec, added for the new surface rather than an
+// attempt to migrate that existing coverage (CONTRIBUTING.md's "adoption,
+// not migration").
+
+import std.spec
+import std.string
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.string.bytes (#2301)") {
+        spec.it("is a bounded view of the string's own bytes") callback {
+            v = string.bytes("abc")
+            spec.assert_eq(v.len, 3, "three bytes")
+            spec.assert_eq(v[0], 97, "'a'")
+            spec.assert_eq(v[2], 99, "'c'")
+        }
+
+        spec.it("is the empty slice for an empty string") callback {
+            v = string.bytes("")
+            spec.assert_true(v == null, "empty slice compares equal to null")
+        }
+    }
+
+    spec.describe(fw, "std.string.array_view (#2301)") {
+        spec.it("gives an owned snapshot of a split result") callback {
+            arr = string.string_split("a,b,c", ",")
+            v = string.array_view(arr)
+            string.string_array_free(arr) // v must outlive this
+            spec.assert_eq(v.len, 3, "three elements")
+            spec.assert_str_eq(v[0], "a", "index 0")
+            spec.assert_str_eq(v[1], "b", "index 1")
+            spec.assert_str_eq(v[2], "c", "index 2")
+        }
+    }
+
+    spec.describe(fw, "std.string seq/string[] bridges (#2301)") {
+        spec.it("seq_from_strings builds a seq preserving order") callback {
+            items = ["x", "y", "z"]
+            seq = string.seq_from_strings(items)
+            spec.assert_eq(string.seq_length(seq), 3, "three elements")
+            spec.assert_str_eq(string.seq_head(seq), "x", "head is the first item")
+        }
+
+        spec.it("seq_to_strings round-trips through seq_from_strings") callback {
+            items = ["x", "y", "z"]
+            seq = string.seq_from_strings(items)
+            back = string.seq_to_strings(seq)
+            spec.assert_eq(back.len, 3, "three elements")
+            spec.assert_str_eq(back[0], "x", "index 0")
+            spec.assert_str_eq(back[2], "z", "index 2")
+        }
+    }
+
+    return spec.run_summary(fw)
+}
