@@ -455,16 +455,18 @@ sign(seed: ptr, msg: byte[]) -> ptr {
 
 // Verify a 64-byte signature over msg with the 32-byte public key.
 // Returns 1 if valid, 0 otherwise.
-verify(public: ptr, msg: byte[], sig: ptr) -> int {
+verify(public: ptr, msg: byte[], sig: byte[]) -> int {
     if msg.len < 0 { panic("ed25519.verify: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len < 0 { panic("ed25519.verify: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len != 64 { return 0 }
     int msg_len = msg.len
     p = field_p(); d = curve_d(p)
     d2 = compute_d2(d, p)
     B = base_point(p, d)
     L = order_L()
 
-    Renc = bytes.new(32); bytes.copy_from_bytes(Renc, 0, sig, 0, 32)
-    Senc = bytes.new(32); bytes.copy_from_bytes(Senc, 0, sig, 32, 32)
+    Renc = bytes.new(32); bytes.copy_from_slice(Renc, 0, sig[0..32])
+    Senc = bytes.new(32); bytes.copy_from_slice(Senc, 0, sig[32..64])
     S = from_le(bytes.view(Senc)[0..32])
 
     ok = 1

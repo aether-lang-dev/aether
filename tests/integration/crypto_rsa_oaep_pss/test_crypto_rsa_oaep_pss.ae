@@ -46,7 +46,9 @@ main() {
     // PSS sign (fixed salt) + verify
     mh = hb("5d1961d33b1b26035f275173addb3ed49f4f1912bf9b8ea2bcb6df88480c5057"); salt = hb("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f")
     fails = fails + ck("pss sign", bh(rsa.sign_pss(k, mh, bytes.view(salt))), "cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
-    if rsa.verify_pss(k, mh, bytes.view(hb("cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1"))[0..32]) != 1 { println("FAIL pss verify"); fails = fails + 1 } else { println("ok   pss verify") }
+    vsig = hb("cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
+    if rsa.verify_pss(k, mh, bytes.view(vsig), 32) != 1 { println("FAIL pss verify"); fails = fails + 1 } else { println("ok   pss verify") }
+    bytes.free(vsig)
 
     // round-trips on fresh inputs
     rt = hb("00112233445566778899aabbccddeeff")
@@ -54,7 +56,7 @@ main() {
     rtpt, rerr = rsa.decrypt_oaep(k, rtct)
     if rerr != "" || bh(rtpt) != bh(rt) { println("FAIL oaep round-trip"); fails = fails + 1 } else { println("ok   oaep round-trip") }
     rsig = rsa.sign_pss(k, mh, bytes.view(salt)[0..32])
-    if rsa.verify_pss(k, mh, bytes.view(rsig)[0..32]) != 1 { println("FAIL pss round-trip"); fails = fails + 1 } else { println("ok   pss round-trip") }
+    if rsa.verify_pss(k, mh, bytes.view(rsig), 32) != 1 { println("FAIL pss round-trip"); fails = fails + 1 } else { println("ok   pss round-trip") }
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

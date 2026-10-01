@@ -99,7 +99,7 @@ main() {
 
     // Record protection key + iv from the server handshake traffic secret
     // (RFC 8448 §3 uses AES-128-GCM: key = 16 bytes, iv = 12).
-    sk = tls13_ks.write_key("sha256", bytes.view(s_hs)[0..16])
+    sk = tls13_ks.write_key("sha256", bytes.view(s_hs)[0..32], 16)
     if check("server write_key", to_hex(sk, 16),
         "3fce516009c21727d0f2e4e86ee403bc") == 0 { total_ok = 0 }
     siv = tls13_ks.write_iv("sha256", s_hs)

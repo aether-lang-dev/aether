@@ -126,7 +126,9 @@ raw_encrypt(k: ptr, m_bytes: ptr) -> ptr {
 fn raw_encrypt_slice(k: ptr, m_bytes: byte[]) -> ptr {
     kk = k as *RsaKey
     klen = modulus_bytes(k)
-    m = bignum.from_bytes_unsigned(m_bytes, m_bytes.len)
+    owned = bytes.from_slice(m_bytes)
+    m = bignum.from_bytes_unsigned(owned, m_bytes.len)
+    bytes.free(owned)
     c = bignum.mod_pow(m, kk.e, kk.n)
     out = to_fixed(c, klen)
     bignum.free(m); bignum.free(c)
@@ -285,7 +287,9 @@ sig_in_range(k: ptr, sig: ptr) -> int {
 fn sig_in_range_slice(k: ptr, sig: byte[]) -> int {
     kk = k as *RsaKey
     if sig.len != modulus_bytes(k) { return 0 }
-    s = bignum.from_bytes_unsigned(sig, sig.len)
+    owned = bytes.from_slice(sig)
+    s = bignum.from_bytes_unsigned(owned, sig.len)
+    bytes.free(owned)
     ok = 1
     if bignum.compare(s, kk.n) >= 0 { ok = 0 }
     bignum.free(s)
@@ -294,10 +298,10 @@ fn sig_in_range_slice(k: ptr, sig: byte[]) -> int {
 
 // verify: public-key op on the signature, rebuild the expected EMSA block
 // from `di`, compare byte-for-byte. Returns 1 (valid) / 0 (invalid).
-verify_pkcs1(k: ptr, di: ptr, sig: ptr) -> int {
-    if sig_in_range(k, sig) != 1 { return 0 }
+verify_pkcs1(k: ptr, di: ptr, sig: byte[]) -> int {
+    if sig_in_range_slice(k, sig) != 1 { return 0 }
     klen = modulus_bytes(k)
-    recovered = raw_encrypt(k, sig) // s^e mod n
+    recovered = raw_encrypt_slice(k, sig) // s^e mod n
     expected = build_emsa(di, klen)
     ok = 1
     if bytes.length(recovered) != bytes.length(expected) { ok = 0 }
@@ -577,9 +581,8 @@ sign_pss(k: ptr, mhash: ptr, salt: byte[]) -> ptr {
 
 // Verify a PSS signature `sig` (k bytes) over `mhash` (32 bytes) with the
 // expected salt length `slen`. Returns 1 if valid, 0 otherwise.
-verify_pss(k: ptr, mhash: ptr, sig: byte[]) -> int {
+verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
     if sig.len < 0 { panic("rsa.verify_pss: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int slen = sig.len
     klen = modulus_bytes(k)
     hlen = oaep_hlen()
     embits = modulus_bits(k) - 1

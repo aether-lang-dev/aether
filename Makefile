@@ -2220,6 +2220,11 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# any new subdir under std/http/, std/collections/ etc. is
 	@# captured automatically.
 	@install -d $(PREFIX)/include/aether
+	@# Generated C includes the slice helpers by their short header name. Keep
+	@# this header at the public include root as well as under runtime/ so
+	@# installed embedders using the normal -I$(PREFIX)/include/aether flag can
+	@# compile slice-bearing generated code.
+	@install -m 644 runtime/aether_slice.h $(PREFIX)/include/aether/aether_slice.h
 	@# Sidecar VERSION next to the headers, mirroring lib/aether/VERSION and
 	@# written by the SAME install step from the SAME $(VERSION), so the two
 	@# cannot diverge. Language-agnostic: a build tool's include-root resolver

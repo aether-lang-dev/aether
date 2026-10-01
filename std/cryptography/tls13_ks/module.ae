@@ -35,7 +35,7 @@
 //   handshake_secret(algo, early, ecdhe)    -> ptr
 //   master_secret(algo, handshake)                  -> ptr
 //   traffic_secret(algo, secret, label, th) -> ptr   (Derive-Secret)
-//   write_key(algo, traffic_secret)        -> ptr
+//   write_key(algo, traffic_secret, key_len) -> ptr
 //   write_iv(algo, traffic_secret)                  -> ptr   (12 bytes)
 //
 // All results are freshly allocated std.bytes (caller frees).
@@ -170,9 +170,8 @@ traffic_secret(algo: string, secret: ptr, label: string, th: byte[]) -> ptr {
 
 // Record write key = HKDF-Expand-Label(traffic_secret, "key", "", key_len).
 // key_len is 16 for AES-128-GCM, 32 for ChaCha20-Poly1305 / AES-256-GCM.
-write_key(algo: string, secret: byte[]) -> ptr {
+write_key(algo: string, secret: byte[], key_len: int) -> ptr {
     if secret.len < 0 { panic("tls13_ks.write_key: the `secret` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int key_len = secret.len
     hl = hlen(algo)
     empty = zeros(0)
     k = tls13_kdf.expand_label(algo, secret[0..hl], "key", bytes.view(empty)[0..0], key_len)

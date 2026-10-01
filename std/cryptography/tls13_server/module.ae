@@ -240,10 +240,11 @@ fn derive_handshake_keys_algo(ecdhe: byte[], th: byte[], key_len: int, hash_algo
 
     c_hs = tls13_ks.traffic_secret(hash_algo, hs, "c hs traffic", th)
     s_hs = tls13_ks.traffic_secret(hash_algo, hs, "s hs traffic", th)
+    hl = bytes.length(c_hs)
 
-    ck = tls13_ks.write_key(hash_algo, bytes.view(c_hs)[0..key_len])
+    ck = tls13_ks.write_key(hash_algo, bytes.view(c_hs)[0..hl], key_len)
     civ = tls13_ks.write_iv(hash_algo, c_hs)
-    sk = tls13_ks.write_key(hash_algo, bytes.view(s_hs)[0..key_len])
+    sk = tls13_ks.write_key(hash_algo, bytes.view(s_hs)[0..hl], key_len)
     siv = tls13_ks.write_iv(hash_algo, s_hs)
 
     k = malloc(sizeof(HsKeys)) as *HsKeys
@@ -430,9 +431,9 @@ accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: p
     c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", bytes.view(th_sf)[0..hash_len])
     s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", bytes.view(th_sf)[0..hash_len])
 
-    ck = tls13_ks.write_key(hash_algo, bytes.view(c_ap)[0..rec_key_len])
+    ck = tls13_ks.write_key(hash_algo, bytes.view(c_ap)[0..hash_len], rec_key_len)
     civ = tls13_ks.write_iv(hash_algo, c_ap)
-    sk = tls13_ks.write_key(hash_algo, bytes.view(s_ap)[0..rec_key_len])
+    sk = tls13_ks.write_key(hash_algo, bytes.view(s_ap)[0..hash_len], rec_key_len)
     siv = tls13_ks.write_iv(hash_algo, s_ap)
 
     app_send = tls13_record.new_aead(rec_aead, bytes.view(sk)[0..rec_key_len], siv)

@@ -158,6 +158,7 @@ main() {
     // A parser that only ever sees well-formed input proves little; these are
     // the shapes a hostile or broken peer actually sends.
     tiny = bytes.new(2)
+    bytes.set(tiny, 1, 0)
     tc = ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0,
         group: 0, key_share: null, key_share_len: 0, has_sni: 0,
         saw_supported_versions: 0 }
@@ -168,6 +169,7 @@ main() {
     bytes.free(tiny)
 
     wrong = bytes.new(64)
+    bytes.set(wrong, 63, 0)
     bytes.set(wrong, 0, 2) // HS_SERVER_HELLO
     if tls13_hs.parse_client_hello(bytes.view(wrong)[0..64], &tc) == "" {
         println("FAIL 4: a ServerHello was accepted as a ClientHello")

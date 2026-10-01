@@ -108,7 +108,7 @@ main() {
             msg = from_hex(msg_hex)
             msg_len = string_length(msg_hex) / 2
             sig = from_hex(sig_hex)
-            ok = ed25519.verify(pk, bytes.view(msg)[0..msg_len], sig)
+            ok = ed25519.verify(pk, bytes.view(msg)[0..msg_len], bytes.view(sig)[0..64])
             if res == "valid" {
                 if ok == 1 {
                     passed = passed + 1

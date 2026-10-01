@@ -246,8 +246,11 @@ split_ecdsa_sig(sig: byte[], coord: int) -> (ptr, ptr, string) {
         rilen = bytes.length(ri)
         silen = bytes.length(si)
         inner = bytes.new(rilen + silen)
-        bytes.copy_from_bytes(inner, 0, ri, 0, rilen)
-        bytes.copy_from_bytes(inner, rilen, si, 0, silen)
+        if rilen + silen > 0 { bytes.set(inner, rilen + silen - 1, 0) }
+        i = 0
+        while i < rilen { bytes.set(inner, i, bytes.get(ri, i)); i = i + 1 }
+        i = 0
+        while i < silen { bytes.set(inner, rilen + i, bytes.get(si, i)); i = i + 1 }
         // encode_sequence consumes `inner` (wrap_tlv frees its content
         // argument), so only ri/si/reenc are ours to free here.
         reenc = asn1.encode_sequence(inner)
@@ -377,7 +380,7 @@ verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[
     content, clen = cert_verify_content(transcript_hash)
     digest = sha256_of_bytes(bytes.view(content)[0..clen])
     k = rsa.key_from_components(n, e, null)
-    result = rsa.verify_pss(k, digest, sig[0..32])
+    result = rsa.verify_pss(k, digest, sig, 32)
     rsa.key_free(k) // frees n, e
     bytes.free(content)
     bytes.free(digest)
