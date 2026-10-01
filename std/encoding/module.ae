@@ -284,7 +284,7 @@ csv_field(handle: ptr, i: int) -> string {
     if i < 0 || i >= string.array_size(handle) { return "" }
     p = string.array_get(handle, i)
     if p == null { return "" }
-    return p as string
+    return p
 }
 
 // Release a handle returned by csv_split.

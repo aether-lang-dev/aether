@@ -31,14 +31,14 @@ held(s: string) -> string {
 // The line `g_out = env(null)` is what pre-fix reported the E0200 against,
 // though neither this function nor that line has anything to do with `full`.
 env(v: ptr) -> string {
-    return v as string
+    return v
 }
 
 main() {
     println("=== test_local_shadows_suffixed_import ===")
 
     // The bug was a COMPILE error (E0200) on this line; reaching runtime at
-    // all is the pass. env(null) casts a null ptr to string, so the value
+    // all is the pass. env(null) returns a null ptr as a string, so the value
     // itself is not the point — that this function type-checks is.
     g_out = env(null)
     println("ok   env(null) line type-checks and runs")
