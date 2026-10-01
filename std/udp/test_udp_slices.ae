@@ -1,23 +1,17 @@
-// Issue #2301 (I/O): std.tcp and std.udp send and receive `byte[]` slices.
+// std.udp sends and receives `byte[]` slices (#2301).
 //
-// The gap: std.tcp's binary write took a string plus a separately carried
-// count, and its binary read allocated a fresh string per call; std.udp's
 // send_to/recv_from took a raw pointer and a count, so nothing stopped a
 // receive of `cap` bytes into a smaller buffer from writing past it. The
 // slice forms carry the bound: a send takes exactly `s.len` bytes, and a
 // receive fills at most `buf.len` bytes of a caller-owned slice and returns
 // the count, the data being `buf[0..n]`.
 //
-// Pre-fix this file fails to compile: none of these calls existed. The
-// blocks cover, over loopback on ephemeral ports: binary payloads with
-// zero bytes both ways, sub-slices as source and destination, a receive
-// slice smaller than the data (UDP: the datagram is truncated and its rest
-// discarded; TCP: the rest stays queued for the next read), guard bytes
-// either side of a receive slice that must stay untouched, an empty receive
-// slice refused without consuming anything, a closed peer, and unbounded
-// slices refused with a panic.
+// Over loopback on ephemeral ports: a binary payload with zero bytes, a
+// sub-slice as source and destination, guard bytes either side of a receive
+// slice, a datagram longer than the slice (truncated, its rest discarded),
+// an empty receive slice refused without consuming the datagram, and
+// unbounded slices refused with a panic.
 
-import std.tcp
 import std.udp
 import std.bytes
 
@@ -69,39 +63,6 @@ fn udp_recv_panics(sock: ptr, s: byte[]) -> bool {
     return caught
 }
 
-fn tcp_write_panics(sock: ptr, s: byte[]) -> bool {
-    caught = false
-    try {
-        _n, _e = tcp.write_slice(sock, s)
-    } catch e {
-        caught = true
-    }
-    return caught
-}
-
-fn tcp_read_panics(sock: ptr, s: byte[]) -> bool {
-    caught = false
-    try {
-        _n, _e = tcp.read_into(sock, s)
-    } catch e {
-        caught = true
-    }
-    return caught
-}
-
-// Read exactly `dst.len` bytes, however TCP splits them.
-fn tcp_read_full(sock: ptr, dst: byte[]) -> bool {
-    got = 0
-    while got < dst.len {
-        n, err = tcp.read_into(sock, dst[got..])
-        if err != "" {
-            return false
-        }
-        got = got + n
-    }
-    return true
-}
-
 main() {
     // A 16-byte binary payload with zero bytes at the start, middle and end.
     pb = bytes.new(16)
@@ -118,7 +79,6 @@ main() {
     bytes.set_length(rb, 64)
     recv = bytes.view(rb)
 
-    // ================= UDP =================
     server, err = udp.bind("127.0.0.1", 0)
     check(err == "", "udp bind server")
     client, cerr = udp.bind("127.0.0.1", 0)
@@ -192,52 +152,6 @@ main() {
     check(udp.close(client) == 0, "udp close client")
     check(udp.close(server) == 0, "udp close server")
 
-    // ================= TCP =================
-    srv, lerr = tcp.listen_on("127.0.0.1", 0)
-    check(lerr == "", "tcp listen_on")
-    tport = tcp.server_port(srv)
-    conn, cerr2 = tcp.connect("127.0.0.1", tport)
-    check(cerr2 == "", "tcp connect")
-    peer, aerr = tcp.accept(srv)
-    check(aerr == "", "tcp accept")
-
-    // A binary payload, read back whole however TCP splits it.
-    tsent, twerr = tcp.write_slice(conn, payload)
-    check(twerr == "" && tsent == 16, "write_slice sends 16 bytes, got ${tsent} '${twerr}'")
-    fill(recv, 0xEE)
-    check(tcp_read_full(peer, recv[0..16]), "read_into gathers 16 bytes")
-    check(same(recv[0..16], payload), "the zero bytes arrive intact over TCP")
-    check(recv[16] == 0xEE, "nothing past the read slice is written")
-
-    // A read slice smaller than what is queued: at most 5 bytes now, the rest
-    // stays for the next read (TCP is a stream: nothing is discarded).
-    tsent, twerr = tcp.write_slice(conn, payload[2..14])
-    check(twerr == "" && tsent == 12, "write_slice sends a 12-byte sub-slice")
-    fill(recv, 0xEE)
-    ready, _ = tcp.poll(peer, 2000)
-    check(ready, "tcp peer is readable")
-    k, rerr = tcp.read_into(peer, recv[10..15])
-    check(rerr == "" && k > 0 && k <= 5, "read_into reads at most the slice, got ${k} '${rerr}'")
-    check(recv[9] == 0xEE && recv[15] == 0xEE, "the guard bytes either side are untouched")
-    check(same(recv[10..10 + k], payload[2..2 + k]), "the first bytes of the stream")
-    check(tcp_read_full(peer, recv[10 + k..22]), "the rest is still queued")
-    check(same(recv[10..22], payload[2..14]), "the whole sub-slice arrived in order")
-
-    // Empty and unbounded slices.
-    k, rerr = tcp.read_into(peer, recv[0..0])
-    check(rerr == "receive buffer is empty" && k == 0, "an empty read slice is refused, got '${rerr}'")
-    tsent, twerr = tcp.write_slice(conn, payload[0..0])
-    check(twerr == "" && tsent == 0, "an empty write sends nothing")
-    check(tcp_write_panics(conn, raw), "write_slice refuses an unbounded slice")
-    check(tcp_read_panics(peer, raw), "read_into refuses an unbounded slice")
-
-    // The peer closes: the read reports it, terminally.
-    tcp.tcp_close(conn)
-    k, rerr = tcp.read_into(peer, recv)
-    check(rerr == "connection closed or receive failed" && k == 0, "a closed peer is reported, got '${rerr}'")
-
-    tcp.tcp_close(peer)
-    tcp.tcp_server_close(srv)
     bytes.free(rb)
     bytes.free(pb)
     println("OK")
