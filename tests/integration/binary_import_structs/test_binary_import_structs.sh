@@ -10,8 +10,11 @@
 #
 # Also pins what the issue needs from the link model: a second binary
 # library (script) importing the engine, and the host importing both, share
-# the engine's one module state, and a panic inside the engine reaches the
-# host's catch.
+# the engine's one module state. Where the host and the library share one
+# runtime (ELF: the library's runtime symbols bind to the host's by
+# interposition) a panic inside the engine reaches the host's catch; macOS's
+# two-level namespace keeps a runtime per image, like Windows, so that check
+# runs on Linux and FreeBSD only until #2297's shared runtime lands.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,7 +36,8 @@ esac
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK" || true' EXIT
-cp "$SCRIPT_DIR/engine.ae" "$SCRIPT_DIR/script.ae" "$SCRIPT_DIR/app.ae" "$WORK/"
+cp "$SCRIPT_DIR/engine.ae" "$SCRIPT_DIR/script.ae" "$SCRIPT_DIR/app.ae" \
+   "$SCRIPT_DIR/app_panic.ae" "$WORK/"
 cd "$WORK"
 
 fail() {
@@ -63,5 +67,13 @@ echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "ae run app.ae did not pass 
 AETHER_HOME="$ROOT" "$AE" build app.ae -o app >app.log 2>&1 || fail "ae build app.ae" app.log
 OUT2="$(./app 2>&1)" || { echo "$OUT2"; fail "the built host failed"; }
 echo "$OUT2" | grep -q "^OK$" || { echo "$OUT2"; fail "the built host did not pass its checks"; }
+
+case "$(uname -s)" in
+    Linux|FreeBSD)
+        OUT3="$(AETHER_HOME="$ROOT" "$AE" run app_panic.ae 2>panic.log)" \
+            || { echo "$OUT3"; fail "a library panic did not reach the host's catch" panic.log; }
+        echo "$OUT3" | grep -q "^OK$" || { echo "$OUT3"; fail "app_panic.ae did not pass"; }
+        ;;
+esac
 
 echo "  [PASS] binary_import_structs: structs, typed pointers and one module state across binary imports"

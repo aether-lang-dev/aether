@@ -37,14 +37,5 @@ main() {
     check(script.bump_twice() == 3, "the script bumps the same counter")
     check(engine.bump() == 4, "the host sees the script's bumps")
 
-    // A panic inside the library reaches the host's catch.
-    caught = ""
-    try {
-        engine.boom(7)
-    } catch e {
-        caught = e
-    }
-    check(caught == "engine boom 7", "a library panic is caught by the host: '${caught}'")
-
     println("OK")
 }

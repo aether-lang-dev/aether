@@ -4321,9 +4321,21 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
     // Module/lib/temp dirs don't contain spaces, same assumption -L
     // relies on. The .so itself stays quoted (it's a plain input file
     // and links fine on both platforms).
+    /* One -rpath per directory: two libraries side by side (an engine and
+     * a script built against it) share one, and macOS ld warns about every
+     * duplicate ("duplicate -rpath ... ignored"). */
+    char rpath_flag[1300];
+    snprintf(rpath_flag, sizeof(rpath_flag), " -Wl,-rpath,%s", dir);
+    const char* hit = strstr(g_binimport_link, rpath_flag);
+    int rpath_seen = 0;
+    while (hit) {
+        char after = hit[strlen(rpath_flag)];
+        if (after == '\0' || after == ' ') { rpath_seen = 1; break; }
+        hit = strstr(hit + 1, rpath_flag);
+    }
     size_t off = strlen(g_binimport_link);
     snprintf(g_binimport_link + off, sizeof(g_binimport_link) - off,
-             " \"%s\" -Wl,-rpath,%s", abs_so, dir);
+             " \"%s\"%s", abs_so, rpath_seen ? "" : rpath_flag);
     if (tc.verbose) {
         fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n",
                 mod, abs_so, stub_path);

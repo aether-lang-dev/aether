@@ -710,7 +710,13 @@ Scope of the current implementation:
 - **Module state lives once.** A module-level `var` in the library is the
   library's single instance for every importer: a second binary library
   that imports the first, and a host that imports both, all reach the same
-  `var`. A panic inside the library unwinds to the host's `catch`.
+  `var`.
+- **The runtime is shared on Linux and FreeBSD only.** There the library's
+  embedded runtime symbols bind to the host's by ELF interposition, so a
+  panic inside the library unwinds to the host's `catch`. macOS's
+  two-level namespace keeps a runtime per image (as Windows does), so a
+  panic raised in a library does not reach a `catch` in the host there
+  yet; one shared runtime is the remaining part of #2297.
   A builder consumer also `import std.map` (the default `map_new`
   config factory is a `std.map` facility used at the call site).
 - **Higher-order exports** (a function taking a closure `fn` parameter)
@@ -804,7 +810,7 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_swig/` | SWIG Python round-trip (skips if `swig` missing) |
 | `emit_lib_with_capability/` | `--with=fs,net,os` opt-ins; `--with=first-party` and `--with=all` aliases |
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
-| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library, a library panic caught by the host (#2297) |
+| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library, and on Linux/FreeBSD a library panic caught by the host (#2297) |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 
 Run them with the standard `make test-ae` or individually:
