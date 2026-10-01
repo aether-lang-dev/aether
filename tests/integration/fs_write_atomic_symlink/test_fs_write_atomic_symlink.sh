@@ -47,9 +47,10 @@ dest="$tmpdir/dest_should_not_exist"
 
 cat > "$tmpdir/atomic_write.ae" <<EOF
 import std.fs
+import std.string
 
 main() {
-    err = fs.write_atomic("$dest", "fresh content from atomic_write.ae", 35)
+    err = fs.write_atomic("$dest", string.bytes("fresh content from atomic_write.ae"))
     if err != "" {
         println("write_atomic failed (expected when symlink trap is set): \${err}")
     } else {

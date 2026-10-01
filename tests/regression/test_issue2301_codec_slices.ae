@@ -1,0 +1,151 @@
+// Regression test for #2301's codec tranche: std.hash, std.encoding,
+// std.zlib, std.zstd, std.brotli and std.lzf take their input as a byte[]
+// whose length travels with it, and the bytes reach C through a `ptr`
+// parameter.
+//
+// The payload begins with DE C0 57 AE, the little-endian AetherString header
+// magic. The C side of base64, zlib, zstd, brotli and lzf used to sniff its
+// input for that header and, finding it, read a `data` pointer out of the
+// bytes that follow — here a deliberately bogus 0x4242424242424242 — so the
+// old path crashed. Every encoder and compressor must now take the 48 bytes
+// verbatim: the round trips below compare byte for byte.
+//
+// It also pins the slice semantics the hashes now have: a sub-slice hashes
+// exactly its own bytes, and a CRC continued over two sub-slices equals the
+// CRC of the whole.
+
+import std.encoding
+import std.hash
+import std.lzf
+import std.string
+import std.zlib
+import std.zstd
+import std.brotli
+
+extern exit(code: int)
+
+const N = 48
+
+fn check(cond: bool, what: string) -> int {
+    if cond {
+        println("  PASS: ${what}")
+        return 0
+    }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+// `got` holds exactly the bytes of `want`.
+fn same_bytes(got: string, n: int, want: byte[]) -> bool {
+    if n != want.len {
+        return false
+    }
+    g = string.bytes(got)[0..n]
+    i = 0
+    while i < n {
+        if g[i] != want[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+main() {
+    println("=== #2301 codec slices ===")
+    fails = 0
+
+    payload = make([]byte, N)
+    payload[0] = 0xDE
+    payload[1] = 0xC0
+    payload[2] = 0x57
+    payload[3] = 0xAE
+    i = 4
+    while i < 24 {
+        payload[i] = 0x41
+        i = i + 1
+    }
+    while i < 32 {
+        payload[i] = 0x42
+        i = i + 1
+    }
+    while i < N {
+        payload[i] = i
+        i = i + 1
+    }
+
+    // base64 and hex
+    b64 = encoding.base64_encode(payload)
+    back, derr = encoding.base64_decode(b64)
+    fails = fails + check(derr == "" && same_bytes(back, string.length(back), payload), "base64 round-trips a header-magic payload")
+    padded = encoding.base64_encode_padded(payload)
+    fails = fails + check(string.length(padded) == 64, "padded base64 of 48 bytes is 64 characters")
+    hx = encoding.hex_encode(payload)
+    fails = fails + check(string.starts_with(hx, "dec057ae4141"), "hex encodes the payload's own leading bytes")
+    fails = fails + check(string.length(encoding.base32_encode(payload[0..5])) == 8, "base32 of a 5-byte sub-slice is one 8-character group")
+
+    // zlib, every framing
+    if zlib.available() == 1 {
+        z, zn, zerr = zlib.deflate(payload, 6)
+        zb, zbn, zberr = zlib.inflate(string.bytes(z)[0..zn])
+        fails = fails + check(zerr == "" && zberr == "" && same_bytes(zb, zbn, payload), "zlib deflate/inflate round-trips it")
+        g, gn, gerr = zlib.gzip_deflate(payload, 6)
+        gb, gbn, gberr = zlib.gzip_inflate(string.bytes(g)[0..gn])
+        fails = fails + check(gerr == "" && gberr == "" && same_bytes(gb, gbn, payload), "gzip round-trips it")
+        r, rn, rerr = zlib.deflate_raw(payload, 6)
+        rb, rbn, rberr = zlib.inflate_raw(string.bytes(r)[0..rn])
+        fails = fails + check(rerr == "" && rberr == "" && same_bytes(rb, rbn, payload), "raw deflate round-trips it")
+        s, serr = zlib.stream_new(zlib.GZIP, 6)
+        _c1, _n1, werr = zlib.stream_write(s, payload)
+        _c2, _n2, ferr = zlib.stream_finish(s)
+        zlib.stream_free(s)
+        fails = fails + check(serr == "" && werr == "" && ferr == "", "zlib stream_write accepts it")
+    } else {
+        println("  SKIP: zlib not built in")
+    }
+
+    // zstd and brotli compress only; the old path crashed on this input.
+    if zstd.available() == 1 {
+        _zc, zcn, zcerr = zstd.compress(payload, 3)
+        fails = fails + check(zcerr == "" && zcn > 0, "zstd compresses it")
+    } else {
+        println("  SKIP: zstd not built in")
+    }
+    if brotli.available() == 1 {
+        _bc, bcn, bcerr = brotli.compress(payload, 5)
+        fails = fails + check(bcerr == "" && bcn > 0, "brotli compresses it")
+    } else {
+        println("  SKIP: brotli not built in")
+    }
+
+    // lzf (vendored, always present)
+    l, ln, lerr = lzf.compress(payload)
+    lb, lbn, lberr = lzf.decompress(string.bytes(l)[0..ln], N)
+    fails = fails + check(lerr == "" && lberr == "" && same_bytes(lb, lbn, payload), "lzf round-trips it")
+
+    // Hash slice semantics.
+    whole = hash.crc32(payload)
+    parts = hash.crc32_update(hash.crc32(payload[0..10]), payload[10..N])
+    fails = fails + check(whole == parts, "crc32 continued over two sub-slices equals crc32 of the whole")
+    fails = fails + check(hash.fnv32(payload[0..4]) == hash.fnv32(payload[0..4]), "fnv32 is deterministic over a sub-slice")
+    fails = fails + check(hash.fnv64(payload[0..4]) != hash.fnv64(payload[0..5]), "a sub-slice hashes only its own bytes")
+    fails = fails + check(hash.crc32(string.bytes("")) == 0, "crc32 of an empty slice is 0")
+
+    raw = make([]byte, 4)
+    unbounded = (raw as ptr) as byte[]
+    refused = false
+    try {
+        _ = hash.crc32(unbounded)
+    } catch e {
+        refused = true
+    }
+    free(raw)
+    fails = fails + check(refused, "hash refuses an unbounded slice")
+
+    free(payload)
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("All #2301 codec slice checks passed")
+}

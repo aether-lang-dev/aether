@@ -61,23 +61,23 @@ main() {
 
     // ---- Streebog-256 Tests ----
     ctx_256_1, _ = gost3411_2012.new("gost3411_2012_256")
-    gost3411_2012.update_bytes(ctx_256_1, m1_bytes, m1_len)
+    gost3411_2012.update(ctx_256_1, bytes.view(m1_bytes)[0..m1_len])
     res_256_1 = gost3411_2012.final_hex(ctx_256_1)
     fails = fails + check("Streebog-256 M1", res_256_1, "9d151eefd8590b89daa6ba6cb74af9275dd051026bb149a452fd84e5e57b5500")
 
     ctx_256_2, _ = gost3411_2012.new("gost3411_2012_256")
-    gost3411_2012.update_bytes(ctx_256_2, m2_bytes, m2_len)
+    gost3411_2012.update(ctx_256_2, bytes.view(m2_bytes)[0..m2_len])
     res_256_2 = gost3411_2012.final_hex(ctx_256_2)
     fails = fails + check("Streebog-256 M2", res_256_2, "9dd2fe4e90409e5da87f53976d7405b0c0cac628fc669a741d50063c557e8f50")
 
     // ---- Streebog-512 Tests ----
     ctx_512_1, _ = gost3411_2012.new("gost3411_2012_512")
-    gost3411_2012.update_bytes(ctx_512_1, m1_bytes, m1_len)
+    gost3411_2012.update(ctx_512_1, bytes.view(m1_bytes)[0..m1_len])
     res_512_1 = gost3411_2012.final_hex(ctx_512_1)
     fails = fails + check("Streebog-512 M1", res_512_1, "1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48")
 
     ctx_512_2, _ = gost3411_2012.new("gost3411_2012_512")
-    gost3411_2012.update_bytes(ctx_512_2, m2_bytes, m2_len)
+    gost3411_2012.update(ctx_512_2, bytes.view(m2_bytes)[0..m2_len])
     res_512_2 = gost3411_2012.final_hex(ctx_512_2)
     fails = fails + check("Streebog-512 M2", res_512_2, "1e88e62226bfca6f9994f1f2d51569e0daf8475a3b0fe61a5300eee46d961376035fe83549ada2b8620fcd7c496ce5b33f0cb9dddc2b6460143b03dabac9fb28")
 
@@ -93,14 +93,14 @@ main() {
     // ---- Multi-part streaming (split M1 across two updates) must equal
     // the one-shot digest — exercises the 64-byte block-buffering path.
     ctx_512_split, _ = gost3411_2012.new("gost3411_2012_512")
-    gost3411_2012.update_bytes(ctx_512_split, m1_bytes, 30)
+    gost3411_2012.update(ctx_512_split, bytes.view(m1_bytes)[0..30])
     m1_tail = bytes.new(m1_len - 30)
     k = 30
     while k < m1_len {
         bytes.set(m1_tail, k - 30, bytes.get(m1_bytes, k))
         k = k + 1
     }
-    gost3411_2012.update_bytes(ctx_512_split, m1_tail, m1_len - 30)
+    gost3411_2012.update(ctx_512_split, bytes.view(m1_tail)[0..m1_len - 30])
     res_512_split = gost3411_2012.final_hex(ctx_512_split)
     fails = fails + check("Streebog-512 M1 split-streaming", res_512_split, "1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48")
     bytes.free(m1_tail)

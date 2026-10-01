@@ -96,8 +96,8 @@ fn send_client_frame(sock: ptr, payload: string) {
         b = string.char_at(payload, i)
         bytes.set(buf, 6 + i, b ^ mask_byte(i))
     }
-    frame = bytes.finish(buf, total)
-    tcp.write_n(sock, frame, total)
+    tcp.write_n(sock, bytes.view(buf))
+    bytes.free(buf)
 }
 
 // Read exactly n bytes from sock into a returned string, looping over read_n

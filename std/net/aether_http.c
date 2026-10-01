@@ -1265,10 +1265,12 @@ int http_request_set_body_raw(HttpClientRequest* req, const char* body, int len,
          * refcount + length + capacity + data-ptr) into our body
          * buffer, and the wire would carry that header. Same shape
          * the std.fs / std.cryptography / std.zlib externs use. */
+        /* Raw bytes: std.http.client.set_body passes a byte[] slice's data
+         * pointer through a `ptr`-typed extern (#2301). This used to check
+         * for an AetherString header, but on raw bytes that misreads a
+         * payload beginning DE C0 57 AE (the header magic) as a header and
+         * copies from a pointer taken out of the bytes that follow. */
         const char* src = body;
-        if (is_aether_string(body)) {
-            src = ((const AetherString*)body)->data;
-        }
         /* Cap-aware (#343): caller-supplied length, untrusted on
          * --emit=lib paths. The matching aether_caps_free passes
          * req->body_len as the size. */

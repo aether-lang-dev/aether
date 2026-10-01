@@ -53,7 +53,7 @@ main() {
 
     // ---- Test 3: fs.write_binary writes the full 10 bytes ----
     print("\nTest 3: fs.write_binary with explicit length = 10\n")
-    werr = fs.write_binary(out_path, data, 10)
+    werr = fs.write_binary(out_path, string.bytes(data)[0..10])
     if werr != "" {
         println("  FAIL: write_binary errored: ${werr}")
         exit(1)
@@ -91,7 +91,7 @@ main() {
     // ---- Test 6: write_binary with length 0 is legal (empty file) ----
     print("\nTest 6: write_binary with length 0\n")
     empty_path = "${tmp}/aether_wb_empty.bin"
-    err6 = fs.write_binary(empty_path, "", 0)
+    err6 = fs.write_binary(empty_path, string.bytes(""))
     if err6 != "" {
         println("  FAIL: empty write errored: ${err6}")
         exit(1)
@@ -107,7 +107,7 @@ main() {
     // ---- Test 7: write_binary to a missing parent dir errors ----
     print("\nTest 7: write_binary to a non-existent parent errors\n")
     bad_path = "${tmp}/aether_wb_no_such_dir_xyz/file.bin"
-    err7 = fs.write_binary(bad_path, data, 10)
+    err7 = fs.write_binary(bad_path, string.bytes(data)[0..10])
     if err7 == "" {
         print("  FAIL: expected error, got success\n")
         exit(1)
@@ -117,7 +117,7 @@ main() {
     // ---- Test 8: write_binary overwrites an existing file ----
     print("\nTest 8: write_binary truncates and overwrites\n")
     fs.write(out_path, "much longer existing content that should be replaced")
-    err8 = fs.write_binary(out_path, data, 10)
+    err8 = fs.write_binary(out_path, string.bytes(data)[0..10])
     if err8 != "" {
         println("  FAIL: overwrite errored: ${err8}")
         exit(1)
@@ -138,7 +138,7 @@ main() {
     // masked the bug. Fixed alongside write_binary.
     print("\nTest 9: fs.write_atomic round-trip preserves NULs\n")
     atomic_path = "${tmp}/aether_wb_atomic.bin"
-    err9 = fs.write_atomic(atomic_path, data, 10)
+    err9 = fs.write_atomic(atomic_path, string.bytes(data)[0..10])
     if err9 != "" {
         println("  FAIL: write_atomic errored: ${err9}")
         exit(1)

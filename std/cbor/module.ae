@@ -1179,7 +1179,7 @@ escape_string(s: string) -> string {
 
 format_bytes_diag(s: string) -> string {
     len = string.length(s)
-    hex_str = encoding.hex_encode(s, len)
+    hex_str = encoding.hex_encode(string.bytes(s)[0..len])
     return string.concat("h'", string.concat(hex_str, "'"))
 }
 

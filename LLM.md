@@ -154,7 +154,7 @@ plays that role), no interfaces.
   selected arm is type-checked/emitted, see `docs/when-static-if.md`). Same
   keyword, two unrelated meanings.
 - **Go-style returns, not tuples-as-values.** `fs.write_atomic(path,
-  data, len) -> string`, empty string = success, non-empty = error
+  data) -> string`, empty string = success, non-empty = error
   message. Don't "improve" the convention, it's consistent across all
   of `std`.
 - **Actor syntax.** `message Add { value: int }` declares a typed

@@ -69,7 +69,9 @@ mac_size_for(algo: string) -> int {
 
 // SP800-90A 10.1.2.2 Update. `provided_data` may be null (treated as
 // empty). Replaces ctx.k / ctx.v in place.
-update(ctx: *DrbgCtx, provided_data: ptr, pd_len: int) {
+update(ctx: *DrbgCtx, provided_data: byte[]) {
+    if provided_data.len < 0 { panic("drbg.update: the `provided_data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pd_len = provided_data.len
     ms = ctx.mac_size
 
     // K = HMAC(K, V || 0x00 || provided_data)
@@ -82,16 +84,16 @@ update(ctx: *DrbgCtx, provided_data: ptr, pd_len: int) {
     bytes.set(buf, ms, 0x00)
     j = 0
     while j < pd_len {
-        bytes.set(buf, ms + 1 + j, bytes.get(provided_data, j))
+        bytes.set(buf, ms + 1 + j, provided_data[j])
         j = j + 1
     }
-    new_k = hmac.hmac_bytes(ctx.algo, ctx.k, ms, buf, ms + 1 + pd_len)
+    new_k = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(buf)[0..ms + 1 + pd_len])
     bytes.free(buf)
     bytes.free(ctx.k)
     ctx.k = new_k
 
     // V = HMAC(K, V)
-    new_v = hmac.hmac_bytes(ctx.algo, ctx.k, ms, ctx.v, ms)
+    new_v = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(ctx.v)[0..ms])
     bytes.free(ctx.v)
     ctx.v = new_v
 
@@ -109,41 +111,47 @@ update(ctx: *DrbgCtx, provided_data: ptr, pd_len: int) {
     bytes.set(buf2, ms, 0x01)
     j = 0
     while j < pd_len {
-        bytes.set(buf2, ms + 1 + j, bytes.get(provided_data, j))
+        bytes.set(buf2, ms + 1 + j, provided_data[j])
         j = j + 1
     }
-    new_k2 = hmac.hmac_bytes(ctx.algo, ctx.k, ms, buf2, ms + 1 + pd_len)
+    new_k2 = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(buf2)[0..ms + 1 + pd_len])
     bytes.free(buf2)
     bytes.free(ctx.k)
     ctx.k = new_k2
 
     // V = HMAC(K, V)
-    new_v2 = hmac.hmac_bytes(ctx.algo, ctx.k, ms, ctx.v, ms)
+    new_v2 = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(ctx.v)[0..ms])
     bytes.free(ctx.v)
     ctx.v = new_v2
 }
 
-// Concatenate up to three (ptr,len) chunks (any may be null/0) into a
-// fresh std.bytes buffer. Caller frees.
-concat3(a: ptr, alen: int, b: ptr, blen: int, c: ptr, clen: int) -> ptr {
+// Concatenate up to three slices (any may be empty) into a fresh std.bytes
+// buffer. Caller frees.
+concat3(a: byte[], b: byte[], c: byte[]) -> ptr {
+    if a.len < 0 { panic("drbg.concat3: the `a` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int alen = a.len
+    if b.len < 0 { panic("drbg.concat3: the `b` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int blen = b.len
+    if c.len < 0 { panic("drbg.concat3: the `c` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int clen = c.len
     total = alen + blen + clen
     out = bytes.new(total)
     off = 0
     i = 0
     while i < alen {
-        bytes.set(out, off, bytes.get(a, i))
+        bytes.set(out, off, a[i])
         off = off + 1
         i = i + 1
     }
     i = 0
     while i < blen {
-        bytes.set(out, off, bytes.get(b, i))
+        bytes.set(out, off, b[i])
         off = off + 1
         i = i + 1
     }
     i = 0
     while i < clen {
-        bytes.set(out, off, bytes.get(c, i))
+        bytes.set(out, off, c[i])
         off = off + 1
         i = i + 1
     }
@@ -151,9 +159,9 @@ concat3(a: ptr, alen: int, b: ptr, blen: int, c: ptr, clen: int) -> ptr {
 }
 
 // Instantiate an HMAC_DRBG. `algo` is a sha2 family name. entropy and
-// nonce are required; perso may be null with perso_len 0. Returns
-// (ctx, "") or (null, error).
-new(algo: string, entropy: ptr, entropy_len: int, nonce: ptr, nonce_len: int, perso: ptr, perso_len: int) -> {
+// nonce are required; perso may be empty (pass null). All three are
+// byte[] (#2301). Returns (ctx, "") or (null, error).
+new(algo: string, entropy: byte[], nonce: byte[], perso: byte[]) -> {
     ms = mac_size_for(algo)
     if ms == 0 {
         return null, "unknown algorithm"
@@ -178,47 +186,36 @@ new(algo: string, entropy: ptr, entropy_len: int, nonce: ptr, nonce_len: int, pe
     ctx.k = k
 
     // seed_material = entropy || nonce || perso
-    pl = perso_len
-    if perso == null {
-        pl = 0
-    }
-    seed = concat3(entropy, entropy_len, nonce, nonce_len, perso, pl)
-    update(ctx, seed, bytes.length(seed))
+    seed = concat3(entropy, nonce, perso)
+    update(ctx, bytes.view(seed))
     bytes.free(seed)
     ctx.reseed_counter = 1
     return ctx, ""
 }
 
 // Reseed with fresh entropy and optional additional input.
-reseed(ctx: ptr, entropy: ptr, entropy_len: int, addl: ptr, addl_len: int) {
+reseed(ctx: ptr, entropy: byte[], addl: byte[]) {
     c = ctx as *DrbgCtx
-    al = addl_len
-    if addl == null {
-        al = 0
-    }
-    seed = concat3(entropy, entropy_len, addl, al, null, 0)
-    update(c, seed, bytes.length(seed))
+    seed = concat3(entropy, addl, null)
+    update(c, bytes.view(seed))
     bytes.free(seed)
     c.reseed_counter = 1
 }
 
 // Core generate. Produces `num_bytes` of output as an AetherBytes
-// buffer. `addl` is optional additional input (null/0 if none).
-generate_core(c: *DrbgCtx, num_bytes: int, addl: ptr, addl_len: int) -> ptr {
+// buffer. `addl` is optional additional input (an empty slice if none).
+generate_core(c: *DrbgCtx, num_bytes: int, addl: byte[]) -> ptr {
+    if addl.len < 0 { panic("drbg.generate_core: the `addl` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ms = c.mac_size
-    al = addl_len
-    if addl == null {
-        al = 0
-    }
-    if al > 0 {
-        update(c, addl, al)
+    if addl.len > 0 {
+        update(c, addl)
     }
 
     out = bytes.new(num_bytes)
     produced = 0
     while produced < num_bytes {
         // V = HMAC(K, V)
-        new_v = hmac.hmac_bytes(c.algo, c.k, ms, c.v, ms)
+        new_v = hmac.hmac_bytes(c.algo, bytes.view(c.k)[0..ms], bytes.view(c.v)[0..ms])
         bytes.free(c.v)
         c.v = new_v
         // append min(ms, remaining) bytes of V
@@ -236,11 +233,7 @@ generate_core(c: *DrbgCtx, num_bytes: int, addl: ptr, addl_len: int) -> ptr {
     }
 
     // Update with addl (or empty) and bump the reseed counter.
-    if al > 0 {
-        update(c, addl, al)
-    } else {
-        update(c, null, 0)
-    }
+    update(c, addl)
     c.reseed_counter = c.reseed_counter + 1
     return out
 }
@@ -248,13 +241,13 @@ generate_core(c: *DrbgCtx, num_bytes: int, addl: ptr, addl_len: int) -> ptr {
 // Generate `num_bytes` of output (no additional input).
 generate(ctx: ptr, num_bytes: int) -> ptr {
     c = ctx as *DrbgCtx
-    return generate_core(c, num_bytes, null, 0)
+    return generate_core(c, num_bytes, null)
 }
 
 // Generate `num_bytes` of output with additional input.
-generate_with_input(ctx: ptr, num_bytes: int, addl: ptr, addl_len: int) -> ptr {
+generate_with_input(ctx: ptr, num_bytes: int, addl: byte[]) -> ptr {
     c = ctx as *DrbgCtx
-    return generate_core(c, num_bytes, addl, addl_len)
+    return generate_core(c, num_bytes, addl)
 }
 
 // Destroy a DRBG context. NULL-safe.

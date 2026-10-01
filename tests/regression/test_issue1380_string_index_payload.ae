@@ -24,7 +24,7 @@ main() {
     // Written through std.fs, not a shell: `system` runs cmd.exe on Windows,
     // where `printf` does not exist.
     path = "aeth_1380_probe.txt"
-    werr = fs.write_binary(path, "HELLO", 5)
+    werr = fs.write_binary(path, string.bytes("HELLO"))
     if werr != "" { fail("could not write the probe file: ${werr}") }
 
     // A string literal: plain char*, the representation that always worked.

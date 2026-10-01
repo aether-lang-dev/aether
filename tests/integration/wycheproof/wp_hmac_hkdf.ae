@@ -94,7 +94,7 @@ fn run_hmac() -> int {
 
             key = from_hex(key_hex)
             msg = from_hex(msg_hex)
-            mac = hmac.hmac_sha256(key, string_length(key_hex) / 2, msg, string_length(msg_hex) / 2)
+            mac = hmac.hmac_sha256(bytes.view(key)[0..string_length(key_hex) / 2], bytes.view(msg)[0..string_length(msg_hex) / 2])
             hit = bytes_eq_hex(mac, 32, tag_hex)
             if res == "valid" {
                 if hit == 1 { passed = passed + 1 } else {
@@ -153,9 +153,7 @@ fn run_hkdf() -> int {
             ikm = from_hex(ikm_hex)
             salt = from_hex(salt_hex)
             info = from_hex(info_hex)
-            okm = hkdf.hkdf("sha256", salt, string_length(salt_hex) / 2,
-                ikm, string_length(ikm_hex) / 2,
-                info, string_length(info_hex) / 2, size)
+            okm = hkdf.hkdf("sha256", bytes.view(salt)[0..string_length(salt_hex) / 2], bytes.view(ikm)[0..string_length(ikm_hex) / 2], bytes.view(info)[0..string_length(info_hex) / 2], size)
             if okm == null {
                 if res == "valid" {
                     println("FAIL hkdf tcId=${tc_id} (valid): refused")

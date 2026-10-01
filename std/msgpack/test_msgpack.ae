@@ -33,7 +33,7 @@ fn check(cond: bool, msg: string) -> int {
 
 fn assert_hex(val: ptr, expected_hex: string, msg: string) -> int {
     let packed = msgpack.pack(val)
-    let actual_hex = encoding.hex_encode(packed, string.length(packed))
+    let actual_hex = encoding.hex_encode(string.bytes(packed))
     if actual_hex != expected_hex {
         println("FAIL: ${msg} (expected hex ${expected_hex}, got ${actual_hex})")
         return 1

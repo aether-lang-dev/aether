@@ -32,17 +32,10 @@ handle_root(req: ptr, res: ptr, ud: ptr) {
 handle_echo(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "application/octet-stream")
-    body = http.request_body(req)
-    body_len = http.request_body_length(req)
-    if body == null {
-        http.response_set_body(res, "")
-    } else {
-        // Use length-aware setter so binary / NUL-bearing payloads
-        // survive the round trip — the h2 wrapper preserves byte
-        // counts, but response_set_body's strlen path would
-        // truncate at the first NUL. Issue #260 Tier 2.
-        http.response_set_body_n(res, body, body_len)
-    }
+    // Binary-safe both ways: the body as a bounded view, set back verbatim,
+    // so NUL-bearing payloads survive the round trip — response_set_body's
+    // strlen path would truncate at the first NUL. Issue #260 Tier 2.
+    http.response_set_body_bytes(res, http.request_body_bytes(req))
 }
 
 handle_head(req: ptr, res: ptr, ud: ptr) {

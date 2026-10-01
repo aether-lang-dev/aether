@@ -7,7 +7,7 @@
 // - http_server_* : HTTP server operations
 
 exports(
-    tcp_connect_raw, tcp_send_raw, tcp_send_n_raw,
+    tcp_connect_raw, tcp_send_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
     tcp_listen_raw, tcp_accept_raw, tcp_server_close,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
@@ -24,7 +24,7 @@ exports(
     http_get_header, http_get_query_param, http_get_path_param,
     http_request_free,
     http_response_create, http_response_set_status,
-    http_response_set_header, http_response_set_body, http_response_set_body_n,
+    http_response_set_header, http_response_set_body,
     http_response_json, http_server_response_free,
     http_server_set_actor_handler,
     http_request_method, http_request_path, http_request_body,
@@ -38,7 +38,10 @@ exports(
 // TCP Client - raw externs (escape hatch)
 extern tcp_connect_raw(host: string, port: int) -> ptr
 extern tcp_send_raw(sock: ptr, data: string) -> int
-extern tcp_send_n_raw(sock: ptr, data: string, length: int) -> int
+// tcp_send_n_raw is not declared here (#2301): std.tcp declares it with a
+// `ptr` data parameter for its byte[] write_n, and two declarations of one
+// C symbol with different parameter types are a C compile error in any
+// program importing both modules. Send binary data with tcp.write_n.
 extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
 extern tcp_close(sock: ptr) -> int
@@ -115,7 +118,10 @@ extern http_response_set_body(res: ptr, body: string)
 // may contain embedded NULs (binary content, gzip, packed binary);
 // plain http_response_set_body uses strlen and truncates at the
 // first NUL.
-extern http_response_set_body_n(res: ptr, body: string, length: int)
+// http_response_set_body_n is not declared here (#2301): std.http declares it
+// with a `ptr` body for response_set_body_bytes, and two declarations of one C
+// symbol with different parameter types are a C compile error in a program
+// importing both. Set a binary body with http.response_set_body_bytes.
 extern http_response_json(res: ptr, json: string)
 extern http_server_response_free(res: ptr)
 

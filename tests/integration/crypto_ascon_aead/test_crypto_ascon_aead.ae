@@ -64,7 +64,7 @@ fn kat(algo: string, label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex
     ad_len = string_length(ad_hex) / 2
     pt_len = string_length(pt_hex) / 2
 
-    ct = ascon_aead.aead_seal(algo, key, nonce, ad, ad_len, pt, pt_len)
+    ct = ascon_aead.aead_seal(algo, key, nonce, bytes.view(ad)[0..ad_len], bytes.view(pt)[0..pt_len])
     got = to_hex(ct, bytes.length(ct))
     if got == want_hex {
         println("ok   seal ${algo} ${label}")
@@ -75,7 +75,7 @@ fn kat(algo: string, label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex
         fails = fails + 1
     }
 
-    op, oerr = ascon_aead.aead_open(algo, key, nonce, ad, ad_len, ct, bytes.length(ct))
+    op, oerr = ascon_aead.aead_open(algo, key, nonce, bytes.view(ad)[0..ad_len], bytes.view(ct))
     if oerr == "" && to_hex(op, pt_len) == pt_hex {
         println("ok   open ${algo} ${label}")
     } else {
@@ -85,7 +85,7 @@ fn kat(algo: string, label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex
 
     tlen = bytes.length(ct)
     bytes.set(ct, tlen - 1, bytes.get(ct, tlen - 1) ^ 1)
-    tp, terr = ascon_aead.aead_open(algo, key, nonce, ad, ad_len, ct, tlen)
+    tp, terr = ascon_aead.aead_open(algo, key, nonce, bytes.view(ad)[0..ad_len], bytes.view(ct)[0..tlen])
     if terr != "" {
         println("ok   tamper-reject ${algo} ${label}")
     } else {

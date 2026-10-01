@@ -29,11 +29,9 @@ slurp_stdin() -> string {
     buf = bytes.new(cap)
     sb = strbuilder.new(cap)
     while true {
-        n, e = io.fd_read_into(0, bytes.data(buf), cap)
+        n, e = io.fd_read_into(0, bytes.capacity_view(buf)[0..cap])
         if e != "" || n <= 0 { break }
-        _ = bytes.set_length(buf, n)
-        chunk = bytes.to_string(buf, n)
-        strbuilder.append_n(sb, chunk, n)
+        strbuilder.append_slice(sb, bytes.capacity_view(buf)[0..n])
     }
     bytes.free(buf)
     return strbuilder.finish(sb)

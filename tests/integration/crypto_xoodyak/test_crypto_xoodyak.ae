@@ -50,7 +50,7 @@ main() {
     // Vector 1 (Empty msg)
     msg1 = hex_to_bytes("")
     ctx1, _ = xoodyak.new()
-    xoodyak.update_bytes(ctx1, msg1, 0)
+    xoodyak.update(ctx1, bytes.view(msg1)[0..0])
     res1 = xoodyak.final_hex(ctx1)
     fails = fails + check("xoodyak empty", res1, "EA152F2B47BCE24EFB66C479D4ADF17BD324D806E85FF75EE369EE50DC8F8BD1")
     bytes.free(msg1)
@@ -58,7 +58,7 @@ main() {
     // Vector 2 (00)
     msg2 = hex_to_bytes("00")
     ctx2, _ = xoodyak.new()
-    xoodyak.update_bytes(ctx2, msg2, 1)
+    xoodyak.update(ctx2, bytes.view(msg2)[0..1])
     res2 = xoodyak.final_hex(ctx2)
     fails = fails + check("xoodyak 00", res2, "27921F8DDF392894460B70B3ED6C091E6421B7D2147DCD6031D7EFEBAD3030CC")
     bytes.free(msg2)
@@ -66,7 +66,7 @@ main() {
     // Vector 3 (0001)
     msg3 = hex_to_bytes("0001")
     ctx3, _ = xoodyak.new()
-    xoodyak.update_bytes(ctx3, msg3, 2)
+    xoodyak.update(ctx3, bytes.view(msg3)[0..2])
     res3 = xoodyak.final_hex(ctx3)
     fails = fails + check("xoodyak 0001", res3, "DD3F12E89DB41C61D3C05779705FA946A8C69C79EEFDC1B4A966A5F1AB35073D")
     bytes.free(msg3)
@@ -74,13 +74,13 @@ main() {
     // Vector 4 (0001020304050607)
     msg4 = hex_to_bytes("0001020304050607")
     ctx4, _ = xoodyak.new()
-    xoodyak.update_bytes(ctx4, msg4, 8)
+    xoodyak.update(ctx4, bytes.view(msg4)[0..8])
     res4 = xoodyak.final_hex(ctx4)
     fails = fails + check("xoodyak 8 bytes", res4, "C826D28C7F5BF948FBA9BB5EA028B4E377F1DE86EC5A2A1511BA4D692968EFD5")
     bytes.free(msg4)
 
     // One-shot wrappers check
-    res_one_shot = xoodyak.xoodyak_hex("", 0)
+    res_one_shot = xoodyak.xoodyak_hex(string.bytes(""))
     fails = fails + check("xoodyak one-shot empty", res_one_shot, "EA152F2B47BCE24EFB66C479D4ADF17BD324D806E85FF75EE369EE50DC8F8BD1")
 
     // Multi-part streaming across the 16-byte absorb rate: a 20-byte message
@@ -91,7 +91,7 @@ main() {
     q = 0
     while q < 20 { bytes.set(msg20, q, q); q = q + 1 }
     ctx20, _ = xoodyak.new()
-    xoodyak.update_bytes(ctx20, msg20, 20)
+    xoodyak.update(ctx20, bytes.view(msg20)[0..20])
     res20 = xoodyak.final_hex(ctx20)
     fails = fails + check("xoodyak 20B one-shot", res20, "9bebe7579ec1d075b6768ae981c54c7d60db82931b074a618b0a68f84cbccfe6")
 
@@ -99,11 +99,11 @@ main() {
     part_a = bytes.new(7)
     q = 0
     while q < 7 { bytes.set(part_a, q, q); q = q + 1 }
-    xoodyak.update_bytes(ctx_sp2, part_a, 7)
+    xoodyak.update(ctx_sp2, bytes.view(part_a)[0..7])
     part_b = bytes.new(13)
     q = 0
     while q < 13 { bytes.set(part_b, q, 7 + q); q = q + 1 }
-    xoodyak.update_bytes(ctx_sp2, part_b, 13)
+    xoodyak.update(ctx_sp2, bytes.view(part_b)[0..13])
     res_sp = xoodyak.final_hex(ctx_sp2)
     fails = fails + check("xoodyak 20B split 7+13", res_sp, "9bebe7579ec1d075b6768ae981c54c7d60db82931b074a618b0a68f84cbccfe6")
     bytes.free(msg20)

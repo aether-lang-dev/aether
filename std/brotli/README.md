@@ -17,7 +17,7 @@ negotiating `br` against `gzip` writes the same shape either way:
 
 ```
 s, err        = brotli.stream_new(brotli.FAST_QUALITY, 0)
-chunk, n, err = brotli.stream_write(s, ev, string.length(ev))
+chunk, n, err = brotli.stream_write(s, string.bytes(ev))
 chunk, n, err = brotli.stream_flush(s)      // send these bytes now
 tail,  n, err = brotli.stream_finish(s)     // at connection close
                 brotli.stream_free(s)
@@ -42,7 +42,7 @@ rejected, matching how `std.zlib` treats `level`.
 ## One-shot
 
 ```
-packed, n, err = brotli.compress(body, string.length(body), brotli.FAST_QUALITY)
+packed, n, err = brotli.compress(string.bytes(body), brotli.FAST_QUALITY)
 ```
 
 ## When the backend is absent

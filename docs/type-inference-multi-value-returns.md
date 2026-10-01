@@ -31,7 +31,7 @@ hash_file(p: string) {
     if string.length(rerr) > 0 {
         return "", rerr                              // multi-value, mixes literal "" with destructured local
     }
-    return cryptography.sha256_hex(bytes, length)    // single-value tuple-typed call
+    return cryptography.sha256_hex(string.bytes(bytes)[0..length])    // single-value tuple-typed call
 }
 ```
 
@@ -136,7 +136,7 @@ hash_file(p: string) {
     if string.length(rerr) > 0 {
         return "", rerr                              // <-- right here
     }
-    return cryptography.sha256_hex(bytes, length)
+    return cryptography.sha256_hex(string.bytes(bytes)[0..length])
 }
 ```
 

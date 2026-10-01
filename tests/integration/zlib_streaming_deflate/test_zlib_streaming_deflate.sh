@@ -66,7 +66,7 @@ main() {
     i = 0
     while i < 3 {
         ev = "event: patch\ndata: chunk-\${i}\n\n"
-        c1, n1, e1 = zlib.stream_write(s, ev, string.length(ev))
+        c1, n1, e1 = zlib.stream_write(s, string.bytes(ev))
         if n1 > 0 { all = string.concat(all, c1) }
         c2, n2, e2 = zlib.stream_flush(s)
         if n2 > 0 { all = string.concat(all, c2) }
@@ -75,7 +75,7 @@ main() {
     t, tn, e3 = zlib.stream_finish(s)
     if tn > 0 { all = string.concat(all, t) }
     zlib.stream_free(s)
-    werr = fs.write_binary("$OUT_GZ", all, string.length(all))
+    werr = fs.write_binary("$OUT_GZ", string.bytes(all))
     if werr != "" { println("write: \${werr}") return 1 }
     return 0
 }

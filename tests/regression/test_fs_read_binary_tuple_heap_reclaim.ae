@@ -52,7 +52,7 @@ main() {
         exit(1)
     }
 
-    werr = fs.write_atomic(path, payload, payload_len)
+    werr = fs.write_atomic(path, string.bytes(payload)[0..payload_len])
     if werr != "" {
         println("FAIL: write_atomic err=${werr}")
         exit(1)

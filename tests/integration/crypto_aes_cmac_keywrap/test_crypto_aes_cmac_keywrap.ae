@@ -21,20 +21,20 @@ main() {
 
     // RFC 4493 AES-128 CMAC, the four canonical lengths (0/16/40/64).
     e0 = bytes.new(0)
-    fails = fails + check("cmac empty", bh(aes.cmac(k, 16, e0, 0)), "bb1d6929e95937287fa37d129b756746")
+    fails = fails + check("cmac empty", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(e0)[0..0])), "bb1d6929e95937287fa37d129b756746")
     m16 = hb("6bc1bee22e409f96e93d7e117393172a")
-    fails = fails + check("cmac 16", bh(aes.cmac(k, 16, m16, 16)), "070a16b46b4d4144f79bdd9dd04a287c")
+    fails = fails + check("cmac 16", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(m16)[0..16])), "070a16b46b4d4144f79bdd9dd04a287c")
     m40 = hb("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411")
-    fails = fails + check("cmac 40", bh(aes.cmac(k, 16, m40, 40)), "dfa66747de9ae63030ca32611497c827")
+    fails = fails + check("cmac 40", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(m40)[0..40])), "dfa66747de9ae63030ca32611497c827")
     m64 = hb("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710")
-    fails = fails + check("cmac 64", bh(aes.cmac(k, 16, m64, 64)), "51f0bebf7e3b9d92fc49741779363cfe")
+    fails = fails + check("cmac 64", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(m64)[0..64])), "51f0bebf7e3b9d92fc49741779363cfe")
 
     // RFC 3394 AES-128 Key Wrap.
     kek = hb("000102030405060708090a0b0c0d0e0f")
     kdata = hb("00112233445566778899aabbccddeeff")
-    w = aes.key_wrap(kek, 16, kdata, 16)
+    w = aes.key_wrap(bytes.view(kek)[0..16], bytes.view(kdata)[0..16])
     fails = fails + check("keywrap", bh(w), "1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5")
-    uw, uerr = aes.key_unwrap(kek, 16, w, bytes.length(w))
+    uw, uerr = aes.key_unwrap(bytes.view(kek)[0..16], bytes.view(w))
     if uerr != "" { println("FAIL keyunwrap err ${uerr}"); fails = fails + 1 }
     if beq(uw, kdata) != 1 { println("FAIL keyunwrap roundtrip"); fails = fails + 1 } else { println("ok   keyunwrap roundtrip") }
 

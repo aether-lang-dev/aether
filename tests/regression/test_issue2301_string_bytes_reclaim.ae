@@ -1,0 +1,86 @@
+// Regression: a scope-owned heap string viewed through `string.bytes(s)`
+// must still be released at scope exit (#2301).
+//
+// `string.bytes(s)` is a BORROWED byte[] view of `s`'s storage. Its body
+// hands `s` to a `ptr` extern and returns a view of it, which the escape
+// walk read as `s` escaping, so the compiler withheld `s`'s scope-exit free.
+// Every `fs.write_binary(p, string.bytes(buf)[0..n])` on a fresh read
+// buffer leaked the whole buffer: the raw byte I/O migration routes exactly
+// that shape through string.bytes.
+//
+// The fix lists string.bytes (and the accessor under it) as a non-storing
+// view, as aether_string_data already is: a slice does not extend its
+// owner's lifetime. This reads a 10 KB file, views it and writes it back
+// out, many times in a helper whose locals die each call, and checks the
+// cap-accounted heap does not grow with the iteration count.
+
+import std.fs
+import std.os
+import std.string
+
+extern exit(code: int)
+extern aether_caps_used_bytes() -> long
+
+// Read `src` and write it to `dst` through a byte view, returning the
+// byte count. The read buffer is local to this call and must be freed
+// when it returns.
+fn copy_through_view(src: string, dst: string) -> int {
+    data, n, err = fs.read_binary(src)
+    if err != "" {
+        return -1
+    }
+    werr = fs.write_binary(dst, string.bytes(data)[0..n])
+    if werr != "" {
+        return -1
+    }
+    return n
+}
+
+main() {
+    println("=== string.bytes view keeps its owner reclaimable (#2301) ===")
+    tmp = os.temp_dir()
+    src = "${tmp}/aether_2301_reclaim_src.bin"
+    dst = "${tmp}/aether_2301_reclaim_dst.bin"
+
+    chunk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    payload = ""
+    i = 0
+    while i < 160 { // 160 * 64 = 10240 bytes
+        payload = string.concat(payload, chunk)
+        i = i + 1
+    }
+    werr = fs.write_binary(src, string.bytes(payload))
+    if werr != "" {
+        println("FAIL: setup write: ${werr}")
+        exit(1)
+    }
+
+    // Warm-up, so first-use allocations do not count against the loop.
+    if copy_through_view(src, dst) != 10240 {
+        println("FAIL: warm-up copy")
+        exit(1)
+    }
+
+    iters = 200
+    before = aether_caps_used_bytes()
+    j = 0
+    while j < iters {
+        if copy_through_view(src, dst) != 10240 {
+            println("FAIL: copy at iteration ${j}")
+            exit(1)
+        }
+        j = j + 1
+    }
+    delta = aether_caps_used_bytes() - before
+
+    // Leaking, the delta is ~iters * 10240 = ~2 MB. Reclaimed, it is noise.
+    ceiling = 65536
+    if delta > ceiling {
+        println("FAIL: heap grew ${delta} bytes over ${iters} view-and-write copies (ceiling ${ceiling}); the viewed read buffer is not being freed")
+        exit(1)
+    }
+    println("  PASS: delta=${delta} bytes over ${iters} copies of 10 KB (ceiling=${ceiling})")
+
+    fs.delete(src)
+    fs.delete(dst)
+}

@@ -52,7 +52,7 @@ actor SrvActor {
             // Then echo one frame back, length-aware (survives NULs).
             bytes, n, rerr = tcp.read_n(busy, 128)
             if rerr == "" {
-                tcp.write_n(busy, bytes, n)
+                tcp.write_n(busy, string.bytes(bytes)[0..n])
             }
 
             // Keep the idle peer alive until the client has finished its

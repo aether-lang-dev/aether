@@ -3,6 +3,7 @@
 
 import std.http
 import std.tcp
+import std.string
 
 extern exit(code: int)
 extern http_server_start_raw(server: ptr) -> int
@@ -27,7 +28,7 @@ handle_connect(req: ptr, res: ptr, ud: ptr) {
 
     bytes, n, err = tcp.read_n(tunnel, 128)
     if err == "" {
-        _sent, werr = tcp.write_n(tunnel, bytes, n)
+        _sent, werr = tcp.write_n(tunnel, string.bytes(bytes)[0..n])
         if werr != "" {
             tcp.close(tunnel)
             return

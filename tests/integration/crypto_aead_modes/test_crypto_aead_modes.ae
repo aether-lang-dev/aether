@@ -19,21 +19,21 @@ main() {
     cnon = hb("10111213141516")
     caad = hb("0001020304050607")
     cpt = hb("20212223")
-    cct, cctlen = aes.ccm_seal(ckey, 16, cnon, 7, caad, 8, cpt, 4, 4)
+    cct, cctlen = aes.ccm_seal(bytes.view(ckey)[0..16], bytes.view(cnon)[0..7], bytes.view(caad)[0..8], bytes.view(cpt)[0..4], 4)
     fails = fails + ck("ccm ex1 seal", bh(cct, cctlen), "7162015b4dac255d")
-    cdec, cdeclen = aes.ccm_open(ckey, 16, cnon, 7, caad, 8, cct, cctlen, 4)
+    cdec, cdeclen = aes.ccm_open(bytes.view(ckey)[0..16], bytes.view(cnon)[0..7], bytes.view(caad)[0..8], bytes.view(cct)[0..cctlen], 4)
     fails = fails + ck("ccm ex1 open", bh(cdec, cdeclen), "20212223")
     bytes.set(cct, 0, bytes.get(cct, 0) ^ 1)
-    cbad, cbadlen = aes.ccm_open(ckey, 16, cnon, 7, caad, 8, cct, cctlen, 4)
+    cbad, cbadlen = aes.ccm_open(bytes.view(ckey)[0..16], bytes.view(cnon)[0..7], bytes.view(caad)[0..8], bytes.view(cct)[0..cctlen], 4)
     if cbadlen == -1 { println("ok   ccm tamper rejected") } else { println("FAIL ccm tamper accepted"); fails = fails + 1 }
 
     // --- OCB: RFC 7253 Appendix A (empty A, empty P -> tag only) ---
     okey = hb("000102030405060708090a0b0c0d0e0f")
     onon = hb("bbaa99887766554433221100")
     empty = bytes.new(0)
-    otag, otaglen = aes.ocb_seal(okey, 16, onon, 12, empty, 0, empty, 0, 16)
+    otag, otaglen = aes.ocb_seal(bytes.view(okey)[0..16], bytes.view(onon)[0..12], bytes.view(empty)[0..0], bytes.view(empty)[0..0], 16)
     fails = fails + ck("ocb empty tag", bh(otag, otaglen), "785407bfffc8ad9edcc5520ac9111ee6")
-    odec, odeclen = aes.ocb_open(okey, 16, onon, 12, empty, 0, otag, otaglen, 16)
+    odec, odeclen = aes.ocb_open(bytes.view(okey)[0..16], bytes.view(onon)[0..12], bytes.view(empty)[0..0], bytes.view(otag)[0..otaglen], 16)
     if odeclen == 0 { println("ok   ocb empty open") } else { println("FAIL ocb empty open len=${odeclen}"); fails = fails + 1 }
 
     if fails == 0 { println("ALL PASS"); return }

@@ -52,8 +52,8 @@ main() {
     enc3("error", resp.new_error("ERR bad"), "-ERR bad\r\n")
     enc3("integer", resp.new_integer(1000), ":1000\r\n")
     enc3("neg integer", resp.new_integer(0 - 5), ":-5\r\n")
-    enc3("bulk", resp.new_bulk("hello", 5), "$5\r\nhello\r\n")
-    enc3("empty bulk", resp.new_bulk("", 0), "$0\r\n\r\n")
+    enc3("bulk", resp.new_bulk(string.bytes("hello")), "$5\r\nhello\r\n")
+    enc3("empty bulk", resp.new_bulk(string.bytes("")), "$0\r\n\r\n")
 
     // --- null: RESP3 vs RESP2 dialect ---
     enc3("null resp3", resp.new_null(), "_\r\n")
@@ -66,33 +66,33 @@ main() {
 
     // --- build an array with array_add, then encode ---
     built = resp.new_array()
-    resp.array_add(built, resp.new_bulk("foo", 3))
+    resp.array_add(built, resp.new_bulk(string.bytes("foo")))
     resp.array_add(built, resp.new_integer(42))
     enc3("built array", built, "*2\r\n$3\r\nfoo\r\n:42\r\n")
 
     // --- decode round-trips (the resumable parser) ---
-    v1, n1, _e1 = resp.parse_prefix("+PONG\r\n", 7)
+    v1, n1, _e1 = resp.parse_prefix(string.bytes("+PONG\r\n"))
     check_int("decode simple type", resp.value_type(v1), resp.RESP_SIMPLE)
     check("decode simple str", resp.str_value(v1), "PONG")
     check_int("decode simple consumed", n1, 7)
     resp.free_value(v1)
 
-    v2, _n2, _e2 = resp.parse_prefix(":42\r\n", 5)
+    v2, _n2, _e2 = resp.parse_prefix(string.bytes(":42\r\n"))
     check_int("decode integer", resp.as_integer(v2) as int, 42)
     resp.free_value(v2)
 
-    v3, _n3, _e3 = resp.parse_prefix("$5\r\nhello\r\n", 11)
+    v3, _n3, _e3 = resp.parse_prefix(string.bytes("$5\r\nhello\r\n"))
     check("decode bulk", resp.str_value(v3), "hello")
     resp.free_value(v3)
 
     // null bulk ($-1) decodes to RESP_NULL
-    v4, _n4, _e4 = resp.parse_prefix("$-1\r\n", 5)
+    v4, _n4, _e4 = resp.parse_prefix(string.bytes("$-1\r\n"))
     check_int("decode null bulk -> null", resp.is_null(v4), 1)
     resp.free_value(v4)
 
     // array of [bulk "foo", int 42]
     arr = "*2\r\n$3\r\nfoo\r\n:42\r\n"
-    v5, _n5, _e5 = resp.parse_prefix(arr, string_length(arr))
+    v5, _n5, _e5 = resp.parse_prefix(string.bytes(arr))
     check_int("decode array type", resp.value_type(v5), resp.RESP_ARRAY)
     check_int("decode array size", resp.array_size(v5), 2)
     check("decode array[0]", resp.str_value(resp.array_get(v5, 0)), "foo")
@@ -103,7 +103,7 @@ main() {
 
     // RESP3 map %1 {"a" => 1}
     mp = "%1\r\n$1\r\na\r\n:1\r\n"
-    v6, _n6, _e6 = resp.parse_prefix(mp, string_length(mp))
+    v6, _n6, _e6 = resp.parse_prefix(string.bytes(mp))
     check_int("decode map type", resp.value_type(v6), resp.RESP_MAP)
     check_int("decode map size", resp.map_size(v6), 1)
     check("decode map key", resp.str_value(resp.map_key(v6, 0)), "a")
@@ -113,7 +113,7 @@ main() {
     resp.free_value(v6)
 
     // --- resumability: a partial frame reports incomplete, not malformed ---
-    vp, np, ep = resp.parse_prefix("$5\r\nhel", 7) // only 3 of 5 data bytes
+    vp, np, ep = resp.parse_prefix(string.bytes("$5\r\nhel")) // only 3 of 5 data bytes
     if vp == null && np == 0 && string.equals(ep, "") == 1 {
         println("  ok   partial bulk -> incomplete")
     } else {
@@ -121,7 +121,7 @@ main() {
     }
 
     // partial array (header says 2, only 1 present)
-    vpa, npa, epa = resp.parse_prefix("*2\r\n:1\r\n", 8)
+    vpa, npa, epa = resp.parse_prefix(string.bytes("*2\r\n:1\r\n"))
     if vpa == null && npa == 0 && string.equals(epa, "") == 1 {
         println("  ok   partial array -> incomplete")
     } else {
@@ -129,7 +129,7 @@ main() {
     }
 
     // --- malformed: a bad integer body is an error, not incomplete ---
-    vm, _nm, em = resp.parse_prefix(":12x\r\n", 6)
+    vm, _nm, em = resp.parse_prefix(string.bytes(":12x\r\n"))
     if vm == null && string.equals(em, "") == 0 {
         println("  ok   malformed integer -> error")
     } else {
@@ -137,12 +137,12 @@ main() {
     }
 
     // --- RESP3 null decode ---
-    vn, _nn, _en = resp.parse_prefix("_\r\n", 3)
+    vn, _nn, _en = resp.parse_prefix(string.bytes("_\r\n"))
     check_int("decode resp3 null", resp.is_null(vn), 1)
     resp.free_value(vn)
 
     // --- RESP3 boolean decode ---
-    vb, _nb, _eb = resp.parse_prefix("#t\r\n", 4)
+    vb, _nb, _eb = resp.parse_prefix(string.bytes("#t\r\n"))
     check_int("decode resp3 bool", resp.as_bool(vb), 1)
     resp.free_value(vb)
 

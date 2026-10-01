@@ -24,7 +24,7 @@ main() {
     i = 0
     while i < 4 {
         ev = "event: patch\ndata: chunk-${i}\n\n"
-        c1, n1, e1 = brotli.stream_write(s, ev, string.length(ev))
+        c1, n1, e1 = brotli.stream_write(s, string.bytes(ev))
         if e1 != "" { println("FAIL stream_write: ${e1}") return 1 }
         if n1 > 0 { all = string.concat(all, c1) }
 
@@ -57,7 +57,7 @@ main() {
 
     // One-shot must work too, and beat the input on repetitive text.
     body = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    c, cn, e4 = brotli.compress(body, string.length(body), brotli.FAST_QUALITY)
+    c, cn, e4 = brotli.compress(string.bytes(body), brotli.FAST_QUALITY)
     if e4 != "" { println("FAIL compress: ${e4}") return 1 }
     if cn >= string.length(body) { println("FAIL: one-shot did not compress") return 1 }
 

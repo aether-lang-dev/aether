@@ -46,7 +46,7 @@ main() {
     // NB: conn_send takes a bytes HANDLE, not bytes.data(rb) -- the `ptr`
     // in its signature means an AetherBytes*, and passing the raw data
     // pointer segfaults inside seal_record.
-    serr = tls13_client.conn_send(conn, rb, rlen)
+    serr = tls13_client.conn_send(conn, bytes.view(rb)[0..rlen])
     if serr != "" {
         println("FAIL: conn_send: ${serr}")
         exit(1)

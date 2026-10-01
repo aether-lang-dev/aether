@@ -153,7 +153,7 @@ write_sheet(path: string, t0: ptr, t1: ptr, t2: ptr, t3: ptr, side: int) -> int 
         row = row + 1
     }
 
-    err = fs.write_binary(path, bytes.data(out), bytes.length(out))
+    err = fs.write_binary(path, bytes.view(out))
     bytes.free(out)
     if err != "" {
         println("write failed: ${err}")

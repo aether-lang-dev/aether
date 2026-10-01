@@ -45,7 +45,7 @@ fn run_test(hex_data: string, expected_diag: string) -> int {
 
     // Convert encoded back to hex to compare
     encoded_len = string.length(encoded)
-    encoded_hex = encoding.hex_encode(encoded, encoded_len)
+    encoded_hex = encoding.hex_encode(string.bytes(encoded)[0..encoded_len])
 
     // We only assert exact hex match for non-floats and non-indefinite values
     is_float = string.starts_with(hex_data, "f9") == 1 || string.starts_with(hex_data, "fa") == 1 || string.starts_with(hex_data, "fb") == 1

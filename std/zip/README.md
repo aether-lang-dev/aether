@@ -16,7 +16,7 @@ with no path or file descriptor, the same posture as `std.json` / `std.cbor` /
 import std.zip
 
 // `data` is the raw bytes of a .zip (from std.fs.read_binary, a socket, …).
-ar, err = zip.open(data, len)
+ar, err = zip.open(string.bytes(data))
 if string.equals(err, "") != 1 { /* not a zip, or truncated */ }
 
 n = zip.count(ar)
@@ -44,8 +44,8 @@ an entry to disk is a layer on top and a separate concern.
 import std.zip
 
 w = zip.writer_new()
-zip.writer_add(w, "a.txt", data_a, len_a, zip.METHOD_DEFLATE, 6) // level 0..9
-zip.writer_add(w, "b.bin", data_b, len_b, zip.METHOD_STORED, 0)
+zip.writer_add(w, "a.txt", string.bytes(data_a), zip.METHOD_DEFLATE, 6) // level 0..9
+zip.writer_add(w, "b.bin", string.bytes(data_b), zip.METHOD_STORED, 0)
 zip.writer_add_dir(w, "sub")                                     // a directory entry
 out, outlen, err = zip.writer_finish(w)   // `out` is a complete, valid .zip
 if string.equals(err, "") != 1 { /* handle */ }
@@ -74,7 +74,7 @@ entry is decompressed and CRC-checked by the reader before it is written.
 import std.zip
 
 opts = zip.default_extract_options()   // safe by default
-err = zip.extract(data, len, "out", opts)
+err = zip.extract(string.bytes(data), "out", opts)
 if string.equals(err, "") != 1 { /* handle */ }
 ```
 

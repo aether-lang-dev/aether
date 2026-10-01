@@ -16,10 +16,10 @@
 //
 // Import with:  import std.cryptography.blake2
 //
-//   one-shot:   blake2b_hex(data, len) / blake2s_hex(data, len)
-//   variable:   blake2b_hex_n(data, len, out_len)
-//   keyed:      blake2b_keyed_hex(data, len, key, key_len, out_len)
-//   streaming:  ctx = new_b(64); update(ctx, data, len); final_hex(ctx)
+//   one-shot:   blake2b_hex(string.bytes(data)[0..len]) / blake2s_hex(string.bytes(data)[0..len])
+//   variable:   blake2b_hex_n(string.bytes(data)[0..len], out_len)
+//   keyed:      blake2b_keyed_hex(string.bytes(data)[0..len], bytes.view(key)[0..key_len], out_len)
+//   streaming:  ctx = new_b(64); update(ctx, string.bytes(data)[0..len]); final_hex(ctx)
 //   ownership:  final_hex / final_bytes FREE the ctx; call free_ctx
 //               ONLY to abandon a ctx before finalizing (never after).
 //
@@ -45,7 +45,7 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports(
     new_b, new_b_keyed, new_s, new_s_keyed,
-    update, update_bytes, final_hex, final_bytes, free_ctx,
+    update, final_hex, final_bytes, free_ctx,
     blake2b_hex, blake2b_bytes, blake2s_hex, blake2s_bytes,
     blake2b_hex_n, blake2b_bytes_n, blake2s_hex_n, blake2s_bytes_n,
     blake2b_keyed_hex, blake2b_keyed_bytes,
@@ -323,13 +323,15 @@ init_h(c: *Blake2Ctx, key_len: int) {
 }
 
 // Seed the first block with the zero-padded key (keyed/MAC mode).
-seed_key(c: *Blake2Ctx, key: ptr, key_len: int) {
+seed_key(c: *Blake2Ctx, key: byte[]) {
+    if key.len < 0 { panic("blake2.seed_key: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     if key_len <= 0 {
         return
     }
     i = 0
     while i < key_len {
-        bytes.set(c.block, i, bytes.get(key, i) & 255)
+        bytes.set(c.block, i, key[i] & 255)
         i = i + 1
     }
     // The remainder of the block is already zero. A keyed digest always
@@ -346,13 +348,15 @@ new_b(out_len: int) -> ptr {
     return c
 }
 
-new_b_keyed(out_len: int, key: ptr, key_len: int) -> ptr {
+new_b_keyed(out_len: int, key: byte[]) -> ptr {
+    if key.len < 0 { panic("blake2.new_b_keyed: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     c = mk_ctx(out_len, 1)
     if c == null {
         return null
     }
     init_h(c, key_len)
-    seed_key(c, key, key_len)
+    seed_key(c, key)
     return c
 }
 
@@ -365,13 +369,15 @@ new_s(out_len: int) -> ptr {
     return c
 }
 
-new_s_keyed(out_len: int, key: ptr, key_len: int) -> ptr {
+new_s_keyed(out_len: int, key: byte[]) -> ptr {
+    if key.len < 0 { panic("blake2.new_s_keyed: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     c = mk_ctx(out_len, 0)
     if c == null {
         return null
     }
     init_h(c, key_len)
-    seed_key(c, key, key_len)
+    seed_key(c, key)
     return c
 }
 
@@ -388,26 +394,16 @@ push_byte(c: *Blake2Ctx, b: int) {
     c.block_len = c.block_len + 1
 }
 
-update(ctx: ptr, data: string, length: int) {
+update(ctx: ptr, data: byte[]) {
+    if data.len < 0 { panic("blake2.update: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     c = ctx as *Blake2Ctx
     if length <= 0 {
         return
     }
     i = 0
     while i < length {
-        push_byte(c, string_char_at_n(data, length, i))
-        i = i + 1
-    }
-}
-
-update_bytes(ctx: ptr, data: ptr, length: int) {
-    c = ctx as *Blake2Ctx
-    if length <= 0 {
-        return
-    }
-    i = 0
-    while i < length {
-        push_byte(c, bytes.get(data, i))
+        push_byte(c, data[i])
         i = i + 1
     }
 }
@@ -528,103 +524,119 @@ free_ctx(ctx: ptr) {
 }
 
 // ---- One-shot, default full digest ----
-blake2b_hex(data: string, len: int) -> string {
+blake2b_hex(data: byte[]) -> string {
+    if data.len < 0 { panic("blake2.blake2b_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_b(64)
     if ctx == null {
         return ""
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_hex(ctx)
 }
-blake2b_bytes(data: string, len: int) -> ptr {
+blake2b_bytes(data: byte[]) -> ptr {
+    if data.len < 0 { panic("blake2.blake2b_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_b(64)
     if ctx == null {
         return null
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_bytes(ctx)
 }
-blake2s_hex(data: string, len: int) -> string {
+blake2s_hex(data: byte[]) -> string {
+    if data.len < 0 { panic("blake2.blake2s_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_s(32)
     if ctx == null {
         return ""
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_hex(ctx)
 }
-blake2s_bytes(data: string, len: int) -> ptr {
+blake2s_bytes(data: byte[]) -> ptr {
+    if data.len < 0 { panic("blake2.blake2s_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_s(32)
     if ctx == null {
         return null
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_bytes(ctx)
 }
 
 // ---- One-shot, variable digest length ----
-blake2b_hex_n(data: string, len: int, out_len: int) -> string {
+blake2b_hex_n(data: byte[], out_len: int) -> string {
+    if data.len < 0 { panic("blake2.blake2b_hex_n: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_b(out_len)
     if ctx == null {
         return ""
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_hex(ctx)
 }
-blake2b_bytes_n(data: string, len: int, out_len: int) -> ptr {
+blake2b_bytes_n(data: byte[], out_len: int) -> ptr {
+    if data.len < 0 { panic("blake2.blake2b_bytes_n: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_b(out_len)
     if ctx == null {
         return null
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_bytes(ctx)
 }
-blake2s_hex_n(data: string, len: int, out_len: int) -> string {
+blake2s_hex_n(data: byte[], out_len: int) -> string {
+    if data.len < 0 { panic("blake2.blake2s_hex_n: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_s(out_len)
     if ctx == null {
         return ""
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_hex(ctx)
 }
-blake2s_bytes_n(data: string, len: int, out_len: int) -> ptr {
+blake2s_bytes_n(data: byte[], out_len: int) -> ptr {
+    if data.len < 0 { panic("blake2.blake2s_bytes_n: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     ctx = new_s(out_len)
     if ctx == null {
         return null
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_bytes(ctx)
 }
 
 // ---- One-shot, keyed (MAC) ----
-blake2b_keyed_hex(data: string, len: int, key: ptr, key_len: int, out_len: int) -> string {
-    ctx = new_b_keyed(out_len, key, key_len)
+blake2b_keyed_hex(data: byte[], key: byte[], out_len: int) -> string {
+    if data.len < 0 { panic("blake2.blake2b_keyed_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if key.len < 0 { panic("blake2.blake2b_keyed_hex: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    ctx = new_b_keyed(out_len, key)
     if ctx == null {
         return ""
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_hex(ctx)
 }
-blake2b_keyed_bytes(data: string, len: int, key: ptr, key_len: int, out_len: int) -> ptr {
-    ctx = new_b_keyed(out_len, key, key_len)
+blake2b_keyed_bytes(data: byte[], key: byte[], out_len: int) -> ptr {
+    if data.len < 0 { panic("blake2.blake2b_keyed_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if key.len < 0 { panic("blake2.blake2b_keyed_bytes: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    ctx = new_b_keyed(out_len, key)
     if ctx == null {
         return null
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_bytes(ctx)
 }
-blake2s_keyed_hex(data: string, len: int, key: ptr, key_len: int, out_len: int) -> string {
-    ctx = new_s_keyed(out_len, key, key_len)
+blake2s_keyed_hex(data: byte[], key: byte[], out_len: int) -> string {
+    if data.len < 0 { panic("blake2.blake2s_keyed_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if key.len < 0 { panic("blake2.blake2s_keyed_hex: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    ctx = new_s_keyed(out_len, key)
     if ctx == null {
         return ""
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_hex(ctx)
 }
-blake2s_keyed_bytes(data: string, len: int, key: ptr, key_len: int, out_len: int) -> ptr {
-    ctx = new_s_keyed(out_len, key, key_len)
+blake2s_keyed_bytes(data: byte[], key: byte[], out_len: int) -> ptr {
+    if data.len < 0 { panic("blake2.blake2s_keyed_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if key.len < 0 { panic("blake2.blake2s_keyed_bytes: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    ctx = new_s_keyed(out_len, key)
     if ctx == null {
         return null
     }
-    update(ctx, data, len)
+    update(ctx, data)
     return final_bytes(ctx)
 }

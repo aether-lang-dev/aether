@@ -83,7 +83,10 @@ int aether_strbuilder_append(AetherStrBuilder* b, const void* s) {
     size_t n = is_aether_string(s)
         ? aether_string_length(s)
         : strlen((const char*)s);
-    return aether_strbuilder_append_n(b, s, (int)n);
+    /* `s` arrives as the AetherString itself (the extern's parameter is
+     * `@aether string`), so this is the one place it is unwrapped;
+     * append_n below takes the payload as raw bytes. */
+    return aether_strbuilder_append_n(b, aether_string_data(s), (int)n);
 }
 
 int aether_strbuilder_append_n(AetherStrBuilder* b, const void* s, int n) {
@@ -93,8 +96,12 @@ int aether_strbuilder_append_n(AetherStrBuilder* b, const void* s, int n) {
     size_t need = b->length + (size_t)n;
     if (need < b->length) return 0;  /* overflow */
     if (!strbuilder_reserve(b, need)) return 0;
-    const char* payload = aether_string_data(s);
-    if (!payload) return 0;
+    /* Raw bytes, never sniffed. The extern's parameter is a plain `string`,
+     * so the generated call has already unwrapped an AetherString to its
+     * payload; checking that payload for a header a second time misread any
+     * binary content beginning DE C0 57 AE (the header magic) as a header
+     * and copied from a pointer taken out of the bytes that follow (#2301). */
+    const char* payload = (const char*)s;
     memcpy(b->data + b->length, payload, (size_t)n);
     b->length = need;
     return 1;

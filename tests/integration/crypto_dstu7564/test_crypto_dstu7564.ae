@@ -61,7 +61,7 @@ incrementing(n: int) -> ptr {
 // string, so drive the streaming API for binary inputs).
 digest_bytes(algo: string, b: ptr, n: int) -> string {
     ctx, _ = dstu7564.new(algo)
-    dstu7564.update_bytes(ctx, b, n)
+    dstu7564.update(ctx, bytes.view(b)[0..n])
     return dstu7564.final_hex(ctx)
 }
 
@@ -73,7 +73,7 @@ main() {
 
     // ---- dstu7564-256 (DSTU 7564:2014 / BC Dstu7564Test vectors) ----
     fails = fails + check("dstu7564-256 empty",
-        dstu7564.dstu7564_hex("dstu7564-256", "", 0),
+        dstu7564.dstu7564_hex("dstu7564-256", string.bytes("")),
         "cd5101d1ccdf0d1d1f4ada56e888cd724ca1a0838a3521e7131d4fb78d0f5eb6")
 
     fails = fails + check("dstu7564-256 ff",
@@ -104,7 +104,7 @@ main() {
 
     // ---- dstu7564-512 ----
     fails = fails + check("dstu7564-512 empty",
-        dstu7564.dstu7564_hex("dstu7564-512", "", 0),
+        dstu7564.dstu7564_hex("dstu7564-512", string.bytes("")),
         "656b2f4cd71462388b64a37043ea55dbe445d452aecd46c3298343314ef04019bcfa3f04265a9857f91be91fce197096187ceda78c9c1c021c294a0689198538")
 
     fails = fails + check("dstu7564-512 ff",
@@ -122,14 +122,14 @@ main() {
     // Multi-part streaming across the 64-byte (256) / 128-byte (512) block
     // boundary must equal the one-shot digest.
     ctx_s, _ = dstu7564.new("dstu7564-256")
-    dstu7564.update_bytes(ctx_s, b128, 40)
+    dstu7564.update(ctx_s, bytes.view(b128)[0..40])
     b128_tail = incrementing(128)
     k = 40
     while k < 128 {
         bytes.set(b128_tail, k - 40, k & 255)
         k = k + 1
     }
-    dstu7564.update_bytes(ctx_s, b128_tail, 88)
+    dstu7564.update(ctx_s, bytes.view(b128_tail)[0..88])
     fails = fails + check("dstu7564-256 128B split-streaming",
         dstu7564.final_hex(ctx_s),
         "0a9474e645a7d25e255e9e89fff42ec7eb31349007059284f0b182e452bda882")

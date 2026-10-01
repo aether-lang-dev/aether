@@ -87,7 +87,7 @@ import std.jsonpath
 import std.aeafixture
 
 main() {
-    println(md2.md2_hex("abc", 3))
+    println(md2.md2_hex(string.bytes("abc")))
     println(aeafixture.value())
 }
 AE

@@ -112,7 +112,7 @@ main() {
     pp = 0
     while pp < 32 { bytes.set(pub, pp, 0x42); pp = pp + 1 }
 
-    ch = tls13_hs.client_hello(random, sid, 32, pub)
+    ch = tls13_hs.client_hello(random, bytes.view(sid)[0..32], pub)
 
     if g8(ch, 0) != 1 {
         println("FAIL CH: msg_type not client_hello (${g8(ch,0)})")
@@ -140,7 +140,7 @@ main() {
     // --- ServerHello round-trip ---
     sh, sh_len = build_server_hello(0x42)
     parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
-    err = tls13_hs.parse_server_hello(sh, sh_len, &parsed)
+    err = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_len], &parsed)
     if err != "" {
         println("FAIL SH parse error: ${err}")
         total_ok = 0
@@ -173,7 +173,7 @@ main() {
     bytes.set(bad, 1, 0)
     bytes.set(bad, 2, 0)
     bytes.set(bad, 3, 6)
-    berr = tls13_hs.parse_server_hello(bad, 4, &parsed)
+    berr = tls13_hs.parse_server_hello(bytes.view(bad)[0..4], &parsed)
     if berr == "" {
         println("FAIL SH: accepted malformed/short server hello")
         total_ok = 0
@@ -187,7 +187,7 @@ main() {
     // secp256r1(0x0017) }.
     hrr = from_hex("020000340303cf21ad74e59a6111be1dfa3a06b44e8c845c7630048b15d5a00d203a15d5b26e00130100000c002b00020304003300020017")
     hp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
-    herr = tls13_hs.parse_server_hello(hrr, bytes.length(hrr), &hp)
+    herr = tls13_hs.parse_server_hello(bytes.view(hrr), &hp)
     if string.equals(herr, "") == 1 {
         if hp.is_hello_retry == 1 {
             if hp.group == tls13_hs.GROUP_SECP256R1 {
@@ -204,7 +204,7 @@ main() {
     p256pt_i = 0
     while p256pt_i < 65 { bytes.set(p256pt, p256pt_i, 0x11); p256pt_i = p256pt_i + 1 }
     bytes.set(p256pt, 0, 0x04)
-    dual = tls13_hs.client_hello_full(random, sid, 32, tls13_hs.GROUP_X25519, pub, 32, tls13_hs.GROUP_SECP256R1, p256pt, 65, "example.com")
+    dual = tls13_hs.client_hello_full(random, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], "example.com")
     // The CH must be a valid handshake message and larger than a single-share
     // CH (it carries an extra 4 + 65 = 69-byte key_share entry + SNI).
     if g8(dual, 0) == 1 {
@@ -222,7 +222,7 @@ main() {
     tkt_i = 0
     while tkt_i < 16 { bytes.set(tkt, tkt_i, 0xAB); tkt_i = tkt_i + 1 }
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt, 16, 0, 32, 0, &pch)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt)[0..16], 0, 32, 0, &pch)
     pok = 1
     if g8(pch.buf, 0) != 1 { pok = 0 } // client_hello type
     if pch.binder_off <= 0 { pok = 0 }
@@ -247,8 +247,8 @@ main() {
     while tk2i < 16 { bytes.set(tkt2, tk2i, 0xCD); tk2i = tk2i + 1 }
     pch_no = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
     pch_ed = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt2, 16, 0, 32, 0, &pch_no)
-    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt2, 16, 0, 32, 1, &pch_ed)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt2)[0..16], 0, 32, 0, &pch_no)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt2)[0..16], 0, 32, 1, &pch_ed)
     // The early_data extension is 4 bytes (type 42 + zero length), so the
     // 0-RTT CH is exactly 4 bytes longer and still begins with client_hello.
     if g8(pch_ed.buf, 0) == 1 && pch_ed.buf_len == pch_no.buf_len + 4 {
@@ -263,7 +263,7 @@ main() {
     hy = bytes.new(1216)
     hyi = 0
     while hyi < 1216 { bytes.set(hy, hyi, (hyi * 3 + 1) & 0xFF); hyi = hyi + 1 }
-    pqch = tls13_hs.client_hello_pq(random, sid, 32, hy, 1216, pub, "example.com")
+    pqch = tls13_hs.client_hello_pq(random, bytes.view(sid)[0..32], hy, 1216, pub, "example.com")
     // Must be a valid client_hello carrying the big hybrid key_share (so the CH
     // is well over 1200 bytes) and advertise GROUP_X25519MLKEM768 (0x11EC).
     pqok = 1

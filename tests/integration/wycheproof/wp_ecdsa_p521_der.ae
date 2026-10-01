@@ -72,7 +72,7 @@ fn coordn(hexs: string, width: int) -> ptr {
 // short hash used whole, not truncated). 64-byte digest -> 2 leading zeros.
 fn hash66(b: ptr, n: int) -> ptr {
     ctx, e = sha2.new("sha512")
-    sha2.update_bytes(ctx, b, n)
+    sha2.update(ctx, bytes.view(b)[0..n])
     d = sha2.final_bytes(ctx) // 64 bytes
     out = bytes.new(66)
     bytes.set(out, 0, 0)
@@ -137,7 +137,7 @@ main() {
             sig = from_hex(sig_hex)
             sig_len = string_length(sig_hex) / 2
 
-            r66, s66, perr = tls13_cert.split_ecdsa_sig(sig, sig_len, 66)
+            r66, s66, perr = tls13_cert.split_ecdsa_sig(bytes.view(sig)[0..sig_len], 66)
             ok = 0
             if r66 != null {
                 ok = p521.ecdsa_verify(pubx, puby, h, r66, s66)

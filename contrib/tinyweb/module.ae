@@ -10,6 +10,7 @@ import std.http
 import std.tcp
 import std.string
 import std.bytes
+import std.mem
 
 exports (
     ALL, GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE,
@@ -557,30 +558,30 @@ ws_send_frame(sock: ptr, payload: string) {
     hdr_len = 2
     if len >= 126 { hdr_len = 4 }
     total = hdr_len + len
-    buf = bytes.new(total)
-    bytes.set(buf, 0, 129)
+    frame = make([]byte, total)
+    frame[0] = 129
     if len < 126 {
-        bytes.set(buf, 1, len)
+        frame[1] = len
     } else {
-        bytes.set(buf, 1, 126)
-        bytes.set(buf, 2, len / 256)
-        bytes.set(buf, 3, len - (len / 256) * 256)
+        frame[1] = 126
+        frame[2] = len / 256
+        frame[3] = len - (len / 256) * 256
     }
-    for (i = 0; i < len; i++) {
-        bytes.set(buf, hdr_len + i, string.char_at(payload, i))
+    if len > 0 {
+        mem.copy_slice(frame[hdr_len..total], string.bytes(payload))
     }
-    frame = bytes.finish(buf, total)
-    tcp.write_n(sock, frame, total)
+    tcp.write_n(sock, frame)
+    free(frame)
 }
 
 // Send a close frame (opcode 8, empty payload): [0x88, 0x00]. Raw octets in a
 // bytes buffer — from_int would emit "136"/"0" as text and corrupt the frame.
 ws_send_close(sock: ptr) {
-    buf = bytes.new(2)
-    bytes.set(buf, 0, 136)
-    bytes.set(buf, 1, 0)
-    frame = bytes.finish(buf, 2)
-    tcp.write_n(sock, frame, 2)
+    frame = make([]byte, 2)
+    frame[0] = 136
+    frame[1] = 0
+    tcp.write_n(sock, frame)
+    free(frame)
 }
 
 // ---------------------------------------------------------------------------

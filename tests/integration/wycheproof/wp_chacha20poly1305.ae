@@ -119,7 +119,7 @@ main() {
             msg_len = string_length(msg_hex) / 2
             ctag, ctag_len = concat_hex(ct_hex, tag_hex)
 
-            pt, oerr = chacha20poly1305.aead_open(key, iv, aad, aad_len, ctag, ctag_len)
+            pt, oerr = chacha20poly1305.aead_open(key, iv, bytes.view(aad)[0..aad_len], bytes.view(ctag)[0..ctag_len])
             if res == "valid" {
                 if pt == null {
                     println("FAIL tcId=${tc_id} (valid): open rejected: ${oerr}")
@@ -132,7 +132,7 @@ main() {
                     } else {
                         // Deterministic AEAD: seal must reproduce ct||tag.
                         msg = from_hex(msg_hex)
-                        sealed = chacha20poly1305.aead_seal(key, iv, aad, aad_len, msg, msg_len)
+                        sealed = chacha20poly1305.aead_seal(key, iv, bytes.view(aad)[0..aad_len], bytes.view(msg)[0..msg_len])
                         if bytes_eq(sealed, ctag, ctag_len) == 1 {
                             passed = passed + 1
                         } else {

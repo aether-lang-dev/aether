@@ -40,20 +40,13 @@ import std.cryptography.sha1
 import std.cryptography.sha2
 
 exports(
-    cryptography_sha1_hex_raw, cryptography_sha256_hex_raw,
-    cryptography_hash_hex_raw, cryptography_hash_supported_raw,
-    cryptography_md4_hex_raw, cryptography_md5_hex_raw,
-    cryptography_hmac_sha256_hex_raw, cryptography_hmac_sha256_bytes_raw,
-    cryptography_md4_bytes_raw, cryptography_md5_bytes_raw,
-    cryptography_sha1_bytes_raw, cryptography_sha256_bytes_raw,
-    cryptography_hash_bytes_raw,
+    cryptography_hash_supported_raw,
     cryptography_get_binary_digest, cryptography_get_binary_digest_length,
     cryptography_release_binary_digest,
     cryptography_random_bytes_raw,
     cryptography_get_random_bytes, cryptography_get_random_bytes_length,
     cryptography_release_random_bytes,
-    cryptography_digest_new_raw, cryptography_digest_update_raw,
-    cryptography_digest_final_hex_raw, cryptography_digest_final_bytes_raw,
+    cryptography_digest_new_raw, cryptography_digest_final_hex_raw, cryptography_digest_final_bytes_raw,
     cryptography_digest_free_raw,
     sha1_hex, sha256_hex, sha256_file, hash_hex, hash_supported,
     md4_hex, md5_hex, hmac_sha256_hex, hmac_sha256_bytes,
@@ -63,9 +56,13 @@ exports(
     digest_free
 )
 
-extern cryptography_sha1_hex_raw(data: string, length: int) -> string @heap
-extern cryptography_sha256_hex_raw(data: string, length: int) -> string @heap
-extern cryptography_hash_hex_raw(algo: string, data: string, length: int) -> string @heap
+// The hashing / HMAC externs below take their input as `ptr`, not `string`,
+// and are not exported (#2301): the wrappers pass a byte[] slice's raw data
+// pointer. A `string` parameter routes through the AetherString unwrap; a
+// heap string passed to a `ptr` parameter would hash its header instead.
+extern cryptography_sha1_hex_raw(data: ptr, length: int) -> string @heap
+extern cryptography_sha256_hex_raw(data: ptr, length: int) -> string @heap
+extern cryptography_hash_hex_raw(algo: string, data: ptr, length: int) -> string @heap
 // Bound under a _raw name like its siblings. The module function below is
 // called `hash_supported`, which mangles to `cryptography_hash_supported` --
 // exactly this C symbol. The two collided, and the extern won, so every
@@ -73,17 +70,17 @@ extern cryptography_hash_hex_raw(algo: string, data: string, length: int) -> str
 // the source read as though it worked. Invisible until the body did more than
 // forward to the extern, which is why it survived this long.
 extern cryptography_hash_supported_raw(algo: string) -> int
-extern cryptography_md4_hex_raw(data: string, length: int) -> string @heap
-extern cryptography_md5_hex_raw(data: string, length: int) -> string @heap
-extern cryptography_hmac_sha256_hex_raw(key: string, key_len: int,
-    msg: string, msg_len: int) -> string @heap
-extern cryptography_hmac_sha256_bytes_raw(key: string, key_len: int,
-    msg: string, msg_len: int) -> int
-extern cryptography_md4_bytes_raw(data: string, length: int) -> int
-extern cryptography_md5_bytes_raw(data: string, length: int) -> int
-extern cryptography_sha1_bytes_raw(data: string, length: int) -> int
-extern cryptography_sha256_bytes_raw(data: string, length: int) -> int
-extern cryptography_hash_bytes_raw(algo: string, data: string, length: int) -> int
+extern cryptography_md4_hex_raw(data: ptr, length: int) -> string @heap
+extern cryptography_md5_hex_raw(data: ptr, length: int) -> string @heap
+extern cryptography_hmac_sha256_hex_raw(key: ptr, key_len: int,
+    msg: ptr, msg_len: int) -> string @heap
+extern cryptography_hmac_sha256_bytes_raw(key: ptr, key_len: int,
+    msg: ptr, msg_len: int) -> int
+extern cryptography_md4_bytes_raw(data: ptr, length: int) -> int
+extern cryptography_md5_bytes_raw(data: ptr, length: int) -> int
+extern cryptography_sha1_bytes_raw(data: ptr, length: int) -> int
+extern cryptography_sha256_bytes_raw(data: ptr, length: int) -> int
+extern cryptography_hash_bytes_raw(algo: string, data: ptr, length: int) -> int
 extern cryptography_get_binary_digest() -> string
 extern cryptography_get_binary_digest_length() -> int
 extern cryptography_release_binary_digest()
@@ -93,7 +90,7 @@ extern cryptography_get_random_bytes_length() -> int
 extern cryptography_release_random_bytes()
 
 extern cryptography_digest_new_raw(algo: string) -> ptr
-extern cryptography_digest_update_raw(handle: ptr, data: string, length: int) -> int
+extern cryptography_digest_update_raw(handle: ptr, data: ptr, length: int) -> int
 extern cryptography_digest_final_hex_raw(handle: ptr) -> string @heap
 extern cryptography_digest_final_bytes_raw(handle: ptr) -> int
 extern cryptography_digest_free_raw(handle: ptr)
@@ -108,14 +105,16 @@ extern string_new_with_length(data: string, length: int) -> ptr
 // SHA-1 is included for interop with legacy formats (Git object IDs,
 // Subversion rep-stores, HMAC-SHA1 fixtures). Prefer SHA-256 for new
 // work.
-sha1_hex(data: string, length: int) -> {
+sha1_hex(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.sha1_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     out = cryptography_sha1_hex_raw(data, length)
     if out == 0 {
         // No OpenSSL in this build: compute it in Aether instead of failing.
         // Binary-safe — sha1.update indexes through string_char_at_n(data,
         // length, i), which is bounded by the explicit length and returns the
         // raw byte, so embedded NULs hash correctly.
-        pure = sha1.sha1_hex(data, length)
+        pure = sha1.sha1_hex(data)
         if string.length(pure) == 0 {
             return "", "sha1 unavailable"
         }
@@ -126,12 +125,14 @@ sha1_hex(data: string, length: int) -> {
 
 // Compute the SHA-256 hex digest of the first `length` bytes of `data`.
 // Returns (digest, "") on success, ("", error) on failure.
-sha256_hex(data: string, length: int) -> {
+sha256_hex(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.sha256_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     out = cryptography_sha256_hex_raw(data, length)
     if out == 0 {
         // See sha1_hex above: pure fallback, binary-safe, so std.cas and
         // every other sha256 caller keeps working without OpenSSL.
-        pure = sha2.sha256_hex(data, length)
+        pure = sha2.sha256_hex(data)
         if string.length(pure) == 0 {
             return "", "sha256 unavailable"
         }
@@ -148,7 +149,7 @@ sha256_hex(data: string, length: int) -> {
 sha256_file(path: string) -> {
     data, len, rerr = fs.read_binary(path)
     if string.length(rerr) > 0 { return "", rerr }
-    return sha256_hex(data, len)
+    return sha256_hex(string.bytes(data)[0..len])
 }
 
 // Algorithm-by-name digest dispatch. `algo` is a string like "sha1"
@@ -168,25 +169,28 @@ sha256_file(path: string) -> {
 // "no pure fallback for this name". Private: the public surface stays
 // hash_hex / hash_supported, which now answer the same way with or without
 // OpenSSL for these five.
-pure_hash_hex(algo: string, data: string, length: int) -> string {
-    if algo == "sha1" { return sha1.sha1_hex(data, length) }
-    if algo == "sha256" { return sha2.sha256_hex(data, length) }
-    if algo == "sha224" { return sha2.sha224_hex(data, length) }
-    if algo == "sha384" { return sha2.sha384_hex(data, length) }
-    if algo == "sha512" { return sha2.sha512_hex(data, length) }
-    if algo == "md4" { return md4.md4_hex(data, length) }
-    if algo == "md5" { return md5.md5_hex(data, length) }
+pure_hash_hex(algo: string, data: byte[]) -> string {
+    if data.len < 0 { panic("cryptography.pure_hash_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if algo == "sha1" { return sha1.sha1_hex(data) }
+    if algo == "sha256" { return sha2.sha256_hex(data) }
+    if algo == "sha224" { return sha2.sha224_hex(data) }
+    if algo == "sha384" { return sha2.sha384_hex(data) }
+    if algo == "sha512" { return sha2.sha512_hex(data) }
+    if algo == "md4" { return md4.md4_hex(data) }
+    if algo == "md5" { return md5.md5_hex(data) }
     return ""
 }
 
-hash_hex(algo: string, data: string, length: int) -> {
+hash_hex(algo: string, data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.hash_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     out = cryptography_hash_hex_raw(algo, data, length)
     if out == 0 {
         // Try the pure implementation BEFORE consulting
         // cryptography_hash_supported: without OpenSSL that probe answers 0
         // for everything, so the old order reported a perfectly valid
         // "sha256" as an *unknown algorithm* rather than an absent backend.
-        pure = pure_hash_hex(algo, data, length)
+        pure = pure_hash_hex(algo, data)
         if string.length(pure) > 0 {
             return pure, ""
         }
@@ -233,12 +237,14 @@ hash_supported(algo: string) -> int {
 // stock OpenSSL 3 (whose by-name dispatcher skips the legacy
 // provider). Returns ("", "md4 unavailable") on builds whose
 // OpenSSL was compiled without MD4 at all.
-md4_hex(data: string, length: int) -> {
+md4_hex(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.md4_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     out = cryptography_md4_hex_raw(data, length)
     if out == 0 {
         // MD4 is absent from OpenSSL 3 default providers as well as from a
         // no-OpenSSL build, so the pure path is the usual one here.
-        pure = md4.md4_hex(data, length)
+        pure = md4.md4_hex(data)
         if string.length(pure) == 0 {
             return "", "md4 unavailable"
         }
@@ -249,10 +255,12 @@ md4_hex(data: string, length: int) -> {
 
 // MD5 hex digest. Legacy — Content-MD5, ETag, and various pre-SHA1
 // fixtures. NOT collision-resistant; do not use for security.
-md5_hex(data: string, length: int) -> {
+md5_hex(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.md5_hex: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     out = cryptography_md5_hex_raw(data, length)
     if out == 0 {
-        pure = md5.md5_hex(data, length)
+        pure = md5.md5_hex(data)
         if string.length(pure) == 0 {
             return "", "md5 unavailable"
         }
@@ -267,29 +275,15 @@ md5_hex(data: string, length: int) -> {
 // key derivation (each round's output keys the next), use the raw
 // bytes form `hmac_sha256_bytes` so intermediate steps don't
 // round-trip through hex.
-// Copy a length-prefixed string payload (binary-safe, embedded NULs OK)
-// into a fresh AetherBytes buffer for the pure-Aether HMAC.
-hmac_str_to_bytes(s: string, n: int) -> ptr {
-    b = bytes.new(n)
-    i = 0
-    while i < n {
-        bytes.set(b, i, string_char_at_n(s, n, i))
-        i = i + 1
-    }
-    return b
-}
-
-hmac_sha256_hex(key: string, key_len: int, msg: string, msg_len: int) -> {
+hmac_sha256_hex(key: byte[], msg: byte[]) -> {
+    if key.len < 0 { panic("cryptography.hmac_sha256_hex: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if msg.len < 0 { panic("cryptography.hmac_sha256_hex: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     // Delegate to the PURE-AETHER HMAC (std.cryptography.hmac): it needs no
     // libcrypto and produces a byte-identical digest, so HMAC works on every
     // target — including cross builds without an OpenSSL sysroot. This closes
     // the fail-open where the openssl-backed path stubbed to "" on cross,
     // making a wrong/empty MAC compare equal in auth checks.
-    kb = hmac_str_to_bytes(key, key_len)
-    mb = hmac_str_to_bytes(msg, msg_len)
-    out = hmac.hmac_sha256_hex(kb, key_len, mb, msg_len)
-    bytes.free(kb)
-    bytes.free(mb)
+    out = hmac.hmac_sha256_hex(key, msg)
     if out == "" {
         return "", "hmac failed"
     }
@@ -301,15 +295,13 @@ hmac_sha256_hex(key: string, key_len: int, msg: string, msg_len: int) -> {
 // digest byte including embedded NULs. Use this for chained key
 // derivation (SigV4, HKDF-shaped flows) where each round's output
 // keys the next.
-hmac_sha256_bytes(key: string, key_len: int, msg: string, msg_len: int) -> {
+hmac_sha256_bytes(key: byte[], msg: byte[]) -> {
+    if key.len < 0 { panic("cryptography.hmac_sha256_bytes: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if msg.len < 0 { panic("cryptography.hmac_sha256_bytes: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     // Pure-Aether HMAC (see hmac_sha256_hex) — works on every target, no
     // libcrypto. Returns the raw 32-byte digest as a length-preserving
     // AetherString so embedded NULs survive (SigV4/HKDF chaining).
-    kb = hmac_str_to_bytes(key, key_len)
-    mb = hmac_str_to_bytes(msg, msg_len)
-    digest = hmac.hmac_sha256(kb, key_len, mb, msg_len)
-    bytes.free(kb)
-    bytes.free(mb)
+    digest = hmac.hmac_sha256(key, msg)
     if digest == null {
         return "", 0, "hmac failed"
     }
@@ -325,10 +317,12 @@ hmac_sha256_bytes(key: string, key_len: int, msg: string, msg_len: int) -> {
 // fixed-width digest (zsync's truncated 3–16 byte MD4 per block,
 // binary git object IDs, etc.) — hex would double the size and
 // lose the embedded-NUL semantics.
-md4_bytes(data: string, length: int) -> {
+md4_bytes(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.md4_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     ok = cryptography_md4_bytes_raw(data, length)
     if ok == 0 {
-        p = md4.md4_bytes(data, length)
+        p = md4.md4_bytes(data)
         if p == null {
             return "", 0, "md4 unavailable"
         }
@@ -341,10 +335,12 @@ md4_bytes(data: string, length: int) -> {
     return owned, n, ""
 }
 
-md5_bytes(data: string, length: int) -> {
+md5_bytes(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.md5_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     ok = cryptography_md5_bytes_raw(data, length)
     if ok == 0 {
-        p = md5.md5_bytes(data, length)
+        p = md5.md5_bytes(data)
         if p == null {
             return "", 0, "md5 unavailable"
         }
@@ -357,10 +353,12 @@ md5_bytes(data: string, length: int) -> {
     return owned, n, ""
 }
 
-sha1_bytes(data: string, length: int) -> {
+sha1_bytes(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.sha1_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     ok = cryptography_sha1_bytes_raw(data, length)
     if ok == 0 {
-        pure = sha1.sha1_bytes(data, length)
+        pure = sha1.sha1_bytes(data)
         if pure == null {
             return "", 0, "sha1 unavailable"
         }
@@ -373,14 +371,16 @@ sha1_bytes(data: string, length: int) -> {
     return owned, n, ""
 }
 
-sha256_bytes(data: string, length: int) -> {
+sha256_bytes(data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.sha256_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     ok = cryptography_sha256_bytes_raw(data, length)
     if ok == 0 {
         // Same pure fallback as sha256_hex. Both variants must agree: a build
         // where sha256_hex() works and sha256_bytes() reports "unavailable"
         // is a worse API than one where neither does, and callers reasonably
         // assume the pair share a backend.
-        pure = sha2.sha256_bytes(data, length)
+        pure = sha2.sha256_bytes(data)
         if pure == null {
             return "", 0, "sha256 unavailable"
         }
@@ -399,38 +399,40 @@ sha256_bytes(data: string, length: int) -> {
 //   - OpenSSL isn't linked
 //   - the algorithm name is unknown ("unknown algorithm")
 //   - the digest computation fails
-hash_bytes(algo: string, data: string, length: int) -> {
+hash_bytes(algo: string, data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.hash_bytes: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     ok = cryptography_hash_bytes_raw(algo, data, length)
     if ok == 0 {
         // Pure fallback first, for the same reason as hash_hex: without
         // OpenSSL the hash_supported probe answers 0 for everything, so
         // checking it first mislabels a valid "sha256" as unknown.
         if algo == "sha1" {
-            p1 = sha1.sha1_bytes(data, length)
+            p1 = sha1.sha1_bytes(data)
             if p1 != null { return bytes.finish(p1, 20), 20, "" }
         }
         if algo == "sha256" {
-            p2 = sha2.sha256_bytes(data, length)
+            p2 = sha2.sha256_bytes(data)
             if p2 != null { return bytes.finish(p2, 32), 32, "" }
         }
         if algo == "sha224" {
-            p3 = sha2.sha224_bytes(data, length)
+            p3 = sha2.sha224_bytes(data)
             if p3 != null { return bytes.finish(p3, 28), 28, "" }
         }
         if algo == "sha384" {
-            p4 = sha2.sha384_bytes(data, length)
+            p4 = sha2.sha384_bytes(data)
             if p4 != null { return bytes.finish(p4, 48), 48, "" }
         }
         if algo == "sha512" {
-            p5 = sha2.sha512_bytes(data, length)
+            p5 = sha2.sha512_bytes(data)
             if p5 != null { return bytes.finish(p5, 64), 64, "" }
         }
         if algo == "md4" {
-            p6 = md4.md4_bytes(data, length)
+            p6 = md4.md4_bytes(data)
             if p6 != null { return bytes.finish(p6, 16), 16, "" }
         }
         if algo == "md5" {
-            p7 = md5.md5_bytes(data, length)
+            p7 = md5.md5_bytes(data)
             if p7 != null { return bytes.finish(p7, 16), 16, "" }
         }
         if cryptography_hash_supported_raw(algo) == 0 {
@@ -520,7 +522,7 @@ random_base64(n: int) -> {
     if n == 0 {
         return "", ""
     }
-    return encoding.base64_encode(raw, raw_n), ""
+    return encoding.base64_encode(string.bytes(raw)[0..raw_n]), ""
 }
 
 // ---- Incremental (streaming) digest context ----
@@ -661,7 +663,9 @@ digest_new(algo: string) -> {
 // may be an owned AetherString from fs.pread / a window buffer; embedded
 // NULs survive). Returns (1, "") on success, (0, error) on failure.
 // Feeding 0 bytes is a no-op success. Does NOT free the context.
-digest_update(ctx: ptr, data: string, length: int) -> {
+digest_update(ctx: ptr, data: byte[]) -> {
+    if data.len < 0 { panic("cryptography.digest_update: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int length = data.len
     if ctx == null {
         return 0, "digest update failed"
     }
@@ -673,10 +677,10 @@ digest_update(ctx: ptr, data: string, length: int) -> {
         }
         return 1, ""
     }
-    if w.kind == 1 { sha1.update(w.inner, data, length) }
-    if w.kind == 2 { sha2.update(w.inner, data, length) }
-    if w.kind == 3 { md5.update(w.inner, data, length) }
-    if w.kind == 4 { md4.update(w.inner, data, length) }
+    if w.kind == 1 { sha1.update(w.inner, data) }
+    if w.kind == 2 { sha2.update(w.inner, data) }
+    if w.kind == 3 { md5.update(w.inner, data) }
+    if w.kind == 4 { md4.update(w.inner, data) }
     return 1, ""
 }
 

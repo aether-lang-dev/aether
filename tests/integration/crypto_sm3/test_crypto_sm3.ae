@@ -1,6 +1,7 @@
 // Validate std.cryptography.sm3 against the GB/T 32905 example vectors.
 import std.cryptography.sm3
 import std.io
+import std.string
 
 check(label: string, got: string, want: string) -> int {
     if got == want {
@@ -16,16 +17,16 @@ check(label: string, got: string, want: string) -> int {
 main() {
     fails = 0
     fails = fails + check("empty",
-        sm3.sm3_hex("", 0),
+        sm3.sm3_hex(string.bytes("")),
         "1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b")
     // Standard example 1 from the SM3 spec.
     fails = fails + check("abc",
-        sm3.sm3_hex("abc", 3),
+        sm3.sm3_hex(string.bytes("abc")),
         "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0")
     // Standard example 2: "abcd" repeated 16 times (64 bytes — exactly one
     // block of input, so padding spills into a second block).
     fails = fails + check("abcd*16",
-        sm3.sm3_hex("abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", 64),
+        sm3.sm3_hex(string.bytes("abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd")),
         "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732")
 
     if fails == 0 {

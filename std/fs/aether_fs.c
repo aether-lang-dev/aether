@@ -189,23 +189,17 @@ void fs_watch_close(void* w) { (void)w; }
     #include <limits.h>           // INT_MAX (saturate the byte count)
 #endif
 
-// Unwrap the payload+length from a value that may be either an
-// AetherString* (from fs.read_binary, string_new_with_length, etc.)
-// or a plain C string literal. Extern fn signatures say `const char*`
-// but Aether passes whichever pointer the variable holds — without
-// this dispatch, AetherString inputs end up writing the struct
-// header (magic 0xAE57C0DE, refcount, length, capacity, data-ptr)
-// to disk instead of the intended bytes. When `explicit_len` is
-// non-negative the caller's length wins (used by write_binary and
-// write_atomic, which take an explicit-length param for binary safety).
+// The payload+length for write_binary / write_atomic. `data` is always raw
+// bytes: std.fs passes a byte[] slice's data pointer through a `ptr`-typed
+// extern (#2301). This used to sniff for an AetherString header and
+// unwrap one, back when a string could arrive here un-unwrapped — but a
+// sniff on raw bytes misreads any payload that happens to begin with the
+// header magic (DE C0 57 AE) as a header and writes from the `data` pointer
+// it then reads out of those bytes. With the payload always raw, the only
+// correct reading is the literal one.
 static inline const char* fs_unwrap_bytes(const char* data, int explicit_len, size_t* out_len) {
-    if (!data) { *out_len = 0; return NULL; }
-    if (is_aether_string(data)) {
-        const AetherString* s = (const AetherString*)data;
-        *out_len = (explicit_len >= 0) ? (size_t)explicit_len : s->length;
-        return s->data;
-    }
-    *out_len = (explicit_len >= 0) ? (size_t)explicit_len : strlen(data);
+    if (!data || explicit_len <= 0) { *out_len = 0; return data; }
+    *out_len = (size_t)explicit_len;
     return data;
 }
 
@@ -1135,6 +1129,7 @@ int fs_write_binary_raw(const char* path, const char* data, int length) {
 
 int fs_write_atomic_raw(const char* path, const char* data, int length) {
     if (!path || length < 0) return 0;
+    if (length > 0 && !data) return 0;
     if (!aether_sandbox_check("fs_write", path)) return 0;
 
     size_t want;

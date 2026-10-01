@@ -69,7 +69,7 @@ main() {
     // frame on `sock` so the server echoes it and it becomes readable;
     // the idle peer is accepted but silent, so it must stay not-ready.
     payload = make_payload()
-    _, werr = tcp.write_n(sock, payload, 3)
+    _, werr = tcp.write_n(sock, string.bytes(payload)[0..3])
     if werr != "" { fail("write payload: ${werr}") }
 
     a_ready, b_ready, p2err = tcp.poll2(sock, idle, 2000)

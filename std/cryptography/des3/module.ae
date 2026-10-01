@@ -256,7 +256,7 @@ struct Des3Ctx {
 
 // ---- single-DES key schedule (BC GenerateWorkingKey) ----
 // Returns intarr(32). `encrypting` selects the round ordering.
-generate_working_key(encrypting: int, key: ptr, key_off: int) -> ptr {
+generate_working_key(encrypting: int, key: byte[], key_off: int) -> ptr {
     new_key = intarr_new_raw(32)
     pc1m = intarr_new_raw(56)
     pcr = intarr_new_raw(56)
@@ -264,7 +264,7 @@ generate_working_key(encrypting: int, key: ptr, key_off: int) -> ptr {
     j = 0
     while j < 56 {
         l = PC1[j]
-        kb = bytes.get(key, key_off + bits.lsr32(l, 3)) & 0xFF
+        kb = key[key_off + bits.lsr32(l, 3)] & 0xFF
         if (kb & BYTEBIT[l & 7]) != 0 {
             intarr_set_raw(pc1m, j, 1)
         } else {
@@ -426,7 +426,9 @@ des_func(wk: ptr, hi: int, lo: int) -> {
 // `encrypt` selects EDE (encrypt) vs DED (decrypt) ordering. The three
 // subkey schedules are built so that running des_func(wk1) -> des_func(wk2)
 // -> des_func(wk3) reproduces BC's DesEdeEngine exactly.
-new_ctx(key: ptr, keylen: int, encrypt: int) -> ptr {
+new_ctx(key: byte[], encrypt: int) -> ptr {
+    if key.len < 0 { panic("des3.new_ctx: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int keylen = key.len
     // BC: key1=key[0..8] (enc dir = forEncryption), key2=key[8..16]
     // (enc dir = !forEncryption), key3=key[16..24] (enc dir = forEncryption,
     // or = key1 when keylen==16). For encryption DesFunc runs k1,k2,k3; for
@@ -458,11 +460,11 @@ new_ctx(key: ptr, keylen: int, encrypt: int) -> ptr {
     return c
 }
 
-new_encryptor(key: ptr, keylen: int) -> ptr {
-    return new_ctx(key, keylen, 1)
+new_encryptor(key: byte[]) -> ptr {
+    return new_ctx(key, 1)
 }
-new_decryptor(key: ptr, keylen: int) -> ptr {
-    return new_ctx(key, keylen, 0)
+new_decryptor(key: byte[]) -> ptr {
+    return new_ctx(key, 0)
 }
 free(ctx: ptr) {
     if ctx == null { return }

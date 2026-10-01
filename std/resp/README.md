@@ -26,15 +26,15 @@ import std.string
 main() {
     // Build a request: *2 ["GET", "mykey"]
     req = resp.new_array()
-    resp.array_add(req, resp.new_bulk("GET", 3))
-    resp.array_add(req, resp.new_bulk("mykey", 5))
+    resp.array_add(req, resp.new_bulk(string.bytes("GET")))
+    resp.array_add(req, resp.new_bulk(string.bytes("mykey")))
 
     wire, _e = resp.encode_resp2(req)   // RESP2 dialect, the client default
     println("wire: ${string.replace_all(wire, "\r\n", "\\r\\n")}")
     resp.free_value(req)
 
     // Decode a RESP3 reply: a map {"speed" => 42}
-    msg, consumed, perr = resp.parse_prefix("%1\r\n$5\r\nspeed\r\n:42\r\n", 20)
+    msg, consumed, perr = resp.parse_prefix(string.bytes("%1\r\n$5\r\nspeed\r\n:42\r\n"))
     println("map size: ${resp.map_size(msg)} consumed: ${consumed} err='${perr}'")
     println("speed = ${resp.as_integer(resp.map_value(msg, 0))}")
     resp.free_value(msg)

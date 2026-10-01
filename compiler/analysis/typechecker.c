@@ -4637,6 +4637,12 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
              * function name into a closure value (#2055). The expression path
              * does both. */
             return typecheck_expression(node, table);
+        case AST_BINARY_EXPRESSION:
+            /* Likewise `return a == null` with `a: byte[]`: the default case
+             * walked the operands but not the binary-operator logic, so the
+             * slice was never coerced to its element pointer and the C
+             * compare was `AetherSlice == NULL` (#2301). */
+            return typecheck_expression(node, table);
         default:
             return typecheck_statement(node, table);
     }
@@ -9016,6 +9022,13 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         int l_int = left_type && (left_type->kind == TYPE_INT || left_type->kind == TYPE_INT64);
         int r_int = right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_INT64);
         int changed = 0;
+        /* slice_coerce_to_ptr reads the operand node's own type; a parameter
+         * identifier (`fn f(a: byte[]) { a == null }`) can reach here with
+         * that unset even though infer_type knows it is a slice, so the
+         * comparison was emitted as `AetherSlice == NULL` and failed in C.
+         * Record what infer_type found before coercing (#2301). */
+        if (l_arr && !left->node_type) left->node_type = clone_type(left_type);
+        if (r_arr && !right->node_type) right->node_type = clone_type(right_type);
         if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
             if (l_arr && r_ptrish) changed |= slice_coerce_to_ptr(&expr->children[0]);
             if (r_arr && l_ptrish) changed |= slice_coerce_to_ptr(&expr->children[1]);
@@ -10292,7 +10305,11 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
              * and passes. */
             if (param_type && param_type->kind == TYPE_ARRAY) {
                 ASTNode* aarg = call->children[arg_slot];
-                if (aarg) {
+                /* The `null` literal is not a bare ptr here: it is the empty
+                 * slice (.len 0), the documented conversion slice_coerce_slot
+                 * applies to a `T[]` slot. Without this, `f(null)` for an
+                 * optional byte[] argument was rejected as a ptr. */
+                if (aarg && aarg->type != AST_NULL_LITERAL) {
                     Type* aa = infer_type(aarg, table);
                     if (aa && aa->kind == TYPE_PTR) {
                         /* Render the array type as `elem[]` (e.g. "string[]")

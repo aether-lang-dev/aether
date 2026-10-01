@@ -1,0 +1,163 @@
+// Regression test for #2301's raw byte I/O tranche: fs.write_binary,
+// fs.write_atomic, fs.pwrite and io.fd_write take a byte[] whose length
+// travels with it, and the bytes reach C through a `ptr` parameter.
+//
+// The payload under test begins with DE C0 57 AE, the little-endian
+// AetherString header magic. A `string`-typed extern parameter runs the
+// value through the AetherString unwrap, and std.fs's C side used to sniff
+// for a header itself: either one reads a payload starting with those four
+// bytes as a header and writes from the `data` pointer it then pulls out of
+// the following bytes. Those bytes here are a deliberately bogus pointer,
+// so the old path wrote garbage or crashed; the slice path must write the
+// 48 bytes verbatim.
+//
+// Also covers the empty-slice cases (a null slice writes an empty file,
+// writes nothing to an fd, pwrites nothing) and that an unbounded slice is
+// refused rather than written.
+
+import std.fs
+import std.io
+import std.os
+import std.string
+
+extern exit(code: int)
+
+const N = 48
+
+fn check(cond: bool, what: string) -> int {
+    if cond {
+        println("  PASS: ${what}")
+        return 0
+    }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+// Every byte of `path` equals the matching byte of `want`, and the file
+// holds exactly `want.len` bytes.
+fn file_matches(path: string, want: byte[]) -> bool {
+    got, n, err = fs.read_binary(path)
+    if err != "" || n != want.len {
+        return false
+    }
+    g = string.bytes(got)[0..n]
+    i = 0
+    while i < n {
+        if g[i] != want[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+main() {
+    println("=== #2301 binary I/O slices ===")
+    fails = 0
+
+    // The header magic, then bytes that, read as an AetherString header,
+    // give a refcount, a length of 0x41414141..., and a data pointer of
+    // 0x4242424242424242: nothing a write should ever follow.
+    payload = make([]byte, N)
+    payload[0] = 0xDE
+    payload[1] = 0xC0
+    payload[2] = 0x57
+    payload[3] = 0xAE
+    i = 4
+    while i < 24 {
+        payload[i] = 0x41
+        i = i + 1
+    }
+    while i < 32 {
+        payload[i] = 0x42
+        i = i + 1
+    }
+    while i < N {
+        payload[i] = i
+        i = i + 1
+    }
+
+    tmp = os.temp_dir()
+
+    // fs.write_binary
+    wb = "${tmp}/aether_2301_wb.bin"
+    werr = fs.write_binary(wb, payload)
+    fails = fails + check(werr == "", "write_binary accepts a header-magic payload")
+    fails = fails + check(file_matches(wb, payload), "write_binary wrote the 48 bytes verbatim")
+
+    // fs.write_atomic
+    wa = "${tmp}/aether_2301_wa.bin"
+    aerr = fs.write_atomic(wa, payload)
+    fails = fails + check(aerr == "", "write_atomic accepts a header-magic payload")
+    fails = fails + check(file_matches(wa, payload), "write_atomic wrote the 48 bytes verbatim")
+
+    // A sub-slice writes exactly its own bytes.
+    ws = "${tmp}/aether_2301_sub.bin"
+    serr = fs.write_binary(ws, payload[0..8])
+    fails = fails + check(serr == "" && file_matches(ws, payload[0..8]), "a sub-slice writes only its 8 bytes")
+
+    // io.fd_write
+    wf = "${tmp}/aether_2301_fd.bin"
+    fd, oerr = io.fd_open_write(wf)
+    if oerr != "" {
+        println("  FAIL: fd_open_write: ${oerr}")
+        exit(1)
+    }
+    rc = io.fd_write(fd, payload)
+    io.fd_close(fd)
+    fails = fails + check(rc == 0, "fd_write returns 0")
+    fails = fails + check(file_matches(wf, payload), "fd_write wrote the 48 bytes verbatim")
+
+    // fs.pwrite, at an offset into a fresh file.
+    wp = "${tmp}/aether_2301_pw.bin"
+    fs.delete(wp)
+    f, perr = fs.open(wp, "w+")
+    if perr != "" {
+        println("  FAIL: open: ${perr}")
+        exit(1)
+    }
+    pn, pe = fs.pwrite(f, payload, 0)
+    fails = fails + check(pe == "" && pn == N, "pwrite wrote 48 bytes")
+    en, ee = fs.pwrite(f, string.bytes(""), 10)
+    fails = fails + check(ee == "" && en == 0, "pwrite of an empty slice writes nothing and succeeds")
+    file_close(f)
+    fails = fails + check(file_matches(wp, payload), "pwrite wrote the 48 bytes verbatim")
+
+    // Empty slices: string.bytes("") is the null slice.
+    we = "${tmp}/aether_2301_empty.bin"
+    eerr = fs.write_binary(we, string.bytes(""))
+    sz, _ = fs.size(we)
+    fails = fails + check(eerr == "" && sz == 0, "write_binary of an empty slice creates an empty file")
+    efd, eoerr = io.fd_open_write(we)
+    erc = io.fd_write(efd, string.bytes(""))
+    io.fd_close(efd)
+    fails = fails + check(eoerr == "" && erc == 0, "fd_write of an empty slice succeeds")
+
+    // An unbounded slice has no length to write: refused, never written.
+    raw = make([]byte, 4)
+    unbounded = (raw as ptr) as byte[]
+    never = "${tmp}/aether_2301_never.bin"
+    refused = false
+    try {
+        _ = fs.write_binary(never, unbounded)
+    } catch e {
+        refused = true
+    }
+    free(raw)
+    fails = fails + check(refused, "write_binary refuses an unbounded slice")
+    fails = fails + check(fs.exists(never) == 0, "and wrote no file")
+
+    free(payload)
+    fs.delete(wb)
+    fs.delete(wa)
+    fs.delete(ws)
+    fs.delete(wf)
+    fs.delete(wp)
+    fs.delete(we)
+
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("All #2301 binary I/O slice checks passed")
+}

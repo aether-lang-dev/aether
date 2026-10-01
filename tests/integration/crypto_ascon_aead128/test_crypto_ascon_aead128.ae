@@ -65,7 +65,7 @@ fn kat(label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex: string, want
     ad_len = string_length(ad_hex) / 2
     pt_len = string_length(pt_hex) / 2
 
-    ct = ascon_aead128.aead_seal(key, nonce, ad, ad_len, pt, pt_len)
+    ct = ascon_aead128.aead_seal(key, nonce, bytes.view(ad)[0..ad_len], bytes.view(pt)[0..pt_len])
     got = to_hex(ct, bytes.length(ct))
     if got == want_hex {
         println("ok   seal ${label}")
@@ -77,7 +77,7 @@ fn kat(label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex: string, want
     }
 
     // Round-trip: open must recover the plaintext with no error.
-    op, oerr = ascon_aead128.aead_open(key, nonce, ad, ad_len, ct, bytes.length(ct))
+    op, oerr = ascon_aead128.aead_open(key, nonce, bytes.view(ad)[0..ad_len], bytes.view(ct))
     if oerr == "" && to_hex(op, pt_len) == pt_hex {
         println("ok   open ${label}")
     } else {
@@ -88,7 +88,7 @@ fn kat(label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex: string, want
     // Tamper: flip a tag byte, open must reject.
     tlen = bytes.length(ct)
     bytes.set(ct, tlen - 1, bytes.get(ct, tlen - 1) ^ 1)
-    tp, terr = ascon_aead128.aead_open(key, nonce, ad, ad_len, ct, tlen)
+    tp, terr = ascon_aead128.aead_open(key, nonce, bytes.view(ad)[0..ad_len], bytes.view(ct)[0..tlen])
     if terr != "" {
         println("ok   tamper-reject ${label}")
     } else {

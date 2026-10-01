@@ -40,9 +40,9 @@ main() {
     pub = ed448.publickey(seed)
     fails = fails + ck("ed448 pubkey", bh(pub), "5fd7449b59b461fd2ce787ec616ad46a1da1342485a70e1f8a0ea75d80e96778edf124769b46c7061bd6783df1e50f6cd1fa1abeafe8256180")
     e0 = bytes.new(0)
-    sig = ed448.sign(seed, e0, 0)
+    sig = ed448.sign(seed, bytes.view(e0)[0..0])
     fails = fails + ck("ed448 sign", bh(sig), "533a37f6bbe457251f023c0d88f976ae2dfb504a843e34d2074fd823d41a591f2b233f034f628281f2fd7a22ddd47d7828c59bd0a21bfd3980ff0d2028d4b18a9df63e006c5d1c2d345b925d8dc00b4104852db99ac5c7cdda8530a113a0f4dbb61149f05a7363268c71d95808ff2e652600")
-    if ed448.verify(pub, e0, 0, sig) == 1 { println("ok   ed448 verify") } else { println("FAIL ed448 verify"); fails = fails + 1 }
+    if ed448.verify(pub, bytes.view(e0)[0..0], sig) == 1 { println("ok   ed448 verify") } else { println("FAIL ed448 verify"); fails = fails + 1 }
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

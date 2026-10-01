@@ -1838,7 +1838,7 @@ apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) 
         if argc != 0 { return "", "base64_encode takes no args" }
         // Use the PADDED form to match Shopify's `base64_encode` filter
         // (RFC 4648 standard alphabet with `=` padding to a multiple of 4).
-        return encoding.base64_encode_padded(val, string_length(val)), ""
+        return encoding.base64_encode_padded(string.bytes(val)), ""
     }
     if string.equals(name, "base64_decode") == 1 {
         if argc != 0 { return "", "base64_decode takes no args" }
@@ -1848,19 +1848,19 @@ apply_filter_args(val: string, name: string, arg_list: ptr) -> (string, string) 
     }
     if string.equals(name, "md5") == 1 {
         if argc != 0 { return "", "md5 takes no args" }
-        out, herr = cryptography.md5_hex(val, string_length(val))
+        out, herr = cryptography.md5_hex(string.bytes(val))
         if herr != "" { return "", herr }
         return out, ""
     }
     if string.equals(name, "sha1") == 1 {
         if argc != 0 { return "", "sha1 takes no args" }
-        out, herr = cryptography.sha1_hex(val, string_length(val))
+        out, herr = cryptography.sha1_hex(string.bytes(val))
         if herr != "" { return "", herr }
         return out, ""
     }
     if string.equals(name, "sha256") == 1 {
         if argc != 0 { return "", "sha256 takes no args" }
-        out, herr = cryptography.sha256_hex(val, string_length(val))
+        out, herr = cryptography.sha256_hex(string.bytes(val))
         if herr != "" { return "", herr }
         return out, ""
     }

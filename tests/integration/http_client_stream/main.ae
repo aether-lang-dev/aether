@@ -105,7 +105,7 @@ main() {
         println("FAIL: buffered response reported as stream"); exit(1)
     }
     buffered = client.response_body(bresp)
-    blen = client.response_body_length(bresp)
+    blen = client.response_body_bytes(bresp).len
     client.response_free(bresp)
     if blen != want_len {
         println("FAIL buffered length: got ${blen}, want ${want_len}"); exit(1)

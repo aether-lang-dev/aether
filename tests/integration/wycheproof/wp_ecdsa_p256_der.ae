@@ -67,7 +67,7 @@ fn coord32(hexs: string) -> ptr {
 
 fn sha256_of(b: ptr, n: int) -> ptr {
     ctx, e = sha2.new("sha256")
-    sha2.update_bytes(ctx, b, n)
+    sha2.update(ctx, bytes.view(b)[0..n])
     return sha2.final_bytes(ctx)
 }
 
@@ -126,7 +126,7 @@ main() {
             sig = from_hex(sig_hex)
             sig_len = string_length(sig_hex) / 2
 
-            r32, s32, perr = tls13_cert.split_ecdsa_sig(sig, sig_len, 32)
+            r32, s32, perr = tls13_cert.split_ecdsa_sig(bytes.view(sig)[0..sig_len], 32)
             ok = 0
             if r32 != null {
                 ok = p256.ecdsa_verify(pubx, puby, h, r32, s32)

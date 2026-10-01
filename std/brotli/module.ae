@@ -9,7 +9,7 @@
 // negotiating `br` vs `gzip` writes the same shape either way:
 //
 //   s, err = brotli.stream_new(5, 0)
-//   chunk, n, err = brotli.stream_write(s, ev, string.length(ev))
+//   chunk, n, err = brotli.stream_write(s, string.bytes(ev))
 //   chunk, n, err = brotli.stream_flush(s)     // send these bytes now
 //   tail,  n, err = brotli.stream_finish(s)    // at connection close
 //   brotli.stream_free(s)
@@ -19,10 +19,10 @@
 
 exports(
     brotli_backend_available,
-    brotli_try_stream_new, brotli_try_stream_write, brotli_try_stream_flush,
+    brotli_try_stream_new, brotli_try_stream_flush,
     brotli_try_stream_finish, brotli_get_stream_bytes, brotli_get_stream_length,
     brotli_release_stream,
-    brotli_try_compress, brotli_get_compress_bytes, brotli_get_compress_length,
+    brotli_get_compress_bytes, brotli_get_compress_length,
     brotli_release_compress,
     available, compress,
     stream_new, stream_write, stream_flush, stream_finish, stream_free,
@@ -33,14 +33,19 @@ exports(
 extern brotli_backend_available() -> int
 
 extern brotli_try_stream_new(quality: int, window: int) -> ptr
-extern brotli_try_stream_write(handle: ptr, data: string, length: int) -> int
+// The `*_try_*` calls that take input bytes have `data: ptr`, not `string`,
+// and are not exported (#2301): the wrappers pass a byte[] slice's raw data
+// pointer. A `string` parameter routes through the AetherString unwrap,
+// which misreads a payload beginning with the header's magic bytes as a
+// header; a heap string passed to a `ptr` parameter would feed in its header.
+extern brotli_try_stream_write(handle: ptr, data: ptr, length: int) -> int
 extern brotli_try_stream_flush(handle: ptr) -> int
 extern brotli_try_stream_finish(handle: ptr) -> int
 extern brotli_get_stream_bytes(handle: ptr) -> string
 extern brotli_get_stream_length(handle: ptr) -> int
 extern brotli_release_stream(handle: ptr)
 
-extern brotli_try_compress(data: string, length: int, quality: int) -> int
+extern brotli_try_compress(data: ptr, length: int, quality: int) -> int
 extern brotli_get_compress_bytes() -> string
 extern brotli_get_compress_length() -> int
 extern brotli_release_compress()
@@ -57,17 +62,23 @@ const MAX_QUALITY = 11
 const DEFAULT_QUALITY = 11
 const FAST_QUALITY = 5
 
+// A slice with no bound (`p as byte[]`, `.len` -1) has no length.
+fn unbounded(fname: string) {
+    panic("brotli.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+}
+
 // 1 when the toolchain was built with libbrotlienc detected. Use it to skip a
 // test or pick a fallback encoding rather than threading an error everywhere.
 available() -> int { return brotli_backend_available() }
 
 // One-shot: compress a body already in memory. Returns (bytes, count, "") on
 // success, ("", 0, error) otherwise. Quality out of range is clamped.
-compress(data: string, length: int, quality: int) -> {
+compress(data: byte[], quality: int) -> {
+    if data.len < 0 { unbounded("compress") }
     if brotli_backend_available() == 0 {
         return "", 0, "brotli unavailable"
     }
-    ok = brotli_try_compress(data, length, quality)
+    ok = brotli_try_compress(data, data.len, quality)
     if ok == 0 {
         return "", 0, "brotli compress failed"
     }
@@ -96,9 +107,10 @@ stream_new(quality: int, window: int) -> {
 // Feed bytes. Returns (bytes, count, "") — the count is usually 0, because
 // the encoder buffers internally for compression ratio. Emit whatever comes
 // back, then stream_flush when the event is complete.
-stream_write(handle: ptr, data: string, length: int) -> {
+stream_write(handle: ptr, data: byte[]) -> {
+    if data.len < 0 { unbounded("stream_write") }
     if handle == null { return "", 0, "brotli stream: null handle" }
-    ok = brotli_try_stream_write(handle, data, length)
+    ok = brotli_try_stream_write(handle, data, data.len)
     if ok == 0 { return "", 0, "brotli stream_write failed" }
     return stream_take(handle)
 }

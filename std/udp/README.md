@@ -21,6 +21,7 @@ address without resolving anything.
 ```aether,run
 import std.udp
 import std.bytes
+import std.string
 
 main() {
     server, err = udp.bind("127.0.0.1", 0)     // port 0: the OS picks one
@@ -32,21 +33,21 @@ main() {
 
     // Nothing waiting yet: "would block", not a wait and not a failure.
     buf = bytes.new(1200)
-    _, _, idle = udp.recv_from(server, bytes.data(buf), 1200)
+    _, _, idle = udp.recv_from(server, bytes.capacity_view(buf)[0..1200])
     println("idle server: ${idle}")
 
-    _, serr = udp.send_to(client, "127.0.0.1", port, "snapshot 1", 10)
+    _, serr = udp.send_to(client, "127.0.0.1", port, string.bytes("snapshot 1"))
     if serr != "" { println("send failed: ${serr}"); return }
 
     ready, _ = udp.poll(server, 1000)
-    n, sender, rerr = udp.recv_from(server, bytes.data(buf), 1200)
+    n, sender, rerr = udp.recv_from(server, bytes.capacity_view(buf)[0..1200])
     println("ready=${ready} got ${n} bytes: ${bytes.to_string(buf, n)}")
 
     // The sender is an address value: answer it without resolving.
-    _, aerr = udp.send_to_addr(server, sender, "ack", 3)
+    _, aerr = udp.send_to_addr(server, sender, string.bytes("ack"))
     if aerr != "" { println("answer failed: ${aerr}"); return }
     _, _ = udp.poll(client, 1000)               // loopback is not synchronous
-    m, from, _ = udp.recv_from(client, bytes.data(buf), 1200)
+    m, from, _ = udp.recv_from(client, bytes.capacity_view(buf)[0..1200])
     println("client got ${bytes.to_string(buf, m)} from the server: ${udp.addr_port(from) == port}")
 
     udp.addr_free(from)
@@ -78,7 +79,7 @@ A receive loop that must allocate nothing per packet keeps one address from
 ```aether,fragment
 peer = udp.addr_new()
 while true {
-    n, err = udp.recv_from_into(sock, bytes.data(buf), 1200, peer)
+    n, err = udp.recv_from_into(sock, bytes.capacity_view(buf)[0..1200], peer)
     if err != "" { break }          // "would block": the tick's packets are drained
     handle(peer, buf, n)            // compare with addr_equal, key on addr_string
 }

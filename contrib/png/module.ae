@@ -42,7 +42,7 @@ put_chunk(out: ptr, at: int, kind: string, data: string, length: int) -> int {
     put_be32(out, at, length as long)
     bytes.copy_from_string(out, at + 4, kind, 4)
     if length > 0 { bytes.copy_from_string(out, at + 8, data, length) }
-    crc = hash.crc32_update(hash.crc32(kind, 4), data, length)
+    crc = hash.crc32_update(hash.crc32(string.bytes(kind)[0..4]), string.bytes(data)[0..length])
     put_be32(out, at + 8 + length, crc)
     return at + 12 + length
 }
@@ -134,7 +134,7 @@ encode_rgba8(pixels: ptr, width: int, height: int) -> (string, int, string) {
     bytes.free(src)
 
     raw = bytes.finish(rows, height * (stride + 1))
-    packed, packed_len, zerr = zlib.deflate(raw, height * (stride + 1), 9)
+    packed, packed_len, zerr = zlib.deflate(string.bytes(raw)[0..height * (stride + 1)], 9)
     string.free(raw)
     if zerr != "" { return ("", 0, "cannot compress the image: ${zerr}") }
 
@@ -177,7 +177,7 @@ encode_rgba8(pixels: ptr, width: int, height: int) -> (string, int, string) {
 write_rgba8(path: string, pixels: ptr, width: int, height: int) -> string {
     data, length, err = encode_rgba8(pixels, width, height)
     if err != "" { return err }
-    werr = fs.write_binary(path, data, length)
+    werr = fs.write_binary(path, string.bytes(data)[0..length])
     string.free(data)
     return werr
 }

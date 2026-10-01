@@ -27,50 +27,51 @@ main() {
     fails = 0
 
     // ---- FNV-1a 32-bit (canonical vectors) ----
-    fails = fails + ck(hash.fnv32("", 0) == 2166136261, "fnv32 empty (0x811c9dc5)")
-    fails = fails + ck(hash.fnv32("a", 1) == 3826002220, "fnv32 'a' (0xe40c292c)")
-    fails = fails + ck(hash.fnv32("hello", 5) == 1335831723, "fnv32 'hello' (0x4f9f2cab)")
-    fails = fails + ck(hash.fnv32("foobar", 6) == 3214735720, "fnv32 'foobar' (0xbf9cf968)")
+    fails = fails + ck(hash.fnv32(string.bytes("")) == 2166136261, "fnv32 empty (0x811c9dc5)")
+    fails = fails + ck(hash.fnv32(string.bytes("a")) == 3826002220, "fnv32 'a' (0xe40c292c)")
+    fails = fails + ck(hash.fnv32(string.bytes("hello")) == 1335831723, "fnv32 'hello' (0x4f9f2cab)")
+    fails = fails + ck(hash.fnv32(string.bytes("foobar")) == 3214735720, "fnv32 'foobar' (0xbf9cf968)")
 
     // ---- FNV-1a 64-bit (canonical vectors; signed view of the u64) ----
     // 0xcbf29ce484222325 / 0xa430d84680aabd0b
-    fails = fails + ck(hash.fnv64("", 0) == -3750763034362895579, "fnv64 empty")
-    fails = fails + ck(hash.fnv64("hello", 5) == -6615550055289275125, "fnv64 'hello'")
+    fails = fails + ck(hash.fnv64(string.bytes("")) == -3750763034362895579, "fnv64 empty")
+    fails = fails + ck(hash.fnv64(string.bytes("hello")) == -6615550055289275125, "fnv64 'hello'")
 
     // ---- MurmurHash3 x86 32-bit (seed 0 reference vectors) ----
-    fails = fails + ck(hash.murmur3_32("", 0, 0) == 0, "murmur empty seed0")
-    fails = fails + ck(hash.murmur3_32("hello", 5, 0) == 613153351, "murmur 'hello' (0x248bfa47)")
+    fails = fails + ck(hash.murmur3_32(string.bytes(""), 0) == 0, "murmur empty seed0")
+    fails = fails + ck(hash.murmur3_32(string.bytes("hello"), 0) == 613153351, "murmur 'hello' (0x248bfa47)")
     // seed changes the digest
-    fails = fails + ck(hash.murmur3_32("hello", 5, 42) != hash.murmur3_32("hello", 5, 0), "murmur seed matters")
+    fails = fails + ck(hash.murmur3_32(string.bytes("hello"), 42) != hash.murmur3_32(string.bytes("hello"), 0), "murmur seed matters")
 
     // ---- CRC-32 (IEEE 802.3) reference vectors ----
     // The check value from the CRC catalogue, and zlib's crc32() results.
-    fails = fails + ck(hash.crc32("", 0) == 0, "crc32 empty")
-    fails = fails + ck(hash.crc32("123456789", 9) == 3421780262, "crc32 check value (0xcbf43926)")
-    fails = fails + ck(hash.crc32("a", 1) == 3904355907, "crc32 'a' (0xe8b7be43)")
-    fails = fails + ck(hash.crc32("The quick brown fox jumps over the lazy dog", 43) == 1095738169,
+    fails = fails + ck(hash.crc32(string.bytes("")) == 0, "crc32 empty")
+    fails = fails + ck(hash.crc32(string.bytes("123456789")) == 3421780262, "crc32 check value (0xcbf43926)")
+    fails = fails + ck(hash.crc32(string.bytes("a")) == 3904355907, "crc32 'a' (0xe8b7be43)")
+    fails = fails + ck(hash.crc32(string.bytes("The quick brown fox jumps over the lazy dog")) == 1095738169,
         "crc32 quick brown fox (0x414fa339)")
     // Embedded NULs are data, not terminators.
-    fails = fails + ck(hash.crc32(ref_msg(4), 4) == 2344191507, "crc32 00 01 02 03 (0x8bb98613)")
+    msg4 = ref_msg(4)
+    fails = fails + ck(hash.crc32(string.bytes(msg4)) == 2344191507, "crc32 00 01 02 03 (0x8bb98613)")
     // Continuing across pieces gives the whole input's CRC.
-    part = hash.crc32("12345", 5)
-    fails = fails + ck(hash.crc32_update(part, "6789", 4) == 3421780262, "crc32_update across two pieces")
+    part = hash.crc32(string.bytes("12345"))
+    fails = fails + ck(hash.crc32_update(part, string.bytes("6789")) == 3421780262, "crc32_update across two pieces")
     // A PNG IEND chunk's CRC covers its type alone.
-    fails = fails + ck(hash.crc32("IEND", 4) == 2923585666, "crc32 IEND (0xae426082)")
+    fails = fails + ck(hash.crc32(string.bytes("IEND")) == 2923585666, "crc32 IEND (0xae426082)")
 
     // ---- determinism + distribution sanity ----
-    fails = fails + ck(hash.fnv32("abc", 3) == hash.fnv32("abc", 3), "fnv32 deterministic")
-    fails = fails + ck(hash.fnv32("abc", 3) != hash.fnv32("abd", 3), "fnv32 distinguishes 1 bit")
-    fails = fails + ck(hash.murmur3_32("abc", 3, 0) != hash.murmur3_32("abd", 3, 0), "murmur distinguishes 1 bit")
+    fails = fails + ck(hash.fnv32(string.bytes("abc")) == hash.fnv32(string.bytes("abc")), "fnv32 deterministic")
+    fails = fails + ck(hash.fnv32(string.bytes("abc")) != hash.fnv32(string.bytes("abd")), "fnv32 distinguishes 1 bit")
+    fails = fails + ck(hash.murmur3_32(string.bytes("abc"), 0) != hash.murmur3_32(string.bytes("abd"), 0), "murmur distinguishes 1 bit")
 
     // ---- tail-length coverage for murmur (1,2,3,4,5-byte inputs) ----
     // exercises the 4-byte-block + 1..3-byte-tail paths; just assert they run
     // and are non-zero & distinct for distinct inputs.
-    m1 = hash.murmur3_32("A", 1, 0)
-    m2 = hash.murmur3_32("AB", 2, 0)
-    m3 = hash.murmur3_32("ABC", 3, 0)
-    m4 = hash.murmur3_32("ABCD", 4, 0)
-    m5 = hash.murmur3_32("ABCDE", 5, 0)
+    m1 = hash.murmur3_32(string.bytes("A"), 0)
+    m2 = hash.murmur3_32(string.bytes("AB"), 0)
+    m3 = hash.murmur3_32(string.bytes("ABC"), 0)
+    m4 = hash.murmur3_32(string.bytes("ABCD"), 0)
+    m5 = hash.murmur3_32(string.bytes("ABCDE"), 0)
     fails = fails + ck(m1 != m2 && m2 != m3 && m3 != m4 && m4 != m5, "murmur tail lengths distinct")
 
     // ---- SipHash-2-4 (canonical reference vectors, Aumasson & Bernstein) ----
@@ -81,17 +82,22 @@ main() {
     let k0 = 0x0706050403020100
     let k1 = 0x0f0e0d0c0b0a0908
     // empty message -> 0x726fdb47dd0e0e31
-    fails = fails + ck(hash.siphash24("", 0, k0, k1) == 8246050544436514353, "siphash empty")
+    fails = fails + ck(hash.siphash24(string.bytes(""), k0, k1) == 8246050544436514353, "siphash empty")
     // n=1 -> 0x74f839c593dc67fd
-    fails = fails + ck(hash.siphash24(ref_msg(1), 1, k0, k1) == 8428550223375919101, "siphash n1")
+    // Messages held in locals: a string.bytes view must not outlive the
+    // string it views, so it is never taken over a temporary.
+    msg1 = ref_msg(1)
+    msg8 = ref_msg(8)
+    msg15 = ref_msg(15)
+    fails = fails + ck(hash.siphash24(string.bytes(msg1), k0, k1) == 8428550223375919101, "siphash n1")
     // n=8 (one full block) -> 0x93f5f5799a932462
-    fails = fails + ck(hash.siphash24(ref_msg(8), 8, k0, k1) == -7785046478206851998, "siphash n8 (full block)")
+    fails = fails + ck(hash.siphash24(string.bytes(msg8), k0, k1) == -7785046478206851998, "siphash n8 (full block)")
     // n=15 (block + 7-byte tail) -> 0xa129ca6149be45e5
-    fails = fails + ck(hash.siphash24(ref_msg(15), 15, k0, k1) == -6833708440360172059, "siphash n15 (block+tail)")
+    fails = fails + ck(hash.siphash24(string.bytes(msg15), k0, k1) == -6833708440360172059, "siphash n15 (block+tail)")
     // keying: a different key gives a different digest for the same message
-    fails = fails + ck(hash.siphash24(ref_msg(8), 8, 0, 0) != hash.siphash24(ref_msg(8), 8, k0, k1), "siphash key matters")
+    fails = fails + ck(hash.siphash24(string.bytes(msg8), 0, 0) != hash.siphash24(string.bytes(msg8), k0, k1), "siphash key matters")
     // determinism
-    fails = fails + ck(hash.siphash24(ref_msg(8), 8, k0, k1) == hash.siphash24(ref_msg(8), 8, k0, k1), "siphash deterministic")
+    fails = fails + ck(hash.siphash24(string.bytes(msg8), k0, k1) == hash.siphash24(string.bytes(msg8), k0, k1), "siphash deterministic")
 
     if fails != 0 {
         println("hash: ${fails} failure(s)")

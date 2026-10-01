@@ -57,15 +57,9 @@ handle_upstream_echo(req: ptr, res: ptr, ud: ptr) {
 }
 
 handle_upstream_echo_post(req: ptr, res: ptr, ud: ptr) {
-    body = http.request_body(req)
-    blen = http.request_body_length(req)
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "application/octet-stream")
-    if body == null {
-        http.response_set_body(res, "")
-    } else {
-        http.response_set_body_n(res, body, blen)
-    }
+    http.response_set_body_bytes(res, http.request_body_bytes(req))
 }
 
 handle_upstream_longheader(req: ptr, res: ptr, ud: ptr) {

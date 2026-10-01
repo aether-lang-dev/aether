@@ -22,11 +22,11 @@
 //
 // Import with:  import std.cryptography.tls13_record
 //
-//   ctx = new(key, key_len, iv12)          // a directional record context
-//   seal_record(ctx, content_type, plaintext, pt_len) -> ptr full_record
+//   ctx = new(key, iv12)          // a directional record context
+//   seal_record(ctx, content_type, plaintext) -> ptr full_record
 //       builds a complete TLSCiphertext record (5-byte header + encrypted
 //       record). Advances the sequence number.
-//   open_record(ctx, record, rec_len, out) -> string
+//   open_record(ctx, record, out) -> string
 //       decrypts a TLSCiphertext record into out (plaintext + content_type),
 //       verifying the tag. Advances the sequence number. "" on success.
 //   free_ctx(ctx)
@@ -91,18 +91,20 @@ struct RecordCtx {
 
 // Create a ChaCha20-Poly1305 record context (the default AEAD). key_len is 32.
 // Kept as the back-compat entry; new_aead selects the cipher explicitly.
-new(key: ptr, key_len: int, iv12: ptr) -> ptr {
-    return new_aead(AEAD_CHACHA20_POLY1305, key, key_len, iv12)
+new(key: byte[], iv12: ptr) -> ptr {
+    return new_aead(AEAD_CHACHA20_POLY1305, key, iv12)
 }
 
 // Create a record context for a specific AEAD. Both key and iv are copied (the
 // ctx owns its copies). For AES-128-GCM the key_len is 16 and an AES encryptor
 // is built once here (GCM only runs the cipher forward, for seal AND open).
-new_aead(aead_id: int, key: ptr, key_len: int, iv12: ptr) -> ptr {
+new_aead(aead_id: int, key: byte[], iv12: ptr) -> ptr {
+    if key.len < 0 { panic("tls13_record.new_aead: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     ctx = malloc(sizeof(RecordCtx)) as *RecordCtx
     k = bytes.new(key_len)
     if key_len > 0 { bytes.set(k, key_len - 1, 0) }
-    bytes.copy_from_bytes(k, 0, key, 0, key_len)
+    bytes.copy_from_slice(k, 0, key[0..key_len])
     iv = bytes.new(NONCE_LEN)
     bytes.set(iv, NONCE_LEN - 1, 0)
     bytes.copy_from_bytes(iv, 0, iv12, 0, NONCE_LEN)
@@ -113,7 +115,7 @@ new_aead(aead_id: int, key: ptr, key_len: int, iv12: ptr) -> ptr {
     ctx.aead = aead_id
     ctx.aes_ctx = null
     if aead_id == AEAD_AES_128_GCM || aead_id == AEAD_AES_256_GCM {
-        ctx.aes_ctx = aes.new_encryptor(k, key_len)
+        ctx.aes_ctx = aes.new_encryptor(bytes.view(k)[0..key_len])
     }
     return ctx as ptr
 }
@@ -166,7 +168,9 @@ fn build_aad(ct_len: int) -> ptr {
 // Seal `plaintext` of `content_type` into a complete TLSCiphertext record
 // (5-byte header + encrypted_record). No extra padding is added (the inner
 // plaintext is content || content_type). Advances ctx.seq. Caller frees.
-seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
+seal_record(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
+    if plaintext.len < 0 { panic("tls13_record.seal_record: the `plaintext` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = plaintext.len
     if ctx == null { return null }
     c = ctx as *RecordCtx
 
@@ -179,7 +183,7 @@ seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
     inner_len = pt_len + 1
     inner = bytes.new(inner_len)
     bytes.set(inner, inner_len - 1, 0)
-    bytes.copy_from_bytes(inner, 0, plaintext, 0, pt_len)
+    bytes.copy_from_slice(inner, 0, plaintext[0..pt_len])
     bytes.set(inner, pt_len, content_type & 0xFF)
 
     // ciphertext length = inner_len + tag
@@ -189,9 +193,9 @@ seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
 
     enc = null
     if c.aead == AEAD_AES_128_GCM || c.aead == AEAD_AES_256_GCM {
-        enc = aes.gcm_seal(c.aes_ctx, nonce, aad, RECORD_HEADER_LEN, inner, inner_len)
+        enc = aes.gcm_seal(c.aes_ctx, nonce, bytes.view(aad)[0..RECORD_HEADER_LEN], bytes.view(inner)[0..inner_len])
     } else {
-        enc = chacha20poly1305.aead_seal(c.key, nonce, aad, RECORD_HEADER_LEN, inner, inner_len)
+        enc = chacha20poly1305.aead_seal(c.key, nonce, bytes.view(aad)[0..RECORD_HEADER_LEN], bytes.view(inner)[0..inner_len])
     }
     // enc is inner_len + 16 bytes (ciphertext-with-tag) == ct_len
 
@@ -222,18 +226,20 @@ struct OpenedRecord {
 
 // Dispatch AEAD-Open to the negotiated cipher. Returns (inner_plaintext, "")
 // or (null, err) exactly like the underlying aead_open primitives.
-fn aead_open_dispatch(c: *RecordCtx, nonce: ptr, aad: ptr, ctbuf: ptr, ct_len: int) -> (ptr, string) {
+fn aead_open_dispatch(c: *RecordCtx, nonce: ptr, aad: ptr, ctbuf: byte[]) -> (ptr, string) {
     if c.aead == AEAD_AES_128_GCM || c.aead == AEAD_AES_256_GCM {
-        return aes.gcm_open(c.aes_ctx, nonce, aad, RECORD_HEADER_LEN, ctbuf, ct_len)
+        return aes.gcm_open(c.aes_ctx, nonce, bytes.view(aad)[0..RECORD_HEADER_LEN], ctbuf)
     }
-    return chacha20poly1305.aead_open(c.key, nonce, aad, RECORD_HEADER_LEN, ctbuf, ct_len)
+    return chacha20poly1305.aead_open(c.key, nonce, bytes.view(aad)[0..RECORD_HEADER_LEN], ctbuf)
 }
 
 // Open a TLSCiphertext record (5-byte header + encrypted_record) into `out`.
 // Verifies the AEAD tag, strips trailing zero padding, and reads the real
 // content type from the last non-zero inner byte. Advances ctx.seq. Returns
 // "" on success or an error string. On success out.plaintext is fresh bytes.
-open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
+open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
+    if record.len < 0 { panic("tls13_record.open_record: the `record` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int rec_len = record.len
     out.content_type = 0
     out.plaintext = null
     out.plaintext_len = 0
@@ -249,10 +255,10 @@ open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
         return "record: too short"
     }
     // header: opaque_type must be 0x17 for a protected record
-    if (bytes.get(record, 0) & 0xFF) != OPAQUE_APPLICATION_DATA {
+    if (record[0] & 0xFF) != OPAQUE_APPLICATION_DATA {
         return "record: unexpected opaque_type"
     }
-    ct_len = ((bytes.get(record, 3) & 0xFF) << 8) | (bytes.get(record, 4) & 0xFF)
+    ct_len = ((record[3] & 0xFF) << 8) | (record[4] & 0xFF)
     // RFC 8446 §5.2: a TLSCiphertext over 2^14 + 256 bytes is a record_overflow.
     // Reject before allocating so a bogus length cannot drive the buffer size.
     if ct_len > RECORD_MAX_CIPHERTEXT_LEN {
@@ -264,15 +270,15 @@ open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
 
     // AAD is the 5-byte header exactly as received.
     aad = bytes.new(RECORD_HEADER_LEN)
-    bytes.copy_from_bytes(aad, 0, record, 0, RECORD_HEADER_LEN)
+    bytes.copy_from_slice(aad, 0, record[0..RECORD_HEADER_LEN])
 
     // ciphertext-with-tag = the ct_len bytes after the header.
     ctbuf = bytes.new(ct_len)
     if ct_len > 0 { bytes.set(ctbuf, ct_len - 1, 0) }
-    bytes.copy_from_bytes(ctbuf, 0, record, RECORD_HEADER_LEN, ct_len)
+    bytes.copy_from_slice(ctbuf, 0, record[RECORD_HEADER_LEN..RECORD_HEADER_LEN + ct_len])
 
     nonce = nonce_for(c.iv, c.seq)
-    inner, err = aead_open_dispatch(c, nonce, aad, ctbuf, ct_len)
+    inner, err = aead_open_dispatch(c, nonce, aad, bytes.view(ctbuf)[0..ct_len])
 
     bytes.free(aad)
     bytes.free(ctbuf)

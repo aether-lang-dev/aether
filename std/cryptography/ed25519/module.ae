@@ -11,8 +11,8 @@
 // group order L = 2^252 + 27742317777372353535851937790883648493.
 //
 //   publickey(seed32)            -> public32
-//   sign(seed32, msg, msg_len)   -> sig64
-//   verify(public32, msg, msg_len, sig64) -> int   (1 = valid, 0 = invalid)
+//   sign(seed32, msg)   -> sig64
+//   verify(public32, msg, sig64) -> int   (1 = valid, 0 = invalid)
 //
 // 32-byte keys, 64-byte signatures, all little-endian per RFC 8032.
 // Point arithmetic uses extended homogeneous coordinates (X:Y:Z:T).
@@ -109,10 +109,12 @@ finv(a: ptr, p: ptr) -> ptr {
 }
 
 // ---- little-endian <-> *BN (32 bytes) ----
-from_le(b: ptr, n: int) -> ptr {
+from_le(b: byte[]) -> ptr {
+    if b.len < 0 { panic("ed25519.from_le: the `b` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = b.len
     be = bytes.new(n)
     i = 0
-    while i < n { bytes.set(be, i, bytes.get(b, n - 1 - i)); i = i + 1 }
+    while i < n { bytes.set(be, i, b[n - 1 - i]); i = i + 1 }
     r = bignum.from_bytes_unsigned(be, n)
     bytes.free(be)
     return r
@@ -327,7 +329,7 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *EdPt {
     bytes.copy_from_bytes(tmp, 0, b, 0, 32)
     sign = (bytes.get(tmp, 31) >> 7) & 1
     bytes.set(tmp, 31, bytes.get(tmp, 31) & 0x7F)
-    y = from_le(tmp, 32)
+    y = from_le(bytes.view(tmp)[0..32])
     bytes.free(tmp)
     // y must be < p
     if bignum.compare(y, p) >= 0 {
@@ -348,7 +350,7 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *EdPt {
 
 // ---- hashing helpers ----
 // SHA-512 of a bytes buffer -> 64-byte bytes.
-sha512(b: ptr, len: int) -> ptr {
+sha512(b: byte[]) -> ptr {
     ctx, err = sha2.new("sha512")
     // sha2.new returns (null, "allocation failed"). Dropping the error here
     // fed a null context to update_bytes, which is the one input it cannot
@@ -356,12 +358,12 @@ sha512(b: ptr, len: int) -> ptr {
     if err != "" {
         return null
     }
-    sha2.update_bytes(ctx, b, len)
+    sha2.update(ctx, b)
     return sha2.final_bytes(ctx)
 }
 // reduce a little-endian byte buffer mod L -> *BN
 reduce_mod_L(b: ptr, len: int) -> ptr {
-    n = from_le(b, len)
+    n = from_le(bytes.view(b)[0..len])
     L = order_L()
     r = bignum.mod(n, L)
     bignum.free(n); bignum.free(L)
@@ -376,13 +378,13 @@ publickey(seed: ptr) -> ptr {
     d2 = compute_d2(d, p)
     B = base_point(p, d)
 
-    h = sha512(seed, 32)
+    h = sha512(bytes.view(seed)[0..32])
     // a = clamp(h[0..32]) as scalar
     a_le = bytes.new(32)
     bytes.copy_from_bytes(a_le, 0, h, 0, 32)
     bytes.set(a_le, 0, bytes.get(a_le, 0) & 248)
     bytes.set(a_le, 31, (bytes.get(a_le, 31) & 63) | 64)
-    a = from_le(a_le, 32)
+    a = from_le(bytes.view(a_le)[0..32])
 
     A = pt_mul(a, B, p, d2)
     pub = pt_encode(A, p)
@@ -393,18 +395,20 @@ publickey(seed: ptr) -> ptr {
 }
 
 // Sign msg with the 32-byte seed; returns a 64-byte signature.
-sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
+sign(seed: ptr, msg: byte[]) -> ptr {
+    if msg.len < 0 { panic("ed25519.sign: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int msg_len = msg.len
     p = field_p(); d = curve_d(p)
     d2 = compute_d2(d, p)
     B = base_point(p, d)
     L = order_L()
 
-    h = sha512(seed, 32)
+    h = sha512(bytes.view(seed)[0..32])
     a_le = bytes.new(32)
     bytes.copy_from_bytes(a_le, 0, h, 0, 32)
     bytes.set(a_le, 0, bytes.get(a_le, 0) & 248)
     bytes.set(a_le, 31, (bytes.get(a_le, 31) & 63) | 64)
-    a = from_le(a_le, 32)
+    a = from_le(bytes.view(a_le)[0..32])
 
     // prefix = h[32..64]; A = a*B
     A = pt_mul(a, B, p, d2)
@@ -414,8 +418,8 @@ sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
     rin_len = 32 + msg_len
     rin = bytes.new(rin_len)
     bytes.copy_from_bytes(rin, 0, h, 32, 32)
-    if msg_len > 0 { bytes.copy_from_bytes(rin, 32, msg, 0, msg_len) }
-    rh = sha512(rin, rin_len)
+    if msg_len > 0 { bytes.copy_from_slice(rin, 32, msg[0..msg_len]) }
+    rh = sha512(bytes.view(rin)[0..rin_len])
     r = reduce_mod_L(rh, 64)
 
     // R = r*B
@@ -427,8 +431,8 @@ sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
     kin = bytes.new(kin_len)
     bytes.copy_from_bytes(kin, 0, Renc, 0, 32)
     bytes.copy_from_bytes(kin, 32, Aenc, 0, 32)
-    if msg_len > 0 { bytes.copy_from_bytes(kin, 64, msg, 0, msg_len) }
-    kh = sha512(kin, kin_len)
+    if msg_len > 0 { bytes.copy_from_slice(kin, 64, msg[0..msg_len]) }
+    kh = sha512(bytes.view(kin)[0..kin_len])
     k = reduce_mod_L(kh, 64)
 
     // S = (r + k*a) mod L
@@ -451,7 +455,9 @@ sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
 
 // Verify a 64-byte signature over msg with the 32-byte public key.
 // Returns 1 if valid, 0 otherwise.
-verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
+verify(public: ptr, msg: byte[], sig: ptr) -> int {
+    if msg.len < 0 { panic("ed25519.verify: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int msg_len = msg.len
     p = field_p(); d = curve_d(p)
     d2 = compute_d2(d, p)
     B = base_point(p, d)
@@ -459,7 +465,7 @@ verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
 
     Renc = bytes.new(32); bytes.copy_from_bytes(Renc, 0, sig, 0, 32)
     Senc = bytes.new(32); bytes.copy_from_bytes(Senc, 0, sig, 32, 32)
-    S = from_le(Senc, 32)
+    S = from_le(bytes.view(Senc)[0..32])
 
     ok = 1
     // S must be < L
@@ -477,8 +483,8 @@ verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
         kin = bytes.new(kin_len)
         bytes.copy_from_bytes(kin, 0, Renc, 0, 32)
         bytes.copy_from_bytes(kin, 32, public, 0, 32)
-        if msg_len > 0 { bytes.copy_from_bytes(kin, 64, msg, 0, msg_len) }
-        kh = sha512(kin, kin_len)
+        if msg_len > 0 { bytes.copy_from_slice(kin, 64, msg[0..msg_len]) }
+        kh = sha512(bytes.view(kin)[0..kin_len])
         k = reduce_mod_L(kh, 64)
 
         // check: S*B == R + k*A

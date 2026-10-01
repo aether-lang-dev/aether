@@ -76,11 +76,11 @@ main() {
     // --- seal -> open round-trip (ChaCha20-Poly1305 key/iv) ---
     key = from_hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
     biv = from_hex("5d313eb2671276ee13000b30")
-    sender = tls13_record.new(key, 32, biv)
-    receiver = tls13_record.new(key, 32, biv)
+    sender = tls13_record.new(bytes.view(key)[0..32], biv)
+    receiver = tls13_record.new(bytes.view(key)[0..32], biv)
 
     msg = from_hex("48656c6c6f2c20544c5320312e3321") // "Hello, TLS 1.3!"
-    rec = tls13_record.seal_record(sender, tls13_record.CONTENT_APPLICATION_DATA, msg, bytes.length(msg))
+    rec = tls13_record.seal_record(sender, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(msg))
 
     // outer record header must be 0x17 0x0303 <len>
     if bytes.get(rec, 0) != 0x17 || bytes.get(rec, 1) != 0x03 || bytes.get(rec, 2) != 0x03 {
@@ -90,7 +90,7 @@ main() {
     }
 
     opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-    oerr = tls13_record.open_record(receiver, rec, bytes.length(rec), &opened)
+    oerr = tls13_record.open_record(receiver, bytes.view(rec), &opened)
     if oerr != "" {
         println("FAIL open error: ${oerr}"); total_ok = 0
     } else {
@@ -116,10 +116,10 @@ main() {
 
     // --- tamper: flip a ciphertext byte -> open must fail. Reset receiver seq
     //     by making a fresh receiver so the sequence matches record #0. ---
-    receiver2 = tls13_record.new(key, 32, biv)
+    receiver2 = tls13_record.new(bytes.view(key)[0..32], biv)
     bytes.set(rec, tls13_record.RECORD_HEADER_LEN + 2, (bytes.get(rec, tls13_record.RECORD_HEADER_LEN + 2) ^ 0x40) & 0xFF)
     opened2 = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-    terr = tls13_record.open_record(receiver2, rec, bytes.length(rec), &opened2)
+    terr = tls13_record.open_record(receiver2, bytes.view(rec), &opened2)
     if terr == "" {
         println("FAIL tampered record accepted"); total_ok = 0
     } else {
@@ -128,16 +128,16 @@ main() {
     if opened2.plaintext != null { bytes.free(opened2.plaintext) }
 
     // --- two records in sequence decrypt correctly (seq advances) ---
-    s2 = tls13_record.new(key, 32, biv)
-    r2 = tls13_record.new(key, 32, biv)
+    s2 = tls13_record.new(bytes.view(key)[0..32], biv)
+    r2 = tls13_record.new(bytes.view(key)[0..32], biv)
     m1 = from_hex("6669727374") // "first"
     m2 = from_hex("7365636f6e64") // "second"
-    rc1 = tls13_record.seal_record(s2, tls13_record.CONTENT_APPLICATION_DATA, m1, bytes.length(m1))
-    rc2 = tls13_record.seal_record(s2, tls13_record.CONTENT_APPLICATION_DATA, m2, bytes.length(m2))
+    rc1 = tls13_record.seal_record(s2, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(m1))
+    rc2 = tls13_record.seal_record(s2, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(m2))
     o1 = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
     o2 = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-    e1 = tls13_record.open_record(r2, rc1, bytes.length(rc1), &o1)
-    e2 = tls13_record.open_record(r2, rc2, bytes.length(rc2), &o2)
+    e1 = tls13_record.open_record(r2, bytes.view(rc1), &o1)
+    e2 = tls13_record.open_record(r2, bytes.view(rc2), &o2)
     seq_ok = 1
     if e1 != "" || e2 != "" { println("FAIL seq open err ${e1} ${e2}"); seq_ok = 0 }
     if o1.plaintext != null {
@@ -161,14 +161,14 @@ main() {
     aiv = bytes.new(12)
     ai2 = 0
     while ai2 < 12 { bytes.set(aiv, ai2, (ai2 * 3 + 1) & 0xFF); ai2 = ai2 + 1 }
-    asend = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, akey, 16, aiv)
-    arecv = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, akey, 16, aiv)
+    asend = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, bytes.view(akey)[0..16], aiv)
+    arecv = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, bytes.view(akey)[0..16], aiv)
     amsg = bytes.new(20)
     am = 0
     while am < 20 { bytes.set(amsg, am, 97 + (am % 26)); am = am + 1 }
-    arec = tls13_record.seal_record(asend, tls13_record.CONTENT_APPLICATION_DATA, amsg, 20)
+    arec = tls13_record.seal_record(asend, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(amsg)[0..20])
     ao = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-    aerr = tls13_record.open_record(arecv, arec, bytes.length(arec), &ao)
+    aerr = tls13_record.open_record(arecv, bytes.view(arec), &ao)
     aok = 1
     if string.equals(aerr, "") != 1 { aok = 0 }
     else {
@@ -191,14 +191,14 @@ main() {
     a2iv = bytes.new(12)
     a2j = 0
     while a2j < 12 { bytes.set(a2iv, a2j, (a2j * 5 + 2) & 0xFF); a2j = a2j + 1 }
-    a2send = tls13_record.new_aead(tls13_record.AEAD_AES_256_GCM, a2key, 32, a2iv)
-    a2recv = tls13_record.new_aead(tls13_record.AEAD_AES_256_GCM, a2key, 32, a2iv)
+    a2send = tls13_record.new_aead(tls13_record.AEAD_AES_256_GCM, bytes.view(a2key)[0..32], a2iv)
+    a2recv = tls13_record.new_aead(tls13_record.AEAD_AES_256_GCM, bytes.view(a2key)[0..32], a2iv)
     a2msg = bytes.new(40)
     a2m = 0
     while a2m < 40 { bytes.set(a2msg, a2m, 65 + (a2m % 26)); a2m = a2m + 1 }
-    a2rec = tls13_record.seal_record(a2send, tls13_record.CONTENT_APPLICATION_DATA, a2msg, 40)
+    a2rec = tls13_record.seal_record(a2send, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(a2msg)[0..40])
     a2o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-    a2err = tls13_record.open_record(a2recv, a2rec, bytes.length(a2rec), &a2o)
+    a2err = tls13_record.open_record(a2recv, bytes.view(a2rec), &a2o)
     a2ok = 1
     if string.equals(a2err, "") != 1 { a2ok = 0 }
     else {
@@ -224,14 +224,14 @@ main() {
     aliv = bytes.new(12)
     alj = 0
     while alj < 12 { bytes.set(aliv, alj, (alj * 2 + 1) & 0xFF); alj = alj + 1 }
-    alsend = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, alkey, 16, aliv)
-    alrecv = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, alkey, 16, aliv)
+    alsend = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, bytes.view(alkey)[0..16], aliv)
+    alrecv = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, bytes.view(alkey)[0..16], aliv)
     almsg = bytes.new(2)
     bytes.set(almsg, 0, 2) // fatal
     bytes.set(almsg, 1, 42) // bad_certificate
-    alrec = tls13_record.seal_record(alsend, tls13_record.CONTENT_ALERT, almsg, 2)
+    alrec = tls13_record.seal_record(alsend, tls13_record.CONTENT_ALERT, bytes.view(almsg)[0..2])
     alo = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-    alerr = tls13_record.open_record(alrecv, alrec, bytes.length(alrec), &alo)
+    alerr = tls13_record.open_record(alrecv, bytes.view(alrec), &alo)
     alok = 1
     if string.equals(alerr, "") != 1 { alok = 0 }
     else {
@@ -257,7 +257,7 @@ main() {
     bytes.free(akey); bytes.free(aiv); bytes.free(amsg); bytes.free(arec)
 
     // ---- record-size / sequence hardening (RFC 8446 §5.1/§5.2/§5.3) ----
-    hctx = tls13_record.new(key, 32, biv)
+    hctx = tls13_record.new(bytes.view(key)[0..32], biv)
 
     // open_record rejects a TLSCiphertext claiming > 2^14 + 256 bytes before
     // it allocates. Forge a 5-byte header with length 0xFFFF and a short body;
@@ -271,7 +271,7 @@ main() {
     bytes.set(big, 3, 0xFF) // length hi
     bytes.set(big, 4, 0xFF) // length lo -> 65535, over the 16640 cap
     OpenedRecord ob
-    berr = tls13_record.open_record(hctx, big, big_len, &ob)
+    berr = tls13_record.open_record(hctx, bytes.view(big)[0..big_len], &ob)
     if string.equals(berr, "record: length exceeds maximum record size") == 1 {
         println("ok   oversized ciphertext rejected")
     } else {
@@ -281,7 +281,7 @@ main() {
     // seal_record rejects a plaintext fragment over 2^14 bytes (returns null).
     over = bytes.new(tls13_record.CONTENT_MAX_PLAIN_LEN + 1)
     bytes.set(over, tls13_record.CONTENT_MAX_PLAIN_LEN, 0)
-    sbig = tls13_record.seal_record(hctx, tls13_record.CONTENT_APPLICATION_DATA, over, bytes.length(over))
+    sbig = tls13_record.seal_record(hctx, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(over))
     if sbig == null {
         println("ok   oversized plaintext rejected")
     } else {
@@ -290,11 +290,11 @@ main() {
     }
 
     // a null context is rejected on both paths rather than dereferenced.
-    if tls13_record.seal_record(null, tls13_record.CONTENT_APPLICATION_DATA, msg, bytes.length(msg)) != null {
+    if tls13_record.seal_record(null, tls13_record.CONTENT_APPLICATION_DATA, bytes.view(msg)) != null {
         println("FAIL seal_record(null) did not reject"); total_ok = 0
     } else { println("ok   seal_record null ctx rejected") }
     OpenedRecord onull
-    if string.equals(tls13_record.open_record(null, rec, bytes.length(rec), &onull), "record: null context") != 1 {
+    if string.equals(tls13_record.open_record(null, bytes.view(rec), &onull), "record: null context") != 1 {
         println("FAIL open_record(null) did not reject"); total_ok = 0
     } else { println("ok   open_record null ctx rejected") }
 

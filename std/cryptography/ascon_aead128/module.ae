@@ -17,14 +17,15 @@
 // Import with:  import std.cryptography.ascon_aead128
 //
 // API (mirrors std.cryptography.chacha20poly1305):
-//   aead_seal(key16, nonce16, aad, aad_len, pt, pt_len)
+//   aead_seal(key16, nonce16, aad, pt)
 //       -> ptr ciphertext-with-tag (pt_len + 16 bytes; 16-byte tag appended)
-//   aead_open(key16, nonce16, aad, aad_len, ct_with_tag, ct_len)
+//   aead_open(key16, nonce16, aad, ct_with_tag)
 //       -> (plaintext_ptr, "") on a valid tag, or (null, error) on failure.
 // key/nonce/aad/pt are std.bytes buffers; returned buffers are std.bytes too.
 
 import std.bits
 import std.bytes
+import std.mem
 
 exports(
     aead_seal, aead_open,
@@ -89,16 +90,21 @@ fn p8(st: *Aead128St) {
 // Load 8 little-endian bytes from `b` at `off` into a long (zero-extended;
 // callers requesting past-end never do so — bounds are precomputed).
 fn ld64(b: ptr, off: int) -> long {
-    return bytes.get_le64(b, off)
+    return ld64_slice(bytes.view(b), off)
+}
+
+// The slice form of ld64 (#2301); ld64 views its std.bytes handle into it.
+fn ld64_slice(b: byte[], off: int) -> long {
+    return mem.read_u64_le(b, off)
 }
 
 // Load the low `n` (0..7) bytes at `off` as a little-endian long, i.e. byte
 // [off] is the least-significant. Bytes above `n` read as zero.
-fn ld_low(b: ptr, off: int, n: int) -> long {
+fn ld_low(b: byte[], off: int, n: int) -> long {
     long v = 0
     i = 0
     while i < n {
-        long byte_v = bytes.get(b, off + i) & 255
+        long byte_v = b[off + i] & 255
         v = v | (byte_v << (i << 3))
         i = i + 1
     }
@@ -135,13 +141,15 @@ fn init_state(st: *Aead128St, key: ptr, nonce: ptr, k0: long, k1: long) {
 // Absorb all associated data, then apply domain separation. Mirrors BC's
 // ProcessBufferAad (full 16-byte blocks) + FinishAad (partial block padded
 // with 0x01, then S4 ^= 0x8000000000000000).
-fn absorb_aad(st: *Aead128St, aad: ptr, aad_len: int) {
+fn absorb_aad(st: *Aead128St, aad: byte[]) {
+    if aad.len < 0 { panic("ascon_aead128.absorb_aad: the `aad` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int aad_len = aad.len
     off = 0
     remaining = aad_len
     // Full rate blocks.
     while remaining >= RATE {
-        st.s0 = st.s0 ^ ld64(aad, off)
-        st.s1 = st.s1 ^ ld64(aad, off + 8)
+        st.s0 = st.s0 ^ ld64_slice(aad, off)
+        st.s1 = st.s1 ^ ld64_slice(aad, off + 8)
         p8(st)
         off = off + RATE
         remaining = remaining - RATE
@@ -149,7 +157,7 @@ fn absorb_aad(st: *Aead128St, aad: ptr, aad_len: int) {
     // Final (possibly empty) partial block — only when AAD is non-empty.
     if aad_len > 0 {
         if remaining >= 8 {
-            st.s0 = st.s0 ^ ld64(aad, off)
+            st.s0 = st.s0 ^ ld64_slice(aad, off)
             r2 = remaining - 8
             st.s1 = st.s1 ^ (ld_low(aad, off + 8, r2) ^ pad(r2))
         } else {
@@ -174,13 +182,15 @@ fn finish_data(st: *Aead128St, k0: long, k1: long) {
 // Encrypt `pt_len` bytes of plaintext into `ct` (same length), updating the
 // rate words as it goes. Leaves the tag material in (S3, S4) after
 // finish_data. `ct` must have room for pt_len bytes.
-fn encrypt_body(st: *Aead128St, pt: ptr, pt_len: int, ct: ptr, k0: long, k1: long) {
+fn encrypt_body(st: *Aead128St, pt: byte[], ct: ptr, k0: long, k1: long) {
+    if pt.len < 0 { panic("ascon_aead128.encrypt_body: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = pt.len
     off = 0
     remaining = pt_len
     while remaining >= RATE {
-        st.s0 = st.s0 ^ ld64(pt, off)
+        st.s0 = st.s0 ^ ld64_slice(pt, off)
         bytes.set_le64(ct, off, st.s0)
-        st.s1 = st.s1 ^ ld64(pt, off + 8)
+        st.s1 = st.s1 ^ ld64_slice(pt, off + 8)
         bytes.set_le64(ct, off + 8, st.s1)
         p8(st)
         off = off + RATE
@@ -188,7 +198,7 @@ fn encrypt_body(st: *Aead128St, pt: ptr, pt_len: int, ct: ptr, k0: long, k1: lon
     }
     // Final partial (or empty) block.
     if remaining >= 8 {
-        st.s0 = st.s0 ^ ld64(pt, off)
+        st.s0 = st.s0 ^ ld64_slice(pt, off)
         bytes.set_le64(ct, off, st.s0)
         r2 = remaining - 8
         if r2 > 0 {
@@ -208,14 +218,16 @@ fn encrypt_body(st: *Aead128St, pt: ptr, pt_len: int, ct: ptr, k0: long, k1: lon
 
 // Decrypt `ct_len` bytes of ciphertext into `pt` (same length), updating the
 // rate words with the recovered plaintext. Leaves tag material in (S3, S4).
-fn decrypt_body(st: *Aead128St, ct: ptr, ct_len: int, pt: ptr, k0: long, k1: long) {
+fn decrypt_body(st: *Aead128St, ct: byte[], pt: ptr, k0: long, k1: long) {
+    if ct.len < 0 { panic("ascon_aead128.decrypt_body: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct.len
     off = 0
     remaining = ct_len
     while remaining >= RATE {
-        c0 = ld64(ct, off)
+        c0 = ld64_slice(ct, off)
         bytes.set_le64(pt, off, st.s0 ^ c0)
         st.s0 = c0
-        c1 = ld64(ct, off + 8)
+        c1 = ld64_slice(ct, off + 8)
         bytes.set_le64(pt, off + 8, st.s1 ^ c1)
         st.s1 = c1
         p8(st)
@@ -223,7 +235,7 @@ fn decrypt_body(st: *Aead128St, ct: ptr, ct_len: int, pt: ptr, k0: long, k1: lon
         remaining = remaining - RATE
     }
     if remaining >= 8 {
-        c0 = ld64(ct, off)
+        c0 = ld64_slice(ct, off)
         bytes.set_le64(pt, off, st.s0 ^ c0)
         st.s0 = c0
         r2 = remaining - 8
@@ -251,7 +263,9 @@ fn decrypt_body(st: *Aead128St, ct: ptr, ct_len: int, pt: ptr, k0: long, k1: lon
 // Seal: authenticated-encrypt `pt` under `key`/`nonce` with associated data
 // `aad`. Returns a fresh std.bytes buffer of pt_len + 16 bytes: the ciphertext
 // followed by the 16-byte tag. Returns null on a bad key/nonce length.
-aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
+aead_seal(key: ptr, nonce: ptr, aad: byte[], pt: byte[]) -> ptr {
+    if pt.len < 0 { panic("ascon_aead128.aead_seal: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = pt.len
     if key == null || nonce == null { return null }
     if bytes.length(key) < KEY_BYTES || bytes.length(nonce) < NONCE_BYTES { return null }
 
@@ -260,7 +274,7 @@ aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) ->
 
     st = Aead128St { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 }
     init_state(&st, key, nonce, k0, k1)
-    absorb_aad(&st, aad, aad_len)
+    absorb_aad(&st, aad)
 
     out_len = pt_len + TAG_BYTES
     out = bytes.new(out_len)
@@ -271,7 +285,7 @@ aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) ->
         j = j + 1
     }
 
-    encrypt_body(&st, pt, pt_len, out, k0, k1)
+    encrypt_body(&st, pt, out, k0, k1)
 
     // Append the tag (S3, S4) little-endian.
     bytes.set_le64(out, pt_len, st.s3)
@@ -282,7 +296,9 @@ aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) ->
 // Open: verify + decrypt `ct_with_tag` (ciphertext followed by its 16-byte
 // tag). Returns (plaintext_ptr, "") on success, or (null, error) if the tag is
 // invalid or inputs are malformed. The plaintext buffer is ct_len-16 bytes.
-aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> ptr! {
+aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> ptr! {
+    if ct_with_tag.len < 0 { panic("ascon_aead128.aead_open: the `ct_with_tag` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct_with_tag.len
     ok = ""
     if key == null || nonce == null || ct_with_tag == null { return null, "null argument" }
     if bytes.length(key) < KEY_BYTES || bytes.length(nonce) < NONCE_BYTES { return null, "bad key/nonce length" }
@@ -293,7 +309,7 @@ aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len
 
     st = Aead128St { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 }
     init_state(&st, key, nonce, k0, k1)
-    absorb_aad(&st, aad, aad_len)
+    absorb_aad(&st, aad)
 
     pt_len = ct_len - TAG_BYTES
     pt = bytes.new(pt_len)
@@ -303,13 +319,13 @@ aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len
         j = j + 1
     }
 
-    decrypt_body(&st, ct_with_tag, pt_len, pt, k0, k1)
+    decrypt_body(&st, ct_with_tag[0..pt_len], pt, k0, k1)
 
     // Constant-time-ish tag check: XOR the computed tag with the received one
     // and OR the differences — zero iff they match. (The Ascon standard's own
     // check compares the recomputed (S3,S4) against the received tag words.)
-    r3 = st.s3 ^ ld64(ct_with_tag, pt_len)
-    r4 = st.s4 ^ ld64(ct_with_tag, pt_len + 8)
+    r3 = st.s3 ^ ld64_slice(ct_with_tag, pt_len)
+    r4 = st.s4 ^ ld64_slice(ct_with_tag, pt_len + 8)
     if (r3 | r4) != 0 {
         bytes.free(pt)
         return null, "tag verification failed"

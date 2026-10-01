@@ -21,7 +21,7 @@ main() {
 
     encoded, eerr = cbor.encode(value)
     // 0x18 introduces a one-byte unsigned; 0x2a is 42.
-    println("hex: ${encoding.hex_encode(encoded, string.length(encoded))} err='${eerr}'")
+    println("hex: ${encoding.hex_encode(string.bytes(encoded))} err='${eerr}'")
 
     back, perr = cbor.parse(encoded)
     text, derr = cbor.diagnose(back)

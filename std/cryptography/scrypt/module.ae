@@ -16,8 +16,8 @@
 //
 // Import with:  import std.cryptography.scrypt
 //
-//   scrypt(pass, pass_len, salt, salt_len, n, r, p, dklen) -> ptr   (std.bytes)
-//   scrypt_hex(pass, pass_len, salt, salt_len, n, r, p, dklen) -> string
+//   scrypt(pass, salt, n, r, p, dklen) -> ptr   (std.bytes; pass, salt: byte[])
+//   scrypt_hex(pass, salt, n, r, p, dklen) -> string
 //
 // All pointer args are std.bytes buffers; the caller frees the result.
 // Returns null on bad parameters (N must be a power of 2 > 1, r >= 1,
@@ -188,7 +188,7 @@ block_mix(bin: ptr, bin_off: int, bout: ptr, bout_off: int, r: int, xbuf: ptr) {
 }
 
 // Compute scrypt. Returns a std.bytes buffer of dklen bytes, or null.
-scrypt(pass: ptr, pass_len: int, salt: ptr, salt_len: int, n: int, r: int, p: int, dklen: int) -> ptr {
+scrypt(pass: byte[], salt: byte[], n: int, r: int, p: int, dklen: int) -> ptr {
     if n <= 1 {
         return null
     }
@@ -210,7 +210,7 @@ scrypt(pass: ptr, pass_len: int, salt: ptr, salt_len: int, n: int, r: int, p: in
     total = p * block_bytes
 
     // B = PBKDF2-HMAC-SHA256(P, S, 1, p * 128 * r)
-    b = pbkdf2.pbkdf2("sha256", pass, pass_len, salt, salt_len, 1, total)
+    b = pbkdf2.pbkdf2("sha256", pass, salt, 1, total)
     if b == null {
         return null
     }
@@ -274,13 +274,13 @@ scrypt(pass: ptr, pass_len: int, salt: ptr, salt_len: int, n: int, r: int, p: in
     bytes.free(bx)
 
     // DK = PBKDF2-HMAC-SHA256(P, B, 1, dkLen)
-    out = pbkdf2.pbkdf2("sha256", pass, pass_len, b, total, 1, dklen)
+    out = pbkdf2.pbkdf2("sha256", pass, bytes.view(b)[0..total], 1, dklen)
     bytes.free(b)
     return out
 }
 
-scrypt_hex(pass: ptr, pass_len: int, salt: ptr, salt_len: int, n: int, r: int, p: int, dklen: int) -> string {
-    out = scrypt(pass, pass_len, salt, salt_len, n, r, p, dklen)
+scrypt_hex(pass: byte[], salt: byte[], n: int, r: int, p: int, dklen: int) -> string {
+    out = scrypt(pass, salt, n, r, p, dklen)
     if out == null {
         return ""
     }

@@ -97,7 +97,7 @@ main() {
     s48 = from_hex("71a6ca3d5744810c83e4cabffe10d0459bfd01c69704521c299e9224e711930e5c422425586302214badb09110751924")
     dsig, dlen = der_ecdsa_sig_w(r48, s48, 48)
 
-    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P384_SHA384, p3x, p3y, th, 32, dsig, dlen) == 1 {
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P384_SHA384, p3x, p3y, bytes.view(th)[0..32], bytes.view(dsig)[0..dlen]) == 1 {
         println("ok   ecdsa-p384 CertificateVerify accepts valid sig")
     } else {
         println("FAIL ecdsa-p384 CertificateVerify rejected valid sig"); total_ok = 0

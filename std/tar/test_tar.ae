@@ -147,7 +147,7 @@ write_mock_tar(path: string, name: string, size: long, chksum_val: long, typefla
     }
 
     final_hdr = bytes.to_string(buf, 512)
-    fs.write_binary(path, final_hdr, 512)
+    fs.write_binary(path, string.bytes(final_hdr)[0..512])
     string_release(hdr_str)
     string_release(final_hdr)
 }
@@ -183,7 +183,7 @@ test_truncated_header(base_dir: string) {
         string_release(r_err2)
     }
 
-    fs.write_binary(tar_path, "short block", 11)
+    fs.write_binary(tar_path, string.bytes("short block"))
     var r_ptr: ptr = null
     var ok = 0
     r_ptr, r_err = tar.reader_open(tar_path)
@@ -322,7 +322,7 @@ test_one_zero(base_dir: string) {
         z = z + 1
     }
     var zero_str = bytes.to_string(zero_buf, 512)
-    fs.write_binary(tar_path, zero_str, 512)
+    fs.write_binary(tar_path, string.bytes(zero_str)[0..512])
     string_release(zero_str)
 
     var r_ptr: ptr = null

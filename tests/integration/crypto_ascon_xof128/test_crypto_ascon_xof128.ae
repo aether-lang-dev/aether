@@ -59,14 +59,14 @@ main() {
     // variable-length + streaming-split checks below guard the squeeze/absorb
     // paths independently of the pinned constants.
     fails = fails + check("empty",
-        ascon_xof128.ascon_xof128_hex("", 0, 64),
+        ascon_xof128.ascon_xof128_hex(string.bytes(""), 64),
         "473d5e6164f58b39dfd84aacdb8ae42ec2d91fed33388ee0d960d9b3993295c6ad77855a5d3b13fe6ad9e6098988373af7d0956d05a8f1665d2c67d1a3ad10ff")
 
     // Msg = 00
     b_00 = hex_to_bytes("00")
     defer bytes.free(b_00)
     ctx, _ = ascon_xof128.new()
-    ascon_xof128.update_bytes(ctx, b_00, 1)
+    ascon_xof128.update(ctx, bytes.view(b_00)[0..1])
     res_00 = ascon_xof128.final_hex(ctx, 64)
     fails = fails + check("00", res_00, "51430e0438ecdf642b393630d977625f5f337656ba58ab1e960784ac32a16e0d446405551f5469384f8ea283cf12e64fa72c426bfebaea3aa1529e2c4ab23a2f")
 
@@ -74,7 +74,7 @@ main() {
     b_0001 = hex_to_bytes("0001")
     defer bytes.free(b_0001)
     ctx2, _ = ascon_xof128.new()
-    ascon_xof128.update_bytes(ctx2, b_0001, 2)
+    ascon_xof128.update(ctx2, bytes.view(b_0001)[0..2])
     res_0001 = ascon_xof128.final_hex(ctx2, 64)
     fails = fails + check("0001", res_0001, "a05383077af971d3830bd37e7b981497a773d441db077c6494cc73125953846eb6427fba4cd308ff90a11385d51101341bf5379249217bfdace9cca1148cc966")
 
@@ -82,7 +82,7 @@ main() {
     b_000102 = hex_to_bytes("000102")
     defer bytes.free(b_000102)
     ctx3, _ = ascon_xof128.new()
-    ascon_xof128.update_bytes(ctx3, b_000102, 3)
+    ascon_xof128.update(ctx3, bytes.view(b_000102)[0..3])
     res_000102 = ascon_xof128.final_hex(ctx3, 64)
     fails = fails + check("000102", res_000102, "9c96f31c3e7bdfdc5ef6ba836f760a0d6548d94dd0a512033022c9242e8ba916c30c3961d37d7dd7282e2191494d60dc5058588b276c60c90be2aaa7e7013d96")
 
@@ -90,16 +90,16 @@ main() {
     b_00010203 = hex_to_bytes("00010203")
     defer bytes.free(b_00010203)
     ctx4, _ = ascon_xof128.new()
-    ascon_xof128.update_bytes(ctx4, b_00010203, 4)
+    ascon_xof128.update(ctx4, bytes.view(b_00010203)[0..4])
     res_00010203 = ascon_xof128.final_hex(ctx4, 64)
     fails = fails + check("00010203", res_00010203, "21f7fd74588e244af45f9016b8db19b857ec5e6208978cfc1b4611ed91fb38f87e8f82a6409fb2b77acfbba8862aa22a7b0c98c1c01d5a4fdf64827b450fa1eb")
 
     // Variable-length XOF property: a 32-byte squeeze must be the exact prefix
     // of a 64-byte squeeze of the same input. This validates the squeeze path
     // for a non-32 length independently of any pinned KAT.
-    x32 = ascon_xof128.ascon_xof128_hex("", 0, 32)
+    x32 = ascon_xof128.ascon_xof128_hex(string.bytes(""), 32)
     x64prefix = string.substring(
-        ascon_xof128.ascon_xof128_hex("", 0, 64), 0, 64)
+        ascon_xof128.ascon_xof128_hex(string.bytes(""), 64), 0, 64)
     fails = fails + check("XOF 32B is prefix of 64B", x32, x64prefix)
 
     // Multi-part streaming: input 00010203 fed as {00} then {01,02,03} must
@@ -107,8 +107,8 @@ main() {
     tail3 = hex_to_bytes("010203")
     defer bytes.free(tail3)
     ctx_sp, _ = ascon_xof128.new()
-    ascon_xof128.update_bytes(ctx_sp, b_00, 1)
-    ascon_xof128.update_bytes(ctx_sp, tail3, 3)
+    ascon_xof128.update(ctx_sp, bytes.view(b_00)[0..1])
+    ascon_xof128.update(ctx_sp, bytes.view(tail3)[0..3])
     fails = fails + check("00010203 split 1+3",
         ascon_xof128.final_hex(ctx_sp, 64),
         "21f7fd74588e244af45f9016b8db19b857ec5e6208978cfc1b4611ed91fb38f87e8f82a6409fb2b77acfbba8862aa22a7b0c98c1c01d5a4fdf64827b450fa1eb")

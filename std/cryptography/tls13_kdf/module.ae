@@ -21,8 +21,8 @@
 //
 // Import with:  import std.cryptography.tls13_kdf
 //
-//   expand_label(algo, secret, sec_len, label, context, ctx_len, out_len) -> ptr
-//   derive_secret(algo, secret, sec_len, label, transcript_hash, th_len) -> ptr
+//   expand_label(algo, secret, label, context, out_len) -> ptr
+//   derive_secret(algo, secret, label, transcript_hash) -> ptr
 //
 // `algo` is an hmac/hkdf algorithm ("sha256", "sha384"). `label` is a plain
 // Aether string WITHOUT the "tls13 " prefix (this module prepends it). All
@@ -48,7 +48,9 @@ const TLS13_PREFIX_LEN = 6
 //   uint8  (6 + labelLen) || "tls13 " || label
 //   uint8  ctxLen || context
 // Returns the buffer (caller frees) and its length via the tuple.
-fn build_hkdf_label(label: string, context: ptr, ctx_len: int, out_len: int) -> (ptr, int) {
+fn build_hkdf_label(label: string, context: byte[], out_len: int) -> (ptr, int) {
+    if context.len < 0 { panic("tls13_kdf.build_hkdf_label: the `context` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ctx_len = context.len
     label_len = string_length(label)
     expanded_label_len = TLS13_PREFIX_LEN + label_len // length of "tls13 "||label
     total = 2 + (1 + expanded_label_len) + (1 + ctx_len)
@@ -81,7 +83,7 @@ fn build_hkdf_label(label: string, context: ptr, ctx_len: int, out_len: int) -> 
     bytes.set(hl, ctx_pos, ctx_len & 255)
     j = 0
     while j < ctx_len {
-        bytes.set(hl, ctx_pos + 1 + j, bytes.get(context, j) & 255)
+        bytes.set(hl, ctx_pos + 1 + j, context[j] & 255)
         j = j + 1
     }
 
@@ -91,9 +93,9 @@ fn build_hkdf_label(label: string, context: ptr, ctx_len: int, out_len: int) -> 
 // HKDF-Expand-Label(Secret, Label, Context, Length) (RFC 8446 §7.1).
 // `label` is the bare label (no "tls13 " prefix — added here). `context` may
 // be a zero-length buffer. Returns out_len fresh bytes (caller frees).
-expand_label(algo: string, secret: ptr, sec_len: int, label: string, context: ptr, ctx_len: int, out_len: int) -> ptr {
-    hl, hl_len = build_hkdf_label(label, context, ctx_len, out_len)
-    okm = hkdf.hkdf_expand(algo, secret, sec_len, hl, hl_len, out_len)
+expand_label(algo: string, secret: byte[], label: string, context: byte[], out_len: int) -> ptr {
+    hl, hl_len = build_hkdf_label(label, context, out_len)
+    okm = hkdf.hkdf_expand(algo, secret, bytes.view(hl)[0..hl_len], out_len)
     bytes.free(hl)
     return okm
 }
@@ -102,7 +104,7 @@ expand_label(algo: string, secret: ptr, sec_len: int, label: string, context: pt
 // the ALREADY-COMPUTED Transcript-Hash of Messages (th / th_len) rather than
 // the messages themselves, so this stays hash-agnostic. Output length is
 // fixed at Hash.length for `algo`. Returns fresh bytes (caller frees).
-derive_secret(algo: string, secret: ptr, sec_len: int, label: string, transcript_hash: ptr, th_len: int) -> ptr {
+derive_secret(algo: string, secret: byte[], label: string, transcript_hash: byte[]) -> ptr {
     out_len = hkdf.hash_len(algo)
-    return expand_label(algo, secret, sec_len, label, transcript_hash, th_len, out_len)
+    return expand_label(algo, secret, label, transcript_hash, out_len)
 }

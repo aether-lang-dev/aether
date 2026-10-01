@@ -62,7 +62,7 @@ exports(
     http_ws_message_data, http_ws_message_length, http_ws_close,
     ws_send_text, ws_send_binary, ws_recv,
     ws_recv_timeout, ws_poll, ws_fd,
-    ws_message, ws_message_length, ws_close,
+    ws_message, ws_message_bytes, ws_close,
     server_bind, server_start, server_start_background,
     http_server_add_route, http_server_get, http_server_post,
     http_server_put, http_server_delete,
@@ -72,7 +72,7 @@ exports(
     http_response_create, http_response_set_status,
     http_response_set_header, http_response_add_header,
     http_response_clear_headers,
-    http_response_set_body, http_response_set_body_n,
+    http_response_set_body, response_set_body_bytes,
     http_response_accept_tunnel, response_accept_tunnel,
     http_response_json, http_server_response_free,
     http_server_set_actor_handler,
@@ -89,7 +89,7 @@ exports(
     http_serve_static, http_serve_file, http_mime_type,
     serve_file, serve_static,
     request_method, request_path, request_body,
-    request_body_length, request_query,
+    request_body_length, request_body_bytes, request_query,
     request_remote_addr, request_remote_port,
     request_local_addr, request_local_port,
     request_scheme, request_is_tls, request_http_version,
@@ -587,7 +587,7 @@ sse_close(sse: ptr) {
 //   ws_recv(ws) -> (kind, data) where kind = 1 (text) / 2 (binary) /
 //                 -1 (closed)
 //   ws_send_text(ws, text) -> int (0 OK, -1 transport error)
-//   ws_send_binary(ws, data, len) -> int
+//   ws_send_binary(ws, data) -> int        // data: byte[]
 //   ws_close(ws, code, reason) — 1000 = normal, 1001 = going away, ...
 //
 // Control frames (ping/pong) are auto-handled inside ws_recv.
@@ -640,14 +640,23 @@ ws_send_text(ws: ptr, text: string) -> int {
     return http_ws_send_text(ws, text)
 }
 
-ws_send_binary(ws: ptr, data: ptr, length: int) -> int {
-    return http_ws_send_binary(ws, data, length)
+// A string or `std.bytes` buffer viewed as a raw pointer. Used to bound a
+// borrowed C buffer the server hands back as a plain `char*` (typed
+// `string`): a `string` passed to a `ptr` parameter arrives as the bare
+// pointer, which is what these buffers are.
+fn as_ptr(p: ptr) -> ptr { return p }
+
+// Send one binary frame holding the bytes of `data` (#2301: a byte[] whose
+// length travels with it). Returns the send result, -1 on a closed socket.
+ws_send_binary(ws: ptr, data: byte[]) -> int {
+    if data.len < 0 { panic("http.ws_send_binary: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return http_ws_send_binary(ws, data, data.len)
 }
 
 // Returns: 1 = text frame, 2 = binary, -1 = closed.
-// After 1 or 2, the message is accessible via ws_message and
-// ws_message_length. Pointers are valid until the next ws_recv /
-// ws_send / ws_close call.
+// After 1 or 2, the message is accessible via ws_message (text) and
+// ws_message_bytes (a binary-safe byte[] view). Both are valid until the
+// next ws_recv / ws_send / ws_close call.
 ws_recv(ws: ptr) -> int {
     return http_ws_recv(ws)
 }
@@ -713,8 +722,13 @@ ws_message(ws: ptr) -> string {
     return http_ws_message_data(ws)
 }
 
-ws_message_length(ws: ptr) -> int {
-    return http_ws_message_length(ws)
+// The current message as a borrowed byte[] view (#2301): binary-safe, its
+// length is the message length. Valid until the next ws_recv / ws_send /
+// ws_close; copy it out (bytes.from_slice) to keep it.
+ws_message_bytes(ws: ptr) -> byte[] {
+    n = http_ws_message_length(ws)
+    if n <= 0 { return null }
+    return (as_ptr(http_ws_message_data(ws)) as byte[])[0..n]
 }
 
 ws_close(ws: ptr, code: int, reason: string) {
@@ -815,11 +829,20 @@ extern http_response_add_header(res: ptr, name: string, value: string)
 // defaults overlaid on the captured response.
 extern http_response_clear_headers(res: ptr)
 extern http_response_set_body(res: ptr, body: string)
-// Length-aware sibling — binary-safe set_body. Use when the body
-// may contain embedded NULs (binary content, gzip output, packed
-// binary). Plain http_response_set_body uses strlen() and
-// truncates at the first NUL.
-extern http_response_set_body_n(res: ptr, body: string, length: int)
+// Length-aware sibling — binary-safe set_body. Wrapped by
+// response_set_body_bytes; `body` is `ptr` and this is not exported
+// (#2301): the wrapper passes a byte[] slice's raw data pointer, and a heap
+// string passed to a `ptr` parameter would send its header. std.net no
+// longer declares it, so the two prototypes cannot disagree.
+extern http_response_set_body_n(res: ptr, body: ptr, length: int)
+
+// Set a binary-safe response body: the bytes of `body` (#2301: a byte[]
+// whose length travels with it — a string as `string.bytes(s)`, a
+// `std.bytes` buffer as `bytes.view(buf)`). The server copies it.
+response_set_body_bytes(res: ptr, body: byte[]) {
+    if body.len < 0 { panic("http.response_set_body_bytes: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    http_response_set_body_n(res, body, body.len)
+}
 // Send the current HTTP response immediately and take ownership of
 // the underlying cleartext HTTP/1.1 connection as a std.tcp socket.
 // Returns null if the response is not attached to a live connection,
@@ -928,6 +951,18 @@ request_body_length(req: ptr) -> int {
     return http_request_body_length(req)
 }
 
+// The request body as a borrowed byte[] view (#2301): binary-safe, bounded
+// by the real body length. Like request_body it materialises a streaming
+// body first. Valid for the handler's duration. request_body_length is kept
+// separately: on a streaming request it reports the declared length
+// WITHOUT materialising, which the chunked request_body_read loop relies on.
+request_body_bytes(req: ptr) -> byte[] {
+    p = as_ptr(http_request_body(req))
+    n = http_request_body_length(req)
+    if n <= 0 { return null }
+    return (p as byte[])[0..n]
+}
+
 // Chunked-read access to the request body (#626). Reads up to `max`
 // bytes from `offset` into an owned AetherString. Returns
 // (bytes, n, "") on success — `n` may be less than `max` at EOF.
@@ -950,7 +985,7 @@ request_body_length(req: ptr) -> int {
 //       chunk, n, err = http.request_body_read(req, off, 65536)
 //       if err != "" { ...handle... break }
 //       if n == 0 { break }
-//       fs.pwrite(out_file, chunk, n, off)   // stream to disk
+//       fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk
 //       off = off + n
 //   }
 request_body_read(req: ptr, offset: int, max: int) -> {

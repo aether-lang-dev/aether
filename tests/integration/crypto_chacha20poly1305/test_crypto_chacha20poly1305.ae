@@ -25,7 +25,7 @@ main() {
     pk = hb("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
     msg = sb("Cryptographic Forum Research Group")
     fails = fails + check("poly1305 §2.5.2",
-        bh(chacha20poly1305.poly1305_mac(pk, msg, bytes.length(msg))),
+        bh(chacha20poly1305.poly1305_mac(pk, bytes.view(msg))),
         "a8061dc1305136c6c22b8baf0c0127a9")
 
     // Poly1305 reduction edge: r=2, s=0, msg = 16 * 0xFF forces the
@@ -33,7 +33,7 @@ main() {
     // conditional-subtract ("freeze") select. (2^128-1)*2 mod (2^130-5) = 3.
     pk_edge = hb("0200000000000000000000000000000000000000000000000000000000000000")
     msg_edge = hb("ffffffffffffffffffffffffffffffff")
-    tag_edge = chacha20poly1305.poly1305_mac(pk_edge, msg_edge, bytes.length(msg_edge))
+    tag_edge = chacha20poly1305.poly1305_mac(pk_edge, bytes.view(msg_edge))
     fails = fails + check("poly1305 freeze (h>=p) edge",
         bh(tag_edge),
         "03000000000000000000000000000000")
@@ -46,18 +46,18 @@ main() {
     nonce = hb("070000004041424344454647")
     aad = hb("50515253c0c1c2c3c4c5c6c7")
     pt = sb("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
-    sealed = chacha20poly1305.aead_seal(key, nonce, aad, bytes.length(aad), pt, bytes.length(pt))
+    sealed = chacha20poly1305.aead_seal(key, nonce, bytes.view(aad), bytes.view(pt))
     want = string.concat("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116",
         "1ae10b594f09e26a7e902ecbd0600691")
     fails = fails + check("aead §2.8.2 seal", bh(sealed), want)
 
-    op, err = chacha20poly1305.aead_open(key, nonce, aad, bytes.length(aad), sealed, bytes.length(sealed))
+    op, err = chacha20poly1305.aead_open(key, nonce, bytes.view(aad), bytes.view(sealed))
     if err != "" { println("FAIL aead open err ${err}"); fails = fails + 1 }
     if beq(op, pt) != 1 { println("FAIL aead open roundtrip"); fails = fails + 1 } else { println("ok   aead open roundtrip") }
 
     // Tamper the last tag byte → open must reject.
     bytes.set(sealed, bytes.length(sealed) - 1, (bytes.get(sealed, bytes.length(sealed) - 1) ^ 0x01) & 0xFF)
-    _, terr = chacha20poly1305.aead_open(key, nonce, aad, bytes.length(aad), sealed, bytes.length(sealed))
+    _, terr = chacha20poly1305.aead_open(key, nonce, bytes.view(aad), bytes.view(sealed))
     if terr == "" { println("FAIL aead must reject tampered tag"); fails = fails + 1 } else { println("ok   aead rejects tampered tag") }
 
     if fails == 0 { println("ALL PASS"); return }

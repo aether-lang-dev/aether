@@ -9,8 +9,9 @@
 //
 // HMAC works over BINARY data — keys, the ipad/opad blocks, and the
 // intermediate digest are all full of NUL bytes — so every byte path
-// goes through std.bytes and sha2.update_bytes (never the string-based
-// sha2.update, which truncates at the first NUL).
+// is a length-carrying byte[] slice (#2301): keys and messages come in as
+// slices, and the internal blocks are fed to sha2.update as bounded views
+// of their std.bytes buffers.
 //
 //   HMAC(K, m) = H( (K0 ^ opad) || H( (K0 ^ ipad) || m ) )
 //
@@ -20,8 +21,8 @@
 //
 // Two shapes are exposed:
 //   one-shot:   hmac_sha256_bytes(key, key_len, msg, msg_len)  (+_hex)
-//   streaming:  ctx = new("sha256", key, key_len)
-//               update(ctx, msg, msg_len); final_hex(ctx)
+//   streaming:  ctx = new("sha256", key)
+//               update(ctx, msg); final_hex(ctx)
 
 import std.bits
 import std.bytes
@@ -72,7 +73,9 @@ block_size_for(algo: string) -> int {
 // bytes. If key_len > B, K0 = H(key) zero-padded to B; otherwise the
 // key is copied and zero-padded to B. Returns the buffer, or null on a
 // bad algo. The caller owns and frees the result.
-make_k0(algo: string, key: ptr, key_len: int, block_size: int) -> ptr {
+make_k0(algo: string, key: byte[], block_size: int) -> ptr {
+    if key.len < 0 { panic("hmac.make_k0: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     k0 = bytes.new(block_size)
     // Zero-fill the whole block first so the pad is implicit.
     j = 0
@@ -87,7 +90,7 @@ make_k0(algo: string, key: ptr, key_len: int, block_size: int) -> ptr {
             bytes.free(k0)
             return null
         }
-        sha2.update_bytes(hctx, key, key_len)
+        sha2.update(hctx, key)
         digest = sha2.final_bytes(hctx)
         dl = bytes.length(digest)
         i = 0
@@ -99,7 +102,7 @@ make_k0(algo: string, key: ptr, key_len: int, block_size: int) -> ptr {
     } else {
         i = 0
         while i < key_len {
-            bytes.set(k0, i, bytes.get(key, i))
+            bytes.set(k0, i, key[i])
             i = i + 1
         }
     }
@@ -110,7 +113,7 @@ make_k0(algo: string, key: ptr, key_len: int, block_size: int) -> ptr {
 // names ("sha256", "sha512", ...). `key` / `key_len` is the (binary)
 // key as an AetherBytes buffer. Returns (ctx, "") on success or
 // (null, error). Thread the handle through update / final_*.
-new(algo: string, key: ptr, key_len: int) -> {
+new(algo: string, key: byte[]) -> {
     bs = block_size_for(algo)
     if bs == 0 {
         return null, "unknown algorithm"
@@ -119,7 +122,7 @@ new(algo: string, key: ptr, key_len: int) -> {
     if ctx == null {
         return null, "allocation failed"
     }
-    k0 = make_k0(algo, key, key_len, bs)
+    k0 = make_k0(algo, key, bs)
     if k0 == null {
         free(ctx)
         return null, "unknown algorithm"
@@ -145,7 +148,7 @@ new(algo: string, key: ptr, key_len: int) -> {
         free(ctx)
         return null, ierr
     }
-    sha2.update_bytes(inner, ipad, bs)
+    sha2.update(inner, bytes.view(ipad)[0..bs])
     bytes.free(ipad)
 
     ctx.inner = inner
@@ -157,9 +160,10 @@ new(algo: string, key: ptr, key_len: int) -> {
 }
 
 // Feed message bytes (binary-safe) into the inner hash.
-update(ctx: ptr, data: ptr, len: int) {
+update(ctx: ptr, data: byte[]) {
+    if data.len < 0 { panic("hmac.update: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     c = ctx as *HmacCtx
-    sha2.update_bytes(c.inner, data, len)
+    sha2.update(c.inner, data)
 }
 
 // Finalize: inner = H(ipad || msg); return H(opad || inner) as an
@@ -179,8 +183,8 @@ final_bytes(ctx: ptr) -> ptr {
         free(ctx)
         return null
     }
-    sha2.update_bytes(outer, c.opad, c.block_size)
-    sha2.update_bytes(outer, inner_digest, idl)
+    sha2.update(outer, bytes.view(c.opad)[0..c.block_size])
+    sha2.update(outer, bytes.view(inner_digest)[0..idl])
     bytes.free(inner_digest)
     result = sha2.final_bytes(outer)
 
@@ -222,35 +226,35 @@ free_ctx(ctx: ptr) {
 
 // General one-shot: HMAC over `algo` of `msg` keyed by `key`. Returns
 // an AetherBytes of the MAC, or null on a bad algo / allocation failure.
-hmac_bytes(algo: string, key: ptr, key_len: int, msg: ptr, msg_len: int) -> ptr {
-    ctx, err = new(algo, key, key_len)
+hmac_bytes(algo: string, key: byte[], msg: byte[]) -> ptr {
+    ctx, err = new(algo, key)
     if err != "" {
         return null
     }
-    update(ctx, msg, msg_len)
+    update(ctx, msg)
     return final_bytes(ctx)
 }
 
-hmac_hex(algo: string, key: ptr, key_len: int, msg: ptr, msg_len: int) -> string {
-    ctx, err = new(algo, key, key_len)
+hmac_hex(algo: string, key: byte[], msg: byte[]) -> string {
+    ctx, err = new(algo, key)
     if err != "" {
         return ""
     }
-    update(ctx, msg, msg_len)
+    update(ctx, msg)
     return final_hex(ctx)
 }
 
-hmac_sha256(key: ptr, key_len: int, msg: ptr, msg_len: int) -> ptr {
-    return hmac_bytes("sha256", key, key_len, msg, msg_len)
+hmac_sha256(key: byte[], msg: byte[]) -> ptr {
+    return hmac_bytes("sha256", key, msg)
 }
-hmac_sha256_hex(key: ptr, key_len: int, msg: ptr, msg_len: int) -> string {
-    return hmac_hex("sha256", key, key_len, msg, msg_len)
+hmac_sha256_hex(key: byte[], msg: byte[]) -> string {
+    return hmac_hex("sha256", key, msg)
 }
-hmac_sha512(key: ptr, key_len: int, msg: ptr, msg_len: int) -> ptr {
-    return hmac_bytes("sha512", key, key_len, msg, msg_len)
+hmac_sha512(key: byte[], msg: byte[]) -> ptr {
+    return hmac_bytes("sha512", key, msg)
 }
-hmac_sha512_hex(key: ptr, key_len: int, msg: ptr, msg_len: int) -> string {
-    return hmac_hex("sha512", key, key_len, msg, msg_len)
+hmac_sha512_hex(key: byte[], msg: byte[]) -> string {
+    return hmac_hex("sha512", key, msg)
 }
 
 // ---- Internal helpers ----

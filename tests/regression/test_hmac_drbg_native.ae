@@ -62,7 +62,7 @@ main() {
     // ---- HMAC-SHA256, RFC 4231 ----
     k1 = hb("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
     m1 = sb("Hi There")
-    if string.equals(hmac.hmac_sha256_hex(k1, 20, m1, 8),
+    if string.equals(hmac.hmac_sha256_hex(bytes.view(k1)[0..20], bytes.view(m1)[0..8]),
         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7") != 1 {
         print("FAIL hmac TC1\n"); fails = fails + 1 }
     bytes.free(k1)
@@ -70,7 +70,7 @@ main() {
 
     k2 = sb("Jefe")
     m2 = sb("what do ya want for nothing?")
-    if string.equals(hmac.hmac_sha256_hex(k2, 4, m2, 28),
+    if string.equals(hmac.hmac_sha256_hex(bytes.view(k2)[0..4], bytes.view(m2)[0..28]),
         "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") != 1 {
         print("FAIL hmac TC2\n"); fails = fails + 1 }
     bytes.free(k2)
@@ -81,7 +81,7 @@ main() {
     z = 0
     while z < 131 { bytes.set(k6, z, 0xaa); z = z + 1 }
     m6 = sb("Test Using Larger Than Block-Size Key - Hash Key First")
-    if string.equals(hmac.hmac_sha256_hex(k6, 131, m6, 54),
+    if string.equals(hmac.hmac_sha256_hex(bytes.view(k6)[0..131], bytes.view(m6)[0..54]),
         "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54") != 1 {
         print("FAIL hmac TC6 (long key)\n"); fails = fails + 1 }
     bytes.free(k6)
@@ -90,7 +90,7 @@ main() {
     // ---- HMAC-DRBG SHA-256, Bouncy Castle HMacDrbgTest.cs vector #1 ----
     ent = hb("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536")
     non = hb("2021222324252627")
-    d, err = drbg.new("sha256", ent, 55, non, 8, null, 0)
+    d, err = drbg.new("sha256", bytes.view(ent)[0..55], bytes.view(non)[0..8], null)
     if string.equals(err, "") != 1 { print("FAIL drbg new: ${err}\n"); fails = fails + 1 }
     g1 = drbg.generate(d, 64)
     if string.equals(bh(g1, 64),

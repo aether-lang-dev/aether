@@ -659,9 +659,9 @@ handler. Inside the handler:
 |---|---|
 | `ws_recv(ws)` | block for next data frame; returns `1` (text), `2` (binary), `-1` (closed). Auto-handles ping/pong; reassembles continuation frames. |
 | `ws_message(ws)` | the message contents from the most recent `ws_recv` (NUL-terminated for text). |
-| `ws_message_length(ws)` | byte length of the most recent message. |
+| `ws_message_bytes(ws)` | the most recent message as a borrowed `byte[]` view (binary-safe; `.len` is its length), valid until the next recv/send/close. |
 | `ws_send_text(ws, text)` | emit one text frame; `0` on success, `-1` on transport error. |
-| `ws_send_binary(ws, data, len)` | emit one binary frame, binary-safe via explicit length. |
+| `ws_send_binary(ws, data)` | emit one binary frame holding the bytes of `data` (a `byte[]`; binary-safe). |
 | `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. |
 
 Returning from the handler closes with code `1000` automatically.

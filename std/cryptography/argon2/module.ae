@@ -15,8 +15,7 @@
 //
 // Import with:  import std.cryptography.argon2
 //
-//   argon2id(pass, pass_len, salt, salt_len, secret, secret_len,
-//            ad, ad_len, t_cost, m_cost_kib, parallelism, out_len) -> ptr
+//   argon2id(pass, salt, secret, //            ad, t_cost, m_cost_kib, parallelism, out_len) -> ptr
 //   argon2i / argon2d  — same signature, different type.
 //   *_hex convenience variants return a lowercase hex string.
 //
@@ -41,6 +40,7 @@ import std.bits
 import std.bytes
 import std.longarr
 import std.cryptography.blake2
+import std.string
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
@@ -65,7 +65,9 @@ const VERSION: int = 0x13
 //   else: V1 = Blake2b-512(LE32(out_len) || input); take first 32 bytes;
 //         Vi = Blake2b-512(V(i-1)); take first 32 each; tail = remaining.
 // Writes out_len bytes into `out` at offset out_off.
-hprime(input: ptr, in_len: int, out_len: int, out: ptr, out_off: int) {
+hprime(input: byte[], out_len: int, out: ptr, out_off: int) {
+    if input.len < 0 { panic("argon2.hprime: the `input` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int in_len = input.len
     // Prepend LE32(out_len) to the input.
     seed_len = in_len + 4
     seed = bytes.new(seed_len)
@@ -74,11 +76,11 @@ hprime(input: ptr, in_len: int, out_len: int, out: ptr, out_off: int) {
     bytes.set(seed, 2, (out_len >> 16) & 0xFF)
     bytes.set(seed, 3, (out_len >> 24) & 0xFF)
     if in_len > 0 {
-        bytes.copy_from_bytes(seed, 4, input, 0, in_len)
+        bytes.copy_from_slice(seed, 4, input[0..in_len])
     }
 
     if out_len <= 64 {
-        h = blake2.blake2b_bytes_n(seed_as_string(seed, seed_len), seed_len, out_len)
+        h = blake2.blake2b_bytes_n(string.bytes(seed_as_string(bytes.view(seed)[0..seed_len]))[0..seed_len], out_len)
         bytes.copy_from_bytes(out, out_off, h, 0, out_len)
         bytes.free(h)
         bytes.free(seed)
@@ -86,7 +88,7 @@ hprime(input: ptr, in_len: int, out_len: int, out: ptr, out_off: int) {
     }
 
     // out_len > 64: chained 32-byte halves.
-    v = blake2.blake2b_bytes_n(seed_as_string(seed, seed_len), seed_len, 64)
+    v = blake2.blake2b_bytes_n(string.bytes(seed_as_string(bytes.view(seed)[0..seed_len]))[0..seed_len], 64)
     bytes.free(seed)
     pos = out_off
     bytes.copy_from_bytes(out, pos, v, 0, 32)
@@ -96,7 +98,7 @@ hprime(input: ptr, in_len: int, out_len: int, out: ptr, out_off: int) {
     r = ((out_len + 31) / 32) - 2
     i = 2
     while i <= r {
-        nv = blake2.blake2b_bytes_n(bytes_as_string(v, 64), 64, 64)
+        nv = blake2.blake2b_bytes_n(string.bytes(bytes_as_string(bytes.view(v)[0..64]))[0..64], 64)
         bytes.free(v)
         v = nv
         bytes.copy_from_bytes(out, pos, v, 0, 32)
@@ -105,7 +107,7 @@ hprime(input: ptr, in_len: int, out_len: int, out: ptr, out_off: int) {
     }
 
     last_len = out_len - 32 * r
-    last = blake2.blake2b_bytes_n(bytes_as_string(v, 64), 64, last_len)
+    last = blake2.blake2b_bytes_n(string.bytes(bytes_as_string(bytes.view(v)[0..64]))[0..64], last_len)
     bytes.free(v)
     bytes.copy_from_bytes(out, pos, last, 0, last_len)
     bytes.free(last)
@@ -114,13 +116,15 @@ hprime(input: ptr, in_len: int, out_len: int, out: ptr, out_off: int) {
 // blake2 one-shots take a `string` (binary-safe). Convert a bytes buffer
 // to a string without consuming it: finish() destroys the buffer, so we
 // duplicate via a fresh buffer.
-seed_as_string(b: ptr, n: int) -> string {
-    return bytes_as_string(b, n)
+seed_as_string(b: byte[]) -> string {
+    return bytes_as_string(b)
 }
 
-bytes_as_string(b: ptr, n: int) -> string {
+bytes_as_string(b: byte[]) -> string {
+    if b.len < 0 { panic("argon2.bytes_as_string: the `b` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = b.len
     dup = bytes.new(n)
-    bytes.copy_from_bytes(dup, 0, b, 0, n)
+    bytes.copy_from_slice(dup, 0, b[0..n])
     return bytes.finish(dup, n)
 }
 
@@ -270,7 +274,7 @@ fill_addresses(input: ptr, addr: ptr, zblk: ptr) {
 
 // ---- Main ----
 
-argon2(atype: int, pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
+argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
     if out_len < 4 {
         return null
     }
@@ -310,13 +314,13 @@ argon2(atype: int, pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: p
     put_le32(pre, 12, t_cost)
     put_le32(pre, 16, VERSION)
     put_le32(pre, 20, atype)
-    blake2.update_bytes(ctx, pre, 24)
+    blake2.update(ctx, bytes.view(pre)[0..24])
     bytes.free(pre)
 
-    add_byte_string(ctx, pass, pass_len)
-    add_byte_string(ctx, salt, salt_len)
-    add_byte_string(ctx, secret, secret_len)
-    add_byte_string(ctx, ad, ad_len)
+    add_byte_string(ctx, pass)
+    add_byte_string(ctx, salt)
+    add_byte_string(ctx, secret)
+    add_byte_string(ctx, ad)
 
     h0 = blake2.final_bytes(ctx) // 64 bytes
 
@@ -332,11 +336,11 @@ argon2(atype: int, pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: p
         put_le32(seed, 68, lane)
         // block 0
         put_le32(seed, 64, 0)
-        hprime(seed, 72, 1024, blk_bytes, 0)
+        hprime(bytes.view(seed)[0..72], 1024, blk_bytes, 0)
         load_block_from_bytes(mem, lane * lane_length + 0, blk_bytes)
         // block 1
         put_le32(seed, 64, 1)
-        hprime(seed, 72, 1024, blk_bytes, 0)
+        hprime(bytes.view(seed)[0..72], 1024, blk_bytes, 0)
         load_block_from_bytes(mem, lane * lane_length + 1, blk_bytes)
         lane = lane + 1
     }
@@ -363,7 +367,7 @@ argon2(atype: int, pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: p
     store_block_to_bytes(mem, final_idx, blk_bytes)
 
     out = bytes.new(out_len)
-    hprime(blk_bytes, 1024, out_len, out, 0)
+    hprime(bytes.view(blk_bytes)[0..1024], out_len, out, 0)
 
     bytes.free(blk_bytes)
     longarr_free(mem)
@@ -383,17 +387,19 @@ put_le32(b: ptr, off: int, v: int) {
 
 // Add a length-prefixed byte string to the H0 BLAKE2b context: LE32(len)
 // then the bytes. A null/empty argument contributes LE32(0).
-add_byte_string(ctx: ptr, octets: ptr, n: int) {
+add_byte_string(ctx: ptr, octets: byte[]) {
+    if octets.len < 0 { panic("argon2.add_byte_string: the `octets` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = octets.len
     use_n = n
     if octets == null {
         use_n = 0
     }
     lp = bytes.new(4)
     put_le32(lp, 0, use_n)
-    blake2.update_bytes(ctx, lp, 4)
+    blake2.update(ctx, bytes.view(lp)[0..4])
     bytes.free(lp)
     if use_n > 0 {
-        blake2.update_bytes(ctx, octets, use_n)
+        blake2.update(ctx, octets[0..use_n])
     }
 }
 
@@ -567,14 +573,14 @@ get_ref_column(pass: int, slice: int, index: int, segment_length: int, lane_leng
 
 // ---- Public wrappers ----
 
-argon2d(pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
-    return argon2(ARGON2_D, pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len)
+argon2d(pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
+    return argon2(ARGON2_D, pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len)
 }
-argon2i(pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
-    return argon2(ARGON2_I, pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len)
+argon2i(pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
+    return argon2(ARGON2_I, pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len)
 }
-argon2id(pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
-    return argon2(ARGON2_ID, pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len)
+argon2id(pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> ptr {
+    return argon2(ARGON2_ID, pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len)
 }
 
 to_hex(out: ptr, out_len: int) -> string {
@@ -603,15 +609,15 @@ to_hex(out: ptr, out_len: int) -> string {
     return bytes.finish(hexbuf, out_len * 2)
 }
 
-argon2_hex(atype: int, pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
-    return to_hex(argon2(atype, pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len), out_len)
+argon2_hex(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
+    return to_hex(argon2(atype, pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len), out_len)
 }
-argon2d_hex(pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
-    return to_hex(argon2d(pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len), out_len)
+argon2d_hex(pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
+    return to_hex(argon2d(pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len), out_len)
 }
-argon2i_hex(pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
-    return to_hex(argon2i(pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len), out_len)
+argon2i_hex(pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
+    return to_hex(argon2i(pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len), out_len)
 }
-argon2id_hex(pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: ptr, secret_len: int, ad: ptr, ad_len: int, t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
-    return to_hex(argon2id(pass, pass_len, salt, salt_len, secret, secret_len, ad, ad_len, t_cost, m_cost, parallelism, out_len), out_len)
+argon2id_hex(pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cost: int, m_cost: int, parallelism: int, out_len: int) -> string {
+    return to_hex(argon2id(pass, salt, secret, ad, t_cost, m_cost, parallelism, out_len), out_len)
 }

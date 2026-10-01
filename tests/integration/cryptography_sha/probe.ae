@@ -22,7 +22,7 @@ main() {
     // assertions can't meaningfully run without a digest backend, so
     // skip gracefully rather than crashing the matrix. See
     // CONTRIBUTING.md §"Coding for portability" pattern #2.
-    _, probe_err = cryptography.sha256_hex("probe", 5)
+    _, probe_err = cryptography.sha256_hex(string.bytes("probe"))
     if probe_err != "" {
         println("SKIP cryptography_sha: ${probe_err} (likely Windows CI without OpenSSL)")
         print("\n=== std.cryptography tests skipped (no backend) ===\n")
@@ -31,7 +31,7 @@ main() {
 
     // ---- Test 1: sha256("") matches the well-known empty-string vector ----
     print("Test 1: sha256(empty)\n")
-    d1, err1 = cryptography.sha256_hex("", 0)
+    d1, err1 = cryptography.sha256_hex(string.bytes(""))
     if err1 != "" {
         println("  FAIL: sha256 errored: ${err1}")
         exit(1)
@@ -44,7 +44,7 @@ main() {
 
     // ---- Test 2: sha256("abc") matches the FIPS 180-2 example ----
     print("\nTest 2: sha256(\"abc\")\n")
-    d2, err2 = cryptography.sha256_hex("abc", 3)
+    d2, err2 = cryptography.sha256_hex(string.bytes("abc"))
     if err2 != "" {
         println("  FAIL: sha256 errored: ${err2}")
         exit(1)
@@ -57,7 +57,7 @@ main() {
 
     // ---- Test 3: sha1("abc") matches the FIPS 180-1 example ----
     print("\nTest 3: sha1(\"abc\")\n")
-    d3, err3 = cryptography.sha1_hex("abc", 3)
+    d3, err3 = cryptography.sha1_hex(string.bytes("abc"))
     if err3 != "" {
         println("  FAIL: sha1 errored: ${err3}")
         exit(1)
@@ -91,7 +91,7 @@ main() {
         exit(1)
     }
 
-    d4, err4 = cryptography.sha256_hex(data, n)
+    d4, err4 = cryptography.sha256_hex(string.bytes(data)[0..n])
     if err4 != "" {
         println("  FAIL: sha256 errored: ${err4}")
         exit(1)
@@ -106,7 +106,7 @@ main() {
 
     // ---- Test 5: sha1 on the same AetherString payload ----
     print("\nTest 5: sha1 of the same 10-byte AetherString\n")
-    d5, err5 = cryptography.sha1_hex(data, n)
+    d5, err5 = cryptography.sha1_hex(string.bytes(data)[0..n])
     if err5 != "" {
         println("  FAIL: sha1 errored: ${err5}")
         exit(1)
@@ -120,7 +120,7 @@ main() {
 
     // ---- Test 6: length=0 on a non-empty buffer still hashes empty ----
     print("\nTest 6: length=0 hashes the empty string regardless of buffer\n")
-    d6, err6 = cryptography.sha256_hex(data, 0)
+    d6, err6 = cryptography.sha256_hex(string.bytes(data)[0..0])
     if err6 != "" {
         println("  FAIL: sha256 errored: ${err6}")
         exit(1)

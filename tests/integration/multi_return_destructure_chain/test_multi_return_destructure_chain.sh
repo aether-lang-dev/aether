@@ -48,7 +48,7 @@
 #                                                   //     destructured local
 #                                                   // (3) inside if-body
 #   }
-#   return cryptography.sha256_hex(bytes, length)   // (4) tuple-typed call
+#   return cryptography.sha256_hex(string.bytes(bytes)[0..length])   // (4) tuple-typed call
 #
 # Both branches return (string, string). The test's main() drives
 # both — happy path against a real file, error path against a
@@ -94,7 +94,7 @@ hash_file(p: string) -> {
     if string.length(rerr) > 0 {
         return "", rerr
     }
-    return cryptography.sha256_hex(bytes, length)
+    return cryptography.sha256_hex(string.bytes(bytes)[0..length])
 }
 
 main() {

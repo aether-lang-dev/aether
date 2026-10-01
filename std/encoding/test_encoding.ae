@@ -19,9 +19,9 @@ main() {
     fails = 0
 
     // ---- hex encode (lowercase; from c3 hex.c3 test cases) ----
-    fails = fails + check(encoding.hex_encode("", 0) == "", "hex encode empty")
-    fails = fails + check(encoding.hex_encode("g", 1) == "67", "hex encode 'g'")
-    fails = fails + check(encoding.hex_encode("hello", 5) == "68656c6c6f", "hex encode hello")
+    fails = fails + check(encoding.hex_encode(string.bytes("")) == "", "hex encode empty")
+    fails = fails + check(encoding.hex_encode(string.bytes("g")) == "67", "hex encode 'g'")
+    fails = fails + check(encoding.hex_encode(string.bytes("hello")) == "68656c6c6f", "hex encode hello")
 
     // ---- hex decode (case-insensitive; even length) ----
     d1, e1 = encoding.hex_decode("68656c6c6f")
@@ -39,30 +39,30 @@ main() {
     fails = fails + check(ce != "", "hex invalid-char rejected")
 
     // ---- base64 encode (unpadded, from c3 base64.c3 encode_nopadding) ----
-    fails = fails + check(encoding.base64_encode("", 0) == "", "b64 encode empty")
-    fails = fails + check(encoding.base64_encode("f", 1) == "Zg", "b64 encode f")
-    fails = fails + check(encoding.base64_encode("fo", 2) == "Zm8", "b64 encode fo")
-    fails = fails + check(encoding.base64_encode("foo", 3) == "Zm9v", "b64 encode foo")
-    fails = fails + check(encoding.base64_encode("foobar", 6) == "Zm9vYmFy", "b64 encode foobar")
+    fails = fails + check(encoding.base64_encode(string.bytes("")) == "", "b64 encode empty")
+    fails = fails + check(encoding.base64_encode(string.bytes("f")) == "Zg", "b64 encode f")
+    fails = fails + check(encoding.base64_encode(string.bytes("fo")) == "Zm8", "b64 encode fo")
+    fails = fails + check(encoding.base64_encode(string.bytes("foo")) == "Zm9v", "b64 encode foo")
+    fails = fails + check(encoding.base64_encode(string.bytes("foobar")) == "Zm9vYmFy", "b64 encode foobar")
 
     // ---- base64 encode (padded, from c3 encode) ----
-    fails = fails + check(encoding.base64_encode_padded("f", 1) == "Zg==", "b64 padded f")
-    fails = fails + check(encoding.base64_encode_padded("foobar", 6) == "Zm9vYmFy", "b64 padded foobar")
+    fails = fails + check(encoding.base64_encode_padded(string.bytes("f")) == "Zg==", "b64 padded f")
+    fails = fails + check(encoding.base64_encode_padded(string.bytes("foobar")) == "Zm9vYmFy", "b64 padded foobar")
 
     // ---- base32 (RFC 4648 §6 vectors, from c3 base32.c3) ----
-    fails = fails + check(encoding.base32_encode("", 0) == "", "b32 empty")
-    fails = fails + check(encoding.base32_encode("f", 1) == "MY======", "b32 f")
-    fails = fails + check(encoding.base32_encode("fo", 2) == "MZXQ====", "b32 fo")
-    fails = fails + check(encoding.base32_encode("foo", 3) == "MZXW6===", "b32 foo")
-    fails = fails + check(encoding.base32_encode("foob", 4) == "MZXW6YQ=", "b32 foob")
-    fails = fails + check(encoding.base32_encode("fooba", 5) == "MZXW6YTB", "b32 fooba")
-    fails = fails + check(encoding.base32_encode("foobar", 6) == "MZXW6YTBOI======", "b32 foobar")
+    fails = fails + check(encoding.base32_encode(string.bytes("")) == "", "b32 empty")
+    fails = fails + check(encoding.base32_encode(string.bytes("f")) == "MY======", "b32 f")
+    fails = fails + check(encoding.base32_encode(string.bytes("fo")) == "MZXQ====", "b32 fo")
+    fails = fails + check(encoding.base32_encode(string.bytes("foo")) == "MZXW6===", "b32 foo")
+    fails = fails + check(encoding.base32_encode(string.bytes("foob")) == "MZXW6YQ=", "b32 foob")
+    fails = fails + check(encoding.base32_encode(string.bytes("fooba")) == "MZXW6YTB", "b32 fooba")
+    fails = fails + check(encoding.base32_encode(string.bytes("foobar")) == "MZXW6YTBOI======", "b32 foobar")
     b32d, b32e = encoding.base32_decode("MZXW6YTBOI======")
     fails = fails + check(b32e == "" && b32d == "foobar", "b32 decode foobar")
     b32d2, b32e2 = encoding.base32_decode("MZXW6===")
     fails = fails + check(b32e2 == "" && b32d2 == "foo", "b32 decode foo")
     // base32 round-trip
-    b32r, _ = encoding.base32_decode(encoding.base32_encode("hello world", 11))
+    b32r, _ = encoding.base32_decode(encoding.base32_encode(string.bytes("hello world")))
     fails = fails + check(b32r == "hello world", "b32 round-trip")
 
     // ---- base64 decode (padded and unpadded, from c3 decode) ----
@@ -76,9 +76,9 @@ main() {
     // ---- round-trip a longer string through both ----
     let msg = "The quick brown fox"
     let mlen = string.length(msg)
-    hround, _ = encoding.hex_decode(encoding.hex_encode(msg, mlen))
+    hround, _ = encoding.hex_decode(encoding.hex_encode(string.bytes(msg)[0..mlen]))
     fails = fails + check(hround == msg, "hex round-trip")
-    bround, _ = encoding.base64_decode(encoding.base64_encode(msg, mlen))
+    bround, _ = encoding.base64_decode(encoding.base64_encode(string.bytes(msg)[0..mlen]))
     fails = fails + check(bround == msg, "base64 round-trip")
 
     // ---- csv (vectors from c3 encoding/csv test) ----

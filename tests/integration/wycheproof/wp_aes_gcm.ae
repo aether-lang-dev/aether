@@ -117,8 +117,8 @@ main() {
             msg_len = string_length(msg_hex) / 2
             ctag, ctag_len = concat_hex(ct_hex, tag_hex)
 
-            ctx = aes.new_encryptor(key, key_bytes)
-            pt, oerr = aes.gcm_open(ctx, iv, aad, aad_len, ctag, ctag_len)
+            ctx = aes.new_encryptor(bytes.view(key)[0..key_bytes])
+            pt, oerr = aes.gcm_open(ctx, iv, bytes.view(aad)[0..aad_len], bytes.view(ctag)[0..ctag_len])
             if res == "valid" {
                 if pt == null {
                     println("FAIL tcId=${tc_id} (valid): open rejected: ${oerr}")
@@ -130,7 +130,7 @@ main() {
                         failed = failed + 1
                     } else {
                         msg = from_hex(msg_hex)
-                        sealed = aes.gcm_seal(ctx, iv, aad, aad_len, msg, msg_len)
+                        sealed = aes.gcm_seal(ctx, iv, bytes.view(aad)[0..aad_len], bytes.view(msg)[0..msg_len])
                         if bytes_eq(sealed, ctag, ctag_len) == 1 {
                             passed = passed + 1
                         } else {

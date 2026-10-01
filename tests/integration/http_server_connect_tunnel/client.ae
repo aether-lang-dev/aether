@@ -58,7 +58,7 @@ main() {
     }
 
     payload = make_payload()
-    _, pwerr = tcp.write_n(accepted, payload, 12)
+    _, pwerr = tcp.write_n(accepted, string.bytes(payload)[0..12])
     if pwerr != "" { fail("write tunnel payload: ${pwerr}") }
 
     echoed, n, rerr = tcp.read_n(accepted, 32)

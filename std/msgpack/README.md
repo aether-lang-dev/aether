@@ -19,7 +19,7 @@ main() {
 
     packed = msgpack.pack(value)
     // 42 fits MessagePack's positive fixint: one byte, no header.
-    println("packed: ${encoding.hex_encode(packed, string.length(packed))}")
+    println("packed: ${encoding.hex_encode(string.bytes(packed))}")
 
     back, err = msgpack.unpack(packed)
     println("err='${err}' value=${msgpack.get_int(back)}")

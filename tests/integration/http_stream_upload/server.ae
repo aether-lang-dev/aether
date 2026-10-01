@@ -62,7 +62,7 @@ handle_upload(req: ptr, res: ptr, ud: ptr) {
         if n == 0 {
             break
         }
-        fs.pwrite(f, chunk, n, off)
+        fs.pwrite(f, string.bytes(chunk)[0..n], off)
         received = received + n
         off = off + n
     }
@@ -76,7 +76,7 @@ handle_upload(req: ptr, res: ptr, ud: ptr) {
         http.response_set_body(res, "reread error: ${rerr}")
         return
     }
-    digest, derr = cryptography.sha256_hex(data, dlen)
+    digest, derr = cryptography.sha256_hex(string.bytes(data)[0..dlen])
     if derr != "" {
         // No OpenSSL — still report the count so the test can SKIP.
         http.response_set_body(res, "received=${received} sha256=unavailable")
@@ -92,10 +92,10 @@ handle_upload(req: ptr, res: ptr, ud: ptr) {
 // computed over the in-memory body, no temp file involved.
 handle_v1body(req: ptr, res: ptr, ud: ptr) {
     pre = http.request_body_complete(req)
-    body = http.request_body(req)
-    len = http.request_body_length(req)
+    body = http.request_body_bytes(req)
+    len = body.len
     post = http.request_body_complete(req)
-    digest, derr = cryptography.sha256_hex(body, len)
+    digest, derr = cryptography.sha256_hex(body)
     if derr != "" {
         http.response_set_body(res, "v1len=${len} v1sha=unavailable v1pre=${pre} v1post=${post}")
         return

@@ -18,13 +18,14 @@
 // Import with:  import std.cryptography.ascon_aead
 //
 // API (mirrors std.cryptography.chacha20poly1305):
-//   aead_seal(algo, key16, nonce16, aad, aad_len, pt, pt_len) -> ptr ct-with-tag
-//   aead_open(algo, key16, nonce16, aad, aad_len, ct_with_tag, ct_len) -> (pt, "")
+//   aead_seal(algo, key16, nonce16, aad, pt) -> ptr ct-with-tag
+//   aead_open(algo, key16, nonce16, aad, ct_with_tag) -> (pt, "")
 // `algo` is "ascon-128" or "ascon-128a". Convenience wrappers a128_* / a128a_*
 // pin the variant. key/nonce/aad/pt are std.bytes; returns are std.bytes.
 
 import std.bits
 import std.bytes
+import std.mem
 
 exports(
     aead_seal, aead_open,
@@ -87,17 +88,22 @@ fn perm(st: *Aead12St, nr: int) {
 
 // Big-endian 8-byte load.
 fn ld64(b: ptr, off: int) -> long {
-    return bytes.get_be64(b, off)
+    return ld64_slice(bytes.view(b), off)
+}
+
+// The slice form of ld64 (#2301); ld64 views its std.bytes handle into it.
+fn ld64_slice(b: byte[], off: int) -> long {
+    return mem.read_u64_be(b, off)
 }
 
 // Big-endian load of the high `n` (0..7) bytes at `off`, i.e. byte [off] is
 // the MOST-significant of the returned word; bytes below (8-n) read as zero.
 // This matches Pack.BE_To_UInt64 over a right-zero-padded buffer.
-fn ld_high(b: ptr, off: int, n: int) -> long {
+fn ld_high(b: byte[], off: int, n: int) -> long {
     long v = 0
     i = 0
     while i < n {
-        long byte_v = bytes.get(b, off + i) & 255
+        long byte_v = b[off + i] & 255
         v = v | (byte_v << ((7 - i) << 3))
         i = i + 1
     }
@@ -142,13 +148,15 @@ fn init_state(st: *Aead12St, key: ptr, nonce: ptr, k1: long, k2: long) {
     st.s4 = st.s4 ^ k2
 }
 
-fn absorb_aad(st: *Aead12St, aad: ptr, aad_len: int) {
+fn absorb_aad(st: *Aead12St, aad: byte[]) {
+    if aad.len < 0 { panic("ascon_aead.absorb_aad: the `aad` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int aad_len = aad.len
     off = 0
     remaining = aad_len
     while remaining >= st.rate {
-        st.s0 = st.s0 ^ ld64(aad, off)
+        st.s0 = st.s0 ^ ld64_slice(aad, off)
         if st.rate == 16 {
-            st.s1 = st.s1 ^ ld64(aad, off + 8)
+            st.s1 = st.s1 ^ ld64_slice(aad, off + 8)
         }
         perm(st, st.nr)
         off = off + st.rate
@@ -157,7 +165,7 @@ fn absorb_aad(st: *Aead12St, aad: ptr, aad_len: int) {
     if aad_len > 0 {
         // Partial final block: set 0x80 pad byte at position `remaining`.
         if remaining >= 8 {
-            st.s0 = st.s0 ^ ld64(aad, off)
+            st.s0 = st.s0 ^ ld64_slice(aad, off)
             r2 = remaining - 8
             st.s1 = st.s1 ^ (ld_high(aad, off + 8, r2) ^ pad(r2))
         } else {
@@ -184,14 +192,16 @@ fn finish_data(st: *Aead12St, key: ptr) {
     st.s4 = st.s4 ^ ld64(key, 8)
 }
 
-fn encrypt_body(st: *Aead12St, pt: ptr, pt_len: int, ct: ptr, key: ptr) {
+fn encrypt_body(st: *Aead12St, pt: byte[], ct: ptr, key: ptr) {
+    if pt.len < 0 { panic("ascon_aead.encrypt_body: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = pt.len
     off = 0
     remaining = pt_len
     while remaining >= st.rate {
-        st.s0 = st.s0 ^ ld64(pt, off)
+        st.s0 = st.s0 ^ ld64_slice(pt, off)
         st_high(ct, off, st.s0, 8)
         if st.rate == 16 {
-            st.s1 = st.s1 ^ ld64(pt, off + 8)
+            st.s1 = st.s1 ^ ld64_slice(pt, off + 8)
             st_high(ct, off + 8, st.s1, 8)
         }
         perm(st, st.nr)
@@ -200,7 +210,7 @@ fn encrypt_body(st: *Aead12St, pt: ptr, pt_len: int, ct: ptr, key: ptr) {
     }
     // Final partial (or empty) block.
     if st.rate == 16 && remaining >= 8 {
-        st.s0 = st.s0 ^ ld64(pt, off)
+        st.s0 = st.s0 ^ ld64_slice(pt, off)
         st_high(ct, off, st.s0, 8)
         r2 = remaining - 8
         if r2 > 0 {
@@ -218,15 +228,17 @@ fn encrypt_body(st: *Aead12St, pt: ptr, pt_len: int, ct: ptr, key: ptr) {
     finish_data(st, key)
 }
 
-fn decrypt_body(st: *Aead12St, ct: ptr, ct_len: int, pt: ptr, key: ptr) {
+fn decrypt_body(st: *Aead12St, ct: byte[], pt: ptr, key: ptr) {
+    if ct.len < 0 { panic("ascon_aead.decrypt_body: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct.len
     off = 0
     remaining = ct_len
     while remaining >= st.rate {
-        c0 = ld64(ct, off)
+        c0 = ld64_slice(ct, off)
         st_high(pt, off, st.s0 ^ c0, 8)
         st.s0 = c0
         if st.rate == 16 {
-            c1 = ld64(ct, off + 8)
+            c1 = ld64_slice(ct, off + 8)
             st_high(pt, off + 8, st.s1 ^ c1, 8)
             st.s1 = c1
         }
@@ -239,7 +251,7 @@ fn decrypt_body(st: *Aead12St, ct: ptr, ct_len: int, pt: ptr, key: ptr) {
     // back, and the state word keeps its LOW bits (the un-decrypted rate/cap
     // boundary) via low_mask.
     if st.rate == 16 && remaining >= 8 {
-        c0 = ld64(ct, off)
+        c0 = ld64_slice(ct, off)
         st.s0 = st.s0 ^ c0
         st_high(pt, off, st.s0, 8)
         st.s0 = c0
@@ -289,7 +301,9 @@ fn config_state(st: *Aead12St, algo: string) -> int {
 
 // Seal with the named variant. Returns ct-with-tag (pt_len + 16), or null on a
 // bad algo/key/nonce.
-aead_seal(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
+aead_seal(algo: string, key: ptr, nonce: ptr, aad: byte[], pt: byte[]) -> ptr {
+    if pt.len < 0 { panic("ascon_aead.aead_seal: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = pt.len
     if key == null || nonce == null { return null }
     if bytes.length(key) < KEY_BYTES || bytes.length(nonce) < NONCE_BYTES { return null }
     st = Aead12St { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, rate: 0, nr: 0, iv: 0 }
@@ -298,7 +312,7 @@ aead_seal(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, p
     k1 = ld64(key, 0)
     k2 = ld64(key, 8)
     init_state(&st, key, nonce, k1, k2)
-    absorb_aad(&st, aad, aad_len)
+    absorb_aad(&st, aad)
 
     out_len = pt_len + TAG_BYTES
     out = bytes.new(out_len)
@@ -307,7 +321,7 @@ aead_seal(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, p
         bytes.set(out, j, 0)
         j = j + 1
     }
-    encrypt_body(&st, pt, pt_len, out, key)
+    encrypt_body(&st, pt, out, key)
     // Tag is (s3, s4) big-endian.
     st_high(out, pt_len, st.s3, 8)
     st_high(out, pt_len + 8, st.s4, 8)
@@ -316,7 +330,9 @@ aead_seal(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, p
 
 // Open with the named variant. Returns (pt, "") on a valid tag, else
 // (null, error).
-aead_open(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> ptr! {
+aead_open(algo: string, key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> ptr! {
+    if ct_with_tag.len < 0 { panic("ascon_aead.aead_open: the `ct_with_tag` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct_with_tag.len
     ok = ""
     if key == null || nonce == null || ct_with_tag == null { return null, "null argument" }
     if bytes.length(key) < KEY_BYTES || bytes.length(nonce) < NONCE_BYTES { return null, "bad key/nonce length" }
@@ -327,7 +343,7 @@ aead_open(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_ta
     k1 = ld64(key, 0)
     k2 = ld64(key, 8)
     init_state(&st, key, nonce, k1, k2)
-    absorb_aad(&st, aad, aad_len)
+    absorb_aad(&st, aad)
 
     pt_len = ct_len - TAG_BYTES
     pt = bytes.new(pt_len)
@@ -336,10 +352,10 @@ aead_open(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_ta
         bytes.set(pt, j, 0)
         j = j + 1
     }
-    decrypt_body(&st, ct_with_tag, pt_len, pt, key)
+    decrypt_body(&st, ct_with_tag[0..pt_len], pt, key)
 
-    r3 = st.s3 ^ ld64(ct_with_tag, pt_len)
-    r4 = st.s4 ^ ld64(ct_with_tag, pt_len + 8)
+    r3 = st.s3 ^ ld64_slice(ct_with_tag, pt_len)
+    r4 = st.s4 ^ ld64_slice(ct_with_tag, pt_len + 8)
     if (r3 | r4) != 0 {
         bytes.free(pt)
         return null, "tag verification failed"
@@ -349,15 +365,15 @@ aead_open(algo: string, key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_ta
 
 // ---- Variant-pinned convenience wrappers ----
 
-a128_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
-    return aead_seal("ascon-128", key, nonce, aad, aad_len, pt, pt_len)
+a128_seal(key: ptr, nonce: ptr, aad: byte[], pt: byte[]) -> ptr {
+    return aead_seal("ascon-128", key, nonce, aad, pt)
 }
-a128_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> ptr! {
-    return aead_open("ascon-128", key, nonce, aad, aad_len, ct_with_tag, ct_len)
+a128_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> ptr! {
+    return aead_open("ascon-128", key, nonce, aad, ct_with_tag)
 }
-a128a_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
-    return aead_seal("ascon-128a", key, nonce, aad, aad_len, pt, pt_len)
+a128a_seal(key: ptr, nonce: ptr, aad: byte[], pt: byte[]) -> ptr {
+    return aead_seal("ascon-128a", key, nonce, aad, pt)
 }
-a128a_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> ptr! {
-    return aead_open("ascon-128a", key, nonce, aad, aad_len, ct_with_tag, ct_len)
+a128a_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> ptr! {
+    return aead_open("ascon-128a", key, nonce, aad, ct_with_tag)
 }

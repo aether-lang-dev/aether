@@ -1225,7 +1225,7 @@ emit_module(path: string, api: string, extensions: string) {
     strbuilder.append(sb, "\n)\n\n")
     strbuilder.append(sb, strbuilder.finish(body))
     out = strbuilder.finish(sb)
-    werr = fs.write_binary(path, out, string.length(out))
+    werr = fs.write_binary(path, string.bytes(out))
     if werr != "" { die("cannot write ${path}: ${werr}") }
     println("vkgen: wrote ${path}")
 }
@@ -1530,7 +1530,7 @@ emit_dispatch(path: string, commands_path: string, api: string, extensions: stri
     }
     strbuilder.append(sb, "\n#endif /* AETHER_VULKAN_DISPATCH_H */\n")
     out = strbuilder.finish(sb)
-    werr = fs.write_binary(path, out, string.length(out))
+    werr = fs.write_binary(path, string.bytes(out))
     if werr != "" { die("cannot write ${path}: ${werr}") }
     println("vkgen: wrote ${path}")
 }

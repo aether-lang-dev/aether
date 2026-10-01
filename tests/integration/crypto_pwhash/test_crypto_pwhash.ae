@@ -17,12 +17,12 @@ main() {
     e0 = bytes.new(0)
 
     // --- scrypt RFC 7914 §12 ---
-    s1 = scrypt.scrypt(e0, 0, e0, 0, 16, 1, 1, 64)
+    s1 = scrypt.scrypt(bytes.view(e0)[0..0], bytes.view(e0)[0..0], 16, 1, 1, 64)
     fails = fails + ck("scrypt empty",
         bh(s1, 64),
         "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906")
     pw = sb("password"); nacl = sb("NaCl")
-    s2 = scrypt.scrypt(pw, 8, nacl, 4, 1024, 8, 16, 64)
+    s2 = scrypt.scrypt(bytes.view(pw)[0..8], bytes.view(nacl)[0..4], 1024, 8, 16, 64)
     fails = fails + ck("scrypt password/NaCl",
         bh(s2, 64),
         "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640")
@@ -32,7 +32,7 @@ main() {
     salt = bytes.new(16); fill(salt, 16, 2)
     sec = bytes.new(8); fill(sec, 8, 3)
     ad = bytes.new(12); fill(ad, 12, 4)
-    aid = argon2.argon2id(pwd, 32, salt, 16, sec, 8, ad, 12, 3, 32, 4, 32)
+    aid = argon2.argon2id(bytes.view(pwd)[0..32], bytes.view(salt)[0..16], bytes.view(sec)[0..8], bytes.view(ad)[0..12], 3, 32, 4, 32)
     fails = fails + ck("argon2id rfc9106",
         bh(aid, 32),
         "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659")

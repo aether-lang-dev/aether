@@ -15,7 +15,7 @@ import std.string
 
 main() {
     data = "Ab"
-    println(encoding.hex_encode(data, string.length(data)))
+    println(encoding.hex_encode(string.bytes(data)))
 
     // Decoders are fallible: handle the failure or propagate it.
     back = encoding.hex_decode("4162") or {
@@ -41,10 +41,9 @@ import std.string
 
 main() {
     msg = "hello"
-    n = string.length(msg)
 
-    println(encoding.base64_encode(msg, n))
-    println(encoding.base64_encode_padded(msg, n))
+    println(encoding.base64_encode(string.bytes(msg)))
+    println(encoding.base64_encode_padded(string.bytes(msg)))
 
     decoded = encoding.base64_decode("aGVsbG8") or {
         println("not valid base64")

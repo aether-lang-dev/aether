@@ -33,7 +33,7 @@ main() {
     print("Test 1: text round-trip\n")
     msg = "Hello, zlib world! This is a test string that should compress down to fewer bytes. Repetition repetition repetition repetition repetition."
     n_in = string.length(msg)
-    c1, nc1, cerr1 = zlib.deflate(msg, n_in, -1)
+    c1, nc1, cerr1 = zlib.deflate(string.bytes(msg)[0..n_in], -1)
     if cerr1 != "" {
         println("  FAIL: deflate errored: ${cerr1}")
         exit(1)
@@ -43,7 +43,7 @@ main() {
         println("  FAIL: expected compression, got ${nc1} from ${n_in}")
         exit(1)
     }
-    u1, nu1, uerr1 = zlib.inflate(c1, nc1)
+    u1, nu1, uerr1 = zlib.inflate(string.bytes(c1)[0..nc1])
     if uerr1 != "" {
         println("  FAIL: inflate errored: ${uerr1}")
         exit(1)
@@ -60,7 +60,7 @@ main() {
 
     // ---- Test 2: length=0 deflate produces a valid empty stream ----
     print("\nTest 2: deflate(empty) + inflate(...) -> 0 bytes\n")
-    c2, nc2, cerr2 = zlib.deflate("", 0, -1)
+    c2, nc2, cerr2 = zlib.deflate(string.bytes(""), -1)
     if cerr2 != "" {
         println("  FAIL: empty deflate errored: ${cerr2}")
         exit(1)
@@ -69,7 +69,7 @@ main() {
         println("  FAIL: empty deflate should produce a non-empty stream, got ${nc2}")
         exit(1)
     }
-    u2, nu2, uerr2 = zlib.inflate(c2, nc2)
+    u2, nu2, uerr2 = zlib.inflate(string.bytes(c2)[0..nc2])
     if uerr2 != "" {
         println("  FAIL: empty-stream inflate errored: ${uerr2}")
         exit(1)
@@ -82,7 +82,7 @@ main() {
 
     // ---- Test 3: inflate of empty input errors cleanly ----
     print("\nTest 3: inflate(empty buffer) errors\n")
-    _, _, uerr3 = zlib.inflate("", 0)
+    _, _, uerr3 = zlib.inflate(string.bytes(""))
     if uerr3 == "" {
         print("  FAIL: expected error on empty input\n")
         exit(1)
@@ -91,7 +91,7 @@ main() {
 
     // ---- Test 4: inflate of garbage errors cleanly ----
     print("\nTest 4: inflate(\"not a zlib stream\") errors\n")
-    _, _, uerr4 = zlib.inflate("not a zlib stream at all xxxxxxxxxxxxxxxxxx", 40)
+    _, _, uerr4 = zlib.inflate(string.bytes("not a zlib stream at all xxxxxxxxxxxxxxxxxx")[0..40])
     if uerr4 == "" {
         print("  FAIL: expected error on garbage input\n")
         exit(1)
@@ -122,13 +122,13 @@ main() {
     // Deflate at level 9 (max) — the payload is pathological for
     // compression (every 4th byte is NUL) but the round-trip must
     // still work.
-    cz, ncz, cerrz = zlib.deflate(data, nd, 9)
+    cz, ncz, cerrz = zlib.deflate(string.bytes(data)[0..nd], 9)
     if cerrz != "" {
         println("  FAIL: deflate errored: ${cerrz}")
         exit(1)
     }
 
-    uz, nuz, uerrz = zlib.inflate(cz, ncz)
+    uz, nuz, uerrz = zlib.inflate(string.bytes(cz)[0..ncz])
     if uerrz != "" {
         println("  FAIL: inflate errored: ${uerrz}")
         exit(1)
@@ -157,12 +157,12 @@ main() {
 
     // ---- Test 6: level out of range is clamped to default ----
     print("\nTest 6: out-of-range level is clamped to default\n")
-    c6, nc6, cerr6 = zlib.deflate(msg, n_in, 42)
+    c6, nc6, cerr6 = zlib.deflate(string.bytes(msg)[0..n_in], 42)
     if cerr6 != "" {
         println("  FAIL: deflate errored on weird level: ${cerr6}")
         exit(1)
     }
-    u6, _, _ = zlib.inflate(c6, nc6)
+    u6, _, _ = zlib.inflate(string.bytes(c6)[0..nc6])
     if string.equals(u6, msg) != 1 {
         print("  FAIL: round-trip content mismatch at clamped level\n")
         exit(1)
