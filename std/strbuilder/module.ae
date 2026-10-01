@@ -32,6 +32,7 @@ import std.string
 
 exports(
     aether_strbuilder_new, aether_strbuilder_append, aether_strbuilder_append_n,
+    aether_strbuilder_append_bytes, append_slice,
     aether_strbuilder_append_byte, aether_strbuilder_append_int,
     aether_strbuilder_append_long, aether_strbuilder_append_hex,
     aether_strbuilder_append_codepoint,
@@ -54,6 +55,7 @@ extern aether_strbuilder_new(cap_hint: int) -> ptr
 // is measured with strlen, as before.
 extern aether_strbuilder_append(b: ptr, s: @aether string) -> int
 extern aether_strbuilder_append_n(b: ptr, s: string, n: int) -> int
+extern aether_strbuilder_append_bytes(b: ptr, data: ptr, n: int) -> int
 extern aether_strbuilder_append_byte(b: ptr, c: int) -> int
 extern aether_strbuilder_append_int(b: ptr, v: int) -> int
 extern aether_strbuilder_append_long(b: ptr, v: long) -> int
@@ -90,6 +92,16 @@ append(b: ptr, s: string) -> int {
 // round-trip cleanly. Returns 1 on success, 0 on failure.
 append_n(b: ptr, s: string, n: int) -> int {
     return aether_strbuilder_append_n(b, s, n)
+}
+
+// Append a `byte[]` slice's bytes, binary-safe: the length travels with the
+// slice (#2301). A slice with no bound panics. Returns 1, or 0 on allocation
+// failure or a null builder.
+append_slice(b: ptr, s: byte[]) -> int {
+    if s.len < 0 {
+        panic("strbuilder.append_slice: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+    return aether_strbuilder_append_bytes(b, s, s.len)
 }
 
 // Append a single byte (low 8 bits of `c`). Useful for separators

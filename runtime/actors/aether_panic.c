@@ -68,6 +68,7 @@ AetherJmpFrame* aether_try_push(void) {
     }
     AetherJmpFrame* f = &tls_stack.frames[tls_stack.depth++];
     f->reason = NULL;
+    f->reason_release = NULL;
     aether_unwind_enter_frame();
     return f;
 }
@@ -416,11 +417,16 @@ static void aether_print_stack_trace_to_stderr(void) {
 // ---------------------------------------------------------------------------
 
 void aether_panic(const char* reason) {
-    if (!reason) reason = "panic: (null)";
+    aether_panic_owned(reason, NULL);
+}
+
+void aether_panic_owned(const char* reason, void (*release)(const void*)) {
+    if (!reason) { reason = "panic: (null)"; release = NULL; }
 
     AetherJmpFrame* f = aether_current_frame();
     if (f) {
         f->reason = reason;
+        f->reason_release = release;
         // Free the innermost frame's still-live journaled allocations
         // before the jump skips their deferred frees (aether_unwind.c).
         aether_unwind_drain_current();
@@ -491,6 +497,7 @@ static void aether_sig_handler(int sig, siginfo_t* info, void* ucontext) {
         default:      reason = "signal: unknown";                         break;
     }
     f->reason = reason;
+    f->reason_release = NULL;
     AETHER_SIGLONGJMP(f->buf, 1);
 }
 

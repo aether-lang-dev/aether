@@ -1,0 +1,173 @@
+// Issue #2333: a caught panic whose message is built at run time leaked it.
+//
+// The gap: `panic(expr)` handed the runtime a borrowed pointer and the catch
+// binding was a plain `const char*`, so an interpolated message had no owner
+// and every caught one stayed allocated. A heap-tracked local passed to
+// panic was worse: the unwind journal freed it before the catch body read
+// it. Now the catcher owns a built message: the binding is freed at the end
+// of the handler unless it is kept, returned, stored or re-raised.
+//
+// Pre-fix the round check fails: each caught panic kept its message, 16
+// bytes or more. The measure compares rounds of built messages with rounds
+// of the same shapes throwing literals (which own nothing), so what the
+// platform keeps per panic cancels out; the bound left over is std.mem's
+// leak-free tolerance, which cached small blocks stay under (Wine's heap
+// counts about 2 KB of them as in use). The value checks
+// cover each way a binding can leave its handler; a literal message
+// returned through the same paths must stay freeable by the caller.
+
+import std.mem
+import std.list
+import std.string
+
+extern exit(code: int)
+
+const PER_ROUND = 200
+// Round offsets at or past LITERAL throw literal messages instead.
+const LITERAL = 1000000
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn boom(n: int) {
+    if n >= LITERAL {
+        panic("bad value")
+    }
+    panic("bad value ${n}")
+}
+
+fn boom_local(n: int) {
+    msg = "local"
+    if n < LITERAL {
+        msg = "local ${n}"
+    }
+    panic(msg)
+}
+
+fn boom_literal() {
+    panic("literal")
+}
+
+fn keep(n: int) -> string {
+    kept = ""
+    try {
+        boom(n)
+    } catch e {
+        kept = e
+    }
+    return kept
+}
+
+fn return_it(n: int) -> string {
+    try {
+        if n < 0 {
+            boom_literal()
+        }
+        boom(n)
+    } catch e {
+        return e
+    }
+    return "none"
+}
+
+fn guarded(n: int) -> (int, string) {
+    try {
+        boom(n)
+    } catch e {
+        return 0, e
+    }
+    return 1, ""
+}
+
+fn rethrow(n: int) {
+    try {
+        boom(n)
+    } catch e {
+        panic(e)
+    }
+}
+
+fn early(n: int) -> int {
+    try {
+        boom(n)
+    } catch e {
+        if n >= 0 {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn stash(l: ptr, n: int) {
+    try {
+        boom(n)
+    } catch e {
+        list.add(l, e)
+    }
+}
+
+// One round through every shape; everything it builds is released.
+fn round(base: int) {
+    i = 0
+    while i < PER_ROUND {
+        n = base + i
+        try { boom(n) } catch e {}
+        try { boom_local(n) } catch e {}
+        try { rethrow(n) } catch e {}
+        k = keep(n)
+        r = return_it(n)
+        l = return_it(-1)
+        _c, err = guarded(n)
+        _x = early(n)
+        i = i + 1
+    }
+}
+
+// What two rounds starting at `base` leave allocated.
+fn two_rounds(base: int) -> long {
+    before = mem.heap_in_use()
+    round(base)
+    round(base)
+    return mem.heap_in_use() - before
+}
+
+main() {
+    // ---- the binding reads the message it was thrown with ----
+    try { boom(3) } catch e { check(e == "bad value 3", "interpolated message") }
+    try { boom_local(4) } catch e { check(e == "local 4", "a heap local survives its own unwind") }
+    try { rethrow(5) } catch e { check(e == "bad value 5", "a re-raised message") }
+    check(keep(6) == "bad value 6", "kept in an outer local")
+    check(return_it(7) == "bad value 7", "returned from the handler")
+    check(return_it(-1) == "literal", "a literal message returned the same way")
+    c, err = guarded(8)
+    check(c == 0 && err == "bad value 8", "returned in a tuple")
+    l = list.new()
+    stash(l, 9)
+    v, _gerr = list.get(l, 0)
+    check(v == "bad value 9", "stored in a list")
+    // A raw list add does not own its element: the test releases both.
+    string.release(v)
+    list.free(l)
+
+    // ---- nothing is left behind ----
+    if mem.heap_in_use() < 0 {
+        println("OK") // no allocator statistics here (musl, valgrind)
+        return
+    }
+    round(0) // warm up: first-use allocations are not per panic
+    round(LITERAL)
+    literal = two_rounds(LITERAL)
+    built = two_rounds(0)
+    // std.mem's leak-free tolerance (its README): allocators may keep a
+    // few KB of cached blocks, which Wine's heap reports as in use. One
+    // leaking shape alone keeps 400 messages here, 6400 bytes or more.
+    if built - literal > 4096 {
+        println("FAIL: two rounds of built messages kept ${built} bytes, literals ${literal}")
+        exit(1)
+    }
+    println("OK")
+}

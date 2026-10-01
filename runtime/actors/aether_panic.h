@@ -124,6 +124,12 @@ typedef jmp_buf aether_sigjmp_buf;
 typedef struct AetherJmpFrame {
     aether_sigjmp_buf buf;
     const char* reason;   // written by aether_panic() just before siglongjmp
+    // Non-NULL when the catcher owns `reason` (a message built at run
+    // time, e.g. an interpolated panic): the function that releases it.
+    // NULL for a borrowed reason (a literal, a static buffer). Set by
+    // aether_panic_owned(); the catch lowering adopts it as the binding's
+    // heap flag, and the actor barrier releases it after the death hook.
+    void (*reason_release)(const void*);
 } AetherJmpFrame;
 
 // Push a new frame onto the current thread's stack and return it. The
@@ -151,6 +157,15 @@ __attribute__((noreturn))
 #endif
 void aether_panic(const char* reason);
 
+// aether_panic() for a reason the catcher takes ownership of: `release`
+// frees it (codegen passes the heap-string free for an interpolated or
+// otherwise heap-built message). With no frame to catch it the process
+// aborts, so the reason is never released there.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+void aether_panic_owned(const char* reason, void (*release)(const void*));
+
 // Install SIGSEGV/SIGFPE/SIGBUS handlers that convert native faults into
 // panics. No-op unless AETHER_CATCH_SIGNALS=1 is set in the environment.
 // Call once at process init.
@@ -169,7 +184,8 @@ void aether_panic_install_signal_handlers(void);
 void aether_panic_capture_stack(void);
 
 // Death notification. Fn is invoked with (actor_id, reason) after an actor
-// step() unwinds. NULL clears. Single global slot — if you need fan-out,
+// step() unwinds; `reason` is valid only for the call (copy it to keep
+// it). NULL clears. Single global slot — if you need fan-out,
 // dispatch yourself.
 typedef void (*AetherDeathHook)(int actor_id, const char* reason);
 void aether_set_on_actor_death(AetherDeathHook fn);

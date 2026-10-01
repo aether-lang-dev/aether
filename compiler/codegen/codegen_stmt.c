@@ -136,6 +136,136 @@ static void emit_unwind_track_local(CodeGenerator* gen, const char* name) {
     fprintf(gen->output, " aether_unwind_track_str_if(%s, _heap_%s);", name, name);
 }
 
+/* #2333: can a `catch NAME` binding be a heap-tracked local? Not when
+ * NAME is reached through something other than a plain C local in the
+ * handler (a closure-env field, a promoted capture cell, actor state):
+ * those keep the borrowed binding. */
+static int catch_binding_can_own(CodeGenerator* gen, const char* name) {
+    if (!gen || !name || strcmp(name, "_") == 0) return 0;
+    if (is_promoted_capture(gen, name)) return 0;
+    for (int e = 0; e < gen->current_env_capture_count; e++) {
+        if (gen->current_env_captures[e] &&
+            strcmp(gen->current_env_captures[e], name) == 0) return 0;
+    }
+    if (gen->current_actor) {
+        for (int s = 0; s < gen->state_var_count; s++) {
+            if (gen->actor_state_vars[s] &&
+                strcmp(gen->actor_state_vars[s], name) == 0) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Drop `name` from a name set (its entries are strdup'd by the mark_*
+ * helpers). */
+static void remove_from_name_set(char** names, int* count, const char* name) {
+    if (!names || !count || !name) return;
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(names[i], name) == 0) {
+            free(names[i]);
+            names[i] = names[*count - 1];
+            names[*count - 1] = NULL;
+            (*count)--;
+            return;
+        }
+    }
+}
+
+/* The catch branch of a try whose binding owns a heap-built reason.
+ * Emits, inside the `else` of the setjmp test:
+ *
+ *   int _heap_NAME = _aether_try_N->reason_release != NULL;
+ *   aether_try_pop();
+ *   aether_unwind_track_str_if(NAME, _heap_NAME);   // outer frame's journal
+ *   { handler ... ; deferred: if (_heap_NAME) aether_heap_str_free(NAME); }
+ *
+ * The binding is tracked only for the handler: the name is marked as a
+ * heap string and run through the escape walk over the handler alone,
+ * and the name's own marks are rolled back afterwards so an enclosing
+ * variable of the same name keeps its own verdicts. (The walk re-marks
+ * other names only as the function-level walk already did.) The C declarations shadow any
+ * enclosing ones, and the free is a defer of the handler's own scope,
+ * so it runs on fall-through, `break`/`continue`, and `return` alike. */
+static void emit_owned_catch_handler(CodeGenerator* gen, ASTNode* catch_clause, int uid) {
+    const char* name = catch_clause->value;
+    ASTNode* handler = catch_clause->children[0];
+
+    int was_heap = is_heap_string_var(gen, name);
+    int was_escaped = is_escaped_string_var(gen, name);
+    int was_ret_escaped = is_return_escaped_string_var(gen, name);
+    int saved_var_count = gen->declared_var_count;
+
+    print_line(gen, "int _heap_%s = _aether_try_%d->reason_release != NULL; (void)_heap_%s;",
+               name, uid, name);
+    print_line(gen, "aether_try_pop();");
+
+    mark_heap_string_var(gen, name);
+    mark_escaped_heap_string_vars(gen, handler);
+    int escapes = is_escaped_string_var(gen, name) ||
+                  is_return_escaped_string_var(gen, name);
+
+    print_indent(gen);
+    fprintf(gen->output, "/* catch %s owns a heap-built reason */", name);
+    emit_unwind_track_local(gen, name);
+    fprintf(gen->output, "\n");
+
+    print_line(gen, "{");
+    indent(gen);
+    enter_scope(gen);
+    if (!escapes) {
+        char annot[300];
+        snprintf(annot, sizeof(annot), "heap_string_exit_free:%s", name);
+        ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                           handler->line, handler->column);
+        if (carrier) {
+            if (carrier->annotation) free(carrier->annotation);
+            carrier->annotation = strdup(annot);
+            codegen_own_node(gen, carrier);
+            push_defer(gen, carrier);
+        }
+    }
+    generate_statement(gen, handler);
+    exit_scope(gen);
+    unindent(gen);
+    print_line(gen, "}");
+    truncate_declared_vars(gen, saved_var_count);
+
+    if (!was_escaped)
+        remove_from_name_set(gen->escaped_string_vars, &gen->escaped_string_var_count, name);
+    if (!was_ret_escaped)
+        remove_from_name_set(gen->return_escaped_string_vars,
+                             &gen->return_escaped_string_var_count, name);
+    if (!was_heap) unmark_heap_string_var(gen, name);
+}
+
+/* `panic(expr)`. A reason the program built at run time is handed to the
+ * catcher to own (#2333): a heap-classified expression goes through
+ * aether_panic_owned with the heap-string free, and a heap-tracked local
+ * gives its buffer up -- journal entry and flag -- so neither the unwind
+ * drain nor its scope-exit free reclaims what the catcher now holds.
+ * Anything else (a literal, a borrowed string) is borrowed as before. */
+static void emit_panic_call(CodeGenerator* gen, ASTNode* arg) {
+    if (arg && arg->type == AST_IDENTIFIER && arg->value &&
+        is_heap_string_var(gen, arg->value) && catch_binding_can_own(gen, arg->value)) {
+        const char* v = arg->value;
+        print_line(gen, "if (_heap_%s) { aether_unwind_forget(%s); _heap_%s = 0; "
+                        "aether_panic_owned(%s, aether_unwind_free_str); }",
+                   v, v, v, v);
+        print_line(gen, "aether_panic(%s);", v);
+        return;
+    }
+    print_indent(gen);
+    if (arg && arg->type != AST_IDENTIFIER && is_heap_string_expr(gen, arg)) {
+        fprintf(gen->output, "aether_panic_owned(");
+        generate_expression(gen, arg);
+        fprintf(gen->output, ", aether_unwind_free_str);\n");
+        return;
+    }
+    fprintf(gen->output, "aether_panic(");
+    generate_expression(gen, arg);
+    fprintf(gen->output, ");\n");
+}
+
 // Returns 1 if the expression tree references the named variable.
 static int expr_references_var(ASTNode* node, const char* var_name) {
     if (!node || !var_name) return 0;
@@ -1144,8 +1274,47 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
 static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
                                          int position);
 
+/* The `catch NAME` bindings in scope at a node, innermost last. A catch
+ * binding may own a heap-built panic reason (#2333), so a value taken
+ * from one is heap evidence for the return classifiers: the uniform-heap
+ * shim at the return site reads the runtime flag and copies a borrowed
+ * reason, so over-classifying costs one copy and never a bad free. */
+#define CATCH_SCOPE_MAX 16
+typedef struct {
+    const char* names[CATCH_SCOPE_MAX];
+    int count;
+} CatchScope;
+
+static int catch_scope_has(const CatchScope* cs, ASTNode* expr) {
+    if (!cs || !expr || expr->type != AST_IDENTIFIER || !expr->value) return 0;
+    for (int i = cs->count - 1; i >= 0; i--) {
+        if (strcmp(cs->names[i], expr->value) == 0) return 1;
+    }
+    return 0;
+}
+
+static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
+                                         const char* var_name, CatchScope* cs);
+
+/* Catch bindings are NOT evidence here: the container-ownership caller
+ * (codegen_expr.c) hands a heap-classified value to an owning container
+ * with no runtime flag to consult, and a borrowed reason (a literal
+ * panic message) would then be freed at teardown. Only the return
+ * classifier, whose uniform-heap shim reads the flag, takes the catch
+ * evidence (body_assigns_var_from_heap_or_catch). */
 int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
                                const char* var_name) {
+    return body_assigns_var_from_heap_in(gen, node, var_name, NULL);
+}
+
+static int body_assigns_var_from_heap_or_catch(CodeGenerator* gen, ASTNode* node,
+                                               const char* var_name) {
+    CatchScope cs = { {0}, 0 };
+    return body_assigns_var_from_heap_in(gen, node, var_name, &cs);
+}
+
+static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
+                                         const char* var_name, CatchScope* cs) {
     if (!node || !var_name) return 0;
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
@@ -1155,8 +1324,18 @@ int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         strcmp(node->value, var_name) == 0 &&
         node->child_count > 0 && node->children[0] &&
-        is_heap_string_expr(gen, node->children[0])) {
+        (is_heap_string_expr(gen, node->children[0]) ||
+         catch_scope_has(cs, node->children[0]))) {
         return 1;
+    }
+    if (cs && node->type == AST_CATCH_CLAUSE && node->value && cs->count < CATCH_SCOPE_MAX) {
+        cs->names[cs->count++] = node->value;
+        int found = 0;
+        for (int i = 0; i < node->child_count && !found; i++) {
+            found = body_assigns_var_from_heap_in(gen, node->children[i], var_name, cs);
+        }
+        cs->count--;
+        return found;
     }
     /* `var_name` bound by a tuple destructure — `a, err = g(...)`. It is heap
      * iff g's tuple position for `var_name` is heap-classified. Without this,
@@ -1195,7 +1374,7 @@ int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        if (body_assigns_var_from_heap(gen, node->children[i], var_name)) return 1;
+        if (body_assigns_var_from_heap_in(gen, node->children[i], var_name, cs)) return 1;
     }
     return 0;
 }
@@ -1270,17 +1449,33 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
     if (!expr) return 0;
     if (expr->type == AST_IDENTIFIER) {
         return expr->value && fn_body_root &&
-               (body_assigns_var_from_heap(gen, fn_body_root, expr->value) ||
+               (body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
                 body_tuple_destructure_binds_heap(gen, fn_body_root,
                                                   expr->value));
     }
     return is_heap_string_expr(gen, expr);
 }
 
+static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
+                                            const char* fn_being_analyzed,
+                                            ASTNode* fn_body_root,
+                                            int* any_heap, int* any_non_heap,
+                                            CatchScope* cs);
+
 static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
                                          const char* fn_being_analyzed,
                                          ASTNode* fn_body_root,
                                          int* any_heap, int* any_non_heap) {
+    CatchScope cs = { {0}, 0 };
+    walk_returns_for_heap_check_in(gen, node, fn_being_analyzed, fn_body_root,
+                                   any_heap, any_non_heap, &cs);
+}
+
+static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
+                                            const char* fn_being_analyzed,
+                                            ASTNode* fn_body_root,
+                                            int* any_heap, int* any_non_heap,
+                                            CatchScope* cs) {
     if (!node) return;
     if (node->type == AST_RETURN_STATEMENT) {
         int is_heap = 0;
@@ -1319,6 +1514,10 @@ static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
                  * free — see the walk_join trace in the v0.149
                  * lucky-UAF write-up. */
                 is_heap = 1;
+            } else if (catch_scope_has(cs, ret)) {
+                /* `return e` inside `catch e`: the binding may own a
+                 * heap-built reason (#2333). */
+                is_heap = 1;
             } else if (return_expr_is_heap(gen, ret, fn_body_root)) {
                 /* Heap evidence for the return expression. Bare
                  * identifiers resolve STRUCTURALLY against the
@@ -1344,11 +1543,17 @@ static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
         node->type == AST_CLOSURE) {
         return;
     }
-    for (int i = 0; i < node->child_count; i++) {
-        walk_returns_for_heap_check(gen, node->children[i],
-                                    fn_being_analyzed, fn_body_root,
-                                    any_heap, any_non_heap);
+    int pushed = 0;
+    if (node->type == AST_CATCH_CLAUSE && node->value && cs->count < CATCH_SCOPE_MAX) {
+        cs->names[cs->count++] = node->value;
+        pushed = 1;
     }
+    for (int i = 0; i < node->child_count; i++) {
+        walk_returns_for_heap_check_in(gen, node->children[i],
+                                       fn_being_analyzed, fn_body_root,
+                                       any_heap, any_non_heap, cs);
+    }
+    if (pushed) cs->count--;
 }
 
 int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
@@ -1910,9 +2115,23 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
 // path to decide whether to emit `_heap_<lhs> = 1;` at the
 // destructure site, and by `emit_tuple_return_position` to decide
 // whether to wrap the return value.
+static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
+                                        int position, ASTNode* fn_body_root,
+                                        int* found, int* any_heap, int* vetoed,
+                                        CatchScope* cs);
+
 static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
                                      int position, ASTNode* fn_body_root,
                                      int* found, int* any_heap, int* vetoed) {
+    CatchScope cs = { {0}, 0 };
+    walk_returns_for_heap_at_in(gen, node, position, fn_body_root,
+                                found, any_heap, vetoed, &cs);
+}
+
+static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
+                                        int position, ASTNode* fn_body_root,
+                                        int* found, int* any_heap, int* vetoed,
+                                        CatchScope* cs) {
     if (!node || *vetoed) return;
     if (node->type == AST_RETURN_STATEMENT) {
         *found = 1;
@@ -1976,7 +2195,8 @@ static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
                 child && child->node_type &&
                 child->node_type->kind == TYPE_TUPLE;
             if (position == 0 && !child_is_tuple &&
-                return_expr_is_heap(gen, child, fn_body_root)) {
+                (catch_scope_has(cs, child) ||
+                 return_expr_is_heap(gen, child, fn_body_root))) {
                 *any_heap = 1;
                 return;
             }
@@ -2016,7 +2236,10 @@ static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
          * the asn1 chain in #1311). Never through
          * `gen->heap_string_vars`, which belongs to whichever function
          * happens to be emitting when the memo is first computed. */
-        if (return_expr_is_heap(gen, pos_expr, fn_body_root)) {
+        /* `return x, e` inside `catch e`: the binding may own a
+         * heap-built reason (#2333). */
+        if (catch_scope_has(cs, pos_expr) ||
+            return_expr_is_heap(gen, pos_expr, fn_body_root)) {
             *any_heap = 1;
         }
         return;
@@ -2026,10 +2249,16 @@ static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
         node->type == AST_CLOSURE) {
         return;
     }
-    for (int i = 0; i < node->child_count && !*vetoed; i++) {
-        walk_returns_for_heap_at(gen, node->children[i], position,
-                                 fn_body_root, found, any_heap, vetoed);
+    int pushed = 0;
+    if (node->type == AST_CATCH_CLAUSE && node->value && cs->count < CATCH_SCOPE_MAX) {
+        cs->names[cs->count++] = node->value;
+        pushed = 1;
     }
+    for (int i = 0; i < node->child_count && !*vetoed; i++) {
+        walk_returns_for_heap_at_in(gen, node->children[i], position,
+                                    fn_body_root, found, any_heap, vetoed, cs);
+    }
+    if (pushed) cs->count--;
 }
 
 static int parse_heap_positions_annotation(const char* ann, int position) {
@@ -7528,8 +7757,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             indent(gen);
             print_line(gen, "const char* %s = _aether_try_%d->reason ? _aether_try_%d->reason : \"panic\";",
                       catch_clause->value, uid, uid);
-            print_line(gen, "aether_try_pop();");
-            generate_statement(gen, catch_clause->children[0]);
+            if (catch_binding_can_own(gen, catch_clause->value)) {
+                /* #2333: a heap-built panic message (aether_panic_owned)
+                 * belongs to the catcher. The binding becomes a heap-
+                 * tracked string local for the handler's scope: its flag
+                 * is the frame's ownership, so aliasing, reassignment,
+                 * escape and scope exit follow the rules every other
+                 * owned string local does. */
+                emit_owned_catch_handler(gen, catch_clause, uid);
+            } else {
+                print_line(gen, "aether_try_pop();");
+                generate_statement(gen, catch_clause->children[0]);
+            }
             print_line(gen, "(void)%s;", catch_clause->value);
             unindent(gen);
             print_line(gen, "}");
@@ -7548,10 +7787,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (stmt->child_count < 1) break;
             print_indent(gen);
             fprintf(gen->output, "aether_panic_capture_stack();\n");
-            print_indent(gen);
-            fprintf(gen->output, "aether_panic(");
-            generate_expression(gen, stmt->children[0]);
-            fprintf(gen->output, ");\n");
+            emit_panic_call(gen, stmt->children[0]);
             break;
         }
             

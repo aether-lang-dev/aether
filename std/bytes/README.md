@@ -104,6 +104,11 @@ main() {
 HiHi
 ```
 
+`std.bytes.cursor` reads slices too: `cursor.from_slice(s)` makes a cursor
+over any bounded `byte[]` (a sub-slice of a view, a fixed array), and
+`cursor.read_view(c, n)` returns the next `n` bytes as a borrowed sub-slice
+without copying, where `read_slice` copies them into a new buffer.
+
 ## Exports
 
 `new`, `from_ptr`, `string_from_ptr`, `set`, `get`, `length`, `set_length`,

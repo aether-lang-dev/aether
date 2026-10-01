@@ -61,9 +61,11 @@ it costs one `memmove` of the content and no allocation.
 
 ## Exports
 
-`new`, `append`, `append_n`, `append_byte`, `append_int`, `append_long`,
-`append_hex`, `append_codepoint`, `append_format`, `length`, `capacity`,
-`reserve`, `truncate`, `clear`, `finish`, `finish_with_length`, `free`.
+`new`, `append`, `append_n`, `append_slice`, `append_byte`, `append_int`,
+`append_long`, `append_hex`, `append_codepoint`, `append_format`, `length`,
+`capacity`, `reserve`, `truncate`, `clear`, `finish`, `finish_with_length`,
+`free`.
 
-`append_n` takes an explicit length, which is how a slice with embedded NUL
-bytes gets appended in full rather than stopping at the first zero.
+`append_slice(b, s)` appends a `byte[]`'s bytes as they are, embedded NULs
+included, with the length the slice carries (#2301). `append_n` takes a
+string and an explicit count, for a prefix of that string.

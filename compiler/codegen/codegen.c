@@ -936,6 +936,20 @@ void mark_heap_string_var(CodeGenerator* gen, const char* var_name) {
     gen->heap_string_var_count++;
 }
 
+// Helper: forget that a variable holds a heap-allocated string (a
+// binding tracked only for one scope, e.g. an owning `catch` name).
+void unmark_heap_string_var(CodeGenerator* gen, const char* var_name) {
+    if (!gen || !var_name) return;
+    for (int i = 0; i < gen->heap_string_var_count; i++) {
+        if (strcmp(gen->heap_string_vars[i], var_name) == 0) {
+            free(gen->heap_string_vars[i]);
+            gen->heap_string_vars[i] = gen->heap_string_vars[gen->heap_string_var_count - 1];
+            gen->heap_string_var_count--;
+            return;
+        }
+    }
+}
+
 // Helper: clear heap string vars (call at function start)
 void clear_heap_string_vars(CodeGenerator* gen) {
     if (gen->heap_string_vars) {

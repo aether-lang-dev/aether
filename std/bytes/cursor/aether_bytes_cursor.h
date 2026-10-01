@@ -26,6 +26,17 @@ typedef struct BytesCursor BytesCursor;
  * is NULL or allocation fails. The cursor borrows `b`. */
 BytesCursor* bytes_cursor_new(AetherBytes* b);
 
+/* A cursor over `len` bytes of raw memory: the backing of a `byte[]` slice
+ * (#2301). Borrows `data` exactly as bytes_cursor_new borrows its buffer.
+ * NULL for a negative length or NULL data with a positive length. */
+BytesCursor* bytes_cursor_new_from_ptr(const void* data, int len);
+
+/* The address of the next `n` bytes, advancing past them, without copying:
+ * a borrowed view (#2301). NULL (cursor unchanged) when fewer than `n`
+ * remain or `n` is negative. For a buffer-backed cursor the address is into
+ * the buffer's storage and is valid until the buffer grows or is freed. */
+const void* bytes_cursor_read_view(BytesCursor* c, int n);
+
 /* Read one byte (0..255) and advance by 1. Returns -1 at EOF (cursor
  * left unchanged). */
 int bytes_cursor_read_u8(BytesCursor* c);

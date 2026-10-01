@@ -54,7 +54,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 110 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 124 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -76,7 +76,7 @@ header comment is the authoritative description.
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
-| `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
+| `std.strbuilder` | Amortised-O(1) string building. | 35 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 94 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |

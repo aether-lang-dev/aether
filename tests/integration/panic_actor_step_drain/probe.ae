@@ -4,6 +4,10 @@
 // before the actor is marked dead. Run with AETHER_NO_INLINE=1 (the
 // driver sets it): main-thread inline mode has no step barrier by
 // design, so the drain only exists on the scheduler-thread path.
+//
+// #2333: Shouter panics with a message built at run time. The barrier
+// owns it and releases it after the death hook; LeakSanitizer sees the
+// leak if it does not.
 
 import std.string
 
@@ -22,7 +26,17 @@ actor Grinder {
     }
 }
 
+actor Shouter {
+    receive {
+        Work(n) -> {
+            panic("shout ${n}")
+        }
+    }
+}
+
 main() {
+    sh = spawn(Shouter())
+    sh ! Work { n: 7 }
     g = spawn(Grinder())
     i = 0
     while i < 300 {

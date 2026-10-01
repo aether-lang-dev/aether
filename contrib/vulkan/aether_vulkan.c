@@ -187,7 +187,11 @@ typedef struct {
  * second writer here. */
 static void*                     g_lib;
 static PFN_vkGetInstanceProcAddr g_gipa;
-static int                       g_probe;      /* 0 unprobed, 1 usable, -1 not */
+/* 0 unprobed, 1 usable, -1 not. Read and written only through the atomics
+ * in aevk_available(): published once, after the probe has finished and
+ * g_dev_name is written, so a reader that sees a settled answer sees the name
+ * too (#2287). */
+static int                       g_probe;
 static char                      g_dev_name[256];
 
 /* Under a lock, every time: callers on several threads (two actors, or the
@@ -724,7 +728,10 @@ static int aevk_pick_physical(AevkInstanceApi* ia, VkInstance inst,
 }
 
 int aevk_available(void) {
-    if (g_probe) return g_probe > 0;
+    /* Acquire pairs with the release below: a settled answer comes with the
+     * g_dev_name the probe wrote before publishing it. */
+    int settled = __atomic_load_n(&g_probe, __ATOMIC_ACQUIRE);
+    if (settled) return settled > 0;
 
     /* Serialised, and re-checked inside. Repeating the probe would be
      * harmless in itself, but it writes g_dev_name, a 256-byte buffer another
@@ -736,13 +743,16 @@ int aevk_available(void) {
     AEVK_MUTEX_LOCK(&probe_lock);
 
     int result = 0;
-    if (g_probe) {
-        result = g_probe > 0;
+    settled = __atomic_load_n(&g_probe, __ATOMIC_RELAXED);   /* under the lock */
+    if (settled) {
+        result = settled > 0;
     } else {
         /* Probe by actually creating an instance and enumerating: a loader
          * with no ICD behind it exports every symbol and still cannot
-         * render. */
-        g_probe = -1;
+         * render. The answer is published only once it is final: storing a
+         * provisional -1 first (as this did) told any thread reaching the
+         * fast path during a slow probe (MoltenVK creates an instance in
+         * milliseconds) that there was no Vulkan at all (#2287). */
         if (aevk_load_library() == AEVK_OK) {
             AevkInstanceApi ia;
             VkInstance inst = VK_NULL_HANDLE;
@@ -752,9 +762,10 @@ int aevk_available(void) {
                 result = aevk_pick_physical(&ia, inst, &phys, &family,
                                             g_dev_name, sizeof(g_dev_name)) == AEVK_OK;
                 ia.vkDestroyInstance(inst, NULL);
-                if (result) { g_probe = 1; aevk_clear_error(); }
+                if (result) aevk_clear_error();
             }
         }
+        __atomic_store_n(&g_probe, result ? 1 : -1, __ATOMIC_RELEASE);
     }
 
     AEVK_MUTEX_UNLOCK(&probe_lock);
