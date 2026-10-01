@@ -168,7 +168,9 @@ jobs:
   windows-wine:
     name: Windows / runtime under Wine (x86_64)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Dependency installation can take 20 minutes on hosted runners; leave
+    # time for the complete cross-build and runtime sweep after setup.
+    timeout-minutes: 60
     # Deliberately NOT a dependency of build-mingw: this is extra signal, not
     # a gate, so it must not add latency to an otherwise green run.
 

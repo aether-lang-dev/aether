@@ -24,10 +24,10 @@ bad() { echo "  [FAIL] $1"; fail=$((fail + 1)); }
 # Byte-compare via cksum (coreutils: CRC + byte count), not cmp/diff: those
 # live in diffutils, which the Windows MSYS2 CI shell does not install, and a
 # missing binary's exit 127 read as "differs" and failed five cases. `same`
-# is true when two files are byte-identical; `differ` is its negation. Read
-# from the files so an unreadable one is an empty sum, never a shell error.
-same()   { [ "$(cksum < "$1" 2>/dev/null)" = "$(cksum < "$2" 2>/dev/null)" ]; }
-differ() { ! same "$1" "$2"; }
+# and `differ` require two nonempty outputs: missing compiler output must
+# never count as an identical build or as a changed build.
+same()   { [ -s "$1" ] && [ -s "$2" ] && [ "$(cksum < "$1" 2>/dev/null)" = "$(cksum < "$2" 2>/dev/null)" ]; }
+differ() { [ -s "$1" ] && [ -s "$2" ] && ! same "$1" "$2"; }
 # For a diagnostic dump when two text files differ (cmp/diff unavailable).
 show_both() { echo "--- $1 ---"; cat "$1"; echo "--- $2 ---"; cat "$2"; }
 
@@ -79,6 +79,7 @@ aec() { (cd "$T/work" && env -u AETHER_HOME -u AETHER_NO_AEA "$PFX/bin/aetherc$E
 from_source() { (cd "$T/work" && env -u AETHER_HOME AETHER_NO_AEA=1 "$PFX/bin/aetherc$EXE" "$@"); }
 
 cat > "$T/work/app.ae" <<'AE'
+import std.string
 import std.cryptography.md2
 import std.cryptography.sha3
 import std.cryptography.blake2
@@ -93,8 +94,12 @@ main() {
 AE
 
 # 1. Artifacts are used, and change nothing about the generated C.
-AETHER_AEA_TRACE=1 aec app.ae "$T/aea.c" 2>"$T/trace.txt"
-from_source app.ae "$T/src.c" 2>/dev/null
+AETHER_AEA_TRACE=1 aec app.ae "$T/aea.c" 2>"$T/trace.txt" || {
+    bad "artifact build did not compile"; cat "$T/trace.txt"; exit 1
+}
+from_source app.ae "$T/src.c" 2>"$T/src_trace.txt" || {
+    bad "source build did not compile"; cat "$T/src_trace.txt"; exit 1
+}
 if same "$T/aea.c" "$T/src.c"; then ok "generated C is identical with and without artifacts"
 else bad "generated C differs between artifact and source builds"; fi
 for m in cryptography/md2 cryptography/sha3 cryptography/blake2 cryptography/pbkdf2 jsonpath jsonpath/parser aeafixture bytes; do
