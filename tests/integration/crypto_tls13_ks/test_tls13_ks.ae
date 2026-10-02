@@ -84,22 +84,22 @@ main() {
 
     // Handshake Secret (ECDHE from RFC 8448)
     ecdhe = from_hex("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d")
-    hs = tls13_ks.handshake_secret("sha256", early, ecdhe, 32)
+    hs = tls13_ks.handshake_secret("sha256", early, bytes.view(ecdhe)[0..32])
     if check("handshake_secret", to_hex(hs, 32),
         "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac") == 0 { total_ok = 0 }
 
     // Traffic secrets over Transcript-Hash(CH..SH)
     th = from_hex("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8")
-    s_hs = tls13_ks.traffic_secret("sha256", hs, "s hs traffic", th, 32)
+    s_hs = tls13_ks.traffic_secret("sha256", hs, "s hs traffic", bytes.view(th)[0..32])
     if check("s hs traffic", to_hex(s_hs, 32),
         "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38") == 0 { total_ok = 0 }
-    c_hs = tls13_ks.traffic_secret("sha256", hs, "c hs traffic", th, 32)
+    c_hs = tls13_ks.traffic_secret("sha256", hs, "c hs traffic", bytes.view(th)[0..32])
     if check("c hs traffic", to_hex(c_hs, 32),
         "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21") == 0 { total_ok = 0 }
 
     // Record protection key + iv from the server handshake traffic secret
     // (RFC 8448 §3 uses AES-128-GCM: key = 16 bytes, iv = 12).
-    sk = tls13_ks.write_key("sha256", s_hs, 16)
+    sk = tls13_ks.write_key("sha256", bytes.view(s_hs)[0..32], 16)
     if check("server write_key", to_hex(sk, 16),
         "3fce516009c21727d0f2e4e86ee403bc") == 0 { total_ok = 0 }
     siv = tls13_ks.write_iv("sha256", s_hs)
@@ -122,18 +122,18 @@ main() {
     //   ticket_nonce = 0000  ->  PSK = 4ecd0eb6ec3b4d87...
     res_master = from_hex("7df235f2031d2a051287d02b0241b0bfdaf86cc856231f2d5aba46c434ec196c")
     nonce = from_hex("0000")
-    psk = tls13_ks.psk_from_resumption("sha256", res_master, 32, nonce, 2)
+    psk = tls13_ks.psk_from_resumption("sha256", res_master, 32, bytes.view(nonce)[0..2])
     if check("resumption PSK", to_hex(psk, 32),
         "4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3") == 0 { total_ok = 0 }
     // early_secret_psk + binder_key must produce Hash.len outputs (chain sanity).
-    esp = tls13_ks.early_secret_psk("sha256", psk, 32)
+    esp = tls13_ks.early_secret_psk("sha256", bytes.view(psk)[0..32])
     bk = tls13_ks.binder_key("sha256", esp)
     if bytes.length(bk) == 32 {
         println("ok   binder_key derived (32 bytes)")
     } else { println("FAIL binder_key length ${bytes.length(bk)}"); total_ok = 0 }
     // 0-RTT: client_early_traffic_secret is a Hash.len secret over CH-hash.
     ch_hash = from_hex("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
-    ets = tls13_ks.early_traffic_secret("sha256", esp, ch_hash, 32)
+    ets = tls13_ks.early_traffic_secret("sha256", esp, bytes.view(ch_hash)[0..32])
     if bytes.length(ets) == 32 {
         println("ok   early_traffic_secret derived (32 bytes)")
     } else { println("FAIL early_traffic_secret length ${bytes.length(ets)}"); total_ok = 0 }

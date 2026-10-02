@@ -53,14 +53,14 @@ main() {
 
     // ISAP Hash test vectors from LWC_HASH_KAT_256.txt
     fails = fails + check("empty",
-        isap.isap_hex("", 0),
+        isap.isap_hex(string.bytes("")),
         "7346bc14f036e87ae03d0997913088f5f68411434b3cf8b54fa796a80d251f91")
 
     // Msg = 00
     b_00 = hex_to_bytes("00")
     defer bytes.free(b_00)
     ctx, _ = isap.new()
-    isap.update_bytes(ctx, b_00, 1)
+    isap.update(ctx, bytes.view(b_00)[0..1])
     res_00 = isap.final_hex(ctx)
     fails = fails + check("00", res_00, "8dd446ada58a7740ecf56eb638ef775f7d5c0fd5f0c2bbbdfdec29609d3c43a2")
 
@@ -68,7 +68,7 @@ main() {
     b_0001 = hex_to_bytes("0001")
     defer bytes.free(b_0001)
     ctx2, _ = isap.new()
-    isap.update_bytes(ctx2, b_0001, 2)
+    isap.update(ctx2, bytes.view(b_0001)[0..2])
     res_0001 = isap.final_hex(ctx2)
     fails = fails + check("0001", res_0001, "f77ca13bf89146d3254f1cfb7eddba8fa1bf162284bb29e7f645545cf9e08424")
 
@@ -76,7 +76,7 @@ main() {
     b_000102 = hex_to_bytes("000102")
     defer bytes.free(b_000102)
     ctx3, _ = isap.new()
-    isap.update_bytes(ctx3, b_000102, 3)
+    isap.update(ctx3, bytes.view(b_000102)[0..3])
     res_000102 = isap.final_hex(ctx3)
     fails = fails + check("000102", res_000102, "15ccf3b00f73ef96faa08c9b440660bea52d6f6aa53c8e2da3f8200a990a122f")
 
@@ -84,7 +84,7 @@ main() {
     b_00010203 = hex_to_bytes("00010203")
     defer bytes.free(b_00010203)
     ctx4, _ = isap.new()
-    isap.update_bytes(ctx4, b_00010203, 4)
+    isap.update(ctx4, bytes.view(b_00010203)[0..4])
     res_00010203 = isap.final_hex(ctx4)
     fails = fails + check("00010203", res_00010203, "8013eaaa1951580a7bef7d29bac323377e64f279ea73e6881b8aed69855ef764")
 
@@ -95,7 +95,7 @@ main() {
     while j < 8 { bytes.set(inc8, j, j); j = j + 1 }
     defer bytes.free(inc8)
     ctx8, _ = isap.new()
-    isap.update_bytes(ctx8, inc8, 8)
+    isap.update(ctx8, bytes.view(inc8)[0..8])
     fails = fails + check("8B(exact rate)", isap.final_hex(ctx8),
         "f4c6a44b29915d3d57cf928a18ec6226bb8dd6c1136acd24965f7e7780cd69cf")
 
@@ -104,18 +104,18 @@ main() {
     while j < 16 { bytes.set(inc16, j, j); j = j + 1 }
     defer bytes.free(inc16)
     ctx16, _ = isap.new()
-    isap.update_bytes(ctx16, inc16, 16)
+    isap.update(ctx16, bytes.view(inc16)[0..16])
     fails = fails + check("16B(2x rate)", isap.final_hex(ctx16),
         "d4e56c4841e2a0069d4f07e61b2dca94fd6d3f9c0df78393e6e8292921bc841d")
 
     // Multi-part streaming across the rate: 8 bytes fed 3+5.
     ctx_sp, _ = isap.new()
-    isap.update_bytes(ctx_sp, inc8, 3)
+    isap.update(ctx_sp, bytes.view(inc8)[0..3])
     tail5 = bytes.new(5)
     k = 3
     while k < 8 { bytes.set(tail5, k - 3, k); k = k + 1 }
     defer bytes.free(tail5)
-    isap.update_bytes(ctx_sp, tail5, 5)
+    isap.update(ctx_sp, bytes.view(tail5)[0..5])
     fails = fails + check("8B split 3+5", isap.final_hex(ctx_sp),
         "f4c6a44b29915d3d57cf928a18ec6226bb8dd6c1136acd24965f7e7780cd69cf")
 

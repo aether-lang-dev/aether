@@ -2,6 +2,7 @@
 // reference test vectors (Bosselaers' set).
 import std.cryptography.ripemd256
 import std.io
+import std.string
 
 check(label: string, got: string, want: string) -> int {
     if got == want {
@@ -17,22 +18,22 @@ check(label: string, got: string, want: string) -> int {
 main() {
     fails = 0
     fails = fails + check("empty",
-        ripemd256.ripemd256_hex("", 0),
+        ripemd256.ripemd256_hex(string.bytes("")),
         "02ba4c4e5f8ecd1877fc52d64d30e37a2d9774fb1e5d026380ae0168e3c5522d")
     fails = fails + check("a",
-        ripemd256.ripemd256_hex("a", 1),
+        ripemd256.ripemd256_hex(string.bytes("a")),
         "f9333e45d857f5d90a91bab70a1eba0cfb1be4b0783c9acfcd883a9134692925")
     fails = fails + check("abc",
-        ripemd256.ripemd256_hex("abc", 3),
+        ripemd256.ripemd256_hex(string.bytes("abc")),
         "afbd6e228b9d8cbbcef5ca2d03e6dba10ac0bc7dcbe4680e1e42d2e975459b65")
     fails = fails + check("message digest",
-        ripemd256.ripemd256_hex("message digest", 14),
+        ripemd256.ripemd256_hex(string.bytes("message digest")),
         "87e971759a1ce47a514d5c914c392c9018c7c46bc14465554afcdf54a5070c0e")
     fails = fails + check("alphabet",
-        ripemd256.ripemd256_hex("abcdefghijklmnopqrstuvwxyz", 26),
+        ripemd256.ripemd256_hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
         "649d3034751ea216776bf9a18acc81bc7896118a5197968782dd1fd97d8d5133")
     fails = fails + check("A...Za...z0...9 (62)",
-        ripemd256.ripemd256_hex("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 62),
+        ripemd256.ripemd256_hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
         "5740a408ac16b720b84424ae931cbb1fe363d1d0bf4017f1a89f7ea6de77a0b8")
 
     if fails == 0 {

@@ -64,7 +64,6 @@ const RESP_PUSH = 62 // '>'  RESP3 push (out-of-band)
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
-extern string_char_at_n(str: string, known_length: int, index: int) -> int
 extern string_length(s: string) -> int
 
 // A decoded/constructed RESP value. Aggregate children live in std.list; scalar
@@ -156,10 +155,17 @@ new_integer(n: long) -> ptr {
     v.int_val = n
     return v as ptr
 }
-// A bulk string of `len` bytes (binary-safe; may contain NUL / CRLF).
-new_bulk(s: string, len: int) -> ptr {
+// A bulk string holding the bytes of `s` (binary-safe; may contain NUL /
+// CRLF). `s` is a byte[] (#2301): pass a string as `string.bytes(text)`. The
+// value keeps its own copy.
+new_bulk(s: byte[]) -> ptr {
+    if s.len < 0 {
+        panic("resp.new_bulk: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
     v = alloc_value(RESP_BULK)
-    set_str(v, s, len)
+    if s.len > 0 {
+        adopt_payload(v, bytes.from_slice(s), s.len)
+    }
     return v as ptr
 }
 new_null() -> ptr { return alloc_value(RESP_NULL) as ptr }
@@ -252,7 +258,7 @@ map_value(vp: ptr, i: int) -> ptr {
 
 // ---- decode ----------------------------------------------------------------
 //
-// The parser is resumable: it works over (data, len) with a running index and
+// The parser is resumable: it works over a byte[] view with a running index and
 // distinguishes three outcomes at every level —
 //   incomplete : not enough bytes yet for a full frame (caller reads more)
 //   malformed  : the bytes present cannot be a valid frame (a protocol error)
@@ -267,11 +273,12 @@ const PS_MALFORMED = 2
 // Find the index just past the next CRLF at/after `from`, or -1 if no complete
 // line is present yet. RESP lines end in "\r\n"; a lone '\r' at end-of-buffer
 // is incomplete, not malformed.
-fn find_crlf_end(data: string, len: int, from: int) -> int {
+fn find_crlf_end(data: byte[], from: int) -> int {
+    int len = data.len
     i = from
     while i + 1 < len {
-        if string_char_at_n(data, len, i) == 13 &&
-        string_char_at_n(data, len, i + 1) == 10 {
+        if data[i] == 13 &&
+        data[i + 1] == 10 {
             return i + 2
         }
         i = i + 1
@@ -282,17 +289,17 @@ fn find_crlf_end(data: string, len: int, from: int) -> int {
 // Parse the base-10 (optionally signed) integer that a line's payload holds,
 // i.e. the bytes in [from, crlf_start). Returns (value, ok). RESP counts and
 // integers are ASCII decimal; anything else is malformed.
-fn parse_line_int(data: string, len: int, from: int, crlf_start: int) -> (long, int) {
+fn parse_line_int(data: byte[], from: int, crlf_start: int) -> (long, int) {
     if from >= crlf_start { return 0, 0 }
     neg = 0
     i = from
-    c0 = string_char_at_n(data, len, i)
+    c0 = data[i]
     if c0 == 45 { neg = 1 i = i + 1 } // '-'
     else if c0 == 43 { i = i + 1 } // '+'
     if i >= crlf_start { return 0, 0 }
     acc = 0
     while i < crlf_start {
-        c = string_char_at_n(data, len, i)
+        c = data[i]
         if c < 48 || c > 57 { return 0, 0 }
         acc = acc * 10 + (c - 48)
         i = i + 1
@@ -301,27 +308,22 @@ fn parse_line_int(data: string, len: int, from: int, crlf_start: int) -> (long, 
     return acc, 1
 }
 
-// Copy the raw bytes [from, to) out of `data` into a fresh AetherString slice
-// via a bytes buffer (binary-safe). Returns the slice (caller: it is set as a
+// Copy the raw bytes [from, to) out of `data` into a fresh, owned bytes
+// buffer (binary-safe). Returns the slice (caller: it is set as a
 // value's payload, or freed).
-fn slice_bytes(data: string, len: int, from: int, to: int) -> (ptr, int) {
+fn slice_bytes(data: byte[], from: int, to: int) -> (ptr, int) {
     n = to - from
     if n <= 0 { return null, 0 }
-    b = bytes.new(n)
-    i = 0
-    while i < n {
-        bytes.set(b, i, string_char_at_n(data, len, from + i))
-        i = i + 1
-    }
-    return b, n
+    return bytes.from_slice(data[from..to]), n
 }
 
 // Parse one value starting at `pos`. Returns (value, next_pos, state). On
 // PS_INCOMPLETE/PS_MALFORMED the value is null and next_pos is `pos`.
-fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
+fn parse_one(data: byte[], pos: int) -> (ptr, int, int) {
+    int len = data.len
     if pos >= len { return null, pos, PS_INCOMPLETE }
-    marker = string_char_at_n(data, len, pos)
-    line_end = find_crlf_end(data, len, pos + 1) // end of the marker's own line
+    marker = data[pos]
+    line_end = find_crlf_end(data, pos + 1) // end of the marker's own line
     if line_end < 0 { return null, pos, PS_INCOMPLETE }
     crlf_start = line_end - 2 // index of the '\r'
     body_from = pos + 1
@@ -329,12 +331,12 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
     // --- simple scalars whose whole payload is the marker line ---
     if marker == RESP_SIMPLE || marker == RESP_ERROR {
         v = alloc_value(marker)
-        sl, n = slice_bytes(data, len, body_from, crlf_start)
+        sl, n = slice_bytes(data, body_from, crlf_start)
         if sl != null { adopt_payload(v, sl, n) }
         return v as ptr, line_end, PS_OK
     }
     if marker == RESP_INTEGER {
-        iv, ok = parse_line_int(data, len, body_from, crlf_start)
+        iv, ok = parse_line_int(data, body_from, crlf_start)
         if ok == 0 { return null, pos, PS_MALFORMED }
         v = alloc_value(RESP_INTEGER) v.int_val = iv
         return v as ptr, line_end, PS_OK
@@ -345,7 +347,7 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
     }
     if marker == RESP_BOOL { // RESP3 `#t\r\n` / `#f\r\n`
         if crlf_start - body_from != 1 { return null, pos, PS_MALFORMED }
-        c = string_char_at_n(data, len, body_from)
+        c = data[body_from]
         if c != 116 && c != 102 { return null, pos, PS_MALFORMED } // 't'/'f'
         v = alloc_value(RESP_BOOL)
         if c == 116 { v.bool_val = 1 } else { v.bool_val = 0 }
@@ -353,19 +355,19 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
     }
     if marker == RESP_DOUBLE { // RESP3 `,3.14\r\n` (incl inf/nan)
         v = alloc_value(RESP_DOUBLE)
-        v.dbl_val = parse_double_span(data, len, body_from, crlf_start)
+        v.dbl_val = parse_double_span(data, body_from, crlf_start)
         return v as ptr, line_end, PS_OK
     }
     if marker == RESP_BIGNUM { // RESP3 `(1234...\r\n` — keep the text
         v = alloc_value(RESP_BIGNUM)
-        sl, n = slice_bytes(data, len, body_from, crlf_start)
+        sl, n = slice_bytes(data, body_from, crlf_start)
         if sl != null { adopt_payload(v, sl, n) }
         return v as ptr, line_end, PS_OK
     }
 
     // --- length-prefixed bulk / verbatim ---
     if marker == RESP_BULK || marker == RESP_VERBATIM {
-        blen, ok = parse_line_int(data, len, body_from, crlf_start)
+        blen, ok = parse_line_int(data, body_from, crlf_start)
         if ok == 0 { return null, pos, PS_MALFORMED }
         if blen < 0 { // RESP2 null bulk: $-1\r\n
             return alloc_value(RESP_NULL) as ptr, line_end, PS_OK
@@ -374,22 +376,22 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
         data_from = line_end
         need_end = data_from + (blen as int) + 2
         if need_end > len { return null, pos, PS_INCOMPLETE }
-        if string_char_at_n(data, len, need_end - 2) != 13 ||
-        string_char_at_n(data, len, need_end - 1) != 10 {
+        if data[need_end - 2] != 13 ||
+        data[need_end - 1] != 10 {
             return null, pos, PS_MALFORMED
         }
         v = alloc_value(marker)
         if marker == RESP_VERBATIM {
             // "=15\r\ntxt:Some string\r\n": first 3 bytes fmt, then ':' , then data.
-            if (blen as int) < 4 || string_char_at_n(data, len, data_from + 3) != 58 {
+            if (blen as int) < 4 || data[data_from + 3] != 58 {
                 free_value(v as ptr) return null, pos, PS_MALFORMED
             }
-            fb, _fn = slice_bytes(data, len, data_from, data_from + 3)
+            fb, _fn = slice_bytes(data, data_from, data_from + 3)
             v.verb_fmt = fb
-            sl, n = slice_bytes(data, len, data_from + 4, data_from + (blen as int))
+            sl, n = slice_bytes(data, data_from + 4, data_from + (blen as int))
             if sl != null { adopt_payload(v, sl, n) }
         } else {
-            sl, n = slice_bytes(data, len, data_from, data_from + (blen as int))
+            sl, n = slice_bytes(data, data_from, data_from + (blen as int))
             if sl != null { adopt_payload(v, sl, n) }
         }
         return v as ptr, need_end, PS_OK
@@ -397,7 +399,7 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
 
     // --- aggregates: array / set / push (count of elements) ---
     if marker == RESP_ARRAY || marker == RESP_SET || marker == RESP_PUSH {
-        cnt, ok = parse_line_int(data, len, body_from, crlf_start)
+        cnt, ok = parse_line_int(data, body_from, crlf_start)
         if ok == 0 { return null, pos, PS_MALFORMED }
         if cnt < 0 { // RESP2 null array: *-1\r\n
             return alloc_value(RESP_NULL) as ptr, line_end, PS_OK
@@ -406,7 +408,7 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
         cur = line_end
         k = 0
         while k < (cnt as int) {
-            child, np, st = parse_one(data, len, cur)
+            child, np, st = parse_one(data, cur)
             if st != PS_OK { free_value(v as ptr) return null, pos, st }
             list.list_add_raw(v.items, child)
             cur = np
@@ -417,15 +419,15 @@ fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
 
     // --- map (count of PAIRS) ---
     if marker == RESP_MAP {
-        cnt, ok = parse_line_int(data, len, body_from, crlf_start)
+        cnt, ok = parse_line_int(data, body_from, crlf_start)
         if ok == 0 || cnt < 0 { return null, pos, PS_MALFORMED }
         v = alloc_value(RESP_MAP) v.map_keys = list.new() v.map_vals = list.new()
         cur = line_end
         k = 0
         while k < (cnt as int) {
-            key, np1, st1 = parse_one(data, len, cur)
+            key, np1, st1 = parse_one(data, cur)
             if st1 != PS_OK { free_value(v as ptr) return null, pos, st1 }
-            val, np2, st2 = parse_one(data, len, np1)
+            val, np2, st2 = parse_one(data, np1)
             if st2 != PS_OK { free_value(key) free_value(v as ptr) return null, pos, st2 }
             list.list_add_raw(v.map_keys, key)
             list.list_add_raw(v.map_vals, val)
@@ -446,8 +448,8 @@ fn adopt_payload(v: *RespValue, b: ptr, len: int) {
 
 // Parse a RESP3 double span (ASCII, may be "inf"/"-inf"/"nan" or decimal).
 // Falls back to 0.0 on an unrecognised body — the frame still parses.
-fn parse_double_span(data: string, len: int, from: int, to: int) -> float {
-    sl, n = slice_bytes(data, len, from, to)
+fn parse_double_span(data: byte[], from: int, to: int) -> float {
+    sl, n = slice_bytes(data, from, to)
     if sl == null { return 0.0 }
     s = bytes.to_string(sl, n)
     bytes.free(sl)
@@ -460,15 +462,21 @@ fn parse_double_span(data: string, len: int, from: int, to: int) -> float {
 
 // ---- public decode ---------------------------------------------------------
 
-// Parse ONE value from the front of `data` (len bytes). Returns
+// Parse ONE value from the front of `data`, a byte[] whose length travels
+// with it (#2301): a socket reader passes the bytes it has buffered so far,
+// e.g. `bytes.view(buf)`. Parsing borrows `data` only for the call; every
+// payload in the returned tree is an owned copy. Returns
 //   (value, consumed, "")  on success — consumed bytes were used, the rest is
 //                           the next frame(s); free the value with free_value.
 //   (null, 0, "")          INCOMPLETE — not enough bytes yet; read more and
 //                           retry with the fuller buffer. Distinct from error.
 //   (null, 0, msg)         MALFORMED — a protocol error; msg says why.
 // This is the resumable entry point for a socket reader.
-parse_prefix(data: string, len: int) -> (ptr, int, string) {
-    v, np, st = parse_one(data, len, 0)
+parse_prefix(data: byte[]) -> (ptr, int, string) {
+    if data.len < 0 {
+        panic("resp.parse_prefix: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+    v, np, st = parse_one(data, 0)
     if st == PS_OK { return v, np, string.concat("", "") }
     if st == PS_INCOMPLETE { return null, 0, string.concat("", "") }
     return null, 0, string.concat("malformed RESP frame", "")
@@ -479,7 +487,7 @@ parse_prefix(data: string, len: int) -> (ptr, int, string) {
 // parse_prefix for a stream where more frames follow.
 parse(data: string) -> ptr! {
     len = string_length(data)
-    v, np, err = parse_prefix(data, len)
+    v, np, err = parse_prefix(string.bytes(data))
     if err != "" { return null, err }
     if v == null { return null, "incomplete RESP frame" }
     if np != len {
@@ -518,8 +526,8 @@ fn append_line(b: ptr, marker: int, payload: string) {
 // Append a value's payload bytes verbatim (binary-safe) into the builder.
 fn append_payload(b: ptr, v: *RespValue) {
     if v.str_bytes == null || v.str_len <= 0 { return }
-    s = bytes.to_string(v.str_bytes, v.str_len)
-    strbuilder.append_n(b, s, v.str_len)
+    // A view of the payload buffer, appended directly: no string copy (#2301).
+    strbuilder.append_slice(b, bytes.view(v.str_bytes)[0..v.str_len])
 }
 
 fn enc_into(b: ptr, vp: ptr, resp3: int) {

@@ -379,7 +379,7 @@ main() {
     // shared AetherString unwrap helper.
     print("\nTest 4: POST sends correct Content-Length\n")
     req4 = client.request("POST", "${base_url()}/echo-length")
-    client.set_body(req4, "abcdef", 6, "application/octet-stream")
+    client.set_body(req4, string.bytes("abcdef"), "application/octet-stream")
     client.set_timeout(req4, 5s)
     resp4, err4 = client.send_request(req4)
     client.request_free(req4)

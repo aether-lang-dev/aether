@@ -24,15 +24,15 @@ main() {
     print("PASS open(w+)\n")
 
     // Three scattered writes at offsets 0, 100, 50 (out of order).
-    n1, e1 = fs.pwrite(f, "FIRST", 5, 0)
+    n1, e1 = fs.pwrite(f, string.bytes("FIRST"), 0)
     if e1 != "" || n1 != 5 {
         print("FAIL pwrite@0: n=${n1} err=${e1}\n"); exit(1)
     }
-    n2, e2 = fs.pwrite(f, "THIRD", 5, 100)
+    n2, e2 = fs.pwrite(f, string.bytes("THIRD"), 100)
     if e2 != "" || n2 != 5 {
         print("FAIL pwrite@100: n=${n2} err=${e2}\n"); exit(1)
     }
-    n3, e3 = fs.pwrite(f, "MIDDL", 5, 50)
+    n3, e3 = fs.pwrite(f, string.bytes("MIDDL"), 50)
     if e3 != "" || n3 != 5 {
         print("FAIL pwrite@50: n=${n3} err=${e3}\n"); exit(1)
     }

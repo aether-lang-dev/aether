@@ -21,7 +21,7 @@ main() {
     print("=== std.cryptography HMAC + MD4 + MD5 + bytes ===\n\n")
 
     // MD4 of empty string
-    md4, e1 = cryptography.md4_hex("", 0)
+    md4, e1 = cryptography.md4_hex(string.bytes(""))
     if e1 != "" {
         print("SKIP: md4 unavailable (${e1})\n")
         return
@@ -33,7 +33,7 @@ main() {
     print("PASS: md4(\"\")\n")
 
     // MD5 of empty string
-    md5, e2 = cryptography.md5_hex("", 0)
+    md5, e2 = cryptography.md5_hex(string.bytes(""))
     if e2 != "" || string.equals(md5, "d41d8cd98f00b204e9800998ecf8427e") != 1 {
         print("FAIL: md5(\"\")=${md5}\n")
         exit(1)
@@ -41,7 +41,7 @@ main() {
     print("PASS: md5(\"\")\n")
 
     // SHA-1 binary digest of "abc" (20 bytes)
-    sha1b, len1, e3 = cryptography.sha1_bytes("abc", 3)
+    sha1b, len1, e3 = cryptography.sha1_bytes(string.bytes("abc"))
     if e3 != "" || len1 != 20 {
         print("FAIL: sha1_bytes len=${len1}\n")
         exit(1)
@@ -49,7 +49,7 @@ main() {
     print("PASS: sha1_bytes(\"abc\") -> 20 bytes\n")
 
     // SHA-256 binary digest of "abc" (32 bytes)
-    sha256b, len2, e4 = cryptography.sha256_bytes("abc", 3)
+    sha256b, len2, e4 = cryptography.sha256_bytes(string.bytes("abc"))
     if e4 != "" || len2 != 32 {
         print("FAIL: sha256_bytes len=${len2}\n")
         exit(1)
@@ -59,7 +59,7 @@ main() {
     // HMAC-SHA-256 hex — canonical test vector.
     msg = "The quick brown fox jumps over the lazy dog"
     msg_len = string_length(msg)
-    hmac, e5 = cryptography.hmac_sha256_hex("key", 3, msg, msg_len)
+    hmac, e5 = cryptography.hmac_sha256_hex(string.bytes("key"), string.bytes(msg)[0..msg_len])
     if e5 != "" {
         print("FAIL: hmac err=${e5}\n")
         exit(1)
@@ -73,7 +73,7 @@ main() {
     print("PASS: hmac_sha256_hex(\"key\", fox)\n")
 
     // HMAC-SHA-256 bytes returns 32 raw bytes.
-    hmacb, hlen, e6 = cryptography.hmac_sha256_bytes("key", 3, msg, msg_len)
+    hmacb, hlen, e6 = cryptography.hmac_sha256_bytes(string.bytes("key"), string.bytes(msg)[0..msg_len])
     if e6 != "" || hlen != 32 {
         print("FAIL: hmac_bytes hlen=${hlen}\n")
         exit(1)

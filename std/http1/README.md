@@ -11,7 +11,6 @@ The example **compiles but is not run** in CI: it needs a live connection.
 
 ```aether
 import std.http1
-import std.bytes
 import std.string
 
 main() {
@@ -20,10 +19,7 @@ main() {
     // feed takes a chunk and reports "complete", "incomplete", or an
     // error — hand it whatever bytes have arrived so far.
     head = "HTTP/1.1 200 OK\r\n\r\n"
-    chunk = bytes.new(64)
-    bytes.copy_from_string(chunk, 0, head, string.length(head))
-
-    state = http1.feed(resp, chunk, string.length(head), 0)
+    state = http1.feed(resp, string.bytes(head), 0)
     println("state: ${state}")
 
     http1.response_free(resp)

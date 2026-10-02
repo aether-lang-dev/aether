@@ -9,19 +9,15 @@
 #include <zlib.h>
 #endif
 
-/* Unwrap the payload from a `data` argument that may be either an
- * AetherString* or a plain char*. Mirrors the helper in
- * std/fs/aether_fs.c and std/cryptography/aether_cryptography.c —
- * without this dispatch a length-aware AetherString from
- * fs.read_binary would leak its struct header into the stream. */
+/* The input bytes and their count. `data` is always raw: the std module
+ * passes a byte[] slice's data pointer through a `ptr`-typed extern
+ * (#2301), and nothing else calls in. This used to sniff for an
+ * AetherString header and unwrap one, but a sniff on raw bytes misreads a
+ * payload beginning DE C0 57 AE (the header magic) as a header and reads
+ * from a `data` pointer taken out of the bytes that follow. */
 static inline const unsigned char* zlib_unwrap_bytes(const char* data, int length, size_t* out_len) {
-    if (!data) { *out_len = 0; return NULL; }
-    if (is_aether_string(data)) {
-        const AetherString* s = (const AetherString*)data;
-        *out_len = (length >= 0) ? (size_t)length : s->length;
-        return (const unsigned char*)s->data;
-    }
-    *out_len = (length >= 0) ? (size_t)length : strlen(data);
+    if (!data || length <= 0) { *out_len = 0; return (const unsigned char*)data; }
+    *out_len = (size_t)length;
     return (const unsigned char*)data;
 }
 

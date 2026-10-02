@@ -21,7 +21,7 @@ encoding writes the same shape whichever it picks:
 
 ```
 s, err        = zstd.stream_new(zstd.DEFAULT_LEVEL)
-chunk, n, err = zstd.stream_write(s, ev, string.length(ev))
+chunk, n, err = zstd.stream_write(s, string.bytes(ev))
 chunk, n, err = zstd.stream_flush(s)      // send these bytes now
 tail,  n, err = zstd.stream_finish(s)     // close the frame
                 zstd.stream_free(s)
@@ -44,7 +44,7 @@ clamped rather than rejected, matching `std.zlib`'s treatment of `level`.
 ## One-shot
 
 ```
-packed, n, err = zstd.compress(body, string.length(body), zstd.DEFAULT_LEVEL)
+packed, n, err = zstd.compress(string.bytes(body), zstd.DEFAULT_LEVEL)
 ```
 
 ## When the backend is absent

@@ -30,10 +30,10 @@ main() {
         spec.describe(fw, "std.zlib deflate/inflate") {
             spec.it("round-trips a string byte for byte") callback {
                 n = string.length(SAMPLE)
-                packed, plen, err = zlib.deflate(SAMPLE, n, 6)
+                packed, plen, err = zlib.deflate(string.bytes(SAMPLE)[0..n], 6)
                 spec.assert_ok(err, "deflate succeeds")
                 spec.assert_true(plen > 0, "compressed length is positive")
-                back, blen, derr = zlib.inflate(packed, plen)
+                back, blen, derr = zlib.inflate(string.bytes(packed)[0..plen])
                 spec.assert_ok(derr, "inflate succeeds")
                 spec.assert_eq(blen, n, "length restored")
                 spec.assert_str_eq(back, SAMPLE, "content restored")
@@ -42,7 +42,7 @@ main() {
             spec.it("shrinks repetitive input") callback {
                 original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 n = string.length(original)
-                packed, plen, err = zlib.deflate(original, n, 6)
+                packed, plen, err = zlib.deflate(string.bytes(original)[0..n], 6)
                 spec.assert_ok(err, "deflate succeeds")
                 spec.assert_true(plen < n, "compressed ${plen} < original ${n}")
             }
@@ -53,9 +53,9 @@ main() {
                 // by a different code path.
                 n = string.length(SAMPLE)
                 for (lvl = 0; lvl <= 9; lvl = lvl + 1) {
-                    packed, plen, err = zlib.deflate(SAMPLE, n, lvl)
+                    packed, plen, err = zlib.deflate(string.bytes(SAMPLE)[0..n], lvl)
                     spec.assert_ok(err, "deflate at level ${lvl}")
-                    back, blen, derr = zlib.inflate(packed, plen)
+                    back, blen, derr = zlib.inflate(string.bytes(packed)[0..plen])
                     spec.assert_ok(derr, "inflate at level ${lvl}")
                     spec.assert_str_eq(back, SAMPLE, "content restored at ${lvl}")
                 }
@@ -69,11 +69,11 @@ main() {
                 // produces a non-empty stream (the header and checksum), and
                 // inflating that has to give zero bytes back rather than an
                 // error.
-                packed, plen, err = zlib.deflate("", 0, -1)
+                packed, plen, err = zlib.deflate(string.bytes(""), -1)
                 spec.assert_ok(err, "deflate of an empty input succeeds")
                 spec.assert_true(plen > 0,
                     "an empty input still yields a framed stream")
-                back, blen, derr = zlib.inflate(packed, plen)
+                back, blen, derr = zlib.inflate(string.bytes(packed)[0..plen])
                 spec.assert_ok(derr, "inflate succeeds")
                 spec.assert_eq(blen, 0, "zero bytes back")
             }
@@ -82,12 +82,12 @@ main() {
                 // Distinct from the case above: an empty INPUT to inflate is
                 // not a valid stream at all, whereas the deflate of an empty
                 // input is.
-                data, n, err = zlib.inflate("", 0)
+                data, n, err = zlib.inflate(string.bytes(""))
                 spec.assert_err(err, "inflate of an empty buffer is rejected")
             }
 
             spec.it("rejects input that is not a zlib stream") callback {
-                data, n, err = zlib.inflate("not a zlib stream", 17)
+                data, n, err = zlib.inflate(string.bytes("not a zlib stream"))
                 spec.assert_err(err, "garbage input is rejected")
             }
         }
@@ -95,9 +95,9 @@ main() {
         spec.describe(fw, "std.zlib gzip framing") {
             spec.it("round-trips through the gzip container") callback {
                 n = string.length(SAMPLE)
-                packed, plen, err = zlib.gzip_deflate(SAMPLE, n, 6)
+                packed, plen, err = zlib.gzip_deflate(string.bytes(SAMPLE)[0..n], 6)
                 spec.assert_ok(err, "gzip_deflate succeeds")
-                back, blen, derr = zlib.gzip_inflate(packed, plen)
+                back, blen, derr = zlib.gzip_inflate(string.bytes(packed)[0..plen])
                 spec.assert_ok(derr, "gzip_inflate succeeds")
                 spec.assert_eq(blen, n, "length restored")
                 spec.assert_str_eq(back, SAMPLE, "content restored")
@@ -108,7 +108,7 @@ main() {
                 // This is what distinguishes the two entry points, so it is
                 // worth asserting rather than trusting the name.
                 n = string.length(SAMPLE)
-                packed, plen, err = zlib.gzip_deflate(SAMPLE, n, 6)
+                packed, plen, err = zlib.gzip_deflate(string.bytes(SAMPLE)[0..n], 6)
                 spec.assert_ok(err, "gzip_deflate succeeds")
                 spec.assert_eq(string.char_at_n(packed, plen, 0), 31,
                     "first byte is 0x1f")
@@ -119,7 +119,7 @@ main() {
             spec.it("rejects input that is not gzip at all") callback {
                 // Ported from tests/integration/test_zlib_gzip.ae, which this
                 // suite replaces.
-                data, n, err = zlib.gzip_inflate("not gzip", 8)
+                data, n, err = zlib.gzip_inflate(string.bytes("not gzip"))
                 spec.assert_err(err, "corrupt gzip input is rejected")
             }
 
@@ -127,9 +127,9 @@ main() {
                 // The two framings are not interchangeable; feeding one to
                 // the other's reader must fail rather than return garbage.
                 n = string.length(SAMPLE)
-                packed, plen, err = zlib.deflate(SAMPLE, n, 6)
+                packed, plen, err = zlib.deflate(string.bytes(SAMPLE)[0..n], 6)
                 spec.assert_ok(err, "deflate succeeds")
-                back, blen, derr = zlib.gzip_inflate(packed, plen)
+                back, blen, derr = zlib.gzip_inflate(string.bytes(packed)[0..plen])
                 spec.assert_err(derr, "gzip_inflate rejects a raw deflate stream")
             }
         }

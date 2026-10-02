@@ -1,0 +1,30 @@
+// Regression (#2301): the `null` literal passed for a `T[]` parameter is the
+// empty slice (.len 0), the conversion the language reference documents for
+// any slice slot. The typechecker's "bare ptr into a slice" check used to
+// reject it as a ptr, so an optional byte[] argument (an HMAC-DRBG
+// personalisation string, an AEAD's associated data) could not be omitted
+// with `null`. Also pins `return a == null` for a `byte[]` parameter, which
+// reached the C compiler as `AetherSlice == NULL`: a binary expression under
+// `return` skipped the operator logic that compares a slice by its pointer.
+
+extern exit(code: int)
+
+fn length_of(a: byte[]) -> int {
+    return a.len
+}
+
+fn is_empty(a: byte[]) -> bool {
+    return a == null
+}
+
+main() {
+    if length_of(null) != 0 {
+        println("FAIL: null for a byte[] parameter has .len ${length_of(null)}, expected 0")
+        exit(1)
+    }
+    if !is_empty(null) {
+        println("FAIL: null for a byte[] parameter does not compare equal to null")
+        exit(1)
+    }
+    println("null passed for a byte[] parameter is the empty slice")
+}

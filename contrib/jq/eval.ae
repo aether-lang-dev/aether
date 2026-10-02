@@ -3926,7 +3926,8 @@ _format(name: string, v: ptr) -> ptr! {
     }
     if string.equals(name, "base64") == 1 {
         s = _tostring(v)
-        out = encoding.base64_encode_padded(value.string_value(s), string.length(value.string_value(s)))
+        text = value.string_value(s)
+        out = encoding.base64_encode_padded(string.bytes(text))
         json.json_free(s)
         return json.json_create_string(out), ""
     }
@@ -3944,7 +3945,8 @@ _format(name: string, v: ptr) -> ptr! {
     }
     if string.equals(name, "base32") == 1 {
         s = _tostring(v)
-        out = encoding.base32_encode(value.string_value(s), string.length(value.string_value(s)))
+        text = value.string_value(s)
+        out = encoding.base32_encode(string.bytes(text))
         json.json_free(s)
         return json.json_create_string(out), ""
     }

@@ -26,7 +26,7 @@ main() {
     src = "abcabcabcabcabcabcabcabcabcabcabcabc"
     n = string.length(src)
 
-    packed, plen, cerr = zlib.deflate(src, n, 6)
+    packed, plen, cerr = zlib.deflate(string.bytes(src), 6)
     if cerr != "" {
         println("deflate failed: ${cerr}")
         return
@@ -34,7 +34,7 @@ main() {
 
     // inflate does not need the original length — the zlib
     // container carries what it needs.
-    back, blen, derr = zlib.inflate(packed, plen)
+    back, blen, derr = zlib.inflate(string.bytes(packed)[0..plen])
     println("round trip ok: ${string.equals(back, src)} err='${derr}'")
 }
 ```
@@ -64,7 +64,7 @@ event independently produces N complete streams concatenated, which no
 
 ```
 s, err = zlib.stream_new(zlib.GZIP, 6)      // RAW / ZLIB / GZIP
-chunk, n, err = zlib.stream_write(s, ev, string.length(ev))
+chunk, n, err = zlib.stream_write(s, string.bytes(ev))
 chunk, n, err = zlib.stream_flush(s)        // send these bytes now
 // ... more events, same stream ...
 tail, n, err = zlib.stream_finish(s)        // at connection close

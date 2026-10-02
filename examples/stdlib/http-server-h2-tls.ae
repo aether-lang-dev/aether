@@ -47,16 +47,10 @@ handle_root(req: ptr, res: ptr, ud: ptr) {
 handle_echo(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "application/octet-stream")
-    body = http.request_body(req)
-    blen = http.request_body_length(req)
-    if body == null {
-        http.response_set_body(res, "")
-    } else {
-        // Length-aware setter so binary / NUL-bearing payloads
-        // round-trip cleanly (response_set_body's strlen path
-        // would truncate at the first NUL).
-        http.response_set_body_n(res, body, blen)
-    }
+    // Binary-safe: the body as a bounded view, set back verbatim, so
+    // NUL-bearing payloads round-trip cleanly (response_set_body's strlen
+    // path would truncate at the first NUL).
+    http.response_set_body_bytes(res, http.request_body_bytes(req))
 }
 
 main() {

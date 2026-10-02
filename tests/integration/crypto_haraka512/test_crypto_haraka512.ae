@@ -62,7 +62,7 @@ main() {
     }
 
     ctx1, _ = haraka512.new()
-    haraka512.update_bytes(ctx1, input1, 64)
+    haraka512.update(ctx1, bytes.view(input1)[0..64])
     res1 = haraka512.final_bytes(ctx1)
     fails = fails + check_bytes("Haraka-512 known vector", res1, "be7f723b4e80a99813b292287f306f625a6d57331cae5f34dd9277b0945be2aa")
     bytes.free(input1)
@@ -74,7 +74,7 @@ main() {
     t = 0
     while t < 1000 {
         ctx, _ = haraka512.new()
-        haraka512.update_bytes(ctx, input_m1, 64)
+        haraka512.update(ctx, bytes.view(input_m1)[0..64])
         res = haraka512.final_bytes(ctx)
 
         if (t & 1) == 1 {
@@ -98,7 +98,7 @@ main() {
     t = 0
     while t < 1000 {
         ctx, _ = haraka512.new()
-        haraka512.update_bytes(ctx, input_m2, 64)
+        haraka512.update(ctx, bytes.view(input_m2)[0..64])
         res = haraka512.final_bytes(ctx)
 
         if (t & 1) == 1 {
@@ -121,7 +121,7 @@ main() {
     s = 0
     while s < 10 { bytes.set(short_in, s, s); s = s + 1 }
     ctx_short, _ = haraka512.new()
-    haraka512.update_bytes(ctx_short, short_in, 10)
+    haraka512.update(ctx_short, bytes.view(short_in)[0..10])
     if haraka512.final_hex(ctx_short) == "" {
         println("ok   Haraka-512 rejects short input")
     } else {
@@ -134,7 +134,7 @@ main() {
     s = 0
     while s < 72 { bytes.set(long_in, s, s); s = s + 1 }
     ctx_long, _ = haraka512.new()
-    haraka512.update_bytes(ctx_long, long_in, 72)
+    haraka512.update(ctx_long, bytes.view(long_in)[0..72])
     if haraka512.final_hex(ctx_long) == "" {
         println("ok   Haraka-512 rejects over-long input")
     } else {

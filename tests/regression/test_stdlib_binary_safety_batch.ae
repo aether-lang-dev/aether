@@ -33,7 +33,7 @@ main() {
 
     // --- cryptography.base64_encode_padded ---
     // 2 input bytes "AB" → "QUI" unpadded, "QUI=" padded.
-    pad = encoding.base64_encode_padded("AB", 2)
+    pad = encoding.base64_encode_padded(string.bytes("AB"))
     if string.equals(pad, "QUI=") == 0 {
         println("FAIL 3: padded='${pad}', want 'QUI='")
         exit(1)
@@ -41,7 +41,7 @@ main() {
     println("  PASS 3: base64_encode_padded(2 bytes) == 'QUI='")
 
     // 3 input bytes — already a multiple of 3, no padding either way.
-    pad3 = encoding.base64_encode_padded("ABC", 3)
+    pad3 = encoding.base64_encode_padded(string.bytes("ABC"))
     if string.equals(pad3, "QUJD") == 0 {
         println("FAIL 4: padded='${pad3}', want 'QUJD'")
         exit(1)
@@ -49,7 +49,7 @@ main() {
     println("  PASS 4: base64_encode_padded(3 bytes) == 'QUJD' (no padding needed)")
 
     // 1 input byte → "QQ==" padded ("QQ" unpadded).
-    pad1 = encoding.base64_encode_padded("A", 1)
+    pad1 = encoding.base64_encode_padded(string.bytes("A"))
     if string.equals(pad1, "QQ==") == 0 {
         println("FAIL 5: padded='${pad1}', want 'QQ=='")
         exit(1)
@@ -58,7 +58,7 @@ main() {
 
     // The unpadded sibling is unchanged — verify both forms produce
     // the right shapes side-by-side.
-    unp = encoding.base64_encode("AB", 2)
+    unp = encoding.base64_encode(string.bytes("AB"))
     if string.equals(unp, "QUI") == 0 {
         println("FAIL 6: unpadded='${unp}', want 'QUI'")
         exit(1)

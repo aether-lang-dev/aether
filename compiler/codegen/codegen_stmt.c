@@ -3221,6 +3221,22 @@ static int is_nonstoring_builtin(const char* fn) {
            strcmp(fn, "aether_string_len") == 0 ||
            strcmp(fn, "aether_string_length") == 0 ||
            strcmp(fn, "_aether_safe_str") == 0 ||
+           /* std.string.bytes: a BORROWED byte[] view of the string's own
+            * storage (#2301). It does not retain the argument, and a slice
+            * does not extend its owner's lifetime (the documented slice
+            * contract, and bytes()'s own), so a NAMED heap string passed to
+            * it keeps its scope-exit free. Without this, routing a scope-
+            * owned string through `string.bytes(s)` to a write withheld the
+            * free and leaked it on every call.
+            *
+            * Deliberately NOT listed: aether_string_raw_ptr, the accessor in
+            * bytes()'s body. The call-argument drain decides whether a
+            * TEMPORARY can be freed straight after the call by walking the
+            * callee's body; with the accessor listed, that walk stops seeing
+            * `s` flow into the returned view, and `string.bytes(f())` frees
+            * f()'s result while the view still points into it. Unlisted,
+            * a temporary is left alone (it leaks, which is safe). */
+           strcmp(fn, "string_bytes") == 0 ||
            /* string_seq_join walks the spine read-only and copies the
             * bytes into a fresh buffer; it retains neither the seq nor
             * the separator. Without this, a `s = seq_cons(x, s)`

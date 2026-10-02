@@ -22,12 +22,12 @@ main() {
     src = "abcabcabcabcabcabcabcabcabcabcabcabc"
     n = string.length(src)
 
-    packed, plen, cerr = lzf.compress(src, n)
+    packed, plen, cerr = lzf.compress(string.bytes(src))
     println("compressed ${n} -> ${plen} err='${cerr}'")
 
     // decompress needs the ORIGINAL length: the format does not
     // carry it, so the caller has to have kept it.
-    back, blen, derr = lzf.decompress(packed, plen, n)
+    back, blen, derr = lzf.decompress(string.bytes(packed)[0..plen], n)
     println("round trip ok: ${string.equals(back, src)} err='${derr}'")
 }
 ```

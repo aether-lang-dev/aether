@@ -39,7 +39,7 @@ exports(
     STAT_KIND_FILE, STAT_KIND_DIR, STAT_KIND_SYMLINK, STAT_KIND_OTHER,
     STAT_KIND_SOCKET, STAT_KIND_FIFO, STAT_KIND_DEVICE,
     WALK_CONTINUE, WALK_SKIP_SUBTREE, WALK_STOP,
-    fs_write_binary_raw, fs_write_atomic_raw, fs_rename_raw,
+    fs_rename_raw,
     fs_try_stat, fs_get_stat_kind, fs_get_stat_size, fs_get_stat_mtime,
     fs_try_statvfs, fs_get_statvfs_total, fs_get_statvfs_free, fs_get_statvfs_avail,
     statvfs,
@@ -54,7 +54,7 @@ exports(
     path_join, path_dirname, path_basename, path_extension, path_is_absolute,
     path_clean, path_is_within_base, path_rel, path_separator,
     clean, is_within_base, rel, join_clean, first_element,
-    fs_pwrite_raw, fs_pread_raw, fs_pread_into_raw, fs_get_pread, fs_get_pread_length,
+    fs_pread_raw, fs_pread_into_raw, fs_get_pread, fs_get_pread_length,
     fs_release_pread, fs_ftruncate_raw, fs_fsync_raw,
     pwrite, pread, pread_into, ftruncate, fsync,
     file_fd_raw, fd,
@@ -178,11 +178,18 @@ extern fs_unlink_raw(path: string) -> int
 // Binary-safe because length is explicit. Cheaper than fs_write_atomic_raw
 // when a partial file on crash is acceptable — scratch writes, caches,
 // and anywhere the destination isn't load-bearing for another process.
-extern fs_write_binary_raw(path: string, data: string, length: int) -> int
+//
+// These two and fs_pwrite_raw take `data: ptr`, not `string`, and are not
+// exported (#2301): the wrappers pass a byte[] slice's raw data pointer.
+// A `string` parameter routes through the AetherString unwrap, which would
+// misread a payload beginning with the header's magic bytes as a header;
+// and a heap string passed to a `ptr` parameter would write its header.
+// Use write_binary / write_atomic / pwrite.
+extern fs_write_binary_raw(path: string, data: ptr, length: int) -> int
 
 // Durable write: write-to-tmp + fsync + rename over destination.
 // Binary-safe — takes an explicit length so embedded NULs survive.
-extern fs_write_atomic_raw(path: string, data: string, length: int) -> int
+extern fs_write_atomic_raw(path: string, data: ptr, length: int) -> int
 
 // POSIX rename(2). Callers pairing with write_atomic should keep
 // `from` on the same filesystem as `to` for atomicity.
@@ -355,7 +362,7 @@ extern path_rel(base: string, target: string) -> string
 extern path_separator() -> string
 
 // Positional I/O (#640).
-extern fs_pwrite_raw(file: ptr, data: string, length: int, offset: long) -> long
+extern fs_pwrite_raw(file: ptr, data: ptr, length: int, offset: long) -> long
 extern fs_pread_raw(file: ptr, length: int, offset: long) -> int
 extern fs_pread_into_raw(file: ptr, buf: ptr, length: int, offset: long) -> int
 extern fs_get_pread() -> string
@@ -728,11 +735,19 @@ watch_close(watch: ptr) {
     fs_watch_close(watch)
 }
 
-// Non-atomic binary write: open, write exactly `length` bytes,
-// close. Binary-safe — embedded NULs in `data` survive because
-// the length is explicit (unlike `fs.write` which also works for
-// AetherString inputs but trusts `string.length(content)` to
-// report the right count).
+// A slice with no bound (`p as byte[]`, `.len` -1) has no length to write.
+fn unbounded_write(fname: string) {
+    panic("fs.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+}
+
+// Non-atomic binary write: open, write every byte of `data`, close.
+// Binary-safe — the length travels with the slice (#2301), so embedded
+// NULs survive. An empty slice writes an empty file.
+//
+// For a string, write its byte view: `fs.write_binary(path,
+// string.bytes(s))`; for a `std.bytes` buffer, `bytes.view(buf)`; for a
+// prefix, sub-slice it (`string.bytes(s)[0..n]`). Text that is never
+// binary can use `fs.write` instead.
 //
 // When you want the write to be crash-safe, use `fs.write_atomic`
 // instead (stage + fsync + rename). `write_binary` skips that
@@ -742,8 +757,11 @@ watch_close(watch: ptr) {
 // Returns "" on success, error on failure (open / write / close).
 // On failure, whatever bytes were written stay on disk — caller
 // removes the partial file if needed.
-write_binary(path: string, data: string, length: int) -> string {
-    ok = fs_write_binary_raw(path, data, length)
+write_binary(path: string, data: byte[]) -> string {
+    if data.len < 0 {
+        unbounded_write("write_binary")
+    }
+    ok = fs_write_binary_raw(path, data, data.len)
     if ok == 0 {
         return "binary write failed"
     }
@@ -753,15 +771,18 @@ write_binary(path: string, data: string, length: int) -> string {
 // Durable write: stage `data` into a sibling tmp file, fsync, then
 // rename(2) over `path`. On crash between write and rename, the
 // destination is either the old contents or the new — never a
-// partial write. Binary-safe: pass the explicit byte length so
-// embedded NULs survive (the Aether string's own length is used at
-// the call site, so callers normally just pass string.length(data)).
+// partial write. Binary-safe: the length travels with the slice
+// (#2301), so embedded NULs survive. For a string pass
+// `string.bytes(s)`; for a `std.bytes` buffer, `bytes.view(buf)`.
 //
 // Returns "" on success, error on failure (tmp create, write, fsync,
 // rename — the tmp is removed if any step fails so the filesystem
 // isn't littered with aborted writes).
-write_atomic(path: string, data: string, length: int) -> {
-    ok = fs_write_atomic_raw(path, data, length)
+write_atomic(path: string, data: byte[]) -> {
+    if data.len < 0 {
+        unbounded_write("write_atomic")
+    }
+    ok = fs_write_atomic_raw(path, data, data.len)
     if ok == 0 {
         return "atomic write failed"
     }
@@ -1062,10 +1083,11 @@ rel(base: string, target: string) -> string {
     return path_rel(base, target)
 }
 
-// Positional binary-safe write. Writes `length` bytes from `data` at
-// `offset` bytes from the start of the file. Returns
-// (written, "") on success, (-1, error) on failure. Loops on
-// short writes (POSIX permits returning fewer bytes than asked).
+// Positional binary-safe write. Writes every byte of `data` at
+// `offset` bytes from the start of the file — the length travels with
+// the slice (#2301). Returns (written, "") on success, (-1, error) on
+// failure. Loops on short writes (POSIX permits returning fewer bytes
+// than asked). An empty slice writes nothing and returns (0, "").
 // The file must be opened in a mode admitting writes — "r+", "w+",
 // "w", "a+", "wb+", etc. — via `fs.open(path, mode)`.
 //
@@ -1074,8 +1096,17 @@ rel(base: string, target: string) -> string {
 // sparse-file build). For sequential append, `fs.write` is simpler.
 // Success arm first — same tuple-slot-inference constraint as `size`
 // (the count slot is `long`).
-pwrite(file: ptr, data: string, length: int, offset: long) -> {
-    n = fs_pwrite_raw(file, data, length, offset)
+pwrite(file: ptr, data: byte[], offset: long) -> {
+    if data.len < 0 {
+        unbounded_write("pwrite")
+    }
+    // An empty slice may carry a null data pointer (string.bytes("") does),
+    // which the C side rejects; nothing to write is a success, not an error.
+    if data.len == 0 {
+        long none_written = 0
+        return none_written, ""
+    }
+    n = fs_pwrite_raw(file, data, data.len, offset)
     if n >= 0 {
         return n, ""
     }

@@ -105,7 +105,7 @@ main() {
     bytes.set(der, 10, 0x01)
     bytes.set(der, 11, 0x05)
 
-    perr = tls13_cert.parse_certificate(der, 12, &leaf)
+    perr = tls13_cert.parse_certificate(bytes.view(der)[0..12], &leaf)
     if string.equals(perr, "") == 1 {
         println("  FAIL a certificate whose TBS ends after serialNumber parsed successfully")
         fails = fails + 1

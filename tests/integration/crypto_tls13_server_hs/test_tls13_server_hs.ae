@@ -52,11 +52,11 @@ main() {
     rnd = filled(32, 0)
     sid = filled(32, 200)
     pub = filled(32, 100)
-    sh = tls13_hs.server_hello(rnd, sid, 32, 0x1301, 0x001d, pub, 32)
+    sh = tls13_hs.server_hello(rnd, bytes.view(sid)[0..32], 0x1301, 0x001d, bytes.view(pub)[0..32])
     shn = bytes.length(sh)
     sp = ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null,
         key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
-    serr = tls13_hs.parse_server_hello(sh, shn, &sp)
+    serr = tls13_hs.parse_server_hello(bytes.view(sh)[0..shn], &sp)
     if serr != "" {
         println("FAIL 1: parse_server_hello rejected our ServerHello: ${serr}")
         fails = fails + 1
@@ -87,12 +87,12 @@ main() {
     r2 = filled(32, 1)
     s2 = filled(32, 9)
     p2 = filled(32, 50)
-    ch = tls13_hs.client_hello_sni(r2, s2, 32, p2, "example.com")
+    ch = tls13_hs.client_hello_sni(r2, bytes.view(s2)[0..32], p2, "example.com")
     chn = bytes.length(ch)
     c = ChParsed { random: null, session_id: null, session_id_len: 0,
         cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
         has_sni: 0, saw_supported_versions: 0 }
-    cerr = tls13_hs.parse_client_hello(ch, chn, &c)
+    cerr = tls13_hs.parse_client_hello(bytes.view(ch)[0..chn], &c)
     if cerr != "" {
         println("FAIL 2: parse_client_hello rejected our own ClientHello: ${cerr}")
         fails = fails + 1
@@ -128,7 +128,7 @@ main() {
     rc = ChParsed { random: null, session_id: null, session_id_len: 0,
         cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
         has_sni: 0, saw_supported_versions: 0 }
-    rerr = tls13_hs.parse_client_hello(real, rn, &rc)
+    rerr = tls13_hs.parse_client_hello(bytes.view(real)[0..rn], &rc)
     if rerr != "" {
         println("FAIL 3: rejected a real OpenSSL ClientHello: ${rerr}")
         fails = fails + 1
@@ -158,18 +158,20 @@ main() {
     // A parser that only ever sees well-formed input proves little; these are
     // the shapes a hostile or broken peer actually sends.
     tiny = bytes.new(2)
+    bytes.set(tiny, 1, 0)
     tc = ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0,
         group: 0, key_share: null, key_share_len: 0, has_sni: 0,
         saw_supported_versions: 0 }
-    if tls13_hs.parse_client_hello(tiny, 2, &tc) == "" {
+    if tls13_hs.parse_client_hello(bytes.view(tiny)[0..2], &tc) == "" {
         println("FAIL 4: a 2-byte message was accepted as a ClientHello")
         fails = fails + 1
     }
     bytes.free(tiny)
 
     wrong = bytes.new(64)
+    bytes.set(wrong, 63, 0)
     bytes.set(wrong, 0, 2) // HS_SERVER_HELLO
-    if tls13_hs.parse_client_hello(wrong, 64, &tc) == "" {
+    if tls13_hs.parse_client_hello(bytes.view(wrong)[0..64], &tc) == "" {
         println("FAIL 4: a ServerHello was accepted as a ClientHello")
         fails = fails + 1
     }
@@ -219,7 +221,7 @@ main() {
     bytes.free(vd)
 
     sig = filled(70, 5)
-    cv = tls13_hs.certificate_verify_msg(0x0403, sig, 70)
+    cv = tls13_hs.certificate_verify_msg(0x0403, bytes.view(sig)[0..70])
     if (bytes.get(cv, 0) & 0xFF) != tls13_hs.HS_CERTIFICATE_VERIFY {
         println("FAIL 5: certificate_verify_msg has the wrong msg type")
         fails = fails + 1

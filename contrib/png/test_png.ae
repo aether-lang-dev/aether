@@ -66,7 +66,7 @@ decode(data: string, n: int, width: int, height: int) -> (ptr, string) {
         length = be32(data, n, at) as int
         kind = string.substring(data, at + 4, at + 8)
         body = string.substring(data, at + 4, at + 8 + length)
-        want = hash.crc32(body, length + 4)
+        want = hash.crc32(string.bytes(body)[0..length + 4])
         string.free(body)
         got = be32(data, n, at + 8 + length)
         if want != got { return (null, "chunk ${kind} has a bad CRC") }
@@ -91,7 +91,7 @@ decode(data: string, n: int, width: int, height: int) -> (ptr, string) {
     if ihdr_w != width || ihdr_h != height { return (null, "IHDR size ${ihdr_w}x${ihdr_h}") }
 
     packed = bytes.finish(idat, idat_len)
-    raw, raw_len, zerr = zlib.inflate(packed, idat_len)
+    raw, raw_len, zerr = zlib.inflate(string.bytes(packed)[0..idat_len])
     string.free(packed)
     if zerr != "" { return (null, "inflate: ${zerr}") }
     stride = width * 4

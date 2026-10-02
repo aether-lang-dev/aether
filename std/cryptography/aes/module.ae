@@ -79,16 +79,20 @@ struct AesCtx {
 // keep in step. Correctness is pinned by the FIPS-197 KATs in
 // tests/regression/test_aes.ae.
 
-new_encryptor(key: ptr, keylen: int) -> ptr {
+new_encryptor(key: byte[]) -> ptr {
+    if key.len < 0 { panic("aes.new_encryptor: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int keylen = key.len
     c = malloc(sizeof(AesCtx)) as *AesCtx
-    c.native = aether_aes_new(bytes.data(key), keylen, 1)
+    c.native = aether_aes_new((key as ptr), keylen, 1)
     c.encrypt = 1
     return c
 }
 
-new_decryptor(key: ptr, keylen: int) -> ptr {
+new_decryptor(key: byte[]) -> ptr {
+    if key.len < 0 { panic("aes.new_decryptor: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int keylen = key.len
     c = malloc(sizeof(AesCtx)) as *AesCtx
-    c.native = aether_aes_new(bytes.data(key), keylen, 0)
+    c.native = aether_aes_new((key as ptr), keylen, 0)
     c.encrypt = 0
     return c
 }
@@ -135,12 +139,17 @@ ecb_run(ctx: ptr, data: ptr) -> ptr {
 // `ctx` must be an ENCRYPTOR (CTR always runs the cipher forward). `iv` is
 // the initial 16-byte counter block, incremented big-endian per block.
 ctr_xor(ctx: ptr, iv: ptr, data: ptr) -> ptr {
-    n = bytes.length(data)
+    return ctr_xor_slice(ctx, iv, bytes.view(data))
+}
+
+// The slice form of ctr_xor (#2301); ctr_xor views its std.bytes handle into it.
+fn ctr_xor_slice(ctx: ptr, iv: ptr, data: byte[]) -> ptr {
+    n = data.len
     c = ctx as *AesCtx
     out = bytes.new(n)
     _ = bytes.set_length(out, n)
     _ = aether_aes_ctr_xor(c.native, bytes.data(iv),
-        bytes.data(data), bytes.data(out), n)
+        (data as ptr), bytes.data(out), n)
     return out
 }
 ctr_increment(ctr: ptr) {
@@ -274,8 +283,10 @@ cbc_decrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> {
 // was set (GF(2^128) doubling). The MAC is CBC-MAC with the final block
 // XOR'd by K1 (when the message is a non-empty multiple of 16) or, after
 // 10*..0 padding, by K2.
-cmac(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
-    enc = new_encryptor(key, keylen)
+cmac(key: byte[], data: byte[]) -> ptr {
+    if data.len < 0 { panic("aes.cmac: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
+    enc = new_encryptor(key)
 
     // L = E(0^128)
     zero = bytes.new(16)
@@ -301,7 +312,7 @@ cmac(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
         base = (n - 1) * 16
         j = 0
         while j < 16 {
-            bytes.set(last, j, (bytes.get(data, base + j) ^ bytes.get(k1, j)) & 0xFF)
+            bytes.set(last, j, (data[base + j] ^ bytes.get(k1, j)) & 0xFF)
             j = j + 1
         }
     } else {
@@ -312,7 +323,7 @@ cmac(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
         while j < 16 {
             b = 0
             if j < rem {
-                b = bytes.get(data, base + j)
+                b = data[base + j]
             } else if j == rem {
                 b = 0x80
             }
@@ -335,7 +346,7 @@ cmac(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
         base = i * 16
         j = 0
         while j < 16 {
-            bytes.set(blk, j, (bytes.get(x, j) ^ bytes.get(data, base + j)) & 0xFF)
+            bytes.set(blk, j, (bytes.get(x, j) ^ data[base + j]) & 0xFF)
             j = j + 1
         }
         eb = process_block(enc, blk)
@@ -383,19 +394,21 @@ cmac_dbl(inp: ptr) -> ptr {
 // Wrap `data` (len bytes, must be a multiple of 8 and >= 16) with the KEK
 // `key`/`keylen`. Returns ciphertext of len+8 bytes, or null on bad input.
 // The default IV A6A6A6A6A6A6A6A6 is used.
-key_wrap(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
+key_wrap(key: byte[], data: byte[]) -> ptr {
+    if data.len < 0 { panic("aes.key_wrap: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
     if len < 16 { return null }
     if (len % 8) != 0 { return null }
     nblk = len / 8 // number of 64-bit blocks
 
-    enc = new_encryptor(key, keylen)
+    enc = new_encryptor(key)
 
     // A = IV; R[1..n] = plaintext blocks.
     a = bytes.new(8)
     i = 0
     while i < 8 { bytes.set(a, i, 0xA6); i = i + 1 }
     r = bytes.new(len)
-    bytes.copy_from_bytes(r, 0, data, 0, len)
+    bytes.copy_from_slice(r, 0, data[0..len])
 
     blk = bytes.new(16)
     j = 0
@@ -439,17 +452,19 @@ key_wrap(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
 // Unwrap RFC 3394 ciphertext (`data`/`len`, len multiple of 8 and >= 24)
 // with KEK `key`/`keylen`. Returns (plaintext, "") on a valid integrity
 // check, or (null, error) if the unwrapped IV != A6A6A6A6A6A6A6A6.
-key_unwrap(key: ptr, keylen: int, data: ptr, len: int) -> {
+key_unwrap(key: byte[], data: byte[]) -> {
+    if data.len < 0 { panic("aes.key_unwrap: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
     if len < 24 { return null, "ciphertext too short" }
     if (len % 8) != 0 { return null, "length not a multiple of 8" }
     nblk = (len / 8) - 1 // number of plaintext blocks
 
-    dec = new_decryptor(key, keylen)
+    dec = new_decryptor(key)
 
     a = bytes.new(8)
-    bytes.copy_from_bytes(a, 0, data, 0, 8)
+    bytes.copy_from_slice(a, 0, data[0..8])
     r = bytes.new(nblk * 8)
-    bytes.copy_from_bytes(r, 0, data, 8, nblk * 8)
+    bytes.copy_from_slice(r, 0, data[8..8 + nblk * 8])
 
     blk = bytes.new(16)
     j = 5
@@ -547,7 +562,9 @@ gf_shr1(v: ptr) {
 
 // GHASH: fold `data` (len bytes, processed in 16-byte blocks, zero-padded)
 // into the running hash `acc` (16 bytes) under subkey H. Returns a fresh acc.
-ghash_update(acc: ptr, h: ptr, data: ptr, len: int) -> ptr {
+ghash_update(acc: ptr, h: ptr, data: byte[]) -> ptr {
+    if data.len < 0 { panic("aes.ghash_update: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
     cur = bytes.new(16)
     i = 0
     while i < 16 { bytes.set(cur, i, bytes.get(acc, i)); i = i + 1 }
@@ -557,7 +574,7 @@ ghash_update(acc: ptr, h: ptr, data: ptr, len: int) -> ptr {
         j = 0
         while j < 16 {
             b = 0
-            if off + j < len { b = bytes.get(data, off + j) }
+            if off + j < len { b = data[off + j] }
             bytes.set(cur, j, (bytes.get(cur, j) ^ b) & 0xFF)
             j = j + 1
         }
@@ -585,7 +602,9 @@ gctr_inc32(ctr: ptr) {
 
 // CTR-mode encrypt/decrypt `data` starting from counter block `ctr0`
 // (incremented before the first block per GCM). Returns a fresh buffer.
-gctr(ctx: ptr, ctr0: ptr, data: ptr, len: int) -> ptr {
+gctr(ctx: ptr, ctr0: ptr, data: byte[]) -> ptr {
+    if data.len < 0 { panic("aes.gctr: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
     out = bytes.new(len)
     ctr = bytes.new(16)
     i = 0
@@ -597,7 +616,7 @@ gctr(ctx: ptr, ctr0: ptr, data: ptr, len: int) -> ptr {
         j = 0
         while j < 16 {
             if off + j < len {
-                bytes.set(out, off + j, (bytes.get(data, off + j) ^ bytes.get(ks, j)) & 0xFF)
+                bytes.set(out, off + j, (data[off + j] ^ bytes.get(ks, j)) & 0xFF)
             }
             j = j + 1
         }
@@ -610,19 +629,23 @@ gctr(ctx: ptr, ctr0: ptr, data: ptr, len: int) -> ptr {
 
 // Compute the GCM tag for ciphertext `ct`/`ct_len` and `aad`/`aad_len`
 // under subkey H and pre-counter J0. Returns the 16-byte tag.
-gcm_tag(ctx: ptr, h: ptr, j0: ptr, aad: ptr, aad_len: int, ct: ptr, ct_len: int) -> ptr {
+gcm_tag(ctx: ptr, h: ptr, j0: ptr, aad: byte[], ct: byte[]) -> ptr {
+    if aad.len < 0 { panic("aes.gcm_tag: the `aad` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int aad_len = aad.len
+    if ct.len < 0 { panic("aes.gcm_tag: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct.len
     acc = bytes.new(16)
     z = 0
     while z < 16 { bytes.set(acc, z, 0); z = z + 1 }
-    a1 = ghash_update(acc, h, aad, aad_len)
+    a1 = ghash_update(acc, h, aad)
     bytes.free(acc)
-    a2 = ghash_update(a1, h, ct, ct_len)
+    a2 = ghash_update(a1, h, ct)
     bytes.free(a1)
     // length block: [len(AAD) in bits | len(C) in bits], each 64-bit BE
     lb = bytes.new(16)
     set_be64_bits(lb, 0, aad_len)
     set_be64_bits(lb, 8, ct_len)
-    a3 = ghash_update(a2, h, lb, 16)
+    a3 = ghash_update(a2, h, bytes.view(lb)[0..16])
     bytes.free(a2); bytes.free(lb)
     // S = E(J0); tag = a3 XOR S
     s = process_block(ctx, j0)
@@ -654,7 +677,9 @@ gcm_j0(iv: ptr) -> ptr {
 
 // Seal: returns ciphertext (pt_len bytes) with the 16-byte tag appended.
 // `ctx` is an encryptor; `iv` must be 12 bytes.
-gcm_seal(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
+gcm_seal(ctx: ptr, iv: ptr, aad: byte[], pt: byte[]) -> ptr {
+    if pt.len < 0 { panic("aes.gcm_seal: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = pt.len
     // H = E(0^128)
     zero = bytes.new(16)
     z = 0
@@ -663,8 +688,8 @@ gcm_seal(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr
     bytes.free(zero)
 
     j0 = gcm_j0(iv)
-    ct = gctr(ctx, j0, pt, pt_len)
-    tag = gcm_tag(ctx, h, j0, aad, aad_len, ct, pt_len)
+    ct = gctr(ctx, j0, pt)
+    tag = gcm_tag(ctx, h, j0, aad, bytes.view(ct)[0..pt_len])
 
     out = bytes.new(pt_len + 16)
     bytes.copy_from_bytes(out, 0, ct, 0, pt_len)
@@ -676,7 +701,9 @@ gcm_seal(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr
 // Open: verifies the trailing 16-byte tag (constant-time) then decrypts.
 // `ctx` is an encryptor; `iv` must be 12 bytes. Returns (plaintext, "") or
 // (null, error).
-gcm_open(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> {
+gcm_open(ctx: ptr, iv: ptr, aad: byte[], ct_with_tag: byte[]) -> {
+    if ct_with_tag.len < 0 { panic("aes.gcm_open: the `ct_with_tag` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct_with_tag.len
     if ct_len < 16 {
         return null, "ciphertext too short"
     }
@@ -688,12 +715,12 @@ gcm_open(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: in
     bytes.free(zero)
     j0 = gcm_j0(iv)
 
-    want = gcm_tag(ctx, h, j0, aad, aad_len, ct_with_tag, body_len)
+    want = gcm_tag(ctx, h, j0, aad, ct_with_tag[0..body_len])
     // constant-time compare against the supplied tag
     diff = 0
     i = 0
     while i < 16 {
-        diff = diff | ((bytes.get(want, i) ^ bytes.get(ct_with_tag, body_len + i)) & 0xFF)
+        diff = diff | ((bytes.get(want, i) ^ ct_with_tag[body_len + i]) & 0xFF)
         i = i + 1
     }
     bytes.free(want)
@@ -701,7 +728,7 @@ gcm_open(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: in
         bytes.free(h); bytes.free(j0)
         return null, "authentication failed"
     }
-    pt = gctr(ctx, j0, ct_with_tag, body_len)
+    pt = gctr(ctx, j0, ct_with_tag[0..body_len])
     bytes.free(h); bytes.free(j0)
     return pt, ""
 }
@@ -714,21 +741,23 @@ gcm_open(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: in
 // The MAC is then CTR-encrypted with counter block S0 and the (truncated) tag
 // is appended to the ciphertext.
 //
-//   ccm_seal(key, keylen, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+//   ccm_seal(key, nonce, aad, pt, taglen)
 //       -> (ct_ptr, ct_len)        ct = ciphertext ‖ tag (ptlen + taglen)
-//   ccm_open(key, keylen, nonce, nlen, aad, aadlen, ct, ctlen, taglen)
+//   ccm_open(key, nonce, aad, ct, taglen)
 //       -> (pt_ptr, pt_len)        pt_len = -1, pt_ptr = null on tag mismatch
 //
 // nonce length must be 7..13; taglen must be one of {4,6,8,10,12,14,16}.
 
 // Build the CCM CTR counter block: flags = (15 - nlen) - 1 in the low 3 bits,
 // nonce at offset 1, the trailing q bytes (the block counter) zeroed.
-ccm_ctr0(nonce: ptr, nlen: int) -> ptr {
+ccm_ctr0(nonce: byte[]) -> ptr {
+    if nonce.len < 0 { panic("aes.ccm_ctr0: the `nonce` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int nlen = nonce.len
     ctr = bytes.new(16)
     q = 15 - nlen
     bytes.set(ctr, 0, (q - 1) & 0x7)
     i = 0
-    while i < nlen { bytes.set(ctr, 1 + i, bytes.get(nonce, i)); i = i + 1 }
+    while i < nlen { bytes.set(ctr, 1 + i, nonce[i]); i = i + 1 }
     i = 1 + nlen
     while i < 16 { bytes.set(ctr, i, 0); i = i + 1 }
     return ctr
@@ -736,7 +765,13 @@ ccm_ctr0(nonce: ptr, nlen: int) -> ptr {
 
 // CBC-MAC over the formatted CCM stream; returns the raw 16-byte MAC block
 // (caller truncates to taglen). `enc` is an AES encryptor.
-ccm_cbc_mac(enc: ptr, nonce: ptr, nlen: int, aad: ptr, aadlen: int, data: ptr, dlen: int, taglen: int) -> ptr {
+ccm_cbc_mac(enc: ptr, nonce: byte[], aad: byte[], data: byte[], taglen: int) -> ptr {
+    if nonce.len < 0 { panic("aes.ccm_cbc_mac: the `nonce` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int nlen = nonce.len
+    if aad.len < 0 { panic("aes.ccm_cbc_mac: the `aad` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int aadlen = aad.len
+    if data.len < 0 { panic("aes.ccm_cbc_mac: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int dlen = data.len
     // B0
     b0 = bytes.new(16)
     flags = 0
@@ -745,7 +780,7 @@ ccm_cbc_mac(enc: ptr, nonce: ptr, nlen: int, aad: ptr, aadlen: int, data: ptr, d
     flags = flags | (((15 - nlen) - 1) & 0x7)
     bytes.set(b0, 0, flags & 0xFF)
     i = 0
-    while i < nlen { bytes.set(b0, 1 + i, bytes.get(nonce, i)); i = i + 1 }
+    while i < nlen { bytes.set(b0, 1 + i, nonce[i]); i = i + 1 }
     // message length q encoded big-endian in the trailing bytes
     long qv = dlen
     count = 1
@@ -786,7 +821,7 @@ ccm_cbc_mac(enc: ptr, nonce: ptr, nlen: int, aad: ptr, aadlen: int, data: ptr, d
         k = 0
         while k < hdr_extra { bytes.set(ablk, k, bytes.get(prefix, k)); k = k + 1 }
         k = 0
-        while k < aadlen { bytes.set(ablk, hdr_extra + k, bytes.get(aad, k)); k = k + 1 }
+        while k < aadlen { bytes.set(ablk, hdr_extra + k, aad[k]); k = k + 1 }
         k = total
         while k < padded { bytes.set(ablk, k, 0); k = k + 1 }
         bytes.free(prefix)
@@ -810,7 +845,7 @@ ccm_cbc_mac(enc: ptr, nonce: ptr, nlen: int, aad: ptr, aadlen: int, data: ptr, d
         j = 0
         while j < 16 {
             b = 0
-            if off + j < dlen { b = bytes.get(data, off + j) }
+            if off + j < dlen { b = data[off + j] }
             bytes.set(blk, j, b)
             j = j + 1
         }
@@ -831,11 +866,13 @@ ccm_mac_block(enc: ptr, x: ptr, blk: ptr) -> ptr {
     return eb
 }
 
-ccm_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt: ptr, ptlen: int, taglen: int) -> {
-    enc = new_encryptor(key, keylen)
-    mac = ccm_cbc_mac(enc, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+ccm_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
+    if pt.len < 0 { panic("aes.ccm_seal: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ptlen = pt.len
+    enc = new_encryptor(key)
+    mac = ccm_cbc_mac(enc, nonce, aad, pt, taglen)
 
-    ctr0 = ccm_ctr0(nonce, nlen)
+    ctr0 = ccm_ctr0(nonce)
     // S0 = E(ctr0) encrypts the MAC -> tag
     s0 = process_block(enc, ctr0)
     tag = bytes.new(taglen)
@@ -856,7 +893,7 @@ ccm_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
         j = 0
         while j < 16 {
             if off + j < ptlen {
-                bytes.set(ct, off + j, (bytes.get(pt, off + j) ^ bytes.get(ks, j)) & 0xFF)
+                bytes.set(ct, off + j, (pt[off + j] ^ bytes.get(ks, j)) & 0xFF)
             }
             j = j + 1
         }
@@ -873,12 +910,14 @@ ccm_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
     return out, ptlen + taglen
 }
 
-ccm_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct: ptr, ctlen: int, taglen: int) -> {
+ccm_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
+    if ct.len < 0 { panic("aes.ccm_open: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ctlen = ct.len
     if ctlen < taglen { return null, -1 }
     ptlen = ctlen - taglen
-    enc = new_encryptor(key, keylen)
+    enc = new_encryptor(key)
 
-    ctr0 = ccm_ctr0(nonce, nlen)
+    ctr0 = ccm_ctr0(nonce)
     // recover plaintext via CTR (S1..), then recompute & verify the MAC.
     pt = bytes.new(ptlen)
     ctr = bytes.new(16)
@@ -891,7 +930,7 @@ ccm_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
         j = 0
         while j < 16 {
             if off + j < ptlen {
-                bytes.set(pt, off + j, (bytes.get(ct, off + j) ^ bytes.get(ks, j)) & 0xFF)
+                bytes.set(pt, off + j, (ct[off + j] ^ bytes.get(ks, j)) & 0xFF)
             }
             j = j + 1
         }
@@ -900,7 +939,7 @@ ccm_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
     }
     bytes.free(ctr)
 
-    mac = ccm_cbc_mac(enc, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+    mac = ccm_cbc_mac(enc, nonce, aad, bytes.view(pt)[0..ptlen], taglen)
     s0 = process_block(enc, ctr0)
     bytes.free(ctr0)
     // expected tag = (mac XOR S0) truncated; compare const-time to supplied.
@@ -908,7 +947,7 @@ ccm_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
     i = 0
     while i < taglen {
         want = (bytes.get(mac, i) ^ bytes.get(s0, i)) & 0xFF
-        diff = diff | (want ^ (bytes.get(ct, ptlen + i) & 0xFF))
+        diff = diff | (want ^ (ct[ptlen + i] & 0xFF))
         i = i + 1
     }
     bytes.free(mac); bytes.free(s0)
@@ -927,34 +966,38 @@ ccm_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
 //   N_mac = OMAC_0(nonce), H_mac = OMAC_1(aad), C_mac = OMAC_2(ciphertext)
 // CTR keystream is seeded by N_mac; tag = N_mac ^ H_mac ^ C_mac (truncated).
 //
-//   eax_seal(key, keylen, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+//   eax_seal(key, nonce, aad, pt, taglen)
 //       -> (ct_ptr, ct_len)        ct = ciphertext ‖ tag (ptlen + taglen)
-//   eax_open(key, keylen, nonce, nlen, aad, aadlen, ct, ctlen, taglen)
+//   eax_open(key, nonce, aad, ct, taglen)
 //       -> (pt_ptr, pt_len)        pt_len = -1, pt_ptr = null on tag mismatch
 
 // OMAC_t(data) = CMAC(key, [0^15 ‖ t] ‖ data). Returns a fresh 16-byte tag.
-eax_omac(key: ptr, keylen: int, t: int, data: ptr, dlen: int) -> ptr {
+eax_omac(key: byte[], t: int, data: byte[]) -> ptr {
+    if data.len < 0 { panic("aes.eax_omac: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int dlen = data.len
     buf = bytes.new(16 + dlen)
     i = 0
     while i < 15 { bytes.set(buf, i, 0); i = i + 1 }
     bytes.set(buf, 15, t & 0xFF)
     i = 0
-    while i < dlen { bytes.set(buf, 16 + i, bytes.get(data, i)); i = i + 1 }
-    tag = cmac(key, keylen, buf, 16 + dlen)
+    while i < dlen { bytes.set(buf, 16 + i, data[i]); i = i + 1 }
+    tag = cmac(key, bytes.view(buf)[0..16 + dlen])
     bytes.free(buf)
     return tag
 }
 
-eax_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt: ptr, ptlen: int, taglen: int) -> {
-    n_mac = eax_omac(key, keylen, 0, nonce, nlen)
-    h_mac = eax_omac(key, keylen, 1, aad, aadlen)
+eax_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
+    if pt.len < 0 { panic("aes.eax_seal: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ptlen = pt.len
+    n_mac = eax_omac(key, 0, nonce)
+    h_mac = eax_omac(key, 1, aad)
 
     // CTR encrypt seeded by N_mac (counter used directly, then incremented).
-    enc = new_encryptor(key, keylen)
-    ct = ctr_xor(enc, n_mac, pt) // ctr_xor allocates ptlen-byte output
+    enc = new_encryptor(key)
+    ct = ctr_xor_slice(enc, n_mac, pt) // ctr_xor allocates ptlen-byte output
     free(enc)
 
-    c_mac = eax_omac(key, keylen, 2, ct, ptlen)
+    c_mac = eax_omac(key, 2, bytes.view(ct)[0..ptlen])
 
     out = bytes.new(ptlen + taglen)
     bytes.copy_from_bytes(out, 0, ct, 0, ptlen)
@@ -968,23 +1011,25 @@ eax_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
     return out, ptlen + taglen
 }
 
-eax_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct: ptr, ctlen: int, taglen: int) -> {
+eax_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
+    if ct.len < 0 { panic("aes.eax_open: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ctlen = ct.len
     if ctlen < taglen { return null, -1 }
     ptlen = ctlen - taglen
 
-    n_mac = eax_omac(key, keylen, 0, nonce, nlen)
-    h_mac = eax_omac(key, keylen, 1, aad, aadlen)
+    n_mac = eax_omac(key, 0, nonce)
+    h_mac = eax_omac(key, 1, aad)
 
     // C_mac is computed over the ciphertext body only (excludes the tag).
     body = bytes.new(ptlen)
-    bytes.copy_from_bytes(body, 0, ct, 0, ptlen)
-    c_mac = eax_omac(key, keylen, 2, body, ptlen)
+    bytes.copy_from_slice(body, 0, ct[0..ptlen])
+    c_mac = eax_omac(key, 2, bytes.view(body)[0..ptlen])
 
     diff = 0
     i = 0
     while i < taglen {
         want = (bytes.get(n_mac, i) ^ bytes.get(h_mac, i) ^ bytes.get(c_mac, i)) & 0xFF
-        diff = diff | (want ^ (bytes.get(ct, ptlen + i) & 0xFF))
+        diff = diff | (want ^ (ct[ptlen + i] & 0xFF))
         i = i + 1
     }
     bytes.free(h_mac); bytes.free(c_mac)
@@ -993,7 +1038,7 @@ eax_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
         return null, -1
     }
 
-    enc = new_encryptor(key, keylen)
+    enc = new_encryptor(key)
     pt = ctr_xor(enc, n_mac, body)
     free(enc)
     bytes.free(n_mac); bytes.free(body)
@@ -1008,9 +1053,9 @@ eax_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
 // authentication folds into `Sum`; a running `Checksum` over plaintext, plus
 // the final offset, yields the tag.
 //
-//   ocb_seal(key, keylen, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+//   ocb_seal(key, nonce, aad, pt, taglen)
 //       -> (ct_ptr, ct_len)        ct = ciphertext ‖ tag (ptlen + taglen)
-//   ocb_open(key, keylen, nonce, nlen, aad, aadlen, ct, ctlen, taglen)
+//   ocb_open(key, nonce, aad, ct, taglen)
 //       -> (pt_ptr, pt_len)        pt_len = -1, pt_ptr = null on tag mismatch
 //
 // nonce length must be <= 15.
@@ -1093,13 +1138,15 @@ ocb_double_at(src: ptr, off: int) -> ptr {
 
 // Compute the initial offset (OffsetMAIN_0) and Sum-over-AAD for a nonce.
 // Returns the 16-byte initial offset; Sum is written into `sum_out`.
-ocb_init_offset(enc: ptr, nonce: ptr, nlen: int, taglen: int) -> ptr {
+ocb_init_offset(enc: ptr, nonce: byte[], taglen: int) -> ptr {
+    if nonce.len < 0 { panic("aes.ocb_init_offset: the `nonce` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int nlen = nonce.len
     // nonce block: [taglen*8 mod 256 << ... ] per RFC: top byte = macSize<<4
     nb = bytes.new(16)
     i = 0
     while i < 16 { bytes.set(nb, i, 0); i = i + 1 }
     i = 0
-    while i < nlen { bytes.set(nb, 16 - nlen + i, bytes.get(nonce, i)); i = i + 1 }
+    while i < nlen { bytes.set(nb, 16 - nlen + i, nonce[i]); i = i + 1 }
     bytes.set(nb, 0, (taglen << 4) & 0xFF)
     bytes.set(nb, 15 - nlen, (bytes.get(nb, 15 - nlen) | 1) & 0xFF)
 
@@ -1142,7 +1189,9 @@ ocb_init_offset(enc: ptr, nonce: ptr, nlen: int, taglen: int) -> ptr {
 }
 
 // Hash the AAD into a 16-byte Sum (PMAC-style). Returns a fresh Sum buffer.
-ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: ptr, aadlen: int) -> ptr {
+ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: byte[]) -> ptr {
+    if aad.len < 0 { panic("aes.ocb_hash_aad: the `aad` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int aadlen = aad.len
     sum = bytes.new(16)
     offh = bytes.new(16)
     i = 0
@@ -1155,7 +1204,7 @@ ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: ptr, aadlen: int) -> ptr {
         ocb_xor_l(offh, ltab, ocb_ntz(blkidx))
         blk = bytes.new(16)
         j = 0
-        while j < 16 { bytes.set(blk, j, (bytes.get(aad, off + j) ^ bytes.get(offh, j)) & 0xFF); j = j + 1 }
+        while j < 16 { bytes.set(blk, j, (aad[off + j] ^ bytes.get(offh, j)) & 0xFF); j = j + 1 }
         eb = process_block(enc, blk)
         ocb_xor(sum, eb)
         bytes.free(blk); bytes.free(eb)
@@ -1170,7 +1219,7 @@ ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: ptr, aadlen: int) -> ptr {
         j = 0
         while j < 16 {
             b = 0
-            if j < rem { b = bytes.get(aad, off + j) }
+            if j < rem { b = aad[off + j] }
             else if j == rem { b = 0x80 }
             bytes.set(blk, j, (b ^ bytes.get(offh, j)) & 0xFF)
             j = j + 1
@@ -1183,8 +1232,10 @@ ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: ptr, aadlen: int) -> ptr {
     return sum
 }
 
-ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt: ptr, ptlen: int, taglen: int) -> {
-    enc = new_encryptor(key, keylen)
+ocb_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
+    if pt.len < 0 { panic("aes.ocb_seal: the `pt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ptlen = pt.len
+    enc = new_encryptor(key)
     zero = bytes.new(16)
     z = 0
     while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
@@ -1195,8 +1246,8 @@ ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
     ltab = ocb_build_l(l0)
     bytes.free(l0)
 
-    sum = ocb_hash_aad(enc, ltab, l_star, aad, aadlen)
-    offm = ocb_init_offset(enc, nonce, nlen, taglen)
+    sum = ocb_hash_aad(enc, ltab, l_star, aad)
+    offm = ocb_init_offset(enc, nonce, taglen)
     checksum = bytes.new(16)
     i = 0
     while i < 16 { bytes.set(checksum, i, 0); i = i + 1 }
@@ -1208,7 +1259,7 @@ ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
     while blkidx <= nblk {
         blk = bytes.new(16)
         j = 0
-        while j < 16 { bytes.set(blk, j, bytes.get(pt, off + j)); j = j + 1 }
+        while j < 16 { bytes.set(blk, j, pt[off + j]); j = j + 1 }
         ocb_xor(checksum, blk)
         ocb_xor_l(offm, ltab, ocb_ntz(blkidx))
         ocb_xor(blk, offm)
@@ -1227,7 +1278,7 @@ ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
         j = 0
         while j < 16 {
             b = 0
-            if j < rem { b = bytes.get(pt, off + j) }
+            if j < rem { b = pt[off + j] }
             else if j == rem { b = 0x80 }
             bytes.set(pad_in, j, b)
             j = j + 1
@@ -1237,7 +1288,7 @@ ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
         ocb_xor(offm, l_star)
         pad = process_block(enc, offm)
         j = 0
-        while j < rem { bytes.set(ct, off + j, (bytes.get(pt, off + j) ^ bytes.get(pad, j)) & 0xFF); j = j + 1 }
+        while j < rem { bytes.set(ct, off + j, (pt[off + j] ^ bytes.get(pad, j)) & 0xFF); j = j + 1 }
         bytes.free(pad)
     }
 
@@ -1258,11 +1309,13 @@ ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
     return out, ptlen + taglen
 }
 
-ocb_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct: ptr, ctlen: int, taglen: int) -> {
+ocb_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
+    if ct.len < 0 { panic("aes.ocb_open: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ctlen = ct.len
     if ctlen < taglen { return null, -1 }
     ptlen = ctlen - taglen
-    enc = new_encryptor(key, keylen)
-    dec = new_decryptor(key, keylen)
+    enc = new_encryptor(key)
+    dec = new_decryptor(key)
 
     zero = bytes.new(16)
     z = 0
@@ -1274,8 +1327,8 @@ ocb_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
     ltab = ocb_build_l(l0)
     bytes.free(l0)
 
-    sum = ocb_hash_aad(enc, ltab, l_star, aad, aadlen)
-    offm = ocb_init_offset(enc, nonce, nlen, taglen)
+    sum = ocb_hash_aad(enc, ltab, l_star, aad)
+    offm = ocb_init_offset(enc, nonce, taglen)
     checksum = bytes.new(16)
     i = 0
     while i < 16 { bytes.set(checksum, i, 0); i = i + 1 }
@@ -1287,7 +1340,7 @@ ocb_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
     while blkidx <= nblk {
         blk = bytes.new(16)
         j = 0
-        while j < 16 { bytes.set(blk, j, bytes.get(ct, off + j)); j = j + 1 }
+        while j < 16 { bytes.set(blk, j, ct[off + j]); j = j + 1 }
         ocb_xor_l(offm, ltab, ocb_ntz(blkidx))
         ocb_xor(blk, offm)
         db = process_block(dec, blk)
@@ -1308,7 +1361,7 @@ ocb_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
         j = 0
         while j < 16 {
             b = 0
-            if j < rem { b = (bytes.get(ct, off + j) ^ bytes.get(pad, j)) & 0xFF }
+            if j < rem { b = (ct[off + j] ^ bytes.get(pad, j)) & 0xFF }
             else if j == rem { b = 0x80 }
             bytes.set(recovered, j, b)
             j = j + 1
@@ -1327,7 +1380,7 @@ ocb_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct
     diff = 0
     i = 0
     while i < taglen {
-        diff = diff | ((bytes.get(tagfull, i) ^ bytes.get(ct, ptlen + i)) & 0xFF)
+        diff = diff | ((bytes.get(tagfull, i) ^ ct[ptlen + i]) & 0xFF)
         i = i + 1
     }
     bytes.free(tagfull); bytes.free(checksum); bytes.free(sum)

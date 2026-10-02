@@ -36,7 +36,7 @@ main() {
     // 1. "w" + pwrite: a '\n' is one byte on disk
     f, oerr = fs.open(p, "w")
     if oerr != "" { println("open w: ${oerr}"); return 1 }
-    n, werr = fs.pwrite(f, "ab\ncd\n", 6, 0)
+    n, werr = fs.pwrite(f, string.bytes("ab\ncd\n"), 0)
     _ = file_close(f)
     sz, serr = fs.size(p)
     println("pwrite ${n} ${werr} size ${sz}")
@@ -49,7 +49,7 @@ main() {
     // 3. a file holding CRLF and a 0x1A byte is read verbatim through "r"
     q = "${dir}/crlf.bin"
     raw = "x\r\ny\r\n"
-    _ = fs.write_binary(q, raw, 6)
+    _ = fs.write_binary(q, string.bytes(raw))
     h, herr = fs.open(q, "r")
     if herr != "" { println("open r2: ${herr}"); return 1 }
     back = file_read_all_raw(h)
@@ -58,7 +58,7 @@ main() {
     // 4. "a+" gets the 'b' after the '+' and still appends
     k, kerr = fs.open(p, "a+")
     if kerr != "" { println("open a+: ${kerr}"); return 1 }
-    _, aerr = fs.pwrite(k, "e\n", 2, 6)
+    _, aerr = fs.pwrite(k, string.bytes("e\n"), 6)
     _ = file_close(k)
     sz2, _ = fs.size(p)
     println("append ${aerr} size ${sz2}")

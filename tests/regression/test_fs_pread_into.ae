@@ -8,6 +8,7 @@
 // pread + copy_from_string recipe.
 
 import std.fs
+import std.string
 import std.os
 import std.bytes
 import std.bytes.cursor
@@ -30,7 +31,7 @@ main() {
     bytes.set_le64(src, 24, -1) // all 0xFF
     bytes.set_le64(src, 32, 305419896) // 0x12345678
     data = bytes.finish(src, 40) // consumes src
-    werr = fs.write_binary(path, data, 40)
+    werr = fs.write_binary(path, string.bytes(data)[0..40])
     if werr != "" { print("FAIL write_binary: ${werr}\n"); exit(1) }
 
     f, ferr = fs.open(path, "r+")

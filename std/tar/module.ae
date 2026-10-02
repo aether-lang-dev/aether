@@ -803,10 +803,9 @@ write_header(fd: int, archive_name: string, kind: int, size: long, mode: int, mt
     encode_octal_chksum(buf, 148, chksum)
     string_release(hdr_str)
 
-    // Write header to file
-    final_hdr = bytes.to_string(buf, 512)
-    write_err = io.fd_write_n(fd, final_hdr, 512)
-    string_release(final_hdr)
+    // Write header to file — a view of the zero-filled 512-byte block,
+    // no copy (#2301).
+    write_err = io.fd_write(fd, bytes.view(buf))
 
     if string_length(prefix_field) > 0 {
         string_release(prefix_field)
@@ -887,7 +886,7 @@ writer_add_file(writer_ptr: ptr, archive_name: string, source_path: string) -> s
             string_release(chunk)
             return "source file truncated during write"
         }
-        write_err = io.fd_write_n(writer.fd, chunk, read_n)
+        write_err = io.fd_write(writer.fd, string.bytes(chunk)[0..read_n])
         string_release(chunk)
         if write_err != 0 {
             return "failed to write file content to archive"
@@ -905,9 +904,7 @@ writer_add_file(writer_ptr: ptr, archive_name: string, source_path: string) -> s
             bytes.set(pad_buf, p, 0)
             p = p + 1
         }
-        pad_str = bytes.to_string(pad_buf, pad_size as int)
-        pad_write_err = io.fd_write_n(writer.fd, pad_str, pad_size as int)
-        string_release(pad_str)
+        pad_write_err = io.fd_write(writer.fd, bytes.view(pad_buf))
         if pad_write_err != 0 {
             return "failed to write payload padding to archive"
         }
@@ -980,9 +977,7 @@ writer_finish(writer_ptr: ptr) -> string {
         bytes.set(zero_buf, z, 0)
         z = z + 1
     }
-    zero_str = bytes.to_string(zero_buf, 1024)
-    err = io.fd_write_n(writer.fd, zero_str, 1024)
-    string_release(zero_str)
+    err = io.fd_write(writer.fd, bytes.view(zero_buf))
     if err != 0 {
         return "failed to write end-of-archive marker"
     }
@@ -1206,7 +1201,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
                     string_release(chunk)
                     break
                 }
-                write_ok = io.fd_write_n(out_fd, chunk, read_n)
+                write_ok = io.fd_write(out_fd, string.bytes(chunk)[0..read_n])
                 string_release(chunk)
                 if write_ok != 0 {
                     write_err_str = "failed to write to output file '${name}'"

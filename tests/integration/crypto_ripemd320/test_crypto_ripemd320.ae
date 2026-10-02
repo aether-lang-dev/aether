@@ -2,6 +2,7 @@
 // reference test vectors (Bosselaers' set).
 import std.cryptography.ripemd320
 import std.io
+import std.string
 
 check(label: string, got: string, want: string) -> int {
     if got == want {
@@ -17,22 +18,22 @@ check(label: string, got: string, want: string) -> int {
 main() {
     fails = 0
     fails = fails + check("empty",
-        ripemd320.ripemd320_hex("", 0),
+        ripemd320.ripemd320_hex(string.bytes("")),
         "22d65d5661536cdc75c1fdf5c6de7b41b9f27325ebc61e8557177d705a0ec880151c3a32a00899b8")
     fails = fails + check("a",
-        ripemd320.ripemd320_hex("a", 1),
+        ripemd320.ripemd320_hex(string.bytes("a")),
         "ce78850638f92658a5a585097579926dda667a5716562cfcf6fbe77f63542f99b04705d6970dff5d")
     fails = fails + check("abc",
-        ripemd320.ripemd320_hex("abc", 3),
+        ripemd320.ripemd320_hex(string.bytes("abc")),
         "de4c01b3054f8930a79d09ae738e92301e5a17085beffdc1b8d116713e74f82fa942d64cdbc4682d")
     fails = fails + check("message digest",
-        ripemd320.ripemd320_hex("message digest", 14),
+        ripemd320.ripemd320_hex(string.bytes("message digest")),
         "3a8e28502ed45d422f68844f9dd316e7b98533fa3f2a91d29f84d425c88d6b4eff727df66a7c0197")
     fails = fails + check("alphabet",
-        ripemd320.ripemd320_hex("abcdefghijklmnopqrstuvwxyz", 26),
+        ripemd320.ripemd320_hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
         "cabdb1810b92470a2093aa6bce05952c28348cf43ff60841975166bb40ed234004b8824463e6b009")
     fails = fails + check("A...Za...z0...9 (62)",
-        ripemd320.ripemd320_hex("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 62),
+        ripemd320.ripemd320_hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
         "ed544940c86d67f250d232c30b7b3e5770e0c60c8cb9a4cafe3b11388af9920e1b99230b843c86a4")
 
     if fails == 0 {

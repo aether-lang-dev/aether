@@ -14,13 +14,13 @@ exports(
     io_stderr_write_raw, io_stdout_write_raw,
     io_perror_raw, io_errno_message_raw,
     io_fd_open_read_tuple, io_fd_open_write_tuple, io_fd_close_raw,
-    io_fd_write_n, io_fd_read_n_tuple, io_fd_read_line_tuple,
+    io_fd_read_n_tuple, io_fd_read_line_tuple,
     io_fd_read_into_raw,
     read_file, write_file, append_file, delete_file, file_info,
     setenv, unsetenv,
     stderr_write, stdout_write, perror, errno_message,
     fd_open_read, fd_open_write, fd_close,
-    fd_write_n, fd_read_n, fd_read_into, fd_read_line
+    fd_write, fd_read_n, fd_read_into, fd_read_line
 )
 
 // Console I/O — infallible in practice
@@ -62,7 +62,7 @@ extern io_errno_message_raw() -> string
 // fd_open_write      → POSIX O_WRONLY|O_CREAT|O_TRUNC, mode 0644 /
 //                      Win _O_WRONLY|_O_CREAT|_O_TRUNC|_O_BINARY
 // fd_close           → close(fd) or _close(fd)
-// fd_write_n         → looped write, retries EINTR; 0 ok / -1 fail
+// fd_write           → looped write of a byte[], retries EINTR; 0 ok / -1 fail
 // fd_read_n          → looped read of up to `n` bytes; (bytes, count, err);
 //                      bytes is a refcounted AetherString (binary-safe;
 //                      embedded NULs survive)
@@ -72,7 +72,13 @@ extern io_errno_message_raw() -> string
 extern io_fd_open_read_tuple(path: string) -> (int, string)
 extern io_fd_open_write_tuple(path: string) -> (int, string)
 extern io_fd_close_raw(fd: int) -> string
-extern io_fd_write_n(fd: int, data: string, length: int) -> int
+// `data` is `ptr`, not `string`, so a byte[] slice reaches C as its raw
+// data pointer: a `string` parameter routes through the AetherString
+// unwrap, which would misread a binary payload that happens to begin with
+// the string header's magic bytes as a header. Not exported for the same
+// reason in reverse: a heap string passed to this `ptr` parameter would
+// write its header bytes. Use fd_write (#2301).
+extern io_fd_write_n(fd: int, data: ptr, length: int) -> int
 // Position 0 (the read buffer) is `@heap`: the C side returns a fresh
 // AetherString (string_new_with_length, "" on EOF/error) that the caller
 // owns and must release — without the annotation the destructured local
@@ -226,14 +232,30 @@ fd_close(fd: int) -> string {
     return io_fd_close_raw(fd)
 }
 
-// Write exactly `length` bytes from `data` to `fd`. Loops on partial
-// writes; retries EINTR on POSIX. `data` may contain NULs.
-// Returns 0 on success, -1 on error.
+// Write every byte of `data` to `fd` — the length travels with the slice
+// (#2301). Loops on partial writes; retries EINTR on POSIX. `data` may
+// contain NULs. Returns 0 on success, -1 on error. An empty slice writes
+// nothing and succeeds; a slice with no bound panics.
 //
-//     n = io.fd_write_n(fd, frame, frame_len)
+//     n = io.fd_write(fd, bytes.view(frame))
 //     if n != 0 { return "write failed" }
-fd_write_n(fd: int, data: string, length: int) -> int {
-    return io_fd_write_n(fd, data, length)
+//
+// For a string, take its byte view: `io.fd_write(fd, string.bytes(s))`,
+// and a prefix of it with `string.bytes(s)[0..n]`.
+//
+// Formerly `fd_write_n(fd, data, length)`. It is not `fd_write_n` any more
+// because a module function's C name is `<module>_<name>`, and
+// `io_fd_write_n` is the C function itself: the two names were one symbol,
+// so `io.fd_write_n(...)` always bound the extern, whatever this wrapper
+// said.
+fd_write(fd: int, data: byte[]) -> int {
+    if data.len < 0 {
+        panic("io.fd_write: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+    if data.len == 0 {
+        return 0
+    }
+    return io_fd_write_n(fd, data, data.len)
 }
 
 // Read up to `n` bytes from `fd`. Returns (bytes, count, err):
@@ -254,29 +276,37 @@ fd_read_n(fd: int, n: int) -> {
 // caller owns instead of minting a fresh string per call. Mirrors
 // `fs.pread_into`, which is the same shape for files.
 //
-// Returns (n, err). `n == 0` means EOF; `0 < n < length` is a normal SHORT
+// Returns (n, err). `n == 0` means EOF; `0 < n < buf.len` is a normal SHORT
 // READ, not an error — unlike `fd_read_n`, this returns as soon as any bytes
 // are available rather than looping to fill the buffer. That is precisely
 // what makes it usable on a live pipe: waiting to fill would stall until the
 // producer happened to send a whole buffer's worth.
 //
-// Loop until it returns 0 to consume a stream to EOF. `buf` comes from
-// `bytes.new(length)`; pass `bytes.data(buf)` and the same `length` used to
-// allocate it. Reading a frame at a time this way avoids ~250 MB/s of
-// allocator churn at 1080p30 versus the allocating form.
+// Reads at most `buf.len` bytes into `buf` (#2301): the slice is the
+// writable space, so its bound is the read limit and the bytes read are
+// `buf[0..n]`. Loop until it returns 0 to consume a stream to EOF. Reading a
+// frame at a time into one reused buffer avoids ~250 MB/s of allocator churn
+// at 1080p30 versus the allocating form. A zero-length slice is an error,
+// the same as a zero length was before; an unbounded one panics.
 //
-// GOTCHA: this writes straight into `data()`'s region, which does not update
-// the buffer's own length. Call `bytes.set_length(buf, n)` afterwards before
-// `bytes.to_string(buf, n)`, or you get an empty string back with no error:
+// For a `std.bytes` buffer, read into its writable storage and then publish
+// the count — writing through the view does not move the buffer's length,
+// and `bytes.to_string` reads that length:
 //
-//     n, e = io.fd_read_into(fd, bytes.data(buf), cap)
-//     _ = bytes.set_length(buf, n)          // <- required
+//     n, e = io.fd_read_into(fd, bytes.capacity_view(buf))
+//     _ = bytes.set_length(buf, n)          // <- required before to_string
 //     s = bytes.to_string(buf, n)
 //
-// A caller passing the bytes straight to another extern (the video case)
-// never needs this — it only matters when converting to a string.
-fd_read_into(fd: int, buf: ptr, length: int) -> int! {
-    n = io_fd_read_into_raw(fd, buf, length)
+// A caller passing the bytes straight on (another write, the video case)
+// uses `buf[0..n]` and never needs set_length.
+fd_read_into(fd: int, buf: byte[]) -> int! {
+    if buf.len < 0 {
+        panic("io.fd_read_into: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+    if buf.len == 0 {
+        return 0, "fd_read_into failed"
+    }
+    n = io_fd_read_into_raw(fd, buf, buf.len)
     if n < 0 {
         return 0, "fd_read_into failed"
     }

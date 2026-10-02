@@ -37,6 +37,7 @@
 import std.bytes
 import std.bits
 import std.intarr
+import std.mem
 
 exports(
     new_encryptor, new_decryptor, process_block, free,
@@ -122,13 +123,13 @@ t_round(z: int) -> int { return l_round(tau(z)) }
 t_key(z: int) -> int { return l_key(tau(z)) }
 
 // ---- key expansion ----
-new_ctx(key: ptr, keylen: int, encrypt: int) -> ptr {
+new_ctx(key: byte[], encrypt: int) -> ptr {
     rk = intarr_new_raw(32)
 
-    k0 = (bytes.get_be32(key, 0) ^ FK[0]) & 0xFFFFFFFF
-    k1 = (bytes.get_be32(key, 4) ^ FK[1]) & 0xFFFFFFFF
-    k2 = (bytes.get_be32(key, 8) ^ FK[2]) & 0xFFFFFFFF
-    k3 = (bytes.get_be32(key, 12) ^ FK[3]) & 0xFFFFFFFF
+    k0 = (sl_be32(key, 0) ^ FK[0]) & 0xFFFFFFFF
+    k1 = (sl_be32(key, 4) ^ FK[1]) & 0xFFFFFFFF
+    k2 = (sl_be32(key, 8) ^ FK[2]) & 0xFFFFFFFF
+    k3 = (sl_be32(key, 12) ^ FK[3]) & 0xFFFFFFFF
 
     // Generate the 32 encryption round keys into a scratch table first.
     enc_rk = intarr_new_raw(32)
@@ -161,11 +162,11 @@ new_ctx(key: ptr, keylen: int, encrypt: int) -> ptr {
     return c
 }
 
-new_encryptor(key: ptr, keylen: int) -> ptr {
-    return new_ctx(key, keylen, 1)
+new_encryptor(key: byte[]) -> ptr {
+    return new_ctx(key, 1)
 }
-new_decryptor(key: ptr, keylen: int) -> ptr {
-    return new_ctx(key, keylen, 0)
+new_decryptor(key: byte[]) -> ptr {
+    return new_ctx(key, 0)
 }
 free(ctx: ptr) {
     if ctx == null { return }
@@ -390,4 +391,10 @@ cbc_decrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> {
     out, err = pkcs7_unpad(raw)
     bytes.free(raw)
     return out, err
+}
+
+// A signed 32-bit big-endian read from a slice, matching bytes.get_be32.
+fn sl_be32(b: byte[], off: int) -> int {
+    int v = mem.read_u32_be(b, off)
+    return v
 }

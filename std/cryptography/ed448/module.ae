@@ -11,8 +11,8 @@
 // cofactor 4, group order L = 2^446 - 138180668...  (see order_L below).
 //
 //   publickey(seed57)             -> public57
-//   sign(seed57, msg, msg_len)    -> sig114
-//   verify(public57, msg, msg_len, sig114) -> int   (1 = valid, 0 = invalid)
+//   sign(seed57, msg)    -> sig114
+//   verify(public57, msg, sig114) -> int   (1 = valid, 0 = invalid)
 //
 // 57-byte keys, 114-byte signatures, all little-endian per RFC 8032. The hash
 // is SHAKE256 with a 114-byte (= 2b/8) output, prefixed with dom4 =
@@ -95,10 +95,12 @@ finv(a: ptr, p: ptr) -> ptr {
 }
 
 // ---- little-endian <-> *BN ----
-from_le(b: ptr, n: int) -> ptr {
+from_le(b: byte[]) -> ptr {
+    if b.len < 0 { panic("ed448.from_le: the `b` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = b.len
     be = bytes.new(n)
     i = 0
-    while i < n { bytes.set(be, i, bytes.get(b, n - 1 - i)); i = i + 1 }
+    while i < n { bytes.set(be, i, b[n - 1 - i]); i = i + 1 }
     r = bignum.from_bytes_unsigned(be, n)
     bytes.free(be)
     return r
@@ -317,7 +319,7 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *Pt {
     sign = (last >> 7) & 1
     ybody = bytes.new(56)
     bytes.copy_from_bytes(ybody, 0, b, 0, 56)
-    y = from_le(ybody, 56)
+    y = from_le(bytes.view(ybody)[0..56])
     bytes.free(ybody)
     if bignum.compare(y, p) >= 0 {
         bignum.free(y)
@@ -336,14 +338,14 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *Pt {
 // SHAKE256(data, out_len) over a bytes buffer -> out_len-byte bytes.
 // NOTE: sha3.final_bytes already frees the context internally, so we must NOT
 // also call free_ctx (that would double-free and segfault).
-shake(b: ptr, len: int, out_len: int) -> ptr {
+shake(b: byte[], out_len: int) -> ptr {
     ctx, err = sha3.new("shake256")
     // Same as ed25519.sha512: sha3.new answers (null, "allocation failed"),
     // and update_bytes cannot take a null context (#1947).
     if err != "" {
         return null
     }
-    sha3.update_bytes(ctx, b, len)
+    sha3.update(ctx, b)
     out = sha3.final_bytes(ctx, out_len)
     return out
 }
@@ -367,7 +369,7 @@ write_dom4(buf: ptr, off: int) -> int {
 
 // reduce a little-endian byte buffer mod L -> *BN
 reduce_mod_L(b: ptr, len: int) -> ptr {
-    n = from_le(b, len)
+    n = from_le(bytes.view(b)[0..len])
     L = order_L()
     r = bignum.mod(n, L)
     bignum.free(n); bignum.free(L)
@@ -378,14 +380,14 @@ reduce_mod_L(b: ptr, len: int) -> ptr {
 // first 57 bytes, pruned; prefix = h[57..114]. Returns the secret scalar *BN
 // and writes the 57-byte prefix into `prefix_out`.
 derive_secret(seed: ptr, prefix_out: ptr) -> ptr {
-    h = shake(seed, 57, 114)
+    h = shake(bytes.view(seed)[0..57], 114)
     s_le = bytes.new(57)
     bytes.copy_from_bytes(s_le, 0, h, 0, 57)
     // prune: clear low 2 bits of byte 0; clear byte 56; set bit 7 of byte 55.
     bytes.set(s_le, 0, bytes.get(s_le, 0) & 252)
     bytes.set(s_le, 56, 0)
     bytes.set(s_le, 55, bytes.get(s_le, 55) | 128)
-    s = from_le(s_le, 57)
+    s = from_le(bytes.view(s_le)[0..57])
     bytes.copy_from_bytes(prefix_out, 0, h, 57, 57)
     bytes.free(h); bytes.free(s_le)
     return s
@@ -409,7 +411,9 @@ publickey(seed: ptr) -> ptr {
 }
 
 // Sign msg with the 57-byte seed; returns a 114-byte signature.
-sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
+sign(seed: ptr, msg: byte[]) -> ptr {
+    if msg.len < 0 { panic("ed448.sign: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int msg_len = msg.len
     p = field_p(); d = curve_d(p)
     B = base_point()
     L = order_L()
@@ -424,8 +428,8 @@ sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
     rin = bytes.new(rin_len)
     off = write_dom4(rin, 0)
     bytes.copy_from_bytes(rin, off, prefix, 0, 57)
-    if msg_len > 0 { bytes.copy_from_bytes(rin, off + 57, msg, 0, msg_len) }
-    rh = shake(rin, rin_len, 114)
+    if msg_len > 0 { bytes.copy_from_slice(rin, off + 57, msg[0..msg_len]) }
+    rh = shake(bytes.view(rin)[0..rin_len], 114)
     r = reduce_mod_L(rh, 114)
 
     // R = r*B
@@ -438,8 +442,8 @@ sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
     off2 = write_dom4(kin, 0)
     bytes.copy_from_bytes(kin, off2, Renc, 0, 57)
     bytes.copy_from_bytes(kin, off2 + 57, Aenc, 0, 57)
-    if msg_len > 0 { bytes.copy_from_bytes(kin, off2 + 114, msg, 0, msg_len) }
-    kh = shake(kin, kin_len, 114)
+    if msg_len > 0 { bytes.copy_from_slice(kin, off2 + 114, msg[0..msg_len]) }
+    kh = shake(bytes.view(kin)[0..kin_len], 114)
     k = reduce_mod_L(kh, 114)
 
     // S = (r + k*s) mod L
@@ -462,14 +466,16 @@ sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
 
 // Verify a 114-byte signature over msg with the 57-byte public key.
 // Returns 1 if valid, 0 otherwise.
-verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
+verify(public: ptr, msg: byte[], sig: ptr) -> int {
+    if msg.len < 0 { panic("ed448.verify: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int msg_len = msg.len
     p = field_p(); d = curve_d(p)
     B = base_point()
     L = order_L()
 
     Renc = bytes.new(57); bytes.copy_from_bytes(Renc, 0, sig, 0, 57)
     Senc = bytes.new(57); bytes.copy_from_bytes(Senc, 0, sig, 57, 57)
-    S = from_le(Senc, 57)
+    S = from_le(bytes.view(Senc)[0..57])
 
     ok = 1
     if bignum.compare(S, L) >= 0 { ok = 0 }
@@ -487,8 +493,8 @@ verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
         off = write_dom4(kin, 0)
         bytes.copy_from_bytes(kin, off, Renc, 0, 57)
         bytes.copy_from_bytes(kin, off + 57, public, 0, 57)
-        if msg_len > 0 { bytes.copy_from_bytes(kin, off + 114, msg, 0, msg_len) }
-        kh = shake(kin, kin_len, 114)
+        if msg_len > 0 { bytes.copy_from_slice(kin, off + 114, msg[0..msg_len]) }
+        kh = shake(bytes.view(kin)[0..kin_len], 114)
         k = reduce_mod_L(kh, 114)
 
         // check: S*B == R + k*A

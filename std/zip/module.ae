@@ -8,7 +8,7 @@
 // fields. std.zlib supplies the decompression (raw inflate, RFC 1951); this
 // module parses the container.
 //
-// Buffer, not filesystem: `open(data, len)` reads a .zip already in memory —
+// Buffer, not filesystem: `open(data)` reads a .zip already in memory —
 // downloaded over HTTP, unpacked from another archive, embedded in a payload.
 // There is no path/fd here, matching std.json / std.cbor / std.resp. (An
 // extract-to-disk layer belongs on top and is a separate concern.)
@@ -23,7 +23,7 @@
 // entries, multi-disk archives, and other compression methods are REFUSED
 // with a clear error rather than silently mis-decoded.
 //
-//   ar, err = zip.open(data, len)
+//   ar, err = zip.open(bytes.view(buf))      // or string.bytes(s)
 //   n = zip.count(ar)
 //   i = 0
 //   while i < n {
@@ -38,6 +38,7 @@ import std.list
 import std.string
 import std.bytes
 import std.zlib
+import std.hash
 import std.io
 import std.fs
 
@@ -287,14 +288,21 @@ fn free_entries(lst: ptr) {
 
 // ---- public: open / close --------------------------------------------------
 
-// Open a ZIP archive held entirely in `data` (`len` bytes). Returns
-// (archive_ptr, "") or (null, err). The archive owns a copy of the bytes;
-// free it with close().
-open(data: string, len: int) -> (ptr, string) {
+// A slice with no bound (`p as byte[]`, `.len` -1) has no length.
+fn unbounded(fname: string) {
+    panic("zip.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+}
+
+// Open a ZIP archive held entirely in `data` (#2301: a byte[] whose length
+// travels with it — pass a string as `string.bytes(s)`, a `std.bytes` buffer
+// as `bytes.view(buf)`). Returns (archive_ptr, "") or (null, err). The
+// archive owns a copy of the bytes, so `data` need not outlive this call;
+// free the archive with close().
+open(data: byte[]) -> (ptr, string) {
+    if data.len < 0 { unbounded("open") }
+    int len = data.len
     if len < 22 { return null, "zip: too small to be a zip archive" }
-    buf = bytes.new(len)
-    bytes.set(buf, len - 1, 0)
-    bytes.copy_from_string(buf, 0, data, len)
+    buf = bytes.from_slice(data)
 
     eocd = find_eocd(buf, len)
     if eocd < 0 {
@@ -422,6 +430,11 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
     ar = arp as *ZipArchive
     b = ar.buf
     blen = ar.buf_len
+    // An index past the central directory has no entry: say so rather than
+    // read through the missing one.
+    if i < 0 || i >= list.size(ar.entries) {
+        return "", 0, "zip: no entry at index ${i}"
+    }
     e = entry_at(arp, i)
 
     if (e.flags & 1) == 1 {
@@ -455,7 +468,7 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
 
     // DEFLATE (method 8): the compressed span is a raw deflate stream.
     comp_str = slice_string(b, data_at, comp)
-    body, blen2, ie = zlib.inflate_raw(comp_str, comp)
+    body, blen2, ie = zlib.inflate_raw(string.bytes(comp_str)[0..comp])
     if string.equals(ie, "") != 1 {
         return "", 0, ie
     }
@@ -496,8 +509,8 @@ fn slice_string(b: ptr, off: int, len: int) -> string {
 // layer belongs on top and is a separate concern.
 //
 //   w = zip.writer_new()
-//   zip.writer_add(w, "a.txt", data_a, len_a, zip.METHOD_DEFLATE, 6)
-//   zip.writer_add(w, "b.bin", data_b, len_b, zip.METHOD_STORED, 0)
+//   zip.writer_add(w, "a.txt", string.bytes(data_a), zip.METHOD_DEFLATE, 6)
+//   zip.writer_add(w, "b.bin", string.bytes(data_b), zip.METHOD_STORED, 0)
 //   out, outlen, err = zip.writer_finish(w)   // `out` is a valid .zip
 //   zip.writer_free(w)
 //
@@ -551,6 +564,13 @@ fn w_put_str(w: *ZipWriter, s: string, len: int) {
     if len > 0 {
         bytes.copy_from_string(w.buf, w.pos, s, len)
         w.pos = w.pos + len
+    }
+}
+
+fn w_put_slice(w: *ZipWriter, s: byte[]) {
+    if s.len > 0 {
+        bytes.copy_from_slice(w.buf, w.pos, s)
+        w.pos = w.pos + s.len
     }
 }
 
@@ -623,24 +643,22 @@ writer_free(wp: ptr) {
     libc_free(w as ptr)
 }
 
-// Shared body of writer_add / writer_add_dir. `data`/`data_len` may be empty
-// (a directory, or a zero-length file). `method` is METHOD_STORED or
+// Shared body of writer_add / writer_add_dir. `data` may be empty (a
+// directory, or a zero-length file). `method` is METHOD_STORED or
 // METHOD_DEFLATE; `level` (0..9, or -1) applies to deflate. Returns "" or an
 // error. On error the writer is left unchanged (nothing was appended).
 fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
-    data: string, data_len: int, method: int, level: int) -> string {
-    if name_len < 0 || data_len < 0 { return "zip: negative length" }
+    data: byte[], method: int, level: int) -> string {
+    if data.len < 0 { unbounded("writer_add") }
+    int data_len = data.len
+    if name_len < 0 { return "zip: negative length" }
 
-    // CRC-32 is over the UNCOMPRESSED bytes; compute it from a scratch buffer.
+    // CRC-32 is over the UNCOMPRESSED bytes, read straight from the slice
+    // (#2301) — no scratch copy. Narrowing the unsigned 32-bit value into the
+    // `int` keeps exactly the bits the record stores.
     var crc: int = 0
     if data_len > 0 {
-        scratch = bytes.new(data_len)
-        bytes.set(scratch, data_len - 1, 0)
-        bytes.copy_from_string(scratch, 0, data, data_len)
-        crc = crc32_bytes(scratch, 0, data_len)
-        bytes.free(scratch)
-    } else {
-        crc = crc32_bytes(w.buf, 0, 0) // == 0 for empty input
+        crc = hash.crc32(data)
     }
 
     // Compress if asked, but never let a "compressed" entry come out larger
@@ -654,7 +672,7 @@ fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
     lfh_off = w.pos
 
     if method == METHOD_DEFLATE && data_len > 0 {
-        cc, cl, derr = zlib.deflate_raw(data, data_len, level)
+        cc, cl, derr = zlib.deflate_raw(data, level)
         if string.equals(derr, "") != 1 {
             // Static message (no interpolation): keeps this function's return
             // a borrowed string literal, so callers' `err` slots stay non-heap
@@ -672,12 +690,12 @@ fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
             // not smaller: keep stored, write the raw data
             comp_len = data_len
             w_put_local_header(w, use_method, crc, comp_len, data_len, name, name_len)
-            w_put_str(w, data, comp_len)
+            w_put_slice(w, data)
         }
         string.free(cc)
     } else {
         w_put_local_header(w, use_method, crc, comp_len, data_len, name, name_len)
-        w_put_str(w, data, comp_len)
+        w_put_slice(w, data)
     }
 
     // ---- record for the central directory ---------------------------------
@@ -697,14 +715,15 @@ fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
     return ""
 }
 
-// Add a file entry. `name` is the archive path (forward slashes). `method`
+// Add a file entry holding the bytes of `data` (#2301: pass a string as
+// `string.bytes(s)`). `name` is the archive path (forward slashes). `method`
 // is zip.METHOD_STORED or zip.METHOD_DEFLATE; `level` is 0..9 (or -1) and is
-// ignored for stored. Returns "" on success, else an error.
-writer_add(wp: ptr, name: string, data: string, data_len: int,
-    method: int, level: int) -> string {
+// ignored for stored. Returns "" on success, else an error. The bytes are
+// copied into the archive, so `data` need not outlive the call.
+writer_add(wp: ptr, name: string, data: byte[], method: int, level: int) -> string {
     if wp == null { return "zip: null writer" }
     w = wp as *ZipWriter
-    return w_add_entry(w, name, string_length(name), data, data_len, method, level)
+    return w_add_entry(w, name, string_length(name), data, method, level)
 }
 
 // Add a directory entry (a name ending in "/", zero-length, stored). A "/"
@@ -720,7 +739,7 @@ writer_add_dir(wp: ptr, name: string) -> string {
         nlen = nlen + 1
         owns = 1
     }
-    err = w_add_entry(w, dname, nlen, "", 0, METHOD_STORED, 0)
+    err = w_add_entry(w, dname, nlen, string.bytes(""), METHOD_STORED, 0)
     if owns == 1 { string.free(dname) }
     return err
 }
@@ -851,10 +870,9 @@ writer_finish(wp: ptr) -> {
 
 // One-shot convenience: build a single-entry archive. For multiple entries
 // use writer_new / writer_add / writer_finish.
-create(name: string, data: string, data_len: int, method: int, level: int)
--> {
+create(name: string, data: byte[], method: int, level: int) -> {
     w = writer_new()
-    err = writer_add(w, name, data, data_len, method, level)
+    err = writer_add(w, name, data, method, level)
     if string.equals(err, "") == 1 {
         // Heap-returning arm first: writer_finish's `out` is an owned string,
         // and pinning the first tuple slot to it here keeps the caller's slot
@@ -970,7 +988,7 @@ add_dir_tree(wp: ptr, fs_root: string, arc_prefix: string, method: int, level: i
                     string.free(pfxs)
                     ename_owned = 1
                 }
-                aerr = writer_add(ctx.w, ename, data, dlen, ctx.method, ctx.level)
+                aerr = writer_add(ctx.w, ename, string.bytes(data)[0..dlen], ctx.method, ctx.level)
                 if ename_owned == 1 { string.free(ename) }
                 string.free(data)
                 if string.equals(aerr, "") != 1 {
@@ -1008,11 +1026,11 @@ add_dir_tree(wp: ptr, fs_root: string, arc_prefix: string, method: int, level: i
 // The reader gives every entry decompressed and CRC-checked; extract walks the
 // entries and writes them under a destination directory, refusing the paths
 // and ratios that make archive extraction dangerous. Buffer-in, mirroring
-// open(): extract(data, len, dest, opts). extract_file() is the convenience
+// open(): extract(data, dest, opts). extract_file() is the convenience
 // that reads a .zip off disk first.
 //
 //   opts = zip.default_extract_options()
-//   err = zip.extract(data, len, "out", opts)   // "" on success
+//   err = zip.extract(data, "out", opts)   // "" on success
 //
 // The guards mirror std.tar's (a zip carries no symlink or device entries in
 // the base format, so the surface is: unsafe names + zip-bomb limits):
@@ -1083,12 +1101,12 @@ fn last_slash(s: string, n: int) -> int {
     return idx
 }
 
-// Extract the archive held in `data` (`len` bytes) under `dest_dir`, applying
-// `options`. Returns "" on success, else a descriptive error; on error, files
+// Extract the archive held in `data` (a byte[], #2301) under `dest_dir`,
+// applying `options`. Returns "" on success, else a descriptive error; on error, files
 // written so far are left in place (as std.tar does). The destination is
 // created if absent.
-extract(data: string, len: int, dest_dir: string, options: ExtractOptions) -> string {
-    ar, oerr = open(data, len)
+extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
+    ar, oerr = open(data)
     if string.equals(oerr, "") != 1 { return oerr }
 
     derr = fs.mkdir_p(dest_dir)
@@ -1159,7 +1177,7 @@ extract(data: string, len: int, dest_dir: string, options: ExtractOptions) -> st
                     if string.equals(rerr, "") != 1 {
                         out_err = rerr
                     } else {
-                        werr = fs.write_binary(full, body, blen)
+                        werr = fs.write_binary(full, string.bytes(body)[0..blen])
                         if string.equals(werr, "") != 1 {
                             out_err = "zip: write failed for '${name}': ${werr}"
                         }
@@ -1188,7 +1206,7 @@ extract_file(zip_path: string, dest_dir: string, options: ExtractOptions) -> str
     if string.equals(rerr, "") != 1 {
         return "zip: cannot read '${zip_path}': ${rerr}"
     }
-    err = extract(data, len, dest_dir, options)
+    err = extract(string.bytes(data)[0..len], dest_dir, options)
     string.free(data)
     return err
 }

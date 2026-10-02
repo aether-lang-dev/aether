@@ -1,0 +1,164 @@
+// Regression test for #2301's structured-format tranche: std.zip, std.resp
+// and std.http1 take their input as a byte[] whose length travels with it.
+//
+//   zip   — open / extract / create / writer_add. The writer now takes each
+//           entry's CRC-32 straight from the slice (no scratch copy), and the
+//           reader verifies every CRC, so a binary entry has to round-trip
+//           and a sub-slice entry has to hold only its own bytes.
+//   resp  — new_bulk / parse_prefix. The parser indexes the slice directly;
+//           a frame cut short by the slice's bound is INCOMPLETE, not read
+//           past.
+//   http1 — feed takes a byte[]; body() is a byte[] view of the decoded body.
+//   strbuilder.append_n — its C side re-checked an already-unwrapped payload
+//           for a string header, so binary content beginning with the header
+//           magic was copied from a bogus pointer (found through resp.encode).
+//
+// The binary payload begins with the AetherString header magic and carries
+// NULs and CRLFs, the bytes a string-shaped path gets wrong.
+
+import std.bytes
+import std.http1
+import std.resp
+import std.strbuilder
+import std.string
+import std.zip
+import std.zlib
+
+extern exit(code: int)
+
+const N = 24
+
+fn check(cond: bool, what: string) -> int {
+    if cond {
+        println("  PASS: ${what}")
+        return 0
+    }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+// `got` (n bytes) holds exactly the bytes of `want`.
+fn same_bytes(got: string, n: int, want: byte[]) -> bool {
+    if n != want.len {
+        return false
+    }
+    g = string.bytes(got)[0..n]
+    i = 0
+    while i < n {
+        if g[i] != want[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+main() {
+    println("=== #2301 format slices ===")
+    fails = 0
+
+    payload = make([]byte, N)
+    payload[0] = 0xDE
+    payload[1] = 0xC0
+    payload[2] = 0x57
+    payload[3] = 0xAE
+    payload[4] = 0
+    payload[5] = 13
+    payload[6] = 10
+    i = 7
+    while i < N {
+        payload[i] = 65 + i
+        i = i + 1
+    }
+
+    // ---- zip -----------------------------------------------------------
+    // A deflated entry needs zlib; a build without it (the zig cross build
+    // for Windows) refuses that one entry, and the archive holds the others.
+    has_zlib = zlib.available() == 1
+    w = zip.writer_new()
+    e1 = zip.writer_add(w, "bin.dat", payload, zip.METHOD_STORED, 0)
+    e2 = zip.writer_add(w, "deflated.dat", payload, zip.METHOD_DEFLATE, 9)
+    e3 = zip.writer_add(w, "head.dat", payload[0..7], zip.METHOD_STORED, 0)
+    archive, alen, ferr = zip.writer_finish(w)
+    zip.writer_free(w)
+    fails = fails + check(e1 == "" && e3 == "" && ferr == "", "writer_add accepts binary slices")
+    if has_zlib {
+        fails = fails + check(e2 == "", "writer_add deflates a binary slice")
+    } else {
+        fails = fails + check(e2 != "", "without zlib, a deflated entry is refused")
+    }
+
+    entries = 2
+    head_index = 1
+    if has_zlib {
+        entries = 3
+        head_index = 2
+    }
+    ar, oerr = zip.open(string.bytes(archive)[0..alen])
+    fails = fails + check(oerr == "" && zip.count(ar) == entries, "open reads the archive back from a view")
+    b1, n1, r1 = zip.entry_read(ar, 0)
+    fails = fails + check(r1 == "" && same_bytes(b1, n1, payload), "a stored binary entry round-trips (CRC verified on read)")
+    if has_zlib {
+        b2, n2, r2 = zip.entry_read(ar, 1)
+        fails = fails + check(r2 == "" && same_bytes(b2, n2, payload), "a deflated binary entry round-trips (CRC verified on read)")
+    }
+    b3, n3, r3 = zip.entry_read(ar, head_index)
+    fails = fails + check(r3 == "" && same_bytes(b3, n3, payload[0..7]), "a sub-slice entry holds only its own 7 bytes")
+    _bx, nx, rx = zip.entry_read(ar, entries)
+    fails = fails + check(rx != "" && nx == 0, "an index past the last entry is an error, not a crash")
+    zip.close(ar)
+
+    _bad, berr = zip.open(string.bytes("not a zip, not even close!"))
+    fails = fails + check(berr != "", "open still refuses non-zip bytes")
+
+    // ---- resp ----------------------------------------------------------
+    bulk = resp.new_bulk(payload)
+    wire, werr = resp.encode(bulk)
+    resp.free_value(bulk)
+    fails = fails + check(werr == "", "new_bulk + encode of a binary payload")
+    wn = string.length(wire)
+    v, used, perr = resp.parse_prefix(string.bytes(wire))
+    fails = fails + check(perr == "" && v != null && used == wn, "parse_prefix consumes the whole frame")
+    if v != null {
+        sv = resp.str_value(v)
+        fails = fails + check(same_bytes(sv, string.length(sv), payload), "the bulk payload round-trips byte for byte")
+        resp.free_value(v)
+    }
+    // The same frame cut one byte short by the slice's bound is incomplete.
+    cut, cused, cerr = resp.parse_prefix(string.bytes(wire)[0..wn - 1])
+    fails = fails + check(cut == null && cused == 0 && cerr == "", "a frame cut short by the slice bound is INCOMPLETE")
+
+    // ---- strbuilder.append_n on binary content -------------------------
+    bin = bytes.string_from_slice(payload)
+    sb = strbuilder.new(8)
+    _ = strbuilder.append_n(sb, bin, N)
+    built = strbuilder.finish(sb)
+    fails = fails + check(same_bytes(built, string.length(built), payload), "strbuilder.append_n copies a header-magic payload verbatim")
+
+    // ---- http1 ---------------------------------------------------------
+    r = http1.response_new()
+    head = "HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\n"
+    s1 = http1.feed(r, string.bytes(head), 0)
+    fails = fails + check(s1 == "incomplete", "headers alone are incomplete")
+    s2 = http1.feed(r, payload[0..10], 0)
+    fails = fails + check(s2 == "incomplete", "a partial body is incomplete")
+    s3 = http1.feed(r, payload[10..N], 0)
+    body = http1.body(r)
+    ok_body = s3 == "" && body.len == N
+    if ok_body {
+        k = 0
+        while k < N {
+            if body[k] != payload[k] { ok_body = false }
+            k = k + 1
+        }
+    }
+    fails = fails + check(ok_body, "a binary body fed in two sub-slices comes back through body()")
+    http1.response_free(r)
+
+    free(payload)
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("All #2301 format slice checks passed")
+}

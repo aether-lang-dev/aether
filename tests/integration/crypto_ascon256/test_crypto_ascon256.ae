@@ -14,6 +14,7 @@
 import std.cryptography.ascon256
 import std.bytes
 import std.io
+import std.string
 
 check(label: string, got: string, want: string) -> int {
     if got == want {
@@ -31,7 +32,7 @@ main() {
 
     // Empty message — the published NIST SP 800-232 Ascon-Hash256 reference.
     fails = fails + check("empty",
-        ascon256.ascon256_hex("", 0),
+        ascon256.ascon256_hex(string.bytes("")),
         "0b3be5850f2f6b98caf29f8fdea89b64a1fa70aa249b8f839bd53baa304d92b2")
 
     // Single 0x00 byte (fed as bytes to avoid NUL string truncation).
@@ -42,7 +43,7 @@ main() {
         println("FAIL: ascon256.new failed: ${e0}")
         fails = fails + 1
     } else {
-        ascon256.update_bytes(c0, b0, 1)
+        ascon256.update(c0, bytes.view(b0)[0..1])
         fails = fails + check("byte 0x00", ascon256.final_hex(c0),
             "0728621035af3ed2bca03bf6fde900f9456f5330e4b5ee23e7f6a1e70291bc80")
     }
@@ -57,7 +58,7 @@ main() {
         println("FAIL: ascon256.new failed: ${e1}")
         fails = fails + 1
     } else {
-        ascon256.update_bytes(c1, b1, 2)
+        ascon256.update(c1, bytes.view(b1)[0..2])
         fails = fails + check("bytes 0x00 0x01", ascon256.final_hex(c1),
             "6115e7c9c4081c2797fc8fe1bc57a836afa1c5381e556dd583860ca2dfb48dd2")
     }
@@ -67,7 +68,7 @@ main() {
     // several times — one-shot digest.
     fox = "The quick brown fox jumps over the lazy dog"
     fails = fails + check("fox one-shot",
-        ascon256.ascon256_hex(fox, 43),
+        ascon256.ascon256_hex(string.bytes(fox)[0..43]),
         "23414503bf4bde7ad0e85aec94c22ae2d7cd807996b537f9564fc2974053f139")
 
     // Same message split across two updates at a non-block-aligned boundary
@@ -77,8 +78,8 @@ main() {
         println("FAIL: ascon256.new failed: ${es}")
         fails = fails + 1
     } else {
-        ascon256.update(cs, "The quick brown fox ", 20)
-        ascon256.update(cs, "jumps over the lazy dog", 23)
+        ascon256.update(cs, string.bytes("The quick brown fox "))
+        ascon256.update(cs, string.bytes("jumps over the lazy dog"))
         fails = fails + check("fox split-streaming", ascon256.final_hex(cs),
             "23414503bf4bde7ad0e85aec94c22ae2d7cd807996b537f9564fc2974053f139")
     }

@@ -66,7 +66,7 @@ main() {
     println("=== std.zip ===")
 
     data, len = from_hex(ZIP_HEX)
-    ar, oerr = zip.open(data, len)
+    ar, oerr = zip.open(string.bytes(data)[0..len])
     if string.equals(oerr, "") != 1 { println("open FAIL: ${oerr}"); exit(1) }
 
     check_int("count", zip.count(ar), 2)
@@ -98,7 +98,7 @@ main() {
     zip.close(ar)
 
     // not a zip
-    _na, naerr = zip.open("plainly not a zip archive at all, no sir", 39)
+    _na, naerr = zip.open(string.bytes("plainly not a zip archive at all, no sir")[0..39])
     if string.equals(naerr, "") == 0 { println("  ok   non-zip rejected") }
     else { println("  FAIL non-zip accepted"); fails = fails + 1 }
 
@@ -113,14 +113,14 @@ main() {
 
     w = zip.writer_new()
     check("w add dir", zip.writer_add_dir(w, "d"), "")
-    check("w add stored", zip.writer_add(w, "d/s.txt", s_body, s_bl, zip.METHOD_STORED, 0), "")
-    check("w add deflate", zip.writer_add(w, "big.txt", w_body, w_bl, zip.METHOD_DEFLATE, 9), "")
-    check("w add empty", zip.writer_add(w, "empty.dat", "", 0, zip.METHOD_DEFLATE, 6), "")
+    check("w add stored", zip.writer_add(w, "d/s.txt", string.bytes(s_body)[0..s_bl], zip.METHOD_STORED, 0), "")
+    check("w add deflate", zip.writer_add(w, "big.txt", string.bytes(w_body)[0..w_bl], zip.METHOD_DEFLATE, 9), "")
+    check("w add empty", zip.writer_add(w, "empty.dat", string.bytes(""), zip.METHOD_DEFLATE, 6), "")
     out, outlen, ferr = zip.writer_finish(w)
     check("w finish err", ferr, "")
     check_int("w archive nonempty", outlen > 0, 1)
 
-    war, woerr = zip.open(out, outlen)
+    war, woerr = zip.open(string.bytes(out)[0..outlen])
     if string.equals(woerr, "") != 1 { println("  FAIL writer output not readable: ${woerr}"); fails = fails + 1 }
     else {
         check_int("w count", zip.count(war), 4)
@@ -158,9 +158,9 @@ main() {
     // one-shot create(): a single deflate entry, read straight back
     c_body = "one-shot create: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     c_bl = string.length(c_body)
-    cout, coutlen, cerr = zip.create("only.txt", c_body, c_bl, zip.METHOD_DEFLATE, 6)
+    cout, coutlen, cerr = zip.create("only.txt", string.bytes(c_body)[0..c_bl], zip.METHOD_DEFLATE, 6)
     check("create err empty", cerr, "")
-    car, caoerr = zip.open(cout, coutlen)
+    car, caoerr = zip.open(string.bytes(cout)[0..coutlen])
     if string.equals(caoerr, "") != 1 { println("  FAIL create output not readable: ${caoerr}"); fails = fails + 1 }
     else {
         check_int("create count", zip.count(car), 1)
@@ -179,10 +179,10 @@ main() {
     // Build a small source tree.
     src = string.concat(base, "/src")
     fs.mkdir_p("${src}/sub/deep")
-    fs.write_binary("${src}/a.txt", "alpha\n", 6)
+    fs.write_binary("${src}/a.txt", string.bytes("alpha\n"))
     big = "beta beta beta beta beta beta beta beta beta beta beta beta beta\n"
-    fs.write_binary("${src}/sub/b.txt", big, string.length(big))
-    fs.write_binary("${src}/sub/deep/c.txt", "gamma\n", 6)
+    fs.write_binary("${src}/sub/b.txt", string.bytes(big))
+    fs.write_binary("${src}/sub/deep/c.txt", string.bytes("gamma\n"))
 
     // Pack it, prefixing entries with "pkg".
     tw = zip.writer_new()
@@ -192,7 +192,7 @@ main() {
     check("tree finish err empty", tferr, "")
 
     // Confirm the three files landed (order is fs.walk's, so check by find).
-    tar2, tarerr = zip.open(tout, toutlen)
+    tar2, tarerr = zip.open(string.bytes(tout)[0..toutlen])
     if string.equals(tarerr, "") != 1 { println("  FAIL tree archive unreadable: ${tarerr}"); fails = fails + 1 }
     else {
         check_int("tree count", zip.count(tar2), 3)
@@ -205,7 +205,7 @@ main() {
     // Extract it back and verify content.
     xopts = zip.default_extract_options()
     xdest = string.concat(base, "/out")
-    xerr = zip.extract(tout, toutlen, xdest, xopts)
+    xerr = zip.extract(string.bytes(tout)[0..toutlen], xdest, xopts)
     check("extract err empty", xerr, "")
     check_int("extracted a.txt exists", fs.exists("${xdest}/pkg/a.txt"), 1)
     check_int("extracted nested exists", fs.exists("${xdest}/pkg/sub/deep/c.txt"), 1)
@@ -217,8 +217,8 @@ main() {
 
     // extract_file convenience: write the archive, extract from the path.
     zpath = string.concat(base, "/pkg.zip")
-    cf_out, cf_len, _cfe = zip.create("hello.txt", "world\n", 6, zip.METHOD_STORED, 0)
-    fs.write_binary(zpath, cf_out, cf_len)
+    cf_out, cf_len, _cfe = zip.create("hello.txt", string.bytes("world\n"), zip.METHOD_STORED, 0)
+    fs.write_binary(zpath, string.bytes(cf_out)[0..cf_len])
     string.free(cf_out)
     ef_err = zip.extract_file(zpath, "${base}/out2", xopts)
     check("extract_file err empty", ef_err, "")
@@ -226,9 +226,9 @@ main() {
 
     // Security: a traversal entry must be refused, and nothing written.
     ew = zip.writer_new()
-    zip.writer_add(ew, "../escape.txt", "pwned", 5, zip.METHOD_STORED, 0)
+    zip.writer_add(ew, "../escape.txt", string.bytes("pwned"), zip.METHOD_STORED, 0)
     eout, eoutlen, _ef = zip.writer_finish(ew)
-    e_err = zip.extract(eout, eoutlen, "${base}/evil", xopts)
+    e_err = zip.extract(string.bytes(eout)[0..eoutlen], "${base}/evil", xopts)
     check_int("traversal rejected", string.equals(e_err, "") == 0, 1)
     check_int("nothing escaped", fs.exists("${base}/escape.txt"), 0)
     string.free(eout)
@@ -236,9 +236,9 @@ main() {
 
     // Absolute path must be refused too.
     aw = zip.writer_new()
-    zip.writer_add(aw, "/tmp/pwn", "x", 1, zip.METHOD_STORED, 0)
+    zip.writer_add(aw, "/tmp/pwn", string.bytes("x"), zip.METHOD_STORED, 0)
     aout, aoutlen, _af = zip.writer_finish(aw)
-    a_err = zip.extract(aout, aoutlen, "${base}/evil2", xopts)
+    a_err = zip.extract(string.bytes(aout)[0..aoutlen], "${base}/evil2", xopts)
     check_int("absolute path rejected", string.equals(a_err, "") == 0, 1)
     string.free(aout)
     zip.writer_free(aw)

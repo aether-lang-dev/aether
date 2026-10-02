@@ -30,9 +30,9 @@
 //
 //   cert_verify_content(context, transcript_hash, th_len) -> (ptr, int)
 //       build the RFC 8446 §4.4.3 signed content; caller frees the buffer.
-//   verify_cert_verify(scheme, pubx, puby, transcript_hash, th_len, sig, sig_len) -> int
+//   verify_cert_verify(scheme, pubx, puby, transcript_hash, sig) -> int
 //       ECDSA-P256 / Ed25519 dispatch (1 = valid, 0 = invalid).
-//   parse_certificate(der, len, out) -> string
+//   parse_certificate(der, out) -> string
 //       split a DER Certificate into a LeafCert (tbs/spki/sig views).
 
 import std.bytes
@@ -91,14 +91,14 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 // Build the RFC 8446 §4.4.3 signed content:
 //   64 bytes of 0x20  ||  context-string  ||  0x00  ||  transcript_hash
 // Returns the content buffer (caller frees) and its length.
-cert_verify_content(transcript_hash: ptr, th_len: int) -> (ptr, int) {
-    return cert_verify_content_ctx("TLS 1.3, server CertificateVerify", transcript_hash, th_len)
+cert_verify_content(transcript_hash: byte[]) -> (ptr, int) {
+    return cert_verify_content_ctx("TLS 1.3, server CertificateVerify", transcript_hash)
 }
 
 // The CLIENT CertificateVerify content (mTLS): identical shape but the context
 // string is "TLS 1.3, client CertificateVerify" (RFC 8446 §4.4.3).
-client_cert_verify_content(transcript_hash: ptr, th_len: int) -> (ptr, int) {
-    return cert_verify_content_ctx("TLS 1.3, client CertificateVerify", transcript_hash, th_len)
+client_cert_verify_content(transcript_hash: byte[]) -> (ptr, int) {
+    return cert_verify_content_ctx("TLS 1.3, client CertificateVerify", transcript_hash)
 }
 
 // Sign a client CertificateVerify with an ECDSA-P256 client key (mTLS). Builds
@@ -107,9 +107,9 @@ client_cert_verify_content(transcript_hash: ptr, th_len: int) -> (ptr, int) {
 // ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } (caller frees). This is the
 // signature that goes in the client CertificateVerify handshake message under
 // SignatureScheme ecdsa_secp256r1_sha256 (0x0403).
-sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: ptr, th_len: int, k: ptr) -> ptr {
-    content, clen = client_cert_verify_content(transcript_hash, th_len)
-    digest = sha256_of_bytes(content, clen)
+sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[], k: ptr) -> ptr {
+    content, clen = client_cert_verify_content(transcript_hash)
+    digest = sha256_of_bytes(bytes.view(content)[0..clen])
     r32, s32 = p256.ecdsa_sign(priv, digest, k)
     // DER-encode as SEQUENCE { INTEGER r, INTEGER s }.
     rbn = bignum.from_bytes_unsigned(r32, 32)
@@ -134,9 +134,9 @@ sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: ptr, th_len: int,
 // §4.4.3 server content ("TLS 1.3, server CertificateVerify"), SHA-256 hashes it,
 // ECDSA-signs with `priv` (32-byte scalar) and per-message nonce `k` (32 bytes),
 // and returns the DER ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } (caller frees).
-sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: ptr, th_len: int, k: ptr) -> ptr {
-    content, clen = cert_verify_content(transcript_hash, th_len)
-    digest = sha256_of_bytes(content, clen)
+sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[], k: ptr) -> ptr {
+    content, clen = cert_verify_content(transcript_hash)
+    digest = sha256_of_bytes(bytes.view(content)[0..clen])
     r32, s32 = p256.ecdsa_sign(priv, digest, k)
     rbn = bignum.from_bytes_unsigned(r32, 32)
     sbn = bignum.from_bytes_unsigned(s32, 32)
@@ -156,7 +156,9 @@ sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: ptr, th_len: int,
 
 // Generic §4.4.3 signed content with an explicit context string:
 //   64 bytes of 0x20 || ctx_str || 0x00 || transcript_hash
-fn cert_verify_content_ctx(ctx_str: string, transcript_hash: ptr, th_len: int) -> (ptr, int) {
+fn cert_verify_content_ctx(ctx_str: string, transcript_hash: byte[]) -> (ptr, int) {
+    if transcript_hash.len < 0 { panic("tls13_cert.cert_verify_content_ctx: the `transcript_hash` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int th_len = transcript_hash.len
     ctx_len = string.length(ctx_str)
     total = 64 + ctx_len + 1 + th_len
     out = bytes.new(total)
@@ -177,7 +179,7 @@ fn cert_verify_content_ctx(ctx_str: string, transcript_hash: ptr, th_len: int) -
     off = off + 1
     j = 0
     while j < th_len {
-        bytes.set(out, off + j, bytes.get(transcript_hash, j) & 0xFF)
+        bytes.set(out, off + j, transcript_hash[j] & 0xFF)
         j = j + 1
     }
     return out, total
@@ -190,10 +192,12 @@ fn cert_verify_content_ctx(ctx_str: string, transcript_hash: ptr, th_len: int) -
 // ECDSA-DER driver exercises this exact parse path — the DER-encoded
 // signature family probes precisely the laxities a hand-rolled test
 // parser would mask.
-split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
+split_ecdsa_sig(sig: byte[], coord: int) -> (ptr, ptr, string) {
+    if sig.len < 0 { panic("tls13_cert.split_ecdsa_sig: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sig_len = sig.len
     view = bytes.new(sig_len)
     if sig_len > 0 { bytes.set(view, sig_len - 1, 0) }
-    bytes.copy_from_bytes(view, 0, sig, 0, sig_len)
+    bytes.copy_from_slice(view, 0, sig[0..sig_len])
     rdr = asn1.reader_new(view)
     sub, body, serr = asn1.read_sequence(rdr)
     if string.equals(serr, "") != 1 {
@@ -242,8 +246,11 @@ split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
         rilen = bytes.length(ri)
         silen = bytes.length(si)
         inner = bytes.new(rilen + silen)
-        bytes.copy_from_bytes(inner, 0, ri, 0, rilen)
-        bytes.copy_from_bytes(inner, rilen, si, 0, silen)
+        if rilen + silen > 0 { bytes.set(inner, rilen + silen - 1, 0) }
+        i = 0
+        while i < rilen { bytes.set(inner, i, bytes.get(ri, i)); i = i + 1 }
+        i = 0
+        while i < silen { bytes.set(inner, rilen + i, bytes.get(si, i)); i = i + 1 }
         // encode_sequence consumes `inner` (wrap_tlv frees its content
         // argument), so only ri/si/reenc are ours to free here.
         reenc = asn1.encode_sequence(inner)
@@ -252,7 +259,7 @@ split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
         } else {
             j = 0
             while j < sig_len {
-                if bytes.get(reenc, j) != bytes.get(sig, j) { strict = 0 }
+                if bytes.get(reenc, j) != sig[j] { strict = 0 }
                 j = j + 1
             }
         }
@@ -309,10 +316,10 @@ fn bn_to_fixed(v: ptr, width: int) -> ptr {
 
 // SHA-256 of a std.bytes buffer (the streaming update_bytes path — the
 // one-shot sha2.sha256_bytes takes a STRING, not a bytes buffer).
-fn sha256_of_bytes(data: ptr, len: int) -> ptr {
+fn sha256_of_bytes(data: byte[]) -> ptr {
     ctx, err = sha2.new("sha256")
     if err != "" { return null }
-    sha2.update_bytes(ctx, data, len)
+    sha2.update(ctx, data)
     return sha2.final_bytes(ctx)
 }
 
@@ -324,16 +331,16 @@ fn sha256_of_bytes(data: ptr, len: int) -> ptr {
 //   transcript_hash   the transcript hash through the server Certificate msg
 //   sig, sig_len      the CertificateVerify signature bytes
 // Returns 1 if valid, 0 otherwise.
-verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_len: int, sig: ptr, sig_len: int) -> int {
-    content, clen = cert_verify_content(transcript_hash, th_len)
+verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], sig: byte[]) -> int {
+    content, clen = cert_verify_content(transcript_hash)
 
     result = 0
     if scheme == SCHEME_ECDSA_P256_SHA256 {
         // ECDSA over SHA-256(content); DER sig -> (r,s).
         // NOTE: sha2.sha256_bytes takes a STRING; content is a std.bytes
         // buffer, so we must hash it through the streaming update_bytes path.
-        digest = sha256_of_bytes(content, clen)
-        r32, s32, serr = split_ecdsa_sig(sig, sig_len, 32)
+        digest = sha256_of_bytes(bytes.view(content)[0..clen])
+        r32, s32, serr = split_ecdsa_sig(sig, 32)
         if string.equals(serr, "") == 1 {
             result = p256.ecdsa_verify(pubx, puby, digest, r32, s32)
             bytes.free(r32)
@@ -344,8 +351,8 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
     if scheme == SCHEME_ECDSA_P384_SHA384 {
         // ECDSA over SHA-384(content) on a P-384 leaf key; pubx/puby are the
         // 48-byte affine coordinates. DER sig -> (r,s), each 48 bytes.
-        digest = sha384_of_bytes(content, clen)
-        r48, s48, serr = split_ecdsa_sig(sig, sig_len, 48)
+        digest = sha384_of_bytes(bytes.view(content)[0..clen])
+        r48, s48, serr = split_ecdsa_sig(sig, 48)
         if string.equals(serr, "") == 1 {
             result = p384.ecdsa_verify(pubx, puby, digest, r48, s48)
             bytes.free(r48)
@@ -355,7 +362,7 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
     }
     if scheme == SCHEME_ED25519 {
         // Ed25519 signs the raw content (hashes internally). pubx = 32-byte key.
-        result = ed25519.verify(pubx, content, clen, sig)
+        result = ed25519.verify(pubx, bytes.view(content)[0..clen], sig)
     }
 
     bytes.free(content)
@@ -367,11 +374,11 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
 // comes from the leaf SPKI (RSAPublicKey SEQUENCE { n, e }). PSS parameters for
 // this scheme are fixed: SHA-256 for both the message hash and MGF1, salt
 // length = hash length = 32. Returns 1 if valid, 0 otherwise.
-verify_cert_verify_rsa_pss(spki_key: ptr, spki_len: int, transcript_hash: ptr, th_len: int, sig: ptr, sig_len: int) -> int {
-    n, e, perr = parse_rsa_spki(spki_key, spki_len)
+verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[]) -> int {
+    n, e, perr = parse_rsa_spki(spki_key)
     if string.equals(perr, "") != 1 { return 0 }
-    content, clen = cert_verify_content(transcript_hash, th_len)
-    digest = sha256_of_bytes(content, clen)
+    content, clen = cert_verify_content(transcript_hash)
+    digest = sha256_of_bytes(bytes.view(content)[0..clen])
     k = rsa.key_from_components(n, e, null)
     result = rsa.verify_pss(k, digest, sig, 32)
     rsa.key_free(k) // frees n, e
@@ -442,7 +449,9 @@ struct LeafCert {
 // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
 // Positionally walks tbsCertificate to extract the full TBS DER, validity,
 // issuer/subject DNs, SAN dNSNames, and the subject public key.
-parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
+parse_certificate(der: byte[], out: *LeafCert) -> string {
+    if der.len < 0 { panic("tls13_cert.parse_certificate: the `der` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = der.len
     out.tbs = null
     out.tbs_len = 0
     out.sig_alg_oid = null
@@ -464,7 +473,7 @@ parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
-    bytes.copy_from_bytes(view, 0, der, 0, len)
+    bytes.copy_from_slice(view, 0, der[0..len])
 
     top = asn1.reader_new(view)
 
@@ -1063,9 +1072,14 @@ const OCSP_ERROR = 3 // malformed / unsuccessful responseStatus
 // Read a DER TLV header at buf[p]: returns (tag, content_offset, content_len,
 // next_offset) or (-1,...) on truncation. Handles short + long-form lengths.
 fn der_tlv(buf: ptr, p: int, end: int) -> (int, int, int, int) {
+    return der_tlv_slice(bytes.view(buf), p, end)
+}
+
+// The slice form of der_tlv (#2301); der_tlv views its std.bytes handle into it.
+fn der_tlv_slice(buf: byte[], p: int, end: int) -> (int, int, int, int) {
     if p + 2 > end { return -1, 0, 0, 0 }
-    tag = bytes.get(buf, p) & 0xFF
-    lb = bytes.get(buf, p + 1) & 0xFF
+    tag = buf[p] & 0xFF
+    lb = buf[p + 1] & 0xFF
     q = p + 2
     clen = 0
     if lb < 0x80 {
@@ -1074,7 +1088,7 @@ fn der_tlv(buf: ptr, p: int, end: int) -> (int, int, int, int) {
         nbytes = lb & 0x7F
         if q + nbytes > end { return -1, 0, 0, 0 }
         i = 0
-        while i < nbytes { clen = (clen * 256) + (bytes.get(buf, q) & 0xFF); q = q + 1; i = i + 1 }
+        while i < nbytes { clen = (clen * 256) + (buf[q] & 0xFF); q = q + 1; i = i + 1 }
     }
     if q + clen > end { return -1, 0, 0, 0 }
     return tag, q, clen, q + clen
@@ -1083,26 +1097,28 @@ fn der_tlv(buf: ptr, p: int, end: int) -> (int, int, int, int) {
 // Parse a stapled OCSP response (DER) and return the first SingleResponse's
 // certStatus: OCSP_GOOD / OCSP_REVOKED / OCSP_UNKNOWN, or OCSP_ERROR on a
 // malformed / unsuccessful response.
-parse_ocsp_status(der: ptr, len: int) -> int {
+parse_ocsp_status(der: byte[]) -> int {
+    if der.len < 0 { panic("tls13_cert.parse_ocsp_status: the `der` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = der.len
     // OCSPResponse ::= SEQUENCE { responseStatus ENUMERATED, responseBytes [0] }
-    t0, c0, l0, _n0 = der_tlv(der, 0, len)
+    t0, c0, l0, _n0 = der_tlv_slice(der, 0, len)
     if t0 != 0x30 { return OCSP_ERROR }
     end0 = c0 + l0
     // responseStatus ENUMERATED — must be 0 (successful).
-    ts, cs, ls, ns = der_tlv(der, c0, end0)
+    ts, cs, ls, ns = der_tlv_slice(der, c0, end0)
     if ts != 0x0A { return OCSP_ERROR }
     if ls < 1 { return OCSP_ERROR }
-    if (bytes.get(der, cs) & 0xFF) != 0 { return OCSP_ERROR }
+    if (der[cs] & 0xFF) != 0 { return OCSP_ERROR }
     // responseBytes [0] EXPLICIT SEQUENCE { responseType OID, response OCTET STRING }
-    tb, cb, lb2, _nb = der_tlv(der, ns, end0)
+    tb, cb, lb2, _nb = der_tlv_slice(der, ns, end0)
     if tb != 0xA0 { return OCSP_ERROR }
     endb = cb + lb2
-    trb, crb, lrb, _nrb = der_tlv(der, cb, endb) // inner SEQUENCE
+    trb, crb, lrb, _nrb = der_tlv_slice(der, cb, endb) // inner SEQUENCE
     if trb != 0x30 { return OCSP_ERROR }
     endrb = crb + lrb
-    toid, _coid, _loid, noid = der_tlv(der, crb, endrb) // responseType OID (skip)
+    toid, _coid, _loid, noid = der_tlv_slice(der, crb, endrb) // responseType OID (skip)
     if toid != 0x06 { return OCSP_ERROR }
-    toct, coct, loct, _noct = der_tlv(der, noid, endrb) // response OCTET STRING
+    toct, coct, loct, _noct = der_tlv_slice(der, noid, endrb) // response OCTET STRING
     if toct != 0x04 { return OCSP_ERROR }
     // The OCTET STRING content is the DER of BasicOCSPResponse.
     return parse_basic_ocsp(der, coct, coct + loct)
@@ -1111,13 +1127,13 @@ parse_ocsp_status(der: ptr, len: int) -> int {
 // BasicOCSPResponse ::= SEQUENCE { tbsResponseData, signatureAlgorithm,
 //                                  signature, certs [0] }
 // We only need tbsResponseData -> responses -> [0].certStatus.
-fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
-    tb, cb, lb, _nb = der_tlv(buf, start, end)
+fn parse_basic_ocsp(buf: byte[], start: int, end: int) -> int {
+    tb, cb, lb, _nb = der_tlv_slice(buf, start, end)
     if tb != 0x30 { return OCSP_ERROR }
     endb = cb + lb
     // tbsResponseData ::= SEQUENCE { version? [0], responderID, producedAt,
     //                                responses SEQUENCE OF SingleResponse, ... }
-    tt, ct, lt, _nt = der_tlv(buf, cb, endb)
+    tt, ct, lt, _nt = der_tlv_slice(buf, cb, endb)
     if tt != 0x30 { return OCSP_ERROR }
     endt = ct + lt
     // Walk tbsResponseData's fields to the first SEQUENCE OF (the `responses`).
@@ -1127,7 +1143,7 @@ fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
     resp_seq = -1
     resp_end = -1
     while p < endt {
-        ti, ci, li, ni = der_tlv(buf, p, endt)
+        ti, ci, li, ni = der_tlv_slice(buf, p, endt)
         if ti < 0 { p = endt } else {
             if ti == 0x30 { resp_seq = ci; resp_end = ci + li; p = endt }
             else { p = ni }
@@ -1135,13 +1151,13 @@ fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
     }
     if resp_seq < 0 { return OCSP_ERROR }
     // First SingleResponse ::= SEQUENCE { certID, certStatus, thisUpdate, ... }
-    ts1, cs1, ls1, _ns1 = der_tlv(buf, resp_seq, resp_end)
+    ts1, cs1, ls1, _ns1 = der_tlv_slice(buf, resp_seq, resp_end)
     if ts1 != 0x30 { return OCSP_ERROR }
     end_sr = cs1 + ls1
     // certID ::= SEQUENCE (skip it); certStatus is the NEXT element.
-    tcid, _ccid, _lcid, ncid = der_tlv(buf, cs1, end_sr)
+    tcid, _ccid, _lcid, ncid = der_tlv_slice(buf, cs1, end_sr)
     if tcid != 0x30 { return OCSP_ERROR }
-    tcs, _ccs, _lcs, _ncs = der_tlv(buf, ncid, end_sr)
+    tcs, _ccs, _lcs, _ncs = der_tlv_slice(buf, ncid, end_sr)
     if tcs < 0 { return OCSP_ERROR }
     // certStatus CHOICE: good [0] IMPLICIT NULL (0x80), revoked [1] (0xA1),
     // unknown [2] IMPLICIT NULL (0x82).
@@ -1154,26 +1170,28 @@ fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
 // Walk an OCSPResponse (DER) down to the BasicOCSPResponse SEQUENCE, returning
 // (content_start, content_end) of that SEQUENCE's body or (-1,-1) on a
 // malformed / non-successful response. Mirrors parse_ocsp_status's descent.
-fn ocsp_basic_bounds(der: ptr, len: int) -> (int, int) {
-    t0, c0, l0, _n0 = der_tlv(der, 0, len)
+fn ocsp_basic_bounds(der: byte[]) -> (int, int) {
+    if der.len < 0 { panic("tls13_cert.ocsp_basic_bounds: the `der` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = der.len
+    t0, c0, l0, _n0 = der_tlv_slice(der, 0, len)
     if t0 != 0x30 { return -1, -1 }
     end0 = c0 + l0
-    ts, cs, ls, ns = der_tlv(der, c0, end0)
+    ts, cs, ls, ns = der_tlv_slice(der, c0, end0)
     if ts != 0x0A { return -1, -1 }
     if ls < 1 { return -1, -1 }
-    if (bytes.get(der, cs) & 0xFF) != 0 { return -1, -1 }
-    tb, cb, lb2, _nb = der_tlv(der, ns, end0)
+    if (der[cs] & 0xFF) != 0 { return -1, -1 }
+    tb, cb, lb2, _nb = der_tlv_slice(der, ns, end0)
     if tb != 0xA0 { return -1, -1 }
     endb = cb + lb2
-    trb, crb, lrb, _nrb = der_tlv(der, cb, endb)
+    trb, crb, lrb, _nrb = der_tlv_slice(der, cb, endb)
     if trb != 0x30 { return -1, -1 }
     endrb = crb + lrb
-    toid, _coid, _loid, noid = der_tlv(der, crb, endrb)
+    toid, _coid, _loid, noid = der_tlv_slice(der, crb, endrb)
     if toid != 0x06 { return -1, -1 }
-    toct, coct, loct, _noct = der_tlv(der, noid, endrb)
+    toct, coct, loct, _noct = der_tlv_slice(der, noid, endrb)
     if toct != 0x04 { return -1, -1 }
     // OCTET STRING content == DER of BasicOCSPResponse SEQUENCE.
-    tbr, cbr, lbr, _nbr = der_tlv(der, coct, coct + loct)
+    tbr, cbr, lbr, _nbr = der_tlv_slice(der, coct, coct + loct)
     if tbr != 0x30 { return -1, -1 }
     return cbr, cbr + lbr
 }
@@ -1198,67 +1216,68 @@ fn ocsp_basic_bounds(der: ptr, len: int) -> (int, int) {
 // ptr-typed convenience for callers holding an issuer as a bare pointer (e.g.
 // find_issuer_cert's return), where the qualified `as *mod.LeafCert` cast at
 // the call site doesn't parse. Casts internally and delegates.
-verify_ocsp_signature_at(der: ptr, len: int, issuer: ptr) -> int {
-    return verify_ocsp_signature(der, len, issuer as *LeafCert)
+verify_ocsp_signature_at(der: byte[], issuer: ptr) -> int {
+    return verify_ocsp_signature(der, issuer as *LeafCert)
 }
 
-verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
+verify_ocsp_signature(der: byte[], issuer: *LeafCert) -> int {
+    if der.len < 0 { panic("tls13_cert.verify_ocsp_signature: the `der` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     if issuer == null { return 0 }
-    bstart, bend = ocsp_basic_bounds(der, len)
+    bstart, bend = ocsp_basic_bounds(der)
     if bstart < 0 { return 0 }
 
     // BasicOCSPResponse ::= SEQUENCE { tbsResponseData, signatureAlgorithm,
     //                                  signature BIT STRING, [0] certs OPTIONAL }
     // tbsResponseData: capture the FULL DER (tag+len+content) — that is the
     // signed message.
-    tt, _ct, _lt, nt = der_tlv(der, bstart, bend)
+    tt, _ct, _lt, nt = der_tlv_slice(der, bstart, bend)
     if tt != 0x30 { return 0 }
     tbs_full_len = nt - bstart
     tbs = bytes.new(tbs_full_len)
     if tbs_full_len > 0 { bytes.set(tbs, tbs_full_len - 1, 0) }
-    bytes.copy_from_bytes(tbs, 0, der, bstart, tbs_full_len)
+    bytes.copy_from_slice(tbs, 0, der[bstart..bstart + tbs_full_len])
 
     // signatureAlgorithm ::= SEQUENCE { algorithm OID, ... }
-    ta, ca, la, na = der_tlv(der, nt, bend)
+    ta, ca, la, na = der_tlv_slice(der, nt, bend)
     if ta != 0x30 { bytes.free(tbs); return 0 }
-    toi, coi, loi, _noi = der_tlv(der, ca, ca + la)
+    toi, coi, loi, _noi = der_tlv_slice(der, ca, ca + la)
     if toi != 0x06 { bytes.free(tbs); return 0 }
-    sig_alg_oid = oid_der_to_dotted_bytes(der, coi, loi)
+    sig_alg_oid = oid_der_to_dotted_bytes_slice(der, coi, loi)
 
     // signature BIT STRING — strip the leading "unused bits" octet (0x00).
-    tsg, csg, lsg, nsg = der_tlv(der, na, bend)
+    tsg, csg, lsg, nsg = der_tlv_slice(der, na, bend)
     if tsg != 0x03 { bytes.free(tbs); bytes.free(sig_alg_oid); return 0 }
     if lsg < 1 { bytes.free(tbs); bytes.free(sig_alg_oid); return 0 }
     sig_len = lsg - 1
     sig = bytes.new(sig_len)
     if sig_len > 0 { bytes.set(sig, sig_len - 1, 0) }
-    bytes.copy_from_bytes(sig, 0, der, csg + 1, sig_len)
+    bytes.copy_from_slice(sig, 0, der[csg + 1..csg + 1 + sig_len])
 
     // Optional certs [0] EXPLICIT SEQUENCE OF Certificate — a delegated responder.
     responder = issuer
     delegated = null as *LeafCert
     have_delegated = 0
     if nsg < bend {
-        tc, cc, lc, _nc = der_tlv(der, nsg, bend)
+        tc, cc, lc, _nc = der_tlv_slice(der, nsg, bend)
         if tc == 0xA0 {
             // certs [0] EXPLICIT wraps a SEQUENCE OF Certificate; step INTO that
             // SEQUENCE OF, then read the first Certificate SEQUENCE inside it.
-            tso, cso, lso, _nso = der_tlv(der, cc, cc + lc)
+            tso, cso, lso, _nso = der_tlv_slice(der, cc, cc + lc)
             tcs2 = 0
             _ccs2 = 0
             _lcs2 = 0
             ncs2 = 0
             if tso == 0x30 {
-                tcs2, _ccs2, _lcs2, ncs2 = der_tlv(der, cso, cso + lso)
+                tcs2, _ccs2, _lcs2, ncs2 = der_tlv_slice(der, cso, cso + lso)
             }
             if tcs2 == 0x30 {
                 cert_der_len = ncs2 - cso
                 cert_der = bytes.new(cert_der_len)
                 if cert_der_len > 0 { bytes.set(cert_der, cert_der_len - 1, 0) }
-                bytes.copy_from_bytes(cert_der, 0, der, cso, cert_der_len)
+                bytes.copy_from_slice(cert_der, 0, der[cso..cso + cert_der_len])
                 d = malloc(LEAFCERT_SIZE) as *LeafCert
                 init_leaf(d)
-                perr = parse_certificate(cert_der, cert_der_len, d)
+                perr = parse_certificate(bytes.view(cert_der)[0..cert_der_len], d)
                 bytes.free(cert_der)
                 if string.equals(perr, "") == 1 {
                     // The delegated responder cert must be signed by `issuer`
@@ -1284,8 +1303,7 @@ verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
 
     result = 0
     if have_delegated == 1 || responder == issuer {
-        result = verify_sig_over_bytes(tbs, tbs_full_len, sig_alg_oid, sig, sig_len,
-            responder.spki_algo_oid, responder.spki_key, responder.spki_key_len)
+        result = verify_sig_over_bytes(bytes.view(tbs)[0..tbs_full_len], sig_alg_oid, bytes.view(sig)[0..sig_len], responder.spki_algo_oid, bytes.view(responder.spki_key)[0..responder.spki_key_len])
     }
 
     if have_delegated == 1 {
@@ -1303,13 +1321,18 @@ verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
 // Rebuilds the `06 <len> <content>` TLV and reuses asn1.read_oid so the
 // base-128 decode matches the rest of the parser exactly.
 fn oid_der_to_dotted_bytes(buf: ptr, coff: int, clen: int) -> ptr {
+    return oid_der_to_dotted_bytes_slice(bytes.view(buf), coff, clen)
+}
+
+// The slice form of oid_der_to_dotted_bytes (#2301); oid_der_to_dotted_bytes views its std.bytes handle into it.
+fn oid_der_to_dotted_bytes_slice(buf: byte[], coff: int, clen: int) -> ptr {
     lenoct = asn1.encode_len(clen)
     ll = bytes.length(lenoct)
     tlv = bytes.new(1 + ll + clen)
     if bytes.length(tlv) > 0 { bytes.set(tlv, bytes.length(tlv) - 1, 0) }
     bytes.set(tlv, 0, 0x06)
     bytes.copy_from_bytes(tlv, 1, lenoct, 0, ll)
-    bytes.copy_from_bytes(tlv, 1 + ll, buf, coff, clen)
+    bytes.copy_from_slice(tlv, 1 + ll, buf[coff..coff + clen])
     bytes.free(lenoct)
     r = asn1.reader_new(tlv)
     dotted, oerr = asn1.read_oid(r)
@@ -1435,13 +1458,17 @@ fn oid_is(oid: ptr, want: string) -> int {
 }
 
 // Byte-for-byte DER Name comparison (issuer DN vs subject DN).
-fn dn_equal(a: ptr, alen: int, b: ptr, blen: int) -> int {
+fn dn_equal(a: byte[], b: byte[]) -> int {
+    if a.len < 0 { panic("tls13_cert.dn_equal: the `a` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int alen = a.len
+    if b.len < 0 { panic("tls13_cert.dn_equal: the `b` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int blen = b.len
     if a == null { return 0 }
     if b == null { return 0 }
     if alen != blen { return 0 }
     i = 0
     while i < alen {
-        if (bytes.get(a, i) & 0xFF) != (bytes.get(b, i) & 0xFF) { return 0 }
+        if (a[i] & 0xFF) != (b[i] & 0xFF) { return 0 }
         i = i + 1
     }
     return 1
@@ -1474,10 +1501,12 @@ fn sha256_digestinfo(hash32: ptr) -> ptr {
 // Parse an RSA SPKI key blob (the SubjectPublicKey content, which for RSA is
 // SEQUENCE { INTEGER n, INTEGER e }) into (n, e) bignums. Returns (n,e,"") or
 // (null,null,err). Caller frees the bignums with bignum.free.
-fn parse_rsa_spki(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
+fn parse_rsa_spki(spki_key: byte[]) -> (ptr, ptr, string) {
+    if spki_key.len < 0 { panic("tls13_cert.parse_rsa_spki: the `spki_key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = spki_key.len
     view = bytes.new(key_len)
     if key_len > 0 { bytes.set(view, key_len - 1, 0) }
-    bytes.copy_from_bytes(view, 0, spki_key, 0, key_len)
+    bytes.copy_from_slice(view, 0, spki_key[0..key_len])
     r = asn1.reader_new(view)
     sub, body, serr = asn1.read_sequence(r)
     if string.equals(serr, "") != 1 {
@@ -1504,9 +1533,7 @@ fn parse_rsa_spki(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
 verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
     if leaf.tbs == null { return 0 }
     if leaf.signature == null { return 0 }
-    return verify_sig_over_bytes(leaf.tbs, leaf.tbs_len, leaf.sig_alg_oid,
-        leaf.signature, leaf.signature_len,
-        issuer.spki_algo_oid, issuer.spki_key, issuer.spki_key_len)
+    return verify_sig_over_bytes(bytes.view(leaf.tbs)[0..leaf.tbs_len], leaf.sig_alg_oid, bytes.view(leaf.signature)[0..leaf.signature_len], issuer.spki_algo_oid, bytes.view(issuer.spki_key)[0..issuer.spki_key_len])
 }
 
 // Verify `sig` over the raw bytes `msg[0..msg_len)` under the signature
@@ -1518,8 +1545,11 @@ verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
 //   sha256WithRSAEncryption  1.2.840.113549.1.1.11  -> RSA PKCS#1 v1.5 / SHA-256
 //   ecdsa-with-SHA256        1.2.840.10045.4.3.2    -> ECDSA P-256 / SHA-256
 //   ecdsa-with-SHA384        1.2.840.10045.4.3.3    -> ECDSA P-384 / SHA-384
-fn verify_sig_over_bytes(msg: ptr, msg_len: int, sig_alg_oid: ptr, sig: ptr, sig_len: int,
-    key_algo_oid: ptr, key: ptr, key_len: int) -> int {
+fn verify_sig_over_bytes(msg: byte[], sig_alg_oid: ptr, sig: byte[], key_algo_oid: ptr, key: byte[]) -> int {
+    if msg.len < 0 { panic("tls13_cert.verify_sig_over_bytes: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len < 0 { panic("tls13_cert.verify_sig_over_bytes: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if key.len < 0 { panic("tls13_cert.verify_sig_over_bytes: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     if msg == null { return 0 }
     if sig == null { return 0 }
     if key == null { return 0 }
@@ -1528,8 +1558,8 @@ fn verify_sig_over_bytes(msg: ptr, msg_len: int, sig_alg_oid: ptr, sig: ptr, sig
     if oid_is(sig_alg_oid, "1.2.840.113549.1.1.11") == 1 {
         // sha256WithRSAEncryption. Signer key must be rsaEncryption.
         if oid_is(key_algo_oid, "1.2.840.113549.1.1.1") == 1 {
-            hash = sha256_of_bytes(msg, msg_len)
-            n, e, perr = parse_rsa_spki(key, key_len)
+            hash = sha256_of_bytes(msg)
+            n, e, perr = parse_rsa_spki(key)
             if string.equals(perr, "") == 1 {
                 k = rsa.key_from_components(n, e, null)
                 di = sha256_digestinfo(hash)
@@ -1544,10 +1574,10 @@ fn verify_sig_over_bytes(msg: ptr, msg_len: int, sig_alg_oid: ptr, sig: ptr, sig
         // ecdsa-with-SHA256 on a P-256 signer key (65-byte uncompressed point).
         if oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
             if key_len == 65 {
-                hash = sha256_of_bytes(msg, msg_len)
-                px, py, kerr = ec_point_from_spki(key, key_len, 32)
+                hash = sha256_of_bytes(msg)
+                px, py, kerr = ec_point_from_spki(key, 32)
                 if string.equals(kerr, "") == 1 {
-                    r32, s32, serr = split_ecdsa_sig(sig, sig_len, 32)
+                    r32, s32, serr = split_ecdsa_sig(sig, 32)
                     if string.equals(serr, "") == 1 {
                         result = p256.ecdsa_verify(px, py, hash, r32, s32)
                         bytes.free(r32); bytes.free(s32)
@@ -1563,10 +1593,10 @@ fn verify_sig_over_bytes(msg: ptr, msg_len: int, sig_alg_oid: ptr, sig: ptr, sig
         // Common on modern roots/intermediates (e.g. Google Trust Services).
         if oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
             if key_len == 97 {
-                hash = sha384_of_bytes(msg, msg_len)
-                px, py, kerr = ec_point_from_spki(key, key_len, 48)
+                hash = sha384_of_bytes(msg)
+                px, py, kerr = ec_point_from_spki(key, 48)
                 if string.equals(kerr, "") == 1 {
-                    r48, s48, serr = split_ecdsa_sig(sig, sig_len, 48)
+                    r48, s48, serr = split_ecdsa_sig(sig, 48)
                     if string.equals(serr, "") == 1 {
                         result = p384.ecdsa_verify(px, py, hash, r48, s48)
                         bytes.free(r48); bytes.free(s48)
@@ -1581,10 +1611,10 @@ fn verify_sig_over_bytes(msg: ptr, msg_len: int, sig_alg_oid: ptr, sig: ptr, sig
 }
 
 // SHA-384 of a std.bytes buffer (streaming path).
-fn sha384_of_bytes(data: ptr, len: int) -> ptr {
+fn sha384_of_bytes(data: byte[]) -> ptr {
     ctx, err = sha2.new("sha384")
     if err != "" { return null }
-    sha2.update_bytes(ctx, data, len)
+    sha2.update(ctx, data)
     return sha2.final_bytes(ctx)
 }
 
@@ -1592,13 +1622,15 @@ fn sha384_of_bytes(data: ptr, len: int) -> ptr {
 // key blob into (X, Y, ""). Returns (null,null,err) if it isn't a
 // (1 + 2*coord)-byte uncompressed point. Caller frees X/Y. coord = 32 for
 // P-256, 48 for P-384.
-fn ec_point_from_spki(key: ptr, key_len: int, coord: int) -> (ptr, ptr, string) {
+fn ec_point_from_spki(key: byte[], coord: int) -> (ptr, ptr, string) {
+    if key.len < 0 { panic("tls13_cert.ec_point_from_spki: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int key_len = key.len
     if key_len != 1 + 2 * coord { return null, null, "unsupported EC point encoding" }
-    if (bytes.get(key, 0) & 0xFF) != 0x04 { return null, null, "EC point not uncompressed" }
+    if (key[0] & 0xFF) != 0x04 { return null, null, "EC point not uncompressed" }
     x = bytes.new(coord); bytes.set(x, coord - 1, 0)
     y = bytes.new(coord); bytes.set(y, coord - 1, 0)
-    bytes.copy_from_bytes(x, 0, key, 1, coord)
-    bytes.copy_from_bytes(y, 0, key, 1 + coord, coord)
+    bytes.copy_from_slice(x, 0, key[1..1 + coord])
+    bytes.copy_from_slice(y, 0, key[1 + coord..1 + coord + coord])
     return x, y, ""
 }
 
@@ -1614,7 +1646,7 @@ chain_verify(leaf: *LeafCert, anchors: ptr) -> string {
     while i < n {
         a = list_get_raw(anchors, i) as *LeafCert
         if a != null {
-            if dn_equal(leaf.issuer, leaf.issuer_len, a.subject, a.subject_len) == 1 {
+            if dn_equal(bytes.view(leaf.issuer)[0..leaf.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                 if verify_cert_signature(leaf, a) == 1 {
                     return ""
                 }
@@ -1633,7 +1665,7 @@ fn chains_to_anchor(cert: *LeafCert, anchors: ptr) -> int {
     while i < n {
         a = list_get_raw(anchors, i) as *LeafCert
         if a != null {
-            if dn_equal(cert.issuer, cert.issuer_len, a.subject, a.subject_len) == 1 {
+            if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                 if verify_cert_signature(cert, a) == 1 {
                     return 1
                 }
@@ -1701,7 +1733,7 @@ fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
         m = list_get_raw(intermediates, i) as *LeafCert
         if m != null {
             if is_in_list(intermediates, i, used) == 0 {
-                if dn_equal(cert.issuer, cert.issuer_len, m.subject, m.subject_len) == 1 {
+                if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
                     if verify_cert_signature(cert, m) == 1 {
                         return i
                     }
@@ -1724,7 +1756,7 @@ find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
         while i < n {
             m = list_get_raw(intermediates, i) as *LeafCert
             if m != null {
-                if dn_equal(leaf.issuer, leaf.issuer_len, m.subject, m.subject_len) == 1 {
+                if dn_equal(bytes.view(leaf.issuer)[0..leaf.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
                     if verify_cert_signature(leaf, m) == 1 { return m as ptr }
                 }
             }
@@ -1737,7 +1769,7 @@ find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
         while j < an {
             a = list_get_raw(anchors, j) as *LeafCert
             if a != null {
-                if dn_equal(leaf.issuer, leaf.issuer_len, a.subject, a.subject_len) == 1 {
+                if dn_equal(bytes.view(leaf.issuer)[0..leaf.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                     if verify_cert_signature(leaf, a) == 1 { return a as ptr }
                 }
             }
@@ -1793,7 +1825,7 @@ trust_store_load(path: string) -> (ptr, string) {
                 leaf = malloc(LEAFCERT_SIZE) as *LeafCert
                 init_leaf(leaf)
                 dlen = bytes.length(der)
-                cerr = parse_certificate(der, dlen, leaf)
+                cerr = parse_certificate(bytes.view(der)[0..dlen], leaf)
                 if string.equals(cerr, "") == 1 {
                     list_add_raw(anchors, leaf)
                 } else {

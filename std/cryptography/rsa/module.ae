@@ -119,9 +119,16 @@ modulus_bits(k: ptr) -> int {
 // fixed-width k-byte big-endian std.bytes (caller frees). The integer
 // must be < n; callers go through the PKCS#1 wrappers normally.
 raw_encrypt(k: ptr, m_bytes: ptr) -> ptr {
+    return raw_encrypt_slice(k, bytes.view(m_bytes))
+}
+
+// The slice form of raw_encrypt (#2301); raw_encrypt views its std.bytes handle into it.
+fn raw_encrypt_slice(k: ptr, m_bytes: byte[]) -> ptr {
     kk = k as *RsaKey
     klen = modulus_bytes(k)
-    m = bignum.from_bytes_unsigned(m_bytes, bytes.length(m_bytes))
+    owned = bytes.from_slice(m_bytes)
+    m = bignum.from_bytes_unsigned(owned, m_bytes.len)
+    bytes.free(owned)
     c = bignum.mod_pow(m, kk.e, kk.n)
     out = to_fixed(c, klen)
     bignum.free(m); bignum.free(c)
@@ -273,9 +280,16 @@ sign_pkcs1(k: ptr, di: ptr) -> (ptr, string) {
 // verify/decrypt identically — malleability, caught by Wycheproof
 // rsa_signature tcId 244 and rsa_oaep tcId 27 ("added n to c").
 sig_in_range(k: ptr, sig: ptr) -> int {
+    return sig_in_range_slice(k, bytes.view(sig))
+}
+
+// The slice form of sig_in_range (#2301); sig_in_range views its std.bytes handle into it.
+fn sig_in_range_slice(k: ptr, sig: byte[]) -> int {
     kk = k as *RsaKey
-    if bytes.length(sig) != modulus_bytes(k) { return 0 }
-    s = bignum.from_bytes_unsigned(sig, bytes.length(sig))
+    if sig.len != modulus_bytes(k) { return 0 }
+    owned = bytes.from_slice(sig)
+    s = bignum.from_bytes_unsigned(owned, sig.len)
+    bytes.free(owned)
     ok = 1
     if bignum.compare(s, kk.n) >= 0 { ok = 0 }
     bignum.free(s)
@@ -284,10 +298,10 @@ sig_in_range(k: ptr, sig: ptr) -> int {
 
 // verify: public-key op on the signature, rebuild the expected EMSA block
 // from `di`, compare byte-for-byte. Returns 1 (valid) / 0 (invalid).
-verify_pkcs1(k: ptr, di: ptr, sig: ptr) -> int {
-    if sig_in_range(k, sig) != 1 { return 0 }
+verify_pkcs1(k: ptr, di: ptr, sig: byte[]) -> int {
+    if sig_in_range_slice(k, sig) != 1 { return 0 }
     klen = modulus_bytes(k)
-    recovered = raw_encrypt(k, sig) // s^e mod n
+    recovered = raw_encrypt_slice(k, sig) // s^e mod n
     expected = build_emsa(di, klen)
     ok = 1
     if bytes.length(recovered) != bytes.length(expected) { ok = 0 }
@@ -323,7 +337,7 @@ build_emsa(di: ptr, klen: int) -> ptr {
 // ---- SHA-256 helper (binary-safe via std.cryptography.sha2) ----
 // hLen for SHA-256.
 oaep_hlen() -> int { return 32 }
-sha256b(data: ptr, len: int) -> ptr {
+sha256b(data: byte[]) -> ptr {
     ctx, err = sha2.new("sha256")
     // Same shape as ed25519.sha512 was: sha2.new answers
     // (null, "allocation failed") and update_bytes cannot take a null
@@ -331,13 +345,15 @@ sha256b(data: ptr, len: int) -> ptr {
     if err != "" {
         return null
     }
-    sha2.update_bytes(ctx, data, len)
+    sha2.update(ctx, data)
     return sha2.final_bytes(ctx)
 }
 
 // ---- MGF1 (RFC 8017 B.2.1) with SHA-256 ----
 // mask = MGF1(seed, mask_len): for counter = 0,1,...: T ||= SHA256(seed || I2OSP(counter,4)).
-mgf1(seed: ptr, seed_len: int, mask_len: int) -> ptr {
+mgf1(seed: byte[], mask_len: int) -> ptr {
+    if seed.len < 0 { panic("rsa.mgf1: the `seed` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int seed_len = seed.len
     out = bytes.new(mask_len)
     produced = 0
     counter = 0
@@ -345,12 +361,12 @@ mgf1(seed: ptr, seed_len: int, mask_len: int) -> ptr {
         // input = seed || counter (4-byte BE)
         inlen = seed_len + 4
         inb = bytes.new(inlen)
-        bytes.copy_from_bytes(inb, 0, seed, 0, seed_len)
+        bytes.copy_from_slice(inb, 0, seed[0..seed_len])
         bytes.set(inb, seed_len + 0, (counter >> 24) & 0xFF)
         bytes.set(inb, seed_len + 1, (counter >> 16) & 0xFF)
         bytes.set(inb, seed_len + 2, (counter >> 8) & 0xFF)
         bytes.set(inb, seed_len + 3, counter & 0xFF)
-        h = sha256b(inb, inlen)
+        h = sha256b(bytes.view(inb)[0..inlen])
         bytes.free(inb)
         // copy min(hLen, remaining) into out
         hl = bytes.length(h)
@@ -366,10 +382,12 @@ mgf1(seed: ptr, seed_len: int, mask_len: int) -> ptr {
 }
 
 // XOR src into dst over `len` bytes (dst modified in place).
-xor_into(dst: ptr, src: ptr, len: int) {
+xor_into(dst: ptr, src: byte[]) {
+    if src.len < 0 { panic("rsa.xor_into: the `src` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = src.len
     i = 0
     while i < len {
-        bytes.set(dst, i, (bytes.get(dst, i) ^ bytes.get(src, i)) & 0xFF)
+        bytes.set(dst, i, (bytes.get(dst, i) ^ src[i]) & 0xFF)
         i = i + 1
     }
 }
@@ -378,7 +396,9 @@ xor_into(dst: ptr, src: ptr, len: int) {
 // Encrypt `msg` (mlen bytes). `seed` must be exactly hLen (32) random bytes
 // (caller-supplied for determinism/testability). Returns k-byte ciphertext,
 // or null if the message is too long (mlen > k - 2*hLen - 2).
-encrypt_oaep(k: ptr, msg: ptr, mlen: int, seed: ptr) -> ptr {
+encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
+    if msg.len < 0 { panic("rsa.encrypt_oaep: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int mlen = msg.len
     klen = modulus_bytes(k)
     hlen = oaep_hlen()
     if mlen > klen - 2 * hlen - 2 {
@@ -386,7 +406,7 @@ encrypt_oaep(k: ptr, msg: ptr, mlen: int, seed: ptr) -> ptr {
     }
     // lHash = SHA256("")  (empty label)
     empty = bytes.new(0)
-    lhash = sha256b(empty, 0)
+    lhash = sha256b(bytes.view(empty)[0..0])
     bytes.free(empty)
 
     // DB = lHash || PS(0x00..) || 0x01 || M   (length k - hLen - 1)
@@ -397,19 +417,19 @@ encrypt_oaep(k: ptr, msg: ptr, mlen: int, seed: ptr) -> ptr {
     bytes.copy_from_bytes(db, 0, lhash, 0, hlen)
     ps_end = dblen - mlen - 1 // index of the 0x01 separator
     bytes.set(db, ps_end, 0x01)
-    if mlen > 0 { bytes.copy_from_bytes(db, ps_end + 1, msg, 0, mlen) }
+    if mlen > 0 { bytes.copy_from_slice(db, ps_end + 1, msg[0..mlen]) }
     bytes.free(lhash)
 
     // dbMask = MGF1(seed, dblen); maskedDB = DB ^ dbMask
-    dbmask = mgf1(seed, hlen, dblen)
-    xor_into(db, dbmask, dblen)
+    dbmask = mgf1(bytes.view(seed)[0..hlen], dblen)
+    xor_into(db, bytes.view(dbmask)[0..dblen])
     bytes.free(dbmask)
 
     // seedMask = MGF1(maskedDB, hLen); maskedSeed = seed ^ seedMask
-    seedmask = mgf1(db, dblen, hlen)
+    seedmask = mgf1(bytes.view(db)[0..dblen], hlen)
     mseed = bytes.new(hlen)
     bytes.copy_from_bytes(mseed, 0, seed, 0, hlen)
-    xor_into(mseed, seedmask, hlen)
+    xor_into(mseed, bytes.view(seedmask)[0..hlen])
     bytes.free(seedmask)
 
     // EM = 0x00 || maskedSeed || maskedDB
@@ -441,7 +461,7 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
     em = raw_decrypt(k, ct)
 
     empty = bytes.new(0)
-    lhash = sha256b(empty, 0)
+    lhash = sha256b(bytes.view(empty)[0..0])
     bytes.free(empty)
 
     bad = 0
@@ -455,12 +475,12 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
     bytes.copy_from_bytes(db, 0, em, 1 + hlen, dblen)
 
     // seed = maskedSeed ^ MGF1(maskedDB, hLen)
-    seedmask = mgf1(db, dblen, hlen)
-    xor_into(mseed, seedmask, hlen)
+    seedmask = mgf1(bytes.view(db)[0..dblen], hlen)
+    xor_into(mseed, bytes.view(seedmask)[0..hlen])
     bytes.free(seedmask)
     // DB = maskedDB ^ MGF1(seed, dblen)
-    dbmask = mgf1(mseed, hlen, dblen)
-    xor_into(db, dbmask, dblen)
+    dbmask = mgf1(bytes.view(mseed)[0..hlen], dblen)
+    xor_into(db, bytes.view(dbmask)[0..dblen])
     bytes.free(dbmask)
 
     // DB = lHash' || PS || 0x01 || M ; check lHash' == lHash
@@ -502,7 +522,9 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
 // ---- RSASSA-PSS (RFC 8017 §8.1 / §9.1), SHA-256 ----
 // Sign the SHA-256 `mhash` (32 bytes) with `salt` (slen bytes, caller-
 // supplied for determinism). Returns the k-byte signature, or null on error.
-sign_pss(k: ptr, mhash: ptr, salt: ptr, slen: int) -> ptr {
+sign_pss(k: ptr, mhash: ptr, salt: byte[]) -> ptr {
+    if salt.len < 0 { panic("rsa.sign_pss: the `salt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int slen = salt.len
     klen = modulus_bytes(k)
     hlen = oaep_hlen()
     embits = modulus_bits(k) - 1
@@ -516,8 +538,8 @@ sign_pss(k: ptr, mhash: ptr, salt: ptr, slen: int) -> ptr {
     z = 0
     while z < 8 { bytes.set(mp, z, 0); z = z + 1 }
     bytes.copy_from_bytes(mp, 8, mhash, 0, hlen)
-    if slen > 0 { bytes.copy_from_bytes(mp, 8 + hlen, salt, 0, slen) }
-    h = sha256b(mp, mp_len)
+    if slen > 0 { bytes.copy_from_slice(mp, 8 + hlen, salt[0..slen]) }
+    h = sha256b(bytes.view(mp)[0..mp_len])
     bytes.free(mp)
 
     // DB = PS(0x00) || 0x01 || salt   (length emLen - hLen - 1)
@@ -526,11 +548,11 @@ sign_pss(k: ptr, mhash: ptr, salt: ptr, slen: int) -> ptr {
     z = 0
     while z < dblen { bytes.set(db, z, 0); z = z + 1 }
     bytes.set(db, dblen - slen - 1, 0x01)
-    if slen > 0 { bytes.copy_from_bytes(db, dblen - slen, salt, 0, slen) }
+    if slen > 0 { bytes.copy_from_slice(db, dblen - slen, salt[0..slen]) }
 
     // maskedDB = DB ^ MGF1(H, dblen)
-    dbmask = mgf1(h, hlen, dblen)
-    xor_into(db, dbmask, dblen)
+    dbmask = mgf1(bytes.view(h)[0..hlen], dblen)
+    xor_into(db, bytes.view(dbmask)[0..dblen])
     bytes.free(dbmask)
     // clear the leftmost (8*emLen - embits) bits of maskedDB
     clear_bits = 8 * emlen - embits
@@ -559,17 +581,18 @@ sign_pss(k: ptr, mhash: ptr, salt: ptr, slen: int) -> ptr {
 
 // Verify a PSS signature `sig` (k bytes) over `mhash` (32 bytes) with the
 // expected salt length `slen`. Returns 1 if valid, 0 otherwise.
-verify_pss(k: ptr, mhash: ptr, sig: ptr, slen: int) -> int {
+verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
+    if sig.len < 0 { panic("rsa.verify_pss: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     klen = modulus_bytes(k)
     hlen = oaep_hlen()
     embits = modulus_bits(k) - 1
     emlen = (embits + 7) / 8
-    if bytes.length(sig) != klen { return 0 }
+    if sig.len != klen { return 0 }
     // Same RFC 8017 range requirement as verify_pkcs1: s >= n is a
     // distinct byte string with the same residue — reject (malleability).
-    if sig_in_range(k, sig) != 1 { return 0 }
+    if sig_in_range_slice(k, sig) != 1 { return 0 }
 
-    emfull = raw_encrypt(k, sig)
+    emfull = raw_encrypt_slice(k, sig)
     // take the low emLen bytes as EM
     em = bytes.new(emlen)
     bytes.copy_from_bytes(em, 0, emfull, klen - emlen, emlen)
@@ -592,8 +615,8 @@ verify_pss(k: ptr, mhash: ptr, sig: ptr, slen: int) -> int {
     }
 
     // DB = maskedDB ^ MGF1(H, dblen)
-    dbmask = mgf1(h, hlen, dblen)
-    xor_into(maskeddb, dbmask, dblen)
+    dbmask = mgf1(bytes.view(h)[0..hlen], dblen)
+    xor_into(maskeddb, bytes.view(dbmask)[0..dblen])
     bytes.free(dbmask)
     if clear_bits > 0 {
         mask = (0xFF >> clear_bits) & 0xFF
@@ -615,7 +638,7 @@ verify_pss(k: ptr, mhash: ptr, sig: ptr, slen: int) -> int {
     while z < 8 { bytes.set(mp, z, 0); z = z + 1 }
     bytes.copy_from_bytes(mp, 8, mhash, 0, hlen)
     if slen > 0 { bytes.copy_from_bytes(mp, 8 + hlen, maskeddb, dblen - slen, slen) }
-    hp = sha256b(mp, mp_len)
+    hp = sha256b(bytes.view(mp)[0..mp_len])
     bytes.free(mp)
     i = 0
     while i < hlen {

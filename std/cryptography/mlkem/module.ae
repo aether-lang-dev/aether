@@ -789,8 +789,8 @@ get_noise(pv: ptr, j: int, seed: ptr, seed_off: int, nonce: int, eta: int) {
     if eta == 3 {
         out_len = 192
     }
-    in_str = bytes.finish(in_buf, SYM + 1)
-    out = sha3.shake256_bytes(in_str, SYM + 1, out_len)
+    out = sha3.shake256_bytes(bytes.view(in_buf)[0..SYM + 1], out_len)
+    bytes.free(in_buf)
     if eta == 2 {
         cbd_eta2(pv, j, out)
     } else {
@@ -811,12 +811,12 @@ gen_matrix_poly(dest: ptr, dj: int, seed: ptr, x: int, y: int) {
     }
     bytes.set(in_buf, SYM, x & 0xFF)
     bytes.set(in_buf, SYM + 1, y & 0xFF)
-    in_str = bytes.finish(in_buf, SYM + 2)
 
     // Squeeze plenty: NumMatrixBlocks*168. NumMatrixBlocks for q=3329 is 3.
     // 3 blocks = 504 bytes gives ~336 candidates; pull extra to be safe.
     squeeze_len = 504 + 168 * 4
-    buf = sha3.shake128_bytes(in_str, SYM + 2, squeeze_len)
+    buf = sha3.shake128_bytes(bytes.view(in_buf)[0..SYM + 2], squeeze_len)
+    bytes.free(in_buf)
 
     base = dj * N
     ctr = 0
@@ -884,8 +884,8 @@ indcpa_keygen(p: *Params, d: ptr, kp: ptr) {
         i = i + 1
     }
     bytes.set(g_in, SYM, k & 0xFF)
-    g_str = bytes.finish(g_in, SYM + 1)
-    gbuf = sha3.sha3_512_bytes(g_str, SYM + 1) // 64 bytes; frees own ctx
+    gbuf = sha3.sha3_512_bytes(bytes.view(g_in)[0..SYM + 1]) // 64 bytes; frees own ctx
+    bytes.free(g_in)
 
     // rho = gbuf[0..32], sigma = gbuf[32..64]
     rho = bytes.new(SYM)
@@ -1156,8 +1156,7 @@ mlkem_keygen(p: *Params, d: ptr, z: ptr) -> {
 
     // dk layout: indcpa_sk || ek || H(ek) || z
     // H(ek) at offset indcpa_sk + indcpa_pk
-    ek_str = bytes_to_string(ek, p.ek_bytes)
-    hbuf = sha3.sha3_256_bytes(ek_str, p.ek_bytes)
+    hbuf = sha3.sha3_256_bytes(bytes.view(ek)[0..p.ek_bytes])
     hoff = p.indcpa_sk + p.indcpa_pk
     i = 0
     while i < SYM {
@@ -1186,8 +1185,7 @@ mlkem_encaps(p: *Params, ek: ptr, m: ptr) -> {
         bytes.set(buf, i, bytes.get(m, i) & 0xFF)
         i = i + 1
     }
-    ek_str = bytes_to_string(ek, p.ek_bytes)
-    hbuf = sha3.sha3_256_bytes(ek_str, p.ek_bytes)
+    hbuf = sha3.sha3_256_bytes(bytes.view(ek)[0..p.ek_bytes])
     i = 0
     while i < SYM {
         bytes.set(buf, SYM + i, bytes.get(hbuf, i) & 0xFF)
@@ -1196,8 +1194,7 @@ mlkem_encaps(p: *Params, ek: ptr, m: ptr) -> {
     bytes.free(hbuf)
 
     // (K, r) = G(buf)
-    buf_str = bytes_to_string(buf, 2 * SYM)
-    kr = sha3.sha3_512_bytes(buf_str, 2 * SYM) // 64 bytes
+    kr = sha3.sha3_512_bytes(bytes.view(buf)[0..2 * SYM]) // 64 bytes
     // r = kr[32..64]
     coins = bytes.new(SYM)
     i = 0
@@ -1241,8 +1238,7 @@ mlkem_decaps(p: *Params, dk: ptr, ct: ptr) -> ptr {
     }
 
     // (K', r') = G(buf)
-    buf_str = bytes_to_string(buf, 2 * SYM)
-    kr = sha3.sha3_512_bytes(buf_str, 2 * SYM)
+    kr = sha3.sha3_512_bytes(bytes.view(buf)[0..2 * SYM])
     coins = bytes.new(SYM)
     i = 0
     while i < SYM {
@@ -1280,8 +1276,7 @@ mlkem_decaps(p: *Params, dk: ptr, ct: ptr) -> ptr {
         bytes.set(j_in, SYM + i, bytes.get(ct, i) & 0xFF)
         i = i + 1
     }
-    j_str = bytes_to_string(j_in, SYM + p.ct_bytes)
-    reject = sha3.shake256_bytes(j_str, SYM + p.ct_bytes, SYM)
+    reject = sha3.shake256_bytes(bytes.view(j_in)[0..SYM + p.ct_bytes], SYM)
 
     // key = (fail==0) ? kr[0..32] : reject
     key = bytes.new(SYM)
@@ -1304,18 +1299,6 @@ mlkem_decaps(p: *Params, dk: ptr, ct: ptr) -> ptr {
     bytes.free(reject)
     free_params(p)
     return key
-}
-
-// Helper: turn the first `len` bytes of a bytes buffer into a string for the
-// sha3 one-shots, without consuming/freeing the original buffer.
-bytes_to_string(b: ptr, len: int) -> string {
-    tmp = bytes.new(len)
-    i = 0
-    while i < len {
-        bytes.set(tmp, i, bytes.get(b, i) & 0xFF)
-        i = i + 1
-    }
-    return bytes.finish(tmp, len)
 }
 
 // ---- Public per-variant API ----

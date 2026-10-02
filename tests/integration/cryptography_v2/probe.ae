@@ -23,13 +23,15 @@ extern exit(code: int)
 // recover via fs.read_binary. Wait — the new base64 surface accepts
 // the buffer directly, so we stage the NUL-bearing bytes via a
 // known-shape constant rather than disk.
-extern cryptography_v2_probe_make_binary() -> string
+// `ptr`, not `string`: the shim returns a static C byte array with a NUL at
+// offset 3, which a string view would bound by strlen and cut short.
+extern cryptography_v2_probe_make_binary() -> ptr
 
 main() {
     print("=== std.cryptography Base64 + dispatch ===\n\n")
 
     // Probe: same skip-when-no-OpenSSL guard as cryptography_sha.
-    _, probe_err = cryptography.sha256_hex("probe", 5)
+    _, probe_err = cryptography.sha256_hex(string.bytes("probe"))
     if probe_err != "" {
         println("SKIP cryptography_v2: ${probe_err} (likely Windows CI without OpenSSL)")
         print("\n=== std.cryptography v2 tests skipped (no backend) ===\n")
@@ -38,7 +40,7 @@ main() {
 
     // ---- Test 1: base64_encode("Man", 3) == "TWFu" ----
     print("Test 1: base64_encode(\"Man\", 3) == \"TWFu\"\n")
-    e1 = encoding.base64_encode("Man", 3)
+    e1 = encoding.base64_encode(string.bytes("Man"))
     if string.equals(e1, "TWFu") != 1 {
         println("  FAIL: got '${e1}', want 'TWFu'")
         exit(1)
@@ -47,7 +49,7 @@ main() {
 
     // ---- Test 2: base64_encode("hello world", 11) == "aGVsbG8gd29ybGQ" ----
     print("\nTest 2: base64_encode(\"hello world\", 11)\n")
-    e2 = encoding.base64_encode("hello world", 11)
+    e2 = encoding.base64_encode(string.bytes("hello world"))
     if string.equals(e2, "aGVsbG8gd29ybGQ") != 1 {
         println("  FAIL: got '${e2}', want 'aGVsbG8gd29ybGQ'")
         exit(1)
@@ -57,7 +59,7 @@ main() {
     // ---- Test 3: ASCII round-trip ----
     print("\nTest 3: ASCII round-trip\n")
     payload3 = "the quick brown fox"
-    enc3 = encoding.base64_encode(payload3, 19)
+    enc3 = encoding.base64_encode(string.bytes(payload3)[0..19])
     dec3, derr3 = encoding.base64_decode(enc3)
     if derr3 != "" { println("  FAIL decode: ${derr3}"); exit(1) }
     if string.length(dec3) != 19 {
@@ -77,7 +79,7 @@ main() {
     print("\nTest 4: binary payload with NUL round-trips\n")
     bin = cryptography_v2_probe_make_binary()
     bin_len = 10
-    enc4 = encoding.base64_encode(bin, bin_len)
+    enc4 = encoding.base64_encode((bin as byte[])[0..bin_len])
     dec4, derr4 = encoding.base64_decode(enc4)
     if derr4 != "" { println("  FAIL decode: ${derr4}"); exit(1) }
     if string.length(dec4) != 10 {
@@ -87,8 +89,8 @@ main() {
     // Verify byte-identical via sha256: the digest of the round-tripped
     // bytes must match the digest of the original. We can't string.equals
     // because of the embedded NUL.
-    h_orig, _ = cryptography.sha256_hex(bin, bin_len)
-    h_rt, _ = cryptography.sha256_hex(dec4, string.length(dec4))
+    h_orig, _ = cryptography.sha256_hex((bin as byte[])[0..bin_len])
+    h_rt, _ = cryptography.sha256_hex(string.bytes(dec4))
     if string.equals(h_orig, h_rt) != 1 {
         println("  FAIL: round-tripped digest differs")
         println("    orig=${h_orig}")
@@ -99,7 +101,7 @@ main() {
 
     // ---- Test 5: empty input ----
     print("\nTest 5: empty input encodes to \"\", decodes to 0 bytes\n")
-    e5 = encoding.base64_encode("", 0)
+    e5 = encoding.base64_encode(string.bytes(""))
     if string.length(e5) != 0 {
         println("  FAIL: empty encode should be 0 chars, got '${e5}'")
         exit(1)
@@ -114,8 +116,8 @@ main() {
 
     // ---- Test 6: hash_hex("sha256", "abc") matches sha256_hex ----
     print("\nTest 6: hash_hex(\"sha256\", \"abc\") matches sha256_hex\n")
-    direct, _ = cryptography.sha256_hex("abc", 3)
-    via_disp, derr6 = cryptography.hash_hex("sha256", "abc", 3)
+    direct, _ = cryptography.sha256_hex(string.bytes("abc"))
+    via_disp, derr6 = cryptography.hash_hex("sha256", string.bytes("abc"))
     if derr6 != "" { println("  FAIL: ${derr6}"); exit(1) }
     if string.equals(direct, via_disp) != 1 {
         println("  FAIL: dispatcher disagrees with direct call")
@@ -127,7 +129,7 @@ main() {
 
     // ---- Test 7: hash_hex with unknown algorithm ----
     print("\nTest 7: hash_hex(\"not_a_real_algo\", ...) errors\n")
-    _, derr7 = cryptography.hash_hex("not_a_real_algo", "x", 1)
+    _, derr7 = cryptography.hash_hex("not_a_real_algo", string.bytes("x"))
     if derr7 == "" {
         println("  FAIL: expected non-empty err, got success")
         exit(1)

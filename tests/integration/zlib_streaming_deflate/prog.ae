@@ -31,7 +31,7 @@ main() {
         ev = "event: patch\ndata: chunk-${i}\n\n"
         expected = string.concat(expected, ev)
 
-        c1, n1, e1 = zlib.stream_write(s, ev, string.length(ev))
+        c1, n1, e1 = zlib.stream_write(s, string.bytes(ev))
         if e1 != "" { println("FAIL stream_write: ${e1}") return 1 }
         if n1 > 0 { all = string.concat(all, c1) }
 
@@ -54,7 +54,7 @@ main() {
     total = string.length(all)
 
     // THE test: the whole concatenation decodes as ONE gzip stream.
-    out, on, e4 = zlib.gzip_inflate(all, total)
+    out, on, e4 = zlib.gzip_inflate(string.bytes(all)[0..total])
     if e4 != "" { println("FAIL: concatenated chunks did not decode: ${e4}") return 1 }
     if out != expected {
         println("FAIL: decoded ${on} bytes, content mismatch")

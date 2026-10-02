@@ -10,36 +10,44 @@
 
 exports(
     lzf_max_compressed_size,
-    lzf_try_compress, lzf_get_compress_bytes, lzf_get_compress_length,
+    lzf_get_compress_bytes, lzf_get_compress_length,
     lzf_release_compress,
-    lzf_try_decompress, lzf_get_decompress_bytes, lzf_get_decompress_length,
+    lzf_get_decompress_bytes, lzf_get_decompress_length,
     lzf_release_decompress,
     max_compressed_size, compress, decompress
 )
 
 extern lzf_max_compressed_size(length: int) -> int
 
-extern lzf_try_compress(data: string, length: int) -> int
+// The `*_try_*` calls that take input bytes have `data: ptr`, not `string`,
+// and are not exported (#2301): the wrappers pass a byte[] slice's raw data
+// pointer. A `string` parameter routes through the AetherString unwrap,
+// which misreads a payload beginning with the header's magic bytes as a
+// header; a heap string passed to a `ptr` parameter would feed in its header.
+extern lzf_try_compress(data: ptr, length: int) -> int
 extern lzf_get_compress_bytes() -> string
 extern lzf_get_compress_length() -> int
 extern lzf_release_compress()
 
-extern lzf_try_decompress(data: string, length: int, output_length: int) -> int
+extern lzf_try_decompress(data: ptr, length: int, output_length: int) -> int
 extern lzf_get_decompress_bytes() -> string
 extern lzf_get_decompress_length() -> int
 extern lzf_release_decompress()
 
 extern string_new_with_length(data: string, length: int) -> ptr
 
+// A slice with no bound (`p as byte[]`, `.len` -1) has no length.
+fn unbounded(fname: string) {
+    panic("lzf.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+}
+
 max_compressed_size(length: int) -> int {
     return lzf_max_compressed_size(length)
 }
 
-compress(data: string, length: int) -> {
-    if length < 0 {
-        return "", 0, "negative input length"
-    }
-    ok = lzf_try_compress(data, length)
+compress(data: byte[]) -> {
+    if data.len < 0 { unbounded("compress") }
+    ok = lzf_try_compress(data, data.len)
     if ok == 0 {
         return "", 0, "lzf compress failed"
     }
@@ -50,14 +58,12 @@ compress(data: string, length: int) -> {
     return owned, n, ""
 }
 
-decompress(data: string, length: int, output_length: int) -> {
-    if length < 0 {
-        return "", 0, "negative input length"
-    }
+decompress(data: byte[], output_length: int) -> {
+    if data.len < 0 { unbounded("decompress") }
     if output_length < 0 {
         return "", 0, "negative output length"
     }
-    ok = lzf_try_decompress(data, length, output_length)
+    ok = lzf_try_decompress(data, data.len, output_length)
     if ok == 0 {
         return "", 0, "lzf decompress failed"
     }

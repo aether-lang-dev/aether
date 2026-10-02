@@ -22,17 +22,17 @@ main() {
     ikm = hb("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
     salt = hb("000102030405060708090a0b0c")
     info = hb("f0f1f2f3f4f5f6f7f8f9")
-    okm = hkdf.hkdf("sha256", salt, bytes.length(salt), ikm, bytes.length(ikm), info, bytes.length(info), 42)
+    okm = hkdf.hkdf("sha256", bytes.view(salt), bytes.view(ikm), bytes.view(info), 42)
     fails = fails + check("hkdf rfc5869 tc1", bh(okm),
         "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
 
     // PBKDF2-HMAC-SHA256 (widely-published vectors)
     pw = hb("70617373776f7264") // "password"
     sp = hb("73616c74") // "salt"
-    dk1 = pbkdf2.pbkdf2("sha256", pw, bytes.length(pw), sp, bytes.length(sp), 1, 32)
+    dk1 = pbkdf2.pbkdf2("sha256", bytes.view(pw), bytes.view(sp), 1, 32)
     fails = fails + check("pbkdf2 sha256 c=1", bh(dk1),
         "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
-    dk2 = pbkdf2.pbkdf2("sha256", pw, bytes.length(pw), sp, bytes.length(sp), 4096, 32)
+    dk2 = pbkdf2.pbkdf2("sha256", bytes.view(pw), bytes.view(sp), 4096, 32)
     fails = fails + check("pbkdf2 sha256 c=4096", bh(dk2),
         "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a")
 

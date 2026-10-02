@@ -15,9 +15,9 @@
 //
 // Import with:  import std.cryptography.hkdf
 //
-//   hkdf_extract(algo, salt, salt_len, ikm, ikm_len) -> ptr (PRK bytes)
-//   hkdf_expand(algo, prk, prk_len, info, info_len, out_len) -> ptr (OKM)
-//   hkdf(algo, salt, salt_len, ikm, ikm_len, info, info_len, out_len) -> ptr
+//   hkdf_extract(algo, salt, ikm) -> ptr (PRK bytes)  -- salt, ikm, info: byte[]
+//   hkdf_expand(algo, prk, info, out_len) -> ptr (OKM)
+//   hkdf(algo, salt, ikm, info, out_len) -> ptr
 //
 // `algo` is any std.cryptography.hmac algorithm ("sha256", "sha512", ...).
 // All buffers are std.bytes (caller frees results). A NULL salt is treated
@@ -59,25 +59,25 @@ hash_len(algo: string) -> int {
 
 // HKDF-Extract: PRK = HMAC(salt, IKM). A NULL/empty salt becomes HashLen
 // zero bytes per RFC 5869 §2.2. Returns PRK (HashLen bytes), or null.
-hkdf_extract(algo: string, salt: ptr, salt_len: int, ikm: ptr, ikm_len: int) -> ptr {
+hkdf_extract(algo: string, salt: byte[], ikm: byte[]) -> ptr {
+    if salt.len < 0 { panic("hkdf.hkdf_extract: the `salt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     hl = hash_len(algo)
     if hl == 0 {
         return null
     }
+    // An absent or empty salt is HashLen zero bytes (RFC 5869 §2.2).
     use_salt = salt
-    use_salt_len = salt_len
     made = null
-    if salt == null || salt_len <= 0 {
+    if salt.len <= 0 {
         made = bytes.new(hl)
         i = 0
         while i < hl {
             bytes.set(made, i, 0)
             i = i + 1
         }
-        use_salt = made
-        use_salt_len = hl
+        use_salt = bytes.view(made)[0..hl]
     }
-    prk = hmac.hmac_bytes(algo, use_salt, use_salt_len, ikm, ikm_len)
+    prk = hmac.hmac_bytes(algo, use_salt, ikm)
     if made != null {
         bytes.free(made)
     }
@@ -87,7 +87,10 @@ hkdf_extract(algo: string, salt: ptr, salt_len: int, ikm: ptr, ikm_len: int) -> 
 // HKDF-Expand: OKM = T(1)|T(2)|... truncated to out_len, where
 // T(i) = HMAC(PRK, T(i-1) | info | byte(i)). Returns OKM, or null if
 // out_len exceeds 255*HashLen or on error.
-hkdf_expand(algo: string, prk: ptr, prk_len: int, info: ptr, info_len: int, out_len: int) -> ptr {
+hkdf_expand(algo: string, prk: byte[], info: byte[], out_len: int) -> ptr {
+    if prk.len < 0 { panic("hkdf.hkdf_expand: the `prk` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if info.len < 0 { panic("hkdf.hkdf_expand: the `info` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int info_len = info.len
     hl = hash_len(algo)
     if hl == 0 {
         return null
@@ -119,12 +122,12 @@ hkdf_expand(algo: string, prk: ptr, prk_len: int, info: ptr, info_len: int, out_
             off = off + prev_len
         }
         if inf_len > 0 {
-            bytes.copy_from_bytes(tin, off, info, 0, inf_len)
+            bytes.copy_from_slice(tin, off, info[0..inf_len])
             off = off + inf_len
         }
         bytes.set(tin, off, counter & 0xFF)
 
-        ti = hmac.hmac_bytes(algo, prk, prk_len, tin, tlen)
+        ti = hmac.hmac_bytes(algo, prk, bytes.view(tin)[0..tlen])
         bytes.free(tin)
         if ti == null {
             if prev != null {
@@ -157,16 +160,16 @@ hkdf_expand(algo: string, prk: ptr, prk_len: int, info: ptr, info_len: int, out_
 }
 
 // Full HKDF: extract then expand. Returns out_len bytes of OKM, or null.
-hkdf(algo: string, salt: ptr, salt_len: int, ikm: ptr, ikm_len: int, info: ptr, info_len: int, out_len: int) -> ptr {
+hkdf(algo: string, salt: byte[], ikm: byte[], info: byte[], out_len: int) -> ptr {
     hl = hash_len(algo)
     if hl == 0 {
         return null
     }
-    prk = hkdf_extract(algo, salt, salt_len, ikm, ikm_len)
+    prk = hkdf_extract(algo, salt, ikm)
     if prk == null {
         return null
     }
-    okm = hkdf_expand(algo, prk, bytes.length(prk), info, info_len, out_len)
+    okm = hkdf_expand(algo, bytes.view(prk), info, out_len)
     bytes.free(prk)
     return okm
 }

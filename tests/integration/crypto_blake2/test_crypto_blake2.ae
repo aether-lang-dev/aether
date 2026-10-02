@@ -3,6 +3,7 @@
 // digest to exercise the parameter block.
 import std.cryptography.blake2
 import std.io
+import std.string
 
 check(label: string, got: string, want: string) -> int {
     if got == want {
@@ -19,16 +20,16 @@ main() {
     fails = 0
 
     fails = fails + check("blake2b-512 empty",
-        blake2.blake2b_hex("", 0),
+        blake2.blake2b_hex(string.bytes("")),
         "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce")
     fails = fails + check("blake2b-512 abc",
-        blake2.blake2b_hex("abc", 3),
+        blake2.blake2b_hex(string.bytes("abc")),
         "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923")
     fails = fails + check("blake2s-256 empty",
-        blake2.blake2s_hex("", 0),
+        blake2.blake2s_hex(string.bytes("")),
         "69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9")
     fails = fails + check("blake2s-256 abc",
-        blake2.blake2s_hex("abc", 3),
+        blake2.blake2s_hex(string.bytes("abc")),
         "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982")
 
     if fails == 0 {

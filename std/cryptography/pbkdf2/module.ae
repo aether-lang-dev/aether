@@ -14,7 +14,7 @@
 //
 // Import with:  import std.cryptography.pbkdf2
 //
-//   pbkdf2(algo, password, pw_len, salt, salt_len, iterations, dk_len) -> ptr
+//   pbkdf2(algo, password, salt, iterations, dk_len) -> ptr  -- password, salt: byte[]
 //
 // `algo` is any std.cryptography.hmac algorithm ("sha256", "sha512", ...).
 // All buffers are std.bytes (caller frees the result). Returns null on a
@@ -54,20 +54,23 @@ hash_len(algo: string) -> int {
 
 // Compute one T(i) block into `out` at offset `out_off`, taking `take`
 // bytes. i is the 1-based block index.
-derive_block(algo: string, password: ptr, pw_len: int, salt: ptr, salt_len: int, iterations: int, i: int, out: ptr, out_off: int, take: int) -> int {
+derive_block(algo: string, password: byte[], salt: byte[], iterations: int, i: int, out: ptr, out_off: int, take: int) -> int {
+    if password.len < 0 { panic("pbkdf2.derive_block: the `password` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if salt.len < 0 { panic("pbkdf2.derive_block: the `salt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int salt_len = salt.len
     hl = hash_len(algo)
     // U(1) = HMAC(P, S | INT_BE32(i))
     sin_len = salt_len + 4
     sin = bytes.new(sin_len)
     if salt_len > 0 {
-        bytes.copy_from_bytes(sin, 0, salt, 0, salt_len)
+        bytes.copy_from_slice(sin, 0, salt[0..salt_len])
     }
     bytes.set(sin, salt_len + 0, (i >> 24) & 0xFF)
     bytes.set(sin, salt_len + 1, (i >> 16) & 0xFF)
     bytes.set(sin, salt_len + 2, (i >> 8) & 0xFF)
     bytes.set(sin, salt_len + 3, i & 0xFF)
 
-    u = hmac.hmac_bytes(algo, password, pw_len, sin, sin_len)
+    u = hmac.hmac_bytes(algo, password, bytes.view(sin)[0..sin_len])
     bytes.free(sin)
     if u == null {
         return 0
@@ -80,7 +83,7 @@ derive_block(algo: string, password: ptr, pw_len: int, salt: ptr, salt_len: int,
     // U(j) = HMAC(P, U(j-1)); XOR each into the accumulator.
     j = 1
     while j < iterations {
-        next = hmac.hmac_bytes(algo, password, pw_len, u, hl)
+        next = hmac.hmac_bytes(algo, password, bytes.view(u)[0..hl])
         bytes.free(u)
         if next == null {
             bytes.free(acc)
@@ -102,7 +105,8 @@ derive_block(algo: string, password: ptr, pw_len: int, salt: ptr, salt_len: int,
 }
 
 // Derive `dk_len` bytes from the password+salt with `iterations` rounds.
-pbkdf2(algo: string, password: ptr, pw_len: int, salt: ptr, salt_len: int, iterations: int, dk_len: int) -> ptr {
+pbkdf2(algo: string, password: byte[], salt: byte[], iterations: int, dk_len: int) -> ptr {
+    if salt.len < 0 { panic("pbkdf2.pbkdf2: the `salt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     hl = hash_len(algo)
     if hl == 0 {
         return null
@@ -113,12 +117,6 @@ pbkdf2(algo: string, password: ptr, pw_len: int, salt: ptr, salt_len: int, itera
     if dk_len <= 0 {
         return bytes.new(0)
     }
-    use_salt = salt
-    use_salt_len = salt_len
-    if salt == null {
-        use_salt_len = 0
-    }
-
     out = bytes.new(dk_len)
     produced = 0
     i = 1
@@ -128,7 +126,7 @@ pbkdf2(algo: string, password: ptr, pw_len: int, salt: ptr, salt_len: int, itera
         if remaining < take {
             take = remaining
         }
-        ok = derive_block(algo, password, pw_len, use_salt, use_salt_len, iterations, i, out, produced, take)
+        ok = derive_block(algo, password, salt, iterations, i, out, produced, take)
         if ok == 0 {
             bytes.free(out)
             return null

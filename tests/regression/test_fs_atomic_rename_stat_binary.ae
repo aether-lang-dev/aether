@@ -17,7 +17,7 @@ main() {
     // ---- Test 1: write_atomic round-trip ---------------------------
     println("\nTest 1: write_atomic writes what we gave it")
     path_a = "${tmp}/aether_fs_atomic_test.txt"
-    err = fs.write_atomic(path_a, "hello atomic", 12)
+    err = fs.write_atomic(path_a, string.bytes("hello atomic"))
     if err != "" {
         println("  FAIL: write_atomic returned err: ${err}")
         exit(1)
@@ -38,7 +38,7 @@ main() {
     //            doesn't exist (matches POSIX rename-into-missing-dir)
     println("\nTest 2: write_atomic fails if parent doesn't exist")
     path_b = "${tmp}/aether_fs_no_such_dir_xyz/file.txt"
-    err2 = fs.write_atomic(path_b, "x", 1)
+    err2 = fs.write_atomic(path_b, string.bytes("x"))
     if err2 == "" {
         println("  FAIL: expected error, got success")
         exit(1)
@@ -219,7 +219,7 @@ main() {
     stage = "${tmp}/aether_fs_stage.txt"
     final_ = "${tmp}/aether_fs_final.txt"
     fs.delete(final_)
-    err11 = fs.write_atomic(stage, "staged payload", 14)
+    err11 = fs.write_atomic(stage, string.bytes("staged payload"))
     if err11 != "" {
         println("  FAIL: atomic stage write: ${err11}")
         exit(1)

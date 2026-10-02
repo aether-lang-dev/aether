@@ -22,7 +22,7 @@ fail(msg: string) {
 
 main() {
     path = "aeth_bytes_foreign_probe.bin"
-    werr = fs.write_binary(path, "HELLO", 5)
+    werr = fs.write_binary(path, string.bytes("HELLO"))
     if werr != "" { fail("could not write the probe: ${werr}") }
 
     // An AetherString* in a `string` slot, handed to a bytes accessor.

@@ -5,7 +5,7 @@
 // The implementations are in std/net/aether_net.c.
 
 exports(
-    tcp_connect_raw, tcp_send_raw, tcp_send_n_raw,
+    tcp_connect_raw, tcp_send_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw,
@@ -19,7 +19,14 @@ exports(
 // Raw externs - escape hatch
 extern tcp_connect_raw(host: string, port: int) -> ptr
 extern tcp_send_raw(sock: ptr, data: string) -> int
-extern tcp_send_n_raw(sock: ptr, data: string, length: int) -> int
+// `data` is `ptr`, not `string`, and this is not exported (#2301): write_n
+// passes a byte[] slice's raw data pointer. A `string` parameter routes
+// through the AetherString unwrap, which would misread a payload beginning
+// with the header's magic bytes as a header — for a relay forwarding a
+// peer's bytes, that is the peer choosing which memory gets sent. And a
+// heap string passed to a `ptr` parameter would send its header. std.net
+// no longer declares this symbol, so the two prototypes cannot disagree.
+extern tcp_send_n_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
 extern tcp_send_bytes_raw(sock: ptr, data: ptr, length: int) -> int
@@ -65,12 +72,23 @@ write(sock: ptr, data: string) -> {
     return n, ""
 }
 
-// Length-aware socket write. Writes exactly the caller-supplied byte
-// prefix, so embedded NUL bytes in `data` do not truncate the send.
-// Returns the OS send(2) byte count; callers that require full-buffer
-// delivery should loop until `length` bytes have been accepted.
-write_n(sock: ptr, data: string, length: int) -> {
-    n = tcp_send_n_raw(sock, data, length)
+// Length-aware socket write: sends the bytes of `data`, whose length
+// travels with the slice (#2301), so embedded NUL bytes do not truncate
+// the send. Returns the OS send(2) byte count; callers that require
+// full-buffer delivery should loop, sending `data[n..]` until every byte
+// has been accepted. An empty slice sends nothing and returns (0, "").
+//
+// For a string, send its byte view: `tcp.write_n(sock, string.bytes(s))`,
+// a prefix with `string.bytes(s)[0..n]`; for a `std.bytes` buffer,
+// `bytes.view(buf)`.
+write_n(sock: ptr, data: byte[]) -> {
+    if data.len < 0 {
+        panic("tcp.write_n: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+    if data.len == 0 {
+        return 0, ""
+    }
+    n = tcp_send_n_raw(sock, data, data.len)
     if n < 0 {
         return 0, "send failed"
     }

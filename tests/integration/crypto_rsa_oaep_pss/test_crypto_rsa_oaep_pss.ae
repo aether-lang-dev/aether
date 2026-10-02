@@ -38,23 +38,25 @@ main() {
 
     // OAEP encrypt (fixed seed) + decrypt
     seed = hb("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"); msg = hb("68656c6c6f206f616570")
-    fails = fails + ck("oaep encrypt", bh(rsa.encrypt_oaep(k, msg, bytes.length(msg), seed)), "b07ad49540cd08de66247b1a8c28070ed013a6bfee2750bb76b28bb575af5fa6af3f88c5366f20c63da1990cd72263acf635a90cc77b1a8445d66ada0374c8b6b0401f940174df0194d883ec29bc93aecc99c0c17ea259d270b864d5b6dde614e6466bb32dbd6901f8fa6e6816b7ee6d8cf02a8a3fc63501a5a25e2d0c07fb5e")
+    fails = fails + ck("oaep encrypt", bh(rsa.encrypt_oaep(k, bytes.view(msg), seed)), "b07ad49540cd08de66247b1a8c28070ed013a6bfee2750bb76b28bb575af5fa6af3f88c5366f20c63da1990cd72263acf635a90cc77b1a8445d66ada0374c8b6b0401f940174df0194d883ec29bc93aecc99c0c17ea259d270b864d5b6dde614e6466bb32dbd6901f8fa6e6816b7ee6d8cf02a8a3fc63501a5a25e2d0c07fb5e")
     pt, oerr = rsa.decrypt_oaep(k, hb("b07ad49540cd08de66247b1a8c28070ed013a6bfee2750bb76b28bb575af5fa6af3f88c5366f20c63da1990cd72263acf635a90cc77b1a8445d66ada0374c8b6b0401f940174df0194d883ec29bc93aecc99c0c17ea259d270b864d5b6dde614e6466bb32dbd6901f8fa6e6816b7ee6d8cf02a8a3fc63501a5a25e2d0c07fb5e"))
     if oerr != "" { println("FAIL oaep decrypt: ${oerr}"); fails = fails + 1 }
     fails = fails + ck("oaep decrypt", bh(pt), "68656c6c6f206f616570")
 
     // PSS sign (fixed salt) + verify
     mh = hb("5d1961d33b1b26035f275173addb3ed49f4f1912bf9b8ea2bcb6df88480c5057"); salt = hb("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f")
-    fails = fails + ck("pss sign", bh(rsa.sign_pss(k, mh, salt, bytes.length(salt))), "cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
-    if rsa.verify_pss(k, mh, hb("cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1"), 32) != 1 { println("FAIL pss verify"); fails = fails + 1 } else { println("ok   pss verify") }
+    fails = fails + ck("pss sign", bh(rsa.sign_pss(k, mh, bytes.view(salt))), "cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
+    vsig = hb("cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
+    if rsa.verify_pss(k, mh, bytes.view(vsig), 32) != 1 { println("FAIL pss verify"); fails = fails + 1 } else { println("ok   pss verify") }
+    bytes.free(vsig)
 
     // round-trips on fresh inputs
     rt = hb("00112233445566778899aabbccddeeff")
-    rtct = rsa.encrypt_oaep(k, rt, bytes.length(rt), seed)
+    rtct = rsa.encrypt_oaep(k, bytes.view(rt), seed)
     rtpt, rerr = rsa.decrypt_oaep(k, rtct)
     if rerr != "" || bh(rtpt) != bh(rt) { println("FAIL oaep round-trip"); fails = fails + 1 } else { println("ok   oaep round-trip") }
-    rsig = rsa.sign_pss(k, mh, salt, 32)
-    if rsa.verify_pss(k, mh, rsig, 32) != 1 { println("FAIL pss round-trip"); fails = fails + 1 } else { println("ok   pss round-trip") }
+    rsig = rsa.sign_pss(k, mh, bytes.view(salt)[0..32])
+    if rsa.verify_pss(k, mh, bytes.view(rsig), 32) != 1 { println("FAIL pss round-trip"); fails = fails + 1 } else { println("ok   pss round-trip") }
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

@@ -26,7 +26,7 @@ header comment is the authoritative description.
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 12 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
-| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 47 | [full section](#cryptography-stdcryptography) |
+| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 34 | [full section](#cryptography-stdcryptography) |
 | `std.decimal` | Arbitrary-precision decimal fixed-point arithmetic with explicit rounding modes, for money math. | 43 | [guide](../std/decimal/README.md) · [source](../std/decimal/module.ae) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 16 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
@@ -34,14 +34,14 @@ header comment is the authoritative description.
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 16 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 160 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 157 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 165 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
-| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 166 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 25 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
-| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
+| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 42 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 55 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
@@ -51,7 +51,7 @@ header comment is the authoritative description.
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 16 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
-| `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
+| `std.lzf` | One-shot LZF compression and decompression. | 10 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 125 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
@@ -59,7 +59,7 @@ header comment is the authoritative description.
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
-| `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
+| `std.net` | TCP sockets and the HTTP client and server externs. | 67 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 17 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
 | `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 85 | [full section](#os-stdos) |
@@ -80,7 +80,7 @@ header comment is the authoritative description.
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 99 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 36 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 35 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 43 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -93,9 +93,9 @@ header comment is the authoritative description.
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 25 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 35 | [full section](#compression-stdzlib) |
-| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 23 | — |
-| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 22 | — |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
+| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 21 | — |
+| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 20 | — |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -1293,7 +1293,7 @@ import std.fs
 
 main() {
     // Durable write: staging + fsync + rename.
-    err = fs.write_atomic("config.json", body, string.length(body))
+    err = fs.write_atomic("config.json", string.bytes(body))
 
     // Rename composes with write_atomic for stage-then-publish.
     err = fs.rename("config.json.new", "config.json")
@@ -1309,8 +1309,8 @@ main() {
 
 **Functions (beyond those re-exported from `std.file`/`std.dir`/`std.path`):**
 - `fs.exists(path)` → `int` - **Path-agnostic** existence check: 1 if anything is at `path` (regular file, directory, symlink, fifo, ...), 0 otherwise. Distinct from `file.exists` (regular-file-only) and `dir.exists` (directory-only), those filter by type, this one doesn't. Uses `lstat(2)` so a dangling symlink counts as existing, matches POSIX `test -e`. Reach for this in tooling that probes whether a path is bound without caring what's there (build-system runtime-path discovery, "did the user pass a real path?" CLI validation).
-- `fs.write_atomic(path, data, length)` → `string` - Stage to `<path>.tmp.<pid>.<n>`, fsync, rename over destination. Binary-safe via explicit length. The tmp file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` so an attacker who pre-plants a symlink at the predictable tmp path can't trick the write into following it; permissions track the process umask exactly as the previous `fopen("wb")` would have.
-- `fs.write_binary(path, data, length)` → `string` - Non-atomic `fopen("wb")` + `fwrite` + `fclose`. Binary-safe via explicit length. Cheaper than `write_atomic` when a partial file on crash is acceptable (scratch writes, caches).
+- `fs.write_atomic(path, data: byte[])` → `string` - Stage to `<path>.tmp.<pid>.<n>`, fsync, rename over destination. Binary-safe: the length travels with the slice (`string.bytes(s)` for a string, `bytes.view(buf)` for a `std.bytes` buffer). The tmp file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` so an attacker who pre-plants a symlink at the predictable tmp path can't trick the write into following it; permissions track the process umask exactly as the previous `fopen("wb")` would have.
+- `fs.write_binary(path, data: byte[])` → `string` - Non-atomic `fopen("wb")` + `fwrite` + `fclose`. Binary-safe: the length travels with the slice. Cheaper than `write_atomic` when a partial file on crash is acceptable (scratch writes, caches).
 - `fs.rename(from, to)` → `string` - POSIX `rename(2)` wrapper. Atomic when source and target are on the same filesystem.
 - `fs.create_dir_with_mode(path, mode)` → `string` - Like `fs.create_dir` but takes an explicit POSIX mode (0777-masked). Use this for private dirs (e.g. `0o700` for keys), sets the bits at creation time, closing the `mkdir` → `chmod` race window. Windows ignores the mode at the directory layer; the parameter is accepted for portability.
 - `fs.mtime(path)` → `(int, string)` - File's mtime as Unix epoch seconds, in the standard `(value, err)` shape. Distinguishes "stat failed" from "file's mtime is 0 (1970 epoch)", the older `file_mtime` extern collapsed both into a single 0 sentinel and is kept only for back-compat.
@@ -1892,39 +1892,40 @@ crashing, callers should always check the error slot.
 import std.cryptography
 import std.encoding
 import std.fs
+import std.string
 
 main() {
     // Text payload, length is explicit.
-    digest, err = cryptography.sha256_hex("abc", 3)
+    digest, err = cryptography.sha256_hex(string.bytes("abc"))
     // digest == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
     // Algorithm chosen at runtime (e.g. read from a config file).
     algo = "sha256"
     if cryptography.hash_supported(algo) == 1 {
-        d, _ = cryptography.hash_hex(algo, "abc", 3)
+        d, _ = cryptography.hash_hex(algo, string.bytes("abc"))
     }
 
     // Base64, round-trip a binary payload through JSON.
-    b64      = encoding.base64_encode("\x01\x02\x03", 3)       // "AQID"
+    b64      = encoding.base64_encode(string.bytes("\x01\x02\x03"))       // "AQID"
     raw, _   = encoding.base64_decode(b64)                     // 3 bytes
 }
 ```
 
 **Hash functions:**
-- `cryptography.sha1_hex(data, length)` → `(string, string)` - 40-char lowercase hex digest. Included for interop with legacy formats (Git, Subversion, HMAC-SHA1). Prefer SHA-256 for new work.
-- `cryptography.sha256_hex(data, length)` → `(string, string)` - 64-char lowercase hex digest.
-- `cryptography.hash_hex(algo, data, length)` → `(string, string)` - Algorithm-by-name dispatcher. `algo` is `"sha1"`, `"sha256"`, or any other name OpenSSL's `EVP_get_digestbyname()` recognizes (`"sha384"`, `"sha512"`, `"sha3-256"`, ...). Returns `("", "unknown algorithm")` for unrecognized names. Useful when the algorithm is config-driven rather than compile-time.
+- `cryptography.sha1_hex(string.bytes(data)[0..length])` → `(string, string)` - 40-char lowercase hex digest. Included for interop with legacy formats (Git, Subversion, HMAC-SHA1). Prefer SHA-256 for new work.
+- `cryptography.sha256_hex(string.bytes(data)[0..length])` → `(string, string)` - 64-char lowercase hex digest.
+- `cryptography.hash_hex(algo, string.bytes(data)[0..length])` → `(string, string)` - Algorithm-by-name dispatcher. `algo` is `"sha1"`, `"sha256"`, or any other name OpenSSL's `EVP_get_digestbyname()` recognizes (`"sha384"`, `"sha512"`, `"sha3-256"`, ...). Returns `("", "unknown algorithm")` for unrecognized names. Useful when the algorithm is config-driven rather than compile-time.
 - `cryptography.hash_supported(algo)` → `int` - `1` if this build can compute `algo`, `0` otherwise. Always succeeds; never errors. Use at config time to validate user-supplied algorithm names before they hit `hash_hex`.
-- `cryptography.md4_hex(data, length)` / `md5_hex(data, length)` → `(string, string)` - 32-char lowercase hex digest. Legacy interop only (Content-MD5, ETag, zsync, pre-SHA1 fixtures), NOT collision-resistant, do not use for security. `("", error)` on failure.
+- `cryptography.md4_hex(string.bytes(data)[0..length])` / `md5_hex(data, length)` → `(string, string)` - 32-char lowercase hex digest. Legacy interop only (Content-MD5, ETag, zsync, pre-SHA1 fixtures), NOT collision-resistant, do not use for security. `("", error)` on failure.
 
 **Raw-bytes digests** (same `(bytes, length, error)` tuple as `base64_decode`; `bytes` is an owned AetherString preserving embedded NULs, use when the wire format wants a fixed-width binary digest rather than hex):
-- `cryptography.sha1_bytes(data, length)` / `sha256_bytes(data, length)` → `(string, int, string)`.
-- `cryptography.md4_bytes(data, length)` / `md5_bytes(data, length)` → `(string, int, string)`.
-- `cryptography.hash_bytes(algo, data, length)` → `(string, int, string)` - Algorithm-by-name binary digest. `("", 0, "unknown algorithm")` for unrecognized names.
+- `cryptography.sha1_bytes(string.bytes(data)[0..length])` / `sha256_bytes(data, length)` → `(string, int, string)`.
+- `cryptography.md4_bytes(string.bytes(data)[0..length])` / `md5_bytes(data, length)` → `(string, int, string)`.
+- `cryptography.hash_bytes(algo, string.bytes(data)[0..length])` → `(string, int, string)` - Algorithm-by-name binary digest. `("", 0, "unknown algorithm")` for unrecognized names.
 
 **HMAC-SHA256** (RFC 2104 / FIPS 198-1; RFC 4231 test vectors):
-- `cryptography.hmac_sha256_hex(key, key_len, msg, msg_len)` → `(string, string)` - Hex digest. Natural shape for opaque-token signing and bearer-token derivation.
-- `cryptography.hmac_sha256_bytes(key, key_len, msg, msg_len)` → `(string, int, string)` - Raw 32-byte digest. Use for chained key derivation (SigV4 / HKDF-shaped flows) where each round's output keys the next.
+- `cryptography.hmac_sha256_hex(string.bytes(key)[0..key_len], string.bytes(msg)[0..msg_len])` → `(string, string)` - Hex digest. Natural shape for opaque-token signing and bearer-token derivation.
+- `cryptography.hmac_sha256_bytes(string.bytes(key)[0..key_len], string.bytes(msg)[0..msg_len])` → `(string, int, string)` - Raw 32-byte digest. Use for chained key derivation (SigV4 / HKDF-shaped flows) where each round's output keys the next.
 
 **Cryptographically-secure random** (OS CSPRNG, `getrandom(2)` / `/dev/urandom` on Linux, `arc4random_buf(3)` on macOS/BSD):
 - `cryptography.random_bytes(n)` → `(string, int, string)` - `n` random bytes as `(bytes, length, error)`; `bytes` preserves embedded NULs.
@@ -1933,14 +1934,14 @@ main() {
 
 **Streaming (incremental) digest** - Hash data that arrives in pieces without ever holding it whole (streaming an upload to disk in fixed windows, S3-style multipart ETags). The two `final` variants free the context; call `digest_free` only when bailing out before finalizing.
 - `cryptography.digest_new(algo)` → `(ptr, string)` - Open a context for `algo` (`"md5"`, `"sha256"`, `"sha1"`, `"md4"`, or any name OpenSSL recognizes). `(null, "unknown algorithm")` / `(null, "openssl unavailable")` on failure.
-- `cryptography.digest_update(ctx, data, length)` → `(int, string)` - Feed `length` bytes; `(1, "")` on success, `(0, error)` on failure. Binary-safe. Does NOT free the context.
+- `cryptography.digest_update(ctx, string.bytes(data)[0..length])` → `(int, string)` - Feed `length` bytes; `(1, "")` on success, `(0, error)` on failure. Binary-safe. Does NOT free the context.
 - `cryptography.digest_final_hex(ctx)` → `(string, string)` - Finalize to lowercase hex. FREES `ctx`.
 - `cryptography.digest_final_bytes(ctx)` → `(string, int, string)` - Finalize to raw digest bytes. FREES `ctx`.
 - `cryptography.digest_free(ctx)` - Abandon a context without finalizing (NULL-safe). Only for the bail-out-before-final case.
 
 **Base64 (RFC 4648 §4 standard alphabet):**
-- `encoding.base64_encode(data, length)` → `string` - Encode `length` bytes, **unpadded** output.
-- `encoding.base64_encode_padded(data, length)` → `string` - Encode `length` bytes, **with `=` padding** to a multiple of 4. Reach for this when the wire format on the other end requires padding; most non-strict decoders accept either.
+- `encoding.base64_encode(data: byte[])` → `string` - Encode the bytes of `data`, **unpadded** output.
+- `encoding.base64_encode_padded(data: byte[])` → `string` - Encode the bytes of `data`, **with `=` padding** to a multiple of 4. Reach for this when the wire format on the other end requires padding; most non-strict decoders accept either.
 - `encoding.base64_decode(b64)` → `string!` - Decode, destructured as `(bytes, err)`. `err` is non-empty on malformed input. Accepts both padded and unpadded input; `bytes` is an AetherString preserving embedded NULs.
 
 Base64 lives in `std.encoding`, not `std.cryptography`: encoding is not a
@@ -1979,15 +1980,14 @@ import std.string
 
 main() {
     raw = "key=secret"
-    n = string.length(raw)
 
     // The encoders take an explicit length, so they are binary-safe: the
     // input may contain NUL bytes.
-    println(encoding.hex_encode(raw, n))
-    println(encoding.base64_encode(raw, n))
-    println(encoding.base32_encode(raw, n))
+    println(encoding.hex_encode(string.bytes(raw)))
+    println(encoding.base64_encode(string.bytes(raw)))
+    println(encoding.base32_encode(string.bytes(raw)))
 
-    back, err = encoding.base64_decode(encoding.base64_encode(raw, n))
+    back, err = encoding.base64_decode(encoding.base64_encode(string.bytes(raw)))
     println("round trip: ${back == raw}, err '${err}'")
 
     // One CSV record split on a separator. Deliberately simple: there is
@@ -2009,12 +2009,12 @@ fields 3: name
 ```
 
 **Functions:**
-- `encoding.hex_encode(data, length)` → `string` - Lowercase hex
+- `encoding.hex_encode(data: byte[])` → `string` - Lowercase hex
 - `encoding.hex_decode(s)` → `(string, string)` - Bytes, or an error for an odd length or a non-hex digit
-- `encoding.base64_encode(data, length)` → `string` - Unpadded Base64
-- `encoding.base64_encode_padded(data, length)` → `string` - Padded Base64
+- `encoding.base64_encode(data: byte[])` → `string` - Unpadded Base64
+- `encoding.base64_encode_padded(data: byte[])` → `string` - Padded Base64
 - `encoding.base64_decode(s)` → `(string, string)` - Accepts padded or unpadded input
-- `encoding.base32_encode(data, length)` → `string`, `encoding.base32_decode(s)` → `(string, string)` - RFC 4648 Base32
+- `encoding.base32_encode(data: byte[])` → `string`, `encoding.base32_decode(s)` → `(string, string)` - RFC 4648 Base32
 - `encoding.csv_split(record, sep)` → `ptr` - Split ONE record on `sep`; a trailing carriage return is trimmed
 - `encoding.csv_count(h)` → `int`, `encoding.csv_field(h, i)` → `string` - Field count and field `i`, borrowed from the handle
 - `encoding.csv_free(h)` - Release a split record
@@ -2105,26 +2105,25 @@ import std.string
 main() {
     // Compress a text payload at the default level (-1).
     msg = "Hello, zlib. Repetition repetition repetition."
-    n_in = string.length(msg)
-    compressed, nc, cerr = zlib.deflate(msg, n_in, -1)
+    compressed, nc, cerr = zlib.deflate(string.bytes(msg), -1)
 
     // Round-trip back to the original bytes. `inflate` doesn't need
     // to be told the decompressed size, it grows as needed.
-    out, nu, uerr = zlib.inflate(compressed, nc)
+    out, nu, uerr = zlib.inflate(string.bytes(compressed)[0..nc])
 
     // Binary payloads work the same way: fs.read_binary gives a
     // length-aware AetherString; the extern unwraps it before
     // feeding the bytes to zlib.
     data, nd, _ = fs.read_binary("payload.bin")
-    blob, nb, _ = zlib.deflate(data, nd, 9)  // level 9 = best
+    blob, nb, _ = zlib.deflate(string.bytes(data)[0..nd], 9)  // level 9 = best
 }
 ```
 
 **Functions:**
-- `zlib.deflate(data, length, level)` → `(string, int, string)` - Compress the first `length` bytes of `data` at `level` (0..9, or -1 for default). Out-of-range levels are clamped to default. Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on failure.
-- `zlib.inflate(data, length)` → `(string, int, string)` - Decompress a zlib stream (RFC 1950). Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on corruption, truncation, or empty input.
+- `zlib.deflate(data: byte[], level)` → `(string, int, string)` - Compress the bytes of `data` at `level` (0..9, or -1 for default). Out-of-range levels are clamped to default. Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on failure.
+- `zlib.inflate(data: byte[])` → `(string, int, string)` - Decompress a zlib stream (RFC 1950). Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on corruption, truncation, or empty input.
 
-Gzip-framed helpers for HTTP `Content-Encoding: gzip` are also available: `zlib.gzip_deflate(data, length, level)` and `zlib.gzip_inflate(data, length)`. Streaming APIs remain out of scope for v1, additive future work under the same module. See [stdlib-vs-contrib.md](stdlib-vs-contrib.md) for the "one obvious shape" criterion.
+Gzip-framed helpers for HTTP `Content-Encoding: gzip` are also available: `zlib.gzip_deflate(data: byte[], level)` and `zlib.gzip_inflate(data: byte[])`. Streaming APIs remain out of scope for v1, additive future work under the same module. See [stdlib-vs-contrib.md](stdlib-vs-contrib.md) for the "one obvious shape" criterion.
 
 ---
 
@@ -2224,6 +2223,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_h
 - `http.request_path(req)` → `string` - URL path (no query string); empty if `req` is null.
 - `http.request_body(req)` → `string` - Request body as a C-string. **Truncates at the first embedded NUL** when read via `string.length(...)`; pair with `http.request_body_length` for binary-safe access. On a large (streaming) request the first call materializes the body, it drains the remaining wire bytes into one buffer, preserving the v1 whole-body contract at the O(Content-Length) cost the caller asked for. Don't mix it with `request_body_read` on the same request (the consumed prefix is gone; the mixed call returns `""`).
 - `http.request_body_length(req)` → `int` - Byte count of the request body. Returns 0 if `req` is null or has no body. Reach for this whenever the body may contain NUL bytes (svn PUT, image uploads, gzipped JSON), the length-aware companion to `http.request_body`. On a streaming request this is the declared `Content-Length` until the body is materialized, then the actual received count.
+- `http.request_body_bytes(req)` → `byte[]` - The request body as a borrowed, bounded view (binary-safe; materialises a streaming body like `request_body`). Valid for the handler's duration.
 - `http.request_body_read(req, offset, max)` → `(bytes, n, err)` - Chunked body read. Bodies ≤ 16 KiB are pre-buffered (random-access offsets); larger bodies are **streamed**, the handler is dispatched at headers-complete and each read pulls the next window straight off the socket (sequential offsets only), so peak server RAM per upload is one window, not the object. Backpressure is TCP flow control itself: the server doesn't `recv` until the handler asks.
 - `http.request_body_complete(req)` → `int` - 1 once every declared body byte has arrived (streaming: pulled off the wire; buffered: always 1). The natural chunked-loop terminator. `Transfer-Encoding: chunked` request bodies remain unsupported (no `Content-Length` → length 0, no body), a deliberate v1 semantics decision.
 - `http.request_query(req)` → `string` - Raw query string; empty if absent.
@@ -2237,7 +2237,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_h
 - `http.response_set_status(res, code)` - Set HTTP status code
 - `http.response_set_header(res, name, value)` - Set response header
 - `http.response_set_body(res, body)` - Set response body. Uses `strdup` + `strlen` internally, **truncates at the first embedded NUL**. Fine for text bodies; use `response_set_body_n` for anything that may contain binary.
-- `http.response_set_body_n(res, body, length)` - Length-aware sibling of `response_set_body`. Treats `body` as `length` bytes verbatim, no NUL searching. Reach for this when the body is binary content (gzip / image / packed binary) or may contain NUL bytes mid-payload. `length == 0` clears the body; negative length is a no-op.
+- `http.response_set_body_bytes(res, body: byte[])` - Binary-safe sibling of `response_set_body`: sets the bytes of `body` verbatim (embedded NULs survive); the server copies them.
 - `http.response_json(res, json)` - Set JSON response
 - `http.server_response_free(res)` - Free response
 
@@ -2392,7 +2392,7 @@ main() {
 **Builder + send:**
 - `client.request(method, url)` → `ptr` - Build a request handle (method as arbitrary string)
 - `client.set_header(req, name, value)` → `string` - Append `Name: value` to outgoing headers
-- `client.set_body(req, body, length, content_type)` → `string` - Set request body (length explicit so binary payloads with embedded NULs survive)
+- `client.set_body(req, body: byte[], content_type)` → `string` - Set the request body to the bytes of `body` (binary-safe; pass a string as `string.bytes(s)`). Empty content_type defaults to `application/x-www-form-urlencoded`.
 - `client.set_timeout(req, timeout)` → `string` - `Duration` per-request timeout (`0ns` = block forever)
 - `client.set_follow_redirects(req, max_hops)` → `string` - Follow up to `max_hops` redirects (`0` = don't follow, the default)
 - `client.send_request(req)` → `(ptr, string)` - Fire the request; returns `(resp, "")` on transport success or `(null, err)` on failure
@@ -2554,13 +2554,13 @@ main() {
     r = http1.response_new()
     part1 = wire_bytes("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Le")
     part2 = wire_bytes("ngth: 11\r\n\r\nhello world")
-    println("after part 1: ${http1.feed(r, part1, bytes.length(part1), 0)}")
-    err = http1.feed(r, part2, bytes.length(part2), 0)
+    println("after part 1: ${http1.feed(r, bytes.view(part1), 0)}")
+    err = http1.feed(r, bytes.view(part2), 0)
     println("after part 2: '${err}'")
 
     println("status ${http1.status_code(r)}")
     println("content-type ${http1.header(r, "content-type")}")
-    println("body ${bytes.to_string(http1.body_ptr(r), http1.body_len(r))}")
+    println("body ${bytes.string_from_slice(http1.body(r))}")
     http1.response_free(r)
     bytes.free(part1)
     bytes.free(part2)
@@ -2568,8 +2568,8 @@ main() {
     // Chunked transfer-encoding is decoded the same way.
     c = http1.response_new()
     ch = wire_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
-    _e = http1.feed(c, ch, bytes.length(ch), 0)
-    println("chunked body ${bytes.to_string(http1.body_ptr(c), http1.body_len(c))}")
+    _e = http1.feed(c, bytes.view(ch), 0)
+    println("chunked body ${bytes.string_from_slice(http1.body(c))}")
     http1.response_free(c)
     bytes.free(ch)
 }
@@ -2585,10 +2585,10 @@ chunked body Wikipedia
 
 **Functions:**
 - `http1.response_new()` → `ptr`, `http1.response_free(r)`
-- `http1.feed(r, bytes, len, is_eof)` → `string` - Add bytes; `""` once a response is complete, `"incomplete"` before
+- `http1.feed(r, data: byte[], is_eof)` → `string` - Add the bytes of `data` (copied in); `""` once a response is complete, `"incomplete"` before
 - `http1.read_response_conn(r, conn)` → `string` - Read a whole response from a `tls13_client` connection
 - `http1.status_code(r)` → `int`, `status_reason(r)` → `ptr` (a C string), `header(r, name)` → `string` (case-insensitive), `header_count(r)` → `int`
-- `http1.body_ptr(r)` → `ptr`, `body_len(r)` → `int`
+- `http1.body(r)` → `byte[]` - The decoded body as a borrowed view, valid until `response_free`
 
 ### TCP (`std.tcp`)
 
@@ -2626,7 +2626,7 @@ main() {
 **Functions (Go-style):**
 - `tcp.connect(host, port)` → `(ptr, string)` - Connect, return `(socket, err)`
 - `tcp.write(sock, data)` → `(int, string)` - Write text-shaped data, return `(bytes_sent, err)`. Uses the legacy strlen-shaped raw send; use `tcp.write_n` for binary payloads.
-- `tcp.write_n(sock, data, length)` → `(int, string)` - Length-aware write, return `(bytes_sent, err)`. Sends exactly the caller-supplied byte prefix, preserving embedded NUL bytes.
+- `tcp.write_n(sock, data: byte[])` → `(int, string)` - Length-aware write, return `(bytes_sent, err)`. Sends the slice's bytes, preserving embedded NUL bytes; send a string as `string.bytes(s)`, a prefix as `string.bytes(s)[0..n]`.
 - `tcp.read(sock, max)` → `(string, string)` - Read text-shaped data, return `(data, err)`. Use `tcp.read_n` for binary payloads.
 - `tcp.read_n(sock, max)` → `(string, int, string)` - Binary-safe read, return `(bytes, length, err)`. The returned length is authoritative for payloads with embedded NUL bytes.
 - `tcp.write_slice(sock, s: byte[])` → `(int, string)` - Send a slice's bytes, binary-safe (#2301). One `send(2)`: the count may be short, so loop on `s[sent..]`. A slice with no bound panics.
@@ -3270,22 +3270,21 @@ import std.string
 
 main() {
     key = "cache-key-42"
-    n = string.length(key)
 
     // Non-cryptographic, for hash tables and checksums. Same input, same
     // output, every run and every platform.
-    println("fnv32 ${hash.fnv32(key, n)}")
-    println("fnv64 ${hash.fnv64(key, n)}")
-    println("murmur3 ${hash.murmur3_32(key, n, 0)}")
+    println("fnv32 ${hash.fnv32(string.bytes(key))}")
+    println("fnv64 ${hash.fnv64(string.bytes(key))}")
+    println("murmur3 ${hash.murmur3_32(string.bytes(key), 0)}")
 
     // SipHash-2-4 takes a 128-bit key, and is the one to reach for when
     // the input is attacker-controlled: without a secret key, an attacker
     // can pick inputs that all land in one bucket.
-    println("siphash ${hash.siphash24(key, n, 0, 0)}")
+    println("siphash ${hash.siphash24(string.bytes(key), 0, 0)}")
 
     // CRC-32 is the checksum PNG, gzip and ZIP carry: for a format that
     // names it, not for a hash table.
-    println("crc32 ${hash.crc32(key, n)}")
+    println("crc32 ${hash.crc32(string.bytes(key))}")
 }
 ```
 ```output
@@ -3297,10 +3296,10 @@ crc32 955761749
 ```
 
 **Functions:**
-- `hash.fnv32(data, length)` → `long`, `hash.fnv64(data, length)` → `long` - FNV-1a, fast and simple
-- `hash.murmur3_32(data, length, seed)` → `long` - MurmurHash3, better distribution
-- `hash.siphash24(data, length, k0, k1)` → `long` - SipHash-2-4 under a 128-bit key
-- `hash.crc32(data, length)` → `long`, `hash.crc32_update(crc, data, length)` → `long` - CRC-32 (IEEE 802.3), continued across pieces by `crc32_update`
+- `hash.fnv32(data: byte[])` → `long`, `hash.fnv64(data: byte[])` → `long` - FNV-1a, fast and simple
+- `hash.murmur3_32(data: byte[], seed)` → `long` - MurmurHash3, better distribution
+- `hash.siphash24(data: byte[], k0, k1)` → `long` - SipHash-2-4 under a 128-bit key
+- `hash.crc32(data: byte[])` → `long`, `hash.crc32_update(crc, data: byte[])` → `long` - CRC-32 (IEEE 802.3), continued across pieces by `crc32_update`
 
 None of these is a cryptographic hash: for integrity or signatures use
 `std.cryptography`.
@@ -3534,7 +3533,7 @@ main() {
 - `io.fd_open_read(path)` → `(int, string)` - Open `path` for reading (POSIX `O_RDONLY` / Win `_O_RDONLY | _O_BINARY`). Returns `(fd, "")` on success, `(-1, error)` on failure.
 - `io.fd_open_write(path)` → `(int, string)` - Open `path` for writing, implicit `O_CREAT | O_TRUNC` (mode 0644 on POSIX, `_O_BINARY` on Windows). Returns `(fd, "")` / `(-1, error)`. Pair with `fd_close`. For O_APPEND or non-truncating opens, file an issue.
 - `io.fd_close(fd)` → `string` - `""` on success, error string on failure. Single attempt, does not retry on EINTR (Linux requires not retrying; the descriptor is already gone).
-- `io.fd_write_n(fd, data, length)` → `int` - Write exactly `length` bytes to `fd`. Loops on partial writes; retries EINTR on POSIX. Returns 0 on success, -1 on error. Note: when `data` is an Aether `string` parameter that crossed an extern boundary, the auto-unwrap may have stripped the AetherString header and the C side sees a plain `const char*` strlen-truncation applies for embedded NULs. For binary writes from Aether-side, marshal through `std.bytes` first.
+- `io.fd_write(fd, data: byte[])` → `int` - Write every byte of the slice to `fd`; the length travels with it, so embedded NULs survive. Loops on partial writes; retries EINTR on POSIX. Returns 0 on success, -1 on error; an empty slice writes nothing and returns 0. For a string pass `string.bytes(s)`, for a `std.bytes` buffer `bytes.view(buf)`.
 - `io.fd_read_n(fd, n)` → `(ptr, int, string)` - Read up to `n` bytes from `fd`. Returns `(bytes, count, err)`: `bytes` is a refcounted AetherString carrying the explicit byte count (binary-safe, embedded NULs survive), `count` is the number actually read (1..n on success, 0 on clean EOF or error), `err` is `""` on success or clean EOF, otherwise an error message.
 - `io.fd_read_line(fd)` → `(ptr, string)` - Read one `\n`-delimited line from `fd`. Trailing `\n` is stripped (a preceding `\r` is also stripped, so CRLF input yields content with neither). Returns `(line, "")` on a normal line, `("", "")` on clean EOF before any byte, `(partial, "")` on EOF mid-line (server-side dump streams sometimes omit a trailing newline), `("", error)` on read error.
 

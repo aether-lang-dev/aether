@@ -102,7 +102,7 @@ main() {
             // a 114-byte buffer), and treat any other length as a reject.
             ok = 0
             if sig_len == 114 {
-                ok = ed448.verify(pk, msg, msg_len, sig)
+                ok = ed448.verify(pk, bytes.view(msg)[0..msg_len], sig)
             }
             if res == "valid" {
                 if ok == 1 { passed = passed + 1 } else {

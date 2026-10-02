@@ -72,7 +72,7 @@ fn slicen(sig: ptr, off: int, width: int) -> ptr {
 
 fn hash66(b: ptr, n: int) -> ptr {
     ctx, e = sha2.new("sha512")
-    sha2.update_bytes(ctx, b, n)
+    sha2.update(ctx, bytes.view(b)[0..n])
     d = sha2.final_bytes(ctx) // 64 bytes
     out = bytes.new(66)
     bytes.set(out, 0, 0)

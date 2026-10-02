@@ -3,18 +3,14 @@
 // open_write / write_n / close + open_read / read_n / read_line /
 // close and check the bytes landed correctly.
 //
-// Note on binary content: the test uses ASCII payloads only. NUL-
-// bearing inputs through `fd_write_n` would hit the well-known
-// length-clamp hazard at the extern boundary (where the AetherString
-// header gets stripped by the #297 auto-unwrap, and `string.length`
-// fall-throughs to strlen at the C side). The fd_read_n side IS
-// binary-safe (returns a refcounted AetherString carrying the
-// explicit byte count); writing binary bytes from Aether-side
-// requires either the bytes module or a length-aware string builder.
+// Note on binary content: the test uses ASCII payloads only. Both
+// directions are binary-safe — fd_write takes a byte[] whose length
+// travels with it (#2301), and fd_read_n returns a refcounted
+// AetherString carrying the explicit byte count.
 //
 // What this test guards:
 //   1. fd_open_write returns (fd, "") for a writable path
-//   2. fd_write_n returns 0 on success and the bytes hit disk
+//   2. fd_write returns 0 on success and the bytes hit disk
 //   3. fd_open_read for the same path returns (fd, "")
 //   4. fd_read_line strips trailing '\n' and round-trips
 //   5. fd_read_n round-trips the exact byte count
@@ -49,9 +45,9 @@ main() {
     // ASCII payload; safe to take string.length and pass through.
     payload = "first-line\nsecond-line\nthe-rest-is-here\n"
     plen = string.length(payload)
-    rc = io.fd_write_n(fd, payload, plen)
+    rc = io.fd_write(fd, string.bytes(payload)[0..plen])
     if rc != 0 {
-        println("FAIL 1: fd_write_n returned ${rc}")
+        println("FAIL 1: fd_write returned ${rc}")
         exit(1)
     }
     cerr = io.fd_close(fd)

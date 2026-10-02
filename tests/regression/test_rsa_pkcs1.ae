@@ -77,7 +77,7 @@ main() {
     if string.equals(sgerr, "") != 1 { print("FAIL sign err\n"); fails = fails + 1 }
     if string.equals(bhex(ours), OSSL_SIG()) != 1 { print("FAIL sig != openssl\n"); fails = fails + 1 }
     osig = hb(OSSL_SIG())
-    if rsa.verify_pkcs1(k, di, osig) != 1 { print("FAIL verify openssl sig\n"); fails = fails + 1 }
+    if rsa.verify_pkcs1(k, di, bytes.view(osig)) != 1 { print("FAIL verify openssl sig\n"); fails = fails + 1 }
     bytes.free(ours); bytes.free(osig)
 
     // tamper -> reject
@@ -85,7 +85,7 @@ main() {
     bytes.set(di2, 5, (bytes.get(di2, 5) ^ 0xFF) & 0xFF)
     sig2, sg2err = rsa.sign_pkcs1(k, di)
     if string.equals(sg2err, "") != 1 { fails = fails + 1 }
-    if rsa.verify_pkcs1(k, di2, sig2) != 0 { print("FAIL tamper accepted\n"); fails = fails + 1 }
+    if rsa.verify_pkcs1(k, di2, bytes.view(sig2)) != 0 { print("FAIL tamper accepted\n"); fails = fails + 1 }
     bytes.free(sig2); bytes.free(di2); bytes.free(di)
 
     // self encrypt/decrypt round-trip

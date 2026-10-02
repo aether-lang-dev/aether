@@ -31,7 +31,7 @@ main() {
     fails = fails + ck(udp.addr_string(null) == "", "addr_string(null) is empty")
     fails = fails + ck(udp.addr_host(null) == "", "addr_host(null) is empty")
     fails = fails + ck(!udp.addr_equal(null, null), "addr_equal(null, null) is false")
-    _, serr = udp.send_to(null, "127.0.0.1", 1, "x", 1)
+    _, serr = udp.send_to(null, "127.0.0.1", 1, string.bytes("x"))
     fails = fails + ck(serr != "", "send_to(null) errors")
 
     server, err = udp.bind("127.0.0.1", 0)
@@ -46,18 +46,18 @@ main() {
 
     // Idle socket: would block, not an error and not a wait.
     buf = bytes.new(64)
-    n, sender, werr = udp.recv_from(server, bytes.data(buf), 64)
+    n, sender, werr = udp.recv_from(server, bytes.capacity_view(buf)[0..64])
     fails = fails + ck(werr == "would block", "idle recv_from reports would block, got '${werr}'")
     fails = fails + ck(n == 0 && sender == null, "idle recv_from carries no packet")
     ready, _ = udp.poll(server, 0)
     fails = fails + ck(!ready, "poll(0) on an idle socket is false")
 
     // Client -> server by host, answered by address.
-    sent, serr2 = udp.send_to(client, "127.0.0.1", port, "snapshot", 8)
+    sent, serr2 = udp.send_to(client, "127.0.0.1", port, string.bytes("snapshot"))
     fails = fails + ck(serr2 == "" && sent == 8, "send_to by host")
     ready, _ = udp.poll(server, 1000)
     fails = fails + ck(ready, "poll sees the packet")
-    n, sender, werr = udp.recv_from(server, bytes.data(buf), 64)
+    n, sender, werr = udp.recv_from(server, bytes.capacity_view(buf)[0..64])
     fails = fails + ck(werr == "" && n == 8, "recv_from gets 8 bytes, got ${n} '${werr}'")
     fails = fails + ck(bytes.to_string(buf, n) == "snapshot", "payload intact")
     fails = fails + ck(udp.addr_host(sender) == "127.0.0.1", "sender host")
@@ -76,16 +76,16 @@ main() {
     fails = fails + ck(udp.addr_equal(keep, same), "clone equals the original")
 
     // Server -> client without resolving, received into a reused address.
-    asent, aerr = udp.send_to_addr(server, keep, "ack", 3)
+    asent, aerr = udp.send_to_addr(server, keep, string.bytes("ack"))
     fails = fails + ck(aerr == "" && asent == 3, "send_to_addr")
     from = udp.addr_new()
     ready, _ = udp.poll(client, 1000)
     fails = fails + ck(ready, "client poll sees the ack")
-    m, ierr = udp.recv_from_into(client, bytes.data(buf), 64, from)
+    m, ierr = udp.recv_from_into(client, bytes.capacity_view(buf)[0..64], from)
     fails = fails + ck(ierr == "" && m == 3, "recv_from_into gets 3 bytes")
     fails = fails + ck(bytes.to_string(buf, m) == "ack", "ack intact")
     fails = fails + ck(udp.addr_port(from) == port, "ack came from the server")
-    m, ierr = udp.recv_from_into(client, bytes.data(buf), 64, from)
+    m, ierr = udp.recv_from_into(client, bytes.capacity_view(buf)[0..64], from)
     fails = fails + ck(ierr == "would block" && m == 0, "drained: would block again")
 
     udp.addr_free(from)

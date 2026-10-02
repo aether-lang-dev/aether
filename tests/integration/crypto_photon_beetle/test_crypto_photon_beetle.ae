@@ -53,14 +53,14 @@ main() {
 
     // Photon-Beetle Hash test vectors from LWC_HASH_KAT_256.txt
     fails = fails + check("empty",
-        photon_beetle.photon_beetle_hex("", 0),
+        photon_beetle.photon_beetle_hex(string.bytes("")),
         "44a99882fea033566856a27e7f0c94dc84fac7e411b08b890a4a574e3db75d4a")
 
     // Msg = 00
     b_00 = hex_to_bytes("00")
     defer bytes.free(b_00)
     ctx, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx, b_00, 1)
+    photon_beetle.update(ctx, bytes.view(b_00)[0..1])
     res_00 = photon_beetle.final_hex(ctx)
     fails = fails + check("00", res_00, "f165ccd18640b9703e96f1bd9a4a4ee32dd4031e4680a1b9890891dcc63468a7")
 
@@ -68,7 +68,7 @@ main() {
     b_0001 = hex_to_bytes("0001")
     defer bytes.free(b_0001)
     ctx2, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx2, b_0001, 2)
+    photon_beetle.update(ctx2, bytes.view(b_0001)[0..2])
     res_0001 = photon_beetle.final_hex(ctx2)
     fails = fails + check("0001", res_0001, "2ef2d38f71e77928df37fba337872b639f7748556c1a081821b9b8460ac68fac")
 
@@ -76,7 +76,7 @@ main() {
     b_000102 = hex_to_bytes("000102")
     defer bytes.free(b_000102)
     ctx3, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx3, b_000102, 3)
+    photon_beetle.update(ctx3, bytes.view(b_000102)[0..3])
     res_000102 = photon_beetle.final_hex(ctx3)
     fails = fails + check("000102", res_000102, "f9a8c467209e7b5f32db28bde50d5210a81a9c6aa9c1686a05c3619cbf44061d")
 
@@ -84,7 +84,7 @@ main() {
     b_00010203 = hex_to_bytes("00010203")
     defer bytes.free(b_00010203)
     ctx4, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx4, b_00010203, 4)
+    photon_beetle.update(ctx4, bytes.view(b_00010203)[0..4])
     res_00010203 = photon_beetle.final_hex(ctx4)
     fails = fails + check("00010203", res_00010203, "efab98a1ffeb6f9e832db6fa7fc6bff670895f8a2abe987cd962e93b0127ec3c")
 
@@ -95,7 +95,7 @@ main() {
     while j < 8 { bytes.set(inc8, j, j); j = j + 1 }
     defer bytes.free(inc8)
     ctx8, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx8, inc8, 8)
+    photon_beetle.update(ctx8, bytes.view(inc8)[0..8])
     fails = fails + check("8B", photon_beetle.final_hex(ctx8),
         "87947eed1020ec45eec25cc05a135e08e5928fb6dc1f9214e6a69421a3bc30da")
 
@@ -104,18 +104,18 @@ main() {
     while j < 16 { bytes.set(inc16, j, j); j = j + 1 }
     defer bytes.free(inc16)
     ctx16, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx16, inc16, 16)
+    photon_beetle.update(ctx16, bytes.view(inc16)[0..16])
     fails = fails + check("16B(exact rate)", photon_beetle.final_hex(ctx16),
         "ab0d1eb0315df8af7f7ae0ac42eaf2f52fb0fdf0904e182dcc796b6cb8d7981a")
 
     // Multi-part streaming across the rate: 16 bytes fed 5+11.
     ctx_sp, _ = photon_beetle.new()
-    photon_beetle.update_bytes(ctx_sp, inc16, 5)
+    photon_beetle.update(ctx_sp, bytes.view(inc16)[0..5])
     tail11 = bytes.new(11)
     k = 5
     while k < 16 { bytes.set(tail11, k - 5, k); k = k + 1 }
     defer bytes.free(tail11)
-    photon_beetle.update_bytes(ctx_sp, tail11, 11)
+    photon_beetle.update(ctx_sp, bytes.view(tail11)[0..11])
     fails = fails + check("16B split 5+11", photon_beetle.final_hex(ctx_sp),
         "ab0d1eb0315df8af7f7ae0ac42eaf2f52fb0fdf0904e182dcc796b6cb8d7981a")
 

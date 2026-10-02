@@ -74,7 +74,7 @@ main() {
     n = 1
     probe = 1
     while n > 0 {
-        n, e = io.fd_read_into(fd, bytes.data(buf), cap)
+        n, e = io.fd_read_into(fd, bytes.capacity_view(buf)[0..cap])
         if e != "" {
             // A failure on the VERY FIRST read means the fd is not readable on
             // this platform at all (see the Windows note above) rather than a
@@ -125,11 +125,11 @@ main() {
 
     // Argument guards: refuse rather than read into nothing.
     b2 = bytes.new(8)
-    bad_fd, e1 = io.fd_read_into(0 - 1, bytes.data(b2), 8)
+    bad_fd, e1 = io.fd_read_into(0 - 1, bytes.capacity_view(b2)[0..8])
     fails = fails + check(bad_fd == 0 && string.length(e1) > 0, "negative fd is refused")
     string.free(e1)
 
-    zero_len, e2 = io.fd_read_into(0, bytes.data(b2), 0)
+    zero_len, e2 = io.fd_read_into(0, bytes.capacity_view(b2)[0..0])
     fails = fails + check(zero_len == 0 && string.length(e2) > 0, "zero length is refused")
     string.free(e2)
     bytes.free(b2)

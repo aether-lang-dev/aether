@@ -8,13 +8,13 @@
 // with no big lookup tables and no block-cipher dependency.
 //
 // Surface:
-//   chacha20_xor(key32, nonce12, counter, data, len) -> ptr
+//   chacha20_xor(key32, nonce12, counter, data) -> ptr
 //       ChaCha20 keystream XOR (encrypt == decrypt). 256-bit key, 96-bit
 //       nonce, 32-bit initial block counter.
-//   poly1305_mac(key32, data, len) -> ptr          // 16-bv tag
-//   aead_seal(key32, nonce12, aad, aad_len, plaintext, pt_len)
+//   poly1305_mac(key32, data) -> ptr          // 16-bv tag
+//   aead_seal(key32, nonce12, aad, plaintext)
 //       -> ptr ciphertext-with-tag (pt_len + 16 bytes; tag appended)
-//   aead_open(key32, nonce12, aad, aad_len, ct_with_tag, ct_len)
+//   aead_open(key32, nonce12, aad, ct_with_tag)
 //       -> (plaintext, "") on a valid tag, or (null, error)
 //
 // All buffers are std.bytes (caller frees results).
@@ -132,7 +132,9 @@ set_le32(b: ptr, off: int, v: long) {
 // ChaCha20 keystream XOR over `data`. `counter` is the initial block
 // counter (1 for AEAD payload; 0 produces the block used for the Poly1305
 // key). Returns a fresh buffer of `len` bytes.
-chacha20_xor(key: ptr, nonce: ptr, counter: long, data: ptr, len: int) -> ptr {
+chacha20_xor(key: ptr, nonce: ptr, counter: long, data: byte[]) -> ptr {
+    if data.len < 0 { panic("chacha20poly1305.chacha20_xor: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
     out = bytes.new(len)
     ks = bytes.new(64)
     off = 0
@@ -142,7 +144,7 @@ chacha20_xor(key: ptr, nonce: ptr, counter: long, data: ptr, len: int) -> ptr {
         j = 0
         while j < 64 {
             if off + j < len {
-                bytes.set(out, off + j, (bytes.get(data, off + j) ^ bytes.get(ks, j)) & 0xFF)
+                bytes.set(out, off + j, (data[off + j] ^ bytes.get(ks, j)) & 0xFF)
             }
             j = j + 1
         }
@@ -157,7 +159,9 @@ chacha20_xor(key: ptr, nonce: ptr, counter: long, data: ptr, len: int) -> ptr {
 
 // One-shot Poly1305: 32-byte one-time key (r||s), message of `len` bytes.
 // Returns a fresh 16-byte tag.
-poly1305_mac(key: ptr, data: ptr, len: int) -> ptr {
+poly1305_mac(key: ptr, data: byte[]) -> ptr {
+    if data.len < 0 { panic("chacha20poly1305.poly1305_mac: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = data.len
     // Clamp r (RFC 8439): r &= 0x0ffffffc0ffffffc0ffffffc0fffffff
     // Load r as 5 26-bit limbs from the 16 clamped key bytes.
     t0 = le32(key, 0)
@@ -199,7 +203,7 @@ poly1305_mac(key: ptr, data: ptr, len: int) -> ptr {
         k = 0
         long bv = 0
         while k < nblk {
-            bv = bytes.get(data, off + k) & 0xFF
+            bv = data[off + k] & 0xFF
             sh = (k % 4) * 8
             word = k / 4
             if word == 0 { b0 = b0 | (bv << sh) }
@@ -318,18 +322,22 @@ poly_key_for(key: ptr, nonce: ptr) -> ptr {
 // Build the Poly1305 MAC input: AAD || pad16 || CT || pad16 ||
 // le64(aad_len) || le64(ct_len). Returns a fresh buffer + sets its length
 // implicitly via bytes.length.
-mac_data(aad: ptr, aad_len: int, ct: ptr, ct_len: int) -> ptr {
+mac_data(aad: byte[], ct: byte[]) -> ptr {
+    if aad.len < 0 { panic("chacha20poly1305.mac_data: the `aad` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int aad_len = aad.len
+    if ct.len < 0 { panic("chacha20poly1305.mac_data: the `ct` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct.len
     pad_a = (16 - (aad_len % 16)) % 16
     pad_c = (16 - (ct_len % 16)) % 16
     total = aad_len + pad_a + ct_len + pad_c + 16
     out = bytes.new(total)
     off = 0
-    if aad_len > 0 { bytes.copy_from_bytes(out, off, aad, 0, aad_len) }
+    if aad_len > 0 { bytes.copy_from_slice(out, off, aad[0..aad_len]) }
     off = off + aad_len
     z = 0
     while z < pad_a { bytes.set(out, off + z, 0); z = z + 1 }
     off = off + pad_a
-    if ct_len > 0 { bytes.copy_from_bytes(out, off, ct, 0, ct_len) }
+    if ct_len > 0 { bytes.copy_from_slice(out, off, ct[0..ct_len]) }
     off = off + ct_len
     z = 0
     while z < pad_c { bytes.set(out, off + z, 0); z = z + 1 }
@@ -349,11 +357,13 @@ set_le64(b: ptr, off: int, v: long) {
 
 // AEAD seal: returns ciphertext (pt_len bytes) with the 16-bv Poly1305
 // tag appended → pt_len + 16 bytes.
-aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, plaintext: ptr, pt_len: int) -> ptr {
-    ct = chacha20_xor(key, nonce, 1, plaintext, pt_len)
+aead_seal(key: ptr, nonce: ptr, aad: byte[], plaintext: byte[]) -> ptr {
+    if plaintext.len < 0 { panic("chacha20poly1305.aead_seal: the `plaintext` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pt_len = plaintext.len
+    ct = chacha20_xor(key, nonce, 1, plaintext)
     pk = poly_key_for(key, nonce)
-    md = mac_data(aad, aad_len, ct, pt_len)
-    tag = poly1305_mac(pk, md, bytes.length(md))
+    md = mac_data(aad, bytes.view(ct)[0..pt_len])
+    tag = poly1305_mac(pk, bytes.view(md))
     bytes.free(pk)
     bytes.free(md)
 
@@ -367,15 +377,17 @@ aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, plaintext: ptr, pt_len: 
 
 // AEAD open: verifies the trailing 16-bv tag (constant-time compare),
 // then decrypts. Returns (plaintext, "") or (null, error).
-aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> {
+aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> {
+    if ct_with_tag.len < 0 { panic("chacha20poly1305.aead_open: the `ct_with_tag` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ct_len = ct_with_tag.len
     if ct_len < 16 {
         return null, "ciphertext too short"
     }
     body_len = ct_len - 16
     // Recompute the tag over the ciphertext body.
     pk = poly_key_for(key, nonce)
-    md = mac_data(aad, aad_len, ct_with_tag, body_len)
-    want = poly1305_mac(pk, md, bytes.length(md))
+    md = mac_data(aad, ct_with_tag[0..body_len])
+    want = poly1305_mac(pk, bytes.view(md))
     bytes.free(pk)
     bytes.free(md)
 
@@ -383,7 +395,7 @@ aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len
     diff = 0
     i = 0
     while i < 16 {
-        diff = diff | ((bytes.get(want, i) ^ bytes.get(ct_with_tag, body_len + i)) & 0xFF)
+        diff = diff | ((bytes.get(want, i) ^ ct_with_tag[body_len + i]) & 0xFF)
         i = i + 1
     }
     bytes.free(want)
@@ -391,6 +403,6 @@ aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len
         return null, "authentication failed"
     }
 
-    pt = chacha20_xor(key, nonce, 1, ct_with_tag, body_len)
+    pt = chacha20_xor(key, nonce, 1, ct_with_tag[0..body_len])
     return pt, ""
 }

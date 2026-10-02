@@ -109,7 +109,7 @@ main() {
                 key = from_hex(key_hex)
                 msg = from_hex(msg_hex)
                 want = from_hex(tag_hex)
-                got = aes.cmac(key, keylen, msg, string_length(msg_hex) / 2)
+                got = aes.cmac(bytes.view(key)[0..keylen], bytes.view(msg)[0..string_length(msg_hex) / 2])
                 if tlen <= 16 && string_length(tag_hex) / 2 == tlen {
                     ok = tag_eq(got, want, tlen)
                 }

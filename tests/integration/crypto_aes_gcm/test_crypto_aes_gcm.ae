@@ -17,13 +17,13 @@ main() {
     // Case 1: zero key/IV, empty AAD+PT -> tag only
     k1 = hb("00000000000000000000000000000000")
     iv0 = hb("000000000000000000000000")
-    e1 = aes.new_encryptor(k1, 16)
-    fails = fails + ck("case1 tag", bh(aes.gcm_seal(e1, iv0, empty, 0, empty, 0)),
+    e1 = aes.new_encryptor(bytes.view(k1)[0..16])
+    fails = fails + ck("case1 tag", bh(aes.gcm_seal(e1, iv0, bytes.view(empty)[0..0], bytes.view(empty)[0..0])),
         "58e2fccefa7e3061367f1d57a4e7455a")
 
     // Case 2: zero key/IV, PT = 16 zero bytes
     pt2 = hb("00000000000000000000000000000000")
-    fails = fails + ck("case2 ct+tag", bh(aes.gcm_seal(e1, iv0, empty, 0, pt2, 16)),
+    fails = fails + ck("case2 ct+tag", bh(aes.gcm_seal(e1, iv0, bytes.view(empty)[0..0], bytes.view(pt2)[0..16])),
         "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf")
 
     // Case 4: with AAD
@@ -31,18 +31,18 @@ main() {
     iv4 = hb("cafebabefacedbaddecaf888")
     aad = hb("feedfacedeadbeeffeedfacedeadbeefabaddad2")
     pt4 = hb("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
-    e4 = aes.new_encryptor(k4, 16)
-    sealed = aes.gcm_seal(e4, iv4, aad, bytes.length(aad), pt4, bytes.length(pt4))
+    e4 = aes.new_encryptor(bytes.view(k4)[0..16])
+    sealed = aes.gcm_seal(e4, iv4, bytes.view(aad), bytes.view(pt4))
     fails = fails + ck("case4 ct+tag", bh(sealed),
         "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47")
 
     // open round-trip
-    op, err = aes.gcm_open(e4, iv4, aad, bytes.length(aad), sealed, bytes.length(sealed))
+    op, err = aes.gcm_open(e4, iv4, bytes.view(aad), bytes.view(sealed))
     if err != "" { println("FAIL open: ${err}"); fails = fails + 1 }
     if bh(op) != bh(pt4) { println("FAIL open roundtrip"); fails = fails + 1 } else { println("ok   open roundtrip") }
     // tamper
     bytes.set(sealed, 0, bytes.get(sealed, 0) ^ 1)
-    _, terr = aes.gcm_open(e4, iv4, aad, bytes.length(aad), sealed, bytes.length(sealed))
+    _, terr = aes.gcm_open(e4, iv4, bytes.view(aad), bytes.view(sealed))
     if terr == "" { println("FAIL tamper not rejected"); fails = fails + 1 } else { println("ok   tamper rejected") }
 
     if fails == 0 { println("ALL PASS"); return }

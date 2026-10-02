@@ -57,7 +57,7 @@ exports(
     request, set_header, set_body, set_timeout, set_follow_redirects, set_insecure,
     set_cafile, set_stream, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
     send_request, send_stream,
-    response_status, response_body, response_body_length, response_error, response_redirect_error,
+    response_status, response_body, response_body_bytes, response_error, response_redirect_error,
     response_is_stream, response_read,
     response_header, response_headers, response_url, response_free,
     get_with_headers, post_with_status,
@@ -72,7 +72,7 @@ exports(
 // re-exported below.
 extern http_request_raw(method: string, url: string) -> ptr
 extern http_request_set_header_raw(req: ptr, name: string, value: string) -> int
-extern http_request_set_body_raw(req: ptr, body: string, length: int, content_type: string) -> int
+extern http_request_set_body_raw(req: ptr, body: ptr, length: int, content_type: string) -> int
 extern http_request_set_timeout_raw(req: ptr, seconds: int) -> int
 extern http_request_set_timeout_ns_raw(req: ptr, timeout: Duration) -> int
 extern http_request_set_follow_redirects_raw(req: ptr, max_hops: int) -> int
@@ -120,13 +120,15 @@ set_header(req: ptr, name: string, value: string) -> string {
     return ""
 }
 
-// Set the request body. `length` is explicit so binary payloads
-// with embedded NULs survive (use string.length(body) for textual
-// bodies). content_type may be the empty string "" — the C side
-// then defaults to application/x-www-form-urlencoded for backward
-// compat with v1's http.post path.
-set_body(req: ptr, body: string, length: int, content_type: string) -> string {
-    rc = http_request_set_body_raw(req, body, length, content_type)
+// Set the request body to the bytes of `body` (#2301: a byte[] whose length
+// travels with it, so binary payloads with embedded NULs survive — pass a
+// string as `string.bytes(s)`, a `std.bytes` buffer as `bytes.view(buf)`).
+// The request keeps its own copy. content_type may be the empty string ""
+// — the C side then defaults to application/x-www-form-urlencoded for
+// backward compat with v1's http.post path.
+set_body(req: ptr, body: byte[], content_type: string) -> string {
+    if body.len < 0 { panic("client.set_body: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    rc = http_request_set_body_raw(req, body, body.len, content_type)
     if rc != 0 { return "set_body failed" }
     return ""
 }
@@ -296,14 +298,15 @@ send_stream(req: ptr) -> {
 response_status(resp: ptr) -> int { return http_response_status(resp) }
 response_body(resp: ptr) -> string { return http_response_body(resp) }
 
-// Byte length of the response body. Binary-safe partner to
-// `response_body` for callers that may receive payloads with
-// embedded NUL bytes (gzip, protobuf, image formats). The body
-// pointer + this length is the canonical "binary-safe read"
-// pattern; using string.length() on the body would truncate at
-// the first NUL.
-response_body_length(resp: ptr) -> int {
-    return http_response_body_length(resp)
+// The response body as a borrowed byte[] view (#2301): binary-safe for
+// payloads with embedded NULs (gzip, protobuf, image formats), bounded by
+// the body's real length. Valid while the response is alive; copy it out
+// (bytes.from_slice) to keep it. `response_body` stays the text accessor.
+response_body_bytes(resp: ptr) -> byte[] {
+    // The body is a retained AetherString; the local is released at scope
+    // exit and the response keeps its own reference, so the view stays valid.
+    b = http_response_body(resp)
+    return string.bytes(b)
 }
 
 // Streaming body reads (#1004). response_is_stream is 1 when the response was
@@ -417,8 +420,7 @@ post_with_status(url: string, body: string, content_type: string) -> {
     req = request("POST", url)
     if req == null { return "", 0, "request build failed" }
     set_timeout(req, 30s)
-    body_len = string_length(body)
-    set_body(req, body, body_len, content_type)
+    set_body(req, string.bytes(body), content_type)
     resp, err = send_request(req)
     request_free(req)
     if err != "" { return "", 0, err }
@@ -477,8 +479,7 @@ post_json(url: string, value: ptr) -> {
     set_timeout(req, 30s)
     set_header(req, "Content-Type", "application/json")
     set_header(req, "Accept", "application/json")
-    body_len = string_length(body_str)
-    set_body(req, body_str, body_len, "application/json")
+    set_body(req, string.bytes(body_str), "application/json")
 
     return send_request(req)
 }
@@ -527,7 +528,7 @@ head(url: string) -> {
 // PATCH (RFC 5789) — partial-update verb common in REST APIs
 // (GitHub, GitLab, Stripe). Same shape as send_request. Body
 // length is computed from the string; binary payloads with
-// embedded NULs need the bare builder + set_body(..., explicit_length).
+// embedded NULs need the bare builder + set_body(req, bytes, content_type).
 //
 // Closes #241 (PATCH half).
 patch(url: string, body: string, content_type: string) -> {
@@ -535,7 +536,6 @@ patch(url: string, body: string, content_type: string) -> {
     if req == null { return null, "request build failed" }
     defer request_free(req)
     set_timeout(req, 30s)
-    body_len = string_length(body)
-    set_body(req, body, body_len, content_type)
+    set_body(req, string.bytes(body), content_type)
     return send_request(req)
 }

@@ -15,18 +15,16 @@
 #endif
 #endif
 
-/* Unwrap the payload from a `data` argument that may be either an
- * AetherString* or a plain char*. Mirrors the helper in
- * std/fs/aether_fs.c — when callers pass a length-aware AetherString
- * (e.g. from fs.read_binary), the raw pointer is the struct, not
- * the bytes. Without this dispatch, we'd hash the struct header. */
+/* The input bytes and their count. `data` is always raw: std.cryptography's
+ * hashing/HMAC wrappers pass a byte[] slice's data pointer through `ptr`-typed
+ * externs (#2301), and base64 decode passes text with length -1 (strlen).
+ * This used to sniff for an AetherString header and unwrap one — but the
+ * generated call had already unwrapped any real AetherString, so the sniff
+ * ran on payload bytes and misread input beginning DE C0 57 AE (the header
+ * magic) as a header, hashing from a pointer taken out of the bytes that
+ * follow. */
 static inline const unsigned char* cryptography_unwrap_bytes(const char* data, int length, size_t* out_len) {
     if (!data) { *out_len = 0; return NULL; }
-    if (is_aether_string(data)) {
-        const AetherString* s = (const AetherString*)data;
-        *out_len = (length >= 0) ? (size_t)length : s->length;
-        return (const unsigned char*)s->data;
-    }
     *out_len = (length >= 0) ? (size_t)length : strlen(data);
     return (const unsigned char*)data;
 }
@@ -450,10 +448,17 @@ static int ae_b64_value(unsigned char c) {
     return -1;
 }
 
+/* `data` is always raw bytes with an explicit length: std.encoding passes a
+ * byte[] slice's data pointer (#2301) and the HTTP server passes SHA-1
+ * digests and nonces. It deliberately does NOT go through
+ * cryptography_unwrap_bytes: that sniffs for an AetherString header, and a
+ * raw input beginning DE C0 57 AE would be read as one, encoding from a
+ * `data` pointer taken out of the bytes that follow it. A WebSocket client
+ * can grind a Sec-WebSocket-Key whose SHA-1 digest starts that way. */
 static char* ae_b64_encode(const char* data, int length, int pad) {
     if (length < 0) return NULL;
-    size_t want;
-    const unsigned char* bytes = cryptography_unwrap_bytes(data, length, &want);
+    size_t want = (size_t)length;
+    const unsigned char* bytes = (const unsigned char*)data;
     if (want > 0 && !bytes) return NULL;
 
     size_t out_cap = ((want + 2) / 3) * 4 + 1;

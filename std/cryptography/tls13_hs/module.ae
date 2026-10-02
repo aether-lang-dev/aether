@@ -19,10 +19,10 @@
 //
 // Import with:  import std.cryptography.tls13_hs
 //
-//   client_hello(random32, session_id, sid_len, x25519_pub32) -> ptr
+//   client_hello(random32, session_id, x25519_pub32) -> ptr
 //       the full ClientHello handshake message (incl. 4-byte msg header),
 //       ready to hash into the transcript and wrap in a record.
-//   parse_server_hello(msg, len, out) -> string
+//   parse_server_hello(msg, out) -> string
 //       parse a ServerHello handshake message into a ShParsed struct;
 //       returns "" on success, an error string otherwise.
 //
@@ -106,10 +106,12 @@ fn put24(b: ptr, off: int, v: int) -> int {
     return off + 3
 }
 
-fn put_bytes(b: ptr, off: int, src: ptr, src_len: int) -> int {
+fn put_bytes(b: ptr, off: int, src: byte[]) -> int {
+    if src.len < 0 { panic("tls13_hs.put_bytes: the `src` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int src_len = src.len
     i = 0
     while i < src_len {
-        bytes.set(b, off + i, bytes.get(src, i) & 0xFF)
+        bytes.set(b, off + i, src[i] & 0xFF)
         i = i + 1
     }
     return off + src_len
@@ -128,31 +130,31 @@ fn put_ascii(b: ptr, off: int, s: string) -> int {
 
 // ---- readers ----
 
-fn get8(b: ptr, off: int) -> int {
-    return bytes.get(b, off) & 0xFF
+fn get8(b: byte[], off: int) -> int {
+    return b[off] & 0xFF
 }
 
-fn get16(b: ptr, off: int) -> int {
-    return ((bytes.get(b, off) & 0xFF) << 8) | (bytes.get(b, off + 1) & 0xFF)
+fn get16(b: byte[], off: int) -> int {
+    return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF)
 }
 
-fn get24(b: ptr, off: int) -> int {
-    return ((bytes.get(b, off) & 0xFF) << 16) | ((bytes.get(b, off + 1) & 0xFF) << 8) | (bytes.get(b, off + 2) & 0xFF)
+fn get24(b: byte[], off: int) -> int {
+    return ((b[off] & 0xFF) << 16) | ((b[off + 1] & 0xFF) << 8) | (b[off + 2] & 0xFF)
 }
 
 // Build the ClientHello handshake message (RFC 8446 §4.1.2), including the
 // 4-byte handshake header (msg_type + uint24 length). random must be 32
 // bytes; session_id 0..32 bytes (TLS 1.3 middlebox-compat: usually a 32-byte
 // echo value); x25519_pub is our 32-byte ephemeral public key.
-client_hello(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr) -> ptr {
-    return client_hello_sni(random, session_id, sid_len, x25519_pub, "")
+client_hello(random: ptr, session_id: byte[], x25519_pub: ptr) -> ptr {
+    return client_hello_sni(random, session_id, x25519_pub, "")
 }
 
 // Like client_hello but includes a server_name (SNI) extension for `host`
 // (RFC 6066 §3). CDNs require SNI to select the right certificate. An empty
 // host omits the extension (identical to the bare client_hello).
-client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string) -> ptr {
-    return client_hello_full(random, session_id, sid_len, GROUP_X25519, x25519_pub, 32, 0, null, 0, host)
+client_hello_sni(random: ptr, session_id: byte[], x25519_pub: ptr, host: string) -> ptr {
+    return client_hello_full(random, session_id, GROUP_X25519, bytes.view(x25519_pub)[0..32], 0, null, host)
 }
 
 // Build a ClientHello offering both x25519 and secp256r1 in supported_groups,
@@ -161,7 +163,13 @@ client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
 // lets a server that prefers the other group complete without a
 // HelloRetryRequest. x25519 share = 32-byte public; secp256r1 share = 65-byte
 // uncompressed point (0x04 || X || Y). The HRR retry path uses a single share.
-client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey: ptr, pubkey_len: int, group2: int, pubkey2: ptr, pubkey2_len: int, host: string) -> ptr {
+client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], host: string) -> ptr {
+    if session_id.len < 0 { panic("tls13_hs.client_hello_full: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sid_len = session_id.len
+    if pubkey.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pubkey_len = pubkey.len
+    if pubkey2.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pubkey2_len = pubkey2.len
     // Generous fixed buffer; this CH is ~230 bytes + the hostname.
     buf = bytes.new(1024)
     bytes.set(buf, 1023, 0) // force full zero-fill
@@ -172,10 +180,10 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     // legacy_version = 0x0303
     off = put16(buf, body, 0x0303)
     // random[32]
-    off = put_bytes(buf, off, random, 32)
+    off = put_bytes(buf, off, bytes.view(random)[0..32])
     // legacy_session_id<0..32>
     off = put8(buf, off, sid_len)
-    off = put_bytes(buf, off, session_id, sid_len)
+    off = put_bytes(buf, off, session_id)
 
     // cipher_suites<2..2^16-2>: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM
     off = put16(buf, off, 6) // 3 suites * 2 bytes
@@ -263,11 +271,11 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     off = put16(buf, off, shares_len) // client_shares length
     off = put16(buf, off, group)
     off = put16(buf, off, pubkey_len)
-    off = put_bytes(buf, off, pubkey, pubkey_len)
+    off = put_bytes(buf, off, pubkey)
     if group2 != 0 {
         off = put16(buf, off, group2)
         off = put16(buf, off, pubkey2_len)
-        off = put_bytes(buf, off, pubkey2, pubkey2_len)
+        off = put_bytes(buf, off, pubkey2)
     }
 
     // fill extensions length
@@ -282,7 +290,7 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     // Trim to exact length.
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
-    put_bytes(out, 0, buf, off)
+    put_bytes(out, 0, bytes.view(buf)[0..off])
     bytes.free(buf)
     return out
 }
@@ -293,14 +301,16 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
 // caller also passes the plain x25519 pub for the fallback entry. The server
 // picks one group and returns the matching share (PQ: ct||xpub, or classical
 // x25519 pub). supported_groups lists { X25519MLKEM768, x25519 }.
-client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, hybrid_len: int, x25519_pub: ptr, host: string) -> ptr {
+client_hello_pq(random: ptr, session_id: byte[], hybrid_share: ptr, hybrid_len: int, x25519_pub: ptr, host: string) -> ptr {
+    if session_id.len < 0 { panic("tls13_hs.client_hello_pq: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sid_len = session_id.len
     buf = bytes.new(2048) // hybrid key_share alone is ~1216 bytes
     bytes.set(buf, 2047, 0)
     body = 4
     off = put16(buf, body, 0x0303)
-    off = put_bytes(buf, off, random, 32)
+    off = put_bytes(buf, off, bytes.view(random)[0..32])
     off = put8(buf, off, sid_len)
-    off = put_bytes(buf, off, session_id, sid_len)
+    off = put_bytes(buf, off, session_id)
     // cipher_suites
     off = put16(buf, off, 6)
     off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
@@ -355,10 +365,10 @@ client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, h
     off = put16(buf, off, shares_len)
     off = put16(buf, off, GROUP_X25519MLKEM768)
     off = put16(buf, off, hybrid_len)
-    off = put_bytes(buf, off, hybrid_share, hybrid_len)
+    off = put_bytes(buf, off, bytes.view(hybrid_share)[0..hybrid_len])
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, 32)
-    off = put_bytes(buf, off, x25519_pub, 32)
+    off = put_bytes(buf, off, bytes.view(x25519_pub)[0..32])
 
     ext_total = off - ext_start
     put16(buf, ext_len_pos, ext_total)
@@ -367,7 +377,7 @@ client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, h
     put24(buf, 1, body_len)
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
-    put_bytes(out, 0, buf, off)
+    put_bytes(out, 0, bytes.view(buf)[0..off])
     bytes.free(buf)
     return out
 }
@@ -392,14 +402,18 @@ struct PskCh {
     truncated_len: int // length of CH bytes the binder is computed over
 }
 
-client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string, ticket: ptr, ticket_len: int, obf_age: int, binder_len: int, with_early_data: int, out_ch: *PskCh) {
+client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string, ticket: byte[], obf_age: int, binder_len: int, with_early_data: int, out_ch: *PskCh) {
+    if session_id.len < 0 { panic("tls13_hs.client_hello_psk: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sid_len = session_id.len
+    if ticket.len < 0 { panic("tls13_hs.client_hello_psk: the `ticket` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int ticket_len = ticket.len
     buf = bytes.new(2048)
     bytes.set(buf, 2047, 0)
     body = 4
     off = put16(buf, body, 0x0303)
-    off = put_bytes(buf, off, random, 32)
+    off = put_bytes(buf, off, bytes.view(random)[0..32])
     off = put8(buf, off, sid_len)
-    off = put_bytes(buf, off, session_id, sid_len)
+    off = put_bytes(buf, off, session_id)
     // cipher_suites
     off = put16(buf, off, 6)
     off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
@@ -454,7 +468,7 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put16(buf, off, entry1)
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, 32)
-    off = put_bytes(buf, off, x25519_pub, 32)
+    off = put_bytes(buf, off, bytes.view(x25519_pub)[0..32])
     // early_data (42): an EMPTY extension in the ClientHello signals intent to
     // send 0-RTT data (RFC 8446 §4.2.10). Emitted only when with_early_data.
     if with_early_data == 1 {
@@ -476,7 +490,7 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put16(buf, off, psk_body_len)
     off = put16(buf, off, identities_len) // PskIdentities length
     off = put16(buf, off, ticket_len) // identity length
-    off = put_bytes(buf, off, ticket, ticket_len)
+    off = put_bytes(buf, off, ticket)
     off = put16(buf, off, (obf_age >> 16) & 0xFFFF) // obfuscated_ticket_age hi
     off = put16(buf, off, obf_age & 0xFFFF) // ...lo (uint32 total)
     // The binder MAC covers the ClientHello TRUNCATED to remove the binders
@@ -499,7 +513,7 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
 
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
-    put_bytes(out, 0, buf, off)
+    put_bytes(out, 0, bytes.view(buf)[0..off])
     bytes.free(buf)
     out_ch.buf = out
     out_ch.buf_len = off
@@ -520,8 +534,11 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
 //
 // Returns a fresh bytes buffer holding the complete handshake message
 // (4-byte header + body); caller frees.
-server_hello(random: ptr, session_id: ptr, sid_len: int, cipher_suite: int,
-    group: int, pubkey: ptr, pubkey_len: int) -> ptr {
+server_hello(random: ptr, session_id: byte[], cipher_suite: int, group: int, pubkey: byte[]) -> ptr {
+    if session_id.len < 0 { panic("tls13_hs.server_hello: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sid_len = session_id.len
+    if pubkey.len < 0 { panic("tls13_hs.server_hello: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int pubkey_len = pubkey.len
     buf = bytes.new(512)
     bytes.set(buf, 511, 0) // force full zero-fill
 
@@ -530,12 +547,12 @@ server_hello(random: ptr, session_id: ptr, sid_len: int, cipher_suite: int,
     // legacy_version
     off = put16(buf, body, 0x0303)
     // random[32]
-    off = put_bytes(buf, off, random, 32)
+    off = put_bytes(buf, off, bytes.view(random)[0..32])
     // legacy_session_id_echo<0..32> -- verbatim, or empty when the client
     // sent none. Echoing it is what makes a middlebox believe this is a
     // resumed TLS 1.2 session and leave the connection alone.
     off = put8(buf, off, sid_len)
-    if sid_len > 0 { off = put_bytes(buf, off, session_id, sid_len) }
+    if sid_len > 0 { off = put_bytes(buf, off, session_id) }
     // cipher_suite
     off = put16(buf, off, cipher_suite)
     // legacy_compression_method
@@ -557,7 +574,7 @@ server_hello(random: ptr, session_id: ptr, sid_len: int, cipher_suite: int,
     off = put16(buf, off, 4 + pubkey_len)
     off = put16(buf, off, group)
     off = put16(buf, off, pubkey_len)
-    off = put_bytes(buf, off, pubkey, pubkey_len)
+    off = put_bytes(buf, off, pubkey)
 
     // patch the extensions length
     ext_total = off - ext_start
@@ -608,7 +625,9 @@ free_ch(c: *ChParsed) {
 // Suite and group selection happen here rather than in the caller because
 // both are "first offered thing we support", and doing it during the single
 // pass avoids keeping the whole offered list alive just to choose from it.
-parse_client_hello(msg: ptr, len: int, out: *ChParsed) -> string {
+parse_client_hello(msg: byte[], out: *ChParsed) -> string {
+    if msg.len < 0 { panic("tls13_hs.parse_client_hello: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = msg.len
     out.random = null
     out.session_id = null
     out.session_id_len = 0
@@ -633,7 +652,7 @@ parse_client_hello(msg: ptr, len: int, out: *ChParsed) -> string {
     // random[32]
     if p + 32 > len { return "client hello: truncated random" }
     rnd = bytes.new(32)
-    bytes.copy_from_bytes(rnd, 0, msg, p, 32)
+    bytes.copy_from_slice(rnd, 0, msg[p..p + 32])
     out.random = rnd
     p = p + 32
 
@@ -645,7 +664,7 @@ parse_client_hello(msg: ptr, len: int, out: *ChParsed) -> string {
     if p + sid_len > len { return "client hello: truncated session id" }
     if sid_len > 0 {
         sid = bytes.new(sid_len)
-        bytes.copy_from_bytes(sid, 0, msg, p, sid_len)
+        bytes.copy_from_slice(sid, 0, msg[p..p + sid_len])
         out.session_id = sid
     }
     out.session_id_len = sid_len
@@ -727,7 +746,7 @@ parse_client_hello(msg: ptr, len: int, out: *ChParsed) -> string {
                             if g == GROUP_X25519 {
                                 if klen == 32 {
                                     kb = bytes.new(klen)
-                                    bytes.copy_from_bytes(kb, 0, msg, kstart, klen)
+                                    bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
                                     out.group = g
                                     out.key_share = kb
                                     out.key_share_len = klen
@@ -755,7 +774,9 @@ parse_client_hello(msg: ptr, len: int, out: *ChParsed) -> string {
     return ""
 }
 
-parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
+parse_server_hello(msg: byte[], out: *ShParsed) -> string {
+    if msg.len < 0 { panic("tls13_hs.parse_server_hello: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int len = msg.len
     out.version = 0
     out.cipher_suite = 0
     out.group = 0
@@ -824,7 +845,7 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
                 if ks_len > 0 { bytes.set(ks, ks_len - 1, 0) }
                 j = 0
                 while j < ks_len {
-                    bytes.set(ks, j, bytes.get(msg, p + 4 + j) & 0xFF)
+                    bytes.set(ks, j, msg[p + 4 + j] & 0xFF)
                     j = j + 1
                 }
                 out.key_share = ks
@@ -847,7 +868,7 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
 
 // The HelloRetryRequest sentinel random = SHA-256("HelloRetryRequest")
 // (RFC 8446 §4.1.3). Returns 1 if the 32 bytes at msg[off..off+32) match.
-fn is_hrr_random(msg: ptr, off: int) -> int {
+fn is_hrr_random(msg: byte[], off: int) -> int {
     // RFC 8446 §4.1.3 HelloRetryRequest special Random =
     // SHA-256("HelloRetryRequest"):
     // CF 21 AD 74 E5 9A 61 11 BE 1D FA 3A 06 B4 4E 8C
@@ -864,7 +885,7 @@ fn is_hrr_random(msg: ptr, off: int) -> int {
     same = 1
     i = 0
     while i < 32 {
-        if (bytes.get(msg, off + i) & 0xFF) != (bytes.get(hrr, i) & 0xFF) { same = 0 }
+        if (msg[off + i] & 0xFF) != (bytes.get(hrr, i) & 0xFF) { same = 0 }
         i = i + 1
     }
     bytes.free(hrr)
@@ -924,7 +945,9 @@ certificate_msg(cert_chain: ptr, cert_lens: ptr, ctx_len: int) -> ptr {
 }
 
 // CertificateVerify handshake message (RFC 8446 §4.4.3)
-certificate_verify_msg(scheme: int, sig: ptr, sig_len: int) -> ptr {
+certificate_verify_msg(scheme: int, sig: byte[]) -> ptr {
+    if sig.len < 0 { panic("tls13_hs.certificate_verify_msg: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sig_len = sig.len
     body_len = 2 + 2 + sig_len
     total = 4 + body_len
     m = bytes.new(total)
@@ -933,7 +956,7 @@ certificate_verify_msg(scheme: int, sig: ptr, sig_len: int) -> ptr {
     put24(m, 1, body_len)
     put16(m, 4, scheme)
     put16(m, 6, sig_len)
-    bytes.copy_from_bytes(m, 8, sig, 0, sig_len)
+    bytes.copy_from_slice(m, 8, sig[0..sig_len])
     return m
 }
 

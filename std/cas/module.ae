@@ -145,7 +145,7 @@ put(file_path: string) -> {
         return "", rerr
     }
 
-    digest, herr = cryptography.sha256_hex(bytes, length)
+    digest, herr = cryptography.sha256_hex(string.bytes(bytes)[0..length])
     if herr != "" {
         return "", herr
     }
@@ -163,7 +163,7 @@ put(file_path: string) -> {
     // write_atomic does write-to-tmp + fsync + rename. Same-FS
     // writes are atomic on POSIX; the CAS root and the temp it
     // creates internally are siblings, so this is the case we get.
-    werr = fs.write_atomic(target, bytes, length)
+    werr = fs.write_atomic(target, string.bytes(bytes)[0..length])
     if werr != "" {
         return "", werr
     }
@@ -202,7 +202,7 @@ get(digest: string, dest_path: string) -> {
         return rerr
     }
 
-    actual, herr = cryptography.sha256_hex(bytes, length)
+    actual, herr = cryptography.sha256_hex(string.bytes(bytes)[0..length])
     if herr != "" {
         return herr
     }
@@ -213,7 +213,7 @@ get(digest: string, dest_path: string) -> {
         return "CAS entry digest mismatch (corruption?)"
     }
 
-    werr = fs.write_atomic(dest_path, bytes, length)
+    werr = fs.write_atomic(dest_path, string.bytes(bytes)[0..length])
     if werr != "" {
         return werr
     }

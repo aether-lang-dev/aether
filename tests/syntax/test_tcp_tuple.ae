@@ -3,6 +3,7 @@
 // without hanging.
 
 import std.tcp
+import std.string
 
 main() {
     sock, err = tcp.connect("127.0.0.1", 1)
@@ -13,7 +14,7 @@ main() {
     if sock != null {
         tcp.close(sock)
     }
-    _, werr = tcp.write_n(null, "A", 1)
+    _, werr = tcp.write_n(null, string.bytes("A"))
     if werr == "" {
         println("FAIL: write_n(null) should error")
         exit(1)

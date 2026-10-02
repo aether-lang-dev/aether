@@ -46,7 +46,7 @@ fn from_hex(s: string) -> ptr {
 
 fn sha256_of(b: ptr, n: int) -> ptr {
     ctx, e = sha2.new("sha256")
-    sha2.update_bytes(ctx, b, n)
+    sha2.update(ctx, bytes.view(b)[0..n])
     return sha2.final_bytes(ctx)
 }
 
@@ -108,7 +108,7 @@ main() {
             msg = from_hex(msg_hex)
             h = sha256_of(msg, string_length(msg_hex) / 2)
             sig = from_hex(sig_hex)
-            ok = rsa.verify_pss(k, h, sig, 32)
+            ok = rsa.verify_pss(k, h, bytes.view(sig), 32)
             if res == "valid" {
                 if ok == 1 { passed = passed + 1 } else {
                     println("FAIL tcId=${tc_id} (valid): verify rejected a good signature")

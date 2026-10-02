@@ -20,46 +20,46 @@ main() {
     fails = 0
 
     // ---- SHA-256 ----
-    if string.equals(sha2.sha256_hex("", 0),
+    if string.equals(sha2.sha256_hex(string.bytes("")),
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") != 1 {
         print("FAIL sha256 empty\n"); fails = fails + 1 }
-    if string.equals(sha2.sha256_hex("abc", 3),
+    if string.equals(sha2.sha256_hex(string.bytes("abc")),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 1 {
         print("FAIL sha256 abc\n"); fails = fails + 1 }
     // 56-byte input — crosses the one-block/two-block padding boundary
-    if string.equals(sha2.sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56),
+    if string.equals(sha2.sha256_hex(string.bytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
         "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") != 1 {
         print("FAIL sha256 56-byte\n"); fails = fails + 1 }
 
     // ---- SHA-224 ----
-    if string.equals(sha2.sha224_hex("", 0),
+    if string.equals(sha2.sha224_hex(string.bytes("")),
         "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f") != 1 {
         print("FAIL sha224 empty\n"); fails = fails + 1 }
-    if string.equals(sha2.sha224_hex("abc", 3),
+    if string.equals(sha2.sha224_hex(string.bytes("abc")),
         "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7") != 1 {
         print("FAIL sha224 abc\n"); fails = fails + 1 }
 
     // ---- SHA-512 ----
-    if string.equals(sha2.sha512_hex("", 0),
+    if string.equals(sha2.sha512_hex(string.bytes("")),
         "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e") != 1 {
         print("FAIL sha512 empty\n"); fails = fails + 1 }
-    if string.equals(sha2.sha512_hex("abc", 3),
+    if string.equals(sha2.sha512_hex(string.bytes("abc")),
         "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f") != 1 {
         print("FAIL sha512 abc\n"); fails = fails + 1 }
 
     // ---- SHA-384 ----
-    if string.equals(sha2.sha384_hex("abc", 3),
+    if string.equals(sha2.sha384_hex(string.bytes("abc")),
         "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7") != 1 {
         print("FAIL sha384 abc\n"); fails = fails + 1 }
-    if string.equals(sha2.sha384_hex("", 0),
+    if string.equals(sha2.sha384_hex(string.bytes("")),
         "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b") != 1 {
         print("FAIL sha384 empty\n"); fails = fails + 1 }
 
     // ---- SHA-512/224 and SHA-512/256 (NIST vectors) ----
-    if string.equals(sha2.sha512_224_hex("abc", 3),
+    if string.equals(sha2.sha512_224_hex(string.bytes("abc")),
         "4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa") != 1 {
         print("FAIL sha512_224 abc\n"); fails = fails + 1 }
-    if string.equals(sha2.sha512_256_hex("abc", 3),
+    if string.equals(sha2.sha512_256_hex(string.bytes("abc")),
         "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23") != 1 {
         print("FAIL sha512_256 abc\n"); fails = fails + 1 }
 
@@ -70,23 +70,23 @@ main() {
 
     // ---- streaming == one-shot ----
     c2, _ = sha2.new("sha256")
-    sha2.update(c2, "a", 1)
-    sha2.update(c2, "b", 1)
-    sha2.update(c2, "c", 1)
-    if string.equals(sha2.final_hex(c2), sha2.sha256_hex("abc", 3)) != 1 {
+    sha2.update(c2, string.bytes("a"))
+    sha2.update(c2, string.bytes("b"))
+    sha2.update(c2, string.bytes("c"))
+    if string.equals(sha2.final_hex(c2), sha2.sha256_hex(string.bytes("abc"))) != 1 {
         print("FAIL streaming sha256 abc\n"); fails = fails + 1 }
 
     c5, _ = sha2.new("sha512")
-    sha2.update(c5, "ab", 2)
-    sha2.update(c5, "c", 1)
-    if string.equals(sha2.final_hex(c5), sha2.sha512_hex("abc", 3)) != 1 {
+    sha2.update(c5, string.bytes("ab"))
+    sha2.update(c5, string.bytes("c"))
+    if string.equals(sha2.final_hex(c5), sha2.sha512_hex(string.bytes("abc"))) != 1 {
         print("FAIL streaming sha512 abc\n"); fails = fails + 1 }
 
     // multi-block streaming (one byte at a time) == one-shot
     cm, _ = sha2.new("sha256")
     j = 0
-    while j < 200 { sha2.update(cm, "x", 1); j = j + 1 }
-    if string.equals(sha2.final_hex(cm), sha2.sha256_hex(big, 200)) != 1 {
+    while j < 200 { sha2.update(cm, string.bytes("x")); j = j + 1 }
+    if string.equals(sha2.final_hex(cm), sha2.sha256_hex(string.bytes(big)[0..200])) != 1 {
         print("FAIL streaming sha256 multi-block\n"); fails = fails + 1 }
 
     if fails == 0 {

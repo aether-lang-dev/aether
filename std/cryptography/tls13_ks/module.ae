@@ -32,10 +32,10 @@
 // Import with:  import std.cryptography.tls13_ks
 //
 //   early_secret(algo)                              -> ptr (Hash.len)
-//   handshake_secret(algo, early, ecdhe, ec_len)    -> ptr
+//   handshake_secret(algo, early, ecdhe)    -> ptr
 //   master_secret(algo, handshake)                  -> ptr
-//   traffic_secret(algo, secret, label, th, th_len) -> ptr   (Derive-Secret)
-//   write_key(algo, traffic_secret, key_len)        -> ptr
+//   traffic_secret(algo, secret, label, th) -> ptr   (Derive-Secret)
+//   write_key(algo, traffic_secret, key_len) -> ptr
 //   write_iv(algo, traffic_secret)                  -> ptr   (12 bytes)
 //
 // All results are freshly allocated std.bytes (caller frees).
@@ -79,7 +79,7 @@ early_secret(algo: string) -> ptr {
     hl = hlen(algo)
     salt = zeros(hl)
     ikm = zeros(hl)
-    prk = hkdf.hkdf_extract(algo, salt, hl, ikm, hl)
+    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
     bytes.free(salt)
     bytes.free(ikm)
     return prk
@@ -87,19 +87,20 @@ early_secret(algo: string) -> ptr {
 
 // Early Secret for RESUMPTION = HKDF-Extract(salt=0, IKM = PSK). Same as
 // early_secret but keyed by the resumption PSK instead of zeros (RFC 8446 §7.1).
-early_secret_psk(algo: string, psk: ptr, psk_len: int) -> ptr {
+early_secret_psk(algo: string, psk: byte[]) -> ptr {
     hl = hlen(algo)
     salt = zeros(hl)
-    prk = hkdf.hkdf_extract(algo, salt, hl, psk, psk_len)
+    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], psk)
     bytes.free(salt)
     return prk
 }
 
 // PSK from a resumption_master_secret + ticket_nonce (RFC 8446 §4.6.1):
 //   PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
-psk_from_resumption(algo: string, res_master: ptr, rm_len: int, nonce: ptr, nonce_len: int) -> ptr {
+psk_from_resumption(algo: string, res_master: ptr, rm_len: int, nonce: byte[]) -> ptr {
+    if nonce.len < 0 { panic("tls13_ks.psk_from_resumption: the `nonce` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     hl = hlen(algo)
-    return tls13_kdf.expand_label(algo, res_master, rm_len, "resumption", nonce, nonce_len, hl)
+    return tls13_kdf.expand_label(algo, bytes.view(res_master)[0..rm_len], "resumption", nonce, hl)
 }
 
 // The PSK binder key = Derive-Secret(EarlySecret_psk, "res binder", "")
@@ -108,7 +109,7 @@ psk_from_resumption(algo: string, res_master: ptr, rm_len: int, nonce: ptr, nonc
 binder_key(algo: string, early: ptr) -> ptr {
     hl = hlen(algo)
     empty_th = empty_transcript_hash(algo)
-    bk = tls13_kdf.derive_secret(algo, early, hl, "res binder", empty_th, hl)
+    bk = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "res binder", bytes.view(empty_th)[0..hl])
     bytes.free(empty_th)
     return bk
 }
@@ -117,9 +118,10 @@ binder_key(algo: string, early: ptr) -> ptr {
 // ClientHello) (RFC 8446 §7.1). This keys the 0-RTT early-data records the
 // client sends in its first flight. `early` is early_secret_psk(...); `th` is
 // Transcript-Hash(ClientHello) (the full CH incl. its binder).
-early_traffic_secret(algo: string, early: ptr, th: ptr, th_len: int) -> ptr {
+early_traffic_secret(algo: string, early: ptr, th: byte[]) -> ptr {
+    if th.len < 0 { panic("tls13_ks.early_traffic_secret: the `th` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     hl = hlen(algo)
-    return tls13_kdf.derive_secret(algo, early, hl, "c e traffic", th, th_len)
+    return tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "c e traffic", th)
 }
 
 // Handshake Secret = HKDF-Extract(salt = Derive-Secret(Early, "derived", ""),
@@ -132,12 +134,12 @@ early_traffic_secret(algo: string, early: ptr, th: ptr, th_len: int) -> ptr {
 // the standard empty-transcript hash, which the caller provides implicitly
 // through the algo. We inline the empty-hash constants for the two subset
 // hashes.
-handshake_secret(algo: string, early: ptr, ecdhe: ptr, ec_len: int) -> ptr {
+handshake_secret(algo: string, early: ptr, ecdhe: byte[]) -> ptr {
     hl = hlen(algo)
     empty_th = empty_transcript_hash(algo)
     // salt = Derive-Secret(Early, "derived", Hash(""))
-    salt = tls13_kdf.derive_secret(algo, early, hl, "derived", empty_th, hl)
-    prk = hkdf.hkdf_extract(algo, salt, hl, ecdhe, ec_len)
+    salt = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "derived", bytes.view(empty_th)[0..hl])
+    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], ecdhe)
     bytes.free(empty_th)
     bytes.free(salt)
     return prk
@@ -148,9 +150,9 @@ handshake_secret(algo: string, early: ptr, ecdhe: ptr, ec_len: int) -> ptr {
 master_secret(algo: string, handshake: ptr) -> ptr {
     hl = hlen(algo)
     empty_th = empty_transcript_hash(algo)
-    salt = tls13_kdf.derive_secret(algo, handshake, hl, "derived", empty_th, hl)
+    salt = tls13_kdf.derive_secret(algo, bytes.view(handshake)[0..hl], "derived", bytes.view(empty_th)[0..hl])
     ikm = zeros(hl)
-    prk = hkdf.hkdf_extract(algo, salt, hl, ikm, hl)
+    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
     bytes.free(empty_th)
     bytes.free(salt)
     bytes.free(ikm)
@@ -160,17 +162,19 @@ master_secret(algo: string, handshake: ptr) -> ptr {
 // A named traffic secret = Derive-Secret(secret, label, transcript_hash).
 // `label` is e.g. "c hs traffic" / "s hs traffic" / "c ap traffic" /
 // "s ap traffic". `th`/`th_len` is the running transcript hash at that point.
-traffic_secret(algo: string, secret: ptr, label: string, th: ptr, th_len: int) -> ptr {
+traffic_secret(algo: string, secret: ptr, label: string, th: byte[]) -> ptr {
+    if th.len < 0 { panic("tls13_ks.traffic_secret: the `th` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     hl = hlen(algo)
-    return tls13_kdf.derive_secret(algo, secret, hl, label, th, th_len)
+    return tls13_kdf.derive_secret(algo, bytes.view(secret)[0..hl], label, th)
 }
 
 // Record write key = HKDF-Expand-Label(traffic_secret, "key", "", key_len).
 // key_len is 16 for AES-128-GCM, 32 for ChaCha20-Poly1305 / AES-256-GCM.
-write_key(algo: string, secret: ptr, key_len: int) -> ptr {
+write_key(algo: string, secret: byte[], key_len: int) -> ptr {
+    if secret.len < 0 { panic("tls13_ks.write_key: the `secret` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     hl = hlen(algo)
     empty = zeros(0)
-    k = tls13_kdf.expand_label(algo, secret, hl, "key", empty, 0, key_len)
+    k = tls13_kdf.expand_label(algo, secret[0..hl], "key", bytes.view(empty)[0..0], key_len)
     bytes.free(empty)
     return k
 }
@@ -179,7 +183,7 @@ write_key(algo: string, secret: ptr, key_len: int) -> ptr {
 write_iv(algo: string, secret: ptr) -> ptr {
     hl = hlen(algo)
     empty = zeros(0)
-    iv = tls13_kdf.expand_label(algo, secret, hl, "iv", empty, 0, IV_LEN)
+    iv = tls13_kdf.expand_label(algo, bytes.view(secret)[0..hl], "iv", bytes.view(empty)[0..0], IV_LEN)
     bytes.free(empty)
     return iv
 }

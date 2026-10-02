@@ -185,13 +185,23 @@ addr_hash(addr: ptr) -> int {
     return udp_addr_hash_raw(addr)
 }
 
-// Send one datagram of n bytes from `data` (a string or a bytes buffer's
-// data pointer) to host:port, resolving the name each call. Returns
-// (bytes_sent, "") or (0, error). A dropped packet (full send buffer)
-// is an error: a datagram protocol expects loss and resends on its own
-// schedule.
-send_to(sock: ptr, host: string, port: int, data: ptr, n: int) -> {
-    sent = udp_send_to_raw(sock, host, port, data, n)
+// A slice with no bound (`p as byte[]`, `.len` -1) has no datagram size.
+fn unbounded(fname: string) {
+    panic("udp.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+}
+
+// Send one datagram holding the bytes of `data` — its length is the
+// datagram size (#2301) — to host:port, resolving the name each call. For
+// a string pass `string.bytes(s)`; for a `std.bytes` buffer,
+// `bytes.view(buf)`. An empty slice sends a zero-length datagram, which UDP
+// permits. Returns (bytes_sent, "") or (0, error). A dropped packet (full
+// send buffer) is an error: a datagram protocol expects loss and resends
+// on its own schedule.
+send_to(sock: ptr, host: string, port: int, data: byte[]) -> {
+    if data.len < 0 {
+        unbounded("send_to")
+    }
+    sent = udp_send_to_raw(sock, host, port, data, data.len)
     if sent < 0 {
         return 0, "send failed"
     }
@@ -200,28 +210,41 @@ send_to(sock: ptr, host: string, port: int, data: ptr, n: int) -> {
 
 // Send to an already-resolved address: the per-peer form for a server
 // answering many peers a tick. Returns (bytes_sent, "") or (0, error).
-send_to_addr(sock: ptr, addr: ptr, data: ptr, n: int) -> {
-    sent = udp_send_to_addr_raw(sock, addr, data, n)
+send_to_addr(sock: ptr, addr: ptr, data: byte[]) -> {
+    if data.len < 0 {
+        unbounded("send_to_addr")
+    }
+    sent = udp_send_to_addr_raw(sock, addr, data, data.len)
     if sent < 0 {
         return 0, "send failed"
     }
     return sent, ""
 }
 
-// Receive one datagram into `buf` (at most `cap` bytes; a longer packet
-// is truncated). Never blocks. Returns (n, sender, "") on a packet,
-// (0, null, "would block") when nothing is waiting (the socket is fine:
-// come back next tick), (0, null, error) on failure. The sender must be
-// addr_free'd; use recv_from_into to reuse one across packets.
-recv_from(sock: ptr, buf: ptr, cap: int) -> {
-    return udp_recv_from_raw(sock, buf, cap)
+// Receive one datagram into `buf`, at most `buf.len` bytes (#2301); a
+// longer packet is truncated, and the datagram is `buf[0..n]`. For a
+// `std.bytes` buffer pass `bytes.capacity_view(buf)`. Never blocks.
+// Returns (n, sender, "") on a packet, (0, null, "would block") when
+// nothing is waiting (the socket is fine: come back next tick),
+// (0, null, error) on failure, including an empty `buf`; an unbounded one
+// panics. The sender must be addr_free'd; use recv_from_into to reuse one
+// across packets.
+recv_from(sock: ptr, buf: byte[]) -> {
+    if buf.len < 0 {
+        unbounded("recv_from")
+    }
+    return udp_recv_from_raw(sock, buf, buf.len)
 }
 
 // recv_from with a caller-owned address (`addr_new`) filled in place, so
-// the drain loop allocates nothing. Returns (n, "") on a packet,
+// the drain loop allocates nothing. Reads at most `buf.len` bytes; the
+// datagram is `buf[0..n]`. Returns (n, "") on a packet,
 // (0, "would block") when nothing is waiting, (0, error) on failure.
-recv_from_into(sock: ptr, buf: ptr, cap: int, addr: ptr) -> {
-    n = udp_recv_from_into_raw(sock, buf, cap, addr)
+recv_from_into(sock: ptr, buf: byte[], addr: ptr) -> {
+    if buf.len < 0 {
+        unbounded("recv_from_into")
+    }
+    n = udp_recv_from_into_raw(sock, buf, buf.len, addr)
     if n == -1 {
         return 0, "would block"
     }
