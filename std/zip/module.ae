@@ -430,6 +430,11 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
     ar = arp as *ZipArchive
     b = ar.buf
     blen = ar.buf_len
+    // An index past the central directory has no entry: say so rather than
+    // read through the missing one.
+    if i < 0 || i >= list.size(ar.entries) {
+        return "", 0, "zip: no entry at index ${i}"
+    }
     e = entry_at(arp, i)
 
     if (e.flags & 1) == 1 {

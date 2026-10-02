@@ -22,6 +22,7 @@ import std.resp
 import std.strbuilder
 import std.string
 import std.zip
+import std.zlib
 
 extern exit(code: int)
 
@@ -71,22 +72,40 @@ main() {
     }
 
     // ---- zip -----------------------------------------------------------
+    // A deflated entry needs zlib; a build without it (the zig cross build
+    // for Windows) refuses that one entry, and the archive holds the others.
+    has_zlib = zlib.available() == 1
     w = zip.writer_new()
     e1 = zip.writer_add(w, "bin.dat", payload, zip.METHOD_STORED, 0)
     e2 = zip.writer_add(w, "deflated.dat", payload, zip.METHOD_DEFLATE, 9)
     e3 = zip.writer_add(w, "head.dat", payload[0..7], zip.METHOD_STORED, 0)
     archive, alen, ferr = zip.writer_finish(w)
     zip.writer_free(w)
-    fails = fails + check(e1 == "" && e2 == "" && e3 == "" && ferr == "", "writer_add accepts binary slices")
+    fails = fails + check(e1 == "" && e3 == "" && ferr == "", "writer_add accepts binary slices")
+    if has_zlib {
+        fails = fails + check(e2 == "", "writer_add deflates a binary slice")
+    } else {
+        fails = fails + check(e2 != "", "without zlib, a deflated entry is refused")
+    }
 
+    entries = 2
+    head_index = 1
+    if has_zlib {
+        entries = 3
+        head_index = 2
+    }
     ar, oerr = zip.open(string.bytes(archive)[0..alen])
-    fails = fails + check(oerr == "" && zip.count(ar) == 3, "open reads the archive back from a view")
+    fails = fails + check(oerr == "" && zip.count(ar) == entries, "open reads the archive back from a view")
     b1, n1, r1 = zip.entry_read(ar, 0)
     fails = fails + check(r1 == "" && same_bytes(b1, n1, payload), "a stored binary entry round-trips (CRC verified on read)")
-    b2, n2, r2 = zip.entry_read(ar, 1)
-    fails = fails + check(r2 == "" && same_bytes(b2, n2, payload), "a deflated binary entry round-trips (CRC verified on read)")
-    b3, n3, r3 = zip.entry_read(ar, 2)
+    if has_zlib {
+        b2, n2, r2 = zip.entry_read(ar, 1)
+        fails = fails + check(r2 == "" && same_bytes(b2, n2, payload), "a deflated binary entry round-trips (CRC verified on read)")
+    }
+    b3, n3, r3 = zip.entry_read(ar, head_index)
     fails = fails + check(r3 == "" && same_bytes(b3, n3, payload[0..7]), "a sub-slice entry holds only its own 7 bytes")
+    _bx, nx, rx = zip.entry_read(ar, entries)
+    fails = fails + check(rx != "" && nx == 0, "an index past the last entry is an error, not a crash")
     zip.close(ar)
 
     _bad, berr = zip.open(string.bytes("not a zip, not even close!"))
