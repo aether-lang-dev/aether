@@ -9,9 +9,11 @@
 // context) and for a builder (the block configures it first).
 
 import std.map
+import std.string
 
 extern exit(code: int)
 extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 struct Bag {
     items: int
@@ -34,15 +36,25 @@ count(p: ptr) -> int {
     return b.items
 }
 
+// The bag's count, the bag freed: the bags below are made for one check.
+taken(p: ptr) -> int {
+    n = count(p)
+    free(p)
+    return n
+}
+
 set_opt(_ctx: ptr, key: string, value: string) {
     map_put(_ctx, key, value)
 }
 
-// A builder: its block fills `_builder` before the body runs.
+// A builder: its block fills `_builder` before the body runs, and the
+// builder owns that config.
 builder label(text: string): string {
     suffix = ""
     if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
-    return "${text}${suffix}"
+    out = string.concat(text, suffix)
+    if _builder != null { map_free(_builder) }
+    return out
 }
 
 fn returned() -> ptr {
@@ -61,13 +73,14 @@ fn returned_builder() -> string {
 main() {
     fails = 0
 
-    if count(returned()) != 2 {
-        println("FAIL: a returned call's block did not run (count ${count(returned())})")
+    r = taken(returned())
+    if r != 2 {
+        println("FAIL: a returned call's block did not run (count ${r})")
         fails = fails + 1
     }
 
     // As an argument, nested in another call.
-    n = count(new_bag() {
+    n = taken(new_bag() {
             add()
             add()
             add()
@@ -77,8 +90,9 @@ main() {
         fails = fails + 1
     }
 
-    if returned_builder() != "x!" {
-        println("FAIL: a returned builder's block did not configure it (${returned_builder()})")
+    lb = returned_builder()
+    if lb != "x!" {
+        println("FAIL: a returned builder's block did not configure it (${lb})")
         fails = fails + 1
     }
 
@@ -90,6 +104,7 @@ main() {
         println("FAIL: a declaration's block ran ${count(held)} times, want 1")
         fails = fails + 1
     }
+    free(held)
     held = new_bag() {
         add()
         add()
@@ -98,6 +113,7 @@ main() {
         println("FAIL: a reassignment's block ran ${count(held)} times, want 2")
         fails = fails + 1
     }
+    free(held)
 
     if fails > 0 { exit(1) }
     println("ok")
