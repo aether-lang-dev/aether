@@ -3,10 +3,10 @@
 //
 //   1. `route`    — a `builder` (trailing-block DSL) entry point.
 //   2. `each`     — a higher-order export with a closure-typed (`fn`)
-//                   parameter (note: such a function is *not* in the
-//                   flattened C ABI function table, yet still has a
-//                   callable bare symbol an Aether consumer can use —
-//                   the closure record is how its shape survives).
+//                   parameter. The closure crosses by value (#2297), so
+//                   `each` is in the function table too, with its source
+//                   signature; the closure record still describes the
+//                   parameter's shape.
 //   3. `sum_with` — a body closure that captures an enclosing variable.
 //
 // `greet` is a plain ABI-exportable function with no closure surface,

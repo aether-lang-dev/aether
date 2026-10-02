@@ -187,10 +187,11 @@ public ABI:
 | `ptr` / `list` / `map` | `AetherValue*` | Opaque handle; walk with `aether_config_*` accessors |
 | `*Struct` | `AetherValue*` | Opaque to a C host; an Aether importer gets the typed pointer back (the catalog's source signature) and reaches the fields |
 | `Struct` (by value) | the struct, by name | Its layout is in the catalog's struct records, which an Aether importer re-declares; an `--emit=csrc` header leaves these prototypes out and says why (#2297) |
-| `fn(A, B) -> R` | `void*` | A C function pointer; a closure (bare `fn`) does not cross |
+| `fn(A, B) -> R` | `void*` | A C function pointer |
+| `fn` (a closure) | `_AeClosure` | Its function and captured environment, by value. Both ways: a library calls the closure a program passes, and a program calls one the library returns, captures included. Only an Aether importer declares `_AeClosure` and its calling convention, so an `--emit=csrc` header leaves these prototypes out, as for a struct by value (#2297) |
 
 Functions whose parameters or returns use types outside this table
-(tuples, closures, actor refs, enums) compile but **don't get an
+(tuples, optionals, actor refs, enums) compile but **don't get an
 `aether_<name>` alias**. `aetherc` prints a warning naming the skipped
 function. You can still use those types internally; they just can't
 cross the FFI boundary yet.
@@ -919,7 +920,7 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_with_capability/` | `--with=fs,net,os` opt-ins; `--with=first-party` and `--with=all` aliases |
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
 | `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
-| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library; static runtime (a library panic caught on Linux/FreeBSD) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
+| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, closures both ways with their captures, one module state shared by a host and a second binary library; static runtime (a library panic caught on Linux/FreeBSD) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
 | `binary_import_actors/` | A library's actors in a program with none of its own: the first spawn starts the scheduler, schema 1.7 `actors` passes through a second library, and the program's exit drains a fire-and-forget message (shared runtime everywhere, static on Linux/FreeBSD; elsewhere a warning) (#2297) |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 

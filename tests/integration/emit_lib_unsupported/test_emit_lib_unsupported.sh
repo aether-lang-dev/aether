@@ -36,24 +36,33 @@ else
         fail=$((fail + 1))
     fi
 
-    # Check (b) — the closure-taking function is absent.
-    if grep -q "aether_takes_closure" "$TMPDIR/config.c"; then
-        echo "  [FAIL] aether_takes_closure stub should NOT have been emitted"
+    # Check (b) — the optional-taking function is absent.
+    if grep -q "aether_takes_optional" "$TMPDIR/config.c"; then
+        echo "  [FAIL] aether_takes_optional stub should NOT have been emitted"
         fail=$((fail + 1))
     else
-        echo "  [PASS] aether_takes_closure stub correctly skipped"
+        echo "  [PASS] aether_takes_optional stub correctly skipped"
         pass=$((pass + 1))
     fi
 
     # Check (c) — a warning mentions the skipped function.
-    if grep -q "takes_closure" "$TMPDIR/stderr.log" && \
+    if grep -q "takes_optional" "$TMPDIR/stderr.log" && \
        grep -q "skipping alias stub\|representable in the" "$TMPDIR/stderr.log"; then
         echo "  [PASS] warning emitted for unsupported param type"
         pass=$((pass + 1))
     else
-        echo "  [FAIL] expected warning about takes_closure not emitted"
+        echo "  [FAIL] expected warning about takes_optional not emitted"
         echo "--- stderr was:"
         cat "$TMPDIR/stderr.log"
+        fail=$((fail + 1))
+    fi
+
+    # Check (c2) — a closure crosses by value (#2297): it gets a stub.
+    if grep -q "aether_takes_closure(_AeClosure cb)" "$TMPDIR/config.c"; then
+        echo "  [PASS] aether_takes_closure stub takes the closure by value"
+        pass=$((pass + 1))
+    else
+        echo "  [FAIL] aether_takes_closure stub missing"
         fail=$((fail + 1))
     fi
 
