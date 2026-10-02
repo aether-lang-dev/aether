@@ -35,7 +35,10 @@ If any one is "no", it belongs in `contrib/`.
    POSIX box. `libnghttp2` is auto-detected via `pkg-config`,
    present on every distro that ships HTTP-aware tools, gracefully
    stubbed out when absent. `SQLite` is a 4 MiB amalgamation,
-   significant weight for projects that don't need it.
+   significant weight for projects that don't need it. (`contrib.sqlite`
+   compiles that amalgamation so programs need no system `libsqlite3`, but
+   fetches it on demand against a pinned checksum rather than committing
+   it, #1372, so the weight stays out of the repository.)
 
 4. **Is the API surface stable and small?** `std/` modules have a
    stability commitment, changes ripple to every Aether user. If

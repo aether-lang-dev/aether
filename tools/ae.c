@@ -2610,17 +2610,21 @@ static unsigned optional_link_requirement(const char* tok, size_t len) {
     return 0;
 }
 
-static bool token_is_toolchain_managed(const char* tok, size_t len) {
-    if (optional_link_requirement(tok, len)) return true;
-    // Platform runtime libraries remain unconditional.
-    static const char* managed[] = {
+static bool token_is_platform_runtime(const char* tok, size_t len) {
+    static const char* platform[] = {
         "-lpthread", "-ldl", "-lm",
     };
-    for (size_t i = 0; i < sizeof(managed) / sizeof(managed[0]); i++) {
-        if (strlen(managed[i]) == len && strncmp(managed[i], tok, len) == 0)
+    for (size_t i = 0; i < sizeof(platform) / sizeof(platform[0]); i++) {
+        if (strlen(platform[i]) == len && strncmp(platform[i], tok, len) == 0)
             return true;
     }
     return false;
+}
+
+static bool token_is_toolchain_managed(const char* tok, size_t len) {
+    if (optional_link_requirement(tok, len)) return true;
+    // Platform runtime libraries remain unconditional.
+    return token_is_platform_runtime(tok, len);
 }
 
 static const char* get_aether_link_flags(const char* c_file, unsigned* required) {
@@ -2648,6 +2652,8 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
         // Record optional groups, then keep only non-managed tokens here.
         size_t out = 0;
         size_t i = 0;
+        char platform[3][16];
+        int nplatform = 0;
         while (i < n) {
             while (i < n && p[i] == ' ') i++;
             if (i >= n) break;
@@ -2655,12 +2661,44 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
             while (i < n && p[i] != ' ') i++;
             size_t tlen = i - start;
             *required |= optional_link_requirement(p + start, tlen);
+            if (token_is_platform_runtime(p + start, tlen)) {
+#ifdef _WIN32
+                /* MinGW has libm but no libdl, and its threads are linked
+                 * by the toolchain; only -lm can need re-placing there. */
+                if (tlen != 3 || strncmp(p + start, "-lm", 3) != 0) continue;
+#endif
+                if (tlen < sizeof(platform[0]) && nplatform < 3) {
+                    memcpy(platform[nplatform], p + start, tlen);
+                    platform[nplatform++][tlen] = '\0';
+                }
+                continue;
+            }
             if (token_is_toolchain_managed(p + start, tlen)) continue;
             if (out + tlen + 2 >= sizeof(flags)) break;
             if (out) flags[out++] = ' ';
             memcpy(flags + out, p + start, tlen);
             out += tlen;
         }
+        /* The toolchain links -lm/-lpthread/-ldl for the runtime anyway, but
+         * EARLIER on the line than these module archives, and a single-pass
+         * linker cannot satisfy a later static archive from an earlier
+         * library. contrib.sqlite's static amalgamation is the case (#1372):
+         * it needs -lm, which a shared libsqlite3 used to bring itself. So
+         * when module archives are here, any platform library the header
+         * names goes AFTER them. Not by its position in the header: codegen
+         * dedupes tokens first-seen, so std.audio's -lm ahead of contrib.
+         * sqlite's would otherwise leave none after -lsqlite3. Not on Apple,
+         * whose ld resolves archives without regard to order and warns about
+         * a duplicate library on stdout. */
+#ifndef __APPLE__
+        for (int k = 0; out > 0 && k < nplatform; k++) {
+            size_t tl = strlen(platform[k]);
+            if (out + tl + 2 >= sizeof(flags)) break;
+            flags[out++] = ' ';
+            memcpy(flags + out, platform[k], tl);
+            out += tl;
+        }
+#endif
         flags[out] = '\0';
         break;
     }

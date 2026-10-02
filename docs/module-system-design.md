@@ -625,7 +625,7 @@ After module orchestration, the compiler clones each module's function and const
 library declares its own link flags at the top of `module.ae`:
 
 ```aether,fragment
-@link("-laether_sqlite -lsqlite3")
+@link("-laether_sqlite -lsqlite3 -lm")
 ```
 
 When the module is in a program's resolved import closure, codegen unions

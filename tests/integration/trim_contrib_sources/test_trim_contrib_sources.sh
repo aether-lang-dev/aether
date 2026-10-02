@@ -2,9 +2,10 @@
 # .github/scripts/trim_contrib_sources.sh, the step install.sh and the
 # Makefile's install targets run over the installed contrib tree (#2208):
 # every .c and .m goes, except a file a module.ae in the tree names with
-# @source (contrib.vulkan.vk names one a directory up), and, when asked, the
-# contrib/host/<lang>/aether_host_<lang>.c bridges. Run on a tree built
-# here, so it needs no install and no toolchain.
+# @source (contrib.vulkan.vk names one a directory up), contrib.sqlite's
+# veneer and fetched amalgamation (`ae build --target` compiles them, #1372),
+# and, when asked, the contrib/host/<lang>/aether_host_<lang>.c bridges. Run
+# on a tree built here, so it needs no install and no toolchain.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +20,7 @@ fail() { echo "  [FAIL] trim_contrib_sources: $1"; exit 1; }
 # A tree with the shapes the real one has.
 make_tree() {
     rm -rf "$1"
-    mkdir -p "$1/vulkan/vk" "$1/metal" "$1/sqlite" "$1/host/python" "$1/host/lua"
+    mkdir -p "$1/vulkan/vk" "$1/metal" "$1/sqlite/amalgamation" "$1/tinyweb" "$1/host/python" "$1/host/lua"
     printf '@c_include("vulkan/vulkan.h")\n@source("aether_vulkan.c")\n' > "$1/vulkan/module.ae"
     printf '@c_include("vulkan/vulkan.h")\n@source("../aether_vulkan.c")\n' > "$1/vulkan/vk/module.ae"
     : > "$1/vulkan/aether_vulkan.c"
@@ -30,6 +31,11 @@ make_tree() {
     : > "$1/metal/aether_metal_extra.m"
     printf '// links libaether_sqlite.a\n' > "$1/sqlite/module.ae"
     : > "$1/sqlite/aether_sqlite.c"
+    : > "$1/sqlite/amalgamation/sqlite3.c"
+    : > "$1/sqlite/amalgamation/sqlite3.h"
+    : > "$1/sqlite/scratch.c"
+    printf '// links libaether_tinyweb.a\n' > "$1/tinyweb/module.ae"
+    : > "$1/tinyweb/ws_handshake.c"
     # A package whose C file is @source'd from a sibling .ae, not module.ae
     # (contrib.jq's value.ae names aether_jq.c). The trim must scan every
     # .ae, not just module.ae, or it deletes this file (#2208).
@@ -61,7 +67,10 @@ present "$TMP/contrib/vulkan/aether_vulkan.h"        "keep-host: headers untouch
 present "$TMP/contrib/host/python/aether_host_python.h" "keep-host: bridge header untouched"
 gone    "$TMP/contrib/vulkan/scratch.c"              "keep-host: a .c no module names"
 gone    "$TMP/contrib/metal/aether_metal_extra.m"    "keep-host: a .m no module names"
-gone    "$TMP/contrib/sqlite/aether_sqlite.c"        "keep-host: an archived module's source"
+gone    "$TMP/contrib/tinyweb/ws_handshake.c"        "keep-host: an archived module's source"
+present "$TMP/contrib/sqlite/aether_sqlite.c"        "keep-host: contrib.sqlite's veneer, for --target"
+present "$TMP/contrib/sqlite/amalgamation/sqlite3.c" "keep-host: the SQLite amalgamation, for --target"
+gone    "$TMP/contrib/sqlite/scratch.c"              "keep-host: only the veneer is kept in sqlite/"
 
 # --- install-contrib: archives carry the bridges, so they go too ------------
 make_tree "$TMP/contrib"
@@ -70,7 +79,9 @@ present "$TMP/contrib/vulkan/aether_vulkan.c"        "no-flag: @source kept"
 present "$TMP/contrib/metal/aether_metal.c"          "no-flag: @source kept"
 gone    "$TMP/contrib/host/python/aether_host_python.c" "no-flag: host bridge"
 gone    "$TMP/contrib/host/lua/aether_host_lua.c"    "no-flag: host bridge"
-gone    "$TMP/contrib/sqlite/aether_sqlite.c"        "no-flag: archived module's source"
+gone    "$TMP/contrib/tinyweb/ws_handshake.c"        "no-flag: archived module's source"
+present "$TMP/contrib/sqlite/aether_sqlite.c"        "no-flag: contrib.sqlite's veneer, for --target"
+present "$TMP/contrib/sqlite/amalgamation/sqlite3.c" "no-flag: the SQLite amalgamation, for --target"
 
 # --- the one contrib.vulkan.vk needs: "../aether_vulkan.c" alone -----------
 make_tree "$TMP/contrib"

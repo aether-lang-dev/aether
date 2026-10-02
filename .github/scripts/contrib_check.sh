@@ -100,10 +100,12 @@ TESTS=(
   # generate its clip; the test itself SKIPs cleanly without the latter.
   "avcodec/decode|$AVC/test_avcodec.ae|$AVC/aether_avcodec.c|run|libavcodec libavformat libavutil libswscale libswresample"
   # sqlite: co-located spec (replaces tests/integration/sqlite_{roundtrip,
-  # prepared}/, whose shell wrappers existed mainly to probe for libsqlite3
-  # and skip). Column 5 makes the runner stage a workspace so -I/-l reach
-  # gcc, and SKIP the entry when pkg-config cannot find sqlite3.
-  "sqlite/roundtrip|$SQL/test_sqlite.ae|$SQL/aether_sqlite.c|run|sqlite3"
+  # prepared}/). Built the way a user's program is: through the module's
+  # @link and the archives `make contrib` builds -- the vendored amalgamation
+  # when it can be fetched (#1372), the system sqlite3 otherwise. No
+  # pkg-config column: neither path needs one, and the veneer step above
+  # SKIPs the entry when neither is available.
+  "sqlite/roundtrip|$SQL/test_sqlite.ae||run|"
   # templating/native: co-located spec (replaces the four
   # tests/integration/native_templating_* dirs). Pure Aether — no system
   # library, so no pkg-config column and nothing to skip on.
@@ -269,6 +271,22 @@ for entry in "${TESTS[@]}"; do
   extra_flags=""
   for c in $extras; do extra_flags="$extra_flags --extra $c"; done
 
+  # A module whose module.ae carries `@link("-laether_<mod> ...")` needs
+  # that veneer archive on the link line — `make contrib` normally builds
+  # it, but this script may run without one (CI does). Build it on demand
+  # so the entry does not depend on a leftover artifact. An archive that
+  # still cannot be built is a provisioning gap (contrib.sqlite offline with
+  # no system sqlite3, say), so the entry SKIPs rather than failing the link.
+  veneer="$(sed -n 's/.*@link("-laether_\([a-z0-9_]*\).*/\1/p' \
+            "$(dirname "$src")/module.ae" 2>/dev/null | head -1)"
+  if [ -n "$veneer" ] && [ ! -f "build/contrib/libaether_$veneer.a" ]; then
+    MODULES="$veneer" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true
+    if [ ! -f "build/contrib/libaether_$veneer.a" ]; then
+      printf '  SKIP  %-22s (libaether_%s.a could not be built)\n' "$label" "$veneer"
+      continue
+    fi
+  fi
+
   if [ -n "$pcmods" ] || [ -n "$pchdrs" ] || [ "$use_lsan" = "1" ]; then
     # Needs system libraries. Skip rather than fail when they are absent —
     # a missing FFmpeg is a provisioning gap on this box, not a code defect.
@@ -303,18 +321,7 @@ for entry in "${TESTS[@]}"; do
     [ "$hdr_probe_ok" = "1" ] || continue
     # `ae build --extra` cannot pass -l flags, so stage a workspace whose
     # aether.toml carries them; ae threads link_flags into gcc via
-    # get_link_flags(). This is what the sqlite entry relies on.
-    # A module whose module.ae carries `@link("-laether_<mod> ...")` needs
-    # that veneer archive on the link line — `make contrib` normally builds
-    # it, but this script may run without one (CI does). Build it on demand
-    # so the entry does not depend on a leftover artifact. Failure is not
-    # fatal here: the link below reports it properly if the archive really
-    # was required.
-    veneer="$(sed -n 's/.*@link("-laether_\([a-z0-9_]*\).*/\1/p' \
-              "$(dirname "$src")/module.ae" 2>/dev/null | head -1)"
-    if [ -n "$veneer" ] && [ ! -f "build/contrib/libaether_$veneer.a" ]; then
-      MODULES="$veneer" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true
-    fi
+    # get_link_flags(). The avcodec and expat entries rely on this.
     work="$run_dir/${safe}.work"
     rm -rf "$work"; mkdir -p "$work"
     ln -s "$(pwd)/contrib" "$work/contrib"

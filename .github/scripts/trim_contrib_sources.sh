@@ -7,6 +7,8 @@
 #     against that module's directory: contrib.vulkan and contrib.vulkan.vk
 #     compile aether_vulkan.c into the program instead of linking an archive,
 #     as contrib.d3d12 and contrib.metal do with theirs (#2208);
+#   - contrib/sqlite/aether_sqlite.c and the fetched SQLite amalgamation,
+#     which `ae build --target` compiles for the target (#1372);
 #   - with --keep-host-bridges, contrib/host/<lang>/aether_host_<lang>.c,
 #     which a plain `make install` ships because it builds no
 #     libaether_host_<lang>.a for a downstream `import contrib.host.<lang>`
@@ -48,6 +50,12 @@ find "$dir" -type f \( -name '*.c' -o -name '*.m' \) | while IFS= read -r f; do
     if [ "$keep_host" = 1 ]; then
         case "$f" in */contrib/host/*/aether_host_*.c) continue ;; esac
     fi
+    # `ae build --target` compiles contrib.sqlite's veneer and the fetched
+    # amalgamation for the target from these (#1372); no archive covers a
+    # foreign target, so they ship as source.
+    case "$f" in
+        */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;;
+    esac
     abs="$(physical "$f")" || abs="$f"
     if ! grep -qxF -- "$abs" "$keep"; then
         rm -f "$f"

@@ -32,11 +32,13 @@
  *   sqlite_changes_raw(db)                   -> int
  *   sqlite_errmsg_raw(db)                    -> const char*    (always non-NULL)
  *
- * This is deliberately a C-only dependency — user programs link
- * -lsqlite3 via aether.toml's `[build] link_flags`. Bundling the
- * 4 MiB amalgamation in contrib/ would defeat the point of having
- * moved sqlite to contrib/ in the first place (see
- * docs/stdlib-vs-contrib.md).
+ * SQLite itself comes from the amalgamation pinned in
+ * amalgamation.lock (#1372): fetched on demand and checksum-verified,
+ * never committed, so the repository stays the size docs/stdlib-vs-
+ * contrib.md asks of contrib/. `make contrib` compiles it into
+ * libsqlite3.a beside this veneer's archive, and `ae build --target`
+ * compiles it for the target; the system libsqlite3 is the fallback
+ * when it cannot be fetched. See README.md, "Build".
  *
  * Streaming row iteration is still out of scope for this version —
  * tracked as v3 in sqlite-improvement-plan.md. The v2 primitives

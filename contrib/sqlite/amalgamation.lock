@@ -1,0 +1,23 @@
+# The SQLite amalgamation contrib.sqlite compiles from source (#1372).
+#
+# Not committed: scripts/fetch-sqlite-amalgamation.sh downloads SQLITE_URL,
+# refuses it unless its SHA-256 is SQLITE_SHA256, and extracts sqlite3.c /
+# sqlite3.h / sqlite3ext.h into contrib/sqlite/amalgamation/ (gitignored).
+# `make contrib`, CI and release packaging run it; release archives ship the
+# extracted files, so an installed toolchain never needs the network.
+#
+# SQLITE_SHA3_256 is the hash sqlite.org publishes on its download page, kept
+# so the pin can be audited against the upstream listing; the script checks
+# SQLITE_SHA256 because sha256sum/shasum are everywhere and sha3 is not.
+#
+# SQLITE_CFLAGS is the one feature-flag set, used for the native archive
+# (tests/scripts/contrib_build.sh) and the per-target cross object (ae build
+# --target). It is part of both cache keys, so changing it recompiles.
+#
+# To bump: change the four values, run the fetch script, and update the
+# version in contrib/sqlite/README.md.
+SQLITE_VERSION=3.53.4
+SQLITE_URL=https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
+SQLITE_SHA256=1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d
+SQLITE_SHA3_256=628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e
+SQLITE_CFLAGS="-DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_MATH_FUNCTIONS"

@@ -1,6 +1,8 @@
 # contrib.sqlite — SQLite bindings for Aether
 
-Thin veneer over the system `libsqlite3`. Lives in `contrib/` rather
+Thin veneer over SQLite: the pinned amalgamation compiled from source,
+or the system `libsqlite3` when the amalgamation is not available (see
+[Build](#build)). Lives in `contrib/` rather
 than `std/` because the API surface is opinionated enough that
 anchoring one shape in `std/` would force future contributors to work
 around it. See [docs/stdlib-vs-contrib.md](../../docs/stdlib-vs-contrib.md)
@@ -116,29 +118,54 @@ main() {
 
 ## Build
 
-This module depends on the system `libsqlite3`. There is no
-auto-detection in the Aether toolchain (unlike OpenSSL and zlib),
-so projects that want SQLite opt in explicitly.
+`import contrib.sqlite` is all a program needs. The module's `@link`
+(`-laether_sqlite -lsqlite3 -lm`) puts the libraries on the link line, so
+no `aether.toml` entry is required.
 
-**Recommended (after `make install-contrib`):** link the prebuilt
-archive that ships with the Aether install. The bridge has already
-been compiled against your machine's `libsqlite3` headers, so all
-your project does is link it.
+### Where SQLite comes from
 
-```toml
-[[bin]]
-name = "myapp"
-path = "src/main.ae"
+SQLite is compiled from the **amalgamation** (`sqlite3.c` / `sqlite3.h`,
+public domain), pinned by version and SHA-256 in
+[`amalgamation.lock`](amalgamation.lock) (SQLite 3.53.4) (#1372). It is not
+committed: [`scripts/fetch-sqlite-amalgamation.sh`](../../scripts/fetch-sqlite-amalgamation.sh)
+downloads it, refuses it unless the checksum matches, and extracts it into
+`contrib/sqlite/amalgamation/` (gitignored). Release archives ship the
+extracted files, so an installed toolchain never fetches anything.
 
-[build]
-link_flags = "-laether_sqlite -lsqlite3"
-```
+- **Native (`make contrib`).** The veneer builds into
+  `build/contrib/libaether_sqlite.a`, and the amalgamation into
+  `build/contrib/libsqlite3.a` beside it. `-lsqlite3` resolves to that
+  archive because the `-L` for the contrib directory is searched before the
+  system directories. The program carries SQLite, and the machine that runs
+  it needs no `libsqlite3`. `make install-contrib` installs both archives.
+  The amalgamation's object takes most of a minute to compile, so it is
+  cached in `.ci-cache/sqlite/` (`SQLITE_OBJ_CACHE_DIR`), keyed by its
+  source, the compiler and the flags.
+- **Cross (`ae build --target=<triple>`).** The veneer and amalgamation are
+  compiled for the target with zig cc, so for example
+  `ae build --target=aarch64-linux-musl app.ae` links a working SQLite with
+  nothing staged for the target. The amalgamation's object is cached per
+  target in the ae cache (`~/.aether/cache`, or `AETHER_CACHE_DIR`). The
+  first build for a target prints `Compiling SQLite for <triple>`, and later
+  builds reuse the object. A `CROSSBUILD_SYSROOT` that stages
+  `libaether_sqlite.a` and `libsqlite3.a` for the target still takes
+  precedence.
+- **System library (fallback).** When the amalgamation cannot be fetched
+  (offline, no `curl`/`wget`) or `SQLITE_SYSTEM=1` is set, `make contrib`
+  builds the veneer against the system `sqlite3.h` and `-lsqlite3` links the
+  system library, as before. Cross builds have no such fallback: without the
+  amalgamation or a staged sysroot they stop and say how to get one.
 
-`ae build` adds `-L<prefix>/lib/aether` automatically, so no path
-to the archive is needed.
+The feature flags (`SQLITE_THREADSAFE=1`, `SQLITE_ENABLE_FTS5`,
+`SQLITE_ENABLE_MATH_FUNCTIONS`) live in the lock file's `SQLITE_CFLAGS` and
+are part of both cache keys.
 
-**Alternative (source-tree build, e.g. before `make install-contrib`
-has been run):** point `extra_sources` at the bridge `.c` directly.
+To move to a newer SQLite, change the four pinned values in
+`amalgamation.lock` and run the fetch script. The `SQLITE_SHA3_256` that
+sqlite.org lists on its download page is kept beside the SHA-256 for audit.
+
+**Without the archives** (no `make contrib`): put the bridge in
+`extra_sources` and link the system library.
 
 ```toml
 [[bin]]
@@ -150,7 +177,7 @@ extra_sources = ["contrib/sqlite/aether_sqlite.c"]
 link_flags = "-lsqlite3"
 ```
 
-## Installing libsqlite3
+## Installing libsqlite3 (system fallback only)
 
 - **Debian / Ubuntu:** `apt install libsqlite3-dev`
 - **Fedora / RHEL:** `dnf install sqlite-devel`
@@ -158,16 +185,11 @@ link_flags = "-lsqlite3"
 - **Windows (MSYS2):** `pacman -S mingw-w64-x86_64-sqlite3`
 - **Alpine:** `apk add sqlite-dev`
 
-When `libsqlite3` isn't installed the user's `gcc` link step fails
-with "undefined reference to `sqlite3_open`" — the usual loud
-diagnostic. There's no runtime fallback because there's no runtime
-to fall back to; without the library the binary never built.
-
 ## Test
 
 ```sh
-sh contrib/sqlite/test_sqlite_roundtrip.sh
+ONLY="sqlite/" bash .github/scripts/contrib_check.sh   # the module spec, test_sqlite.ae
+sh tests/integration/sqlite_vendored_native/test_sqlite_vendored_native.sh
+sh tests/integration/sqlite_amalgamation_fetch/test_sqlite_amalgamation_fetch.sh
+sh tests/integration/sqlite_vendored_cross/test_sqlite_vendored_cross.sh  # needs zig
 ```
-
-Runs a 7-case matrix against an in-memory database: open, CREATE
-TABLE, two INSERTs, SELECT, column names, cell values, close.

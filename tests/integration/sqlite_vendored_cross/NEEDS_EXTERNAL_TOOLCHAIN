@@ -1,0 +1,4 @@
+zig 0.16.0 (scripts/get-zig.sh) and the fetched SQLite amalgamation
+(scripts/fetch-sqlite-amalgamation.sh). Each target compiles the runtime and,
+on a cold cache, the ~260k-line amalgamation, so this runs in CI's
+ci-sqlite-cross job rather than the default sweep.

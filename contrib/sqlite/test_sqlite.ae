@@ -11,10 +11,13 @@
 // failure, which stops at the first problem and reports no others. As specs
 // each check is independent, so one broken query no longer masks the rest.
 //
-// DEPENDENCY: contrib.sqlite links libsqlite3. contrib_check.sh names
-// `sqlite3` in the entry's pkg-config column and SKIPS the whole entry when
-// it is absent, so this file only runs where the library exists — the
-// it_when guard below is belt-and-braces for a direct `ae run`.
+// DEPENDENCY: contrib.sqlite links -lsqlite3: the pinned amalgamation that
+// `make contrib` builds into build/contrib/libsqlite3.a (#1372), or the
+// system library when the amalgamation could not be fetched. contrib_check.sh
+// SKIPS the entry when neither is available, so this file only runs where
+// SQLite exists -- the it_when guard below is belt-and-braces for a direct
+// `ae run`. tests/integration/sqlite_vendored_cross also cross-builds and
+// runs it for other targets.
 
 import contrib.sqlite
 import std.spec

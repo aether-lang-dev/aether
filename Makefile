@@ -2501,12 +2501,14 @@ install-contrib: contrib
 	fi
 	@install -d $(PREFIX)/lib/aether
 	@install -d $(PREFIX)/share/aether/contrib
-	@# Install built archives. Manifest lines: <name> <path> (tab-separated).
-	@awk -F'\t' 'NF>=2 { print $$1, $$2 }' $(BUILD_DIR)/contrib/MANIFEST | \
-		while read -r name path; do \
+	@# Install built archives. Manifest lines: <name> <path> [<installed name>]
+	@# (tab-separated). The third column overrides libaether_<name>.a: the
+	@# vendored SQLite must stay libsqlite3.a for the module's -lsqlite3 (#1372).
+	@awk -F'\t' 'NF>=2 { print $$1, $$2, (NF>=3 ? $$3 : "libaether_" $$1 ".a") }' $(BUILD_DIR)/contrib/MANIFEST | \
+		while read -r name path inst; do \
 			[ -z "$$name" ] && continue; \
-			install -m 644 "$$path" "$(PREFIX)/lib/aether/libaether_$$name.a"; \
-			printf "  lib/aether/libaether_%s.a\n" "$$name"; \
+			install -m 644 "$$path" "$(PREFIX)/lib/aether/$$inst"; \
+			printf "  lib/aether/%s\n" "$$inst"; \
 		done
 	@# Mirror the contrib source tree for module.ae + headers.
 	@# Trim noise: tests, benchmarks, example .ae, build scripts,
