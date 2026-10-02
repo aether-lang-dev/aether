@@ -71,6 +71,71 @@ Coercion is **lax by default** (Pydantic-style): `"25"` is accepted for an
 `INT` field. A value that cannot be coerced to the declared type produces an
 `invalid_type` error and the field's other rules are skipped.
 
+## Nested records and arrays
+
+Two more types hold structure, and `parse_json` validates a `std.json` tree
+against them:
+
+| Type                    | Holds                                              |
+|-------------------------|----------------------------------------------------|
+| `schema.OBJECT`         | the fields declared in its block, a nested record  |
+| `schema.array(T)`       | a list of `T`; `T` may be `OBJECT` or another array |
+
+```aether
+import std.schema
+import std.json
+
+main() {
+    order = schema.record() {
+        schema.field("customer", schema.OBJECT) {
+            schema.field("email", schema.STR) { schema.email() }
+        }
+        // An array of records: the item's fields go straight in the block,
+        // and the field's own min/max/len count the items.
+        schema.field("lines", schema.array(schema.OBJECT)) {
+            schema.min(1)
+            schema.field("sku", schema.STR) { schema.present() }
+            schema.field("qty", schema.INT) { schema.positive() }
+        }
+        // An array of scalars: the rules for each item go in items().
+        schema.field("tags", schema.array(schema.STR)) {
+            schema.optional()
+            schema.max(5)
+            schema.items() { schema.len(1, 20) }
+        }
+    }
+
+    root, err = json.parse("{\"customer\": {\"email\": \"a@b.co\"}, \"lines\": [{\"sku\": \"X\", \"qty\": 0}]}")
+    if err != "" { return }
+    values, errors = schema.parse_json(order, root)
+    i = 0
+    while i < schema.error_count(errors) {
+        // lines[0].qty: lines[0].qty must be positive
+        println("${schema.error_field(errors, i)}: ${schema.error_message(errors, i)}")
+        i = i + 1
+    }
+    json.json_free(values)
+    schema.errors_free(errors)
+    json.json_free(root)
+    schema.schema_free(order)
+}
+```
+
+- **Errors name their path** from the root: `customer.email`, `lines[0].qty`,
+  `tags[2]`.
+- **Values are a `std.json` object** of the fields that passed, typed: an `INT`
+  is a JSON integer, a `BOOL` a boolean, an `OBJECT` an object, an array an
+  array. Keys the schema does not declare are left out. Free it with
+  `json.json_free`.
+- **A JSON `null` is an absent field**, so an `optional()` field may be null.
+- **Lax mode** also takes a number or boolean for a `STR` field as its text.
+  Strict mode refuses that, and refuses a string for an `INT`, `FLOAT` or
+  `BOOL` field.
+- The flat `parse` cannot carry nesting: an `OBJECT` or array field it is given
+  is an `invalid_type` error that points at `parse_json`.
+- A rule an object or array cannot honour is refused when the schema is
+  built, with a message that says where it belongs.
+
 ## Validators
 
 Rules are composable builder calls inside a `field(…) { … }` block:
@@ -187,10 +252,13 @@ JSON Schema; it does not consume external JSON Schema documents.
 
 ### Types
 - `schema.STR`, `schema.INT`, `schema.FLOAT`, `schema.BOOL`
+- `schema.OBJECT`, `schema.array(T) -> int`
 
 ### Builders
 - `record() -> ptr` — start a schema; the trailing block declares its fields
 - `field(name, type) -> ptr` — declare a field; the trailing block adds its rules
+  (and, for an `OBJECT` or `array(OBJECT)`, the nested record's fields)
+- `items() -> ptr` — in an array field's block, the rules each item is checked against
 - checks: `min(n)`, `max(n)`, `len(lo, hi)`, `present()`, `positive()`,
   `nonneg()`, `one_of(set)`, `email()`, `pattern("kind:needle")`, `refine(fn)`
 - transforms: `trim()`, `lowercase()`, `uppercase()`
@@ -200,10 +268,14 @@ JSON Schema; it does not consume external JSON Schema documents.
 - `parse(schema, input) -> (values, errors)` — `input` is a `*Map` of
   `string → string`; returns a coerced value-map and an error list (both always
   non-null, both owned by the caller)
+- `parse_json(schema, root) -> (values, errors)` — `root` is a `std.json`
+  object; returns a typed `std.json` object (free with `json.json_free`) and an
+  error list whose fields are paths
 
 ### Projection
 - `to_json_schema(schema) -> string` — emit a draft-07 JSON Schema (owned
-  string; free with `string_free`)
+  string; free with `string_free`). An `OBJECT` field is a nested `object`
+  schema; an array is `array` with its `items` schema and `minItems`/`maxItems`.
 
 ### Result helpers
 - `ok(errors) -> int` — `1` if there are no errors

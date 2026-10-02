@@ -97,6 +97,13 @@ main() {
         schema.field("name", schema.STR) {
             schema.present()
         }
+        // Nested: validated as a tree, its errors pointing at their path.
+        schema.field("address", schema.OBJECT) {
+            schema.optional()
+            schema.field("city", schema.STR) {
+                schema.present()
+            }
+        }
     }
 
     registry = list.new()
@@ -133,6 +140,20 @@ main() {
             spec.assert_eq(http_response_status_code(r), 201, "handler ran, 201")
             spec.assert_eq(string_contains(http_response_body_str(r), "ok"), 1,
                 "the handler's own body came back")
+            http_response_free(r)
+        }
+
+        spec.it(fw, "validates a nested object") callback {
+            r = post("/users/", "{\"age\":30,\"name\":\"Bo\",\"address\":{\"city\":\"Oslo\"}}")
+            spec.assert_eq(http_response_status_code(r), 201, "a valid nested body reaches the handler")
+            http_response_free(r)
+        }
+
+        spec.it(fw, "points a nested error at its path") callback {
+            r = post("/users/", "{\"age\":30,\"name\":\"Bo\",\"address\":{\"city\":\"\"}}")
+            spec.assert_eq(http_response_status_code(r), 422, "422 for an empty nested field")
+            spec.assert_eq(string_contains(http_response_body_str(r), "\"pointer\":\"/data/attributes/address/city\""), 1,
+                "the error's JSON pointer is the field's path")
             http_response_free(r)
         }
 

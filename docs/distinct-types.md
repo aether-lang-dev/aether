@@ -83,13 +83,13 @@ Four pulls, in order of how directly the language design touches each:
    distinct types add a nuance that the type checker can see.
 
 4. **Stdlib internal hygiene.** `*StringSeq` vs. `string[]` is
-   already a documented footgun in `LLM.md`. A pair of distinct
+   already a documented footgun in `AGENTS.md`. A pair of distinct
    types over the underlying representations would let the compiler
    diagnose the mistake with a clear message rather than a
    lowering-time C compile error.
 
 Two downstream projects (`avn / svn-aether`, `aether-ui`) have asked
-for this in spec form (per `LLM.md` § "Working with downstream
+for this in spec form (per `AGENTS.md` § "Working with downstream
 users").
 
 ## Sketch
@@ -265,9 +265,9 @@ Each phase gets its own follow-up issue.
   serves as the operator-inheritance precedent (see TBD-2).
 - Bare-int → Duration at parameter passing is rejected;
   the strictness precedent for distinct types at call sites.
-- `LLM.md` § "Runtime sequence of strings → `*StringSeq`, not
+- `AGENTS.md` § "Runtime sequence of strings → `*StringSeq`, not
   `string[]`", exactly the class of mistake distinct types diagnose.
-- `LLM.md` § "Ownership of `ptr`-typed returns",
+- `AGENTS.md` § "Ownership of `ptr`-typed returns",
   borrowed-vs-ref-counted is another candidate distinction.
 - `docs/containment-sandbox.md` capability tokens, the prime use
   case.

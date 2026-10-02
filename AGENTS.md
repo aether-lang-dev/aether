@@ -1,4 +1,4 @@
-# Orientation for an LLM working on Aether
+# Orientation for an agent working on Aether
 
 A dense, opinionated map of the parts of this repo that aren't obvious from
 a first read: what the language is, the idioms that trip up a first port,

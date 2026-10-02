@@ -294,7 +294,7 @@ it also fixes the double-precision wobble in the elision path for free.
 | Move `sprint_expr_text` to shared TU + diagnostics | 60–100 | low | message format mirrors the runtime panic text, so the two read as the same violation |
 | Unify `emit_contract_check` onto the shared evaluator, delete `try_fold_predicate` | −60 net | low | keeps `test_contract_const_fold.ae` green as the guard |
 | Tests: positive folding, reject suite (`tests/integration/contract_fold_reject/`, ~6–8 cases modelled on `bitstruct_reject`), **silence suite** (runtime args, partial env, call operands, member access must NOT error), Makefile prune entry | 250–350 |, | the silence suite is the important one: false positives are this feature's only way to fail badly |
-| Docs (`language-reference.md` contracts section, `LLM.md` bullet, CHANGELOG + upgrade note) | 100–150 |, | |
+| Docs (`language-reference.md` contracts section, `AGENTS.md` bullet, CHANGELOG + upgrade note) | 100–150 |, | |
 | **Total** | **~700–950** | | one PR; no new tokens, no parser changes, no ABI impact |
 
 Prior calibration from this repo: `bitstruct` ~1,050 staged lines (parser +

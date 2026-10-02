@@ -361,7 +361,7 @@ borrowed-immut, borrowed-mut, refcounted-shared. Per GA's own
 **Verdict, explicitly reject.** This is the headline gap between
 GA's stated goals and what was built; copying it would be copying
 the most-broken part of the project. More importantly, the design
-direction is wrong for Aether. The `LLM.md` guidance is unambiguous:
+direction is wrong for Aether. The `AGENTS.md` guidance is unambiguous:
 
 > NOT Rust, no borrow checker, no ownership, no lifetimes. Strings
 > are ref-counted or arena-owned; you release explicitly where it
@@ -628,7 +628,7 @@ on top is a layer of indirection without a payoff.
 | 2.1 | S-expression syntax | Costs the human-readable leg of the value prop |
 | 2.4 (rest) | `@idempotent`, `@deterministic`, `@timeout_ms`, `@retry_policy`, etc. | Documentation, not type system; doc comments already cover it |
 | 2.5 | `RESOURCE_SCOPE` construct | `defer` already covers this with less ceremony |
-| 2.6 | Rust-shape `^T` / `&T` / `&mut T` ownership | Explicit design rejection in Aether's `LLM.md`; GA's own impl is a stub |
+| 2.6 | Rust-shape `^T` / `&T` / `&mut T` ownership | Explicit design rejection in Aether's `AGENTS.md`; GA's own impl is a stub |
 | 2.7 (rest) | Auto-fix suggestions, intent-mismatch detection, partial compilation | High infra cost, low payoff at Aether's scale |
 | 2.10 | Performance / complexity expectation attributes | Hand-asserted docs; cannot be verified |
 | 2.11 | `DEFINE_SEMANTIC_TYPE` / refinement types | Wrapper struct + parser fn covers the use case |
@@ -776,7 +776,7 @@ This survey is the fifth in a series (sister umbrellas: Flux, Fir, Flint, Zym). 
 | 2.1 | S-expression syntax | Costs the human-readable leg of the value prop |
 | 2.4 (rest) | `@idempotent`, `@deterministic`, `@timeout_ms`, `@retry_policy`, etc. | Documentation, not type system; doc comments already cover it |
 | 2.5 | `RESOURCE_SCOPE` construct | `defer` already covers this with less ceremony |
-| 2.6 | Rust-shape `^T` / `&T` / `&mut T` ownership | Explicit design rejection in Aether's LLM.md; GA's own impl is a stub |
+| 2.6 | Rust-shape `^T` / `&T` / `&mut T` ownership | Explicit design rejection in Aether's AGENTS.md; GA's own impl is a stub |
 | 2.7 (rest) | Auto-fix suggestions, intent-mismatch detection, partial compilation | High infra cost, low payoff at Aether's scale |
 | 2.10 | Performance / complexity expectation attributes | Hand-asserted docs; cannot be verified |
 | 2.11 | `DEFINE_SEMANTIC_TYPE` / refinement types | Wrapper struct + parser fn covers the use case |

@@ -310,6 +310,12 @@ const char* lookup_extern_c_name(CodeGenerator* gen, const char* func_name);
 int is_builder_func_reg(CodeGenerator* gen, const char* func_name);
 const char* get_builder_factory(CodeGenerator* gen, const char* func_name);
 
+/* A trailing block's statements, in its own scope (codegen_stmt.c). */
+void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body);
+/* The block of a call's trailing DSL closure: not a closure the function
+ * takes as a `fn` parameter. NULL when the call has none (codegen_expr.c). */
+ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call);
+
 /* Bare-fn → fn-typed-slot adapter registry (ASK 3). At every bare-fn
  * wrap site we call register_bare_fn_adapter(name); at file
  * finalisation we call emit_bare_fn_adapters() to dump the resulting

@@ -132,7 +132,7 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: .ci-cache
-        key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
+        key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
@@ -163,7 +163,7 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
-        key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
+        key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     # macOS leaks(1) gate (#468). Runs only on the ARM64 macOS job —
     # one macOS arch is enough leak coverage, and MallocStackLogging

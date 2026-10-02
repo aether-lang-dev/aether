@@ -51,7 +51,7 @@ below.
    convention.
 2. **[FIP-shaped C interop](#2-fip-shaped-c-interop)**, even a stripped-down
    "parse C header → emit Aether stubs" tool would replace a lot of the
-   `extern fs_foo_raw` boilerplate. The split-accessor TLS pattern in `LLM.md`
+   `extern fs_foo_raw` boilerplate. The split-accessor TLS pattern in `AGENTS.md`
    is exactly the kind of friction this kills.
 3. **[Variant / tagged-union types](#3-variant--tagged-union-types)**,
    Aether has none. Codegen as C tagged union + discriminant; pattern-match in
@@ -243,7 +243,7 @@ against* the FIP-resolved symbol, signature mismatch is a compile-time error
 ### Why it's a fit for Aether
 
 Aether's `extern fs_foo_raw() -> string` + the split-accessor TLS pattern
-documented in `aether/LLM.md` exists exactly because Aether can't synthesize
+documented in `aether/AGENTS.md` exists exactly because Aether can't synthesize
 length-aware bindings automatically. FIP-style header introspection would
 enable:
 
@@ -375,7 +375,7 @@ switch (v.tag) {
 
 Exhaustiveness check is a parser/analyzer obligation, like Flint already does.
 
-**Naming the keyword**: Aether has `match` reserved already (per `LLM.md`).
+**Naming the keyword**: Aether has `match` reserved already (per `AGENTS.md`).
 `variant V: …;` for declaration, `match v: …;` for use. Consistent with how
 `message` is reserved for actor model.
 
@@ -473,7 +473,7 @@ new built-in that gets added. Cheap, formulaic, eats real friction.
 
 Specifically: any time a new primitive or a SIMD-shaped tuple (§9) is added,
 the `from_*` companion should be added at the same time. This belongs on the
-checklist for new primitives in `LLM.md`'s "Invariants to not break" section.
+checklist for new primitives in `AGENTS.md`'s "Invariants to not break" section.
 
 ### Codegen-to-C reimplementation note
 
@@ -531,7 +531,7 @@ Order of evaluation: RHS is fully evaluated *before* any LHS write, so swaps
 work correctly without a temp the user has to name.
 
 This depends on Aether having a tuple type that survives codegen. The
-`split-accessor pattern via TLS` documented in `LLM.md` is a workaround for
+`split-accessor pattern via TLS` documented in `AGENTS.md` is a workaround for
 exactly this gap. Fixing tuples-cross-FFI is the real prerequisite.
 
 ---
@@ -741,7 +741,7 @@ problems) are huge. Flint's `pong-3.0` example reads naturally because
 - Tuples-vs-vectors: `(1, 2, 3)` literal is currently a tuple in Aether;
   it should *also* satisfy `i32x3` when assignment context demands it.
   Same dual-targeting Aether already does for `[a, b, c]` against
-  `string[]` vs `*StringSeq` (per `LLM.md`).
+  `string[]` vs `*StringSeq` (per `AGENTS.md`).
 
 ---
 
@@ -904,7 +904,7 @@ Flint is a Python-ish (indentation + `;`) systems language compiling to LLVM IR 
 4. **Switch expressions**, collapses temp-var dance.
 5. **Grouped field access/assign** (`v.(x, y) = v.(y, x)`), pure desugaring.
 6. **String interpolation coverage**, incremental `from_<T>` per primitive.
-7. **FIP-shaped C interop**, largest project; replaces a lot of `extern fs_foo_raw` boilerplate plus the split-accessor TLS pattern documented in LLM.md. Worth a month-scale investment because of how much it deletes.
+7. **FIP-shaped C interop**, largest project; replaces a lot of `extern fs_foo_raw` boilerplate plus the split-accessor TLS pattern documented in AGENTS.md. Worth a month-scale investment because of how much it deletes.
 8. **SIMD primitives**, defer until a downstream user asks.
 9. **DCMP / entity composition**, explicit skip; competes with actor model rather than complementing it.
 

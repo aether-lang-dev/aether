@@ -166,7 +166,7 @@ What does not transfer:
 - **Merging "absent" with "failed".** Aether's docs are explicit
   (`language-reference.md` §Optionals: *"the type for 'maybe a value',
   distinct from the (value, err) result convention, which is for fallible
-  operations"*; same position in `LLM.md`). C3 conflates them, `none` and
+  operations"*; same position in `AGENTS.md`). C3 conflates them, `none` and
   `fault==0` are the same state, and C3 then can't express "this lookup
   succeeded and found nothing" distinctly from "this lookup failed".
   Aether's split is *better*, and the tree contains a working narrowing
@@ -348,7 +348,7 @@ typed mechanism nobody uses plus an untyped convention everybody uses.
 | 3 | `fault` declarations: parser + interned-global emission | 120–180 | low, enum/bitstruct pattern |
 | 3 | `==`-on-fault lowering (ptr-then-strcmp) + typecheck | 80–120 | low |
 | 3 | tests incl. a **binary_import cross-boundary identity test** | 200–300 | the one genuinely novel test |
-|, | docs (language-reference, LLM.md, CHANGELOG ×3) | 200–300 |, |
+|, | docs (language-reference, AGENTS.md, CHANGELOG ×3) | 200–300 |, |
 | | **Total, phases 0–3** | **~1,200–2,000** | three-to-four PRs |
 
 Calibration: `bitstruct` ~1,050 staged; `defer catch` ~620; contract folding

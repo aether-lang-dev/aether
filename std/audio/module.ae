@@ -22,8 +22,8 @@
 // `stream_push`); and a headless engine (`open_headless` + `render`) that
 // advances only when told to, so a test holds a mix to numbers: the gain,
 // pan and pitch last applied, the frames each source played, the peak of
-// the rendered block. mp3 and flac already decode through `load_wav`
-// (miniaudio sniffs the container); OGG Vorbis is a later tier.
+// the rendered block. mp3, flac and OGG Vorbis decode through `load_wav`
+// (miniaudio sniffs the container; Vorbis through the vendored stb_vorbis).
 //
 // Not here (named later tiers): synthesis/DSP, capture, the actor pipeline.
 
@@ -181,8 +181,8 @@ const FORMAT_F32 = 5
 // Play PCM samples the caller ALREADY decoded, rather than an encoded
 // container (asks/pcm-please.md).
 //
-// `load_wav` is really a format-sniffing decoder — it accepts mp3 and flac
-// too — but every entry point wants bytes miniaudio can demux itself. That
+// `load_wav` is really a format-sniffing decoder — it accepts mp3, flac and
+// OGG Vorbis too — but every entry point wants bytes miniaudio can demux itself. That
 // leaves no way in for samples a *different* decoder produced, which is
 // exactly the case when contrib.avcodec has demuxed an MP4 and holds the
 // audio packets. The workaround was pre-extracting a sidecar WAV: roughly

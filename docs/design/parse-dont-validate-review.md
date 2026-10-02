@@ -157,7 +157,7 @@ programmer error, not an expected case.)
 ## Where this pays off most: "config IS code" → "config IS *parsed* code"
 
 Aether's pitch for server-shaped libraries is **config IS code** (see
-[`closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) and LLM.md): don't
+[`closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) and AGENTS.md): don't
 ship a YAML loader, expose your start-surface as a closure-DSL block and let the
 operator's config be a `.ae` file they `ae run`. The builder-DSL machinery makes
 that block *read* declaratively and *wire* itself.

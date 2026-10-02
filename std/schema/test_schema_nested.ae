@@ -1,0 +1,197 @@
+// std.schema nested records and arrays (#1446): parse_json walks a std.json
+// tree against a schema of OBJECT and array(T) fields, returns the coerced
+// values as a JSON tree, and names each error by its path.
+
+import std.schema
+import std.json
+import std.map(map_new, map_put_raw, map_free)
+import std.string(string_equals, string_contains, string_free)
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if !cond { println("FAIL: ${msg}"); return 1 }
+    return 0
+}
+
+fn order_schema() -> ptr {
+    return schema.record() {
+        schema.field("id", schema.INT) { schema.positive() }
+        schema.field("customer", schema.OBJECT) {
+            schema.field("name", schema.STR) { schema.present() }
+            schema.field("email", schema.STR) { schema.email() }
+            schema.field("address", schema.OBJECT) {
+                schema.optional()
+                schema.field("city", schema.STR) { schema.present() }
+                schema.field("zip", schema.STR) { schema.len(4, 10) }
+            }
+        }
+        schema.field("lines", schema.array(schema.OBJECT)) {
+            schema.min(1)
+            schema.field("sku", schema.STR) { schema.trim(); schema.uppercase() }
+            schema.field("qty", schema.INT) { schema.positive() }
+            schema.field("gift", schema.BOOL) { schema.default_to("false") }
+        }
+        schema.field("tags", schema.array(schema.STR)) {
+            schema.optional()
+            schema.max(3)
+            schema.items() { schema.len(1, 8) }
+        }
+        schema.field("grid", schema.array(schema.array(schema.INT))) {
+            schema.optional()
+        }
+    }
+}
+
+// Parse `text` and validate it; returns (values, errors) and frees the input tree.
+fn run(s: ptr, text: string) -> (ptr, ptr) {
+    root, err = json.parse(text)
+    if err != "" { println("FAIL: test JSON does not parse: ${err}"); exit(1) }
+    values, errors = schema.parse_json(s, root)
+    json.json_free(root)
+    return values, errors
+}
+
+fn has_error(errors: ptr, field: string, code: string) -> bool {
+    i = 0
+    while i < schema.error_count(errors) {
+        if string_equals(schema.error_field(errors, i), field) == 1 &&
+        string_equals(schema.error_code(errors, i), code) == 1 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn dump(errors: ptr) {
+    i = 0
+    while i < schema.error_count(errors) {
+        println("  ${schema.error_field(errors, i)} ${schema.error_code(errors, i)}: ${schema.error_message(errors, i)}")
+        i = i + 1
+    }
+}
+
+fn test_valid(s: ptr) -> int {
+    fails = 0
+    values, errors = run(s, "{\"id\": \"7\", \"customer\": {\"name\": \"Ada\", \"email\": \"ada@example.com\", \"address\": {\"city\": \"Paris\", \"zip\": \"75001\"}}, \"lines\": [{\"sku\": \" ab-1 \", \"qty\": 2}, {\"sku\": \"cd-2\", \"qty\": 1, \"gift\": true}], \"tags\": [\"red\", \"new\"], \"grid\": [[1, 2], [3]], \"extra\": 99}")
+    if schema.ok(errors) != 1 { println("FAIL: a valid order fails:"); dump(errors); return 1 }
+    out, _ = json.stringify(values)
+    // Coerced and typed: "7" became 7, the sku was trimmed and uppercased,
+    // the missing gift took its default as a boolean, undeclared "extra" is gone.
+    want = "{\"id\":7,\"customer\":{\"name\":\"Ada\",\"email\":\"ada@example.com\",\"address\":{\"city\":\"Paris\",\"zip\":\"75001\"}},\"lines\":[{\"sku\":\"AB-1\",\"qty\":2,\"gift\":false},{\"sku\":\"CD-2\",\"qty\":1,\"gift\":true}],\"tags\":[\"red\",\"new\"],\"grid\":[[1,2],[3]]}"
+    fails = fails + ck(string_equals(out, want) == 1, "the values tree:\n  got  ${out}\n  want ${want}")
+    json.json_free(values)
+    schema.errors_free(errors)
+    return fails
+}
+
+fn test_paths(s: ptr) -> int {
+    fails = 0
+    values, errors = run(s, "{\"id\": 3, \"customer\": {\"name\": \"\", \"email\": \"nope\", \"address\": {\"zip\": \"1\"}}, \"lines\": [{\"sku\": \"a\", \"qty\": 1}, {\"sku\": \"b\", \"qty\": 0}, {\"qty\": \"x\"}], \"tags\": [\"ok\", \"waytoolongtag\"], \"grid\": [[1], [2, \"z\"]]}")
+    fails = fails + ck(has_error(errors, "customer.name", "invalid_value"), "customer.name is empty")
+    fails = fails + ck(has_error(errors, "customer.email", "invalid_format"), "customer.email is not an email")
+    fails = fails + ck(has_error(errors, "customer.address.city", "missing"), "customer.address.city is missing")
+    fails = fails + ck(has_error(errors, "customer.address.zip", "too_small"), "customer.address.zip is too short")
+    fails = fails + ck(has_error(errors, "lines[1].qty", "too_small"), "lines[1].qty is not positive")
+    fails = fails + ck(has_error(errors, "lines[2].sku", "missing"), "lines[2].sku is missing")
+    fails = fails + ck(has_error(errors, "lines[2].qty", "invalid_type"), "lines[2].qty is not an integer")
+    fails = fails + ck(has_error(errors, "tags[1]", "too_big"), "tags[1] is longer than 8")
+    fails = fails + ck(has_error(errors, "grid[1][1]", "invalid_type"), "grid[1][1] is not an integer")
+    fails = fails + ck(schema.error_count(errors) == 9, "nine errors (got ${schema.error_count(errors)})")
+    if fails > 0 { dump(errors) }
+    // What passed is still returned: id, and nothing of the failed subtrees.
+    out, _ = json.stringify(values)
+    fails = fails + ck(string_equals(out, "{\"id\":3}") == 1, "only the passing fields remain (${out})")
+    json.json_free(values)
+    schema.errors_free(errors)
+    return fails
+}
+
+fn test_shapes(s: ptr) -> int {
+    fails = 0
+    v1, e1 = run(s, "{\"id\": 1, \"customer\": \"Ada\", \"lines\": {}}")
+    fails = fails + ck(has_error(e1, "customer", "invalid_type"), "a string where an object goes")
+    fails = fails + ck(has_error(e1, "lines", "invalid_type"), "an object where an array goes")
+    json.json_free(v1)
+    schema.errors_free(e1)
+
+    v2, e2 = run(s, "{\"id\": 1, \"customer\": {\"name\": \"A\", \"email\": \"a@b.co\"}, \"lines\": [], \"tags\": [\"a\", \"b\", \"c\", \"d\"]}")
+    fails = fails + ck(has_error(e2, "lines", "too_small"), "an empty lines array is below min(1)")
+    fails = fails + ck(has_error(e2, "tags", "too_big"), "four tags are above max(3)")
+    json.json_free(v2)
+    schema.errors_free(e2)
+
+    v3, e3 = run(s, "{\"id\": 1, \"customer\": {\"name\": \"A\", \"email\": \"a@b.co\", \"address\": null}, \"lines\": [{\"sku\": \"s\", \"qty\": 1}], \"tags\": null}")
+    fails = fails + ck(schema.ok(e3) == 1, "null is absent: the optional address and tags may be null")
+    if schema.ok(e3) != 1 { dump(e3) }
+    json.json_free(v3)
+    schema.errors_free(e3)
+
+    root, _ = json.parse("[1, 2]")
+    v4, e4 = schema.parse_json(s, root)
+    fails = fails + ck(has_error(e4, "", "invalid_type"), "a root that is not an object")
+    json.json_free(root)
+    json.json_free(v4)
+    schema.errors_free(e4)
+    return fails
+}
+
+fn test_strict_and_flat() -> int {
+    fails = 0
+    strict_s = schema.record() {
+        schema.field("n", schema.INT)
+        schema.field("s", schema.STR)
+    }
+    // Lax (the default): "5" is an int, 12 is the text "12".
+    v, e = run(strict_s, "{\"n\": \"5\", \"s\": 12}")
+    out, _ = json.stringify(v)
+    fails = fails + ck(schema.ok(e) == 1 && string_equals(out, "{\"n\":5,\"s\":\"12\"}") == 1, "lax coercion (${out})")
+    json.json_free(v)
+    schema.errors_free(e)
+    schema.schema_free(strict_s)
+
+    // The flat parse cannot carry nesting, and says so.
+    nested = order_schema()
+    input = map_new()
+    map_put_raw(input, "id", "1")
+    map_put_raw(input, "customer", "{}")
+    fv, fe = schema.parse(nested, input)
+    fails = fails + ck(has_error(fe, "customer", "invalid_type"), "flat parse refuses an OBJECT field")
+    fails = fails + ck(string_contains(schema.error_message(fe, 0), "parse_json") == 1 || schema.error_count(fe) > 1,
+        "and points at parse_json")
+    schema.values_free(fv)
+    schema.errors_free(fe)
+    map_free(input)
+    schema.schema_free(nested)
+    return fails
+}
+
+fn test_json_schema(s: ptr) -> int {
+    js = schema.to_json_schema(s)
+    fails = 0
+    fails = fails + ck(string_contains(js, "\"customer\":{\"type\":\"object\",\"properties\":{\"name\"") == 1, "customer is a nested object schema")
+    fails = fails + ck(string_contains(js, "\"lines\":{\"type\":\"array\",\"items\":{\"type\":\"object\"") == 1, "lines is an array of objects")
+    fails = fails + ck(string_contains(js, "\"minItems\":1") == 1, "min(1) on lines is minItems")
+    fails = fails + ck(string_contains(js, "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8},\"maxItems\":3}") == 1,
+        "tags: items schema and maxItems")
+    fails = fails + ck(string_contains(js, "\"grid\":{\"type\":\"array\",\"items\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}}") == 1,
+        "an array of arrays")
+    fails = fails + ck(string_contains(js, "\"required\":[\"city\",\"zip\"]") == 1, "the nested record's own required list")
+    if fails > 0 { println(js) }
+    string_free(js)
+    return fails
+}
+
+main() {
+    s = order_schema()
+    fails = 0
+    fails = fails + test_valid(s)
+    fails = fails + test_paths(s)
+    fails = fails + test_shapes(s)
+    fails = fails + test_json_schema(s)
+    schema.schema_free(s)
+    fails = fails + test_strict_and_flat()
+    if fails > 0 { println("${fails} failure(s)"); exit(1) }
+    println("OK: nested records and arrays")
+}

@@ -367,7 +367,7 @@ sub-VM and call functions on it." You can do something
 similar today with the in-process language hosts
 (`contrib.host.python.run_sandboxed(perms, code)` etc.) but Aether
 hosting Aether currently requires a separate process. The README and
-`LLM.md` both note this limitation:
+`AGENTS.md` both note this limitation:
 
 > Java/Go/aether-hosts-aether are separate-process.
 
@@ -597,7 +597,7 @@ the compiler.
 
 Aether already has a preprocessor (or its equivalent, directives,
 includes, macro expansion all happen somewhere in `compiler/`). It is
-not clear from the LLM.md what the user-facing flag is, if any.
+not clear from the AGENTS.md what the user-facing flag is, if any.
 
 **Recommendation:** if there isn't already an `aetherc --emit=preproc`
 or similar, **add one**. Cheap to implement (the data is on the heap
@@ -747,7 +747,7 @@ The full doc above is a survey of [Zym](https://github.com/zym-lang/zym), a byte
 
 If only one item from this survey lands, it's §3, Zym's pattern of `var sandbox = ZymVM()` from script code, returning an object with `.compileSource() / .load() / .call(name, args)` and a value-only marshalling boundary (primitives copy, strings/lists deep-copy, **closures and refs do not cross**).
 
-This would give Aether **in-process aether-in-aether sandboxing**, currently the README and LLM.md both note that Aether-hosts-Aether requires a separate process. Real use case: an Aether-written editor loading user-supplied Aether macros, a plugin host loading untrusted user scripts, etc. The svn-aether port doesn't need it (they're the host, not the host-of-untrusted-code), so this is gated on a downstream demand surfacing.
+This would give Aether **in-process aether-in-aether sandboxing**, currently the README and AGENTS.md both note that Aether-hosts-Aether requires a separate process. Real use case: an Aether-written editor loading user-supplied Aether macros, a plugin host loading untrusted user scripts, etc. The svn-aether port doesn't need it (they're the host, not the host-of-untrusted-code), so this is gated on a downstream demand surfacing.
 
 **Why this is not filed as a focused issue**: P2/large effort + explicit "only worth doing if a real use case shows up" gate. Filing prematurely would create implementation pressure without justification. Flag for separate issue when (if) someone files a wish for it.
 

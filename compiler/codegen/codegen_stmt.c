@@ -3497,7 +3497,7 @@ void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body) {
  * variable declared between those braces; emitting it at the enclosing
  * function's exit instead puts the free where the name is out of scope, and
  * the generated C does not compile. */
-static void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
+void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
     if (!gen || !body) return;
     int saved_var_count = gen->declared_var_count;
     print_indent(gen);
@@ -4803,9 +4803,33 @@ static void emit_observable_store_notify(CodeGenerator* gen, ASTNode* stmt) {
 
 static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt);
 
+/* The call whose trailing block this statement runs itself: a declaration's
+ * initializer, an assignment's right side, an expression statement's call.
+ * generate_expression lowers a trailing call anywhere else (a return value,
+ * an argument) on its own; this tells it which one not to. */
+static ASTNode* stmt_trailing_call(CodeGenerator* gen, ASTNode* stmt) {
+    ASTNode* call = NULL;
+    if (stmt->type == AST_VARIABLE_DECLARATION && stmt->child_count > 0) {
+        call = stmt->children[0];
+    } else if (stmt->type == AST_ASSIGNMENT && stmt->child_count >= 2) {
+        call = stmt->children[1];
+    } else if (stmt->type == AST_EXPRESSION_STATEMENT && stmt->child_count > 0) {
+        call = stmt->children[0];
+        if (call && call->type == AST_BINARY_EXPRESSION && call->value &&
+            strcmp(call->value, "=") == 0 && call->child_count == 2) {
+            call = call->children[1];
+        }
+    }
+    if (!call || call->type != AST_FUNCTION_CALL) return NULL;
+    return trailing_dsl_block(gen, call) ? call : NULL;
+}
+
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
+    ASTNode* saved_trailing = gen->trailing_stmt_call;
+    gen->trailing_stmt_call = stmt_trailing_call(gen, stmt);
     generate_statement_body(gen, stmt);
+    gen->trailing_stmt_call = saved_trailing;
     emit_observable_store_notify(gen, stmt);
 }
 

@@ -1050,7 +1050,7 @@ CKSUM_CMD := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || (
 # and the build-variant flags (HARDEN, EXTRA_CFLAGS: coop/wasm/embedded set
 # -DAETHER_NO_THREADING etc). If any of these differ the stamp differs, so a
 # hardened / coop / cross object never gets restored over a plain one.
-AUDIO_CACHE_KEY := $(shell cat std/audio/aether_audio.c std/audio/miniaudio.h std/audio/aether_audio.h 2>/dev/null | $(CKSUM_CMD) 2>/dev/null | cut -d' ' -f1)-$(shell $(CC) --version 2>/dev/null | head -1 | tr -dc 'a-zA-Z0-9.')-h$(HARDEN)-$(shell printf '%s %s' "$(AUDIO_GCC_ONLY_RELAX)" "$(EXTRA_CFLAGS)" | $(CKSUM_CMD) 2>/dev/null | cut -d' ' -f1)
+AUDIO_CACHE_KEY := $(shell cat std/audio/aether_audio.c std/audio/miniaudio.h std/audio/stb_vorbis.c std/audio/aether_audio.h 2>/dev/null | $(CKSUM_CMD) 2>/dev/null | cut -d' ' -f1)-$(shell $(CC) --version 2>/dev/null | head -1 | tr -dc 'a-zA-Z0-9.')-h$(HARDEN)-$(shell printf '%s %s' "$(AUDIO_GCC_ONLY_RELAX)" "$(EXTRA_CFLAGS)" | $(CKSUM_CMD) 2>/dev/null | cut -d' ' -f1)
 
 # Restore the cached object into build/ if the stamp matches, then touch it
 # newer than its source so make treats it as up-to-date and skips the compile.
