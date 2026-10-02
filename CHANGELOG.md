@@ -14,6 +14,160 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.758.0]
+
+### Added
+
+- **contrib.sqlite carries its own SQLite, natively and when cross-compiling.**
+  The SQLite amalgamation (3.53.4) is pinned by version and SHA-256 in
+  `contrib/sqlite/amalgamation.lock` and fetched on demand by
+  `scripts/fetch-sqlite-amalgamation.sh`; it is not committed. `make contrib`
+  compiles it into `build/contrib/libsqlite3.a` beside the veneer, so a
+  program using contrib.sqlite needs no `libsqlite3` where it runs, and
+  `ae build --target=<triple>` compiles it for the target, so
+  `--target=aarch64-linux-musl` links a working SQLite with nothing staged.
+  The ~1 minute amalgamation compile is cached: per target in the ae cache,
+  and in CI. The system `libsqlite3` remains the fallback when the
+  amalgamation cannot be fetched, and release archives ship it (#1372).
+
+- **Closures cross a binary import.** An exported function that takes or
+  returns a closure (bare `fn`) was left out of an `--emit=lib` library
+  with a warning. Now the closure crosses by value as `_AeClosure`, which
+  carries its function and its captured environment. A library calls the
+  closure a program passes, and a program calls one the library returns,
+  captures included. The catalog's source signature spells the type `fn`,
+  so the interface `ae` builds for an importer declares it. Only an Aether
+  importer knows the `_AeClosure` layout and calling convention, so an
+  `--emit=csrc` header leaves these prototypes out, as it does for a struct
+  passed by value (#2297).
+
+### Changed
+
+- **Raw byte I/O takes `byte[]` slices: the length travels with the data
+  (#2301).** `fs.write_binary(path, data)`, `fs.write_atomic(path, data)`,
+  `fs.pwrite(file, data, offset)`, `tcp.write_n(sock, data)`,
+  `udp.send_to(sock, host, port, data)` and `udp.send_to_addr(sock, addr,
+  data)` drop their separate length argument; `io.fd_read_into(fd, buf)`,
+  `udp.recv_from(sock, buf)` and `udp.recv_from_into(sock, buf, addr)` read
+  at most `buf.len` bytes, the received bytes being `buf[0..n]`.
+  `io.fd_write_n(fd, data, length)` is now `io.fd_write(fd, data)`: a module
+  function's C name is `<module>_<name>`, so `io.fd_write_n` was the same
+  symbol as the C function `io_fd_write_n` and every call bound the extern
+  directly. Pass a string as `string.bytes(s)` (a prefix as
+  `string.bytes(s)[0..n]`) and a `std.bytes` buffer as `bytes.view(buf)` or,
+  for a read, `bytes.capacity_view(buf)`. An empty slice writes nothing and
+  succeeds; a slice with no bound panics. Backward compatibility was not a
+  goal: every caller in `std/`, `contrib/` and `tests/` was moved, and
+  `fs.pread_into`, which fills a `std.bytes` handle and sets its length, is
+  unchanged. The raw externs behind these wrappers (`io_fd_write_n`,
+  `fs_write_binary_raw`, `fs_write_atomic_raw`, `fs_pwrite_raw`,
+  `tcp_send_n_raw`) now take `ptr` data and are no longer exported, and
+  `std.net` no longer declares `tcp_send_n_raw`; a heap string passed to a
+  `ptr` parameter would send its header bytes, so a caller of the old raw
+  form now gets a compile error instead. The TLS 1.3 client and server send
+  each sealed record as a borrowed view instead of copying it into a string
+  first.
+
+- **The hashes, encoders and compressors take `byte[]` input (#2301).**
+  `hash.fnv32`/`fnv64`/`murmur3_32`/`siphash24`/`crc32`/`crc32_update`,
+  `encoding.hex_encode`/`base64_encode`/`base64_encode_padded`/
+  `base32_encode`, `zlib.deflate`/`inflate`/`gzip_deflate`/`gzip_inflate`/
+  `deflate_raw`/`inflate_raw`/`stream_write`, `zstd.compress`/`stream_write`,
+  `brotli.compress`/`stream_write` and `lzf.compress`/`decompress` drop their
+  separate length argument: the input is a slice whose length travels with
+  it. Pass a string as `string.bytes(s)`, a prefix as `string.bytes(s)[0..n]`
+  and a `std.bytes` buffer as `bytes.view(buf)`; a sub-slice hashes or
+  compresses only its own bytes. Results are unchanged (owned, length-aware
+  strings and `(bytes, n, err)` tuples), decoders still take text, and
+  `lzf.decompress` still takes the original length. A slice with no bound
+  panics. Every caller in `std/`, `contrib/`, `tests/` and the docs was moved;
+  the compressors' input externs (`zlib_try_deflate` and the rest of the
+  `*_try_*` calls that take data) now take `ptr` and are no longer exported.
+
+- **`std.zip`, `std.resp` and `std.http1` take `byte[]` input (#2301).**
+  `zip.open(data)`, `zip.extract(data, dest, opts)`,
+  `zip.create(name, data, method, level)` and
+  `zip.writer_add(w, name, data, method, level)` drop their length argument;
+  the writer takes each entry's CRC-32 straight from the slice instead of
+  copying it into a scratch buffer first. `resp.new_bulk(data)` and
+  `resp.parse_prefix(data)` take a slice, and the RESP parser now indexes it
+  directly instead of reading byte-by-byte through a length-checked string
+  accessor; a frame cut short by the slice's bound is reported incomplete.
+  `resp.parse(s)` still takes a string. `http1.feed(r, chunk, is_eof)` takes a
+  slice, the parser works over a view of its accumulator, and
+  `http1.body(r)` returns the decoded body as a borrowed `byte[]` view,
+  replacing `body_ptr` / `body_len`. Pass a string as `string.bytes(s)` and a
+  `std.bytes` buffer as `bytes.view(buf)`. Every caller and doc example was
+  moved.
+
+- **Cryptography and TLS buffers use `byte[]` slices (#2301).** Byte inputs
+  and outputs across the cryptographic modules now carry their bounds with
+  them, replacing separate pointer-and-length pairs where the data extent is
+  known. TLS record, handshake and certificate paths pass bounded views
+  through the Aether layer while retaining the existing C callback ABI.
+  Cryptographic size checks and buffer ownership remain explicit.
+
+### Fixed
+
+- **A binary write no longer misreads a payload that begins with the
+  string-header magic.** `fs.write_binary` / `fs.write_atomic` checked their
+  data in C for an AetherString header after the generated call had already
+  unwrapped it, and a raw pointer (`bytes.data(buf)`) passed to their
+  `string` parameter went through the same check on the way in. A payload
+  starting `DE C0 57 AE` was therefore taken for a header, and the write
+  followed a `data` pointer read out of the payload's own bytes, writing
+  whatever memory that named or crashing. Binary data now reaches C as a raw
+  `ptr` from a `byte[]` slice and is never checked;
+  `tests/regression/test_issue2301_binary_io_slices.ae` writes such a payload
+  through every changed path and compares it byte for byte.
+
+- **`string.bytes(s)` no longer leaks the string it views.** It returns a
+  borrowed `byte[]` view, but its body hands `s` to a `ptr` extern and
+  returns a view of it, which the compiler's escape walk read as `s`
+  escaping, so a scope-owned heap string passed through it was never freed.
+  `fs.write_binary(p, string.bytes(buf)[0..n])` on a fresh read buffer leaked
+  the whole buffer per call. A named string passed to `string.bytes` is now
+  freed at scope exit like any other: a slice does not extend its owner's
+  lifetime, which is the documented contract. A *temporary* passed straight
+  in (`string.bytes(f())`) is still left unfreed rather than freed under the
+  view; hold it in a local. `tests/regression/test_issue2301_string_bytes_reclaim.ae`
+  copies a 10 KB file through a view 200 times and checks the heap does not
+  grow.
+
+- **base64 and the compressors no longer misread input that begins with the
+  string-header magic.** The C side of `encoding.base64_encode`, `std.zlib`,
+  `std.zstd`, `std.brotli` and `std.lzf` checked its input for an
+  AetherString header, so input starting `DE C0 57 AE` was taken for one and
+  the call read from a `data` pointer pulled out of the bytes that follow,
+  crashing or encoding/compressing whatever memory that named. The HTTP
+  server reaches the same base64 code with a SHA-1 digest of the client's
+  `Sec-WebSocket-Key`, so a client could grind a key whose digest starts that
+  way. Input now reaches C as raw bytes with its length and is never checked;
+  `tests/regression/test_issue2301_codec_slices.ae` round-trips such a
+  payload through every codec (it segfaults against the old C).
+
+- **`strbuilder.append_n` no longer corrupts binary content that begins with
+  the string-header magic.** The generated call already unwraps an
+  AetherString to its payload, and the C side then checked that payload for
+  a header again, so content starting `DE C0 57 AE` was taken for a header
+  and the append copied from a pointer read out of the bytes that follow. It
+  surfaced as `resp.encode` of such a bulk string reading uninitialised
+  memory. The payload is now copied as raw bytes; `strbuilder.append`, whose
+  parameter is `@aether string` and so does receive the header, unwraps it
+  exactly once. `tests/regression/test_issue2301_format_slices.ae` covers it
+  and fails against the old C.
+
+- **Rebuilding a contrib archive invalidates the build cache.** The cache key
+  hashed `libaether.a` but not the archives `make contrib` puts beside it, so
+  after rebuilding `libaether_<module>.a` (or switching contrib.sqlite between
+  the system library and the vendored one) `ae build` reported a cache hit
+  and handed back a binary linked against the old archive.
+- **A static module archive can need libm.** `ae build` dropped `-lm`,
+  `-lpthread` and `-ldl` from a module's `@link` because the runtime links
+  them already, but earlier on the line than the module's archives, which a
+  single-pass linker cannot use for a later static archive. They now follow
+  the module archives when a module names them (#1372).
+
 ## [0.757.0]
 
 ### Fixed
