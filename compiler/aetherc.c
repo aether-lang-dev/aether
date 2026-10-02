@@ -2058,6 +2058,8 @@ void print_help(const char* program_name) {
     printf("                                   summary / derived per-function effect+purity JSON (#889)\n");
     printf("  --emit=aea <mod.ae> <out.aea>    Write a module's compiled artifact: its parse, reused by\n");
     printf("                                   importers of the installed module (#1746)\n");
+    printf("  --lib-package=<pkg>              With --emit=lib: export every <pkg>.* module the build\n");
+    printf("                                   imports, as one package library (#2297)\n");
     printf("  --emit-main=<func>               With --emit=lib: also emit a thin main(argc,argv) shim\n");
     printf("                                   that calls <func>(). Closes the exe/lib symmetry.\n");
     printf("  --emit-namespace-manifest        Print the manifest JSON for a manifest.ae and exit\n");
@@ -2309,6 +2311,18 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea (got '%s')\n", val);
                 return 1;
             }
+            arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--lib-package=", 14) == 0) {
+            // #2297: --lib-package=<pkg> with --emit=lib: every module named
+            // <pkg> or <pkg>.<...> is part of the library, so its exported
+            // functions and constants are exported (aether_<module>__<name>)
+            // and cataloged with the module they belong to.
+            const char* val = argv[arg_offset] + 14;
+            if (!*val) {
+                fprintf(stderr, "Error: --lib-package= requires a package name\n");
+                return 1;
+            }
+            module_set_lib_package(val);
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--emit-main=", 12) == 0) {
             // --emit-main=<func>: a follow-up to --emit=lib. The codegen

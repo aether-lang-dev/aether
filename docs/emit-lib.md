@@ -730,6 +730,43 @@ Scope of the current implementation:
   host's, so a panic in the library would not reach the host's `catch`
   (#2297).
 
+#### A package as one library (`--package`, schema "1.4")
+
+A package of many modules (`ae3d.core`, `ae3d.gl`, ...) builds into one
+library, which programs then import module by module (#2297):
+
+```sh
+ae build --emit=lib --package ae3d --lib src -o libae3d.so
+```
+
+- **What is built.** The package's modules are its directory under `.`,
+  `src` or a `--lib` / dependency directory (`src/ae3d/`): that directory if
+  it holds a `module.ae`, and every directory below it that does
+  (`src/ae3d/core/module.ae` is `ae3d.core`). `ae` writes an entry that
+  imports all of them and builds it with `--lib-package=ae3d`. The default
+  output name is `lib<package>`, with dots as `_`.
+- **What is exported.** Each module's public functions and constants are
+  exported: the names in its `exports (...)` list, or all of them when it
+  has no list, minus `_`-suffixed privates. A function gets a stable C
+  symbol named after its module, `aether_ae3d_core__model_new`. The
+  compiler's own merged name (`core_model_new`) depends on which other
+  modules a build loads, so it is never the ABI. The package's structs are
+  recorded as in schema 1.3, and module `var`s live once, in the library.
+- **The catalog.** `function_modules` and `constant_modules` are parallel
+  to the function and constant tables and give the module each export
+  belongs to. `aether_name` is the bare name (`model_new`). `ae lib-info`
+  prints a `module:` line under each export.
+- **Importing.** `import ae3d.core` with no `ae3d/core` source on the path
+  resolves to the package library: `ae` tries each proper prefix of the
+  import, longest first (`ae3d` → `libae3d`), and takes the library whose
+  catalog lists `ae3d.core`. The interface it builds for that module
+  declares the module's functions and constants and the library's structs,
+  so `core.model_new(...)` reads as it does against source. Importing
+  several modules of one package links the library once.
+- **Not exported:** a package module's `builder` functions. The builder ABI
+  passes the trailing block through the function's own symbol, which a
+  merged clone keeps static. The build warns, naming each one.
+
 ### `ae lib-info <path>` inspect any artifact
 
 The `ae` CLI ships a turnkey reader that `dlopen`s a `.so`/`.dylib`,
@@ -810,6 +847,7 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_swig/` | SWIG Python round-trip (skips if `swig` missing) |
 | `emit_lib_with_capability/` | `--with=fs,net,os` opt-ins; `--with=first-party` and `--with=all` aliases |
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
+| `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
 | `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library, and on Linux/FreeBSD a library panic caught by the host (#2297) |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 

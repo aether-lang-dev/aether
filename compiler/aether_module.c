@@ -1668,7 +1668,7 @@ static int module_same_file(const char* a, const char* b) {
 #endif
 }
 
-static AetherModule* module_find_by_file(const char* file_path) {
+AetherModule* module_find_by_file(const char* file_path) {
     if (!global_module_registry || !file_path) return NULL;
     for (int i = 0; i < global_module_registry->module_count; i++) {
         AetherModule* m = global_module_registry->modules[i];
@@ -4404,6 +4404,51 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
 }
 
 
+/* ---- #2297: a package built as one --emit=lib library ----
+ *
+ * `aetherc --lib-package <pkg>` (driven by `ae build --emit=lib --package`)
+ * names a module prefix whose modules ARE the library: every module named
+ * `<pkg>` or `<pkg>.<...>` is part of it, so its exported functions and
+ * constants get stable `aether_<module>__<name>` wrappers and catalog
+ * records instead of being private merged clones. */
+static char* g_lib_package = NULL;
+
+void module_set_lib_package(const char* pkg) {
+    free(g_lib_package);
+    g_lib_package = (pkg && *pkg) ? strdup(pkg) : NULL;
+}
+
+const char* module_lib_package(void) {
+    return g_lib_package;
+}
+
+int module_in_lib_package(const AetherModule* m) {
+    if (!g_lib_package || !m || !m->name) return 0;
+    size_t n = strlen(g_lib_package);
+    return strncmp(m->name, g_lib_package, n) == 0 &&
+           (m->name[n] == '\0' || m->name[n] == '.');
+}
+
+/* The package module a merged declaration came from, or NULL. Identified by
+ * the declaration's originating file: clones keep `source_file`. */
+AetherModule* module_lib_package_module_of(const ASTNode* decl) {
+    if (!g_lib_package || !decl || !decl->source_file) return NULL;
+    /* Consecutive declarations nearly always share a file, and the lookup
+     * compares files by identity (a stat per module): remember the last. */
+    static char last_file[2048] = "";
+    static AetherModule* last_module = NULL;
+    static ModuleRegistry* last_registry = NULL;
+    if (last_registry == global_module_registry && last_file[0] &&
+        strcmp(last_file, decl->source_file) == 0) {
+        return module_in_lib_package(last_module) ? last_module : NULL;
+    }
+    AetherModule* m = module_find_by_file(decl->source_file);
+    snprintf(last_file, sizeof(last_file), "%s", decl->source_file);
+    last_module = m;
+    last_registry = global_module_registry;
+    return module_in_lib_package(m) ? m : NULL;
+}
+
 void module_prune_unreachable(ASTNode* program) {
     if (!program) return;
 
@@ -4424,7 +4469,11 @@ void module_prune_unreachable(ASTNode* program) {
                 break;
             case AST_FUNCTION_DEFINITION:
             case AST_BUILDER_FUNCTION:
-                if (!c->is_imported || (c->annotation && strncmp(c->annotation, "c_callback:", 11) == 0)) {
+                /* #2297: a package library exports its modules' functions,
+                 * so they are roots even though nothing in the entry calls
+                 * them. */
+                if (!c->is_imported || (c->annotation && strncmp(c->annotation, "c_callback:", 11) == 0) ||
+                    module_lib_package_module_of(c)) {
                     if (c->value) {
                         if (nameset_add(&reachable, c->value)) {
                             namestack_push(&worklist, c->value);
