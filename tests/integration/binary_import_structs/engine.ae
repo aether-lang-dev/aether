@@ -49,6 +49,16 @@ bump() -> int {
     return counter
 }
 
+// Closures both ways: the host's closure (with its captures) is called
+// here, and a closure made here (capturing `k`) is called by the host.
+apply2(f: fn, a: int, b: int) -> int {
+    return call(f, a, b)
+}
+
+make_adder(k: int) -> fn {
+    return | x: int | { return x + k }
+}
+
 boom(n: int) -> int {
     if n > 2 {
         panic("engine boom ${n}")

@@ -2601,9 +2601,11 @@ static const char* get_abi_type(Type* type) {
         case TYPE_VOID:   return "void";
         case TYPE_PTR:    return "AetherValue*";
         /* #2297: a C function pointer (`fn(A) -> R`) is `void*` storage in
-         * the generated C, so it crosses as one; a closure (bare `fn`) is an
-         * _AeClosure and does not. */
-        case TYPE_FUNCTION: return type->is_fnptr ? "void*" : NULL;
+         * the generated C, so it crosses as one. A closure (bare `fn`) is an
+         * _AeClosure {fn, env}, which every Aether image declares the same
+         * way, so it crosses by value to an Aether importer; like a struct
+         * by value, it stays out of the C header (abi_is_struct_value). */
+        case TYPE_FUNCTION: return type->is_fnptr ? "void*" : "_AeClosure";
         /* #2297: a struct crosses BY VALUE under its own name. An Aether
          * importer re-declares it from the catalog's struct records (same
          * fields, same codegen, so the same C layout); a C consumer of an
@@ -2614,8 +2616,11 @@ static const char* get_abi_type(Type* type) {
     }
 }
 
-/* #2297: does `t` cross the lib ABI as a by-value struct? */
+/* #2297: does `t` cross the lib ABI as a by-value struct? A closure is
+ * one too: an _AeClosure, whose layout and calling convention only an
+ * Aether importer knows. */
 static int abi_is_struct_value(Type* t) {
+    if (t && !t->c_alias && t->kind == TYPE_FUNCTION && !t->is_fnptr) return 1;
     return t && !t->c_alias && t->kind == TYPE_STRUCT && t->struct_name;
 }
 
@@ -2850,10 +2855,11 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             }
         }
 
-        /* #2297: a by-value struct needs its layout, which a C header
+        /* #2297: a by-value struct needs its layout, and a closure the
+         * _AeClosure layout and calling convention, which a C header
          * consumer does not have: keep the export (an Aether importer
-         * re-declares the struct from the catalog) but leave the prototype
-         * out of the --emit=csrc header, saying why. */
+         * declares both) but leave the prototype out of the --emit=csrc
+         * header, saying why. */
         int sig_has_struct_value = abi_is_struct_value(fn->node_type);
         for (int p = 0; p < fn->child_count && !sig_has_struct_value; p++) {
             ASTNode* c = fn->children[p];
@@ -2865,8 +2871,9 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         // #996 --emit=csrc: mirror the public prototype into the header.
         if (gen->csrc_header_file && sig_has_struct_value) {
             fprintf(gen->csrc_header_file,
-                    "/* %s passes a struct by value; its layout is in the\n"
-                    " * catalog's struct records, not in this header. */\n", alias);
+                    "/* %s passes a struct or a closure by value, which only an\n"
+                    " * Aether importer declares (struct layouts are in the catalog's\n"
+                    " * struct records); it is not in this header. */\n", alias);
         } else if (gen->csrc_header_file) {
             fprintf(gen->csrc_header_file, "%s %s(", ret_abi, alias);
             if (param_count == 0) {

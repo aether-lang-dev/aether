@@ -8,8 +8,14 @@ good_fn(a: int, b: int) {
     return a + b
 }
 
-// Unsupported parameter type — fn (closure). Should not get an
-// aether_takes_closure stub.
+// Unsupported parameter type: an optional. Should not get an
+// aether_takes_optional stub.
+takes_optional(v: int?) -> int {
+    return 1
+}
+
+// A closure (bare fn) crosses by value to an Aether importer (#2297), so
+// it gets a stub; only the --emit=csrc C header leaves it out.
 takes_closure(cb: fn) {
     return call(cb)
 }
@@ -17,7 +23,7 @@ takes_closure(cb: fn) {
 // Tuple return — also unsupported. The codegen used to fall through
 // to int32_t for unknown returns and emit a broken alias whose
 // signature didn't match the function's `_tuple_int_int` body. Now
-// it skips the alias with the same warning shape as the closure
+// it skips the alias with the same warning shape as the optional
 // case. Closes #277.
 returns_tuple(n: int) -> {
     return n, n + 1

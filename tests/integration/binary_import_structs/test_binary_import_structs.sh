@@ -59,6 +59,8 @@ run_pass() {
     echo "$INFO" | grep -q "update: fn(ptr, float) -> int" || { echo "$INFO"; fail "$label: the fn-pointer field is not recorded"; }
     echo "$INFO" | grep -q "as: model_new(name: string) -> \*Model" \
         || { echo "$INFO"; fail "$label: the typed-pointer source signature is missing"; }
+    echo "$INFO" | grep -q "as: make_adder(k: int) -> fn" \
+        || { echo "$INFO"; fail "$label: a closure-returning export is missing or mis-signed"; }
 
     AETHER_HOME="$ROOT" "$AE" build --emit=lib $flags script.ae -o "libscript$SO_EXT" >script.log 2>&1 \
         || fail "$label: ae build --emit=lib script.ae (importing the engine binary)" script.log
