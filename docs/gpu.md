@@ -13,15 +13,12 @@ They have **the same shape**: the same calls, with the same names, arguments,
 status codes and behaviour. Each gives a device, offscreen targets in four
 colour formats with depth and multisampling, pipelines with vertex layouts,
 bindings and push constants, textures with mip chains, 3D textures,
-materials and batches, a target's colour or depth read back as a texture in a
-later pass, frames in flight, readback and PNG output, compute over shared buffers, and
+materials and batches, instanced and indirect draws, dynamic uniform offsets,
+a target's colour or depth read back as a texture in a later pass, frames in
+flight, GPU timing, readback and PNG output, compute over shared buffers, and
 swapchains over a window someone else owns. A program written against one
 reads the same against the others. What differs is below: the shading
 language, where resources sit in it, and the coordinate conventions.
-
-A target feeds one vertex stream, binding 0, from the vertices reserved on it;
-a layout that declares another binding is refused when the pipeline is made,
-in all three, rather than drawn from a buffer that is never bound.
 
 For anything the shared shape does not cover,
 [`contrib.vulkan.vk`](../contrib/vulkan/README.md#the-vulkan-api-directly-contribvulkanvk)
@@ -102,6 +99,11 @@ Every call returns one of the same codes, or a null handle with the reason in
 | y axis | points down | points up | points up |
 | Depth range | 0 to 1 | 0 to 1 | 0 to 1 |
 | `FORMAT_*` numbers | VkFormat | DXGI_FORMAT | VkFormat, translated where used |
+| Vertex stream B | `binding = B` in the layout | input slot B | `[[buffer(16 + B)]]` |
+| Instance index in the shader | `gl_InstanceIndex`, counting from the first instance | `SV_InstanceID`, counting from 0 | `[[instance_id]]`, counting from the first instance |
+| Dynamic uniform offsets are multiples of | the device's `minUniformBufferOffsetAlignment` | 256 | 256 |
+| An indirect command's first instance | honoured where the device has `drawIndirectFirstInstance`, and must be 0 elsewhere | honoured | honoured |
+| GPU time | timestamp queries | a timestamp query heap | the command buffer's `GPUStartTime` to `GPUEndTime` |
 | Debugging | the Khronos validation layer | `AETHER_D3D12_DEBUG=1` or `2` | `MTL_DEBUG_LAYER=1` |
 
 The format constants have the same names in all three, so code that names them
@@ -144,6 +146,62 @@ wants.
 `texture_create_3d(dev, w, h, depth, linear, repeat)` is a volume: `depth`
 slices of RGBA, uploaded slice after slice and read through a 3D sampler.
 `texture_depth(tex)` reports the slice count, 1 for a 2D texture.
+
+## Drawing many things
+
+Binding 0 is the target's own vertices. A layout can declare streams 1 to 7
+as well, each advancing per vertex or per instance, and each fed from a
+buffer:
+
+```aether,fragment
+vulkan.layout_binding(lay, 0, 8, vulkan.PER_VERTEX)     // the mesh
+vulkan.layout_binding(lay, 1, 20, vulkan.PER_INSTANCE)  // offset + colour each
+vulkan.vertex_stream(target, 1, instances)              // a buffer_create buffer
+vulkan.target_set_instances(target, 1000)
+```
+
+`batch_add_instanced(t, m, first, count, first_instance, instances)` draws a
+range of instances, and a per-instance stream reads from `first_instance`.
+A draw is refused if a stream the pipeline reads has no buffer, or has fewer
+bytes than the vertices or instances it draws.
+
+An indirect draw reads its commands from a buffer when the frame runs, so a
+compute pass can write them, for culling or sorting on the GPU:
+
+```aether,fragment
+vulkan.batch_add_indirect(target, mat, commands, 0, 2)  // two commands at byte 0
+```
+
+A command is five 32-bit words when the target has indices: index count,
+instance count, first index, vertex offset and first instance. Without
+indices it is four words: vertex count, instance count, first vertex and
+first instance. All three APIs lay their commands out this way, so a buffer
+written for one draws on the others. The words are the GPU's to supply, and
+they are not checked against the geometry, the same as in the native APIs.
+
+A dynamic uniform is a window of one buffer whose offset each draw chooses.
+One buffer then holds every draw's block, which is how an engine fills its
+per-draw constants once a frame:
+
+```aether,fragment
+vulkan.bindings_uniform_dynamic(binds, 0, 64)  // a 64-byte block a draw
+vulkan.set_buffer(pipe, 0, ring)
+vulkan.batch_add(target, null, 0, 36)
+vulkan.batch_set_offset(target, 0, 0, 0)
+vulkan.batch_add(target, null, 36, 36)
+vulkan.batch_set_offset(target, 1, 0, 256)
+```
+
+Each offset is a multiple of `uniform_offset_alignment(dev)`, and a draw
+whose window runs past the buffer is refused. Compute passes take no dynamic
+uniforms.
+
+`target_set_timing(t, 1)` times each frame on the GPU, from its start to its
+end, readback copy included, and `target_gpu_ms(t)` reports the newest frame
+the host has waited for, in milliseconds. `compute_set_timing` and
+`compute_gpu_ms` do the same for dispatches. Both are -1 while timing is off
+and until a timed frame has finished, and a queue that keeps no time refuses
+timing with `ERR_UNSUPPORTED`.
 
 ## Windows belong to someone else
 
@@ -197,5 +255,5 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
-| Indirect draws, dynamic uniform offsets, GPU timestamps, and a second vertex stream for per-instance data, in all three modules | [#2198](https://github.com/aether-lang-dev/aether/issues/2198) |
+| Comparison sampling of a target's depth (hardware shadow-map filtering), in all three modules | [#2373](https://github.com/aether-lang-dev/aether/issues/2373) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

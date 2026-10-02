@@ -253,6 +253,40 @@ checks included, reports nothing for `test_vulkan_sampling.ae`.
 `maxImageDimension3D` a side. `texture_upload` takes `w * h * depth * 4`
 bytes; `texture_depth` reports the slices.
 
+## Instancing, indirect draws, dynamic offsets and timing
+
+Streams 1 to 7 come from buffers, at whatever rate the layout declares:
+
+```aether,fragment
+vulkan.layout_binding(lay, 1, 20, vulkan.PER_INSTANCE)
+vulkan.vertex_stream(target, 1, instances)
+vulkan.target_set_instances(target, 64)
+vulkan.batch_add_instanced(target, mat, 0, 36, 16, 8)   // instances 16..23
+vulkan.batch_add_indirect(target, mat, commands, 0, 4)  // four commands
+```
+
+Every buffer from `buffer_create` can be a vertex stream and hold indirect
+commands. A dispatch's closing barrier makes its writes visible to the
+indirect-command read and the vertex fetch of later draws, so commands a
+compute pass writes are drawn without the host touching them. Several
+commands go to one `vkCmdDrawIndexedIndirect` where the device has
+`multiDrawIndirect`, and to one call each where it does not.
+`drawIndirectFirstInstance` is enabled where the device has it, and a
+command's first instance must be 0 on a device without it.
+
+A dynamic uniform is a `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` binding.
+Each batch entry carries its own offsets, which are bound with its set, and
+changing one re-records the frame. Offsets are multiples of the device's
+`minUniformBufferOffsetAlignment`, which `uniform_offset_alignment` reports.
+
+Timing writes a timestamp at the top of each frame's command buffer and one at
+the bottom, in a query pool of two per frame slot. The results are read when
+the slot's fence is waited on, scaled by `timestampPeriod`, and masked to the
+queue's `timestampValidBits`, so a counter that wraps still subtracts
+correctly. A queue that reports no valid bits refuses timing with
+`ERR_UNSUPPORTED`. `test_vulkan_draws.ae` runs clean under the validation
+layer with synchronisation and best-practices validation on.
+
 ## Colour formats and image files
 
 `target_create` renders to RGBA8 UNORM. `target_create_format` takes any of

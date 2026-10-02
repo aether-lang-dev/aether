@@ -72,6 +72,15 @@
 //         compute_push_int / compute_set_timeout_ms / compute_destroy
 //   metal.dispatch(c, gx, gy, gz) / dispatch_async / compute_wait
 //
+//   metal.vertex_stream(t, binding, buf) / target_set_instances(t, n) /
+//         target_instances(t)          streams 1..7 from buffers; instancing
+//   metal.batch_add_instanced(t, m, first, count, first_instance, instances)
+//   metal.batch_add_indirect(t, m, buf, offset, draws)  commands read from a buffer
+//   metal.bindings_uniform_dynamic(b, binding, bytes) / batch_set_offset(t, item,
+//         binding, offset) / uniform_offset_alignment(dev)  256 here
+//   metal.target_set_timing(t, on) / target_gpu_ms(t) / compute_set_timing(c, on) /
+//         compute_gpu_ms(c)              GPU milliseconds, -1 until a timed one
+//
 //   metal.swapchain_create(dev, kind, display, window, w, h) -> ptr
 //   metal.swapchain_destroy / swapchain_resize / swapchain_set_vsync /
 //         swapchain_width / swapchain_height / swapchain_format /
@@ -165,7 +174,16 @@ exports(
     swapchain_width, swapchain_height, swapchain_format, swapchain_presented, present,
     aemt_ae_set_target, aemt_ae_material_set_target, aemt_ae_texture_create_3d, aemt_ae_texture_depth,
     set_target, set_target_depth, material_set_target, material_set_target_depth,
-    texture_create_3d, texture_depth
+    texture_create_3d, texture_depth,
+    aemt_ae_vertex_stream, aemt_ae_target_set_instances, aemt_ae_target_instances,
+    aemt_ae_batch_add_instanced, aemt_ae_batch_add_indirect, aemt_ae_batch_set_offset,
+    aemt_ae_uniform_offset_alignment, aemt_ae_bindings_uniform_dynamic,
+    aemt_ae_target_set_timing, aemt_ae_target_gpu_ms,
+    aemt_ae_compute_set_timing, aemt_ae_compute_gpu_ms,
+    vertex_stream, target_set_instances, target_instances,
+    batch_add_instanced, batch_add_indirect, batch_set_offset,
+    uniform_offset_alignment, bindings_uniform_dynamic,
+    target_set_timing, target_gpu_ms, compute_set_timing, compute_gpu_ms
 )
 
 extern aemt_ae_available() -> int
@@ -211,6 +229,18 @@ extern aemt_ae_texture_mip_levels(tex: ptr) -> int
 extern aemt_ae_texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr
 extern aemt_ae_texture_depth(tex: ptr) -> int
 extern aemt_ae_set_target(p: ptr, binding: int, t: ptr, depth: int) -> int
+extern aemt_ae_vertex_stream(t: ptr, binding: int, buf: ptr) -> int
+extern aemt_ae_target_set_instances(t: ptr, count: int) -> int
+extern aemt_ae_target_instances(t: ptr) -> int
+extern aemt_ae_batch_add_instanced(t: ptr, m: ptr, first: int, count: int, first_instance: int, instances: int) -> int
+extern aemt_ae_batch_add_indirect(t: ptr, m: ptr, buf: ptr, offset: int, draws: int) -> int
+extern aemt_ae_batch_set_offset(t: ptr, item: int, binding: int, offset: int) -> int
+extern aemt_ae_uniform_offset_alignment(dev: ptr) -> int
+extern aemt_ae_bindings_uniform_dynamic(b: ptr, binding: int, bytes: int) -> int
+extern aemt_ae_target_set_timing(t: ptr, on: int) -> int
+extern aemt_ae_target_gpu_ms(t: ptr) -> float
+extern aemt_ae_compute_set_timing(c: ptr, on: int) -> int
+extern aemt_ae_compute_gpu_ms(c: ptr) -> float
 extern aemt_ae_material_set_target(m: ptr, binding: int, t: ptr, depth: int) -> int
 extern aemt_ae_texture_upload(tex: ptr, rgba: ptr, len: int) -> int
 extern aemt_ae_set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int
@@ -445,6 +475,47 @@ push_float(t: ptr, index: int, value: float) -> int { return aemt_ae_push_float(
 batch_reset(t: ptr) -> int { return aemt_ae_batch_reset(t) }
 batch_add(t: ptr, m: ptr, first: int, count: int) -> int { return aemt_ae_batch_add(t, m, first, count) }
 batch_count(t: ptr) -> int { return aemt_ae_batch_count(t) }
+
+// Instancing (#2198). Every draw of a target makes `count` instances unless
+// a batch entry says otherwise; a per-instance stream advances once each.
+target_set_instances(t: ptr, count: int) -> int { return aemt_ae_target_set_instances(t, count) }
+target_instances(t: ptr) -> int { return aemt_ae_target_instances(t) }
+// A buffer as vertex stream `binding`, 1..7: binding 0 is the target's own
+// vertices. The pipeline's layout gives the stride and whether it advances
+// per vertex or per instance; null unbinds it. A draw refuses a stream the
+// pipeline reads that is unbound or shorter than what the draw reads. The
+// buffer has to outlive the draws that use it.
+vertex_stream(t: ptr, binding: int, buf: ptr) -> int { return aemt_ae_vertex_stream(t, binding, buf) }
+// `instances` copies of indices (or vertices) first..first+count-1, the
+// first of them instance `first_instance`.
+batch_add_instanced(t: ptr, m: ptr, first: int, count: int, first_instance: int, instances: int) -> int {
+    return aemt_ae_batch_add_instanced(t, m, first, count, first_instance, instances)
+}
+// `draws` commands read from `buf` at `offset` (a multiple of 4) when the
+// frame runs. The commands are the GPU's to supply and are not checked
+// against the geometry, as in the native APIs.
+batch_add_indirect(t: ptr, m: ptr, buf: ptr, offset: int, draws: int) -> int {
+    return aemt_ae_batch_add_indirect(t, m, buf, offset, draws)
+}
+// The offset batch entry `item` (0 is the first added) reads dynamic uniform
+// `binding` at: a multiple of uniform_offset_alignment(dev).
+batch_set_offset(t: ptr, item: int, binding: int, offset: int) -> int {
+    return aemt_ae_batch_set_offset(t, item, binding, offset)
+}
+uniform_offset_alignment(dev: ptr) -> int { return aemt_ae_uniform_offset_alignment(dev) }
+// A uniform read as a `bytes` window of the buffer set_buffer binds, at the
+// offset each batch entry sets: one buffer holds every draw's block.
+bindings_uniform_dynamic(b: ptr, binding: int, bytes: int) -> int {
+    return aemt_ae_bindings_uniform_dynamic(b, binding, bytes)
+}
+
+// GPU time in milliseconds of the newest frame (or dispatch) the host waited
+// for, start to end, readback copy included; -1 while timing is off or before
+// a timed one has finished. ERR_UNSUPPORTED where the queue keeps no time.
+target_set_timing(t: ptr, on: int) -> int { return aemt_ae_target_set_timing(t, on) }
+target_gpu_ms(t: ptr) -> float { return aemt_ae_target_gpu_ms(t) }
+compute_set_timing(c: ptr, on: int) -> int { return aemt_ae_compute_set_timing(c, on) }
+compute_gpu_ms(c: ptr) -> float { return aemt_ae_compute_gpu_ms(c) }
 
 draw(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int { return aemt_ae_draw(t, p, r, g, b, a) }
 draw_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int {

@@ -1,0 +1,461 @@
+// contrib.metal: instancing from a second vertex stream, indirect draws,
+// dynamic uniform offsets and GPU timing (#2198).
+//
+// Every check reads pixels back: an instanced draw whose instances all land
+// in one place, an indirect draw that ignores its commands, or an offset that
+// is never applied would each pass a test that only looked at status codes.
+//
+// Runs on macOS; elsewhere every case skips. MTL_DEBUG_LAYER=1 adds
+// Metal's API validation.
+
+import std.string
+import std.fs
+import contrib.metal
+import std.spec
+
+load_src(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+const RED = 4278190335
+const GREEN = 16711935
+const BLUE = 65535
+const WHITE = 4294967295
+const BLACK = 255
+
+// instanced.vert's input: binding 0 the shape's corners (x, y), binding 1
+// an offset and a colour (x, y, r, g, b), advancing per instance or, with
+// `stream_rate` PER_VERTEX, per vertex.
+instanced_layout(stream_rate: int) -> ptr {
+    lay = metal.layout_create()
+    _ = metal.layout_binding(lay, 0, 8, metal.PER_VERTEX)
+    _ = metal.layout_binding(lay, 1, 20, stream_rate)
+    _ = metal.layout_attr(lay, 0, 0, metal.FORMAT_R32G32_SFLOAT, 0)
+    _ = metal.layout_attr(lay, 1, 1, metal.FORMAT_R32G32_SFLOAT, 0)
+    _ = metal.layout_attr(lay, 2, 1, metal.FORMAT_R32G32B32_SFLOAT, 8)
+    return lay
+}
+
+// A quad over the top-left quarter of the target (Metal's y points up),
+// as four corners and six indices.
+write_corner_quad(t: ptr) {
+    _ = metal.verts_reserve_n(t, 4, 2)
+    xs = [-1.0, 0.0, 0.0, -1.0]
+    ys = [1.0, 1.0, 0.0, 0.0]
+    i = 0
+    while i < 4 {
+        _ = metal.verts_set_float(t, i * 2, xs[i])
+        _ = metal.verts_set_float(t, i * 2 + 1, ys[i])
+        i = i + 1
+    }
+    _ = metal.indices_reserve(t, 6)
+    order = [0, 1, 2, 2, 3, 0]
+    k = 0
+    while k < 6 {
+        _ = metal.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+// Four instances: red at the top left, green top right, blue bottom left,
+// white bottom right, each an offset of the corner quad.
+fill_instances(buf: ptr) {
+    v = [0.0, 0.0, 1.0, 0.0, 0.0,
+         1.0, 0.0, 0.0, 1.0, 0.0,
+         0.0, -1.0, 0.0, 0.0, 1.0,
+         1.0, -1.0, 1.0, 1.0, 1.0]
+    i = 0
+    while i < 20 {
+        _ = metal.buffer_set_float(buf, i, v[i])
+        i = i + 1
+    }
+}
+
+// The four quarters of an 8x8 target, top left, top right, bottom left and
+// bottom right, as one number each: 1 where `want` matches.
+quarters(t: ptr, tl: long, tr: long, bl: long, br: long) -> int {
+    ok = 1
+    if metal.pixel(t, 2, 2) != tl { ok = 0 }
+    if metal.pixel(t, 6, 2) != tr { ok = 0 }
+    if metal.pixel(t, 2, 6) != bl { ok = 0 }
+    if metal.pixel(t, 6, 6) != br { ok = 0 }
+    return ok
+}
+
+describe_quarters(t: ptr) -> string {
+    return "${metal.pixel(t, 2, 2)} ${metal.pixel(t, 6, 2)} ${metal.pixel(t, 2, 6)} ${metal.pixel(t, 6, 6)}"
+}
+
+// Writes up to five words at word `at` of `buf` on the GPU.
+gpu_words(c: ptr, at: int, n: int, w0: int, w1: int, w2: int, w3: int, w4: int) -> int {
+    _ = metal.compute_push_int(c, 0, at)
+    _ = metal.compute_push_int(c, 1, n)
+    _ = metal.compute_push_int(c, 2, w0)
+    _ = metal.compute_push_int(c, 3, w1)
+    _ = metal.compute_push_int(c, 4, w2)
+    _ = metal.compute_push_int(c, 5, w3)
+    _ = metal.compute_push_int(c, 6, w4)
+    return metal.dispatch(c, 1, 1, 1)
+}
+
+main() {
+    fw = spec.init()
+
+    ready = 0
+    reason = "no Metal device"
+    dev = null
+    ivs = ""
+    ivl = 0
+    tfs = ""
+    tfl = 0
+    pvs = ""
+    pvl = 0
+    ufs = ""
+    ufl = 0
+    acs = ""
+    acl = 0
+    tvs = ""
+    tvl = 0
+    if metal.available() == 1 {
+        dev = metal.device_create()
+        if dev == null {
+            reason = "device_create failed (${metal.last_error()})"
+        } else {
+            ivs, ivl = load_src("contrib/metal/shaders/instanced_vs.metal")
+            tfs, tfl = load_src("contrib/metal/shaders/triangle_fs.metal")
+            pvs, pvl = load_src("contrib/metal/shaders/plain_vs.metal")
+            ufs, ufl = load_src("contrib/metal/shaders/uniform_color_fs.metal")
+            acs, acl = load_src("contrib/metal/shaders/indirect_args_cs.metal")
+            tvs, tvl = load_src("contrib/metal/shaders/triangle_vs.metal")
+            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 {
+                reason = "Metal shaders not found"
+            } else {
+                ready = 1
+            }
+        }
+    } else {
+        reason = "no Metal device (${metal.last_error()})"
+    }
+
+    spec.describe(fw, "metal: a second vertex stream") {
+        spec.it_when(ready, "draws each instance from its own slot of the stream", reason) callback {
+            t = metal.target_create(dev, 8, 8)
+            lay = instanced_layout(metal.PER_INSTANCE)
+            pipe = metal.pipeline_create_ex(dev, t, ivs, ivl, tfs, tfl, lay, 0, null)
+            spec.assert_true(pipe != null, "the instanced pipeline (${metal.last_error()})")
+            write_corner_quad(t)
+
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "a stream the pipeline reads with no buffer is refused")
+            spec.assert_true(string.contains(metal.last_error(), "vertex stream 1") == 1,
+                "and named: ${metal.last_error()}")
+
+            inst = metal.buffer_create(dev, 80)
+            fill_instances(inst)
+            spec.assert_eq(metal.vertex_stream(t, 1, inst), metal.OK, "stream 1 bound")
+            spec.assert_eq(metal.target_instances(t), 1, "one instance by default")
+            spec.assert_eq(metal.target_set_instances(t, 4), metal.OK, "four instances")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK,
+                "drawn (${metal.last_error()})")
+            spec.assert_eq(quarters(t, RED, GREEN, BLUE, WHITE), 1,
+                "each instance in its own quarter: ${describe_quarters(t)}")
+
+            spec.assert_eq(metal.target_set_instances(t, 5), metal.OK, "five instances")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "a stream shorter than the instances drawn is refused")
+            _ = metal.target_set_instances(t, 4)
+
+            // A batch entry draws instances 2 and 3 only.
+            spec.assert_eq(metal.batch_add_instanced(t, null, 0, 6, 2, 2), metal.OK, "batched")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "drawn")
+            spec.assert_eq(quarters(t, BLACK, BLACK, BLUE, WHITE), 1,
+                "only the instances from 2: ${describe_quarters(t)}")
+            _ = metal.batch_reset(t)
+
+            spec.assert_eq(metal.vertex_stream(t, 0, inst), metal.ERR_ARG,
+                "binding 0 is the target's own vertices")
+            spec.assert_eq(metal.vertex_stream(t, 8, inst), metal.ERR_ARG, "past the last stream")
+            spec.assert_eq(metal.target_set_instances(t, 0), metal.ERR_ARG, "zero instances")
+            spec.assert_eq(metal.batch_add_instanced(t, null, 0, 6, -1, 1), metal.ERR_ARG,
+                "a negative first instance")
+            spec.assert_eq(metal.batch_add_instanced(t, null, 0, 6, 0, 0), metal.ERR_ARG,
+                "zero instances in a batch entry")
+
+            // Unbinding the stream refuses the draw again.
+            spec.assert_eq(metal.vertex_stream(t, 1, null), metal.OK, "unbound")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG, "refused unbound")
+
+            metal.pipeline_destroy(pipe)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+            metal.buffer_destroy(inst)
+        }
+
+        spec.it_when(ready, "reads a per-vertex stream beside the target's vertices", reason) callback {
+            t = metal.target_create(dev, 8, 8)
+            lay = instanced_layout(metal.PER_VERTEX)
+            pipe = metal.pipeline_create_ex(dev, t, ivs, ivl, tfs, tfl, lay, 0, null)
+            spec.assert_true(pipe != null, "the pipeline (${metal.last_error()})")
+            write_corner_quad(t)
+            // Each corner's offset and colour: no offset, all green.
+            per = metal.buffer_create(dev, 80)
+            i = 0
+            while i < 4 {
+                _ = metal.buffer_set_float(per, i * 5 + 3, 1.0)
+                i = i + 1
+            }
+            short = metal.buffer_create(dev, 60)
+            spec.assert_eq(metal.vertex_stream(t, 1, short), metal.OK, "a three-vertex stream")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "shorter than the four vertices: refused")
+            spec.assert_eq(metal.vertex_stream(t, 1, per), metal.OK, "a four-vertex stream")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK,
+                "drawn (${metal.last_error()})")
+            spec.assert_eq(quarters(t, GREEN, BLACK, BLACK, BLACK), 1,
+                "the corner quad in the stream's green: ${describe_quarters(t)}")
+
+            metal.pipeline_destroy(pipe)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+            metal.buffer_destroy(short)
+            metal.buffer_destroy(per)
+        }
+    }
+
+    spec.describe(fw, "metal: indirect draws") {
+        spec.it_when(ready, "draws the commands a compute pass wrote", reason) callback {
+            t = metal.target_create(dev, 8, 8)
+            lay = instanced_layout(metal.PER_INSTANCE)
+            pipe = metal.pipeline_create_ex(dev, t, ivs, ivl, tfs, tfl, lay, 0, null)
+            write_corner_quad(t)
+            inst = metal.buffer_create(dev, 80)
+            fill_instances(inst)
+            _ = metal.vertex_stream(t, 1, inst)
+
+            args = metal.buffer_create(dev, 40)
+            cb = metal.bindings_create()
+            _ = metal.bindings_storage(cb, 0)
+            writer = metal.compute_create(dev, acs, acl, cb, 28)
+            spec.assert_true(writer != null, "the command writer (${metal.last_error()})")
+            _ = metal.compute_set_buffer(writer, 0, args)
+            _ = metal.compute_set_group_size(writer, 1, 1, 1)
+
+            // Six indices, two instances: the top two quarters.
+            spec.assert_eq(gpu_words(writer, 0, 5, 6, 2, 0, 0, 0), metal.OK, "command written")
+            spec.assert_eq(metal.batch_add_indirect(t, null, args, 0, 1), metal.OK, "indirect draw")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK,
+                "drawn (${metal.last_error()})")
+            spec.assert_eq(quarters(t, RED, GREEN, BLACK, BLACK), 1,
+                "the two instances the GPU asked for: ${describe_quarters(t)}")
+
+            // The GPU culls it: no instances, nothing drawn, nothing re-recorded.
+            spec.assert_eq(gpu_words(writer, 1, 1, 0, 0, 0, 0, 0), metal.OK, "instances zeroed")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "drawn again")
+            spec.assert_eq(quarters(t, BLACK, BLACK, BLACK, BLACK), 1,
+                "a command with no instances draws nothing: ${describe_quarters(t)}")
+
+            // Two commands, the second from instance 3.
+            spec.assert_eq(gpu_words(writer, 0, 5, 6, 1, 0, 0, 0), metal.OK, "first command")
+            spec.assert_eq(gpu_words(writer, 5, 5, 6, 1, 0, 0, 3), metal.OK, "second command")
+            _ = metal.batch_reset(t)
+            spec.assert_eq(metal.batch_add_indirect(t, null, args, 0, 2), metal.OK, "two commands")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "drawn")
+            spec.assert_eq(quarters(t, RED, BLACK, BLACK, WHITE), 1,
+                "instance 0 and instance 3: ${describe_quarters(t)}")
+
+            spec.assert_eq(metal.batch_add_indirect(t, null, args, 2, 1), metal.ERR_ARG,
+                "an offset that is not a multiple of 4")
+            spec.assert_eq(metal.batch_add_indirect(t, null, args, 0, 0), metal.ERR_ARG, "no draws")
+            spec.assert_eq(metal.batch_add_indirect(t, null, null, 0, 1), metal.ERR_ARG, "no buffer")
+            _ = metal.batch_reset(t)
+            spec.assert_eq(metal.batch_add_indirect(t, null, args, 24, 1), metal.OK, "added")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "a command running past the buffer is refused")
+
+            // Without indices a command is four words: six vertices, four
+            // instances.
+            _ = metal.indices_reserve(t, 0)
+            _ = metal.verts_reserve_n(t, 6, 2)
+            xs = [-1.0, 0.0, 0.0, 0.0, -1.0, -1.0]
+            ys = [1.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+            i = 0
+            while i < 6 {
+                _ = metal.verts_set_float(t, i * 2, xs[i])
+                _ = metal.verts_set_float(t, i * 2 + 1, ys[i])
+                i = i + 1
+            }
+            spec.assert_eq(gpu_words(writer, 0, 4, 6, 4, 0, 0, 0), metal.OK, "a non-indexed command")
+            _ = metal.batch_reset(t)
+            _ = metal.batch_add_indirect(t, null, args, 0, 1)
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK,
+                "drawn (${metal.last_error()})")
+            spec.assert_eq(quarters(t, RED, GREEN, BLUE, WHITE), 1,
+                "all four instances: ${describe_quarters(t)}")
+
+            metal.compute_destroy(writer)
+            metal.bindings_destroy(cb)
+            metal.pipeline_destroy(pipe)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+            metal.buffer_destroy(args)
+            metal.buffer_destroy(inst)
+        }
+    }
+
+    spec.describe(fw, "metal: dynamic uniform offsets") {
+        spec.it_when(ready, "reads each draw's block from one buffer", reason) callback {
+            t = metal.target_create(dev, 8, 8)
+            lay = metal.layout_create()
+            _ = metal.layout_binding(lay, 0, 8, metal.PER_VERTEX)
+            _ = metal.layout_attr(lay, 0, 0, metal.FORMAT_R32G32_SFLOAT, 0)
+            binds = metal.bindings_create()
+            spec.assert_eq(metal.bindings_uniform_dynamic(binds, 0, 0), metal.ERR_ARG, "an empty window")
+            spec.assert_eq(metal.bindings_uniform_dynamic(binds, 0, 16), metal.OK, "declared")
+            pipe = metal.pipeline_create_ex(dev, t, pvs, pvl, ufs, ufl, lay, 0, binds)
+            spec.assert_true(pipe != null, "the pipeline (${metal.last_error()})")
+            spec.assert_true(metal.compute_create(dev, acs, acl, binds, 28) == null,
+                "a compute pass refuses a dynamic uniform")
+
+            // The left half and the right half, two quads.
+            _ = metal.verts_reserve_n(t, 8, 2)
+            xs = [-1.0, 0.0, 0.0, -1.0, 0.0, 1.0, 1.0, 0.0]
+            ys = [-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0]
+            i = 0
+            while i < 8 {
+                _ = metal.verts_set_float(t, i * 2, xs[i])
+                _ = metal.verts_set_float(t, i * 2 + 1, ys[i])
+                i = i + 1
+            }
+            _ = metal.indices_reserve(t, 12)
+            order = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
+            k = 0
+            while k < 12 {
+                _ = metal.indices_set(t, k, order[k])
+                k = k + 1
+            }
+
+            align = metal.uniform_offset_alignment(dev)
+            spec.assert_true(align > 0, "an alignment (${align})")
+            stride = align
+            while stride < 16 { stride = stride + align }
+            ring = metal.buffer_create(dev, stride * 2)
+            // Red in the first block, green in the second.
+            _ = metal.buffer_set_float(ring, 0, 1.0)
+            _ = metal.buffer_set_float(ring, 3, 1.0)
+            _ = metal.buffer_set_float(ring, stride / 4 + 1, 1.0)
+            _ = metal.buffer_set_float(ring, stride / 4 + 3, 1.0)
+
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "a dynamic uniform with no buffer is refused")
+            spec.assert_eq(metal.uniform_floats(pipe, 0, 4), metal.ERR_ARG,
+                "a dynamic uniform takes no uniform of its own")
+            tiny = metal.buffer_create(dev, 8)
+            spec.assert_eq(metal.set_buffer(pipe, 0, tiny), metal.ERR_ARG,
+                "a buffer smaller than the window")
+            spec.assert_eq(metal.set_buffer(pipe, 0, ring), metal.OK, "the ring bound")
+
+            _ = metal.batch_add(t, null, 0, 6)
+            _ = metal.batch_add(t, null, 6, 6)
+            spec.assert_eq(metal.batch_set_offset(t, 1, 0, stride), metal.OK, "the right half's offset")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK,
+                "drawn (${metal.last_error()})")
+            spec.assert_eq(quarters(t, RED, GREEN, RED, GREEN), 1,
+                "red from offset 0, green from the second block: ${describe_quarters(t)}")
+
+            spec.assert_eq(metal.batch_set_offset(t, 0, 0, stride), metal.OK, "the left half moves")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "drawn")
+            spec.assert_eq(quarters(t, GREEN, GREEN, GREEN, GREEN), 1,
+                "both read the second block: ${describe_quarters(t)}")
+
+            if align > 1 {
+                spec.assert_eq(metal.batch_set_offset(t, 0, 0, align + 1), metal.ERR_ARG,
+                    "an offset off the alignment")
+            }
+            spec.assert_eq(metal.batch_set_offset(t, 2, 0, 0), metal.ERR_ARG, "no third draw")
+            spec.assert_eq(metal.batch_set_offset(t, 0, 0, stride * 2), metal.OK, "past the end")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "a window past the buffer is refused")
+            _ = metal.batch_set_offset(t, 0, 0, 0)
+            spec.assert_eq(metal.batch_set_offset(t, 0, 1, stride), metal.OK, "binding 1's offset")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.ERR_ARG,
+                "an offset for a binding that is not dynamic is refused")
+
+            metal.pipeline_destroy(pipe)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.target_destroy(t)
+            metal.buffer_destroy(tiny)
+            metal.buffer_destroy(ring)
+        }
+    }
+
+    spec.describe(fw, "metal: GPU timing") {
+        spec.it_when(ready, "times frames and dispatches on the GPU", reason) callback {
+            t = metal.target_create(dev, 64, 64)
+            pipe = metal.pipeline_create(dev, t, tvs, tvl, tfs, tfl)
+            _ = metal.verts_reserve(t, 3)
+            _ = metal.verts_set(t, 0, -1.0, -1.0, 1.0, 0.0, 0.0)
+            _ = metal.verts_set(t, 1, 3.0, -1.0, 1.0, 0.0, 0.0)
+            _ = metal.verts_set(t, 2, -1.0, 3.0, 1.0, 0.0, 0.0)
+            _ = metal.target_set_instances(t, 256)
+
+            spec.assert_true(metal.target_gpu_ms(t) < 0.0, "-1 while timing is off")
+            spec.assert_eq(metal.target_set_timing(t, 1), metal.OK,
+                "timing on (${metal.last_error()})")
+            spec.assert_true(metal.target_gpu_ms(t) < 0.0, "-1 before a timed frame")
+            spec.assert_eq(metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "a timed frame")
+            ms = metal.target_gpu_ms(t)
+            spec.assert_true(ms > 0.0, "the frame took GPU time (${ms} ms)")
+            spec.assert_true(ms < 5000.0, "and less than the draw's timeout (${ms} ms)")
+            spec.assert_eq(metal.pixel(t, 32, 32), RED, "and drew")
+
+            // Three frames in flight, waited for together: the time is the
+            // newest frame's, whichever slot it sits in.
+            spec.assert_eq(metal.target_set_frames(t, 3), metal.OK, "three frames in flight")
+            j = 0
+            while j < 4 {
+                _ = metal.submit(t, pipe, 0.0, 0.0, 0.0, 1.0)
+                j = j + 1
+            }
+            spec.assert_eq(metal.wait_all(t), metal.OK, "all waited")
+            fms = metal.target_gpu_ms(t)
+            spec.assert_true(fms > 0.0, "a time with frames in flight (${fms} ms)")
+            spec.assert_eq(metal.target_set_timing(t, 0), metal.OK, "timing off")
+            spec.assert_true(metal.target_gpu_ms(t) < 0.0, "-1 again")
+
+            args = metal.buffer_create(dev, 20)
+            cb = metal.bindings_create()
+            _ = metal.bindings_storage(cb, 0)
+            c = metal.compute_create(dev, acs, acl, cb, 28)
+            _ = metal.compute_set_buffer(c, 0, args)
+            _ = metal.compute_set_group_size(c, 1, 1, 1)
+            spec.assert_true(metal.compute_gpu_ms(c) < 0.0, "-1 while timing is off")
+            spec.assert_eq(metal.compute_set_timing(c, 1), metal.OK, "compute timing on")
+            spec.assert_eq(gpu_words(c, 0, 5, 1, 2, 3, 4, 5), metal.OK, "a timed dispatch")
+            cms = metal.compute_gpu_ms(c)
+            spec.assert_true(cms >= 0.0, "the dispatch has a GPU time (${cms} ms)")
+            spec.assert_true(cms < 5000.0, "within its timeout (${cms} ms)")
+            spec.assert_eq(metal.buffer_int(args, 4), 5, "and ran")
+
+            metal.compute_destroy(c)
+            metal.bindings_destroy(cb)
+            metal.buffer_destroy(args)
+            metal.pipeline_destroy(pipe)
+            metal.target_destroy(t)
+        }
+    }
+
+    string.free(ivs)
+    string.free(tfs)
+    string.free(pvs)
+    string.free(ufs)
+    string.free(acs)
+    string.free(tvs)
+    _rc = spec.run_summary(fw)
+    if dev != null { metal.device_destroy(dev) }
+    return _rc
+}

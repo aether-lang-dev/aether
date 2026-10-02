@@ -172,6 +172,23 @@ int           aedx_material_set_buffer(AedxMaterial* m, int binding, AedxBuffer*
 int aedx_target_set_push(AedxTarget* t, const void* data, size_t len);
 int aedx_batch_reset(AedxTarget* t);
 int aedx_batch_add(AedxTarget* t, AedxMaterial* mat, int first, int count);
+
+/* Instancing, indirect draws, dynamic uniform offsets and GPU timing, as in
+ * contrib/vulkan (#2198). A dynamic uniform is a root CBV whose address
+ * moves per draw, so offsets are multiples of 256. */
+int    aedx_target_set_stream(AedxTarget* t, int binding, AedxBuffer* buf);
+int    aedx_target_set_instances(AedxTarget* t, int count);
+int    aedx_target_instances(const AedxTarget* t);
+int    aedx_batch_add_instanced(AedxTarget* t, AedxMaterial* mat, int first, int count,
+                                int first_instance, int instances);
+int    aedx_batch_add_indirect(AedxTarget* t, AedxMaterial* mat, AedxBuffer* buf, int offset, int draws);
+int    aedx_batch_set_offset(AedxTarget* t, int item, int binding, int offset);
+int    aedx_uniform_offset_alignment(const AedxDevice* d);
+int    aedx_bindings_uniform_dynamic(AedxBindings* b, int binding, int bytes);
+int    aedx_target_set_timing(AedxTarget* t, int on);
+double aedx_target_gpu_ms(const AedxTarget* t);
+int    aedx_compute_set_timing(AedxCompute* c, int on);
+double aedx_compute_gpu_ms(const AedxCompute* c);
 int aedx_batch_count(const AedxTarget* t);
 int aedx_draw(AedxTarget* t, AedxPipeline* p, AedxMaterial* mat,
               float r, float g, float b, float a);
