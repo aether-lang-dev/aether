@@ -1024,6 +1024,7 @@ AUDIO_GCC_ONLY_RELAX := $(shell $(CC) --version 2>/dev/null | grep -qi clang || 
 AUDIO_CFLAGS_RELAX = -Wno-unused-function -Wno-unused-variable \
                      -Wno-implicit-fallthrough -Wno-sign-compare \
                      -Wno-unused-parameter -Wno-type-limits \
+                     -Wno-tautological-compare \
                      $(AUDIO_GCC_ONLY_RELAX)
 $(OBJ_DIR)/std/audio/aether_audio.o: CFLAGS += $(AUDIO_CFLAGS_RELAX)
 
