@@ -494,6 +494,13 @@ jobs:
         # Makefile stamp binaries with an older version (see Makefile:66).
         # Belt-and-braces now that VERSION is authoritative, but this job
         # compiles the UPLOADED artifacts so it should not be the thin one.
+        #
+        # The tag is the release commit, which can be older than the main
+        # HEAD this workflow file came from (the tag job's #2282 note). So a
+        # step here runs against a tree that may predate it: keep what
+        # depends on the tree in the tree (scripts/stage-release.sh), and
+        # never name a file in a step that an older tag may lack. 0.757.0
+        # failed every leg on a step calling a script its tag did not have.
         fetch-depth: 0
         fetch-tags: true
 
@@ -531,7 +538,9 @@ jobs:
         # ca-certificates ships /mingw64/etc/ssl/certs/ca-bundle.crt —
         # required for HTTPS in std.net (without it the OpenSSL handshake
         # completes but cert verification fails for lack of a trust
-        # anchor on Windows). Mirrors ci.yml::ci-windows.
+        # anchor on Windows). unzip extracts the pinned SQLite amalgamation
+        # the archive ships (scripts/fetch-sqlite-amalgamation.sh; 0.758.0
+        # and 0.759.0 failed without it). Mirrors ci.yml::ci-windows.
         install: >-
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-zlib
@@ -540,6 +549,7 @@ jobs:
           pkg-config
           make
           zip
+          unzip
           bc
 
     # -- Build + test: Linux / macOS ---
@@ -600,81 +610,9 @@ jobs:
       if: matrix.os != 'windows-latest'
       run: |
         VERSION=$(cat VERSION | tr -d '[:space:]')
-        mkdir -p release/bin release/lib release/share/aether release/include/aether
-        cp build/aetherc release/bin/
-        cp build/ae      release/bin/
-        chmod 755 release/bin/*
-        if [ -f build/libaether.a ]; then
-          cp build/libaether.a release/lib/
-        fi
-        # The shared runtime (#2297): lib/shared/, beside the archive.
-        if [ -d build/shared ]; then
-          mkdir -p release/lib/shared
-          cp build/shared/* release/lib/shared/
-        fi
-        # Headers (preserve directory structure — must match install.sh)
-        for dir in runtime runtime/actors runtime/scheduler runtime/utils \
-                   runtime/memory runtime/config std std/string std/io std/math \
-                   std/net std/collections std/json std/fs std/log std/http \
-                   std/file std/dir std/path std/tcp std/list std/map std/os; do
-          if [ -d "$dir" ]; then
-            mkdir -p "release/include/aether/$dir"
-            cp "$dir"/*.h "release/include/aether/$dir/" 2>/dev/null || true
-          fi
-        done
-        # Runtime source, for linking without libaether.a. MANIFEST lists
-        # which of those .c files to compile; without it `ae` cannot build
-        # from source at all.
-        cp -r runtime release/share/aether/
-        cp -r std     release/share/aether/
-        # std module specs (std/<mod>/test_*.ae, #1584) are tests, not
-        # payload: strip them as install.sh does. `make test-release-archive`
-        # asserts no test_*.ae survives under share/aether.
-        find release/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
-        # contrib source, so `import contrib.X` resolves on a binary release
-        # the way it does on a source install (#2208). The tarball shipped
-        # runtime/ and std/ but not contrib/, so a project that got Aether
-        # from a gh-release could not build against any contrib module. This
-        # mirrors install.sh's copy+trim exactly: drop tests/benches/example
-        # and build scripts, keep every module.ae plus the host bridges and
-        # the .c files a module.ae names with @source (vulkan/d3d12/metal),
-        # which `ae build` recompiles into the consumer.
-        #
-        # The pinned SQLite amalgamation is fetched (checksum-verified) first,
-        # so it ships too: `ae build --target` compiles contrib.sqlite from it
-        # for any target, and an installed toolchain must not need the network
-        # to do so (#1372). A failed fetch fails the release.
-        sh scripts/fetch-sqlite-amalgamation.sh
-        cp -r contrib release/share/aether/
-        find release/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
-        find release/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'test_*.ae' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'test_*.sh' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'build.sh'  -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
-        sh .github/scripts/trim_contrib_sources.sh release/share/aether/contrib --keep-host-bridges 2>/dev/null || true
-        # The public headers that sit at the top of include/, libaether.h
-        # among them. The loop above only mirrors the runtime/ and std/
-        # SUBTREES, so anything directly in include/ was dropped.
-        #
-        # That matters because include/aether/ is itself an -I directory for
-        # an installed tree, and runtime/libaether_caps.c -- shipped in
-        # share/aether/runtime/ above -- does `#include "libaether.h"`. The
-        # release therefore carried the .c that needs the header and not the
-        # header, so a fetched release could cross-compile hello.ae (which
-        # pulls no runtime .c) and failed on anything that linked the runtime
-        # with `fatal error: 'libaether.h' file not found`. A local install
-        # was fine: the Makefile's own staging has copied these since #1420,
-        # and this workflow reimplements that staging without the line.
-        cp include/*.h release/include/aether/ 2>/dev/null || true
-        cp build/MANIFEST release/share/aether/
-        # Compiled module artifacts (#1746), made by the aetherc this release
-        # ships, so an import of an installed std module skips its parse.
-        # The FreeBSD cross-build below cannot run its aetherc here and ships
-        # without them; its imports parse the sources, as before.
-        sh scripts/build_module_artifacts.sh build/aetherc . release/lib/aether/modules
-        cp LICENSE README.md VERSION release/
+        # What the archive holds is defined once, in the tree being packaged
+        # (`make test-release-archive` runs the same script on every PR).
+        sh scripts/stage-release.sh build release --module-artifacts build/aetherc
         cd release && tar -czf ../aether-${VERSION}-${{ matrix.target }}.tar.gz *
 
     # -- Package: Windows (MSYS2 shell) ---
@@ -683,80 +621,7 @@ jobs:
       shell: msys2 {0}
       run: |
         VERSION=$(cat VERSION | tr -d '[:space:]')
-        mkdir -p release/bin release/lib release/share/aether release/include/aether
-        cp build/aetherc.exe release/bin/
-        cp build/ae.exe      release/bin/
-        if [ -f build/libaether.a ]; then
-          cp build/libaether.a release/lib/
-        fi
-        # The shared runtime (#2297): lib/shared/, beside the archive.
-        if [ -d build/shared ]; then
-          mkdir -p release/lib/shared
-          cp build/shared/* release/lib/shared/
-        fi
-        # Headers (preserve directory structure — must match install.sh)
-        for dir in runtime runtime/actors runtime/scheduler runtime/utils \
-                   runtime/memory runtime/config std std/string std/io std/math \
-                   std/net std/collections std/json std/fs std/log std/http \
-                   std/file std/dir std/path std/tcp std/list std/map std/os; do
-          if [ -d "$dir" ]; then
-            mkdir -p "release/include/aether/$dir"
-            cp "$dir"/*.h "release/include/aether/$dir/" 2>/dev/null || true
-          fi
-        done
-        # Runtime source, for linking without libaether.a. MANIFEST lists
-        # which of those .c files to compile; without it `ae` cannot build
-        # from source at all.
-        cp -r runtime release/share/aether/
-        cp -r std     release/share/aether/
-        # std module specs (std/<mod>/test_*.ae, #1584) are tests, not
-        # payload: strip them as install.sh does. `make test-release-archive`
-        # asserts no test_*.ae survives under share/aether.
-        find release/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
-        # contrib source, so `import contrib.X` resolves on a binary release
-        # the way it does on a source install (#2208). The tarball shipped
-        # runtime/ and std/ but not contrib/, so a project that got Aether
-        # from a gh-release could not build against any contrib module. This
-        # mirrors install.sh's copy+trim exactly: drop tests/benches/example
-        # and build scripts, keep every module.ae plus the host bridges and
-        # the .c files a module.ae names with @source (vulkan/d3d12/metal),
-        # which `ae build` recompiles into the consumer.
-        #
-        # The pinned SQLite amalgamation is fetched (checksum-verified) first,
-        # so it ships too: `ae build --target` compiles contrib.sqlite from it
-        # for any target, and an installed toolchain must not need the network
-        # to do so (#1372). A failed fetch fails the release.
-        sh scripts/fetch-sqlite-amalgamation.sh
-        cp -r contrib release/share/aether/
-        find release/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
-        find release/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'test_*.ae' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'test_*.sh' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'build.sh'  -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
-        sh .github/scripts/trim_contrib_sources.sh release/share/aether/contrib --keep-host-bridges 2>/dev/null || true
-        # The public headers that sit at the top of include/, libaether.h
-        # among them. The loop above only mirrors the runtime/ and std/
-        # SUBTREES, so anything directly in include/ was dropped.
-        #
-        # That matters because include/aether/ is itself an -I directory for
-        # an installed tree, and runtime/libaether_caps.c -- shipped in
-        # share/aether/runtime/ above -- does `#include "libaether.h"`. The
-        # release therefore carried the .c that needs the header and not the
-        # header, so a fetched release could cross-compile hello.ae (which
-        # pulls no runtime .c) and failed on anything that linked the runtime
-        # with `fatal error: 'libaether.h' file not found`. A local install
-        # was fine: the Makefile's own staging has copied these since #1420,
-        # and this workflow reimplements that staging without the line.
-        cp include/*.h release/include/aether/ 2>/dev/null || true
-        cp build/MANIFEST release/share/aether/
-        # Compiled module artifacts (#1746), made by the aetherc this release
-        # ships, so an import of an installed std module skips its parse.
-        # The FreeBSD cross-build below cannot run its aetherc here and ships
-        # without them; its imports parse the sources, as before.
-        sh scripts/build_module_artifacts.sh build/aetherc.exe . release/lib/aether/modules
-        cp LICENSE README.md VERSION release/
+        sh scripts/stage-release.sh build release --module-artifacts build/aetherc.exe
         cd release && zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
 
     - name: Upload artifact
@@ -868,66 +733,9 @@ jobs:
       run: |
         VERSION=$(cat VERSION | tr -d '[:space:]')
         TARGET=freebsd-x86_64
-        mkdir -p release/bin release/lib release/share/aether release/include/aether
-        X=build/.alien/freebsd-x86_64
-        cp $X/aetherc release/bin/
-        cp $X/ae      release/bin/
-        chmod 755 release/bin/*
-        if [ -f $X/libaether.a ]; then cp $X/libaether.a release/lib/; fi
-        for dir in runtime runtime/actors runtime/scheduler runtime/utils \
-                   runtime/memory runtime/config std std/string std/io std/math \
-                   std/net std/collections std/json std/fs std/log std/http \
-                   std/file std/dir std/path std/tcp std/list std/map std/os; do
-          if [ -d "$dir" ]; then
-            mkdir -p "release/include/aether/$dir"
-            cp "$dir"/*.h "release/include/aether/$dir/" 2>/dev/null || true
-          fi
-        done
-        cp -r runtime release/share/aether/
-        cp -r std     release/share/aether/
-        # std module specs (std/<mod>/test_*.ae, #1584) are tests, not
-        # payload: strip them as install.sh does. `make test-release-archive`
-        # asserts no test_*.ae survives under share/aether.
-        find release/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
-        # contrib source, so `import contrib.X` resolves on a binary release
-        # the way it does on a source install (#2208). The tarball shipped
-        # runtime/ and std/ but not contrib/, so a project that got Aether
-        # from a gh-release could not build against any contrib module. This
-        # mirrors install.sh's copy+trim exactly: drop tests/benches/example
-        # and build scripts, keep every module.ae plus the host bridges and
-        # the .c files a module.ae names with @source (vulkan/d3d12/metal),
-        # which `ae build` recompiles into the consumer.
-        #
-        # The pinned SQLite amalgamation is fetched (checksum-verified) first,
-        # so it ships too: `ae build --target` compiles contrib.sqlite from it
-        # for any target, and an installed toolchain must not need the network
-        # to do so (#1372). A failed fetch fails the release.
-        sh scripts/fetch-sqlite-amalgamation.sh
-        cp -r contrib release/share/aether/
-        find release/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
-        find release/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'test_*.ae' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'test_*.sh' -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'build.sh'  -delete 2>/dev/null || true
-        find release/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
-        sh .github/scripts/trim_contrib_sources.sh release/share/aether/contrib --keep-host-bridges 2>/dev/null || true
-        # The public headers that sit at the top of include/, libaether.h
-        # among them. The loop above only mirrors the runtime/ and std/
-        # SUBTREES, so anything directly in include/ was dropped.
-        #
-        # That matters because include/aether/ is itself an -I directory for
-        # an installed tree, and runtime/libaether_caps.c -- shipped in
-        # share/aether/runtime/ above -- does `#include "libaether.h"`. The
-        # release therefore carried the .c that needs the header and not the
-        # header, so a fetched release could cross-compile hello.ae (which
-        # pulls no runtime .c) and failed on anything that linked the runtime
-        # with `fatal error: 'libaether.h' file not found`. A local install
-        # was fine: the Makefile's own staging has copied these since #1420,
-        # and this workflow reimplements that staging without the line.
-        cp include/*.h release/include/aether/ 2>/dev/null || true
-        cp $X/MANIFEST release/share/aether/
-        cp LICENSE README.md VERSION release/
+        # The cross-built aetherc cannot run here, so no module artifacts:
+        # the FreeBSD archive's imports parse the sources.
+        sh scripts/stage-release.sh build/.alien/freebsd-x86_64 release
         # Note the cross-build in the archive so downstream users know it was
         # not run through the test suite on FreeBSD.
         echo "Cross-built for FreeBSD with zig cc; not run through the test suite on FreeBSD." \

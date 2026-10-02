@@ -1487,35 +1487,20 @@ check-archive-exports-nozlib: stdlib
 	done && \
 	sh scripts/check_archive_exports.sh "$$tmp/libaether.a"
 
+# The archive release.yml ships, staged by the same script (scripts/
+# stage-release.sh), packed, extracted and used: `ae init` + `ae run` against
+# the extracted tree. It used to rebuild the layout here by hand, which drifted
+# from what the release actually packed, so a packaging break (0.757.0 to
+# 0.759.0) passed this test and failed the release.
 test-release-archive: compiler ae stdlib check-archive-exports
 	@echo "==================================="
 	@echo "  Release Archive Smoke Test"
 	@echo "==================================="
 	@tmpdir=$$(mktemp -d) && \
 	reldir="$$tmpdir/release" && \
-	mkdir -p "$$reldir/bin" "$$reldir/lib/aether" "$$reldir/share/aether" "$$reldir/include/aether" && \
-	cp $(BUILD_DIR)/aetherc$(EXE_EXT) "$$reldir/bin/" && \
-	cp $(BUILD_DIR)/ae$(EXE_EXT)      "$$reldir/bin/" && \
-	chmod 755 "$$reldir/bin/"* && \
-	if [ -f $(BUILD_DIR)/libaether.a ]; then cp $(BUILD_DIR)/libaether.a "$$reldir/lib/aether/"; fi && \
-	for dir in runtime runtime/actors runtime/scheduler runtime/utils \
-	           runtime/memory runtime/config std std/string std/io std/math \
-	           std/net std/collections std/json std/xml std/fs std/log std/http \
-	           std/file std/dir std/path std/tcp std/udp std/list std/map std/dl \
-	           std/config std/actors std/capsicum std/casper std/snapshot \
-	           std/sync std/audio std/worker; do \
-	  if [ -d "$$dir" ]; then \
-	    mkdir -p "$$reldir/include/aether/$$dir"; \
-	    cp "$$dir"/*.h "$$reldir/include/aether/$$dir/" 2>/dev/null || true; \
-	  fi; \
-	done && \
-	cp include/*.h "$$reldir/include/aether/" 2>/dev/null; \
-	cp -r runtime "$$reldir/share/aether/" && \
-	cp -r std     "$$reldir/share/aether/" && \
-	find "$$reldir/share/aether/std" -type f -name 'test_*.ae' -delete && \
-	cp $(BUILD_DIR)/MANIFEST "$$reldir/share/aether/" && \
-	rm -rf "$$reldir/share/aether/runtime/examples" && \
-	echo "  Created release layout in $$reldir" && \
+	{ sh scripts/stage-release.sh $(BUILD_DIR) "$$reldir" --module-artifacts $(BUILD_DIR)/aetherc$(EXE_EXT) > "$$tmpdir/stage.log" 2>&1 || \
+	  { echo "  FAIL: scripts/stage-release.sh:"; tail -20 "$$tmpdir/stage.log" | sed 's/^/      /'; rm -rf "$$tmpdir"; exit 1; }; } && \
+	echo "  Staged the release tree in $$reldir" && \
 	echo "  Packing tarball..." && \
 	(cd "$$reldir" && tar -czf "$$tmpdir/aether-test.tar.gz" *) && \
 	echo "  Extracting to simulated version dir..." && \
@@ -1524,12 +1509,14 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	echo "  Checking extracted layout..." && \
 	test -f "$$verdir/bin/aetherc$(EXE_EXT)" || (echo "  FAIL: bin/aetherc missing"; exit 1) && \
 	test -f "$$verdir/bin/ae$(EXE_EXT)"      || (echo "  FAIL: bin/ae missing"; exit 1) && \
-	test -f "$$verdir/lib/aether/libaether.a" || (echo "  FAIL: lib/aether/libaether.a missing"; exit 1) && \
+	test -f "$$verdir/lib/libaether.a"       || (echo "  FAIL: lib/libaether.a missing"; exit 1) && \
+	test -f "$$verdir/include/aether/libaether.h" || (echo "  FAIL: include/aether/libaether.h missing (#1420)"; exit 1) && \
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
+	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
 	test -s "$$verdir/share/aether/MANIFEST" || (echo "  FAIL: share/aether/MANIFEST missing; ae cannot build from source without it"; exit 1) && \
 	shipped_specs=$$(find "$$verdir/share/aether" -type f -name 'test_*.ae' | head -5) && \
-	{ test -z "$$shipped_specs" || (echo "  FAIL: co-located specs shipped in the archive (#1584); every copy site must strip std/**/test_*.ae:"; echo "$$shipped_specs" | sed 's/^/        /'; exit 1); } && \
+	{ test -z "$$shipped_specs" || (echo "  FAIL: co-located specs shipped in the archive (#1584):"; echo "$$shipped_specs" | sed 's/^/        /'; exit 1); } && \
 	echo "  Testing ae init + ae run from extracted archive..." && \
 	projdir=$$(mktemp -d) && \
 	cd "$$projdir" && \
