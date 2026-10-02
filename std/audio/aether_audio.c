@@ -86,6 +86,14 @@ double aether_audio_rendered_sample(int f, int ch) { (void)f; (void)ch; return 0
 
 #else
 
+/* OGG Vorbis (#2364). miniaudio decodes Vorbis through stb_vorbis (vendored
+ * beside it, std/audio/stb_vorbis.c, public domain / MIT; miniaudio's own
+ * extras/ copy for the same release). stb_vorbis's declarations go in before
+ * miniaudio's implementation, which keys its Vorbis decoder on them, and its
+ * implementation after, as miniaudio documents. */
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.c"
+
 #define MINIAUDIO_IMPLEMENTATION
 /* Trim the build: we only need decoding + playback, no capture/encoding/
  * resource-manager niceties beyond what ma_engine needs by default. */
@@ -99,6 +107,10 @@ double aether_audio_rendered_sample(int f, int ch) { (void)f; (void)ch; return 0
  * reports unavailable at runtime, which is correct for a target with no
  * audio device to play to. */
 #include "miniaudio.h"
+
+/* stb_vorbis's implementation, after miniaudio's (see above). */
+#undef STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.c"
 
 /* ---- engine ------------------------------------------------------------ */
 

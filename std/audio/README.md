@@ -28,7 +28,8 @@ main() {
     }
 
     // load_wav takes the BYTES, not a path — read the file yourself,
-    // which keeps the module out of the filesystem.
+    // which keeps the module out of the filesystem. Despite the name it
+    // sniffs the container: WAV, MP3, FLAC and OGG Vorbis all load here.
     data, dlen, rerr = fs.read_binary("chime.wav")
     if rerr != "" {
         println("read failed: ${rerr}")

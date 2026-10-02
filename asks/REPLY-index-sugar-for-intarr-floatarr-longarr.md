@@ -82,6 +82,6 @@ diagnostic (which the ask said was worth doing regardless) ships now.
   "make `finish` return a length-bearing string" fix is blocked on the
   heap-tracker's return shim not carrying `is_struct` (the comment in
   `aether_strbuilder.c` explains it) — a separate, riskier change.
-- `llm-md-says-no-sizeof-but-sizeof-exists.md` — fixed; the LLM.md bullet now
+- `llm-md-says-no-sizeof-but-sizeof-exists.md` — fixed; the AGENTS.md bullet now
   teaches `malloc(sizeof(T)) as *T` and calls the hand-counted literal the
   anti-pattern, matching the compiler's own warning.

@@ -9,7 +9,7 @@
 
 This survey is written for Aether's maintainers, weighing what, if anything,
 from Fir is worth porting. It compares the in-tree Fir snapshot in this
-directory against Aether as described in Aether's LLM.md.
+directory against Aether as described in Aether's AGENTS.md.
 
 This document is intentionally detailed enough that an Aether implementer can
 read **only this file** and start designing a port of any individual feature
@@ -309,7 +309,7 @@ Specifically for Aether:
 - **Actor message types.** Right now they're declared. Allowing
   `(kind = .Foo, payload = ..)`-shaped messages with row-poly handlers
   would be a real ergonomics win. **Caveat**: Aether's actor model
-  intentionally uses *declared* messages (per `LLM.md`) for
+  intentionally uses *declared* messages (per `AGENTS.md`) for
   cross-process safety, so this might be a non-fit there specifically.
   Anonymous records inside a single process, fine; across the actor
   boundary, keep nominal.
@@ -545,7 +545,7 @@ print("-`do:
 Yes, that includes multi-line `do:` blocks inside the interpolation,
 parsed by a small dedicated state machine in `src/interpolation.rs`.
 
-**Aether status.** Aether already has string interpolation per `LLM.md`
+**Aether status.** Aether already has string interpolation per `AGENTS.md`
 ("string interpolation, pattern matching"), so the question is **shape**
 rather than whether to add it at all.
 
@@ -628,7 +628,7 @@ let c2 = \(): c2(); c1()           # lambda
 test(\() U32 / [Err]: 123)         # lambda with type and effect annotations
 ```
 
-Aether already has closures per `LLM.md`. The Fir-specific note is the
+Aether already has closures per `AGENTS.md`. The Fir-specific note is the
 lambda syntax `\(args): body` terser than `func(...) { ... }`. If
 Aether wants a shorter closure form for callbacks, this is a candidate
 but not material.
@@ -761,7 +761,7 @@ For symmetry, these are the places **Aether is ahead**:
   library support for file IO yet". For practical work, Aether is
   much further along here.
 - **Cross-platform CI** including Windows MSYS2 / MINGW-w64 (per
-  Aether's `LLM.md`). Fir's CI is Linux-only.
+  Aether's `AGENTS.md`). Fir's CI is Linux-only.
 
 In short: **Fir is the better-shaped language; Aether is the more
 deployable one.** The features above are exactly the reason a

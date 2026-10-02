@@ -1,0 +1,94 @@
+// std.audio decodes OGG Vorbis (#2364), through the same `load_wav` path as
+// WAV, MP3 and FLAC: miniaudio sniffs the container and decodes Vorbis with
+// the vendored stb_vorbis.
+//
+// The fixture, tests/vectors/audio/tone440_22050_mono.ogg, is a 440 Hz sine
+// at amplitude 0.5, 22050 Hz mono, 11025 frames (0.5 s), Vorbis quality 0.6
+// (tests/vectors/audio/mktone.c). This spec synthesises the same samples as
+// its WAV twin and plays both through the headless engine: the OGG must
+// report the twin's rate, channels and length, and render to the twin's peak
+// within the codec's error.
+
+import std.audio
+import std.bytes
+import std.fs
+import std.math
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if !cond { println("FAIL: ${msg}"); return 1 }
+    return 0
+}
+
+fn near(a: float, b: float, tol: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d <= tol
+}
+
+const RATE = 22050
+const FRAMES = 11025
+const PI = 3.14159265358979
+
+// The fixture's samples, as interleaved 16-bit mono PCM.
+fn make_twin() -> (string, int) {
+    total = FRAMES * 2
+    b = bytes.new(total)
+    i = 0
+    while i < FRAMES {
+        s = 0.5 * math_sin(2.0 * PI * 440.0 * i / RATE)
+        v = (s * 32767.0) as int
+        bytes.set_le16(b, i * 2, v & 65535)
+        i = i + 1
+    }
+    return bytes.finish(b, total), total
+}
+
+// Render the whole clip (and some silence after it) with only `src` playing;
+// return the left channel's peak.
+fn render_peak(src: ptr) -> float {
+    _ = audio.play(src)
+    _ = audio.render(FRAMES + 2000)
+    peak = audio.rendered_peak(0)
+    _ = audio.stop(src)
+    return peak
+}
+
+main() {
+    fails = 0
+    if !audio.open_headless(RATE, 2) { println("FAIL: open_headless ${audio.last_error()}"); exit(1) }
+
+    data, n, ferr = fs.read_binary("tests/vectors/audio/tone440_22050_mono.ogg")
+    if ferr != "" { println("FAIL: read the fixture: ${ferr}"); exit(1) }
+    fails = fails + ck(n > 0, "the fixture is not empty")
+
+    ogg, err = audio.load_wav(data, n)
+    if err != "" { println("FAIL: load_wav(ogg): ${err}"); exit(1) }
+    fails = fails + ck(audio.sample_rate(ogg) == RATE, "OGG sample rate ${audio.sample_rate(ogg)}")
+    fails = fails + ck(audio.channels(ogg) == 1, "OGG channels ${audio.channels(ogg)}")
+    dur = audio.duration_ms(ogg)
+    fails = fails + ck(dur == 500, "OGG length is 0.5 s (got ${dur} ms)")
+
+    pcm, pn = make_twin()
+    wav, werr = audio.load_pcm(pcm, pn, RATE, 1, audio.FORMAT_S16)
+    if werr != "" { println("FAIL: load the twin: ${werr}"); exit(1) }
+    fails = fails + ck(audio.duration_ms(wav) == dur, "the twin is as long as the OGG")
+
+    ogg_peak = render_peak(ogg)
+    fails = fails + ck(audio.played_frames(ogg) == FRAMES,
+                       "every OGG frame plays (${audio.played_frames(ogg)} of ${FRAMES})")
+    wav_peak = render_peak(wav)
+
+    // A mono source at pan 0 on a stereo engine: amplitude * cos(pi/4).
+    fails = fails + ck(near(wav_peak, 0.5 * 0.70710678, 0.002), "the twin's peak (${wav_peak})")
+    fails = fails + ck(near(ogg_peak, wav_peak, 0.02),
+                       "the OGG peaks where its twin does (${ogg_peak} vs ${wav_peak})")
+
+    audio.unload(ogg)
+    audio.unload(wav)
+    audio.close()
+
+    if fails > 0 { println("${fails} failure(s)"); exit(1) }
+    println("OK: OGG Vorbis decodes to its WAV twin")
+}
