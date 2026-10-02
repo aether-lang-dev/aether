@@ -2925,6 +2925,81 @@ static int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
  * generated once more through the ordinary path. */
 static const ASTNode* g_slice_view_wrapping = NULL;
 
+/* The block of a call's trailing DSL closure, or NULL. A closure the
+ * function declares a `fn` parameter for, where the block sits, is an
+ * ordinary argument, not a DSL block (the same test the argument loop of
+ * the call path applies). */
+ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL) return NULL;
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* arg = call->children[i];
+        if (!arg || arg->type != AST_CLOSURE || !arg->value ||
+            strcmp(arg->value, "trailing") != 0) continue;
+        if (call->value && gen->program) {
+            ASTNode* fdef = find_function_definition_by_name(gen->program, call->value);
+            if (fdef) {
+                int pi = 0;
+                for (int fj = 0; fj < fdef->child_count; fj++) {
+                    ASTNode* p = fdef->children[fj];
+                    if (p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK) continue;
+                    if (pi == i && p->node_type && p->node_type->kind == TYPE_FUNCTION)
+                        return NULL;
+                    pi++;
+                }
+            }
+        }
+        for (int bi = 0; bi < arg->child_count; bi++) {
+            if (arg->children[bi] && arg->children[bi]->type == AST_BLOCK)
+                return arg->children[bi];
+        }
+    }
+    return NULL;
+}
+
+/* `call(args) { block }` where the value is used inside an expression:
+ * `return build() { ... }`, `f(build() { ... })`. A declaration, an
+ * assignment and an expression statement run the block themselves
+ * (generate_statement marks that call); anywhere else the block was
+ * skipped with the argument loop's DSL test and silently dropped. Lowered
+ * here to a statement expression that runs it the way those statements
+ * do: a builder's block configures it before the call; any other call's
+ * value is the block's context. Returns 0 when there is no such block. */
+static int g_trailing_tmp = 0;
+static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
+    ASTNode* block = trailing_dsl_block(gen, call);
+    if (!block) return 0;
+    int n = g_trailing_tmp++;
+    if (call->value && is_builder_func_reg(gen, call->value)) {
+        fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
+                n, get_builder_factory(gen, call->value), n);
+        emit_trailing_block_body(gen, block);
+        char c_fn[256];
+        strncpy(c_fn, safe_c_name(call->value), sizeof(c_fn) - 1);
+        c_fn[sizeof(c_fn) - 1] = '\0';
+        for (char* q = c_fn; *q; q++) { if (*q == '.') *q = '_'; }
+        fprintf(gen->output, "_aether_ctx_pop(); %s(", c_fn);
+        int argc = 0;
+        for (int i = 0; i < call->child_count; i++) {
+            ASTNode* arg = call->children[i];
+            if (arg && arg->type == AST_CLOSURE && arg->value &&
+                strcmp(arg->value, "trailing") == 0) continue;
+            if (argc++ > 0) fprintf(gen->output, ", ");
+            generate_expression(gen, arg);
+        }
+        fprintf(gen->output, "%s_tcfg%d); })", argc > 0 ? ", " : "", n);
+        return 1;
+    }
+    ASTNode* saved = gen->trailing_stmt_call;
+    fprintf(gen->output, "({ __auto_type _tcv%d = ", n);
+    gen->trailing_stmt_call = call;      /* the plain call, block skipped */
+    generate_expression(gen, call);
+    gen->trailing_stmt_call = saved;
+    fprintf(gen->output, "; _aether_ctx_push((void*)(intptr_t)_tcv%d);\n", n);
+    emit_trailing_block_body(gen, block);
+    fprintf(gen->output, "_aether_ctx_pop(); _tcv%d; })", n);
+    return 1;
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -4291,6 +4366,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_FUNCTION_CALL:
+            if (expr != gen->trailing_stmt_call && emit_trailing_call_expression(gen, expr)) {
+                break;
+            }
             /* heap.free(p) — counterpart to heap.new(T) (issue #564, #790).
              * A POD box owns no heap fields, so a plain free(p) reclaims it.
              * A box whose struct has string fields (#790) routes through the

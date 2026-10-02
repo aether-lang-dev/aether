@@ -1,0 +1,104 @@
+// A trailing block on a call whose value is used inside an expression runs.
+//
+// `return build() { ... }` and `use(build() { ... })` compiled to the bare
+// call: the declaration, assignment and expression-statement forms ran a
+// call's trailing block, and every other place skipped it, so the whole body
+// vanished without a diagnostic (a std.schema record returned from a
+// function had no fields). The block now runs wherever the call sits, once,
+// before its value is used, for a plain call (its value is the block's
+// context) and for a builder (the block configures it first).
+
+import std.map
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+struct Bag {
+    items: int
+}
+
+new_bag() -> ptr {
+    b = malloc(sizeof(Bag)) as *Bag
+    b.items = 0
+    return b
+}
+
+// Called in a trailing block: the block's context is the bag.
+add(_ctx: ptr) {
+    b = _ctx as *Bag
+    b.items = b.items + 1
+}
+
+count(p: ptr) -> int {
+    b = p as *Bag
+    return b.items
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+// A builder: its block fills `_builder` before the body runs.
+builder label(text: string): string {
+    suffix = ""
+    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
+    return "${text}${suffix}"
+}
+
+fn returned() -> ptr {
+    return new_bag() {
+        add()
+        add()
+    }
+}
+
+fn returned_builder() -> string {
+    return label("x") {
+        set_opt("suffix", "!")
+    }
+}
+
+main() {
+    fails = 0
+
+    if count(returned()) != 2 {
+        println("FAIL: a returned call's block did not run (count ${count(returned())})")
+        fails = fails + 1
+    }
+
+    // As an argument, nested in another call.
+    n = count(new_bag() {
+            add()
+            add()
+            add()
+        })
+    if n != 3 {
+        println("FAIL: an argument's block did not run (count ${n})")
+        fails = fails + 1
+    }
+
+    if returned_builder() != "x!" {
+        println("FAIL: a returned builder's block did not configure it (${returned_builder()})")
+        fails = fails + 1
+    }
+
+    // The statement forms still run their block exactly once.
+    held = new_bag() {
+        add()
+    }
+    if count(held) != 1 {
+        println("FAIL: a declaration's block ran ${count(held)} times, want 1")
+        fails = fails + 1
+    }
+    held = new_bag() {
+        add()
+        add()
+    }
+    if count(held) != 2 {
+        println("FAIL: a reassignment's block ran ${count(held)} times, want 2")
+        fails = fails + 1
+    }
+
+    if fails > 0 { exit(1) }
+    println("ok")
+}

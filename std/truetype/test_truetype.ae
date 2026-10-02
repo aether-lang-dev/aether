@@ -1,0 +1,298 @@
+// std.truetype (#2365): a font built here byte by byte, so every number the
+// reader returns is known exactly.
+//
+// The font: units per em 1000, four glyphs.
+//   0 .notdef  empty
+//   1 'A'      one contour: (0,0) (500,0) (500,600) on the curve, a control
+//              point at (250,900), then (0,600): a square with a curved top
+//              whose peak is at y 750
+//   2 'B'      compound: glyph 1 as is, then glyph 1 scaled by 0.5 and moved
+//              600 to the right
+//   3 ' '      empty
+// cmap format 4 (32 -> 3, 65..66 -> 1..2), hmtx with three long metrics and a
+// trailing bearing for glyph 3, one kern pair (1, 2) = -50, a `name` record 4
+// for Macintosh and for Windows, `post` declaring fixed pitch, and `OS/2`
+// PANOSE declaring a serif face.
+
+import std.bytes
+import std.string
+import std.truetype
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if !cond { println("FAIL: ${msg}"); return 1 }
+    return 0
+}
+
+fn put16(b: ptr, at: int, v: int) { _ = bytes.set_be16(b, at, v & 65535) }
+fn put32(b: ptr, at: int, v: int) { _ = bytes.set_be32(b, at, v) }
+
+fn put_tag(b: ptr, at: int, tag: string) {
+    k = 0
+    while k < 4 {
+        _ = bytes.set(b, at + k, string.char_at(tag, k) & 255)
+        k = k + 1
+    }
+}
+
+// A table directory record, and the table's place: returns where the next table goes.
+fn table(b: ptr, index: int, tag: string, at: int, length: int) -> int {
+    rec = 12 + 16 * index
+    put_tag(b, rec, tag)
+    put32(b, rec + 4, 0)
+    put32(b, rec + 8, at)
+    put32(b, rec + 12, length)
+    next = at + length
+    while next % 4 != 0 { next = next + 1 }
+    return next
+}
+
+// Glyph 1: five points, all coordinates as 16-bit deltas.
+fn glyph_simple(b: ptr, at: int) {
+    put16(b, at, 1) // one contour
+    put16(b, at + 2, 0); put16(b, at + 4, 0); put16(b, at + 6, 500); put16(b, at + 8, 750)
+    put16(b, at + 10, 4) // the contour ends at point 4
+    put16(b, at + 12, 0) // no instructions
+    flags = at + 14
+    _ = bytes.set(b, flags, 1); _ = bytes.set(b, flags + 1, 1); _ = bytes.set(b, flags + 2, 1)
+    _ = bytes.set(b, flags + 3, 0); _ = bytes.set(b, flags + 4, 1)
+    xs = flags + 5
+    put16(b, xs, 0); put16(b, xs + 2, 500); put16(b, xs + 4, 0); put16(b, xs + 6, 0 - 250); put16(b, xs + 8, 0 - 250)
+    ys = xs + 10
+    put16(b, ys, 0); put16(b, ys + 2, 0); put16(b, ys + 4, 600); put16(b, ys + 6, 300); put16(b, ys + 8, 0 - 300)
+}
+
+// Glyph 2: glyph 1, then glyph 1 at half scale moved by (600, 0).
+fn glyph_compound(b: ptr, at: int) {
+    put16(b, at, 0 - 1)
+    put16(b, at + 2, 0); put16(b, at + 4, 0); put16(b, at + 6, 850); put16(b, at + 8, 750)
+    c = at + 10
+    put16(b, c, 1 + 2 + 32) // word args, xy values, more components
+    put16(b, c + 2, 1)
+    put16(b, c + 4, 0); put16(b, c + 6, 0)
+    c = c + 8
+    put16(b, c, 1 + 2 + 8) // word args, xy values, a scale
+    put16(b, c + 2, 1)
+    put16(b, c + 4, 600); put16(b, c + 6, 0)
+    put16(b, c + 8, 8192) // 0.5 in 2.14
+}
+
+// The whole font. `mac_english` false gives the Macintosh name record a
+// language other than English, so the Windows record is the one read.
+fn build_font(mac_english: bool) -> (ptr, int) {
+    size = 1024
+    b = bytes.new(size)
+    i = 0
+    while i < size { _ = bytes.set(b, i, 0); i = i + 1 }
+    put32(b, 0, 65536) // TrueType outlines
+    put16(b, 4, 11) // tables
+
+    at = 12 + 16 * 11
+    head = at
+    at = table(b, 0, "head", at, 54)
+    put32(b, head, 65536)
+    put32(b, head + 12, 1594834165) // magic
+    put16(b, head + 18, 1000) // units per em
+    put16(b, head + 50, 0) // short loca
+
+    maxp = at
+    at = table(b, 1, "maxp", at, 6)
+    put32(b, maxp, 20480)
+    put16(b, maxp + 4, 4)
+
+    hhea = at
+    at = table(b, 2, "hhea", at, 36)
+    put32(b, hhea, 65536)
+    put16(b, hhea + 4, 800); put16(b, hhea + 6, 0 - 200); put16(b, hhea + 8, 90)
+    put16(b, hhea + 34, 3) // three long metrics
+
+    hmtx = at
+    at = table(b, 3, "hmtx", at, 14)
+    put16(b, hmtx, 500); put16(b, hmtx + 2, 0)
+    put16(b, hmtx + 4, 600); put16(b, hmtx + 6, 10)
+    put16(b, hmtx + 8, 900); put16(b, hmtx + 10, 20)
+    put16(b, hmtx + 12, 0 - 5) // glyph 3's bearing; its advance is the last one
+
+    loca = at
+    at = table(b, 4, "loca", at, 10)
+    put16(b, loca, 0); put16(b, loca + 2, 0); put16(b, loca + 4, 20); put16(b, loca + 6, 34); put16(b, loca + 8, 34)
+
+    glyf = at
+    at = table(b, 5, "glyf", at, 68)
+    glyph_simple(b, glyf)
+    glyph_compound(b, glyf + 40)
+
+    cmap = at
+    at = table(b, 6, "cmap", at, 52)
+    put16(b, cmap, 0); put16(b, cmap + 2, 1)
+    put16(b, cmap + 4, 3); put16(b, cmap + 6, 1); put32(b, cmap + 8, 12)
+    sub = cmap + 12
+    put16(b, sub, 4); put16(b, sub + 2, 40); put16(b, sub + 6, 6)
+    put16(b, sub + 14, 32); put16(b, sub + 16, 66); put16(b, sub + 18, 65535) // ends
+    put16(b, sub + 22, 32); put16(b, sub + 24, 65); put16(b, sub + 26, 65535) // starts
+    put16(b, sub + 28, 3 - 32); put16(b, sub + 30, 1 - 65); put16(b, sub + 32, 1) // deltas
+
+    kern = at
+    at = table(b, 7, "kern", at, 24)
+    put16(b, kern, 0); put16(b, kern + 2, 1)
+    put16(b, kern + 4, 0); put16(b, kern + 6, 20); put16(b, kern + 8, 1)
+    put16(b, kern + 10, 1)
+    put16(b, kern + 18, 1); put16(b, kern + 20, 2); put16(b, kern + 22, 0 - 50)
+
+    name = at
+    at = table(b, 8, "name", at, 47)
+    put16(b, name, 0); put16(b, name + 2, 2); put16(b, name + 4, 30)
+    mac_language = 0
+    if !mac_english { mac_language = 5 }
+    r = name + 6
+    put16(b, r, 1); put16(b, r + 2, 0); put16(b, r + 4, mac_language); put16(b, r + 6, 4)
+    put16(b, r + 8, 9); put16(b, r + 10, 0)
+    r = r + 12
+    put16(b, r, 3); put16(b, r + 2, 1); put16(b, r + 4, 1033); put16(b, r + 6, 4)
+    put16(b, r + 8, 8); put16(b, r + 10, 9)
+    _ = bytes.copy_from_string(b, name + 30, "Test Sans", 9)
+    w = name + 39
+    put16(b, w, 84); put16(b, w + 2, 233); put16(b, w + 4, 115); put16(b, w + 6, 116) // "Tést"
+
+    post = at
+    at = table(b, 9, "post", at, 32)
+    put32(b, post, 196608)
+    put32(b, post + 12, 1) // fixed pitch
+
+    os2 = at
+    at = table(b, 10, "OS/2", at, 78)
+    _ = bytes.set(b, os2 + 32, 2) // PANOSE: Latin text
+    _ = bytes.set(b, os2 + 33, 3) // a serif style
+
+    return b, at
+}
+
+fn test_metrics(f: *Typeface) -> int {
+    fails = 0
+    fails = fails + ck(f.units_per_em == 1000, "units per em ${f.units_per_em}")
+    fails = fails + ck(f.glyph_count == 4, "glyph count ${f.glyph_count}")
+    fails = fails + ck(f.ascender == 800 && f.descender == 0 - 200 && f.line_gap == 90,
+        "hhea ${f.ascender} ${f.descender} ${f.line_gap}")
+    fails = fails + ck(truetype.glyph_index(f, 65) == 1, "'A' is glyph 1")
+    fails = fails + ck(truetype.glyph_index(f, 66) == 2, "'B' is glyph 2")
+    fails = fails + ck(truetype.glyph_index(f, 32) == 3, "space is glyph 3")
+    fails = fails + ck(truetype.glyph_index(f, 67) == 0, "'C' is the missing glyph")
+    fails = fails + ck(truetype.glyph_index(f, 128512) == 0, "a codepoint past the BMP is missing in a format-4 font")
+    fails = fails + ck(truetype.advance(f, 1) == 600, "advance of 1")
+    fails = fails + ck(truetype.advance(f, 3) == 900, "glyph 3 takes the last long metric's advance")
+    fails = fails + ck(truetype.left_bearing(f, 2) == 20, "bearing of 2")
+    fails = fails + ck(truetype.left_bearing(f, 3) == 0 - 5, "glyph 3's bearing from the trailing array")
+    fails = fails + ck(truetype.advance(f, 9) == 0, "advance of a glyph outside the font is 0")
+    fails = fails + ck(truetype.kerning(f, 1, 2) == 0 - 50, "kern pair (1, 2)")
+    fails = fails + ck(truetype.kerning(f, 2, 1) == 0, "no kern pair (2, 1)")
+    x0, y0, x1, y1 = truetype.glyph_bounds(f, 2)
+    fails = fails + ck(x0 == 0 && y0 == 0 && x1 == 850 && y1 == 750, "glyph 2's box ${x0} ${y0} ${x1} ${y1}")
+    return fails
+}
+
+fn test_points(f: *Typeface) -> int {
+    fails = 0
+    p = truetype.glyph_points(f, 1)
+    if p == null { println("FAIL: glyph 1's points: ${truetype.last_error()}"); return 1 }
+    fails = fails + ck(p.count == 5 && p.contours == 1, "glyph 1: 5 points, 1 contour (${p.count}, ${p.contours})")
+    fails = fails + ck(truetype.contour_end(p, 0) == 4, "the contour ends at point 4")
+    fails = fails + ck(truetype.point_x(p, 3) == 250.0 && truetype.point_y(p, 3) == 900.0, "point 3 at (250, 900)")
+    fails = fails + ck(!truetype.point_on(p, 3), "point 3 is a control point")
+    fails = fails + ck(truetype.point_on(p, 4), "point 4 is on the curve")
+    truetype.points_free(p)
+
+    c = truetype.glyph_points(f, 2)
+    if c == null { println("FAIL: glyph 2's points: ${truetype.last_error()}"); return fails + 1 }
+    fails = fails + ck(c.count == 10 && c.contours == 2, "glyph 2: 10 points, 2 contours (${c.count}, ${c.contours})")
+    fails = fails + ck(truetype.contour_end(c, 0) == 4 && truetype.contour_end(c, 1) == 9, "contour ends 4 and 9")
+    fails = fails + ck(truetype.point_x(c, 5) == 600.0 && truetype.point_y(c, 5) == 0.0,
+        "the second component starts at (600, 0)")
+    fails = fails + ck(truetype.point_x(c, 7) == 850.0 && truetype.point_y(c, 7) == 300.0,
+        "the second component is at half scale: (850, 300)")
+    truetype.points_free(c)
+
+    s = truetype.glyph_points(f, 3)
+    fails = fails + ck(s != null && s.count == 0, "the space has no points")
+    truetype.points_free(s)
+    return fails
+}
+
+fn test_outline(f: *Typeface) -> int {
+    fails = 0
+    // Tolerance 0.5 units: the top curve's bend is 600, so it takes
+    // ceil(sqrt(600 / 2)) = 18 chords; with the three straight sides, 21.
+    o = truetype.outline(f, 1, 1.0, 0.5)
+    if o == null { println("FAIL: glyph 1's outline: ${truetype.last_error()}"); return 1 }
+    fails = fails + ck(o.count == 21, "glyph 1 flattens to 21 segments (got ${o.count})")
+    fails = fails + ck(o.x_min == 0.0 && o.x_max == 500.0 && o.y_min == 0.0, "x 0..500, from y 0")
+    fails = fails + ck(o.y_max == 750.0, "the curve peaks at 750 (got ${o.y_max})")
+    x0, y0, x1, y1 = truetype.segment(o, 0)
+    fails = fails + ck(x0 == 0.0 && y0 == 0.0 && x1 == 500.0 && y1 == 0.0, "the first segment is the base")
+    truetype.outline_free(o)
+
+    // At a scale the outline scales with it.
+    h = truetype.outline(f, 1, 0.064, 0.02)
+    fails = fails + ck(h != null && h.x_max == 32.0, "at 64 px per em the glyph is 32 px wide")
+    truetype.outline_free(h)
+
+    e = truetype.outline(f, 3, 1.0, 0.5)
+    fails = fails + ck(e != null && e.count == 0, "the space's outline is empty")
+    truetype.outline_free(e)
+
+    bad = truetype.outline(f, 99, 1.0, 0.5)
+    fails = fails + ck(bad == null, "a glyph outside the font has no outline")
+    fails = fails + ck(string.contains(truetype.last_error(), "outside the font"), "and says so: ${truetype.last_error()}")
+    return fails
+}
+
+fn test_declarations(f: *Typeface) -> int {
+    fails = 0
+    fails = fails + ck(truetype.full_name(f) == "Test Sans", "the English Macintosh name (${truetype.full_name(f)})")
+    fails = fails + ck(truetype.is_monospace(f), "post declares fixed pitch")
+    fails = fails + ck(truetype.is_serif(f), "PANOSE declares a serif face")
+    return fails
+}
+
+fn test_refusals() -> int {
+    fails = 0
+    b, n = build_font(true)
+    short = truetype.load_bytes(bytes.data(b), 100, "short")
+    fails = fails + ck(short == null, "a font cut short does not load")
+    fails = fails + ck(string.contains(truetype.last_error(), "short"), "and names itself: ${truetype.last_error()}")
+
+    put_tag(b, 0, "OTTO")
+    cff = truetype.load_bytes(bytes.data(b), n, "cff")
+    fails = fails + ck(cff == null, "CFF outlines do not load")
+    fails = fails + ck(string.contains(truetype.last_error(), "CFF"), "and say why: ${truetype.last_error()}")
+    bytes.free(b)
+
+    missing = truetype.load("no/such/font.ttf")
+    fails = fails + ck(missing == null, "a missing file does not load")
+    return fails
+}
+
+main() {
+    fails = 0
+    b, n = build_font(true)
+    f = truetype.load_bytes(bytes.data(b), n, "synthetic")
+    bytes.free(b)
+    if f == null { println("FAIL: load: ${truetype.last_error()}"); exit(1) }
+    fails = fails + test_metrics(f)
+    fails = fails + test_points(f)
+    fails = fails + test_outline(f)
+    fails = fails + test_declarations(f)
+    truetype.typeface_free(f)
+
+    w, wn = build_font(false)
+    g = truetype.load_bytes(bytes.data(w), wn, "synthetic-windows-name")
+    bytes.free(w)
+    if g == null { println("FAIL: load (windows name): ${truetype.last_error()}"); exit(1) }
+    fails = fails + ck(truetype.full_name(g) == "Tést", "the English Windows name, UTF-16 to UTF-8 (${truetype.full_name(g)})")
+    truetype.typeface_free(g)
+
+    fails = fails + test_refusals()
+
+    if fails > 0 { println("${fails} failure(s)"); exit(1) }
+    println("OK: std.truetype reads the synthetic font exactly")
+}

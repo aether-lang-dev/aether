@@ -1,0 +1,1115 @@
+// std.truetype: a TrueType font read from its bytes (#2365).
+//
+// Two consumers parsed the same tables twice, aether-ui (glyph outlines as
+// vector paths) and ae3d (a signed-distance-field atlas). This is the one
+// reader both build on; what each draws stays in its own repo.
+//
+// Read: the table directory (a collection's first font), `head` (units per
+// em, the loca format), `maxp`, `hhea` and `hmtx` (advances and left side
+// bearings), `cmap` (formats 4 and 12, Unicode), `loca` and `glyf` (simple
+// glyphs of quadratic contours; compound glyphs of components placed by
+// offset, by matched points, and scaled), pair kerning from `kern` format
+// 0, and the face's own declarations: its full name (`name`), fixed pitch
+// (`post`) and serif style (`OS/2` PANOSE).
+//
+// Not read: CFF outlines (.otf), GPOS, hinting. A font with CFF outlines
+// fails to load and says so.
+//
+// Every read is bounds-checked against the file and its table, and the
+// work a glyph can claim is capped (points, components, nesting), so a
+// malformed font fails with a message naming what is wrong instead of
+// reading past its bytes.
+//
+// A glyph comes two ways:
+//   glyph_points  its contours as TrueType gives them, font units, each
+//                 point on or off the curve: for a reader with its own
+//                 curve handling (vector paths)
+//   outline       the same contours flattened to line segments at a scale,
+//                 every curve within a tolerance: for a rasteriser or a
+//                 distance field
+//
+//   face = truetype.load("DejaVuSans.ttf")
+//   g = truetype.glyph_index(face, 65)                 // 'A'
+//   o = truetype.outline(face, g, 64.0 / (face.units_per_em as float), 0.02)
+//   truetype.outline_free(o)
+//   truetype.typeface_free(face)
+
+import std.bytes
+import std.fs
+import std.heap
+import std.string
+
+exports(
+    Typeface, GlyphPoints, GlyphOutline,
+    load, load_bytes, typeface_free, last_error,
+    glyph_index, advance, left_bearing, kerning, glyph_bounds,
+    full_name, is_monospace, is_serif,
+    glyph_points, points_free, point_x, point_y, point_on, contour_end,
+    outline, outline_free, segment
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+extern sqrt(x: float) -> float
+extern ceil(x: float) -> float
+
+// A font, as the tables it was read from: offsets into its bytes.
+struct Typeface {
+    blob: ptr // the std.bytes buffer holding the file, owned
+    data: ptr // its bytes
+    size: int
+    path: string
+    bad: int // a read fell outside the file or its table
+    units_per_em: int
+    glyph_count: int
+    ascender: int // hhea, em units: above the baseline
+    descender: int // below it, negative
+    line_gap: int
+    index_to_loc: int // 0: loca holds u16 offsets halved; 1: u32 offsets
+    metric_count: int // hhea.numberOfHMetrics
+    loca: int
+    glyf: int
+    glyf_length: int
+    hmtx: int
+    hmtx_length: int
+    cmap: int // the Unicode subtable used, from the file's start
+    cmap_end: int // the end of the cmap table, which bounds it
+    cmap_format: int // 4 or 12
+    kern_pairs: int // the first kern pair; 0 when there is no kerning
+    kern_count: int
+    kern_sorted: int // the pairs are in key order, as the format requires
+    name: int // the `name` table, or 0
+    name_length: int
+    post: int // the `post` table, or 0
+    post_length: int
+    os2: int // the `OS/2` table, or 0
+    os2_length: int
+}
+
+// A glyph's points: font units, each on or off the curve, and the index of
+// each contour's last point. A compound glyph's components arrive placed.
+struct GlyphPoints {
+    xs: ptr // float[capacity]
+    ys: ptr
+    on: ptr // float: 1 on the curve, 0 a control point
+    count: int
+    capacity: int
+    ends: ptr // int[contour_capacity]
+    contours: int
+    contour_capacity: int
+    visits: int // glyphs decoded for this one, components and all
+}
+
+// A glyph's outline as line segments: font units times a scale, y up, the
+// pen's origin at 0.
+struct GlyphOutline {
+    segments: ptr // float[count * 4]: x0 y0 x1 y1
+    count: int
+    capacity: int
+    points: int // the TrueType points it was made from, on and off the curve
+    contours: int
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+}
+
+var g_error = ""
+var g_error_owned = false
+
+// What the last failed load, glyph_points or outline found wrong.
+last_error() -> string { return g_error }
+
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    joined = string.concat(reason, ": ")
+    g_error = string.concat(joined, detail)
+    string.free(joined)
+    g_error_owned = true
+}
+
+least(a: float, b: float) -> float {
+    if a < b { return a }
+    return b
+}
+
+most(a: float, b: float) -> float {
+    if a > b { return a }
+    return b
+}
+
+// --- reading the file, big-endian and bounds-checked -------------------------------------------
+
+u8(f: *Typeface, at: int) -> int {
+    if at < 0 || at + 1 > f.size { f.bad = 1; return 0 }
+    d = f.data as uint8[]
+    return d[at] as int
+}
+
+u16(f: *Typeface, at: int) -> int {
+    if at < 0 || at + 2 > f.size { f.bad = 1; return 0 }
+    d = f.data as uint8[]
+    return (d[at] as int) * 256 + (d[at + 1] as int)
+}
+
+s16(f: *Typeface, at: int) -> int {
+    v = u16(f, at)
+    if v >= 32768 { return v - 65536 }
+    return v
+}
+
+s8(f: *Typeface, at: int) -> int {
+    v = u8(f, at)
+    if v >= 128 { return v - 256 }
+    return v
+}
+
+u32(f: *Typeface, at: int) -> long {
+    if at < 0 || at + 4 > f.size { f.bad = 1; return 0 as long }
+    d = f.data as uint8[]
+    return (d[at] as long) * (16777216 as long) + (d[at + 1] as long) * (65536 as long) +
+    (d[at + 2] as long) * (256 as long) + (d[at + 3] as long)
+}
+
+// A 2.14 fixed-point number: a component's scale.
+f2dot14(f: *Typeface, at: int) -> float {
+    return (s16(f, at) as float) / 16384.0
+}
+
+// An offset read from the file, as an int when it lies within the file,
+// else -1: a u32 can name a place past any file this could hold.
+offset32(f: *Typeface, at: int) -> int {
+    v = u32(f, at)
+    if v > (f.size as long) { return 0 - 1 }
+    return v as int
+}
+
+// --- the tables --------------------------------------------------------------------------------
+
+// A table's offset and length from the directory at `dir`: (0, -1) when
+// the font has none, (0, -2) when the directory puts it outside the file.
+find_table(f: *Typeface, dir: int, tag: string) -> (int, int) {
+    tables = u16(f, dir + 4)
+    t = 0
+    while t < tables {
+        entry = dir + 12 + 16 * t
+        same = true
+        k = 0
+        while k < 4 {
+            if u8(f, entry + k) != (string.char_at(tag, k) & 255) { same = false }
+            k = k + 1
+        }
+        if same {
+            offset = offset32(f, entry + 8)
+            length = offset32(f, entry + 12)
+            if offset < 0 || length < 0 || offset + length > f.size { return 0, 0 - 2 }
+            return offset, length
+        }
+        t = t + 1
+    }
+    return 0, 0 - 1
+}
+
+// The Unicode cmap subtable: format 12 (all of Unicode) over format 4
+// (the Basic Multilingual Plane), Windows or Unicode platform. Returns
+// false when the font has neither.
+choose_cmap(f: *Typeface, cmap: int, cmap_length: int) -> bool {
+    f.cmap_end = cmap + cmap_length
+    tables = u16(f, cmap + 2)
+    if cmap + 4 + 8 * tables > f.cmap_end { return false }
+    best = 0
+    t = 0
+    while t < tables {
+        platform = u16(f, cmap + 4 + 8 * t)
+        encoding = u16(f, cmap + 6 + 8 * t)
+        offset = offset32(f, cmap + 8 + 8 * t)
+        at = cmap + offset
+        if offset >= 0 && at + 4 <= f.cmap_end {
+            format = u16(f, at)
+            unicode = platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10))
+            score = 0
+            if unicode && format == 12 { score = 3 }
+            if unicode && format == 4 { score = 2 }
+            if platform == 3 && encoding == 0 && format == 4 { score = 1 } // a symbol font
+            if score > best && cmap_fits(f, at, format) {
+                best = score
+                f.cmap = at
+                f.cmap_format = format
+            }
+        }
+        t = t + 1
+    }
+    return best > 0
+}
+
+// Whether a subtable's arrays lie inside the cmap table.
+cmap_fits(f: *Typeface, at: int, format: int) -> bool {
+    if format == 4 {
+        if at + 14 > f.cmap_end { return false }
+        segments_x2 = u16(f, at + 6)
+        if segments_x2 == 0 || segments_x2 % 2 != 0 { return false }
+        return at + 16 + 4 * segments_x2 <= f.cmap_end
+    }
+    if at + 16 > f.cmap_end { return false }
+    groups = u32(f, at + 12)
+    return (at as long) + (16 as long) + (12 as long) * groups <= (f.cmap_end as long)
+}
+
+// The first horizontal format-0 subtable of a version-0 `kern` table. A
+// format-0 subtable's length is a u16, and one with more than 10,921
+// pairs overflows it (PT Sans has 24,030): its size is taken from its
+// pair count instead. A kern table that does not fit is no kerning, not
+// a font that fails to load; Apple's version-1 tables are not read.
+read_kern(f: *Typeface, kern: int, kern_length: int) {
+    f.kern_pairs = 0
+    f.kern_count = 0
+    f.kern_sorted = 1
+    end = kern + kern_length
+    if kern_length < 4 || u16(f, kern) != 0 { return }
+    tables = u16(f, kern + 2)
+    at = kern + 4
+    t = 0
+    while t < tables && at + 14 <= end {
+        length = u16(f, at + 2)
+        coverage = u16(f, at + 4)
+        format = coverage / 256
+        if format == 0 {
+            pairs = u16(f, at + 6)
+            // Horizontal, not minimum values, not cross-stream.
+            if (coverage & 1) == 1 && (coverage & 6) == 0 {
+                fit = (end - at - 14) / 6
+                if pairs > fit { pairs = fit }
+                f.kern_pairs = at + 14
+                f.kern_count = pairs
+                previous = 0 - 1
+                i = 0
+                while i < pairs {
+                    key = u16(f, at + 14 + 6 * i) * 65536 + u16(f, at + 16 + 6 * i)
+                    if key <= previous { f.kern_sorted = 0 }
+                    previous = key
+                    i = i + 1
+                }
+                return
+            }
+            length = 14 + 6 * pairs
+        }
+        if length < 6 { return }
+        at = at + length
+        t = t + 1
+    }
+}
+
+// Reads the tables a font's glyphs need. "" when they are whole, else what is wrong.
+parse(f: *Typeface) -> string {
+    if f.size < 12 { return "not a font (shorter than a table directory)" }
+    dir = 0
+    version = u32(f, 0)
+    if version == (1953784678 as long) { // "ttcf": a collection, its first font
+        dir = offset32(f, 12)
+        if dir < 0 { return "font collection header points outside the file" }
+        version = u32(f, dir)
+    }
+    if version == (1330926671 as long) { return "CFF outlines (an OpenType .otf) are not read; a TrueType font is needed" }
+    if version != (65536 as long) && version != (1953658213 as long) { return "not a TrueType font (unknown sfnt version)" }
+    if dir + 12 + 16 * u16(f, dir + 4) > f.size { return "table directory runs past the end of the file" }
+
+    head, head_length = find_table(f, dir, "head")
+    if head_length < 54 { return "head table missing or short" }
+    if u32(f, head + 12) != (1594834165 as long) { return "head table's magic number is wrong" }
+    f.units_per_em = u16(f, head + 18)
+    if f.units_per_em < 16 || f.units_per_em > 16384 { return "head.unitsPerEm outside 16..16384" }
+    f.index_to_loc = s16(f, head + 50)
+    if f.index_to_loc != 0 && f.index_to_loc != 1 { return "head.indexToLocFormat is neither 0 nor 1" }
+
+    maxp, maxp_length = find_table(f, dir, "maxp")
+    if maxp_length < 6 { return "maxp table missing or short" }
+    f.glyph_count = u16(f, maxp + 4)
+    if f.glyph_count == 0 { return "maxp says the font has no glyphs" }
+
+    hhea, hhea_length = find_table(f, dir, "hhea")
+    if hhea_length < 36 { return "hhea table missing or short" }
+    f.ascender = s16(f, hhea + 4)
+    f.descender = s16(f, hhea + 6)
+    f.line_gap = s16(f, hhea + 8)
+    f.metric_count = u16(f, hhea + 34)
+    if f.metric_count == 0 || f.metric_count > f.glyph_count { return "hhea.numberOfHMetrics outside 1..numGlyphs" }
+
+    hmtx, hmtx_length = find_table(f, dir, "hmtx")
+    if hmtx_length < 4 * f.metric_count { return "hmtx table missing or shorter than its metrics" }
+    f.hmtx = hmtx
+    f.hmtx_length = hmtx_length
+
+    loca, loca_length = find_table(f, dir, "loca")
+    entry = 2
+    if f.index_to_loc == 1 { entry = 4 }
+    if loca_length < entry * (f.glyph_count + 1) { return "loca table missing or shorter than numGlyphs + 1 offsets" }
+    f.loca = loca
+
+    glyf, glyf_length = find_table(f, dir, "glyf")
+    if glyf_length < 0 { return "glyf table missing (no TrueType outlines)" }
+    f.glyf = glyf
+    f.glyf_length = glyf_length
+
+    cmap, cmap_length = find_table(f, dir, "cmap")
+    if cmap_length < 4 { return "cmap table missing or short" }
+    if !choose_cmap(f, cmap, cmap_length) { return "no Unicode cmap subtable of format 4 or 12" }
+
+    kern, kern_length = find_table(f, dir, "kern")
+    if kern_length > 0 { read_kern(f, kern, kern_length) }
+
+    // The face's own declarations: optional, and a missing one is no answer.
+    name, name_length = find_table(f, dir, "name")
+    if name_length > 0 { f.name = name; f.name_length = name_length }
+    post, post_length = find_table(f, dir, "post")
+    if post_length > 0 { f.post = post; f.post_length = post_length }
+    os2, os2_length = find_table(f, dir, "OS/2")
+    if os2_length > 0 { f.os2 = os2; f.os2_length = os2_length }
+
+    if f.bad != 0 { return "a table points outside the file" }
+    return ""
+}
+
+// The font at `path`, or null with last_error() saying why.
+load(path: string) -> *Typeface {
+    data, n, err = fs.read_binary(path)
+    if err != "" {
+        set_error("truetype: cannot read the font", path)
+        return null
+    }
+    blob = bytes.new(n + 1)
+    _ = bytes.copy_from_string(blob, 0, data, n)
+    string.free(data)
+    return adopt(blob, n, path)
+}
+
+// A font already in memory (a pack's entry, say): its `size` bytes are
+// copied, and `name` is what errors call it.
+load_bytes(data: ptr, size: int, name: string) -> *Typeface {
+    if data == null || size <= 0 {
+        set_error("truetype: no bytes for the font", name)
+        return null
+    }
+    return adopt(bytes.from_ptr(data, size), size, name)
+}
+
+adopt(blob: ptr, size: int, path: string) -> *Typeface {
+    f = heap.new(Typeface)
+    f.blob = blob
+    f.data = bytes.data(blob)
+    f.size = size
+    f.path = string.concat(path, "")
+    f.bad = 0
+    f.kern_pairs = 0
+    f.kern_count = 0
+    f.name = 0
+    f.post = 0
+    f.os2 = 0
+    why = parse(f)
+    if why != "" {
+        reason = string.concat("truetype: ", why)
+        set_error(reason, path)
+        string.free(reason)
+        typeface_free(f)
+        return null
+    }
+    return f
+}
+
+typeface_free(f: *Typeface) {
+    if f == null { return }
+    if f.blob != null { bytes.free(f.blob) }
+    heap.free(f) // and the path it owns
+}
+
+// --- characters to glyphs, and their metrics ---------------------------------------------------
+
+// The font's glyph for a Unicode codepoint; 0, the missing glyph, when it has none.
+glyph_index(f: *Typeface, codepoint: int) -> int {
+    if f == null || codepoint < 0 { return 0 }
+    g = 0
+    if f.cmap_format == 12 {
+        g = glyph_index_12(f, codepoint)
+    } else if codepoint <= 65535 {
+        g = glyph_index_4(f, codepoint)
+    }
+    if g < 0 || g >= f.glyph_count { return 0 }
+    return g
+}
+
+// Format 4: segments of codepoints, each mapped by a delta or through an
+// array of glyph indices.
+glyph_index_4(f: *Typeface, c: int) -> int {
+    at = f.cmap
+    segments_x2 = u16(f, at + 6)
+    ends = at + 14
+    starts = ends + segments_x2 + 2
+    deltas = starts + segments_x2
+    ranges = deltas + segments_x2
+    // The first segment whose end is at or past c: the ends are in order.
+    lo = 0
+    hi = segments_x2 / 2 - 1
+    found = 0 - 1
+    while lo <= hi {
+        mid = (lo + hi) / 2
+        if u16(f, ends + 2 * mid) >= c {
+            found = mid
+            hi = mid - 1
+        } else {
+            lo = mid + 1
+        }
+    }
+    if found < 0 { return 0 }
+    start = u16(f, starts + 2 * found)
+    if c < start { return 0 }
+    delta = u16(f, deltas + 2 * found)
+    range = u16(f, ranges + 2 * found)
+    if range == 0 { return (c + delta) & 65535 }
+    slot = ranges + 2 * found + range + 2 * (c - start)
+    if slot + 2 > f.cmap_end { return 0 }
+    g = u16(f, slot)
+    if g == 0 { return 0 }
+    return (g + delta) & 65535
+}
+
+// Format 12: groups of consecutive codepoints mapped to consecutive glyphs, in order.
+glyph_index_12(f: *Typeface, c: int) -> int {
+    at = f.cmap
+    groups = u32(f, at + 12) as int
+    code = c as long
+    lo = 0
+    hi = groups - 1
+    while lo <= hi {
+        mid = (lo + hi) / 2
+        group = at + 16 + 12 * mid
+        start = u32(f, group)
+        end = u32(f, group + 4)
+        if code < start {
+            hi = mid - 1
+        } else if code > end {
+            lo = mid + 1
+        } else {
+            return (u32(f, group + 8) + (code - start)) as int
+        }
+    }
+    return 0
+}
+
+// How far the pen moves after a glyph, in em units.
+advance(f: *Typeface, glyph: int) -> int {
+    if f == null || glyph < 0 || glyph >= f.glyph_count { return 0 }
+    i = glyph
+    if i >= f.metric_count { i = f.metric_count - 1 }
+    return u16(f, f.hmtx + 4 * i)
+}
+
+// The glyph's left edge right of the pen, em units.
+left_bearing(f: *Typeface, glyph: int) -> int {
+    if f == null || glyph < 0 || glyph >= f.glyph_count { return 0 }
+    if glyph < f.metric_count { return s16(f, f.hmtx + 4 * glyph + 2) }
+    at = f.hmtx + 4 * f.metric_count + 2 * (glyph - f.metric_count)
+    if at + 2 > f.hmtx + f.hmtx_length { return 0 }
+    return s16(f, at)
+}
+
+// The adjustment between two glyphs, em units: negative draws them closer.
+kerning(f: *Typeface, left: int, right: int) -> int {
+    if f == null || f.kern_count == 0 { return 0 }
+    key = left * 65536 + right
+    if f.kern_sorted == 0 {
+        i = 0
+        while i < f.kern_count {
+            at = f.kern_pairs + 6 * i
+            if u16(f, at) * 65536 + u16(f, at + 2) == key { return s16(f, at + 4) }
+            i = i + 1
+        }
+        return 0
+    }
+    lo = 0
+    hi = f.kern_count - 1
+    while lo <= hi {
+        mid = (lo + hi) / 2
+        at = f.kern_pairs + 6 * mid
+        probe = u16(f, at) * 65536 + u16(f, at + 2)
+        if probe == key { return s16(f, at + 4) }
+        if probe < key { lo = mid + 1 } else { hi = mid - 1 }
+    }
+    return 0
+}
+
+// A glyph's bytes in glyf: (start, end) from the file's start, equal for
+// a glyph with no outline (a space); (-1, -1) when loca is inconsistent.
+glyph_range(f: *Typeface, glyph: int) -> (int, int) {
+    start = 0
+    end = 0
+    if f.index_to_loc == 0 {
+        start = 2 * u16(f, f.loca + 2 * glyph)
+        end = 2 * u16(f, f.loca + 2 * glyph + 2)
+    } else {
+        start = offset32(f, f.loca + 4 * glyph)
+        end = offset32(f, f.loca + 4 * glyph + 4)
+    }
+    if start < 0 || end < start || end > f.glyf_length { return 0 - 1, 0 - 1 }
+    return f.glyf + start, f.glyf + end
+}
+
+// A glyph's box as glyf's header gives it, em units: (x_min, y_min, x_max,
+// y_max); all 0 for a glyph with no outline or one outside the font.
+glyph_bounds(f: *Typeface, glyph: int) -> (int, int, int, int) {
+    if f == null || glyph < 0 || glyph >= f.glyph_count { return 0, 0, 0, 0 }
+    start, end = glyph_range(f, glyph)
+    if start < 0 || end - start < 10 { return 0, 0, 0, 0 }
+    return s16(f, start + 2), s16(f, start + 4), s16(f, start + 6), s16(f, start + 8)
+}
+
+// --- the face's own declarations ---------------------------------------------------------------
+
+// Fixed pitch, as `post` declares it (isFixedPitch). False when the font
+// carries no `post` table.
+is_monospace(f: *Typeface) -> bool {
+    if f == null || f.post == 0 || f.post_length < 16 { return false }
+    return u32(f, f.post + 12) != (0 as long)
+}
+
+// A serif face, as OS/2's PANOSE declares it: family kind 2 (Latin text)
+// with a serif style of 2 to 10 (11 to 15 are the sans styles). False when
+// the font carries no OS/2 table or classifies itself otherwise.
+is_serif(f: *Typeface) -> bool {
+    if f == null || f.os2 == 0 || f.os2_length < 34 { return false }
+    if u8(f, f.os2 + 32) != 2 { return false }
+    style = u8(f, f.os2 + 33)
+    return style >= 2 && style <= 10
+}
+
+// The face's full name ("DejaVu Sans Bold"), `name` record 4. The English
+// Macintosh record (plain bytes) is preferred, then the English Windows
+// record (UTF-16BE, its Latin-1 characters kept), then any record 4: fonts
+// carry the same name in several languages, and a non-English record would
+// give another script's name. "" when the font names itself nowhere.
+full_name(f: *Typeface) -> string {
+    if f == null || f.name == 0 || f.name_length < 6 { return "" }
+    end = f.name + f.name_length
+    count = u16(f, f.name + 2)
+    strings_at = f.name + u16(f, f.name + 4)
+    if f.name + 6 + 12 * count > end { return "" }
+    best = 0 - 1
+    best_platform = 0 - 1
+    i = 0
+    while i < count {
+        record = f.name + 6 + 12 * i
+        platform = u16(f, record)
+        language = u16(f, record + 4)
+        if u16(f, record + 6) == 4 {
+            if platform == 1 && language == 0 && best_platform != 1 { best = record; best_platform = 1 }
+            if platform == 3 && language == 1033 && best_platform < 0 { best = record; best_platform = 3 }
+        }
+        i = i + 1
+    }
+    i = 0
+    while best < 0 && i < count {
+        record = f.name + 6 + 12 * i
+        if u16(f, record + 6) == 4 { best = record; best_platform = u16(f, record) }
+        i = i + 1
+    }
+    if best < 0 { return "" }
+    length = u16(f, best + 8)
+    at = strings_at + u16(f, best + 10)
+    if at < f.name || at + length > end { return "" }
+    out = bytes.new(length + 1)
+    n = 0
+    if best_platform == 1 {
+        while n < length {
+            _ = bytes.set(out, n, u8(f, at + n))
+            n = n + 1
+        }
+    } else {
+        // UTF-16BE: the characters below U+0100 as UTF-8 (one byte below
+        // U+0080, two from it on); anything wider is left out.
+        k = 0
+        while k + 1 < length {
+            hi = u8(f, at + k)
+            lo = u8(f, at + k + 1)
+            if hi == 0 && lo >= 32 && lo < 128 {
+                _ = bytes.set(out, n, lo)
+                n = n + 1
+            } else if hi == 0 && lo >= 160 {
+                _ = bytes.set(out, n, 192 + lo / 64)
+                _ = bytes.set(out, n + 1, 128 + lo % 64)
+                n = n + 2
+            }
+            k = k + 2
+        }
+    }
+    return bytes.finish(out, n)
+}
+
+// --- a glyph's points --------------------------------------------------------------------------
+
+points_new() -> *GlyphPoints {
+    p = heap.new(GlyphPoints)
+    p.xs = null
+    p.ys = null
+    p.on = null
+    p.count = 0
+    p.capacity = 0
+    p.ends = null
+    p.contours = 0
+    p.contour_capacity = 0
+    p.visits = 0
+    return p
+}
+
+points_free(p: *GlyphPoints) {
+    if p == null { return }
+    if p.xs != null { free(p.xs) }
+    if p.ys != null { free(p.ys) }
+    if p.on != null { free(p.on) }
+    if p.ends != null { free(p.ends) }
+    heap.free(p)
+}
+
+points_add(p: *GlyphPoints, x: float, y: float, on: float) {
+    if p.count == p.capacity {
+        capacity = p.capacity * 2
+        if capacity < 64 { capacity = 64 }
+        p.xs = realloc(p.xs, (capacity * 8) as long)
+        p.ys = realloc(p.ys, (capacity * 8) as long)
+        p.on = realloc(p.on, (capacity * 8) as long)
+        p.capacity = capacity
+    }
+    xs = p.xs as float[]
+    ys = p.ys as float[]
+    ons = p.on as float[]
+    xs[p.count] = x
+    ys[p.count] = y
+    ons[p.count] = on
+    p.count = p.count + 1
+}
+
+points_end_contour(p: *GlyphPoints, last: int) {
+    if p.contours == p.contour_capacity {
+        capacity = p.contour_capacity * 2
+        if capacity < 16 { capacity = 16 }
+        p.ends = realloc(p.ends, (capacity * 8) as long)
+        p.contour_capacity = capacity
+    }
+    ends = p.ends as int[]
+    ends[p.contours] = last
+    p.contours = p.contours + 1
+}
+
+// Point i of a glyph, font units.
+point_x(p: *GlyphPoints, i: int) -> float {
+    if p == null || i < 0 || i >= p.count { return 0.0 }
+    xs = p.xs as float[]
+    return xs[i]
+}
+
+point_y(p: *GlyphPoints, i: int) -> float {
+    if p == null || i < 0 || i >= p.count { return 0.0 }
+    ys = p.ys as float[]
+    return ys[i]
+}
+
+// Whether point i is on the curve (false: a quadratic's control point).
+point_on(p: *GlyphPoints, i: int) -> bool {
+    if p == null || i < 0 || i >= p.count { return false }
+    ons = p.on as float[]
+    return ons[i] > 0.5
+}
+
+// The index of contour c's last point.
+contour_end(p: *GlyphPoints, c: int) -> int {
+    if p == null || c < 0 || c >= p.contours { return 0 - 1 }
+    ends = p.ends as int[]
+    return ends[c]
+}
+
+// No glyph a font means to draw has more; a compound glyph whose parts
+// are compound many times over could claim billions of points, or of
+// components with none.
+const MAX_POINTS = 1000000
+const MAX_VISITS = 10000
+const MAX_DEPTH = 8
+
+// A glyph's points and contours onto `p`, in font units. "" or what is wrong.
+decode(f: *Typeface, glyph: int, p: *GlyphPoints, depth: int) -> string {
+    if depth > MAX_DEPTH { return "compound glyph nested too deep" }
+    p.visits = p.visits + 1
+    if p.visits > MAX_VISITS { return "compound glyph has too many components" }
+    if glyph < 0 || glyph >= f.glyph_count { return "glyph index outside the font" }
+    start, end = glyph_range(f, glyph)
+    if start < 0 { return "loca points outside glyf" }
+    if end == start { return "" }
+    if end - start < 10 { return "glyph header cut short" }
+    contours = s16(f, start)
+    if contours >= 0 { return decode_simple(f, start, end, contours, p) }
+    return decode_compound(f, start, end, p, depth)
+}
+
+decode_simple(f: *Typeface, start: int, end: int, contours: int, p: *GlyphPoints) -> string {
+    if contours == 0 { return "" }
+    at = start + 10
+    if at + 2 * contours + 2 > end { return "glyph's contour ends run past it" }
+    last = 0 - 1
+    c = 0
+    while c < contours {
+        e = u16(f, at + 2 * c)
+        if e < last { return "glyph's contour ends go backwards" }
+        last = e
+        c = c + 1
+    }
+    count = last + 1
+    if p.count + count > MAX_POINTS { return "glyph has too many points" }
+    at = at + 2 * contours
+    at = at + 2 + u16(f, at) // past the instructions
+    if at > end { return "glyph's instructions run past it" }
+
+    // The flags, one a point, a repeat flag followed by how many more times.
+    flag_block = calloc(count + 1, 1)
+    flags = flag_block as uint8[]
+    n = 0
+    while n < count {
+        if at >= end { free(flag_block); return "glyph's flags run past it" }
+        flag = u8(f, at)
+        at = at + 1
+        flags[n] = flag
+        n = n + 1
+        if (flag & 8) != 0 {
+            if at >= end { free(flag_block); return "glyph's flags run past it" }
+            repeat = u8(f, at)
+            at = at + 1
+            while repeat > 0 && n < count {
+                flags[n] = flag
+                n = n + 1
+                repeat = repeat - 1
+            }
+        }
+    }
+    // x then y, each a delta from the last: a byte with its sign in the
+    // flags, nothing (the same as before), or a signed 16-bit value.
+    base = p.count
+    x = 0
+    n = 0
+    while n < count {
+        flag = flags[n] as int
+        if (flag & 2) != 0 {
+            if at + 1 > end { free(flag_block); return "glyph's x coordinates run past it" }
+            dx = u8(f, at)
+            at = at + 1
+            if (flag & 16) != 0 { x = x + dx } else { x = x - dx }
+        } else if (flag & 16) == 0 {
+            if at + 2 > end { free(flag_block); return "glyph's x coordinates run past it" }
+            x = x + s16(f, at)
+            at = at + 2
+        }
+        on = 0.0
+        if (flag & 1) != 0 { on = 1.0 }
+        points_add(p, x as float, 0.0, on)
+        n = n + 1
+    }
+    ys = p.ys as float[]
+    y = 0
+    n = 0
+    while n < count {
+        flag = flags[n] as int
+        if (flag & 4) != 0 {
+            if at + 1 > end { free(flag_block); return "glyph's y coordinates run past it" }
+            dy = u8(f, at)
+            at = at + 1
+            if (flag & 32) != 0 { y = y + dy } else { y = y - dy }
+        } else if (flag & 32) == 0 {
+            if at + 2 > end { free(flag_block); return "glyph's y coordinates run past it" }
+            y = y + s16(f, at)
+            at = at + 2
+        }
+        ys[base + n] = y as float
+        n = n + 1
+    }
+    free(flag_block)
+    c = 0
+    while c < contours {
+        points_end_contour(p, base + u16(f, start + 10 + 2 * c))
+        c = c + 1
+    }
+    return ""
+}
+
+// A compound glyph: other glyphs, each through a 2x2 transform and moved
+// by an offset or so that one of its points lands on one already placed.
+decode_compound(f: *Typeface, start: int, end: int, p: *GlyphPoints, depth: int) -> string {
+    base = p.count
+    at = start + 10
+    more = true
+    while more {
+        if at + 4 > end { return "compound glyph's component runs past it" }
+        flags = u16(f, at)
+        child = u16(f, at + 2)
+        at = at + 4
+        arg1 = 0
+        arg2 = 0
+        if (flags & 1) != 0 { // ARG_1_AND_2_ARE_WORDS
+            if at + 4 > end { return "compound glyph's component runs past it" }
+            if (flags & 2) != 0 { arg1 = s16(f, at); arg2 = s16(f, at + 2) } else { arg1 = u16(f, at); arg2 = u16(f, at + 2) }
+            at = at + 4
+        } else {
+            if at + 2 > end { return "compound glyph's component runs past it" }
+            if (flags & 2) != 0 { arg1 = s8(f, at); arg2 = s8(f, at + 1) } else { arg1 = u8(f, at); arg2 = u8(f, at + 1) }
+            at = at + 2
+        }
+        a = 1.0
+        b = 0.0
+        c = 0.0
+        d = 1.0
+        if (flags & 8) != 0 { // WE_HAVE_A_SCALE
+            if at + 2 > end { return "compound glyph's scale runs past it" }
+            a = f2dot14(f, at)
+            d = a
+            at = at + 2
+        } else if (flags & 64) != 0 { // WE_HAVE_AN_X_AND_Y_SCALE
+            if at + 4 > end { return "compound glyph's scale runs past it" }
+            a = f2dot14(f, at)
+            d = f2dot14(f, at + 2)
+            at = at + 4
+        } else if (flags & 128) != 0 { // WE_HAVE_A_TWO_BY_TWO
+            if at + 8 > end { return "compound glyph's transform runs past it" }
+            a = f2dot14(f, at)
+            b = f2dot14(f, at + 2)
+            c = f2dot14(f, at + 4)
+            d = f2dot14(f, at + 6)
+            at = at + 8
+        }
+        first = p.count
+        why = decode(f, child, p, depth + 1)
+        if why != "" { return why }
+        xs = p.xs as float[]
+        ys = p.ys as float[]
+        i = first
+        while i < p.count {
+            x = xs[i]
+            y = ys[i]
+            xs[i] = a * x + c * y
+            ys[i] = b * x + d * y
+            i = i + 1
+        }
+        dx = 0.0
+        dy = 0.0
+        if (flags & 2) != 0 { // ARGS_ARE_XY_VALUES
+            dx = arg1 as float
+            dy = arg2 as float
+            // SCALED_COMPONENT_OFFSET without UNSCALED: the offset goes
+            // through the transform too (Apple's reading; Microsoft's
+            // default is unscaled, and a font says which it means).
+            if (flags & 2048) != 0 && (flags & 4096) == 0 {
+                ox = dx
+                dx = a * ox + c * dy
+                dy = b * ox + d * dy
+            }
+        } else {
+            // Matched points: arg1 is a point of the compound so far, arg2 one of this component.
+            if base + arg1 >= first || first + arg2 >= p.count { return "compound glyph matches a point it does not have" }
+            dx = xs[base + arg1] - xs[first + arg2]
+            dy = ys[base + arg1] - ys[first + arg2]
+        }
+        i = first
+        while i < p.count {
+            xs[i] = xs[i] + dx
+            ys[i] = ys[i] + dy
+            i = i + 1
+        }
+        more = (flags & 32) != 0 // MORE_COMPONENTS
+    }
+    return ""
+}
+
+// A glyph's points and contours, font units: empty for a glyph with
+// nothing to draw (a space), null for one the font cannot give, with
+// last_error() saying why. points_free releases it.
+glyph_points(f: *Typeface, glyph: int) -> *GlyphPoints {
+    if f == null { return null }
+    f.bad = 0
+    p = points_new()
+    why = decode(f, glyph, p, 0)
+    if why == "" && f.bad != 0 { why = "glyph reads outside the file" }
+    if why != "" {
+        refuse(f, why)
+        points_free(p)
+        return null
+    }
+    return p
+}
+
+// A glyph the font cannot give: said, and the read flag cleared.
+refuse(f: *Typeface, why: string) {
+    reason = string.concat("truetype: ", why)
+    set_error(reason, f.path)
+    string.free(reason)
+    f.bad = 0
+}
+
+// --- outlines ----------------------------------------------------------------------------------
+
+outline_new() -> *GlyphOutline {
+    o = heap.new(GlyphOutline)
+    o.segments = null
+    o.count = 0
+    o.capacity = 0
+    o.points = 0
+    o.contours = 0
+    o.x_min = 0.0
+    o.y_min = 0.0
+    o.x_max = 0.0
+    o.y_max = 0.0
+    return o
+}
+
+outline_free(o: *GlyphOutline) {
+    if o == null { return }
+    if o.segments != null { free(o.segments) }
+    heap.free(o)
+}
+
+// Segment k of an outline: (x0, y0, x1, y1).
+segment(o: *GlyphOutline, k: int) -> (float, float, float, float) {
+    if o == null || k < 0 || k >= o.count { return 0.0, 0.0, 0.0, 0.0 }
+    s = o.segments as float[]
+    return s[k * 4], s[k * 4 + 1], s[k * 4 + 2], s[k * 4 + 3]
+}
+
+add_line(o: *GlyphOutline, x0: float, y0: float, x1: float, y1: float) {
+    if x0 == x1 && y0 == y1 { return }
+    if o.count == o.capacity {
+        capacity = o.capacity * 2
+        if capacity < 64 { capacity = 64 }
+        o.segments = realloc(o.segments, (capacity * 32) as long)
+        o.capacity = capacity
+    }
+    s = o.segments as float[]
+    at = o.count * 4
+    s[at] = x0
+    s[at + 1] = y0
+    s[at + 2] = x1
+    s[at + 3] = y1
+    if o.count == 0 {
+        o.x_min = least(x0, x1)
+        o.x_max = most(x0, x1)
+        o.y_min = least(y0, y1)
+        o.y_max = most(y0, y1)
+    } else {
+        o.x_min = least(o.x_min, least(x0, x1))
+        o.x_max = most(o.x_max, most(x0, x1))
+        o.y_min = least(o.y_min, least(y0, y1))
+        o.y_max = most(o.y_max, most(y0, y1))
+    }
+    o.count = o.count + 1
+}
+
+// A quadratic from (x0, y0) through the control (cx, cy) to (x1, y1), as
+// n chords of equal parameter: a chord over a step h strays at most
+// |P0 - 2 P1 + P2| h^2 / 4 from the curve, so n is the least that keeps
+// that within the tolerance.
+add_curve(o: *GlyphOutline, x0: float, y0: float, cx: float, cy: float, x1: float, y1: float, tolerance: float) {
+    ddx = x0 - 2.0 * cx + x1
+    ddy = y0 - 2.0 * cy + y1
+    bend = sqrt(ddx * ddx + ddy * ddy)
+    n = ceil(sqrt(bend / (4.0 * tolerance))) as int
+    if n < 1 { n = 1 }
+    if n > 256 { n = 256 }
+    px = x0
+    py = y0
+    k = 1
+    while k <= n {
+        t = (k as float) / (n as float)
+        mt = 1.0 - t
+        x = mt * mt * x0 + 2.0 * mt * t * cx + t * t * x1
+        y = mt * mt * y0 + 2.0 * mt * t * cy + t * t * y1
+        if k == n { x = x1; y = y1 }
+        add_line(o, px, py, x, y)
+        px = x
+        py = y
+        k = k + 1
+    }
+}
+
+// One contour's points, on and off the curve, as segments. Between two
+// control points is an on-curve point implied at their midpoint; a
+// contour of control points only starts at the midpoint of its first two.
+flatten_contour(p: *GlyphPoints, first: int, count: int, scale: float, tolerance: float, o: *GlyphOutline) {
+    xs = p.xs as float[]
+    ys = p.ys as float[]
+    ons = p.on as float[]
+    s = 0 - 1
+    k = 0
+    while k < count && s < 0 {
+        if ons[first + k] > 0.5 { s = k }
+        k = k + 1
+    }
+    sx = 0.0
+    sy = 0.0
+    steps = 0
+    from = 0
+    if s >= 0 {
+        sx = xs[first + s] * scale
+        sy = ys[first + s] * scale
+        steps = count - 1
+        from = s + 1
+    } else {
+        sx = (xs[first] + xs[first + 1]) * 0.5 * scale
+        sy = (ys[first] + ys[first + 1]) * 0.5 * scale
+        steps = count
+        from = 1
+    }
+    cx = sx
+    cy = sy
+    qx = 0.0
+    qy = 0.0
+    control = false
+    n = 0
+    while n < steps {
+        i = first + (from + n) % count
+        x = xs[i] * scale
+        y = ys[i] * scale
+        if ons[i] > 0.5 {
+            if control { add_curve(o, cx, cy, qx, qy, x, y, tolerance) } else { add_line(o, cx, cy, x, y) }
+            cx = x
+            cy = y
+            control = false
+        } else {
+            if control {
+                mx = (qx + x) * 0.5
+                my = (qy + y) * 0.5
+                add_curve(o, cx, cy, qx, qy, mx, my, tolerance)
+                cx = mx
+                cy = my
+            }
+            qx = x
+            qy = y
+            control = true
+        }
+        n = n + 1
+    }
+    if control { add_curve(o, cx, cy, qx, qy, sx, sy, tolerance) } else { add_line(o, cx, cy, sx, sy) }
+}
+
+// A glyph's outline as segments, in font units times `scale` (pixels
+// when scale is pixels per em over units per em), curves within
+// `tolerance` of true. Empty for a glyph with nothing to draw; null for
+// one the font cannot give, with last_error() saying why.
+outline(f: *Typeface, glyph: int, scale: float, tolerance: float) -> *GlyphOutline {
+    p = glyph_points(f, glyph)
+    if p == null { return null }
+    o = outline_new()
+    o.points = p.count
+    o.contours = p.contours
+    ends = p.ends as int[]
+    first = 0
+    c = 0
+    while c < p.contours {
+        last = ends[c]
+        if last - first + 1 >= 2 { flatten_contour(p, first, last - first + 1, scale, tolerance, o) }
+        first = last + 1
+        c = c + 1
+    }
+    points_free(p)
+    return o
+}

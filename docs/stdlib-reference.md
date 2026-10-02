@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (85 modules)
+## Module index (86 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -69,7 +69,7 @@ header comment is the authoritative description.
 | `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 68 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
-| `std.schema` | Declarative typed validation and coercion. | 31 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
+| `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 23 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
@@ -84,6 +84,7 @@ header comment is the authoritative description.
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 43 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
+| `std.truetype` | TrueType fonts read from their bytes: glyph lookup, metrics, kerning, contours and flattened outlines. | 24 | [guide](../std/truetype/README.md) · [source](../std/truetype/module.ae) |
 | `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [guide](../std/tsid/README.md) · [source](../std/tsid/module.ae) |
 | `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [guide](../std/ulid/README.md) · [source](../std/ulid/module.ae) |
 | `std.unicode` | Unicode normalization, case/accent folding and grapheme-aware length/substring (utf8proc). | 8 | [guide](../std/unicode/README.md) · [source](../std/unicode/module.ae) |

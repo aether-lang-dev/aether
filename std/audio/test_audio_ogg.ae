@@ -77,13 +77,13 @@ main() {
 
     ogg_peak = render_peak(ogg)
     fails = fails + ck(audio.played_frames(ogg) == FRAMES,
-                       "every OGG frame plays (${audio.played_frames(ogg)} of ${FRAMES})")
+        "every OGG frame plays (${audio.played_frames(ogg)} of ${FRAMES})")
     wav_peak = render_peak(wav)
 
     // A mono source at pan 0 on a stereo engine: amplitude * cos(pi/4).
     fails = fails + ck(near(wav_peak, 0.5 * 0.70710678, 0.002), "the twin's peak (${wav_peak})")
     fails = fails + ck(near(ogg_peak, wav_peak, 0.02),
-                       "the OGG peaks where its twin does (${ogg_peak} vs ${wav_peak})")
+        "the OGG peaks where its twin does (${ogg_peak} vs ${wav_peak})")
 
     audio.unload(ogg)
     audio.unload(wav)

@@ -37,7 +37,6 @@ exports(
 )
 
 import std.schema
-import std.map(map_new, map_put_raw, map_free)
 import std.map
 import std.json
 import std.list(list_new, list_add_raw, list_get_raw, list_size)
@@ -130,9 +129,10 @@ fn mount_schema_route(g: *ApiGroup) {
     }
 }
 
-// Parse the request body as JSON, coerce it into a schema-input map, and run
-// std.schema. On malformed JSON -> 400; on validation failure -> 422 JSON:API
-// envelope; on success -> CONTINUE (endpoint handler runs).
+// Parse the request body as JSON and validate the tree with std.schema's
+// parse_json, nested objects and arrays included. On malformed JSON -> 400;
+// on validation failure -> 422 JSON:API envelope, each error pointing at its
+// field's path; on success -> CONTINUE (endpoint handler runs).
 fn validate_body(res: ptr, req: ptr, resource: ptr) -> int {
     body = request_get_body(req)
     if string_length(body) == 0 {
@@ -146,60 +146,21 @@ fn validate_body(res: ptr, req: ptr, resource: ptr) -> int {
         return STOP
     }
 
-    // Build the untyped string->string input map std.schema expects.
-    input = json_object_to_input(root)
-
-    values, errors = schema.parse(resource, input)
+    values, errors = schema.parse_json(resource, root)
     passed = schema.ok(errors)
 
     if passed != 1 {
         write_validation_errors(res, errors)
     }
 
-    schema.values_free(values)
+    json.json_free(values)
     schema.errors_free(errors)
-    map_free(input)
     json.json_free(root)
 
     if passed == 1 {
         return CONTINUE
     }
     return STOP
-}
-
-// Flatten a JSON object's top-level scalar fields into a string->string map.
-// Strings pass through; numbers/bools are stringified to their canonical text
-// (std.schema does the typed coercion from there).
-fn json_object_to_input(obj: ptr) -> ptr {
-    m = map_new()
-    if json.json_type(obj) != 5 { // 5 == JSON_OBJECT
-        return m
-    }
-    n = json.object_size(obj)
-    i = 0
-    while i < n {
-        key = json.json_object_key_at(obj, i)
-        val = json.json_object_get_raw(obj, key)
-        if val != null {
-            t = json.json_type(val)
-            if t == 3 { // JSON_STRING
-                // json_get_string_raw borrows from the JSON tree; mint an owned
-                // copy so the whole `input` map has uniform (owned) ownership
-                // and map_free reclaims every value consistently.
-                raw = json.json_get_string_raw(val)
-                map.put(m, key, string_concat(raw, ""))
-            } else if t == 0 { // JSON_NULL -> omit (treated as absent)
-                i = i + 1
-                continue
-            } else {
-                sv, _ = json.stringify(val)
-                // stringify returns an owned string; map takes ownership.
-                map.put(m, key, sv)
-            }
-        }
-        i = i + 1
-    }
-    return m
 }
 
 // ---- JSON:API error rendering ----
@@ -246,6 +207,37 @@ fn write_error(res: ptr, status: int, title: string, detail: string) {
     // `out` is a plain char* from finish(); tracker-reclaimed on scope exit.
 }
 
+// A std.schema error path ("address.city", "tags[2]") as the rest of a JSON
+// Pointer (RFC 6901): "/address/city", "/tags/2". A key's own "~" and "/"
+// are escaped as "~0" and "~1", and anything a JSON string needs escaped is.
+fn pointer_into(b: ptr, path: string) {
+    n = string_length(path)
+    if n == 0 {
+        return
+    }
+    strbuilder.append(b, "/")
+    i = 0
+    while i < n {
+        c = string.char_at(path, i)
+        if c == 46 || c == 91 { // '.' and '[' start a new reference token
+            strbuilder.append(b, "/")
+        } else if c == 93 { // ']'
+            // the index's closing bracket: nothing to write
+        } else if c == 126 { // '~'
+            strbuilder.append(b, "~0")
+        } else if c == 47 { // '/'
+            strbuilder.append(b, "~1")
+        } else if c == 34 {
+            strbuilder.append(b, "\\\"")
+        } else if c == 92 {
+            strbuilder.append(b, "\\\\")
+        } else {
+            strbuilder.append_byte(b, c)
+        }
+        i = i + 1
+    }
+}
+
 fn write_validation_errors(res: ptr, errors: ptr) {
     b = strbuilder.new(256)
     strbuilder.append(b, "{\"errors\":[")
@@ -259,9 +251,9 @@ fn write_validation_errors(res: ptr, errors: ptr) {
         json_str_into(b, schema.error_code(errors, i))
         strbuilder.append(b, ",\"title\":\"Validation Error\",\"detail\":")
         json_str_into(b, schema.error_message(errors, i))
-        strbuilder.append(b, ",\"source\":{\"pointer\":")
-        json_str_into(b, "/data/attributes/${schema.error_field(errors, i)}")
-        strbuilder.append(b, "}}")
+        strbuilder.append(b, ",\"source\":{\"pointer\":\"/data/attributes")
+        pointer_into(b, schema.error_field(errors, i))
+        strbuilder.append(b, "\"}}")
         i = i + 1
     }
     strbuilder.append(b, "]}")
