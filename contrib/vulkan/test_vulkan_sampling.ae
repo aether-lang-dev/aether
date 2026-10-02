@@ -1,0 +1,354 @@
+// contrib.vulkan: reading what was rendered, and 3D textures (#2198).
+//
+// A target's colour and depth bound where a texture goes, read in a later
+// pass, and a 3D texture read slice by slice. Every check reads pixels back:
+// "the call returned OK" would pass against a binding that sampled nothing.
+//
+// Runs anywhere: with no driver every case skips.
+
+import std.bytes
+import std.string
+import std.fs
+import contrib.vulkan
+import std.spec
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// The seven-float quad layout of textured.vert: x, y, a normal it ignores,
+// u, v. The quad covers the target, UV 0,0 at the top left.
+quad_layout() -> ptr {
+    lay = vulkan.layout_create()
+    _ = vulkan.layout_binding(lay, 0, 28, vulkan.PER_VERTEX)
+    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+    _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 8)
+    _ = vulkan.layout_attr(lay, 2, 0, vulkan.FORMAT_R32G32_SFLOAT, 20)
+    return lay
+}
+
+write_fullscreen_quad(t: ptr) {
+    _ = vulkan.verts_reserve_n(t, 4, 7)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    us = [0.0, 1.0, 1.0, 0.0]
+    vs = [0.0, 0.0, 1.0, 1.0]
+    i = 0
+    while i < 4 {
+        f = i * 7
+        _ = vulkan.verts_set_float(t, f, xs[i])
+        _ = vulkan.verts_set_float(t, f + 1, ys[i])
+        _ = vulkan.verts_set_float(t, f + 2, 0.0)
+        _ = vulkan.verts_set_float(t, f + 3, 0.0)
+        _ = vulkan.verts_set_float(t, f + 4, 1.0)
+        _ = vulkan.verts_set_float(t, f + 5, us[i])
+        _ = vulkan.verts_set_float(t, f + 6, vs[i])
+        i = i + 1
+    }
+    _ = vulkan.indices_reserve(t, 6)
+    order = [0, 1, 2, 2, 3, 0]
+    k = 0
+    while k < 6 {
+        _ = vulkan.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+// depth.vert's layout: x, y, z and a colour.
+depth_layout() -> ptr {
+    lay = vulkan.layout_create()
+    _ = vulkan.layout_binding(lay, 0, 24, vulkan.PER_VERTEX)
+    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 0)
+    _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 12)
+    return lay
+}
+
+// A quad over the LEFT half of the target at depth z; the right half keeps
+// the cleared far plane, 1.
+write_left_half(t: ptr, z: float) {
+    _ = vulkan.verts_reserve_n(t, 6, 6)
+    xs = [-1.0, 0.0, 0.0, 0.0, -1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0, 1.0, -1.0]
+    i = 0
+    while i < 6 {
+        f = i * 6
+        _ = vulkan.verts_set_float(t, f, xs[i])
+        _ = vulkan.verts_set_float(t, f + 1, ys[i])
+        _ = vulkan.verts_set_float(t, f + 2, z)
+        _ = vulkan.verts_set_float(t, f + 3, 1.0)
+        _ = vulkan.verts_set_float(t, f + 4, 1.0)
+        _ = vulkan.verts_set_float(t, f + 5, 1.0)
+        i = i + 1
+    }
+}
+
+// A white tint at binding 1, so the textured shader passes the texel through.
+white_tint(p: ptr) {
+    _ = vulkan.uniform_floats(p, 1, 4)
+    i = 0
+    while i < 4 {
+        _ = vulkan.uniform_float(p, 1, i, 1.0)
+        i = i + 1
+    }
+}
+
+near(a: float, b: float) -> int {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    if d < 0.001 { return 1 }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+
+    ready = 0
+    reason = "no Vulkan driver"
+    dev = null
+    tvs = ""
+    tvl = 0
+    tfs = ""
+    tfl = 0
+    dfs = ""
+    dfl = 0
+    vfs = ""
+    vfl = 0
+    pvs = ""
+    pvl = 0
+    pfs = ""
+    pfl = 0
+    if vulkan.available() == 1 {
+        dev = vulkan.device_create()
+        if dev == null {
+            reason = "device_create failed (${vulkan.last_error()})"
+        } else {
+            tvs, tvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
+            tfs, tfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
+            dfs, dfl = load_spv("contrib/vulkan/shaders/depth_read.frag.spv")
+            vfs, vfl = load_spv("contrib/vulkan/shaders/volume.frag.spv")
+            pvs, pvl = load_spv("contrib/vulkan/shaders/depth.vert.spv")
+            pfs, pfl = load_spv("contrib/vulkan/shaders/depth.frag.spv")
+            if tvl == 0 || tfl == 0 || dfl == 0 || vfl == 0 || pvl == 0 || pfl == 0 {
+                reason = "SPIR-V shaders not built"
+            } else {
+                ready = 1
+            }
+        }
+    } else {
+        reason = "no Vulkan driver (${vulkan.last_error()})"
+    }
+
+    spec.describe(fw, "vulkan: a target's colour as a texture") {
+        spec.it_when(ready, "reads the newest frame, and the frame after a resize", reason) callback {
+            src = vulkan.target_create(dev, 8, 8)
+            dst = vulkan.target_create(dev, 8, 8)
+            lay = quad_layout()
+            binds = vulkan.bindings_create()
+            _ = vulkan.bindings_texture(binds, 0)
+            _ = vulkan.bindings_uniform(binds, 1)
+            pipe = vulkan.pipeline_create_ex(dev, dst, tvs, tvl, tfs, tfl, lay, 0, binds)
+            spec.assert_true(pipe != null, "the sampling pipeline (${vulkan.last_error()})")
+            white_tint(pipe)
+            write_fullscreen_quad(dst)
+
+            // Cleared red: no pipeline, the clear is the frame.
+            spec.assert_eq(vulkan.draw(src, null, 1.0, 0.0, 0.0, 1.0), vulkan.OK, "src drawn red")
+            spec.assert_eq(vulkan.set_target(pipe, 0, src), vulkan.OK, "bound (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.draw(dst, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK,
+                "dst samples src (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.pixel(dst, 4, 4), 4278190335, "dst reads src's red")
+
+            // The newest frame, without rebinding.
+            spec.assert_eq(vulkan.draw(src, null, 0.0, 1.0, 0.0, 1.0), vulkan.OK, "src drawn green")
+            spec.assert_eq(vulkan.draw(dst, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "dst again")
+            spec.assert_eq(vulkan.pixel(dst, 4, 4), 16711935, "dst reads src's newest frame")
+
+            // A resize replaces src's images; the binding follows them.
+            spec.assert_eq(vulkan.target_resize(src, 16, 16), vulkan.OK, "src resized")
+            spec.assert_eq(vulkan.draw(src, null, 0.0, 0.0, 1.0, 1.0), vulkan.OK, "src drawn blue")
+            spec.assert_eq(vulkan.draw(dst, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK,
+                "dst after the resize (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.pixel(dst, 4, 4), 65535, "dst reads src at its new size")
+
+            // A material does the same, and two materials read two targets.
+            other = vulkan.target_create(dev, 8, 8)
+            _ = vulkan.draw(other, null, 1.0, 1.0, 1.0, 1.0)
+            m = vulkan.material_create(pipe)
+            _ = vulkan.material_floats(m, 1, 4)
+            j = 0
+            while j < 4 { _ = vulkan.material_float(m, 1, j, 1.0); j = j + 1 }
+            spec.assert_eq(vulkan.material_set_target(m, 0, other), vulkan.OK, "material bound")
+            spec.assert_eq(vulkan.draw_material(dst, pipe, m, 0.0, 0.0, 0.0, 1.0), vulkan.OK,
+                "draw with the material")
+            spec.assert_eq(vulkan.pixel(dst, 4, 4), 4294967295, "the material reads the white target")
+
+            vulkan.material_destroy(m)
+            vulkan.pipeline_destroy(pipe)
+            vulkan.bindings_destroy(binds)
+            vulkan.layout_destroy(lay)
+            vulkan.target_destroy(other)
+            vulkan.target_destroy(dst)
+            vulkan.target_destroy(src)
+        }
+
+        spec.it_when(ready, "refuses what cannot be sampled", reason) callback {
+            src = vulkan.target_create(dev, 8, 8)
+            dst = vulkan.target_create(dev, 8, 8)
+            lay = quad_layout()
+            binds = vulkan.bindings_create()
+            _ = vulkan.bindings_texture(binds, 0)
+            _ = vulkan.bindings_uniform(binds, 1)
+            pipe = vulkan.pipeline_create_ex(dev, dst, tvs, tvl, tfs, tfl, lay, 0, binds)
+            white_tint(pipe)
+            write_fullscreen_quad(dst)
+
+            spec.assert_eq(vulkan.set_target(pipe, 1, src), vulkan.ERR_ARG, "binding 1 is a uniform")
+            spec.assert_eq(vulkan.set_target(pipe, 0, src), vulkan.OK, "bound before src has a frame")
+            spec.assert_eq(vulkan.draw(dst, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.ERR_ARG,
+                "a target with no frame yet is refused")
+            spec.assert_true(string.contains(vulkan.last_error(), "no frame yet") == 1,
+                "and says so: ${vulkan.last_error()}")
+
+            spec.assert_eq(vulkan.set_target(pipe, 0, dst), vulkan.OK, "bound to itself")
+            spec.assert_eq(vulkan.draw(dst, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.ERR_ARG,
+                "a target sampling itself is refused")
+
+            spec.assert_eq(vulkan.set_target_depth(pipe, 0, src), vulkan.ERR_ARG,
+                "depth of a target without depth")
+            msaa = vulkan.target_create_ex(dev, 8, 8, 1, 4)
+            if msaa != null {
+                spec.assert_eq(vulkan.set_target_depth(pipe, 0, msaa), vulkan.ERR_UNSUPPORTED,
+                    "depth of a multisampled target")
+                vulkan.target_destroy(msaa)
+            }
+
+            vulkan.pipeline_destroy(pipe)
+            vulkan.bindings_destroy(binds)
+            vulkan.layout_destroy(lay)
+            vulkan.target_destroy(dst)
+            vulkan.target_destroy(src)
+        }
+    }
+
+    spec.describe(fw, "vulkan: a target's depth as a texture") {
+        spec.it_when(ready, "reads the depth a pass wrote", reason) callback {
+            ds = vulkan.target_create_ex(dev, 8, 8, 1, 1)
+            dlay = depth_layout()
+            dpipe = vulkan.pipeline_create_ex(dev, ds, pvs, pvl, pfs, pfl, dlay, 0, null)
+            spec.assert_true(dpipe != null, "the depth pipeline (${vulkan.last_error()})")
+            write_left_half(ds, 0.25)
+
+            out = vulkan.target_create_format(dev, 8, 8, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            lay = quad_layout()
+            binds = vulkan.bindings_create()
+            _ = vulkan.bindings_texture(binds, 0)
+            rpipe = vulkan.pipeline_create_ex(dev, out, tvs, tvl, dfs, dfl, lay, 0, binds)
+            spec.assert_true(rpipe != null, "the depth-reading pipeline (${vulkan.last_error()})")
+            write_fullscreen_quad(out)
+
+            spec.assert_eq(vulkan.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "a first depth pass")
+            // Binding the depth the first time makes the target keep it, which
+            // replaces its images: the earlier frame is gone.
+            spec.assert_eq(vulkan.set_target_depth(rpipe, 0, ds), vulkan.OK,
+                "depth bound (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.draw(out, rpipe, 0.0, 0.0, 0.0, 1.0), vulkan.ERR_ARG,
+                "the depth from before it was kept is not there to read")
+
+            spec.assert_eq(vulkan.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "depth pass")
+            spec.assert_eq(vulkan.draw(out, rpipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK,
+                "the depth read (${vulkan.last_error()})")
+            spec.assert_eq(near(vulkan.pixel_value(out, 1, 4, 0), 0.25), 1,
+                "the quad's depth, 0.25 (got ${vulkan.pixel_value(out, 1, 4, 0)})")
+            spec.assert_eq(near(vulkan.pixel_value(out, 6, 4, 0), 1.0), 1,
+                "the cleared far plane, 1 (got ${vulkan.pixel_value(out, 6, 4, 0)})")
+
+            // The depth pass keeps rendering normally once it is kept.
+            write_left_half(ds, 0.5)
+            _ = vulkan.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0)
+            _ = vulkan.draw(out, rpipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(near(vulkan.pixel_value(out, 1, 4, 0), 0.5), 1,
+                "the next depth, 0.5 (got ${vulkan.pixel_value(out, 1, 4, 0)})")
+
+            vulkan.pipeline_destroy(rpipe)
+            vulkan.pipeline_destroy(dpipe)
+            vulkan.bindings_destroy(binds)
+            vulkan.layout_destroy(lay)
+            vulkan.layout_destroy(dlay)
+            vulkan.target_destroy(out)
+            vulkan.target_destroy(ds)
+        }
+    }
+
+    spec.describe(fw, "vulkan: 3D textures") {
+        spec.it_when(ready, "reads each slice's texels", reason) callback {
+            vol = vulkan.texture_create_3d(dev, 2, 2, 2, 0, 0)
+            spec.assert_true(vol != null, "texture_create_3d (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.texture_depth(vol), 2, "two slices")
+            // Slice 0: red, green / blue, yellow. Slice 1: cyan, magenta /
+            // white, a dark grey.
+            texels = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0,
+                      0, 255, 255, 255, 0, 255, 255, 255, 255, 40, 40, 40]
+            px = bytes.new(32)
+            _ = bytes.set_length(px, 32)
+            i = 0
+            while i < 8 {
+                _ = bytes.set(px, i * 4, texels[i * 3])
+                _ = bytes.set(px, i * 4 + 1, texels[i * 3 + 1])
+                _ = bytes.set(px, i * 4 + 2, texels[i * 3 + 2])
+                _ = bytes.set(px, i * 4 + 3, 255)
+                i = i + 1
+            }
+            spec.assert_eq(vulkan.texture_upload(vol, bytes.data(px), 31), vulkan.ERR_ARG,
+                "a short upload is refused")
+            spec.assert_eq(vulkan.texture_upload(vol, bytes.data(px), 32), vulkan.OK, "uploaded")
+            bytes.free(px)
+
+            out = vulkan.target_create(dev, 2, 2)
+            lay = quad_layout()
+            binds = vulkan.bindings_create()
+            _ = vulkan.bindings_texture(binds, 0)
+            pipe = vulkan.pipeline_create_ex(dev, out, tvs, tvl, vfs, vfl, lay, 4, binds)
+            spec.assert_true(pipe != null, "the volume pipeline (${vulkan.last_error()})")
+            write_fullscreen_quad(out)
+            spec.assert_eq(vulkan.set_texture(pipe, 0, vol), vulkan.OK, "bound")
+            _ = vulkan.push_floats(out, 1)
+
+            _ = vulkan.push_float(out, 0, 0.25)
+            spec.assert_eq(vulkan.draw(out, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "slice 0")
+            spec.assert_eq(vulkan.pixel(out, 0, 0), 4278190335, "slice 0 top left: red")
+            spec.assert_eq(vulkan.pixel(out, 1, 0), 16711935, "slice 0 top right: green")
+            spec.assert_eq(vulkan.pixel(out, 0, 1), 65535, "slice 0 bottom left: blue")
+            spec.assert_eq(vulkan.pixel(out, 1, 1), 4294902015, "slice 0 bottom right: yellow")
+
+            _ = vulkan.push_float(out, 0, 0.75)
+            spec.assert_eq(vulkan.draw(out, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "slice 1")
+            spec.assert_eq(vulkan.pixel(out, 0, 0), 16777215, "slice 1 top left: cyan")
+            spec.assert_eq(vulkan.pixel(out, 1, 0), 4278255615, "slice 1 top right: magenta")
+            spec.assert_eq(vulkan.pixel(out, 0, 1), 4294967295, "slice 1 bottom left: white")
+            spec.assert_eq(vulkan.pixel(out, 1, 1), 673720575, "slice 1 bottom right: grey")
+
+            spec.assert_true(vulkan.texture_create_3d(dev, 2, 2, 0, 0, 0) == null,
+                "zero slices are refused")
+
+            vulkan.pipeline_destroy(pipe)
+            vulkan.bindings_destroy(binds)
+            vulkan.layout_destroy(lay)
+            vulkan.target_destroy(out)
+            vulkan.texture_destroy(vol)
+        }
+    }
+
+    string.free(tvs)
+    string.free(tfs)
+    string.free(dfs)
+    string.free(vfs)
+    string.free(pvs)
+    string.free(pfs)
+    _rc = spec.run_summary(fw)
+    if dev != null { vulkan.device_destroy(dev) }
+    return _rc
+}

@@ -160,12 +160,24 @@ AemtTexture* aemt_texture_create_ex(AemtDevice* dev, int width, int height,
                                     int mipmapped, int linear_filter, int repeat);
 void         aemt_texture_destroy(AemtTexture* tex);
 int          aemt_texture_mip_levels(const AemtTexture* tex);
+/* A 3D texture of `depth` slices of width x height RGBA, read through a
+ * texture3d (#2198). No mip chain; upload is width*height*depth*4 bytes,
+ * slice after slice. Slices: 1 for a 2D texture. */
+AemtTexture* aemt_texture_create_3d(AemtDevice* dev, int width, int height, int depth,
+                                    int linear_filter, int repeat);
+int          aemt_texture_depth(const AemtTexture* tex);
 int          aemt_texture_upload(AemtTexture* tex, const void* rgba, size_t len);
 
 AemtMaterial* aemt_material_create(AemtPipeline* p);
 void          aemt_material_destroy(AemtMaterial* m);
 int           aemt_material_set_uniform(AemtMaterial* m, int binding, const void* data, size_t len);
 int           aemt_material_set_texture(AemtMaterial* m, int binding, AemtTexture* tex);
+/* A target's newest frame where a texture goes (#2198): its colour (depth 0)
+ * or its depth as a Depth32Float texture (depth 1). Draw the target first. A
+ * target cannot sample itself, one with no frame yet cannot be sampled, and
+ * neither can a multisampled target's depth. Binding the depth the first
+ * time rebuilds the target's images so the depth is kept. */
+int           aemt_material_set_target(AemtMaterial* m, int binding, AemtTarget* t, int depth);
 int           aemt_material_set_buffer(AemtMaterial* m, int binding, AemtBuffer* buf);
 
 /* --- geometry, drawing, readback -------------------------------------------- */

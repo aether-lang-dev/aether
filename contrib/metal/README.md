@@ -214,6 +214,22 @@ staging buffer and, for a mipmapped texture, builds the chain on the GPU with
 comes out as its average grey, and without the chain as single texels; the
 resources test checks both.
 
+`texture_create_3d(dev, w, h, depth, linear, repeat)` is a `texture3d` of
+`depth` RGBA slices, up to 2048 a side; `texture_upload` takes them slice
+after slice and `texture_depth` reports how many.
+
+## Reading what was rendered
+
+`set_target(p, b, t)` and `set_target_depth(p, b, t)`, and their `material_`
+forms, bind a target's newest frame at `[[texture(N)]]` and `[[sampler(N)]]`.
+Depth reads through a `depth2d<float>`, 0 near to 1 far. Metal tracks the
+hazard between the pass that draws a target and the one that reads it, so no
+barrier is written. A depth texture gains `MTLTextureUsageShaderRead` and the
+store action `Store` once something samples it; until then the pass discards
+it. The refusals are those of the shared shape: sampling the target
+being drawn, a target with no frame, and depth of a target without depth or
+with multisampling.
+
 A draw of 16-bit indices must start at an even index. Metal requires an index
 buffer offset to be a multiple of 4 bytes, and the module refuses such a draw
 rather than letting it read the wrong indices.

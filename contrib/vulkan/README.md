@@ -219,6 +219,40 @@ render pass, so a tiler never writes them to memory.
 `target_has_depth(t)` and `target_samples(t)` report what a target actually
 got.
 
+## Reading what was rendered
+
+A target's newest frame binds where a texture goes, as colour or as depth:
+
+```aether,fragment
+vulkan.draw(shadow, shadow_pipe, 0.0, 0.0, 0.0, 1.0)
+vulkan.set_target_depth(lit_pipe, 0, shadow)   // sampler2D, red = depth
+vulkan.material_set_target(post_mat, 0, scene) // a material, the colour
+```
+
+The binding follows the target rather than one image: after a resize, or with
+frames in flight, the draw reads whatever was most recently submitted to it.
+The colour image rests in `TRANSFER_SRC_OPTIMAL` between frames; the
+consumer's command buffer moves it to `SHADER_READ_ONLY_OPTIMAL` before its
+render pass and back after, and depth goes from its attachment layout and
+back the same way. The colour is filtered linearly where the format allows
+it, and depth by nearest texel.
+
+Depth is `TRANSIENT` with `storeOp DONT_CARE` until the first time something
+samples it. That call waits for the device, rebuilds the depth image as
+`SAMPLED` and its pass with `storeOp STORE`, and re-records what was recorded
+against the old images; pipelines carry over, because render-pass
+compatibility ignores store operations.
+
+Refused, with the reason in `last_error()`: a draw sampling its own target, a
+target with no frame yet, and the depth of a target without depth or with
+multisampling. The validation layer, synchronisation and best-practices
+checks included, reports nothing for `test_vulkan_sampling.ae`.
+
+`texture_create_3d(dev, w, h, depth, linear, repeat)` makes a 3D texture of
+`depth` RGBA slices, read through a `sampler3D`, up to the device's
+`maxImageDimension3D` a side. `texture_upload` takes `w * h * depth * 4`
+bytes; `texture_depth` reports the slices.
+
 ## Colour formats and image files
 
 `target_create` renders to RGBA8 UNORM. `target_create_format` takes any of

@@ -121,6 +121,22 @@
 //   vulkan.target_set_readback(t, on)   -> int     off: no per-frame copy out
 //   vulkan.target_readback(t)           -> int
 //
+// Reading what was rendered, and volumes (#2198):
+//
+//   vulkan.set_target(p, binding, t)    -> int     a target's colour as a texture
+//   vulkan.set_target_depth(p, binding, t) -> int  its depth, as a float texture
+//   vulkan.material_set_target(m, binding, t)       -> int
+//   vulkan.material_set_target_depth(m, binding, t) -> int
+//   vulkan.texture_create_3d(dev, w, h, depth, linear, repeat) -> ptr
+//   vulkan.texture_depth(tex)           -> int     slices: 1 for a 2D texture
+//
+// A target bound where a texture goes is read as its newest frame: whatever
+// was most recently submitted to it when the draw runs. Draw the target first.
+// Its depth reads near 0 to far 1. A target cannot sample itself, a target
+// with no frame yet cannot be sampled, and a multisampled target's depth
+// cannot either. A 3D texture is uploaded slice after slice
+// (w * h * depth * 4 bytes) and read through a sampler3D.
+//
 // The window is never this module's: `kind`, `display` and `window` are what
 // the toolkit that owns it hands out, numbered as aether-ui's
 // native_view_kind() numbers them (WINDOW_WIN32 = 1 ... WINDOW_WAYLAND = 4),
@@ -230,7 +246,11 @@ exports (
     target_resize, target_set_readback, target_readback,
     swapchain_create, swapchain_destroy, swapchain_resize, swapchain_set_vsync,
     swapchain_width, swapchain_height, swapchain_format, swapchain_presented,
-    present
+    present,
+    aevk_ae_set_target, aevk_ae_material_set_target,
+    aevk_ae_texture_create_3d, aevk_ae_texture_depth,
+    set_target, set_target_depth, material_set_target, material_set_target_depth,
+    texture_create_3d, texture_depth
 )
 
 extern aevk_ae_available() -> int
@@ -296,6 +316,10 @@ extern aevk_ae_indices_set(t: ptr, index: int, value: int) -> int
 extern aevk_ae_material_create(p: ptr) -> ptr
 extern aevk_ae_material_destroy(m: ptr)
 extern aevk_ae_material_set_texture(m: ptr, binding: int, tex: ptr) -> int
+extern aevk_ae_set_target(p: ptr, binding: int, t: ptr, depth: int) -> int
+extern aevk_ae_material_set_target(m: ptr, binding: int, t: ptr, depth: int) -> int
+extern aevk_ae_texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr
+extern aevk_ae_texture_depth(tex: ptr) -> int
 extern aevk_ae_material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int
 extern aevk_ae_material_floats(m: ptr, binding: int, count: int) -> int
 extern aevk_ae_material_float(m: ptr, binding: int, index: int, value: float) -> int
@@ -501,6 +525,16 @@ texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int,
 // Levels in the chain: 1 for a texture created without mipmaps.
 texture_mip_levels(tex: ptr) -> int { return aevk_ae_texture_mip_levels(tex) }
 
+// A 3D texture: `depth` slices of w x h RGBA, read through a sampler3D (the
+// clouds' tileable noise, a colour grading cube). No mip chain. Upload
+// w * h * depth * 4 bytes, slice after slice.
+texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr {
+    return aevk_ae_texture_create_3d(dev, w, h, depth, linear, repeat)
+}
+
+// Slices: 1 for a 2D texture.
+texture_depth(tex: ptr) -> int { return aevk_ae_texture_depth(tex) }
+
 texture_destroy(tex: ptr) { aevk_ae_texture_destroy(tex) }
 texture_upload(tex: ptr, rgba: ptr, len: int) -> int {
     return aevk_ae_texture_upload(tex, rgba, len)
@@ -511,6 +545,15 @@ set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int {
 }
 set_texture(p: ptr, binding: int, tex: ptr) -> int {
     return aevk_ae_set_texture(p, binding, tex)
+}
+
+// A target's newest frame where a texture goes: its colour, or its depth as
+// a single-channel float (near 0, far 1). Draw the target first.
+set_target(p: ptr, binding: int, t: ptr) -> int {
+    return aevk_ae_set_target(p, binding, t, 0)
+}
+set_target_depth(p: ptr, binding: int, t: ptr) -> int {
+    return aevk_ae_set_target(p, binding, t, 1)
 }
 set_push(t: ptr, data: ptr, len: int) -> int { return aevk_ae_set_push(t, data, len) }
 
@@ -557,6 +600,12 @@ material_create(p: ptr) -> ptr { return aevk_ae_material_create(p) }
 material_destroy(m: ptr) { aevk_ae_material_destroy(m) }
 material_set_texture(m: ptr, binding: int, tex: ptr) -> int {
     return aevk_ae_material_set_texture(m, binding, tex)
+}
+material_set_target(m: ptr, binding: int, t: ptr) -> int {
+    return aevk_ae_material_set_target(m, binding, t, 0)
+}
+material_set_target_depth(m: ptr, binding: int, t: ptr) -> int {
+    return aevk_ae_material_set_target(m, binding, t, 1)
 }
 material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int {
     return aevk_ae_material_set_uniform(m, binding, data, len)

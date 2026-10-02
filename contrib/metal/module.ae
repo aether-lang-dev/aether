@@ -36,6 +36,12 @@
 //   metal.texture_create_ex(dev, w, h, mipmapped, linear, repeat) -> ptr
 //   metal.texture_upload(tex, rgba, len) -> int
 //   metal.texture_mip_levels(tex)       -> int
+//   metal.texture_create_3d(dev, w, h, depth, linear, repeat) -> ptr
+//   metal.texture_depth(tex)            -> int     slices: 1 for a 2D texture
+//   metal.set_target(p, binding, t) / set_target_depth(p, binding, t)
+//   metal.material_set_target(m, binding, t) / material_set_target_depth(...)
+//         a target's newest frame, its colour or its depth (a float,
+//         near 0 to far 1), where a texture goes; draw the target first
 //   metal.texture_destroy(tex)
 //
 //   metal.set_texture / set_uniform / set_buffer / uniform_floats /
@@ -156,7 +162,10 @@ exports(
     compute_set_push,
     compute_push_float, compute_push_int, compute_set_timeout_ms, dispatch, dispatch_async, compute_wait,
     swapchain_create, swapchain_destroy, swapchain_resize, swapchain_set_vsync,
-    swapchain_width, swapchain_height, swapchain_format, swapchain_presented, present
+    swapchain_width, swapchain_height, swapchain_format, swapchain_presented, present,
+    aemt_ae_set_target, aemt_ae_material_set_target, aemt_ae_texture_create_3d, aemt_ae_texture_depth,
+    set_target, set_target_depth, material_set_target, material_set_target_depth,
+    texture_create_3d, texture_depth
 )
 
 extern aemt_ae_available() -> int
@@ -199,6 +208,10 @@ extern aemt_ae_texture_create(dev: ptr, w: int, h: int) -> ptr
 extern aemt_ae_texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int, linear: int, repeat: int) -> ptr
 extern aemt_ae_texture_destroy(tex: ptr)
 extern aemt_ae_texture_mip_levels(tex: ptr) -> int
+extern aemt_ae_texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr
+extern aemt_ae_texture_depth(tex: ptr) -> int
+extern aemt_ae_set_target(p: ptr, binding: int, t: ptr, depth: int) -> int
+extern aemt_ae_material_set_target(m: ptr, binding: int, t: ptr, depth: int) -> int
 extern aemt_ae_texture_upload(tex: ptr, rgba: ptr, len: int) -> int
 extern aemt_ae_set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int
 extern aemt_ae_set_texture(p: ptr, binding: int, tex: ptr) -> int
@@ -377,10 +390,20 @@ texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int, linear: int, repeat:
 }
 texture_destroy(tex: ptr) { aemt_ae_texture_destroy(tex) }
 texture_mip_levels(tex: ptr) -> int { return aemt_ae_texture_mip_levels(tex) }
+// A 3D texture: `depth` slices of w x h RGBA, read through a texture3d. No
+// mip chain. Upload w * h * depth * 4 bytes, slice after slice.
+texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr {
+    return aemt_ae_texture_create_3d(dev, w, h, depth, linear, repeat)
+}
+texture_depth(tex: ptr) -> int { return aemt_ae_texture_depth(tex) }
 texture_upload(tex: ptr, rgba: ptr, len: int) -> int { return aemt_ae_texture_upload(tex, rgba, len) }
 
 set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int { return aemt_ae_set_uniform(p, binding, data, len) }
 set_texture(p: ptr, binding: int, tex: ptr) -> int { return aemt_ae_set_texture(p, binding, tex) }
+// A target's newest frame where a texture goes: its colour, or its depth as
+// a float (near 0, far 1). Draw the target first.
+set_target(p: ptr, binding: int, t: ptr) -> int { return aemt_ae_set_target(p, binding, t, 0) }
+set_target_depth(p: ptr, binding: int, t: ptr) -> int { return aemt_ae_set_target(p, binding, t, 1) }
 set_buffer(p: ptr, binding: int, buf: ptr) -> int { return aemt_ae_set_buffer(p, binding, buf) }
 uniform_floats(p: ptr, binding: int, count: int) -> int { return aemt_ae_uniform_floats(p, binding, count) }
 uniform_float(p: ptr, binding: int, index: int, value: float) -> int {
@@ -390,6 +413,10 @@ uniform_float(p: ptr, binding: int, index: int, value: float) -> int {
 material_create(p: ptr) -> ptr { return aemt_ae_material_create(p) }
 material_destroy(m: ptr) { aemt_ae_material_destroy(m) }
 material_set_texture(m: ptr, binding: int, tex: ptr) -> int { return aemt_ae_material_set_texture(m, binding, tex) }
+material_set_target(m: ptr, binding: int, t: ptr) -> int { return aemt_ae_material_set_target(m, binding, t, 0) }
+material_set_target_depth(m: ptr, binding: int, t: ptr) -> int {
+    return aemt_ae_material_set_target(m, binding, t, 1)
+}
 material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int {
     return aemt_ae_material_set_uniform(m, binding, data, len)
 }

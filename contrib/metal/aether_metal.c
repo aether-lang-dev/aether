@@ -90,6 +90,7 @@ enum {
     MTL_RESOURCE_SHARED        = 0x0,
     MTL_TEXTURE_2D             = 2,
     MTL_TEXTURE_2D_MULTISAMPLE = 4,
+    MTL_TEXTURE_3D             = 7,
     MTL_USAGE_SHADER_READ      = 1,
     MTL_USAGE_RENDER_TARGET    = 4,
 
@@ -119,6 +120,8 @@ enum {
 /* Every Metal GPU on macOS supports 2D textures this large (the Mac2 and
  * Apple3 and later families of Apple's Metal feature set tables). */
 #define AEMT_MAX_TEXTURE 16384
+/* And 3D textures this large on every side (#2198). */
+#define AEMT_MAX_TEXTURE_3D 2048
 
 /* ------------------------------------------------------------------------ */
 /* Runtime loading                                                           */
@@ -552,6 +555,15 @@ struct AemtTarget {
     id             depth;
     int            readback_on;
     int            rendered;
+    /* Sampling the target in a later pass (#2198). `sampler` filters the
+     * colour linearly where the device can, `depth_sampler` reads depth by
+     * nearest texel. `depth_sampled` is set the first time a material binds
+     * the depth: from then on it is stored at the end of the pass and made
+     * shader-readable. Metal tracks hazards on these textures itself, so a
+     * later command buffer on the queue waits for the pass that wrote them. */
+    id             sampler;
+    id             depth_sampler;
+    int            depth_sampled;
 
     id             vbuf;
     unsigned char* vbuf_ptr;
@@ -698,7 +710,8 @@ static int aemt_target_make_images(AemtTarget* t) {
     }
     if (t->has_depth) {
         t->depth = aemt_make_texture(d, t->width, t->height, MTL_PIXEL_DEPTH32_FLOAT, t->samples, 1,
-                                     MTL_USAGE_RENDER_TARGET);
+                                     MTL_USAGE_RENDER_TARGET |
+                                     (t->depth_sampled ? MTL_USAGE_SHADER_READ : 0));
         if (!t->depth) return AEMT_ERR_OOM;
     }
     return AEMT_OK;
@@ -716,6 +729,23 @@ static int aemt_check_size(int width, int height, int bpp) {
         return aemt_fail(AEMT_ERR_UNSUPPORTED, "%dx%d does not fit a readback", width, height);
     }
     return AEMT_OK;
+}
+
+/* A clamped, unmipmapped sampler: linear or nearest (#2198). Owned. */
+static id aemt_make_sampler(AemtDevice* d, int linear) {
+    id sd = mt_new("MTLSamplerDescriptor");
+    if (!sd) { aemt_fail(AEMT_ERR_OOM, "MTLSamplerDescriptor is missing"); return NULL; }
+    AemtUInt filter = linear ? MTL_FILTER_LINEAR : MTL_FILTER_NEAREST;
+    MT_SEND(void, AemtUInt)(sd, mt_sel("setMinFilter:"), filter);
+    MT_SEND(void, AemtUInt)(sd, mt_sel("setMagFilter:"), filter);
+    MT_SEND(void, AemtUInt)(sd, mt_sel("setMipFilter:"), (AemtUInt)MTL_MIP_NOT_MIPMAPPED);
+    MT_SEND(void, AemtUInt)(sd, mt_sel("setSAddressMode:"), (AemtUInt)MTL_ADDRESS_CLAMP_TO_EDGE);
+    MT_SEND(void, AemtUInt)(sd, mt_sel("setTAddressMode:"), (AemtUInt)MTL_ADDRESS_CLAMP_TO_EDGE);
+    MT_SEND(void, AemtUInt)(sd, mt_sel("setRAddressMode:"), (AemtUInt)MTL_ADDRESS_CLAMP_TO_EDGE);
+    id sampler = MT_SEND(id, id)(d->device, mt_sel("newSamplerStateWithDescriptor:"), sd);
+    mt_release(sd);
+    if (!sampler) aemt_fail(AEMT_ERR_OOM, "newSamplerStateWithDescriptor failed");
+    return sampler;
 }
 
 AemtTarget* aemt_target_create(AemtDevice* d, int width, int height) {
@@ -768,7 +798,17 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
     t->timeout_ms = 5000;
     t->last_submitted = -1;
     void* pool = g_mt.pool_push();
-    int rc = aemt_target_make_images(t);
+    /* The samplers a later pass reads the target through (#2198): linear
+     * unless the format is a 32-bit float the device cannot filter. */
+    int linear = format != AEMT_FORMAT_R32G32B32A32_SFLOAT || d->filter32;
+    int rc = AEMT_OK;
+    t->sampler = aemt_make_sampler(d, linear);
+    if (!t->sampler) rc = AEMT_ERR_OOM;
+    if (rc == AEMT_OK && want_depth) {
+        t->depth_sampler = aemt_make_sampler(d, 0);
+        if (!t->depth_sampler) rc = AEMT_ERR_OOM;
+    }
+    if (rc == AEMT_OK) rc = aemt_target_make_images(t);
     if (rc == AEMT_OK) rc = aemt_frames_alloc(t, 1);
     g_mt.pool_pop(pool);
     if (rc != AEMT_OK) {
@@ -796,6 +836,8 @@ void aemt_target_destroy(AemtTarget* t) {
     void* pool = g_mt.pool_push();
     aemt_frames_free(t);
     aemt_target_free_images(t);
+    mt_release(t->sampler);
+    mt_release(t->depth_sampler);
     mt_release(t->vbuf);
     mt_release(t->ibuf);
     g_mt.pool_pop(pool);
@@ -1187,6 +1229,7 @@ int aemt_bindings_storage(AemtBindings* b, int binding) { return aemt_bindings_a
 struct AemtTexture {
     AemtDevice* dev;
     int         width, height;
+    int         depth;          /* 1 for a 2D texture; slices for a 3D one (#2198) */
     int         mips;
     id          tex;
     id          sampler;
@@ -1207,12 +1250,37 @@ AemtTexture* aemt_texture_create(AemtDevice* d, int w, int h) {
     return aemt_texture_create_ex(d, w, h, 0, 0, 0);
 }
 
-AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int mipmapped, int linear_filter, int repeat) {
+/* A private RGBA8 3D texture of `depth` slices, one level. Owned. */
+static id aemt_make_texture3d(AemtDevice* d, int w, int h, int depth) {
+    id desc = mt_new("MTLTextureDescriptor");
+    if (!desc) { aemt_fail(AEMT_ERR_OOM, "MTLTextureDescriptor is missing"); return NULL; }
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setTextureType:"), (AemtUInt)MTL_TEXTURE_3D);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setPixelFormat:"), (AemtUInt)MTL_PIXEL_RGBA8_UNORM);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setWidth:"), (AemtUInt)w);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setHeight:"), (AemtUInt)h);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setDepth:"), (AemtUInt)depth);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setMipmapLevelCount:"), (AemtUInt)1);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setUsage:"), (AemtUInt)MTL_USAGE_SHADER_READ);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setStorageMode:"), (AemtUInt)MTL_STORAGE_PRIVATE);
+    id t = MT_SEND(id, id)(d->device, mt_sel("newTextureWithDescriptor:"), desc);
+    mt_release(desc);
+    if (!t) aemt_fail(AEMT_ERR_OOM, "newTextureWithDescriptor (%dx%dx%d 3D texture) failed", w, h, depth);
+    return t;
+}
+
+/* A 2D texture (`is_3d` 0, `depth` 1) or a 3D one of `depth` slices
+ * (#2198): the clouds' tileable noise, a colour grading cube, a volume. */
+static AemtTexture* aemt_texture_make(AemtDevice* d, int w, int h, int depth, int is_3d,
+                                      int mipmapped, int linear_filter, int repeat) {
     aemt_clear_error();
     if (!d) { aemt_fail(AEMT_ERR_ARG, "device is null"); return NULL; }
-    if (w <= 0 || h <= 0) { aemt_fail(AEMT_ERR_ARG, "texture size %dx%d is not positive", w, h); return NULL; }
-    if (w > AEMT_MAX_TEXTURE || h > AEMT_MAX_TEXTURE) {
-        aemt_fail(AEMT_ERR_UNSUPPORTED, "texture %dx%d exceeds the Metal limit of %d", w, h, AEMT_MAX_TEXTURE);
+    if (w <= 0 || h <= 0 || depth <= 0) {
+        aemt_fail(AEMT_ERR_ARG, "texture size %dx%dx%d is not positive", w, h, depth);
+        return NULL;
+    }
+    int limit = is_3d ? AEMT_MAX_TEXTURE_3D : AEMT_MAX_TEXTURE;
+    if (w > limit || h > limit || depth > limit) {
+        aemt_fail(AEMT_ERR_UNSUPPORTED, "texture %dx%dx%d exceeds the Metal limit of %d", w, h, depth, limit);
         return NULL;
     }
     AemtTexture* tex = (AemtTexture*)calloc(1, sizeof(*tex));
@@ -1220,11 +1288,13 @@ AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int mipmapped, 
     tex->dev = d;
     tex->width = w;
     tex->height = h;
+    tex->depth = depth;
     tex->mips = mipmapped ? aemt_mip_levels_for(w, h) : 1;
     void* pool = g_mt.pool_push();
     /* Render-target usage too: generating the mip chain renders into it. */
-    tex->tex = aemt_make_texture(d, w, h, MTL_PIXEL_RGBA8_UNORM, 1, tex->mips,
-                                 MTL_USAGE_SHADER_READ | (tex->mips > 1 ? MTL_USAGE_RENDER_TARGET : 0));
+    tex->tex = is_3d ? aemt_make_texture3d(d, w, h, depth)
+                     : aemt_make_texture(d, w, h, MTL_PIXEL_RGBA8_UNORM, 1, tex->mips,
+                                         MTL_USAGE_SHADER_READ | (tex->mips > 1 ? MTL_USAGE_RENDER_TARGET : 0));
     if (tex->tex) {
         id sd = mt_new("MTLSamplerDescriptor");
         AemtUInt filter = linear_filter ? MTL_FILTER_LINEAR : MTL_FILTER_NEAREST;
@@ -1248,6 +1318,18 @@ AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int mipmapped, 
     return tex;
 }
 
+AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int mipmapped, int linear_filter, int repeat) {
+    return aemt_texture_make(d, w, h, 1, 0, mipmapped, linear_filter, repeat);
+}
+
+/* A 3D texture: `depth` slices of w x h RGBA, read through a texture3d. No
+ * mip chain; upload is w * h * depth * 4 bytes, slice by slice. */
+AemtTexture* aemt_texture_create_3d(AemtDevice* d, int w, int h, int depth, int linear_filter, int repeat) {
+    return aemt_texture_make(d, w, h, depth, 1, 0, linear_filter, repeat);
+}
+
+int aemt_texture_depth(const AemtTexture* tex) { return tex ? tex->depth : 0; }
+
 int aemt_texture_mip_levels(const AemtTexture* tex) { return tex ? tex->mips : 0; }
 
 /* A command buffer retains what it uses, so a draw still sampling the
@@ -1267,9 +1349,10 @@ void aemt_texture_destroy(AemtTexture* tex) {
 int aemt_texture_upload(AemtTexture* tex, const void* rgba, size_t len) {
     aemt_clear_error();
     if (!tex || !rgba) return aemt_fail(AEMT_ERR_ARG, "texture or pixel data is null");
-    size_t need = (size_t)tex->width * (size_t)tex->height * 4u;
+    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * 4u;
     if (len < need) {
-        return aemt_fail(AEMT_ERR_ARG, "need %zu bytes for %dx%d RGBA, got %zu", need, tex->width, tex->height, len);
+        return aemt_fail(AEMT_ERR_ARG, "need %zu bytes for %dx%dx%d RGBA, got %zu",
+                         need, tex->width, tex->height, tex->depth, len);
     }
     AemtDevice* d = tex->dev;
     void* pool = g_mt.pool_push();
@@ -1283,12 +1366,14 @@ int aemt_texture_upload(AemtTexture* tex, const void* rgba, size_t len) {
     if (!blit) {
         rc = aemt_fail(AEMT_ERR_OOM, "cannot make a blit encoder");
     } else {
-        AemtSize size = { (AemtUInt)tex->width, (AemtUInt)tex->height, 1 };
+        /* Slice after slice: each image is one slice of a 3D texture. */
+        AemtSize size = { (AemtUInt)tex->width, (AemtUInt)tex->height, (AemtUInt)tex->depth };
         AemtOrigin origin = { 0, 0, 0 };
+        AemtUInt row = (AemtUInt)tex->width * 4u;
         MT_SEND(void, id, AemtUInt, AemtUInt, AemtUInt, AemtSize, id, AemtUInt, AemtUInt, AemtOrigin)(
             blit, mt_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:"
                          "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-            staging, 0, (AemtUInt)tex->width * 4u, (AemtUInt)need, size, tex->tex, 0, 0, origin);
+            staging, 0, row, row * (AemtUInt)tex->height, size, tex->tex, 0, 0, origin);
         if (tex->mips > 1) MT_SEND(void, id)(blit, mt_sel("generateMipmapsForTexture:"), tex->tex);
         MT_SEND(void)(blit, mt_sel("endEncoding"));
         MT_SEND(void)(cb, mt_sel("commit"));
@@ -1375,6 +1460,11 @@ struct AemtMaterial {
     } ub[AEMT_MAX_DESC];
     AemtBuffer*   buf[AEMT_MAX_DESC];   /* a caller's buffer at this binding */
     AemtTexture*  tex[AEMT_MAX_DESC];
+    /* A target sampled at a texture binding (#2198): its colour, or its
+     * depth when tgt_depth is set, as the target's textures are when the
+     * frame is encoded. */
+    AemtTarget*   tgt[AEMT_MAX_DESC];
+    int           tgt_depth[AEMT_MAX_DESC];
 };
 
 struct AemtPipeline {
@@ -1601,6 +1691,49 @@ int aemt_material_set_texture(AemtMaterial* m, int binding, AemtTexture* tex) {
     if (!tex) return aemt_fail(AEMT_ERR_ARG, "texture is null");
     if (!tex->uploaded) return aemt_fail(AEMT_ERR_ARG, "texture has no pixels yet, upload before binding");
     m->tex[binding] = tex;
+    m->tgt[binding] = NULL;
+    m->set[binding] = 1;
+    return AEMT_OK;
+}
+
+/* From now on the target's depth is stored at the end of its pass and can be
+ * sampled: new images, made once, the first time a material binds it. */
+static int aemt_target_enable_depth_sampling(AemtTarget* t) {
+    if (t->depth_sampled) return AEMT_OK;
+    int rc = aemt_wait_all_frames(t);
+    if (rc != AEMT_OK) return rc;
+    void* pool = g_mt.pool_push();
+    aemt_target_free_images(t);
+    t->depth_sampled = 1;
+    rc = aemt_target_make_images(t);
+    if (rc != AEMT_OK) aemt_target_free_images(t);
+    g_mt.pool_pop(pool);
+    return rc;
+}
+
+/* A target's newest frame, its colour or its depth, where a texture goes
+ * (#2198). The frame read is the one most recently committed to the target
+ * when the draw runs on the queue. The target must outlive every draw that
+ * uses the material. */
+int aemt_material_set_target(AemtMaterial* m, int binding, AemtTarget* tg, int depth) {
+    aemt_clear_error();
+    int rc = aemt_material_check(m, binding, AEMT_BIND_TEXTURE, "a texture");
+    if (rc != AEMT_OK) return rc;
+    if (!tg) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (tg->dev != m->pipe->dev) return aemt_fail(AEMT_ERR_ARG, "the target belongs to another device");
+    if (depth) {
+        if (!tg->has_depth) return aemt_fail(AEMT_ERR_ARG, "the target was created without depth");
+        if (tg->samples > 1) {
+            return aemt_fail(AEMT_ERR_UNSUPPORTED,
+                             "a multisampled target's depth cannot be sampled as a texture");
+        }
+        rc = aemt_target_enable_depth_sampling(tg);
+        if (rc != AEMT_OK) return rc;
+    }
+    if (!tg->color) return aemt_fail(AEMT_ERR_ARG, "target has no images: its last resize failed");
+    m->tgt[binding] = tg;
+    m->tgt_depth[binding] = depth ? 1 : 0;
+    m->tex[binding] = NULL;
     m->set[binding] = 1;
     return AEMT_OK;
 }
@@ -1631,16 +1764,43 @@ static int aemt_material_ready(const AemtPipeline* p, const AemtMaterial* m) {
     return AEMT_OK;
 }
 
+/* The targets a material samples can be read by a frame of `t`: not `t`
+ * itself, and drawn at least once (#2198). */
+static int aemt_material_sampleable(const AemtTarget* t, const AemtMaterial* m) {
+    if (!m) return AEMT_OK;
+    for (int i = 0; i < AEMT_MAX_DESC; i++) {
+        const AemtTarget* tg = m->tgt[i];
+        if (!tg) continue;
+        if (tg == t) {
+            return aemt_fail(AEMT_ERR_ARG,
+                             "binding %d samples the target being drawn; draw into another target", i);
+        }
+        if (!tg->color || !tg->rendered) {
+            return aemt_fail(AEMT_ERR_ARG,
+                             "binding %d samples a target that has no frame yet: draw it first", i);
+        }
+    }
+    return AEMT_OK;
+}
+
 /* Binds a material's resources to both stages, as Vulkan's bindings are
  * visible to every stage. */
 static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m) {
     for (int i = 0; i < AEMT_MAX_DESC; i++) {
         if (!kind[i]) continue;
         if (kind[i] == AEMT_BIND_TEXTURE) {
-            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setVertexTexture:atIndex:"), m->tex[i]->tex, (AemtUInt)i);
-            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentTexture:atIndex:"), m->tex[i]->tex, (AemtUInt)i);
-            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setVertexSamplerState:atIndex:"), m->tex[i]->sampler, (AemtUInt)i);
-            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentSamplerState:atIndex:"), m->tex[i]->sampler, (AemtUInt)i);
+            id tex, sampler;
+            if (m->tgt[i]) {
+                tex = m->tgt_depth[i] ? m->tgt[i]->depth : m->tgt[i]->color;
+                sampler = m->tgt_depth[i] ? m->tgt[i]->depth_sampler : m->tgt[i]->sampler;
+            } else {
+                tex = m->tex[i]->tex;
+                sampler = m->tex[i]->sampler;
+            }
+            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setVertexTexture:atIndex:"), tex, (AemtUInt)i);
+            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentTexture:atIndex:"), tex, (AemtUInt)i);
+            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setVertexSamplerState:atIndex:"), sampler, (AemtUInt)i);
+            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setFragmentSamplerState:atIndex:"), sampler, (AemtUInt)i);
             continue;
         }
         id b = m->buf[i] ? m->buf[i]->buf : m->ub[i].buf;
@@ -1688,7 +1848,9 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
         MT_SEND(void, id)(da, mt_sel("setTexture:"), t->depth);
         MT_SEND(void, AemtUInt)(da, mt_sel("setLoadAction:"), (AemtUInt)MTL_LOAD_CLEAR);
         MT_SEND(void, double)(da, mt_sel("setClearDepth:"), 1.0);
-        MT_SEND(void, AemtUInt)(da, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_DONT_CARE);
+        /* Kept only when a later pass samples it (#2198). */
+        MT_SEND(void, AemtUInt)(da, mt_sel("setStoreAction:"),
+                                t->depth_sampled ? (AemtUInt)MTL_STORE_STORE : (AemtUInt)MTL_STORE_DONT_CARE);
     }
     id enc = MT_SEND(id, id)(cb, mt_sel("renderCommandEncoderWithDescriptor:"), rpd);
     if (!enc) { aemt_fail(AEMT_ERR_OOM, "cannot make a render encoder"); return NULL; }
@@ -1762,10 +1924,12 @@ static int aemt_submit_frame(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat, 
                 return aemt_fail(AEMT_ERR_ARG, "draw %d uses a material of another pipeline", i);
             }
             rc = aemt_material_ready(p, it->mat ? it->mat : (mat ? mat : p->def));
+            if (rc == AEMT_OK) rc = aemt_material_sampleable(t, it->mat ? it->mat : (mat ? mat : p->def));
             if (rc != AEMT_OK) return rc;
         }
         if (t->batch_count == 0) {
             int rc = aemt_material_ready(p, mat ? mat : p->def);
+            if (rc == AEMT_OK) rc = aemt_material_sampleable(t, mat ? mat : p->def);
             if (rc != AEMT_OK) return rc;
         }
     }
@@ -2454,6 +2618,11 @@ int aemt_ae_set_texture(void* p, int binding, void* tex) {
     AemtMaterial* m = aemt_default_material((AemtPipeline*)p);
     return m ? aemt_material_set_texture(m, binding, (AemtTexture*)tex) : AEMT_ERR_ARG;
 }
+int aemt_ae_set_target(void* p, int binding, void* t, int depth) {
+    aemt_clear_error();
+    AemtMaterial* m = aemt_default_material((AemtPipeline*)p);
+    return m ? aemt_material_set_target(m, binding, (AemtTarget*)t, depth) : AEMT_ERR_ARG;
+}
 int aemt_ae_set_buffer(void* p, int binding, void* buf) {
     aemt_clear_error();
     AemtMaterial* m = aemt_default_material((AemtPipeline*)p);
@@ -2534,11 +2703,16 @@ AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int m, int l, i
 }
 void   aemt_texture_destroy(AemtTexture* t) { (void)t; }
 int    aemt_texture_mip_levels(const AemtTexture* t) { (void)t; return 0; }
+AemtTexture* aemt_texture_create_3d(AemtDevice* d, int w, int h, int z, int l, int r) {
+    (void)d; (void)w; (void)h; (void)z; (void)l; (void)r; aemt_no(); return NULL;
+}
+int    aemt_texture_depth(const AemtTexture* t) { (void)t; return 0; }
 int    aemt_texture_upload(AemtTexture* t, const void* p, size_t n) { (void)t; (void)p; (void)n; return aemt_no(); }
 AemtMaterial* aemt_material_create(AemtPipeline* p) { (void)p; aemt_no(); return NULL; }
 void   aemt_material_destroy(AemtMaterial* m) { (void)m; }
 int    aemt_material_set_uniform(AemtMaterial* m, int b, const void* d, size_t n) { (void)m; (void)b; (void)d; (void)n; return aemt_no(); }
 int    aemt_material_set_texture(AemtMaterial* m, int b, AemtTexture* t) { (void)m; (void)b; (void)t; return aemt_no(); }
+int    aemt_material_set_target(AemtMaterial* m, int b, AemtTarget* t, int z) { (void)m; (void)b; (void)t; (void)z; return aemt_no(); }
 int    aemt_material_set_buffer(AemtMaterial* m, int b, AemtBuffer* f) { (void)m; (void)b; (void)f; return aemt_no(); }
 int    aemt_target_set_push(AemtTarget* t, const void* d, size_t n) { (void)t; (void)d; (void)n; return aemt_no(); }
 int    aemt_batch_reset(AemtTarget* t) { (void)t; return aemt_no(); }
@@ -2602,6 +2776,7 @@ int    aemt_ae_material_floats(void* m, int b, int c) { (void)m; (void)b; (void)
 int    aemt_ae_material_float(void* m, int b, int i, double v) { (void)m; (void)b; (void)i; (void)v; return aemt_no(); }
 int    aemt_ae_set_uniform(void* p, int b, const void* d, int n) { (void)p; (void)b; (void)d; (void)n; return aemt_no(); }
 int    aemt_ae_set_texture(void* p, int b, void* t) { (void)p; (void)b; (void)t; return aemt_no(); }
+int    aemt_ae_set_target(void* p, int b, void* t, int z) { (void)p; (void)b; (void)t; (void)z; return aemt_no(); }
 int    aemt_ae_set_buffer(void* p, int b, void* f) { (void)p; (void)b; (void)f; return aemt_no(); }
 int    aemt_ae_compute_push_float(void* c, int i, double v) { (void)c; (void)i; (void)v; return aemt_no(); }
 int    aemt_ae_compute_push_int(void* c, int i, int v) { (void)c; (void)i; (void)v; return aemt_no(); }
@@ -2678,6 +2853,10 @@ void* aemt_ae_texture_create_ex(void* d, int w, int h, int mipmapped, int linear
 }
 void  aemt_ae_texture_destroy(void* t)       { aemt_texture_destroy((AemtTexture*)t); }
 int   aemt_ae_texture_mip_levels(void* t)    { return aemt_texture_mip_levels((const AemtTexture*)t); }
+void* aemt_ae_texture_create_3d(void* d, int w, int h, int depth, int linear, int repeat) {
+    return (void*)aemt_texture_create_3d((AemtDevice*)d, w, h, depth, linear, repeat);
+}
+int   aemt_ae_texture_depth(void* t)         { return aemt_texture_depth((const AemtTexture*)t); }
 int   aemt_ae_texture_upload(void* t, const void* rgba, int len) {
     if (len < 0) return aemt_fail(AEMT_ERR_ARG, "negative pixel length");
     return aemt_texture_upload((AemtTexture*)t, rgba, (size_t)len);
@@ -2687,6 +2866,9 @@ void* aemt_ae_material_create(void* p)       { return (void*)aemt_material_creat
 void  aemt_ae_material_destroy(void* m)      { aemt_material_destroy((AemtMaterial*)m); }
 int   aemt_ae_material_set_texture(void* m, int b, void* t) {
     return aemt_material_set_texture((AemtMaterial*)m, b, (AemtTexture*)t);
+}
+int   aemt_ae_material_set_target(void* m, int b, void* t, int depth) {
+    return aemt_material_set_target((AemtMaterial*)m, b, (AemtTarget*)t, depth);
 }
 int   aemt_ae_material_set_uniform(void* m, int b, const void* data, int len) {
     if (len < 0) return aemt_fail(AEMT_ERR_ARG, "negative uniform length");

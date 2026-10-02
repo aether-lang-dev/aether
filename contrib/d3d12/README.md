@@ -166,6 +166,23 @@ is what a linear 2:1 blit produces. A 128x128 one-texel checkerboard drawn at
 16x16 comes out as its average grey, and without the chain as single texels;
 the resources test checks both.
 
+`texture_create_3d(dev, w, h, depth, linear, repeat)` is a `Texture3D` of
+`depth` RGBA slices, up to 2048 a side; `texture_upload` takes them slice
+after slice and `texture_depth` reports how many.
+
+## Reading what was rendered
+
+`set_target(p, b, t)` and `set_target_depth(p, b, t)`, and their `material_`
+forms, bind a target's newest frame at `tN`/`sN`. Colour is read through the
+SRV every target already has. Depth sampled once is made `R32_TYPELESS` from
+then on, written through a `D32_FLOAT` view and read as `R32_FLOAT`, so a
+`Texture2D<float>` gets 0 near to 1 far. Consumers move the image to
+`PIXEL_SHADER_RESOURCE | NON_PIXEL_SHADER_RESOURCE` before their draws and
+back after, in the same command list. The refusals are those of the shared
+shape: sampling the target being drawn, a target with no frame, and depth of
+a target without depth or with multisampling. `test_d3d12_sampling.ae` runs
+with the debug layer and asserts it logged nothing.
+
 ## Threads
 
 One device may be used from several threads. Direct3D 12's device is
