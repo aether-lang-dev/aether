@@ -877,6 +877,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_64bit.c \
            tests/runtime/test_runtime_collections.c \
            tests/runtime/test_runtime_strings.c \
+           tests/runtime/test_runtime_panic.c \
            tests/runtime/test_runtime_strbuilder.c \
            tests/runtime/test_runtime_math.c \
            tests/runtime/test_runtime_json.c \
