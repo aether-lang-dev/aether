@@ -972,6 +972,29 @@ static VkSampleCountFlagBits aevk_sample_bit(int samples) {
     }
 }
 
+/* vkCreateImage, serialized on Apple (#2287). MoltenVK on Apple's
+ * paravirtualized GPU (the macOS CI runners are VMs) faults inside
+ * MVKImagePlane::initSubresources -> NSData getBytes when two threads create
+ * images at once: two actors each making their render target, which
+ * example_parallel_render does by design. Vulkan does not require external
+ * synchronization for vkCreateImage on a shared device, so this is a driver
+ * bug, worked around where it lives. Image creation is not per-frame, and
+ * recording and submitting stay parallel. Elsewhere it is a plain call. */
+#if defined(__APPLE__)
+static AevkMutex g_image_create_lock = AEVK_MUTEX_STATIC;
+#endif
+static VkResult aevk_create_image(AevkDevice* d, const VkImageCreateInfo* ici,
+                                  VkImage* out) {
+#if defined(__APPLE__)
+    AEVK_MUTEX_LOCK(&g_image_create_lock);
+    VkResult r = d->da.vkCreateImage(d->device, ici, NULL, out);
+    AEVK_MUTEX_UNLOCK(&g_image_create_lock);
+    return r;
+#else
+    return d->da.vkCreateImage(d->device, ici, NULL, out);
+#endif
+}
+
 /* Creates an image plus its memory and view in one step: the colour, resolve
  * and depth attachments differ only in format, usage and aspect. */
 static int aevk_make_attachment(AevkDevice* d, int width, int height,
@@ -994,7 +1017,7 @@ static int aevk_make_attachment(AevkDevice* d, int width, int height,
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    VkResult r = d->da.vkCreateImage(d->device, &ici, NULL, out_img);
+    VkResult r = aevk_create_image(d, &ici, out_img);
     if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateImage failed (%d)", (int)r);
 
     VkMemoryRequirements req;
@@ -1921,7 +1944,7 @@ AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
                VK_IMAGE_USAGE_SAMPLED_BIT;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkResult r = d->da.vkCreateImage(d->device, &ii, NULL, &tex->image);
+    VkResult r = aevk_create_image(d, &ii, &tex->image);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateImage failed (%d)", (int)r); goto fail; }
 
     VkMemoryRequirements req;

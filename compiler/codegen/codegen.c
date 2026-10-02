@@ -2921,6 +2921,71 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         fprintf(gen->output, ";\n}\n");
     }
 
+    /* #2349: an exported builder of a package module. A builder's ABI is its
+     * parameters plus the trailing `void* _builder` config the call site's
+     * trailing block fills; the merged clone is static, so the library
+     * exports a wrapper with the same C signature under the package symbol,
+     * aether_<module>__<name>, which the importer's stub binds. */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* b = program->children[i];
+        if (b && b->type == AST_EXPORT_STATEMENT && b->child_count > 0) b = b->children[0];
+        if (!b || b->type != AST_BUILDER_FUNCTION || !b->value || !b->is_imported) continue;
+        AetherModule* m = module_lib_package_module_of(b);
+        if (!m) continue;
+        const char* base = lib_pkg_base_name(m, b->value);
+        if (!lib_pkg_exports(m, base)) continue;
+        int ok = 1;
+        for (int p = 0; p < b->child_count; p++) {
+            ASTNode* c = b->children[p];
+            if (!c || c->type == AST_GUARD_CLAUSE) continue;
+            if (c->type == AST_BLOCK) break;
+            if (c->type != AST_VARIABLE_DECLARATION && c->type != AST_PATTERN_VARIABLE) { ok = 0; break; }
+        }
+        if (!ok) {
+            char msg[384];
+            snprintf(msg, sizeof(msg),
+                     "builder '%s' in package module '%s' has a pattern parameter; "
+                     "it is not exported by the package library", base, m->name);
+            AetherError w = {NULL, NULL, b->line, b->column, msg,
+                             "give the builder plain named parameters", NULL, AETHER_ERR_NONE};
+            aether_warning_report(&w);
+            continue;
+        }
+        char sym[512];
+        lib_pkg_symbol(m, base, sym, sizeof(sym));
+        /* The return type, chosen exactly as the builder's own definition
+         * chooses it (codegen_func.c), so the two prototypes agree. */
+        Type* rt = b->node_type;
+        int unannotated = (!rt || rt->kind == TYPE_VOID || rt->kind == TYPE_UNKNOWN);
+        int returns = 1;
+        if (unannotated && has_return_value(b)) fprintf(gen->output, "int");
+        else if (unannotated) { fprintf(gen->output, "void"); returns = 0; }
+        else generate_type(gen, rt);
+        fprintf(gen->output, " %s(", sym);
+        int np = 0;
+        for (int p = 0; p < b->child_count; p++) {
+            ASTNode* c = b->children[p];
+            if (!c || c->type == AST_GUARD_CLAUSE) continue;
+            if (c->type == AST_BLOCK) break;
+            if (np++) fprintf(gen->output, ", ");
+            if (is_fnptr_type(c->node_type)) {
+                emit_fnptr_decl(gen, c->node_type, c->value);
+            } else {
+                generate_type(gen, c->node_type);
+                fprintf(gen->output, " %s", c->value);
+            }
+        }
+        fprintf(gen->output, "%svoid* _builder) {\n    %s%s(", np ? ", " : "",
+                returns ? "return " : "", b->value);
+        for (int p = 0; p < b->child_count; p++) {
+            ASTNode* c = b->children[p];
+            if (!c || c->type == AST_GUARD_CLAUSE) continue;
+            if (c->type == AST_BLOCK) break;
+            fprintf(gen->output, "%s, ", c->value);
+        }
+        fprintf(gen->output, "_builder);\n}\n");
+    }
+
     /* #996 --emit=csrc: close the header guard. */
     if (gen->csrc_header_file) {
         fprintf(gen->csrc_header_file,
@@ -3578,7 +3643,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    const char* const* source_signatures;\n"
         "    const char* const* function_modules;\n"
         "    const char* const* constant_modules;\n"
-        "    const char* runtime; };\n\n");
+        "    const char* runtime;\n"
+        "    const char* const* closure_modules; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -3656,9 +3722,16 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         }
         if (!fn || !fn->value) continue;
         if (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION) continue;
-        if (fn->is_imported) continue;
-        size_t nlen = strlen(fn->value);
-        if (nlen > 0 && fn->value[nlen - 1] == '_') continue;
+        if (fn->is_imported) {
+            /* #2349: a package module's exported builder (its wrapper is
+             * emitted by emit_lib_alias_stubs). */
+            AetherModule* pm = (fn->type == AST_BUILDER_FUNCTION)
+                               ? module_lib_package_module_of(fn) : NULL;
+            if (!pm || !lib_pkg_exports(pm, lib_pkg_base_name(pm, fn->value))) continue;
+        } else {
+            size_t nlen = strlen(fn->value);
+            if (nlen > 0 && fn->value[nlen - 1] == '_') continue;
+        }
         cfns[cfn_count++] = fn;
     }
     /* Bookkeeping sized to: 1 builder slot + every param per candidate,
@@ -3673,11 +3746,30 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     char**       rec_sig  = (char**)malloc(sizeof(char*) * max_records);
     const char** rec_src  = (const char**)malloc(sizeof(char*) * max_records);
     int*         rec_line = (int*)malloc(sizeof(int) * max_records);
+    ASTNode**    rec_fn   = (ASTNode**)malloc(sizeof(ASTNode*) * max_records);  /* builder's own fn */
+    const char** rec_mod  = (const char**)malloc(sizeof(char*) * max_records);  /* #2349 module, or "" */
 
     int cap_arr_next = 0;
     /* 1 + 2: per candidate, builder flag then closure-typed params. */
     for (int i = 0; i < cfn_count; i++) {
         ASTNode* fn = cfns[i];
+        AetherModule* pm = fn->is_imported ? module_lib_package_module_of(fn) : NULL;
+        if (pm) {
+            /* #2349: a package builder, named by its bare name and its
+             * module; the symbol is aether_<module>__<name>. */
+            const char* base = lib_pkg_base_name(pm, fn->value);
+            lit_ci[clo_count] = -1; cap_arr_id[clo_count] = -1;
+            rec_name[clo_count] = base;
+            rec_role[clo_count] = "builder";
+            rec_encl[clo_count] = base;
+            rec_sig[clo_count]  = NULL;
+            rec_src[clo_count]  = fn->source_file ? fn->source_file : "";
+            rec_line[clo_count] = fn->line;
+            rec_fn[clo_count]   = fn;
+            rec_mod[clo_count]  = pm->name;
+            clo_count++;
+            continue;
+        }
         if (fn->type == AST_BUILDER_FUNCTION ||
             is_builder_func_reg(gen, fn->value) || fn_takes_builder_context(fn)) {
             lit_ci[clo_count] = -1; cap_arr_id[clo_count] = -1;
@@ -3687,6 +3779,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             rec_sig[clo_count]  = NULL;   /* render the fn's own signature inline below */
             rec_src[clo_count]  = fn->source_file ? fn->source_file : "";
             rec_line[clo_count] = fn->line;
+            rec_fn[clo_count]   = fn;
+            rec_mod[clo_count]  = "";
             clo_count++;
         }
         for (int p = 0; p < fn->child_count; p++) {
@@ -3703,6 +3797,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                 rec_sig[clo_count]  = strdup(type_to_string(c->node_type));
                 rec_src[clo_count]  = fn->source_file ? fn->source_file : "";
                 rec_line[clo_count] = fn->line;
+                rec_fn[clo_count]   = NULL;
+                rec_mod[clo_count]  = "";
                 clo_count++;
             }
         }
@@ -3744,6 +3840,17 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         rec_src[clo_count]   = (cnode && cnode->source_file) ? cnode->source_file
                                  : (owner->source_file ? owner->source_file : "");
         rec_line[clo_count]  = (cnode && cnode->line) ? cnode->line : owner->line;
+        rec_fn[clo_count]    = NULL;
+        rec_mod[clo_count]   = "";
+        {
+            /* A literal inside a package builder belongs to its module and
+             * is named by the builder's bare name (#2349). */
+            AetherModule* om = owner->is_imported ? module_lib_package_module_of(owner) : NULL;
+            if (om) {
+                rec_encl[clo_count] = lib_pkg_base_name(om, owner->value);
+                rec_mod[clo_count]  = om->name;
+            }
+        }
         clo_count++;
     }
 
@@ -3763,8 +3870,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             } else if (lit_ci[r] == -1 && strcmp(rec_role[r], "builder") == 0) {
                 /* Builder: render the export's own signature now (the
                  * static type_to_string buffer is safe at point of use). */
-                ASTNode* bf = NULL;
-                for (int i = 0; i < cfn_count; i++) {
+                ASTNode* bf = rec_fn[r];
+                for (int i = 0; !bf && i < cfn_count; i++) {
                     if (cfns[i]->value && strcmp(cfns[i]->value, rec_encl[r]) == 0) { bf = cfns[i]; break; }
                 }
                 fputc('"', gen->output);
@@ -3898,29 +4005,19 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         }
         fprintf(gen->output, "};\n\n");
     }
-    /* A package module's exported builder has no wrapper: the builder ABI
-     * passes the trailing block's config through the function's own
-     * symbol, which a merged clone keeps static. Say so rather than drop
-     * it silently. */
-    if (pkg_lib) {
-        for (int i = 0; i < program->child_count; i++) {
-            ASTNode* b = program->children[i];
-            if (b && b->type == AST_EXPORT_STATEMENT && b->child_count > 0) b = b->children[0];
-            if (!b || b->type != AST_BUILDER_FUNCTION || !b->value || !b->is_imported) continue;
-            AetherModule* m = module_lib_package_module_of(b);
-            if (!m) continue;
-            const char* base = lib_pkg_base_name(m, b->value);
-            if (!lib_pkg_exports(m, base)) continue;
-            char msg[384];
-            snprintf(msg, sizeof(msg),
-                     "builder '%s' in package module '%s' is not exported by the package library",
-                     base, m->name);
-            AetherError w = {NULL, NULL, b->line, b->column, msg,
-                             "a package library exports functions and constants; "
-                             "call this builder from a function the module exports",
-                             NULL, AETHER_ERR_NONE};
-            aether_warning_report(&w);
+    /* #2349: in a package library each closure record belongs to a module
+     * too (a package builder's wrapper is aether_<module>__<name>);
+     * parallel to the closure table, "" for the entry's own. */
+    int pkg_closures = 0;
+    for (int r = 0; r < clo_count; r++) if (rec_mod[r] && rec_mod[r][0]) pkg_closures = 1;
+    if (pkg_lib && clo_count > 0) {
+        fprintf(gen->output, "static const char* const _aether_lib_closure_modules[] = {\n");
+        for (int r = 0; r < clo_count; r++) {
+            fprintf(gen->output, "    ");
+            emit_lib_metadata_c_string_literal(gen->output, rec_mod[r] ? rec_mod[r] : "");
+            fprintf(gen->output, ",\n");
         }
+        fprintf(gen->output, "};\n\n");
     }
 
     /* Pull the primary source path off the first non-imported fn —
@@ -3945,7 +4042,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * trailing slots are always written (the struct always has them); older
      * readers stop at the count/pointer they know. */
     /* "1.5": the library links the shared runtime (#2297). */
-    const char* schema = gen->lib_shared_runtime ? "1.5"
+    /* "1.6": a package library's builder records carry their module. */
+    const char* schema = (pkg_lib && pkg_closures) ? "1.6"
+                       : gen->lib_shared_runtime ? "1.5"
                        : pkg_lib ? "1.4"
                        : (struct_count > 0 || src_sig_needed) ? "1.3"
                        : (const_count > 0) ? "1.2"
@@ -3968,7 +4067,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     else                         fprintf(gen->output, "NULL, ");
     if (pkg_lib && const_count > 0) fprintf(gen->output, "_aether_lib_const_modules, ");
     else                            fprintf(gen->output, "NULL, ");
-    fprintf(gen->output, "%s\n};\n\n", gen->lib_shared_runtime ? "\"shared\"" : "NULL");
+    fprintf(gen->output, "%s, ", gen->lib_shared_runtime ? "\"shared\"" : "NULL");
+    if (pkg_lib && clo_count > 0) fprintf(gen->output, "_aether_lib_closure_modules\n};\n\n");
+    else                          fprintf(gen->output, "NULL\n};\n\n");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4045,6 +4146,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         for (int r = 0; r < clo_count; r++) {
             char* built_sig = NULL;
             const char* sig = rec_sig[r];
+            if (!sig && strcmp(rec_role[r], "builder") == 0 && rec_fn[r]) {
+                built_sig = fn_signature_string(rec_fn[r]); sig = built_sig;
+            }
             if (!sig && strcmp(rec_role[r], "builder") == 0) {
                 for (int i = 0; i < cfn_count; i++) {
                     if (cfns[i]->value && strcmp(cfns[i]->value, rec_encl[r]) == 0) {
@@ -4056,6 +4160,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             fputs("    { \"name\": ", j);             emit_json_string(j, rec_name[r]);
             fputs(", \"role\": ", j);                 emit_json_string(j, rec_role[r]);
             fputs(", \"enclosing_export\": ", j);     emit_json_string(j, rec_encl[r]);
+            if (module_lib_package()) {
+                fputs(", \"module\": ", j); emit_json_string(j, rec_mod[r]);
+            }
             fputs(", \"signature\": ", j);            emit_json_string(j, sig ? sig : "");
             fputs(", \"captures\": [", j);
             if (lit_ci[r] >= 0 && gen->closures[lit_ci[r]].capture_count > 0) {
@@ -4138,6 +4245,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     free(cfns);
     free(lit_ci); free(cap_arr_id); free(rec_name); free(rec_role);
     free(rec_encl); free(rec_sig); free(rec_src); free(rec_line);
+    free(rec_fn); free(rec_mod);
     free(consts); free(const_type);
     if (export_names) free(export_names);
 

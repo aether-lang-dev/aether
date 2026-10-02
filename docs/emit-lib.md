@@ -796,9 +796,15 @@ ae build --emit=lib --package ae3d --lib src -o libae3d.so
   declares the module's functions and constants and the library's structs,
   so `core.model_new(...)` reads as it does against source. Importing
   several modules of one package links the library once.
-- **Not exported:** a package module's `builder` functions. The builder ABI
-  passes the trailing block through the function's own symbol, which a
-  merged clone keeps static. The build warns, naming each one.
+- **Builders** of a package module are exported too (#2349, schema 1.6). A
+  builder takes its parameters plus the trailing block's `void* _builder`
+  config, so the library exports a wrapper with that signature,
+  `aether_ae3d_ui__panel`. Its catalog record carries the module
+  (`closure_modules`), and a module's interface declares it as a
+  trailing-block `builder`, so `ui.panel("hud") { ... }` works against the
+  library. An importer of a builder also `import std.map`, as for a
+  single-module library. A builder with a pattern parameter is the one form
+  left out, with a warning naming it.
 
 ### `ae lib-info <path>` inspect any artifact
 
