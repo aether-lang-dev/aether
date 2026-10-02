@@ -2967,7 +2967,9 @@ ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
 static int g_trailing_tmp = 0;
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     ASTNode* block = trailing_dsl_block(gen, call);
-    if (!block) return 0;
+    /* An empty block runs nothing and configures nothing: the plain call,
+     * as before (and a builder's config factory is not needed for it). */
+    if (!block || block->child_count == 0) return 0;
     int n = g_trailing_tmp++;
     if (call->value && is_builder_func_reg(gen, call->value)) {
         fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
