@@ -31,11 +31,21 @@ export AETHER_CACHE_DIR="$tmp/cache"
 gen() { printf 'main() { println("program %s") }\n' "$1" > "$tmp/p$1.ae"; }
 run() { "$AE" run "$tmp/p$1.ae" >/dev/null 2>&1; }
 cache_count() { "$AE" cache | sed -n 's/^Cache: \([0-9]*\) build.*/\1/p'; }
+# The slot a run just published or touched: the newest countable entry.
+# Eviction is asserted on these FILES, not on a later run's "[cache] hit".
+# The key folds in every module archive under build/ and build/contrib/,
+# and in `make ci` other tests rebuild those archives in parallel, so a
+# re-run can compute a new key and miss while the slot under test is still
+# on disk. That race failed this test on a slow macOS runner (#2358).
+slots_by_age() {
+    ls -t "$tmp/cache" | grep -v -e '\.deps$' -e '\.tmp\.' -e '^gc\.stamp$' -e '^latest_release$'
+}
+newest_slot() { slots_by_age | head -1; }
 
 # 1. unlimited: nothing is evicted
 export AETHER_CACHE_MAX_MB=0
 gen 1; gen 2; gen 3
-run 1; run 2; run 3
+run 1; run 2; s2="$(newest_slot)"; run 3
 n="$(cache_count)"
 if [ "$n" != "3" ]; then
     echo "  [FAIL] cache_size_limit: with AETHER_CACHE_MAX_MB=0 expected 3 builds, got '$n'"
@@ -57,6 +67,7 @@ fi
 export AETHER_CACHE_MAX_MB=1
 sleep 1
 run 1
+s1="$(newest_slot)"
 out="$("$AE" cache gc 2>&1)"
 n="$(cache_count)"
 if ! printf '%s\n' "$out" | grep -q "^Evicted [1-9]"; then
@@ -67,12 +78,12 @@ if [ $((n * one)) -gt $((1024 * 1024)) ]; then
     echo "  [FAIL] cache_size_limit: after gc the cache still holds $n builds (~$((n * one)) bytes) over a 1 MB cap"
     fail=1
 fi
-if "$AE" run "$tmp/p2.ae" --verbose 2>&1 | grep -q "\[cache\] hit"; then
-    echo "  [FAIL] cache_size_limit: the least-recently-used build (p2) survived eviction"
+if [ -f "$tmp/cache/$s2" ]; then
+    echo "  [FAIL] cache_size_limit: the least-recently-used build (p2, $s2) survived eviction"
     fail=1
 fi
-if ! "$AE" run "$tmp/p1.ae" --verbose 2>&1 | grep -q "\[cache\] hit"; then
-    echo "  [FAIL] cache_size_limit: the most-recently-used build (p1) was evicted"
+if [ ! -f "$tmp/cache/$s1" ]; then
+    echo "  [FAIL] cache_size_limit: the most-recently-used build (p1, $s1) was evicted"
     fail=1
 fi
 
@@ -93,14 +104,19 @@ while [ "$i" -le "$N" ]; do run "$i"; i=$((i + 1)); done
 rm -f "$tmp/cache/gc.stamp"
 export AETHER_CACHE_MAX_MB=1
 gen 99
+slots_by_age | sort > "$tmp/before"
 run 99
+slots_by_age | sort > "$tmp/after"
+# p99's slot is the name that is new across its run; none means the publish
+# evicted its own slot (newest_slot would name a surviving neighbour).
+s99="$(comm -13 "$tmp/before" "$tmp/after" | head -1)"
 n="$(cache_count)"
 if [ $((n * one)) -gt $((1024 * 1024)) ]; then
     echo "  [FAIL] cache_size_limit: a publish over the cap did not evict (cache holds $n builds)"
     fail=1
 fi
-if ! "$AE" run "$tmp/p99.ae" --verbose 2>&1 | grep -q "\[cache\] hit"; then
-    echo "  [FAIL] cache_size_limit: the slot just published was evicted"
+if [ -z "$s99" ] || [ ! -f "$tmp/cache/$s99" ]; then
+    echo "  [FAIL] cache_size_limit: the slot just published ($s99) was evicted"
     fail=1
 fi
 
