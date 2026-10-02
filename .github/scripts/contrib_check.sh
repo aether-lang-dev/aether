@@ -176,6 +176,7 @@ TESTS=(
   "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae||lsan||vulkan"
   "vulkan/frames|$VK/test_vulkan_frames.ae||lsan||vulkan"
   "vulkan/materials|$VK/test_vulkan_materials.ae||lsan||vulkan"
+  "vulkan/sampling|$VK/test_vulkan_sampling.ae||lsan||vulkan"
   "vulkan/formats|$VK/test_vulkan_formats.ae||lsan||vulkan"
   "vulkan/compute|$VK/test_vulkan_compute.ae||lsan||vulkan"
   "vulkan/raw|$VK/test_vulkan_raw.ae||lsan||vulkan"
@@ -202,6 +203,7 @@ TESTS=(
   # reach, so these are gated for correctness only.
   "d3d12/core|$DX/test_d3d12.ae||run|"
   "d3d12/resources|$DX/test_d3d12_resources.ae||run|"
+  "d3d12/sampling|$DX/test_d3d12_sampling.ae||run|"
   "d3d12/compute|$DX/test_d3d12_compute.ae||run|"
   "d3d12/actors|$DX/test_d3d12_actors.ae||run|"
   "d3d12/present|$DX/test_d3d12_present.ae|tests/support/native_window/native_window.c|run|"
@@ -212,6 +214,7 @@ TESTS=(
   # gates here are valgrind and LSan on Linux, where Metal does not exist.
   "metal/core|$MT/test_metal.ae||run|"
   "metal/resources|$MT/test_metal_resources.ae||run|"
+  "metal/sampling|$MT/test_metal_sampling.ae||run|"
   "metal/compute|$MT/test_metal_compute.ae||run|"
   "metal/actors|$MT/test_metal_actors.ae||run|"
   "metal/present|$MT/test_metal_present.ae|tests/support/native_window/native_window.c|run|"

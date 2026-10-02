@@ -261,6 +261,12 @@ struct AevkDevice {
     VkCommandPool    pool;
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t         max_dim;
+    uint32_t         max_dim_3d;   /* a 3D texture's largest side (#2198) */
+    /* Bumped whenever what a draw samples changes shape: a material binding a
+     * target or rebinding one away from it, or a target rebuilding its images.
+     * A recorded frame names the sampled images in its barriers, so a frame
+     * recorded under an older epoch re-records (#2198). */
+    unsigned         bind_epoch;
     /* The largest dispatch the device takes, per dimension (#1515). */
     uint32_t         max_groups[3];
     /* Which sample counts the device can actually use for framebuffer colour
@@ -321,6 +327,7 @@ typedef struct {
      * recorded. */
     unsigned        rec_batch_version;
     int             rec_batch_count;
+    unsigned        rec_bind_epoch;   /* the device's bind_epoch when recorded */
 } AevkFrame;
 
 struct AevkTarget {
@@ -360,6 +367,20 @@ struct AevkTarget {
     VkImage        depth_image;
     VkDeviceMemory depth_mem;
     VkImageView    depth_view;
+
+    /* Sampling the target in a later pass (#2198). `sampleable` is whether the
+     * device can sample the colour format at all; `sampler` filters it
+     * linearly where the format allows and by nearest texel otherwise, and
+     * `depth_sampler` reads depth by nearest texel. `depth_sampled` is set the
+     * first time a material binds the depth: from then on the depth image is
+     * stored at the end of the pass and made sampleable instead of transient.
+     * `image_gen` counts image rebuilds, so a material's descriptor that names
+     * an older image is rewritten before it is next drawn. */
+    int            sampleable;
+    VkSampler      sampler;
+    VkSampler      depth_sampler;
+    int            depth_sampled;
+    unsigned       image_gen;
 
     VkBuffer       vbuf;
     VkDeviceMemory vbuf_mem;
@@ -415,6 +436,7 @@ struct AevkBindings {
 struct AevkTexture {
     AevkDevice*    dev;
     int            width, height;
+    int            depth;      /* 1 for a 2D texture; slices for a 3D one (#2198) */
     uint32_t       mip_levels;
     VkImage        image;
     VkDeviceMemory mem;
@@ -458,6 +480,12 @@ struct AevkMaterial {
      * a storage binding), so a uniform written later knows to re-point the
      * descriptor at the material's buffer. */
     AevkBuffer*     ext[AEVK_MAX_DESC];
+    /* A target sampled at a texture binding (#2198): its colour, or its depth
+     * when tgt_depth is set, as of tgt_gen, the target's image generation
+     * when the descriptor was written. */
+    AevkTarget*     tgt[AEVK_MAX_DESC];
+    int             tgt_depth[AEVK_MAX_DESC];
+    unsigned        tgt_gen[AEVK_MAX_DESC];
 };
 
 #define AEVK_SETS_PER_POOL 16
@@ -792,6 +820,7 @@ AevkDevice* aevk_device_create(void) {
     VkPhysicalDeviceProperties props;
     d->ia.vkGetPhysicalDeviceProperties(d->phys, &props);
     d->max_dim = props.limits.maxImageDimension2D;
+    d->max_dim_3d = props.limits.maxImageDimension3D;
     d->max_groups[0] = props.limits.maxComputeWorkGroupCount[0];
     d->max_groups[1] = props.limits.maxComputeWorkGroupCount[1];
     d->max_groups[2] = props.limits.maxComputeWorkGroupCount[2];
@@ -1147,10 +1176,13 @@ fail:
  * target. The caller guarantees nothing is using the old images. */
 static int aevk_target_make_images(AevkTarget* t) {
     AevkDevice* d = t->dev;
+    /* SAMPLED as well, where the device can sample the format, so a later
+     * pass reads the frame as a texture (#2198). */
+    VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (t->sampleable) color_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     int rc = aevk_make_attachment(d, t->width, t->height, t->color_format,
-                                  VK_SAMPLE_COUNT_1_BIT,
-                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                  VK_SAMPLE_COUNT_1_BIT, color_usage,
                                   VK_IMAGE_ASPECT_COLOR_BIT,
                                   &t->image, &t->image_mem, &t->view);
     if (rc != AEVK_OK) return rc;
@@ -1168,10 +1200,14 @@ static int aevk_target_make_images(AevkTarget* t) {
         if (rc != AEVK_OK) return rc;
     }
     if (t->has_depth) {
+        /* Transient unless a later pass samples it: a depth buffer nobody reads
+         * never has to leave a tiler's on-chip memory. Sampled depth is stored
+         * at the end of the pass instead (aevk_target_make_pass). */
+        VkImageUsageFlags depth_usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+            (t->depth_sampled ? VK_IMAGE_USAGE_SAMPLED_BIT
+                              : VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
         rc = aevk_make_attachment(d, t->width, t->height, t->depth_format,
-                                  aevk_sample_bit(t->samples),
-                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                                  VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                  aevk_sample_bit(t->samples), depth_usage,
                                   VK_IMAGE_ASPECT_DEPTH_BIT,
                                   &t->depth_image, &t->depth_mem, &t->depth_view);
         if (rc != AEVK_OK) return rc;
@@ -1195,6 +1231,10 @@ static int aevk_target_make_images(AevkTarget* t) {
     fci.layers = 1;
     VkResult r = d->da.vkCreateFramebuffer(d->device, &fci, NULL, &t->fb);
     if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateFramebuffer failed (%d)", (int)r);
+    /* New images: a material sampling this target rewrites its descriptor,
+     * and a frame that names the old images in its barriers re-records. */
+    t->image_gen++;
+    d->bind_epoch++;
     return AEVK_OK;
 }
 
@@ -1276,7 +1316,10 @@ static int aevk_target_make_pass(AevkTarget* t) {
         atts[n_att].format = t->depth_format;
         atts[n_att].samples = aevk_sample_bit(t->samples);
         atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        atts[n_att].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        /* Kept only when a later pass samples it (#2198). Store ops are not
+         * part of render pass compatibility, so switching costs no pipeline. */
+        atts[n_att].storeOp = t->depth_sampled ? VK_ATTACHMENT_STORE_OP_STORE
+                                               : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1437,6 +1480,26 @@ static int aevk_target_check_size(AevkDevice* d, int width, int height, int bpp,
     return AEVK_OK;
 }
 
+/* The sampler a later pass reads a target through (#2198): clamped, since a
+ * frame has no tiling, and linear where the format allows it. Depth reads
+ * use nearest: a filtered depth is a value no surface was at. */
+static int aevk_make_target_sampler(AevkDevice* d, int linear, VkSampler* out) {
+    VkSamplerCreateInfo si = {0};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    VkFilter filter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    si.magFilter = filter;
+    si.minFilter = filter;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = 0.0f;
+    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    VkResult r = d->da.vkCreateSampler(d->device, &si, NULL, out);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateSampler failed (%d)", (int)r);
+    return AEVK_OK;
+}
+
 AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
     return aevk_target_create_format(d, width, height, VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
 }
@@ -1481,6 +1544,13 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
         return NULL;
     }
 
+    /* Sampling the frame later (#2198) needs the format's SAMPLED_IMAGE
+     * feature; every target format has it on every conformant device, but it
+     * is asked rather than assumed, and a format without it is simply a target
+     * that cannot be sampled. Linear filtering is optional for 32-bit floats. */
+    int sampleable = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    int linear_ok = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+
     VkFormat depth_format = VK_FORMAT_UNDEFINED;
     if (want_depth) {
         depth_format = aevk_pick_depth_format(d);
@@ -1504,6 +1574,10 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
     t->has_depth = want_depth ? 1 : 0;
     t->depth_format = depth_format;
     t->timeout_ns = 5000000000ull;
+    t->sampleable = sampleable;
+
+    if (sampleable && aevk_make_target_sampler(d, linear_ok, &t->sampler) != AEVK_OK) goto fail;
+    if (want_depth && aevk_make_target_sampler(d, 0, &t->depth_sampler) != AEVK_OK) goto fail;
 
     if (aevk_target_make_pass(t) != AEVK_OK) goto fail;
     if (aevk_target_make_images(t) != AEVK_OK) goto fail;
@@ -1534,7 +1608,9 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->ibuf)         d->da.vkDestroyBuffer(d->device, t->ibuf, NULL);
         if (t->ibuf_mem)     d->da.vkFreeMemory(d->device, t->ibuf_mem, NULL);
         aevk_target_free_images(t);
-        if (t->pass)         d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
+        if (t->pass)          d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
+        if (t->sampler)       d->da.vkDestroySampler(d->device, t->sampler, NULL);
+        if (t->depth_sampler) d->da.vkDestroySampler(d->device, t->depth_sampler, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(t->batch);
@@ -1883,17 +1959,21 @@ AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
  * linear blitting of the format. `linear_filter` picks LINEAR over NEAREST for
  * magnification, minification and between mip levels. `repeat` picks REPEAT
  * over CLAMP_TO_EDGE for addressing. */
-AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
-                                    int mipmapped, int linear_filter, int repeat) {
+/* A 2D texture (`is_3d` 0, `depth` 1) or a 3D one of `depth` slices (#2198):
+ * the clouds' tileable noise, a colour grading cube, a volume. */
+static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int depth,
+                                      int is_3d, int mipmapped, int linear_filter,
+                                      int repeat) {
     aevk_clear_error();
     if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
-    if (width <= 0 || height <= 0) {
-        aevk_fail(AEVK_ERR_ARG, "texture size %dx%d is not positive", width, height);
+    if (width <= 0 || height <= 0 || depth <= 0) {
+        aevk_fail(AEVK_ERR_ARG, "texture size %dx%dx%d is not positive", width, height, depth);
         return NULL;
     }
-    if ((uint32_t)width > d->max_dim || (uint32_t)height > d->max_dim) {
-        aevk_fail(AEVK_ERR_UNSUPPORTED, "texture %dx%d exceeds the device limit of %u",
-                  width, height, d->max_dim);
+    uint32_t limit = is_3d ? d->max_dim_3d : d->max_dim;
+    if ((uint32_t)width > limit || (uint32_t)height > limit || (uint32_t)depth > limit) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "texture %dx%dx%d exceeds the device limit of %u",
+                  width, height, depth, limit);
         return NULL;
     }
 
@@ -1925,15 +2005,16 @@ AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
     tex->dev = d;
     tex->width = width;
     tex->height = height;
+    tex->depth = depth;
     tex->mip_levels = levels;
 
     VkImageCreateInfo ii = {0};
     ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ii.format = VK_FORMAT_R8G8B8A8_UNORM;
     ii.extent.width = (uint32_t)width;
     ii.extent.height = (uint32_t)height;
-    ii.extent.depth = 1;
+    ii.extent.depth = (uint32_t)depth;
     ii.mipLevels = levels;
     ii.arrayLayers = 1;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1966,7 +2047,7 @@ AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
     VkImageViewCreateInfo vi = {0};
     vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vi.image = tex->image;
-    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vi.subresourceRange.levelCount = levels;
@@ -1997,6 +2078,21 @@ fail:
     return NULL;
 }
 
+AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
+                                    int mipmapped, int linear_filter, int repeat) {
+    return aevk_texture_make(d, width, height, 1, 0, mipmapped, linear_filter, repeat);
+}
+
+/* A 3D texture: `depth` slices of width x height RGBA, sampled with a
+ * sampler3D. No mip chain; upload is width*height*depth*4 bytes, slice by
+ * slice. */
+AevkTexture* aevk_texture_create_3d(AevkDevice* d, int width, int height, int depth,
+                                    int linear_filter, int repeat) {
+    return aevk_texture_make(d, width, height, depth, 1, 0, linear_filter, repeat);
+}
+
+int aevk_texture_depth(const AevkTexture* tex) { return tex ? tex->depth : 0; }
+
 int aevk_texture_mip_levels(const AevkTexture* tex) {
     return tex ? (int)tex->mip_levels : 0;
 }
@@ -2016,10 +2112,10 @@ void aevk_texture_destroy(AevkTexture* tex) {
 int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     aevk_clear_error();
     if (!tex || !rgba) return aevk_fail(AEVK_ERR_ARG, "texture or pixel data is null");
-    size_t need = (size_t)tex->width * (size_t)tex->height * 4u;
+    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * 4u;
     if (len < need) {
-        return aevk_fail(AEVK_ERR_ARG, "need %zu bytes for %dx%d RGBA, got %zu",
-                         need, tex->width, tex->height, len);
+        return aevk_fail(AEVK_ERR_ARG, "need %zu bytes for %dx%dx%d RGBA, got %zu",
+                         need, tex->width, tex->height, tex->depth, len);
     }
     AevkDevice* d = tex->dev;
 
@@ -2061,7 +2157,7 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
         copy.imageSubresource.layerCount = 1;
         copy.imageExtent.width = (uint32_t)tex->width;
         copy.imageExtent.height = (uint32_t)tex->height;
-        copy.imageExtent.depth = 1;
+        copy.imageExtent.depth = (uint32_t)tex->depth;
         d->da.vkCmdCopyBufferToImage(cmd, staging, tex->image,
                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
@@ -2483,6 +2579,15 @@ void aevk_pipeline_destroy(AevkPipeline* p) {
 /* Shader resources: uniform buffers, textures, push constants              */
 /* ------------------------------------------------------------------------ */
 
+/* The binding no longer samples a target: what was written over it replaced
+ * the target's descriptor, so frames recorded with its barriers re-record. */
+static void aevk_material_forget_target(AevkMaterial* m, int binding) {
+    if (!m->tgt[binding]) return;
+    m->tgt[binding] = NULL;
+    m->tgt_depth[binding] = 0;
+    m->pipe->dev->bind_epoch++;
+}
+
 int aevk_material_set_uniform(AevkMaterial* m, int binding,
                               const void* data, size_t len) {
     aevk_clear_error();
@@ -2518,6 +2623,7 @@ int aevk_material_set_uniform(AevkMaterial* m, int binding,
      * material's own, so the descriptor is rewritten below. */
     int repoint = m->ext[binding] != NULL && m->ub[binding].buf != VK_NULL_HANDLE;
     m->ext[binding] = NULL;
+    aevk_material_forget_target(m, binding);
 
     if (!m->ub[binding].buf) {
         int rc = aevk_make_buffer(d, (VkDeviceSize)len, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -2604,8 +2710,124 @@ int aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex) {
     w.pImageInfo = &ii;
     d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
     m->writes++;
+    aevk_material_forget_target(m, binding);
     return AEVK_OK;
 }
+
+/* Writes a material's descriptor for the target sampled at `binding`, as the
+ * target's images are now. */
+static void aevk_material_write_target(AevkMaterial* m, int binding) {
+    AevkTarget* tg = m->tgt[binding];
+    AevkDevice* d = m->pipe->dev;
+    VkDescriptorImageInfo ii = {0};
+    ii.sampler = m->tgt_depth[binding] ? tg->depth_sampler : tg->sampler;
+    ii.imageView = m->tgt_depth[binding] ? tg->depth_view : tg->view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w = {0};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = m->set;
+    w.dstBinding = (uint32_t)binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
+    m->tgt_gen[binding] = tg->image_gen;
+}
+
+static void aevk_invalidate_records(AevkTarget* t);
+
+/* From now on the target's depth is stored at the end of its pass and can be
+ * sampled: a new render pass (compatible with the old one, so its pipelines
+ * stay valid) and new images. Done once, the first time a material binds the
+ * depth, with the device idle since the images are replaced. */
+static int aevk_target_enable_depth_sampling(AevkTarget* t) {
+    if (t->depth_sampled) return AEVK_OK;
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    d->da.vkDeviceWaitIdle(d->device);
+    aevk_target_free_images(t);
+    VkRenderPass old_pass = t->pass;
+    t->pass = VK_NULL_HANDLE;
+    t->depth_sampled = 1;
+    int rc = aevk_target_make_pass(t);
+    if (rc == AEVK_OK) {
+        d->da.vkDestroyRenderPass(d->device, old_pass, NULL);
+        rc = aevk_target_make_images(t);
+    } else {
+        t->pass = old_pass;
+        t->depth_sampled = 0;
+        int back = aevk_target_make_images(t);
+        (void)back;
+    }
+    if (rc != AEVK_OK) aevk_target_free_images(t);
+    aevk_invalidate_records(t);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+/* Binds a target's newest frame, its colour or its depth, where a texture
+ * goes (#2198): a post pass reading the frame, a shadow map, a depth
+ * prepass. The frame is the one most recently submitted to the target when
+ * this material's draw runs on the queue. The target must outlive every draw
+ * that uses the material. */
+static int aevk_material_set_target(AevkMaterial* m, int binding, AevkTarget* tg, int depth) {
+    aevk_clear_error();
+    if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
+    AevkPipeline* p = m->pipe;
+    if (!p || !tg) return aevk_fail(AEVK_ERR_ARG, "pipeline or target is null");
+    if (binding < 0 || binding >= AEVK_MAX_DESC) {
+        return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
+    }
+    if (!m->set) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    if (tg->dev != p->dev) return aevk_fail(AEVK_ERR_ARG, "the target belongs to another device");
+    if (!p->declared[binding] ||
+        p->desc_type[binding] != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a texture", binding);
+    }
+    if (depth) {
+        if (!tg->has_depth) {
+            return aevk_fail(AEVK_ERR_ARG, "the target was created without depth");
+        }
+        if (tg->samples > 1) {
+            return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                             "a multisampled target's depth cannot be sampled as a texture");
+        }
+        int rc = aevk_target_enable_depth_sampling(tg);
+        if (rc != AEVK_OK) return rc;
+    } else if (!tg->sampleable) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED,
+                         "the device cannot sample the target's format %d", (int)tg->color_format);
+    }
+    if (!tg->fb) return aevk_fail(AEVK_ERR_ARG, "target has no images: its last resize failed");
+    m->tgt[binding] = tg;
+    m->tgt_depth[binding] = depth ? 1 : 0;
+    aevk_material_write_target(m, binding);
+    m->writes++;
+    p->dev->bind_epoch++;
+    return AEVK_OK;
+}
+
+int aevk_material_set_target_color(AevkMaterial* m, int binding, AevkTarget* tg) {
+    return aevk_material_set_target(m, binding, tg, 0);
+}
+
+int aevk_material_set_target_depth(AevkMaterial* m, int binding, AevkTarget* tg) {
+    return aevk_material_set_target(m, binding, tg, 1);
+}
+
+int aevk_pipeline_set_target(AevkPipeline* p, int binding, AevkTarget* tg, int depth) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_target(p->def, binding, tg, depth);
+}
+
 /* The pipeline-level writers address its default material, so callers that
  * never ask for one see no change. */
 int aevk_pipeline_set_uniform(AevkPipeline* p, int binding, const void* data, size_t len) {
@@ -2662,6 +2884,7 @@ int aevk_material_set_buffer(AevkMaterial* m, int binding, AevkBuffer* buf) {
     p->dev->da.vkUpdateDescriptorSets(p->dev->device, 1, &w, 0, NULL);
     m->ext[binding] = buf;
     m->writes++;
+    aevk_material_forget_target(m, binding);
     return AEVK_OK;
 }
 
@@ -2707,9 +2930,143 @@ int aevk_target_set_vertices(AevkTarget* t, const float* data, int count) {
     return AEVK_OK;
 }
 
+/* A target a frame samples, and which of its images (#2198). */
+typedef struct {
+    AevkTarget* tg;
+    int         depth;
+} AevkSampled;
+
+#define AEVK_MAX_SAMPLED 32
+
+/* Adds the targets one material samples to `out`, each image once, after
+ * checking it can be read: not the target being drawn, and drawn at least
+ * once. A descriptor written for images the target has since replaced (a
+ * resize) is rewritten now; replacing them waited for the device to go idle,
+ * so nothing in flight still reads it. */
+static int aevk_collect_sampled(AevkTarget* t, AevkMaterial* m, AevkSampled* out, int* n) {
+    if (!m) return AEVK_OK;
+    for (int b = 0; b < AEVK_MAX_DESC; b++) {
+        AevkTarget* tg = m->tgt[b];
+        if (!tg) continue;
+        if (tg == t) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "binding %d samples the target being drawn; draw into another target",
+                             b);
+        }
+        if (!tg->fb || !tg->rendered) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "binding %d samples a target that has no frame yet: draw it first", b);
+        }
+        if (m->tgt_gen[b] != tg->image_gen) aevk_material_write_target(m, b);
+        int seen = 0;
+        for (int i = 0; i < *n; i++) {
+            if (out[i].tg == tg && out[i].depth == m->tgt_depth[b]) { seen = 1; break; }
+        }
+        if (seen) continue;
+        if (*n >= AEVK_MAX_SAMPLED) {
+            return aevk_fail(AEVK_ERR_ARG, "a frame samples more than %d target images",
+                             AEVK_MAX_SAMPLED);
+        }
+        out[*n].tg = tg;
+        out[*n].depth = m->tgt_depth[b];
+        (*n)++;
+    }
+    return AEVK_OK;
+}
+
+/* Moves each sampled image between the layout its own pass leaves it in and
+ * the one a shader reads, before (`to_read`) or after this frame's pass.
+ * Everything is on one queue, so the barrier also orders the producer's
+ * writes, whatever frame they were submitted in, before this frame's reads,
+ * and this frame's reads before the producer's next pass. */
+static void aevk_sampled_barriers(AevkDevice* d, VkCommandBuffer cmd,
+                                  const AevkSampled* list, int n, int to_read) {
+    const VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    for (int i = 0; i < n; i++) {
+        AevkTarget* tg = list[i].tg;
+        VkImageMemoryBarrier ib = {0};
+        ib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        ib.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib.subresourceRange.levelCount = 1;
+        ib.subresourceRange.layerCount = 1;
+        VkPipelineStageFlags src, dst;
+        if (list[i].depth) {
+            ib.image = tg->depth_image;
+            ib.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            VkImageLayout attach = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            if (to_read) {
+                ib.oldLayout = attach;
+                ib.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                ib.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                ib.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                src = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                dst = shader_stages;
+            } else {
+                ib.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                ib.newLayout = attach;
+                ib.srcAccessMask = 0;
+                ib.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                src = shader_stages;
+                dst = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            }
+        } else {
+            /* The colour image rests in TRANSFER_SRC_OPTIMAL: its pass ends
+             * there so readback and present copy from it without a barrier. */
+            ib.image = tg->image;
+            ib.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            if (to_read) {
+                /* The pass's closing dependency already made its colour
+                 * writes available to the transfer stage, which this barrier's
+                 * source scope chains with; the access that goes with the
+                 * resting layout is the transfer read. */
+                ib.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                ib.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                ib.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                ib.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                src = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                      VK_PIPELINE_STAGE_TRANSFER_BIT;
+                dst = shader_stages;
+            } else {
+                ib.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                ib.srcAccessMask = 0;
+                ib.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                src = shader_stages;
+                dst = VK_PIPELINE_STAGE_TRANSFER_BIT |
+                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            }
+        }
+        d->da.vkCmdPipelineBarrier(cmd, src, dst, 0, 0, NULL, 0, NULL, 1, &ib);
+    }
+}
+
 static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMaterial* mat,
                        float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
+
+    /* What this frame samples, checked before anything is recorded, so a
+     * refusal leaves no half-recorded command buffer behind. */
+    AevkSampled sampled[AEVK_MAX_SAMPLED];
+    int n_sampled = 0;
+    if (p && t->vertex_count > 0) {
+        AevkMaterial* use = mat ? mat : p->def;
+        int src = AEVK_OK;
+        if (t->batch_count > 0) {
+            for (int i = 0; i < t->batch_count && src == AEVK_OK; i++) {
+                AevkMaterial* im = t->batch[i].mat ? t->batch[i].mat : use;
+                src = aevk_collect_sampled(t, im, sampled, &n_sampled);
+            }
+        } else {
+            src = aevk_collect_sampled(t, use, sampled, &n_sampled);
+        }
+        if (src != AEVK_OK) return src;
+    }
+
     VkResult vr = d->da.vkResetCommandBuffer(fr->cmd, 0);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkResetCommandBuffer failed (%d)", (int)vr);
 
@@ -2741,6 +3098,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     rp.clearValueCount = t->clear_count ? t->clear_count : 1;
     rp.pClearValues = clears;
 
+    aevk_sampled_barriers(d, fr->cmd, sampled, n_sampled, 1);
     d->da.vkCmdBeginRenderPass(fr->cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     if (p && t->vertex_count > 0) {
         VkViewport vp = {0};
@@ -2807,6 +3165,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
         }
     }
     d->da.vkCmdEndRenderPass(fr->cmd);
+    aevk_sampled_barriers(d, fr->cmd, sampled, n_sampled, 0);
 
     if (t->readback_on) {
         VkBufferImageCopy copy = {0};
@@ -2832,6 +3191,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     if (t->push_size) memcpy(fr->rec_push, t->push_data, t->push_size);
     fr->rec_batch_version = t->batch_version;
     fr->rec_batch_count = t->batch_count;
+    fr->rec_bind_epoch = d->bind_epoch;
     return AEVK_OK;
 }
 
@@ -2918,6 +3278,7 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                 fr->rec_push_size != t->push_size ||
                 fr->rec_batch_version != t->batch_version ||
                 fr->rec_batch_count != t->batch_count ||
+                fr->rec_bind_epoch != d->bind_epoch ||
                 (t->push_size && memcmp(fr->rec_push, t->push_data, t->push_size) != 0);
     if (stale) {
         rc = aevk_record(t, fr, p, mat, r, g, b, a);
@@ -4574,6 +4935,20 @@ void aevk_ae_material_destroy(void* mp) { aevk_material_destroy((AevkMaterial*)m
 int aevk_ae_material_set_texture(void* mp, int binding, void* tex) {
     return aevk_material_set_texture((AevkMaterial*)mp, binding, (AevkTexture*)tex);
 }
+
+int aevk_ae_material_set_target(void* mp, int binding, void* t, int depth) {
+    return aevk_material_set_target((AevkMaterial*)mp, binding, (AevkTarget*)t, depth);
+}
+
+int aevk_ae_set_target(void* p, int binding, void* t, int depth) {
+    return aevk_pipeline_set_target((AevkPipeline*)p, binding, (AevkTarget*)t, depth);
+}
+
+void* aevk_ae_texture_create_3d(void* d, int w, int h, int depth, int linear, int repeat) {
+    return (void*)aevk_texture_create_3d((AevkDevice*)d, w, h, depth, linear, repeat);
+}
+
+int aevk_ae_texture_depth(void* tex) { return aevk_texture_depth((const AevkTexture*)tex); }
 
 int aevk_ae_material_set_uniform(void* mp, int binding, const void* data, int len) {
     if (len < 0) return aevk_fail(AEVK_ERR_ARG, "negative uniform length");

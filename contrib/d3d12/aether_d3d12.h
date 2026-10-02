@@ -147,12 +147,24 @@ AedxTexture* aedx_texture_create_ex(AedxDevice* dev, int width, int height,
                                     int mipmapped, int linear_filter, int repeat);
 void         aedx_texture_destroy(AedxTexture* tex);
 int          aedx_texture_mip_levels(const AedxTexture* tex);
+/* A 3D texture of `depth` slices of width x height RGBA, read through a
+ * Texture3D (#2198). No mip chain; upload is width*height*depth*4 bytes,
+ * slice after slice. Slices: 1 for a 2D texture. */
+AedxTexture* aedx_texture_create_3d(AedxDevice* dev, int width, int height, int depth,
+                                    int linear_filter, int repeat);
+int          aedx_texture_depth(const AedxTexture* tex);
 int          aedx_texture_upload(AedxTexture* tex, const void* rgba, size_t len);
 
 AedxMaterial* aedx_material_create(AedxPipeline* p);
 void          aedx_material_destroy(AedxMaterial* m);
 int           aedx_material_set_uniform(AedxMaterial* m, int binding, const void* data, size_t len);
 int           aedx_material_set_texture(AedxMaterial* m, int binding, AedxTexture* tex);
+/* A target's newest frame where a texture goes (#2198): its colour (depth 0)
+ * or its depth as an R32_FLOAT texture (depth 1). Draw the target first. A
+ * target cannot sample itself, one with no frame yet cannot be sampled, and
+ * neither can a multisampled target's depth. Binding the depth the first
+ * time rebuilds the target's images with a shader view of it. */
+int           aedx_material_set_target(AedxMaterial* m, int binding, AedxTarget* t, int depth);
 int           aedx_material_set_buffer(AedxMaterial* m, int binding, AedxBuffer* buf);
 
 /* --- geometry, drawing, readback -------------------------------------------- */

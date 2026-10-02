@@ -185,6 +185,15 @@ AevkTexture* aevk_texture_create_ex(AevkDevice* dev, int width, int height,
 
 /* Mip levels the texture carries: 1 when it was not built mipmapped. */
 int aevk_texture_mip_levels(const AevkTexture* tex);
+
+/* A 3D texture of `depth` slices, each width x height RGBA, read in a shader
+ * through a sampler3D (#2198). No mip chain. Upload takes
+ * width*height*depth*4 bytes, slice after slice; each side is limited by the
+ * device's maxImageDimension3D. */
+AevkTexture* aevk_texture_create_3d(AevkDevice* dev, int width, int height, int depth,
+                                    int linear_filter, int repeat);
+/* Slices: 1 for a 2D texture. */
+int aevk_texture_depth(const AevkTexture* tex);
 void         aevk_texture_destroy(AevkTexture* tex);
 int          aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len);
 
@@ -203,6 +212,17 @@ void          aevk_material_destroy(AevkMaterial* m);
 int           aevk_material_set_uniform(AevkMaterial* m, int binding,
                                         const void* data, size_t len);
 int           aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex);
+
+/* A target's newest frame where a texture goes (#2198): its colour, or its
+ * depth (a single-channel float, near 0 to far 1), read in a later pass. The
+ * frame read is the one most recently submitted to the target when the draw
+ * runs on the queue, so draw the target first. Refused while that target is
+ * the one being drawn, before it has a frame, and for the depth of a target
+ * without one or of a multisampled one. Binding the depth the first time
+ * switches the target to storing it, with the device idle. The target must
+ * outlive every draw that uses the material. */
+int           aevk_material_set_target_color(AevkMaterial* m, int binding, AevkTarget* t);
+int           aevk_material_set_target_depth(AevkMaterial* m, int binding, AevkTarget* t);
 
 /* Draw or submit with a specific material. Passing NULL uses the pipeline's
  * default, which is what `aevk_draw` and `aevk_submit` do. */
@@ -229,6 +249,9 @@ int aevk_pipeline_set_uniform(AevkPipeline* p, int binding, const void* data, si
 
 /* Points a combined-image-sampler binding at `tex`. */
 int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex);
+
+/* The same, at a target's colour (depth 0) or depth (depth 1). */
+int aevk_pipeline_set_target(AevkPipeline* p, int binding, AevkTarget* t, int depth);
 
 /* Stages the push-constant block used by the next draw. At most 128 bytes,
  * the minimum every Vulkan device guarantees. */

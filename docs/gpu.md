@@ -12,8 +12,9 @@ API:
 They have **the same shape**: the same calls, with the same names, arguments,
 status codes and behaviour. Each gives a device, offscreen targets in four
 colour formats with depth and multisampling, pipelines with vertex layouts,
-bindings and push constants, textures with mip chains, materials and batches,
-frames in flight, readback and PNG output, compute over shared buffers, and
+bindings and push constants, textures with mip chains, 3D textures,
+materials and batches, a target's colour or depth read back as a texture in a
+later pass, frames in flight, readback and PNG output, compute over shared buffers, and
 swapchains over a window someone else owns. A program written against one
 reads the same against the others. What differs is below: the shading
 language, where resources sit in it, and the coordinate conventions.
@@ -111,6 +112,39 @@ A few calls exist in one module only, because they describe something the
 others do not have: `d3d12.device_is_warp` and `d3d12.debug_message_count`,
 `metal.device_unified_memory`, and `metal.compute_set_group_size`.
 
+## Reading what was rendered
+
+A target's newest frame can be bound where a texture goes, as its colour or
+its depth, which is what shadow maps, post-processing and deferred lighting
+are built from:
+
+```aether,fragment
+vulkan.draw(shadow, shadow_pipe, 0.0, 0.0, 0.0, 1.0)  // draw the source first
+vulkan.set_target_depth(lit_pipe, 0, shadow)          // its depth, near 0 to far 1
+vulkan.set_target(post_pipe, 0, scene)                // or its colour
+```
+
+The binding names the target, not one image, so it follows the target: a
+resize, or a newer frame of a target with frames in flight, is what the next
+draw reads. `material_set_target` and `material_set_target_depth` do the same
+for a material. Each module moves the image between being drawn and being
+read itself (Vulkan and Direct3D 12 with barriers, Metal by its own hazard
+tracking), so nothing waits for the GPU between the passes.
+
+Refused, in all three, with the reason named:
+
+- a draw that samples the target it draws into;
+- a target that has no frame yet;
+- the depth of a target made without depth, or of a multisampled one.
+
+Vulkan and Metal store a target's depth at the end of its pass only once
+something samples it; until then the pass discards it, which is what a tiler
+wants.
+
+`texture_create_3d(dev, w, h, depth, linear, repeat)` is a volume: `depth`
+slices of RGBA, uploaded slice after slice and read through a 3D sampler.
+`texture_depth(tex)` reports the slice count, 1 for a 2D texture.
+
 ## Windows belong to someone else
 
 None of the modules makes a window, and the language does not own windowing. A
@@ -163,5 +197,5 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
-| Sampling a target's colour or depth in a later pass, 3D textures, indirect draws, dynamic uniform offsets, GPU timestamps, and a second vertex stream for per-instance data, in all three modules | [#2198](https://github.com/aether-lang-dev/aether/issues/2198) |
+| Indirect draws, dynamic uniform offsets, GPU timestamps, and a second vertex stream for per-instance data, in all three modules | [#2198](https://github.com/aether-lang-dev/aether/issues/2198) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |
