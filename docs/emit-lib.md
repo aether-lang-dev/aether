@@ -763,6 +763,37 @@ ae build app.ae -o app                                            # imports both
   `@c_callback` registers itself by name when its image loads, and the
   runtime looks a hook up before falling back to its own definition.
 
+#### A library that runs actors (schema "1.7")
+
+A library's exports may spawn actors that the program never defines:
+
+```sh
+ae build --emit=lib --shared-runtime crowd.ae -o libcrowd.so   # spawns actors
+ae build app.ae -o app                                          # has none
+```
+
+- **The scheduler starts on the first spawn.** A program's `main()`
+  initializes the scheduler only when the program has actors. Otherwise the
+  first spawn initializes it and starts its threads. This holds for an Aether
+  program and for a C host. A second `scheduler_init()` while one is live is
+  a no-op, so it cannot wipe the actor tables of actors already running.
+  `scheduler_shutdown()` and `scheduler_cleanup()` end the lifecycle.
+- **The catalog says so.** The library's catalog has `actors = 1`, and
+  `ae lib-info` prints `Actors: yes`. This also covers a library with no actors
+  of its own that imports one which has them. A program that imports such a
+  library has `main()` run the scheduler as it does for its own actors. On the
+  way out, `main()` drains the scheduler and joins it, so a message the
+  library sent fire-and-forget is still delivered.
+- **Draining needs one runtime.** The drain reaches the library's actors
+  where the program and the library share one runtime: `--shared-runtime`
+  everywhere, or ELF interposition with the default static runtime (Linux,
+  FreeBSD). On macOS and Windows a static library's actors run on that
+  library's own scheduler. `ae` warns that messages still in flight when the
+  program exits are not delivered, and names the library to rebuild with
+  `--shared-runtime`.
+- **A C host** calls `scheduler_shutdown()` before it exits to deliver what
+  is still in flight.
+
 #### A package as one library (`--package`, schema "1.4")
 
 A package of many modules (`ae3d.core`, `ae3d.gl`, ...) builds into one
@@ -889,6 +920,7 @@ The integration suite under `tests/integration/` covers:
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
 | `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
 | `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library; static runtime (a library panic caught on Linux/FreeBSD) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
+| `binary_import_actors/` | A library's actors in a program with none of its own: the first spawn starts the scheduler, schema 1.7 `actors` passes through a second library, and the program's exit drains a fire-and-forget message (shared runtime everywhere, static on Linux/FreeBSD; elsewhere a warning) (#2297) |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 
 Run them with the standard `make test-ae` or individually:

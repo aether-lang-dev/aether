@@ -66,12 +66,20 @@
  * `aether_<module, dots as _>__<name>`, taking its parameters and the
  * trailing `void* _builder` config.
  *
+ * v8 (schema "1.7", #2297) appends `actors`: 1 when the library runs actors,
+ * its own or those of a binary library it imports, else 0. A program that
+ * imports such a library runs the scheduler from its main() as it does for
+ * its own actors, so the library's in-flight messages are delivered before
+ * the program exits. A host that does not (a C program, say) still gets a
+ * running scheduler on the library's first spawn, and calls
+ * scheduler_shutdown() before it exits to drain it.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
  * constant records are present, "1.3" once struct records or source
  * signatures are, "1.4" for a package library, "1.5" for a library
- * linked against the shared runtime, and "1.6" for a package library
- * that exports builders. Hosts that read the metadata should
+ * linked against the shared runtime, "1.6" for a package library
+ * that exports builders, and "1.7" for a library that runs actors. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -194,6 +202,8 @@ typedef struct {
                                                     shared runtime, else NULL */
     const char* const*        closure_modules;   /* schema >= 1.6; parallel to
                                                     closures, or NULL       */
+    int                       actors;            /* schema >= 1.7: 1 when the
+                                                    library runs actors     */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

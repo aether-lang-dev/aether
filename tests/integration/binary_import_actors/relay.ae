@@ -1,0 +1,11 @@
+// #2297: a library with no actors of its own that calls one that has them.
+// Its catalog still says it runs actors, so its importers run the scheduler.
+import crowd
+
+relay_count(n: int) -> int {
+    return crowd.count_to(n)
+}
+
+relay_announce(n: int) {
+    crowd.announce(n)
+}

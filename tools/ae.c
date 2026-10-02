@@ -280,6 +280,10 @@ static bool g_emit_lib = false;
  * imports run on one runtime. Set by --shared-runtime, and by a binary
  * import of a library built that way. */
 static bool g_shared_runtime = false;
+/* #2297: a binary library this build imports runs actors (catalog >= 1.7).
+ * The compiler is told (--lib-actors): a program's main() runs the scheduler
+ * for them, and a library's catalog passes the fact on to its importers. */
+static bool g_binimport_actors = false;
 static bool g_emit_csrc = false;  // #996 --emit=csrc: emit .c + catalog .h, no gcc
 /* --emit=staticlib: one .a holding the program's objects AND the runtime +
  * stdlib objects, rather than a shared library. iOS is the motivating target:
@@ -425,6 +429,7 @@ typedef struct {
     const char* const* constant_modules;   /* schema >= 1.4, parallel to constants */
     const char* runtime;                   /* schema >= 1.5: "shared" or NULL */
     const char* const* closure_modules;    /* schema >= 1.6, parallel to closures */
+    int         actors;                    /* schema >= 1.7: the library runs actors */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -612,10 +617,11 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
     /* The catalog of a library linked against the shared runtime says so,
      * and a program importing it follows (#2297). */
     const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+    const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
+    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
              tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-             g_lib_package_flag, shared_rt_flag, g_defines, lib_flags, deps_flag,
-             input, output);
+             g_lib_package_flag, shared_rt_flag, lib_actors_flag, g_defines, lib_flags,
+             deps_flag, input, output);
 }
 
 // --------------------------------------------------------------------------
@@ -4128,6 +4134,8 @@ static char g_binimport_dirs[4096] = "";
 static int g_binimport_shared_rt = 0;
 static int g_binimport_static_rt = 0;
 static char g_binimport_static_names[1024] = "";
+/* Those of them that run actors (catalog >= 1.7). */
+static char g_binimport_static_actor_names[1024] = "";
 
 // Split a rendered signature "(A, B) -> R" into an Aether parameter list
 // ("p0: A, p1: B"), a bare argument list ("p0, p1"), and the return type
@@ -4249,6 +4257,22 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         size_t ol = strlen(g_binimport_static_names);
         snprintf(g_binimport_static_names + ol, sizeof(g_binimport_static_names) - ol,
                  "%s%s", ol ? ", " : "", base);
+    }
+
+    /* #2297: a library that runs actors (schema >= 1.7) needs the program
+     * to run the scheduler, and drain it before exiting. */
+    if (minor >= 7 && m->actors) {
+        g_binimport_actors = true;
+        int shared = minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0;
+        const char* base = strrchr(so_path, '/');
+        base = base ? base + 1 : so_path;
+        /* A package library's stub is generated once per module it serves. */
+        if (!shared && !strstr(g_binimport_static_actor_names, base)) {
+            size_t ol = strlen(g_binimport_static_actor_names);
+            snprintf(g_binimport_static_actor_names + ol,
+                     sizeof(g_binimport_static_actor_names) - ol,
+                     "%s%s", ol ? ", " : "", base);
+        }
     }
 
     // Struct records (schema >= 1.3, #2297) → the struct declarations the
@@ -4701,6 +4725,18 @@ static void prepare_binary_imports(const char* main_file) {
             g_binimport_static_names, g_binimport_static_rt > 1 ? "were" : "was",
             g_binimport_static_rt > 1 ? "them" : "it");
     }
+#if defined(_WIN32) || defined(__APPLE__)
+    /* Without ELF interposition, a static-runtime library's actors run on
+     * the library's own scheduler, which the program's exit does not drain:
+     * a message still in flight when main() returns is not delivered. */
+    if (g_binimport_static_actor_names[0]) {
+        fprintf(stderr,
+            "Warning: %s runs actors on its own static runtime, so messages still in flight\n"
+            "         when the program exits are not delivered; rebuild it with\n"
+            "         `ae build --emit=lib --shared-runtime` to run them on the program's.\n",
+            g_binimport_static_actor_names);
+    }
+#endif
 }
 
 /* #2297: Windows has no rpath. After a link that names DLLs (binary imports,
@@ -10062,6 +10098,9 @@ static int cmd_lib_info(int argc, char** argv) {
     }
     if (minor >= 5) {
         printf("  Runtime:       %s\n", (m->runtime && m->runtime[0]) ? m->runtime : "static");
+    }
+    if (minor >= 7) {
+        printf("  Actors:        %s\n", m->actors ? "yes" : "no");
     }
     printf("\n");
 
