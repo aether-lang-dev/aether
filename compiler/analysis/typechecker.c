@@ -7793,11 +7793,21 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
         case AST_RETURN_STATEMENT:
             // #1044 implicit enum selector: `return Blue` in a function whose
-            // return type is an enum resolves the bare member against it. Then
-            // typecheck children exactly as the default case does.
+            // return type is an enum resolves the bare member against it.
+            //
+            // #2337: a returned value is an EXPRESSION and is checked as one,
+            // exactly as a declaration's initializer is. Walking it through
+            // typecheck_node (the statement path) only visited its children,
+            // so the expression rules never ran on anything returned: `return
+            // (s as int) & 255` with a string `s` compiled, while the same
+            // cast assigned to a local was refused. Match-as-expression is
+            // the one value form the statement path owns.
             for (int i = 0; i < stmt->child_count; i++) {
                 coerce_bare_enum_member(stmt->children[i], g_tc_return_type, table);
-                typecheck_node(stmt->children[i], table);
+                if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT)
+                    typecheck_node(stmt->children[i], table);
+                else
+                    typecheck_expression(stmt->children[i], table);
             }
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
@@ -8303,8 +8313,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             Type* operand = expr->child_count > 0 ? infer_type(expr->children[0], table) : NULL;
             if (operand && expr->node_type) {
                 int same = (operand->kind == expr->node_type->kind);
-                int numeric = is_numeric_scalar(operand->kind) &&
-                              is_numeric_scalar(expr->node_type->kind);
+                /* #2337: `byte` is an unsigned 8-bit integer (`unsigned char`,
+                 * the same C type as uint8), so `b as int` widens it and
+                 * `n as byte` keeps the low 8 bits, as for uint8. It is not in
+                 * is_numeric_scalar, whose other callers type arithmetic, where
+                 * a byte has its own rules. */
+                int numeric = (is_numeric_scalar(operand->kind) || operand->kind == TYPE_BYTE) &&
+                              (is_numeric_scalar(expr->node_type->kind) ||
+                               expr->node_type->kind == TYPE_BYTE);
                 /* #1132: a bitstruct never converts IMPLICITLY (is_type_compatible
                  * keeps it strictly nominal), but `as` is exactly how you cross the
                  * boundary on purpose: `w as Flags` to wrap a raw word, `f as

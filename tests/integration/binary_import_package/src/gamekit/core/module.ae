@@ -1,0 +1,36 @@
+// gamekit.core: uses gamekit.math inside the package, keeps module state,
+// and lists its exports, so `secret` stays out of the library (#2297).
+
+import gamekit.math
+
+exports(create, count, position_of, MAX_ENTITIES)
+
+const MAX_ENTITIES = 64
+const HIDDEN_LIMIT = 9
+
+var created = 0
+
+struct Entity {
+    id: int
+    pos: math.Vec2
+}
+
+create(x: float, y: float) -> *Entity {
+    e = heap.new(Entity)
+    created = created + 1
+    e.id = created
+    e.pos = math.add(math.vec2(x, y), math.vec2(math.UNIT, 0.0))
+    return e
+}
+
+count() -> int {
+    return created
+}
+
+position_of(e: *Entity) -> math.Vec2 {
+    return e.pos
+}
+
+secret() -> int {
+    return HIDDEN_LIMIT
+}

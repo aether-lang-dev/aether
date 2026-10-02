@@ -29,6 +29,9 @@
 #include "aether_defines.h"
 #include "aether_error.h"
 #include "aether_module.h"
+
+/* #2297: --shared-runtime (with --emit=lib): recorded in the catalog. */
+static int g_lib_shared_runtime = 0;
 #include "../lsp/aether_lsp.h"
 
 // Version is set by Makefile from VERSION file
@@ -1686,6 +1689,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (no_contracts_mode) codegen->no_contracts = 1;
     codegen->emit_exe = emit_exe ? 1 : 0;
     codegen->emit_lib = emit_lib ? 1 : 0;
+    codegen->lib_shared_runtime = g_lib_shared_runtime;
     // #996 --emit=csrc: open the catalog header if requested. Distinct from the
     // pre-existing --header (header_output) path above.
     FILE* csrc_header = NULL;
@@ -2058,6 +2062,10 @@ void print_help(const char* program_name) {
     printf("                                   summary / derived per-function effect+purity JSON (#889)\n");
     printf("  --emit=aea <mod.ae> <out.aea>    Write a module's compiled artifact: its parse, reused by\n");
     printf("                                   importers of the installed module (#1746)\n");
+    printf("  --shared-runtime                 With --emit=lib: record that the library links the\n");
+    printf("                                   shared runtime, so importers link it too (#2297)\n");
+    printf("  --lib-package=<pkg>              With --emit=lib: export every <pkg>.* module the build\n");
+    printf("                                   imports, as one package library (#2297)\n");
     printf("  --emit-main=<func>               With --emit=lib: also emit a thin main(argc,argv) shim\n");
     printf("                                   that calls <func>(). Closes the exe/lib symmetry.\n");
     printf("  --emit-namespace-manifest        Print the manifest JSON for a manifest.ae and exit\n");
@@ -2309,6 +2317,23 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea (got '%s')\n", val);
                 return 1;
             }
+            arg_offset++;
+        } else if (strcmp(argv[arg_offset], "--shared-runtime") == 0) {
+            // #2297: with --emit=lib, the library links the shared runtime;
+            // its catalog records that, so an importing program follows.
+            g_lib_shared_runtime = 1;
+            arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--lib-package=", 14) == 0) {
+            // #2297: --lib-package=<pkg> with --emit=lib: every module named
+            // <pkg> or <pkg>.<...> is part of the library, so its exported
+            // functions and constants are exported (aether_<module>__<name>)
+            // and cataloged with the module they belong to.
+            const char* val = argv[arg_offset] + 14;
+            if (!*val) {
+                fprintf(stderr, "Error: --lib-package= requires a package name\n");
+                return 1;
+            }
+            module_set_lib_package(val);
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--emit-main=", 12) == 0) {
             // --emit-main=<func>: a follow-up to --emit=lib. The codegen

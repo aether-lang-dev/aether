@@ -132,13 +132,14 @@ content-addressable. Fields:
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | `"1.0"` functions only, `"1.1"` adds closures, `"1.2"` adds constants (the highest feature level present) |
+| `schema_version` | `"1.0"` functions only, `"1.1"` adds closures, `"1.2"` adds constants, `"1.3"` adds structs and source signatures (the highest feature level present) |
 | `aether_version` | Compiler version stamp |
 | `primary_source` | The `.ae` the artifact was built from (mirrors the path passed to the compiler: pass a relative path for a reproducible, machine-independent value) |
 | `capabilities` | The `--with` grants this artifact was built with (e.g. `["fs","net"]`), empty when capability-empty. Because the emitted C only contains code paths for granted capabilities, this is the syscall surface a consumer can inspect *before* compiling the source |
-| `functions[]` | `aether_name`, `c_symbol` (the `dlsym`/link name), `signature`, `source_file`, `source_line` |
+| `functions[]` | `aether_name`, `c_symbol` (the `dlsym`/link name), `signature`, `source_file`, `source_line`; at schema 1.3 also `source_signature`, the signature as Aether source (`"(m: *Model, p: Vec3) -> void"`) |
 | `closures[]` | Closure surface reachable from exports: `name`, `role` (`builder` / `param` / `literal`), `enclosing_export`, `signature`, `captures[]` (`name` + `type`), `source_file`, `source_line` |
 | `constants[]` | Exported scalar/string consts: `name`, `type`, `value` |
+| `structs[]` | Schema 1.3: the structs the exports use, `name`, `kind` (`""`, `"extern"`, `"extern_packed"`), `fields[]` (`name`, `type` as Aether source, `flags`), `source_file`, `source_line` |
 
 ```json
 {
@@ -184,12 +185,15 @@ public ABI:
 | `bool` | `int32_t` | `0` = false, `1` = true |
 | `string` | `const char*` | Borrowed pointer; copy in the host if the lifetime matters |
 | `ptr` / `list` / `map` | `AetherValue*` | Opaque handle; walk with `aether_config_*` accessors |
+| `*Struct` | `AetherValue*` | Opaque to a C host; an Aether importer gets the typed pointer back (the catalog's source signature) and reaches the fields |
+| `Struct` (by value) | the struct, by name | Its layout is in the catalog's struct records, which an Aether importer re-declares; an `--emit=csrc` header leaves these prototypes out and says why (#2297) |
+| `fn(A, B) -> R` | `void*` | A C function pointer; a closure (bare `fn`) does not cross |
 
 Functions whose parameters or returns use types outside this table
-(tuples, structs, closures, actor refs) compile but **don't get an
+(tuples, closures, actor refs, enums) compile but **don't get an
 `aether_<name>` alias**. `aetherc` prints a warning naming the skipped
 function. You can still use those types internally; they just can't
-cross the FFI boundary in v1.
+cross the FFI boundary yet.
 
 Two private-helper conventions also opt out of the `aether_<name>`
 surface:
@@ -553,7 +557,7 @@ typedef struct {
 } AetherLibFunction;
 
 typedef struct {
-    const char* schema_version;   /* "1.0" funcs; "1.1" closures; "1.2" consts */
+    const char* schema_version;   /* "1.0" funcs; "1.1" closures; "1.2" consts; "1.3" structs */
     const char* aether_version;   /* compiler version                  */
     const char* primary_source;   /* the .ae passed to aetherc         */
     int                       function_count;
@@ -562,6 +566,9 @@ typedef struct {
     const AetherLibClosure*   closures;        /* NULL when closure_count==0 */
     int                       constant_count;  /* v3: exported-constant records */
     const AetherLibConstant*  constants;       /* NULL when constant_count==0 */
+    int                       struct_count;    /* v4: struct records          */
+    const AetherLibStruct*    structs;         /* NULL when struct_count==0   */
+    const char* const*        source_signatures; /* v4: parallel to functions */
 } AetherLibMeta;
 ```
 
@@ -572,8 +579,11 @@ so a "1.0" reader walks a "1.1" or "1.2" artifact unchanged (it reads
 `function_count`/`functions` and ignores the closure and constant slots;
 those fields were always present, just NULL before). `schema_version` is
 "1.0" for function-only artifacts, "1.1" once closure records are
-present, and "1.2" once exported-constant records
-(`constant_count`/`constants`, of type `AetherLibConstant`) are present.
+present, "1.2" once exported-constant records
+(`constant_count`/`constants`, of type `AetherLibConstant`) are present,
+and "1.3" once struct records or source signatures are (below). A reader
+touches a field only when the artifact's minor version is at least the one
+that appended it: an older artifact's struct ends before the newer slots.
 The function table includes every
 Aether-defined function the linker exports; functions skipped from the
 `aether_<name>` alias surface (unsupported types, tuple returns,
@@ -624,6 +634,40 @@ Closure-literal return types are best-effort: rendered when resolved,
 `?` when the body type-checks lazily and the type isn't known at emit
 time. Captures and parameter types are exact.
 
+#### Struct records and source signatures (v4, schema "1.3", #2297)
+
+The display `signature` flattens a typed pointer to `ptr` and spells a
+struct `struct Vec3`, which is enough to call through a C ABI and not
+enough to declare the function on the Aether side. Two additions carry what
+an Aether importer needs:
+
+```c
+typedef struct { const char* name; const char* type; const char* flags; } AetherLibField;
+
+typedef struct {
+    const char* name;              /* "Model"                              */
+    const char* kind;              /* "", "extern" or "extern_packed"      */
+    int                    field_count;
+    const AetherLibField*  fields; /* type as Aether source: "*Vec3", "fn(ptr, float) -> int" */
+    const char* source_file;
+    int         source_line;
+} AetherLibStruct;
+```
+
+- `structs` lists every struct the library defines and every struct an
+  export's signature reaches (through fields, transitively), including
+  one merged in from a module the library imports. A struct that cannot be
+  re-declared (an opaque or header-defined `extern` type, a union or
+  bit-width field, a field of enum, sum or distinct type) is left out with
+  a compile-time warning naming why.
+- `source_signatures[i]` is `functions[i]`'s signature as Aether source,
+  with parameter names: `"(m: *Model, p: Vec3) -> void"`. An entry is `""`
+  when an export has no source spelling.
+
+Both are emitted only when an artifact has struct records or a signature
+the display form flattens, so a library with neither stays byte-identical
+to schema 1.2.
+
 #### Consuming a published library from Aether (`import`)
 
 The records above are not just for inspection, they are what lets an
@@ -646,8 +690,9 @@ When `ae run` / `ae build` sees an `import foo` that has no `foo` source
 module but a `libfoo.so` / `foo.so` on the search path, it reads that
 artifact's `aether_lib_meta()` catalog and synthesizes a small Aether
 interface stub: an `@extern("<c_symbol>") name(...) -> R` for each
-function export, and a trailing-block `builder` wrapper for each
-`builder` record (forwarding the block's config map to the library
+function export (typed by its source signature from schema 1.3), a
+`struct` declaration for each struct record, and a trailing-block `builder`
+wrapper for each `builder` record (forwarding the block's config map to the library
 function's `(..., _builder)` entry point). The stub is dropped onto the
 module search path, so the *existing* source-import machinery
 (typecheck, namespace prefixing, builder registration) rehydrates the
@@ -660,12 +705,100 @@ Scope of the current implementation:
 - **Function exports** and **builder DSL entry points** are callable.
   A builder consumer also `import std.map` (the default `map_new`
   config factory is a `std.map` facility used at the call site).
+- **Structs** cross (#2297): a struct passes by value, a `*Struct`
+  reaches its fields (`m.position.x`), and a struct with a
+  function-pointer field keeps its layout. The importer declares each
+  struct from the catalog, so its layout is the library's.
+- **Module state lives once.** A module-level `var` in the library is the
+  library's single instance for every importer: a second binary library
+  that imports the first, and a host that imports both, all reach the same
+  `var`.
 - **Higher-order exports** (a function taking a closure `fn` parameter)
   are described in the metadata but not yet callable across the binary
   boundary, passing an Aether closure into an imported function is a
   follow-on (the closure ABI across the boundary).
-- POSIX only for now (the prepass is gated on `dlopen`); Windows DLL
-  hosting is a follow-up, matching `ae lib-info`.
+- **Every platform.** On Windows the catalog is read by mapping the DLL
+  without running its initialisation code, the DLL is linked directly, and
+  `ae build` copies each imported DLL next to the program it builds (PE has
+  no rpath); `ae run` puts their directories on the program's `PATH`.
+
+#### One runtime for a program and its libraries (`--shared-runtime`, schema "1.5")
+
+A library built the default way carries its own copy of the runtime, linked
+in statically: one scheduler, one set of panic frames, one config per image.
+That keeps a library self-contained for a C or Python host, but a program
+that imports Aether libraries in binary form then runs on several runtimes.
+On Linux and FreeBSD ELF symbol interposition happens to bind a library's
+runtime calls to the program's copy; macOS's two-level namespace and Windows'
+PE keep them apart, so a panic raised inside a library never reaches the
+program's `catch` there.
+
+`--shared-runtime` links against the runtime as a shared library instead,
+`aether.dll` (with `libaether.dll.a`), `libaether.dylib` or `libaether.so`,
+which the toolchain builds and installs in `lib/aether/shared/` (`build/shared/`
+in a source tree), beside the static archive:
+
+```sh
+ae build --emit=lib --shared-runtime engine.ae -o libengine.so
+ae build --emit=lib --shared-runtime script.ae -o libscript.so   # imports engine
+ae build app.ae -o app                                            # imports both
+```
+
+- The library's catalog records it (`runtime = "shared"`, schema 1.5;
+  `ae lib-info` prints `Runtime: shared`), and a program importing such a
+  library links the shared runtime too, without being asked.
+- Program and libraries then run on one runtime: a panic inside a library
+  unwinds to the program's `catch` on every platform, and actors, config and
+  resource caps are the program's.
+- The shared runtime is linked by path (never `-laether`, which keeps
+  finding the static archive): an rpath to its directory on Linux and macOS,
+  and on Windows `aether.dll` is copied next to the program (`ae build`) or
+  put on `PATH` (`ae run`). The Windows DLL is self-contained: it needs only
+  system DLLs and the UCRT.
+- A program that imports one library built on the shared runtime and another
+  built static gets a warning naming the static one: rebuild it with
+  `--shared-runtime`.
+- Hooks a program supplies to the runtime by `@c_callback` (the pure-TLS
+  client and server) reach a shared runtime by registration: every
+  `@c_callback` registers itself by name when its image loads, and the
+  runtime looks a hook up before falling back to its own definition.
+
+#### A package as one library (`--package`, schema "1.4")
+
+A package of many modules (`ae3d.core`, `ae3d.gl`, ...) builds into one
+library, which programs then import module by module (#2297):
+
+```sh
+ae build --emit=lib --package ae3d --lib src -o libae3d.so
+```
+
+- **What is built.** The package's modules are its directory under `.`,
+  `src` or a `--lib` / dependency directory (`src/ae3d/`): that directory if
+  it holds a `module.ae`, and every directory below it that does
+  (`src/ae3d/core/module.ae` is `ae3d.core`). `ae` writes an entry that
+  imports all of them and builds it with `--lib-package=ae3d`. The default
+  output name is `lib<package>`, with dots as `_`.
+- **What is exported.** Each module's public functions and constants are
+  exported: the names in its `exports (...)` list, or all of them when it
+  has no list, minus `_`-suffixed privates. A function gets a stable C
+  symbol named after its module, `aether_ae3d_core__model_new`. The
+  compiler's own merged name (`core_model_new`) depends on which other
+  modules a build loads, so it is never the ABI. The package's structs are
+  recorded as in schema 1.3, and module `var`s live once, in the library.
+- **The catalog.** `function_modules` and `constant_modules` are parallel
+  to the function and constant tables and give the module each export
+  belongs to. `aether_name` is the bare name (`model_new`). `ae lib-info`
+  prints a `module:` line under each export.
+- **Importing.** `import ae3d.core` with no `ae3d/core` source on the path
+  resolves to the package library: `ae` tries each proper prefix of the
+  import, longest first (`ae3d` → `libae3d`), and takes the library whose
+  catalog lists `ae3d.core`. The interface it builds for that module
+  declares the module's functions and constants and the library's structs,
+  so `core.model_new(...)` reads as it does against source. Importing
+  several modules of one package links the library once.
+- **Not exported:** a package module's `builder` functions. The builder ABI
+  passes the trailing block through the function's own symbol, which a
+  merged clone keeps static. The build warns, naming each one.
 
 ### `ae lib-info <path>` inspect any artifact
 
@@ -695,10 +828,11 @@ The `c_symbol:` line is suppressed when the symbol equals `aether_<name>`
 `@c_callback`-marked functions whose Aether name *is* the C symbol show
 no `c_symbol:` line either; they are their own export.
 
-Windows is a follow-up, `ae lib-info` returns 1 with a "DLL hosting is
-a follow-up" message; the metadata struct *is* still emitted into the
-DLL's `.rodata` and is reachable via `LoadLibrary` +
-`GetProcAddress("aether_lib_meta")` from any host.
+On Windows `ae lib-info` maps the DLL without running its initialisation
+code and reads the same catalog; any host reaches it with `LoadLibrary` +
+`GetProcAddress("aether_lib_meta")`. A DLL that `ae` links exports the
+entry point strong: PE cannot export a weak definition, so the generated
+code is compiled with `-DAETHER_LIB_META_WEAK=` there (#2297).
 
 ### What this enables for FFI hosts
 
@@ -747,6 +881,8 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_swig/` | SWIG Python round-trip (skips if `swig` missing) |
 | `emit_lib_with_capability/` | `--with=fs,net,os` opt-ins; `--with=first-party` and `--with=all` aliases |
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
+| `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
+| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library; static runtime (a library panic caught on Linux/FreeBSD) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 
 Run them with the standard `make test-ae` or individually:

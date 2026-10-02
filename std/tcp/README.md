@@ -38,10 +38,37 @@ main() {
 }
 ```
 
-`write` and `read` may transfer **fewer bytes than asked**, which is TCP
-working as designed rather than an error. `write_n` and `read_n` loop until
-the full count is transferred or the connection dies — usually what a caller
-wants, and always what a length-prefixed protocol needs.
+Every write and read may transfer **fewer bytes than asked**, which is TCP
+working as designed rather than an error: each is one `send(2)` or `recv(2)`,
+and returns the count it moved. A length-prefixed protocol loops on the
+rest until the full count is transferred or the connection dies.
+
+## Binary data in `byte[]` slices
+
+`write_slice(sock, s)` sends a `byte[]` slice's bytes as they are, zero bytes
+included: the length travels with the slice. `read_into(sock, buf)` receives
+into a caller-owned slice, allocating nothing, and returns `(n, err)` with the
+data in `buf[0..n]`; it never writes past `buf.len`. Both may be short, so
+the loops take the rest as a sub-slice. A quiet peer is `"timeout"` (retry or
+`poll`, as with `read_n`), a closed one `"connection closed or receive
+failed"`. An empty receive slice returns `"receive buffer is empty"` without
+reading, and a slice with no bound (`p as byte[]`, `.len` -1) panics.
+
+```aether,fragment
+// Send all of `frame`, then read exactly `want` bytes into `buf`.
+sent = 0
+while sent < frame.len {
+    n, err = tcp.write_slice(sock, frame[sent..])
+    if err != "" { break }
+    sent = sent + n
+}
+got = 0
+while got < want {
+    n, err = tcp.read_into(sock, buf[got..want])
+    if err != "" { break }          // "timeout": poll and retry; else closed
+    got = got + n
+}
+```
 
 `poll` reports readability without blocking, which is how one thread services
 several sockets. For an HTTP server rather than raw sockets, use
@@ -78,6 +105,6 @@ while !stopping {
 
 ## Exports
 
-`connect`, `listen`, `listen_on`, `accept`, `read`, `read_n`, `write`,
-`write_n`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
+`connect`, `listen`, `listen_on`, `accept`, `read`, `read_n`, `read_into`,
+`write`, `write_n`, `write_slice`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
 `fd`, `server_fd`, `tcp_close`, `tcp_server_close`.

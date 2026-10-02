@@ -242,6 +242,30 @@ AETHER_WEAK void aether_pure_tls_server_close(void* pure_conn) {
     (void)pure_conn;
 }
 
+/* #2297: the registered implementation (aether_callback_lookup), else the
+ * symbol above; see the client side in aether_http.c. */
+#include "../../runtime/aether_callbacks.h"
+typedef void* (*pt_server_accept_fn)(int, const char*, const char*);
+typedef int   (*pt_server_send_fn)(void*, const void*, int);
+typedef int   (*pt_server_recv_fn)(void*, void*, int);
+typedef void  (*pt_server_close_fn)(void*);
+static void* pt_server_accept(int fd, const char* cert_path, const char* key_path) {
+    pt_server_accept_fn f = (pt_server_accept_fn)aether_callback_lookup("aether_pure_tls_server_accept");
+    return f ? f(fd, cert_path, key_path) : aether_pure_tls_server_accept(fd, cert_path, key_path);
+}
+static int pt_server_send(void* c, const void* buf, int len) {
+    pt_server_send_fn f = (pt_server_send_fn)aether_callback_lookup("aether_pure_tls_server_send");
+    return f ? f(c, buf, len) : aether_pure_tls_server_send(c, buf, len);
+}
+static int pt_server_recv(void* c, void* buf, int len) {
+    pt_server_recv_fn f = (pt_server_recv_fn)aether_callback_lookup("aether_pure_tls_server_recv");
+    return f ? f(c, buf, len) : aether_pure_tls_server_recv(c, buf, len);
+}
+static void pt_server_close(void* c) {
+    pt_server_close_fn f = (pt_server_close_fn)aether_callback_lookup("aether_pure_tls_server_close");
+    if (f) f(c); else aether_pure_tls_server_close(c);
+}
+
 /* Per-connection read buffer. Persists across requests on a
  * keep-alive connection so that pipelined bytes (the start of
  * request N+1 already received while reading request N) are not
@@ -337,7 +361,7 @@ int http_conn_fd(HttpConn* conn) { return conn ? conn->fd : -1; }
 
 static int conn_recv(HttpConn* c, void* buf, int len) {
     if (c->pure_tls) {
-        return aether_pure_tls_server_recv(c->pure_tls, buf, len);
+        return pt_server_recv(c->pure_tls, buf, len);
     }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
@@ -351,7 +375,7 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
 
 static int conn_send(HttpConn* c, const void* buf, int len) {
     if (c->pure_tls) {
-        return aether_pure_tls_server_send(c->pure_tls, buf, len);
+        return pt_server_send(c->pure_tls, buf, len);
     }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
@@ -618,7 +642,7 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
 
 static void conn_close(HttpConn* c) {
     if (c->pure_tls) {
-        aether_pure_tls_server_close(c->pure_tls);
+        pt_server_close(c->pure_tls);
         c->pure_tls = NULL;
     }
 #ifdef AETHER_HAS_OPENSSL
@@ -5208,7 +5232,7 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
 
     if (server->tls_enabled) {
         if (server->is_pure_tls) {
-            void* pure_conn = aether_pure_tls_server_accept(conn->fd, server->cert_path, server->key_path);
+            void* pure_conn = pt_server_accept(conn->fd, server->cert_path, server->key_path);
             if (!pure_conn) {
                 close(client_fd);
                 free(conn);

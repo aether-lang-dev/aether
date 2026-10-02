@@ -1,0 +1,25 @@
+// gamekit.math: a module of the gamekit package (#2297). No exports list,
+// so everything public is exported; `half_` stays private by its suffix.
+
+struct Vec2 {
+    x: float
+    y: float
+}
+
+const UNIT = 1.0
+
+vec2(x: float, y: float) -> Vec2 {
+    return Vec2 { x: x, y: y }
+}
+
+add(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+dot(a: Vec2, b: Vec2) -> float {
+    return a.x * b.x + a.y * b.y
+}
+
+half_(v: float) -> float {
+    return v / 2.0
+}

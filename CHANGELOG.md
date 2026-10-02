@@ -14,6 +14,116 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.755.0]
+
+### Added
+
+- **One runtime for a program and its libraries, and binary import on
+  Windows.** The toolchain now also builds the runtime as a shared library:
+  `aether.dll` with its import library, `libaether.dylib` or `libaether.so`.
+  It is installed in `lib/aether/shared/`, beside the static archive.
+  `ae build --emit=lib --shared-runtime` links a library against it, and the
+  library's catalog records that (schema 1.5). A program that imports such a
+  library links the shared runtime too, without being asked. The program and
+  its libraries then share one scheduler, one config and one set of panic
+  frames, so a panic inside a library reaches the program's `catch` on every
+  platform; before, that worked only on Linux and FreeBSD. Binary import
+  (`import foo` of a prebuilt `--emit=lib` library) and `ae lib-info` now
+  work on Windows. `ae` maps the DLL without running its init code to read
+  the catalog, and `ae build` copies the DLLs a program needs next to it,
+  since PE has no rpath. A Windows DLL now exports its `aether_lib_meta`
+  catalog, which it never did before (PE cannot export a weak definition).
+  `@c_callback` hooks such as the pure-TLS client and server reach a shared
+  runtime by registering by name at load. The build cache now keys on the
+  imported libraries, so a program is rebuilt after one of them changes
+  (#2297).
+
+## [0.754.0]
+
+### Added
+
+- **A package of modules builds into one library.** `ae build --emit=lib
+  --package ae3d` builds every module under the package's directory
+  (`src/ae3d/core/module.ae` is `ae3d.core`) into one library, `libae3d`.
+  Each module's public functions and constants are exported, meaning the
+  names in its `exports` list, or all of them when it has no list, minus
+  `_`-suffixed privates. Each function's C symbol is named after its module
+  (`aether_ae3d_core__model_new`), so the symbol stays the same whichever
+  other modules a build loads. The catalog (schema 1.4) records the module
+  each export belongs to. A program's `import ae3d.core` with no source on
+  the path now resolves to the library whose catalog lists that module, so
+  `core.model_new(...)` works against the prebuilt library as it does
+  against source. A library also stops cataloging constants it merely
+  imported from other modules (#2297).
+
+## [0.753.0]
+
+### Added
+
+- **Structs cross a binary import.** An `--emit=lib` library's
+  `aether_lib_meta()` catalog (schema 1.3) now carries struct records:
+  each struct the library defines or its exports reach, field by field,
+  with each field's type in Aether source spelling. It also carries a
+  source signature for each export (`(m: *Model, p: Vec3) -> void`). The
+  interface `ae` builds for an `import` of the library declares those
+  structs and types each extern from its source signature. An importer can
+  pass a struct by value, reach fields through a `*Struct`
+  (`m.position.x`), and use a struct with a function-pointer field, all
+  with the library's own layout. Before, a typed pointer arrived as an
+  opaque `ptr`, and a function that took or returned a struct was not
+  exported at all. Structs by value and `fn(...) -> R` function pointers
+  now cross the `aether_<name>` ABI, a typed-pointer return is cast for
+  GCC 14, and `ae lib-info` prints the struct records and source
+  signatures. A library without them keeps its schema 1.2 catalog
+  byte for byte (#2297).
+
+## [0.752.0]
+
+### Added
+
+- **`std.tcp` and `std.udp` send and receive `byte[]` slices.**
+  `tcp.write_slice(sock, s)` sends a slice's bytes as they are, and
+  `tcp.read_into(sock, buf)` receives into a caller-owned slice without
+  allocating and returns the count, the data being `buf[0..n]`; both keep
+  TCP's short transfers and `read_n`'s "timeout" sentinel.
+  `udp.send_slice_to`, `send_slice_to_addr`, `recv_slice_from` and
+  `recv_slice_from_into` do the same for datagrams. A receive never writes
+  past the slice (the pointer forms trusted a separate capacity), a datagram
+  longer than the slice is truncated to it with the rest discarded, an empty
+  receive slice is refused without consuming anything, and a slice with no
+  bound panics (#2301).
+
+### Fixed
+
+- **A dependency's own dependencies resolve for the project that uses it.**
+  `ae` used to read only the project's manifest, so `app -> pkga -> pkgb`
+  failed with an unresolved import from `app`. The consumer had to declare
+  `pkgb` itself and patch it to a path inside `pkga`'s checkout. `ae run`,
+  `ae build` and `ae lib-path` now walk the graph. A dependency's `[patch]`
+  paths resolve against that dependency's own root, and the project's
+  `[patch]` wins for any package in the graph. A package that resolves to
+  two different places is an error naming both paths and who required
+  each, and a missing transitive dependency names the package that needs it
+  (#2335).
+
+- **`byte as int` converts, and a returned value is type-checked.** A
+  value cast accepted every numeric kind except `byte`, so assigning
+  `bytes[i] as int` was refused with E0200. The same cast compiled inside a
+  `return`, because a returned value went through the statement checker and
+  no expression rule ever ran on it. A `byte` now converts with `as` like
+  the `uint8` it is, in both directions (`n as byte` keeps the low 8 bits).
+  A returned value is checked as an expression, the same way a
+  declaration's initializer is, so an invalid cast such as `return (s as int)
+  & 255` with a string `s` is now an error. Before, it compiled to a
+  pointer-to-int conversion (#2337).
+
+- **An uncaught panic prints a message built at run time.** An
+  interpolated or otherwise heap-built panic message reached the runtime as
+  an `AetherString`, and the uncaught fallback printed it as a C string. The
+  line showed the string's header bytes instead of the text. The fallback and
+  an actor's death hook now take the text out of the string, and a literal
+  message prints as before (#2340).
+
 ## [0.751.0]
 
 ### Added

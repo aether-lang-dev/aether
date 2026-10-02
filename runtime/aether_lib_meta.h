@@ -35,9 +35,36 @@
  * const *arrays* are out of scope (the emitter skips them rather than
  * emit a half-record). See emit-lib-export-constants-ask.md.
  *
+ * v4 (schema "1.3", #2297) appends `struct_count` / `structs` and
+ * `source_signatures`. A struct record carries a struct an export uses
+ * (or the library defines), field by field, with each field's type as
+ * Aether SOURCE ("*Vec3", "fn(ptr, int) -> int", "float[3]"); a
+ * `source_signatures[i]` is functions[i]'s signature in the same spelling,
+ * with parameter names ("(m: *Model, dt: float) -> void"), where
+ * `signature` stays the display form that flattens a typed pointer to
+ * "ptr". Together they let `ae` declare, for a binary import, the same
+ * structs and the same typed externs the library was built with. Either
+ * slot may be absent (0 / NULL), and an entry of `source_signatures` is ""
+ * when that export has no source spelling.
+ *
+ * v5 (schema "1.4", #2297) appends `function_modules` and
+ * `constant_modules`, parallel to `functions` and `constants`: in a library
+ * built from a whole package (`ae build --emit=lib --package <pkg>`), the
+ * module each export belongs to ("ae3d.core"; "" for the entry's own). An
+ * export of a package module is named by its bare name in `aether_name`
+ * and has the C symbol `aether_<module, dots as _>__<name>`.
+ *
+ * v6 (schema "1.5", #2297) appends `runtime`: "shared" when the library was
+ * linked against the shared runtime (`--shared-runtime`), NULL otherwise. A
+ * program importing such a library links the shared runtime too, so the two
+ * run on one runtime: a panic raised in the library reaches the program's
+ * catch, on every platform.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
- * artifacts, "1.1" once closure records are present, and "1.2" once
- * constant records are present. Hosts that read the metadata should
+ * artifacts, "1.1" once closure records are present, "1.2" once
+ * constant records are present, "1.3" once struct records or source
+ * signatures are, "1.4" for a package library, and "1.5" for a library
+ * linked against the shared runtime. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -114,11 +141,31 @@ typedef struct {
     const char* value;   /* rendered literal: "0", "\"...\"", "true", ...   */
 } AetherLibConstant;
 
+/* One field of a struct record (v4). `type` is Aether source; `flags` is
+ * "using" for an embedded field (#1048), else "". */
+typedef struct {
+    const char* name;
+    const char* type;
+    const char* flags;
+} AetherLibField;
+
+/* One struct an importer can re-declare (v4). `kind` is "" for an Aether
+ * struct, "extern" / "extern_packed" for an `extern struct` with a layout.
+ * Stable layout — append only, never reorder. */
+typedef struct {
+    const char* name;
+    const char* kind;
+    int                    field_count;
+    const AetherLibField*  fields;
+    const char* source_file;
+    int         source_line;
+} AetherLibStruct;
+
 /* Top-level catalog. Stable layout — never reorder fields, only
  * append. New optional fields go at the end with a documented
  * "all-zero means absent" contract. */
 typedef struct {
-    const char* schema_version;   /* "1.0" funcs; "1.1" closures; "1.2" consts */
+    const char* schema_version;   /* "1.0" funcs; "1.1" closures; "1.2" consts; "1.3" structs; "1.4" package */
     const char* aether_version;   /* compiler version that produced this   */
     const char* primary_source;   /* the main .ae file passed to aetherc   */
     int                       function_count;
@@ -127,6 +174,17 @@ typedef struct {
     const AetherLibClosure*   closures;        /* NULL when closure_count==0 */
     int                       constant_count;  /* 0 if no exported consts   */
     const AetherLibConstant*  constants;       /* NULL when constant_count==0 */
+    int                       struct_count;    /* schema >= 1.3; 0 if none   */
+    const AetherLibStruct*    structs;         /* NULL when struct_count==0  */
+    const char* const*        source_signatures; /* schema >= 1.3; parallel to
+                                                    functions, or NULL      */
+    const char* const*        function_modules;  /* schema >= 1.4; parallel to
+                                                    functions, or NULL      */
+    const char* const*        constant_modules;  /* schema >= 1.4; parallel to
+                                                    constants, or NULL      */
+    const char*               runtime;           /* schema >= 1.5: "shared" when
+                                                    the library links the
+                                                    shared runtime, else NULL */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

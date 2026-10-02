@@ -1,0 +1,62 @@
+// Issue #2337: `byte as int` was refused when assigned and accepted when
+// returned.
+//
+// The gap: a value cast accepted only the kinds in is_numeric_scalar, which
+// leaves `byte` out, so `plain = bytes[i] as int` failed with E0200. The same
+// cast inside a `return` compiled because a returned value was never checked
+// as an expression at all. Now `byte` converts like the uint8 it is, both
+// ways, and a returned value is checked by the expression rules (an invalid
+// cast there is refused: tests/integration/return_value_checked).
+//
+// Pre-fix this file fails to compile at `assigned` and at `masked`.
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+returned(pixels: ptr, i: int) -> int {
+    bytes = pixels as byte[]
+    return (bytes[i] as int) & 255
+}
+
+assigned(pixels: ptr, i: int) -> int {
+    bytes = pixels as byte[]
+    plain = bytes[i] as int
+    return plain
+}
+
+narrow(n: int) -> byte {
+    return n as byte
+}
+
+main() {
+    block = calloc(16, 1)
+    px = block as byte[]
+    px[3] = 200
+    px[4] = 7
+    masked = (px[3] as int) & 255
+    check(returned(block, 3) == 200, "byte as int in a return")
+    check(assigned(block, 3) == 200, "byte as int assigned")
+    check(masked == 200, "byte as int in an expression")
+    check(assigned(block, 4) + 1 == 8, "a widened byte does arithmetic as int")
+
+    // int to byte keeps the low 8 bits, as for uint8.
+    b = narrow(300)
+    check((b as int) == 44, "300 as byte is 44")
+    big = 255 as byte
+    check((big as int) == 255, "255 survives as a byte")
+    l = (px[3] as long) * 1000000
+    check(l == 200000000, "byte as long")
+    f = (px[4] as float) / 2.0
+    check(f == 3.5, "byte as float")
+
+    free(block)
+    println("OK")
+}

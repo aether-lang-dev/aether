@@ -806,7 +806,7 @@ endif
 
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
-RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c
+RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_callbacks.c
 STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
 # g_sync_step_actor, current_core_id). Excluded from the compiler binary
@@ -1130,9 +1130,9 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # the binary other tests were executing at that moment: macOS kills a process
 # whose text file changed under it, which is a SIGKILL in a test that never
 # went near the build system.
-$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
+$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds)
@@ -1142,7 +1142,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -1889,8 +1889,55 @@ docs-serve: docs docs-server
 	@echo ""
 	./$(BUILD_DIR)/docs-server$(EXE_EXT)
 
+# ---- The shared runtime (#2297) ----
+#
+# The same objects as libaether.a, linked whole into one shared library, so a
+# program and the --emit=lib libraries it imports in binary form share ONE
+# runtime: one scheduler, one set of panic frames (a panic raised in a library
+# reaches the program's catch), one config. A statically linked library keeps
+# its own copy; ELF interposition happens to merge most of it on Linux, macOS
+# and Windows merge none. `ae build --shared-runtime` links against this.
+#
+# It lives in its own directory, never beside libaether.a: a linker searching
+# -L<dir> for -laether takes a .so/.dylib/.dll.a there over the .a, and every
+# default build must keep linking the static archive.
+#
+# On Windows the DLL is self-contained (AETHER_REQUIRED_LDFLAGS carries
+# -static: libgcc, winpthread, OpenSSL and the rest are linked into it) and an
+# import library is written next to it. Native builds only: a cross build has
+# no use for a host shared library here.
+SHARED_RT :=
+ifeq ($(BUILD_DIR),build)
+ifeq ($(PLATFORM),native)
+ifneq ($(IS_WINDOWS),)
+  SHARED_RT := $(BUILD_DIR)/shared/aether.dll
+  SHARED_RT_LINK = -shared -Wl,--out-implib,$(BUILD_DIR)/shared/libaether.dll.a \
+                   -Wl,--whole-archive $(BUILD_DIR)/libaether.a -Wl,--no-whole-archive
+else ifeq ($(DETECTED_OS),Darwin)
+  SHARED_RT := $(BUILD_DIR)/shared/libaether.dylib
+  SHARED_RT_LINK = -dynamiclib -install_name @rpath/libaether.dylib \
+                   -Wl,-force_load,$(BUILD_DIR)/libaether.a
+else
+  SHARED_RT := $(BUILD_DIR)/shared/libaether.so
+  SHARED_RT_LINK = -shared -Wl,-soname,libaether.so \
+                   -Wl,--whole-archive $(BUILD_DIR)/libaether.a -Wl,--no-whole-archive
+endif
+endif
+endif
+
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(BUILD_TARGET_STAMP)
+stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(BUILD_TARGET_STAMP) $(SHARED_RT)
+
+ifneq ($(SHARED_RT),)
+$(SHARED_RT): $(BUILD_DIR)/libaether.a
+	@echo "Linking the shared runtime..."
+	@mkdir -p $(BUILD_DIR)/shared
+	@$(CC) $(SHARED_RT_LINK) -o $@ $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@echo "✓ Shared runtime: $@"
+
+shared-runtime: $(SHARED_RT)
+.PHONY: shared-runtime
+endif
 
 $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
 	@echo "Compiling the Windows application manifest..."
@@ -2150,7 +2197,7 @@ release-build: $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 
 # A file target as well, so `make install` on a current tree does not spend a
 # minute recompiling the whole compiler in one LTO link before copying.
-$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
+$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
 	@echo "==================================="
 	@echo "Building Optimized Release"
 	@echo "==================================="
@@ -2175,7 +2222,7 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
-		runtime/aether_locale_num.c $(MANIFEST_OBJ) \
+		runtime/aether_locale_num.c runtime/aether_callbacks.c $(MANIFEST_OBJ) \
 		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
@@ -2207,6 +2254,12 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@install -m 755 $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(PREFIX)/bin/aetherc$(EXE_EXT)
 	@install -d $(PREFIX)/lib/aether
 	@install -m 644 $(BUILD_DIR)/libaether.a $(PREFIX)/lib/aether/
+	@# The shared runtime (#2297), in its own directory beside the archive:
+	@# `ae build --shared-runtime` looks for it there.
+	@if [ -d $(BUILD_DIR)/shared ]; then \
+		install -d $(PREFIX)/lib/aether/shared && \
+		cp $(BUILD_DIR)/shared/* $(PREFIX)/lib/aether/shared/; \
+	fi
 	@# Version stamp next to libaether.a. `ae build` reads this and
 	@# compares it to the compiler's own version; a mismatch (the
 	@# classic split where a stale `current` symlink shadows a fresh
@@ -3310,7 +3363,7 @@ ci-wasm: clean compiler ae
 		runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c \
 		runtime/aether_host.c \
 		runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c \
-		runtime/actors/aether_unwind.c \
+		runtime/actors/aether_unwind.c runtime/aether_callbacks.c \
 		runtime/actors/aether_actor_thread.c \
 		std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c \
 		std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_net.c std/net/aether_actor_bridge.c \

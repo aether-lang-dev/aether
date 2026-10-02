@@ -1,0 +1,61 @@
+// A library whose exports use its structs (#2297): built once with
+// --emit=lib, then imported in binary form by app.ae and by script.ae.
+
+struct Vec3 {
+    x: float
+    y: float
+    z: float
+}
+
+// A string field, a nested struct by value, and a function-pointer field:
+// each has to reach the importer with the library's layout.
+struct Model {
+    name: string
+    position: Vec3
+    scale: float
+    update: fn(ptr, float) -> int
+}
+
+const KIND_MESH = 3
+
+// Module state: one instance, the library's, for every importer.
+var counter = 0
+
+vec3(x: float, y: float, z: float) -> Vec3 {
+    return Vec3 { x: x, y: y, z: z }
+}
+
+vlen2(v: Vec3) -> float {
+    return v.x * v.x + v.y * v.y + v.z * v.z
+}
+
+model_new(name: string) -> *Model {
+    m = heap.new(Model)
+    m.name = name
+    m.scale = 1.0
+    return m
+}
+
+model_set_position(m: *Model, p: Vec3) {
+    m.position = p
+}
+
+model_x(m: *Model) -> float {
+    return m.position.x
+}
+
+bump() -> int {
+    counter = counter + 1
+    return counter
+}
+
+boom(n: int) -> int {
+    if n > 2 {
+        panic("engine boom ${n}")
+    }
+    return n
+}
+
+main() {
+    println("engine is a library")
+}

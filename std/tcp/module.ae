@@ -10,7 +10,9 @@ exports(
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
-    connect, write, write_n, read, read_n, listen, listen_on, accept, fd, server_fd,
+    tcp_send_bytes_raw, tcp_receive_into_raw,
+    connect, write, write_n, write_slice, read, read_n, read_into,
+    listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, poll, poll2
 )
 
@@ -27,6 +29,8 @@ extern tcp_send_raw(sock: ptr, data: string) -> int
 extern tcp_send_n_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
+extern tcp_send_bytes_raw(sock: ptr, data: ptr, length: int) -> int
+extern tcp_receive_into_raw(sock: ptr, buf: ptr, cap: int) -> int
 extern tcp_close(sock: ptr) -> int
 extern tcp_listen_raw(port: int) -> ptr
 extern tcp_listen_on_raw(address: string, port: int) -> ptr
@@ -118,6 +122,51 @@ read(sock: ptr, max_bytes: int) -> {
 // into "closed."
 read_n(sock: ptr, max_bytes: int) -> {
     return tcp_receive_n_raw(sock, max_bytes)
+}
+
+// A slice with no bound (`p as byte[]`, `.len` -1) has no length to send
+// or to receive into: refuse it rather than guess one (#2301).
+fn need_bound(fname: string, s: byte[]) {
+    if s.len < 0 {
+        panic("tcp.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+}
+
+// Write a `byte[]` slice's bytes, binary-safe: the length travels with
+// the slice (#2301). Returns (bytes_sent, "") or (0, "send failed"). The
+// count is one send(2) and may be SHORT, as with write_n: a caller that
+// needs the whole slice delivered loops on the rest, `s[sent..]`. An empty
+// slice sends nothing and returns (0, ""). A slice with no bound panics.
+write_slice(sock: ptr, s: byte[]) -> {
+    need_bound("write_slice", s)
+    n = tcp_send_bytes_raw(sock, s, s.len)
+    if n < 0 {
+        return 0, "send failed"
+    }
+    return n, ""
+}
+
+// Read into a caller-owned `byte[]` (#2301): one receive of at most
+// `buf.len` bytes, nothing allocated, never a byte past `buf.len`. Returns
+// (n, "") with the data in `buf[0..n]`, which may be fewer bytes than
+// asked. Errors follow read_n: (0, "timeout") for a quiet peer (the socket
+// stays connected: retry or poll), (0, "connection closed or receive
+// failed") for an orderly close or an error (terminal). An empty slice
+// returns (0, "receive buffer is empty") without touching the socket; a
+// slice with no bound panics.
+read_into(sock: ptr, buf: byte[]) -> {
+    need_bound("read_into", buf)
+    if buf.len == 0 {
+        return 0, "receive buffer is empty"
+    }
+    n = tcp_receive_into_raw(sock, buf, buf.len)
+    if n == -2 {
+        return 0, "timeout"
+    }
+    if n < 0 {
+        return 0, "connection closed or receive failed"
+    }
+    return n, ""
 }
 
 // Wait until `sock` is readable, up to timeout_ms (-1 blocks, 0 polls,

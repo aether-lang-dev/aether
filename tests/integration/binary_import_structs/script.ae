@@ -1,0 +1,19 @@
+// A second library that imports the engine in BINARY form, the shape of a
+// game script built against a prebuilt engine (#2297). Its calls must reach
+// the engine's single module state, not a copy of its own.
+
+import engine
+
+bump_twice() -> int {
+    engine.bump()
+    return engine.bump()
+}
+
+// Takes and returns the engine's struct by value across both boundaries.
+scaled(v: engine.Vec3, k: float) -> engine.Vec3 {
+    return engine.vec3(v.x * k, v.y * k, v.z * k)
+}
+
+main() {
+    println("script is a library")
+}

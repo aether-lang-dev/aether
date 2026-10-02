@@ -10,16 +10,12 @@
 #
 # Also asserts `ae lib-info` reports the constants (schema 1.2).
 
-# Skip on Windows — `--emit=lib` artifact hosting consumes the .so through the
-# POSIX dlopen + lib<module>.so binimport path (DLL hosting is a follow-up, see
-# tools/ae.c). The sibling .so-consume tests (emit_lib, emit_lib_composite,
-# emit_lib_dual_build) all skip here for the same reason; this one was added
-# without the guard and so failed the Windows matrix instead of skipping.
+# The library is consumed through the binary-import path, which reads its
+# catalog and links it: lib<module>.so / .dylib, or a .dll on Windows (#2297).
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_const on Windows (POSIX dlopen / .so hosting)"
-        exit 0
-        ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll"; EXE=".exe" ;;
+    Darwin)                          SO_EXT=".dylib"; EXE="" ;;
+    *)                               SO_EXT=".so"; EXE="" ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,14 +34,14 @@ trap 'rm -rf "$ISO"' EXIT
 #    lib<module>.so naming rule, so name it libconst_lib.so for
 #    `import const_lib` to resolve it.
 if ! AETHER_HOME="$ROOT" "$AE" build --emit=lib "$SCRIPT_DIR/const_lib.ae" \
-        -o "$ISO/libconst_lib.so" >"$ISO/build_lib.log" 2>&1; then
+        -o "$ISO/libconst_lib$SO_EXT" >"$ISO/build_lib.log" 2>&1; then
     echo "  [FAIL] emit_lib_const: building const_lib .so failed"
     head -15 "$ISO/build_lib.log"
     exit 1
 fi
 
 # 2. lib-info must list the constants (schema 1.2). Self-describing artifact.
-INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "$ISO/libconst_lib.so" 2>&1)"
+INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "$ISO/libconst_lib$SO_EXT" 2>&1)"
 if ! echo "$INFO" | grep -q "Constants:     5"; then
     echo "  [FAIL] emit_lib_const: lib-info did not report 5 constants"
     echo "$INFO" | head -20
@@ -67,13 +63,14 @@ if ! (cd "$ISO" && AETHER_HOME="$ROOT" "$AE" build --lib "$ISO" uses_const_lib.a
     head -20 "$ISO/build_consume.log"
     exit 1
 fi
-if ! "$ISO/consume" >"$ACTUAL" 2>&1; then
+if ! "$ISO/consume$EXE" >"$ACTUAL" 2>&1; then
     echo "  [FAIL] emit_lib_const: consumer exited non-zero"
     head -10 "$ACTUAL"
     exit 1
 fi
 
-# 4. Verify every line.
+# 4. Verify every line (a Windows program writes CRLF).
+tr -d '\r' < "$ACTUAL" > "$ACTUAL.lf" && mv "$ACTUAL.lf" "$ACTUAL"
 ok=1
 check() { echo "$ACTUAL" >/dev/null; grep -Fxq "$1" "$ACTUAL" || { echo "    missing: $1"; ok=0; }; }
 check "fn=7"

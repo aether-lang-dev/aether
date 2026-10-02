@@ -133,6 +133,39 @@ AETHER_WEAK int aether_pure_tls_client_available(void) {
     return 0;
 }
 
+/* #2297: the implementation a program registered (aether_callback_lookup),
+ * else the symbol above: the weak stub, or, when the runtime is linked into
+ * the program, the program's strong override. A shared runtime binds its
+ * own calls to its own stubs, so the registration is what reaches the
+ * program's tls13_client there. */
+#include "../../runtime/aether_callbacks.h"
+typedef void* (*pt_client_connect_fn)(int, const char*, int, const char*);
+typedef int   (*pt_client_io_fn)(void*, void*, int);
+typedef int   (*pt_client_send_fn)(void*, const void*, int);
+typedef void  (*pt_client_close_fn)(void*);
+typedef int   (*pt_client_available_fn)(void);
+static void* pt_client_connect(int fd, const char* host, int verify_mode, const char* cafile) {
+    pt_client_connect_fn f = (pt_client_connect_fn)aether_callback_lookup("aether_pure_tls_client_connect");
+    return f ? f(fd, host, verify_mode, cafile)
+             : aether_pure_tls_client_connect(fd, host, verify_mode, cafile);
+}
+static int pt_client_send(void* conn, const void* buf, int len) {
+    pt_client_send_fn f = (pt_client_send_fn)aether_callback_lookup("aether_pure_tls_client_send");
+    return f ? f(conn, buf, len) : aether_pure_tls_client_send(conn, buf, len);
+}
+static int pt_client_recv(void* conn, void* buf, int len) {
+    pt_client_io_fn f = (pt_client_io_fn)aether_callback_lookup("aether_pure_tls_client_recv");
+    return f ? f(conn, buf, len) : aether_pure_tls_client_recv(conn, buf, len);
+}
+static void pt_client_close(void* conn) {
+    pt_client_close_fn f = (pt_client_close_fn)aether_callback_lookup("aether_pure_tls_client_close");
+    if (f) f(conn); else aether_pure_tls_client_close(conn);
+}
+static int pt_client_available(void) {
+    pt_client_available_fn f = (pt_client_available_fn)aether_callback_lookup("aether_pure_tls_client_available");
+    return f ? f() : aether_pure_tls_client_available();
+}
+
 #ifdef AETHER_HAS_OPENSSL
     #include <openssl/ssl.h>
     #include <openssl/err.h>
@@ -361,7 +394,7 @@ static int transport_send(Transport* t, const void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
     if (t->ssl) return SSL_write(t->ssl, buf, len);
 #endif
-    if (t->pure_tls) return aether_pure_tls_client_send(t->pure_tls, buf, len);
+    if (t->pure_tls) return pt_client_send(t->pure_tls, buf, len);
     return (int)send(t->sockfd, buf, len, 0);
 }
 
@@ -369,7 +402,7 @@ static int transport_recv(Transport* t, void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
     if (t->ssl) return SSL_read(t->ssl, buf, len);
 #endif
-    if (t->pure_tls) return aether_pure_tls_client_recv(t->pure_tls, buf, len);
+    if (t->pure_tls) return pt_client_recv(t->pure_tls, buf, len);
     return (int)recv(t->sockfd, buf, len, 0);
 }
 
@@ -397,7 +430,7 @@ static void transport_close(Transport* t) {
      * closing a descriptor twice (and, worse, one the process may have already
      * reused). */
     if (t->pure_tls) {
-        aether_pure_tls_client_close(t->pure_tls);
+        pt_client_close(t->pure_tls);
         t->pure_tls = NULL;
         t->sockfd = -1;
     }
@@ -1959,7 +1992,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
      * anchor, validity window, and hostname/SAN pinned to `host`. set_insecure
      * skips it; set_cafile pins a couriered bundle. */
     if (use_tls) {
-        if (!aether_pure_tls_client_available()) {
+        if (!pt_client_available()) {
             close(sockfd);
             ae_set_err(out_err,
                 "HTTPS requested but this build has no TLS backend: it was "
@@ -1968,7 +2001,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                 "`import std.cryptography.tls13_client` to the program.");
             return -1;
         }
-        void* pc = aether_pure_tls_client_connect(sockfd, host,
+        void* pc = pt_client_connect(sockfd, host,
                                                   req && req->insecure ? 1 : 0,
                                                   req ? req->cafile : NULL);
         if (!pc) {

@@ -498,7 +498,7 @@ reader_next(reader_ptr: ptr) -> {
 
 entry_name(reader_ptr: ptr) -> string {
     if reader_ptr == null { return "" }
-    return (reader_ptr as *TarReader).entry_name as string
+    return (reader_ptr as *TarReader).entry_name
 }
 
 entry_kind(reader_ptr: ptr) -> int {
@@ -523,7 +523,7 @@ entry_mtime(reader_ptr: ptr) -> long {
 
 entry_link_name(reader_ptr: ptr) -> string {
     if reader_ptr == null { return "" }
-    return (reader_ptr as *TarReader).entry_link_name as string
+    return (reader_ptr as *TarReader).entry_link_name
 }
 
 entry_read(reader_ptr: ptr, max_bytes: int) -> {

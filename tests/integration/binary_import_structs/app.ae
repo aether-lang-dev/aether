@@ -1,0 +1,41 @@
+// The host: imports the engine and a script, both in binary form (#2297).
+
+import engine
+import script
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    // A struct by value, both ways.
+    v = engine.vec3(1.0, 2.0, 2.0)
+    check(engine.vlen2(v) == 9.0, "Vec3 crosses by value")
+    check(v.y == 2.0, "the importer reads a returned struct's fields")
+
+    // A typed pointer, and field access into the library's struct.
+    m = engine.model_new("crate")
+    engine.model_set_position(m, engine.vec3(5.0, 0.0, 0.0))
+    check(m.position.x == 5.0, "a nested field read through *Model")
+    check(m.name == "crate", "a string field read through *Model")
+    check(engine.model_x(m) == 5.0, "the library reads the field the importer sees")
+    m.scale = 2.5
+    check(m.scale == 2.5, "the importer writes a field the library declared")
+    check(engine.KIND_MESH == 3, "a constant")
+
+    // A second binary library passing the struct through.
+    w = script.scaled(v, 2.0)
+    check(w.z == 4.0, "a struct through two library boundaries")
+
+    // One module state for the host and the script.
+    check(engine.bump() == 1, "the host's first bump")
+    check(script.bump_twice() == 3, "the script bumps the same counter")
+    check(engine.bump() == 4, "the host sees the script's bumps")
+
+    println("OK")
+}

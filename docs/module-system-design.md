@@ -549,6 +549,29 @@ Only a local path override is supported. A table naming anything else (a git URL
 
 Either way the build prints `Overriding <dep> -> <path>`. A `--override` for a dependency also overridden by `[patch]` wins, since the invocation is the more specific instruction. The override target is read exactly like an installed package: it needs its own `[package] modules` declaration.
 
+#### Dependencies of dependencies
+
+A dependency's own `[dependencies]` resolve too, transitively (#2335). A project lists only what it imports itself. A game built on an engine does not declare the engine's physics package, and it does not patch that package to a path inside the engine's checkout. The graph is walked breadth-first, so the project's direct dependencies come first on the search path, in manifest order. `ae lib-path` lists every package in the graph.
+
+Each package resolves through the first of these that names it:
+
+1. `--override` on the command line;
+2. the **project's** `[patch]`, so the consumer always has the last word;
+3. the `[patch]` of the manifest that declares the dependency, a path relative to **that package's** root (an engine patching its physics to its own `deps/physics` submodule works from any consumer);
+4. the installed package.
+
+A package reached twice at the same place (a diamond) and a cycle are both fine. A package that resolves to two **different** places is an error. The error names both paths and who required each, and the command stops instead of building against whichever was reached first:
+
+```
+Error: dependency 'example.com/pkgb' resolves to two places:
+         ../pkga/../pkgb (required by example.com/pkga)
+         ../pkgc/../pkgb2 (required by example.com/pkgc)
+       One build can use only one. Patch it in the project's
+       aether.toml to choose: [patch] "example.com/pkgb" = "<path>"
+```
+
+A transitive dependency that is not installed fails by name and says who needs it: `Error: dependency 'x' (required by example.com/pkga) is not installed.`
+
 ### Namespace Convention
 
 Function names must be prefixed with the namespace:

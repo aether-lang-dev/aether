@@ -26,7 +26,8 @@ exports(
     bind, local_port, close, fd, poll, set_buffer_sizes, set_broadcast,
     resolve, addr_new, addr_clone, addr_free, addr_host, addr_port,
     addr_string, addr_equal, addr_hash,
-    send_to, send_to_addr, recv_from, recv_from_into
+    send_to, send_to_addr, recv_from, recv_from_into,
+    send_slice_to, send_slice_to_addr, recv_slice_from, recv_slice_from_into
 )
 
 // Raw externs - escape hatch
@@ -242,6 +243,83 @@ recv_from(sock: ptr, buf: byte[]) -> {
 recv_from_into(sock: ptr, buf: byte[], addr: ptr) -> {
     if buf.len < 0 {
         unbounded("recv_from_into")
+    }
+    n = udp_recv_from_into_raw(sock, buf, buf.len, addr)
+    if n == -1 {
+        return 0, "would block"
+    }
+    if n < 0 {
+        return 0, "receive failed"
+    }
+    return n, ""
+}
+
+// ---- byte[] slice forms (#2301) ----
+//
+// The length travels with the slice instead of beside it, and a receive
+// fills at most `buf.len` bytes: it never writes past the slice. A slice
+// with no bound (`p as byte[]`, `.len` -1) panics. A sub-slice works as
+// it is: `send_slice_to_addr(sock, peer, frame[4..n])`.
+//
+// Truncation: a datagram longer than the receive slice delivers its first
+// `buf.len` bytes and the rest is DISCARDED by the OS (not kept for the
+// next receive), on every platform. The count is then `buf.len`, so a
+// caller that must tell a full fit from a truncation gives the slice one
+// byte more than the largest datagram it accepts, and treats
+// `n == buf.len` as too long.
+
+fn need_bound(fname: string, s: byte[]) {
+    if s.len < 0 {
+        panic("udp.${fname}: the slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`")
+    }
+}
+
+// send_to over a slice: one datagram of exactly `s.len` bytes to
+// host:port, resolving the name each call. An empty slice sends an empty
+// datagram. Returns (bytes_sent, "") or (0, error).
+send_slice_to(sock: ptr, host: string, port: int, s: byte[]) -> {
+    need_bound("send_slice_to", s)
+    sent = udp_send_to_raw(sock, host, port, s, s.len)
+    if sent < 0 {
+        return 0, "send failed"
+    }
+    return sent, ""
+}
+
+// send_to_addr over a slice: one datagram of `s.len` bytes to a resolved
+// address. Returns (bytes_sent, "") or (0, error).
+send_slice_to_addr(sock: ptr, addr: ptr, s: byte[]) -> {
+    need_bound("send_slice_to_addr", s)
+    sent = udp_send_to_addr_raw(sock, addr, s, s.len)
+    if sent < 0 {
+        return 0, "send failed"
+    }
+    return sent, ""
+}
+
+// recv_from into a slice: the datagram lands in `buf[0..n]` (truncated to
+// `buf.len`, see above). Never blocks. Returns (n, sender, "") on a packet,
+// (0, null, "would block") when nothing is waiting, (0, null, error) on
+// failure. An empty slice returns (0, null, "receive buffer is empty")
+// without consuming a datagram. The sender must be addr_free'd.
+recv_slice_from(sock: ptr, buf: byte[]) -> {
+    need_bound("recv_slice_from", buf)
+    if buf.len == 0 {
+        return 0, null, "receive buffer is empty"
+    }
+    n, sender, err = udp_recv_from_raw(sock, buf, buf.len)
+    return n, sender, err
+}
+
+// recv_from_into into a slice, with a caller-owned address (`addr_new`)
+// filled in place: the allocation-free drain loop. Returns (n, "") with
+// the datagram in `buf[0..n]`, (0, "would block") when nothing is
+// waiting, (0, error) on failure, and (0, "receive buffer is empty") for
+// an empty slice without consuming a datagram.
+recv_slice_from_into(sock: ptr, buf: byte[], addr: ptr) -> {
+    need_bound("recv_slice_from_into", buf)
+    if buf.len == 0 {
+        return 0, "receive buffer is empty"
     }
     n = udp_recv_from_into_raw(sock, buf, buf.len, addr)
     if n == -1 {

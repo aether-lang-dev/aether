@@ -17,6 +17,17 @@ int tcp_send_raw(TcpSocket* sock, const char* data);
 int tcp_send_n_raw(TcpSocket* sock, const char* data, int length);
 char* tcp_receive_raw(TcpSocket* sock, int max_bytes);
 TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes);
+// Byte-buffer forms for std.tcp's slice wrappers (#2301). The Aether
+// wrapper checks the slice's bound and passes its length; these trust it.
+// tcp_send_bytes_raw: send(2) of `length` bytes from `data`; the count
+//   (possibly short) or -1.
+// tcp_receive_into_raw: one recv(2) of at most `cap` bytes into `buf`;
+//   the count (> 0), TCP_RECV_TIMEOUT for an idle peer (still connected),
+//   or TCP_RECV_CLOSED for a FIN, an error, a closed handle or a bad buffer.
+#define TCP_RECV_CLOSED  (-1)
+#define TCP_RECV_TIMEOUT (-2)
+int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length);
+int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap);
 int tcp_close(TcpSocket* sock);
 
 // TCP Server

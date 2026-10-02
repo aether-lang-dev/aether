@@ -1247,8 +1247,12 @@ int run_cross_build(const char* c_file, const char* out_file,
                     size_t il = strlen(implib);
                     if (il >= 4 && strcasecmp(implib + il - 4, ".dll") == 0)
                         implib[il - 4] = '\0';
+                    /* -DAETHER_LIB_META_WEAK=: PE cannot export a weak
+                     * definition, and this DLL is one TU, so the catalog
+                     * entry point is strong here (#2297). */
                     snprintf(pe_lib_flags, sizeof(pe_lib_flags),
                              "-shared -fPIC -Wl,--export-all-symbols "
+                             "-DAETHER_LIB_META_WEAK= "
                              "-Wl,--out-implib,\"%s.lib\"", implib);
                     elf_pe_lib_flags = pe_lib_flags;
                 } else {
