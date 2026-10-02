@@ -171,6 +171,125 @@ void free_type(Type* type) {
     }
 }
 
+/* #2297: `type` spelled as Aether source that parse_type reads back to the
+ * same type -- unlike type_to_string, which is for display and flattens a
+ * typed pointer to "ptr" and a struct to "struct X". Used where a type has to
+ * cross a binary boundary and be re-declared on the other side (the
+ * --emit=lib catalog, from which `ae` synthesizes an importer's interface).
+ *
+ * Writes into buf[*pos..cap). Returns 1 when the type has a faithful
+ * spelling, 0 when it does not (an enum, sum or distinct type whose
+ * definition the reader would also need, a const-qualified C spelling, an
+ * actor ref, ...): the caller then leaves the record out rather than describe
+ * the type wrongly. */
+static int type_src_put(char* buf, size_t cap, size_t* pos, const char* s) {
+    size_t n = strlen(s);
+    if (*pos + n + 1 > cap) return 0;
+    memcpy(buf + *pos, s, n + 1);
+    *pos += n;
+    return 1;
+}
+
+static int type_src_write(const Type* t, char* buf, size_t cap, size_t* pos) {
+    if (!t) return 0;
+    if (t->distinct_name) return 0;
+    if (t->c_alias) {
+        const char* a = t->c_alias;
+        if (strcmp(a, "char*") == 0)       return type_src_put(buf, cap, pos, "cstring");
+        if (strcmp(a, "const char*") == 0) return type_src_put(buf, cap, pos, "cstring_const");
+        if (strcmp(a, "long long") == 0)   return type_src_put(buf, cap, pos, "long long");
+        if (strcmp(a, "va_list") == 0)     return type_src_put(buf, cap, pos, "va_list");
+        /* A C ABI scalar alias (size_t, uint32_t, ...) is spelled as itself;
+         * anything else (a `const`-qualified spelling) has no source form. */
+        for (const char* c = a; *c; c++) {
+            if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                  (*c >= '0' && *c <= '9') || *c == '_')) return 0;
+        }
+        return type_src_put(buf, cap, pos, a);
+    }
+    switch (t->kind) {
+        case TYPE_INT:        return type_src_put(buf, cap, pos, "int");
+        case TYPE_INT64:      return type_src_put(buf, cap, pos, "long");
+        case TYPE_UINT64:     return type_src_put(buf, cap, pos, "uint64");
+        case TYPE_UINT32:     return type_src_put(buf, cap, pos, "uint32");
+        case TYPE_UINT16:     return type_src_put(buf, cap, pos, "uint16");
+        case TYPE_UINT8:      return type_src_put(buf, cap, pos, "uint8");
+        case TYPE_DURATION:   return type_src_put(buf, cap, pos, "Duration");
+        case TYPE_FLOAT:      return type_src_put(buf, cap, pos, "float");
+        case TYPE_LONGDOUBLE: return type_src_put(buf, cap, pos, "longdouble");
+        case TYPE_FLOAT32:    return type_src_put(buf, cap, pos, "f32");
+        case TYPE_F32X4:      return type_src_put(buf, cap, pos, "f32x4");
+        case TYPE_F64X2:      return type_src_put(buf, cap, pos, "f64x2");
+        case TYPE_I32X4:      return type_src_put(buf, cap, pos, "i32x4");
+        case TYPE_I64X2:      return type_src_put(buf, cap, pos, "i64x2");
+        case TYPE_I16X8:      return type_src_put(buf, cap, pos, "i16x8");
+        case TYPE_BOOL:       return type_src_put(buf, cap, pos, "bool");
+        case TYPE_BYTE:       return type_src_put(buf, cap, pos, "byte");
+        case TYPE_STRING:     return type_src_put(buf, cap, pos, "string");
+        case TYPE_PTR:
+            if (t->element_type && t->element_type->kind == TYPE_STRUCT &&
+                t->element_type->struct_name) {
+                return type_src_put(buf, cap, pos, "*") &&
+                       type_src_put(buf, cap, pos, t->element_type->struct_name);
+            }
+            return type_src_put(buf, cap, pos, "ptr");
+        case TYPE_STRUCT:
+            return t->struct_name && type_src_put(buf, cap, pos, t->struct_name);
+        case TYPE_ARRAY: {
+            if (t->index_enum_name) return 0;
+            if (!type_src_write(t->element_type, buf, cap, pos)) return 0;
+            if (t->array_size < 0) return type_src_put(buf, cap, pos, "[]");
+            char n[32];
+            snprintf(n, sizeof(n), "[%d]", t->array_size);
+            return type_src_put(buf, cap, pos, n);
+        }
+        case TYPE_FUNCTION:
+            /* A closure value is spelled bare `fn`; only a C function
+             * pointer carries its signature in source. */
+            if (!t->is_fnptr) return type_src_put(buf, cap, pos, "fn");
+            if (!type_src_put(buf, cap, pos, "fn(")) return 0;
+            for (int i = 0; i < t->param_count; i++) {
+                if (i > 0 && !type_src_put(buf, cap, pos, ", ")) return 0;
+                if (!type_src_write(t->param_types ? t->param_types[i] : NULL, buf, cap, pos))
+                    return 0;
+            }
+            if (!type_src_put(buf, cap, pos, ")")) return 0;
+            if (t->return_type && t->return_type->kind != TYPE_VOID) {
+                return type_src_put(buf, cap, pos, " -> ") &&
+                       type_src_write(t->return_type, buf, cap, pos);
+            }
+            return 1;
+        case TYPE_OPTIONAL:
+            return type_src_write(t->element_type, buf, cap, pos) &&
+                   type_src_put(buf, cap, pos, "?");
+        case TYPE_TUPLE:
+            if (t->is_result && t->tuple_count == 2) {
+                return type_src_write(t->tuple_types[0], buf, cap, pos) &&
+                       type_src_put(buf, cap, pos, "!");
+            }
+            if (!type_src_put(buf, cap, pos, "(")) return 0;
+            for (int i = 0; i < t->tuple_count; i++) {
+                if (i > 0 && !type_src_put(buf, cap, pos, ", ")) return 0;
+                if (!type_src_write(t->tuple_types[i], buf, cap, pos)) return 0;
+            }
+            return type_src_put(buf, cap, pos, ")");
+        case TYPE_ISOLATED:
+            return type_src_put(buf, cap, pos, "Isolated[") &&
+                   type_src_write(t->element_type, buf, cap, pos) &&
+                   type_src_put(buf, cap, pos, "]");
+        default:
+            return 0;
+    }
+}
+
+int type_to_aether_source(const Type* type, char* buf, size_t cap) {
+    if (!buf || cap == 0) return 0;
+    buf[0] = '\0';
+    size_t pos = 0;
+    if (!type_src_write(type, buf, cap, &pos)) { buf[0] = '\0'; return 0; }
+    return 1;
+}
+
 const char* type_to_string(Type* type) {
     if (!type) return "UNKNOWN";
     

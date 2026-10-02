@@ -1,0 +1,23 @@
+// A panic inside a binary-imported library reaches the host's catch
+// (#2297). Holds where the host and the library share one runtime: on ELF
+// (Linux, FreeBSD) the library's runtime symbols bind to the host's by
+// interposition. The test script runs this only there; macOS and Windows
+// keep a runtime per image until #2297's shared-runtime work lands.
+
+import engine
+
+extern exit(code: int)
+
+main() {
+    caught = ""
+    try {
+        engine.boom(7)
+    } catch e {
+        caught = e
+    }
+    if caught != "engine boom 7" {
+        println("FAIL: a library panic is caught by the host: '${caught}'")
+        exit(1)
+    }
+    println("OK")
+}
