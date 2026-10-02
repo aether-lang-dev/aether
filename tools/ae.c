@@ -424,6 +424,7 @@ typedef struct {
     const char* const* function_modules;   /* schema >= 1.4, parallel to functions */
     const char* const* constant_modules;   /* schema >= 1.4, parallel to constants */
     const char* runtime;                   /* schema >= 1.5: "shared" or NULL */
+    const char* const* closure_modules;    /* schema >= 1.6, parallel to closures */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -4341,14 +4342,30 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
     for (int i = 0; i < m->closure_count && m->closures; i++) {
         const _AeLibInfoClosure* c = &m->closures[i];
         if (!c->role || strcmp(c->role, "builder") != 0 || !c->name || !c->name[0]) continue;
-        if (module) continue;   /* a package library exports no builders */
+        /* A package library's builder (schema >= 1.6, #2349) belongs to a
+         * module and is exported as aether_<module, dots as _>__<name>; a
+         * module stub takes only its own. A single-module library exports a
+         * builder under its own name. */
+        const char* cmod = (minor >= 6 && m->closure_modules && m->closure_modules[i])
+                           ? m->closure_modules[i] : "";
+        char csym[512];
+        if (module) {
+            if (strcmp(cmod, module) != 0) continue;
+            int n = snprintf(csym, sizeof(csym), "aether_%s__%s", module, c->name);
+            if (n < 0 || (size_t)n >= sizeof(csym)) continue;
+            for (char* q = csym + 7; *q && q < csym + 7 + strlen(module); q++)
+                if (*q == '.') *q = '_';
+        } else {
+            if (cmod[0]) continue;
+            snprintf(csym, sizeof(csym), "%s", c->name);
+        }
         ae_split_signature(c->signature, params, sizeof(params),
                             args, sizeof(args), ret, sizeof(ret));
         int is_void = (strcmp(ret, "void") == 0);
         const char* comma = params[0] ? ", " : "";
         const char* acomma = args[0] ? ", " : "";
         fprintf(out, "\n@extern(\"%s\") __aeb_%s(%s%s_builder: ptr)%s%s\n",
-                c->name, c->name, params, comma,
+                csym, c->name, params, comma,
                 is_void ? "" : " -> ", is_void ? "" : ret);
         fprintf(out, "builder %s(%s) {\n", c->name, params);
         fprintf(out, "    %s__aeb_%s(%s%s_builder)\n",
@@ -10098,6 +10115,10 @@ static int cmd_lib_info(int argc, char** argv) {
                 printf("  - [%s] %s.%s %s\n", role, encl, nm, sig);
             } else {
                 printf("  - [%s] %s %s\n", role, encl, sig);
+            }
+            if (minor >= 6 && m->closure_modules && m->closure_modules[i] &&
+                m->closure_modules[i][0]) {
+                printf("        module: %s\n", m->closure_modules[i]);
             }
             for (int k = 0; k < c->capture_count && c->captures; k++) {
                 const _AeLibInfoCap* cap = &c->captures[k];

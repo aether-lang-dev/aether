@@ -3,7 +3,7 @@
 
 import gamekit.math
 
-exports(create, count, position_of, MAX_ENTITIES)
+exports(create, count, position_of, label, MAX_ENTITIES)
 
 const MAX_ENTITIES = 64
 const HIDDEN_LIMIT = 9
@@ -33,4 +33,10 @@ position_of(e: *Entity) -> math.Vec2 {
 
 secret() -> int {
     return HIDDEN_LIMIT
+}
+
+// An exported builder: the library exports it as a wrapper,
+// aether_gamekit_core__label, that takes the trailing block's config (#2349).
+builder label(text: string) {
+    return text
 }

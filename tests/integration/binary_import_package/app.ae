@@ -1,6 +1,7 @@
 // A host that imports two modules of the gamekit package, both served by
 // one prebuilt library, libgamekit (#2297).
 
+import std.map
 import gamekit.core
 import gamekit.math
 
@@ -26,6 +27,9 @@ main() {
     core.create(0.0, 0.0)
     check(core.count() == 2, "core's module state lives in the library")
     check(core.MAX_ENTITIES == 64, "an exported constant of core")
+    tag = core.label("hud") {
+    }
+    check(tag == "hud", "a package module's builder, driven by a trailing block")
 
     println("OK")
 }

@@ -36,10 +36,12 @@ AETHER_HOME="$ROOT" "$AE" build --emit=lib --package gamekit -o "libgamekit$SO_E
 [ -f "libgamekit$SO_EXT" ] || fail "libgamekit$SO_EXT not produced"
 
 INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "./libgamekit$SO_EXT" 2>&1)" || fail "ae lib-info"
-echo "$INFO" | grep -q "Schema:[[:space:]]*1\.4" || { echo "$INFO"; fail "schema is not 1.4"; }
+echo "$INFO" | grep -q "Schema:[[:space:]]*1\.6" || { echo "$INFO"; fail "schema is not 1.6 (a package with a builder)"; }
 echo "$INFO" | grep -q "c_symbol: aether_gamekit_core__create" \
     || { echo "$INFO"; fail "core.create is not exported as aether_gamekit_core__create"; }
 echo "$INFO" | grep -q "module: gamekit.math" || { echo "$INFO"; fail "no function is attributed to gamekit.math"; }
+echo "$INFO" | grep -q "\[builder\] label" || { echo "$INFO"; fail "core.label is not recorded as a builder (#2349)"; }
+echo "$INFO" | grep -q "\[builder\] label" || { echo "$INFO"; fail "core.label is not recorded as a builder (#2349)"; }
 case "$INFO" in
     *secret*)       echo "$INFO"; fail "core.secret is not in core's exports list but was exported" ;;
     *half_*)        echo "$INFO"; fail "math.half_ is private by its suffix but was exported" ;;

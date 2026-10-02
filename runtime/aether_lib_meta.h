@@ -60,11 +60,18 @@
  * run on one runtime: a panic raised in the library reaches the program's
  * catch, on every platform.
  *
+ * v7 (schema "1.6", #2349) appends `closure_modules`, parallel to
+ * `closures`: in a package library, the module a record belongs to (""
+ * for the entry's own). A package module's builder is exported as
+ * `aether_<module, dots as _>__<name>`, taking its parameters and the
+ * trailing `void* _builder` config.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
  * constant records are present, "1.3" once struct records or source
- * signatures are, "1.4" for a package library, and "1.5" for a library
- * linked against the shared runtime. Hosts that read the metadata should
+ * signatures are, "1.4" for a package library, "1.5" for a library
+ * linked against the shared runtime, and "1.6" for a package library
+ * that exports builders. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -185,6 +192,8 @@ typedef struct {
     const char*               runtime;           /* schema >= 1.5: "shared" when
                                                     the library links the
                                                     shared runtime, else NULL */
+    const char* const*        closure_modules;   /* schema >= 1.6; parallel to
+                                                    closures, or NULL       */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this
