@@ -137,14 +137,6 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
 
-    # The release archive, staged by the script release.yml packs with
-    # (scripts/stage-release.sh), then extracted and used. Packaging only ever
-    # ran in the release itself, so 0.757.0 to 0.759.0 failed there on what a
-    # pull request could have shown: once per OS family the release builds on.
-    - name: Release archive (what release.yml ships)
-      if: matrix.name == 'Linux / GCC' || matrix.name == 'macOS / Clang (ARM64)'
-      run: make test-release-archive
-
     # The hardened leg must produce a hardened toolchain, and a program built
     # by it must carry the mitigations too. Before this, `make HARDEN=1` after
     # an ordinary build recompiled nothing and relinked the same unhardened
@@ -773,7 +765,8 @@ jobs:
         # Mesa brings lavapipe (vulkan_lvp.dll), a CPU Vulkan driver, so the
         # Vulkan entries render and present here instead of skipping.
         # unzip extracts the pinned SQLite amalgamation the release archive
-        # ships, as release.yml's Windows leg does.
+        # ships: `make ci` stages that archive (test-release-archive) through
+        # the script release.yml packs with.
         install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc unzip
 
     # #2256: Mesa 26.2.3's lavapipe frees every vkAllocateMemory block with
@@ -861,9 +854,6 @@ jobs:
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
         make ci
-
-    - name: Release archive (what release.yml ships)
-      run: make test-release-archive
 
     # contrib on Windows. Every contrib module is built and run on the Linux
     # legs and none of them were built here, which is how contrib/vulkan came to
