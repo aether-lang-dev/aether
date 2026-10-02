@@ -41,7 +41,6 @@ echo "$INFO" | grep -q "c_symbol: aether_gamekit_core__create" \
     || { echo "$INFO"; fail "core.create is not exported as aether_gamekit_core__create"; }
 echo "$INFO" | grep -q "module: gamekit.math" || { echo "$INFO"; fail "no function is attributed to gamekit.math"; }
 echo "$INFO" | grep -q "\[builder\] label" || { echo "$INFO"; fail "core.label is not recorded as a builder (#2349)"; }
-echo "$INFO" | grep -q "\[builder\] label" || { echo "$INFO"; fail "core.label is not recorded as a builder (#2349)"; }
 case "$INFO" in
     *secret*)       echo "$INFO"; fail "core.secret is not in core's exports list but was exported" ;;
     *half_*)        echo "$INFO"; fail "math.half_ is private by its suffix but was exported" ;;

@@ -1,0 +1,8 @@
+// No actors here: the scheduler is the libraries'.
+import relay
+
+main() {
+    v = relay.relay_count(100)
+    if v == 300 { println("OK") } else { println("FAIL count ${v}") }
+    relay.relay_announce(7)
+}

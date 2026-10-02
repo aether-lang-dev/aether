@@ -36,8 +36,16 @@ extern AETHER_TLS ActorBase* g_sync_step_actor;
 // Initialization
 // ============================================================================
 
+// Set by scheduler_init(), cleared by scheduler_cleanup(). A library's actors
+// in a program without actors of its own initialize the scheduler on their
+// first spawn (#2297), and a second scheduler_init() must not wipe the table
+// of the actors already registered.
+static int g_coop_initialized = 0;
+
 void scheduler_init(int cores) {
     (void)cores;
+    if (g_coop_initialized) return;
+    g_coop_initialized = 1;
     num_cores = 1;
 
     aether_detect_hardware();
@@ -88,6 +96,7 @@ void scheduler_cleanup(void) {
         schedulers[0].actors = NULL;
     }
     schedulers[0].actor_count = 0;
+    g_coop_initialized = 0;
 }
 
 void scheduler_shutdown(void) {
@@ -121,6 +130,7 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
 
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     (void)preferred_core;
+    scheduler_init(1);  // no-op once initialized; see g_coop_initialized
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
     ActorBase* actor = calloc(1, actor_size);

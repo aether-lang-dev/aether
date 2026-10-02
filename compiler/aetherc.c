@@ -32,6 +32,8 @@
 
 /* #2297: --shared-runtime (with --emit=lib): recorded in the catalog. */
 static int g_lib_shared_runtime = 0;
+/* #2297: --lib-actors: a binary library this build imports runs actors. */
+static int g_lib_actors = 0;
 #include "../lsp/aether_lsp.h"
 
 // Version is set by Makefile from VERSION file
@@ -1690,6 +1692,7 @@ int compile_source(const char* input_path, const char* output_path) {
     codegen->emit_exe = emit_exe ? 1 : 0;
     codegen->emit_lib = emit_lib ? 1 : 0;
     codegen->lib_shared_runtime = g_lib_shared_runtime;
+    codegen->lib_actors = g_lib_actors;
     // #996 --emit=csrc: open the catalog header if requested. Distinct from the
     // pre-existing --header (header_output) path above.
     FILE* csrc_header = NULL;
@@ -2064,6 +2067,8 @@ void print_help(const char* program_name) {
     printf("                                   importers of the installed module (#1746)\n");
     printf("  --shared-runtime                 With --emit=lib: record that the library links the\n");
     printf("                                   shared runtime, so importers link it too (#2297)\n");
+    printf("  --lib-actors                     An imported binary library runs actors: main() runs\n");
+    printf("                                   the scheduler, a library's catalog says so (#2297)\n");
     printf("  --lib-package=<pkg>              With --emit=lib: export every <pkg>.* module the build\n");
     printf("                                   imports, as one package library (#2297)\n");
     printf("  --emit-main=<func>               With --emit=lib: also emit a thin main(argc,argv) shim\n");
@@ -2322,6 +2327,13 @@ int main(int argc, char *argv[]) {
             // #2297: with --emit=lib, the library links the shared runtime;
             // its catalog records that, so an importing program follows.
             g_lib_shared_runtime = 1;
+            arg_offset++;
+        } else if (strcmp(argv[arg_offset], "--lib-actors") == 0) {
+            // #2297: a binary library this build imports runs actors (its
+            // catalog says so). A program's main() then initializes, drains
+            // and shuts down the scheduler as it does for its own actors, and
+            // a library's catalog passes the fact on to its importers.
+            g_lib_actors = 1;
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--lib-package=", 14) == 0) {
             // #2297: --lib-package=<pkg> with --emit=lib: every module named

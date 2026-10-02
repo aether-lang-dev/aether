@@ -116,6 +116,7 @@ typedef struct {
     int emit_exe;            // Emit the int main(int,char**) entry point
     int emit_lib;            // Emit aether_<name> alias stubs for top-level functions
     int lib_shared_runtime;  // #2297: the library links the shared runtime (catalog says so)
+    int lib_actors;          // #2297: an imported binary library runs actors, so main() runs the scheduler
     FILE* csrc_header_file;  // #996 --emit=csrc: if set, write each export's C
                              // prototype here (a distributable .h for the catalog)
     FILE* csrc_catalog_file; // #996 --emit=csrc: if set, write the aether_lib_meta

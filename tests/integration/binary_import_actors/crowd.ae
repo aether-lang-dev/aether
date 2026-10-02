@@ -1,0 +1,47 @@
+// #2297: a library whose exports run actors. A program importing it in
+// binary form has no actors of its own.
+message Add { n: int }
+message Get {}
+message Total { v: int }
+message Say { n: int }
+
+actor Counter {
+    state sum = 0
+    receive {
+        Add(n) -> { sum = sum + n }
+        Get() -> { reply Total { v: sum } }
+    }
+}
+
+actor Herald {
+    receive {
+        Say(n) -> {
+            // Slow on purpose: the program has returned from main() by the
+            // time this prints, unless its exit drains the scheduler.
+            sleep(300)
+            println("late ${n}")
+        }
+    }
+}
+
+// Two actors: past the single-actor main-thread mode, so the scheduler's
+// threads do the work.
+count_to(n: int) -> int {
+    a = spawn(Counter())
+    b = spawn(Counter())
+    i = 0
+    while i < n {
+        a ! Add { n: 1 }
+        b ! Add { n: 2 }
+        i = i + 1
+    }
+    ra = a ? Get {}
+    rb = b ? Get {}
+    return ra + rb
+}
+
+// Fire and forget: still in flight when the caller's main() returns.
+announce(n: int) {
+    h = spawn(Herald())
+    h ! Say { n: n }
+}

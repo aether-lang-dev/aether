@@ -159,6 +159,49 @@ void test_scheduler_init_cleanup(void) {
     scheduler_cleanup();
 }
 
+// #2297: a library's actors in a host that never initialized the scheduler
+// (a C program, or an Aether program with no actors of its own). The first
+// spawn initializes and starts it; a later scheduler_init() is a no-op that
+// leaves the live actors' tables alone.
+void test_scheduler_spawn_on_demand(void) {
+    ASSERT_EQ(0, num_cores);
+
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    CounterActor* b = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    int cores = num_cores;
+    ASSERT_TRUE(cores > 0);
+
+    scheduler_init(1);
+    ASSERT_EQ(cores, num_cores);
+    int registered = 0;
+    for (int i = 0; i < num_cores; i++) registered += schedulers[i].actor_count;
+    ASSERT_EQ(2, registered);
+
+    for (int i = 0; i < 50; i++) {
+        Message msg = {1, 0, i, NULL, {NULL, 0, 0}, NULL};
+        scheduler_send_remote((ActorBase*)a, msg, -1);
+        scheduler_send_remote((ActorBase*)b, msg, -1);
+    }
+    for (int i = 0; i < 200 && (atomic_load(&a->count) < 50 || atomic_load(&b->count) < 50); i++) {
+        sleep_ms(10);
+    }
+    int a_count = atomic_load(&a->count);
+    int b_count = atomic_load(&b->count);
+
+    scheduler_shutdown();
+    scheduler_release_actor((ActorBase*)a);
+    scheduler_release_actor((ActorBase*)b);
+    scheduler_cleanup();
+
+    ASSERT_EQ(50, a_count);
+    ASSERT_EQ(50, b_count);
+    ASSERT_EQ(0, num_cores);
+}
+
 void test_scheduler_spawn_placement(void) {
     scheduler_init(4);
     ActorBase* actors[10];
@@ -516,6 +559,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Mailbox overflow handling", test_mailbox_overflow, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler init/cleanup", test_scheduler_init_cleanup, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler spawn on demand", test_scheduler_spawn_on_demand, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler spawn placement", test_scheduler_spawn_placement, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);

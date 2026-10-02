@@ -3644,7 +3644,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    const char* const* function_modules;\n"
         "    const char* const* constant_modules;\n"
         "    const char* runtime;\n"
-        "    const char* const* closure_modules; };\n\n");
+        "    const char* const* closure_modules;\n"
+        "    int actors; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -4043,7 +4044,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * readers stop at the count/pointer they know. */
     /* "1.5": the library links the shared runtime (#2297). */
     /* "1.6": a package library's builder records carry their module. */
-    const char* schema = (pkg_lib && pkg_closures) ? "1.6"
+    /* "1.7": the library runs actors, its own or an imported library's. */
+    int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
+    const char* schema = lib_runs_actors ? "1.7"
+                       : (pkg_lib && pkg_closures) ? "1.6"
                        : gen->lib_shared_runtime ? "1.5"
                        : pkg_lib ? "1.4"
                        : (struct_count > 0 || src_sig_needed) ? "1.3"
@@ -4068,8 +4072,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     if (pkg_lib && const_count > 0) fprintf(gen->output, "_aether_lib_const_modules, ");
     else                            fprintf(gen->output, "NULL, ");
     fprintf(gen->output, "%s, ", gen->lib_shared_runtime ? "\"shared\"" : "NULL");
-    if (pkg_lib && clo_count > 0) fprintf(gen->output, "_aether_lib_closure_modules\n};\n\n");
-    else                          fprintf(gen->output, "NULL\n};\n\n");
+    if (pkg_lib && clo_count > 0) fprintf(gen->output, "_aether_lib_closure_modules, ");
+    else                          fprintf(gen->output, "NULL, ");
+    fprintf(gen->output, "%d\n};\n\n", lib_runs_actors ? 1 : 0);
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4085,6 +4090,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (gen->lib_shared_runtime) {
             fputs("  \"runtime\": ", j); emit_json_string(j, "shared"); fputs(",\n", j);
         }
+        if (lib_runs_actors) fputs("  \"actors\": true,\n", j);
 
         /* capabilities: the --with grants this artifact was built with. The
          * emitted C only contains code paths for granted capabilities, so this
@@ -4723,7 +4729,12 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     print_line(gen, "aether_capsicum_autosandbox();");
     // main_exit_ret and main_exit: label are needed when actors exist
     // (scheduler cleanup) or when main() contains return statements.
-    int needs_main_exit = gen->actor_count > 0 || has_return_statement(main);
+    /* The program runs the scheduler when it has actors, or when a binary
+     * library it imports does (#2297): main() then initializes it, and drains
+     * and joins it on the way out, so the library's in-flight messages are
+     * delivered before the program exits. */
+    int runs_scheduler = gen->actor_count > 0 || gen->lib_actors;
+    int needs_main_exit = runs_scheduler || has_return_statement(main);
     gen->uses_main_exit = needs_main_exit;
     if (needs_main_exit) {
         print_line(gen, "int main_exit_ret = 0;");
@@ -4731,7 +4742,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     print_line(gen, "");
 
     // Initialize scheduler with recommended core count if actors were defined
-    if (gen->actor_count > 0) {
+    if (runs_scheduler) {
         print_line(gen, "// Initialize Aether runtime with auto-detected optimizations");
         print_line(gen, "// TIER 1 (always-on): Actor pooling, Direct send, Adaptive batching");
         print_line(gen, "// TIER 2 (auto-detect): SIMD (if AVX2/NEON), MWAIT (if supported)");
@@ -4816,14 +4827,14 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     if (needs_main_exit) {
         print_line(gen, "main_exit:");
     }
-    if (gen->actor_count > 0) {
+    if (runs_scheduler) {
         print_line(gen, "");
         print_line(gen, "// Wait for quiescence, stop scheduler threads, and join them");
         print_line(gen, "scheduler_shutdown();");
     }
 
     // Print message pool statistics (only for actor programs)
-    if (gen->actor_count > 0) {
+    if (runs_scheduler) {
         print_line(gen, "");
         print_line(gen, "// Message pool statistics");
         print_line(gen, "{");
@@ -6535,8 +6546,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "void aether_capsicum_autosandbox(void);");
     print_line(gen, "");
 
-    // Only include actor runtime if program uses actors
-    bool has_actors = false;
+    // Only include actor runtime if program uses actors (its own, or a
+    // binary library's: main() then runs the scheduler, #2297)
+    bool has_actors = gen->lib_actors != 0;
     for (int i = 0; i < program->child_count; i++) {
         if (program->children[i] && program->children[i]->type == AST_ACTOR_DEFINITION) {
             has_actors = true;

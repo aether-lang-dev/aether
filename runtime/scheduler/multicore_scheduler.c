@@ -336,6 +336,14 @@ static atomic_int g_threads_started = 0;
 // processed.
 static atomic_int g_threads_ready = 0;
 
+// Scheduler lifecycle: 0 = not initialized, 1 = scheduler_init() running,
+// 2 = initialized. A program's main() is not the only caller any more: a
+// library loaded into a program that has no actors of its own initializes the
+// scheduler on its first spawn (#2297). A second scheduler_init() while one is
+// live must not wipe the actor tables of the actors already running, so it is
+// a no-op; scheduler_shutdown() and scheduler_cleanup() end the lifecycle.
+static atomic_int g_sched_state = 0;
+
 AETHER_TLS int current_core_id = -1;
 AETHER_TLS void* g_current_step_actor = NULL;
 
@@ -1139,6 +1147,17 @@ void* AETHER_HOT scheduler_thread(void* arg) {
 }
 
 void scheduler_init(int cores) {
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&g_sched_state, &expected, 1,
+                                                 memory_order_acq_rel, memory_order_acquire)) {
+        // Already initialized, or another thread is initializing it: wait for
+        // that to finish so the caller can use the scheduler on return.
+        while (atomic_load_explicit(&g_sched_state, memory_order_acquire) == 1) {
+            AETHER_PAUSE();
+        }
+        return;
+    }
+
     // Opt-in SIGSEGV/SIGFPE/SIGBUS → panic handlers. No-op unless
     // AETHER_CATCH_SIGNALS=1 in the environment. Safe to call multiple times
     // — sigaction just overwrites.
@@ -1234,6 +1253,18 @@ void scheduler_init(int cores) {
         pthread_mutex_init(&schedulers[i].foreign_lock, NULL);
         atomic_store_explicit(&schedulers[i].parked, 0, memory_order_relaxed);
     }
+    atomic_store_explicit(&g_sched_state, 2, memory_order_release);
+}
+
+// The first spawn in a process whose main() never initialized the scheduler:
+// a library's actors in a program without actors of its own, or a C host
+// that calls into an Aether library (#2297). Initialize and start it the way
+// a generated main() does. The program's own main(), when it has actors,
+// initializes it before any spawn, so this is a single load on that path.
+static void scheduler_init_on_demand(void) {
+    if (atomic_load_explicit(&g_sched_state, memory_order_acquire) == 2) return;
+    scheduler_init(cpu_recommend_cores());
+    scheduler_start();
 }
 
 // Initialize with explicit optimization flags (TIER 3 opt-in)
@@ -1484,6 +1515,9 @@ void scheduler_shutdown(void) {
      * path free of the hang the worker pool hit when it tried to do teardown
      * work from atexit. Compiles to nothing without -DAETHER_TRACE. */
     AETHER_TRACE_FLUSH();
+
+    // A stopped scheduler can be initialized again.
+    atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }
 
 void scheduler_cleanup(void) {
@@ -1508,6 +1542,7 @@ void scheduler_cleanup(void) {
         schedulers[i].capacity = 0;
     }
     num_cores = 0;
+    atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }
 
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
@@ -2108,6 +2143,7 @@ void scheduler_send_batch_flush(void) {
 // Spawn actor with NUMA-aware allocation.  actor_size must be >= sizeof(ActorBase)
 // and cover the full derived-actor struct (e.g. sizeof(PingActor)).
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
+    scheduler_init_on_demand();
     if (preferred_core < 0 || preferred_core >= num_cores) {
         // Spawn on caller's core so parent→child messaging stays local.
         // Main-thread spawns have no parent core: keep -1 so registration
