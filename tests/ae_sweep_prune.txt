@@ -19,6 +19,7 @@ tests/integration/bare_fn_in_closure/
 tests/integration/bin_name_lookup_and_walkup/
 tests/integration/bin_path_match/
 tests/integration/binary_import/
+tests/integration/binary_import_package/
 tests/integration/bitstruct_cross_module/
 tests/integration/bitstruct_reject/
 tests/integration/build_surfaces_import_error/
