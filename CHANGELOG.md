@@ -14,6 +14,73 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.761.0]
+
+### Added
+
+- **std.audio decodes OGG Vorbis.** `load_wav` now loads OGG Vorbis, the
+  same way as WAV, MP3 and FLAC: miniaudio sniffs the container, and the
+  encoded bytes are decoded as the mixer pulls them. This covers game music
+  and long ambiences, which usually ship as OGG. It comes from stb_vorbis
+  (public domain / MIT), vendored as `std/audio/stb_vorbis.c` beside
+  `miniaudio.h`. The copy is the one miniaudio ships for its own release. A
+  new spec decodes a short OGG fixture and checks it against the same
+  samples written out as WAV: the sample rate, channel count, length and
+  frames played match, and the headless mix peaks where the WAV's does,
+  within the codec's error (#2364).
+
+- **std.truetype: one TrueType reader for every renderer.** aether-ui and
+  ae3d each parsed TrueType fonts with their own copy of the same reader.
+  `std.truetype` is now that reader, and each repo keeps only what it draws
+  on top of it: vector paths in aether-ui, a distance-field atlas in ae3d.
+  - **Reads:** the table directory (and the first font of a `.ttc`
+    collection), `head`, `maxp`, `hhea`, `hmtx`, `cmap` formats 4 and 12,
+    `loca` and `glyf` (simple and compound glyphs), `kern` format 0, and the
+    face's own name, fixed pitch and serif style.
+  - **Returns:** glyph indices, advances and bearings, kerning, a glyph's
+    contours as the font gives them (on and off the curve), and an outline
+    flattened to segments at a scale, with every curve within a tolerance.
+  - **Safety:** every read is bounds-checked, and the work a glyph can claim
+    is capped. A malformed or CFF font fails to load and says why.
+  - **Testing:** a spec builds a font byte by byte and checks every number
+    the reader returns (#2365).
+
+- **std.schema validates nested records and arrays.**
+  - **New types.** `schema.OBJECT` holds a record of its own, declared in
+    the field's block. `schema.array(T)` holds a list of `T`, and arrays
+    nest. A field's min, max and len count an array's items, and the rules
+    for each item go in `items()`.
+  - **parse_json.** `parse_json(schema, root)` validates a std.json tree
+    against such a schema. It returns the passing fields as a typed
+    std.json object, with ints as integers and bools as booleans, and each
+    error names its path: `customer.email`, `lines[2].qty`, `tags[0]`.
+  - **JSON Schema.** `to_json_schema` emits nested `object` schemas and
+    `array` with `items`, `minItems` and `maxItems`.
+  - **Misplaced rules are refused.** A rule an object or array cannot honour
+    is refused when the schema is built, with a message saying where it
+    belongs.
+  - **tinyweb.** tinyweb's `schema_api` now validates request bodies through
+    `parse_json`, nested objects and arrays included. A 422's JSON pointer
+    names the failing field's path (#1446).
+
+### Changed
+
+- **`LLM.md` is now `AGENTS.md`.** The orientation file for coding agents
+  working on the repository now uses the name agent tools look for by
+  convention. Every document that linked to it now points at the new name
+  (#2362).
+
+### Fixed
+
+- **A trailing block on a call used inside an expression runs.**
+  `return build() { ... }` and `f(build() { ... })` used to compile to the
+  bare call, and the block was dropped without a diagnostic. Before, only a
+  declaration, an assignment or an expression statement ran the block, so
+  a `std.schema` record returned from a function had no fields. The block
+  now runs wherever the call sits, once, before its value is used. For a
+  builder it configures the call; for any other call it takes the call's
+  value as its context.
+
 ## [0.760.0]
 
 ### Fixed
