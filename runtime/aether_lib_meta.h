@@ -54,10 +54,17 @@
  * export of a package module is named by its bare name in `aether_name`
  * and has the C symbol `aether_<module, dots as _>__<name>`.
  *
+ * v6 (schema "1.5", #2297) appends `runtime`: "shared" when the library was
+ * linked against the shared runtime (`--shared-runtime`), NULL otherwise. A
+ * program importing such a library links the shared runtime too, so the two
+ * run on one runtime: a panic raised in the library reaches the program's
+ * catch, on every platform.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
  * constant records are present, "1.3" once struct records or source
- * signatures are, and "1.4" for a package library. Hosts that read the metadata should
+ * signatures are, "1.4" for a package library, and "1.5" for a library
+ * linked against the shared runtime. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -175,6 +182,9 @@ typedef struct {
                                                     functions, or NULL      */
     const char* const*        constant_modules;  /* schema >= 1.4; parallel to
                                                     constants, or NULL      */
+    const char*               runtime;           /* schema >= 1.5: "shared" when
+                                                    the library links the
+                                                    shared runtime, else NULL */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

@@ -26,7 +26,7 @@ AETHERC="$ROOT/build/aetherc"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        echo "  [SKIP] lib_meta: Windows DLL hosting is a follow-up"
+        echo "  [SKIP] lib_meta: links the library with a raw gcc -shared that leaves runtime symbols to the host, which a PE DLL cannot"
         exit 0
         ;;
     Darwin) SO_EXT=".dylib"; SHARED_LDFLAGS="-Wl,-undefined,dynamic_lookup" ;;

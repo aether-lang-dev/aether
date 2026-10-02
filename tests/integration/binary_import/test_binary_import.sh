@@ -13,12 +13,9 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        echo "  [SKIP] binary_import: Windows DLL hosting is a follow-up"
-        exit 0
-        ;;
-    Darwin) SO_EXT=".dylib" ;;
-    *)      SO_EXT=".so" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll"; EXE=".exe" ;;
+    Darwin) SO_EXT=".dylib"; EXE="" ;;
+    *)      SO_EXT=".so"; EXE="" ;;
 esac
 
 WORK="$(mktemp -d)"
@@ -51,7 +48,7 @@ echo "$OUT" | grep -q "intro"    || { echo "$OUT"; fail "builder DSL gizmo.secti
 if ! AETHER_HOME="$ROOT" "$AE" build app.ae -o app >build_app.log 2>&1; then
     echo "--- build app log:"; cat build_app.log; fail "ae build app.ae"
 fi
-OUT2="$(./app 2>&1)" || fail "built binary failed to run"
+OUT2="$(./app$EXE 2>&1)" || fail "built binary failed to run"
 echo "$OUT2" | grep -q "hi world" || { echo "$OUT2"; fail "built binary: greet missing"; }
 echo "$OUT2" | grep -q "intro"    || { echo "$OUT2"; fail "built binary: builder missing"; }
 

@@ -380,6 +380,12 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     if [ -f build/libaether.a ]; then
         cp build/libaether.a "$LIB_DIR/libaether.a"
     fi
+    # The shared runtime (#2297), in its own directory beside the archive,
+    # where `ae build --shared-runtime` looks for it.
+    if [ -d build/shared ]; then
+        mkdir -p "$LIB_DIR/shared"
+        cp build/shared/* "$LIB_DIR/shared/"
+    fi
     # Windows: the application manifest object (UTF-8 process code page,
     # #2077). `ae build`/`ae run` link it from beside libaether.a.
     if [ -f build/aether_manifest.o ]; then

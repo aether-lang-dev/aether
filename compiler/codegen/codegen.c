@@ -3577,7 +3577,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    int struct_count; const struct _AetherLibStruct* structs;\n"
         "    const char* const* source_signatures;\n"
         "    const char* const* function_modules;\n"
-        "    const char* const* constant_modules; };\n\n");
+        "    const char* const* constant_modules;\n"
+        "    const char* runtime; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -3943,7 +3944,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * function-only artifact byte-identical to v1 for existing readers. The
      * trailing slots are always written (the struct always has them); older
      * readers stop at the count/pointer they know. */
-    const char* schema = pkg_lib ? "1.4"
+    /* "1.5": the library links the shared runtime (#2297). */
+    const char* schema = gen->lib_shared_runtime ? "1.5"
+                       : pkg_lib ? "1.4"
                        : (struct_count > 0 || src_sig_needed) ? "1.3"
                        : (const_count > 0) ? "1.2"
                        : (clo_count > 0)   ? "1.1"
@@ -3963,8 +3966,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     else                                fprintf(gen->output, "NULL, ");
     if (pkg_lib && fn_count > 0) fprintf(gen->output, "_aether_lib_fn_modules, ");
     else                         fprintf(gen->output, "NULL, ");
-    if (pkg_lib && const_count > 0) fprintf(gen->output, "_aether_lib_const_modules\n};\n\n");
-    else                            fprintf(gen->output, "NULL\n};\n\n");
+    if (pkg_lib && const_count > 0) fprintf(gen->output, "_aether_lib_const_modules, ");
+    else                            fprintf(gen->output, "NULL, ");
+    fprintf(gen->output, "%s\n};\n\n", gen->lib_shared_runtime ? "\"shared\"" : "NULL");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -3977,6 +3981,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         fputs("  \"schema_version\": ", j); emit_json_string(j, schema);      fputs(",\n", j);
         fputs("  \"aether_version\": ", j); emit_json_string(j, "0.0.0-dev"); fputs(",\n", j);
         fputs("  \"primary_source\": ", j); emit_json_string(j, primary_src); fputs(",\n", j);
+        if (gen->lib_shared_runtime) {
+            fputs("  \"runtime\": ", j); emit_json_string(j, "shared"); fputs(",\n", j);
+        }
 
         /* capabilities: the --with grants this artifact was built with. The
          * emitted C only contains code paths for granted capabilities, so this
@@ -4155,7 +4162,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * honour the attribute across ELF/Mach-O/COFF; the non-GNU
      * fallback keeps the old strong emission (single-TU only). */
     fprintf(gen->output,
-        "/* Weak: N --emit=lib TUs may be linked into one artifact (#1590). */\n"
+        "/* Weak: N --emit=lib TUs may be linked into one artifact (#1590).\n"
+        " * PE cannot export a weak definition, so a single-TU Windows DLL is\n"
+        " * compiled with -DAETHER_LIB_META_WEAK= (empty: strong), as ae does. */\n"
         "#ifndef AETHER_LIB_META_WEAK\n"
         "#  if defined(__GNUC__) || defined(__clang__)\n"
         "#    define AETHER_LIB_META_WEAK __attribute__((weak))\n"
@@ -7539,6 +7548,47 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (gen->closure_count > 0) {
         print_line(gen, "// Closure definitions");
         emit_closure_definitions(gen);
+    }
+
+    /* #2297: register this image's @c_callback functions by name at load,
+     * so a runtime linked as a shared library (which binds its own calls to
+     * its own symbols) can still reach the hooks a program supplies. */
+    {
+        int n_cb = 0;
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* f = program->children[i];
+            if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
+            if (f && f->type == AST_FUNCTION_DEFINITION && c_callback_symbol(f)) n_cb++;
+        }
+        if (n_cb > 0) {
+            /* The reference is weak on ELF and Mach-O: a library linked with
+             * its runtime symbols left to the host (a raw `cc -shared`)
+             * has no registry until a host provides one, and loading it,
+             * which runs this constructor, must not fail on the missing
+             * symbol. A PE DLL is always fully linked, and a weak undefined
+             * reference does not bind to a DLL import there. */
+            fprintf(gen->output,
+                "\n/* @c_callback registry (#2297): hooks reach a shared runtime by name. */\n"
+                "#if defined(__GNUC__) || defined(__clang__)\n"
+                "#if defined(_WIN32)\n"
+                "extern void aether_callback_register(const char*, void*);\n"
+                "#define AE_CALLBACK_REGISTRY_PRESENT 1\n"
+                "#else\n"
+                "extern void aether_callback_register(const char*, void*) __attribute__((weak));\n"
+                "#define AE_CALLBACK_REGISTRY_PRESENT (aether_callback_register != 0)\n"
+                "#endif\n"
+                "__attribute__((constructor)) static void _aether_register_c_callbacks(void) {\n"
+                "    if (!(AE_CALLBACK_REGISTRY_PRESENT)) return;\n");
+            for (int i = 0; i < program->child_count; i++) {
+                ASTNode* f = program->children[i];
+                if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
+                if (!f || f->type != AST_FUNCTION_DEFINITION) continue;
+                const char* sym = c_callback_symbol(f);
+                if (!sym) continue;
+                fprintf(gen->output, "    aether_callback_register(\"%s\", (void*)%s);\n", sym, sym);
+            }
+            fprintf(gen->output, "}\n#undef AE_CALLBACK_REGISTRY_PRESENT\n#endif\n");
+        }
     }
 
     // --emit=lib / --emit=both: append aether_<name> alias stubs that form

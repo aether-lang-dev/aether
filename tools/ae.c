@@ -275,6 +275,11 @@ static int ae_define_arg(int argc, char** argv, int* i) {
 // to decide what flags to emit.
 static bool g_emit_exe = true;
 static bool g_emit_lib = false;
+/* #2297: link against the shared runtime (build/shared, lib/aether/shared)
+ * instead of the static archive, so a program and the binary libraries it
+ * imports run on one runtime. Set by --shared-runtime, and by a binary
+ * import of a library built that way. */
+static bool g_shared_runtime = false;
 static bool g_emit_csrc = false;  // #996 --emit=csrc: emit .c + catalog .h, no gcc
 /* --emit=staticlib: one .a holding the program's objects AND the runtime +
  * stdlib objects, rather than a shared library. iOS is the motivating target:
@@ -334,11 +339,9 @@ static bool g_trace = false;
 // program `import`s a precompiled `--emit=lib` artifact (libfoo.so),
 // `prepare_binary_imports` generates an Aether interface stub for it
 // and records the .so path + rpath here so build_gcc_cmd links it.
-// Empty for the common all-source build. POSIX-only (the prepass is
-// gated on dlopen availability); stays empty on Windows.
-#ifndef _WIN32
+// Empty for the common all-source build. On Windows it carries the DLL
+// paths alone (PE has no rpath; the DLLs are staged next to the output).
 static char g_binimport_link[4096] = "";
-#endif
 
 // Extra link flags accumulated by the host-bridge import prepass: when
 // a program `import`s `contrib.host.<lang>`, the bridge's static lib
@@ -420,6 +423,7 @@ typedef struct {
     const char* const* source_signatures;  /* schema >= 1.3, parallel to functions */
     const char* const* function_modules;   /* schema >= 1.4, parallel to functions */
     const char* const* constant_modules;   /* schema >= 1.4, parallel to constants */
+    const char* runtime;                   /* schema >= 1.5: "shared" or NULL */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -491,6 +495,54 @@ static char g_emit_deps_path[1200] = "";
 static char g_build_package[256] = "";
 static char g_lib_package_flag[300] = "";
 
+/* #2297: the shared runtime's directory and the link argument naming it:
+ * the import library on Windows, the shared object (with an rpath to its
+ * directory) elsewhere. By full path, never -laether: the static archive's
+ * directory is first on -L and a -laether would find libaether.a there.
+ * Returns 0 when the toolchain has no shared runtime. */
+static int ae_shared_runtime(char* dir, size_t dcap, char* link_arg, size_t lcap) {
+    if (!tc.has_lib) return 0;
+    char lib_dir[1024];
+    snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
+    char* slash = strrchr(lib_dir, '/');
+    char* bslash = strrchr(lib_dir, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (slash) *slash = '\0';
+    snprintf(dir, dcap, "%s/shared", lib_dir);
+    char file[1200];
+#if defined(_WIN32)
+    snprintf(file, sizeof(file), "%s/libaether.dll.a", dir);
+    if (!path_exists(file)) return 0;
+    snprintf(link_arg, lcap, "\"%s\"", file);
+#elif defined(__APPLE__)
+    snprintf(file, sizeof(file), "%s/libaether.dylib", dir);
+    if (!path_exists(file)) return 0;
+    snprintf(link_arg, lcap, "\"%s\" -Wl,-rpath,%s", file, dir);
+#else
+    snprintf(file, sizeof(file), "%s/libaether.so", dir);
+    if (!path_exists(file)) return 0;
+    snprintf(link_arg, lcap, "\"%s\" -Wl,-rpath,%s", file, dir);
+#endif
+    return 1;
+}
+
+/* The -laether a link line carries: the static archive, or the shared
+ * runtime under --shared-runtime. NULL (with the reason printed) when the
+ * shared runtime was asked for and this toolchain has none. */
+static const char* ae_runtime_link_arg(void) {
+    if (!g_shared_runtime) return "-laether";
+    static char arg[1400];
+    char dir[1100];
+    if (!ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
+        fprintf(stderr,
+            "Error: --shared-runtime: this toolchain has no shared runtime (looked in %s).\n"
+            "       Build it with `make shared-runtime`, or install a release that ships it.\n",
+            dir[0] ? dir : "<lib>/shared");
+        return NULL;
+    }
+    return arg;
+}
+
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
     if (g_emit_csrc)                   emit_flag = " --emit=csrc";
@@ -556,9 +608,13 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
         snprintf(deps_flag, sizeof(deps_flag), " --emit-deps=%s", g_emit_deps_path);
     }
 
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+    /* The catalog of a library linked against the shared runtime says so,
+     * and a program importing it follows (#2297). */
+    const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
+    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
              tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-             g_lib_package_flag, g_defines, lib_flags, deps_flag, input, output);
+             g_lib_package_flag, shared_rt_flag, g_defines, lib_flags, deps_flag,
+             input, output);
 }
 
 // --------------------------------------------------------------------------
@@ -3548,7 +3604,12 @@ void build_gcc_cmd(char* cmd, size_t size,
      * and failed with "undefined reference to WinMain". -static stays: the
      * DLL carries its own libgcc/libwinpthread, like the executables. */
     const char* emit_lib_flags = (g_emit_lib && !g_emit_exe)
-        ? "-shared -Wl,--export-all-symbols " : "";
+        /* #2297: aether_lib_meta is emitted weak so N --emit=lib TUs can
+         * share one link (#1590), but PE cannot export a weak definition
+         * (--export-all-symbols skips it; an explicit dllexport is "symbol
+         * wrong type"), so no Windows DLL ever exported its catalog. A DLL
+         * `ae` links is one TU: make the definition strong. */
+        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= " : "";
     if (user_cflags[0])
         snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s", emit_lib_flags, opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
@@ -3599,9 +3660,11 @@ void build_gcc_cmd(char* cmd, size_t size,
          * bridge archive was found, reported, and then never passed to the
          * linker, so `import contrib.host.tinygo` failed with undefined
          * tinygo_call_* while the .a sat in build/contrib. */
+        const char* rt_arg = ae_runtime_link_arg();
+        if (!rt_arg) { set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s %s \"%s\" %s %s-L\"%s\" %s%s -laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s %s \"%s\" %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, g_binimport_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3867,9 +3930,11 @@ void build_gcc_cmd(char* cmd, size_t size,
             snprintf(contrib_L, sizeof(contrib_L), "-L%s ", contrib_dir);
         else
             contrib_L[0] = '\0';
+        const char* rt_arg = ae_runtime_link_arg();
+        if (!rt_arg) { set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3942,6 +4007,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         "runtime/actors/aether_actor_thread.c",
         "runtime/actors/aether_panic.c",
         "runtime/actors/aether_unwind.c",
+        "runtime/aether_callbacks.c",
         "std/string/aether_string.c",
         "std/math/aether_math.c",
         "std/net/aether_http.c",
@@ -4028,11 +4094,40 @@ static int build_wasm_cmd(char* cmd, size_t size,
 // (typecheck, namespace prefixing, builder registration) rehydrates the
 // library with full call-site fidelity — `foo.greet(x)` and
 // `foo.route(p) { ... }` read exactly as if compiled in the same cycle.
-// The artifact itself is added to the link line. POSIX-only (gated on
-// dlopen); a no-op on Windows, where DLL hosting is a follow-up.
+// The artifact itself is added to the link line. Windows too since #2297:
+// the DLL is mapped without running its init code (ae_lib_open).
 // --------------------------------------------------------------------------
 
-#ifndef _WIN32
+/* ---- Reading an artifact's catalog (POSIX and, since #2297, Windows) ----
+ *
+ * `ae` maps a library only to read its aether_lib_meta() catalog. On
+ * Windows the DLL is mapped with DONT_RESOLVE_DLL_REFERENCES: its DllMain
+ * and TLS callbacks do not run and its imports are not loaded (aether.dll
+ * need not be findable at build time). aether_lib_meta() only returns the
+ * address of relocated static data, which that mapping provides. */
+#ifdef _WIN32
+static void* ae_lib_open(const char* path) {
+    return (void*)LoadLibraryExA(path, NULL, DONT_RESOLVE_DLL_REFERENCES);
+}
+static void* ae_lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void ae_lib_close(void* h) { FreeLibrary((HMODULE)h); }
+#else
+static void* ae_lib_open(const char* path) { return dlopen(path, RTLD_LAZY | RTLD_LOCAL); }
+static void* ae_lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void ae_lib_close(void* h) { dlclose(h); }
+#endif
+
+/* The directories of the binary libraries this build links, for staging
+ * the DLLs next to a Windows output and for `ae run`'s PATH. ';'-joined. */
+static char g_binimport_dirs[4096] = "";
+/* Imported libraries, by runtime: a program that imports a library linked
+ * against the shared runtime has to link it too (#2297). */
+static int g_binimport_shared_rt = 0;
+static int g_binimport_static_rt = 0;
+static char g_binimport_static_names[1024] = "";
+
 // Split a rendered signature "(A, B) -> R" into an Aether parameter list
 // ("p0: A, p1: B"), a bare argument list ("p0, p1"), and the return type
 // ("R", or "void"). Top-level comma split tracking paren depth; the ABI
@@ -4103,9 +4198,9 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
 
 /* Does the catalog of `so_path` list `module` (schema >= 1.4)? */
 static int ae_lib_provides_module(const char* so_path, const char* module) {
-    void* h = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+    void* h = ae_lib_open(so_path);
     if (!h) return 0;
-    ae_meta_fn_t mf = (ae_meta_fn_t)dlsym(h, "aether_lib_meta");
+    ae_meta_fn_t mf = (ae_meta_fn_t)ae_lib_sym(h, "aether_lib_meta");
     const _AeLibInfoMeta* m = mf ? mf() : NULL;
     int found = 0;
     if (m && ae_lib_meta_minor(m) >= 4) {
@@ -4114,7 +4209,7 @@ static int ae_lib_provides_module(const char* so_path, const char* module) {
         for (int i = 0; !found && m->constant_modules && i < m->constant_count; i++)
             found = m->constant_modules[i] && strcmp(m->constant_modules[i], module) == 0;
     }
-    dlclose(h);
+    ae_lib_close(h);
     return found;
 }
 
@@ -4123,12 +4218,12 @@ static int ae_lib_provides_module(const char* so_path, const char* module) {
  * a package library (#2297); struct records are shared by all its
  * modules and always declared. */
 static int ae_generate_binimport_stub(const char* so_path, const char* module, FILE* out) {
-    void* h = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+    void* h = ae_lib_open(so_path);
     if (!h) return -1;
-    ae_meta_fn_t mf = (ae_meta_fn_t)dlsym(h, "aether_lib_meta");
-    if (!mf) { dlclose(h); return -1; }
+    ae_meta_fn_t mf = (ae_meta_fn_t)ae_lib_sym(h, "aether_lib_meta");
+    if (!mf) { ae_lib_close(h); return -1; }
     const _AeLibInfoMeta* m = mf();
-    if (!m) { dlclose(h); return -1; }
+    if (!m) { ae_lib_close(h); return -1; }
 
     fprintf(out, "// Auto-generated Aether interface for %s\n", so_path);
     fprintf(out, "// Synthesized by `ae` from the artifact's aether_lib_meta\n");
@@ -4138,6 +4233,22 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
 
     char params[1100], args[600], ret[160];
     int minor = ae_lib_meta_minor(m);
+
+    /* #2297: a library linked against the shared runtime (schema >= 1.5)
+     * makes the program link it too: they must run on one runtime. */
+    if (minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0) {
+        g_binimport_shared_rt++;
+        if (!g_shared_runtime && tc.verbose)
+            fprintf(stderr, "ae: %s links the shared runtime; so will this build\n", so_path);
+        g_shared_runtime = true;
+    } else {
+        g_binimport_static_rt++;
+        const char* base = strrchr(so_path, '/');
+        base = base ? base + 1 : so_path;
+        size_t ol = strlen(g_binimport_static_names);
+        snprintf(g_binimport_static_names + ol, sizeof(g_binimport_static_names) - ol,
+                 "%s%s", ol ? ", " : "", base);
+    }
 
     // Struct records (schema >= 1.3, #2297) → the struct declarations the
     // exports use, field for field. The importer's codegen lays them out
@@ -4245,7 +4356,7 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         fprintf(out, "}\n");
     }
 
-    dlclose(h);  // m points into the .so; everything was emitted above.
+    ae_lib_close(h);  // m points into the library; everything was emitted above.
     return 0;
 }
 
@@ -4283,7 +4394,9 @@ static int ae_source_module_exists(const char* mod) {
 // Writes the resolved path into `out` and returns 1 if found.
 static int ae_find_binimport_so(const char* mod, char* out, size_t outcap) {
     const char* exts[] = {
-#ifdef __APPLE__
+#if defined(_WIN32)
+        ".dll"
+#elif defined(__APPLE__)
         ".dylib", ".so"
 #else
         ".so", ".dylib"
@@ -4310,9 +4423,14 @@ static int ae_find_binimport_so(const char* mod, char* out, size_t outcap) {
 // on the link line, so the produced binary finds the .so at run time
 // regardless of the cwd it is launched from.
 static void ae_abspath(const char* path, char* out, size_t outcap) {
+#ifdef _WIN32
+    if (!_fullpath(out, path, outcap)) snprintf(out, outcap, "%s", path);
+    for (char* q = out; *q; q++) if (*q == '\\') *q = '/';
+#else
     char* rp = realpath(path, NULL);
     if (rp) { snprintf(out, outcap, "%s", rp); free(rp); }
     else    { snprintf(out, outcap, "%s", path); }
+#endif
 }
 
 // Scan `main_file` for `import <bare>` statements that resolve to a
@@ -4327,8 +4445,21 @@ static void ae_abspath(const char* path, char* out, size_t outcap) {
 static int ae_emit_binimport_stub(const char* mod, const char* so_path,
                                   char* stubdir, size_t stubdir_cap) {
     if (!stubdir[0]) {
+#ifdef _WIN32
+        /* No mkdtemp: a pid-and-counter name under %TEMP%, created fresh. */
+        static int seq = 0;
+        for (int tries = 0; tries < 100; tries++) {
+            snprintf(stubdir, stubdir_cap, "%s/ae-binimport-%d-%d",
+                     get_temp_dir(), (int)getpid(), seq++);
+            for (char* q = stubdir; *q; q++) if (*q == '\\') *q = '/';
+            if (_mkdir(stubdir) == 0) break;
+            stubdir[0] = '\0';
+        }
+        if (!stubdir[0]) return -1;
+#else
         snprintf(stubdir, stubdir_cap, "/tmp/ae-binimport-XXXXXX");
         if (!mkdtemp(stubdir)) { stubdir[0] = '\0'; return -1; }
+#endif
     }
     /* A dotted module of a package library (#2297) is the stub
      * `<stubdir>/a/b/c/module.ae`, where `import a.b.c` resolves; a bare
@@ -4347,7 +4478,7 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
                 /* Create each level: <stubdir>/a, <stubdir>/a/b, ... */
                 size_t seg = (size_t)(p - rel);
                 snprintf(sub + base_len, sizeof(sub) - base_len, "%.*s", (int)seg, rel);
-                mkdir(sub, 0755);
+                mkdir_p(sub);
                 if (*p == '\0') break;
             }
         }
@@ -4391,6 +4522,24 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
         }
         return 0;
     }
+    {
+        size_t dl = strlen(g_binimport_dirs);
+        if (!strstr(g_binimport_dirs, dir))
+            snprintf(g_binimport_dirs + dl, sizeof(g_binimport_dirs) - dl, "%s%s",
+                     dl ? ";" : "", dir);
+    }
+#ifdef _WIN32
+    /* PE has no rpath: GNU ld links the DLL directly, and ae stages it next
+     * to the output (ae_stage_windows_dlls) or puts its directory on `ae
+     * run`'s PATH. */
+    {
+        size_t off = strlen(g_binimport_link);
+        snprintf(g_binimport_link + off, sizeof(g_binimport_link) - off, " \"%s\"", abs_so);
+        if (tc.verbose)
+            fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n", mod, abs_so, stub_path);
+        return 0;
+    }
+#endif
     char rpath_flag[1300];
     snprintf(rpath_flag, sizeof(rpath_flag), " -Wl,-rpath,%s", dir);
     const char* hit = strstr(g_binimport_link, rpath_flag);
@@ -4524,11 +4673,106 @@ static void prepare_binary_imports(const char* main_file) {
     int nvisited = 0;
     ae_scan_binary_imports(main_file, stubdir, sizeof(stubdir), visited, &nvisited);
     free(visited);
+    /* One runtime or none: a library that carries its own (static) runtime
+     * next to one built on the shared runtime would split panics and
+     * scheduler state between them. */
+    if (g_binimport_shared_rt > 0 && g_binimport_static_rt > 0) {
+        fprintf(stderr,
+            "Warning: %s %s built with a static runtime while another import uses the\n"
+            "         shared one; rebuild %s with `ae build --emit=lib --shared-runtime`\n"
+            "         so the program and its libraries run on one runtime.\n",
+            g_binimport_static_names, g_binimport_static_rt > 1 ? "were" : "was",
+            g_binimport_static_rt > 1 ? "them" : "it");
+    }
 }
-#else
-static void prepare_binary_imports(const char* main_file) { (void)main_file; }
-#endif
 
+/* #2297: Windows has no rpath. After a link that names DLLs (binary imports,
+ * the shared runtime), copy each next to the output, the first place the
+ * loader looks, unless it is already there. */
+static void ae_stage_windows_dlls(const char* out_file) {
+#ifdef _WIN32
+    char out_dir[1100];
+    ae_abspath(out_file, out_dir, sizeof(out_dir));
+    char* slash = strrchr(out_dir, '/');
+    if (slash) *slash = '\0'; else snprintf(out_dir, sizeof(out_dir), ".");
+
+    /* The binary imports: each "<path>" in the link fragment. */
+    const char* p = g_binimport_link;
+    while ((p = strchr(p, '"')) != NULL) {
+        const char* e = strchr(p + 1, '"');
+        if (!e) break;
+        char src[1200];
+        snprintf(src, sizeof(src), "%.*s", (int)(e - p - 1), p + 1);
+        p = e + 1;
+        const char* base = strrchr(src, '/');
+        base = base ? base + 1 : src;
+        char dst[1300];
+        snprintf(dst, sizeof(dst), "%s/%s", out_dir, base);
+        if (!paths_same(src, dst)) copy_file(src, dst);
+    }
+    if (g_shared_runtime) {
+        char dir[1100], arg[1400];
+        if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
+            char src[1200], dst[1300];
+            snprintf(src, sizeof(src), "%s/aether.dll", dir);
+            snprintf(dst, sizeof(dst), "%s/aether.dll", out_dir);
+            if (!paths_same(src, dst)) copy_file(src, dst);
+        }
+    }
+#else
+    (void)out_file;
+#endif
+}
+
+/* #2297: the binary libraries a build links, as cache-key salt: each one's
+ * path, size and modification time. A program that imports a library must
+ * not be served from the cache after the library was rebuilt (its catalog,
+ * and so the interface the program was compiled against, may differ), nor a
+ * static build for a shared-runtime one. */
+static const char* ae_binimport_salt(char* out, size_t cap) {
+    snprintf(out, cap, "%s", g_shared_runtime ? "+shared-runtime" : "");
+    const char* p = g_binimport_link;
+    while ((p = strchr(p, '"')) != NULL) {
+        const char* e = strchr(p + 1, '"');
+        if (!e) break;
+        char path[1200];
+        snprintf(path, sizeof(path), "%.*s", (int)(e - p - 1), p + 1);
+        p = e + 1;
+        struct stat st;
+        size_t ol = strlen(out);
+        if (stat(path, &st) == 0) {
+            snprintf(out + ol, cap - ol, "+lib:%s:%lld:%lld", path,
+                     (long long)st.st_size, (long long)st.st_mtime);
+        } else {
+            snprintf(out + ol, cap - ol, "+lib:%s", path);
+        }
+    }
+    return out;
+}
+
+/* #2297: `ae run` launches the program where it was built (a temp or cache
+ * dir); on Windows, put the imported libraries' and the shared runtime's
+ * directories at the front of PATH so the loader finds them there. */
+static void ae_windows_dll_path_for_run(void) {
+#ifdef _WIN32
+    char dirs[6000] = "";
+    snprintf(dirs, sizeof(dirs), "%s", g_binimport_dirs);
+    if (g_shared_runtime) {
+        char dir[1100], arg[1400];
+        if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
+            size_t dl = strlen(dirs);
+            snprintf(dirs + dl, sizeof(dirs) - dl, "%s%s", dl ? ";" : "", dir);
+        }
+    }
+    if (!dirs[0]) return;
+    const char* old = getenv("PATH");
+    size_t need = strlen(dirs) + (old ? strlen(old) : 0) + 8;
+    char* env = malloc(need);
+    if (!env) return;
+    snprintf(env, need, "PATH=%s%s%s", dirs, old ? ";" : "", old ? old : "");
+    _putenv(env);   /* the CRT keeps the string: it is not freed */
+#endif
+}
 /* ---- #2297: a package's modules ----
  *
  * A package `<pkg>` lives in `<root>/<pkg as path>/`, where root is `.`,
@@ -4895,6 +5139,15 @@ static void build_run_cmd(char* cmd, size_t cap, const char* exe,
     }
 }
 
+static const char* ae_binimport_salt(char* out, size_t cap);
+/* `ae run`'s cache salt: "run", plus the binary libraries it links. */
+static const char* run_mode_salt(void) {
+    static char salt[3000];
+    char libs[2900];
+    snprintf(salt, sizeof(salt), "run%s", ae_binimport_salt(libs, sizeof(libs)));
+    return salt;
+}
+
 static int cmd_run(int argc, char** argv) {
     const char* file = NULL;
     /* 8 KiB matches toml_extra below + the fgets line buffer in
@@ -4918,6 +5171,9 @@ static int cmd_run(int argc, char** argv) {
                 fprintf(stderr, "Error: too many --extra files (the list exceeds 8 KiB)\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--shared-runtime") == 0) {
+            /* #2297: link against the shared runtime. */
+            g_shared_runtime = true;
         } else if (strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
             /* #1901 part 2: --override <dep>=<path>, Bazel's
              * --override_repository shape. Leaves no trace in the manifest,
@@ -5008,6 +5264,13 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
+    // Binary-import prepass: synthesize interface stubs for any
+    // `import foo` that resolves to a precompiled libfoo.so, and record
+    // it on the link line. No-op for all-source programs. Before the cache
+    // check (#2297): the libraries it finds, and whether one of them links
+    // the shared runtime, are part of the cache key.
+    prepare_binary_imports(file);
+
     // --- Cache check ---
     // ae run uses -O0 (fast dev builds). Check if we have a cached exe for
     // this exact source + compiler + extras combination.
@@ -5016,7 +5279,7 @@ static int cmd_run(int argc, char** argv) {
     char run_salt[4096];
     unsigned long long cache_key =
         compute_cache_key(file, extra_files, "O0",
-                          ae_define_salt("run", run_salt, sizeof(run_salt)));
+                          ae_define_salt(run_mode_salt(), run_salt, sizeof(run_salt)));
     if (cache_key != 0) {
         init_cache_dir();
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -5025,6 +5288,7 @@ static int cmd_run(int argc, char** argv) {
             cache_touch(cached_exe);   /* least-recently-USED, for the cap */
             cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
             build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
+            ae_windows_dll_path_for_run();
             int rc = run_cmd_forwarding(cmd);
             if (rc < 0) {
                 report_crash(rc);
@@ -5059,10 +5323,7 @@ static int cmd_run(int argc, char** argv) {
         snprintf(exe_file, sizeof(exe_file), "%s/_ae_%d" EXE_EXT, get_temp_dir(), pid);
     }
 
-    // Binary-import prepass: synthesize interface stubs for any
-    // `import foo` that resolves to a precompiled libfoo.so, and record
-    // it on the link line. No-op for all-source programs.
-    prepare_binary_imports(file);
+    // (The binary-import prepass ran before the cache check: see there.)
 
     // Host-bridge prepass: `import contrib.host.<lang>` queues
     // libaether_host_<lang>.a onto the link line. Import-driven so a
@@ -5159,6 +5420,7 @@ static int cmd_run(int argc, char** argv) {
 
     // Step 3: run it, forwarding any post-`--` args (see build_run_cmd).
     build_run_cmd(cmd, sizeof(cmd), exe_file, argc, argv, prog_args_start);
+    ae_windows_dll_path_for_run();
     int rc = run_cmd_forwarding(cmd);
 
     if (rc < 0) {
@@ -7178,6 +7440,9 @@ static int cmd_build(int argc, char** argv) {
                 fprintf(stderr, "Error: --emit must be one of: exe, lib, staticlib, both, obj, csrc (got '%s')\n", val);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--shared-runtime") == 0) {
+            // #2297: link against the shared runtime.
+            g_shared_runtime = true;
         } else if (strcmp(argv[i], "--package") == 0 && i + 1 < argc) {
             // #2297: build every module of a package into one library.
             snprintf(g_build_package, sizeof(g_build_package), "%s", argv[++i]);
@@ -7725,6 +7990,12 @@ static int cmd_build(int argc, char** argv) {
      * beside it, so a cached coverage binary reused from another directory
      * silently deposits its results back where it was first compiled, leaving
      * the caller with a binary that ran and no data next to it. */
+    // Binary-import prepass: synthesize interface stubs for any
+    // `import foo` resolving to a precompiled libfoo.so, link it in. Before
+    // the cache check (#2297): the libraries it finds, and whether one of
+    // them links the shared runtime, are part of the cache key.
+    prepare_binary_imports(file);
+
     bool cache_eligible = !is_wasm && !is_cross && g_emit_exe && !g_emit_lib &&
                           !g_coverage;
     char cached_exe[1024] = "";
@@ -7747,9 +8018,13 @@ static int cmd_build(int argc, char** argv) {
         if (g_coverage) strncat(build_mode, "+coverage", sizeof(build_mode) - strlen(build_mode) - 1);
         if (g_profile)  strncat(build_mode, "+profile",  sizeof(build_mode) - strlen(build_mode) - 1);
         if (g_size)     strncat(build_mode, "+size",     sizeof(build_mode) - strlen(build_mode) - 1);
+        char libs_salt[2900];
+        ae_binimport_salt(libs_salt, sizeof(libs_salt));
+        char build_mode_full[3000];
+        snprintf(build_mode_full, sizeof(build_mode_full), "%s%s", build_mode, libs_salt);
         cache_key = compute_cache_key(file, extra_files,
                                       quick ? "O0" : "O2",
-                                      ae_define_salt(build_mode,
+                                      ae_define_salt(build_mode_full,
                                                      build_salt, sizeof(build_salt)));
         if (cache_key != 0) {
             init_cache_dir();
@@ -7781,9 +8056,7 @@ static int cmd_build(int argc, char** argv) {
      * being built. */
     fflush(stdout);
 
-    // Binary-import prepass: synthesize interface stubs for any
-    // `import foo` resolving to a precompiled libfoo.so, link it in.
-    prepare_binary_imports(file);
+    // (The binary-import prepass ran before the cache check: see there.)
 
     // Host-bridge prepass: queue libaether_host_<lang>.a for any
     // `import contrib.host.<lang>` in the entry file. See cmd_run.
@@ -7945,6 +8218,10 @@ static int cmd_build(int argc, char** argv) {
 
     // Clean up intermediate C file — ae build produces a binary, not C source
     remove(c_file);
+
+    /* #2297: Windows has no rpath: the DLLs this output loads (binary
+     * imports, the shared runtime) go next to it. */
+    if (!is_cross) ae_stage_windows_dlls(exe_file);
 
 #ifdef __APPLE__
     /* macOS clang bakes the `-o` value into the dylib's install_name at
@@ -9700,14 +9977,6 @@ static int cmd_lib_path(int argc, char** argv) {
 }
 
 static int cmd_lib_info(int argc, char** argv) {
-#ifdef _WIN32
-    (void)argc; (void)argv;
-    fprintf(stderr,
-        "ae lib-info: Windows DLL hosting is a follow-up. The metadata\n"
-        "is still embedded in the produced artifact; consume it via\n"
-        "LoadLibrary + GetProcAddress(\"aether_lib_meta\") for now.\n");
-    return 1;
-#else
     if (argc < 1) {
         fprintf(stderr,
             "Usage: ae lib-info <path-to-library>\n"
@@ -9719,37 +9988,34 @@ static int cmd_lib_info(int argc, char** argv) {
     }
     const char* path = argv[0];
 
-    /* dlopen with RTLD_LAZY — we only need the metadata symbol; the
-     * artifact's other functions don't have to bind successfully
-     * (a missing runtime dependency would still let lib-info dump
-     * what's there). RTLD_LOCAL keeps the library's symbols out of
-     * the host's global namespace. */
-    void* h = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+    /* Mapped only to read the catalog (ae_lib_open): RTLD_LAZY|RTLD_LOCAL
+     * on POSIX, so a missing runtime dependency still lets lib-info dump
+     * what is there; on Windows without running the DLL's init code or
+     * loading its imports (#2297). */
+    void* h = ae_lib_open(path);
     if (!h) {
+#ifdef _WIN32
+        fprintf(stderr, "ae lib-info: cannot load %s (Windows error %lu)\n",
+                path, (unsigned long)GetLastError());
+#else
         fprintf(stderr, "ae lib-info: dlopen failed: %s\n", dlerror());
+#endif
         return 1;
     }
 
-    /* Clear stale dlerror state, then dlsym, then check. POSIX
-     * specifies dlsym can legitimately return NULL for a defined
-     * symbol, so dlerror is the canonical "did the lookup fail"
-     * test. */
-    (void)dlerror();
     typedef const _AeLibInfoMeta* (*meta_fn_t)(void);
-    meta_fn_t meta_fn = (meta_fn_t)dlsym(h, "aether_lib_meta");
-    const char* dl_err = dlerror();
-    if (!meta_fn || dl_err) {
+    meta_fn_t meta_fn = (meta_fn_t)ae_lib_sym(h, "aether_lib_meta");
+    if (!meta_fn) {
         fprintf(stderr,
             "ae lib-info: artifact has no `aether_lib_meta` export.\n"
             "Was it built with `--emit=lib`?\n");
-        if (dl_err) fprintf(stderr, "  dlerror: %s\n", dl_err);
-        dlclose(h);
+        ae_lib_close(h);
         return 1;
     }
     const _AeLibInfoMeta* m = meta_fn();
     if (!m) {
         fprintf(stderr, "ae lib-info: aether_lib_meta() returned NULL\n");
-        dlclose(h);
+        ae_lib_close(h);
         return 1;
     }
 
@@ -9776,6 +10042,9 @@ static int cmd_lib_info(int argc, char** argv) {
     int minor = ae_lib_meta_minor(m);
     if (minor >= 3) {
         printf("  Structs:       %d\n", m->struct_count);
+    }
+    if (minor >= 5) {
+        printf("  Runtime:       %s\n", (m->runtime && m->runtime[0]) ? m->runtime : "static");
     }
     printf("\n");
 
@@ -9879,9 +10148,8 @@ static int cmd_lib_info(int argc, char** argv) {
         }
     }
 
-    dlclose(h);
+    ae_lib_close(h);
     return 0;
-#endif
 }
 
 // ------------------------------------------------------------- ae fmt -------
