@@ -15,12 +15,9 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] binary_import_package: ae not built"; exit 0; }
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] binary_import_package: Windows DLL hosting needs one shared runtime (#2297)"
-        exit 0
-        ;;
-    Darwin) SO_EXT=".dylib" ;;
-    *)      SO_EXT=".so" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll"; EXE=".exe" ;;
+    Darwin) SO_EXT=".dylib"; EXE="" ;;
+    *)      SO_EXT=".so"; EXE="" ;;
 esac
 
 WORK="$(mktemp -d)"
@@ -52,10 +49,10 @@ esac
 rm -rf src   # every import of gamekit.* now resolves to the library
 
 OUT="$(AETHER_HOME="$ROOT" "$AE" run app.ae 2>run.log)" || { echo "$OUT"; fail "ae run app.ae" run.log; }
-echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "ae run app.ae did not pass its checks"; }
+echo "$OUT" | grep -q "^OK" || { echo "$OUT"; fail "ae run app.ae did not pass its checks"; }
 
 AETHER_HOME="$ROOT" "$AE" build app.ae -o app >app.log 2>&1 || fail "ae build app.ae" app.log
-OUT2="$(./app 2>&1)" || { echo "$OUT2"; fail "the built host failed"; }
-echo "$OUT2" | grep -q "^OK$" || { echo "$OUT2"; fail "the built host did not pass its checks"; }
+OUT2="$(./app$EXE 2>&1)" || { echo "$OUT2"; fail "the built host failed"; }
+echo "$OUT2" | grep -q "^OK" || { echo "$OUT2"; fail "the built host did not pass its checks"; }
 
 echo "  [PASS] binary_import_package: a package library serves its modules by name"

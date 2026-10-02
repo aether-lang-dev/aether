@@ -607,6 +607,11 @@ jobs:
         if [ -f build/libaether.a ]; then
           cp build/libaether.a release/lib/
         fi
+        # The shared runtime (#2297): lib/shared/, beside the archive.
+        if [ -d build/shared ]; then
+          mkdir -p release/lib/shared
+          cp build/shared/* release/lib/shared/
+        fi
         # Headers (preserve directory structure — must match install.sh)
         for dir in runtime runtime/actors runtime/scheduler runtime/utils \
                    runtime/memory runtime/config std std/string std/io std/math \
@@ -677,6 +682,11 @@ jobs:
         cp build/ae.exe      release/bin/
         if [ -f build/libaether.a ]; then
           cp build/libaether.a release/lib/
+        fi
+        # The shared runtime (#2297): lib/shared/, beside the archive.
+        if [ -d build/shared ]; then
+          mkdir -p release/lib/shared
+          cp build/shared/* release/lib/shared/
         fi
         # Headers (preserve directory structure — must match install.sh)
         for dir in runtime runtime/actors runtime/scheduler runtime/utils \

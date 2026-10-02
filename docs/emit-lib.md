@@ -703,6 +703,8 @@ library, no special call-site syntax. The artifact is linked in
 Scope of the current implementation:
 
 - **Function exports** and **builder DSL entry points** are callable.
+  A builder consumer also `import std.map` (the default `map_new`
+  config factory is a `std.map` facility used at the call site).
 - **Structs** cross (#2297): a struct passes by value, a `*Struct`
   reaches its fields (`m.position.x`), and a struct with a
   function-pointer field keeps its layout. The importer declares each
@@ -711,24 +713,55 @@ Scope of the current implementation:
   library's single instance for every importer: a second binary library
   that imports the first, and a host that imports both, all reach the same
   `var`.
-- **The runtime is shared on Linux and FreeBSD only.** There the library's
-  embedded runtime symbols bind to the host's by ELF interposition, so a
-  panic inside the library unwinds to the host's `catch`. macOS's
-  two-level namespace keeps a runtime per image (as Windows does), so a
-  panic raised in a library does not reach a `catch` in the host there
-  yet; one shared runtime is the remaining part of #2297.
-  A builder consumer also `import std.map` (the default `map_new`
-  config factory is a `std.map` facility used at the call site).
 - **Higher-order exports** (a function taking a closure `fn` parameter)
   are described in the metadata but not yet callable across the binary
   boundary, passing an Aether closure into an imported function is a
   follow-on (the closure ABI across the boundary).
-- POSIX only for now (the prepass is gated on `dlopen`); Windows DLL
-  hosting is a follow-up, matching `ae lib-info`. The blocker is the
-  runtime, not the catalog: a `-static` DLL carries its own copy of
-  libaether, and PE has no symbol interposition to merge it with the
-  host's, so a panic in the library would not reach the host's `catch`
-  (#2297).
+- **Every platform.** On Windows the catalog is read by mapping the DLL
+  without running its initialisation code, the DLL is linked directly, and
+  `ae build` copies each imported DLL next to the program it builds (PE has
+  no rpath); `ae run` puts their directories on the program's `PATH`.
+
+#### One runtime for a program and its libraries (`--shared-runtime`, schema "1.5")
+
+A library built the default way carries its own copy of the runtime, linked
+in statically: one scheduler, one set of panic frames, one config per image.
+That keeps a library self-contained for a C or Python host, but a program
+that imports Aether libraries in binary form then runs on several runtimes.
+On Linux and FreeBSD ELF symbol interposition happens to bind a library's
+runtime calls to the program's copy; macOS's two-level namespace and Windows'
+PE keep them apart, so a panic raised inside a library never reaches the
+program's `catch` there.
+
+`--shared-runtime` links against the runtime as a shared library instead,
+`aether.dll` (with `libaether.dll.a`), `libaether.dylib` or `libaether.so`,
+which the toolchain builds and installs in `lib/aether/shared/` (`build/shared/`
+in a source tree), beside the static archive:
+
+```sh
+ae build --emit=lib --shared-runtime engine.ae -o libengine.so
+ae build --emit=lib --shared-runtime script.ae -o libscript.so   # imports engine
+ae build app.ae -o app                                            # imports both
+```
+
+- The library's catalog records it (`runtime = "shared"`, schema 1.5;
+  `ae lib-info` prints `Runtime: shared`), and a program importing such a
+  library links the shared runtime too, without being asked.
+- Program and libraries then run on one runtime: a panic inside a library
+  unwinds to the program's `catch` on every platform, and actors, config and
+  resource caps are the program's.
+- The shared runtime is linked by path (never `-laether`, which keeps
+  finding the static archive): an rpath to its directory on Linux and macOS,
+  and on Windows `aether.dll` is copied next to the program (`ae build`) or
+  put on `PATH` (`ae run`). The Windows DLL is self-contained: it needs only
+  system DLLs and the UCRT.
+- A program that imports one library built on the shared runtime and another
+  built static gets a warning naming the static one: rebuild it with
+  `--shared-runtime`.
+- Hooks a program supplies to the runtime by `@c_callback` (the pure-TLS
+  client and server) reach a shared runtime by registration: every
+  `@c_callback` registers itself by name when its image loads, and the
+  runtime looks a hook up before falling back to its own definition.
 
 #### A package as one library (`--package`, schema "1.4")
 
@@ -795,10 +828,11 @@ The `c_symbol:` line is suppressed when the symbol equals `aether_<name>`
 `@c_callback`-marked functions whose Aether name *is* the C symbol show
 no `c_symbol:` line either; they are their own export.
 
-Windows is a follow-up, `ae lib-info` returns 1 with a "DLL hosting is
-a follow-up" message; the metadata struct *is* still emitted into the
-DLL's `.rodata` and is reachable via `LoadLibrary` +
-`GetProcAddress("aether_lib_meta")` from any host.
+On Windows `ae lib-info` maps the DLL without running its initialisation
+code and reads the same catalog; any host reaches it with `LoadLibrary` +
+`GetProcAddress("aether_lib_meta")`. A DLL that `ae` links exports the
+entry point strong: PE cannot export a weak definition, so the generated
+code is compiled with `-DAETHER_LIB_META_WEAK=` there (#2297).
 
 ### What this enables for FFI hosts
 
@@ -848,7 +882,7 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_with_capability/` | `--with=fs,net,os` opt-ins; `--with=first-party` and `--with=all` aliases |
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
 | `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
-| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library, and on Linux/FreeBSD a library panic caught by the host (#2297) |
+| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, one module state shared by a host and a second binary library; static runtime (a library panic caught on Linux/FreeBSD) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 
 Run them with the standard `make test-ae` or individually:
