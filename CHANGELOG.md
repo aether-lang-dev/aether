@@ -14,6 +14,32 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.756.0]
+
+### Added
+
+- **A package library exports its modules' builders.** A `builder`
+  in a module of a package built with `ae build --emit=lib --package` is
+  now exported, where before the build only warned that it was left out.
+  The library exports a wrapper named after the module
+  (`aether_ae3d_ui__panel`) with the builder's parameters and the trailing
+  `void* _builder` config. The builder's catalog record carries its module
+  (schema 1.6), and the interface `ae` builds for an `import` of that module
+  declares it as a trailing-block builder, so `ui.panel("hud") { ... }`
+  works against the prebuilt library (#2349).
+
+### Fixed
+
+- **Vulkan: parallel render targets no longer crash on macOS.** Two
+  actors that create their render targets at the same moment crashed inside
+  MoltenVK's `vkCreateImage` on Apple's paravirtualized GPU, which runs the
+  macOS CI. It was a segfault in `NSData getBytes`, reached from
+  `MVKImagePlane::initSubresources`, and `contrib/vulkan`'s
+  `example_parallel_render` hit it intermittently. Vulkan allows concurrent
+  image creation on a device, so this is a driver bug. The Vulkan backend now
+  serializes `vkCreateImage` on Apple; recording and submitting stay
+  parallel (#2287).
+
 ## [0.755.0]
 
 ### Added
