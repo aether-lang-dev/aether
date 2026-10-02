@@ -1,0 +1,31 @@
+// A host that imports two modules of the gamekit package, both served by
+// one prebuilt library, libgamekit (#2297).
+
+import gamekit.core
+import gamekit.math
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    v = math.add(math.vec2(1.0, 2.0), math.vec2(3.0, 4.0))
+    check(v.x == 4.0 && v.y == 6.0, "math.add by value from the package library")
+    check(math.dot(v, math.vec2(1.0, 0.0)) == 4.0, "math.dot")
+    check(math.UNIT == 1.0, "a module constant")
+
+    e = core.create(2.0, 3.0)
+    check(e.id == 1, "a field of a package struct through *Entity")
+    p = core.position_of(e)
+    check(p.x == 3.0 && p.y == 3.0, "core uses math inside the library")
+    core.create(0.0, 0.0)
+    check(core.count() == 2, "core's module state lives in the library")
+    check(core.MAX_ENTITIES == 64, "an exported constant of core")
+
+    println("OK")
+}

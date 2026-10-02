@@ -418,6 +418,8 @@ typedef struct {
     int         struct_count;              /* schema >= 1.3 */
     const _AeLibInfoStruct* structs;       /* schema >= 1.3 */
     const char* const* source_signatures;  /* schema >= 1.3, parallel to functions */
+    const char* const* function_modules;   /* schema >= 1.4, parallel to functions */
+    const char* const* constant_modules;   /* schema >= 1.4, parallel to constants */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -484,6 +486,11 @@ static bool g_size = false;
  * build/run sites right before build_aetherc_cmd; empty (skip) otherwise. */
 static char g_emit_deps_path[1200] = "";
 
+/* #2297: `ae build --emit=lib --package <pkg>`: the package being built as
+ * one library, and the aetherc flag that says so. */
+static char g_build_package[256] = "";
+static char g_lib_package_flag[300] = "";
+
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
     if (g_emit_csrc)                   emit_flag = " --emit=csrc";
@@ -549,9 +556,9 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
         snprintf(deps_flag, sizeof(deps_flag), " --emit-deps=%s", g_emit_deps_path);
     }
 
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s \"%s\" \"%s\"",
+    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
              tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-             g_defines, lib_flags, deps_flag, input, output);
+             g_lib_package_flag, g_defines, lib_flags, deps_flag, input, output);
 }
 
 // --------------------------------------------------------------------------
@@ -4092,7 +4099,30 @@ typedef const _AeLibInfoMeta* (*ae_meta_fn_t)(void);
 // dlopen `so_path`, read its aether_lib_meta catalog, and write an Aether
 // interface stub to `out`. Returns 0 on success, -1 if the artifact has
 // no readable metadata.
-static int ae_generate_binimport_stub(const char* so_path, FILE* out) {
+static int ae_generate_binimport_stub(const char* so_path, const char* module, FILE* out);
+
+/* Does the catalog of `so_path` list `module` (schema >= 1.4)? */
+static int ae_lib_provides_module(const char* so_path, const char* module) {
+    void* h = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+    if (!h) return 0;
+    ae_meta_fn_t mf = (ae_meta_fn_t)dlsym(h, "aether_lib_meta");
+    const _AeLibInfoMeta* m = mf ? mf() : NULL;
+    int found = 0;
+    if (m && ae_lib_meta_minor(m) >= 4) {
+        for (int i = 0; !found && m->function_modules && i < m->function_count; i++)
+            found = m->function_modules[i] && strcmp(m->function_modules[i], module) == 0;
+        for (int i = 0; !found && m->constant_modules && i < m->constant_count; i++)
+            found = m->constant_modules[i] && strcmp(m->constant_modules[i], module) == 0;
+    }
+    dlclose(h);
+    return found;
+}
+
+/* `module` NULL: the whole catalog (a bare import of a one-module
+ * library). Otherwise only the functions and constants of that module of
+ * a package library (#2297); struct records are shared by all its
+ * modules and always declared. */
+static int ae_generate_binimport_stub(const char* so_path, const char* module, FILE* out) {
     void* h = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
     if (!h) return -1;
     ae_meta_fn_t mf = (ae_meta_fn_t)dlsym(h, "aether_lib_meta");
@@ -4138,6 +4168,8 @@ static int ae_generate_binimport_stub(const char* so_path, FILE* out) {
     for (int i = 0; i < m->function_count && m->functions; i++) {
         const _AeLibInfoFn* f = &m->functions[i];
         if (!f->aether_name || !f->c_symbol) continue;
+        if (module && !(minor >= 4 && m->function_modules && m->function_modules[i] &&
+                        strcmp(m->function_modules[i], module) == 0)) continue;
         /* The source signature (schema >= 1.3) keeps typed pointers,
          * structs and function pointers that the display signature
          * flattens to `ptr`; it is already `(name: T, ...) -> R`. */
@@ -4185,6 +4217,8 @@ static int ae_generate_binimport_stub(const char* so_path, FILE* out) {
     for (int i = 0; i < m->constant_count && m->constants; i++) {
         const _AeLibInfoConst* k = &m->constants[i];
         if (!k->name || !k->value) continue;
+        if (module && !(minor >= 4 && m->constant_modules && m->constant_modules[i] &&
+                        strcmp(m->constant_modules[i], module) == 0)) continue;
         fprintf(out, "const %s = %s\n", k->name, k->value);
     }
 
@@ -4196,6 +4230,7 @@ static int ae_generate_binimport_stub(const char* so_path, FILE* out) {
     for (int i = 0; i < m->closure_count && m->closures; i++) {
         const _AeLibInfoClosure* c = &m->closures[i];
         if (!c->role || strcmp(c->role, "builder") != 0 || !c->name || !c->name[0]) continue;
+        if (module) continue;   /* a package library exports no builders */
         ae_split_signature(c->signature, params, sizeof(params),
                             args, sizeof(args), ret, sizeof(ret));
         int is_void = (strcmp(ret, "void") == 0);
@@ -4295,11 +4330,34 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
         snprintf(stubdir, stubdir_cap, "/tmp/ae-binimport-XXXXXX");
         if (!mkdtemp(stubdir)) { stubdir[0] = '\0'; return -1; }
     }
-    char stub_path[512];
-    snprintf(stub_path, sizeof(stub_path), "%s/%s.ae", stubdir, mod);
+    /* A dotted module of a package library (#2297) is the stub
+     * `<stubdir>/a/b/c/module.ae`, where `import a.b.c` resolves; a bare
+     * module is `<stubdir>/<mod>.ae`, as before. */
+    int dotted = strchr(mod, '.') != NULL;
+    char stub_path[1024];
+    if (dotted) {
+        char rel[512];
+        snprintf(rel, sizeof(rel), "%s", mod);
+        for (char* p = rel; *p; p++) if (*p == '.') *p = '/';
+        char sub[1024];
+        snprintf(sub, sizeof(sub), "%s/", stubdir);
+        size_t base_len = strlen(sub);
+        for (const char* p = rel; ; p++) {
+            if (*p == '/' || *p == '\0') {
+                /* Create each level: <stubdir>/a, <stubdir>/a/b, ... */
+                size_t seg = (size_t)(p - rel);
+                snprintf(sub + base_len, sizeof(sub) - base_len, "%.*s", (int)seg, rel);
+                mkdir(sub, 0755);
+                if (*p == '\0') break;
+            }
+        }
+        snprintf(stub_path, sizeof(stub_path), "%s/%s/module.ae", stubdir, rel);
+    } else {
+        snprintf(stub_path, sizeof(stub_path), "%s/%s.ae", stubdir, mod);
+    }
     FILE* sf = fopen(stub_path, "w");
     if (!sf) return 0;   /* best-effort: leave the build to fail later */
-    int rc = ae_generate_binimport_stub(so_path, sf);
+    int rc = ae_generate_binimport_stub(so_path, dotted ? mod : NULL, sf);
     fclose(sf);
     if (rc != 0) { remove(stub_path); return 0; }
 
@@ -4324,6 +4382,15 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
     /* One -rpath per directory: two libraries side by side (an engine and
      * a script built against it) share one, and macOS ld warns about every
      * duplicate ("duplicate -rpath ... ignored"). */
+    /* A package library serves several imported modules: link it once. */
+    char so_quoted[1300];
+    snprintf(so_quoted, sizeof(so_quoted), " \"%s\"", abs_so);
+    if (strstr(g_binimport_link, so_quoted)) {
+        if (tc.verbose) {
+            fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n", mod, abs_so, stub_path);
+        }
+        return 0;
+    }
     char rpath_flag[1300];
     snprintf(rpath_flag, sizeof(rpath_flag), " -Wl,-rpath,%s", dir);
     const char* hit = strstr(g_binimport_link, rpath_flag);
@@ -4404,6 +4471,30 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
             slashed[si] = '\0';
             if (ae_source_module_path(slashed, src_path, sizeof(src_path))) {
                 ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+                continue;
+            }
+            /* #2297: no source -- a module of a package library? The
+             * library of package `a.b` is lib<a_b>; try each proper prefix
+             * of the import, longest first, and take the one whose catalog
+             * lists this module. */
+            char pkgname[256];
+            snprintf(pkgname, sizeof(pkgname), "%s", mod);
+            for (;;) {
+                char* last = strrchr(pkgname, '.');
+                if (!last) break;
+                *last = '\0';
+                char libname[256];
+                snprintf(libname, sizeof(libname), "%s", pkgname);
+                for (char* q = libname; *q; q++) if (*q == '.') *q = '_';
+                char so_path[1200];
+                if (ae_find_binimport_so(libname, so_path, sizeof(so_path)) &&
+                    ae_lib_provides_module(so_path, mod)) {
+                    if (ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0) {
+                        fclose(f);
+                        return;
+                    }
+                    break;
+                }
             }
             continue;
         }
@@ -4437,6 +4528,128 @@ static void prepare_binary_imports(const char* main_file) {
 #else
 static void prepare_binary_imports(const char* main_file) { (void)main_file; }
 #endif
+
+/* ---- #2297: a package's modules ----
+ *
+ * A package `<pkg>` lives in `<root>/<pkg as path>/`, where root is `.`,
+ * `src` or a --lib / dependency dir, the places a dotted import resolves
+ * from. Its modules are that directory if it holds a module.ae, and every
+ * directory below it that does (`ae3d/core/module.ae` is `ae3d.core`). */
+#define AE_PKG_MAX_MODULES 512
+
+static void ae_pkg_collect(const char* dir, const char* modname,
+                           char (*mods)[256], int* n) {
+    char probe[1300];
+    snprintf(probe, sizeof(probe), "%s/module.ae", dir);
+    if (path_exists(probe) && *n < AE_PKG_MAX_MODULES) {
+        int dup = 0;
+        for (int i = 0; i < *n; i++) if (strcmp(mods[i], modname) == 0) { dup = 1; break; }
+        if (!dup) snprintf(mods[(*n)++], 256, "%s", modname);
+    }
+#ifdef _WIN32
+    char pattern[1300];
+    snprintf(pattern, sizeof(pattern), "%s\\*", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const char* name = fd.cFileName;
+        if (name[0] == '.') continue;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        char child[1300], childmod[256];
+        snprintf(child, sizeof(child), "%s/%s", dir, name);
+        snprintf(childmod, sizeof(childmod), "%s.%s", modname, name);
+        ae_pkg_collect(child, childmod, mods, n);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR* d = opendir(dir);
+    if (!d) return;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char* name = ent->d_name;
+        if (name[0] == '.') continue;
+        char child[1300], childmod[256];
+        snprintf(child, sizeof(child), "%s/%s", dir, name);
+        struct stat st;
+        if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        snprintf(childmod, sizeof(childmod), "%s.%s", modname, name);
+        ae_pkg_collect(child, childmod, mods, n);
+    }
+    closedir(d);
+#endif
+}
+
+/* Write an entry that imports every module of `pkg` (sorted, so the build is
+ * reproducible) to a temp file named after the package, so the library's
+ * default name is lib<pkg>. Returns 0, or -1 with the reason printed. */
+static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
+    char rel[256];
+    snprintf(rel, sizeof(rel), "%s", pkg);
+    for (char* p = rel; *p; p++) if (*p == '.') *p = '/';
+    char (*mods)[256] = malloc((size_t)AE_PKG_MAX_MODULES * 256);
+    if (!mods) return -1;
+    int n = 0;
+    const char* roots[2 + AETHER_LIB_DIRS_MAX];
+    int nr = 0;
+    roots[nr++] = ".";
+    roots[nr++] = "src";
+    for (int i = 0; i < tc.lib_dir_count && nr < (int)(sizeof(roots)/sizeof(roots[0])); i++)
+        roots[nr++] = tc.lib_dirs[i];
+    const char* found_root = NULL;
+    for (int r = 0; r < nr && !found_root; r++) {
+        char dir[1100];
+        snprintf(dir, sizeof(dir), "%s/%s", roots[r], rel);
+        if (!dir_exists(dir)) continue;
+        ae_pkg_collect(dir, pkg, mods, &n);
+        if (n > 0) found_root = roots[r];
+    }
+    if (n == 0) {
+        fprintf(stderr, "Error: package '%s' has no modules: no %s/ directory holding a "
+                        "module.ae under ., src or the --lib directories.\n", pkg, rel);
+        free(mods);
+        return -1;
+    }
+    /* The entry lives in a temp dir, so the root it was found under must be
+     * on the search path for its imports to resolve. */
+    if (strcmp(found_root, ".") != 0 && strcmp(found_root, "src") != 0) {
+        tc_lib_dir_append_one(found_root);
+    } else {
+        char abs_root[1100];
+#ifdef _WIN32
+        if (!_fullpath(abs_root, found_root, sizeof(abs_root)))
+            snprintf(abs_root, sizeof(abs_root), "%s", found_root);
+#else
+        char* rp = realpath(found_root, NULL);
+        snprintf(abs_root, sizeof(abs_root), "%s", rp ? rp : found_root);
+        free(rp);
+#endif
+        tc_lib_dir_append_one(abs_root);
+    }
+    qsort(mods, (size_t)n, 256, (int (*)(const void*, const void*))strcmp);
+
+    char dir[900];
+    snprintf(dir, sizeof(dir), "%s/ae-package-%d", get_temp_dir(), (int)getpid());
+    mkdir_p(dir);
+    char stem[256];
+    snprintf(stem, sizeof(stem), "%s", pkg);
+    for (char* p = stem; *p; p++) if (*p == '.') *p = '_';
+    snprintf(out, outcap, "%s/%s.ae", dir, stem);
+    FILE* f = fopen(out, "w");
+    if (!f) {
+        fprintf(stderr, "Error: cannot write the package entry %s\n", out);
+        free(mods);
+        return -1;
+    }
+    fprintf(f, "// Synthesized by `ae build --emit=lib --package %s`: the package's\n", pkg);
+    fprintf(f, "// %d modules, built as one library.\n", n);
+    for (int i = 0; i < n; i++) fprintf(f, "import %s\n", mods[i]);
+    fprintf(f, "\nmain() {}\n");
+    fclose(f);
+    if (tc.verbose) fprintf(stderr, "ae: package %s: %d modules from %s\n", pkg, n, found_root);
+    free(mods);
+    return 0;
+}
 
 // Scan `main_file` for `import contrib.host.<lang>` statements and
 // queue the matching bridge static archive onto the link line.
@@ -6965,6 +7178,9 @@ static int cmd_build(int argc, char** argv) {
                 fprintf(stderr, "Error: --emit must be one of: exe, lib, staticlib, both, obj, csrc (got '%s')\n", val);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--package") == 0 && i + 1 < argc) {
+            // #2297: build every module of a package into one library.
+            snprintf(g_build_package, sizeof(g_build_package), "%s", argv[++i]);
         } else if (strcmp(argv[i], "--namespace") == 0 && i + 1 < argc) {
             // Handled in a dedicated function defined above.
             return cmd_build_namespace(argc, argv);
@@ -7064,6 +7280,26 @@ static int cmd_build(int argc, char** argv) {
             "  For a native static library, link your objects against the "
             "installed libaether.a — see `ae cflags`.\n");
         return 1;
+    }
+
+    /* #2297: --package <pkg> builds the package's modules into one library:
+     * an entry that imports each of them is synthesized, and aetherc is
+     * told which modules are the package. */
+    static char package_entry[1200];
+    if (g_build_package[0]) {
+        if (!g_emit_lib || g_emit_exe) {
+            fprintf(stderr, "Error: --package builds a library; add --emit=lib.\n");
+            return 1;
+        }
+        if (file) {
+            fprintf(stderr, "Error: --package %s builds the package's modules; give no source file "
+                            "(got '%s').\n", g_build_package, file);
+            return 1;
+        }
+        if (ae_package_entry(g_build_package, package_entry, sizeof(package_entry)) != 0) return 1;
+        file = package_entry;
+        snprintf(g_lib_package_flag, sizeof(g_lib_package_flag),
+                 " --lib-package=%s", g_build_package);
     }
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
@@ -9561,6 +9797,11 @@ static int cmd_lib_info(int argc, char** argv) {
             if (ssig) {
                 printf("        as: %s%s\n", aname, ssig);
             }
+            /* The package module it belongs to (schema >= 1.4, #2297). */
+            if (minor >= 4 && m->function_modules && m->function_modules[i] &&
+                m->function_modules[i][0]) {
+                printf("        module: %s\n", m->function_modules[i]);
+            }
             if (strcmp(aname, csym) != 0) {
                 printf("        c_symbol: %s\n", csym);
             }
@@ -9610,6 +9851,10 @@ static int cmd_lib_info(int argc, char** argv) {
                    k->name  ? k->name  : "?",
                    k->type  ? k->type  : "?",
                    k->value ? k->value : "?");
+            if (minor >= 4 && m->constant_modules && m->constant_modules[i] &&
+                m->constant_modules[i][0]) {
+                printf("        module: %s\n", m->constant_modules[i]);
+            }
         }
     }
 

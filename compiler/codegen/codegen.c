@@ -2619,6 +2619,88 @@ static int abi_is_struct_value(Type* t) {
     return t && !t->c_alias && t->kind == TYPE_STRUCT && t->struct_name;
 }
 
+/* ---- #2297: a package built as one library (--lib-package) ----
+ *
+ * The functions of the package's modules arrive merged under the
+ * compiler's namespace prefix (`core_model_new`), which depends on which
+ * other modules a compile loads, so it cannot be the library's ABI. Each
+ * exported one gets a stable wrapper named after its module instead:
+ * `aether_<module, dots as _>__<name>` (`aether_ae3d_core__model_new`),
+ * and a catalog record giving the module it belongs to. The merged function
+ * itself stays static; the wrapper is the export. */
+
+/* `value` without its module's namespace prefix. */
+static const char* lib_pkg_base_name(AetherModule* m, const char* value) {
+    const char* ns = m->ns ? m->ns : module_namespace_of(m->name);
+    size_t n = ns ? strlen(ns) : 0;
+    if (n && strncmp(value, ns, n) == 0 && value[n] == '_') return value + n + 1;
+    return value;
+}
+
+static void lib_pkg_symbol(AetherModule* m, const char* base, char* out, size_t cap) {
+    int n = snprintf(out, cap, "aether_%s__%s", m->name, base);
+    if (n < 0) { out[0] = '\0'; return; }
+    size_t mod_end = strlen("aether_") + strlen(m->name);
+    for (size_t i = strlen("aether_"); i < mod_end && i < cap; i++)
+        if (out[i] == '.') out[i] = '_';
+}
+
+/* Does the module make `base` public: its `exports (...)` list names it, or
+ * it has no list; a trailing `_` is always private (#279). */
+static int lib_pkg_exports(AetherModule* m, const char* base) {
+    size_t n = strlen(base);
+    if (n == 0 || base[n - 1] == '_') return 0;
+    return m->export_count == 0 || module_exports_symbol(m, base);
+}
+
+/* The public identity of a top-level function in a --emit=lib build, or 0
+ * when it is not part of the library's surface. `alias` receives the
+ * wrapper symbol, `*name` the name the catalog gives it, `*module` the
+ * package module it belongs to ("" for the entry's own functions). */
+static int lib_fn_identity(ASTNode* fn, char* alias, size_t acap,
+                           const char** name, const char** module) {
+    if (fn->is_imported) {
+        AetherModule* m = module_lib_package_module_of(fn);
+        if (!m) return 0;
+        const char* base = lib_pkg_base_name(m, fn->value);
+        if (!lib_pkg_exports(m, base)) return 0;
+        lib_pkg_symbol(m, base, alias, acap);
+        *name = base;
+        *module = m->name;
+        return 1;
+    }
+    size_t name_len = strlen(fn->value);
+    if (name_len > 0 && fn->value[name_len - 1] == '_') return 0;
+    snprintf(alias, acap, "aether_%s", fn->value);
+    *name = fn->value;
+    *module = "";
+    return 1;
+}
+
+/* The public identity of a module-level const in a --emit=lib build. A
+ * const merged in from an imported module is part of the surface only when
+ * that module belongs to the package (#2297): such consts are not flagged
+ * is_imported, so the originating file decides. `entry_gate` reports
+ * whether the entry module's own exports list still has to be consulted. */
+static int lib_const_identity(ASTNode* cd, const char** name, const char** module,
+                              int* entry_gate) {
+    const char* pub = const_public_name(cd);
+    AetherModule* m = cd->source_file ? module_find_by_file(cd->source_file) : NULL;
+    if (!m) {
+        *name = pub;
+        *module = "";
+        *entry_gate = 1;
+        return 1;
+    }
+    if (!module_in_lib_package(m)) return 0;
+    const char* base = lib_pkg_base_name(m, pub);
+    if (!lib_pkg_exports(m, base)) return 0;
+    *name = base;
+    *module = m->name;
+    *entry_gate = 0;
+    return 1;
+}
+
 // Emit `aether_<name>` alias stubs after normal top-level function emission.
 // Called from generate_program only when --emit=lib or --emit=both is set.
 //
@@ -2676,17 +2758,17 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         }
         if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value) continue;
         // Skip cloned-from-import functions (they're marked static and
-        // are an implementation detail of the importer).
-        if (fn->is_imported) continue;
-
-        // Skip trailing-underscore "private helper" convention: `foo_`
-        // means file-local. Emitting an aether_<name> alias for it
-        // (a) leaks an internal name into the public ABI, and
-        // (b) causes a duplicate-symbol link error when two .ae files
-        //     in the same --namespace bundle pick the same helper
-        //     name (they each generate their own alias). Closes #279.
-        size_t name_len = strlen(fn->value);
-        if (name_len > 0 && fn->value[name_len - 1] == '_') continue;
+        // are an implementation detail of the importer) unless they belong
+        // to the package this library is (#2297), and the trailing-
+        // underscore "private helper" convention: `foo_` means file-local.
+        // Emitting an aether_<name> alias for it (a) leaks an internal name
+        // into the public ABI, and (b) causes a duplicate-symbol link error
+        // when two .ae files in the same --namespace bundle pick the same
+        // helper name (they each generate their own alias). Closes #279.
+        char alias[512];
+        const char* pub_name = NULL;
+        const char* pub_module = NULL;
+        if (!lib_fn_identity(fn, alias, sizeof(alias), &pub_name, &pub_module)) continue;
 
         // Check that every param type is ABI-representable.
         // The last non-guard, non-block child is the body; everything before
@@ -2783,10 +2865,10 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         // #996 --emit=csrc: mirror the public prototype into the header.
         if (gen->csrc_header_file && sig_has_struct_value) {
             fprintf(gen->csrc_header_file,
-                    "/* aether_%s passes a struct by value; its layout is in the\n"
-                    " * catalog's struct records, not in this header. */\n", fn->value);
+                    "/* %s passes a struct by value; its layout is in the\n"
+                    " * catalog's struct records, not in this header. */\n", alias);
         } else if (gen->csrc_header_file) {
-            fprintf(gen->csrc_header_file, "%s aether_%s(", ret_abi, fn->value);
+            fprintf(gen->csrc_header_file, "%s %s(", ret_abi, alias);
             if (param_count == 0) {
                 fprintf(gen->csrc_header_file, "void");
             } else {
@@ -2799,7 +2881,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         }
 
         // Emit: RET aether_NAME(PARAMS) { [return] NAME(args); }
-        fprintf(gen->output, "%s aether_%s(", ret_abi, fn->value);
+        fprintf(gen->output, "%s %s(", ret_abi, alias);
         if (param_count == 0) {
             fprintf(gen->output, "void");
         } else {
@@ -3282,11 +3364,15 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         }
         if (!fn) continue;
         if (fn->type != AST_FUNCTION_DEFINITION || !fn->value) continue;
-        if (fn->is_imported) continue;
-        /* Trailing-underscore convention marks a function file-local
-         * (matches emit_lib_alias_stubs:898ish). Skip — same gate. */
-        size_t nlen = strlen(fn->value);
-        if (nlen > 0 && fn->value[nlen - 1] == '_') continue;
+        /* The same surface emit_lib_alias_stubs wraps: the entry's own
+         * functions minus `_`-suffixed privates, plus a package module's
+         * exported functions (#2297). */
+        {
+            char alias_probe[512];
+            const char* nm = NULL;
+            const char* md = NULL;
+            if (!lib_fn_identity(fn, alias_probe, sizeof(alias_probe), &nm, &md)) continue;
+        }
         /* @c_callback functions are always eligible — the user opted
          * the bare Aether name into the C ABI directly. Plain
          * functions must satisfy the same param/return gates as
@@ -3360,8 +3446,15 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (cd->child_count < 1) continue;
         const char* ts = lib_const_type_string(cd->node_type);
         if (!ts) continue;  /* unsupported const type — skip, no half-record */
+        /* A const merged in from an import is the library's only when that
+         * module is part of the package (#2297); a std module's consts the
+         * library merely uses are not its surface. */
+        const char* c_name = NULL;
+        const char* c_module = NULL;
+        int entry_gate = 0;
+        if (!lib_const_identity(cd, &c_name, &c_module, &entry_gate)) continue;
         /* export gate */
-        if (has_exports_list) {
+        if (entry_gate && has_exports_list) {
             int listed = 0;
             for (int k = 0; k < export_name_count; k++) {
                 if (strcmp(export_names[k], const_public_name(cd)) == 0) { listed = 1; break; }
@@ -3385,7 +3478,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* d = program->children[i];
         if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
-        if (d && d->type == AST_STRUCT_DEFINITION && d->value && !d->is_imported)
+        /* A package module's structs are the library's own too (#2297). */
+        if (d && d->type == AST_STRUCT_DEFINITION && d->value &&
+            (!d->is_imported || module_lib_package_module_of(d)))
             lib_struct_collect(program, d->value, st_all, &st_all_count, st_cap);
     }
     for (int i = 0; i < fn_count; i++) {
@@ -3480,14 +3575,20 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    int closure_count; const struct _AetherLibClosure* closures;\n"
         "    int constant_count; const struct _AetherLibConst* constants;\n"
         "    int struct_count; const struct _AetherLibStruct* structs;\n"
-        "    const char* const* source_signatures; };\n\n");
+        "    const char* const* source_signatures;\n"
+        "    const char* const* function_modules;\n"
+        "    const char* const* constant_modules; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
     for (int i = 0; i < fn_count; i++) {
         ASTNode* fn = fns[i];
+        char pkg_alias[512];
+        const char* pub_name = fn->value;
+        const char* pub_module = "";
+        lib_fn_identity(fn, pkg_alias, sizeof(pkg_alias), &pub_name, &pub_module);
         fprintf(gen->output, "    { ");
-        emit_lib_metadata_c_string_literal(gen->output, fn->value);
+        emit_lib_metadata_c_string_literal(gen->output, pub_name);
         fprintf(gen->output, ", ");
         /* C symbol resolution:
          *   * @c_callback functions are exported with their bare
@@ -3500,11 +3601,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
          * a callable pointer regardless of which path the function
          * took. */
         const char* cb_sym = c_callback_symbol(fn);
-        char c_sym[256];
+        char c_sym[512];
         if (cb_sym) {
             snprintf(c_sym, sizeof(c_sym), "%s", cb_sym);
         } else {
-            snprintf(c_sym, sizeof(c_sym), "aether_%s", fn->value);
+            snprintf(c_sym, sizeof(c_sym), "%s", pkg_alias);
         }
         emit_lib_metadata_c_string_literal(gen->output, c_sym);
         fprintf(gen->output, ", \"");
@@ -3691,8 +3792,12 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             "\nstatic const struct _AetherLibConst _aether_lib_consts[] = {\n");
         for (int i = 0; i < const_count; i++) {
             ASTNode* cd = consts[i];
+            const char* c_name = const_public_name(cd);
+            const char* c_module = "";
+            int entry_gate = 0;
+            lib_const_identity(cd, &c_name, &c_module, &entry_gate);
             fprintf(gen->output, "    { ");
-            emit_lib_metadata_c_string_literal(gen->output, const_public_name(cd));
+            emit_lib_metadata_c_string_literal(gen->output, c_name);
             fprintf(gen->output, ", ");
             emit_lib_metadata_c_string_literal(gen->output, const_type[i]);
             fprintf(gen->output, ", ");
@@ -3762,6 +3867,61 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         fprintf(gen->output, "};\n\n");
     }
 
+    /* --- v5 module tables (schema 1.4, #2297): in a package library each
+     * function and constant belongs to a module; parallel to the function
+     * and constant tables, "" for the entry's own. */
+    int pkg_lib = module_lib_package() != NULL;
+    if (pkg_lib && fn_count > 0) {
+        fprintf(gen->output, "static const char* const _aether_lib_fn_modules[] = {\n");
+        for (int i = 0; i < fn_count; i++) {
+            char a[512];
+            const char* nm = NULL;
+            const char* md = "";
+            lib_fn_identity(fns[i], a, sizeof(a), &nm, &md);
+            fprintf(gen->output, "    ");
+            emit_lib_metadata_c_string_literal(gen->output, md ? md : "");
+            fprintf(gen->output, ",\n");
+        }
+        fprintf(gen->output, "};\n\n");
+    }
+    if (pkg_lib && const_count > 0) {
+        fprintf(gen->output, "static const char* const _aether_lib_const_modules[] = {\n");
+        for (int i = 0; i < const_count; i++) {
+            const char* nm = NULL;
+            const char* md = "";
+            int eg = 0;
+            lib_const_identity(consts[i], &nm, &md, &eg);
+            fprintf(gen->output, "    ");
+            emit_lib_metadata_c_string_literal(gen->output, md ? md : "");
+            fprintf(gen->output, ",\n");
+        }
+        fprintf(gen->output, "};\n\n");
+    }
+    /* A package module's exported builder has no wrapper: the builder ABI
+     * passes the trailing block's config through the function's own
+     * symbol, which a merged clone keeps static. Say so rather than drop
+     * it silently. */
+    if (pkg_lib) {
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* b = program->children[i];
+            if (b && b->type == AST_EXPORT_STATEMENT && b->child_count > 0) b = b->children[0];
+            if (!b || b->type != AST_BUILDER_FUNCTION || !b->value || !b->is_imported) continue;
+            AetherModule* m = module_lib_package_module_of(b);
+            if (!m) continue;
+            const char* base = lib_pkg_base_name(m, b->value);
+            if (!lib_pkg_exports(m, base)) continue;
+            char msg[384];
+            snprintf(msg, sizeof(msg),
+                     "builder '%s' in package module '%s' is not exported by the package library",
+                     base, m->name);
+            AetherError w = {NULL, NULL, b->line, b->column, msg,
+                             "a package library exports functions and constants; "
+                             "call this builder from a function the module exports",
+                             NULL, AETHER_ERR_NONE};
+            aether_warning_report(&w);
+        }
+    }
+
     /* Pull the primary source path off the first non-imported fn —
      * approximation of "the .ae the user passed to aetherc". The
      * artifact may bundle multiple sources (concat-ae); naming the
@@ -3783,7 +3943,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * function-only artifact byte-identical to v1 for existing readers. The
      * trailing slots are always written (the struct always has them); older
      * readers stop at the count/pointer they know. */
-    const char* schema = (struct_count > 0 || src_sig_needed) ? "1.3"
+    const char* schema = pkg_lib ? "1.4"
+                       : (struct_count > 0 || src_sig_needed) ? "1.3"
                        : (const_count > 0) ? "1.2"
                        : (clo_count > 0)   ? "1.1"
                        : "1.0";
@@ -3798,8 +3959,12 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     else                 fprintf(gen->output, "0, NULL, ");
     if (struct_count > 0) fprintf(gen->output, "%d, _aether_lib_structs, ", struct_count);
     else                  fprintf(gen->output, "0, NULL, ");
-    if (src_sig_needed && fn_count > 0) fprintf(gen->output, "_aether_lib_src_sigs\n};\n\n");
-    else                                fprintf(gen->output, "NULL\n};\n\n");
+    if (src_sig_needed && fn_count > 0) fprintf(gen->output, "_aether_lib_src_sigs, ");
+    else                                fprintf(gen->output, "NULL, ");
+    if (pkg_lib && fn_count > 0) fprintf(gen->output, "_aether_lib_fn_modules, ");
+    else                         fprintf(gen->output, "NULL, ");
+    if (pkg_lib && const_count > 0) fprintf(gen->output, "_aether_lib_const_modules\n};\n\n");
+    else                            fprintf(gen->output, "NULL\n};\n\n");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -3844,12 +4009,19 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         for (int i = 0; i < fn_count; i++) {
             ASTNode* fn = fns[i];
             const char* cb_sym = c_callback_symbol(fn);
-            char c_sym[256];
+            char pkg_alias[512];
+            const char* pub_name = fn->value;
+            const char* pub_module = "";
+            lib_fn_identity(fn, pkg_alias, sizeof(pkg_alias), &pub_name, &pub_module);
+            char c_sym[512];
             if (cb_sym) snprintf(c_sym, sizeof(c_sym), "%s", cb_sym);
-            else        snprintf(c_sym, sizeof(c_sym), "aether_%s", fn->value);
+            else        snprintf(c_sym, sizeof(c_sym), "%s", pkg_alias);
             char* sig = fn_signature_string(fn);
             fputs(i == 0 ? "\n" : ",\n", j);
-            fputs("    { \"aether_name\": ", j);  emit_json_string(j, fn->value);
+            fputs("    { \"aether_name\": ", j);  emit_json_string(j, pub_name);
+            if (module_lib_package()) {
+                fputs(", \"module\": ", j); emit_json_string(j, pub_module);
+            }
             fputs(", \"c_symbol\": ", j);         emit_json_string(j, c_sym);
             fputs(", \"signature\": ", j);        emit_json_string(j, sig);
             if (src_sig_needed && src_sigs[i]) {
@@ -3907,10 +4079,17 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             ASTNode* cd = consts[i];
             ASTNode* lit = cd->child_count > 0 ? cd->children[0] : NULL;
             const char* val = (lit && lit->type == AST_LITERAL && lit->value) ? lit->value : "";
+            const char* c_name = const_public_name(cd);
+            const char* c_module = "";
+            int entry_gate = 0;
+            lib_const_identity(cd, &c_name, &c_module, &entry_gate);
             fputs(i == 0 ? "\n" : ",\n", j);
-            fputs("    { \"name\": ", j);   emit_json_string(j, const_public_name(cd));
+            fputs("    { \"name\": ", j);   emit_json_string(j, c_name);
             fputs(", \"type\": ", j);       emit_json_string(j, const_type[i]);
             fputs(", \"value\": ", j);      emit_json_string(j, val);
+            if (module_lib_package()) {
+                fputs(", \"module\": ", j); emit_json_string(j, c_module);
+            }
             fputs(" }", j);
         }
         fputs(const_count ? "\n  ]" : "]", j);

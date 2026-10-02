@@ -47,10 +47,17 @@
  * slot may be absent (0 / NULL), and an entry of `source_signatures` is ""
  * when that export has no source spelling.
  *
+ * v5 (schema "1.4", #2297) appends `function_modules` and
+ * `constant_modules`, parallel to `functions` and `constants`: in a library
+ * built from a whole package (`ae build --emit=lib --package <pkg>`), the
+ * module each export belongs to ("ae3d.core"; "" for the entry's own). An
+ * export of a package module is named by its bare name in `aether_name`
+ * and has the C symbol `aether_<module, dots as _>__<name>`.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
- * constant records are present, and "1.3" once struct records or source
- * signatures are. Hosts that read the metadata should
+ * constant records are present, "1.3" once struct records or source
+ * signatures are, and "1.4" for a package library. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -151,7 +158,7 @@ typedef struct {
  * append. New optional fields go at the end with a documented
  * "all-zero means absent" contract. */
 typedef struct {
-    const char* schema_version;   /* "1.0" funcs; "1.1" closures; "1.2" consts; "1.3" structs */
+    const char* schema_version;   /* "1.0" funcs; "1.1" closures; "1.2" consts; "1.3" structs; "1.4" package */
     const char* aether_version;   /* compiler version that produced this   */
     const char* primary_source;   /* the main .ae file passed to aetherc   */
     int                       function_count;
@@ -164,6 +171,10 @@ typedef struct {
     const AetherLibStruct*    structs;         /* NULL when struct_count==0  */
     const char* const*        source_signatures; /* schema >= 1.3; parallel to
                                                     functions, or NULL      */
+    const char* const*        function_modules;  /* schema >= 1.4; parallel to
+                                                    functions, or NULL      */
+    const char* const*        constant_modules;  /* schema >= 1.4; parallel to
+                                                    constants, or NULL      */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

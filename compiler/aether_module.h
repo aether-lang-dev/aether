@@ -67,6 +67,17 @@ AetherModule* module_find(const char* name);
 void module_assign_namespaces(void);
 const char* module_namespace_of(const char* module_path);
 AetherModule* module_find_by_namespace(const char* ns);
+/* The registered module whose source is `file_path` (compared as files, not
+ * spellings), or NULL. */
+AetherModule* module_find_by_file(const char* file_path);
+/* #2297: a package built as one --emit=lib library (`--lib-package <pkg>`).
+ * module_in_lib_package: is `m` named `<pkg>` or `<pkg>.<...>`?
+ * module_lib_package_module_of: the package module a merged declaration
+ * came from (by its source_file), or NULL. */
+void module_set_lib_package(const char* pkg);
+const char* module_lib_package(void);
+int module_in_lib_package(const AetherModule* m);
+AetherModule* module_lib_package_module_of(const ASTNode* decl);
 
 // Import/export handling
 void module_add_export(AetherModule* module, const char* symbol);
