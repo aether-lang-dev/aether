@@ -14,6 +14,14 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.759.0]
+
+### Added
+
+- Add runtime regression tests for heap, literal and null actor death-hook
+  reasons, and for the heap message and release callback passed to a panic
+  catcher (#2340).
+
 ## [0.758.0]
 
 ### Added
