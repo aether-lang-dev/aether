@@ -7561,11 +7561,24 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             if (f && f->type == AST_FUNCTION_DEFINITION && c_callback_symbol(f)) n_cb++;
         }
         if (n_cb > 0) {
+            /* The reference is weak on ELF and Mach-O: a library linked with
+             * its runtime symbols left to the host (a raw `cc -shared`)
+             * has no registry until a host provides one, and loading it,
+             * which runs this constructor, must not fail on the missing
+             * symbol. A PE DLL is always fully linked, and a weak undefined
+             * reference does not bind to a DLL import there. */
             fprintf(gen->output,
                 "\n/* @c_callback registry (#2297): hooks reach a shared runtime by name. */\n"
                 "#if defined(__GNUC__) || defined(__clang__)\n"
+                "#if defined(_WIN32)\n"
                 "extern void aether_callback_register(const char*, void*);\n"
-                "__attribute__((constructor)) static void _aether_register_c_callbacks(void) {\n");
+                "#define AE_CALLBACK_REGISTRY_PRESENT 1\n"
+                "#else\n"
+                "extern void aether_callback_register(const char*, void*) __attribute__((weak));\n"
+                "#define AE_CALLBACK_REGISTRY_PRESENT (aether_callback_register != 0)\n"
+                "#endif\n"
+                "__attribute__((constructor)) static void _aether_register_c_callbacks(void) {\n"
+                "    if (!(AE_CALLBACK_REGISTRY_PRESENT)) return;\n");
             for (int i = 0; i < program->child_count; i++) {
                 ASTNode* f = program->children[i];
                 if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
@@ -7574,7 +7587,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 if (!sym) continue;
                 fprintf(gen->output, "    aether_callback_register(\"%s\", (void*)%s);\n", sym, sym);
             }
-            fprintf(gen->output, "}\n#endif\n");
+            fprintf(gen->output, "}\n#undef AE_CALLBACK_REGISTRY_PRESENT\n#endif\n");
         }
     }
 
