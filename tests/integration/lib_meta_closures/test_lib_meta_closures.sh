@@ -1,18 +1,21 @@
 #!/bin/sh
 # Integration test for the v2 closure-context records in the
-# `--emit=lib` metadata catalog (aether_lib_meta, schema 1.1).
+# `--emit=lib` metadata catalog (aether_lib_meta).
 # Compiles `script.ae` with `--emit=lib`, links the emitted C into a
 # shared library, runs `ae lib-info`, and asserts the closure surface.
 #
 # Asserts:
 #   1. `ae lib-info` exits 0
-#   2. Schema is 1.1 (closure records present)
+#   2. Schema is 1.3: closure records (1.1), and `each`'s closure
+#      parameter crosses by value (#2297), so the function table carries
+#      source signatures (1.3)
 #   3. Closure count is 3
 #   4. The `builder` record names `route` with role [builder]
 #   5. The closure-typed param `action` of `each` is recorded [param]
 #   6. The capturing body closure in `sum_with` records `captures
 #      base: int` under role [literal]
-#   7. The function table still lists the ABI exports (greet, sum_with)
+#   7. The function table still lists the ABI exports (greet, sum_with),
+#      and `each` with its source signature
 
 set -e
 
@@ -68,7 +71,7 @@ fi
 
 fail() { echo "  [FAIL] $1"; echo "--- output:"; echo "$OUT"; exit 1; }
 
-echo "$OUT" | grep -q "Schema:[[:space:]]*1\\.1" || fail "schema not 1.1"
+echo "$OUT" | grep -q "Schema:[[:space:]]*1\\.3" || fail "schema not 1.3"
 echo "$OUT" | grep -q "Closures:[[:space:]]*3" || fail "closure count not 3"
 
 # Builder record.
@@ -90,5 +93,7 @@ echo "$OUT" | grep -qE "greet\\(string\\) -> string" \
     || fail "function table missing greet"
 echo "$OUT" | grep -qE "sum_with\\(int, int\\) -> int" \
     || fail "function table missing sum_with"
+echo "$OUT" | grep -qE "as: each\\(items: ptr, action: fn\\)" \
+    || fail "function table missing each, whose closure parameter crosses by value"
 
-echo "  [PASS] lib_meta_closures: 7/7 — schema 1.1, 3 closure records, builder/param/literal, capture, function table coexists"
+echo "  [PASS] lib_meta_closures: 8/8 — schema 1.3, 3 closure records, builder/param/literal, capture, function table coexists, each exported"
