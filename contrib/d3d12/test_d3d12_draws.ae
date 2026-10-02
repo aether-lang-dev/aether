@@ -91,6 +91,9 @@ describe_quarters(t: ptr) -> string {
     return "${d3d12.pixel(t, 2, 2)} ${d3d12.pixel(t, 6, 2)} ${d3d12.pixel(t, 2, 6)} ${d3d12.pixel(t, 6, 6)}"
 }
 
+// Whether a timed frame must show time passing: always, here.
+exact_timer() -> int { return 1 }
+
 // Writes up to five words at word `at` of `buf` on the GPU.
 gpu_words(c: ptr, at: int, n: int, w0: int, w1: int, w2: int, w3: int, w4: int) -> int {
     _ = d3d12.compute_push_int(c, 0, at)
@@ -409,8 +412,11 @@ main() {
             spec.assert_true(d3d12.target_gpu_ms(t) < 0.0, "-1 before a timed frame")
             spec.assert_eq(d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "a timed frame")
             ms = d3d12.target_gpu_ms(t)
-            spec.assert_true(ms > 0.0, "the frame took GPU time (${ms} ms)")
-            spec.assert_true(ms < 5000.0, "and less than the draw's timeout (${ms} ms)")
+            spec.assert_true(ms >= 0.0, "the frame has a GPU time (${ms} ms)")
+            if exact_timer() == 1 {
+                spec.assert_true(ms > 0.0, "and it took time (${ms} ms)")
+            }
+            spec.assert_true(ms < 5000.0, "less than the draw's timeout (${ms} ms)")
             spec.assert_eq(d3d12.pixel(t, 32, 32), RED, "and drew")
 
             // Three frames in flight, waited for together: the time is the
@@ -423,7 +429,10 @@ main() {
             }
             spec.assert_eq(d3d12.wait_all(t), d3d12.OK, "all waited")
             fms = d3d12.target_gpu_ms(t)
-            spec.assert_true(fms > 0.0, "a time with frames in flight (${fms} ms)")
+            spec.assert_true(fms >= 0.0, "a time with frames in flight (${fms} ms)")
+            if exact_timer() == 1 {
+                spec.assert_true(fms > 0.0, "and it took time (${fms} ms)")
+            }
             spec.assert_eq(d3d12.target_set_timing(t, 0), d3d12.OK, "timing off")
             spec.assert_true(d3d12.target_gpu_ms(t) < 0.0, "-1 again")
 

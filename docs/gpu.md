@@ -103,7 +103,7 @@ Every call returns one of the same codes, or a null handle with the reason in
 | Instance index in the shader | `gl_InstanceIndex`, counting from the first instance | `SV_InstanceID`, counting from 0 | `[[instance_id]]`, counting from the first instance |
 | Dynamic uniform offsets are multiples of | the device's `minUniformBufferOffsetAlignment` | 256 | 256 |
 | An indirect command's first instance | honoured where the device has `drawIndirectFirstInstance`, and must be 0 elsewhere | honoured | honoured |
-| GPU time | timestamp queries | a timestamp query heap | the command buffer's `GPUStartTime` to `GPUEndTime` |
+| GPU time | timestamp queries; through MoltenVK on a GPU without Metal counter sampling (a virtual machine's), a frame's queries are stamped together and read 0 | a timestamp query heap | the command buffer's `GPUStartTime` to `GPUEndTime` |
 | Debugging | the Khronos validation layer | `AETHER_D3D12_DEBUG=1` or `2` | `MTL_DEBUG_LAYER=1` |
 
 The format constants have the same names in all three, so code that names them

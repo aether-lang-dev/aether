@@ -284,7 +284,12 @@ the bottom, in a query pool of two per frame slot. The results are read when
 the slot's fence is waited on, scaled by `timestampPeriod`, and masked to the
 queue's `timestampValidBits`, so a counter that wraps still subtracts
 correctly. A queue that reports no valid bits refuses timing with
-`ERR_UNSUPPORTED`. `test_vulkan_draws.ae` runs clean under the validation
+`ERR_UNSUPPORTED`. MoltenVK takes timestamps at Metal's stage boundaries
+only where the GPU can sample counters there. Where it cannot, as on a
+virtual machine's GPU, it stamps every query in a command buffer as the
+buffer completes, and a frame reads 0 ms. On those machines
+`contrib.metal`, which times the command buffer itself, gives the real
+figure. `test_vulkan_draws.ae` runs clean under the validation
 layer with synchronisation and best-practices validation on.
 
 ## Colour formats and image files
