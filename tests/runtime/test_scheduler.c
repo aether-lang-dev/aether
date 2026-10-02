@@ -172,6 +172,12 @@ void test_scheduler_spawn_on_demand(void) {
                                                            sizeof(CounterActor));
     ASSERT_NOT_NULL(a);
     ASSERT_NOT_NULL(b);
+    // The scheduler initializes the ActorBase prefix only; the generated
+    // spawn function initializes an actor's own fields.
+    atomic_store(&a->count, 0);
+    atomic_store(&a->last_value, -1);
+    atomic_store(&b->count, 0);
+    atomic_store(&b->last_value, -1);
     int cores = num_cores;
     ASSERT_TRUE(cores > 0);
 
