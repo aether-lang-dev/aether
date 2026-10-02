@@ -1510,7 +1510,9 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	test -f "$$verdir/bin/aetherc$(EXE_EXT)" || (echo "  FAIL: bin/aetherc missing"; exit 1) && \
 	test -f "$$verdir/bin/ae$(EXE_EXT)"      || (echo "  FAIL: bin/ae missing"; exit 1) && \
 	test -f "$$verdir/lib/libaether.a"       || (echo "  FAIL: lib/libaether.a missing"; exit 1) && \
-	test -f "$$verdir/include/aether/libaether.h" || (echo "  FAIL: include/aether/libaether.h missing (#1420)"; exit 1) && \
+	for h in include/*.h; do \
+	  test -f "$$verdir/include/aether/$$(basename "$$h")" || { echo "  FAIL: include/aether/$$(basename "$$h") missing (#1420)"; exit 1; }; \
+	done && \
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
