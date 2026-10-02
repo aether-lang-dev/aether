@@ -764,7 +764,10 @@ jobs:
         # coverage this leg exists for is silently absent.
         # Mesa brings lavapipe (vulkan_lvp.dll), a CPU Vulkan driver, so the
         # Vulkan entries render and present here instead of skipping.
-        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc
+        # unzip extracts the pinned SQLite amalgamation the release archive
+        # ships: `make ci` stages that archive (test-release-archive) through
+        # the script release.yml packs with.
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc unzip
 
     # #2256: Mesa 26.2.3's lavapipe frees every vkAllocateMemory block with
     # the wrong free on Windows. llvmpipe_allocate_memory takes the block from

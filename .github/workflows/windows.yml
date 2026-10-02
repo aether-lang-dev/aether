@@ -237,6 +237,9 @@ jobs:
       with:
         msystem: ${{ matrix.msystem }}
         update: true
+        # unzip extracts the pinned SQLite amalgamation the release archive
+        # ships: `make ci` stages that archive (test-release-archive) through
+        # scripts/stage-release.sh, as release.yml does.
         install: >-
           ${{ matrix.prefix }}-gcc
           ${{ matrix.prefix }}-make
@@ -246,6 +249,7 @@ jobs:
           pkg-config
           make
           bc
+          unzip
 
     # Cache the compiled miniaudio object — same rationale as ci.yml. The
     # MinGW toolchain identity is folded into the Makefile stamp, and the key

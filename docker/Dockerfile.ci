@@ -25,7 +25,11 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     zlib1g-dev \
     libpcre2-dev \
+    curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+# curl + unzip: `make ci` stages the release archive (test-release-archive),
+# which fetches and extracts the pinned SQLite amalgamation.
 
 WORKDIR /aether
 

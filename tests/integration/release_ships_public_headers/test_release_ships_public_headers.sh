@@ -16,31 +16,39 @@
 #
 # This asserts the CONTRACT rather than one filename: every .h directly in
 # include/ has to be staged, so a new public header cannot go missing the
-# same way.
+# same way. The staging is scripts/stage-release.sh, which every packaging
+# step of release.yml runs; `make test-release-archive` stages through it too
+# and checks each header is in the extracted archive.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 WF="$ROOT/.github/workflows/release.yml"
+STAGE="$ROOT/scripts/stage-release.sh"
 
 [ -f "$WF" ] || { echo "  [SKIP] release.yml not found"; exit 0; }
 [ -d "$ROOT/include" ] || { echo "  [SKIP] no include/ in the tree"; exit 0; }
+[ -f "$STAGE" ] || { echo "  [FAIL] scripts/stage-release.sh is missing"; exit 1; }
 
-# Every packaging block that stages the runtime source must also stage the
-# top-level headers. Counting both means a NEW packaging block (a new target)
-# cannot quietly omit it.
-n_pkg=$(grep -c 'cp -r runtime release/share/aether/' "$WF" || true)
-n_hdr=$(grep -c 'cp include/\*\.h release/include/aether/' "$WF" || true)
-
-[ "$n_pkg" -gt 0 ] || { echo "  [FAIL] no packaging block found in release.yml"; exit 1; }
-if [ "$n_hdr" != "$n_pkg" ]; then
-    echo "  [FAIL] $n_pkg packaging block(s) ship the runtime source but only"
-    echo "         $n_hdr stage include/*.h into include/aether/."
+# Every packaging step stages through the script: one that stages the runtime
+# source inline (a new target written out by hand) would bypass it, and the
+# copies drifting apart is how libaether.h went missing.
+n_pkg=$(grep -c 'sh scripts/stage-release.sh' "$WF" || true)
+n_inline=$(grep -c 'cp -r runtime' "$WF" || true)
+[ "$n_pkg" -gt 0 ] || { echo "  [FAIL] no packaging step in release.yml runs scripts/stage-release.sh"; exit 1; }
+if [ "$n_inline" != "0" ]; then
+    echo "  [FAIL] release.yml stages the runtime source inline in $n_inline place(s);"
+    echo "         package through scripts/stage-release.sh, the one definition of"
+    echo "         the archive, so every target ships include/*.h."
+    exit 1
+fi
+grep -q 'cp include/\*\.h "\$out/include/aether/"' "$STAGE" || {
+    echo "  [FAIL] scripts/stage-release.sh does not stage include/*.h into include/aether/."
     echo "         A release that ships runtime/libaether_caps.c without"
     echo "         libaether.h cannot cross-compile a runtime-linking program."
     exit 1
-fi
+}
 
 # And the header the runtime actually needs must exist to be staged.
 [ -f "$ROOT/include/libaether.h" ] || {
@@ -60,4 +68,4 @@ if [ -f "$CAPS" ]; then
     }
 fi
 
-echo "  [PASS] release_ships_public_headers: $n_pkg packaging block(s) stage include/*.h"
+echo "  [PASS] release_ships_public_headers: $n_pkg packaging step(s) stage through scripts/stage-release.sh, which stages include/*.h"
