@@ -29,6 +29,61 @@ static int aemt_fail(int code, const char* fmt, ...) {
 
 const char* aemt_last_error(void) { return g_err; }
 
+/* A pipeline's fixed-function state (#2385), the same in every module: how
+ * it blends, what it culls and its depth test. Zeroed is the state every
+ * pipeline had before: no blending, no culling, and with depth a LESS test
+ * that writes. Plain data, so it is built the same on every platform. */
+struct AemtState {
+    int blend;          /* 0 none, 1 alpha, 2 premultiplied, 3 additive */
+    int cull;           /* 0 none, 1 back, 2 front */
+    int depth_set;      /* state_depth was called */
+    int depth_op;       /* compare op 1..4 */
+    int depth_write;
+};
+
+AemtState* aemt_state_create(void) {
+    g_err[0] = '\0';
+    AemtState* s = (AemtState*)calloc(1, sizeof(*s));
+    if (!s) aemt_fail(AEMT_ERR_OOM, "out of memory");
+    return s;
+}
+
+void aemt_state_destroy(AemtState* s) { free(s); }
+
+int aemt_state_blend(AemtState* s, int mode) {
+    g_err[0] = '\0';
+    if (!s) return aemt_fail(AEMT_ERR_ARG, "state is null");
+    if (mode < 0 || mode > 3) {
+        return aemt_fail(AEMT_ERR_ARG, "blend mode %d is not BLEND_NONE..BLEND_ADDITIVE (0..3)", mode);
+    }
+    s->blend = mode;
+    return AEMT_OK;
+}
+
+/* A face is front-facing when its corners run counter-clockwise on screen,
+ * in all three modules. */
+int aemt_state_cull(AemtState* s, int mode) {
+    g_err[0] = '\0';
+    if (!s) return aemt_fail(AEMT_ERR_ARG, "state is null");
+    if (mode < 0 || mode > 2) {
+        return aemt_fail(AEMT_ERR_ARG, "cull mode %d is not CULL_NONE..CULL_FRONT (0..2)", mode);
+    }
+    s->cull = mode;
+    return AEMT_OK;
+}
+
+int aemt_state_depth(AemtState* s, int op, int write) {
+    g_err[0] = '\0';
+    if (!s) return aemt_fail(AEMT_ERR_ARG, "state is null");
+    if (op < 1 || op > 4) {
+        return aemt_fail(AEMT_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)", op);
+    }
+    s->depth_set = 1;
+    s->depth_op = op;
+    s->depth_write = write ? 1 : 0;
+    return AEMT_OK;
+}
+
 #if defined(__APPLE__)
 
 static void aemt_clear_error(void) { g_err[0] = '\0'; }
@@ -98,6 +153,17 @@ enum {
     MTL_INDEX_UINT16           = 0,
     MTL_INDEX_UINT32           = 1,
     MTL_COMPARE_LESS           = 1,
+    MTL_COMPARE_LESS_EQUAL     = 3,
+    MTL_COMPARE_GREATER        = 4,
+    MTL_COMPARE_GREATER_EQUAL  = 6,
+    MTL_BLEND_ZERO             = 0,
+    MTL_BLEND_ONE              = 1,
+    MTL_BLEND_SRC_ALPHA        = 4,
+    MTL_BLEND_ONE_MINUS_SRC_ALPHA = 5,
+    MTL_CULL_NONE              = 0,
+    MTL_CULL_FRONT             = 1,
+    MTL_CULL_BACK              = 2,
+    MTL_WINDING_CCW            = 1,
 
     MTL_FILTER_NEAREST         = 0,
     MTL_FILTER_LINEAR          = 1,
@@ -250,6 +316,9 @@ static AemtCGRect mt_rect(id obj, const char* selector) {
 #define AEMT_MAX_DESC     8          /* bindings: buffer / texture indices 0..7 */
 #define AEMT_MAX_PUSH     128
 #define AEMT_MAX_FRAMES   8
+/* Compare ops for sampling a depth (#2373): 1 LESS, 2 LESS_EQUAL, 3 GREATER,
+ * 4 GREATER_EQUAL, the shared shape's numbering; slot 0 is unused. */
+#define AEMT_COMPARE_OPS  5
 #define AEMT_PUSH_INDEX   8          /* [[buffer(8)]] */
 #define AEMT_STREAM_BASE  16         /* vertex stream B is [[buffer(16 + B)]] */
 
@@ -602,6 +671,10 @@ struct AemtTarget {
     id             sampler;
     id             depth_sampler;
     int            depth_sampled;
+    /* Comparison samplers for the depth (#2373), one per compare op 1..4,
+     * made when a material first asks, filtering linearly: a Depth32Float
+     * texture filters on every Mac GPU. */
+    id             compare_sampler[AEMT_COMPARE_OPS];
 
     id             vbuf;
     unsigned char* vbuf_ptr;
@@ -783,9 +856,23 @@ static int aemt_check_size(int width, int height, int bpp) {
 }
 
 /* A clamped, unmipmapped sampler: linear or nearest (#2198). Owned. */
-static id aemt_make_sampler(AemtDevice* d, int linear) {
+static id aemt_make_sampler_ex(AemtDevice* d, int linear, int compare);
+
+static id aemt_make_sampler(AemtDevice* d, int linear) { return aemt_make_sampler_ex(d, linear, 0); }
+
+/* A clamped sampler, filtering linearly or by nearest texel; with `compare`
+ * 1..4 a comparison sampler, which returns the fraction of the footprint
+ * whose depth passes `reference op texel` (#2373). */
+static id aemt_make_sampler_ex(AemtDevice* d, int linear, int compare) {
     id sd = mt_new("MTLSamplerDescriptor");
     if (!sd) { aemt_fail(AEMT_ERR_OOM, "MTLSamplerDescriptor is missing"); return NULL; }
+    if (compare) {
+        AemtUInt fn = compare == 1 ? (AemtUInt)MTL_COMPARE_LESS
+                    : compare == 2 ? (AemtUInt)MTL_COMPARE_LESS_EQUAL
+                    : compare == 3 ? (AemtUInt)MTL_COMPARE_GREATER
+                                   : (AemtUInt)MTL_COMPARE_GREATER_EQUAL;
+        MT_SEND(void, AemtUInt)(sd, mt_sel("setCompareFunction:"), fn);
+    }
     AemtUInt filter = linear ? MTL_FILTER_LINEAR : MTL_FILTER_NEAREST;
     MT_SEND(void, AemtUInt)(sd, mt_sel("setMinFilter:"), filter);
     MT_SEND(void, AemtUInt)(sd, mt_sel("setMagFilter:"), filter);
@@ -898,6 +985,7 @@ void aemt_target_destroy(AemtTarget* t) {
     aemt_target_free_images(t);
     mt_release(t->sampler);
     mt_release(t->depth_sampler);
+    for (int c = 0; c < AEMT_COMPARE_OPS; c++) mt_release(t->compare_sampler[c]);
     mt_release(t->vbuf);
     mt_release(t->ibuf);
     g_mt.pool_pop(pool);
@@ -1634,12 +1722,14 @@ struct AemtMaterial {
      * frame is encoded. */
     AemtTarget*   tgt[AEMT_MAX_DESC];
     int           tgt_depth[AEMT_MAX_DESC];
+    int           tgt_cmp[AEMT_MAX_DESC];   /* compare op, 0 for the raw depth (#2373) */
 };
 
 struct AemtPipeline {
     AemtDevice*   dev;
     id            pso;
     id            depth_state;   /* NULL for a target without depth */
+    int           cull;          /* MTL_CULL_*, set on the encoder per draw (#2385) */
     int           kind[AEMT_MAX_DESC];
     int           dyn_range[AEMT_MAX_DESC];
     int           push_bytes;
@@ -1700,8 +1790,29 @@ static id aemt_vertex_descriptor(const AemtLayout* layout) {
 AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* vs, size_t vs_len,
                                       const void* fs, size_t fs_len, const AemtLayout* layout,
                                       int push_bytes, const AemtBindings* bindings) {
+    return aemt_pipeline_create_state(d, t, vs, vs_len, fs, fs_len, layout, push_bytes, bindings, NULL);
+}
+
+static AemtUInt aemt_compare_func(int op) {
+    return op == 1 ? (AemtUInt)MTL_COMPARE_LESS
+         : op == 2 ? (AemtUInt)MTL_COMPARE_LESS_EQUAL
+         : op == 3 ? (AemtUInt)MTL_COMPARE_GREATER
+                   : (AemtUInt)MTL_COMPARE_GREATER_EQUAL;
+}
+
+AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const void* vs, size_t vs_len,
+                                         const void* fs, size_t fs_len, const AemtLayout* layout,
+                                         int push_bytes, const AemtBindings* bindings,
+                                         const AemtState* state) {
     aemt_clear_error();
     if (!d || !t) { aemt_fail(AEMT_ERR_ARG, "device or target is null"); return NULL; }
+    AemtState none;
+    memset(&none, 0, sizeof(none));
+    const AemtState* st = state ? state : &none;
+    if (st->depth_set && !t->has_depth) {
+        aemt_fail(AEMT_ERR_ARG, "the state sets a depth test, but the target was created without depth");
+        return NULL;
+    }
     if (push_bytes < 0 || push_bytes > AEMT_MAX_PUSH || (push_bytes % 4)) {
         aemt_fail(AEMT_ERR_ARG, "push constant block must be 0..%d bytes and a multiple of 4 (got %d)",
                   AEMT_MAX_PUSH, push_bytes);
@@ -1720,6 +1831,7 @@ AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* 
     if (!p) { aemt_fail(AEMT_ERR_OOM, "out of memory"); return NULL; }
     p->dev = d;
     p->push_bytes = push_bytes;
+    p->cull = st->cull == 1 ? MTL_CULL_BACK : st->cull == 2 ? MTL_CULL_FRONT : MTL_CULL_NONE;
     p->vertex_input = !layout || layout->bind_count > 0;
     for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) {
         p->kind[i] = bindings->kind[i];
@@ -1748,6 +1860,17 @@ AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* 
         if (p->vertex_input) MT_SEND(void, id)(desc, mt_sel("setVertexDescriptor:"), aemt_vertex_descriptor(layout));
         id ca = mt_at(MT_SEND(id)(desc, mt_sel("colorAttachments")), 0);
         MT_SEND(void, AemtUInt)(ca, mt_sel("setPixelFormat:"), t->pixel_format);
+        if (st->blend) {
+            /* 1 alpha, 2 premultiplied, 3 additive (#2385); the operations
+             * are Metal's default, add. */
+            AemtUInt src_rgb = st->blend == 1 ? (AemtUInt)MTL_BLEND_SRC_ALPHA : (AemtUInt)MTL_BLEND_ONE;
+            AemtUInt dst = st->blend == 3 ? (AemtUInt)MTL_BLEND_ONE : (AemtUInt)MTL_BLEND_ONE_MINUS_SRC_ALPHA;
+            MT_SEND(void, BOOL)(ca, mt_sel("setBlendingEnabled:"), (BOOL)1);
+            MT_SEND(void, AemtUInt)(ca, mt_sel("setSourceRGBBlendFactor:"), src_rgb);
+            MT_SEND(void, AemtUInt)(ca, mt_sel("setDestinationRGBBlendFactor:"), dst);
+            MT_SEND(void, AemtUInt)(ca, mt_sel("setSourceAlphaBlendFactor:"), (AemtUInt)MTL_BLEND_ONE);
+            MT_SEND(void, AemtUInt)(ca, mt_sel("setDestinationAlphaBlendFactor:"), dst);
+        }
         if (t->has_depth) {
             MT_SEND(void, AemtUInt)(desc, mt_sel("setDepthAttachmentPixelFormat:"), (AemtUInt)MTL_PIXEL_DEPTH32_FLOAT);
         }
@@ -1762,8 +1885,9 @@ AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* 
     }
     if (p->pso && t->has_depth) {
         id dd = mt_new("MTLDepthStencilDescriptor");
-        MT_SEND(void, AemtUInt)(dd, mt_sel("setDepthCompareFunction:"), (AemtUInt)MTL_COMPARE_LESS);
-        MT_SEND(void, BOOL)(dd, mt_sel("setDepthWriteEnabled:"), (BOOL)1);
+        MT_SEND(void, AemtUInt)(dd, mt_sel("setDepthCompareFunction:"),
+                                st->depth_set ? aemt_compare_func(st->depth_op) : (AemtUInt)MTL_COMPARE_LESS);
+        MT_SEND(void, BOOL)(dd, mt_sel("setDepthWriteEnabled:"), (BOOL)(!st->depth_set || st->depth_write));
         p->depth_state = MT_SEND(id, id)(d->device, mt_sel("newDepthStencilStateWithDescriptor:"), dd);
         mt_release(dd);
         if (!p->depth_state) aemt_fail(AEMT_ERR_OOM, "newDepthStencilStateWithDescriptor failed");
@@ -1897,7 +2021,8 @@ static int aemt_target_enable_depth_sampling(AemtTarget* t) {
  * (#2198). The frame read is the one most recently committed to the target
  * when the draw runs on the queue. The target must outlive every draw that
  * uses the material. */
-int aemt_material_set_target(AemtMaterial* m, int binding, AemtTarget* tg, int depth) {
+static int aemt_material_set_target_cmp(AemtMaterial* m, int binding, AemtTarget* tg, int depth,
+                                       int compare) {
     aemt_clear_error();
     int rc = aemt_material_check(m, binding, AEMT_BIND_TEXTURE, "a texture");
     if (rc != AEMT_OK) return rc;
@@ -1911,14 +2036,43 @@ int aemt_material_set_target(AemtMaterial* m, int binding, AemtTarget* tg, int d
         }
         rc = aemt_target_enable_depth_sampling(tg);
         if (rc != AEMT_OK) return rc;
+        if (compare && !tg->compare_sampler[compare]) {
+            void* pool = g_mt.pool_push();
+            tg->compare_sampler[compare] = aemt_make_sampler_ex(tg->dev, 1, compare);
+            g_mt.pool_pop(pool);
+            if (!tg->compare_sampler[compare]) return AEMT_ERR_OOM;
+        }
     }
     if (!tg->color) return aemt_fail(AEMT_ERR_ARG, "target has no images: its last resize failed");
     m->tgt[binding] = tg;
     m->tgt_depth[binding] = depth ? 1 : 0;
+    m->tgt_cmp[binding] = depth ? compare : 0;
     m->tex[binding] = NULL;
     m->set[binding] = 1;
     return AEMT_OK;
 }
+
+int aemt_material_set_target(AemtMaterial* m, int binding, AemtTarget* tg, int depth) {
+    return aemt_material_set_target_cmp(m, binding, tg, depth, 0);
+}
+
+/* A target's depth read through a comparison sampler (#2373): a shadow map.
+ * The shader (depth2d::sample_compare) gets the fraction of the footprint
+ * whose depth passes `reference op texel`. */
+int aemt_material_set_target_depth_compare(AemtMaterial* m, int binding, AemtTarget* tg, int op) {
+    if (op < 1 || op >= AEMT_COMPARE_OPS) {
+        return aemt_fail(AEMT_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)", op);
+    }
+    return aemt_material_set_target_cmp(m, binding, tg, 1, op);
+}
+
+int aemt_pipeline_set_target_depth_compare(AemtPipeline* p, int binding, AemtTarget* tg, int op) {
+    aemt_clear_error();
+    if (!p || !p->def) return aemt_fail(AEMT_ERR_ARG, "pipeline is null or has no bindings");
+    return aemt_material_set_target_depth_compare(p->def, binding, tg, op);
+}
+
+int aemt_target_depth_linear(const AemtTarget* t) { return t && t->has_depth ? 1 : 0; }
 
 int aemt_material_set_buffer(AemtMaterial* m, int binding, AemtBuffer* buf) {
     aemt_clear_error();
@@ -1978,7 +2132,8 @@ static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m, con
             id tex, sampler;
             if (m->tgt[i]) {
                 tex = m->tgt_depth[i] ? m->tgt[i]->depth : m->tgt[i]->color;
-                sampler = m->tgt_depth[i] ? m->tgt[i]->depth_sampler : m->tgt[i]->sampler;
+                sampler = m->tgt_cmp[i] ? m->tgt[i]->compare_sampler[m->tgt_cmp[i]]
+                        : m->tgt_depth[i] ? m->tgt[i]->depth_sampler : m->tgt[i]->sampler;
             } else {
                 tex = m->tex[i]->tex;
                 sampler = m->tex[i]->sampler;
@@ -2070,6 +2225,11 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
         MT_SEND(void, AemtViewport)(enc, mt_sel("setViewport:"), vp);
         MT_SEND(void, id)(enc, mt_sel("setRenderPipelineState:"), p->pso);
         if (p->depth_state) MT_SEND(void, id)(enc, mt_sel("setDepthStencilState:"), p->depth_state);
+        /* Culling is the encoder's in Metal, not the pipeline's (#2385).
+         * Metal's window coordinates run down like the screen's, so its
+         * counter-clockwise is the screen's. */
+        MT_SEND(void, AemtUInt)(enc, mt_sel("setFrontFacingWinding:"), (AemtUInt)MTL_WINDING_CCW);
+        MT_SEND(void, AemtUInt)(enc, mt_sel("setCullMode:"), (AemtUInt)p->cull);
         if (p->push_bytes > 0) {
             unsigned char block[AEMT_MAX_PUSH];
             memset(block, 0, sizeof(block));
@@ -3021,6 +3181,13 @@ int    aemt_bindings_storage(AemtBindings* b, int n) { (void)b; (void)n; return 
 AemtPipeline* aemt_pipeline_create(AemtDevice* d, AemtTarget* t, const void* v, size_t vl, const void* p, size_t pl) {
     (void)d; (void)t; (void)v; (void)vl; (void)p; (void)pl; aemt_no(); return NULL;
 }
+AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const void* v, size_t vl, const void* p,
+                                         size_t pl, const AemtLayout* l, int pb, const AemtBindings* b,
+                                         const AemtState* s) {
+    (void)d; (void)t; (void)v; (void)vl; (void)p; (void)pl; (void)l; (void)pb; (void)b; (void)s;
+    aemt_no();
+    return NULL;
+}
 AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* v, size_t vl, const void* p,
                                       size_t pl, const AemtLayout* l, int pb, const AemtBindings* b) {
     (void)d; (void)t; (void)v; (void)vl; (void)p; (void)pl; (void)l; (void)pb; (void)b; aemt_no(); return NULL;
@@ -3061,6 +3228,13 @@ int    aemt_target_instances(const AemtTarget* t) { (void)t; return 0; }
 int    aemt_target_set_timing(AemtTarget* t, int on) { (void)t; (void)on; return aemt_no(); }
 double aemt_target_gpu_ms(const AemtTarget* t) { (void)t; return -1.0; }
 int    aemt_compute_set_timing(AemtCompute* c, int on) { (void)c; (void)on; return aemt_no(); }
+int    aemt_material_set_target_depth_compare(AemtMaterial* m, int b, AemtTarget* t, int op) {
+    (void)m; (void)b; (void)t; (void)op; return aemt_no();
+}
+int    aemt_pipeline_set_target_depth_compare(AemtPipeline* p, int b, AemtTarget* t, int op) {
+    (void)p; (void)b; (void)t; (void)op; return aemt_no();
+}
+int    aemt_target_depth_linear(const AemtTarget* t) { (void)t; return 0; }
 double aemt_compute_gpu_ms(const AemtCompute* c) { (void)c; return -1.0; }
 int    aemt_batch_count(const AemtTarget* t) { (void)t; return 0; }
 int    aemt_draw(AemtTarget* t, AemtPipeline* p, AemtMaterial* m, float r, float g, float b, float a) {
@@ -3337,6 +3511,26 @@ int   aemt_ae_target_instances(void* t) { return aemt_target_instances((const Ae
 int   aemt_ae_target_set_timing(void* t, int on) { return aemt_target_set_timing((AemtTarget*)t, on); }
 double aemt_ae_target_gpu_ms(void* t) { return aemt_target_gpu_ms((const AemtTarget*)t); }
 int   aemt_ae_compute_set_timing(void* c, int on) { return aemt_compute_set_timing((AemtCompute*)c, on); }
+int   aemt_ae_set_target_depth_compare(void* p, int binding, void* t, int op) {
+    return aemt_pipeline_set_target_depth_compare((AemtPipeline*)p, binding, (AemtTarget*)t, op);
+}
+int   aemt_ae_material_set_target_depth_compare(void* m, int binding, void* t, int op) {
+    return aemt_material_set_target_depth_compare((AemtMaterial*)m, binding, (AemtTarget*)t, op);
+}
+int   aemt_ae_target_depth_linear(void* t) { return aemt_target_depth_linear((const AemtTarget*)t); }
+
+void* aemt_ae_state_create(void) { return (void*)aemt_state_create(); }
+void  aemt_ae_state_destroy(void* s) { aemt_state_destroy((AemtState*)s); }
+int   aemt_ae_state_blend(void* s, int mode) { return aemt_state_blend((AemtState*)s, mode); }
+int   aemt_ae_state_cull(void* s, int mode) { return aemt_state_cull((AemtState*)s, mode); }
+int   aemt_ae_state_depth(void* s, int op, int write) { return aemt_state_depth((AemtState*)s, op, write); }
+void* aemt_ae_pipeline_create_state(void* d, void* t, const char* vs, int vl, const char* fs, int fl,
+                                   void* layout, int push_bytes, void* bindings, void* state) {
+    if (vl < 0 || fl < 0) { aemt_fail(AEMT_ERR_SHADER, "negative shader length"); return NULL; }
+    return (void*)aemt_pipeline_create_state((AemtDevice*)d, (AemtTarget*)t, vs, (size_t)vl, fs, (size_t)fl,
+                                            (const AemtLayout*)layout, push_bytes,
+                                            (const AemtBindings*)bindings, (const AemtState*)state);
+}
 double aemt_ae_compute_gpu_ms(void* c) { return aemt_compute_gpu_ms((const AemtCompute*)c); }
 
 void* aemt_ae_swapchain_create(void* d, int kind, void* display, void* window, int w, int h) {

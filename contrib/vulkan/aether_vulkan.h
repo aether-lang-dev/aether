@@ -287,6 +287,31 @@ int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex);
 /* The same, at a target's colour (depth 0) or depth (depth 1). */
 int aevk_pipeline_set_target(AevkPipeline* p, int binding, AevkTarget* t, int depth);
 
+/* A target's depth through a comparison sampler, for shadow maps (#2373):
+ * `op` is 1 LESS, 2 LESS_EQUAL, 3 GREATER or 4 GREATER_EQUAL, and the shader
+ * (a sampler2DShadow) gets the fraction of the footprint whose depth passes
+ * `reference op texel`. Filtered across texels where target_depth_linear. */
+int aevk_pipeline_set_target_depth_compare(AevkPipeline* p, int binding, AevkTarget* t, int op);
+int aevk_material_set_target_depth_compare(AevkMaterial* m, int binding, AevkTarget* t, int op);
+int aevk_target_depth_linear(const AevkTarget* t);
+
+/* Pipeline state (#2385): blending (0 none, 1 alpha, 2 premultiplied,
+ * 3 additive), culling (0 none, 1 back, 2 front; front faces run
+ * counter-clockwise on screen) and the depth test (a compare op 1..4, and
+ * whether it writes). NULL is the default every pipeline has: no blending,
+ * no culling, a LESS test that writes. */
+typedef struct AevkState AevkState;
+AevkState* aevk_state_create(void);
+void       aevk_state_destroy(AevkState* s);
+int        aevk_state_blend(AevkState* s, int mode);
+int        aevk_state_cull(AevkState* s, int mode);
+int        aevk_state_depth(AevkState* s, int op, int write);
+AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
+                                         const void* vert_spv, size_t vert_len,
+                                         const void* frag_spv, size_t frag_len,
+                                         const AevkLayout* layout, int push_bytes,
+                                         const AevkBindings* bindings, const AevkState* state);
+
 /* Stages the push-constant block used by the next draw. At most 128 bytes,
  * the minimum every Vulkan device guarantees. */
 int aevk_target_set_push(AevkTarget* t, const void* data, size_t len);

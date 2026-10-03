@@ -94,6 +94,126 @@ describe_quarters(t: ptr) -> string {
 // Whether a timed frame must show time passing: always, here.
 exact_timer() -> int { return 1 }
 
+// A y as on screen, which points down, in Direct3D's NDC, which points up:
+// the same picture, and the same winding on screen, in every module.
+flip_y(y: float) -> float { return 0.0 - y }
+
+// Two triangles side by side: on the left one whose corners run
+// counter-clockwise on screen (front-facing), on the right one that runs
+// clockwise (back-facing). Built-in layout: x, y and a colour.
+write_two_windings(t: ptr) {
+    _ = d3d12.verts_reserve(t, 6)
+    _ = d3d12.verts_set(t, 0, -1.0, flip_y(-1.0), 1.0, 0.0, 0.0)
+    _ = d3d12.verts_set(t, 1, -1.0, flip_y(1.0), 1.0, 0.0, 0.0)
+    _ = d3d12.verts_set(t, 2, 0.0, flip_y(1.0), 1.0, 0.0, 0.0)
+    _ = d3d12.verts_set(t, 3, 0.0, flip_y(-1.0), 0.0, 1.0, 0.0)
+    _ = d3d12.verts_set(t, 4, 1.0, flip_y(1.0), 0.0, 1.0, 0.0)
+    _ = d3d12.verts_set(t, 5, 0.0, flip_y(1.0), 0.0, 1.0, 0.0)
+}
+
+// A full-target quad of position-only vertices, for uniform_color.
+write_plain_quad(t: ptr) {
+    _ = d3d12.verts_reserve_n(t, 4, 2)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    i = 0
+    while i < 4 {
+        _ = d3d12.verts_set_float(t, i * 2, xs[i])
+        _ = d3d12.verts_set_float(t, i * 2 + 1, ys[i])
+        i = i + 1
+    }
+    _ = d3d12.indices_reserve(t, 6)
+    order = [0, 1, 2, 2, 3, 0]
+    k = 0
+    while k < 6 {
+        _ = d3d12.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+// Two full-target quads at depths z1 then z2, coloured red then green, as
+// depth.vert reads them: x, y, z and a colour.
+write_two_depths(t: ptr, z1: float, z2: float) {
+    _ = d3d12.verts_reserve_n(t, 8, 6)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    q = 0
+    while q < 2 {
+        z = z1
+        r = 1.0
+        g = 0.0
+        if q == 1 {
+            z = z2
+            r = 0.0
+            g = 1.0
+        }
+        i = 0
+        while i < 4 {
+            f = (q * 4 + i) * 6
+            _ = d3d12.verts_set_float(t, f, xs[i])
+            _ = d3d12.verts_set_float(t, f + 1, ys[i])
+            _ = d3d12.verts_set_float(t, f + 2, z)
+            _ = d3d12.verts_set_float(t, f + 3, r)
+            _ = d3d12.verts_set_float(t, f + 4, g)
+            _ = d3d12.verts_set_float(t, f + 5, 0.0)
+            i = i + 1
+        }
+        q = q + 1
+    }
+    _ = d3d12.indices_reserve(t, 12)
+    order = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
+    k = 0
+    while k < 12 {
+        _ = d3d12.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+close_to(a: float, b: float) -> int {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    if d < 0.01 { return 1 }
+    return 0
+}
+
+// The red, green, blue and alpha of pixel (4, 4), as text for a message.
+rgba_text(t: ptr) -> string {
+    return "${d3d12.pixel_value(t, 4, 4, 0)} ${d3d12.pixel_value(t, 4, 4, 1)} ${d3d12.pixel_value(t, 4, 4, 2)} ${d3d12.pixel_value(t, 4, 4, 3)}"
+}
+
+rgba_is(t: ptr, r: float, g: float, b: float, a: float) -> int {
+    ok = close_to(d3d12.pixel_value(t, 4, 4, 0), r)
+    if close_to(d3d12.pixel_value(t, 4, 4, 1), g) == 0 { ok = 0 }
+    if close_to(d3d12.pixel_value(t, 4, 4, 2), b) == 0 { ok = 0 }
+    if close_to(d3d12.pixel_value(t, 4, 4, 3), a) == 0 { ok = 0 }
+    return ok
+}
+
+// A pipeline drawing uniform_color's colour onto `t` with blend `mode`, the
+// colour set to (r, g, b, a).
+blend_pipeline(dev: ptr, t: ptr, pvs: string, pvl: int, ufs: string, ufl: int, mode: int,
+               r: float, g: float, b: float, a: float) -> ptr {
+    lay = d3d12.layout_create()
+    _ = d3d12.layout_binding(lay, 0, 8, d3d12.PER_VERTEX)
+    _ = d3d12.layout_attr(lay, 0, 0, d3d12.FORMAT_R32G32_SFLOAT, 0)
+    binds = d3d12.bindings_create()
+    _ = d3d12.bindings_uniform(binds, 0)
+    st = d3d12.state_create()
+    _ = d3d12.state_blend(st, mode)
+    pipe = d3d12.pipeline_create_state(dev, t, pvs, pvl, ufs, ufl, lay, 0, binds, st)
+    d3d12.state_destroy(st)
+    d3d12.bindings_destroy(binds)
+    d3d12.layout_destroy(lay)
+    if pipe != null {
+        _ = d3d12.uniform_floats(pipe, 0, 4)
+        _ = d3d12.uniform_float(pipe, 0, 0, r)
+        _ = d3d12.uniform_float(pipe, 0, 1, g)
+        _ = d3d12.uniform_float(pipe, 0, 2, b)
+        _ = d3d12.uniform_float(pipe, 0, 3, a)
+    }
+    return pipe
+}
+
 // Writes up to five words at word `at` of `buf` on the GPU.
 gpu_words(c: ptr, at: int, n: int, w0: int, w1: int, w2: int, w3: int, w4: int) -> int {
     _ = d3d12.compute_push_int(c, 0, at)
@@ -124,6 +244,10 @@ main() {
     acl = 0
     tvs = ""
     tvl = 0
+    dvs = ""
+    dvl = 0
+    dfs = ""
+    dfl = 0
     if d3d12.available() == 1 {
         dev = d3d12.device_create()
         if dev == null {
@@ -135,7 +259,9 @@ main() {
             ufs, ufl = load_src("contrib/d3d12/shaders/uniform_color_ps.hlsl")
             acs, acl = load_src("contrib/d3d12/shaders/indirect_args_cs.hlsl")
             tvs, tvl = load_src("contrib/d3d12/shaders/triangle_vs.hlsl")
-            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 {
+            dvs, dvl = load_src("contrib/d3d12/shaders/depth_vs.hlsl")
+            dfs, dfl = load_src("contrib/d3d12/shaders/triangle_ps.hlsl")
+            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 || dvl == 0 || dfl == 0 {
                 reason = "HLSL shaders not found"
             } else {
                 ready = 1
@@ -396,6 +522,133 @@ main() {
         }
     }
 
+    spec.describe(fw, "d3d12: pipeline state") {
+        spec.it_when(ready, "blends by alpha, premultiplied and additively", reason) callback {
+            t = d3d12.target_create(dev, 8, 8)
+            write_plain_quad(t)
+            // RGBA8 rounds to 1/255, so each value is checked to 0.01.
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, d3d12.BLEND_NONE, 1.0, 0.0, 0.0, 0.5)
+            spec.assert_true(p != null, "an unblended pipeline (${d3d12.last_error()})")
+            _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(rgba_is(t, 1.0, 0.0, 0.0, 0.5), 1, "replaced: ${rgba_text(t)}")
+            d3d12.pipeline_destroy(p)
+
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, d3d12.BLEND_ALPHA, 1.0, 0.0, 0.0, 0.5)
+            _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(rgba_is(t, 0.5, 0.0, 0.5, 1.0), 1, "half red over blue: ${rgba_text(t)}")
+            d3d12.pipeline_destroy(p)
+
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, d3d12.BLEND_PREMULTIPLIED, 0.5, 0.0, 0.0, 0.5)
+            _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(rgba_is(t, 0.5, 0.0, 0.5, 1.0), 1, "premultiplied, the same: ${rgba_text(t)}")
+            d3d12.pipeline_destroy(p)
+
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, d3d12.BLEND_ADDITIVE, 0.5, 0.25, 0.0, 0.0)
+            _ = d3d12.draw(t, p, 0.25, 0.0, 0.0, 1.0)
+            spec.assert_eq(rgba_is(t, 0.75, 0.25, 0.0, 1.0), 1, "added: ${rgba_text(t)}")
+            d3d12.pipeline_destroy(p)
+
+            st = d3d12.state_create()
+            spec.assert_eq(d3d12.state_blend(st, 4), d3d12.ERR_ARG, "blend mode 4")
+            spec.assert_eq(d3d12.state_cull(st, 3), d3d12.ERR_ARG, "cull mode 3")
+            spec.assert_eq(d3d12.state_depth(st, 0, 1), d3d12.ERR_ARG, "compare op 0")
+            spec.assert_eq(d3d12.state_depth(st, d3d12.COMPARE_LESS, 1), d3d12.OK, "a depth test")
+            spec.assert_true(d3d12.pipeline_create_state(dev, t, pvs, pvl, ufs, ufl, null, 0, null, st) == null,
+                "a depth test on a target without depth is refused")
+            d3d12.state_destroy(st)
+            d3d12.target_destroy(t)
+        }
+
+        // A pipeline destroyed and another made often share an address; a
+        // frame cached against the first must not be submitted for the
+        // second, whose state and colour differ.
+        spec.it_when(ready, "draws with a new pipeline made where a destroyed one was", reason) callback {
+            t = d3d12.target_create(dev, 8, 8)
+            write_plain_quad(t)
+            shades = [0.2, 0.4, 0.6, 0.8, 1.0, 0.0]
+            i = 0
+            while i < 6 {
+                p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, d3d12.BLEND_NONE, shades[i], 0.0, 0.0, 1.0)
+                spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.OK,
+                    "pipeline ${i} draws (${d3d12.last_error()})")
+                spec.assert_eq(close_to(d3d12.pixel_value(t, 4, 4, 0), shades[i]), 1,
+                    "pipeline ${i}'s own red, ${shades[i]} (${d3d12.pixel_value(t, 4, 4, 0)})")
+                d3d12.pipeline_destroy(p)
+                i = i + 1
+            }
+            d3d12.target_destroy(t)
+        }
+
+        spec.it_when(ready, "culls by the winding on screen", reason) callback {
+            t = d3d12.target_create(dev, 8, 8)
+            write_two_windings(t)
+            modes = [d3d12.CULL_NONE, d3d12.CULL_BACK, d3d12.CULL_FRONT]
+            // Pixel (1, 6) is inside the left triangle, (5, 6) the right.
+            left = [RED, RED, BLACK]
+            right = [GREEN, BLACK, GREEN]
+            m = 0
+            while m < 3 {
+                st = d3d12.state_create()
+                _ = d3d12.state_cull(st, modes[m])
+                p = d3d12.pipeline_create_state(dev, t, tvs, tvl, tfs, tfl, null, 0, null, st)
+                d3d12.state_destroy(st)
+                spec.assert_true(p != null, "cull mode ${modes[m]} (${d3d12.last_error()})")
+                _ = d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(d3d12.pixel(t, 1, 6), left[m],
+                    "cull mode ${modes[m]}: the counter-clockwise triangle (${d3d12.pixel(t, 1, 6)})")
+                spec.assert_eq(d3d12.pixel(t, 5, 6), right[m],
+                    "cull mode ${modes[m]}: the clockwise one (${d3d12.pixel(t, 5, 6)})")
+                d3d12.pipeline_destroy(p)
+                m = m + 1
+            }
+            d3d12.target_destroy(t)
+        }
+
+        spec.it_when(ready, "tests depth with the op given, and writes only when asked", reason) callback {
+            t = d3d12.target_create_ex(dev, 8, 8, 1, 1)
+            lay = d3d12.layout_create()
+            _ = d3d12.layout_binding(lay, 0, 24, d3d12.PER_VERTEX)
+            _ = d3d12.layout_attr(lay, 0, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 0)
+            _ = d3d12.layout_attr(lay, 1, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 12)
+            // Red at 0.5, then green behind it at 0.75.
+            write_two_depths(t, 0.5, 0.75)
+
+            p = d3d12.pipeline_create_ex(dev, t, dvs, dvl, dfs, dfl, lay, 0, null)
+            _ = d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 4, 4), RED, "by default the nearer red wins")
+            d3d12.pipeline_destroy(p)
+
+            // Not writing, the red leaves the cleared far plane for the green
+            // to pass against.
+            st = d3d12.state_create()
+            _ = d3d12.state_depth(st, d3d12.COMPARE_LESS, 0)
+            p = d3d12.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            spec.assert_true(p != null, "a depth state (${d3d12.last_error()})")
+            _ = d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 4, 4), GREEN, "without writes the green passes too")
+            d3d12.pipeline_destroy(p)
+
+            // GREATER against the cleared 1.0 passes nothing.
+            _ = d3d12.state_depth(st, d3d12.COMPARE_GREATER, 1)
+            p = d3d12.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 4, 4), BLUE, "nothing is beyond the far plane")
+            d3d12.pipeline_destroy(p)
+
+            // LESS_EQUAL lets an equal depth through: the green at 0.5 too.
+            write_two_depths(t, 0.5, 0.5)
+            _ = d3d12.state_depth(st, d3d12.COMPARE_LESS_EQUAL, 1)
+            p = d3d12.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            _ = d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 4, 4), GREEN, "an equal depth passes LESS_EQUAL")
+            d3d12.pipeline_destroy(p)
+
+            d3d12.state_destroy(st)
+            d3d12.layout_destroy(lay)
+            d3d12.target_destroy(t)
+        }
+    }
+
     spec.describe(fw, "d3d12: GPU timing") {
         spec.it_when(ready, "times frames and dispatches on the GPU", reason) callback {
             t = d3d12.target_create(dev, 64, 64)
@@ -463,6 +716,8 @@ main() {
     string.free(ufs)
     string.free(acs)
     string.free(tvs)
+    string.free(dvs)
+    string.free(dfs)
     _rc = spec.run_summary(fw)
     if dev != null {
         println("  debug-layer warnings and errors: ${d3d12.debug_message_count(dev)}")

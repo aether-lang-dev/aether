@@ -292,6 +292,26 @@ buffer completes, and a frame reads 0 ms. On those machines
 figure. `test_vulkan_draws.ae` runs clean under the validation
 layer with synchronisation and best-practices validation on.
 
+## Shadow maps and pipeline state
+
+`set_target_depth_compare(p, binding, t, op)` binds a target's depth with a
+comparison sampler (`compareEnable`, the op as a `VkCompareOp`). The sampler
+is made once per target and op, the first time it is asked for, and filters
+linearly when the depth format has `SAMPLED_IMAGE_FILTER_LINEAR`, which
+`target_depth_linear` reports. The shader reads it as a `sampler2DShadow`.
+
+`pipeline_create_state` takes blending, culling and the depth test into the
+pipeline itself: `blendEnable` with the factors for each mode, `cullMode`
+with `VK_FRONT_FACE_COUNTER_CLOCKWISE` (Vulkan's framebuffer y points down
+as the screen's does), and `depthCompareOp` / `depthWriteEnable`. Blending a
+format without `COLOR_ATTACHMENT_BLEND` is refused when the pipeline is made.
+
+A frame's recorded commands are reused while nothing they name has changed.
+They name the pipeline and the material by a serial the device hands out,
+not by address. A pipeline destroyed and another made in its memory would
+otherwise pass for the same one, and the cached frame would submit commands
+that name destroyed objects.
+
 ## Colour formats and image files
 
 `target_create` renders to RGBA8 UNORM. `target_create_format` takes any of
@@ -821,4 +841,4 @@ plan in someone's head.
 
 | Missing | Issue |
 |---|---|
-| The pixels a Wayland compositor shows are not checked: a client cannot read the screen there, so the Wayland leg checks presents and the target, not the screen | [#2197](https://github.com/aether-lang-dev/aether/issues/2197) |
+| The pixels a Wayland compositor shows are not checked: a client cannot read the screen there, so the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |

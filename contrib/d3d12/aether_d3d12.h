@@ -189,6 +189,27 @@ int    aedx_target_set_timing(AedxTarget* t, int on);
 double aedx_target_gpu_ms(const AedxTarget* t);
 int    aedx_compute_set_timing(AedxCompute* c, int on);
 double aedx_compute_gpu_ms(const AedxCompute* c);
+
+/* A target's depth through a comparison sampler, for shadow maps (#2373):
+ * `op` is 1 LESS, 2 LESS_EQUAL, 3 GREATER or 4 GREATER_EQUAL. */
+int    aedx_pipeline_set_target_depth_compare(AedxPipeline* p, int binding, AedxTarget* t, int op);
+int    aedx_material_set_target_depth_compare(AedxMaterial* m, int binding, AedxTarget* t, int op);
+int    aedx_target_depth_linear(const AedxTarget* t);
+
+/* Pipeline state (#2385): blending (0 none, 1 alpha, 2 premultiplied,
+ * 3 additive), culling (0 none, 1 back, 2 front; front faces run
+ * counter-clockwise on screen) and the depth test (a compare op 1..4, and
+ * whether it writes). NULL is the default every pipeline has. */
+typedef struct AedxState AedxState;
+AedxState* aedx_state_create(void);
+void       aedx_state_destroy(AedxState* s);
+int        aedx_state_blend(AedxState* s, int mode);
+int        aedx_state_cull(AedxState* s, int mode);
+int        aedx_state_depth(AedxState* s, int op, int write);
+AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const void* vs, size_t vs_len,
+                                         const void* ps, size_t ps_len, const AedxLayout* layout,
+                                         int push_bytes, const AedxBindings* bindings,
+                                         const AedxState* state);
 int aedx_batch_count(const AedxTarget* t);
 int aedx_draw(AedxTarget* t, AedxPipeline* p, AedxMaterial* mat,
               float r, float g, float b, float a);

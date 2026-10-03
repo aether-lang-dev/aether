@@ -1,4 +1,4 @@
-// contrib.vulkan: reading what was rendered, and 3D textures (#2198).
+// contrib.vulkan: reading what was rendered, and 3D textures (#2198, #2373).
 //
 // A target's colour and depth bound where a texture goes, read in a later
 // pass, and a 3D texture read slice by slice. Every check reads pixels back:
@@ -117,6 +117,8 @@ main() {
     dfl = 0
     vfs = ""
     vfl = 0
+    sfs = ""
+    sfl = 0
     pvs = ""
     pvl = 0
     pfs = ""
@@ -129,10 +131,11 @@ main() {
             tvs, tvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
             tfs, tfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
             dfs, dfl = load_spv("contrib/vulkan/shaders/depth_read.frag.spv")
+            sfs, sfl = load_spv("contrib/vulkan/shaders/shadow.frag.spv")
             vfs, vfl = load_spv("contrib/vulkan/shaders/volume.frag.spv")
             pvs, pvl = load_spv("contrib/vulkan/shaders/depth.vert.spv")
             pfs, pfl = load_spv("contrib/vulkan/shaders/depth.frag.spv")
-            if tvl == 0 || tfl == 0 || dfl == 0 || vfl == 0 || pvl == 0 || pfl == 0 {
+            if tvl == 0 || tfl == 0 || dfl == 0 || vfl == 0 || pvl == 0 || pfl == 0 || sfl == 0 {
                 reason = "SPIR-V shaders not built"
             } else {
                 ready = 1
@@ -283,6 +286,81 @@ main() {
         }
     }
 
+    spec.describe(fw, "vulkan: a target's depth through a comparison sampler") {
+        spec.it_when(ready, "compares each texel with the reference, and filters the edge", reason) callback {
+            ds = vulkan.target_create_ex(dev, 8, 8, 1, 1)
+            dlay = depth_layout()
+            dpipe = vulkan.pipeline_create_ex(dev, ds, pvs, pvl, pfs, pfl, dlay, 0, null)
+            write_left_half(ds, 0.25)
+
+            // Twice the depth's size, so the pixels at the edge sample
+            // between the 0.25 texels and the far ones.
+            out = vulkan.target_create_format(dev, 16, 16, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            lay = quad_layout()
+            binds = vulkan.bindings_create()
+            _ = vulkan.bindings_texture(binds, 0)
+            spipe = vulkan.pipeline_create_ex(dev, out, tvs, tvl, sfs, sfl, lay, 4, binds)
+            spec.assert_true(spipe != null, "the comparing pipeline (${vulkan.last_error()})")
+            write_fullscreen_quad(out)
+            _ = vulkan.push_floats(out, 1)
+
+            colour = vulkan.target_create(dev, 8, 8)
+            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, colour, vulkan.COMPARE_LESS), vulkan.ERR_ARG,
+                "a target without depth")
+            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, 0), vulkan.ERR_ARG, "compare op 0")
+            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, 5), vulkan.ERR_ARG, "compare op 5")
+            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, vulkan.COMPARE_LESS), vulkan.OK,
+                "bound (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "the depth pass")
+
+            // LESS: a texel passes when the reference is in front of it.
+            _ = vulkan.push_float(out, 0, 0.5)
+            spec.assert_eq(vulkan.draw(out, spipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK,
+                "compared (${vulkan.last_error()})")
+            spec.assert_eq(near(vulkan.pixel_value(out, 2, 8, 0), 0.0), 1,
+                "0.5 is behind the 0.25 quad: shadowed (${vulkan.pixel_value(out, 2, 8, 0)})")
+            spec.assert_eq(near(vulkan.pixel_value(out, 13, 8, 0), 1.0), 1,
+                "0.5 is in front of the far plane: lit (${vulkan.pixel_value(out, 13, 8, 0)})")
+            // Pixels 7 and 8 sample a quarter and three quarters of the way
+            // from the last 0.25 texel to the first far one.
+            e7 = vulkan.pixel_value(out, 7, 8, 0)
+            e8 = vulkan.pixel_value(out, 8, 8, 0)
+            if vulkan.target_depth_linear(ds) == 1 {
+                spec.assert_eq(near(e7, 0.25), 1, "the edge filters: a quarter lit (${e7})")
+                spec.assert_eq(near(e8, 0.75), 1, "and three quarters (${e8})")
+            } else {
+                spec.assert_eq(near(e7, 0.0), 1, "nearest: the edge is the 0.25 texel's (${e7})")
+                spec.assert_eq(near(e8, 1.0), 1, "and the far texel's (${e8})")
+            }
+
+            _ = vulkan.push_float(out, 0, 0.1)
+            _ = vulkan.draw(out, spipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(near(vulkan.pixel_value(out, 2, 8, 0), 1.0), 1,
+                "0.1 is in front of the quad: lit (${vulkan.pixel_value(out, 2, 8, 0)})")
+
+            // GREATER turns it around.
+            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, vulkan.COMPARE_GREATER), vulkan.OK, "GREATER")
+            _ = vulkan.push_float(out, 0, 0.5)
+            _ = vulkan.draw(out, spipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(near(vulkan.pixel_value(out, 2, 8, 0), 1.0), 1,
+                "0.5 > 0.25 (${vulkan.pixel_value(out, 2, 8, 0)})")
+            spec.assert_eq(near(vulkan.pixel_value(out, 13, 8, 0), 0.0), 1,
+                "0.5 is not > 1 (${vulkan.pixel_value(out, 13, 8, 0)})")
+
+            // The same depth read raw by another binding call still works.
+            spec.assert_eq(vulkan.set_target_depth(spipe, 0, ds), vulkan.OK, "back to the raw depth")
+
+            vulkan.pipeline_destroy(spipe)
+            vulkan.pipeline_destroy(dpipe)
+            vulkan.bindings_destroy(binds)
+            vulkan.layout_destroy(lay)
+            vulkan.layout_destroy(dlay)
+            vulkan.target_destroy(colour)
+            vulkan.target_destroy(out)
+            vulkan.target_destroy(ds)
+        }
+    }
+
     spec.describe(fw, "vulkan: 3D textures") {
         spec.it_when(ready, "reads each slice's texels", reason) callback {
             vol = vulkan.texture_create_3d(dev, 2, 2, 2, 0, 0)
@@ -346,6 +424,7 @@ main() {
     string.free(tfs)
     string.free(dfs)
     string.free(vfs)
+    string.free(sfs)
     string.free(pvs)
     string.free(pfs)
     _rc = spec.run_summary(fw)

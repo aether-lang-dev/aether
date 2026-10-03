@@ -13,7 +13,7 @@ for src in triangle.vert triangle.frag transform.vert transform.frag \
            textured.vert textured.frag \
            depth.vert depth.frag \
            transform.comp vertices.comp pulled.vert \
-           depth_read.frag volume.frag \
+           depth_read.frag volume.frag shadow.frag \
            instanced.vert plain.vert uniform_color.frag indirect_args.comp; do
     glslangValidator -V --target-env vulkan1.0 "$src" -o "$src.spv"
     echo "  $src -> $src.spv"

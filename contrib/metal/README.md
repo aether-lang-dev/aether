@@ -251,6 +251,16 @@ Timing reads the command buffer's `GPUStartTime` and `GPUEndTime` once it has
 completed. Metal keeps these for every command buffer, so turning timing on
 costs nothing on the GPU.
 
+## Shadow maps and pipeline state
+
+`set_target_depth_compare` binds the depth with a sampler whose
+`compareFunction` is the op, made once per target and op. The shader reads
+it with `depth2d<float>::sample_compare`.
+
+`pipeline_create_state` sets the colour attachment's blending and the
+depth-stencil state on the pipeline. Culling is the render encoder's in
+Metal, so each draw sets `setCullMode:` with counter-clockwise front faces.
+
 ## Threads
 
 One device may be used from several threads. Metal's device and command queue

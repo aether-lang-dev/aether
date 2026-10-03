@@ -143,6 +143,20 @@ Vulkan and Metal store a target's depth at the end of its pass only once
 something samples it; until then the pass discards it, which is what a tiler
 wants.
 
+A shadow map reads its depth through a comparison sampler, which compares a
+reference depth with each texel and returns the fraction that pass:
+
+```aether,fragment
+vulkan.set_target_depth_compare(lit_pipe, 0, shadow, vulkan.COMPARE_LESS_EQUAL)
+```
+
+The shader samples it as a `sampler2DShadow`, a `Texture2D` through a
+`SamplerComparisonState` (`SampleCmp`), or a `depth2d` with
+`sample_compare`. A texel passes when `reference op texel`. Where
+`target_depth_linear(t)` is 1, which is every Direct3D 12 and Metal device
+and most Vulkan ones, the sampler filters the result across neighbouring
+texels, so a shadow's edge comes back as a fraction rather than a step.
+
 `texture_create_3d(dev, w, h, depth, linear, repeat)` is a volume: `depth`
 slices of RGBA, uploaded slice after slice and read through a 3D sampler.
 `texture_depth(tex)` reports the slice count, 1 for a 2D texture.
@@ -203,6 +217,27 @@ the host has waited for, in milliseconds. `compute_set_timing` and
 and until a timed frame has finished, and a queue that keeps no time refuses
 timing with `ERR_UNSUPPORTED`.
 
+## Pipeline state
+
+A pipeline blends, culls and tests depth the way a state description says,
+built like a layout and passed to `pipeline_create_state`:
+
+```aether,fragment
+st = vulkan.state_create()
+vulkan.state_blend(st, vulkan.BLEND_ALPHA)               // NONE, ALPHA, PREMULTIPLIED, ADDITIVE
+vulkan.state_cull(st, vulkan.CULL_BACK)                  // NONE, BACK, FRONT
+vulkan.state_depth(st, vulkan.COMPARE_LESS_EQUAL, 0)     // test, without writing
+pipe = vulkan.pipeline_create_state(dev, target, vs, vl, fs, fl, layout, 0, binds, st)
+vulkan.state_destroy(st)
+```
+
+A pipeline made without one, or with a fresh one, does not blend or cull,
+and with depth it runs a LESS test that writes, as every pipeline did before
+state existed. A face is front-facing when its corners run counter-clockwise
+on screen, in all three modules, whichever way each API's y points. A depth
+state on a target without depth is refused, and so is blending a format the
+device cannot blend.
+
 ## Windows belong to someone else
 
 None of the modules makes a window, and the language does not own windowing. A
@@ -255,5 +290,8 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
-| Comparison sampling of a target's depth (hardware shadow-map filtering), in all three modules | [#2373](https://github.com/aether-lang-dev/aether/issues/2373) |
+| Targets with several colour attachments, for a G-buffer | [#2386](https://github.com/aether-lang-dev/aether/issues/2386) |
+| Cube maps and 2D texture arrays | [#2387](https://github.com/aether-lang-dev/aether/issues/2387) |
+| Compute passes that write textures (storage images) | [#2388](https://github.com/aether-lang-dev/aether/issues/2388) |
+| The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |
