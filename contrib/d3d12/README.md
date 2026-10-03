@@ -205,6 +205,19 @@ buffer. The time is read when the frame is waited on, at the queue's
 `test_d3d12_draws.ae` runs with no debug-layer messages on a GPU and on WARP,
 including with GPU-based validation (`AETHER_D3D12_DEBUG=2`).
 
+## Shadow maps and pipeline state
+
+`set_target_depth_compare` binds the depth's `R32_FLOAT` view with a
+comparison sampler (`D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT`),
+made once per target and op in the device's sampler heap. The shader reads
+it with `Texture2D.SampleCmp` or `SampleCmpLevelZero` through a
+`SamplerComparisonState`.
+
+`pipeline_create_state` sets the PSO's blend, rasterizer and depth-stencil
+state. `FrontCounterClockwise` is on, because the render target's y points
+down as the screen's does, and blending is refused for a format without
+`D3D12_FORMAT_SUPPORT1_BLENDABLE`.
+
 ## Threads
 
 One device may be used from several threads. Direct3D 12's device is

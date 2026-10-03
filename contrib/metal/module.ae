@@ -80,6 +80,11 @@
 //         binding, offset) / uniform_offset_alignment(dev)  256 here
 //   metal.target_set_timing(t, on) / target_gpu_ms(t) / compute_set_timing(c, on) /
 //         compute_gpu_ms(c)              GPU milliseconds, -1 until a timed one
+//   metal.set_target_depth_compare(p, binding, t, op) / material_set_target_depth_compare /
+//         target_depth_linear(t)        a depth through a COMPARE_* sampler
+//   metal.state_create() / state_blend(st, BLEND_*) / state_cull(st, CULL_*) /
+//         state_depth(st, op, write) / state_destroy(st)
+//   metal.pipeline_create_state(dev, t, vs, vl, fs, fl, layout, push_bytes, bindings, st) -> ptr
 //
 //   metal.swapchain_create(dev, kind, display, window, w, h) -> ptr
 //   metal.swapchain_destroy / swapchain_resize / swapchain_set_vsync /
@@ -183,7 +188,15 @@ exports(
     vertex_stream, target_set_instances, target_instances,
     batch_add_instanced, batch_add_indirect, batch_set_offset,
     uniform_offset_alignment, bindings_uniform_dynamic,
-    target_set_timing, target_gpu_ms, compute_set_timing, compute_gpu_ms
+    target_set_timing, target_gpu_ms, compute_set_timing, compute_gpu_ms,
+    aemt_ae_set_target_depth_compare, aemt_ae_material_set_target_depth_compare,
+    aemt_ae_target_depth_linear,
+    set_target_depth_compare, material_set_target_depth_compare, target_depth_linear,
+    COMPARE_LESS, COMPARE_LESS_EQUAL, COMPARE_GREATER, COMPARE_GREATER_EQUAL,
+    aemt_ae_state_create, aemt_ae_state_destroy, aemt_ae_state_blend, aemt_ae_state_cull,
+    aemt_ae_state_depth, aemt_ae_pipeline_create_state,
+    state_create, state_destroy, state_blend, state_cull, state_depth, pipeline_create_state,
+    BLEND_NONE, BLEND_ALPHA, BLEND_PREMULTIPLIED, BLEND_ADDITIVE, CULL_NONE, CULL_BACK, CULL_FRONT
 )
 
 extern aemt_ae_available() -> int
@@ -229,6 +242,15 @@ extern aemt_ae_texture_mip_levels(tex: ptr) -> int
 extern aemt_ae_texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr
 extern aemt_ae_texture_depth(tex: ptr) -> int
 extern aemt_ae_set_target(p: ptr, binding: int, t: ptr, depth: int) -> int
+extern aemt_ae_set_target_depth_compare(p: ptr, binding: int, t: ptr, op: int) -> int
+extern aemt_ae_material_set_target_depth_compare(m: ptr, binding: int, t: ptr, op: int) -> int
+extern aemt_ae_target_depth_linear(t: ptr) -> int
+extern aemt_ae_state_create() -> ptr
+extern aemt_ae_state_destroy(s: ptr)
+extern aemt_ae_state_blend(s: ptr, mode: int) -> int
+extern aemt_ae_state_cull(s: ptr, mode: int) -> int
+extern aemt_ae_state_depth(s: ptr, op: int, write: int) -> int
+extern aemt_ae_pipeline_create_state(dev: ptr, t: ptr, vs: string, vlen: int, fs: string, flen: int, layout: ptr, push_bytes: int, bindings: ptr, st: ptr) -> ptr
 extern aemt_ae_vertex_stream(t: ptr, binding: int, buf: ptr) -> int
 extern aemt_ae_target_set_instances(t: ptr, count: int) -> int
 extern aemt_ae_target_instances(t: ptr) -> int
@@ -328,6 +350,24 @@ const WINDOW_METAL_LAYER = 5
 // Input rate for layout_binding.
 const PER_VERTEX = 0
 const PER_INSTANCE = 1
+
+// Compare ops for reading a depth through a comparison sampler (#2373): a
+// texel passes when `reference op texel`.
+const COMPARE_LESS = 1
+const COMPARE_LESS_EQUAL = 2
+const COMPARE_GREATER = 3
+const COMPARE_GREATER_EQUAL = 4
+
+// Pipeline state (#2385): how a fragment's colour meets the target's, and
+// which faces are culled. A face is front-facing when its corners run
+// counter-clockwise on screen, in every module.
+const BLEND_NONE = 0           // replace
+const BLEND_ALPHA = 1          // src * a + dst * (1 - a)
+const BLEND_PREMULTIPLIED = 2  // src + dst * (1 - a)
+const BLEND_ADDITIVE = 3       // src + dst
+const CULL_NONE = 0
+const CULL_BACK = 1
+const CULL_FRONT = 2
 
 // Formats, named and numbered as contrib.vulkan's (VkFormat): Metal keeps
 // pixel and vertex formats in two enums, and one name here serves both, so
@@ -479,6 +519,35 @@ batch_count(t: ptr) -> int { return aemt_ae_batch_count(t) }
 // Instancing (#2198). Every draw of a target makes `count` instances unless
 // a batch entry says otherwise; a per-instance stream advances once each.
 target_set_instances(t: ptr, count: int) -> int { return aemt_ae_target_set_instances(t, count) }
+
+// A target's depth read through a comparison sampler: a shadow map (#2373).
+// The shader samples it with a reference depth and gets the fraction of the
+// footprint whose depth passes `reference op texel`, `op` one of the
+// COMPARE_* constants. Where target_depth_linear(t) is 1 the fraction is
+// filtered across neighbouring texels (percentage-closer filtering in the
+// sampler), and it is 0 or 1 otherwise.
+set_target_depth_compare(p: ptr, binding: int, t: ptr, op: int) -> int {
+    return aemt_ae_set_target_depth_compare(p, binding, t, op)
+}
+material_set_target_depth_compare(m: ptr, binding: int, t: ptr, op: int) -> int {
+    return aemt_ae_material_set_target_depth_compare(m, binding, t, op)
+}
+target_depth_linear(t: ptr) -> int { return aemt_ae_target_depth_linear(t) }
+
+// Pipeline state (#2385), described the way layouts and bindings are and
+// passed to pipeline_create_state. A fresh state is the one every pipeline
+// has: no blending, no culling, and with depth a LESS test that writes.
+// state_depth sets the test (a COMPARE_* op, `fragment op stored`) and
+// whether a passing fragment writes; it needs a target with depth.
+state_create() -> ptr { return aemt_ae_state_create() }
+state_destroy(s: ptr) { aemt_ae_state_destroy(s) }
+state_blend(s: ptr, mode: int) -> int { return aemt_ae_state_blend(s, mode) }
+state_cull(s: ptr, mode: int) -> int { return aemt_ae_state_cull(s, mode) }
+state_depth(s: ptr, op: int, write: int) -> int { return aemt_ae_state_depth(s, op, write) }
+pipeline_create_state(dev: ptr, t: ptr, vs: string, vlen: int, fs: string, flen: int,
+                      layout: ptr, push_bytes: int, bindings: ptr, st: ptr) -> ptr {
+    return aemt_ae_pipeline_create_state(dev, t, vs, vlen, fs, flen, layout, push_bytes, bindings, st)
+}
 target_instances(t: ptr) -> int { return aemt_ae_target_instances(t) }
 // A buffer as vertex stream `binding`, 1..7: binding 0 is the target's own
 // vertices. The pipeline's layout gives the stride and whether it advances

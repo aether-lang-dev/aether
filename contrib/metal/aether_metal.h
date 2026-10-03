@@ -203,6 +203,27 @@ int    aemt_target_set_timing(AemtTarget* t, int on);
 double aemt_target_gpu_ms(const AemtTarget* t);
 int    aemt_compute_set_timing(AemtCompute* c, int on);
 double aemt_compute_gpu_ms(const AemtCompute* c);
+
+/* A target's depth through a comparison sampler, for shadow maps (#2373):
+ * `op` is 1 LESS, 2 LESS_EQUAL, 3 GREATER or 4 GREATER_EQUAL. */
+int    aemt_pipeline_set_target_depth_compare(AemtPipeline* p, int binding, AemtTarget* t, int op);
+int    aemt_material_set_target_depth_compare(AemtMaterial* m, int binding, AemtTarget* t, int op);
+int    aemt_target_depth_linear(const AemtTarget* t);
+
+/* Pipeline state (#2385): blending (0 none, 1 alpha, 2 premultiplied,
+ * 3 additive), culling (0 none, 1 back, 2 front; front faces run
+ * counter-clockwise on screen) and the depth test (a compare op 1..4, and
+ * whether it writes). NULL is the default every pipeline has. */
+typedef struct AemtState AemtState;
+AemtState* aemt_state_create(void);
+void       aemt_state_destroy(AemtState* s);
+int        aemt_state_blend(AemtState* s, int mode);
+int        aemt_state_cull(AemtState* s, int mode);
+int        aemt_state_depth(AemtState* s, int op, int write);
+AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const void* vs, size_t vs_len,
+                                         const void* fs, size_t fs_len, const AemtLayout* layout,
+                                         int push_bytes, const AemtBindings* bindings,
+                                         const AemtState* state);
 int aemt_batch_count(const AemtTarget* t);
 int aemt_draw(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat,
               float r, float g, float b, float a);

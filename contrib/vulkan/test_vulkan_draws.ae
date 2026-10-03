@@ -101,6 +101,127 @@ exact_timer() -> int {
     return 1
 }
 
+// A y in Vulkan's NDC, where y points down as on screen. Direct3D and
+// Metal point it up, so their copies of this spec negate it: the same
+// picture, and the same winding on screen.
+flip_y(y: float) -> float { return y }
+
+// Two triangles side by side: on the left one whose corners run
+// counter-clockwise on screen (front-facing), on the right one that runs
+// clockwise (back-facing). Built-in layout: x, y and a colour.
+write_two_windings(t: ptr) {
+    _ = vulkan.verts_reserve(t, 6)
+    _ = vulkan.verts_set(t, 0, -1.0, flip_y(-1.0), 1.0, 0.0, 0.0)
+    _ = vulkan.verts_set(t, 1, -1.0, flip_y(1.0), 1.0, 0.0, 0.0)
+    _ = vulkan.verts_set(t, 2, 0.0, flip_y(1.0), 1.0, 0.0, 0.0)
+    _ = vulkan.verts_set(t, 3, 0.0, flip_y(-1.0), 0.0, 1.0, 0.0)
+    _ = vulkan.verts_set(t, 4, 1.0, flip_y(1.0), 0.0, 1.0, 0.0)
+    _ = vulkan.verts_set(t, 5, 0.0, flip_y(1.0), 0.0, 1.0, 0.0)
+}
+
+// A full-target quad of position-only vertices, for uniform_color.
+write_plain_quad(t: ptr) {
+    _ = vulkan.verts_reserve_n(t, 4, 2)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    i = 0
+    while i < 4 {
+        _ = vulkan.verts_set_float(t, i * 2, xs[i])
+        _ = vulkan.verts_set_float(t, i * 2 + 1, ys[i])
+        i = i + 1
+    }
+    _ = vulkan.indices_reserve(t, 6)
+    order = [0, 1, 2, 2, 3, 0]
+    k = 0
+    while k < 6 {
+        _ = vulkan.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+// Two full-target quads at depths z1 then z2, coloured red then green, as
+// depth.vert reads them: x, y, z and a colour.
+write_two_depths(t: ptr, z1: float, z2: float) {
+    _ = vulkan.verts_reserve_n(t, 8, 6)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    q = 0
+    while q < 2 {
+        z = z1
+        r = 1.0
+        g = 0.0
+        if q == 1 {
+            z = z2
+            r = 0.0
+            g = 1.0
+        }
+        i = 0
+        while i < 4 {
+            f = (q * 4 + i) * 6
+            _ = vulkan.verts_set_float(t, f, xs[i])
+            _ = vulkan.verts_set_float(t, f + 1, ys[i])
+            _ = vulkan.verts_set_float(t, f + 2, z)
+            _ = vulkan.verts_set_float(t, f + 3, r)
+            _ = vulkan.verts_set_float(t, f + 4, g)
+            _ = vulkan.verts_set_float(t, f + 5, 0.0)
+            i = i + 1
+        }
+        q = q + 1
+    }
+    _ = vulkan.indices_reserve(t, 12)
+    order = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
+    k = 0
+    while k < 12 {
+        _ = vulkan.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+close_to(a: float, b: float) -> int {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    if d < 0.01 { return 1 }
+    return 0
+}
+
+// The red, green, blue and alpha of pixel (4, 4), as text for a message.
+rgba_text(t: ptr) -> string {
+    return "${vulkan.pixel_value(t, 4, 4, 0)} ${vulkan.pixel_value(t, 4, 4, 1)} ${vulkan.pixel_value(t, 4, 4, 2)} ${vulkan.pixel_value(t, 4, 4, 3)}"
+}
+
+rgba_is(t: ptr, r: float, g: float, b: float, a: float) -> int {
+    ok = close_to(vulkan.pixel_value(t, 4, 4, 0), r)
+    if close_to(vulkan.pixel_value(t, 4, 4, 1), g) == 0 { ok = 0 }
+    if close_to(vulkan.pixel_value(t, 4, 4, 2), b) == 0 { ok = 0 }
+    if close_to(vulkan.pixel_value(t, 4, 4, 3), a) == 0 { ok = 0 }
+    return ok
+}
+
+// A pipeline drawing uniform_color's colour onto `t` with blend `mode`, the
+// colour set to (r, g, b, a).
+blend_pipeline(dev: ptr, t: ptr, pvs: string, pvl: int, ufs: string, ufl: int, mode: int,
+               r: float, g: float, b: float, a: float) -> ptr {
+    lay = vulkan.layout_create()
+    _ = vulkan.layout_binding(lay, 0, 8, vulkan.PER_VERTEX)
+    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+    binds = vulkan.bindings_create()
+    _ = vulkan.bindings_uniform(binds, 0)
+    st = vulkan.state_create()
+    _ = vulkan.state_blend(st, mode)
+    pipe = vulkan.pipeline_create_state(dev, t, pvs, pvl, ufs, ufl, lay, 0, binds, st)
+    vulkan.state_destroy(st)
+    vulkan.bindings_destroy(binds)
+    vulkan.layout_destroy(lay)
+    if pipe != null {
+        _ = vulkan.uniform_floats(pipe, 0, 4)
+        _ = vulkan.uniform_float(pipe, 0, 0, r)
+        _ = vulkan.uniform_float(pipe, 0, 1, g)
+        _ = vulkan.uniform_float(pipe, 0, 2, b)
+        _ = vulkan.uniform_float(pipe, 0, 3, a)
+    }
+    return pipe
+}
+
 // Writes up to five words at word `at` of `buf` on the GPU.
 gpu_words(c: ptr, at: int, n: int, w0: int, w1: int, w2: int, w3: int, w4: int) -> int {
     _ = vulkan.compute_push_int(c, 0, at)
@@ -131,6 +252,10 @@ main() {
     acl = 0
     tvs = ""
     tvl = 0
+    dvs = ""
+    dvl = 0
+    dfs = ""
+    dfl = 0
     if vulkan.available() == 1 {
         dev = vulkan.device_create()
         if dev == null {
@@ -142,7 +267,9 @@ main() {
             ufs, ufl = load_spv("contrib/vulkan/shaders/uniform_color.frag.spv")
             acs, acl = load_spv("contrib/vulkan/shaders/indirect_args.comp.spv")
             tvs, tvl = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
-            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 {
+            dvs, dvl = load_spv("contrib/vulkan/shaders/depth.vert.spv")
+            dfs, dfl = load_spv("contrib/vulkan/shaders/depth.frag.spv")
+            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 || dvl == 0 || dfl == 0 {
                 reason = "SPIR-V shaders not built"
             } else {
                 ready = 1
@@ -403,6 +530,133 @@ main() {
         }
     }
 
+    spec.describe(fw, "vulkan: pipeline state") {
+        spec.it_when(ready, "blends by alpha, premultiplied and additively", reason) callback {
+            t = vulkan.target_create(dev, 8, 8)
+            write_plain_quad(t)
+            // RGBA8 rounds to 1/255, so each value is checked to 0.01.
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, vulkan.BLEND_NONE, 1.0, 0.0, 0.0, 0.5)
+            spec.assert_true(p != null, "an unblended pipeline (${vulkan.last_error()})")
+            _ = vulkan.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(rgba_is(t, 1.0, 0.0, 0.0, 0.5), 1, "replaced: ${rgba_text(t)}")
+            vulkan.pipeline_destroy(p)
+
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, vulkan.BLEND_ALPHA, 1.0, 0.0, 0.0, 0.5)
+            _ = vulkan.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(rgba_is(t, 0.5, 0.0, 0.5, 1.0), 1, "half red over blue: ${rgba_text(t)}")
+            vulkan.pipeline_destroy(p)
+
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, vulkan.BLEND_PREMULTIPLIED, 0.5, 0.0, 0.0, 0.5)
+            _ = vulkan.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(rgba_is(t, 0.5, 0.0, 0.5, 1.0), 1, "premultiplied, the same: ${rgba_text(t)}")
+            vulkan.pipeline_destroy(p)
+
+            p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, vulkan.BLEND_ADDITIVE, 0.5, 0.25, 0.0, 0.0)
+            _ = vulkan.draw(t, p, 0.25, 0.0, 0.0, 1.0)
+            spec.assert_eq(rgba_is(t, 0.75, 0.25, 0.0, 1.0), 1, "added: ${rgba_text(t)}")
+            vulkan.pipeline_destroy(p)
+
+            st = vulkan.state_create()
+            spec.assert_eq(vulkan.state_blend(st, 4), vulkan.ERR_ARG, "blend mode 4")
+            spec.assert_eq(vulkan.state_cull(st, 3), vulkan.ERR_ARG, "cull mode 3")
+            spec.assert_eq(vulkan.state_depth(st, 0, 1), vulkan.ERR_ARG, "compare op 0")
+            spec.assert_eq(vulkan.state_depth(st, vulkan.COMPARE_LESS, 1), vulkan.OK, "a depth test")
+            spec.assert_true(vulkan.pipeline_create_state(dev, t, pvs, pvl, ufs, ufl, null, 0, null, st) == null,
+                "a depth test on a target without depth is refused")
+            vulkan.state_destroy(st)
+            vulkan.target_destroy(t)
+        }
+
+        // A pipeline destroyed and another made often share an address; a
+        // frame cached against the first must not be submitted for the
+        // second, whose state and colour differ.
+        spec.it_when(ready, "draws with a new pipeline made where a destroyed one was", reason) callback {
+            t = vulkan.target_create(dev, 8, 8)
+            write_plain_quad(t)
+            shades = [0.2, 0.4, 0.6, 0.8, 1.0, 0.0]
+            i = 0
+            while i < 6 {
+                p = blend_pipeline(dev, t, pvs, pvl, ufs, ufl, vulkan.BLEND_NONE, shades[i], 0.0, 0.0, 1.0)
+                spec.assert_eq(vulkan.draw(t, p, 0.0, 0.0, 0.0, 1.0), vulkan.OK,
+                    "pipeline ${i} draws (${vulkan.last_error()})")
+                spec.assert_eq(close_to(vulkan.pixel_value(t, 4, 4, 0), shades[i]), 1,
+                    "pipeline ${i}'s own red, ${shades[i]} (${vulkan.pixel_value(t, 4, 4, 0)})")
+                vulkan.pipeline_destroy(p)
+                i = i + 1
+            }
+            vulkan.target_destroy(t)
+        }
+
+        spec.it_when(ready, "culls by the winding on screen", reason) callback {
+            t = vulkan.target_create(dev, 8, 8)
+            write_two_windings(t)
+            modes = [vulkan.CULL_NONE, vulkan.CULL_BACK, vulkan.CULL_FRONT]
+            // Pixel (1, 6) is inside the left triangle, (5, 6) the right.
+            left = [RED, RED, BLACK]
+            right = [GREEN, BLACK, GREEN]
+            m = 0
+            while m < 3 {
+                st = vulkan.state_create()
+                _ = vulkan.state_cull(st, modes[m])
+                p = vulkan.pipeline_create_state(dev, t, tvs, tvl, tfs, tfl, null, 0, null, st)
+                vulkan.state_destroy(st)
+                spec.assert_true(p != null, "cull mode ${modes[m]} (${vulkan.last_error()})")
+                _ = vulkan.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(vulkan.pixel(t, 1, 6), left[m],
+                    "cull mode ${modes[m]}: the counter-clockwise triangle (${vulkan.pixel(t, 1, 6)})")
+                spec.assert_eq(vulkan.pixel(t, 5, 6), right[m],
+                    "cull mode ${modes[m]}: the clockwise one (${vulkan.pixel(t, 5, 6)})")
+                vulkan.pipeline_destroy(p)
+                m = m + 1
+            }
+            vulkan.target_destroy(t)
+        }
+
+        spec.it_when(ready, "tests depth with the op given, and writes only when asked", reason) callback {
+            t = vulkan.target_create_ex(dev, 8, 8, 1, 1)
+            lay = vulkan.layout_create()
+            _ = vulkan.layout_binding(lay, 0, 24, vulkan.PER_VERTEX)
+            _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 0)
+            _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 12)
+            // Red at 0.5, then green behind it at 0.75.
+            write_two_depths(t, 0.5, 0.75)
+
+            p = vulkan.pipeline_create_ex(dev, t, dvs, dvl, dfs, dfl, lay, 0, null)
+            _ = vulkan.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 4, 4), RED, "by default the nearer red wins")
+            vulkan.pipeline_destroy(p)
+
+            // Not writing, the red leaves the cleared far plane for the green
+            // to pass against.
+            st = vulkan.state_create()
+            _ = vulkan.state_depth(st, vulkan.COMPARE_LESS, 0)
+            p = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            spec.assert_true(p != null, "a depth state (${vulkan.last_error()})")
+            _ = vulkan.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 4, 4), GREEN, "without writes the green passes too")
+            vulkan.pipeline_destroy(p)
+
+            // GREATER against the cleared 1.0 passes nothing.
+            _ = vulkan.state_depth(st, vulkan.COMPARE_GREATER, 1)
+            p = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            _ = vulkan.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 4, 4), BLUE, "nothing is beyond the far plane")
+            vulkan.pipeline_destroy(p)
+
+            // LESS_EQUAL lets an equal depth through: the green at 0.5 too.
+            write_two_depths(t, 0.5, 0.5)
+            _ = vulkan.state_depth(st, vulkan.COMPARE_LESS_EQUAL, 1)
+            p = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            _ = vulkan.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 4, 4), GREEN, "an equal depth passes LESS_EQUAL")
+            vulkan.pipeline_destroy(p)
+
+            vulkan.state_destroy(st)
+            vulkan.layout_destroy(lay)
+            vulkan.target_destroy(t)
+        }
+    }
+
     spec.describe(fw, "vulkan: GPU timing") {
         spec.it_when(ready, "times frames and dispatches on the GPU", reason) callback {
             t = vulkan.target_create(dev, 64, 64)
@@ -470,6 +724,8 @@ main() {
     string.free(ufs)
     string.free(acs)
     string.free(tvs)
+    string.free(dvs)
+    string.free(dfs)
     _rc = spec.run_summary(fw)
     if dev != null { vulkan.device_destroy(dev) }
     return _rc

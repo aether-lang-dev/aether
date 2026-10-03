@@ -280,6 +280,12 @@ struct AevkDevice {
      * A recorded frame names the sampled images in its barriers, so a frame
      * recorded under an older epoch re-records (#2198). */
     unsigned         bind_epoch;
+    /* The last serial handed to a pipeline or a material. A recorded frame
+     * names what it was recorded with by serial, not by address: a pipeline
+     * destroyed and another made can share an address, and a frame cached
+     * against the old one would submit commands that name destroyed objects
+     * (#2385). Taken under the device lock. */
+    unsigned long long serial;
     /* The largest dispatch the device takes, per dimension (#1515). */
     uint32_t         max_groups[3];
     /* Which sample counts the device can actually use for framebuffer colour
@@ -308,6 +314,17 @@ struct AevkDevice {
 #define AEVK_MAX_DESC     8
 #define AEVK_MAX_PUSH     128   /* the guaranteed minimum every device offers */
 #define AEVK_MAX_FRAMES   8     /* frames in flight a target can have */
+/* Compare ops for sampling a depth (#2373): 1 LESS, 2 LESS_EQUAL, 3 GREATER,
+ * 4 GREATER_EQUAL, the shared shape's numbering; slot 0 is unused. */
+#define AEVK_COMPARE_OPS  5
+/* Pipeline state (#2385), the shared shape's numbering. */
+#define AEVK_BLEND_NONE          0
+#define AEVK_BLEND_ALPHA         1
+#define AEVK_BLEND_PREMULTIPLIED 2
+#define AEVK_BLEND_ADDITIVE      3
+#define AEVK_CULL_NONE           0
+#define AEVK_CULL_BACK           1
+#define AEVK_CULL_FRONT          2
 
 /* One draw inside a frame. `first`/`count` address indices when the target
  * has an index buffer and vertices otherwise, so a batch slices whatever
@@ -344,8 +361,8 @@ typedef struct {
      * the reuse test, or a changed transform silently redraws the old frame,
      * so push bytes are compared by value rather than by size alone. */
     int             recorded;
-    AevkPipeline*   rec_pipe;
-    AevkMaterial*   rec_mat;
+    unsigned long long rec_pipe;   /* the serial of the pipeline recorded with, 0 for none */
+    unsigned long long rec_mat;    /* and of the material */
     int             rec_vertices;
     int             rec_indices;
     float           rec_clear[4];
@@ -417,6 +434,12 @@ struct AevkTarget {
     VkSampler      depth_sampler;
     int            depth_sampled;
     unsigned       image_gen;
+    /* Comparison sampling of the depth (#2373): a sampler per compare op,
+     * made the first time a material asks for it, filtering linearly when
+     * the depth format can be (`depth_linear`), which makes a shadow edge a
+     * fraction rather than a step. */
+    VkSampler      compare_sampler[AEVK_COMPARE_OPS];
+    int            depth_linear;
 
     VkBuffer       vbuf;
     VkDeviceMemory vbuf_mem;
@@ -479,6 +502,17 @@ struct AevkLayout {
     uint32_t attr_count;
 };
 
+/* A pipeline's fixed-function state (#2385): how it blends, what it culls,
+ * and its depth test. Zeroed is the state every pipeline had before: no
+ * blending, no culling, and with depth a LESS test that writes. */
+struct AevkState {
+    int blend;          /* AEVK_BLEND_* */
+    int cull;           /* AEVK_CULL_* */
+    int depth_set;      /* state_depth was called */
+    int depth_op;       /* compare op 1..4 */
+    int depth_write;
+};
+
 /* What a shader may read besides vertex attributes: uniform buffers and
  * sampled images, by binding number. */
 struct AevkBindings {
@@ -518,6 +552,7 @@ struct AevkBuffer {
 
 struct AevkMaterial {
     AevkPipeline*   pipe;
+    unsigned long long serial;   /* unique on its device: what a recorded frame names */
     VkDescriptorSet set;
     /* Descriptors actually written into `set`. A set straight out of the pool
      * holds nothing, and binding one is what crashed lavapipe 22.3 from inside
@@ -541,6 +576,9 @@ struct AevkMaterial {
     AevkTarget*     tgt[AEVK_MAX_DESC];
     int             tgt_depth[AEVK_MAX_DESC];
     unsigned        tgt_gen[AEVK_MAX_DESC];
+    /* The compare op a depth binding is read with, 0 for its raw value
+     * (#2373). */
+    int             tgt_cmp[AEVK_MAX_DESC];
 };
 
 #define AEVK_SETS_PER_POOL 16
@@ -548,6 +586,7 @@ struct AevkMaterial {
 
 struct AevkPipeline {
     AevkDevice*      dev;
+    unsigned long long serial;   /* unique on its device: what a recorded frame names */
     VkShaderModule   vert, frag;
     VkPipelineLayout layout;
     VkPipeline       pipeline;
@@ -1579,9 +1618,32 @@ static int aevk_target_check_size(AevkDevice* d, int width, int height, int bpp,
 /* The sampler a later pass reads a target through (#2198): clamped, since a
  * frame has no tiling, and linear where the format allows it. Depth reads
  * use nearest: a filtered depth is a value no surface was at. */
+/* The VkCompareOp for the shared shape's compare op 1..4 (#2373). */
+static VkCompareOp aevk_compare_op(int op) {
+    switch (op) {
+        case 1:  return VK_COMPARE_OP_LESS;
+        case 2:  return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case 3:  return VK_COMPARE_OP_GREATER;
+        default: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    }
+}
+
+/* A clamped sampler, filtering linearly or by nearest texel; with `compare`
+ * 1..4 a comparison sampler, which returns the fraction of the footprint
+ * whose depth passes `reference op texel` (#2373). */
+static int aevk_make_sampler_ex(AevkDevice* d, int linear, int compare, VkSampler* out);
+
 static int aevk_make_target_sampler(AevkDevice* d, int linear, VkSampler* out) {
+    return aevk_make_sampler_ex(d, linear, 0, out);
+}
+
+static int aevk_make_sampler_ex(AevkDevice* d, int linear, int compare, VkSampler* out) {
     VkSamplerCreateInfo si = {0};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    if (compare) {
+        si.compareEnable = VK_TRUE;
+        si.compareOp = aevk_compare_op(compare);
+    }
     VkFilter filter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     si.magFilter = filter;
     si.minFilter = filter;
@@ -1648,6 +1710,7 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
     int linear_ok = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
 
     VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    int depth_linear = 0;
     if (want_depth) {
         depth_format = aevk_pick_depth_format(d);
         if (depth_format == VK_FORMAT_UNDEFINED) {
@@ -1676,6 +1739,12 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
 
     if (sampleable && aevk_make_target_sampler(d, linear_ok, &t->sampler) != AEVK_OK) goto fail;
     if (want_depth && aevk_make_target_sampler(d, 0, &t->depth_sampler) != AEVK_OK) goto fail;
+    if (want_depth) {
+        VkFormatProperties dfp;
+        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, depth_format, &dfp);
+        depth_linear = (dfp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    }
+    t->depth_linear = depth_linear;
 
     if (aevk_target_make_pass(t) != AEVK_OK) goto fail;
     if (aevk_target_make_images(t) != AEVK_OK) goto fail;
@@ -1709,6 +1778,9 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->pass)          d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
         if (t->sampler)       d->da.vkDestroySampler(d->device, t->sampler, NULL);
         if (t->depth_sampler) d->da.vkDestroySampler(d->device, t->depth_sampler, NULL);
+        for (int c = 0; c < AEVK_COMPARE_OPS; c++) {
+            if (t->compare_sampler[c]) d->da.vkDestroySampler(d->device, t->compare_sampler[c], NULL);
+        }
         if (t->timer_pool)    d->da.vkDestroyQueryPool(d->device, t->timer_pool, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
@@ -2173,6 +2245,55 @@ int aevk_layout_attr(AevkLayout* l, int location, int binding, int format, int o
     a->binding = (uint32_t)binding;
     a->format = (VkFormat)format;
     a->offset = (uint32_t)offset;
+    return AEVK_OK;
+}
+
+AevkState* aevk_state_create(void) {
+    aevk_clear_error();
+    AevkState* s = (AevkState*)calloc(1, sizeof(*s));
+    if (!s) aevk_fail(AEVK_ERR_OOM, "out of memory");
+    return s;
+}
+
+void aevk_state_destroy(AevkState* s) { free(s); }
+
+/* How the fragment's colour meets what the target holds: replaced (NONE),
+ * blended by its alpha (ALPHA), blended with the colour already multiplied
+ * by alpha (PREMULTIPLIED), or added (ADDITIVE). */
+int aevk_state_blend(AevkState* s, int mode) {
+    aevk_clear_error();
+    if (!s) return aevk_fail(AEVK_ERR_ARG, "state is null");
+    if (mode < AEVK_BLEND_NONE || mode > AEVK_BLEND_ADDITIVE) {
+        return aevk_fail(AEVK_ERR_ARG, "blend mode %d is not BLEND_NONE..BLEND_ADDITIVE (0..3)", mode);
+    }
+    s->blend = mode;
+    return AEVK_OK;
+}
+
+/* Which faces are dropped: none, the back ones or the front ones. A face is
+ * front-facing when its corners run counter-clockwise on screen, in all
+ * three modules. */
+int aevk_state_cull(AevkState* s, int mode) {
+    aevk_clear_error();
+    if (!s) return aevk_fail(AEVK_ERR_ARG, "state is null");
+    if (mode < AEVK_CULL_NONE || mode > AEVK_CULL_FRONT) {
+        return aevk_fail(AEVK_ERR_ARG, "cull mode %d is not CULL_NONE..CULL_FRONT (0..2)", mode);
+    }
+    s->cull = mode;
+    return AEVK_OK;
+}
+
+/* The depth test, `fragment op stored` with a COMPARE_* op, and whether a
+ * fragment that passes writes its depth. Needs a target with depth. */
+int aevk_state_depth(AevkState* s, int op, int write) {
+    aevk_clear_error();
+    if (!s) return aevk_fail(AEVK_ERR_ARG, "state is null");
+    if (op < 1 || op >= AEVK_COMPARE_OPS) {
+        return aevk_fail(AEVK_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)", op);
+    }
+    s->depth_set = 1;
+    s->depth_op = op;
+    s->depth_write = write ? 1 : 0;
     return AEVK_OK;
 }
 
@@ -2650,6 +2771,9 @@ AevkMaterial* aevk_material_create(AevkPipeline* p) {
     AevkMaterial* m = (AevkMaterial*)calloc(1, sizeof(*m));
     if (!m) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     m->pipe = p;
+    AEVK_MUTEX_LOCK(&d->lock);
+    m->serial = ++d->serial;
+    AEVK_MUTEX_UNLOCK(&d->lock);
 
     VkDescriptorSetAllocateInfo dsi = {0};
     dsi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -2705,8 +2829,37 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
                                       const AevkLayout* layout,
                                       int push_bytes,
                                       const AevkBindings* bindings) {
+    return aevk_pipeline_create_state(d, t, vert_spv, vert_len, frag_spv, frag_len, layout,
+                                      push_bytes, bindings, NULL);
+}
+
+AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
+                                         const void* vert_spv, size_t vert_len,
+                                         const void* frag_spv, size_t frag_len,
+                                         const AevkLayout* layout,
+                                         int push_bytes,
+                                         const AevkBindings* bindings,
+                                         const AevkState* state) {
     aevk_clear_error();
     if (!d || !t) { aevk_fail(AEVK_ERR_ARG, "device or target is null"); return NULL; }
+    AevkState none;
+    memset(&none, 0, sizeof(none));
+    const AevkState* st = state ? state : &none;
+    if (st->depth_set && !t->has_depth) {
+        aevk_fail(AEVK_ERR_ARG, "the state sets a depth test, but the target was created without depth");
+        return NULL;
+    }
+    if (st->blend != AEVK_BLEND_NONE) {
+        /* Blending a format is a feature the device reports per format;
+         * a float target in particular may render without blending. */
+        VkFormatProperties bfp;
+        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, t->color_format, &bfp);
+        if (!(bfp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot blend the target's format %d",
+                      (int)t->color_format);
+            return NULL;
+        }
+    }
     if (!vert_spv || !frag_spv) { aevk_fail(AEVK_ERR_ARG, "shader bytes are null"); return NULL; }
     if (vert_len == 0 || frag_len == 0 || (vert_len % 4) || (frag_len % 4)) {
         aevk_fail(AEVK_ERR_SHADER,
@@ -2734,6 +2887,9 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
     AevkPipeline* p = (AevkPipeline*)calloc(1, sizeof(*p));
     if (!p) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     p->dev = d;
+    AEVK_MUTEX_LOCK(&d->lock);
+    p->serial = ++d->serial;
+    AEVK_MUTEX_UNLOCK(&d->lock);
     /* Binding 0 is the target's own vertices (verts_reserve fills it); each
      * binding past it is a stream the target is given a buffer for
      * (vertex_stream), checked at draw time (#2198). layout_binding kept
@@ -2898,7 +3054,10 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
     VkPipelineRasterizationStateCreateInfo rs = {0};
     rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rs.polygonMode = VK_POLYGON_MODE_FILL;
-    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.cullMode = st->cull == AEVK_CULL_BACK ? VK_CULL_MODE_BACK_BIT
+                : st->cull == AEVK_CULL_FRONT ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+    /* Vulkan's framebuffer y points down like the screen's, so its
+     * counter-clockwise is the screen's. */
     rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
 
@@ -2911,14 +3070,31 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
     VkPipelineDepthStencilStateCreateInfo ds = {0};
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     ds.depthTestEnable = t->has_depth ? VK_TRUE : VK_FALSE;
-    ds.depthWriteEnable = t->has_depth ? VK_TRUE : VK_FALSE;
-    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+    ds.depthWriteEnable = (t->has_depth && (!st->depth_set || st->depth_write)) ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = st->depth_set ? aevk_compare_op(st->depth_op) : VK_COMPARE_OP_LESS;
     ds.minDepthBounds = 0.0f;
     ds.maxDepthBounds = 1.0f;
 
     VkPipelineColorBlendAttachmentState cba = {0};
     cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    if (st->blend != AEVK_BLEND_NONE) {
+        cba.blendEnable = VK_TRUE;
+        cba.colorBlendOp = VK_BLEND_OP_ADD;
+        cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        if (st->blend == AEVK_BLEND_ADDITIVE) {
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        } else {
+            cba.srcColorBlendFactor = st->blend == AEVK_BLEND_ALPHA ? VK_BLEND_FACTOR_SRC_ALPHA
+                                                                     : VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        }
+    }
     VkPipelineColorBlendStateCreateInfo cb = {0};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.attachmentCount = 1;
@@ -2985,6 +3161,7 @@ static void aevk_material_forget_target(AevkMaterial* m, int binding) {
     if (!m->tgt[binding]) return;
     m->tgt[binding] = NULL;
     m->tgt_depth[binding] = 0;
+    m->tgt_cmp[binding] = 0;
     m->pipe->dev->bind_epoch++;
 }
 
@@ -3125,7 +3302,8 @@ static void aevk_material_write_target(AevkMaterial* m, int binding) {
     AevkTarget* tg = m->tgt[binding];
     AevkDevice* d = m->pipe->dev;
     VkDescriptorImageInfo ii = {0};
-    ii.sampler = m->tgt_depth[binding] ? tg->depth_sampler : tg->sampler;
+    ii.sampler = m->tgt_cmp[binding] ? tg->compare_sampler[m->tgt_cmp[binding]]
+               : m->tgt_depth[binding] ? tg->depth_sampler : tg->sampler;
     ii.imageView = m->tgt_depth[binding] ? tg->depth_view : tg->view;
     ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w = {0};
@@ -3175,7 +3353,8 @@ static int aevk_target_enable_depth_sampling(AevkTarget* t) {
  * prepass. The frame is the one most recently submitted to the target when
  * this material's draw runs on the queue. The target must outlive every draw
  * that uses the material. */
-static int aevk_material_set_target(AevkMaterial* m, int binding, AevkTarget* tg, int depth) {
+static int aevk_material_set_target_cmp(AevkMaterial* m, int binding, AevkTarget* tg, int depth,
+                                       int compare) {
     aevk_clear_error();
     if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
     AevkPipeline* p = m->pipe;
@@ -3202,6 +3381,17 @@ static int aevk_material_set_target(AevkMaterial* m, int binding, AevkTarget* tg
         }
         int rc = aevk_target_enable_depth_sampling(tg);
         if (rc != AEVK_OK) return rc;
+        if (compare < 0 || compare >= AEVK_COMPARE_OPS) {
+            return aevk_fail(AEVK_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)",
+                             compare);
+        }
+        if (compare && !tg->compare_sampler[compare]) {
+            AevkDevice* d = tg->dev;
+            AEVK_MUTEX_LOCK(&d->lock);
+            rc = aevk_make_sampler_ex(d, tg->depth_linear, compare, &tg->compare_sampler[compare]);
+            AEVK_MUTEX_UNLOCK(&d->lock);
+            if (rc != AEVK_OK) return rc;
+        }
     } else if (!tg->sampleable) {
         return aevk_fail(AEVK_ERR_UNSUPPORTED,
                          "the device cannot sample the target's format %d", (int)tg->color_format);
@@ -3209,11 +3399,39 @@ static int aevk_material_set_target(AevkMaterial* m, int binding, AevkTarget* tg
     if (!tg->fb) return aevk_fail(AEVK_ERR_ARG, "target has no images: its last resize failed");
     m->tgt[binding] = tg;
     m->tgt_depth[binding] = depth ? 1 : 0;
+    m->tgt_cmp[binding] = depth ? compare : 0;
     aevk_material_write_target(m, binding);
     m->writes++;
     p->dev->bind_epoch++;
     return AEVK_OK;
 }
+
+static int aevk_material_set_target(AevkMaterial* m, int binding, AevkTarget* tg, int depth) {
+    return aevk_material_set_target_cmp(m, binding, tg, depth, 0);
+}
+
+/* A target's depth read through a comparison sampler (#2373): what a shadow
+ * map is. The shader gets the fraction of the footprint whose depth passes
+ * `reference op texel`, filtered across texels where the depth format
+ * filters linearly (target_depth_linear) and 0 or 1 otherwise. */
+int aevk_material_set_target_depth_compare(AevkMaterial* m, int binding, AevkTarget* tg, int op) {
+    if (op < 1 || op >= AEVK_COMPARE_OPS) {
+        return aevk_fail(AEVK_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)", op);
+    }
+    return aevk_material_set_target_cmp(m, binding, tg, 1, op);
+}
+
+int aevk_pipeline_set_target_depth_compare(AevkPipeline* p, int binding, AevkTarget* tg, int op) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_target_depth_compare(p->def, binding, tg, op);
+}
+
+int aevk_target_depth_linear(const AevkTarget* t) { return t ? t->depth_linear : 0; }
 
 int aevk_material_set_target_color(AevkMaterial* m, int binding, AevkTarget* tg) {
     return aevk_material_set_target(m, binding, tg, 0);
@@ -3648,8 +3866,8 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkEndCommandBuffer failed (%d)", (int)vr);
 
     fr->recorded = 1;
-    fr->rec_pipe = p;
-    fr->rec_mat = mat;
+    fr->rec_pipe = p ? p->serial : 0;
+    fr->rec_mat = mat ? mat->serial : 0;
     fr->rec_vertices = t->vertex_count;
     fr->rec_clear[0] = r; fr->rec_clear[1] = g; fr->rec_clear[2] = b; fr->rec_clear[3] = a;
     fr->rec_indices = t->index_count;
@@ -3740,7 +3958,8 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
     if (rc != AEVK_OK) return rc;
 
     AevkFrame* fr = &t->frames[slot];
-    int stale = !fr->recorded || fr->rec_pipe != p || fr->rec_mat != mat ||
+    int stale = !fr->recorded || fr->rec_pipe != (p ? p->serial : 0) ||
+                fr->rec_mat != (mat ? mat->serial : 0) ||
                 fr->rec_vertices != t->vertex_count ||
                 fr->rec_clear[0] != r || fr->rec_clear[1] != g ||
                 fr->rec_clear[2] != b || fr->rec_clear[3] != a ||
@@ -5486,6 +5705,29 @@ int aevk_ae_material_set_target(void* mp, int binding, void* t, int depth) {
 
 int aevk_ae_set_target(void* p, int binding, void* t, int depth) {
     return aevk_pipeline_set_target((AevkPipeline*)p, binding, (AevkTarget*)t, depth);
+}
+
+int aevk_ae_set_target_depth_compare(void* p, int binding, void* t, int op) {
+    return aevk_pipeline_set_target_depth_compare((AevkPipeline*)p, binding, (AevkTarget*)t, op);
+}
+
+int aevk_ae_material_set_target_depth_compare(void* m, int binding, void* t, int op) {
+    return aevk_material_set_target_depth_compare((AevkMaterial*)m, binding, (AevkTarget*)t, op);
+}
+
+int aevk_ae_target_depth_linear(void* t) { return aevk_target_depth_linear((const AevkTarget*)t); }
+
+void* aevk_ae_state_create(void) { return (void*)aevk_state_create(); }
+void  aevk_ae_state_destroy(void* s) { aevk_state_destroy((AevkState*)s); }
+int   aevk_ae_state_blend(void* s, int mode) { return aevk_state_blend((AevkState*)s, mode); }
+int   aevk_ae_state_cull(void* s, int mode) { return aevk_state_cull((AevkState*)s, mode); }
+int   aevk_ae_state_depth(void* s, int op, int write) { return aevk_state_depth((AevkState*)s, op, write); }
+void* aevk_ae_pipeline_create_state(void* d, void* t, const char* vs, int vlen, const char* fs, int flen,
+                                    void* layout, int push_bytes, void* bindings, void* state) {
+    if (vlen < 0 || flen < 0) { aevk_fail(AEVK_ERR_SHADER, "negative SPIR-V length"); return NULL; }
+    return (void*)aevk_pipeline_create_state((AevkDevice*)d, (AevkTarget*)t, vs, (size_t)vlen, fs, (size_t)flen,
+                                             (const AevkLayout*)layout, push_bytes,
+                                             (const AevkBindings*)bindings, (const AevkState*)state);
 }
 
 void* aevk_ae_texture_create_3d(void* d, int w, int h, int depth, int linear, int repeat) {

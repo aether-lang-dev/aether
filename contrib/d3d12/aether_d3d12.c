@@ -32,6 +32,61 @@ static void aedx_clear_error(void) { g_err[0] = '\0'; }
 
 const char* aedx_last_error(void) { return g_err; }
 
+/* A pipeline's fixed-function state (#2385), the same in every module: how
+ * it blends, what it culls and its depth test. Zeroed is the state every
+ * pipeline had before: no blending, no culling, and with depth a LESS test
+ * that writes. Plain data, so it is built the same on every platform. */
+struct AedxState {
+    int blend;          /* 0 none, 1 alpha, 2 premultiplied, 3 additive */
+    int cull;           /* 0 none, 1 back, 2 front */
+    int depth_set;      /* state_depth was called */
+    int depth_op;       /* compare op 1..4 */
+    int depth_write;
+};
+
+AedxState* aedx_state_create(void) {
+    aedx_clear_error();
+    AedxState* s = (AedxState*)calloc(1, sizeof(*s));
+    if (!s) aedx_fail(AEDX_ERR_OOM, "out of memory");
+    return s;
+}
+
+void aedx_state_destroy(AedxState* s) { free(s); }
+
+int aedx_state_blend(AedxState* s, int mode) {
+    aedx_clear_error();
+    if (!s) return aedx_fail(AEDX_ERR_ARG, "state is null");
+    if (mode < 0 || mode > 3) {
+        return aedx_fail(AEDX_ERR_ARG, "blend mode %d is not BLEND_NONE..BLEND_ADDITIVE (0..3)", mode);
+    }
+    s->blend = mode;
+    return AEDX_OK;
+}
+
+/* A face is front-facing when its corners run counter-clockwise on screen,
+ * in all three modules. */
+int aedx_state_cull(AedxState* s, int mode) {
+    aedx_clear_error();
+    if (!s) return aedx_fail(AEDX_ERR_ARG, "state is null");
+    if (mode < 0 || mode > 2) {
+        return aedx_fail(AEDX_ERR_ARG, "cull mode %d is not CULL_NONE..CULL_FRONT (0..2)", mode);
+    }
+    s->cull = mode;
+    return AEDX_OK;
+}
+
+int aedx_state_depth(AedxState* s, int op, int write) {
+    aedx_clear_error();
+    if (!s) return aedx_fail(AEDX_ERR_ARG, "state is null");
+    if (op < 1 || op > 4) {
+        return aedx_fail(AEDX_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)", op);
+    }
+    s->depth_set = 1;
+    s->depth_op = op;
+    s->depth_write = write ? 1 : 0;
+    return AEDX_OK;
+}
+
 #if defined(_WIN32)
 
 /* The C interface to the COM headers. WIDL_C_INLINE_WRAPPERS makes MinGW's
@@ -127,6 +182,9 @@ static int aedx_hr_status(HRESULT hr) {
 #define AEDX_MAX_DESC     8
 #define AEDX_MAX_PUSH     128
 #define AEDX_MAX_FRAMES   8
+/* Compare ops for sampling a depth (#2373): 1 LESS, 2 LESS_EQUAL, 3 GREATER,
+ * 4 GREATER_EQUAL, the shared shape's numbering; slot 0 is unused. */
+#define AEDX_COMPARE_OPS  5
 
 /* Shader-visible heaps, one of each per device: every texture's SRV and
  * sampler lives in a slot of these, so any draw can bind any texture without
@@ -674,6 +732,11 @@ struct AedxTarget {
     int             depth_sampler_slot;
     int             depth_srv_slot;
     int             depth_sampled;
+    /* Comparison samplers for the depth (#2373), one per compare op 1..4,
+     * made when a material first asks; -1 until then. R32_FLOAT comparison
+     * filtering is required of every Direct3D 12 device, so they filter
+     * linearly. */
+    int             compare_slot[AEDX_COMPARE_OPS];
     D3D12_RESOURCE_STATES depth_state;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
     UINT64          readback_bytes;
@@ -979,21 +1042,38 @@ static int aedx_check_size(AedxDevice* d, int width, int height, int bpp) {
 
 /* A clamped sampler in a slot of the shader-visible sampler heap: linear, or
  * nearest. The device lock must NOT be held. */
-static int aedx_make_sampler(AedxDevice* d, int linear, int* out_slot) {
+/* A clamped sampler in a slot of the device's sampler heap, filtering
+ * linearly or by nearest texel; with `compare` 1..4 a comparison sampler,
+ * which returns the fraction of the footprint whose depth passes
+ * `reference op texel` (#2373). */
+static int aedx_make_sampler_ex(AedxDevice* d, int linear, int compare, int* out_slot) {
     AcquireSRWLockExclusive(&d->lock);
     int slot = aedx_slot_take(&d->samplers, "sampler");
     ReleaseSRWLockExclusive(&d->lock);
     if (slot < 0) return AEDX_ERR_OOM;
     D3D12_SAMPLER_DESC sd;
     memset(&sd, 0, sizeof(sd));
-    sd.Filter = linear ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
+    if (compare) {
+        sd.Filter = linear ? D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT
+                           : D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+        sd.ComparisonFunc = compare == 1 ? D3D12_COMPARISON_FUNC_LESS
+                          : compare == 2 ? D3D12_COMPARISON_FUNC_LESS_EQUAL
+                          : compare == 3 ? D3D12_COMPARISON_FUNC_GREATER
+                                         : D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+    } else {
+        sd.Filter = linear ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
+        sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    }
     sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sd.MaxLOD = D3D12_FLOAT32_MAX;
     sd.MaxAnisotropy = 1;
-    sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
     ID3D12Device_CreateSampler(d->device, &sd, aedx_slot_cpu(&d->samplers, slot));
     *out_slot = slot;
     return AEDX_OK;
+}
+
+static int aedx_make_sampler(AedxDevice* d, int linear, int* out_slot) {
+    return aedx_make_sampler_ex(d, linear, 0, out_slot);
 }
 
 AedxTarget* aedx_target_create(AedxDevice* d, int width, int height) {
@@ -1058,6 +1138,7 @@ AedxTarget* aedx_target_create_format(AedxDevice* d, int width, int height, int 
     t->srv_slot = -1;
     t->sampler_slot = -1;
     t->depth_sampler_slot = -1;
+    for (int c = 0; c < AEDX_COMPARE_OPS; c++) t->compare_slot[c] = -1;
     t->depth_srv_slot = -1;
     t->readback_on = 1;
     t->index_bits = 32;
@@ -1161,12 +1242,11 @@ void aedx_target_destroy(AedxTarget* t) {
     aedx_frames_free(t);
     ReleaseSRWLockExclusive(&d->lock);
     aedx_target_free_images(t);
-    if (t->sampler_slot >= 0 || t->depth_sampler_slot >= 0) {
-        AcquireSRWLockExclusive(&d->lock);
-        aedx_slot_give(&d->samplers, t->sampler_slot);
-        aedx_slot_give(&d->samplers, t->depth_sampler_slot);
-        ReleaseSRWLockExclusive(&d->lock);
-    }
+    AcquireSRWLockExclusive(&d->lock);
+    aedx_slot_give(&d->samplers, t->sampler_slot);
+    aedx_slot_give(&d->samplers, t->depth_sampler_slot);
+    for (int c = 0; c < AEDX_COMPARE_OPS; c++) aedx_slot_give(&d->samplers, t->compare_slot[c]);
+    ReleaseSRWLockExclusive(&d->lock);
     aedx_free_timer(&t->timer_heap, &t->timer_rb);
     if (t->vbuf) ID3D12Resource_Release(t->vbuf);
     if (t->ibuf) ID3D12Resource_Release(t->ibuf);
@@ -2119,6 +2199,7 @@ struct AedxMaterial {
      * when a frame is recorded, so a resize needs nothing here. */
     AedxTarget*   tgt[AEDX_MAX_DESC];
     int           tgt_depth[AEDX_MAX_DESC];
+    int           tgt_cmp[AEDX_MAX_DESC];   /* compare op, 0 for the raw depth (#2373) */
 };
 
 struct AedxPipeline {
@@ -2143,8 +2224,39 @@ AedxPipeline* aedx_pipeline_create(AedxDevice* d, AedxTarget* t, const void* vs,
 AedxPipeline* aedx_pipeline_create_ex(AedxDevice* d, AedxTarget* t, const void* vs, size_t vs_len,
                                       const void* ps, size_t ps_len, const AedxLayout* layout,
                                       int push_bytes, const AedxBindings* bindings) {
+    return aedx_pipeline_create_state(d, t, vs, vs_len, ps, ps_len, layout, push_bytes, bindings, NULL);
+}
+
+static D3D12_COMPARISON_FUNC aedx_compare_func(int op) {
+    return op == 1 ? D3D12_COMPARISON_FUNC_LESS
+         : op == 2 ? D3D12_COMPARISON_FUNC_LESS_EQUAL
+         : op == 3 ? D3D12_COMPARISON_FUNC_GREATER
+                   : D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+}
+
+AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const void* vs, size_t vs_len,
+                                         const void* ps, size_t ps_len, const AedxLayout* layout,
+                                         int push_bytes, const AedxBindings* bindings,
+                                         const AedxState* state) {
     aedx_clear_error();
     if (!d || !t) { aedx_fail(AEDX_ERR_ARG, "device or target is null"); return NULL; }
+    AedxState none;
+    memset(&none, 0, sizeof(none));
+    const AedxState* st = state ? state : &none;
+    if (st->depth_set && !t->has_depth) {
+        aedx_fail(AEDX_ERR_ARG, "the state sets a depth test, but the target was created without depth");
+        return NULL;
+    }
+    if (st->blend) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT bs;
+        memset(&bs, 0, sizeof(bs));
+        bs.Format = t->format;
+        if (FAILED(ID3D12Device_CheckFeatureSupport(d->device, D3D12_FEATURE_FORMAT_SUPPORT, &bs, sizeof(bs))) ||
+            !(bs.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE)) {
+            aedx_fail(AEDX_ERR_UNSUPPORTED, "the device cannot blend the target's format %d", (int)t->format);
+            return NULL;
+        }
+    }
     if (push_bytes < 0 || push_bytes > AEDX_MAX_PUSH || (push_bytes % 4)) {
         aedx_fail(AEDX_ERR_ARG, "push constant block must be 0..%d bytes and a multiple of 4 (got %d)",
                   AEDX_MAX_PUSH, push_bytes);
@@ -2216,22 +2328,52 @@ AedxPipeline* aedx_pipeline_create_ex(AedxDevice* d, AedxTarget* t, const void* 
     gd.VS.BytecodeLength = ID3D10Blob_GetBufferSize(vblob);
     gd.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(pblob);
     gd.PS.BytecodeLength = ID3D10Blob_GetBufferSize(pblob);
-    gd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    gd.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-    gd.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-    gd.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    gd.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    gd.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-    gd.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    gd.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+    D3D12_RENDER_TARGET_BLEND_DESC* rtb = &gd.BlendState.RenderTarget[0];
+    rtb->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    rtb->BlendEnable = st->blend ? TRUE : FALSE;
+    rtb->BlendOp = D3D12_BLEND_OP_ADD;
+    rtb->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rtb->LogicOp = D3D12_LOGIC_OP_NOOP;
+    switch (st->blend) {
+        case 1:   /* alpha */
+            rtb->SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            rtb->DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+            rtb->SrcBlendAlpha = D3D12_BLEND_ONE;
+            rtb->DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+            break;
+        case 2:   /* premultiplied */
+            rtb->SrcBlend = D3D12_BLEND_ONE;
+            rtb->DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+            rtb->SrcBlendAlpha = D3D12_BLEND_ONE;
+            rtb->DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+            break;
+        case 3:   /* additive */
+            rtb->SrcBlend = D3D12_BLEND_ONE;
+            rtb->DestBlend = D3D12_BLEND_ONE;
+            rtb->SrcBlendAlpha = D3D12_BLEND_ONE;
+            rtb->DestBlendAlpha = D3D12_BLEND_ONE;
+            break;
+        default:
+            rtb->SrcBlend = D3D12_BLEND_ONE;
+            rtb->DestBlend = D3D12_BLEND_ZERO;
+            rtb->SrcBlendAlpha = D3D12_BLEND_ONE;
+            rtb->DestBlendAlpha = D3D12_BLEND_ZERO;
+            break;
+    }
     gd.SampleMask = UINT_MAX;
     gd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    gd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    gd.RasterizerState.CullMode = st->cull == 1 ? D3D12_CULL_MODE_BACK
+                                : st->cull == 2 ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_NONE;
+    /* The render target's y points down like the screen's, so its
+     * counter-clockwise is the screen's. */
+    gd.RasterizerState.FrontCounterClockwise = TRUE;
     gd.RasterizerState.DepthClipEnable = TRUE;
     gd.RasterizerState.MultisampleEnable = t->samples > 1;
     gd.DepthStencilState.DepthEnable = t->has_depth ? TRUE : FALSE;
-    gd.DepthStencilState.DepthWriteMask = t->has_depth ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-    gd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    gd.DepthStencilState.DepthWriteMask = (t->has_depth && (!st->depth_set || st->depth_write))
+                                              ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+    gd.DepthStencilState.DepthFunc = st->depth_set ? aedx_compare_func(st->depth_op)
+                                                   : D3D12_COMPARISON_FUNC_LESS;
     gd.InputLayout = il;
     gd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     gd.NumRenderTargets = 1;
@@ -2396,7 +2538,8 @@ static int aedx_target_enable_depth_sampling(AedxTarget* t) {
  * (#2198). The frame read is the one most recently submitted to the target
  * when the draw runs on the queue. The target must outlive every draw that
  * uses the material. */
-int aedx_material_set_target(AedxMaterial* m, int binding, AedxTarget* tg, int depth) {
+static int aedx_material_set_target_cmp(AedxMaterial* m, int binding, AedxTarget* tg, int depth,
+                                       int compare) {
     aedx_clear_error();
     int rc = aedx_material_check(m, binding, AEDX_BIND_TEXTURE, "a texture");
     if (rc != AEDX_OK) return rc;
@@ -2410,14 +2553,43 @@ int aedx_material_set_target(AedxMaterial* m, int binding, AedxTarget* tg, int d
         }
         rc = aedx_target_enable_depth_sampling(tg);
         if (rc != AEDX_OK) return rc;
+        if (compare && tg->compare_slot[compare] < 0) {
+            rc = aedx_make_sampler_ex(tg->dev, 1, compare, &tg->compare_slot[compare]);
+            if (rc != AEDX_OK) return rc;
+        }
     }
     if (!tg->color) return aedx_fail(AEDX_ERR_ARG, "target has no images: its last resize failed");
     m->tgt[binding] = tg;
     m->tgt_depth[binding] = depth ? 1 : 0;
+    m->tgt_cmp[binding] = depth ? compare : 0;
     m->tex[binding] = NULL;
     m->set[binding] = 1;
     return AEDX_OK;
 }
+
+int aedx_material_set_target(AedxMaterial* m, int binding, AedxTarget* tg, int depth) {
+    return aedx_material_set_target_cmp(m, binding, tg, depth, 0);
+}
+
+/* A target's depth read through a comparison sampler (#2373): a shadow map.
+ * The shader (Texture2D.SampleCmp with a SamplerComparisonState) gets the
+ * fraction of the footprint whose depth passes `reference op texel`. */
+int aedx_material_set_target_depth_compare(AedxMaterial* m, int binding, AedxTarget* tg, int op) {
+    if (op < 1 || op >= AEDX_COMPARE_OPS) {
+        return aedx_fail(AEDX_ERR_ARG, "compare op %d is not COMPARE_LESS..COMPARE_GREATER_EQUAL (1..4)", op);
+    }
+    return aedx_material_set_target_cmp(m, binding, tg, 1, op);
+}
+
+int aedx_pipeline_set_target_depth_compare(AedxPipeline* p, int binding, AedxTarget* tg, int op) {
+    aedx_clear_error();
+    if (!p || !p->def) return aedx_fail(AEDX_ERR_ARG, "pipeline is null or has no bindings");
+    return aedx_material_set_target_depth_compare(p->def, binding, tg, op);
+}
+
+/* R32_FLOAT comparison filtering is required at every feature level the
+ * module runs on, so a depth target always filters. */
+int aedx_target_depth_linear(const AedxTarget* t) { return t && t->has_depth ? 1 : 0; }
 
 int aedx_material_set_buffer(AedxMaterial* m, int binding, AedxBuffer* buf) {
     aedx_clear_error();
@@ -2462,7 +2634,8 @@ static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, c
             if (m->tgt[i]) {
                 const AedxTarget* tg = m->tgt[i];
                 srv_slot = m->tgt_depth[i] ? tg->depth_srv_slot : tg->srv_slot;
-                smp_slot = m->tgt_depth[i] ? tg->depth_sampler_slot : tg->sampler_slot;
+                smp_slot = m->tgt_cmp[i] ? tg->compare_slot[m->tgt_cmp[i]]
+                         : m->tgt_depth[i] ? tg->depth_sampler_slot : tg->sampler_slot;
             } else {
                 srv_slot = m->tex[i]->srv_slot;
                 smp_slot = m->tex[i]->sampler_slot;
@@ -3763,6 +3936,13 @@ AedxPipeline* aedx_pipeline_create_ex(AedxDevice* d, AedxTarget* t, const void* 
                                       size_t pl, const AedxLayout* l, int pb, const AedxBindings* b) {
     (void)d; (void)t; (void)v; (void)vl; (void)p; (void)pl; (void)l; (void)pb; (void)b; aedx_no(); return NULL;
 }
+AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const void* v, size_t vl, const void* p,
+                                         size_t pl, const AedxLayout* l, int pb, const AedxBindings* b,
+                                         const AedxState* s) {
+    (void)d; (void)t; (void)v; (void)vl; (void)p; (void)pl; (void)l; (void)pb; (void)b; (void)s;
+    aedx_no();
+    return NULL;
+}
 void   aedx_pipeline_destroy(AedxPipeline* p) { (void)p; }
 AedxTexture* aedx_texture_create(AedxDevice* d, int w, int h) { (void)d; (void)w; (void)h; aedx_no(); return NULL; }
 AedxTexture* aedx_texture_create_ex(AedxDevice* d, int w, int h, int m, int l, int r) {
@@ -3825,6 +4005,13 @@ int    aedx_target_instances(const AedxTarget* t) { (void)t; return 0; }
 int    aedx_target_set_timing(AedxTarget* t, int on) { (void)t; (void)on; return aedx_no(); }
 double aedx_target_gpu_ms(const AedxTarget* t) { (void)t; return -1.0; }
 int    aedx_compute_set_timing(AedxCompute* c, int on) { (void)c; (void)on; return aedx_no(); }
+int    aedx_material_set_target_depth_compare(AedxMaterial* m, int b, AedxTarget* t, int op) {
+    (void)m; (void)b; (void)t; (void)op; return aedx_no();
+}
+int    aedx_pipeline_set_target_depth_compare(AedxPipeline* p, int b, AedxTarget* t, int op) {
+    (void)p; (void)b; (void)t; (void)op; return aedx_no();
+}
+int    aedx_target_depth_linear(const AedxTarget* t) { (void)t; return 0; }
 double aedx_compute_gpu_ms(const AedxCompute* c) { (void)c; return -1.0; }
 AedxSwapchain* aedx_swapchain_create(AedxDevice* d, int k, void* dp, void* w, int x, int y) {
     (void)d; (void)k; (void)dp; (void)w; (void)x; (void)y; aedx_no(); return NULL;
@@ -3915,6 +4102,19 @@ void* aedx_ae_pipeline_create_ex(void* d, void* t, const char* vs, int vl, const
                                           (const AedxLayout*)layout, push_bytes, (const AedxBindings*)bindings);
 }
 void  aedx_ae_pipeline_destroy(void* p)      { aedx_pipeline_destroy((AedxPipeline*)p); }
+
+void* aedx_ae_state_create(void) { return (void*)aedx_state_create(); }
+void  aedx_ae_state_destroy(void* s) { aedx_state_destroy((AedxState*)s); }
+int   aedx_ae_state_blend(void* s, int mode) { return aedx_state_blend((AedxState*)s, mode); }
+int   aedx_ae_state_cull(void* s, int mode) { return aedx_state_cull((AedxState*)s, mode); }
+int   aedx_ae_state_depth(void* s, int op, int write) { return aedx_state_depth((AedxState*)s, op, write); }
+void* aedx_ae_pipeline_create_state(void* d, void* t, const char* vs, int vl, const char* fs, int fl,
+                                   void* layout, int push_bytes, void* bindings, void* state) {
+    if (vl < 0 || fl < 0) { aedx_fail(AEDX_ERR_SHADER, "negative shader length"); return NULL; }
+    return (void*)aedx_pipeline_create_state((AedxDevice*)d, (AedxTarget*)t, vs, (size_t)vl, fs, (size_t)fl,
+                                            (const AedxLayout*)layout, push_bytes,
+                                            (const AedxBindings*)bindings, (const AedxState*)state);
+}
 
 void* aedx_ae_layout_create(void)            { return (void*)aedx_layout_create(); }
 void  aedx_ae_layout_destroy(void* l)        { aedx_layout_destroy((AedxLayout*)l); }
@@ -4072,6 +4272,13 @@ int   aedx_ae_target_instances(void* t) { return aedx_target_instances((const Ae
 int   aedx_ae_target_set_timing(void* t, int on) { return aedx_target_set_timing((AedxTarget*)t, on); }
 double aedx_ae_target_gpu_ms(void* t) { return aedx_target_gpu_ms((const AedxTarget*)t); }
 int   aedx_ae_compute_set_timing(void* c, int on) { return aedx_compute_set_timing((AedxCompute*)c, on); }
+int   aedx_ae_set_target_depth_compare(void* p, int binding, void* t, int op) {
+    return aedx_pipeline_set_target_depth_compare((AedxPipeline*)p, binding, (AedxTarget*)t, op);
+}
+int   aedx_ae_material_set_target_depth_compare(void* m, int binding, void* t, int op) {
+    return aedx_material_set_target_depth_compare((AedxMaterial*)m, binding, (AedxTarget*)t, op);
+}
+int   aedx_ae_target_depth_linear(void* t) { return aedx_target_depth_linear((const AedxTarget*)t); }
 double aedx_ae_compute_gpu_ms(void* c) { return aedx_compute_gpu_ms((const AedxCompute*)c); }
 
 void* aedx_ae_swapchain_create(void* d, int kind, void* display, void* window, int w, int h) {
