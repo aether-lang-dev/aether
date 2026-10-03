@@ -204,6 +204,14 @@ AedxTexture* aedx_texture_create_array(AedxDevice* d, int w, int h, int layers, 
                                        int linear_filter, int repeat);
 AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int depth, int format);
 int          aedx_texture_layers(const AedxTexture* tex);
+
+/* Targets with several colour attachments (#2386), as in contrib/vulkan. */
+AedxTarget* aedx_target_create_mrt(AedxDevice* d, int width, int height, int count, int f0, int f1,
+                                   int f2, int f3, int want_depth, int samples);
+int         aedx_target_attachments(const AedxTarget* t);
+int         aedx_pipeline_set_target_attachment(AedxPipeline* p, int binding, AedxTarget* t, int n);
+int         aedx_material_set_target_attachment(AedxMaterial* m, int binding, AedxTarget* t, int n);
+double      aedx_ae_pixel_value_at(void* t, int n, int x, int y, int channel);
 int          aedx_bindings_storage_texture(AedxBindings* b, int binding);
 int          aedx_compute_set_storage_texture(AedxCompute* c, int binding, AedxTexture* tex);
 

@@ -316,6 +316,7 @@ struct AevkDevice {
 #define AEVK_MAX_DESC     8
 #define AEVK_MAX_PUSH     128   /* the guaranteed minimum every device offers */
 #define AEVK_MAX_FRAMES   8     /* frames in flight a target can have */
+#define AEVK_MAX_COLOR    4     /* colour attachments a target can have (#2386) */
 /* Compare ops for sampling a depth (#2373): 1 LESS, 2 LESS_EQUAL, 3 GREATER,
  * 4 GREATER_EQUAL, the shared shape's numbering; slot 0 is unused. */
 #define AEVK_COMPARE_OPS  5
@@ -355,6 +356,10 @@ typedef struct {
     VkBuffer        readback;
     VkDeviceMemory  readback_mem;
     void*           readback_ptr;   /* mapped for the slot's lifetime */
+    /* The same for colour attachments 1.. of a target with several (#2386). */
+    VkBuffer        xreadback[AEVK_MAX_COLOR - 1];
+    VkDeviceMemory  xreadback_mem[AEVK_MAX_COLOR - 1];
+    void*           xreadback_ptr[AEVK_MAX_COLOR - 1];
     int             submitted;      /* work handed to the queue, not yet waited on */
 
     /* What this slot's command buffer currently holds, so a repeat draw skips
@@ -404,6 +409,23 @@ struct AevkTarget {
     VkImageView    view;
     VkRenderPass   pass;
     VkFramebuffer  fb;
+
+    /* Colour attachments past the first (#2386): a target made by
+     * target_create_mrt writes `extra` more, fragment output 1 to attachment
+     * 1 and so on. Each has its own format, image (and multisampled image),
+     * sampler and per-frame readback buffer; attachment 0 is the fields
+     * above, which present, readback and sampling the colour all use. */
+    int            extra;
+    VkFormat       xformat[AEVK_MAX_COLOR - 1];
+    int            xbpp[AEVK_MAX_COLOR - 1];
+    int            xsampleable[AEVK_MAX_COLOR - 1];
+    VkSampler      xsampler[AEVK_MAX_COLOR - 1];
+    VkImage        ximage[AEVK_MAX_COLOR - 1];
+    VkDeviceMemory xmem[AEVK_MAX_COLOR - 1];
+    VkImageView    xview[AEVK_MAX_COLOR - 1];
+    VkImage        xmsaa_image[AEVK_MAX_COLOR - 1];
+    VkDeviceMemory xmsaa_mem[AEVK_MAX_COLOR - 1];
+    VkImageView    xmsaa_view[AEVK_MAX_COLOR - 1];
 
     VkDeviceSize   readback_size;
 
@@ -595,6 +617,8 @@ struct AevkMaterial {
     /* The compare op a depth binding is read with, 0 for its raw value
      * (#2373). */
     int             tgt_cmp[AEVK_MAX_DESC];
+    /* Which colour attachment a colour binding reads, 0.. (#2386). */
+    int             tgt_att[AEVK_MAX_DESC];
 };
 
 #define AEVK_SETS_PER_POOL 16
@@ -1245,6 +1269,11 @@ static void aevk_frames_free(AevkTarget* t) {
         if (f->readback_ptr) d->da.vkUnmapMemory(d->device, f->readback_mem);
         if (f->readback)     d->da.vkDestroyBuffer(d->device, f->readback, NULL);
         if (f->readback_mem) d->da.vkFreeMemory(d->device, f->readback_mem, NULL);
+        for (int x = 0; x < AEVK_MAX_COLOR - 1; x++) {
+            if (f->xreadback_ptr[x]) d->da.vkUnmapMemory(d->device, f->xreadback_mem[x]);
+            if (f->xreadback[x])     d->da.vkDestroyBuffer(d->device, f->xreadback[x], NULL);
+            if (f->xreadback_mem[x]) d->da.vkFreeMemory(d->device, f->xreadback_mem[x], NULL);
+        }
     }
     free(t->frames);
     t->frames = NULL;
@@ -1286,6 +1315,17 @@ static int aevk_frames_alloc(AevkTarget* t, int count) {
             r = d->da.vkMapMemory(d->device, f->readback_mem, 0,
                                   t->readback_size, 0, &f->readback_ptr);
             if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
+            for (int x = 0; x < t->extra; x++) {
+                VkDeviceSize xb = (VkDeviceSize)t->width * (VkDeviceSize)t->height * (VkDeviceSize)t->xbpp[x];
+                if (aevk_make_buffer(d, xb, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                     &f->xreadback[x], &f->xreadback_mem[x]) != AEVK_OK) {
+                    goto fail;
+                }
+                r = d->da.vkMapMemory(d->device, f->xreadback_mem[x], 0, xb, 0, &f->xreadback_ptr[x]);
+                if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
+            }
         }
 
         VkCommandBufferAllocateInfo cai = {0};
@@ -1352,6 +1392,21 @@ static int aevk_target_make_images(AevkTarget* t) {
                                   &t->msaa_image, &t->msaa_mem, &t->msaa_view);
         if (rc != AEVK_OK) return rc;
     }
+    for (int x = 0; x < t->extra; x++) {
+        VkImageUsageFlags xusage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (t->xsampleable[x]) xusage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        rc = aevk_make_attachment(d, t->width, t->height, t->xformat[x], VK_SAMPLE_COUNT_1_BIT, xusage,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, &t->ximage[x], &t->xmem[x], &t->xview[x]);
+        if (rc != AEVK_OK) return rc;
+        if (t->samples > 1) {
+            rc = aevk_make_attachment(d, t->width, t->height, t->xformat[x], aevk_sample_bit(t->samples),
+                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
+                                      &t->xmsaa_image[x], &t->xmsaa_mem[x], &t->xmsaa_view[x]);
+            if (rc != AEVK_OK) return rc;
+        }
+    }
     if (t->has_depth) {
         /* Transient unless a later pass samples it: a depth buffer nobody reads
          * never has to leave a tiler's on-chip memory. Sampled depth is stored
@@ -1366,12 +1421,16 @@ static int aevk_target_make_images(AevkTarget* t) {
         if (rc != AEVK_OK) return rc;
     }
 
-    /* In attachment order, which the render pass fixed: [0] colour written,
-     * [1] resolve (MSAA only), [last] depth. */
-    VkImageView views[3];
+    /* In attachment order, which the render pass fixed: each colour
+     * attachment written, then its resolve (MSAA only), and depth last. */
+    VkImageView views[2 * AEVK_MAX_COLOR + 1];
     uint32_t n_view = 0;
     views[n_view++] = (t->samples > 1) ? t->msaa_view : t->view;
     if (t->samples > 1) views[n_view++] = t->view;
+    for (int x = 0; x < t->extra; x++) {
+        views[n_view++] = (t->samples > 1) ? t->xmsaa_view[x] : t->xview[x];
+        if (t->samples > 1) views[n_view++] = t->xview[x];
+    }
     if (t->has_depth)   views[n_view++] = t->depth_view;
 
     VkFramebufferCreateInfo fci = {0};
@@ -1405,6 +1464,20 @@ static void aevk_target_free_images(AevkTarget* t) {
     if (t->depth_view)  d->da.vkDestroyImageView(d->device, t->depth_view, NULL);
     if (t->depth_image) d->da.vkDestroyImage(d->device, t->depth_image, NULL);
     if (t->depth_mem)   d->da.vkFreeMemory(d->device, t->depth_mem, NULL);
+    for (int x = 0; x < AEVK_MAX_COLOR - 1; x++) {
+        if (t->xview[x])       d->da.vkDestroyImageView(d->device, t->xview[x], NULL);
+        if (t->ximage[x])      d->da.vkDestroyImage(d->device, t->ximage[x], NULL);
+        if (t->xmem[x])        d->da.vkFreeMemory(d->device, t->xmem[x], NULL);
+        if (t->xmsaa_view[x])  d->da.vkDestroyImageView(d->device, t->xmsaa_view[x], NULL);
+        if (t->xmsaa_image[x]) d->da.vkDestroyImage(d->device, t->xmsaa_image[x], NULL);
+        if (t->xmsaa_mem[x])   d->da.vkFreeMemory(d->device, t->xmsaa_mem[x], NULL);
+        t->xview[x] = VK_NULL_HANDLE;
+        t->ximage[x] = VK_NULL_HANDLE;
+        t->xmem[x] = VK_NULL_HANDLE;
+        t->xmsaa_view[x] = VK_NULL_HANDLE;
+        t->xmsaa_image[x] = VK_NULL_HANDLE;
+        t->xmsaa_mem[x] = VK_NULL_HANDLE;
+    }
     t->fb = VK_NULL_HANDLE;
     t->view = VK_NULL_HANDLE;
     t->image = VK_NULL_HANDLE;
@@ -1432,35 +1505,45 @@ static int aevk_target_make_pass(AevkTarget* t) {
      * Order: [0] colour written, [1] resolve (MSAA only), [last] depth. The
      * clear-value array is indexed by attachment, so record() has to build it
      * in this same order. */
-    VkAttachmentDescription atts[3];
+    VkAttachmentDescription atts[2 * AEVK_MAX_COLOR + 1];
     memset(atts, 0, sizeof(atts));
     uint32_t n_att = 0;
 
-    uint32_t color_index = n_att;
-    atts[n_att].format = t->color_format;
-    atts[n_att].samples = aevk_sample_bit(t->samples);
-    atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    atts[n_att].storeOp = (t->samples > 1) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
-                                           : VK_ATTACHMENT_STORE_OP_STORE;
-    atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    atts[n_att].finalLayout = (t->samples > 1) ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                               : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    n_att++;
-
-    uint32_t resolve_index = 0;
-    if (t->samples > 1) {
-        resolve_index = n_att;
-        atts[n_att].format = t->color_format;
-        atts[n_att].samples = VK_SAMPLE_COUNT_1_BIT;
-        atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        atts[n_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    /* Each colour attachment, then its resolve when multisampled (#2386 adds
+     * attachments 1..; the first is the one this always had). */
+    VkAttachmentReference color_refs[AEVK_MAX_COLOR];
+    VkAttachmentReference resolve_refs[AEVK_MAX_COLOR];
+    memset(color_refs, 0, sizeof(color_refs));
+    memset(resolve_refs, 0, sizeof(resolve_refs));
+    int n_color = 1 + t->extra;
+    for (int c = 0; c < n_color; c++) {
+        VkFormat cf = c == 0 ? t->color_format : t->xformat[c - 1];
+        color_refs[c].attachment = n_att;
+        color_refs[c].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        atts[n_att].format = cf;
+        atts[n_att].samples = aevk_sample_bit(t->samples);
+        atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[n_att].storeOp = (t->samples > 1) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                               : VK_ATTACHMENT_STORE_OP_STORE;
         atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        atts[n_att].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        atts[n_att].finalLayout = (t->samples > 1) ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                   : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         n_att++;
+        if (t->samples > 1) {
+            resolve_refs[c].attachment = n_att;
+            resolve_refs[c].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            atts[n_att].format = cf;
+            atts[n_att].samples = VK_SAMPLE_COUNT_1_BIT;
+            atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[n_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            atts[n_att].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            n_att++;
+        }
     }
 
     uint32_t depth_index = 0;
@@ -1482,23 +1565,15 @@ static int aevk_target_make_pass(AevkTarget* t) {
     t->clear_count = n_att;
     t->depth_clear_index = t->has_depth ? depth_index : 0;
 
-    VkAttachmentReference color_ref = {0};
-    color_ref.attachment = color_index;
-    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference resolve_ref = {0};
-    resolve_ref.attachment = resolve_index;
-    resolve_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
     VkAttachmentReference depth_ref = {0};
     depth_ref.attachment = depth_index;
     depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription sub = {0};
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sub.colorAttachmentCount = 1;
-    sub.pColorAttachments = &color_ref;
-    if (t->samples > 1)  sub.pResolveAttachments = &resolve_ref;
+    sub.colorAttachmentCount = (uint32_t)n_color;
+    sub.pColorAttachments = color_refs;
+    if (t->samples > 1)  sub.pResolveAttachments = resolve_refs;
     if (t->has_depth)    sub.pDepthStencilAttachment = &depth_ref;
 
     /* deps[0] orders this frame's attachment writes (and the layout
@@ -1602,6 +1677,25 @@ static float aevk_channel_value(const AevkTarget* t, const unsigned char* px, in
     }
 }
 
+/* Channel `c` of a pixel in format `f`, as aevk_channel_value reads a
+ * target's own format (#2386). */
+static float aevk_format_channel(VkFormat f, const unsigned char* px, int c) {
+    switch (f) {
+        case VK_FORMAT_R16G16B16A16_SFLOAT: {
+            uint16_t h;
+            memcpy(&h, px + c * 2, sizeof(h));
+            return aevk_half_to_float(h);
+        }
+        case VK_FORMAT_R32G32B32A32_SFLOAT: {
+            float v;
+            memcpy(&v, px + c * 4, sizeof(v));
+            return v;
+        }
+        default:
+            return (float)px[c] / 255.0f;
+    }
+}
+
 /* The 8-bit value of channel `c`: the stored byte for the 8-bit formats, the
  * float clamped to 0..1 and rounded for the others. NaN reads as 0. */
 static unsigned char aevk_channel_u8(const AevkTarget* t, const unsigned char* px, int c) {
@@ -1686,8 +1780,31 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
                                      want_depth, samples);
 }
 
+static AevkTarget* aevk_target_create_mrt_impl(AevkDevice* d, int width, int height, int count,
+                                               const int* formats, int want_depth, int samples);
+
 AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int format,
                                       int want_depth, int samples) {
+    return aevk_target_create_mrt_impl(d, width, height, 1, &format, want_depth, samples);
+}
+
+/* A target with `count` colour attachments, 1..4, each in its own format
+ * (#2386): what a deferred renderer's G-buffer pass writes in one draw.
+ * Fragment output N writes attachment N. */
+AevkTarget* aevk_target_create_mrt(AevkDevice* d, int width, int height, int count, int f0, int f1,
+                                   int f2, int f3, int want_depth, int samples) {
+    int formats[AEVK_MAX_COLOR] = { f0, f1, f2, f3 };
+    if (count < 1 || count > AEVK_MAX_COLOR) {
+        aevk_clear_error();
+        aevk_fail(AEVK_ERR_ARG, "a target has 1..%d colour attachments, not %d", AEVK_MAX_COLOR, count);
+        return NULL;
+    }
+    return aevk_target_create_mrt_impl(d, width, height, count, formats, want_depth, samples);
+}
+
+static AevkTarget* aevk_target_create_mrt_impl(AevkDevice* d, int width, int height, int count,
+                                               const int* formats, int want_depth, int samples) {
+    int format = formats[0];
     aevk_clear_error();
     if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
     int bpp = aevk_format_bpp((VkFormat)format);
@@ -1755,6 +1872,29 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
     t->gpu_ms = -1.0;
     t->sampleable = sampleable;
 
+    /* Attachments 1.. (#2386): each asked of the device like the first. */
+    t->extra = count - 1;
+    for (int x = 0; x < t->extra; x++) {
+        VkFormat xf = (VkFormat)formats[x + 1];
+        int xbpp = aevk_format_bpp(xf);
+        VkFormatProperties xfp;
+        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, xf, &xfp);
+        if (!xbpp) {
+            aevk_fail(AEVK_ERR_ARG, "attachment %d's format %d is not a target format", x + 1, (int)xf);
+            goto fail;
+        }
+        if (!(xfp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot render to attachment %d's format %d",
+                      x + 1, (int)xf);
+            goto fail;
+        }
+        t->xformat[x] = xf;
+        t->xbpp[x] = xbpp;
+        t->xsampleable[x] = (xfp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+        int xlinear = (xfp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+        if (t->xsampleable[x] && aevk_make_target_sampler(d, xlinear, &t->xsampler[x]) != AEVK_OK) goto fail;
+    }
+
     if (sampleable && aevk_make_target_sampler(d, linear_ok, &t->sampler) != AEVK_OK) goto fail;
     if (want_depth && aevk_make_target_sampler(d, 0, &t->depth_sampler) != AEVK_OK) goto fail;
     if (want_depth) {
@@ -1796,6 +1936,9 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->pass)          d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
         if (t->sampler)       d->da.vkDestroySampler(d->device, t->sampler, NULL);
         if (t->depth_sampler) d->da.vkDestroySampler(d->device, t->depth_sampler, NULL);
+        for (int x = 0; x < AEVK_MAX_COLOR - 1; x++) {
+            if (t->xsampler[x]) d->da.vkDestroySampler(d->device, t->xsampler[x], NULL);
+        }
         for (int c = 0; c < AEVK_COMPARE_OPS; c++) {
             if (t->compare_sampler[c]) d->da.vkDestroySampler(d->device, t->compare_sampler[c], NULL);
         }
@@ -2988,13 +3131,17 @@ AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
     }
     if (st->blend != AEVK_BLEND_NONE) {
         /* Blending a format is a feature the device reports per format;
-         * a float target in particular may render without blending. */
-        VkFormatProperties bfp;
-        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, t->color_format, &bfp);
-        if (!(bfp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)) {
-            aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot blend the target's format %d",
-                      (int)t->color_format);
-            return NULL;
+         * a float target in particular may render without blending. Every
+         * attachment blends, so every one is asked. */
+        for (int c = 0; c <= t->extra; c++) {
+            VkFormat cf = c == 0 ? t->color_format : t->xformat[c - 1];
+            VkFormatProperties bfp;
+            d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, cf, &bfp);
+            if (!(bfp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)) {
+                aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot blend attachment %d's format %d",
+                          c, (int)cf);
+                return NULL;
+            }
         }
     }
     if (!vert_spv || !frag_spv) { aevk_fail(AEVK_ERR_ARG, "shader bytes are null"); return NULL; }
@@ -3237,10 +3384,13 @@ AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
             cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         }
     }
+    /* One blend state an attachment, the same for each (#2386). */
+    VkPipelineColorBlendAttachmentState cbas[AEVK_MAX_COLOR];
+    for (int c = 0; c < AEVK_MAX_COLOR; c++) cbas[c] = cba;
     VkPipelineColorBlendStateCreateInfo cb = {0};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb.attachmentCount = 1;
-    cb.pAttachments = &cba;
+    cb.attachmentCount = (uint32_t)(1 + t->extra);
+    cb.pAttachments = cbas;
 
     VkGraphicsPipelineCreateInfo gpi = {0};
     gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -3304,6 +3454,7 @@ static void aevk_material_forget_target(AevkMaterial* m, int binding) {
     m->tgt[binding] = NULL;
     m->tgt_depth[binding] = 0;
     m->tgt_cmp[binding] = 0;
+    m->tgt_att[binding] = 0;
     m->pipe->dev->bind_epoch++;
 }
 
@@ -3444,9 +3595,11 @@ static void aevk_material_write_target(AevkMaterial* m, int binding) {
     AevkTarget* tg = m->tgt[binding];
     AevkDevice* d = m->pipe->dev;
     VkDescriptorImageInfo ii = {0};
+    int att = m->tgt_att[binding];
     ii.sampler = m->tgt_cmp[binding] ? tg->compare_sampler[m->tgt_cmp[binding]]
-               : m->tgt_depth[binding] ? tg->depth_sampler : tg->sampler;
-    ii.imageView = m->tgt_depth[binding] ? tg->depth_view : tg->view;
+               : m->tgt_depth[binding] ? tg->depth_sampler
+               : att ? tg->xsampler[att - 1] : tg->sampler;
+    ii.imageView = m->tgt_depth[binding] ? tg->depth_view : att ? tg->xview[att - 1] : tg->view;
     ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3495,8 +3648,8 @@ static int aevk_target_enable_depth_sampling(AevkTarget* t) {
  * prepass. The frame is the one most recently submitted to the target when
  * this material's draw runs on the queue. The target must outlive every draw
  * that uses the material. */
-static int aevk_material_set_target_cmp(AevkMaterial* m, int binding, AevkTarget* tg, int depth,
-                                       int compare) {
+static int aevk_material_set_target_att(AevkMaterial* m, int binding, AevkTarget* tg, int depth,
+                                       int compare, int att) {
     aevk_clear_error();
     if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
     AevkPipeline* p = m->pipe;
@@ -3534,23 +3687,50 @@ static int aevk_material_set_target_cmp(AevkMaterial* m, int binding, AevkTarget
             AEVK_MUTEX_UNLOCK(&d->lock);
             if (rc != AEVK_OK) return rc;
         }
-    } else if (!tg->sampleable) {
-        return aevk_fail(AEVK_ERR_UNSUPPORTED,
-                         "the device cannot sample the target's format %d", (int)tg->color_format);
+    } else if (att < 0 || att > tg->extra) {
+        return aevk_fail(AEVK_ERR_ARG, "the target has colour attachments 0..%d, not %d", tg->extra, att);
+    } else if (!(att ? tg->xsampleable[att - 1] : tg->sampleable)) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot sample attachment %d's format %d", att,
+                         (int)(att ? tg->xformat[att - 1] : tg->color_format));
     }
     if (!tg->fb) return aevk_fail(AEVK_ERR_ARG, "target has no images: its last resize failed");
     m->tgt[binding] = tg;
     m->tgt_depth[binding] = depth ? 1 : 0;
     m->tgt_cmp[binding] = depth ? compare : 0;
+    m->tgt_att[binding] = depth ? 0 : att;
     aevk_material_write_target(m, binding);
     m->writes++;
     p->dev->bind_epoch++;
     return AEVK_OK;
 }
 
+static int aevk_material_set_target_cmp(AevkMaterial* m, int binding, AevkTarget* tg, int depth,
+                                       int compare) {
+    return aevk_material_set_target_att(m, binding, tg, depth, compare, 0);
+}
+
 static int aevk_material_set_target(AevkMaterial* m, int binding, AevkTarget* tg, int depth) {
     return aevk_material_set_target_cmp(m, binding, tg, depth, 0);
 }
+
+/* Colour attachment `n` of a target, its newest frame, where a texture goes
+ * (#2386): a G-buffer's normals or material parameters for a lighting pass.
+ * Attachment 0 is what set_target binds. */
+int aevk_material_set_target_attachment(AevkMaterial* m, int binding, AevkTarget* tg, int n) {
+    return aevk_material_set_target_att(m, binding, tg, 0, 0, n);
+}
+
+int aevk_pipeline_set_target_attachment(AevkPipeline* p, int binding, AevkTarget* tg, int n) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_target_attachment(p->def, binding, tg, n);
+}
+
+int aevk_target_attachments(const AevkTarget* t) { return t ? 1 + t->extra : 0; }
 
 /* A target's depth read through a comparison sampler (#2373): what a shadow
  * map is. The shader gets the fraction of the footprint whose depth passes
@@ -3709,6 +3889,7 @@ int aevk_target_set_vertices(AevkTarget* t, const float* data, int count) {
 typedef struct {
     AevkTarget* tg;
     int         depth;
+    int         att;     /* the colour attachment, when not depth (#2386) */
 } AevkSampled;
 
 #define AEVK_MAX_SAMPLED 32
@@ -3735,7 +3916,10 @@ static int aevk_collect_sampled(AevkTarget* t, AevkMaterial* m, AevkSampled* out
         if (m->tgt_gen[b] != tg->image_gen) aevk_material_write_target(m, b);
         int seen = 0;
         for (int i = 0; i < *n; i++) {
-            if (out[i].tg == tg && out[i].depth == m->tgt_depth[b]) { seen = 1; break; }
+            if (out[i].tg == tg && out[i].depth == m->tgt_depth[b] && out[i].att == m->tgt_att[b]) {
+                seen = 1;
+                break;
+            }
         }
         if (seen) continue;
         if (*n >= AEVK_MAX_SAMPLED) {
@@ -3744,6 +3928,7 @@ static int aevk_collect_sampled(AevkTarget* t, AevkMaterial* m, AevkSampled* out
         }
         out[*n].tg = tg;
         out[*n].depth = m->tgt_depth[b];
+        out[*n].att = m->tgt_att[b];
         (*n)++;
     }
     return AEVK_OK;
@@ -3792,7 +3977,7 @@ static void aevk_sampled_barriers(AevkDevice* d, VkCommandBuffer cmd,
         } else {
             /* The colour image rests in TRANSFER_SRC_OPTIMAL: its pass ends
              * there so readback and present copy from it without a barrier. */
-            ib.image = tg->image;
+            ib.image = list[i].att ? tg->ximage[list[i].att - 1] : tg->image;
             ib.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             if (to_read) {
                 /* The pass's closing dependency already made its colour
@@ -3907,12 +4092,16 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     /* Indexed by attachment, so the resolve slot is present but unused and the
      * depth slot sits wherever the render pass put it. Cleared to the far
      * plane: with a LESS test, anything drawn is nearer than nothing. */
-    VkClearValue clears[3];
+    VkClearValue clears[2 * AEVK_MAX_COLOR + 1];
     memset(clears, 0, sizeof(clears));
-    clears[0].color.float32[0] = r;
-    clears[0].color.float32[1] = g;
-    clears[0].color.float32[2] = b;
-    clears[0].color.float32[3] = a;
+    /* Every colour attachment clears to the same colour; a resolve's value
+     * is never read, and depth's is set below. */
+    for (uint32_t ci = 0; ci < t->clear_count; ci++) {
+        clears[ci].color.float32[0] = r;
+        clears[ci].color.float32[1] = g;
+        clears[ci].color.float32[2] = b;
+        clears[ci].color.float32[3] = a;
+    }
     if (t->has_depth) {
         clears[t->depth_clear_index].depthStencil.depth = 1.0f;
         clears[t->depth_clear_index].depthStencil.stencil = 0;
@@ -3999,6 +4188,10 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
         copy.imageExtent.depth = 1;
         d->da.vkCmdCopyImageToBuffer(fr->cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                      fr->readback, 1, &copy);
+        for (int x = 0; x < t->extra; x++) {
+            d->da.vkCmdCopyImageToBuffer(fr->cmd, t->ximage[x], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                         fr->xreadback[x], 1, &copy);
+        }
     }
     if (fr->timed) {
         d->da.vkCmdWriteTimestamp(fr->cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, t->timer_pool, timer + 1u);
@@ -5892,6 +6085,18 @@ int aevk_ae_material_set_target_depth_compare(void* m, int binding, void* t, int
 
 int aevk_ae_target_depth_linear(void* t) { return aevk_target_depth_linear((const AevkTarget*)t); }
 
+void* aevk_ae_target_create_mrt(void* d, int w, int h, int count, int f0, int f1, int f2, int f3,
+                                int depth, int samples) {
+    return (void*)aevk_target_create_mrt((AevkDevice*)d, w, h, count, f0, f1, f2, f3, depth, samples);
+}
+int aevk_ae_target_attachments(void* t) { return aevk_target_attachments((const AevkTarget*)t); }
+int aevk_ae_set_target_attachment(void* p, int binding, void* t, int n) {
+    return aevk_pipeline_set_target_attachment((AevkPipeline*)p, binding, (AevkTarget*)t, n);
+}
+int aevk_ae_material_set_target_attachment(void* m, int binding, void* t, int n) {
+    return aevk_material_set_target_attachment((AevkMaterial*)m, binding, (AevkTarget*)t, n);
+}
+
 void* aevk_ae_state_create(void) { return (void*)aevk_state_create(); }
 void  aevk_ae_state_destroy(void* s) { aevk_state_destroy((AevkState*)s); }
 int   aevk_ae_state_blend(void* s, int mode) { return aevk_state_blend((AevkState*)s, mode); }
@@ -6163,8 +6368,8 @@ int aevk_ae_copy_rgba(void* t, void* dest, int dest_len) {
  * Every reader goes through this: with frames in flight the caller may not
  * have waited, and reading a buffer the GPU is still writing hands back a torn
  * frame. NULL when the target has no mapping or the wait failed. */
-static const unsigned char* aevk_readable_pixels(AevkTarget* t) {
-    if (!t || !t->frames || !t->readback_on) return NULL;
+static const unsigned char* aevk_readable_attachment(AevkTarget* t, int att) {
+    if (!t || !t->frames || !t->readback_on || att < 0 || att > t->extra) return NULL;
     AevkDevice* d = t->dev;
     AEVK_MUTEX_LOCK(&d->lock);
     /* The NEWEST frame, not the last one that happened to be waited on: a
@@ -6175,8 +6380,10 @@ static const unsigned char* aevk_readable_pixels(AevkTarget* t) {
     int rc = aevk_wait_frame_locked(t, slot);
     AEVK_MUTEX_UNLOCK(&d->lock);
     if (rc != AEVK_OK) return NULL;
-    return (const unsigned char*)t->frames[slot].readback_ptr;
+    return (const unsigned char*)(att ? t->frames[slot].xreadback_ptr[att - 1] : t->frames[slot].readback_ptr);
 }
+
+static const unsigned char* aevk_readable_pixels(AevkTarget* t) { return aevk_readable_attachment(t, 0); }
 
 /* Packed 0xRRGGBBAA for one pixel, as a non-negative 64-bit value, or -1 when
  * the coordinates are outside the image or there is no frame to read. 64 bits
@@ -6231,6 +6438,38 @@ double aevk_ae_pixel_value(void* tp, int x, int y, int channel) {
     const unsigned char* px =
         base + ((size_t)y * (size_t)t->width + (size_t)x) * (size_t)t->bytes_per_pixel;
     return (double)aevk_channel_value(t, px, channel);
+}
+
+/* One channel of one pixel of colour attachment `att` at full precision
+ * (#2386); attachment 0 is what pixel_value reads. NaN, with the reason set,
+ * for a bad attachment, coordinate or channel. */
+double aevk_ae_pixel_value_at(void* tp, int att, int x, int y, int channel) {
+    AevkTarget* t = (AevkTarget*)tp;
+    aevk_clear_error();
+    const double nan = (double)NAN;
+    if (!t) { aevk_fail(AEVK_ERR_ARG, "target is null"); return nan; }
+    if (att < 0 || att > t->extra) {
+        aevk_fail(AEVK_ERR_ARG, "the target has colour attachments 0..%d, not %d", t->extra, att);
+        return nan;
+    }
+    if (att == 0) return aevk_ae_pixel_value(tp, x, y, channel);
+    if (x < 0 || y < 0 || x >= t->width || y >= t->height) {
+        aevk_fail(AEVK_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, t->width, t->height);
+        return nan;
+    }
+    if (channel < 0 || channel > 3) {
+        aevk_fail(AEVK_ERR_ARG, "channel %d is not 0..3", channel);
+        return nan;
+    }
+    if (!t->readback_on) {
+        aevk_fail(AEVK_ERR_ARG, "readback is off for this target (target_set_readback)");
+        return nan;
+    }
+    const unsigned char* base = aevk_readable_attachment(t, att);
+    if (!base) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return nan; }
+    const unsigned char* px =
+        base + ((size_t)y * (size_t)t->width + (size_t)x) * (size_t)t->xbpp[att - 1];
+    return (double)aevk_format_channel(t->xformat[att - 1], px, channel);
 }
 
 /* Binary PPM (P6). Chosen over PNG because it needs no compressor, so the

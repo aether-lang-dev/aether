@@ -251,6 +251,13 @@ Timing reads the command buffer's `GPUStartTime` and `GPUEndTime` once it has
 completed. Metal keeps these for every command buffer, so turning timing on
 costs nothing on the GPU.
 
+## Several colour attachments
+
+A `target_create_mrt` target fills `colorAttachments[N]` of the render pass
+and of the pipeline for every attachment, with a resolve texture when it is
+multisampled. Each attachment gets its own blit into its readback buffer.
+Metal's hazard tracking orders a later pass's reads of any attachment.
+
 ## Cube maps, arrays and storage textures
 
 A cube map is an `MTLTextureTypeCube` and an array an

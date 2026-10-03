@@ -218,6 +218,14 @@ AemtTexture* aemt_texture_create_array(AemtDevice* d, int w, int h, int layers, 
                                        int linear_filter, int repeat);
 AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int depth, int format);
 int          aemt_texture_layers(const AemtTexture* tex);
+
+/* Targets with several colour attachments (#2386), as in contrib/vulkan. */
+AemtTarget* aemt_target_create_mrt(AemtDevice* d, int width, int height, int count, int f0, int f1,
+                                   int f2, int f3, int want_depth, int samples);
+int         aemt_target_attachments(const AemtTarget* t);
+int         aemt_pipeline_set_target_attachment(AemtPipeline* p, int binding, AemtTarget* t, int n);
+int         aemt_material_set_target_attachment(AemtMaterial* m, int binding, AemtTarget* t, int n);
+double      aemt_ae_pixel_value_at(void* t, int n, int x, int y, int channel);
 int          aemt_bindings_storage_texture(AemtBindings* b, int binding);
 int          aemt_compute_set_storage_texture(AemtCompute* c, int binding, AemtTexture* tex);
 

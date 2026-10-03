@@ -13,7 +13,8 @@ They have **the same shape**: the same calls, with the same names, arguments,
 status codes and behaviour. Each gives a device, offscreen targets in four
 colour formats with depth and multisampling, pipelines with vertex layouts,
 bindings and push constants, textures with mip chains, 3D textures, cube
-maps and 2D arrays, textures compute passes write,
+maps and 2D arrays, textures compute passes write, targets with several
+colour attachments,
 materials and batches, instanced and indirect draws, dynamic uniform offsets,
 a target's colour or depth read back as a texture in a later pass, frames in
 flight, GPU timing, readback and PNG output, compute over shared buffers, and
@@ -162,6 +163,30 @@ texels, so a shadow's edge comes back as a fraction rather than a step.
 `texture_create_3d(dev, w, h, depth, linear, repeat)` is a volume: `depth`
 slices of RGBA, uploaded slice after slice and read through a 3D sampler.
 `texture_depth(tex)` reports the slice count, 1 for a 2D texture.
+
+## Several colour attachments
+
+`target_create_mrt(dev, w, h, count, f0, f1, f2, f3, depth, samples)` makes
+a target with `count` colour attachments, 1 to 4, which is a deferred
+renderer's G-buffer written in one draw. Attachment N is in format fN, and
+the fragment shader's output N writes it: `location = N`, `SV_TargetN` or
+`[[color(N)]]`. Every attachment clears to the draw's colour and resolves
+when multisampled, and a pipeline's blend state applies to each one.
+
+```aether,fragment
+gbuf = vulkan.target_create_mrt(dev, w, h, 3, vulkan.FORMAT_R8G8B8A8_UNORM,
+                                vulkan.FORMAT_R16G16B16A16_SFLOAT, vulkan.FORMAT_R16G16B16A16_SFLOAT,
+                                0, 1, 1)
+vulkan.set_target_attachment(light_pipe, 0, gbuf, 0)   // albedo
+vulkan.set_target_attachment(light_pipe, 1, gbuf, 1)   // normals
+vulkan.set_target_depth(light_pipe, 2, gbuf)
+```
+
+`set_target_attachment` and its `material_` form bind attachment N where a
+texture goes; `set_target` is attachment 0. `pixel_value_at(t, n, x, y,
+channel)` reads any attachment back. `present`, `pixel`, `copy_rgba` and
+`save_png` read attachment 0, and `target_attachments(t)` reports how many
+there are.
 
 ## Cube maps, arrays, and textures compute writes
 
@@ -317,6 +342,5 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
-| Targets with several colour attachments, for a G-buffer | [#2386](https://github.com/aether-lang-dev/aether/issues/2386) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

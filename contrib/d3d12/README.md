@@ -205,6 +205,15 @@ buffer. The time is read when the frame is waited on, at the queue's
 `test_d3d12_draws.ae` runs with no debug-layer messages on a GPU and on WARP,
 including with GPU-based validation (`AETHER_D3D12_DEBUG=2`).
 
+## Several colour attachments
+
+A `target_create_mrt` target has two RTVs per attachment, its image and its
+multisampled image. Every attachment is cleared, bound with
+`OMSetRenderTargets`, and resolved and copied out after the draws. Each has
+its own resource state, shader view and sampler slot. The PSO lists every
+attachment's format, with `IndependentBlendEnable` off, so render target
+0's blend applies to all of them.
+
 ## Cube maps, arrays and storage textures
 
 A cube map is a 2D resource of six array slices with a `TEXTURECUBE` view,

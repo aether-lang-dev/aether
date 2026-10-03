@@ -311,6 +311,15 @@ int aevk_pipeline_set_target_depth_compare(AevkPipeline* p, int binding, AevkTar
 int aevk_material_set_target_depth_compare(AevkMaterial* m, int binding, AevkTarget* t, int op);
 int aevk_target_depth_linear(const AevkTarget* t);
 
+/* Targets with several colour attachments (#2386): `count` 1..4, attachment
+ * N in format fN, written by fragment output N and cleared to the draw's
+ * colour. Present and the whole-frame readers use attachment 0. */
+AevkTarget* aevk_target_create_mrt(AevkDevice* d, int width, int height, int count, int f0, int f1,
+                                   int f2, int f3, int want_depth, int samples);
+int         aevk_target_attachments(const AevkTarget* t);
+int         aevk_pipeline_set_target_attachment(AevkPipeline* p, int binding, AevkTarget* t, int n);
+int         aevk_material_set_target_attachment(AevkMaterial* m, int binding, AevkTarget* t, int n);
+
 /* Pipeline state (#2385): blending (0 none, 1 alpha, 2 premultiplied,
  * 3 additive), culling (0 none, 1 back, 2 front; front faces run
  * counter-clockwise on screen) and the depth test (a compare op 1..4, and
