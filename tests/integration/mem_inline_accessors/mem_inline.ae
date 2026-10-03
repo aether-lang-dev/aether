@@ -24,6 +24,20 @@ extern aether_mem_get_float64(p: ptr, offset: int) -> float
 extern aether_mem_set_float64(p: ptr, offset: int, value: float) -> int
 extern aether_mem_get_float32(p: ptr, offset: int) -> float
 extern aether_mem_set_float32(p: ptr, offset: int, value: float) -> int
+extern aether_mem_get_ptr(p: ptr, offset: int) -> ptr
+extern aether_mem_set_ptr(p: ptr, offset: int, value: ptr) -> int
+extern aether_mem_get_int8(p: ptr, offset: int) -> int
+extern aether_mem_set_int8(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint8(p: ptr, offset: int) -> int
+extern aether_mem_set_uint8(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_int16(p: ptr, offset: int) -> int
+extern aether_mem_set_int16(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint16(p: ptr, offset: int) -> int
+extern aether_mem_set_uint16(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint32(p: ptr, offset: int) -> long
+extern aether_mem_set_uint32(p: ptr, offset: int, value: long) -> int
+extern aether_mem_ptr_to_long(p: ptr) -> long
+extern aether_mem_long_to_ptr(addr: long) -> ptr
 extern exit(code: int)
 
 ck(cond: int, label: string) -> int {
@@ -96,6 +110,47 @@ main() {
     _ = mem.set_float64(buf, 65, 1.5)
     _ = aether_mem_set_float64(buf, 73, 1.5)
     f = f + ck(mem.get_float64(buf, 65) == aether_mem_get_float64(buf, 73), "unaligned float64")
+
+    // ---- narrow widths: sign/zero extension and masking ----------------
+    _ = mem.set_int8(buf, 80, 200)
+    _ = aether_mem_set_int8(buf, 81, 200)
+    f = f + ck(mem.get_int8(buf, 80) == aether_mem_get_int8(buf, 81), "int8 sign-extends")
+    f = f + ck(mem.get_uint8(buf, 80) == aether_mem_get_uint8(buf, 81), "uint8")
+    _ = mem.set_uint8(buf, 82, 511)
+    _ = aether_mem_set_uint8(buf, 83, 511)
+    f = f + ck(mem.get_uint8(buf, 82) == aether_mem_get_uint8(buf, 83), "uint8 masks")
+    _ = mem.set_int16(buf, 85, 0 - 2)
+    _ = aether_mem_set_int16(buf, 87, 0 - 2)
+    f = f + ck(mem.get_int16(buf, 85) == aether_mem_get_int16(buf, 87), "int16, unaligned")
+    f = f + ck(mem.get_uint16(buf, 85) == aether_mem_get_uint16(buf, 87), "uint16, unaligned")
+    _ = mem.set_uint16(buf, 90, 70000)
+    _ = aether_mem_set_uint16(buf, 92, 70000)
+    f = f + ck(mem.get_uint16(buf, 90) == aether_mem_get_uint16(buf, 92), "uint16 masks")
+    _ = mem.set_uint32(buf, 96, 4294967295)
+    _ = aether_mem_set_uint32(buf, 100, 4294967295)
+    f = f + ck(mem.get_uint32(buf, 96) == aether_mem_get_uint32(buf, 100), "uint32 zero-extends")
+
+    // ---- pointers and the ptr <-> long casts ----------------------------
+    _ = mem.set_ptr(buf, 104, buf)
+    _ = aether_mem_set_ptr(buf, 112, buf)
+    f = f + ck(mem.ptr_to_long(mem.get_ptr(buf, 104)) == aether_mem_ptr_to_long(aether_mem_get_ptr(buf, 112)), "get_ptr / set_ptr")
+    long a = mem.ptr_to_long(buf)
+    f = f + ck(a == aether_mem_ptr_to_long(buf), "ptr_to_long")
+    f = f + ck(mem.ptr_to_long(mem.long_to_ptr(a + 8)) == aether_mem_ptr_to_long(aether_mem_long_to_ptr(a + 8)), "long_to_ptr")
+    // a slot written as a long and read back as a pointer (what a tagged
+    // JS heap does), then the other way round
+    _ = mem.set_long(buf, 120, a)
+    f = f + ck(mem.ptr_to_long(mem.get_ptr(buf, 120)) == a, "long slot read as ptr")
+    _ = mem.set_ptr(buf, 120, mem.long_to_ptr(a + 16))
+    f = f + ck(mem.get_long(buf, 120) == a + 16, "ptr slot read as long")
+
+    // ---- null paths of the new entries ----------------------------------
+    f = f + ck(mem.ptr_to_long(mem.get_ptr(null, 0)) == aether_mem_ptr_to_long(aether_mem_get_ptr(null, 0)), "null get_ptr agrees")
+    f = f + ck(mem.set_ptr(null, 0, buf) == aether_mem_set_ptr(null, 0, buf), "null set_ptr agrees")
+    f = f + ck(mem.get_int8(null, 0) == aether_mem_get_int8(null, 0), "null get_int8 agrees")
+    f = f + ck(mem.get_uint16(null, 0) == aether_mem_get_uint16(null, 0), "null get_uint16 agrees")
+    f = f + ck(mem.get_uint32(null, 0) == aether_mem_get_uint32(null, 0), "null get_uint32 agrees")
+    f = f + ck(mem.set_uint32(null, 0, 1) == aether_mem_set_uint32(null, 0, 1), "null set_uint32 agrees")
 
     arena.destroy(ar)
 

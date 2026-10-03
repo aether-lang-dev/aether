@@ -67,6 +67,8 @@ void aether_caps_set_deadline_ms(int64_t ms);
  * --emit=lib is active. Returns 1 if the deadline has passed OR
  * the sticky-tripped flag is set; 0 otherwise. Direct TLS read +
  * atomic load + monotonic clock — no PLT call, no allocation. */
+/* Nonzero once any deadline has been armed or tripped (see the .c). */
+extern int aether_caps_armed;
 int aether_caps_deadline_tripped(void);
 
 /* Set the sticky-tripped flag; called by codegen-emitted code on

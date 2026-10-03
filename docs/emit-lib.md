@@ -429,10 +429,14 @@ cap exceeded" up the call chain rather than aborting. Pass `0` to
 disable.
 
 **Wall-clock deadline.** Per-thread monotonic (`CLOCK_MONOTONIC`).
-The codegen emits `if (aether_caps_deadline_tripped()) {
-__aether_abort_call(); break; }` at every `for` / `while` loop head
+The codegen emits `if (aether_caps_armed && aether_caps_deadline_tripped())
+{ __aether_abort_call(); break; }` at every `for` / `while` loop head
 under `--emit=lib` not under `--emit=exe` (zero overhead on
-non-sandboxed builds). On trip the sticky flag flips; subsequent
+non-sandboxed builds). `aether_caps_armed` is a plain global that goes
+nonzero once any thread arms a deadline (or trips one) and stays so; until
+then a loop head costs one load, with no call and no thread-local read.
+(The call reads two thread-locals, and on macOS each of those is itself a
+call: in a ported interpreter that was a fifth of the run time.) On trip the sticky flag flips; subsequent
 loop heads in the same call exit too, so any depth of nested loops
 unwinds in O(N) tripwire-bounded breaks. Pass `0` to disable; pass
 a fresh ms value to clear the sticky flag and re-arm.

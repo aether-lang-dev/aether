@@ -6728,7 +6728,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // --emit=exe builds (the if (gen->emit_lib) gate elides
             // the print entirely).
             if (gen->emit_lib) {
-                print_line(gen, "if (aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry.
              * #893: record the loop's label / containing scope / C-label id. */
@@ -6800,7 +6800,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // Issue #343 codegen tripwire — see AST_FOR_LOOP comment.
             if (gen->emit_lib) {
-                print_line(gen, "if (aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry so
              * `break` / `continue` inside the body drains only

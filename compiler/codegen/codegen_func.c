@@ -980,8 +980,8 @@ void propagate_tuple_type_to_calls(ASTNode* node, const char* func_name, Type* t
  * memcpy (unaligned-safe, exactly as today). Copying that distinction is
  * what makes "same as the extern" true rather than approximately true.
  *
- * get_ptr/set_ptr are excluded: stricter documented aligned-slot contract,
- * never hot.
+ * get_ptr/set_ptr were first excluded as never hot; a ported VM showed
+ * otherwise, and they are now lowered through memcpy (see their entries).
  *
  * The bodies reference the wrapper's own parameter names (p / i / offset /
  * value), which are the names in std/mem/module.ae and are what this
@@ -1037,6 +1037,72 @@ static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
     { "mem_set_float64",
       "    if (!p) return 0;\n"
       "    __builtin_memcpy((char*)p + offset, &value, sizeof(value));\n"
+      "    return 1;\n" },
+    /* The rest were added when a profile of mquickjs-ae (a C engine ported
+     * to Aether, whose VM reads its heap through std.mem) put about 30% of
+     * its run time in calls to aether_mem_long_to_ptr / ptr_to_long alone,
+     * with get_ptr and the narrow widths close behind. */
+    { "mem_ptr_to_long",
+      "    return (int64_t)(uintptr_t)p;\n" },
+    { "mem_long_to_ptr",
+      "    return (void*)(uintptr_t)addr;\n" },
+    /* get_ptr/set_ptr go through memcpy rather than the extern's typed
+     * `*(void**)` deref: the same result on the aligned slots their contract
+     * requires, but alias-safe once inlined. Inlined typed pointer accesses
+     * next to int64 accesses of the same heap slots let clang reorder them
+     * (type-based alias analysis) and crashed mquickjs-ae's Octane run. */
+    { "mem_get_ptr",
+      "    if (!p) return NULL;\n"
+      "    void* _v;\n"
+      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    return _v;\n" },
+    { "mem_set_ptr",
+      "    if (!p) return 0;\n"
+      "    __builtin_memcpy((char*)p + offset, &value, sizeof(value));\n"
+      "    return 1;\n" },
+    { "mem_get_int8",
+      "    if (!p) return 0;\n"
+      "    return (int)((int8_t*)p)[offset];\n" },
+    { "mem_set_int8",
+      "    if (!p) return 0;\n"
+      "    ((int8_t*)p)[offset] = (int8_t)(value & 0xff);\n"
+      "    return 1;\n" },
+    { "mem_get_uint8",
+      "    if (!p) return 0;\n"
+      "    return (int)((uint8_t*)p)[offset];\n" },
+    { "mem_set_uint8",
+      "    if (!p) return 0;\n"
+      "    ((uint8_t*)p)[offset] = (uint8_t)(value & 0xff);\n"
+      "    return 1;\n" },
+    { "mem_get_int16",
+      "    if (!p) return 0;\n"
+      "    int16_t _v;\n"
+      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    return (int)_v;\n" },
+    { "mem_set_int16",
+      "    if (!p) return 0;\n"
+      "    int16_t _v = (int16_t)(value & 0xffff);\n"
+      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    return 1;\n" },
+    { "mem_get_uint16",
+      "    if (!p) return 0;\n"
+      "    uint16_t _v;\n"
+      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    return (int)_v;\n" },
+    { "mem_set_uint16",
+      "    if (!p) return 0;\n"
+      "    uint16_t _v = (uint16_t)(value & 0xffff);\n"
+      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    return 1;\n" },
+    { "mem_get_uint32",
+      "    if (!p) return 0;\n"
+      "    uint32_t _v;\n"
+      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    return (int64_t)_v;\n" },
+    { "mem_set_uint32",
+      "    if (!p) return 0;\n"
+      "    uint32_t _v = (uint32_t)(value & 0xFFFFFFFF);\n"
+      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
       "    return 1;\n" },
 };
 
@@ -1275,8 +1341,8 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
      * binaries and FFI consumers; this changes only what this wrapper's
      * body compiles to.
      *
-     * get_ptr/set_ptr are deliberately excluded: they carry a stricter
-     * documented aligned-slot contract and are never hot. */
+     * The table also covers ptr_to_long / long_to_ptr, get_ptr / set_ptr and
+     * the int8/uint8/int16/uint16/uint32 widths (see MEM_ACCESSOR_BODIES). */
     if (emit_mem_accessor_body(gen, func)) {
         fprintf(gen->output, "}\n\n");
         return;

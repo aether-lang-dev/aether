@@ -61,6 +61,15 @@ rather than spilling into the next one.
 `bits_of_float` / `float_from_bits` reinterpret a double as its IEEE 754 bit
 pattern and back, without going through a conversion.
 
+The scalar accessors cost no more than the load or store they wrap. The
+compiler emits the native-endian `get_*` / `set_*` accessors (`byte`, `int8`
+through `uint32`, `int`, `long`, `float32`, `float64`, `ptr`) and
+`ptr_to_long` / `long_to_ptr` inline in the calling translation unit rather
+than as calls into libaether (the `_le` / `_be` pairs are still calls), with the same null behaviour as the library
+functions (a null read gives 0, or -1 for `get_byte`; a null write gives 0).
+A port that walks a heap through these in its inner loop, as mquickjs-ae's VM
+does, does not pay a call per access.
+
 ## Bulk operations on interior spans
 
 `copy`, `move`, `compare` and `set` all start at byte 0 of each buffer. Since

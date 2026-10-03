@@ -87,7 +87,14 @@ void aether_caps_set_memory_cap(uint64_t bytes) {
     atomic_store_explicit(&g_mem_cap, bytes, memory_order_relaxed);
 }
 
+/* Nonzero once any thread has armed or tripped a deadline. The codegen's
+ * loop-head check reads this first, so code that never uses deadlines pays
+ * one load instead of a call and two TLS reads. It is never cleared: another
+ * thread may still be armed, and the full check below stays exact. */
+int aether_caps_armed = 0;
+
 void aether_caps_set_deadline_ms(int64_t ms) {
+    if (ms > 0) aether_caps_armed = 1;
     if (ms <= 0) {
         g_deadline_at_ns = 0;
     } else {
@@ -101,6 +108,7 @@ int aether_caps_deadline_tripped(void) {
     if (g_tripped) return 1;
     if (g_deadline_at_ns == 0) return 0;
     if (now_ns() >= g_deadline_at_ns) {
+        aether_caps_armed = 1;
         g_tripped = 1;
         return 1;
     }
@@ -108,6 +116,7 @@ int aether_caps_deadline_tripped(void) {
 }
 
 void __aether_abort_call(void) {
+    aether_caps_armed = 1;
     g_tripped = 1;
 }
 

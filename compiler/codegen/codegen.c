@@ -5728,6 +5728,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * --emit=exe builds — the gate elides both the extern decls and
      * the per-loop checks. */
     if (gen->emit_lib) {
+        /* aether_caps_armed is a plain global, nonzero once any thread has
+         * armed (or tripped) a deadline. Testing it first keeps the loop-head
+         * check to one load when no deadline is in use: the call and its two
+         * thread-local reads were ~22% of mquickjs-ae's run time on macOS,
+         * where each TLS read goes through _tlv_get_addr. */
+        print_line(gen, "extern int  aether_caps_armed;");
         print_line(gen, "extern int  aether_caps_deadline_tripped(void);");
         print_line(gen, "extern void __aether_abort_call(void);");
     }
