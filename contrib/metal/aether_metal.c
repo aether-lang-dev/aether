@@ -376,6 +376,9 @@ typedef struct {
     id                   cb;
     dispatch_semaphore_t done;
     int                  submitted;
+    /* The GPU time of the command buffer the last wait retired, start to
+     * end, in milliseconds; -1 where Metal reports none (#2198). */
+    double               gpu_ms;
 } AemtFence;
 
 static int aemt_fence_init(AemtFence* f) {
@@ -409,6 +412,14 @@ static int aemt_fence_wait(AemtFence* f, int timeout_ms) {
      * autorelease, and the waits run from calls that hold none. */
     void* pool = g_mt.pool_push();
     int rc = aemt_cb_status(f->cb);
+    /* GPUStartTime and GPUEndTime are the seconds the GPU began and finished
+     * the command buffer: its timestamps, which Metal keeps for every one. */
+    f->gpu_ms = -1.0;
+    if (rc == AEMT_OK) {
+        double start = MT_SEND(double)(f->cb, mt_sel("GPUStartTime"));
+        double end = MT_SEND(double)(f->cb, mt_sel("GPUEndTime"));
+        if (end > 0.0 && end >= start) f->gpu_ms = (end - start) * 1000.0;
+    }
     mt_release(f->cb);
     g_mt.pool_pop(pool);
     f->cb = NULL;
@@ -530,16 +541,43 @@ static id aemt_function(id lib, AemtUInt type, const char* stage) {
 /* Targets                                                                   */
 /* ------------------------------------------------------------------------ */
 
+/* A caller's buffer (#1515): defined here because draws name buffers too,
+ * as vertex streams and indirect commands (#2198). */
+struct AemtBuffer {
+    AemtDevice*    dev;
+    id             buf;
+    unsigned char* ptr;
+    size_t         size;
+};
+
+/* One draw inside a frame. `instances` 0 draws the target's instance count
+ * from instance 0; above 0, that many from `first_instance`. An indirect draw
+ * reads `indirect_draws` commands from `indirect` at `indirect_offset`, and
+ * `offsets` is each dynamic uniform binding's offset, by binding (#2198). */
 typedef struct {
     AemtMaterial* mat;
     int           first;
     int           count;
+    int           first_instance;
+    int           instances;
+    AemtBuffer*   indirect;
+    size_t        indirect_offset;
+    int           indirect_draws;
+    AemtUInt      offsets[AEMT_MAX_DESC];
 } AemtDrawItem;
+
+/* The bytes of one indirect draw command, indexed and not: the layouts of
+ * MTLDrawIndexedPrimitivesIndirectArguments and MTLDrawPrimitivesIndirect-
+ * Arguments. */
+#define AEMT_INDIRECT_INDEXED_BYTES 20
+#define AEMT_INDIRECT_BYTES         16
 
 typedef struct {
     AemtFence      fence;
     id             readback;       /* shared buffer, w * h * bpp, tightly packed */
     unsigned char* readback_ptr;
+    int            timed;          /* submitted with timing on (#2198) */
+    unsigned long long seq;        /* the target's submission count when it was */
 } AemtFrame;
 
 struct AemtTarget {
@@ -580,6 +618,19 @@ struct AemtTarget {
     int            batch_count, batch_cap;
     unsigned char  push[AEMT_MAX_PUSH];
     int            push_size;
+
+    /* Vertex streams past binding 0, a caller's buffer each, and the
+     * instances each draw makes, 1 unless set (#2198). */
+    AemtBuffer*    streams[AEMT_MAX_BINDINGS];
+    int            instance_count;
+
+    /* GPU timing (#2198): the newest waited frame's time, -1 before one,
+     * and the submission it came from, so waiting on the slots out of order
+     * never reports an older frame. */
+    int            timing_on;
+    double         gpu_ms;
+    unsigned long long submitted_seq;
+    unsigned long long gpu_seq;
 
     AemtFrame      frames[AEMT_MAX_FRAMES];
     int            frame_count;
@@ -796,6 +847,8 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
     t->readback_on = 1;
     t->index_bits = 32;
     t->timeout_ms = 5000;
+    t->instance_count = 1;
+    t->gpu_ms = -1.0;
     t->last_submitted = -1;
     void* pool = g_mt.pool_push();
     /* The samplers a later pass reads the target through (#2198): linear
@@ -819,7 +872,14 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
 }
 
 static int aemt_wait_frame(AemtTarget* t, int slot) {
-    return aemt_fence_wait(&t->frames[slot].fence, t->timeout_ms);
+    AemtFrame* fr = &t->frames[slot];
+    int was = fr->fence.submitted;
+    int rc = aemt_fence_wait(&fr->fence, t->timeout_ms);
+    if (rc == AEMT_OK && was && fr->timed && fr->seq > t->gpu_seq) {
+        t->gpu_ms = fr->fence.gpu_ms;
+        t->gpu_seq = fr->seq;
+    }
+    return rc;
 }
 
 static int aemt_wait_all_frames(AemtTarget* t) {
@@ -1085,7 +1145,20 @@ static int aemt_check_index_start(const AemtTarget* t, int first) {
     return AEMT_OK;
 }
 
-int aemt_batch_add(AemtTarget* t, AemtMaterial* mat, int first, int count) {
+static int aemt_batch_push(AemtTarget* t, const AemtDrawItem* item) {
+    if (t->batch_count == t->batch_cap) {
+        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
+        AemtDrawItem* grown = (AemtDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
+        if (!grown) return aemt_fail(AEMT_ERR_OOM, "out of memory");
+        t->batch = grown;
+        t->batch_cap = cap;
+    }
+    t->batch[t->batch_count++] = *item;
+    return AEMT_OK;
+}
+
+static int aemt_batch_add_range(AemtTarget* t, AemtMaterial* mat, int first, int count,
+                                int first_instance, int instances) {
     aemt_clear_error();
     if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
     if (first < 0) return aemt_fail(AEMT_ERR_ARG, "first must not be negative, got %d", first);
@@ -1097,19 +1170,109 @@ int aemt_batch_add(AemtTarget* t, AemtMaterial* mat, int first, int count) {
     }
     int rc = aemt_check_index_start(t, first);
     if (rc != AEMT_OK) return rc;
-    if (t->batch_count == t->batch_cap) {
-        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
-        AemtDrawItem* grown = (AemtDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
-        if (!grown) return aemt_fail(AEMT_ERR_OOM, "out of memory");
-        t->batch = grown;
-        t->batch_cap = cap;
+    AemtDrawItem it;
+    memset(&it, 0, sizeof(it));
+    it.mat = mat;
+    it.first = first;
+    it.count = count;
+    it.first_instance = first_instance;
+    it.instances = instances;
+    return aemt_batch_push(t, &it);
+}
+
+int aemt_batch_add(AemtTarget* t, AemtMaterial* mat, int first, int count) {
+    return aemt_batch_add_range(t, mat, first, count, 0, 0);
+}
+
+/* Instancing (#2198): `instances` copies of the range from instance
+ * `first_instance`, where a per-instance stream starts reading. */
+int aemt_batch_add_instanced(AemtTarget* t, AemtMaterial* mat, int first, int count,
+                             int first_instance, int instances) {
+    if (first_instance < 0) {
+        return aemt_fail(AEMT_ERR_ARG, "first instance must not be negative, got %d", first_instance);
     }
-    t->batch[t->batch_count].mat = mat;
-    t->batch[t->batch_count].first = first;
-    t->batch[t->batch_count].count = count;
-    t->batch_count++;
+    if (instances <= 0) return aemt_fail(AEMT_ERR_ARG, "instances must be positive, got %d", instances);
+    return aemt_batch_add_range(t, mat, first, count, first_instance, instances);
+}
+
+/* An indirect draw (#2198): `draws` commands read from `buf` at `offset` when
+ * the frame runs, five 32-bit words each with indices and four without. */
+int aemt_batch_add_indirect(AemtTarget* t, AemtMaterial* mat, AemtBuffer* buf, int offset, int draws) {
+    aemt_clear_error();
+    if (!t || !buf) return aemt_fail(AEMT_ERR_ARG, "target or buffer is null");
+    if (buf->dev != t->dev) return aemt_fail(AEMT_ERR_ARG, "the buffer belongs to another device");
+    if (offset < 0 || (offset % 4)) {
+        return aemt_fail(AEMT_ERR_ARG, "an indirect offset must be a non-negative multiple of 4, got %d",
+                         offset);
+    }
+    if (draws <= 0) return aemt_fail(AEMT_ERR_ARG, "draws must be positive, got %d", draws);
+    AemtDrawItem it;
+    memset(&it, 0, sizeof(it));
+    it.mat = mat;
+    it.indirect = buf;
+    it.indirect_offset = (size_t)offset;
+    it.indirect_draws = draws;
+    return aemt_batch_push(t, &it);
+}
+
+/* A buffer bound in the constant address space at an offset needs the
+ * offset to be a multiple of 256 on macOS. */
+#define AEMT_UNIFORM_ALIGN 256
+
+int aemt_batch_set_offset(AemtTarget* t, int item, int binding, int offset) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (binding < 0 || binding >= AEMT_MAX_DESC) {
+        return aemt_fail(AEMT_ERR_ARG, "binding must be 0..%d", AEMT_MAX_DESC - 1);
+    }
+    if (offset < 0 || (offset % AEMT_UNIFORM_ALIGN)) {
+        return aemt_fail(AEMT_ERR_ARG,
+                         "a uniform offset must be a non-negative multiple of %d on this device, got %d",
+                         AEMT_UNIFORM_ALIGN, offset);
+    }
+    if (item < 0 || item >= t->batch_count) {
+        return aemt_fail(AEMT_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    t->batch[item].offsets[binding] = (AemtUInt)offset;
     return AEMT_OK;
 }
+
+int aemt_uniform_offset_alignment(const AemtDevice* d) { return d ? AEMT_UNIFORM_ALIGN : 0; }
+
+int aemt_target_set_stream(AemtTarget* t, int binding, AemtBuffer* buf) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (binding < 1 || binding >= AEMT_MAX_BINDINGS) {
+        return aemt_fail(AEMT_ERR_ARG,
+                         "a vertex stream binding is 1..%d; binding 0 is the target's own vertices",
+                         AEMT_MAX_BINDINGS - 1);
+    }
+    if (buf && buf->dev != t->dev) return aemt_fail(AEMT_ERR_ARG, "the buffer belongs to another device");
+    t->streams[binding] = buf;
+    return AEMT_OK;
+}
+
+int aemt_target_set_instances(AemtTarget* t, int count) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (count <= 0) return aemt_fail(AEMT_ERR_ARG, "instances must be positive, got %d", count);
+    t->instance_count = count;
+    return AEMT_OK;
+}
+
+int aemt_target_instances(const AemtTarget* t) { return t ? t->instance_count : 0; }
+
+/* GPU timing (#2198): Metal times every command buffer, so turning it on
+ * only says which frames report. */
+int aemt_target_set_timing(AemtTarget* t, int on) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    t->timing_on = on ? 1 : 0;
+    t->gpu_ms = -1.0;
+    return AEMT_OK;
+}
+
+double aemt_target_gpu_ms(const AemtTarget* t) { return (t && t->timing_on) ? t->gpu_ms : -1.0; }
 
 int aemt_batch_count(const AemtTarget* t) { return t ? t->batch_count : 0; }
 
@@ -1190,11 +1353,13 @@ int aemt_layout_attr(AemtLayout* l, int location, int binding, int format, int o
     return AEMT_OK;
 }
 
-enum { AEMT_BIND_NONE = 0, AEMT_BIND_UNIFORM, AEMT_BIND_TEXTURE, AEMT_BIND_STORAGE };
+enum { AEMT_BIND_NONE = 0, AEMT_BIND_UNIFORM, AEMT_BIND_TEXTURE, AEMT_BIND_STORAGE,
+       AEMT_BIND_UNIFORM_DYNAMIC };
 
 struct AemtBindings {
     int kind[AEMT_MAX_DESC];
     int count;
+    int dyn_range[AEMT_MAX_DESC];   /* a dynamic uniform's window (#2198) */
 };
 
 AemtBindings* aemt_bindings_create(void) {
@@ -1221,6 +1386,16 @@ static int aemt_bindings_add(AemtBindings* b, int binding, int kind) {
 int aemt_bindings_uniform(AemtBindings* b, int binding) { return aemt_bindings_add(b, binding, AEMT_BIND_UNIFORM); }
 int aemt_bindings_texture(AemtBindings* b, int binding) { return aemt_bindings_add(b, binding, AEMT_BIND_TEXTURE); }
 int aemt_bindings_storage(AemtBindings* b, int binding) { return aemt_bindings_add(b, binding, AEMT_BIND_STORAGE); }
+
+/* A uniform read as a `bytes` window of a caller's buffer, at the offset
+ * each draw chooses: the buffer bound at an offset per draw (#2198). */
+int aemt_bindings_uniform_dynamic(AemtBindings* b, int binding, int bytes) {
+    aemt_clear_error();
+    if (bytes <= 0) return aemt_fail(AEMT_ERR_ARG, "a dynamic uniform's window must be positive, got %d", bytes);
+    int rc = aemt_bindings_add(b, binding, AEMT_BIND_UNIFORM_DYNAMIC);
+    if (rc == AEMT_OK) b->dyn_range[binding] = bytes;
+    return rc;
+}
 
 /* ------------------------------------------------------------------------ */
 /* Textures                                                                  */
@@ -1392,14 +1567,8 @@ int aemt_texture_upload(AemtTexture* tex, const void* rgba, size_t len) {
 
 /* A shared buffer shaders read and write: the Metal counterpart of Vulkan's
  * host-visible coherent memory, mapped for its lifetime and zeroed. Usable as
- * a storage or uniform binding. */
-struct AemtBuffer {
-    AemtDevice*    dev;
-    id             buf;
-    unsigned char* ptr;
-    size_t         size;
-};
-
+ * a storage or uniform binding, a vertex stream and indirect commands
+ * (struct AemtBuffer is defined with the draw items). */
 AemtBuffer* aemt_buffer_create(AemtDevice* d, size_t bytes) {
     aemt_clear_error();
     if (!d) { aemt_fail(AEMT_ERR_ARG, "device is null"); return NULL; }
@@ -1472,8 +1641,13 @@ struct AemtPipeline {
     id            pso;
     id            depth_state;   /* NULL for a target without depth */
     int           kind[AEMT_MAX_DESC];
+    int           dyn_range[AEMT_MAX_DESC];
     int           push_bytes;
     int           vertex_input;
+    /* The streams the layout declares past binding 0 (#2198). */
+    int           stream_declared[AEMT_MAX_BINDINGS];
+    int           stream_stride[AEMT_MAX_BINDINGS];
+    int           stream_instanced[AEMT_MAX_BINDINGS];
     AemtMaterial* def;
 };
 
@@ -1534,15 +1708,6 @@ AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* 
         return NULL;
     }
     if (layout) {
-        /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
-         * A layout declaring another would have the pipeline read a buffer that
-         * is never bound, so it is refused here rather than drawn from. */
-        for (int b = 1; b < AEMT_MAX_BINDINGS; b++) {
-            if (layout->declared[b]) {
-                aemt_fail(AEMT_ERR_ARG, "vertex binding %d is declared, but a target feeds binding 0 only", b);
-                return NULL;
-            }
-        }
         for (int i = 0; i < layout->attr_count; i++) {
             if (!layout->declared[layout->attr[i].binding]) {
                 aemt_fail(AEMT_ERR_ARG, "attribute %d reads binding %d, which was never declared",
@@ -1556,7 +1721,19 @@ AemtPipeline* aemt_pipeline_create_ex(AemtDevice* d, AemtTarget* t, const void* 
     p->dev = d;
     p->push_bytes = push_bytes;
     p->vertex_input = !layout || layout->bind_count > 0;
-    for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) p->kind[i] = bindings->kind[i];
+    for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) {
+        p->kind[i] = bindings->kind[i];
+        p->dyn_range[i] = bindings->dyn_range[i];
+    }
+    /* Binding 0 is the target's own vertices; each binding past it is a
+     * stream the target is given a buffer for (vertex_stream), checked at
+     * draw time (#2198). */
+    for (int b = 1; layout && b < AEMT_MAX_BINDINGS; b++) {
+        if (!layout->declared[b]) continue;
+        p->stream_declared[b] = 1;
+        p->stream_stride[b] = layout->stride[b];
+        p->stream_instanced[b] = layout->per_instance[b];
+    }
 
     void* pool = g_mt.pool_push();
     id vlib = NULL, flib = NULL, vfn = NULL, ffn = NULL, desc = NULL;
@@ -1652,7 +1829,12 @@ static int aemt_material_check(AemtMaterial* m, int binding, int kind, const cha
         return aemt_fail(AEMT_ERR_ARG, "binding must be 0..%d", AEMT_MAX_DESC - 1);
     }
     int k = m->pipe->kind[binding];
-    if (k != kind && !(kind == AEMT_BIND_STORAGE && k == AEMT_BIND_UNIFORM)) {
+    if (kind == AEMT_BIND_UNIFORM && k == AEMT_BIND_UNIFORM_DYNAMIC) {
+        return aemt_fail(AEMT_ERR_ARG,
+                         "binding %d is a dynamic uniform: bind a buffer with set_buffer and choose "
+                         "each draw's offset with batch_set_offset", binding);
+    }
+    if (k != kind && !(kind == AEMT_BIND_STORAGE && (k == AEMT_BIND_UNIFORM || k == AEMT_BIND_UNIFORM_DYNAMIC))) {
         return aemt_fail(AEMT_ERR_ARG, "binding %d is not declared as %s", binding, what);
     }
     return AEMT_OK;
@@ -1744,6 +1926,10 @@ int aemt_material_set_buffer(AemtMaterial* m, int binding, AemtBuffer* buf) {
     if (rc != AEMT_OK) return rc;
     if (!buf) return aemt_fail(AEMT_ERR_ARG, "buffer is null");
     if (buf->dev != m->pipe->dev) return aemt_fail(AEMT_ERR_ARG, "the buffer belongs to another device");
+    if (m->pipe->kind[binding] == AEMT_BIND_UNIFORM_DYNAMIC && buf->size < (size_t)m->pipe->dyn_range[binding]) {
+        return aemt_fail(AEMT_ERR_ARG, "a %zu-byte buffer is smaller than binding %d's %d-byte window",
+                         buf->size, binding, m->pipe->dyn_range[binding]);
+    }
     m->buf[binding] = buf;
     m->set[binding] = 1;
     return AEMT_OK;
@@ -1785,7 +1971,7 @@ static int aemt_material_sampleable(const AemtTarget* t, const AemtMaterial* m) 
 
 /* Binds a material's resources to both stages, as Vulkan's bindings are
  * visible to every stage. */
-static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m) {
+static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m, const AemtUInt* offsets) {
     for (int i = 0; i < AEMT_MAX_DESC; i++) {
         if (!kind[i]) continue;
         if (kind[i] == AEMT_BIND_TEXTURE) {
@@ -1804,23 +1990,48 @@ static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m) {
             continue;
         }
         id b = m->buf[i] ? m->buf[i]->buf : m->ub[i].buf;
-        MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"), b, 0, (AemtUInt)i);
-        MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setFragmentBuffer:offset:atIndex:"), b, 0, (AemtUInt)i);
+        /* A dynamic uniform's window starts at the draw's offset (#2198). */
+        AemtUInt off = (kind[i] == AEMT_BIND_UNIFORM_DYNAMIC && offsets) ? offsets[i] : 0;
+        MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"), b, off, (AemtUInt)i);
+        MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setFragmentBuffer:offset:atIndex:"), b, off, (AemtUInt)i);
     }
 }
 
-static void aemt_draw_range(AemtTarget* t, id enc, int first, int count) {
+/* Encodes one draw: a range of the target's geometry, instanced, or the
+ * commands an indirect draw reads, one call each (#2198). */
+static void aemt_draw_item(AemtTarget* t, id enc, const AemtDrawItem* it) {
+    AemtUInt index_type = t->index_bits == 16 ? (AemtUInt)MTL_INDEX_UINT16 : (AemtUInt)MTL_INDEX_UINT32;
+    if (it->indirect) {
+        AemtUInt stride = t->index_count > 0 ? AEMT_INDIRECT_INDEXED_BYTES : AEMT_INDIRECT_BYTES;
+        for (int c = 0; c < it->indirect_draws; c++) {
+            AemtUInt off = (AemtUInt)it->indirect_offset + (AemtUInt)c * stride;
+            if (t->index_count > 0) {
+                MT_SEND(void, AemtUInt, AemtUInt, id, AemtUInt, id, AemtUInt)(
+                    enc, mt_sel("drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:"
+                                "indirectBuffer:indirectBufferOffset:"),
+                    (AemtUInt)MTL_PRIMITIVE_TRIANGLE, index_type, t->ibuf, 0, it->indirect->buf, off);
+            } else {
+                MT_SEND(void, AemtUInt, id, AemtUInt)(
+                    enc, mt_sel("drawPrimitives:indirectBuffer:indirectBufferOffset:"),
+                    (AemtUInt)MTL_PRIMITIVE_TRIANGLE, it->indirect->buf, off);
+            }
+        }
+        return;
+    }
+    AemtUInt instances = (AemtUInt)(it->instances > 0 ? it->instances : t->instance_count);
+    AemtUInt first_instance = (AemtUInt)(it->instances > 0 ? it->first_instance : 0);
     if (t->index_count > 0) {
         AemtUInt size = (AemtUInt)(t->index_bits / 8);
-        MT_SEND(void, AemtUInt, AemtUInt, AemtUInt, id, AemtUInt)(
-            enc, mt_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"),
-            (AemtUInt)MTL_PRIMITIVE_TRIANGLE, (AemtUInt)count,
-            t->index_bits == 16 ? (AemtUInt)MTL_INDEX_UINT16 : (AemtUInt)MTL_INDEX_UINT32,
-            t->ibuf, (AemtUInt)first * size);
+        MT_SEND(void, AemtUInt, AemtUInt, AemtUInt, id, AemtUInt, AemtUInt, long, AemtUInt)(
+            enc, mt_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"
+                        "instanceCount:baseVertex:baseInstance:"),
+            (AemtUInt)MTL_PRIMITIVE_TRIANGLE, (AemtUInt)it->count, index_type,
+            t->ibuf, (AemtUInt)it->first * size, instances, 0L, first_instance);
     } else {
-        MT_SEND(void, AemtUInt, AemtUInt, AemtUInt)(enc, mt_sel("drawPrimitives:vertexStart:vertexCount:"),
-                                                    (AemtUInt)MTL_PRIMITIVE_TRIANGLE, (AemtUInt)first,
-                                                    (AemtUInt)count);
+        MT_SEND(void, AemtUInt, AemtUInt, AemtUInt, AemtUInt, AemtUInt)(
+            enc, mt_sel("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"),
+            (AemtUInt)MTL_PRIMITIVE_TRIANGLE, (AemtUInt)it->first, (AemtUInt)it->count,
+            instances, first_instance);
     }
 }
 
@@ -1873,17 +2084,27 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
             MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"),
                                                   t->vbuf, 0, (AemtUInt)AEMT_STREAM_BASE);
         }
+        /* The caller's streams past binding 0, which the draw check made
+         * sure are bound (#2198). */
+        for (int sb = 1; sb < AEMT_MAX_BINDINGS; sb++) {
+            if (!p->stream_declared[sb]) continue;
+            MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"),
+                                                  t->streams[sb]->buf, 0, (AemtUInt)(AEMT_STREAM_BASE + sb));
+        }
         AemtMaterial* bind_mat = mat ? mat : p->def;
         if (t->batch_count > 0) {
             for (int i = 0; i < t->batch_count; i++) {
                 AemtDrawItem* it = &t->batch[i];
                 AemtMaterial* im = it->mat ? it->mat : bind_mat;
-                if (im) aemt_bind_render(enc, p->kind, im);
-                aemt_draw_range(t, enc, it->first, it->count);
+                if (im) aemt_bind_render(enc, p->kind, im, it->offsets);
+                aemt_draw_item(t, enc, it);
             }
         } else {
-            if (bind_mat) aemt_bind_render(enc, p->kind, bind_mat);
-            aemt_draw_range(t, enc, 0, t->index_count > 0 ? t->index_count : t->vertex_count);
+            if (bind_mat) aemt_bind_render(enc, p->kind, bind_mat, NULL);
+            AemtDrawItem all;
+            memset(&all, 0, sizeof(all));
+            all.count = t->index_count > 0 ? t->index_count : t->vertex_count;
+            aemt_draw_item(t, enc, &all);
         }
     }
     MT_SEND(void)(enc, mt_sel("endEncoding"));
@@ -1903,6 +2124,64 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
     return cb;
 }
 
+/* The dynamic uniforms a draw with material `m` and `offsets` (NULL: all 0)
+ * reads are in range, and it sets no offset the pipeline has no dynamic
+ * binding for (#2198). */
+static int aemt_offsets_check(const AemtPipeline* p, const AemtMaterial* m, const AemtUInt* offsets, int item) {
+    for (int b = 0; b < AEMT_MAX_DESC; b++) {
+        AemtUInt off = offsets ? offsets[b] : 0;
+        if (p->kind[b] != AEMT_BIND_UNIFORM_DYNAMIC) {
+            if (off != 0) {
+                return aemt_fail(AEMT_ERR_ARG,
+                                 "draw %d sets an offset for binding %d, which the pipeline does not "
+                                 "declare as a dynamic uniform", item, b);
+            }
+            continue;
+        }
+        const AemtBuffer* buf = m ? m->buf[b] : NULL;
+        if (!buf) {
+            return aemt_fail(AEMT_ERR_ARG,
+                             "binding %d is a dynamic uniform with no buffer bound: set_buffer first", b);
+        }
+        if ((size_t)off + (size_t)p->dyn_range[b] > buf->size) {
+            return aemt_fail(AEMT_ERR_ARG,
+                             "draw %d reads binding %d's %d bytes at offset %lu, past the %zu-byte buffer",
+                             item, b, p->dyn_range[b], (unsigned long)off, buf->size);
+        }
+    }
+    return AEMT_OK;
+}
+
+/* Every stream the pipeline declares past binding 0 has a buffer holding
+ * what the frame's draws read from it (#2198). */
+static int aemt_streams_check(const AemtTarget* t, const AemtPipeline* p) {
+    long long instances_end = t->batch_count == 0 ? (long long)t->instance_count : 0;
+    for (int i = 0; i < t->batch_count; i++) {
+        const AemtDrawItem* it = &t->batch[i];
+        if (it->indirect) continue;
+        long long end = it->instances > 0 ? (long long)it->first_instance + it->instances
+                                          : (long long)t->instance_count;
+        if (end > instances_end) instances_end = end;
+    }
+    for (int b = 1; b < AEMT_MAX_BINDINGS; b++) {
+        if (!p->stream_declared[b]) continue;
+        const AemtBuffer* buf = t->streams[b];
+        if (!buf) {
+            return aemt_fail(AEMT_ERR_ARG,
+                             "the pipeline reads vertex stream %d, but no buffer is bound to it "
+                             "(vertex_stream)", b);
+        }
+        long long n = p->stream_instanced[b] ? instances_end : (long long)t->vertex_count;
+        unsigned long long need = (unsigned long long)n * (unsigned long long)p->stream_stride[b];
+        if (need > (unsigned long long)buf->size) {
+            return aemt_fail(AEMT_ERR_ARG,
+                             "vertex stream %d needs %llu bytes for %lld %s, but its buffer has %zu",
+                             b, need, n, p->stream_instanced[b] ? "instances" : "vertices", buf->size);
+        }
+    }
+    return AEMT_OK;
+}
+
 /* Records into the next slot and commits it without waiting; returns the
  * slot or a negative status. */
 static int aemt_submit_frame(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat, const float clear[4]) {
@@ -1912,26 +2191,42 @@ static int aemt_submit_frame(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat, 
     if (p && t->vertex_count > 0) {
         if (p->vertex_input && !t->vbuf) return aemt_fail(AEMT_ERR_ARG, "vertices were never uploaded");
         int limit = t->index_count > 0 ? t->index_count : t->vertex_count;
+        size_t cmd_bytes = t->index_count > 0 ? AEMT_INDIRECT_INDEXED_BYTES : AEMT_INDIRECT_BYTES;
         for (int i = 0; i < t->batch_count; i++) {
             AemtDrawItem* it = &t->batch[i];
-            if ((long long)it->first + it->count > limit) {
-                return aemt_fail(AEMT_ERR_ARG, "draw %d covers %d..%lld but only %d are uploaded",
-                                 i, it->first, (long long)it->first + it->count - 1, limit);
+            int rc = AEMT_OK;
+            if (it->indirect) {
+                size_t end = it->indirect_offset + (size_t)it->indirect_draws * cmd_bytes;
+                if (end > it->indirect->size) {
+                    return aemt_fail(AEMT_ERR_ARG,
+                                     "draw %d reads %d commands of %zu bytes at %zu, past the %zu-byte buffer",
+                                     i, it->indirect_draws, cmd_bytes, it->indirect_offset, it->indirect->size);
+                }
+            } else {
+                if ((long long)it->first + it->count > limit) {
+                    return aemt_fail(AEMT_ERR_ARG, "draw %d covers %d..%lld but only %d are uploaded",
+                                     i, it->first, (long long)it->first + it->count - 1, limit);
+                }
+                rc = aemt_check_index_start(t, it->first);
+                if (rc != AEMT_OK) return rc;
             }
-            int rc = aemt_check_index_start(t, it->first);
-            if (rc != AEMT_OK) return rc;
             if (it->mat && it->mat->pipe != p) {
                 return aemt_fail(AEMT_ERR_ARG, "draw %d uses a material of another pipeline", i);
             }
-            rc = aemt_material_ready(p, it->mat ? it->mat : (mat ? mat : p->def));
-            if (rc == AEMT_OK) rc = aemt_material_sampleable(t, it->mat ? it->mat : (mat ? mat : p->def));
+            AemtMaterial* im = it->mat ? it->mat : (mat ? mat : p->def);
+            rc = aemt_material_ready(p, im);
+            if (rc == AEMT_OK) rc = aemt_material_sampleable(t, im);
+            if (rc == AEMT_OK) rc = aemt_offsets_check(p, im, it->offsets, i);
             if (rc != AEMT_OK) return rc;
         }
         if (t->batch_count == 0) {
             int rc = aemt_material_ready(p, mat ? mat : p->def);
             if (rc == AEMT_OK) rc = aemt_material_sampleable(t, mat ? mat : p->def);
+            if (rc == AEMT_OK) rc = aemt_offsets_check(p, mat ? mat : p->def, NULL, -1);
             if (rc != AEMT_OK) return rc;
         }
+        int src = aemt_streams_check(t, p);
+        if (src != AEMT_OK) return src;
     }
     int slot = t->next_frame;
     int rc = aemt_wait_frame(t, slot);
@@ -1940,6 +2235,8 @@ static int aemt_submit_frame(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat, 
     void* pool = g_mt.pool_push();
     id cb = aemt_record(t, fr, p, mat, clear);
     if (cb) {
+        fr->timed = t->timing_on;
+        fr->seq = ++t->submitted_seq;
         pthread_mutex_lock(&t->dev->lock);
         aemt_fence_commit(&fr->fence, cb);
         pthread_mutex_unlock(&t->dev->lock);
@@ -2043,7 +2340,30 @@ struct AemtCompute {
     AemtUInt      group[3];        /* threads a group, 0 until set */
     AemtFence     fence;
     int           timeout_ms;
+    /* GPU timing (#2198): whether the dispatch in flight reports, and the
+     * newest waited one's time. */
+    int           timing_on;
+    int           timed;
+    double        gpu_ms;
 };
+
+/* Waits for the dispatch in flight, taking its GPU time when it reports. */
+static int aemt_compute_retire(AemtCompute* c) {
+    int was = c->fence.submitted;
+    int rc = aemt_fence_wait(&c->fence, c->timeout_ms);
+    if (rc == AEMT_OK && was && c->timed) c->gpu_ms = c->fence.gpu_ms;
+    return rc;
+}
+
+int aemt_compute_set_timing(AemtCompute* c, int on) {
+    aemt_clear_error();
+    if (!c) return aemt_fail(AEMT_ERR_ARG, "compute is null");
+    c->timing_on = on ? 1 : 0;
+    c->gpu_ms = -1.0;
+    return AEMT_OK;
+}
+
+double aemt_compute_gpu_ms(const AemtCompute* c) { return (c && c->timing_on) ? c->gpu_ms : -1.0; }
 
 void aemt_compute_destroy(AemtCompute* c) {
     if (!c) return;
@@ -2069,7 +2389,15 @@ AemtCompute* aemt_compute_create(AemtDevice* d, const void* cs, size_t len, cons
     c->dev = d;
     c->push_bytes = push_bytes;
     c->timeout_ms = 5000;
-    for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) c->kind[i] = bindings->kind[i];
+    c->gpu_ms = -1.0;
+    for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) {
+        if (bindings->kind[i] == AEMT_BIND_UNIFORM_DYNAMIC) {
+            aemt_fail(AEMT_ERR_ARG, "binding %d is a dynamic uniform, which draws take and compute passes do not", i);
+            free(c);
+            return NULL;
+        }
+        c->kind[i] = bindings->kind[i];
+    }
     if (aemt_fence_init(&c->fence) != AEMT_OK) { free(c); return NULL; }
     void* pool = g_mt.pool_push();
     id lib = aemt_library(d, cs, len, "kernel");
@@ -2173,7 +2501,7 @@ int aemt_dispatch_async(AemtCompute* c, int gx, int gy, int gz) {
     for (int i = 0; i < AEMT_MAX_DESC; i++) {
         if (c->kind[i] && !c->args.set[i]) return aemt_fail(AEMT_ERR_ARG, "binding %d was declared but never set", i);
     }
-    int rc = aemt_fence_wait(&c->fence, c->timeout_ms);
+    int rc = aemt_compute_retire(c);
     if (rc != AEMT_OK) return rc;
     AemtDevice* d = c->dev;
     void* pool = g_mt.pool_push();
@@ -2202,6 +2530,7 @@ int aemt_dispatch_async(AemtCompute* c, int gx, int gy, int gz) {
     AemtSize threads = { c->group[0], c->group[1], c->group[2] };
     MT_SEND(void, AemtSize, AemtSize)(enc, mt_sel("dispatchThreadgroups:threadsPerThreadgroup:"), groups, threads);
     MT_SEND(void)(enc, mt_sel("endEncoding"));
+    c->timed = c->timing_on;
     pthread_mutex_lock(&d->lock);
     aemt_fence_commit(&c->fence, cb);
     pthread_mutex_unlock(&d->lock);
@@ -2212,7 +2541,7 @@ int aemt_dispatch_async(AemtCompute* c, int gx, int gy, int gz) {
 int aemt_compute_wait(AemtCompute* c) {
     aemt_clear_error();
     if (!c) return aemt_fail(AEMT_ERR_ARG, "compute is null");
-    return aemt_fence_wait(&c->fence, c->timeout_ms);
+    return aemt_compute_retire(c);
 }
 
 int aemt_dispatch(AemtCompute* c, int gx, int gy, int gz) {
@@ -2717,6 +3046,22 @@ int    aemt_material_set_buffer(AemtMaterial* m, int b, AemtBuffer* f) { (void)m
 int    aemt_target_set_push(AemtTarget* t, const void* d, size_t n) { (void)t; (void)d; (void)n; return aemt_no(); }
 int    aemt_batch_reset(AemtTarget* t) { (void)t; return aemt_no(); }
 int    aemt_batch_add(AemtTarget* t, AemtMaterial* m, int f, int c) { (void)t; (void)m; (void)f; (void)c; return aemt_no(); }
+int    aemt_batch_add_instanced(AemtTarget* t, AemtMaterial* m, int f, int c, int fi, int n) {
+    (void)t; (void)m; (void)f; (void)c; (void)fi; (void)n; return aemt_no();
+}
+int    aemt_batch_add_indirect(AemtTarget* t, AemtMaterial* m, AemtBuffer* b, int o, int n) {
+    (void)t; (void)m; (void)b; (void)o; (void)n; return aemt_no();
+}
+int    aemt_batch_set_offset(AemtTarget* t, int i, int b, int o) { (void)t; (void)i; (void)b; (void)o; return aemt_no(); }
+int    aemt_uniform_offset_alignment(const AemtDevice* d) { (void)d; return 0; }
+int    aemt_bindings_uniform_dynamic(AemtBindings* b, int n, int s) { (void)b; (void)n; (void)s; return aemt_no(); }
+int    aemt_target_set_stream(AemtTarget* t, int b, AemtBuffer* buf) { (void)t; (void)b; (void)buf; return aemt_no(); }
+int    aemt_target_set_instances(AemtTarget* t, int n) { (void)t; (void)n; return aemt_no(); }
+int    aemt_target_instances(const AemtTarget* t) { (void)t; return 0; }
+int    aemt_target_set_timing(AemtTarget* t, int on) { (void)t; (void)on; return aemt_no(); }
+double aemt_target_gpu_ms(const AemtTarget* t) { (void)t; return -1.0; }
+int    aemt_compute_set_timing(AemtCompute* c, int on) { (void)c; (void)on; return aemt_no(); }
+double aemt_compute_gpu_ms(const AemtCompute* c) { (void)c; return -1.0; }
 int    aemt_batch_count(const AemtTarget* t) { (void)t; return 0; }
 int    aemt_draw(AemtTarget* t, AemtPipeline* p, AemtMaterial* m, float r, float g, float b, float a) {
     (void)t; (void)p; (void)m; (void)r; (void)g; (void)b; (void)a; return aemt_no();
@@ -2971,6 +3316,28 @@ int   aemt_ae_compute_set_timeout_ms(void* c, int ms) { return aemt_compute_set_
 int   aemt_ae_dispatch(void* c, int x, int y, int z) { return aemt_dispatch((AemtCompute*)c, x, y, z); }
 int   aemt_ae_dispatch_async(void* c, int x, int y, int z) { return aemt_dispatch_async((AemtCompute*)c, x, y, z); }
 int   aemt_ae_compute_wait(void* c)          { return aemt_compute_wait((AemtCompute*)c); }
+int   aemt_ae_batch_add_instanced(void* t, void* m, int first, int count, int first_instance, int instances) {
+    return aemt_batch_add_instanced((AemtTarget*)t, (AemtMaterial*)m, first, count, first_instance, instances);
+}
+int   aemt_ae_batch_add_indirect(void* t, void* m, void* buf, int offset, int draws) {
+    return aemt_batch_add_indirect((AemtTarget*)t, (AemtMaterial*)m, (AemtBuffer*)buf, offset, draws);
+}
+int   aemt_ae_batch_set_offset(void* t, int item, int binding, int offset) {
+    return aemt_batch_set_offset((AemtTarget*)t, item, binding, offset);
+}
+int   aemt_ae_uniform_offset_alignment(void* d) { return aemt_uniform_offset_alignment((const AemtDevice*)d); }
+int   aemt_ae_bindings_uniform_dynamic(void* b, int binding, int bytes) {
+    return aemt_bindings_uniform_dynamic((AemtBindings*)b, binding, bytes);
+}
+int   aemt_ae_vertex_stream(void* t, int binding, void* buf) {
+    return aemt_target_set_stream((AemtTarget*)t, binding, (AemtBuffer*)buf);
+}
+int   aemt_ae_target_set_instances(void* t, int count) { return aemt_target_set_instances((AemtTarget*)t, count); }
+int   aemt_ae_target_instances(void* t) { return aemt_target_instances((const AemtTarget*)t); }
+int   aemt_ae_target_set_timing(void* t, int on) { return aemt_target_set_timing((AemtTarget*)t, on); }
+double aemt_ae_target_gpu_ms(void* t) { return aemt_target_gpu_ms((const AemtTarget*)t); }
+int   aemt_ae_compute_set_timing(void* c, int on) { return aemt_compute_set_timing((AemtCompute*)c, on); }
+double aemt_ae_compute_gpu_ms(void* c) { return aemt_compute_gpu_ms((const AemtCompute*)c); }
 
 void* aemt_ae_swapchain_create(void* d, int kind, void* display, void* window, int w, int h) {
     return (void*)aemt_swapchain_create((AemtDevice*)d, kind, display, window, w, h);

@@ -137,6 +137,30 @@
 // cannot either. A 3D texture is uploaded slice after slice
 // (w * h * depth * 4 bytes) and read through a sampler3D.
 //
+// Instancing, indirect draws, dynamic uniform offsets and GPU timing (#2198):
+//
+//   vulkan.vertex_stream(t, binding, buf)        -> int  a buffer as stream 1..7
+//   vulkan.target_set_instances(t, count)        -> int  instances a draw makes
+//   vulkan.target_instances(t)                   -> int
+//   vulkan.batch_add_instanced(t, m, first, count, first_instance, instances) -> int
+//   vulkan.batch_add_indirect(t, m, buf, offset, draws) -> int  commands from a buffer
+//   vulkan.bindings_uniform_dynamic(b, binding, bytes)  -> int
+//   vulkan.batch_set_offset(t, item, binding, offset)   -> int
+//   vulkan.uniform_offset_alignment(dev)         -> int
+//   vulkan.target_set_timing(t, on)              -> int
+//   vulkan.target_gpu_ms(t)                      -> float  -1 until a timed frame
+//   vulkan.compute_set_timing(c, on)             -> int
+//   vulkan.compute_gpu_ms(c)                     -> float
+//
+// Binding 0 is the target's own vertices; a layout can declare streams 1..7
+// as well, per vertex or per instance, each fed from a buffer. An indirect
+// draw reads its commands from a buffer when the frame runs, so a compute pass
+// can write them: five 32-bit words each with indices (index count, instance
+// count, first index, vertex offset, first instance), four without (vertex
+// count, instance count, first vertex, first instance). A dynamic uniform is
+// a `bytes` window of the buffer set_buffer binds, read at the offset each
+// batch entry sets.
+//
 // The window is never this module's: `kind`, `display` and `window` are what
 // the toolkit that owns it hands out, numbered as aether-ui's
 // native_view_kind() numbers them (WINDOW_WIN32 = 1 ... WINDOW_WAYLAND = 4),
@@ -250,7 +274,16 @@ exports (
     aevk_ae_set_target, aevk_ae_material_set_target,
     aevk_ae_texture_create_3d, aevk_ae_texture_depth,
     set_target, set_target_depth, material_set_target, material_set_target_depth,
-    texture_create_3d, texture_depth
+    texture_create_3d, texture_depth,
+    aevk_ae_vertex_stream, aevk_ae_target_set_instances, aevk_ae_target_instances,
+    aevk_ae_batch_add_instanced, aevk_ae_batch_add_indirect, aevk_ae_batch_set_offset,
+    aevk_ae_uniform_offset_alignment, aevk_ae_bindings_uniform_dynamic,
+    aevk_ae_target_set_timing, aevk_ae_target_gpu_ms,
+    aevk_ae_compute_set_timing, aevk_ae_compute_gpu_ms,
+    vertex_stream, target_set_instances, target_instances,
+    batch_add_instanced, batch_add_indirect, batch_set_offset,
+    uniform_offset_alignment, bindings_uniform_dynamic,
+    target_set_timing, target_gpu_ms, compute_set_timing, compute_gpu_ms
 )
 
 extern aevk_ae_available() -> int
@@ -317,6 +350,18 @@ extern aevk_ae_material_create(p: ptr) -> ptr
 extern aevk_ae_material_destroy(m: ptr)
 extern aevk_ae_material_set_texture(m: ptr, binding: int, tex: ptr) -> int
 extern aevk_ae_set_target(p: ptr, binding: int, t: ptr, depth: int) -> int
+extern aevk_ae_vertex_stream(t: ptr, binding: int, buf: ptr) -> int
+extern aevk_ae_target_set_instances(t: ptr, count: int) -> int
+extern aevk_ae_target_instances(t: ptr) -> int
+extern aevk_ae_batch_add_instanced(t: ptr, m: ptr, first: int, count: int, first_instance: int, instances: int) -> int
+extern aevk_ae_batch_add_indirect(t: ptr, m: ptr, buf: ptr, offset: int, draws: int) -> int
+extern aevk_ae_batch_set_offset(t: ptr, item: int, binding: int, offset: int) -> int
+extern aevk_ae_uniform_offset_alignment(dev: ptr) -> int
+extern aevk_ae_bindings_uniform_dynamic(b: ptr, binding: int, bytes: int) -> int
+extern aevk_ae_target_set_timing(t: ptr, on: int) -> int
+extern aevk_ae_target_gpu_ms(t: ptr) -> float
+extern aevk_ae_compute_set_timing(c: ptr, on: int) -> int
+extern aevk_ae_compute_gpu_ms(c: ptr) -> float
 extern aevk_ae_material_set_target(m: ptr, binding: int, t: ptr, depth: int) -> int
 extern aevk_ae_texture_create_3d(dev: ptr, w: int, h: int, depth: int, linear: int, repeat: int) -> ptr
 extern aevk_ae_texture_depth(tex: ptr) -> int
@@ -630,6 +675,47 @@ batch_add(t: ptr, m: ptr, first: int, count: int) -> int {
     return aevk_ae_batch_add(t, m, first, count)
 }
 batch_count(t: ptr) -> int { return aevk_ae_batch_count(t) }
+
+// Instancing (#2198). Every draw of a target makes `count` instances unless
+// a batch entry says otherwise; a per-instance stream advances once each.
+target_set_instances(t: ptr, count: int) -> int { return aevk_ae_target_set_instances(t, count) }
+target_instances(t: ptr) -> int { return aevk_ae_target_instances(t) }
+// A buffer as vertex stream `binding`, 1..7: binding 0 is the target's own
+// vertices. The pipeline's layout gives the stride and whether it advances
+// per vertex or per instance; null unbinds it. A draw refuses a stream the
+// pipeline reads that is unbound or shorter than what the draw reads. The
+// buffer has to outlive the draws that use it.
+vertex_stream(t: ptr, binding: int, buf: ptr) -> int { return aevk_ae_vertex_stream(t, binding, buf) }
+// `instances` copies of indices (or vertices) first..first+count-1, the
+// first of them instance `first_instance`.
+batch_add_instanced(t: ptr, m: ptr, first: int, count: int, first_instance: int, instances: int) -> int {
+    return aevk_ae_batch_add_instanced(t, m, first, count, first_instance, instances)
+}
+// `draws` commands read from `buf` at `offset` (a multiple of 4) when the
+// frame runs. The commands are the GPU's to supply and are not checked
+// against the geometry, as in the native APIs.
+batch_add_indirect(t: ptr, m: ptr, buf: ptr, offset: int, draws: int) -> int {
+    return aevk_ae_batch_add_indirect(t, m, buf, offset, draws)
+}
+// The offset batch entry `item` (0 is the first added) reads dynamic uniform
+// `binding` at: a multiple of uniform_offset_alignment(dev).
+batch_set_offset(t: ptr, item: int, binding: int, offset: int) -> int {
+    return aevk_ae_batch_set_offset(t, item, binding, offset)
+}
+uniform_offset_alignment(dev: ptr) -> int { return aevk_ae_uniform_offset_alignment(dev) }
+// A uniform read as a `bytes` window of the buffer set_buffer binds, at the
+// offset each batch entry sets: one buffer holds every draw's block.
+bindings_uniform_dynamic(b: ptr, binding: int, bytes: int) -> int {
+    return aevk_ae_bindings_uniform_dynamic(b, binding, bytes)
+}
+
+// GPU time in milliseconds of the newest frame (or dispatch) the host waited
+// for, start to end, readback copy included; -1 while timing is off or before
+// a timed one has finished. ERR_UNSUPPORTED where the queue keeps no time.
+target_set_timing(t: ptr, on: int) -> int { return aevk_ae_target_set_timing(t, on) }
+target_gpu_ms(t: ptr) -> float { return aevk_ae_target_gpu_ms(t) }
+compute_set_timing(c: ptr, on: int) -> int { return aevk_ae_compute_set_timing(c, on) }
+compute_gpu_ms(c: ptr) -> float { return aevk_ae_compute_gpu_ms(c) }
 
 // draw_material blocks like draw; submit_material pipelines like submit.
 // Passing a null material uses the pipeline's default one.

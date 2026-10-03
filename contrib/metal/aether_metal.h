@@ -185,6 +185,24 @@ int           aemt_material_set_buffer(AemtMaterial* m, int binding, AemtBuffer*
 int aemt_target_set_push(AemtTarget* t, const void* data, size_t len);
 int aemt_batch_reset(AemtTarget* t);
 int aemt_batch_add(AemtTarget* t, AemtMaterial* mat, int first, int count);
+
+/* Instancing, indirect draws, dynamic uniform offsets and GPU timing, as in
+ * contrib/vulkan (#2198). Stream B is [[buffer(16 + B)]]; a dynamic uniform
+ * is its buffer bound at the draw's offset, a multiple of 256; GPU time is
+ * the command buffer's GPUStartTime to GPUEndTime. */
+int    aemt_target_set_stream(AemtTarget* t, int binding, AemtBuffer* buf);
+int    aemt_target_set_instances(AemtTarget* t, int count);
+int    aemt_target_instances(const AemtTarget* t);
+int    aemt_batch_add_instanced(AemtTarget* t, AemtMaterial* mat, int first, int count,
+                                int first_instance, int instances);
+int    aemt_batch_add_indirect(AemtTarget* t, AemtMaterial* mat, AemtBuffer* buf, int offset, int draws);
+int    aemt_batch_set_offset(AemtTarget* t, int item, int binding, int offset);
+int    aemt_uniform_offset_alignment(const AemtDevice* d);
+int    aemt_bindings_uniform_dynamic(AemtBindings* b, int binding, int bytes);
+int    aemt_target_set_timing(AemtTarget* t, int on);
+double aemt_target_gpu_ms(const AemtTarget* t);
+int    aemt_compute_set_timing(AemtCompute* c, int on);
+double aemt_compute_gpu_ms(const AemtCompute* c);
 int aemt_batch_count(const AemtTarget* t);
 int aemt_draw(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat,
               float r, float g, float b, float a);

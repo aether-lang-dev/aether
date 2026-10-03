@@ -160,21 +160,16 @@ main() {
                 "a duplicate binding is refused")
         }
 
-        // A target feeds vertex stream 0 only, so a layout declaring another
-        // is refused rather than drawn from a buffer that is never bound.
-        spec.it_when(ready, "refuses a layout with a second vertex stream", reason) callback {
+        // Streams are bindings 0..7, each declared once; what a second
+        // stream draws is test_vulkan_draws.ae's (#2198).
+        spec.it_when(ready, "refuses a vertex stream past the last, or declared twice", reason) callback {
             two = vulkan.layout_create()
-            _ = vulkan.layout_binding(two, 0, 8, vulkan.PER_VERTEX)
-            _ = vulkan.layout_binding(two, 1, 8, vulkan.PER_INSTANCE)
-            _ = vulkan.layout_attr(two, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
-            _ = vulkan.layout_attr(two, 1, 1, vulkan.FORMAT_R32G32_SFLOAT, 0)
-            yvs, yvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
-            yfs, yfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
-            check(vulkan.pipeline_create_ex(dev, target, yvs, yvl, yfs, yfl, two, 0, binds) == null,
-                "a second vertex stream is refused")
-            check(string.index_of(vulkan.last_error(), "binding 0 only") >= 0, "and says why")
-            string.free(yvs)
-            string.free(yfs)
+            check(vulkan.layout_binding(two, 1, 8, vulkan.PER_INSTANCE) == vulkan.OK, "stream 1")
+            check(vulkan.layout_binding(two, 1, 8, vulkan.PER_INSTANCE) == vulkan.ERR_ARG,
+                "stream 1 again is refused")
+            check(vulkan.layout_binding(two, 8, 8, vulkan.PER_INSTANCE) == vulkan.ERR_ARG,
+                "stream 8 is refused")
+            check(string.index_of(vulkan.last_error(), "0..7") >= 0, "and says why")
             vulkan.layout_destroy(two)
         }
     }

@@ -242,6 +242,40 @@ int aevk_batch_reset(AevkTarget* t);
 int aevk_batch_add(AevkTarget* t, AevkMaterial* mat, int first, int count);
 int aevk_batch_count(const AevkTarget* t);
 
+/* --- instancing, indirect draws, dynamic offsets, timing (#2198) ----------- */
+
+/* A caller's buffer as vertex stream `binding`, 1..7 (binding 0 is the
+ * target's own vertices); NULL unbinds it. The pipeline's layout gives its
+ * stride and rate. A draw refuses a stream the pipeline reads that is unbound
+ * or too short for the vertices or instances drawn. */
+int aevk_target_set_stream(AevkTarget* t, int binding, AevkBuffer* buf);
+/* Instances each draw makes, 1 by default, unless a batch entry says. */
+int aevk_target_set_instances(AevkTarget* t, int count);
+int aevk_target_instances(const AevkTarget* t);
+/* A batch entry drawing `instances` copies of the range from instance
+ * `first_instance`. */
+int aevk_batch_add_instanced(AevkTarget* t, AevkMaterial* mat, int first, int count,
+                             int first_instance, int instances);
+/* A batch entry whose `draws` commands are read from `buf` at `offset` when
+ * the frame runs: five 32-bit words each with indices (index count, instance
+ * count, first index, vertex offset, first instance), four without (vertex
+ * count, instance count, first vertex, first instance). */
+int aevk_batch_add_indirect(AevkTarget* t, AevkMaterial* mat, AevkBuffer* buf, int offset, int draws);
+/* The offset batch entry `item` reads dynamic uniform `binding` at: a
+ * multiple of aevk_uniform_offset_alignment. */
+int aevk_batch_set_offset(AevkTarget* t, int item, int binding, int offset);
+int aevk_uniform_offset_alignment(const AevkDevice* d);
+/* A uniform read as a `bytes` window of the buffer set_buffer binds, at the
+ * offset each draw chooses. Graphics pipelines only. */
+int aevk_bindings_uniform_dynamic(AevkBindings* b, int binding, int bytes);
+/* GPU time of a target's frames and a compute pass's dispatches, in
+ * milliseconds, for the newest one waited for; -1 while timing is off or
+ * before one has finished. ERR_UNSUPPORTED on a queue with no timestamps. */
+int    aevk_target_set_timing(AevkTarget* t, int on);
+double aevk_target_gpu_ms(const AevkTarget* t);
+int    aevk_compute_set_timing(AevkCompute* c, int on);
+double aevk_compute_gpu_ms(const AevkCompute* c);
+
 /* Writes a uniform buffer, creating and binding it on first use, then
  * copying on every call. Host-coherent, so a per-frame update is a memcpy
  * and no descriptor rewrite. */

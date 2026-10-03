@@ -1,0 +1,19 @@
+#version 450
+
+// Writes `n` 32-bit words from word `at` of a buffer: the commands an
+// indirect draw reads, set on the GPU (#2198).
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) writeonly buffer Words { uint w[]; } words;
+
+layout(push_constant) uniform Push {
+    uint at;
+    uint n;
+    uint v[5];
+} push;
+
+void main() {
+    for (uint i = 0u; i < push.n; i++) {
+        words.w[push.at + i] = push.v[i];
+    }
+}

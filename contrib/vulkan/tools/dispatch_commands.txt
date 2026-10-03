@@ -13,6 +13,7 @@ vkGetPhysicalDeviceProperties
 vkGetPhysicalDeviceMemoryProperties
 vkGetPhysicalDeviceQueueFamilyProperties
 vkGetPhysicalDeviceFormatProperties
+vkGetPhysicalDeviceFeatures
 vkEnumerateDeviceExtensionProperties
 vkCreateDevice
 vkGetDeviceProcAddr
@@ -86,6 +87,13 @@ vkCreateSemaphore
 vkDestroySemaphore
 vkCreateComputePipelines
 vkCmdDispatch
+vkCmdDrawIndirect
+vkCmdDrawIndexedIndirect
+vkCreateQueryPool
+vkDestroyQueryPool
+vkCmdResetQueryPool
+vkCmdWriteTimestamp
+vkGetQueryPoolResults
 
 # surface
 vkDestroySurfaceKHR

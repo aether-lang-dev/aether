@@ -262,6 +262,19 @@ struct AevkDevice {
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t         max_dim;
     uint32_t         max_dim_3d;   /* a 3D texture's largest side (#2198) */
+    /* Indirect draws (#2198): whether one call takes several commands, and
+     * whether a command's first instance is honoured. Both are optional
+     * features, enabled when the device has them. */
+    int              multi_draw_indirect;
+    int              indirect_first_instance;
+    /* GPU timestamps (#2198): nanoseconds a tick, and how many low bits of a
+     * timestamp the queue writes. 0 bits is a queue with no timestamps. */
+    float            timestamp_period;
+    uint32_t         timestamp_bits;
+    /* Dynamic uniform offsets (#2198): the alignment every offset needs, and
+     * the largest window a uniform binding can read. */
+    uint32_t         uniform_align;
+    uint32_t         max_uniform_range;
     /* Bumped whenever what a draw samples changes shape: a material binding a
      * target or rebinding one away from it, or a target rebuilding its images.
      * A recorded frame names the sampled images in its barriers, so a frame
@@ -286,17 +299,35 @@ struct AevkDevice {
  * array: a pipeline with more than this many streams or attributes is past
  * the point where a description struct is the right interface. */
 #define AEVK_MAX_BINDINGS 8
+/* The bytes of one indirect draw command, indexed and not: VkDrawIndexed-
+ * IndirectCommand and VkDrawIndirectCommand, which Direct3D 12 and Metal lay
+ * out the same way. */
+#define AEVK_INDIRECT_INDEXED_BYTES 20
+#define AEVK_INDIRECT_BYTES         16
 #define AEVK_MAX_ATTRS    16
 #define AEVK_MAX_DESC     8
 #define AEVK_MAX_PUSH     128   /* the guaranteed minimum every device offers */
+#define AEVK_MAX_FRAMES   8     /* frames in flight a target can have */
 
 /* One draw inside a frame. `first`/`count` address indices when the target
  * has an index buffer and vertices otherwise, so a batch slices whatever
- * geometry is already uploaded rather than needing its own copy. */
+ * geometry is already uploaded rather than needing its own copy.
+ *
+ * `instances` 0 draws the target's instance count from instance 0; above 0
+ * it draws that many from `first_instance` (#2198). An indirect draw reads
+ * `indirect_draws` commands from `indirect` at `indirect_offset` instead of
+ * first/count/instances. `offsets` is each dynamic uniform binding's offset
+ * into its buffer, by binding number. */
 typedef struct {
     AevkMaterial* mat;
     int           first;
     int           count;
+    int           first_instance;
+    int           instances;
+    AevkBuffer*   indirect;
+    VkDeviceSize  indirect_offset;
+    int           indirect_draws;
+    uint32_t      offsets[AEVK_MAX_DESC];
 } AevkDrawItem;
 
 typedef struct {
@@ -328,6 +359,11 @@ typedef struct {
     unsigned        rec_batch_version;
     int             rec_batch_count;
     unsigned        rec_bind_epoch;   /* the device's bind_epoch when recorded */
+    /* Whether the recorded commands write the slot's two timestamps, so the
+     * wait that retires it reads them, and which submission of the target
+     * the slot holds (#2198). */
+    int             timed;
+    unsigned long long seq;
 } AevkFrame;
 
 struct AevkTarget {
@@ -401,6 +437,23 @@ struct AevkTarget {
     int            batch_cap;
     unsigned       batch_version;
 
+    /* Vertex streams past binding 0, which the target's own vertices fill:
+     * a caller's buffer per binding (vertex_stream), and the instances each
+     * draw makes, 1 unless set (#2198). */
+    AevkBuffer*    streams[AEVK_MAX_BINDINGS];
+    int            instance_count;
+
+    /* GPU timestamps (#2198): two queries a frame slot, its start and its
+     * end, read back when the slot is waited on. `gpu_ms` is the newest
+     * waited frame's time, -1 before there is one, and `gpu_seq` the
+     * submission it came from, so waiting on the slots out of order never
+     * reports an older frame. */
+    VkQueryPool    timer_pool;
+    int            timing_on;
+    double         gpu_ms;
+    unsigned long long submitted_seq;
+    unsigned long long gpu_seq;
+
     unsigned char  push_data[AEVK_MAX_PUSH];
     uint32_t       push_size;
 
@@ -431,6 +484,8 @@ struct AevkLayout {
 struct AevkBindings {
     VkDescriptorSetLayoutBinding b[AEVK_MAX_DESC];
     uint32_t count;
+    /* The window a dynamic uniform binding reads, by binding number (#2198). */
+    uint32_t dyn_range[AEVK_MAX_DESC];
 };
 
 struct AevkTexture {
@@ -508,12 +563,23 @@ struct AevkPipeline {
     VkDescriptorPool      pools[AEVK_MAX_POOLS];
     int                   pool_count;
     int                   sets_in_pool;   /* used in the newest pool */
-    VkDescriptorPoolSize  pool_sizes[3];
+    VkDescriptorPoolSize  pool_sizes[4];
     uint32_t              pool_size_count;
     /* What each binding was declared as, so a write of the wrong kind is
      * refused with its binding named rather than left to the driver. */
     int                   declared[AEVK_MAX_DESC];
     VkDescriptorType      desc_type[AEVK_MAX_DESC];
+    /* Dynamic uniform bindings (#2198): each one's window, and how many there
+     * are, which every bind of the set passes that many offsets for. */
+    uint32_t              dyn_range[AEVK_MAX_DESC];
+    uint32_t              dyn_count;
+
+    /* Vertex streams the layout declares, past binding 0 (#2198): their
+     * strides and rates, so a draw checks the buffer bound to each holds
+     * what it will read. */
+    int                   stream_declared[AEVK_MAX_BINDINGS];
+    uint32_t              stream_stride[AEVK_MAX_BINDINGS];
+    int                   stream_instanced[AEVK_MAX_BINDINGS];
 
     /* The set pipeline_set_uniform / pipeline_set_texture write to, so code
      * that never asks for a material keeps working unchanged. */
@@ -826,7 +892,36 @@ AevkDevice* aevk_device_create(void) {
     d->max_groups[2] = props.limits.maxComputeWorkGroupCount[2];
     d->sample_counts = props.limits.framebufferColorSampleCounts &
                        props.limits.framebufferDepthSampleCounts;
+    d->uniform_align = (uint32_t)props.limits.minUniformBufferOffsetAlignment;
+    if (d->uniform_align == 0) d->uniform_align = 1;
+    d->max_uniform_range = props.limits.maxUniformBufferRange;
+    d->timestamp_period = props.limits.timestampPeriod;
     d->ia.vkGetPhysicalDeviceMemoryProperties(d->phys, &d->mem_props);
+
+    /* Timestamps are written by the queue, so it is the queue family that
+     * says how many bits are valid; 0 means it writes none (#2198). */
+    uint32_t qfn = 0;
+    d->ia.vkGetPhysicalDeviceQueueFamilyProperties(d->phys, &qfn, NULL);
+    if (d->queue_family < qfn) {
+        VkQueueFamilyProperties* qf = (VkQueueFamilyProperties*)calloc(qfn, sizeof(*qf));
+        if (!qf) { aevk_fail(AEVK_ERR_OOM, "out of memory"); goto fail; }
+        d->ia.vkGetPhysicalDeviceQueueFamilyProperties(d->phys, &qfn, qf);
+        d->timestamp_bits = qf[d->queue_family].timestampValidBits;
+        free(qf);
+    }
+
+    /* Optional features the shared shape uses where the device has them:
+     * several indirect commands in one call, and a first instance read from
+     * the command. Nothing else is enabled, so a device without them is
+     * still a device (#2198). */
+    VkPhysicalDeviceFeatures have, want;
+    memset(&have, 0, sizeof(have));
+    memset(&want, 0, sizeof(want));
+    d->ia.vkGetPhysicalDeviceFeatures(d->phys, &have);
+    want.multiDrawIndirect = have.multiDrawIndirect;
+    want.drawIndirectFirstInstance = have.drawIndirectFirstInstance;
+    d->multi_draw_indirect = have.multiDrawIndirect == VK_TRUE;
+    d->indirect_first_instance = have.drawIndirectFirstInstance == VK_TRUE;
 
     /* VK_KHR_portability_subset must be enabled when the device advertises it,
      * or vkCreateDevice is required to fail. This is the MoltenVK path.
@@ -865,6 +960,7 @@ AevkDevice* aevk_device_create(void) {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = dev_ext_count;
     dci.ppEnabledExtensionNames = dev_ext_count ? dev_exts : NULL;
+    dci.pEnabledFeatures = &want;
 
     VkResult r = d->ia.vkCreateDevice(d->phys, &dci, NULL, &d->device);
     if (r != VK_SUCCESS) {
@@ -1574,6 +1670,8 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
     t->has_depth = want_depth ? 1 : 0;
     t->depth_format = depth_format;
     t->timeout_ns = 5000000000ull;
+    t->instance_count = 1;
+    t->gpu_ms = -1.0;
     t->sampleable = sampleable;
 
     if (sampleable && aevk_make_target_sampler(d, linear_ok, &t->sampler) != AEVK_OK) goto fail;
@@ -1611,6 +1709,7 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->pass)          d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
         if (t->sampler)       d->da.vkDestroySampler(d->device, t->sampler, NULL);
         if (t->depth_sampler) d->da.vkDestroySampler(d->device, t->depth_sampler, NULL);
+        if (t->timer_pool)    d->da.vkDestroyQueryPool(d->device, t->timer_pool, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(t->batch);
@@ -1689,7 +1788,27 @@ int aevk_batch_reset(AevkTarget* t) {
     return AEVK_OK;
 }
 
-int aevk_batch_add(AevkTarget* t, AevkMaterial* mat, int first, int count) {
+static void aevk_invalidate_records(AevkTarget* t);
+
+/* Appends one draw. The device lock is held. */
+static int aevk_batch_push(AevkTarget* t, const AevkDrawItem* item) {
+    if (t->batch_count == t->batch_cap) {
+        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
+        AevkDrawItem* grown = (AevkDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
+        if (!grown) return aevk_fail(AEVK_ERR_OOM, "out of memory");
+        t->batch = grown;
+        t->batch_cap = cap;
+    }
+    t->batch[t->batch_count++] = *item;
+    t->batch_version++;
+    return AEVK_OK;
+}
+
+/* A draw of `count` indices (or vertices) from `first`: `instances` of them
+ * from `first_instance`, or with `instances` 0 the target's instance count
+ * from instance 0. */
+static int aevk_batch_add_range(AevkTarget* t, AevkMaterial* mat, int first, int count,
+                                int first_instance, int instances) {
     aevk_clear_error();
     if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
     if (first < 0) return aevk_fail(AEVK_ERR_ARG, "first must not be negative, got %d", first);
@@ -1705,23 +1824,179 @@ int aevk_batch_add(AevkTarget* t, AevkMaterial* mat, int first, int count) {
         return aevk_fail(AEVK_ERR_ARG, "draw covers %d..%lld but only %d are uploaded",
                          first, (long long)first + count - 1, limit);
     }
-    if (t->batch_count == t->batch_cap) {
-        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
-        AevkDrawItem* grown = (AevkDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
-        if (!grown) {
-            AEVK_MUTEX_UNLOCK(&t->dev->lock);
-            return aevk_fail(AEVK_ERR_OOM, "out of memory");
-        }
-        t->batch = grown;
-        t->batch_cap = cap;
+    AevkDrawItem it;
+    memset(&it, 0, sizeof(it));
+    it.mat = mat;
+    it.first = first;
+    it.count = count;
+    it.first_instance = first_instance;
+    it.instances = instances;
+    int rc = aevk_batch_push(t, &it);
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return rc;
+}
+
+int aevk_batch_add(AevkTarget* t, AevkMaterial* mat, int first, int count) {
+    return aevk_batch_add_range(t, mat, first, count, 0, 0);
+}
+
+/* Instancing (#2198): `instances` copies of the range, the first of them
+ * instance `first_instance`, which is where a per-instance stream starts
+ * reading. */
+int aevk_batch_add_instanced(AevkTarget* t, AevkMaterial* mat, int first, int count,
+                             int first_instance, int instances) {
+    if (first_instance < 0) {
+        return aevk_fail(AEVK_ERR_ARG, "first instance must not be negative, got %d", first_instance);
     }
-    t->batch[t->batch_count].mat = mat;
-    t->batch[t->batch_count].first = first;
-    t->batch[t->batch_count].count = count;
-    t->batch_count++;
-    t->batch_version++;
+    if (instances <= 0) return aevk_fail(AEVK_ERR_ARG, "instances must be positive, got %d", instances);
+    return aevk_batch_add_range(t, mat, first, count, first_instance, instances);
+}
+
+/* An indirect draw (#2198): `draws` commands read from `buf` at `offset`
+ * when the frame runs, so a compute pass can write them. A command is five
+ * 32-bit words when the target has indices (index count, instance count,
+ * first index, vertex offset, first instance) and four otherwise (vertex
+ * count, instance count, first vertex, first instance). The words are the
+ * GPU's to supply: they are not checked against the geometry. */
+int aevk_batch_add_indirect(AevkTarget* t, AevkMaterial* mat, AevkBuffer* buf, int offset, int draws) {
+    aevk_clear_error();
+    if (!t || !buf) return aevk_fail(AEVK_ERR_ARG, "target or buffer is null");
+    if (buf->dev != t->dev) return aevk_fail(AEVK_ERR_ARG, "the buffer belongs to another device");
+    if (offset < 0 || (offset % 4)) {
+        return aevk_fail(AEVK_ERR_ARG, "an indirect offset must be a non-negative multiple of 4, got %d",
+                         offset);
+    }
+    if (draws <= 0) return aevk_fail(AEVK_ERR_ARG, "draws must be positive, got %d", draws);
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    AevkDrawItem it;
+    memset(&it, 0, sizeof(it));
+    it.mat = mat;
+    it.indirect = buf;
+    it.indirect_offset = (VkDeviceSize)offset;
+    it.indirect_draws = draws;
+    int rc = aevk_batch_push(t, &it);
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return rc;
+}
+
+/* The offset draw `item` reads dynamic uniform `binding` at (#2198). Whether
+ * the binding is dynamic is the pipeline's to say, so that is checked when
+ * the frame is drawn; the alignment is the device's, checked here. */
+int aevk_batch_set_offset(AevkTarget* t, int item, int binding, int offset) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (binding < 0 || binding >= AEVK_MAX_DESC) {
+        return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
+    }
+    if (offset < 0 || ((uint32_t)offset % t->dev->uniform_align)) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "a uniform offset must be a non-negative multiple of %u on this device, got %d",
+                         t->dev->uniform_align, offset);
+    }
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    int rc = AEVK_OK;
+    if (item < 0 || item >= t->batch_count) {
+        rc = aevk_fail(AEVK_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    } else if (t->batch[item].offsets[binding] != (uint32_t)offset) {
+        t->batch[item].offsets[binding] = (uint32_t)offset;
+        t->batch_version++;
+    }
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return rc;
+}
+
+int aevk_uniform_offset_alignment(const AevkDevice* d) { return d ? (int)d->uniform_align : 0; }
+
+/* A caller's buffer as vertex stream `binding` (#2198), 1 and up: binding 0
+ * is the target's own vertices. NULL unbinds it. The pipeline's layout says
+ * the stride and whether it advances per vertex or per instance. The buffer
+ * must outlive the draws that read it. */
+int aevk_target_set_stream(AevkTarget* t, int binding, AevkBuffer* buf) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (binding < 1 || binding >= AEVK_MAX_BINDINGS) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "a vertex stream binding is 1..%d; binding 0 is the target's own vertices",
+                         AEVK_MAX_BINDINGS - 1);
+    }
+    if (buf && buf->dev != t->dev) return aevk_fail(AEVK_ERR_ARG, "the buffer belongs to another device");
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    if (t->streams[binding] != buf) {
+        t->streams[binding] = buf;
+        aevk_invalidate_records(t);
+    }
     AEVK_MUTEX_UNLOCK(&t->dev->lock);
     return AEVK_OK;
+}
+
+/* How many instances each draw of the target makes, unless a batch entry
+ * says otherwise (#2198). */
+int aevk_target_set_instances(AevkTarget* t, int count) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (count <= 0) return aevk_fail(AEVK_ERR_ARG, "instances must be positive, got %d", count);
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    if (t->instance_count != count) {
+        t->instance_count = count;
+        aevk_invalidate_records(t);
+    }
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return AEVK_OK;
+}
+
+int aevk_target_instances(const AevkTarget* t) { return t ? t->instance_count : 0; }
+
+/* A query pool of `count` timestamps (#2198). The device lock is held. */
+static int aevk_make_timer_pool(AevkDevice* d, uint32_t count, VkQueryPool* out) {
+    if (d->timestamp_bits == 0) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "the device's queue writes no timestamps");
+    }
+    VkQueryPoolCreateInfo qi = {0};
+    qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = count;
+    VkResult r = d->da.vkCreateQueryPool(d->device, &qi, NULL, out);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateQueryPool failed (%d)", (int)r);
+    return AEVK_OK;
+}
+
+/* Milliseconds between the two timestamps at `first` and `first + 1`, which
+ * the work just waited for wrote; -1 if they cannot be read. Only the bits
+ * the queue writes count, so a counter that wrapped still subtracts right. */
+static double aevk_read_timer(AevkDevice* d, VkQueryPool pool, uint32_t first) {
+    uint64_t ts[2] = {0, 0};
+    VkResult r = d->da.vkGetQueryPoolResults(d->device, pool, first, 2, sizeof(ts), ts,
+                                             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return -1.0;
+    uint64_t mask = d->timestamp_bits >= 64 ? ~0ull : ((1ull << d->timestamp_bits) - 1ull);
+    uint64_t ticks = (ts[1] - ts[0]) & mask;
+    return (double)ticks * (double)d->timestamp_period / 1.0e6;
+}
+
+/* GPU timing (#2198): each frame writes a timestamp as it starts and one as
+ * it ends, its readback copy included, and target_gpu_ms reports the time
+ * between them for the newest frame the host has waited for. */
+int aevk_target_set_timing(AevkTarget* t, int on) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    on = on ? 1 : 0;
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = AEVK_OK;
+    if (on && !t->timer_pool) rc = aevk_make_timer_pool(d, 2u * AEVK_MAX_FRAMES, &t->timer_pool);
+    if (rc == AEVK_OK) {
+        if (t->timing_on != on) {
+            t->timing_on = on;
+            aevk_invalidate_records(t);
+        }
+        t->gpu_ms = -1.0;
+    }
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+double aevk_target_gpu_ms(const AevkTarget* t) {
+    return (t && t->timing_on) ? t->gpu_ms : -1.0;
 }
 
 int aevk_batch_count(const AevkTarget* t) { return t ? t->batch_count : 0; }
@@ -1732,9 +2007,19 @@ int aevk_batch_count(const AevkTarget* t) { return t ? t->batch_count : 0; }
 static int aevk_batch_check(AevkTarget* t, AevkPipeline* p) {
     int limit = t->index_count > 0 ? t->index_count : t->vertex_count;
     const char* what = t->index_count > 0 ? "indices" : "vertices";
+    VkDeviceSize cmd_bytes = t->index_count > 0 ? AEVK_INDIRECT_INDEXED_BYTES : AEVK_INDIRECT_BYTES;
     for (int i = 0; i < t->batch_count; i++) {
         AevkDrawItem* it = &t->batch[i];
-        if ((long long)it->first + (long long)it->count > (long long)limit) {
+        if (it->indirect) {
+            VkDeviceSize end = it->indirect_offset + (VkDeviceSize)it->indirect_draws * cmd_bytes;
+            if (end > it->indirect->size) {
+                return aevk_fail(AEVK_ERR_ARG,
+                                 "draw %d reads %d commands of %u bytes at %llu, past the %llu-byte buffer",
+                                 i, it->indirect_draws, (unsigned)cmd_bytes,
+                                 (unsigned long long)it->indirect_offset,
+                                 (unsigned long long)it->indirect->size);
+            }
+        } else if ((long long)it->first + (long long)it->count > (long long)limit) {
             return aevk_fail(AEVK_ERR_ARG,
                              "draw %d covers %s %d..%lld but only %d are uploaded",
                              i, what, it->first, (long long)it->first + it->count - 1, limit);
@@ -1744,6 +2029,89 @@ static int aevk_batch_check(AevkTarget* t, AevkPipeline* p) {
         }
     }
     return AEVK_OK;
+}
+
+/* The dynamic uniforms a draw with material `m` and `offsets` (NULL: all 0)
+ * reads are bound and in range, and it sets no offset the pipeline has no
+ * dynamic binding for (#2198). `item` names the draw in the error, -1 for
+ * the unbatched one. */
+static int aevk_offsets_check(AevkPipeline* p, AevkMaterial* m, const uint32_t* offsets, int item) {
+    for (int b = 0; b < AEVK_MAX_DESC; b++) {
+        uint32_t off = offsets ? offsets[b] : 0;
+        int dynamic = p->declared[b] && p->desc_type[b] == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        if (!dynamic) {
+            if (off != 0) {
+                return aevk_fail(AEVK_ERR_ARG,
+                                 "draw %d sets an offset for binding %d, which the pipeline does not "
+                                 "declare as a dynamic uniform", item, b);
+            }
+            continue;
+        }
+        AevkBuffer* buf = m ? m->ext[b] : NULL;
+        if (!buf) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "binding %d is a dynamic uniform with no buffer bound: set_buffer first", b);
+        }
+        if ((VkDeviceSize)off + p->dyn_range[b] > buf->size) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "draw %d reads binding %d's %u bytes at offset %u, past the %llu-byte buffer",
+                             item, b, p->dyn_range[b], off, (unsigned long long)buf->size);
+        }
+    }
+    return AEVK_OK;
+}
+
+/* Every vertex stream the pipeline declares past binding 0 has a buffer that
+ * holds what the frame's draws read from it: the target's vertices for a
+ * per-vertex stream, the highest instance drawn for a per-instance one.
+ * Indirect draws name their instances on the GPU, so only their direct
+ * siblings bound the per-instance check (#2198). */
+static int aevk_streams_check(AevkTarget* t, AevkPipeline* p) {
+    long long instances_end = 0;
+    if (t->batch_count == 0) {
+        instances_end = t->instance_count;
+    }
+    for (int i = 0; i < t->batch_count; i++) {
+        AevkDrawItem* it = &t->batch[i];
+        if (it->indirect) continue;
+        long long end = it->instances > 0 ? (long long)it->first_instance + it->instances
+                                          : (long long)t->instance_count;
+        if (end > instances_end) instances_end = end;
+    }
+    for (int b = 1; b < AEVK_MAX_BINDINGS; b++) {
+        if (!p->stream_declared[b]) continue;
+        AevkBuffer* buf = t->streams[b];
+        if (!buf) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "the pipeline reads vertex stream %d, but no buffer is bound to it "
+                             "(vertex_stream)", b);
+        }
+        long long n = p->stream_instanced[b] ? instances_end : (long long)t->vertex_count;
+        unsigned long long need = (unsigned long long)n * p->stream_stride[b];
+        if (need > (unsigned long long)buf->size) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "vertex stream %d needs %llu bytes for %lld %s, but its buffer has %llu",
+                             b, need, n, p->stream_instanced[b] ? "instances" : "vertices",
+                             (unsigned long long)buf->size);
+        }
+    }
+    return AEVK_OK;
+}
+
+/* Everything a frame of `t` drawn with `p` reads, checked before anything is
+ * recorded. The device lock is held. */
+static int aevk_draw_check(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat) {
+    int rc = t->batch_count > 0 ? aevk_batch_check(t, p) : AEVK_OK;
+    if (rc != AEVK_OK || t->vertex_count == 0) return rc;
+    rc = aevk_streams_check(t, p);
+    if (rc != AEVK_OK) return rc;
+    AevkMaterial* use = mat ? mat : p->def;
+    if (t->batch_count == 0) return aevk_offsets_check(p, use, NULL, -1);
+    for (int i = 0; i < t->batch_count && rc == AEVK_OK; i++) {
+        AevkDrawItem* it = &t->batch[i];
+        rc = aevk_offsets_check(p, it->mat ? it->mat : use, it->offsets, i);
+    }
+    return rc;
 }
 
 int aevk_target_has_depth(const AevkTarget* t) { return t ? t->has_depth : 0; }
@@ -1773,11 +2141,14 @@ void aevk_layout_destroy(AevkLayout* l) { free(l); }
 int aevk_layout_binding(AevkLayout* l, int binding, int stride, int per_instance) {
     aevk_clear_error();
     if (!l) return aevk_fail(AEVK_ERR_ARG, "layout is null");
-    if (binding < 0 || stride <= 0) {
-        return aevk_fail(AEVK_ERR_ARG, "binding %d stride %d is not a stream", binding, stride);
+    if (binding < 0 || binding >= AEVK_MAX_BINDINGS || stride <= 0) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d stride %d is not a stream (bindings 0..%d)",
+                         binding, stride, AEVK_MAX_BINDINGS - 1);
     }
-    if (l->bind_count >= AEVK_MAX_BINDINGS) {
-        return aevk_fail(AEVK_ERR_ARG, "at most %d vertex bindings", AEVK_MAX_BINDINGS);
+    for (uint32_t i = 0; i < l->bind_count; i++) {
+        if (l->binds[i].binding == (uint32_t)binding) {
+            return aevk_fail(AEVK_ERR_ARG, "binding %d is already declared", binding);
+        }
     }
     VkVertexInputBindingDescription* b = &l->binds[l->bind_count++];
     b->binding = (uint32_t)binding;
@@ -1845,6 +2216,17 @@ int aevk_bindings_uniform(AevkBindings* b, int binding) {
 int aevk_bindings_texture(AevkBindings* b, int binding) {
     aevk_clear_error();
     return aevk_bindings_add(b, binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+}
+
+/* A uniform read as a `bytes` window of a caller's buffer, at an offset each
+ * draw chooses (batch_set_offset): one buffer holds every draw's block, the
+ * per-draw ring an engine fills once a frame (#2198). */
+int aevk_bindings_uniform_dynamic(AevkBindings* b, int binding, int bytes) {
+    aevk_clear_error();
+    if (bytes <= 0) return aevk_fail(AEVK_ERR_ARG, "a dynamic uniform's window must be positive, got %d", bytes);
+    int rc = aevk_bindings_add(b, binding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
+    if (rc == AEVK_OK) b->dyn_range[binding] = (uint32_t)bytes;
+    return rc;
 }
 
 /* A storage buffer: `layout(std430, binding = N) buffer`. What a compute pass
@@ -2339,13 +2721,12 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
                   AEVK_MAX_PUSH, push_bytes);
         return NULL;
     }
-    /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
-     * A layout declaring another would have the pipeline read a buffer that
-     * is never bound, so it is refused here rather than drawn from. */
-    for (uint32_t i = 0; layout && i < layout->bind_count; i++) {
-        if (layout->binds[i].binding != 0) {
-            aevk_fail(AEVK_ERR_ARG, "vertex binding %u is declared, but a target feeds binding 0 only",
-                      layout->binds[i].binding);
+    for (uint32_t i = 0; bindings && i < bindings->count; i++) {
+        uint32_t bn = bindings->b[i].binding;
+        if (bindings->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC &&
+            bindings->dyn_range[bn] > d->max_uniform_range) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "binding %u's %u-byte window is past the device's %u",
+                      bn, bindings->dyn_range[bn], d->max_uniform_range);
             return NULL;
         }
     }
@@ -2353,6 +2734,17 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
     AevkPipeline* p = (AevkPipeline*)calloc(1, sizeof(*p));
     if (!p) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     p->dev = d;
+    /* Binding 0 is the target's own vertices (verts_reserve fills it); each
+     * binding past it is a stream the target is given a buffer for
+     * (vertex_stream), checked at draw time (#2198). layout_binding kept
+     * every binding in 0..AEVK_MAX_BINDINGS-1 and declared once. */
+    for (uint32_t i = 0; layout && i < layout->bind_count; i++) {
+        uint32_t bn = layout->binds[i].binding;
+        if (bn == 0) continue;
+        p->stream_declared[bn] = 1;
+        p->stream_stride[bn] = layout->binds[i].stride;
+        p->stream_instanced[bn] = layout->binds[i].inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
+    }
 
     VkShaderModuleCreateInfo smi = {0};
     smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -2380,18 +2772,26 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
             goto fail;
         }
 
-        VkDescriptorPoolSize sizes[3] = {{0}, {0}, {0}};
-        uint32_t nsizes = 0, n_ub = 0, n_img = 0, n_sb = 0;
+        VkDescriptorPoolSize sizes[4] = {{0}, {0}, {0}, {0}};
+        uint32_t nsizes = 0, n_ub = 0, n_img = 0, n_sb = 0, n_dyn = 0;
         for (uint32_t i = 0; i < bindings->count; i++) {
             VkDescriptorType ty = bindings->b[i].descriptorType;
+            uint32_t bn = bindings->b[i].binding;
             if (ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_ub++;
+            else if (ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                n_dyn++;
+                p->dyn_range[bn] = bindings->dyn_range[bn];
+            }
             else if (ty == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) n_sb++;
             else n_img++;
-            p->declared[bindings->b[i].binding] = 1;
-            p->desc_type[bindings->b[i].binding] = ty;
+            p->declared[bn] = 1;
+            p->desc_type[bn] = ty;
         }
+        p->dyn_count = n_dyn;
         if (n_ub)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                      sizes[nsizes++].descriptorCount = n_ub; }
+        if (n_dyn) { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+                     sizes[nsizes++].descriptorCount = n_dyn; }
         if (n_img) { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                      sizes[nsizes++].descriptorCount = n_img; }
         if (n_sb)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -2601,6 +3001,11 @@ int aevk_material_set_uniform(AevkMaterial* m, int binding,
     if (!m->set) {
         return aevk_fail(AEVK_ERR_ARG,
                          "pipeline was created without bindings, so it has no descriptor set");
+    }
+    if (p->declared[binding] && p->desc_type[binding] == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "binding %d is a dynamic uniform: bind a buffer with set_buffer and choose "
+                         "each draw's offset with batch_set_offset", binding);
     }
     if (!p->declared[binding] || p->desc_type[binding] != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
         return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a uniform", binding);
@@ -2867,13 +3272,23 @@ int aevk_material_set_buffer(AevkMaterial* m, int binding, AevkBuffer* buf) {
     if (buf->dev != p->dev) return aevk_fail(AEVK_ERR_ARG, "the buffer belongs to another device");
     VkDescriptorType ty = p->desc_type[binding];
     if (!p->declared[binding] ||
-        (ty != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && ty != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)) {
+        (ty != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && ty != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+         ty != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)) {
         return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a storage or uniform buffer",
                          binding);
     }
     VkDescriptorBufferInfo bi = {0};
     bi.buffer = buf->buf;
     bi.range = VK_WHOLE_SIZE;
+    /* A dynamic uniform reads its declared window, wherever each draw puts
+     * it (#2198). */
+    if (ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+        if (buf->size < p->dyn_range[binding]) {
+            return aevk_fail(AEVK_ERR_ARG, "a %llu-byte buffer is smaller than binding %d's %u-byte window",
+                             (unsigned long long)buf->size, binding, p->dyn_range[binding]);
+        }
+        bi.range = p->dyn_range[binding];
+    }
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w.dstSet = m->set;
@@ -3045,6 +3460,51 @@ static void aevk_sampled_barriers(AevkDevice* d, VkCommandBuffer cmd,
     }
 }
 
+/* Binds a material's set, with the offsets its dynamic uniforms are read at
+ * (NULL: all 0), in binding order as Vulkan takes them (#2198). A set with
+ * nothing written into it is not bound: lavapipe walks a set as it is bound. */
+static void aevk_bind_material(AevkDevice* d, VkCommandBuffer cmd, AevkPipeline* p,
+                               AevkMaterial* m, const uint32_t* offsets) {
+    if (!m || !m->set || m->writes <= 0) return;
+    uint32_t dyn[AEVK_MAX_DESC];
+    uint32_t n = 0;
+    for (int b = 0; b < AEVK_MAX_DESC; b++) {
+        if (p->declared[b] && p->desc_type[b] == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+            dyn[n++] = offsets ? offsets[b] : 0;
+        }
+    }
+    d->da.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &m->set,
+                                  n, n ? dyn : NULL);
+}
+
+/* Records one draw: a range of the target's geometry, instanced, or the
+ * commands an indirect draw reads (#2198). Several indirect commands go in
+ * one call where the device takes that, and one call each otherwise. */
+static void aevk_record_draw(AevkDevice* d, AevkTarget* t, VkCommandBuffer cmd, const AevkDrawItem* it) {
+    int indexed = t->index_count > 0;
+    if (it->indirect) {
+        uint32_t stride = indexed ? AEVK_INDIRECT_INDEXED_BYTES : AEVK_INDIRECT_BYTES;
+        uint32_t calls = d->multi_draw_indirect ? 1u : (uint32_t)it->indirect_draws;
+        uint32_t per_call = d->multi_draw_indirect ? (uint32_t)it->indirect_draws : 1u;
+        for (uint32_t c = 0; c < calls; c++) {
+            VkDeviceSize off = it->indirect_offset + (VkDeviceSize)c * stride;
+            if (indexed) {
+                d->da.vkCmdDrawIndexedIndirect(cmd, it->indirect->buf, off, per_call, stride);
+            } else {
+                d->da.vkCmdDrawIndirect(cmd, it->indirect->buf, off, per_call, stride);
+            }
+        }
+        return;
+    }
+    uint32_t instances = (uint32_t)(it->instances > 0 ? it->instances : t->instance_count);
+    uint32_t first_instance = (uint32_t)(it->instances > 0 ? it->first_instance : 0);
+    if (indexed) {
+        d->da.vkCmdDrawIndexed(cmd, (uint32_t)it->count, instances, (uint32_t)it->first, 0, first_instance);
+    } else {
+        d->da.vkCmdDraw(cmd, (uint32_t)it->count, instances, (uint32_t)it->first, first_instance);
+    }
+}
+
 static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMaterial* mat,
                        float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
@@ -3074,6 +3534,15 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vr = d->da.vkBeginCommandBuffer(fr->cmd, &bi);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkBeginCommandBuffer failed (%d)", (int)vr);
+
+    /* The frame's first timestamp, before anything else it does; its pair
+     * closes the command buffer (#2198). */
+    uint32_t timer = (uint32_t)(fr - t->frames) * 2u;
+    fr->timed = t->timing_on && t->timer_pool;
+    if (fr->timed) {
+        d->da.vkCmdResetQueryPool(fr->cmd, t->timer_pool, timer, 2);
+        d->da.vkCmdWriteTimestamp(fr->cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, t->timer_pool, timer);
+    }
 
     /* Indexed by attachment, so the resolve slot is present but unused and the
      * depth slot sits wherever the render pass put it. Cleared to the far
@@ -3113,12 +3582,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
          * default is used, which is what a caller that never asked for
          * materials has. */
         AevkMaterial* bind_mat = mat ? mat : p->def;
-        /* `writes`, not just a non-null handle: a set fresh out of the pool has
-         * no descriptors, and lavapipe walks a set as it is bound. */
-        if (t->batch_count == 0 && bind_mat && bind_mat->set && bind_mat->writes > 0) {
-            d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          p->layout, 0, 1, &bind_mat->set, 0, NULL);
-        }
+        if (t->batch_count == 0) aevk_bind_material(d, fr->cmd, p, bind_mat, NULL);
         /* Push whatever the pipeline declared room for, so a caller who set
          * fewer bytes than the range still gets a defined block. */
         if (p->push_bytes > 0) {
@@ -3134,6 +3598,13 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
             VkDeviceSize off = 0;
             d->da.vkCmdBindVertexBuffers(fr->cmd, 0, 1, &t->vbuf, &off);
         }
+        /* The caller's streams past binding 0; the draw check made sure each
+         * one the pipeline reads is bound (#2198). */
+        for (uint32_t sb = 1; sb < AEVK_MAX_BINDINGS; sb++) {
+            if (!p->stream_declared[sb]) continue;
+            VkDeviceSize off = 0;
+            d->da.vkCmdBindVertexBuffers(fr->cmd, sb, 1, &t->streams[sb]->buf, &off);
+        }
         if (t->index_count > 0) {
             d->da.vkCmdBindIndexBuffer(fr->cmd, t->ibuf, 0,
                                        (t->index_bits == 16) ? VK_INDEX_TYPE_UINT16
@@ -3146,22 +3617,14 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
              * draw would overwrite what the first is still going to read. */
             for (int i = 0; i < t->batch_count; i++) {
                 AevkDrawItem* it = &t->batch[i];
-                AevkMaterial* im = it->mat ? it->mat : bind_mat;
-                if (im && im->set && im->writes > 0) {
-                    d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                  p->layout, 0, 1, &im->set, 0, NULL);
-                }
-                if (t->index_count > 0) {
-                    d->da.vkCmdDrawIndexed(fr->cmd, (uint32_t)it->count, 1,
-                                           (uint32_t)it->first, 0, 0);
-                } else {
-                    d->da.vkCmdDraw(fr->cmd, (uint32_t)it->count, 1, (uint32_t)it->first, 0);
-                }
+                aevk_bind_material(d, fr->cmd, p, it->mat ? it->mat : bind_mat, it->offsets);
+                aevk_record_draw(d, t, fr->cmd, it);
             }
-        } else if (t->index_count > 0) {
-            d->da.vkCmdDrawIndexed(fr->cmd, (uint32_t)t->index_count, 1, 0, 0, 0);
         } else {
-            d->da.vkCmdDraw(fr->cmd, (uint32_t)t->vertex_count, 1, 0, 0);
+            AevkDrawItem all;
+            memset(&all, 0, sizeof(all));
+            all.count = t->index_count > 0 ? t->index_count : t->vertex_count;
+            aevk_record_draw(d, t, fr->cmd, &all);
         }
     }
     d->da.vkCmdEndRenderPass(fr->cmd);
@@ -3176,6 +3639,9 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
         copy.imageExtent.depth = 1;
         d->da.vkCmdCopyImageToBuffer(fr->cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                      fr->readback, 1, &copy);
+    }
+    if (fr->timed) {
+        d->da.vkCmdWriteTimestamp(fr->cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, t->timer_pool, timer + 1u);
     }
 
     vr = d->da.vkEndCommandBuffer(fr->cmd);
@@ -3244,6 +3710,10 @@ static int aevk_wait_frame_locked(AevkTarget* t, int slot) {
     }
     fr->submitted = 0;
     t->last_done = slot;
+    if (fr->timed && t->timer_pool && fr->seq > t->gpu_seq) {
+        t->gpu_ms = aevk_read_timer(d, t->timer_pool, (uint32_t)slot * 2u);
+        t->gpu_seq = fr->seq;
+    }
     return AEVK_OK;
 }
 
@@ -3261,8 +3731,8 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
     if (!t->fb || !t->frames) {
         return aevk_fail(AEVK_ERR_ARG, "target has no images: its last resize failed");
     }
-    if (t->batch_count > 0 && p) {
-        int brc = aevk_batch_check(t, p);
+    if (p) {
+        int brc = aevk_draw_check(t, p, mat);
         if (brc != AEVK_OK) return brc;
     }
 
@@ -3298,6 +3768,7 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                          "vkQueueSubmit failed (%d)", (int)vr);
     }
     fr->submitted = 1;
+    fr->seq = ++t->submitted_seq;
     t->rendered = 1;
     t->last_submitted = slot;
     t->next_frame = (slot + 1) % t->frame_count;
@@ -3321,8 +3792,8 @@ static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
 int aevk_target_set_frames(AevkTarget* t, int count) {
     aevk_clear_error();
     if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
-    if (count < 1 || count > 8) {
-        return aevk_fail(AEVK_ERR_ARG, "frames in flight must be 1..8 (got %d)", count);
+    if (count < 1 || count > AEVK_MAX_FRAMES) {
+        return aevk_fail(AEVK_ERR_ARG, "frames in flight must be 1..%d (got %d)", AEVK_MAX_FRAMES, count);
     }
     if (count == t->frame_count) return AEVK_OK;
 
@@ -3479,12 +3950,14 @@ AevkBuffer* aevk_buffer_create(AevkDevice* d, size_t bytes) {
     b->dev = d;
     b->size = (VkDeviceSize)bytes;
     /* Every use this module has for a buffer: read and written by a compute
-     * pass, read as a uniform, pulled from by a vertex shader, and copied. */
+     * pass, read as a uniform, pulled from by a vertex shader or fetched as a
+     * vertex stream, read as indirect draw commands, and copied. */
     int rc = aevk_make_buffer(d, (VkDeviceSize)bytes,
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                               VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                              VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -3559,6 +4032,12 @@ struct AevkCompute {
     VkFence               fence;
     int                   submitted;
     uint64_t              timeout_ns;
+    /* GPU timing (#2198): the dispatch's start and end timestamps, whether
+     * the one in flight writes them, and the newest waited one's time. */
+    VkQueryPool           timer_pool;
+    int                   timing_on;
+    int                   timed;
+    double                gpu_ms;
 };
 
 void aevk_compute_destroy(AevkCompute* c) {
@@ -3568,6 +4047,7 @@ void aevk_compute_destroy(AevkCompute* c) {
         AEVK_MUTEX_LOCK(&d->lock);
         d->da.vkDeviceWaitIdle(d->device);
         if (c->fence)      d->da.vkDestroyFence(d->device, c->fence, NULL);
+        if (c->timer_pool) d->da.vkDestroyQueryPool(d->device, c->timer_pool, NULL);
         if (c->cmd)        d->da.vkFreeCommandBuffers(d->device, d->pool, 1, &c->cmd);
         if (c->pipeline)   d->da.vkDestroyPipeline(d->device, c->pipeline, NULL);
         if (c->layout)     d->da.vkDestroyPipelineLayout(d->device, c->layout, NULL);
@@ -3600,6 +4080,7 @@ AevkCompute* aevk_compute_create(AevkDevice* d, const void* spv, size_t len,
     c->dev = d;
     c->push_bytes = (uint32_t)push_bytes;
     c->timeout_ns = 5000000000ull;
+    c->gpu_ms = -1.0;
 
     VkShaderModuleCreateInfo smi = {0};
     smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -3614,6 +4095,12 @@ AevkCompute* aevk_compute_create(AevkDevice* d, const void* spv, size_t len,
         VkDescriptorSetLayoutBinding b[AEVK_MAX_DESC];
         uint32_t n_ub = 0, n_sb = 0, n_img = 0;
         for (uint32_t i = 0; i < bindings->count; i++) {
+            if (bindings->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                aevk_fail(AEVK_ERR_ARG,
+                          "binding %u is a dynamic uniform, which draws take and compute passes do not",
+                          bindings->b[i].binding);
+                goto fail;
+            }
             b[i] = bindings->b[i];
             b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
             c->declared[b[i].binding] = 1;
@@ -3796,7 +4283,31 @@ static int aevk_compute_wait_locked(AevkCompute* c) {
                          "vkWaitForFences failed (%d)", (int)vr);
     }
     c->submitted = 0;
+    if (c->timed && c->timer_pool) c->gpu_ms = aevk_read_timer(d, c->timer_pool, 0);
     return AEVK_OK;
+}
+
+/* GPU timing for a compute pass (#2198): each dispatch writes a timestamp as
+ * it starts and one as it ends, and compute_gpu_ms reports the time between
+ * them for the newest dispatch waited for. */
+int aevk_compute_set_timing(AevkCompute* c, int on) {
+    aevk_clear_error();
+    if (!c) return aevk_fail(AEVK_ERR_ARG, "compute is null");
+    on = on ? 1 : 0;
+    AevkDevice* d = c->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = AEVK_OK;
+    if (on && !c->timer_pool) rc = aevk_make_timer_pool(d, 2, &c->timer_pool);
+    if (rc == AEVK_OK) {
+        c->timing_on = on;
+        c->gpu_ms = -1.0;
+    }
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+double aevk_compute_gpu_ms(const AevkCompute* c) {
+    return (c && c->timing_on) ? c->gpu_ms : -1.0;
 }
 
 /* Records and submits one dispatch of gx * gy * gz work groups without
@@ -3837,6 +4348,11 @@ int aevk_dispatch_async(AevkCompute* c, int gx, int gy, int gz) {
         AEVK_MUTEX_UNLOCK(&d->lock);
         return aevk_fail(AEVK_ERR_OOM, "cannot begin the dispatch (%d)", (int)vr);
     }
+    c->timed = c->timing_on && c->timer_pool;
+    if (c->timed) {
+        d->da.vkCmdResetQueryPool(cmd, c->timer_pool, 0, 2);
+        d->da.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c->timer_pool, 0);
+    }
 
     /* Earlier work on the queue that read or wrote these buffers (a draw
      * pulling vertices from one, the previous dispatch) finishes first. */
@@ -3845,6 +4361,7 @@ int aevk_dispatch_async(AevkCompute* c, int gx, int gy, int gz) {
     before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     d->da.vkCmdPipelineBarrier(cmd,
+                               VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
                                VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -3862,21 +4379,26 @@ int aevk_dispatch_async(AevkCompute* c, int gx, int gy, int gz) {
     }
     d->da.vkCmdDispatch(cmd, (uint32_t)gx, (uint32_t)gy, (uint32_t)gz);
     /* The results are for the host (read back after the fence) and for any
-     * later draw that reads the buffers as vertices, indices, uniforms or
-     * storage. */
+     * later draw that reads the buffers as indirect commands, vertices,
+     * indices, uniforms or storage. */
     VkMemoryBarrier after = {0};
     after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
+                          VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
                           VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
                           VK_ACCESS_UNIFORM_READ_BIT;
     d->da.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_PIPELINE_STAGE_HOST_BIT |
+                               VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
                                VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                0, 1, &after, 0, NULL, 0, NULL);
+    if (c->timed) {
+        d->da.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, c->timer_pool, 1);
+    }
     vr = d->da.vkEndCommandBuffer(cmd);
     if (vr == VK_SUCCESS) vr = d->da.vkResetFences(d->device, 1, &c->fence);
     if (vr == VK_SUCCESS) {
@@ -4926,6 +5448,28 @@ int aevk_ae_batch_add(void* t, void* m, int first, int count) {
     return aevk_batch_add((AevkTarget*)t, (AevkMaterial*)m, first, count);
 }
 int aevk_ae_batch_count(void* t) { return aevk_batch_count((const AevkTarget*)t); }
+int aevk_ae_batch_add_instanced(void* t, void* m, int first, int count, int first_instance, int instances) {
+    return aevk_batch_add_instanced((AevkTarget*)t, (AevkMaterial*)m, first, count, first_instance, instances);
+}
+int aevk_ae_batch_add_indirect(void* t, void* m, void* buf, int offset, int draws) {
+    return aevk_batch_add_indirect((AevkTarget*)t, (AevkMaterial*)m, (AevkBuffer*)buf, offset, draws);
+}
+int aevk_ae_batch_set_offset(void* t, int item, int binding, int offset) {
+    return aevk_batch_set_offset((AevkTarget*)t, item, binding, offset);
+}
+int aevk_ae_uniform_offset_alignment(void* d) { return aevk_uniform_offset_alignment((const AevkDevice*)d); }
+int aevk_ae_bindings_uniform_dynamic(void* b, int binding, int bytes) {
+    return aevk_bindings_uniform_dynamic((AevkBindings*)b, binding, bytes);
+}
+int aevk_ae_vertex_stream(void* t, int binding, void* buf) {
+    return aevk_target_set_stream((AevkTarget*)t, binding, (AevkBuffer*)buf);
+}
+int aevk_ae_target_set_instances(void* t, int count) {
+    return aevk_target_set_instances((AevkTarget*)t, count);
+}
+int aevk_ae_target_instances(void* t) { return aevk_target_instances((const AevkTarget*)t); }
+int aevk_ae_target_set_timing(void* t, int on) { return aevk_target_set_timing((AevkTarget*)t, on); }
+double aevk_ae_target_gpu_ms(void* t) { return aevk_target_gpu_ms((const AevkTarget*)t); }
 
 void* aevk_ae_material_create(void* pp) {
     return (void*)aevk_material_create((AevkPipeline*)pp);
@@ -5438,6 +5982,8 @@ int aevk_ae_dispatch_async(void* c, int gx, int gy, int gz) {
     return aevk_dispatch_async((AevkCompute*)c, gx, gy, gz);
 }
 int aevk_ae_compute_wait(void* c) { return aevk_compute_wait((AevkCompute*)c); }
+int aevk_ae_compute_set_timing(void* c, int on) { return aevk_compute_set_timing((AevkCompute*)c, on); }
+double aevk_ae_compute_gpu_ms(void* c) { return aevk_compute_gpu_ms((const AevkCompute*)c); }
 
 /* The loader's entry points for contrib.vulkan.vk, the generated module that
  * drives the API directly (#1506). It goes through the loader this file

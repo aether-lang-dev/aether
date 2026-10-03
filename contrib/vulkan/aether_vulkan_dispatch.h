@@ -26,6 +26,7 @@
     X(vkGetPhysicalDeviceMemoryProperties) \
     X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkGetPhysicalDeviceFormatProperties) \
+    X(vkGetPhysicalDeviceFeatures) \
     X(vkEnumerateDeviceExtensionProperties) \
     X(vkCreateDevice) \
     X(vkGetDeviceProcAddr)
@@ -99,7 +100,14 @@
     X(vkCreateSemaphore) \
     X(vkDestroySemaphore) \
     X(vkCreateComputePipelines) \
-    X(vkCmdDispatch)
+    X(vkCmdDispatch) \
+    X(vkCmdDrawIndirect) \
+    X(vkCmdDrawIndexedIndirect) \
+    X(vkCreateQueryPool) \
+    X(vkDestroyQueryPool) \
+    X(vkCmdResetQueryPool) \
+    X(vkCmdWriteTimestamp) \
+    X(vkGetQueryPoolResults)
 
 /* INSTANCE */
 #define AEVK_KHR_SURFACE_FNS(X) \

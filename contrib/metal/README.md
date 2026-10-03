@@ -234,6 +234,23 @@ A draw of 16-bit indices must start at an even index. Metal requires an index
 buffer offset to be a multiple of 4 bytes, and the module refuses such a draw
 rather than letting it read the wrong indices.
 
+## Instancing, indirect draws, dynamic offsets and timing
+
+`vertex_stream(t, binding, buf)` binds a buffer at `[[buffer(16 + B)]]`, at
+the rate the layout's step function gives. Instanced draws pass the first
+instance as `baseInstance`.
+
+An indirect draw encodes one `drawIndexedPrimitives:...indirectBuffer:` (or
+`drawPrimitives:indirectBuffer:`) per command. Metal's argument structs have
+the same layout as the other two APIs' commands.
+
+A dynamic uniform is its buffer bound at the draw's offset, which macOS
+requires to be a multiple of 256 for constant buffers.
+
+Timing reads the command buffer's `GPUStartTime` and `GPUEndTime` once it has
+completed. Metal keeps these for every command buffer, so turning timing on
+costs nothing on the GPU.
+
 ## Threads
 
 One device may be used from several threads. Metal's device and command queue

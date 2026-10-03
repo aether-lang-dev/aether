@@ -183,6 +183,28 @@ shape: sampling the target being drawn, a target with no frame, and depth of
 a target without depth or with multisampling. `test_d3d12_sampling.ae` runs
 with the debug layer and asserts it logged nothing.
 
+## Instancing, indirect draws, dynamic offsets and timing
+
+`vertex_stream(t, binding, buf)` binds a buffer at input slot 1..7. Instances
+come from `target_set_instances` and `batch_add_instanced`, which pass the
+first instance as `StartInstanceLocation`. `SV_InstanceID` counts from 0
+whatever the first instance is, so per-instance data belongs in a stream,
+where the first instance does apply.
+
+`batch_add_indirect` records one `ExecuteIndirect` per entry. It uses a
+command signature for `D3D12_DRAW_INDEXED_ARGUMENTS` (20 bytes), or for
+`D3D12_DRAW_ARGUMENTS` (16 bytes) on a target without indices, each made once
+per device.
+
+A dynamic uniform is a root CBV whose address is the buffer's plus the draw's
+offset, so offsets are multiples of 256. Timing ends a timestamp query
+before and after the frame's commands and resolves the pair into a readback
+buffer. The time is read when the frame is waited on, at the queue's
+`GetTimestampFrequency`.
+
+`test_d3d12_draws.ae` runs with no debug-layer messages on a GPU and on WARP,
+including with GPU-based validation (`AETHER_D3D12_DEBUG=2`).
+
 ## Threads
 
 One device may be used from several threads. Direct3D 12's device is

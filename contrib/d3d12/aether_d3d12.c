@@ -162,6 +162,13 @@ struct AedxDevice {
     /* The present pass (a textured full-screen triangle), made on first use. */
     ID3D12RootSignature* present_root;
     ID3D12PipelineState* present_pso[2];   /* [0] UNORM view, [1] sRGB view */
+    /* Indirect draws (#2198): a command signature for each command shape,
+     * indexed and not, made on first use. */
+    ID3D12CommandSignature* sig_indexed;
+    ID3D12CommandSignature* sig_draw;
+    /* GPU timestamps (#2198): ticks a second on the queue, 0 when it keeps
+     * no time. */
+    UINT64              timestamp_freq;
     char                name[256];
 };
 
@@ -402,6 +409,8 @@ AedxDevice* aedx_device_create(void) {
     hr = ID3D12Device_CreateFence(d->device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**)&d->fence);
     if (FAILED(hr)) { aedx_fail(AEDX_ERR_OOM, "CreateFence failed (0x%08lx)", (unsigned long)hr); goto fail; }
     d->fence_next = 1;
+    UINT64 freq = 0;
+    if (SUCCEEDED(ID3D12CommandQueue_GetTimestampFrequency(d->queue, &freq))) d->timestamp_freq = freq;
 
     if (aedx_heap_init(d, &d->srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, AEDX_SRV_SLOTS) != AEDX_OK) goto fail;
     if (aedx_heap_init(d, &d->samplers, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, AEDX_SAMPLER_SLOTS) != AEDX_OK) goto fail;
@@ -489,6 +498,8 @@ void aedx_device_destroy(AedxDevice* d) {
         if (d->present_pso[i]) ID3D12PipelineState_Release(d->present_pso[i]);
     }
     if (d->present_root) ID3D12RootSignature_Release(d->present_root);
+    if (d->sig_indexed) ID3D12CommandSignature_Release(d->sig_indexed);
+    if (d->sig_draw) ID3D12CommandSignature_Release(d->sig_draw);
     aedx_heap_free_all(&d->srv);
     aedx_heap_free_all(&d->samplers);
     if (d->fence) ID3D12Fence_Release(d->fence);
@@ -597,11 +608,35 @@ static int aedx_shader(const void* src, size_t len, const char* profile, ID3DBlo
 /* Targets                                                                   */
 /* ------------------------------------------------------------------------ */
 
+/* A caller's buffer (#1515): defined here because draws name buffers too,
+ * as vertex streams and indirect commands (#2198). */
+struct AedxBuffer {
+    AedxDevice*     dev;
+    ID3D12Resource* res;
+    unsigned char*  ptr;
+    size_t          size;
+};
+
+/* One draw inside a frame. `instances` 0 draws the target's instance count
+ * from instance 0; above 0, that many from `first_instance`. An indirect draw
+ * reads `indirect_draws` commands from `indirect` at `indirect_offset`, and
+ * `offsets` is each dynamic uniform binding's offset, by binding (#2198). */
 typedef struct {
     AedxMaterial* mat;
     int           first;
     int           count;
+    int           first_instance;
+    int           instances;
+    AedxBuffer*   indirect;
+    UINT64        indirect_offset;
+    int           indirect_draws;
+    UINT          offsets[AEDX_MAX_DESC];
 } AedxDrawItem;
+
+/* The bytes of one indirect draw command, indexed and not: the layouts of
+ * D3D12_DRAW_INDEXED_ARGUMENTS and D3D12_DRAW_ARGUMENTS. */
+#define AEDX_INDIRECT_INDEXED_BYTES 20
+#define AEDX_INDIRECT_BYTES         16
 
 typedef struct {
     ID3D12CommandAllocator*    alloc;
@@ -611,6 +646,8 @@ typedef struct {
     int                        submitted;
     ID3D12Resource*            readback;    /* READBACK heap, mapped for its life */
     unsigned char*             readback_ptr;
+    int                        timed;       /* writes the slot's two timestamps (#2198) */
+    unsigned long long         seq;         /* the target's submission it holds */
 } AedxFrame;
 
 struct AedxTarget {
@@ -658,6 +695,23 @@ struct AedxTarget {
     int             batch_count, batch_cap;
     unsigned char   push[AEDX_MAX_PUSH];
     UINT            push_size;
+
+    /* Vertex streams past slot 0, a caller's buffer each, and the instances
+     * each draw makes, 1 unless set (#2198). */
+    AedxBuffer*     streams[AEDX_MAX_BINDINGS];
+    int             instance_count;
+
+    /* GPU timestamps (#2198): two a frame slot, resolved into `timer_rb`
+     * (mapped for its life) and read when the slot is waited on. */
+    ID3D12QueryHeap* timer_heap;
+    ID3D12Resource*  timer_rb;
+    UINT64*          timer_ptr;
+    int              timing_on;
+    double           gpu_ms;
+    /* The submission `gpu_ms` came from, so waiting on the slots out of
+     * order never reports an older frame. */
+    unsigned long long submitted_seq;
+    unsigned long long gpu_seq;
 
     AedxFrame       frames[AEDX_MAX_FRAMES];
     int             frame_count;
@@ -1008,6 +1062,8 @@ AedxTarget* aedx_target_create_format(AedxDevice* d, int width, int height, int 
     t->readback_on = 1;
     t->index_bits = 32;
     t->timeout_ms = 5000;
+    t->instance_count = 1;
+    t->gpu_ms = -1.0;
     t->last_submitted = -1;
     /* The samplers a later pass reads the target through (#2198): linear
      * where the format can be filtered, nearest for the depth. */
@@ -1025,12 +1081,66 @@ fail:
     return NULL;
 }
 
+/* A timestamp query heap of `count` and a mapped readback buffer it
+ * resolves into (#2198). */
+static int aedx_make_timer(AedxDevice* d, UINT count, ID3D12QueryHeap** heap, ID3D12Resource** rb,
+                           UINT64** ptr) {
+    if (!d->timestamp_freq) return aedx_fail(AEDX_ERR_UNSUPPORTED, "the device's queue keeps no timestamps");
+    D3D12_QUERY_HEAP_DESC qd;
+    memset(&qd, 0, sizeof(qd));
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = count;
+    HRESULT hr = ID3D12Device_CreateQueryHeap(d->device, &qd, &IID_ID3D12QueryHeap, (void**)heap);
+    if (FAILED(hr)) return aedx_fail(aedx_hr_status(hr), "CreateQueryHeap failed (0x%08lx)", (unsigned long)hr);
+    *rb = aedx_make_buffer(d, D3D12_HEAP_TYPE_READBACK, (UINT64)count * sizeof(UINT64),
+                           D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+    if (!*rb) {
+        ID3D12QueryHeap_Release(*heap);
+        *heap = NULL;
+        return AEDX_ERR_OOM;
+    }
+    hr = ID3D12Resource_Map(*rb, 0, NULL, (void**)ptr);
+    if (FAILED(hr)) {
+        ID3D12Resource_Release(*rb);
+        ID3D12QueryHeap_Release(*heap);
+        *rb = NULL;
+        *heap = NULL;
+        return aedx_fail(AEDX_ERR_OOM, "Map (timestamps) failed (0x%08lx)", (unsigned long)hr);
+    }
+    return AEDX_OK;
+}
+
+static void aedx_free_timer(ID3D12QueryHeap** heap, ID3D12Resource** rb) {
+    if (*rb) {
+        ID3D12Resource_Unmap(*rb, 0, NULL);
+        ID3D12Resource_Release(*rb);
+        *rb = NULL;
+    }
+    if (*heap) {
+        ID3D12QueryHeap_Release(*heap);
+        *heap = NULL;
+    }
+}
+
+/* Milliseconds between the two timestamps at `ts`, which the work just
+ * waited for resolved. */
+static double aedx_timer_ms(const AedxDevice* d, const UINT64* ts) {
+    if (!d->timestamp_freq || ts[1] < ts[0]) return -1.0;
+    return (double)(ts[1] - ts[0]) * 1000.0 / (double)d->timestamp_freq;
+}
+
 /* Waits for one slot's last submission. THE DEVICE LOCK IS HELD. */
 static int aedx_wait_frame(AedxTarget* t, int slot) {
     AedxFrame* f = &t->frames[slot];
     if (!f->submitted) return AEDX_OK;
     int rc = aedx_wait_value(t->dev, f->value, f->event, t->timeout_ms);
-    if (rc == AEDX_OK) f->submitted = 0;
+    if (rc == AEDX_OK) {
+        f->submitted = 0;
+        if (f->timed && t->timer_ptr && f->seq > t->gpu_seq) {
+            t->gpu_ms = aedx_timer_ms(t->dev, t->timer_ptr + slot * 2);
+            t->gpu_seq = f->seq;
+        }
+    }
     return rc;
 }
 
@@ -1057,6 +1167,7 @@ void aedx_target_destroy(AedxTarget* t) {
         aedx_slot_give(&d->samplers, t->depth_sampler_slot);
         ReleaseSRWLockExclusive(&d->lock);
     }
+    aedx_free_timer(&t->timer_heap, &t->timer_rb);
     if (t->vbuf) ID3D12Resource_Release(t->vbuf);
     if (t->ibuf) ID3D12Resource_Release(t->ibuf);
     free(t->batch);
@@ -1310,7 +1421,20 @@ int aedx_batch_reset(AedxTarget* t) {
     return AEDX_OK;
 }
 
-int aedx_batch_add(AedxTarget* t, AedxMaterial* mat, int first, int count) {
+static int aedx_batch_push(AedxTarget* t, const AedxDrawItem* item) {
+    if (t->batch_count == t->batch_cap) {
+        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
+        AedxDrawItem* grown = (AedxDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
+        if (!grown) return aedx_fail(AEDX_ERR_OOM, "out of memory");
+        t->batch = grown;
+        t->batch_cap = cap;
+    }
+    t->batch[t->batch_count++] = *item;
+    return AEDX_OK;
+}
+
+static int aedx_batch_add_range(AedxTarget* t, AedxMaterial* mat, int first, int count,
+                                int first_instance, int instances) {
     aedx_clear_error();
     if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
     if (first < 0) return aedx_fail(AEDX_ERR_ARG, "first must not be negative, got %d", first);
@@ -1320,19 +1444,116 @@ int aedx_batch_add(AedxTarget* t, AedxMaterial* mat, int first, int count) {
         return aedx_fail(AEDX_ERR_ARG, "draw covers %d..%lld but only %d are uploaded",
                          first, (long long)first + count - 1, limit);
     }
-    if (t->batch_count == t->batch_cap) {
-        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
-        AedxDrawItem* grown = (AedxDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
-        if (!grown) return aedx_fail(AEDX_ERR_OOM, "out of memory");
-        t->batch = grown;
-        t->batch_cap = cap;
+    AedxDrawItem it;
+    memset(&it, 0, sizeof(it));
+    it.mat = mat;
+    it.first = first;
+    it.count = count;
+    it.first_instance = first_instance;
+    it.instances = instances;
+    return aedx_batch_push(t, &it);
+}
+
+int aedx_batch_add(AedxTarget* t, AedxMaterial* mat, int first, int count) {
+    return aedx_batch_add_range(t, mat, first, count, 0, 0);
+}
+
+/* Instancing (#2198): `instances` copies of the range from instance
+ * `first_instance`, where a per-instance stream starts reading. */
+int aedx_batch_add_instanced(AedxTarget* t, AedxMaterial* mat, int first, int count,
+                             int first_instance, int instances) {
+    if (first_instance < 0) {
+        return aedx_fail(AEDX_ERR_ARG, "first instance must not be negative, got %d", first_instance);
     }
-    t->batch[t->batch_count].mat = mat;
-    t->batch[t->batch_count].first = first;
-    t->batch[t->batch_count].count = count;
-    t->batch_count++;
+    if (instances <= 0) return aedx_fail(AEDX_ERR_ARG, "instances must be positive, got %d", instances);
+    return aedx_batch_add_range(t, mat, first, count, first_instance, instances);
+}
+
+/* An indirect draw (#2198): `draws` commands read from `buf` at `offset` when
+ * the frame runs, five 32-bit words each with indices and four without. */
+int aedx_batch_add_indirect(AedxTarget* t, AedxMaterial* mat, AedxBuffer* buf, int offset, int draws) {
+    aedx_clear_error();
+    if (!t || !buf) return aedx_fail(AEDX_ERR_ARG, "target or buffer is null");
+    if (buf->dev != t->dev) return aedx_fail(AEDX_ERR_ARG, "the buffer belongs to another device");
+    if (offset < 0 || (offset % 4)) {
+        return aedx_fail(AEDX_ERR_ARG, "an indirect offset must be a non-negative multiple of 4, got %d",
+                         offset);
+    }
+    if (draws <= 0) return aedx_fail(AEDX_ERR_ARG, "draws must be positive, got %d", draws);
+    AedxDrawItem it;
+    memset(&it, 0, sizeof(it));
+    it.mat = mat;
+    it.indirect = buf;
+    it.indirect_offset = (UINT64)offset;
+    it.indirect_draws = draws;
+    return aedx_batch_push(t, &it);
+}
+
+/* A root constant buffer view's address must be a multiple of 256. */
+#define AEDX_UNIFORM_ALIGN D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
+
+int aedx_batch_set_offset(AedxTarget* t, int item, int binding, int offset) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    if (binding < 0 || binding >= AEDX_MAX_DESC) {
+        return aedx_fail(AEDX_ERR_ARG, "binding must be 0..%d", AEDX_MAX_DESC - 1);
+    }
+    if (offset < 0 || (offset % AEDX_UNIFORM_ALIGN)) {
+        return aedx_fail(AEDX_ERR_ARG,
+                         "a uniform offset must be a non-negative multiple of %d on this device, got %d",
+                         AEDX_UNIFORM_ALIGN, offset);
+    }
+    if (item < 0 || item >= t->batch_count) {
+        return aedx_fail(AEDX_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    t->batch[item].offsets[binding] = (UINT)offset;
     return AEDX_OK;
 }
+
+int aedx_uniform_offset_alignment(const AedxDevice* d) { return d ? AEDX_UNIFORM_ALIGN : 0; }
+
+int aedx_target_set_stream(AedxTarget* t, int binding, AedxBuffer* buf) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    if (binding < 1 || binding >= AEDX_MAX_BINDINGS) {
+        return aedx_fail(AEDX_ERR_ARG,
+                         "a vertex stream binding is 1..%d; binding 0 is the target's own vertices",
+                         AEDX_MAX_BINDINGS - 1);
+    }
+    if (buf && buf->dev != t->dev) return aedx_fail(AEDX_ERR_ARG, "the buffer belongs to another device");
+    t->streams[binding] = buf;
+    return AEDX_OK;
+}
+
+int aedx_target_set_instances(AedxTarget* t, int count) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    if (count <= 0) return aedx_fail(AEDX_ERR_ARG, "instances must be positive, got %d", count);
+    t->instance_count = count;
+    return AEDX_OK;
+}
+
+int aedx_target_instances(const AedxTarget* t) { return t ? t->instance_count : 0; }
+
+int aedx_target_set_timing(AedxTarget* t, int on) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    on = on ? 1 : 0;
+    AedxDevice* d = t->dev;
+    AcquireSRWLockExclusive(&d->lock);
+    int rc = AEDX_OK;
+    if (on && !t->timer_heap) {
+        rc = aedx_make_timer(d, 2u * AEDX_MAX_FRAMES, &t->timer_heap, &t->timer_rb, &t->timer_ptr);
+    }
+    if (rc == AEDX_OK) {
+        t->timing_on = on;
+        t->gpu_ms = -1.0;
+    }
+    ReleaseSRWLockExclusive(&d->lock);
+    return rc;
+}
+
+double aedx_target_gpu_ms(const AedxTarget* t) { return (t && t->timing_on) ? t->gpu_ms : -1.0; }
 
 int aedx_batch_count(const AedxTarget* t) { return t ? t->batch_count : 0; }
 
@@ -1396,11 +1617,13 @@ int aedx_layout_attr(AedxLayout* l, int location, int binding, int format, int o
     return AEDX_OK;
 }
 
-enum { AEDX_BIND_NONE = 0, AEDX_BIND_UNIFORM, AEDX_BIND_TEXTURE, AEDX_BIND_STORAGE };
+enum { AEDX_BIND_NONE = 0, AEDX_BIND_UNIFORM, AEDX_BIND_TEXTURE, AEDX_BIND_STORAGE,
+       AEDX_BIND_UNIFORM_DYNAMIC };
 
 struct AedxBindings {
-    int kind[AEDX_MAX_DESC];
-    int count;
+    int  kind[AEDX_MAX_DESC];
+    int  count;
+    UINT dyn_range[AEDX_MAX_DESC];   /* a dynamic uniform's window (#2198) */
 };
 
 AedxBindings* aedx_bindings_create(void) {
@@ -1428,6 +1651,16 @@ int aedx_bindings_uniform(AedxBindings* b, int binding) { return aedx_bindings_a
 int aedx_bindings_texture(AedxBindings* b, int binding) { return aedx_bindings_add(b, binding, AEDX_BIND_TEXTURE); }
 int aedx_bindings_storage(AedxBindings* b, int binding) { return aedx_bindings_add(b, binding, AEDX_BIND_STORAGE); }
 
+/* A uniform read as a `bytes` window of a caller's buffer, at the offset
+ * each draw chooses: a root CBV whose address moves per draw (#2198). */
+int aedx_bindings_uniform_dynamic(AedxBindings* b, int binding, int bytes) {
+    aedx_clear_error();
+    if (bytes <= 0) return aedx_fail(AEDX_ERR_ARG, "a dynamic uniform's window must be positive, got %d", bytes);
+    int rc = aedx_bindings_add(b, binding, AEDX_BIND_UNIFORM_DYNAMIC);
+    if (rc == AEDX_OK) b->dyn_range[binding] = (UINT)bytes;
+    return rc;
+}
+
 /* A root signature for a set of bindings and a push block, and where each
  * binding's argument lives in it. Push constants are root constants at b0
  * in space1; a uniform at binding N is a root CBV at bN, a storage buffer a
@@ -1437,6 +1670,7 @@ typedef struct {
     ID3D12RootSignature* root;
     int                  kind[AEDX_MAX_DESC];
     int                  param[AEDX_MAX_DESC];   /* root parameter index */
+    UINT                 dyn_range[AEDX_MAX_DESC];
     UINT                 push_words;
 } AedxRootLayout;
 
@@ -1460,9 +1694,15 @@ static int aedx_make_root(AedxDevice* d, const AedxBindings* b, int push_bytes, 
         out->kind[i] = b->kind[i];
         out->param[i] = -1;
         if (!b->kind[i]) continue;
+        if (compute && b->kind[i] == AEDX_BIND_UNIFORM_DYNAMIC) {
+            return aedx_fail(AEDX_ERR_ARG,
+                             "binding %d is a dynamic uniform, which draws take and compute passes do not", i);
+        }
+        out->dyn_range[i] = b->dyn_range[i];
         out->param[i] = (int)np;
         switch (b->kind[i]) {
             case AEDX_BIND_UNIFORM:
+            case AEDX_BIND_UNIFORM_DYNAMIC:
                 params[np].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
                 params[np].Descriptor.ShaderRegister = (UINT)i;
                 params[np].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -1778,13 +2018,6 @@ int aedx_texture_upload(AedxTexture* tex, const void* rgba, size_t len) {
  * coherent memory. Mapped for its lifetime and zeroed; usable as a storage
  * or uniform binding and as vertices. Buffers promote implicitly from COMMON
  * to whatever state a command needs, so none is tracked. */
-struct AedxBuffer {
-    AedxDevice*     dev;
-    ID3D12Resource* res;
-    unsigned char*  ptr;
-    size_t          size;
-};
-
 AedxBuffer* aedx_buffer_create(AedxDevice* d, size_t bytes) {
     aedx_clear_error();
     if (!d) { aedx_fail(AEDX_ERR_ARG, "device is null"); return NULL; }
@@ -1895,6 +2128,10 @@ struct AedxPipeline {
     int                  push_bytes;
     int                  vertex_input;
     UINT                 stride;       /* bytes a vertex in slot 0 */
+    /* The streams the layout declares past slot 0 (#2198). */
+    int                  stream_declared[AEDX_MAX_BINDINGS];
+    UINT                 stream_stride[AEDX_MAX_BINDINGS];
+    int                  stream_instanced[AEDX_MAX_BINDINGS];
     AedxMaterial*        def;
 };
 
@@ -1945,14 +2182,14 @@ AedxPipeline* aedx_pipeline_create_ex(AedxDevice* d, AedxTarget* t, const void* 
         p->stride = 20;
         p->vertex_input = 1;
     } else {
-    /* A target feeds one vertex stream, binding 0 (verts_reserve fills it).
-     * A layout declaring another would have the pipeline read a buffer that
-     * is never bound, so it is refused here rather than drawn from. */
+        /* Slot 0 is the target's own vertices; each slot past it is a
+         * stream the target is given a buffer for (vertex_stream), checked
+         * at draw time (#2198). */
         for (int b = 1; b < AEDX_MAX_BINDINGS; b++) {
-            if (layout->declared[b]) {
-                aedx_fail(AEDX_ERR_ARG, "vertex binding %d is declared, but a target feeds binding 0 only", b);
-                goto fail;
-            }
+            if (!layout->declared[b]) continue;
+            p->stream_declared[b] = 1;
+            p->stream_stride[b] = (UINT)layout->stride[b];
+            p->stream_instanced[b] = layout->per_instance[b];
         }
         for (int i = 0; i < layout->attr_count; i++) {
             custom[i] = layout->el[i];
@@ -2073,7 +2310,12 @@ static int aedx_material_check(AedxMaterial* m, int binding, int kind, const cha
         return aedx_fail(AEDX_ERR_ARG, "binding must be 0..%d", AEDX_MAX_DESC - 1);
     }
     int k = m->pipe->rl.kind[binding];
-    if (k != kind && !(kind == AEDX_BIND_STORAGE && k == AEDX_BIND_UNIFORM)) {
+    if (kind == AEDX_BIND_UNIFORM && k == AEDX_BIND_UNIFORM_DYNAMIC) {
+        return aedx_fail(AEDX_ERR_ARG,
+                         "binding %d is a dynamic uniform: bind a buffer with set_buffer and choose "
+                         "each draw's offset with batch_set_offset", binding);
+    }
+    if (k != kind && !(kind == AEDX_BIND_STORAGE && (k == AEDX_BIND_UNIFORM || k == AEDX_BIND_UNIFORM_DYNAMIC))) {
         return aedx_fail(AEDX_ERR_ARG, "binding %d is not declared as %s", binding, what);
     }
     return AEDX_OK;
@@ -2183,6 +2425,11 @@ int aedx_material_set_buffer(AedxMaterial* m, int binding, AedxBuffer* buf) {
     if (rc != AEDX_OK) return rc;
     if (!buf) return aedx_fail(AEDX_ERR_ARG, "buffer is null");
     if (buf->dev != m->pipe->dev) return aedx_fail(AEDX_ERR_ARG, "the buffer belongs to another device");
+    const AedxRootLayout* rl = &m->pipe->rl;
+    if (rl->kind[binding] == AEDX_BIND_UNIFORM_DYNAMIC && buf->size < rl->dyn_range[binding]) {
+        return aedx_fail(AEDX_ERR_ARG, "a %zu-byte buffer is smaller than binding %d's %u-byte window",
+                         buf->size, binding, rl->dyn_range[binding]);
+    }
     m->buf[binding] = buf;
     m->set[binding] = 1;
     return AEDX_OK;
@@ -2205,7 +2452,7 @@ static int aedx_material_ready(const AedxPipeline* p, const AedxMaterial* m) {
 }
 
 static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, const AedxRootLayout* rl,
-                               const AedxMaterial* m, int compute) {
+                               const AedxMaterial* m, int compute, const UINT* offsets) {
     for (int i = 0; i < AEDX_MAX_DESC; i++) {
         int k = rl->kind[i];
         if (!k) continue;
@@ -2233,7 +2480,9 @@ static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, c
         }
         D3D12_GPU_VIRTUAL_ADDRESS va = m->buf[i] ? ID3D12Resource_GetGPUVirtualAddress(m->buf[i]->res)
                                                  : ID3D12Resource_GetGPUVirtualAddress(m->ub[i].res);
-        if (k == AEDX_BIND_UNIFORM) {
+        /* A dynamic uniform's window starts at the draw's offset (#2198). */
+        if (k == AEDX_BIND_UNIFORM_DYNAMIC && offsets) va += offsets[i];
+        if (k == AEDX_BIND_UNIFORM || k == AEDX_BIND_UNIFORM_DYNAMIC) {
             if (compute) ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(list, param, va);
             else ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(list, param, va);
         } else {
@@ -2313,6 +2562,48 @@ static void aedx_sampled_barriers(ID3D12GraphicsCommandList* l, AedxSampled* lis
 /* Records one frame into slot `fr`. Direct3D 12 lists are recorded fresh
  * every frame: recording is cheap, and a list re-executed with a stale state
  * assumption would be the kind of bug caching invites. */
+/* The command signature an indirect draw of the target's kind uses, made on
+ * first use (#2198). THE DEVICE LOCK IS HELD. */
+static int aedx_indirect_signature(AedxDevice* d, int indexed) {
+    ID3D12CommandSignature** slot = indexed ? &d->sig_indexed : &d->sig_draw;
+    if (*slot) return AEDX_OK;
+    D3D12_INDIRECT_ARGUMENT_DESC arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_COMMAND_SIGNATURE_DESC sd;
+    memset(&sd, 0, sizeof(sd));
+    sd.ByteStride = indexed ? AEDX_INDIRECT_INDEXED_BYTES : AEDX_INDIRECT_BYTES;
+    sd.NumArgumentDescs = 1;
+    sd.pArgumentDescs = &arg;
+    HRESULT hr = ID3D12Device_CreateCommandSignature(d->device, &sd, NULL, &IID_ID3D12CommandSignature,
+                                                     (void**)slot);
+    if (FAILED(hr)) {
+        *slot = NULL;
+        return aedx_fail(aedx_hr_status(hr), "CreateCommandSignature failed (0x%08lx)", (unsigned long)hr);
+    }
+    return AEDX_OK;
+}
+
+/* Records one draw: a range of the target's geometry, instanced, or the
+ * commands an indirect draw reads, all in one ExecuteIndirect (#2198). */
+static void aedx_record_draw(AedxDevice* d, AedxTarget* t, ID3D12GraphicsCommandList* l, const AedxDrawItem* it) {
+    int indexed = t->index_count > 0;
+    if (it->indirect) {
+        ID3D12GraphicsCommandList_ExecuteIndirect(l, indexed ? d->sig_indexed : d->sig_draw,
+                                                  (UINT)it->indirect_draws, it->indirect->res,
+                                                  it->indirect_offset, NULL, 0);
+        return;
+    }
+    UINT instances = (UINT)(it->instances > 0 ? it->instances : t->instance_count);
+    UINT first_instance = (UINT)(it->instances > 0 ? it->first_instance : 0);
+    if (indexed) {
+        ID3D12GraphicsCommandList_DrawIndexedInstanced(l, (UINT)it->count, instances, (UINT)it->first, 0,
+                                                       first_instance);
+    } else {
+        ID3D12GraphicsCommandList_DrawInstanced(l, (UINT)it->count, instances, (UINT)it->first, first_instance);
+    }
+}
+
 static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMaterial* mat, const float clear[4]) {
     AedxDevice* d = t->dev;
     /* What this frame samples, checked before anything is recorded. */
@@ -2335,6 +2626,10 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
     if (SUCCEEDED(hr)) hr = ID3D12GraphicsCommandList_Reset(fr->list, fr->alloc, NULL);
     if (FAILED(hr)) return aedx_fail(aedx_hr_status(hr), "cannot reset the command list (0x%08lx)", (unsigned long)hr);
     ID3D12GraphicsCommandList* l = fr->list;
+    /* The frame's first timestamp; its pair and the resolve close the list. */
+    UINT timer = (UINT)(fr - t->frames) * 2u;
+    fr->timed = t->timing_on && t->timer_heap;
+    if (fr->timed) ID3D12GraphicsCommandList_EndQuery(l, t->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer);
     aedx_sampled_barriers(l, sampled, n_sampled, 1);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->rtv_heap);
@@ -2377,6 +2672,16 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
             vbv.StrideInBytes = p->stride ? p->stride : (UINT)(t->vertex_floats * 4);
             ID3D12GraphicsCommandList_IASetVertexBuffers(l, 0, 1, &vbv);
         }
+        /* The caller's streams past slot 0, which the draw check made sure
+         * are bound (#2198). */
+        for (UINT sb = 1; sb < AEDX_MAX_BINDINGS; sb++) {
+            if (!p->stream_declared[sb]) continue;
+            D3D12_VERTEX_BUFFER_VIEW sv;
+            sv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->streams[sb]->res);
+            sv.SizeInBytes = (UINT)t->streams[sb]->size;
+            sv.StrideInBytes = p->stream_stride[sb];
+            ID3D12GraphicsCommandList_IASetVertexBuffers(l, sb, 1, &sv);
+        }
         if (t->index_count > 0) {
             D3D12_INDEX_BUFFER_VIEW ibv;
             ibv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->ibuf);
@@ -2389,20 +2694,15 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
             for (int i = 0; i < t->batch_count; i++) {
                 AedxDrawItem* it = &t->batch[i];
                 AedxMaterial* im = it->mat ? it->mat : bind_mat;
-                if (im) aedx_bind_material(d, l, &p->rl, im, 0);
-                if (t->index_count > 0) {
-                    ID3D12GraphicsCommandList_DrawIndexedInstanced(l, (UINT)it->count, 1, (UINT)it->first, 0, 0);
-                } else {
-                    ID3D12GraphicsCommandList_DrawInstanced(l, (UINT)it->count, 1, (UINT)it->first, 0);
-                }
+                if (im) aedx_bind_material(d, l, &p->rl, im, 0, it->offsets);
+                aedx_record_draw(d, t, l, it);
             }
         } else {
-            if (bind_mat) aedx_bind_material(d, l, &p->rl, bind_mat, 0);
-            if (t->index_count > 0) {
-                ID3D12GraphicsCommandList_DrawIndexedInstanced(l, (UINT)t->index_count, 1, 0, 0, 0);
-            } else {
-                ID3D12GraphicsCommandList_DrawInstanced(l, (UINT)t->vertex_count, 1, 0, 0);
-            }
+            if (bind_mat) aedx_bind_material(d, l, &p->rl, bind_mat, 0, NULL);
+            AedxDrawItem all;
+            memset(&all, 0, sizeof(all));
+            all.count = t->index_count > 0 ? t->index_count : t->vertex_count;
+            aedx_record_draw(d, t, l, &all);
         }
     }
 
@@ -2431,10 +2731,73 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         src.SubresourceIndex = 0;
         ID3D12GraphicsCommandList_CopyTextureRegion(l, &dst, 0, 0, 0, &src, NULL);
     }
+    if (fr->timed) {
+        ID3D12GraphicsCommandList_EndQuery(l, t->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer + 1u);
+        ID3D12GraphicsCommandList_ResolveQueryData(l, t->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer, 2,
+                                                   t->timer_rb, (UINT64)timer * sizeof(UINT64));
+    }
     hr = ID3D12GraphicsCommandList_Close(l);
     if (FAILED(hr)) {
         aedx_drain_debug(d);
         return aedx_fail(AEDX_ERR_ARG, "the frame's commands were invalid (0x%08lx)", (unsigned long)hr);
+    }
+    return AEDX_OK;
+}
+
+/* The dynamic uniforms a draw with material `m` and `offsets` (NULL: all 0)
+ * reads are in range, and it sets no offset the pipeline has no dynamic
+ * binding for (#2198). */
+static int aedx_offsets_check(const AedxPipeline* p, const AedxMaterial* m, const UINT* offsets, int item) {
+    for (int b = 0; b < AEDX_MAX_DESC; b++) {
+        UINT off = offsets ? offsets[b] : 0;
+        if (p->rl.kind[b] != AEDX_BIND_UNIFORM_DYNAMIC) {
+            if (off != 0) {
+                return aedx_fail(AEDX_ERR_ARG,
+                                 "draw %d sets an offset for binding %d, which the pipeline does not "
+                                 "declare as a dynamic uniform", item, b);
+            }
+            continue;
+        }
+        const AedxBuffer* buf = m ? m->buf[b] : NULL;
+        if (!buf) {
+            return aedx_fail(AEDX_ERR_ARG,
+                             "binding %d is a dynamic uniform with no buffer bound: set_buffer first", b);
+        }
+        if ((size_t)off + p->rl.dyn_range[b] > buf->size) {
+            return aedx_fail(AEDX_ERR_ARG,
+                             "draw %d reads binding %d's %u bytes at offset %u, past the %zu-byte buffer",
+                             item, b, p->rl.dyn_range[b], off, buf->size);
+        }
+    }
+    return AEDX_OK;
+}
+
+/* Every stream the pipeline declares past slot 0 has a buffer holding what
+ * the frame's draws read from it (#2198). */
+static int aedx_streams_check(const AedxTarget* t, const AedxPipeline* p) {
+    long long instances_end = t->batch_count == 0 ? (long long)t->instance_count : 0;
+    for (int i = 0; i < t->batch_count; i++) {
+        const AedxDrawItem* it = &t->batch[i];
+        if (it->indirect) continue;
+        long long end = it->instances > 0 ? (long long)it->first_instance + it->instances
+                                          : (long long)t->instance_count;
+        if (end > instances_end) instances_end = end;
+    }
+    for (int b = 1; b < AEDX_MAX_BINDINGS; b++) {
+        if (!p->stream_declared[b]) continue;
+        const AedxBuffer* buf = t->streams[b];
+        if (!buf) {
+            return aedx_fail(AEDX_ERR_ARG,
+                             "the pipeline reads vertex stream %d, but no buffer is bound to it "
+                             "(vertex_stream)", b);
+        }
+        long long n = p->stream_instanced[b] ? instances_end : (long long)t->vertex_count;
+        unsigned long long need = (unsigned long long)n * p->stream_stride[b];
+        if (need > (unsigned long long)buf->size) {
+            return aedx_fail(AEDX_ERR_ARG,
+                             "vertex stream %d needs %llu bytes for %lld %s, but its buffer has %zu",
+                             b, need, n, p->stream_instanced[b] ? "instances" : "vertices", buf->size);
+        }
     }
     return AEDX_OK;
 }
@@ -2448,22 +2811,38 @@ static int aedx_submit_locked(AedxTarget* t, AedxPipeline* p, AedxMaterial* mat,
     if (p && t->vertex_count > 0) {
         if (p->vertex_input && !t->vbuf) return aedx_fail(AEDX_ERR_ARG, "vertices were never uploaded");
         int limit = t->index_count > 0 ? t->index_count : t->vertex_count;
+        UINT64 cmd_bytes = t->index_count > 0 ? AEDX_INDIRECT_INDEXED_BYTES : AEDX_INDIRECT_BYTES;
         for (int i = 0; i < t->batch_count; i++) {
             AedxDrawItem* it = &t->batch[i];
-            if ((long long)it->first + it->count > limit) {
+            if (it->indirect) {
+                UINT64 end = it->indirect_offset + (UINT64)it->indirect_draws * cmd_bytes;
+                if (end > (UINT64)it->indirect->size) {
+                    return aedx_fail(AEDX_ERR_ARG,
+                                     "draw %d reads %d commands of %u bytes at %llu, past the %zu-byte buffer",
+                                     i, it->indirect_draws, (unsigned)cmd_bytes,
+                                     (unsigned long long)it->indirect_offset, it->indirect->size);
+                }
+                int src = aedx_indirect_signature(t->dev, t->index_count > 0);
+                if (src != AEDX_OK) return src;
+            } else if ((long long)it->first + it->count > limit) {
                 return aedx_fail(AEDX_ERR_ARG, "draw %d covers %d..%lld but only %d are uploaded",
                                  i, it->first, (long long)it->first + it->count - 1, limit);
             }
             if (it->mat && it->mat->pipe != p) {
                 return aedx_fail(AEDX_ERR_ARG, "draw %d uses a material of another pipeline", i);
             }
-            int rc = aedx_material_ready(p, it->mat ? it->mat : (mat ? mat : p->def));
+            AedxMaterial* im = it->mat ? it->mat : (mat ? mat : p->def);
+            int rc = aedx_material_ready(p, im);
+            if (rc == AEDX_OK) rc = aedx_offsets_check(p, im, it->offsets, i);
             if (rc != AEDX_OK) return rc;
         }
         if (t->batch_count == 0) {
             int rc = aedx_material_ready(p, mat ? mat : p->def);
+            if (rc == AEDX_OK) rc = aedx_offsets_check(p, mat ? mat : p->def, NULL, -1);
             if (rc != AEDX_OK) return rc;
         }
+        int src = aedx_streams_check(t, p);
+        if (src != AEDX_OK) return src;
     }
     int slot = t->next_frame;
     int rc = aedx_wait_frame(t, slot);
@@ -2475,6 +2854,7 @@ static int aedx_submit_locked(AedxTarget* t, AedxPipeline* p, AedxMaterial* mat,
     if (!v) return AEDX_ERR_DEVICE_LOST;
     fr->value = v;
     fr->submitted = 1;
+    fr->seq = ++t->submitted_seq;
     t->rendered = 1;
     t->last_submitted = slot;
     t->next_frame = (slot + 1) % t->frame_count;
@@ -2591,6 +2971,13 @@ struct AedxCompute {
     UINT64                     value;
     int                        submitted;
     DWORD                      timeout_ms;
+    /* GPU timing (#2198): the dispatch's start and end timestamps. */
+    ID3D12QueryHeap*           timer_heap;
+    ID3D12Resource*            timer_rb;
+    UINT64*                    timer_ptr;
+    int                        timing_on;
+    int                        timed;
+    double                     gpu_ms;
 };
 
 void aedx_compute_destroy(AedxCompute* c) {
@@ -2605,6 +2992,7 @@ void aedx_compute_destroy(AedxCompute* c) {
             ID3D12Resource_Release(c->args.ub[i].res);
         }
     }
+    aedx_free_timer(&c->timer_heap, &c->timer_rb);
     if (c->list) ID3D12GraphicsCommandList_Release(c->list);
     if (c->alloc) ID3D12CommandAllocator_Release(c->alloc);
     if (c->event) CloseHandle(c->event);
@@ -2629,6 +3017,7 @@ AedxCompute* aedx_compute_create(AedxDevice* d, const void* cs, size_t len, cons
     c->dev = d;
     c->push_bytes = push_bytes;
     c->timeout_ms = 5000;
+    c->gpu_ms = -1.0;
     if (aedx_make_root(d, bindings, push_bytes, 1, &c->rl) != AEDX_OK) goto fail;
     D3D12_COMPUTE_PIPELINE_STATE_DESC cd;
     memset(&cd, 0, sizeof(cd));
@@ -2710,9 +3099,30 @@ int aedx_compute_set_timeout_ms(AedxCompute* c, int ms) {
 static int aedx_compute_wait_locked(AedxCompute* c) {
     if (!c->submitted) return AEDX_OK;
     int rc = aedx_wait_value(c->dev, c->value, c->event, c->timeout_ms);
-    if (rc == AEDX_OK) c->submitted = 0;
+    if (rc == AEDX_OK) {
+        c->submitted = 0;
+        if (c->timed && c->timer_ptr) c->gpu_ms = aedx_timer_ms(c->dev, c->timer_ptr);
+    }
     return rc;
 }
+
+int aedx_compute_set_timing(AedxCompute* c, int on) {
+    aedx_clear_error();
+    if (!c) return aedx_fail(AEDX_ERR_ARG, "compute is null");
+    on = on ? 1 : 0;
+    AedxDevice* d = c->dev;
+    AcquireSRWLockExclusive(&d->lock);
+    int rc = AEDX_OK;
+    if (on && !c->timer_heap) rc = aedx_make_timer(d, 2, &c->timer_heap, &c->timer_rb, &c->timer_ptr);
+    if (rc == AEDX_OK) {
+        c->timing_on = on;
+        c->gpu_ms = -1.0;
+    }
+    ReleaseSRWLockExclusive(&d->lock);
+    return rc;
+}
+
+double aedx_compute_gpu_ms(const AedxCompute* c) { return (c && c->timing_on) ? c->gpu_ms : -1.0; }
 
 int aedx_dispatch_async(AedxCompute* c, int gx, int gy, int gz) {
     aedx_clear_error();
@@ -2739,13 +3149,15 @@ int aedx_dispatch_async(AedxCompute* c, int gx, int gy, int gz) {
         return aedx_fail(aedx_hr_status(hr), "cannot reset the command list (0x%08lx)", (unsigned long)hr);
     }
     ID3D12GraphicsCommandList* l = c->list;
+    c->timed = c->timing_on && c->timer_heap;
+    if (c->timed) ID3D12GraphicsCommandList_EndQuery(l, c->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
     ID3D12GraphicsCommandList_SetComputeRootSignature(l, c->rl.root);
     ID3D12DescriptorHeap* heaps[2] = { d->srv.heap, d->samplers.heap };
     ID3D12GraphicsCommandList_SetDescriptorHeaps(l, 2, heaps);
     if (c->rl.push_words > 0) {
         ID3D12GraphicsCommandList_SetComputeRoot32BitConstants(l, 0, c->rl.push_words, c->push, 0);
     }
-    aedx_bind_material(d, l, &c->rl, &c->args, 1);
+    aedx_bind_material(d, l, &c->rl, &c->args, 1, NULL);
     ID3D12GraphicsCommandList_Dispatch(l, (UINT)gx, (UINT)gy, (UINT)gz);
     /* Writes made visible to whatever reads the buffers next: a later
      * dispatch, a draw, or (after the fence) the CPU. */
@@ -2754,6 +3166,11 @@ int aedx_dispatch_async(AedxCompute* c, int gx, int gy, int gz) {
     uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav.UAV.pResource = NULL;
     ID3D12GraphicsCommandList_ResourceBarrier(l, 1, &uav);
+    if (c->timed) {
+        ID3D12GraphicsCommandList_EndQuery(l, c->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        ID3D12GraphicsCommandList_ResolveQueryData(l, c->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+                                                   c->timer_rb, 0);
+    }
     hr = ID3D12GraphicsCommandList_Close(l);
     if (FAILED(hr)) {
         aedx_drain_debug(d);
@@ -3393,6 +3810,22 @@ int    aedx_compute_set_timeout_ms(AedxCompute* c, int ms) { (void)c; (void)ms; 
 int    aedx_dispatch(AedxCompute* c, int x, int y, int z) { (void)c; (void)x; (void)y; (void)z; return aedx_no(); }
 int    aedx_dispatch_async(AedxCompute* c, int x, int y, int z) { (void)c; (void)x; (void)y; (void)z; return aedx_no(); }
 int    aedx_compute_wait(AedxCompute* c) { (void)c; return aedx_no(); }
+int    aedx_batch_add_instanced(AedxTarget* t, AedxMaterial* m, int f, int c, int fi, int n) {
+    (void)t; (void)m; (void)f; (void)c; (void)fi; (void)n; return aedx_no();
+}
+int    aedx_batch_add_indirect(AedxTarget* t, AedxMaterial* m, AedxBuffer* b, int o, int n) {
+    (void)t; (void)m; (void)b; (void)o; (void)n; return aedx_no();
+}
+int    aedx_batch_set_offset(AedxTarget* t, int i, int b, int o) { (void)t; (void)i; (void)b; (void)o; return aedx_no(); }
+int    aedx_uniform_offset_alignment(const AedxDevice* d) { (void)d; return 0; }
+int    aedx_bindings_uniform_dynamic(AedxBindings* b, int n, int s) { (void)b; (void)n; (void)s; return aedx_no(); }
+int    aedx_target_set_stream(AedxTarget* t, int b, AedxBuffer* buf) { (void)t; (void)b; (void)buf; return aedx_no(); }
+int    aedx_target_set_instances(AedxTarget* t, int n) { (void)t; (void)n; return aedx_no(); }
+int    aedx_target_instances(const AedxTarget* t) { (void)t; return 0; }
+int    aedx_target_set_timing(AedxTarget* t, int on) { (void)t; (void)on; return aedx_no(); }
+double aedx_target_gpu_ms(const AedxTarget* t) { (void)t; return -1.0; }
+int    aedx_compute_set_timing(AedxCompute* c, int on) { (void)c; (void)on; return aedx_no(); }
+double aedx_compute_gpu_ms(const AedxCompute* c) { (void)c; return -1.0; }
 AedxSwapchain* aedx_swapchain_create(AedxDevice* d, int k, void* dp, void* w, int x, int y) {
     (void)d; (void)k; (void)dp; (void)w; (void)x; (void)y; aedx_no(); return NULL;
 }
@@ -3618,6 +4051,28 @@ int   aedx_ae_compute_set_timeout_ms(void* c, int ms) { return aedx_compute_set_
 int   aedx_ae_dispatch(void* c, int x, int y, int z) { return aedx_dispatch((AedxCompute*)c, x, y, z); }
 int   aedx_ae_dispatch_async(void* c, int x, int y, int z) { return aedx_dispatch_async((AedxCompute*)c, x, y, z); }
 int   aedx_ae_compute_wait(void* c)          { return aedx_compute_wait((AedxCompute*)c); }
+int   aedx_ae_batch_add_instanced(void* t, void* m, int first, int count, int first_instance, int instances) {
+    return aedx_batch_add_instanced((AedxTarget*)t, (AedxMaterial*)m, first, count, first_instance, instances);
+}
+int   aedx_ae_batch_add_indirect(void* t, void* m, void* buf, int offset, int draws) {
+    return aedx_batch_add_indirect((AedxTarget*)t, (AedxMaterial*)m, (AedxBuffer*)buf, offset, draws);
+}
+int   aedx_ae_batch_set_offset(void* t, int item, int binding, int offset) {
+    return aedx_batch_set_offset((AedxTarget*)t, item, binding, offset);
+}
+int   aedx_ae_uniform_offset_alignment(void* d) { return aedx_uniform_offset_alignment((const AedxDevice*)d); }
+int   aedx_ae_bindings_uniform_dynamic(void* b, int binding, int bytes) {
+    return aedx_bindings_uniform_dynamic((AedxBindings*)b, binding, bytes);
+}
+int   aedx_ae_vertex_stream(void* t, int binding, void* buf) {
+    return aedx_target_set_stream((AedxTarget*)t, binding, (AedxBuffer*)buf);
+}
+int   aedx_ae_target_set_instances(void* t, int count) { return aedx_target_set_instances((AedxTarget*)t, count); }
+int   aedx_ae_target_instances(void* t) { return aedx_target_instances((const AedxTarget*)t); }
+int   aedx_ae_target_set_timing(void* t, int on) { return aedx_target_set_timing((AedxTarget*)t, on); }
+double aedx_ae_target_gpu_ms(void* t) { return aedx_target_gpu_ms((const AedxTarget*)t); }
+int   aedx_ae_compute_set_timing(void* c, int on) { return aedx_compute_set_timing((AedxCompute*)c, on); }
+double aedx_ae_compute_gpu_ms(void* c) { return aedx_compute_gpu_ms((const AedxCompute*)c); }
 
 void* aedx_ae_swapchain_create(void* d, int kind, void* display, void* window, int w, int h) {
     return (void*)aedx_swapchain_create((AedxDevice*)d, kind, display, window, w, h);
