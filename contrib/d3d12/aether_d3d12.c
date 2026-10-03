@@ -42,6 +42,7 @@ struct AedxState {
     int depth_set;      /* state_depth was called */
     int depth_op;       /* compare op 1..4 */
     int depth_write;
+    int topology;       /* 0 triangles, 1 strip, 2 lines, 3 line strip, 4 points (#2398) */
 };
 
 AedxState* aedx_state_create(void) {
@@ -72,6 +73,17 @@ int aedx_state_cull(AedxState* s, int mode) {
         return aedx_fail(AEDX_ERR_ARG, "cull mode %d is not CULL_NONE..CULL_FRONT (0..2)", mode);
     }
     s->cull = mode;
+    return AEDX_OK;
+}
+
+/* What the vertices assemble into (#2398). */
+int aedx_state_topology(AedxState* s, int topology) {
+    aedx_clear_error();
+    if (!s) return aedx_fail(AEDX_ERR_ARG, "state is null");
+    if (topology < 0 || topology > 4) {
+        return aedx_fail(AEDX_ERR_ARG, "topology %d is not TOPOLOGY_TRIANGLES..TOPOLOGY_POINTS (0..4)", topology);
+    }
+    s->topology = topology;
     return AEDX_OK;
 }
 
@@ -690,6 +702,12 @@ typedef struct {
     UINT64        indirect_offset;
     int           indirect_draws;
     UINT          offsets[AEDX_MAX_DESC];
+    /* A scissor and a viewport of the draw's own (#2398), in pixels from
+     * the target's top left; unset, the whole target. */
+    int           scissor_set;
+    int           sx, sy, sw, sh;
+    int           viewport_set;
+    float         vx, vy, vw, vh, vmin, vmax;
 } AedxDrawItem;
 
 /* The bytes of one indirect draw command, indexed and not: the layouts of
@@ -1725,6 +1743,42 @@ int aedx_batch_set_offset(AedxTarget* t, int item, int binding, int offset) {
 
 int aedx_uniform_offset_alignment(const AedxDevice* d) { return d ? AEDX_UNIFORM_ALIGN : 0; }
 
+/* Draw `item`'s scissor (#2398), checked against the target when the frame
+ * is drawn; a width of 0 goes back to the whole target. */
+int aedx_batch_set_scissor(AedxTarget* t, int item, int x, int y, int w, int h) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    if (x < 0 || y < 0 || w < 0 || h < 0) {
+        return aedx_fail(AEDX_ERR_ARG, "a scissor %d,%d %dx%d is not inside a target", x, y, w, h);
+    }
+    if (item < 0 || item >= t->batch_count) {
+        return aedx_fail(AEDX_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    AedxDrawItem* it = &t->batch[item];
+    it->scissor_set = w > 0 && h > 0;
+    it->sx = x; it->sy = y; it->sw = w; it->sh = h;
+    return AEDX_OK;
+}
+
+/* Draw `item`'s viewport (#2398); a width of 0 goes back to the whole
+ * target. */
+int aedx_batch_set_viewport(AedxTarget* t, int item, float x, float y, float w, float h,
+                           float min_depth, float max_depth) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    if (w < 0.0f || h < 0.0f || !(min_depth >= 0.0f && max_depth <= 1.0f && min_depth <= max_depth)) {
+        return aedx_fail(AEDX_ERR_ARG, "a viewport needs a size of at least 0 and depths in 0 <= min <= max <= 1");
+    }
+    if (item < 0 || item >= t->batch_count) {
+        return aedx_fail(AEDX_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    AedxDrawItem* it = &t->batch[item];
+    it->viewport_set = w > 0.0f && h > 0.0f;
+    it->vx = x; it->vy = y; it->vw = w; it->vh = h; it->vmin = min_depth; it->vmax = max_depth;
+    return AEDX_OK;
+}
+
+
 int aedx_target_set_stream(AedxTarget* t, int binding, AedxBuffer* buf) {
     aedx_clear_error();
     if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
@@ -2520,6 +2574,7 @@ struct AedxPipeline {
     int                  push_bytes;
     int                  vertex_input;
     UINT                 stride;       /* bytes a vertex in slot 0 */
+    D3D_PRIMITIVE_TOPOLOGY prim;       /* what the vertices assemble into (#2398) */
     /* The streams the layout declares past slot 0 (#2198). */
     int                  stream_declared[AEDX_MAX_BINDINGS];
     UINT                 stream_stride[AEDX_MAX_BINDINGS];
@@ -2690,7 +2745,13 @@ AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const voi
     gd.DepthStencilState.DepthFunc = st->depth_set ? aedx_compare_func(st->depth_op)
                                                    : D3D12_COMPARISON_FUNC_LESS;
     gd.InputLayout = il;
-    gd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    gd.PrimitiveTopologyType = st->topology >= 4 ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
+                             : st->topology >= 2 ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+                                                 : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    p->prim = st->topology == 1 ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP
+            : st->topology == 2 ? D3D_PRIMITIVE_TOPOLOGY_LINELIST
+            : st->topology == 3 ? D3D_PRIMITIVE_TOPOLOGY_LINESTRIP
+            : st->topology == 4 ? D3D_PRIMITIVE_TOPOLOGY_POINTLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     /* One render target an attachment (#2386); IndependentBlendEnable is
      * off, so render target 0's blend applies to every one. */
     gd.NumRenderTargets = (UINT)(1 + t->extra);
@@ -3194,7 +3255,7 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         ID3D12GraphicsCommandList_SetPipelineState(l, p->pso);
         ID3D12DescriptorHeap* heaps[2] = { d->srv.heap, d->samplers.heap };
         ID3D12GraphicsCommandList_SetDescriptorHeaps(l, 2, heaps);
-        ID3D12GraphicsCommandList_IASetPrimitiveTopology(l, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D12GraphicsCommandList_IASetPrimitiveTopology(l, p->prim);
         if (p->rl.push_words > 0) {
             unsigned char block[AEDX_MAX_PUSH];
             memset(block, 0, sizeof(block));
@@ -3232,6 +3293,20 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
                 AedxDrawItem* it = &t->batch[i];
                 AedxMaterial* im = it->mat ? it->mat : bind_mat;
                 if (im) aedx_bind_material(d, l, &p->rl, im, 0, it->offsets);
+                /* Each draw's own scissor and viewport, or the whole target
+                 * (#2398). */
+                D3D12_VIEWPORT ivp = vp;
+                D3D12_RECT isc = sc;
+                if (it->viewport_set) {
+                    ivp.TopLeftX = it->vx; ivp.TopLeftY = it->vy; ivp.Width = it->vw; ivp.Height = it->vh;
+                    ivp.MinDepth = it->vmin; ivp.MaxDepth = it->vmax;
+                }
+                if (it->scissor_set) {
+                    isc.left = it->sx; isc.top = it->sy;
+                    isc.right = it->sx + it->sw; isc.bottom = it->sy + it->sh;
+                }
+                ID3D12GraphicsCommandList_RSSetViewports(l, 1, &ivp);
+                ID3D12GraphicsCommandList_RSSetScissorRects(l, 1, &isc);
                 aedx_record_draw(d, t, l, it);
             }
         } else {
@@ -3384,6 +3459,10 @@ static int aedx_submit_locked(AedxTarget* t, AedxPipeline* p, AedxMaterial* mat,
             }
             if (it->mat && it->mat->pipe != p) {
                 return aedx_fail(AEDX_ERR_ARG, "draw %d uses a material of another pipeline", i);
+            }
+            if (it->scissor_set && ((long long)it->sx + it->sw > t->width || (long long)it->sy + it->sh > t->height)) {
+                return aedx_fail(AEDX_ERR_ARG, "draw %d's scissor %d,%d %dx%d runs outside the %dx%d target",
+                                 i, it->sx, it->sy, it->sw, it->sh, t->width, t->height);
             }
             AedxMaterial* im = it->mat ? it->mat : (mat ? mat : p->def);
             int rc = aedx_material_ready(p, im);
@@ -4499,6 +4578,12 @@ int    aedx_material_set_target_attachment(AedxMaterial* m, int b, AedxTarget* t
 double aedx_ae_pixel_value_at(void* t, int n, int x, int y, int c) {
     (void)t; (void)n; (void)x; (void)y; (void)c; aedx_no(); return (double)NAN;
 }
+int    aedx_batch_set_scissor(AedxTarget* t, int i, int x, int y, int w, int h) {
+    (void)t; (void)i; (void)x; (void)y; (void)w; (void)h; return aedx_no();
+}
+int    aedx_batch_set_viewport(AedxTarget* t, int i, float x, float y, float w, float h, float a, float b) {
+    (void)t; (void)i; (void)x; (void)y; (void)w; (void)h; (void)a; (void)b; return aedx_no();
+}
 int    aedx_bindings_storage_texture(AedxBindings* b, int n) { (void)b; (void)n; return aedx_no(); }
 int    aedx_compute_set_storage_texture(AedxCompute* c, int b, AedxTexture* t) {
     (void)c; (void)b; (void)t; return aedx_no();
@@ -4594,6 +4679,15 @@ void* aedx_ae_pipeline_create_ex(void* d, void* t, const char* vs, int vl, const
 }
 void  aedx_ae_pipeline_destroy(void* p)      { aedx_pipeline_destroy((AedxPipeline*)p); }
 
+int   aedx_ae_state_topology(void* s, int topology) { return aedx_state_topology((AedxState*)s, topology); }
+int   aedx_ae_batch_set_scissor(void* t, int item, int x, int y, int w, int h) {
+    return aedx_batch_set_scissor((AedxTarget*)t, item, x, y, w, h);
+}
+int   aedx_ae_batch_set_viewport(void* t, int item, double x, double y, double w, double h,
+                                double min_depth, double max_depth) {
+    return aedx_batch_set_viewport((AedxTarget*)t, item, (float)x, (float)y, (float)w, (float)h,
+                                  (float)min_depth, (float)max_depth);
+}
 void* aedx_ae_state_create(void) { return (void*)aedx_state_create(); }
 void  aedx_ae_state_destroy(void* s) { aedx_state_destroy((AedxState*)s); }
 int   aedx_ae_state_blend(void* s, int mode) { return aedx_state_blend((AedxState*)s, mode); }

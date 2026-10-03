@@ -214,6 +214,35 @@ blend_pipeline(dev: ptr, t: ptr, pvs: string, pvl: int, ufs: string, ufl: int, m
     return pipe
 }
 
+// A pipeline drawing the built-in layout as `topology`.
+topology_pipeline(dev: ptr, t: ptr, vs: string, vl: int, fs: string, fl: int, topology: int) -> ptr {
+    st = d3d12.state_create()
+    _ = d3d12.state_topology(st, topology)
+    p = d3d12.pipeline_create_state(dev, t, vs, vl, fs, fl, null, 0, null, st)
+    d3d12.state_destroy(st)
+    return p
+}
+
+// Two full-target quads in the built-in layout, red then green.
+write_two_quads(t: ptr) {
+    _ = d3d12.verts_reserve(t, 8)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    i = 0
+    while i < 4 {
+        _ = d3d12.verts_set(t, i, xs[i], ys[i], 1.0, 0.0, 0.0)
+        _ = d3d12.verts_set(t, i + 4, xs[i], ys[i], 0.0, 1.0, 0.0)
+        i = i + 1
+    }
+    _ = d3d12.indices_reserve(t, 12)
+    order = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
+    k = 0
+    while k < 12 {
+        _ = d3d12.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
 // Writes up to five words at word `at` of `buf` on the GPU.
 gpu_words(c: ptr, at: int, n: int, w0: int, w1: int, w2: int, w3: int, w4: int) -> int {
     _ = d3d12.compute_push_int(c, 0, at)
@@ -248,6 +277,8 @@ main() {
     dvl = 0
     dfs = ""
     dfl = 0
+    nvs = ""
+    nvl = 0
     if d3d12.available() == 1 {
         dev = d3d12.device_create()
         if dev == null {
@@ -261,7 +292,8 @@ main() {
             tvs, tvl = load_src("contrib/d3d12/shaders/triangle_vs.hlsl")
             dvs, dvl = load_src("contrib/d3d12/shaders/depth_vs.hlsl")
             dfs, dfl = load_src("contrib/d3d12/shaders/triangle_ps.hlsl")
-            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 || dvl == 0 || dfl == 0 {
+            nvs, nvl = load_src("contrib/d3d12/shaders/triangle_vs.hlsl")
+            if ivl == 0 || tfl == 0 || pvl == 0 || ufl == 0 || acl == 0 || tvl == 0 || dvl == 0 || dfl == 0 || nvl == 0 {
                 reason = "HLSL shaders not found"
             } else {
                 ready = 1
@@ -649,6 +681,99 @@ main() {
         }
     }
 
+    spec.describe(fw, "d3d12: topology, scissor and viewport") {
+        spec.it_when(ready, "draws lines, points and strips", reason) callback {
+            t = d3d12.target_create(dev, 8, 8)
+            st = d3d12.state_create()
+            spec.assert_eq(d3d12.state_topology(st, 5), d3d12.ERR_ARG, "topology 5")
+            d3d12.state_destroy(st)
+
+            // A line across the middle of row 4.
+            lp = topology_pipeline(dev, t, tvs, tvl, tfs, tfl, d3d12.TOPOLOGY_LINES)
+            spec.assert_true(lp != null, "a line pipeline (${d3d12.last_error()})")
+            _ = d3d12.verts_reserve(t, 2)
+            _ = d3d12.verts_set(t, 0, -1.0, flip_y(0.125), 1.0, 0.0, 0.0)
+            _ = d3d12.verts_set(t, 1, 1.0, flip_y(0.125), 1.0, 0.0, 0.0)
+            spec.assert_eq(d3d12.draw(t, lp, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "a line (${d3d12.last_error()})")
+            spec.assert_eq(d3d12.pixel(t, 3, 4), RED, "the line's pixel")
+            spec.assert_eq(d3d12.pixel(t, 3, 2), BLACK, "and none above it")
+
+            // A line strip along row 1, through a middle vertex.
+            sp = topology_pipeline(dev, t, tvs, tvl, tfs, tfl, d3d12.TOPOLOGY_LINE_STRIP)
+            _ = d3d12.verts_reserve(t, 3)
+            _ = d3d12.verts_set(t, 0, -1.0, flip_y(-0.625), 0.0, 1.0, 0.0)
+            _ = d3d12.verts_set(t, 1, 0.0, flip_y(-0.625), 0.0, 1.0, 0.0)
+            _ = d3d12.verts_set(t, 2, 1.0, flip_y(-0.625), 0.0, 1.0, 0.0)
+            _ = d3d12.draw(t, sp, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 1, 1), GREEN, "the strip's first segment")
+            spec.assert_eq(d3d12.pixel(t, 6, 1), GREEN, "and its second")
+            spec.assert_eq(d3d12.pixel(t, 6, 5), BLACK, "and nothing else")
+
+            // One point at the centre of pixel 2, 6.
+            pp = topology_pipeline(dev, t, nvs, nvl, tfs, tfl, d3d12.TOPOLOGY_POINTS)
+            spec.assert_true(pp != null, "a point pipeline (${d3d12.last_error()})")
+            _ = d3d12.verts_reserve(t, 1)
+            _ = d3d12.verts_set(t, 0, -0.375, flip_y(0.625), 0.0, 0.0, 1.0)
+            _ = d3d12.draw(t, pp, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 2, 6), BLUE, "the point's pixel")
+            spec.assert_eq(d3d12.pixel(t, 3, 6), BLACK, "not its right neighbour")
+            spec.assert_eq(d3d12.pixel(t, 2, 5), BLACK, "nor the one above")
+
+            // A triangle strip of four vertices: the left half.
+            tp = topology_pipeline(dev, t, tvs, tvl, tfs, tfl, d3d12.TOPOLOGY_TRIANGLE_STRIP)
+            _ = d3d12.verts_reserve(t, 4)
+            _ = d3d12.verts_set(t, 0, -1.0, flip_y(-1.0), 1.0, 1.0, 1.0)
+            _ = d3d12.verts_set(t, 1, -1.0, flip_y(1.0), 1.0, 1.0, 1.0)
+            _ = d3d12.verts_set(t, 2, 0.0, flip_y(-1.0), 1.0, 1.0, 1.0)
+            _ = d3d12.verts_set(t, 3, 0.0, flip_y(1.0), 1.0, 1.0, 1.0)
+            _ = d3d12.draw(t, tp, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 1, 1), WHITE, "the strip's top left")
+            spec.assert_eq(d3d12.pixel(t, 2, 6), WHITE, "and its bottom")
+            spec.assert_eq(d3d12.pixel(t, 6, 4), BLACK, "and not the right half")
+
+            d3d12.pipeline_destroy(tp)
+            d3d12.pipeline_destroy(pp)
+            d3d12.pipeline_destroy(sp)
+            d3d12.pipeline_destroy(lp)
+            d3d12.target_destroy(t)
+        }
+
+        spec.it_when(ready, "scissors and positions each draw", reason) callback {
+            t = d3d12.target_create(dev, 8, 8)
+            p = d3d12.pipeline_create(dev, t, tvs, tvl, tfs, tfl)
+            write_two_quads(t)
+            _ = d3d12.batch_add(t, null, 0, 6)
+            _ = d3d12.batch_add(t, null, 6, 6)
+            spec.assert_eq(d3d12.batch_set_scissor(t, 0, 0, 0, 4, 8), d3d12.OK, "the red's scissor")
+            spec.assert_eq(d3d12.batch_set_scissor(t, 1, 4, 0, 4, 8), d3d12.OK, "the green's scissor")
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "drawn (${d3d12.last_error()})")
+            spec.assert_eq(d3d12.pixel(t, 1, 4), RED, "red on the left")
+            spec.assert_eq(d3d12.pixel(t, 6, 4), GREEN, "green on the right")
+
+            spec.assert_eq(d3d12.batch_set_scissor(t, 1, 0, 0, 0, 0), d3d12.OK, "the green's scissor cleared")
+            _ = d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 1, 4), GREEN, "green over everything again")
+
+            spec.assert_eq(d3d12.batch_set_scissor(t, 0, 6, 0, 4, 8), d3d12.OK, "a scissor past the edge")
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.ERR_ARG, "is refused when drawn")
+            spec.assert_eq(d3d12.batch_set_scissor(t, 5, 0, 0, 1, 1), d3d12.ERR_ARG, "no draw 5")
+            spec.assert_eq(d3d12.batch_set_viewport(t, 0, 0.0, 0.0, 4.0, 4.0, 0.75, 0.25), d3d12.ERR_ARG,
+                "a depth range that runs backwards")
+
+            // One red quad, its viewport the bottom right quarter.
+            _ = d3d12.batch_reset(t)
+            _ = d3d12.batch_add(t, null, 0, 6)
+            spec.assert_eq(d3d12.batch_set_viewport(t, 0, 4.0, 4.0, 4.0, 4.0, 0.0, 1.0), d3d12.OK, "a viewport")
+            spec.assert_eq(d3d12.draw(t, p, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "drawn (${d3d12.last_error()})")
+            spec.assert_eq(d3d12.pixel(t, 6, 6), RED, "the quad fills the bottom right quarter")
+            spec.assert_eq(d3d12.pixel(t, 2, 2), BLACK, "and only that quarter")
+            spec.assert_eq(d3d12.pixel(t, 6, 2), BLACK, "not the top right")
+
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+        }
+    }
+
     spec.describe(fw, "d3d12: GPU timing") {
         spec.it_when(ready, "times frames and dispatches on the GPU", reason) callback {
             t = d3d12.target_create(dev, 64, 64)
@@ -718,6 +843,7 @@ main() {
     string.free(tvs)
     string.free(dvs)
     string.free(dfs)
+    string.free(nvs)
     _rc = spec.run_summary(fw)
     if dev != null {
         println("  debug-layer warnings and errors: ${d3d12.debug_message_count(dev)}")
