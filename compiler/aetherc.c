@@ -148,7 +148,10 @@ static int mem_accessor_width(const char* fn) {
         {"get_ptr",8},{"set_ptr",8},
     };
     for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
-        if (strcmp(fn, t[i].name) == 0) return t[i].width;
+        if (strcmp(fn, t[i].name) == 0 ||
+            (strncmp(fn, t[i].name, strlen(t[i].name)) == 0 &&
+             strcmp(fn + strlen(t[i].name), "_unchecked") == 0))
+            return t[i].width;
     return 0;
 }
 

@@ -29,6 +29,30 @@
 // helpers, little-endian variants) ship when concrete uses surface.
 
 exports(
+    aether_mem_get_byte_unchecked, get_byte_unchecked,
+    aether_mem_set_byte_unchecked, set_byte_unchecked,
+    aether_mem_get_byte_sz_unchecked, get_byte_sz_unchecked,
+    aether_mem_set_byte_sz_unchecked, set_byte_sz_unchecked,
+    aether_mem_get_ptr_unchecked, get_ptr_unchecked,
+    aether_mem_set_ptr_unchecked, set_ptr_unchecked,
+    aether_mem_get_int_unchecked, get_int_unchecked,
+    aether_mem_set_int_unchecked, set_int_unchecked,
+    aether_mem_get_long_unchecked, get_long_unchecked,
+    aether_mem_set_long_unchecked, set_long_unchecked,
+    aether_mem_get_int8_unchecked, get_int8_unchecked,
+    aether_mem_set_int8_unchecked, set_int8_unchecked,
+    aether_mem_get_uint8_unchecked, get_uint8_unchecked,
+    aether_mem_set_uint8_unchecked, set_uint8_unchecked,
+    aether_mem_get_int16_unchecked, get_int16_unchecked,
+    aether_mem_set_int16_unchecked, set_int16_unchecked,
+    aether_mem_get_uint16_unchecked, get_uint16_unchecked,
+    aether_mem_set_uint16_unchecked, set_uint16_unchecked,
+    aether_mem_get_uint32_unchecked, get_uint32_unchecked,
+    aether_mem_set_uint32_unchecked, set_uint32_unchecked,
+    aether_mem_get_float32_unchecked, get_float32_unchecked,
+    aether_mem_set_float32_unchecked, set_float32_unchecked,
+    aether_mem_get_float64_unchecked, get_float64_unchecked,
+    aether_mem_set_float64_unchecked, set_float64_unchecked,
     aether_mem_get_byte, aether_mem_set_byte,
     aether_mem_get_byte_sz, aether_mem_set_byte_sz,
     aether_mem_get_ptr, aether_mem_set_ptr,
@@ -502,3 +526,57 @@ compare_slice(a: byte[], b: byte[]) -> int {
     if a.len > b.len { return 1 }
     return 0
 }
+
+// Native-endian scalar accessors without a null check (#2379).
+// The caller must supply a non-null pointer to a valid slot, with the
+// same size and alignment as the checked counterpart. Null is undefined
+// behaviour; setters return 1. These wrappers lower inline as well.
+extern aether_mem_get_byte_unchecked(p: ptr, i: int) -> int
+extern aether_mem_set_byte_unchecked(p: ptr, i: int, value: int) -> int
+extern aether_mem_get_byte_sz_unchecked(p: ptr, i: size_t) -> int
+extern aether_mem_set_byte_sz_unchecked(p: ptr, i: size_t, value: int) -> int
+extern aether_mem_get_ptr_unchecked(p: ptr, offset: int) -> ptr
+extern aether_mem_set_ptr_unchecked(p: ptr, offset: int, value: ptr) -> int
+extern aether_mem_get_int_unchecked(p: ptr, offset: int) -> int
+extern aether_mem_set_int_unchecked(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_long_unchecked(p: ptr, offset: int) -> long
+extern aether_mem_set_long_unchecked(p: ptr, offset: int, value: long) -> int
+extern aether_mem_get_int8_unchecked(p: ptr, offset: int) -> int
+extern aether_mem_set_int8_unchecked(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint8_unchecked(p: ptr, offset: int) -> int
+extern aether_mem_set_uint8_unchecked(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_int16_unchecked(p: ptr, offset: int) -> int
+extern aether_mem_set_int16_unchecked(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint16_unchecked(p: ptr, offset: int) -> int
+extern aether_mem_set_uint16_unchecked(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint32_unchecked(p: ptr, offset: int) -> long
+extern aether_mem_set_uint32_unchecked(p: ptr, offset: int, value: long) -> int
+extern aether_mem_get_float32_unchecked(p: ptr, offset: int) -> float
+extern aether_mem_set_float32_unchecked(p: ptr, offset: int, value: float) -> int
+extern aether_mem_get_float64_unchecked(p: ptr, offset: int) -> float
+extern aether_mem_set_float64_unchecked(p: ptr, offset: int, value: float) -> int
+
+get_byte_unchecked(p: ptr, i: int) -> int { return aether_mem_get_byte_unchecked(p, i) }
+set_byte_unchecked(p: ptr, i: int, value: int) -> int { return aether_mem_set_byte_unchecked(p, i, value) }
+get_byte_sz_unchecked(p: ptr, i: size_t) -> int { return aether_mem_get_byte_sz_unchecked(p, i) }
+set_byte_sz_unchecked(p: ptr, i: size_t, value: int) -> int { return aether_mem_set_byte_sz_unchecked(p, i, value) }
+get_ptr_unchecked(p: ptr, offset: int) -> ptr { return aether_mem_get_ptr_unchecked(p, offset) }
+set_ptr_unchecked(p: ptr, offset: int, value: ptr) -> int { return aether_mem_set_ptr_unchecked(p, offset, value) }
+get_int_unchecked(p: ptr, offset: int) -> int { return aether_mem_get_int_unchecked(p, offset) }
+set_int_unchecked(p: ptr, offset: int, value: int) -> int { return aether_mem_set_int_unchecked(p, offset, value) }
+get_long_unchecked(p: ptr, offset: int) -> long { return aether_mem_get_long_unchecked(p, offset) }
+set_long_unchecked(p: ptr, offset: int, value: long) -> int { return aether_mem_set_long_unchecked(p, offset, value) }
+get_int8_unchecked(p: ptr, offset: int) -> int { return aether_mem_get_int8_unchecked(p, offset) }
+set_int8_unchecked(p: ptr, offset: int, value: int) -> int { return aether_mem_set_int8_unchecked(p, offset, value) }
+get_uint8_unchecked(p: ptr, offset: int) -> int { return aether_mem_get_uint8_unchecked(p, offset) }
+set_uint8_unchecked(p: ptr, offset: int, value: int) -> int { return aether_mem_set_uint8_unchecked(p, offset, value) }
+get_int16_unchecked(p: ptr, offset: int) -> int { return aether_mem_get_int16_unchecked(p, offset) }
+set_int16_unchecked(p: ptr, offset: int, value: int) -> int { return aether_mem_set_int16_unchecked(p, offset, value) }
+get_uint16_unchecked(p: ptr, offset: int) -> int { return aether_mem_get_uint16_unchecked(p, offset) }
+set_uint16_unchecked(p: ptr, offset: int, value: int) -> int { return aether_mem_set_uint16_unchecked(p, offset, value) }
+get_uint32_unchecked(p: ptr, offset: int) -> long { return aether_mem_get_uint32_unchecked(p, offset) }
+set_uint32_unchecked(p: ptr, offset: int, value: long) -> int { return aether_mem_set_uint32_unchecked(p, offset, value) }
+get_float32_unchecked(p: ptr, offset: int) -> float { return aether_mem_get_float32_unchecked(p, offset) }
+set_float32_unchecked(p: ptr, offset: int, value: float) -> int { return aether_mem_set_float32_unchecked(p, offset, value) }
+get_float64_unchecked(p: ptr, offset: int) -> float { return aether_mem_get_float64_unchecked(p, offset) }
+set_float64_unchecked(p: ptr, offset: int, value: float) -> int { return aether_mem_set_float64_unchecked(p, offset, value) }

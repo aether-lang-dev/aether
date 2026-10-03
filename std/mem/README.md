@@ -64,11 +64,23 @@ pattern and back, without going through a conversion.
 The scalar accessors cost no more than the load or store they wrap. The
 compiler emits the native-endian `get_*` / `set_*` accessors (`byte`, `int8`
 through `uint32`, `int`, `long`, `float32`, `float64`, `ptr`) and
-`ptr_to_long` / `long_to_ptr` inline in the calling translation unit rather
+`ptr_to_long` / `long_to_ptr`, `bits_of_float` / `float_from_bits`, and
+`clz32` / `clz64` inline in the calling translation unit rather
 than as calls into libaether (the `_le` / `_be` pairs are still calls), with the same null behaviour as the library
 functions (a null read gives 0, or -1 for `get_byte`; a null write gives 0).
 A port that walks a heap through these in its inner loop, as mquickjs-ae's VM
 does, does not pay a call per access.
+
+For a hot loop whose pointers are known to be non-null, each native-endian
+scalar getter and setter also has an inline `_unchecked` companion:
+`get_byte_unchecked`, `set_byte_unchecked`, `get_byte_sz_unchecked`,
+`set_byte_sz_unchecked`, and `get_*_unchecked` / `set_*_unchecked` for
+`ptr`, `int`, `long`, `int8`, `uint8`, `int16`, `uint16`, `uint32`,
+`float32` and `float64`. These omit the null check; passing null is undefined
+behavior. Width, truncation, alignment and byte-offset requirements match
+the checked forms, and setters return 1. Pointer loads/stores retain the
+alias-safe memcpy lowering. `--audit-mem` reports these accesses too.
+`clz32` and `clz64` require a nonzero value in both the inline and extern forms.
 
 ## Bulk operations on interior spans
 

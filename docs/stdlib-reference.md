@@ -54,7 +54,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 10 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 125 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 173 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -3866,7 +3866,11 @@ network packet, a memory-mapped file -- at **byte offsets**. `std.bytes` is
 for building up bytes Aether owns; this is for the pointer you were handed.
 There is no bounds check: the caller knows the size, exactly as with POSIX
 `read`/`write`. A null pointer is defended against; an out-of-range offset is
-the caller's to avoid.
+the caller's to avoid. Native-endian scalar getters and setters also have
+`_unchecked` companions that omit the null check; callers must guarantee
+non-null storage with the same size and alignment as the checked forms.
+The compiler inlines those accessors, `bits_of_float` / `float_from_bits`,
+and `clz32` / `clz64` (which require nonzero inputs).
 
 Offsets are in bytes, where `std.lanes`' loads take an element index -- the
 two conventions meet whenever a buffer is reached both ways.

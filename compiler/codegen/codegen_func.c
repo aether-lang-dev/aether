@@ -984,10 +984,9 @@ void propagate_tuple_type_to_calls(ASTNode* node, const char* func_name, Type* t
  * otherwise, and they are now lowered through memcpy (see their entries).
  *
  * The bodies reference the wrapper's own parameter names (p / i / offset /
- * value), which are the names in std/mem/module.ae and are what this
- * emitter prints for the signature. emit_mem_accessor_body verifies the
- * arity and names before substituting, so a signature change in std.mem
- * turns into "no lowering" (correct, slower) rather than broken C. */
+ * value / bits), which are the names in std/mem/module.ae and are what this
+ * emitter prints for the signature. Differential integration tests pin
+ * this coupling, including the unchecked companions (#2379). */
 typedef struct { const char* name; const char* body; } MemAccessorBody;
 
 static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
@@ -1104,6 +1103,14 @@ static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
       "    uint32_t _v = (uint32_t)(value & 0xFFFFFFFF);\n"
       "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
       "    return 1;\n" },
+    { "mem_bits_of_float",
+      "    int64_t _b; __builtin_memcpy(&_b, &value, sizeof(_b)); return _b;\n" },
+    { "mem_float_from_bits",
+      "    double _d; __builtin_memcpy(&_d, &bits, sizeof(_d)); return _d;\n" },
+    { "mem_clz32",
+      "    return __builtin_clz((unsigned int)value);\n" },
+    { "mem_clz64",
+      "    return __builtin_clzll((unsigned long long)value);\n" },
 };
 
 static int emit_mem_accessor_body(CodeGenerator* gen, ASTNode* func) {
@@ -1115,7 +1122,18 @@ static int emit_mem_accessor_body(CodeGenerator* gen, ASTNode* func) {
     for (size_t k = 0;
          k < sizeof(MEM_ACCESSOR_BODIES) / sizeof(MEM_ACCESSOR_BODIES[0]);
          k++) {
-        if (strcmp(cname, MEM_ACCESSOR_BODIES[k].name) != 0) continue;
+        const char* name = MEM_ACCESSOR_BODIES[k].name;
+        const char* body = MEM_ACCESSOR_BODIES[k].body;
+        if (strcmp(cname, name) != 0) {
+            /* Only scalar loads/stores have unchecked companions. Reuse
+             * the exact checked body after its leading null guard, keeping
+             * widths, conversions and alias-safe memcpy paths in sync. */
+            size_t n = strlen(name);
+            if (strncmp(body, "    if (!p) return ", 19) != 0 ||
+                strncmp(cname, name, n) != 0 ||
+                strcmp(cname + n, "_unchecked") != 0) continue;
+            body = strchr(body, '\n') + 1;
+        }
 
         /* The canned bodies name the wrapper's parameters directly (p / i /
          * offset / value), which are the names in std/mem/module.ae and the
@@ -1124,7 +1142,7 @@ static int emit_mem_accessor_body(CodeGenerator* gen, ASTNode* func) {
          * every lowered accessor against its extern for equal results --
          * including the null paths -- so a rename in std.mem fails loudly
          * there rather than silently emitting C that will not compile. */
-        fputs(MEM_ACCESSOR_BODIES[k].body, gen->output);
+        fputs(body, gen->output);
         return 1;
     }
     return 0;

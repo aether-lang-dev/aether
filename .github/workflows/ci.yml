@@ -794,7 +794,16 @@ jobs:
         ver="$(pacman -Q mingw-w64-x86_64-mesa | awk '{print $2}')"
         if [ "$(vercmp "$ver" 26.2.3)" -ge 0 ] && [ "$(vercmp "$ver" 26.2.4)" -lt 0 ]; then
           echo "Mesa $ver frees aligned device memory with free() (#2256); installing 26.1.2-1"
-          pacman -U --noconfirm https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-mesa-26.1.2-1-any.pkg.tar.zst
+          # Try every mirror pacman itself would use, not repo.msys2.org
+          # alone: a URL to `pacman -U` gets no mirror fallback, so that one
+          # host being down (2026-10-03) failed the leg before it built.
+          pkg=mingw-w64-x86_64-mesa-26.1.2-1-any.pkg.tar.zst
+          for base in https://repo.msys2.org/mingw/mingw64 \
+              $(sed -n 's/^[[:space:]]*Server[[:space:]]*=[[:space:]]*//p' /etc/pacman.d/mirrorlist.mingw \
+                | sed 's/\$repo/mingw64/; s/\$arch/x86_64/; s#/*$##'); do
+            pacman -U --noconfirm "$base/$pkg" && break
+            echo "Mesa pin: $base did not serve $pkg; trying the next mirror"
+          done
           pacman -Q mingw-w64-x86_64-mesa | grep -qx 'mingw-w64-x86_64-mesa 26.1.2-1' || {
             echo "Mesa pin did not take:"; pacman -Q mingw-w64-x86_64-mesa; exit 1; }
         else
