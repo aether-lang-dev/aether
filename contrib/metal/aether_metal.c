@@ -39,6 +39,7 @@ struct AemtState {
     int depth_set;      /* state_depth was called */
     int depth_op;       /* compare op 1..4 */
     int depth_write;
+    int topology;       /* 0 triangles, 1 strip, 2 lines, 3 line strip, 4 points (#2398) */
 };
 
 AemtState* aemt_state_create(void) {
@@ -69,6 +70,17 @@ int aemt_state_cull(AemtState* s, int mode) {
         return aemt_fail(AEMT_ERR_ARG, "cull mode %d is not CULL_NONE..CULL_FRONT (0..2)", mode);
     }
     s->cull = mode;
+    return AEMT_OK;
+}
+
+/* What the vertices assemble into (#2398). */
+int aemt_state_topology(AemtState* s, int topology) {
+    g_err[0] = '\0';
+    if (!s) return aemt_fail(AEMT_ERR_ARG, "state is null");
+    if (topology < 0 || topology > 4) {
+        return aemt_fail(AEMT_ERR_ARG, "topology %d is not TOPOLOGY_TRIANGLES..TOPOLOGY_POINTS (0..4)", topology);
+    }
+    s->topology = topology;
     return AEMT_OK;
 }
 
@@ -113,6 +125,7 @@ static int aemt_format_bpp(int f) {
 typedef unsigned long AemtUInt;
 typedef struct { double red, green, blue, alpha; } AemtClearColor;
 typedef struct { double x, y, width, height, znear, zfar; } AemtViewport;
+typedef struct { AemtUInt x, y, width, height; } AemtScissorRect;
 typedef struct { AemtUInt x, y, z; } AemtOrigin;
 typedef struct { AemtUInt width, height, depth; } AemtSize;
 typedef struct { double width, height; } AemtCGSize;
@@ -152,7 +165,14 @@ enum {
     MTL_USAGE_SHADER_WRITE     = 2,
     MTL_USAGE_RENDER_TARGET    = 4,
 
+    MTL_PRIMITIVE_POINT        = 0,
+    MTL_PRIMITIVE_LINE         = 1,
+    MTL_PRIMITIVE_LINE_STRIP   = 2,
     MTL_PRIMITIVE_TRIANGLE     = 3,
+    MTL_PRIMITIVE_TRIANGLE_STRIP = 4,
+    MTL_TOPOLOGY_CLASS_POINT   = 1,
+    MTL_TOPOLOGY_CLASS_LINE    = 2,
+    MTL_TOPOLOGY_CLASS_TRIANGLE = 3,
     MTL_INDEX_UINT16           = 0,
     MTL_INDEX_UINT32           = 1,
     MTL_COMPARE_LESS           = 1,
@@ -637,6 +657,12 @@ typedef struct {
     size_t        indirect_offset;
     int           indirect_draws;
     AemtUInt      offsets[AEMT_MAX_DESC];
+    /* A scissor and a viewport of the draw's own (#2398), in pixels from
+     * the target's top left; unset, the whole target. */
+    int           scissor_set;
+    int           sx, sy, sw, sh;
+    int           viewport_set;
+    float         vx, vy, vw, vh, vmin, vmax;
 } AemtDrawItem;
 
 /* The bytes of one indirect draw command, indexed and not: the layouts of
@@ -1406,6 +1432,42 @@ int aemt_batch_set_offset(AemtTarget* t, int item, int binding, int offset) {
 
 int aemt_uniform_offset_alignment(const AemtDevice* d) { return d ? AEMT_UNIFORM_ALIGN : 0; }
 
+/* Draw `item`'s scissor (#2398), checked against the target when the frame
+ * is drawn; a width of 0 goes back to the whole target. */
+int aemt_batch_set_scissor(AemtTarget* t, int item, int x, int y, int w, int h) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (x < 0 || y < 0 || w < 0 || h < 0) {
+        return aemt_fail(AEMT_ERR_ARG, "a scissor %d,%d %dx%d is not inside a target", x, y, w, h);
+    }
+    if (item < 0 || item >= t->batch_count) {
+        return aemt_fail(AEMT_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    AemtDrawItem* it = &t->batch[item];
+    it->scissor_set = w > 0 && h > 0;
+    it->sx = x; it->sy = y; it->sw = w; it->sh = h;
+    return AEMT_OK;
+}
+
+/* Draw `item`'s viewport (#2398); a width of 0 goes back to the whole
+ * target. */
+int aemt_batch_set_viewport(AemtTarget* t, int item, float x, float y, float w, float h,
+                           float min_depth, float max_depth) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (w < 0.0f || h < 0.0f || !(min_depth >= 0.0f && max_depth <= 1.0f && min_depth <= max_depth)) {
+        return aemt_fail(AEMT_ERR_ARG, "a viewport needs a size of at least 0 and depths in 0 <= min <= max <= 1");
+    }
+    if (item < 0 || item >= t->batch_count) {
+        return aemt_fail(AEMT_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    AemtDrawItem* it = &t->batch[item];
+    it->viewport_set = w > 0.0f && h > 0.0f;
+    it->vx = x; it->vy = y; it->vw = w; it->vh = h; it->vmin = min_depth; it->vmax = max_depth;
+    return AEMT_OK;
+}
+
+
 int aemt_target_set_stream(AemtTarget* t, int binding, AemtBuffer* buf) {
     aemt_clear_error();
     if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
@@ -1896,6 +1958,7 @@ struct AemtPipeline {
     id            pso;
     id            depth_state;   /* NULL for a target without depth */
     int           cull;          /* MTL_CULL_*, set on the encoder per draw (#2385) */
+    AemtUInt      prim;          /* MTL_PRIMITIVE_*: what the vertices assemble into (#2398) */
     int           kind[AEMT_MAX_DESC];
     int           dyn_range[AEMT_MAX_DESC];
     int           push_bytes;
@@ -2004,6 +2067,10 @@ AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const voi
     p->dev = d;
     p->push_bytes = push_bytes;
     p->cull = st->cull == 1 ? MTL_CULL_BACK : st->cull == 2 ? MTL_CULL_FRONT : MTL_CULL_NONE;
+    p->prim = st->topology == 1 ? (AemtUInt)MTL_PRIMITIVE_TRIANGLE_STRIP
+            : st->topology == 2 ? (AemtUInt)MTL_PRIMITIVE_LINE
+            : st->topology == 3 ? (AemtUInt)MTL_PRIMITIVE_LINE_STRIP
+            : st->topology == 4 ? (AemtUInt)MTL_PRIMITIVE_POINT : (AemtUInt)MTL_PRIMITIVE_TRIANGLE;
     p->vertex_input = !layout || layout->bind_count > 0;
     for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) {
         p->kind[i] = bindings->kind[i];
@@ -2052,6 +2119,10 @@ AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const voi
             MT_SEND(void, AemtUInt)(desc, mt_sel("setDepthAttachmentPixelFormat:"), (AemtUInt)MTL_PIXEL_DEPTH32_FLOAT);
         }
         MT_SEND(void, AemtUInt)(desc, mt_sel("setRasterSampleCount:"), (AemtUInt)t->samples);
+        MT_SEND(void, AemtUInt)(desc, mt_sel("setInputPrimitiveTopology:"),
+                                st->topology >= 4 ? (AemtUInt)MTL_TOPOLOGY_CLASS_POINT
+                                : st->topology >= 2 ? (AemtUInt)MTL_TOPOLOGY_CLASS_LINE
+                                                    : (AemtUInt)MTL_TOPOLOGY_CLASS_TRIANGLE);
         id error = NULL;
         p->pso = MT_SEND(id, id, id*)(d->device, mt_sel("newRenderPipelineStateWithDescriptor:error:"), desc, &error);
         if (!p->pso) {
@@ -2356,7 +2427,7 @@ static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m, con
 
 /* Encodes one draw: a range of the target's geometry, instanced, or the
  * commands an indirect draw reads, one call each (#2198). */
-static void aemt_draw_item(AemtTarget* t, id enc, const AemtDrawItem* it) {
+static void aemt_draw_item(AemtTarget* t, id enc, const AemtDrawItem* it, AemtUInt prim) {
     AemtUInt index_type = t->index_bits == 16 ? (AemtUInt)MTL_INDEX_UINT16 : (AemtUInt)MTL_INDEX_UINT32;
     if (it->indirect) {
         AemtUInt stride = t->index_count > 0 ? AEMT_INDIRECT_INDEXED_BYTES : AEMT_INDIRECT_BYTES;
@@ -2366,11 +2437,11 @@ static void aemt_draw_item(AemtTarget* t, id enc, const AemtDrawItem* it) {
                 MT_SEND(void, AemtUInt, AemtUInt, id, AemtUInt, id, AemtUInt)(
                     enc, mt_sel("drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:"
                                 "indirectBuffer:indirectBufferOffset:"),
-                    (AemtUInt)MTL_PRIMITIVE_TRIANGLE, index_type, t->ibuf, 0, it->indirect->buf, off);
+                    prim, index_type, t->ibuf, 0, it->indirect->buf, off);
             } else {
                 MT_SEND(void, AemtUInt, id, AemtUInt)(
                     enc, mt_sel("drawPrimitives:indirectBuffer:indirectBufferOffset:"),
-                    (AemtUInt)MTL_PRIMITIVE_TRIANGLE, it->indirect->buf, off);
+                    prim, it->indirect->buf, off);
             }
         }
         return;
@@ -2382,12 +2453,12 @@ static void aemt_draw_item(AemtTarget* t, id enc, const AemtDrawItem* it) {
         MT_SEND(void, AemtUInt, AemtUInt, AemtUInt, id, AemtUInt, AemtUInt, long, AemtUInt)(
             enc, mt_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"
                         "instanceCount:baseVertex:baseInstance:"),
-            (AemtUInt)MTL_PRIMITIVE_TRIANGLE, (AemtUInt)it->count, index_type,
+            prim, (AemtUInt)it->count, index_type,
             t->ibuf, (AemtUInt)it->first * size, instances, 0L, first_instance);
     } else {
         MT_SEND(void, AemtUInt, AemtUInt, AemtUInt, AemtUInt, AemtUInt)(
             enc, mt_sel("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"),
-            (AemtUInt)MTL_PRIMITIVE_TRIANGLE, (AemtUInt)it->first, (AemtUInt)it->count,
+            prim, (AemtUInt)it->first, (AemtUInt)it->count,
             instances, first_instance);
     }
 }
@@ -2474,14 +2545,28 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
                 AemtDrawItem* it = &t->batch[i];
                 AemtMaterial* im = it->mat ? it->mat : bind_mat;
                 if (im) aemt_bind_render(enc, p->kind, im, it->offsets);
-                aemt_draw_item(t, enc, it);
+                /* Each draw's own scissor and viewport, or the whole target
+                 * (#2398). */
+                AemtViewport ivp = vp;
+                AemtScissorRect isc = { 0, 0, (AemtUInt)t->width, (AemtUInt)t->height };
+                if (it->viewport_set) {
+                    ivp.x = it->vx; ivp.y = it->vy; ivp.width = it->vw; ivp.height = it->vh;
+                    ivp.znear = it->vmin; ivp.zfar = it->vmax;
+                }
+                if (it->scissor_set) {
+                    isc.x = (AemtUInt)it->sx; isc.y = (AemtUInt)it->sy;
+                    isc.width = (AemtUInt)it->sw; isc.height = (AemtUInt)it->sh;
+                }
+                MT_SEND(void, AemtViewport)(enc, mt_sel("setViewport:"), ivp);
+                MT_SEND(void, AemtScissorRect)(enc, mt_sel("setScissorRect:"), isc);
+                aemt_draw_item(t, enc, it, p->prim);
             }
         } else {
             if (bind_mat) aemt_bind_render(enc, p->kind, bind_mat, NULL);
             AemtDrawItem all;
             memset(&all, 0, sizeof(all));
             all.count = t->index_count > 0 ? t->index_count : t->vertex_count;
-            aemt_draw_item(t, enc, &all);
+            aemt_draw_item(t, enc, &all, p->prim);
         }
     }
     MT_SEND(void)(enc, mt_sel("endEncoding"));
@@ -2596,6 +2681,10 @@ static int aemt_submit_frame(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat, 
             }
             if (it->mat && it->mat->pipe != p) {
                 return aemt_fail(AEMT_ERR_ARG, "draw %d uses a material of another pipeline", i);
+            }
+            if (it->scissor_set && ((long long)it->sx + it->sw > t->width || (long long)it->sy + it->sh > t->height)) {
+                return aemt_fail(AEMT_ERR_ARG, "draw %d's scissor %d,%d %dx%d runs outside the %dx%d target",
+                                 i, it->sx, it->sy, it->sw, it->sh, t->width, t->height);
             }
             AemtMaterial* im = it->mat ? it->mat : (mat ? mat : p->def);
             rc = aemt_material_ready(p, im);
@@ -3544,6 +3633,12 @@ int    aemt_material_set_target_attachment(AemtMaterial* m, int b, AemtTarget* t
 double aemt_ae_pixel_value_at(void* t, int n, int x, int y, int c) {
     (void)t; (void)n; (void)x; (void)y; (void)c; aemt_no(); return (double)NAN;
 }
+int    aemt_batch_set_scissor(AemtTarget* t, int i, int x, int y, int w, int h) {
+    (void)t; (void)i; (void)x; (void)y; (void)w; (void)h; return aemt_no();
+}
+int    aemt_batch_set_viewport(AemtTarget* t, int i, float x, float y, float w, float h, float a, float b) {
+    (void)t; (void)i; (void)x; (void)y; (void)w; (void)h; (void)a; (void)b; return aemt_no();
+}
 int    aemt_bindings_storage_texture(AemtBindings* b, int n) { (void)b; (void)n; return aemt_no(); }
 int    aemt_compute_set_storage_texture(AemtCompute* c, int b, AemtTexture* t) {
     (void)c; (void)b; (void)t; return aemt_no();
@@ -3859,6 +3954,15 @@ int   aemt_ae_compute_set_storage_texture(void* c, int binding, void* tex) {
     return aemt_compute_set_storage_texture((AemtCompute*)c, binding, (AemtTexture*)tex);
 }
 
+int   aemt_ae_state_topology(void* s, int topology) { return aemt_state_topology((AemtState*)s, topology); }
+int   aemt_ae_batch_set_scissor(void* t, int item, int x, int y, int w, int h) {
+    return aemt_batch_set_scissor((AemtTarget*)t, item, x, y, w, h);
+}
+int   aemt_ae_batch_set_viewport(void* t, int item, double x, double y, double w, double h,
+                                double min_depth, double max_depth) {
+    return aemt_batch_set_viewport((AemtTarget*)t, item, (float)x, (float)y, (float)w, (float)h,
+                                  (float)min_depth, (float)max_depth);
+}
 void* aemt_ae_state_create(void) { return (void*)aemt_state_create(); }
 void  aemt_ae_state_destroy(void* s) { aemt_state_destroy((AemtState*)s); }
 int   aemt_ae_state_blend(void* s, int mode) { return aemt_state_blend((AemtState*)s, mode); }

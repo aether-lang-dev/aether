@@ -331,6 +331,14 @@ void       aevk_state_destroy(AevkState* s);
 int        aevk_state_blend(AevkState* s, int mode);
 int        aevk_state_cull(AevkState* s, int mode);
 int        aevk_state_depth(AevkState* s, int op, int write);
+/* Topology (#2398): 0 triangles, 1 triangle strip, 2 lines, 3 line strip,
+ * 4 points (the vertex shader writes gl_PointSize). */
+int        aevk_state_topology(AevkState* s, int topology);
+/* A batch entry's scissor and viewport, in pixels from the target's top
+ * left (#2398); a width of 0 goes back to the whole target. */
+int        aevk_batch_set_scissor(AevkTarget* t, int item, int x, int y, int w, int h);
+int        aevk_batch_set_viewport(AevkTarget* t, int item, float x, float y, float w, float h,
+                                   float min_depth, float max_depth);
 AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
                                          const void* vert_spv, size_t vert_len,
                                          const void* frag_spv, size_t frag_len,

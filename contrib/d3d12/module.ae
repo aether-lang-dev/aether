@@ -82,7 +82,9 @@
 //   d3d12.set_target_depth_compare(p, binding, t, op) / material_set_target_depth_compare /
 //         target_depth_linear(t)        a depth through a COMPARE_* sampler
 //   d3d12.state_create() / state_blend(st, BLEND_*) / state_cull(st, CULL_*) /
-//         state_depth(st, op, write) / state_destroy(st)
+//         state_depth(st, op, write) / state_topology(st, TOPOLOGY_*) / state_destroy(st)
+//   d3d12.batch_set_scissor(t, item, x, y, w, h) / batch_set_viewport(t, item, x, y, w, h,
+//         min_depth, max_depth)        a draw's own scissor and viewport
 //   d3d12.pipeline_create_state(dev, t, vs, vl, fs, fl, layout, push_bytes, bindings, st) -> ptr
 //   d3d12.texture_create_cube(dev, size, mipmapped, linear) / texture_create_array(dev, w, h,
 //         layers, mipmapped, linear, repeat) / texture_layers(tex)
@@ -205,7 +207,10 @@ exports(
     aedx_ae_target_create_mrt, aedx_ae_target_attachments, aedx_ae_set_target_attachment,
     aedx_ae_material_set_target_attachment, aedx_ae_pixel_value_at,
     target_create_mrt, target_attachments, set_target_attachment, material_set_target_attachment,
-    pixel_value_at
+    pixel_value_at,
+    aedx_ae_state_topology, aedx_ae_batch_set_scissor, aedx_ae_batch_set_viewport,
+    state_topology, batch_set_scissor, batch_set_viewport,
+    TOPOLOGY_TRIANGLES, TOPOLOGY_TRIANGLE_STRIP, TOPOLOGY_LINES, TOPOLOGY_LINE_STRIP, TOPOLOGY_POINTS
 )
 
 extern aedx_ae_available() -> int
@@ -256,6 +261,9 @@ extern aedx_ae_set_target_depth_compare(p: ptr, binding: int, t: ptr, op: int) -
 extern aedx_ae_material_set_target_depth_compare(m: ptr, binding: int, t: ptr, op: int) -> int
 extern aedx_ae_target_depth_linear(t: ptr) -> int
 extern aedx_ae_state_create() -> ptr
+extern aedx_ae_state_topology(s: ptr, topology: int) -> int
+extern aedx_ae_batch_set_scissor(t: ptr, item: int, x: int, y: int, w: int, h: int) -> int
+extern aedx_ae_batch_set_viewport(t: ptr, item: int, x: float, y: float, w: float, h: float, min_depth: float, max_depth: float) -> int
 extern aedx_ae_texture_create_cube(dev: ptr, size: int, mipmapped: int, linear: int) -> ptr
 extern aedx_ae_target_create_mrt(dev: ptr, w: int, h: int, count: int, f0: int, f1: int, f2: int, f3: int, depth: int, samples: int) -> ptr
 extern aedx_ae_target_attachments(t: ptr) -> int
@@ -386,6 +394,15 @@ const BLEND_ADDITIVE = 3       // src + dst
 const CULL_NONE = 0
 const CULL_BACK = 1
 const CULL_FRONT = 2
+
+// What a pipeline's vertices assemble into (#2398). A point's size comes
+// from the vertex shader where the API reads one (gl_PointSize in Vulkan,
+// [[point_size]] in Metal); Direct3D 12 draws points one pixel wide.
+const TOPOLOGY_TRIANGLES = 0
+const TOPOLOGY_TRIANGLE_STRIP = 1
+const TOPOLOGY_LINES = 2
+const TOPOLOGY_LINE_STRIP = 3
+const TOPOLOGY_POINTS = 4
 
 // DXGI_FORMAT values under the names contrib.vulkan uses for the same
 // formats: for layout_attr, and (the four RGBA ones) for target_create_format.
@@ -558,6 +575,18 @@ state_destroy(s: ptr) { aedx_ae_state_destroy(s) }
 state_blend(s: ptr, mode: int) -> int { return aedx_ae_state_blend(s, mode) }
 state_cull(s: ptr, mode: int) -> int { return aedx_ae_state_cull(s, mode) }
 state_depth(s: ptr, op: int, write: int) -> int { return aedx_ae_state_depth(s, op, write) }
+state_topology(s: ptr, topology: int) -> int { return aedx_ae_state_topology(s, topology) }
+
+// A batch entry's scissor and viewport (#2398), in pixels from the target's
+// top left in every module. The scissor must lie inside the target when the
+// frame is drawn; a width of 0 sets either back to the whole target.
+batch_set_scissor(t: ptr, item: int, x: int, y: int, w: int, h: int) -> int {
+    return aedx_ae_batch_set_scissor(t, item, x, y, w, h)
+}
+batch_set_viewport(t: ptr, item: int, x: float, y: float, w: float, h: float,
+                   min_depth: float, max_depth: float) -> int {
+    return aedx_ae_batch_set_viewport(t, item, x, y, w, h, min_depth, max_depth)
+}
 pipeline_create_state(dev: ptr, t: ptr, vs: string, vlen: int, fs: string, flen: int,
                       layout: ptr, push_bytes: int, bindings: ptr, st: ptr) -> ptr {
     return aedx_ae_pipeline_create_state(dev, t, vs, vlen, fs, flen, layout, push_bytes, bindings, st)

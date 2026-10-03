@@ -306,6 +306,12 @@ with `VK_FRONT_FACE_COUNTER_CLOCKWISE` (Vulkan's framebuffer y points down
 as the screen's does), and `depthCompareOp` / `depthWriteEnable`. Blending a
 format without `COLOR_ATTACHMENT_BLEND` is refused when the pipeline is made.
 
+`state_topology` sets the pipeline's `VkPrimitiveTopology`; a point list
+needs the vertex shader to write `gl_PointSize`. A batch entry's scissor and
+viewport are set with `vkCmdSetScissor` and `vkCmdSetViewport` before its
+draw, from the dynamic state every pipeline already declares, and changing
+one re-records the frame.
+
 A frame's recorded commands are reused while nothing they name has changed.
 They name the pipeline and the material by a serial the device hands out,
 not by address. A pipeline destroyed and another made in its memory would

@@ -101,6 +101,7 @@ Every call returns one of the same codes, or a null handle with the reason in
 | y axis | points down | points up | points up |
 | Depth range | 0 to 1 | 0 to 1 | 0 to 1 |
 | `FORMAT_*` numbers | VkFormat | DXGI_FORMAT | VkFormat, translated where used |
+| A point's size | `gl_PointSize`, which the vertex shader must write | always one pixel | `[[point_size]]`, which the vertex shader must write |
 | A cube map, an array, a storage texture | `samplerCube`, `sampler2DArray`, `image2D`/`image3D` with its format | `TextureCube`, `Texture2DArray`, `RWTexture2D`/`RWTexture3D` at `uN` | `texturecube`, `texture2d_array`, `texture2d`/`texture3d` with `access::write` |
 | Vertex stream B | `binding = B` in the layout | input slot B | `[[buffer(16 + B)]]` |
 | Instance index in the shader | `gl_InstanceIndex`, counting from the first instance | `SV_InstanceID`, counting from 0 | `[[instance_id]]`, counting from the first instance |
@@ -283,6 +284,20 @@ pipe = vulkan.pipeline_create_state(dev, target, vs, vl, fs, fl, layout, 0, bind
 vulkan.state_destroy(st)
 ```
 
+`state_topology(st, TOPOLOGY_*)` draws the vertices as triangle lists,
+which is the default, or as a triangle strip, line lists, a line strip, or
+points. Each batch entry can also have a scissor and a viewport, in pixels
+from the target's top left in every module:
+
+```aether,fragment
+vulkan.batch_set_scissor(target, 0, 0, 0, 640, 720)        // left half
+vulkan.batch_set_viewport(target, 1, 640, 0, 640, 720, 0.0, 1.0)
+```
+
+A scissor that runs outside the target is refused when the frame is drawn,
+since the target can be resized in between. A width of 0 sets either back
+to the whole target.
+
 A pipeline made without one, or with a fresh one, does not blend or cull,
 and with depth it runs a LESS test that writes, as every pipeline did before
 state existed. A face is front-facing when its corners run counter-clockwise
@@ -342,5 +357,7 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
+| Sampled texture formats past RGBA8 (sRGB, R8, RG8, half and float, BC compression) and anisotropic filtering | [#2397](https://github.com/aether-lang-dev/aether/issues/2397) |
+| Stencil, and rendering into one layer of an array or one face of a cube | [#2399](https://github.com/aether-lang-dev/aether/issues/2399) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |
