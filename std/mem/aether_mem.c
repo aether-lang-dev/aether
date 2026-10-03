@@ -601,3 +601,130 @@ int aether_mem_set_u64_be(void* p, int offset, int64_t value) {
     }
     return 1;
 }
+
+/* Unchecked native-endian scalar accessors (#2379). Caller guarantees
+ * non-null storage and the same bounds/alignment as the checked forms.
+ * Pointer accesses use memcpy to preserve alias safety when inlined. */
+int aether_mem_get_byte_unchecked(void* p, int i) {
+    return (int)((uint8_t*)p)[i];
+}
+
+int aether_mem_set_byte_unchecked(void* p, int i, int value) {
+    ((uint8_t*)p)[i] = (uint8_t)(value & 0xff);
+    return 1;
+}
+
+int aether_mem_get_byte_sz_unchecked(void* p, size_t i) {
+    return (int)((uint8_t*)p)[i];
+}
+
+int aether_mem_set_byte_sz_unchecked(void* p, size_t i, int value) {
+    ((uint8_t*)p)[i] = (uint8_t)(value & 0xff);
+    return 1;
+}
+
+void* aether_mem_get_ptr_unchecked(void* p, int offset) {
+    void* v;
+    __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
+    return v;
+}
+
+int aether_mem_set_ptr_unchecked(void* p, int offset, void* value) {
+    __builtin_memcpy((char*)p + offset, &value, sizeof(value));
+    return 1;
+}
+
+int aether_mem_get_int_unchecked(void* p, int offset) {
+    return *(int32_t*)((char*)p + offset);
+}
+
+int aether_mem_set_int_unchecked(void* p, int offset, int value) {
+    *(int32_t*)((char*)p + offset) = (int32_t)value;
+    return 1;
+}
+
+int64_t aether_mem_get_long_unchecked(void* p, int offset) {
+    return *(int64_t*)((char*)p + offset);
+}
+
+int aether_mem_set_long_unchecked(void* p, int offset, int64_t value) {
+    *(int64_t*)((char*)p + offset) = value;
+    return 1;
+}
+
+int aether_mem_get_int8_unchecked(void* p, int offset) {
+    return (int)((int8_t*)p)[offset];
+}
+
+int aether_mem_set_int8_unchecked(void* p, int offset, int value) {
+    ((int8_t*)p)[offset] = (int8_t)(value & 0xff);
+    return 1;
+}
+
+int aether_mem_get_uint8_unchecked(void* p, int offset) {
+    return (int)((uint8_t*)p)[offset];
+}
+
+int aether_mem_set_uint8_unchecked(void* p, int offset, int value) {
+    ((uint8_t*)p)[offset] = (uint8_t)(value & 0xff);
+    return 1;
+}
+
+int aether_mem_get_int16_unchecked(void* p, int offset) {
+    int16_t v;
+    __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
+    return (int)v;
+}
+
+int aether_mem_set_int16_unchecked(void* p, int offset, int value) {
+    int16_t v = (int16_t)(value & 0xffff);
+    __builtin_memcpy((char*)p + offset, &v, sizeof(v));
+    return 1;
+}
+
+int aether_mem_get_uint16_unchecked(void* p, int offset) {
+    uint16_t v;
+    __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
+    return (int)v;
+}
+
+int aether_mem_set_uint16_unchecked(void* p, int offset, int value) {
+    uint16_t v = (uint16_t)(value & 0xffff);
+    __builtin_memcpy((char*)p + offset, &v, sizeof(v));
+    return 1;
+}
+
+int64_t aether_mem_get_uint32_unchecked(void* p, int offset) {
+    uint32_t v;
+    __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
+    return (int64_t)v;
+}
+
+int aether_mem_set_uint32_unchecked(void* p, int offset, int64_t value) {
+    uint32_t v = (uint32_t)(value & 0xFFFFFFFF);
+    __builtin_memcpy((char*)p + offset, &v, sizeof(v));
+    return 1;
+}
+
+double aether_mem_get_float32_unchecked(void* p, int offset) {
+    float v;
+    __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
+    return (double)v;
+}
+
+int aether_mem_set_float32_unchecked(void* p, int offset, double value) {
+    float v = (float)value;
+    __builtin_memcpy((char*)p + offset, &v, sizeof(v));
+    return 1;
+}
+
+double aether_mem_get_float64_unchecked(void* p, int offset) {
+    double v;
+    __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
+    return v;
+}
+
+int aether_mem_set_float64_unchecked(void* p, int offset, double value) {
+    __builtin_memcpy((char*)p + offset, &value, sizeof(value));
+    return 1;
+}
