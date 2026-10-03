@@ -70,6 +70,100 @@ sampling_pipeline(dev: ptr, t: ptr, tvs: string, tvl: int, fs: string, fl: int, 
     return pipe
 }
 
+// A float target drawn with textured.frag (white tint), sampling `tex`.
+// Returns the pipeline; the caller destroys it.
+plain_pipeline(dev: ptr, t: ptr, tvs: string, tvl: int, tfs: string, tfl: int) -> ptr {
+    lay = quad_layout()
+    binds = vulkan.bindings_create()
+    _ = vulkan.bindings_texture(binds, 0)
+    _ = vulkan.bindings_uniform(binds, 1)
+    p = vulkan.pipeline_create_ex(dev, t, tvs, tvl, tfs, tfl, lay, 0, binds)
+    vulkan.bindings_destroy(binds)
+    vulkan.layout_destroy(lay)
+    if p != null {
+        _ = vulkan.uniform_floats(p, 1, 4)
+        j = 0
+        while j < 4 { _ = vulkan.uniform_float(p, 1, j, 1.0); j = j + 1 }
+    }
+    return p
+}
+
+// A byte buffer holding `vals`, repeated `times` times.
+bytes_of(vals: int[], n: int, times: int) -> ptr {
+    b = bytes.new(n * times)
+    _ = bytes.set_length(b, n * times)
+    k = 0
+    while k < times {
+        i = 0
+        while i < n {
+            _ = bytes.set(b, k * n + i, vals[i])
+            i = i + 1
+        }
+        k = k + 1
+    }
+    return b
+}
+
+close(a: float, b: float, tol: float) -> int {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    if d <= tol { return 1 }
+    return 0
+}
+
+// Draws `tex` over a w x h float target and returns the channel at x, y.
+sampled(dev: ptr, tex: ptr, w: int, h: int, x: int, y: int, ch: int,
+        tvs: string, tvl: int, tfs: string, tfl: int) -> float {
+    t = vulkan.target_create_format(dev, w, h, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+    p = plain_pipeline(dev, t, tvs, tvl, tfs, tfl)
+    write_fullscreen_quad(t)
+    _ = vulkan.set_texture(p, 0, tex)
+    _ = vulkan.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+    v = vulkan.pixel_value(t, x, y, ch)
+    vulkan.pipeline_destroy(p)
+    vulkan.target_destroy(t)
+    return v
+}
+
+// A 4x4 texture of `n`-byte texels whose middle 2x2 is `zero` and the ring
+// around it `one`: its 1x1 level is three quarters of `one`.
+ring_bytes(one: int[], zero: int[], n: int) -> ptr {
+    b = bytes.new(16 * n)
+    _ = bytes.set_length(b, 16 * n)
+    i = 0
+    while i < 16 {
+        x = i % 4
+        y = i / 4
+        inner = 0
+        if x >= 1 && x <= 2 && y >= 1 && y <= 2 { inner = 1 }
+        k = 0
+        while k < n {
+            if inner == 1 {
+                _ = bytes.set(b, i * n + k, zero[k])
+            } else {
+                _ = bytes.set(b, i * n + k, one[k])
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return b
+}
+
+// The red of a mipmapped 4x4 ring texture in `format` drawn into one pixel,
+// which reads its 1x1 level; -1 when the texture is refused.
+chain_level(dev: ptr, format: int, one: int[], zero: int[], n: int,
+            tvs: string, tvl: int, tfs: string, tfl: int) -> float {
+    tex = vulkan.texture_create_format(dev, 4, 4, format, 1, 1, 0, 1)
+    if tex == null { return -1.0 }
+    px = ring_bytes(one, zero, n)
+    _ = vulkan.texture_upload(tex, bytes.data(px), 16 * n)
+    bytes.free(px)
+    v = sampled(dev, tex, 1, 1, 0, 0, 0, tvs, tvl, tfs, tfl)
+    vulkan.texture_destroy(tex)
+    return v
+}
+
 // 0xRRGGBBAA for a byte colour.
 packed(r: int, g: int, b: int, a: int) -> long {
     return r * 16777216 + g * 65536 + b * 256 + a
@@ -267,6 +361,193 @@ main() {
             vulkan.pipeline_destroy(pipe)
             vulkan.target_destroy(t)
             vulkan.texture_destroy(arr)
+        }
+    }
+
+    spec.describe(fw, "vulkan: texture formats") {
+        spec.it_when(ready, "samples each uncompressed format", reason) callback {
+            spec.assert_true(vulkan.texture_create_format(dev, 2, 2, 12345, 0, 0, 0, 1) == null,
+                "an unknown format")
+            spec.assert_true(vulkan.texture_create_format(dev, 2, 2, vulkan.FORMAT_R8_UNORM, 0, 0, 0, 0) == null,
+                "anisotropy 0")
+
+            r8 = vulkan.texture_create_format(dev, 2, 2, vulkan.FORMAT_R8_UNORM, 0, 0, 0, 1)
+            spec.assert_true(r8 != null, "R8 (${vulkan.last_error()})")
+            px = bytes_of([0, 64, 128, 255], 4, 1)
+            spec.assert_eq(vulkan.texture_upload(r8, bytes.data(px), 3), vulkan.ERR_ARG, "a short upload")
+            spec.assert_eq(vulkan.texture_upload(r8, bytes.data(px), 4), vulkan.OK, "uploaded")
+            bytes.free(px)
+            v = sampled(dev, r8, 2, 2, 1, 0, 0, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 64.0 / 255.0, 0.002), 1, "R8 texel 1 reads 64 (${v})")
+            v = sampled(dev, r8, 2, 2, 1, 0, 1, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 0.0, 0.002), 1, "and green 0 (${v})")
+            vulkan.texture_destroy(r8)
+
+            rg = vulkan.texture_create_format(dev, 2, 2, vulkan.FORMAT_R8G8_UNORM, 0, 0, 0, 1)
+            spec.assert_true(rg != null, "RG8 (${vulkan.last_error()})")
+            px = bytes_of([10, 20, 30, 40, 50, 60, 70, 80], 8, 1)
+            _ = vulkan.texture_upload(rg, bytes.data(px), 8)
+            bytes.free(px)
+            v = sampled(dev, rg, 2, 2, 0, 1, 1, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 60.0 / 255.0, 0.002), 1, "RG8 texel 2's green, 60 (${v})")
+
+            srgb = vulkan.texture_create_format(dev, 2, 2, vulkan.FORMAT_R8G8B8A8_SRGB, 0, 0, 0, 1)
+            spec.assert_true(srgb != null, "sRGB (${vulkan.last_error()})")
+            px = bytes_of([188, 188, 188, 255], 4, 4)
+            _ = vulkan.texture_upload(srgb, bytes.data(px), 16)
+            bytes.free(px)
+            v = sampled(dev, srgb, 2, 2, 0, 0, 0, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 0.5029, 0.01), 1, "sRGB 188 reads linear 0.503 (${v})")
+
+            half = vulkan.texture_create_format(dev, 2, 2, vulkan.FORMAT_R16G16B16A16_SFLOAT, 0, 0, 0, 1)
+            spec.assert_true(half != null, "RGBA16F (${vulkan.last_error()})")
+            px = bytes_of([0, 52, 0, 64, 0, 188, 0, 60], 8, 4)
+            _ = vulkan.texture_upload(half, bytes.data(px), 32)
+            bytes.free(px)
+            spec.assert_eq(close(sampled(dev, half, 2, 2, 1, 1, 1, tvs, tvl, tfs, tfl), 2.0, 0.0001), 1,
+                "RGBA16F keeps 2.0")
+            spec.assert_eq(close(sampled(dev, half, 2, 2, 1, 1, 2, tvs, tvl, tfs, tfl), -1.0, 0.0001), 1,
+                "and -1.0")
+
+            full = vulkan.texture_create_format(dev, 2, 2, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 0, 0, 1)
+            spec.assert_true(full != null, "RGBA32F (${vulkan.last_error()})")
+            px = bytes_of([0, 0, 0, 62, 0, 0, 96, 64, 0, 0, 0, 192, 0, 0, 128, 63], 16, 4)
+            _ = vulkan.texture_upload(full, bytes.data(px), 64)
+            bytes.free(px)
+            spec.assert_eq(close(sampled(dev, full, 2, 2, 0, 1, 0, tvs, tvl, tfs, tfl), 0.125, 0.0), 1,
+                "RGBA32F keeps 0.125")
+            spec.assert_eq(close(sampled(dev, full, 2, 2, 0, 1, 1, tvs, tvl, tfs, tfl), 3.5, 0.0), 1, "and 3.5")
+
+            vulkan.texture_destroy(full)
+            vulkan.texture_destroy(half)
+            vulkan.texture_destroy(srgb)
+            vulkan.texture_destroy(rg)
+        }
+
+        spec.it_when(ready, "builds each format's mip chain", reason) callback {
+            // Three quarters of the level-0 texels are one, so the last
+            // level reads 0.75; an sRGB chain averaged as bytes rather than
+            // as light would read 0.52.
+            v = chain_level(dev, vulkan.FORMAT_R8_UNORM, [255], [0], 1, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 0.749, 0.01), 1, "R8 (${v}, ${vulkan.last_error()})")
+            v = chain_level(dev, vulkan.FORMAT_R8G8B8A8_SRGB, [255, 255, 255, 255], [0, 0, 0, 255], 4,
+                            tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 0.75, 0.01), 1, "sRGB averages light (${v}, ${vulkan.last_error()})")
+            v = chain_level(dev, vulkan.FORMAT_R16G16B16A16_SFLOAT, [0, 60, 0, 60, 0, 60, 0, 60],
+                            [0, 0, 0, 0, 0, 0, 0, 60], 8, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, 0.75, 0.001), 1, "RGBA16F (${v}, ${vulkan.last_error()})")
+            // Filtering 32-bit float is optional, and a chain needs it.
+            v = chain_level(dev, vulkan.FORMAT_R32G32B32A32_SFLOAT, [0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 128, 63],
+                            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63], 16, tvs, tvl, tfs, tfl)
+            if v < 0.0 {
+                println("    (this device cannot filter 32-bit float: ${vulkan.last_error()})")
+            } else {
+                spec.assert_eq(close(v, 0.75, 0.001), 1, "RGBA32F (${v})")
+            }
+        }
+
+        spec.it_when(ready, "decodes block-compressed formats", reason) callback {
+            if vulkan.texture_format_supported(dev, vulkan.FORMAT_BC1_RGBA_UNORM) == 0 {
+                spec.assert_true(vulkan.texture_create_format(dev, 4, 4, vulkan.FORMAT_BC1_RGBA_UNORM, 0, 0, 0, 1) == null,
+                    "a device without BC refuses it")
+                println("    (this device samples no BC formats)")
+            } else {
+                // BC1: endpoints red and blue, texels 0..3 of row 0 at
+                // indices 0, 1, 2 and 3: red, blue, and the two thirds.
+                spec.assert_true(vulkan.texture_create_format(dev, 6, 4, vulkan.FORMAT_BC1_RGBA_UNORM, 0, 0, 0, 1) == null,
+                    "a size that is not whole blocks")
+                bc1 = vulkan.texture_create_format(dev, 4, 4, vulkan.FORMAT_BC1_RGBA_UNORM, 0, 0, 0, 1)
+                spec.assert_true(bc1 != null, "BC1 (${vulkan.last_error()})")
+                px = bytes_of([0, 248, 31, 0, 228, 0, 0, 0], 8, 1)
+                spec.assert_eq(vulkan.texture_upload(bc1, bytes.data(px), 7), vulkan.ERR_ARG, "a short block")
+                spec.assert_eq(vulkan.texture_upload(bc1, bytes.data(px), 8), vulkan.OK, "one block")
+                bytes.free(px)
+                spec.assert_eq(close(sampled(dev, bc1, 4, 4, 0, 0, 0, tvs, tvl, tfs, tfl), 1.0, 0.03), 1, "index 0, red")
+                spec.assert_eq(close(sampled(dev, bc1, 4, 4, 1, 0, 2, tvs, tvl, tfs, tfl), 1.0, 0.03), 1, "index 1, blue")
+                v = sampled(dev, bc1, 4, 4, 2, 0, 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 0.6667, 0.03), 1, "index 2, two thirds red (${v})")
+                v = sampled(dev, bc1, 4, 4, 3, 0, 2, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 0.6667, 0.03), 1, "index 3, two thirds blue (${v})")
+                vulkan.texture_destroy(bc1)
+
+                // BC4: endpoints 1 and 0; texel 0 at index 0, texel 1 at 1.
+                bc4 = vulkan.texture_create_format(dev, 4, 4, vulkan.FORMAT_BC4_UNORM, 0, 0, 0, 1)
+                px = bytes_of([255, 0, 8, 0, 0, 0, 0, 0], 8, 1)
+                _ = vulkan.texture_upload(bc4, bytes.data(px), 8)
+                bytes.free(px)
+                spec.assert_eq(close(sampled(dev, bc4, 4, 4, 0, 0, 0, tvs, tvl, tfs, tfl), 1.0, 0.01), 1, "BC4 index 0")
+                spec.assert_eq(close(sampled(dev, bc4, 4, 4, 1, 0, 0, tvs, tvl, tfs, tfl), 0.0, 0.01), 1, "BC4 index 1")
+                vulkan.texture_destroy(bc4)
+
+                // BC7 mode 6, one solid colour: 128, 0, 254, 254.
+                bc7 = vulkan.texture_create_format(dev, 4, 4, vulkan.FORMAT_BC7_UNORM, 0, 0, 0, 1)
+                px = bytes_of([64, 32, 16, 0, 248, 255, 255, 127, 0, 0, 0, 0, 0, 0, 0, 0], 16, 1)
+                _ = vulkan.texture_upload(bc7, bytes.data(px), 16)
+                bytes.free(px)
+                v = sampled(dev, bc7, 4, 4, 2, 2, 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 128.0 / 255.0, 0.01), 1, "BC7's red (${v})")
+                spec.assert_eq(close(sampled(dev, bc7, 4, 4, 2, 2, 2, tvs, tvl, tfs, tfl), 254.0 / 255.0, 0.01), 1,
+                    "and blue")
+                vulkan.texture_destroy(bc7)
+
+                // A block format's chain, level by level: three levels, one
+                // block each, and the texture binds once all three are there.
+                chain = vulkan.texture_create_format(dev, 4, 4, vulkan.FORMAT_BC1_RGBA_UNORM, 1, 1, 0, 1)
+                spec.assert_eq(vulkan.texture_mip_levels(chain), 3, "three levels")
+                block = bytes_of([0, 248, 31, 0, 0, 0, 0, 0], 8, 1)
+                t = vulkan.target_create_format(dev, 4, 4, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+                p = plain_pipeline(dev, t, tvs, tvl, tfs, tfl)
+                spec.assert_eq(vulkan.texture_upload_level(chain, 0, bytes.data(block), 8), vulkan.OK, "level 0")
+                spec.assert_eq(vulkan.texture_upload_level(chain, 1, bytes.data(block), 8), vulkan.OK, "level 1")
+                spec.assert_eq(vulkan.set_texture(p, 0, chain), vulkan.ERR_ARG, "not bound with level 2 missing")
+                spec.assert_eq(vulkan.texture_upload_level(chain, 3, bytes.data(block), 8), vulkan.ERR_ARG, "no level 3")
+                spec.assert_eq(vulkan.texture_upload_level(chain, 2, bytes.data(block), 8), vulkan.OK, "level 2")
+                spec.assert_eq(vulkan.set_texture(p, 0, chain), vulkan.OK, "bound once complete")
+                bytes.free(block)
+                vulkan.pipeline_destroy(p)
+                vulkan.target_destroy(t)
+                vulkan.texture_destroy(chain)
+            }
+        }
+
+        spec.it_when(ready, "filters anisotropically", reason) callback {
+            // One-texel vertical stripes, squeezed 16:1 vertically: an
+            // isotropic sampler picks the level the squeeze calls for and
+            // reads grey; an anisotropic one keeps the stripes.
+            n = 64 * 64 * 4
+            stripes = bytes.new(n)
+            _ = bytes.set_length(stripes, n)
+            i = 0
+            while i < 64 * 64 {
+                v = 0
+                if (i % 64) % 2 == 0 { v = 255 }
+                _ = bytes.set(stripes, i * 4, v)
+                _ = bytes.set(stripes, i * 4 + 1, v)
+                _ = bytes.set(stripes, i * 4 + 2, v)
+                _ = bytes.set(stripes, i * 4 + 3, 255)
+                i = i + 1
+            }
+            iso = vulkan.texture_create_format(dev, 64, 64, vulkan.FORMAT_R8G8B8A8_UNORM, 1, 1, 0, 1)
+            ani = vulkan.texture_create_format(dev, 64, 64, vulkan.FORMAT_R8G8B8A8_UNORM, 1, 1, 0, 16)
+            spec.assert_true(ani != null, "an anisotropic texture (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.texture_anisotropy(iso), 1, "anisotropy 1 is none")
+            granted = vulkan.texture_anisotropy(ani)
+            spec.assert_true(granted > 1, "anisotropy granted (${granted})")
+            _ = vulkan.texture_upload(iso, bytes.data(stripes), n)
+            _ = vulkan.texture_upload(ani, bytes.data(stripes), n)
+            bytes.free(stripes)
+            a = sampled(dev, iso, 64, 4, 10, 2, 0, tvs, tvl, tfs, tfl)
+            b = sampled(dev, iso, 64, 4, 11, 2, 0, tvs, tvl, tfs, tfl)
+            d = a - b
+            if d < 0.0 { d = 0.0 - d }
+            spec.assert_true(d < 0.2, "isotropic: the stripes blur to grey (${a}, ${b})")
+            a = sampled(dev, ani, 64, 4, 10, 2, 0, tvs, tvl, tfs, tfl)
+            b = sampled(dev, ani, 64, 4, 11, 2, 0, tvs, tvl, tfs, tfl)
+            d = a - b
+            if d < 0.0 { d = 0.0 - d }
+            spec.assert_true(d > 0.4, "anisotropic: the stripes stay (${a}, ${b})")
+            vulkan.texture_destroy(ani)
+            vulkan.texture_destroy(iso)
         }
     }
 

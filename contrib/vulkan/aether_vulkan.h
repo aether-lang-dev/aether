@@ -203,6 +203,17 @@ AevkTexture* aevk_texture_create_array(AevkDevice* d, int width, int height, int
                                        int mipmapped, int linear_filter, int repeat);
 int          aevk_texture_layers(const AevkTexture* tex);
 
+/* Sampled textures in other formats, and anisotropic filtering (#2397):
+ * R8, RG8, RGBA8 UNORM and sRGB, RGBA16F, RGBA32F, and the BC1, BC3, BC4, BC5
+ * and BC7 block formats (as VkFormat values). A block format's mip levels
+ * are uploaded one by one with texture_upload_level; texture_upload is its
+ * level 0. Anisotropy is granted up to the device's limit. */
+AevkTexture* aevk_texture_create_format(AevkDevice* d, int width, int height, int format, int mipmapped,
+                                        int linear_filter, int repeat, int anisotropy);
+int          aevk_texture_format_supported(AevkDevice* d, int format);
+int          aevk_texture_anisotropy(const AevkTexture* tex);
+int          aevk_texture_upload_level(AevkTexture* tex, int level, const void* data, size_t len);
+
 /* Textures compute passes write (#2388): 2D, or 3D when depth > 1, in
  * VK_FORMAT_R8G8B8A8_UNORM, R16G16B16A16_SFLOAT or R32G32B32A32_SFLOAT;
  * zeroed at creation, sampled by draws by nearest texel. A storage binding

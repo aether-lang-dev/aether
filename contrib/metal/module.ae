@@ -91,6 +91,9 @@
 //         layers, mipmapped, linear, repeat) / texture_layers(tex)
 //   metal.texture_create_storage(dev, w, h, depth, format) / bindings_storage_texture(b, binding) /
 //         compute_set_storage_texture(c, binding, tex)   textures compute passes write
+//   metal.texture_create_format(dev, w, h, format, mipmapped, linear, repeat, anisotropy) /
+//         texture_format_supported(dev, format) / texture_upload_level(tex, level, data, len) /
+//         texture_anisotropy(tex)       sampled formats and anisotropic filtering
 //   metal.target_create_mrt(dev, w, h, count, f0, f1, f2, f3, depth, samples) / target_attachments(t)
 //   metal.set_target_attachment(p, binding, t, n) / material_set_target_attachment /
 //         pixel_value_at(t, n, x, y, channel)   several colour attachments
@@ -216,7 +219,11 @@ exports(
     pixel_value_at,
     aemt_ae_state_topology, aemt_ae_batch_set_scissor, aemt_ae_batch_set_viewport,
     state_topology, batch_set_scissor, batch_set_viewport,
-    TOPOLOGY_TRIANGLES, TOPOLOGY_TRIANGLE_STRIP, TOPOLOGY_LINES, TOPOLOGY_LINE_STRIP, TOPOLOGY_POINTS
+    TOPOLOGY_TRIANGLES, TOPOLOGY_TRIANGLE_STRIP, TOPOLOGY_LINES, TOPOLOGY_LINE_STRIP, TOPOLOGY_POINTS,
+    aemt_ae_texture_create_format, aemt_ae_texture_format_supported, aemt_ae_texture_anisotropy,
+    aemt_ae_texture_upload_level,
+    texture_create_format, texture_format_supported, texture_anisotropy, texture_upload_level,
+    FORMAT_R8_UNORM, FORMAT_R8G8_UNORM, FORMAT_BC1_RGBA_UNORM, FORMAT_BC1_RGBA_SRGB, FORMAT_BC3_UNORM, FORMAT_BC3_SRGB, FORMAT_BC4_UNORM, FORMAT_BC5_UNORM, FORMAT_BC7_UNORM, FORMAT_BC7_SRGB
 )
 
 extern aemt_ae_available() -> int
@@ -266,6 +273,10 @@ extern aemt_ae_set_target_depth_compare(p: ptr, binding: int, t: ptr, op: int) -
 extern aemt_ae_material_set_target_depth_compare(m: ptr, binding: int, t: ptr, op: int) -> int
 extern aemt_ae_target_depth_linear(t: ptr) -> int
 extern aemt_ae_state_create() -> ptr
+extern aemt_ae_texture_create_format(dev: ptr, w: int, h: int, format: int, mipmapped: int, linear: int, repeat: int, anisotropy: int) -> ptr
+extern aemt_ae_texture_format_supported(dev: ptr, format: int) -> int
+extern aemt_ae_texture_anisotropy(tex: ptr) -> int
+extern aemt_ae_texture_upload_level(tex: ptr, level: int, data: ptr, len: int) -> int
 extern aemt_ae_state_topology(s: ptr, topology: int) -> int
 extern aemt_ae_batch_set_scissor(t: ptr, item: int, x: int, y: int, w: int, h: int) -> int
 extern aemt_ae_batch_set_viewport(t: ptr, item: int, x: float, y: float, w: float, h: float, min_depth: float, max_depth: float) -> int
@@ -424,6 +435,19 @@ const FORMAT_R32G32B32_SFLOAT = 106
 const FORMAT_R32G32B32A32_SFLOAT = 109
 const FORMAT_R8G8B8A8_UNORM = 37
 const FORMAT_R8G8B8A8_SRGB = 43
+// Sampled texture formats (#2397): one and two 8-bit channels, and the BC
+// block formats, 4x4 texels a block of 8 (BC1, BC4) or 16 bytes (BC3, BC5,
+// BC7). Numbered as this module's API numbers them, like the rest.
+const FORMAT_R8_UNORM = 9
+const FORMAT_R8G8_UNORM = 16
+const FORMAT_BC1_RGBA_UNORM = 133
+const FORMAT_BC1_RGBA_SRGB = 134
+const FORMAT_BC3_UNORM = 137
+const FORMAT_BC3_SRGB = 138
+const FORMAT_BC4_UNORM = 139
+const FORMAT_BC5_UNORM = 141
+const FORMAT_BC7_UNORM = 145
+const FORMAT_BC7_SRGB = 146
 const FORMAT_R16G16B16A16_SFLOAT = 97
 const FORMAT_B8G8R8A8_UNORM = 44
 const FORMAT_B8G8R8A8_SRGB = 50
@@ -617,6 +641,25 @@ texture_create_array(dev: ptr, w: int, h: int, layers: int, mipmapped: int, line
 }
 // 6 for a cube, the layers of an array, 1 for a 2D or 3D texture.
 texture_layers(tex: ptr) -> int { return aemt_ae_texture_layers(tex) }
+
+// A 2D texture in any sampled format (#2397): FORMAT_R8_UNORM,
+// FORMAT_R8G8_UNORM, FORMAT_R8G8B8A8_UNORM and _SRGB (sampled in linear
+// values), FORMAT_R16G16B16A16_SFLOAT, FORMAT_R32G32B32A32_SFLOAT, and the
+// BC block formats. `anisotropy` above 1 filters anisotropically, up to the
+// device's limit, which texture_anisotropy reports. texture_upload takes
+// level 0 and builds the rest of a mipmapped chain; a block format's chain
+// cannot be built, so each level is uploaded with texture_upload_level, and
+// the texture binds once every level has pixels. A format the device cannot
+// sample is refused; texture_format_supported asks first.
+texture_create_format(dev: ptr, w: int, h: int, format: int, mipmapped: int, linear: int, repeat: int,
+                      anisotropy: int) -> ptr {
+    return aemt_ae_texture_create_format(dev, w, h, format, mipmapped, linear, repeat, anisotropy)
+}
+texture_format_supported(dev: ptr, format: int) -> int { return aemt_ae_texture_format_supported(dev, format) }
+texture_anisotropy(tex: ptr) -> int { return aemt_ae_texture_anisotropy(tex) }
+texture_upload_level(tex: ptr, level: int, data: ptr, len: int) -> int {
+    return aemt_ae_texture_upload_level(tex, level, data, len)
+}
 
 // A target with `count` colour attachments, 1..4 (#2386): a G-buffer in one
 // draw. Attachment N is in format fN (a FORMAT_* value, unused past count)
