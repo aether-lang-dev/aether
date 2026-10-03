@@ -1,0 +1,12 @@
+#version 450
+
+// Writes voxel (x, y, z) of a 2x2x2 RGBA8 storage texture as (x, y, z, 1)
+// (#2388): the corners of the colour cube, exact in eight bits.
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0, rgba8) uniform writeonly image3D vol;
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    imageStore(vol, p, vec4(vec3(p), 1.0));
+}

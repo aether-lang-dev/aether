@@ -12,7 +12,8 @@ API:
 They have **the same shape**: the same calls, with the same names, arguments,
 status codes and behaviour. Each gives a device, offscreen targets in four
 colour formats with depth and multisampling, pipelines with vertex layouts,
-bindings and push constants, textures with mip chains, 3D textures,
+bindings and push constants, textures with mip chains, 3D textures, cube
+maps and 2D arrays, textures compute passes write,
 materials and batches, instanced and indirect draws, dynamic uniform offsets,
 a target's colour or depth read back as a texture in a later pass, frames in
 flight, GPU timing, readback and PNG output, compute over shared buffers, and
@@ -99,6 +100,7 @@ Every call returns one of the same codes, or a null handle with the reason in
 | y axis | points down | points up | points up |
 | Depth range | 0 to 1 | 0 to 1 | 0 to 1 |
 | `FORMAT_*` numbers | VkFormat | DXGI_FORMAT | VkFormat, translated where used |
+| A cube map, an array, a storage texture | `samplerCube`, `sampler2DArray`, `image2D`/`image3D` with its format | `TextureCube`, `Texture2DArray`, `RWTexture2D`/`RWTexture3D` at `uN` | `texturecube`, `texture2d_array`, `texture2d`/`texture3d` with `access::write` |
 | Vertex stream B | `binding = B` in the layout | input slot B | `[[buffer(16 + B)]]` |
 | Instance index in the shader | `gl_InstanceIndex`, counting from the first instance | `SV_InstanceID`, counting from 0 | `[[instance_id]]`, counting from the first instance |
 | Dynamic uniform offsets are multiples of | the device's `minUniformBufferOffsetAlignment` | 256 | 256 |
@@ -160,6 +162,31 @@ texels, so a shadow's edge comes back as a fraction rather than a step.
 `texture_create_3d(dev, w, h, depth, linear, repeat)` is a volume: `depth`
 slices of RGBA, uploaded slice after slice and read through a 3D sampler.
 `texture_depth(tex)` reports the slice count, 1 for a 2D texture.
+
+## Cube maps, arrays, and textures compute writes
+
+`texture_create_cube(dev, size, mipmapped, linear)` is six square faces,
+uploaded +X, -X, +Y, -Y, +Z, -Z. A shader samples it with a direction, and
+the face and the texel are picked the same way in all three APIs.
+`texture_create_array(dev, w, h, layers, mipmapped, linear, repeat)` is
+`layers` images of one size, uploaded one after another and sampled with
+the layer as a coordinate. Mip chains are built per face and per layer, and
+`texture_layers(tex)` reports 6, the array's layers, or 1.
+
+`texture_create_storage(dev, w, h, depth, format)` is a texture a compute
+pass writes: 2D, or 3D when `depth` is above 1, in RGBA8, RGBA16F or
+RGBA32F. A pass declares it with `bindings_storage_texture` and binds it
+with `compute_set_storage_texture`. A draw samples it like any texture once
+the dispatch has run, and each module orders the two itself. It starts
+zeroed. Draws do not take storage bindings.
+
+```aether,fragment
+img = vulkan.texture_create_storage(dev, 256, 256, 1, vulkan.FORMAT_R16G16B16A16_SFLOAT)
+vulkan.bindings_storage_texture(cbinds, 0)
+vulkan.compute_set_storage_texture(blur, 0, img)
+vulkan.dispatch(blur, 32, 32, 1)
+vulkan.set_texture(post_pipe, 0, img)
+```
 
 ## Drawing many things
 
@@ -291,7 +318,5 @@ Each gap has an issue:
 | Missing | Issue |
 |---|---|
 | Targets with several colour attachments, for a G-buffer | [#2386](https://github.com/aether-lang-dev/aether/issues/2386) |
-| Cube maps and 2D texture arrays | [#2387](https://github.com/aether-lang-dev/aether/issues/2387) |
-| Compute passes that write textures (storage images) | [#2388](https://github.com/aether-lang-dev/aether/issues/2388) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

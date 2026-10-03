@@ -205,6 +205,20 @@ buffer. The time is read when the frame is waited on, at the queue's
 `test_d3d12_draws.ae` runs with no debug-layer messages on a GPU and on WARP,
 including with GPU-based validation (`AETHER_D3D12_DEBUG=2`).
 
+## Cube maps, arrays and storage textures
+
+A cube map is a 2D resource of six array slices with a `TEXTURECUBE` view,
+and an array uses a `TEXTURE2DARRAY` view. The default view of a six-slice
+resource is an array, so both views are spelled out. Uploads copy every
+subresource, and the CPU builds the mip chain layer by layer.
+
+A storage texture is created with `ALLOW_UNORDERED_ACCESS`, checked against
+`TYPED_UNORDERED_ACCESS_VIEW`. It gets a UAV in the shader-visible heap and
+starts zeroed by an upload. It rests in the shader-resource state like any
+texture. A dispatch that writes it moves it to `UNORDERED_ACCESS` and back
+in the same command list. The pass binds it through a descriptor table at
+`uN`.
+
 ## Shadow maps and pipeline state
 
 `set_target_depth_compare` binds the depth's `R32_FLOAT` view with a

@@ -196,6 +196,17 @@ int    aedx_pipeline_set_target_depth_compare(AedxPipeline* p, int binding, Aedx
 int    aedx_material_set_target_depth_compare(AedxMaterial* m, int binding, AedxTarget* t, int op);
 int    aedx_target_depth_linear(const AedxTarget* t);
 
+/* Cube maps, 2D arrays and storage textures (#2387, #2388), as in
+ * contrib/vulkan: TextureCube, Texture2DArray, and RWTexture2D/3D at uN in a
+ * compute pass. */
+AedxTexture* aedx_texture_create_cube(AedxDevice* d, int size, int mipmapped, int linear_filter);
+AedxTexture* aedx_texture_create_array(AedxDevice* d, int w, int h, int layers, int mipmapped,
+                                       int linear_filter, int repeat);
+AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int depth, int format);
+int          aedx_texture_layers(const AedxTexture* tex);
+int          aedx_bindings_storage_texture(AedxBindings* b, int binding);
+int          aedx_compute_set_storage_texture(AedxCompute* c, int binding, AedxTexture* tex);
+
 /* Pipeline state (#2385): blending (0 none, 1 alpha, 2 premultiplied,
  * 3 additive), culling (0 none, 1 back, 2 front; front faces run
  * counter-clockwise on screen) and the depth test (a compare op 1..4, and

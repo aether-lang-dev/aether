@@ -210,6 +210,17 @@ int    aemt_pipeline_set_target_depth_compare(AemtPipeline* p, int binding, Aemt
 int    aemt_material_set_target_depth_compare(AemtMaterial* m, int binding, AemtTarget* t, int op);
 int    aemt_target_depth_linear(const AemtTarget* t);
 
+/* Cube maps, 2D arrays and storage textures (#2387, #2388), as in
+ * contrib/vulkan: texturecube, texture2d_array, and texture2d/3d with
+ * access::write in a compute pass. */
+AemtTexture* aemt_texture_create_cube(AemtDevice* d, int size, int mipmapped, int linear_filter);
+AemtTexture* aemt_texture_create_array(AemtDevice* d, int w, int h, int layers, int mipmapped,
+                                       int linear_filter, int repeat);
+AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int depth, int format);
+int          aemt_texture_layers(const AemtTexture* tex);
+int          aemt_bindings_storage_texture(AemtBindings* b, int binding);
+int          aemt_compute_set_storage_texture(AemtCompute* c, int binding, AemtTexture* tex);
+
 /* Pipeline state (#2385): blending (0 none, 1 alpha, 2 premultiplied,
  * 3 additive), culling (0 none, 1 back, 2 front; front faces run
  * counter-clockwise on screen) and the depth test (a compare op 1..4, and

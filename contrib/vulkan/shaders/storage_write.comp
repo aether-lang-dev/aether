@@ -1,0 +1,12 @@
+#version 450
+
+// Writes texel (x, y) of a float storage texture as (x/4, y/4, 0.5, 1)
+// (#2388): values a 4x4 texture holds exactly, read back by a draw.
+layout(local_size_x = 1, local_size_y = 1) in;
+
+layout(binding = 0, rgba32f) uniform writeonly image2D img;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    imageStore(img, p, vec4(float(p.x) * 0.25, float(p.y) * 0.25, 0.5, 1.0));
+}

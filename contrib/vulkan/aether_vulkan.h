@@ -194,6 +194,22 @@ AevkTexture* aevk_texture_create_3d(AevkDevice* dev, int width, int height, int 
                                     int linear_filter, int repeat);
 /* Slices: 1 for a 2D texture. */
 int aevk_texture_depth(const AevkTexture* tex);
+
+/* Cube maps and 2D arrays (#2387): six faces uploaded +X, -X, +Y, -Y, +Z,
+ * -Z, or `layers` images one after another; mip chains are built per layer.
+ * texture_layers is 6 for a cube, the layers of an array, 1 otherwise. */
+AevkTexture* aevk_texture_create_cube(AevkDevice* d, int size, int mipmapped, int linear_filter);
+AevkTexture* aevk_texture_create_array(AevkDevice* d, int width, int height, int layers,
+                                       int mipmapped, int linear_filter, int repeat);
+int          aevk_texture_layers(const AevkTexture* tex);
+
+/* Textures compute passes write (#2388): 2D, or 3D when depth > 1, in
+ * VK_FORMAT_R8G8B8A8_UNORM, R16G16B16A16_SFLOAT or R32G32B32A32_SFLOAT;
+ * zeroed at creation, sampled by draws by nearest texel. A storage binding
+ * is a compute pass's only. */
+AevkTexture* aevk_texture_create_storage(AevkDevice* d, int width, int height, int depth, int format);
+int          aevk_bindings_storage_texture(AevkBindings* b, int binding);
+int          aevk_compute_set_storage_texture(AevkCompute* c, int binding, AevkTexture* tex);
 void         aevk_texture_destroy(AevkTexture* tex);
 int          aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len);
 

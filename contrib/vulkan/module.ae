@@ -163,6 +163,15 @@
 //   vulkan.state_depth(st, op, write)         -> int
 //   vulkan.pipeline_create_state(dev, t, vs, vl, fs, fl, layout, push_bytes, bindings, st) -> ptr
 //
+// Cube maps, arrays and storage textures (#2387, #2388):
+//
+//   vulkan.texture_create_cube(dev, size, mipmapped, linear)         -> ptr
+//   vulkan.texture_create_array(dev, w, h, layers, mipmapped, linear, repeat) -> ptr
+//   vulkan.texture_layers(tex)                -> int  6, the layers, or 1
+//   vulkan.texture_create_storage(dev, w, h, depth, format)          -> ptr
+//   vulkan.bindings_storage_texture(b, binding) -> int  compute passes only
+//   vulkan.compute_set_storage_texture(c, binding, tex) -> int
+//
 // Binding 0 is the target's own vertices; a layout can declare streams 1..7
 // as well, per vertex or per instance, each fed from a buffer. An indirect
 // draw reads its commands from a buffer when the frame runs, so a compute pass
@@ -302,7 +311,11 @@ exports (
     aevk_ae_state_create, aevk_ae_state_destroy, aevk_ae_state_blend, aevk_ae_state_cull,
     aevk_ae_state_depth, aevk_ae_pipeline_create_state,
     state_create, state_destroy, state_blend, state_cull, state_depth, pipeline_create_state,
-    BLEND_NONE, BLEND_ALPHA, BLEND_PREMULTIPLIED, BLEND_ADDITIVE, CULL_NONE, CULL_BACK, CULL_FRONT
+    BLEND_NONE, BLEND_ALPHA, BLEND_PREMULTIPLIED, BLEND_ADDITIVE, CULL_NONE, CULL_BACK, CULL_FRONT,
+    aevk_ae_texture_create_cube, aevk_ae_texture_create_array, aevk_ae_texture_create_storage,
+    aevk_ae_texture_layers, aevk_ae_bindings_storage_texture, aevk_ae_compute_set_storage_texture,
+    texture_create_cube, texture_create_array, texture_create_storage, texture_layers,
+    bindings_storage_texture, compute_set_storage_texture
 )
 
 extern aevk_ae_available() -> int
@@ -373,6 +386,12 @@ extern aevk_ae_set_target_depth_compare(p: ptr, binding: int, t: ptr, op: int) -
 extern aevk_ae_material_set_target_depth_compare(m: ptr, binding: int, t: ptr, op: int) -> int
 extern aevk_ae_target_depth_linear(t: ptr) -> int
 extern aevk_ae_state_create() -> ptr
+extern aevk_ae_texture_create_cube(dev: ptr, size: int, mipmapped: int, linear: int) -> ptr
+extern aevk_ae_texture_create_array(dev: ptr, w: int, h: int, layers: int, mipmapped: int, linear: int, repeat: int) -> ptr
+extern aevk_ae_texture_create_storage(dev: ptr, w: int, h: int, depth: int, format: int) -> ptr
+extern aevk_ae_texture_layers(tex: ptr) -> int
+extern aevk_ae_bindings_storage_texture(b: ptr, binding: int) -> int
+extern aevk_ae_compute_set_storage_texture(c: ptr, binding: int, tex: ptr) -> int
 extern aevk_ae_state_destroy(s: ptr)
 extern aevk_ae_state_blend(s: ptr, mode: int) -> int
 extern aevk_ae_state_cull(s: ptr, mode: int) -> int
@@ -753,6 +772,33 @@ state_depth(s: ptr, op: int, write: int) -> int { return aevk_ae_state_depth(s, 
 pipeline_create_state(dev: ptr, t: ptr, vs: string, vlen: int, fs: string, flen: int,
                       layout: ptr, push_bytes: int, bindings: ptr, st: ptr) -> ptr {
     return aevk_ae_pipeline_create_state(dev, t, vs, vlen, fs, flen, layout, push_bytes, bindings, st)
+}
+
+// Cube maps and 2D arrays (#2387). A cube is six square faces uploaded +X,
+// -X, +Y, -Y, +Z, -Z (size * size * 4 bytes each), and a shader picks the
+// face and texel from a direction the same way in every module. An array is
+// `layers` images uploaded one after another, read with the layer as the
+// third coordinate. Mip chains are built per face and per layer.
+texture_create_cube(dev: ptr, size: int, mipmapped: int, linear: int) -> ptr {
+    return aevk_ae_texture_create_cube(dev, size, mipmapped, linear)
+}
+texture_create_array(dev: ptr, w: int, h: int, layers: int, mipmapped: int, linear: int, repeat: int) -> ptr {
+    return aevk_ae_texture_create_array(dev, w, h, layers, mipmapped, linear, repeat)
+}
+// 6 for a cube, the layers of an array, 1 for a 2D or 3D texture.
+texture_layers(tex: ptr) -> int { return aevk_ae_texture_layers(tex) }
+
+// A texture compute passes write (#2388): 2D, or 3D when depth is above 1,
+// in FORMAT_R8G8B8A8_UNORM, FORMAT_R16G16B16A16_SFLOAT or
+// FORMAT_R32G32B32A32_SFLOAT. It starts zeroed; a pass writes it through a
+// storage-texture binding, and draws sample it (by nearest texel) like any
+// texture once the dispatch has run. texture_upload takes its own texel size.
+texture_create_storage(dev: ptr, w: int, h: int, depth: int, format: int) -> ptr {
+    return aevk_ae_texture_create_storage(dev, w, h, depth, format)
+}
+bindings_storage_texture(b: ptr, binding: int) -> int { return aevk_ae_bindings_storage_texture(b, binding) }
+compute_set_storage_texture(c: ptr, binding: int, tex: ptr) -> int {
+    return aevk_ae_compute_set_storage_texture(c, binding, tex)
 }
 target_instances(t: ptr) -> int { return aevk_ae_target_instances(t) }
 // A buffer as vertex stream `binding`, 1..7: binding 0 is the target's own

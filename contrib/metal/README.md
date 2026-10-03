@@ -251,6 +251,16 @@ Timing reads the command buffer's `GPUStartTime` and `GPUEndTime` once it has
 completed. Metal keeps these for every command buffer, so turning timing on
 costs nothing on the GPU.
 
+## Cube maps, arrays and storage textures
+
+A cube map is an `MTLTextureTypeCube` and an array an
+`MTLTextureType2DArray`. Uploads copy each layer into its own slice, and
+`generateMipmapsForTexture:` builds the chain for every slice.
+
+A storage texture adds `MTLTextureUsageShaderWrite` and starts zeroed by an
+upload. A compute pass binds it with `setTexture:atIndex:`, and Metal's
+hazard tracking orders the pass's writes before the draws that sample it.
+
 ## Shadow maps and pipeline state
 
 `set_target_depth_compare` binds the depth with a sampler whose
