@@ -328,6 +328,12 @@ struct AevkDevice {
 #define AEVK_CULL_NONE           0
 #define AEVK_CULL_BACK           1
 #define AEVK_CULL_FRONT          2
+/* Primitive topology (#2398), the shared shape's numbering. */
+#define AEVK_TOPOLOGY_TRIANGLES      0
+#define AEVK_TOPOLOGY_TRIANGLE_STRIP 1
+#define AEVK_TOPOLOGY_LINES          2
+#define AEVK_TOPOLOGY_LINE_STRIP     3
+#define AEVK_TOPOLOGY_POINTS         4
 
 /* One draw inside a frame. `first`/`count` address indices when the target
  * has an index buffer and vertices otherwise, so a batch slices whatever
@@ -348,6 +354,12 @@ typedef struct {
     VkDeviceSize  indirect_offset;
     int           indirect_draws;
     uint32_t      offsets[AEVK_MAX_DESC];
+    /* A scissor and a viewport of the draw's own (#2398), in pixels from
+     * the target's top left; unset, the whole target. */
+    int           scissor_set;
+    int           sx, sy, sw, sh;
+    int           viewport_set;
+    float         vx, vy, vw, vh, vmin, vmax;
 } AevkDrawItem;
 
 typedef struct {
@@ -535,6 +547,7 @@ struct AevkState {
     int depth_set;      /* state_depth was called */
     int depth_op;       /* compare op 1..4 */
     int depth_write;
+    int topology;       /* AEVK_TOPOLOGY_*, triangles unless set (#2398) */
 };
 
 /* What a shader may read besides vertex attributes: uniform buffers and
@@ -2140,6 +2153,54 @@ int aevk_batch_set_offset(AevkTarget* t, int item, int binding, int offset) {
 
 int aevk_uniform_offset_alignment(const AevkDevice* d) { return d ? (int)d->uniform_align : 0; }
 
+/* Draw `item`'s scissor (#2398): only pixels in x..x+w-1, y..y+h-1 from the
+ * target's top left are drawn. It must lie inside the target, which is
+ * checked when the frame is drawn, since the target can be resized between.
+ * A width of 0 clears it back to the whole target. */
+int aevk_batch_set_scissor(AevkTarget* t, int item, int x, int y, int w, int h) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (x < 0 || y < 0 || w < 0 || h < 0) {
+        return aevk_fail(AEVK_ERR_ARG, "a scissor %d,%d %dx%d is not inside a target", x, y, w, h);
+    }
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    int rc = AEVK_OK;
+    if (item < 0 || item >= t->batch_count) {
+        rc = aevk_fail(AEVK_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    } else {
+        AevkDrawItem* it = &t->batch[item];
+        it->scissor_set = w > 0 && h > 0;
+        it->sx = x; it->sy = y; it->sw = w; it->sh = h;
+        t->batch_version++;
+    }
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return rc;
+}
+
+/* Draw `item`'s viewport (#2398): NDC maps onto the w x h pixels at x, y
+ * from the target's top left, depth onto min_depth..max_depth. A width of 0
+ * clears it back to the whole target. */
+int aevk_batch_set_viewport(AevkTarget* t, int item, float x, float y, float w, float h,
+                            float min_depth, float max_depth) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (w < 0.0f || h < 0.0f || !(min_depth >= 0.0f && max_depth <= 1.0f && min_depth <= max_depth)) {
+        return aevk_fail(AEVK_ERR_ARG, "a viewport needs a size of at least 0 and depths in 0 <= min <= max <= 1");
+    }
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    int rc = AEVK_OK;
+    if (item < 0 || item >= t->batch_count) {
+        rc = aevk_fail(AEVK_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    } else {
+        AevkDrawItem* it = &t->batch[item];
+        it->viewport_set = w > 0.0f && h > 0.0f;
+        it->vx = x; it->vy = y; it->vw = w; it->vh = h; it->vmin = min_depth; it->vmax = max_depth;
+        t->batch_version++;
+    }
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return rc;
+}
+
 /* A caller's buffer as vertex stream `binding` (#2198), 1 and up: binding 0
  * is the target's own vertices. NULL unbinds it. The pipeline's layout says
  * the stride and whether it advances per vertex or per instance. The buffer
@@ -2259,6 +2320,10 @@ static int aevk_batch_check(AevkTarget* t, AevkPipeline* p) {
         }
         if (it->mat && p && it->mat->pipe != p) {
             return aevk_fail(AEVK_ERR_ARG, "draw %d uses a material of another pipeline", i);
+        }
+        if (it->scissor_set && ((long long)it->sx + it->sw > t->width || (long long)it->sy + it->sh > t->height)) {
+            return aevk_fail(AEVK_ERR_ARG, "draw %d's scissor %d,%d %dx%d runs outside the %dx%d target",
+                             i, it->sx, it->sy, it->sw, it->sh, t->width, t->height);
         }
     }
     return AEVK_OK;
@@ -2455,6 +2520,19 @@ int aevk_state_depth(AevkState* s, int op, int write) {
     s->depth_set = 1;
     s->depth_op = op;
     s->depth_write = write ? 1 : 0;
+    return AEVK_OK;
+}
+
+/* What the vertices assemble into (#2398): triangle lists, a strip, line
+ * lists, a line strip, or points. A point's size is the vertex shader's
+ * gl_PointSize, which it must write. */
+int aevk_state_topology(AevkState* s, int topology) {
+    aevk_clear_error();
+    if (!s) return aevk_fail(AEVK_ERR_ARG, "state is null");
+    if (topology < AEVK_TOPOLOGY_TRIANGLES || topology > AEVK_TOPOLOGY_POINTS) {
+        return aevk_fail(AEVK_ERR_ARG, "topology %d is not TOPOLOGY_TRIANGLES..TOPOLOGY_POINTS (0..4)", topology);
+    }
+    s->topology = topology;
     return AEVK_OK;
 }
 
@@ -3321,7 +3399,11 @@ AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
 
     VkPipelineInputAssemblyStateCreateInfo ia = {0};
     ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ia.topology = st->topology == AEVK_TOPOLOGY_TRIANGLE_STRIP ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+                : st->topology == AEVK_TOPOLOGY_LINES ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                : st->topology == AEVK_TOPOLOGY_LINE_STRIP ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
+                : st->topology == AEVK_TOPOLOGY_POINTS ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     /* Viewport and scissor are dynamic so one pipeline serves every target
      * size; a resize costs a re-record, not a pipeline rebuild. */
@@ -4167,6 +4249,20 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
             for (int i = 0; i < t->batch_count; i++) {
                 AevkDrawItem* it = &t->batch[i];
                 aevk_bind_material(d, fr->cmd, p, it->mat ? it->mat : bind_mat, it->offsets);
+                /* Each draw's own scissor and viewport, or the whole target
+                 * (#2398). */
+                VkViewport ivp = vp;
+                VkRect2D isc = sc;
+                if (it->viewport_set) {
+                    ivp.x = it->vx; ivp.y = it->vy; ivp.width = it->vw; ivp.height = it->vh;
+                    ivp.minDepth = it->vmin; ivp.maxDepth = it->vmax;
+                }
+                if (it->scissor_set) {
+                    isc.offset.x = it->sx; isc.offset.y = it->sy;
+                    isc.extent.width = (uint32_t)it->sw; isc.extent.height = (uint32_t)it->sh;
+                }
+                d->da.vkCmdSetViewport(fr->cmd, 0, 1, &ivp);
+                d->da.vkCmdSetScissor(fr->cmd, 0, 1, &isc);
                 aevk_record_draw(d, t, fr->cmd, it);
             }
         } else {
@@ -6097,6 +6193,15 @@ int aevk_ae_material_set_target_attachment(void* m, int binding, void* t, int n)
     return aevk_material_set_target_attachment((AevkMaterial*)m, binding, (AevkTarget*)t, n);
 }
 
+int   aevk_ae_state_topology(void* s, int topology) { return aevk_state_topology((AevkState*)s, topology); }
+int   aevk_ae_batch_set_scissor(void* t, int item, int x, int y, int w, int h) {
+    return aevk_batch_set_scissor((AevkTarget*)t, item, x, y, w, h);
+}
+int   aevk_ae_batch_set_viewport(void* t, int item, double x, double y, double w, double h,
+                                 double min_depth, double max_depth) {
+    return aevk_batch_set_viewport((AevkTarget*)t, item, (float)x, (float)y, (float)w, (float)h,
+                                   (float)min_depth, (float)max_depth);
+}
 void* aevk_ae_state_create(void) { return (void*)aevk_state_create(); }
 void  aevk_ae_state_destroy(void* s) { aevk_state_destroy((AevkState*)s); }
 int   aevk_ae_state_blend(void* s, int mode) { return aevk_state_blend((AevkState*)s, mode); }

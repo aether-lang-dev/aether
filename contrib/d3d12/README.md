@@ -237,7 +237,10 @@ it with `Texture2D.SampleCmp` or `SampleCmpLevelZero` through a
 `SamplerComparisonState`.
 
 `pipeline_create_state` sets the PSO's blend, rasterizer and depth-stencil
-state. `FrontCounterClockwise` is on, because the render target's y points
+state, and its primitive topology type: triangle, line or point, with the
+exact topology set by `IASetPrimitiveTopology` when the frame is recorded.
+Points are one pixel wide. A batch entry's scissor and viewport go to
+`RSSetScissorRects` and `RSSetViewports` before its draw. `FrontCounterClockwise` is on, because the render target's y points
 down as the screen's does, and blending is refused for a format without
 `D3D12_FORMAT_SUPPORT1_BLENDABLE`.
 

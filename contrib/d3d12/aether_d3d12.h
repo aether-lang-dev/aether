@@ -225,6 +225,10 @@ void       aedx_state_destroy(AedxState* s);
 int        aedx_state_blend(AedxState* s, int mode);
 int        aedx_state_cull(AedxState* s, int mode);
 int        aedx_state_depth(AedxState* s, int op, int write);
+int        aedx_state_topology(AedxState* s, int topology);
+int        aedx_batch_set_scissor(AedxTarget* t, int item, int x, int y, int w, int h);
+int        aedx_batch_set_viewport(AedxTarget* t, int item, float x, float y, float w, float h,
+                                  float min_depth, float max_depth);
 AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const void* vs, size_t vs_len,
                                          const void* ps, size_t ps_len, const AedxLayout* layout,
                                          int push_bytes, const AedxBindings* bindings,

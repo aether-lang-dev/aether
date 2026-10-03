@@ -239,6 +239,10 @@ void       aemt_state_destroy(AemtState* s);
 int        aemt_state_blend(AemtState* s, int mode);
 int        aemt_state_cull(AemtState* s, int mode);
 int        aemt_state_depth(AemtState* s, int op, int write);
+int        aemt_state_topology(AemtState* s, int topology);
+int        aemt_batch_set_scissor(AemtTarget* t, int item, int x, int y, int w, int h);
+int        aemt_batch_set_viewport(AemtTarget* t, int item, float x, float y, float w, float h,
+                                  float min_depth, float max_depth);
 AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const void* vs, size_t vs_len,
                                          const void* fs, size_t fs_len, const AemtLayout* layout,
                                          int push_bytes, const AemtBindings* bindings,

@@ -275,7 +275,11 @@ hazard tracking orders the pass's writes before the draws that sample it.
 it with `depth2d<float>::sample_compare`.
 
 `pipeline_create_state` sets the colour attachment's blending and the
-depth-stencil state on the pipeline. Culling is the render encoder's in
+depth-stencil state on the pipeline, and its input primitive topology
+class. The exact primitive type is the draw call's, and a point list needs
+the vertex shader to write `[[point_size]]`. A batch entry's scissor and
+viewport are the encoder's `setScissorRect:` and `setViewport:` before its
+draw. Culling is the render encoder's in
 Metal, so each draw sets `setCullMode:` with counter-clockwise front faces.
 
 ## Threads
