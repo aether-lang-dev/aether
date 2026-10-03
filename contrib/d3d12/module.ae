@@ -88,6 +88,9 @@
 //         layers, mipmapped, linear, repeat) / texture_layers(tex)
 //   d3d12.texture_create_storage(dev, w, h, depth, format) / bindings_storage_texture(b, binding) /
 //         compute_set_storage_texture(c, binding, tex)   textures compute passes write
+//   d3d12.target_create_mrt(dev, w, h, count, f0, f1, f2, f3, depth, samples) / target_attachments(t)
+//   d3d12.set_target_attachment(p, binding, t, n) / material_set_target_attachment /
+//         pixel_value_at(t, n, x, y, channel)   several colour attachments
 //
 //   d3d12.swapchain_create(dev, kind, display, window, w, h) -> ptr
 //   d3d12.swapchain_destroy / swapchain_resize / swapchain_set_vsync /
@@ -198,7 +201,11 @@ exports(
     aedx_ae_texture_create_cube, aedx_ae_texture_create_array, aedx_ae_texture_create_storage,
     aedx_ae_texture_layers, aedx_ae_bindings_storage_texture, aedx_ae_compute_set_storage_texture,
     texture_create_cube, texture_create_array, texture_create_storage, texture_layers,
-    bindings_storage_texture, compute_set_storage_texture
+    bindings_storage_texture, compute_set_storage_texture,
+    aedx_ae_target_create_mrt, aedx_ae_target_attachments, aedx_ae_set_target_attachment,
+    aedx_ae_material_set_target_attachment, aedx_ae_pixel_value_at,
+    target_create_mrt, target_attachments, set_target_attachment, material_set_target_attachment,
+    pixel_value_at
 )
 
 extern aedx_ae_available() -> int
@@ -250,6 +257,11 @@ extern aedx_ae_material_set_target_depth_compare(m: ptr, binding: int, t: ptr, o
 extern aedx_ae_target_depth_linear(t: ptr) -> int
 extern aedx_ae_state_create() -> ptr
 extern aedx_ae_texture_create_cube(dev: ptr, size: int, mipmapped: int, linear: int) -> ptr
+extern aedx_ae_target_create_mrt(dev: ptr, w: int, h: int, count: int, f0: int, f1: int, f2: int, f3: int, depth: int, samples: int) -> ptr
+extern aedx_ae_target_attachments(t: ptr) -> int
+extern aedx_ae_set_target_attachment(p: ptr, binding: int, t: ptr, n: int) -> int
+extern aedx_ae_material_set_target_attachment(m: ptr, binding: int, t: ptr, n: int) -> int
+extern aedx_ae_pixel_value_at(t: ptr, n: int, x: int, y: int, channel: int) -> float
 extern aedx_ae_texture_create_array(dev: ptr, w: int, h: int, layers: int, mipmapped: int, linear: int, repeat: int) -> ptr
 extern aedx_ae_texture_create_storage(dev: ptr, w: int, h: int, depth: int, format: int) -> ptr
 extern aedx_ae_texture_layers(tex: ptr) -> int
@@ -564,6 +576,28 @@ texture_create_array(dev: ptr, w: int, h: int, layers: int, mipmapped: int, line
 }
 // 6 for a cube, the layers of an array, 1 for a 2D or 3D texture.
 texture_layers(tex: ptr) -> int { return aedx_ae_texture_layers(tex) }
+
+// A target with `count` colour attachments, 1..4 (#2386): a G-buffer in one
+// draw. Attachment N is in format fN (a FORMAT_* value, unused past count)
+// and fragment output N writes it; every one clears to the draw's colour and
+// resolves when multisampled. Present, pixel, copy_rgba and save_png read
+// attachment 0; pixel_value_at reads any.
+target_create_mrt(dev: ptr, w: int, h: int, count: int, f0: int, f1: int, f2: int, f3: int,
+                  depth: int, samples: int) -> ptr {
+    return aedx_ae_target_create_mrt(dev, w, h, count, f0, f1, f2, f3, depth, samples)
+}
+target_attachments(t: ptr) -> int { return aedx_ae_target_attachments(t) }
+// Colour attachment `n` of a target's newest frame, where a texture goes:
+// set_target is attachment 0.
+set_target_attachment(p: ptr, binding: int, t: ptr, n: int) -> int {
+    return aedx_ae_set_target_attachment(p, binding, t, n)
+}
+material_set_target_attachment(m: ptr, binding: int, t: ptr, n: int) -> int {
+    return aedx_ae_material_set_target_attachment(m, binding, t, n)
+}
+pixel_value_at(t: ptr, n: int, x: int, y: int, channel: int) -> float {
+    return aedx_ae_pixel_value_at(t, n, x, y, channel)
+}
 
 // A texture compute passes write (#2388): 2D, or 3D when depth is above 1,
 // in FORMAT_R8G8B8A8_UNORM, FORMAT_R16G16B16A16_SFLOAT or

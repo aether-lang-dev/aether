@@ -1,4 +1,4 @@
-// contrib.metal: reading what was rendered, and 3D textures (#2198, #2373).
+// contrib.metal: reading what was rendered, and 3D textures (#2198, #2373, #2386).
 //
 // A target's colour and depth bound where a texture goes, read in a later
 // pass, and a 3D texture read slice by slice. Every check reads pixels back:
@@ -105,6 +105,14 @@ near(a: float, b: float) -> int {
     return 0
 }
 
+// A red triangle over the whole target, in the built-in layout.
+write_big_triangle(t: ptr) {
+    _ = metal.verts_reserve(t, 3)
+    _ = metal.verts_set(t, 0, -1.0, -1.0, 1.0, 0.0, 0.0)
+    _ = metal.verts_set(t, 1, 3.0, -1.0, 1.0, 0.0, 0.0)
+    _ = metal.verts_set(t, 2, -1.0, 3.0, 1.0, 0.0, 0.0)
+}
+
 main() {
     fw = spec.init()
 
@@ -121,6 +129,10 @@ main() {
     vfl = 0
     sfs = ""
     sfl = 0
+    mvs = ""
+    mvl = 0
+    mfs = ""
+    mfl = 0
     pvs = ""
     pvl = 0
     pfs = ""
@@ -134,10 +146,12 @@ main() {
             tfs, tfl = load_src("contrib/metal/shaders/textured_fs.metal")
             dfs, dfl = load_src("contrib/metal/shaders/depth_read_fs.metal")
             sfs, sfl = load_src("contrib/metal/shaders/shadow_fs.metal")
+            mvs, mvl = load_src("contrib/metal/shaders/triangle_vs.metal")
+            mfs, mfl = load_src("contrib/metal/shaders/mrt_fs.metal")
             vfs, vfl = load_src("contrib/metal/shaders/volume_fs.metal")
             pvs, pvl = load_src("contrib/metal/shaders/depth_vs.metal")
             pfs, pfl = load_src("contrib/metal/shaders/triangle_fs.metal")
-            if tvl == 0 || tfl == 0 || dfl == 0 || vfl == 0 || pvl == 0 || pfl == 0 || sfl == 0 {
+            if tvl == 0 || tfl == 0 || dfl == 0 || vfl == 0 || pvl == 0 || pfl == 0 || sfl == 0 || mvl == 0 || mfl == 0 {
                 reason = "MSL shaders not found"
             } else {
                 ready = 1
@@ -363,6 +377,78 @@ main() {
         }
     }
 
+    spec.describe(fw, "metal: several colour attachments") {
+        spec.it_when(ready, "writes each attachment in one draw and reads each back", reason) callback {
+            u8 = metal.FORMAT_R8G8B8A8_UNORM
+            f16 = metal.FORMAT_R16G16B16A16_SFLOAT
+            f32 = metal.FORMAT_R32G32B32A32_SFLOAT
+            spec.assert_true(metal.target_create_mrt(dev, 4, 4, 0, u8, u8, u8, u8, 0, 1) == null, "no attachments")
+            spec.assert_true(metal.target_create_mrt(dev, 4, 4, 5, u8, u8, u8, u8, 0, 1) == null, "five")
+            spec.assert_true(metal.target_create_mrt(dev, 4, 4, 2, u8, 12345, u8, u8, 0, 1) == null,
+                "an unknown format")
+
+            g = metal.target_create_mrt(dev, 4, 4, 3, u8, f16, f32, u8, 1, 1)
+            spec.assert_true(g != null, "a three-attachment target (${metal.last_error()})")
+            spec.assert_eq(metal.target_attachments(g), 3, "three attachments")
+            mp = metal.pipeline_create(dev, g, mvs, mvl, mfs, mfl)
+            spec.assert_true(mp != null, "the pipeline writing three outputs (${metal.last_error()})")
+            write_big_triangle(g)
+            spec.assert_eq(metal.draw(g, mp, 0.0, 0.0, 0.0, 1.0), metal.OK, "drawn (${metal.last_error()})")
+            spec.assert_eq(metal.pixel(g, 1, 1), 4278190335, "attachment 0, the interpolated red")
+            spec.assert_eq(near(metal.pixel_value_at(g, 1, 1, 1, 0), 0.25), 1, "attachment 1, red 0.25")
+            spec.assert_eq(near(metal.pixel_value_at(g, 1, 1, 1, 2), 0.75), 1, "attachment 1, blue 0.75")
+            spec.assert_eq(near(metal.pixel_value_at(g, 2, 1, 1, 0), 2.0), 1,
+                "attachment 2 keeps HDR 2.0 (${metal.pixel_value_at(g, 2, 1, 1, 0)})")
+            spec.assert_eq(near(metal.pixel_value_at(g, 2, 1, 1, 1), -1.0), 1, "and -1.0")
+            _ = metal.pixel_value_at(g, 3, 1, 1, 0)
+            spec.assert_true(string.contains(metal.last_error(), "0..2") == 1,
+                "attachment 3 is refused: ${metal.last_error()}")
+
+            // A later pass samples attachment 2, its HDR values intact.
+            out = metal.target_create_format(dev, 4, 4, f32, 0, 1)
+            lay = quad_layout()
+            binds = metal.bindings_create()
+            _ = metal.bindings_texture(binds, 0)
+            _ = metal.bindings_uniform(binds, 1)
+            sp = metal.pipeline_create_ex(dev, out, tvs, tvl, tfs, tfl, lay, 0, binds)
+            white_tint(sp)
+            write_fullscreen_quad(out)
+            spec.assert_eq(metal.set_target_attachment(sp, 0, g, 3), metal.ERR_ARG, "attachment 3 of three")
+            spec.assert_eq(metal.set_target_attachment(sp, 0, g, 2), metal.OK, "attachment 2 bound")
+            spec.assert_eq(metal.draw(out, sp, 0.0, 0.0, 0.0, 1.0), metal.OK, "sampled (${metal.last_error()})")
+            spec.assert_eq(near(metal.pixel_value(out, 1, 1, 0), 2.0), 1,
+                "the sampled attachment's 2.0 (${metal.pixel_value(out, 1, 1, 0)})")
+            spec.assert_eq(near(metal.pixel_value(out, 1, 1, 1), -1.0), 1, "and -1.0")
+            spec.assert_eq(metal.set_target_attachment(sp, 0, g, 1), metal.OK, "attachment 1 bound")
+            _ = metal.draw(out, sp, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(near(metal.pixel_value(out, 1, 1, 1), 0.5), 1, "attachment 1's green 0.5")
+
+            // A resize rebuilds every attachment.
+            spec.assert_eq(metal.target_resize(g, 8, 8), metal.OK, "resized")
+            _ = metal.draw(g, mp, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(near(metal.pixel_value_at(g, 2, 6, 6, 0), 2.0), 1, "attachment 2 at the new size")
+
+            // Multisampled, with depth: every attachment resolves.
+            ms = metal.target_create_mrt(dev, 4, 4, 3, u8, f16, f16, u8, 1, 4)
+            spec.assert_true(ms != null, "a multisampled one (${metal.last_error()})")
+            msp = metal.pipeline_create(dev, ms, mvs, mvl, mfs, mfl)
+            write_big_triangle(ms)
+            spec.assert_eq(metal.draw(ms, msp, 0.0, 0.0, 0.0, 1.0), metal.OK, "drawn (${metal.last_error()})")
+            spec.assert_eq(metal.pixel(ms, 1, 1), 4278190335, "attachment 0 resolved")
+            spec.assert_eq(near(metal.pixel_value_at(ms, 1, 1, 1, 1), 0.5), 1, "attachment 1 resolved")
+            spec.assert_eq(near(metal.pixel_value_at(ms, 2, 1, 1, 0), 2.0), 1, "attachment 2 resolved")
+
+            metal.pipeline_destroy(msp)
+            metal.target_destroy(ms)
+            metal.pipeline_destroy(sp)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.target_destroy(out)
+            metal.pipeline_destroy(mp)
+            metal.target_destroy(g)
+        }
+    }
+
     spec.describe(fw, "metal: 3D textures") {
         spec.it_when(ready, "reads each slice's texels", reason) callback {
             vol = metal.texture_create_3d(dev, 2, 2, 2, 0, 0)
@@ -427,6 +513,8 @@ main() {
     string.free(dfs)
     string.free(vfs)
     string.free(sfs)
+    string.free(mvs)
+    string.free(mfs)
     string.free(pvs)
     string.free(pfs)
     _rc = spec.run_summary(fw)

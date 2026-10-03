@@ -312,6 +312,16 @@ not by address. A pipeline destroyed and another made in its memory would
 otherwise pass for the same one, and the cached frame would submit commands
 that name destroyed objects.
 
+## Several colour attachments
+
+A `target_create_mrt` target's render pass has each colour attachment
+followed by its resolve, and depth last. The framebuffer and the clear
+values follow the same order. Each attachment has its own image, sampler,
+and per-frame readback buffer that the frame's copy fills. The sampling
+barriers name the attachment a material reads. A pipeline made for the
+target has one blend attachment state per colour attachment, all the same,
+and checks every format for `COLOR_ATTACHMENT_BLEND` when it blends.
+
 ## Cube maps, arrays and storage textures
 
 A cube map is a `CUBE_COMPATIBLE` image of six layers with a `CUBE` view,

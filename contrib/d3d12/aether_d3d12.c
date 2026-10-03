@@ -182,6 +182,7 @@ static int aedx_hr_status(HRESULT hr) {
 #define AEDX_MAX_DESC     8
 #define AEDX_MAX_PUSH     128
 #define AEDX_MAX_FRAMES   8
+#define AEDX_MAX_COLOR    4   /* colour attachments a target can have (#2386) */
 /* Compare ops for sampling a depth (#2373): 1 LESS, 2 LESS_EQUAL, 3 GREATER,
  * 4 GREATER_EQUAL, the shared shape's numbering; slot 0 is unused. */
 #define AEDX_COMPARE_OPS  5
@@ -704,6 +705,9 @@ typedef struct {
     int                        submitted;
     ID3D12Resource*            readback;    /* READBACK heap, mapped for its life */
     unsigned char*             readback_ptr;
+    /* The same for colour attachments 1.. (#2386). */
+    ID3D12Resource*            xreadback[AEDX_MAX_COLOR - 1];
+    unsigned char*             xreadback_ptr[AEDX_MAX_COLOR - 1];
     int                        timed;       /* writes the slot's two timestamps (#2198) */
     unsigned long long         seq;         /* the target's submission it holds */
 } AedxFrame;
@@ -719,7 +723,23 @@ struct AedxTarget {
     ID3D12Resource* msaa;
     ID3D12Resource* depth;
     D3D12_RESOURCE_STATES color_state;
-    ID3D12DescriptorHeap* rtv_heap; /* [0] colour, [1] multisampled colour */
+    /* Two views an attachment: [2N] attachment N, [2N + 1] its multisampled
+     * image. */
+    ID3D12DescriptorHeap* rtv_heap;
+    /* Colour attachments past the first (#2386): a target_create_mrt
+     * target's attachments 1.., each with its format, image (and
+     * multisampled image), state, shader view, sampler and readback
+     * footprint. Attachment 0 is the fields around them. */
+    int             extra;
+    DXGI_FORMAT     xformat[AEDX_MAX_COLOR - 1];
+    int             xbpp[AEDX_MAX_COLOR - 1];
+    ID3D12Resource* xcolor[AEDX_MAX_COLOR - 1];
+    ID3D12Resource* xmsaa[AEDX_MAX_COLOR - 1];
+    D3D12_RESOURCE_STATES xstate[AEDX_MAX_COLOR - 1];
+    int             xsrv_slot[AEDX_MAX_COLOR - 1];
+    int             xsampler_slot[AEDX_MAX_COLOR - 1];
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT xfootprint[AEDX_MAX_COLOR - 1];
+    UINT64          xreadback_bytes[AEDX_MAX_COLOR - 1];
     ID3D12DescriptorHeap* dsv_heap;
     int             srv_slot;       /* the colour image as a texture: presenting, and a later pass */
     /* Sampling the target in a later pass (#2198). `sampler_slot` filters the
@@ -855,6 +875,11 @@ static void aedx_frames_free(AedxTarget* t) {
             if (f->readback_ptr) ID3D12Resource_Unmap(f->readback, 0, NULL);
             ID3D12Resource_Release(f->readback);
         }
+        for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) {
+            if (!f->xreadback[x]) continue;
+            if (f->xreadback_ptr[x]) ID3D12Resource_Unmap(f->xreadback[x], 0, NULL);
+            ID3D12Resource_Release(f->xreadback[x]);
+        }
         if (f->list) ID3D12GraphicsCommandList_Release(f->list);
         if (f->alloc) ID3D12CommandAllocator_Release(f->alloc);
         if (f->event) CloseHandle(f->event);
@@ -882,6 +907,13 @@ static int aedx_frames_alloc(AedxTarget* t, int count) {
              * nothing for memory the CPU reads every frame. */
             HRESULT hr = ID3D12Resource_Map(f->readback, 0, NULL, (void**)&f->readback_ptr);
             if (FAILED(hr)) { aedx_fail(AEDX_ERR_OOM, "Map (readback) failed (0x%08lx)", (unsigned long)hr); goto fail; }
+            for (int x = 0; x < t->extra; x++) {
+                f->xreadback[x] = aedx_make_buffer(d, D3D12_HEAP_TYPE_READBACK, t->xreadback_bytes[x],
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
+                if (!f->xreadback[x]) goto fail;
+                hr = ID3D12Resource_Map(f->xreadback[x], 0, NULL, (void**)&f->xreadback_ptr[x]);
+                if (FAILED(hr)) { aedx_fail(AEDX_ERR_OOM, "Map (readback) failed (0x%08lx)", (unsigned long)hr); goto fail; }
+            }
         }
     }
     t->next_frame = 0;
@@ -895,13 +927,20 @@ fail:
 /* The caller guarantees the target is idle; the device lock must NOT be
  * held, since returning the descriptor slot takes it. */
 static void aedx_target_free_images(AedxTarget* t) {
-    if (t->srv_slot >= 0 || t->depth_srv_slot >= 0) {
-        AcquireSRWLockExclusive(&t->dev->lock);
-        aedx_slot_give(&t->dev->srv, t->srv_slot);
-        aedx_slot_give(&t->dev->srv, t->depth_srv_slot);
-        ReleaseSRWLockExclusive(&t->dev->lock);
-        t->srv_slot = -1;
-        t->depth_srv_slot = -1;
+    AcquireSRWLockExclusive(&t->dev->lock);
+    aedx_slot_give(&t->dev->srv, t->srv_slot);
+    aedx_slot_give(&t->dev->srv, t->depth_srv_slot);
+    for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) {
+        aedx_slot_give(&t->dev->srv, t->xsrv_slot[x]);
+        t->xsrv_slot[x] = -1;
+    }
+    ReleaseSRWLockExclusive(&t->dev->lock);
+    t->srv_slot = -1;
+    t->depth_srv_slot = -1;
+    for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) {
+        if (t->xcolor[x]) ID3D12Resource_Release(t->xcolor[x]);
+        if (t->xmsaa[x]) ID3D12Resource_Release(t->xmsaa[x]);
+        t->xcolor[x] = t->xmsaa[x] = NULL;
     }
     if (t->color) ID3D12Resource_Release(t->color);
     if (t->msaa) ID3D12Resource_Release(t->msaa);
@@ -956,17 +995,36 @@ static int aedx_target_make_images(AedxTarget* t) {
                                       D3D12_RESOURCE_STATE_RENDER_TARGET, NULL);
         if (!t->msaa) return AEDX_ERR_OOM;
     }
+    for (int x = 0; x < t->extra; x++) {
+        t->xcolor[x] = aedx_make_texture2d(d, t->width, t->height, t->xformat[x], 1, 1,
+                                           D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                           D3D12_RESOURCE_STATE_COPY_SOURCE, NULL);
+        if (!t->xcolor[x]) return AEDX_ERR_OOM;
+        t->xstate[x] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        if (t->samples > 1) {
+            t->xmsaa[x] = aedx_make_texture2d(d, t->width, t->height, t->xformat[x], t->samples, 1,
+                                              D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                              D3D12_RESOURCE_STATE_RENDER_TARGET, NULL);
+            if (!t->xmsaa[x]) return AEDX_ERR_OOM;
+        }
+    }
     D3D12_DESCRIPTOR_HEAP_DESC hd;
     memset(&hd, 0, sizeof(hd));
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    hd.NumDescriptors = 2;
+    hd.NumDescriptors = 2u * (UINT)(1 + t->extra);
     HRESULT hr = ID3D12Device_CreateDescriptorHeap(d->device, &hd, &IID_ID3D12DescriptorHeap, (void**)&t->rtv_heap);
     if (FAILED(hr)) return aedx_fail(AEDX_ERR_OOM, "CreateDescriptorHeap (RTV) failed (0x%08lx)", (unsigned long)hr);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->rtv_heap);
-    ID3D12Device_CreateRenderTargetView(d->device, t->color, NULL, rtv);
-    if (t->msaa) {
-        rtv.ptr += d->rtv_inc;
-        ID3D12Device_CreateRenderTargetView(d->device, t->msaa, NULL, rtv);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv0 = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->rtv_heap);
+    for (int c = 0; c <= t->extra; c++) {
+        ID3D12Resource* single = c == 0 ? t->color : t->xcolor[c - 1];
+        ID3D12Resource* multi = c == 0 ? t->msaa : t->xmsaa[c - 1];
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv0;
+        rtv.ptr += (SIZE_T)(2 * c) * d->rtv_inc;
+        ID3D12Device_CreateRenderTargetView(d->device, single, NULL, rtv);
+        if (multi) {
+            rtv.ptr += d->rtv_inc;
+            ID3D12Device_CreateRenderTargetView(d->device, multi, NULL, rtv);
+        }
     }
     if (t->has_depth) {
         D3D12_CLEAR_VALUE cv;
@@ -1022,6 +1080,18 @@ static int aedx_target_make_images(AedxTarget* t) {
     UINT64 row_bytes = 0;
     ID3D12Device_GetCopyableFootprints(d->device, &desc, 0, 1, 0, &t->footprint, &rows, &row_bytes,
                                        &t->readback_bytes);
+    /* Each further attachment as a texture, and its readback footprint. */
+    for (int x = 0; x < t->extra; x++) {
+        AcquireSRWLockExclusive(&d->lock);
+        t->xsrv_slot[x] = aedx_slot_take(&d->srv, "shader-visible");
+        ReleaseSRWLockExclusive(&d->lock);
+        if (t->xsrv_slot[x] < 0) return AEDX_ERR_OOM;
+        ID3D12Device_CreateShaderResourceView(d->device, t->xcolor[x], NULL,
+                                              aedx_slot_cpu(&d->srv, t->xsrv_slot[x]));
+        D3D12_RESOURCE_DESC xd = ID3D12Resource_GetDesc(t->xcolor[x]);
+        ID3D12Device_GetCopyableFootprints(d->device, &xd, 0, 1, 0, &t->xfootprint[x], &rows, &row_bytes,
+                                           &t->xreadback_bytes[x]);
+    }
     return AEDX_OK;
 }
 
@@ -1040,12 +1110,10 @@ static int aedx_check_size(AedxDevice* d, int width, int height, int bpp) {
     return AEDX_OK;
 }
 
-/* A clamped sampler in a slot of the shader-visible sampler heap: linear, or
- * nearest. The device lock must NOT be held. */
 /* A clamped sampler in a slot of the device's sampler heap, filtering
  * linearly or by nearest texel; with `compare` 1..4 a comparison sampler,
  * which returns the fraction of the footprint whose depth passes
- * `reference op texel` (#2373). */
+ * `reference op texel` (#2373). The device lock must NOT be held. */
 static int aedx_make_sampler_ex(AedxDevice* d, int linear, int compare, int* out_slot) {
     AcquireSRWLockExclusive(&d->lock);
     int slot = aedx_slot_take(&d->samplers, "sampler");
@@ -1084,8 +1152,58 @@ AedxTarget* aedx_target_create_ex(AedxDevice* d, int width, int height, int want
     return aedx_target_create_format(d, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, want_depth, samples);
 }
 
+static AedxTarget* aedx_target_create_mrt_impl(AedxDevice* d, int width, int height, int count,
+                                               const int* formats, int want_depth, int samples);
+
 AedxTarget* aedx_target_create_format(AedxDevice* d, int width, int height, int format,
                                       int want_depth, int samples) {
+    return aedx_target_create_mrt_impl(d, width, height, 1, &format, want_depth, samples);
+}
+
+/* A target with `count` colour attachments, 1..4, each in its own format
+ * (#2386); SV_TargetN writes attachment N. */
+AedxTarget* aedx_target_create_mrt(AedxDevice* d, int width, int height, int count, int f0, int f1,
+                                   int f2, int f3, int want_depth, int samples) {
+    int formats[AEDX_MAX_COLOR] = { f0, f1, f2, f3 };
+    if (count < 1 || count > AEDX_MAX_COLOR) {
+        aedx_clear_error();
+        aedx_fail(AEDX_ERR_ARG, "a target has 1..%d colour attachments, not %d", AEDX_MAX_COLOR, count);
+        return NULL;
+    }
+    return aedx_target_create_mrt_impl(d, width, height, count, formats, want_depth, samples);
+}
+
+/* The format checks a colour attachment needs: a target format the device
+ * renders to, at the sample count asked for. */
+static int aedx_check_color_format(AedxDevice* d, int format, int samples, D3D12_FEATURE_DATA_FORMAT_SUPPORT* fs) {
+    if (!aedx_format_bpp((DXGI_FORMAT)format)) {
+        return aedx_fail(AEDX_ERR_ARG,
+                         "format %d is not a target format (R8G8B8A8_UNORM 28, R8G8B8A8_UNORM_SRGB 29, "
+                         "R16G16B16A16_FLOAT 10, R32G32B32A32_FLOAT 2)", format);
+    }
+    memset(fs, 0, sizeof(*fs));
+    fs->Format = (DXGI_FORMAT)format;
+    if (FAILED(ID3D12Device_CheckFeatureSupport(d->device, D3D12_FEATURE_FORMAT_SUPPORT, fs, sizeof(*fs))) ||
+        !(fs->Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET)) {
+        return aedx_fail(AEDX_ERR_UNSUPPORTED, "the device cannot render to format %d", format);
+    }
+    if (samples > 1) {
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS ql;
+        memset(&ql, 0, sizeof(ql));
+        ql.Format = (DXGI_FORMAT)format;
+        ql.SampleCount = (UINT)samples;
+        if (FAILED(ID3D12Device_CheckFeatureSupport(d->device, D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                                                    &ql, sizeof(ql))) || ql.NumQualityLevels == 0) {
+            return aedx_fail(AEDX_ERR_UNSUPPORTED, "the device does not support %dx multisampling for format %d",
+                             samples, format);
+        }
+    }
+    return AEDX_OK;
+}
+
+static AedxTarget* aedx_target_create_mrt_impl(AedxDevice* d, int width, int height, int count,
+                                               const int* formats, int want_depth, int samples) {
+    int format = formats[0];
     aedx_clear_error();
     if (!d) { aedx_fail(AEDX_ERR_ARG, "device is null"); return NULL; }
     int bpp = aedx_format_bpp((DXGI_FORMAT)format);
@@ -1140,6 +1258,10 @@ AedxTarget* aedx_target_create_format(AedxDevice* d, int width, int height, int 
     t->depth_sampler_slot = -1;
     for (int c = 0; c < AEDX_COMPARE_OPS; c++) t->compare_slot[c] = -1;
     t->depth_srv_slot = -1;
+    for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) {
+        t->xsrv_slot[x] = -1;
+        t->xsampler_slot[x] = -1;
+    }
     t->readback_on = 1;
     t->index_bits = 32;
     t->timeout_ms = 5000;
@@ -1150,6 +1272,16 @@ AedxTarget* aedx_target_create_format(AedxDevice* d, int width, int height, int 
      * where the format can be filtered, nearest for the depth. */
     int filter_ok = (fs.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0;
     if (aedx_make_sampler(d, filter_ok, &t->sampler_slot) != AEDX_OK) goto fail;
+    /* Attachments 1.. (#2386), each checked like the first. */
+    t->extra = count - 1;
+    for (int x = 0; x < t->extra; x++) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT xfs;
+        if (aedx_check_color_format(d, formats[x + 1], samples, &xfs) != AEDX_OK) goto fail;
+        t->xformat[x] = (DXGI_FORMAT)formats[x + 1];
+        t->xbpp[x] = aedx_format_bpp(t->xformat[x]);
+        if (aedx_make_sampler(d, (xfs.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0,
+                              &t->xsampler_slot[x]) != AEDX_OK) goto fail;
+    }
     if (want_depth && aedx_make_sampler(d, 0, &t->depth_sampler_slot) != AEDX_OK) goto fail;
     if (aedx_target_make_images(t) != AEDX_OK) goto fail;
     AcquireSRWLockExclusive(&d->lock);
@@ -1245,6 +1377,7 @@ void aedx_target_destroy(AedxTarget* t) {
     AcquireSRWLockExclusive(&d->lock);
     aedx_slot_give(&d->samplers, t->sampler_slot);
     aedx_slot_give(&d->samplers, t->depth_sampler_slot);
+    for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) aedx_slot_give(&d->samplers, t->xsampler_slot[x]);
     for (int c = 0; c < AEDX_COMPARE_OPS; c++) aedx_slot_give(&d->samplers, t->compare_slot[c]);
     ReleaseSRWLockExclusive(&d->lock);
     aedx_free_timer(&t->timer_heap, &t->timer_rb);
@@ -2377,6 +2510,7 @@ struct AedxMaterial {
     AedxTarget*   tgt[AEDX_MAX_DESC];
     int           tgt_depth[AEDX_MAX_DESC];
     int           tgt_cmp[AEDX_MAX_DESC];   /* compare op, 0 for the raw depth (#2373) */
+    int           tgt_att[AEDX_MAX_DESC];   /* the colour attachment a colour binding reads (#2386) */
 };
 
 struct AedxPipeline {
@@ -2427,11 +2561,15 @@ AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const voi
     if (st->blend) {
         D3D12_FEATURE_DATA_FORMAT_SUPPORT bs;
         memset(&bs, 0, sizeof(bs));
-        bs.Format = t->format;
-        if (FAILED(ID3D12Device_CheckFeatureSupport(d->device, D3D12_FEATURE_FORMAT_SUPPORT, &bs, sizeof(bs))) ||
-            !(bs.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE)) {
-            aedx_fail(AEDX_ERR_UNSUPPORTED, "the device cannot blend the target's format %d", (int)t->format);
-            return NULL;
+        for (int c = 0; c <= t->extra; c++) {
+            bs.Format = c == 0 ? t->format : t->xformat[c - 1];
+            if (FAILED(ID3D12Device_CheckFeatureSupport(d->device, D3D12_FEATURE_FORMAT_SUPPORT, &bs,
+                                                        sizeof(bs))) ||
+                !(bs.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE)) {
+                aedx_fail(AEDX_ERR_UNSUPPORTED, "the device cannot blend attachment %d's format %d", c,
+                          (int)bs.Format);
+                return NULL;
+            }
         }
     }
     if (push_bytes < 0 || push_bytes > AEDX_MAX_PUSH || (push_bytes % 4)) {
@@ -2553,8 +2691,11 @@ AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const voi
                                                    : D3D12_COMPARISON_FUNC_LESS;
     gd.InputLayout = il;
     gd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    gd.NumRenderTargets = 1;
+    /* One render target an attachment (#2386); IndependentBlendEnable is
+     * off, so render target 0's blend applies to every one. */
+    gd.NumRenderTargets = (UINT)(1 + t->extra);
     gd.RTVFormats[0] = t->format;
+    for (int x = 0; x < t->extra; x++) gd.RTVFormats[x + 1] = t->xformat[x];
     gd.DSVFormat = t->has_depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
     gd.SampleDesc.Count = (UINT)t->samples;
     HRESULT hr = ID3D12Device_CreateGraphicsPipelineState(d->device, &gd, &IID_ID3D12PipelineState,
@@ -2715,8 +2856,8 @@ static int aedx_target_enable_depth_sampling(AedxTarget* t) {
  * (#2198). The frame read is the one most recently submitted to the target
  * when the draw runs on the queue. The target must outlive every draw that
  * uses the material. */
-static int aedx_material_set_target_cmp(AedxMaterial* m, int binding, AedxTarget* tg, int depth,
-                                       int compare) {
+static int aedx_material_set_target_att(AedxMaterial* m, int binding, AedxTarget* tg, int depth,
+                                       int compare, int att) {
     aedx_clear_error();
     int rc = aedx_material_check(m, binding, AEDX_BIND_TEXTURE, "a texture");
     if (rc != AEDX_OK) return rc;
@@ -2735,18 +2876,41 @@ static int aedx_material_set_target_cmp(AedxMaterial* m, int binding, AedxTarget
             if (rc != AEDX_OK) return rc;
         }
     }
+    if (!depth && (att < 0 || att > tg->extra)) {
+        return aedx_fail(AEDX_ERR_ARG, "the target has colour attachments 0..%d, not %d", tg->extra, att);
+    }
     if (!tg->color) return aedx_fail(AEDX_ERR_ARG, "target has no images: its last resize failed");
     m->tgt[binding] = tg;
     m->tgt_depth[binding] = depth ? 1 : 0;
     m->tgt_cmp[binding] = depth ? compare : 0;
+    m->tgt_att[binding] = depth ? 0 : att;
     m->tex[binding] = NULL;
     m->set[binding] = 1;
     return AEDX_OK;
 }
 
+static int aedx_material_set_target_cmp(AedxMaterial* m, int binding, AedxTarget* tg, int depth,
+                                       int compare) {
+    return aedx_material_set_target_att(m, binding, tg, depth, compare, 0);
+}
+
 int aedx_material_set_target(AedxMaterial* m, int binding, AedxTarget* tg, int depth) {
     return aedx_material_set_target_cmp(m, binding, tg, depth, 0);
 }
+
+/* Colour attachment `n` of a target's newest frame where a texture goes
+ * (#2386); attachment 0 is what set_target binds. */
+int aedx_material_set_target_attachment(AedxMaterial* m, int binding, AedxTarget* tg, int n) {
+    return aedx_material_set_target_att(m, binding, tg, 0, 0, n);
+}
+
+int aedx_pipeline_set_target_attachment(AedxPipeline* p, int binding, AedxTarget* tg, int n) {
+    aedx_clear_error();
+    if (!p || !p->def) return aedx_fail(AEDX_ERR_ARG, "pipeline is null or has no bindings");
+    return aedx_material_set_target_attachment(p->def, binding, tg, n);
+}
+
+int aedx_target_attachments(const AedxTarget* t) { return t ? 1 + t->extra : 0; }
 
 /* A target's depth read through a comparison sampler (#2373): a shadow map.
  * The shader (Texture2D.SampleCmp with a SamplerComparisonState) gets the
@@ -2816,9 +2980,11 @@ static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, c
             int srv_slot, smp_slot;
             if (m->tgt[i]) {
                 const AedxTarget* tg = m->tgt[i];
-                srv_slot = m->tgt_depth[i] ? tg->depth_srv_slot : tg->srv_slot;
+                int a = m->tgt_att[i];
+                srv_slot = m->tgt_depth[i] ? tg->depth_srv_slot : a ? tg->xsrv_slot[a - 1] : tg->srv_slot;
                 smp_slot = m->tgt_cmp[i] ? tg->compare_slot[m->tgt_cmp[i]]
-                         : m->tgt_depth[i] ? tg->depth_sampler_slot : tg->sampler_slot;
+                         : m->tgt_depth[i] ? tg->depth_sampler_slot
+                         : a ? tg->xsampler_slot[a - 1] : tg->sampler_slot;
             } else {
                 srv_slot = m->tex[i]->srv_slot;
                 smp_slot = m->tex[i]->sampler_slot;
@@ -2852,6 +3018,7 @@ static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, c
 typedef struct {
     AedxTarget* tg;
     int         depth;
+    int         att;     /* the colour attachment, when not depth (#2386) */
 } AedxSampled;
 
 #define AEDX_MAX_SAMPLED 32
@@ -2873,7 +3040,10 @@ static int aedx_collect_sampled(AedxTarget* t, const AedxMaterial* m, AedxSample
         }
         int seen = 0;
         for (int i = 0; i < *n; i++) {
-            if (out[i].tg == tg && out[i].depth == m->tgt_depth[b]) { seen = 1; break; }
+            if (out[i].tg == tg && out[i].depth == m->tgt_depth[b] && out[i].att == m->tgt_att[b]) {
+                seen = 1;
+                break;
+            }
         }
         if (seen) continue;
         if (*n >= AEDX_MAX_SAMPLED) {
@@ -2881,6 +3051,7 @@ static int aedx_collect_sampled(AedxTarget* t, const AedxMaterial* m, AedxSample
         }
         out[*n].tg = tg;
         out[*n].depth = m->tgt_depth[b];
+        out[*n].att = m->tgt_att[b];
         (*n)++;
     }
     return AEDX_OK;
@@ -2903,21 +3074,19 @@ static void aedx_sampled_barriers(ID3D12GraphicsCommandList* l, AedxSampled* lis
                 aedx_barrier(l, tg->depth, tg->depth_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
                 tg->depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
             }
-        } else if (to_read) {
-            aedx_barrier(l, tg->color, tg->color_state, read);
-            tg->color_state = read;
         } else {
+            int a = list[i].att;
+            ID3D12Resource* img = a ? tg->xcolor[a - 1] : tg->color;
+            D3D12_RESOURCE_STATES* st = a ? &tg->xstate[a - 1] : &tg->color_state;
             /* COPY_SOURCE is where a target's colour rests between frames:
              * readback and presenting start from it. */
-            aedx_barrier(l, tg->color, tg->color_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            tg->color_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            D3D12_RESOURCE_STATES want = to_read ? read : D3D12_RESOURCE_STATE_COPY_SOURCE;
+            aedx_barrier(l, img, *st, want);
+            *st = want;
         }
     }
 }
 
-/* Records one frame into slot `fr`. Direct3D 12 lists are recorded fresh
- * every frame: recording is cheap, and a list re-executed with a stale state
- * assumption would be the kind of bug caching invites. */
 /* The command signature an indirect draw of the target's kind uses, made on
  * first use (#2198). THE DEVICE LOCK IS HELD. */
 static int aedx_indirect_signature(AedxDevice* d, int indexed) {
@@ -2960,6 +3129,9 @@ static void aedx_record_draw(AedxDevice* d, AedxTarget* t, ID3D12GraphicsCommand
     }
 }
 
+/* Records one frame into slot `fr`. Direct3D 12 lists are recorded fresh
+ * every frame: recording is cheap, and a list re-executed with a stale state
+ * assumption would be the kind of bug caching invites. */
 static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMaterial* mat, const float clear[4]) {
     AedxDevice* d = t->dev;
     /* What this frame samples, checked before anything is recorded. */
@@ -2988,12 +3160,21 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
     if (fr->timed) ID3D12GraphicsCommandList_EndQuery(l, t->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer);
     aedx_sampled_barriers(l, sampled, n_sampled, 1);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->rtv_heap);
-    if (t->samples > 1) {
-        rtv.ptr += d->rtv_inc;
-    } else {
+    /* Each attachment's view: the multisampled one when there is one,
+     * which resolves after the draws, otherwise the image itself. */
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[AEDX_MAX_COLOR];
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv0 = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->rtv_heap);
+    for (int c = 0; c <= t->extra; c++) {
+        rtvs[c] = rtv0;
+        rtvs[c].ptr += (SIZE_T)(2 * c + (t->samples > 1 ? 1 : 0)) * d->rtv_inc;
+    }
+    if (t->samples == 1) {
         aedx_barrier(l, t->color, t->color_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         t->color_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        for (int x = 0; x < t->extra; x++) {
+            aedx_barrier(l, t->xcolor[x], t->xstate[x], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            t->xstate[x] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
     }
     D3D12_CPU_DESCRIPTOR_HANDLE dsv;
     dsv.ptr = 0;
@@ -3001,8 +3182,8 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         dsv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->dsv_heap);
         ID3D12GraphicsCommandList_ClearDepthStencilView(l, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
     }
-    ID3D12GraphicsCommandList_ClearRenderTargetView(l, rtv, clear, 0, NULL);
-    ID3D12GraphicsCommandList_OMSetRenderTargets(l, 1, &rtv, FALSE, t->has_depth ? &dsv : NULL);
+    for (int c = 0; c <= t->extra; c++) ID3D12GraphicsCommandList_ClearRenderTargetView(l, rtvs[c], clear, 0, NULL);
+    ID3D12GraphicsCommandList_OMSetRenderTargets(l, (UINT)(1 + t->extra), rtvs, FALSE, t->has_depth ? &dsv : NULL);
 
     if (p && t->vertex_count > 0) {
         D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)t->width, (float)t->height, 0.0f, 1.0f };
@@ -3070,10 +3251,21 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         ID3D12GraphicsCommandList_ResolveSubresource(l, t->color, 0, t->msaa, 0, t->format);
         aedx_barrier(l, t->msaa, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         aedx_barrier(l, t->color, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (int x = 0; x < t->extra; x++) {
+            aedx_barrier(l, t->xmsaa[x], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+            aedx_barrier(l, t->xcolor[x], t->xstate[x], D3D12_RESOURCE_STATE_RESOLVE_DEST);
+            ID3D12GraphicsCommandList_ResolveSubresource(l, t->xcolor[x], 0, t->xmsaa[x], 0, t->xformat[x]);
+            aedx_barrier(l, t->xmsaa[x], D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            aedx_barrier(l, t->xcolor[x], D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        }
     } else {
         aedx_barrier(l, t->color, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (int x = 0; x < t->extra; x++) {
+            aedx_barrier(l, t->xcolor[x], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        }
     }
     t->color_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    for (int x = 0; x < t->extra; x++) t->xstate[x] = D3D12_RESOURCE_STATE_COPY_SOURCE;
 
     if (t->readback_on) {
         D3D12_TEXTURE_COPY_LOCATION dst, src;
@@ -3086,6 +3278,12 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.SubresourceIndex = 0;
         ID3D12GraphicsCommandList_CopyTextureRegion(l, &dst, 0, 0, 0, &src, NULL);
+        for (int x = 0; x < t->extra; x++) {
+            dst.pResource = fr->xreadback[x];
+            dst.PlacedFootprint = t->xfootprint[x];
+            src.pResource = t->xcolor[x];
+            ID3D12GraphicsCommandList_CopyTextureRegion(l, &dst, 0, 0, 0, &src, NULL);
+        }
     }
     if (fr->timed) {
         ID3D12GraphicsCommandList_EndQuery(l, t->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer + 1u);
@@ -3271,6 +3469,14 @@ static const unsigned char* aedx_readable(AedxTarget* t) {
     ReleaseSRWLockExclusive(&t->dev->lock);
     if (rc != AEDX_OK) return NULL;
     return t->frames[t->last_submitted].readback_ptr;
+}
+
+/* Attachment `att`'s readback memory of the newest frame, waited for
+ * (#2386). NULL with the reason set. */
+static const unsigned char* aedx_readable_at(AedxTarget* t, int att) {
+    const unsigned char* base = aedx_readable(t);
+    if (!base || att == 0) return base;
+    return t->frames[t->last_submitted].xreadback_ptr[att - 1];
 }
 
 /* Rows in the readback are RowPitch apart (a multiple of 256), not
@@ -3993,6 +4199,48 @@ double aedx_ae_pixel_value(void* tp, int x, int y, int channel) {
     return (double)aedx_channel_value(t, aedx_px(t, base, x, y), channel);
 }
 
+/* Channel `c` of a pixel in format `f`, as aedx_channel_value reads a
+ * target's own format (#2386). */
+static float aedx_format_channel(DXGI_FORMAT f, const unsigned char* px, int c) {
+    switch (f) {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: {
+            uint16_t h;
+            memcpy(&h, px + c * 2, sizeof(h));
+            return aedx_half_to_float(h);
+        }
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: {
+            float v;
+            memcpy(&v, px + c * 4, sizeof(v));
+            return v;
+        }
+        default:
+            return (float)px[c] / 255.0f;
+    }
+}
+
+/* One channel of one pixel of colour attachment `att` (#2386). */
+double aedx_ae_pixel_value_at(void* tp, int att, int x, int y, int channel) {
+    AedxTarget* t = (AedxTarget*)tp;
+    aedx_clear_error();
+    if (!t) { aedx_fail(AEDX_ERR_ARG, "target is null"); return (double)NAN; }
+    if (att < 0 || att > t->extra) {
+        aedx_fail(AEDX_ERR_ARG, "the target has colour attachments 0..%d, not %d", t->extra, att);
+        return (double)NAN;
+    }
+    if (att == 0) return aedx_ae_pixel_value(tp, x, y, channel);
+    if (x < 0 || y < 0 || x >= t->width || y >= t->height) {
+        aedx_fail(AEDX_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, t->width, t->height);
+        return (double)NAN;
+    }
+    if (channel < 0 || channel > 3) { aedx_fail(AEDX_ERR_ARG, "channel %d is not 0..3", channel); return (double)NAN; }
+    const unsigned char* base = aedx_readable_at(t, att);
+    if (!base) return (double)NAN;
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT* fp = &t->xfootprint[att - 1];
+    const unsigned char* px = base + fp->Offset + (size_t)y * fp->Footprint.RowPitch +
+                              (size_t)x * (size_t)t->xbpp[att - 1];
+    return (double)aedx_format_channel(t->xformat[att - 1], px, channel);
+}
+
 int aedx_ae_save_ppm(void* tp, const char* path) {
     AedxTarget* t = (AedxTarget*)tp;
     aedx_clear_error();
@@ -4236,6 +4484,21 @@ AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int z, int
     (void)d; (void)w; (void)h; (void)z; (void)f; aedx_no(); return NULL;
 }
 int    aedx_texture_layers(const AedxTexture* t) { (void)t; return 0; }
+AedxTarget* aedx_target_create_mrt(AedxDevice* d, int w, int h, int n, int f0, int f1, int f2, int f3, int z, int s) {
+    (void)d; (void)w; (void)h; (void)n; (void)f0; (void)f1; (void)f2; (void)f3; (void)z; (void)s;
+    aedx_no();
+    return NULL;
+}
+int    aedx_target_attachments(const AedxTarget* t) { (void)t; return 0; }
+int    aedx_pipeline_set_target_attachment(AedxPipeline* p, int b, AedxTarget* t, int n) {
+    (void)p; (void)b; (void)t; (void)n; return aedx_no();
+}
+int    aedx_material_set_target_attachment(AedxMaterial* m, int b, AedxTarget* t, int n) {
+    (void)m; (void)b; (void)t; (void)n; return aedx_no();
+}
+double aedx_ae_pixel_value_at(void* t, int n, int x, int y, int c) {
+    (void)t; (void)n; (void)x; (void)y; (void)c; aedx_no(); return (double)NAN;
+}
 int    aedx_bindings_storage_texture(AedxBindings* b, int n) { (void)b; (void)n; return aedx_no(); }
 int    aedx_compute_set_storage_texture(AedxCompute* c, int b, AedxTexture* t) {
     (void)c; (void)b; (void)t; return aedx_no();
@@ -4517,6 +4780,17 @@ void* aedx_ae_texture_create_storage(void* d, int w, int h, int depth, int forma
     return (void*)aedx_texture_create_storage((AedxDevice*)d, w, h, depth, format);
 }
 int   aedx_ae_texture_layers(void* tex) { return aedx_texture_layers((const AedxTexture*)tex); }
+void* aedx_ae_target_create_mrt(void* d, int w, int h, int count, int f0, int f1, int f2, int f3,
+                                int depth, int samples) {
+    return (void*)aedx_target_create_mrt((AedxDevice*)d, w, h, count, f0, f1, f2, f3, depth, samples);
+}
+int   aedx_ae_target_attachments(void* t) { return aedx_target_attachments((const AedxTarget*)t); }
+int   aedx_ae_set_target_attachment(void* p, int binding, void* t, int n) {
+    return aedx_pipeline_set_target_attachment((AedxPipeline*)p, binding, (AedxTarget*)t, n);
+}
+int   aedx_ae_material_set_target_attachment(void* m, int binding, void* t, int n) {
+    return aedx_material_set_target_attachment((AedxMaterial*)m, binding, (AedxTarget*)t, n);
+}
 int   aedx_ae_bindings_storage_texture(void* b, int binding) {
     return aedx_bindings_storage_texture((AedxBindings*)b, binding);
 }

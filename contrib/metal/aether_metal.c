@@ -319,6 +319,7 @@ static AemtCGRect mt_rect(id obj, const char* selector) {
 #define AEMT_MAX_DESC     8          /* bindings: buffer / texture indices 0..7 */
 #define AEMT_MAX_PUSH     128
 #define AEMT_MAX_FRAMES   8
+#define AEMT_MAX_COLOR    4   /* colour attachments a target can have (#2386) */
 /* Compare ops for sampling a depth (#2373): 1 LESS, 2 LESS_EQUAL, 3 GREATER,
  * 4 GREATER_EQUAL, the shared shape's numbering; slot 0 is unused. */
 #define AEMT_COMPARE_OPS  5
@@ -648,6 +649,9 @@ typedef struct {
     AemtFence      fence;
     id             readback;       /* shared buffer, w * h * bpp, tightly packed */
     unsigned char* readback_ptr;
+    /* The same for colour attachments 1.. (#2386). */
+    id             xreadback[AEMT_MAX_COLOR - 1];
+    unsigned char* xreadback_ptr[AEMT_MAX_COLOR - 1];
     int            timed;          /* submitted with timing on (#2198) */
     unsigned long long seq;        /* the target's submission count when it was */
 } AemtFrame;
@@ -662,6 +666,16 @@ struct AemtTarget {
     int            has_depth;
     id             color;          /* single-sample: resolved into, read back, presented */
     id             msaa;
+    /* Colour attachments past the first (#2386): a target_create_mrt
+     * target's attachments 1.., each with its format, texture (and
+     * multisampled texture) and sampler. Attachment 0 is the fields around
+     * them. */
+    int            extra;
+    int            xformat[AEMT_MAX_COLOR - 1];      /* AEMT_FORMAT_* */
+    int            xbpp[AEMT_MAX_COLOR - 1];
+    id             xcolor[AEMT_MAX_COLOR - 1];
+    id             xmsaa[AEMT_MAX_COLOR - 1];
+    id             xsampler[AEMT_MAX_COLOR - 1];
     id             depth;
     int            readback_on;
     int            rendered;
@@ -788,6 +802,7 @@ static void aemt_frames_free(AemtTarget* t) {
         AemtFrame* f = &t->frames[i];
         aemt_fence_free(&f->fence);
         mt_release(f->readback);
+        for (int x = 0; x < AEMT_MAX_COLOR - 1; x++) mt_release(f->xreadback[x]);
     }
     memset(t->frames, 0, sizeof(t->frames));
     t->frame_count = 0;
@@ -805,6 +820,11 @@ static int aemt_frames_alloc(AemtTarget* t, int count) {
             f->readback = aemt_make_buffer(t->dev, (size_t)t->width * (size_t)t->height * (size_t)t->bpp,
                                            &f->readback_ptr);
             if (!f->readback) goto fail;
+            for (int x = 0; x < t->extra; x++) {
+                f->xreadback[x] = aemt_make_buffer(t->dev, (size_t)t->width * (size_t)t->height * (size_t)t->xbpp[x],
+                                                   &f->xreadback_ptr[x]);
+                if (!f->xreadback[x]) goto fail;
+            }
         }
     }
     t->next_frame = 0;
@@ -820,6 +840,11 @@ static void aemt_target_free_images(AemtTarget* t) {
     mt_release(t->msaa);
     mt_release(t->depth);
     t->color = t->msaa = t->depth = NULL;
+    for (int x = 0; x < AEMT_MAX_COLOR - 1; x++) {
+        mt_release(t->xcolor[x]);
+        mt_release(t->xmsaa[x]);
+        t->xcolor[x] = t->xmsaa[x] = NULL;
+    }
     t->rendered = 0;
 }
 
@@ -834,6 +859,16 @@ static int aemt_target_make_images(AemtTarget* t) {
         t->msaa = aemt_make_texture(d, t->width, t->height, t->pixel_format, t->samples, 1,
                                     MTL_USAGE_RENDER_TARGET);
         if (!t->msaa) return AEMT_ERR_OOM;
+    }
+    for (int x = 0; x < t->extra; x++) {
+        AemtUInt pf = aemt_pixel_format(t->xformat[x]);
+        t->xcolor[x] = aemt_make_texture(d, t->width, t->height, pf, 1, 1,
+                                         MTL_USAGE_RENDER_TARGET | MTL_USAGE_SHADER_READ);
+        if (!t->xcolor[x]) return AEMT_ERR_OOM;
+        if (t->samples > 1) {
+            t->xmsaa[x] = aemt_make_texture(d, t->width, t->height, pf, t->samples, 1, MTL_USAGE_RENDER_TARGET);
+            if (!t->xmsaa[x]) return AEMT_ERR_OOM;
+        }
     }
     if (t->has_depth) {
         t->depth = aemt_make_texture(d, t->width, t->height, MTL_PIXEL_DEPTH32_FLOAT, t->samples, 1,
@@ -897,8 +932,30 @@ AemtTarget* aemt_target_create_ex(AemtDevice* d, int width, int height, int want
     return aemt_target_create_format(d, width, height, AEMT_FORMAT_R8G8B8A8_UNORM, want_depth, samples);
 }
 
+static AemtTarget* aemt_target_create_mrt_impl(AemtDevice* d, int width, int height, int count,
+                                               const int* formats, int want_depth, int samples);
+
 AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int format,
                                       int want_depth, int samples) {
+    return aemt_target_create_mrt_impl(d, width, height, 1, &format, want_depth, samples);
+}
+
+/* A target with `count` colour attachments, 1..4, each in its own format
+ * (#2386); [[color(N)]] writes attachment N. */
+AemtTarget* aemt_target_create_mrt(AemtDevice* d, int width, int height, int count, int f0, int f1,
+                                   int f2, int f3, int want_depth, int samples) {
+    int formats[AEMT_MAX_COLOR] = { f0, f1, f2, f3 };
+    if (count < 1 || count > AEMT_MAX_COLOR) {
+        aemt_clear_error();
+        aemt_fail(AEMT_ERR_ARG, "a target has 1..%d colour attachments, not %d", AEMT_MAX_COLOR, count);
+        return NULL;
+    }
+    return aemt_target_create_mrt_impl(d, width, height, count, formats, want_depth, samples);
+}
+
+static AemtTarget* aemt_target_create_mrt_impl(AemtDevice* d, int width, int height, int count,
+                                               const int* formats, int want_depth, int samples) {
+    int format = formats[0];
     aemt_clear_error();
     if (!d) { aemt_fail(AEMT_ERR_ARG, "device is null"); return NULL; }
     int bpp = aemt_format_bpp(format);
@@ -922,6 +979,17 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
     if (samples > 1 && format == AEMT_FORMAT_R32G32B32A32_SFLOAT && !d->msaa32) {
         aemt_fail(AEMT_ERR_UNSUPPORTED, "the device cannot resolve a multisampled 32-bit float target");
         return NULL;
+    }
+    /* Attachments 1.. (#2386), each checked like the first. */
+    for (int x = 1; x < count; x++) {
+        if (!aemt_format_bpp(formats[x])) {
+            aemt_fail(AEMT_ERR_ARG, "attachment %d's format %d is not a target format", x, formats[x]);
+            return NULL;
+        }
+        if (samples > 1 && formats[x] == AEMT_FORMAT_R32G32B32A32_SFLOAT && !d->msaa32) {
+            aemt_fail(AEMT_ERR_UNSUPPORTED, "the device cannot resolve attachment %d's 32-bit float format", x);
+            return NULL;
+        }
     }
 
     AemtTarget* t = (AemtTarget*)calloc(1, sizeof(*t));
@@ -950,6 +1018,13 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
     if (rc == AEMT_OK && want_depth) {
         t->depth_sampler = aemt_make_sampler(d, 0);
         if (!t->depth_sampler) rc = AEMT_ERR_OOM;
+    }
+    t->extra = count - 1;
+    for (int x = 0; rc == AEMT_OK && x < t->extra; x++) {
+        t->xformat[x] = formats[x + 1];
+        t->xbpp[x] = aemt_format_bpp(formats[x + 1]);
+        t->xsampler[x] = aemt_make_sampler(d, formats[x + 1] != AEMT_FORMAT_R32G32B32A32_SFLOAT || d->filter32);
+        if (!t->xsampler[x]) rc = AEMT_ERR_OOM;
     }
     if (rc == AEMT_OK) rc = aemt_target_make_images(t);
     if (rc == AEMT_OK) rc = aemt_frames_alloc(t, 1);
@@ -988,6 +1063,7 @@ void aemt_target_destroy(AemtTarget* t) {
     aemt_target_free_images(t);
     mt_release(t->sampler);
     mt_release(t->depth_sampler);
+    for (int x = 0; x < AEMT_MAX_COLOR - 1; x++) mt_release(t->xsampler[x]);
     for (int c = 0; c < AEMT_COMPARE_OPS; c++) mt_release(t->compare_sampler[c]);
     mt_release(t->vbuf);
     mt_release(t->ibuf);
@@ -1812,6 +1888,7 @@ struct AemtMaterial {
     AemtTarget*   tgt[AEMT_MAX_DESC];
     int           tgt_depth[AEMT_MAX_DESC];
     int           tgt_cmp[AEMT_MAX_DESC];   /* compare op, 0 for the raw depth (#2373) */
+    int           tgt_att[AEMT_MAX_DESC];   /* the colour attachment a colour binding reads (#2386) */
 };
 
 struct AemtPipeline {
@@ -1953,18 +2030,23 @@ AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const voi
         MT_SEND(void, id)(desc, mt_sel("setVertexFunction:"), vfn);
         MT_SEND(void, id)(desc, mt_sel("setFragmentFunction:"), ffn);
         if (p->vertex_input) MT_SEND(void, id)(desc, mt_sel("setVertexDescriptor:"), aemt_vertex_descriptor(layout));
-        id ca = mt_at(MT_SEND(id)(desc, mt_sel("colorAttachments")), 0);
-        MT_SEND(void, AemtUInt)(ca, mt_sel("setPixelFormat:"), t->pixel_format);
-        if (st->blend) {
-            /* 1 alpha, 2 premultiplied, 3 additive (#2385); the operations
-             * are Metal's default, add. */
-            AemtUInt src_rgb = st->blend == 1 ? (AemtUInt)MTL_BLEND_SRC_ALPHA : (AemtUInt)MTL_BLEND_ONE;
-            AemtUInt dst = st->blend == 3 ? (AemtUInt)MTL_BLEND_ONE : (AemtUInt)MTL_BLEND_ONE_MINUS_SRC_ALPHA;
-            MT_SEND(void, BOOL)(ca, mt_sel("setBlendingEnabled:"), (BOOL)1);
-            MT_SEND(void, AemtUInt)(ca, mt_sel("setSourceRGBBlendFactor:"), src_rgb);
-            MT_SEND(void, AemtUInt)(ca, mt_sel("setDestinationRGBBlendFactor:"), dst);
-            MT_SEND(void, AemtUInt)(ca, mt_sel("setSourceAlphaBlendFactor:"), (AemtUInt)MTL_BLEND_ONE);
-            MT_SEND(void, AemtUInt)(ca, mt_sel("setDestinationAlphaBlendFactor:"), dst);
+        /* One colour attachment a target attachment (#2386), each blending
+         * the same way. */
+        for (int c = 0; c <= t->extra; c++) {
+            id ca = mt_at(MT_SEND(id)(desc, mt_sel("colorAttachments")), (AemtUInt)c);
+            MT_SEND(void, AemtUInt)(ca, mt_sel("setPixelFormat:"),
+                                    c == 0 ? t->pixel_format : aemt_pixel_format(t->xformat[c - 1]));
+            if (st->blend) {
+                /* 1 alpha, 2 premultiplied, 3 additive (#2385); the
+                 * operations are Metal's default, add. */
+                AemtUInt src_rgb = st->blend == 1 ? (AemtUInt)MTL_BLEND_SRC_ALPHA : (AemtUInt)MTL_BLEND_ONE;
+                AemtUInt dst = st->blend == 3 ? (AemtUInt)MTL_BLEND_ONE : (AemtUInt)MTL_BLEND_ONE_MINUS_SRC_ALPHA;
+                MT_SEND(void, BOOL)(ca, mt_sel("setBlendingEnabled:"), (BOOL)1);
+                MT_SEND(void, AemtUInt)(ca, mt_sel("setSourceRGBBlendFactor:"), src_rgb);
+                MT_SEND(void, AemtUInt)(ca, mt_sel("setDestinationRGBBlendFactor:"), dst);
+                MT_SEND(void, AemtUInt)(ca, mt_sel("setSourceAlphaBlendFactor:"), (AemtUInt)MTL_BLEND_ONE);
+                MT_SEND(void, AemtUInt)(ca, mt_sel("setDestinationAlphaBlendFactor:"), dst);
+            }
         }
         if (t->has_depth) {
             MT_SEND(void, AemtUInt)(desc, mt_sel("setDepthAttachmentPixelFormat:"), (AemtUInt)MTL_PIXEL_DEPTH32_FLOAT);
@@ -2116,8 +2198,8 @@ static int aemt_target_enable_depth_sampling(AemtTarget* t) {
  * (#2198). The frame read is the one most recently committed to the target
  * when the draw runs on the queue. The target must outlive every draw that
  * uses the material. */
-static int aemt_material_set_target_cmp(AemtMaterial* m, int binding, AemtTarget* tg, int depth,
-                                       int compare) {
+static int aemt_material_set_target_att(AemtMaterial* m, int binding, AemtTarget* tg, int depth,
+                                       int compare, int att) {
     aemt_clear_error();
     int rc = aemt_material_check(m, binding, AEMT_BIND_TEXTURE, "a texture");
     if (rc != AEMT_OK) return rc;
@@ -2138,18 +2220,41 @@ static int aemt_material_set_target_cmp(AemtMaterial* m, int binding, AemtTarget
             if (!tg->compare_sampler[compare]) return AEMT_ERR_OOM;
         }
     }
+    if (!depth && (att < 0 || att > tg->extra)) {
+        return aemt_fail(AEMT_ERR_ARG, "the target has colour attachments 0..%d, not %d", tg->extra, att);
+    }
     if (!tg->color) return aemt_fail(AEMT_ERR_ARG, "target has no images: its last resize failed");
     m->tgt[binding] = tg;
     m->tgt_depth[binding] = depth ? 1 : 0;
     m->tgt_cmp[binding] = depth ? compare : 0;
+    m->tgt_att[binding] = depth ? 0 : att;
     m->tex[binding] = NULL;
     m->set[binding] = 1;
     return AEMT_OK;
 }
 
+static int aemt_material_set_target_cmp(AemtMaterial* m, int binding, AemtTarget* tg, int depth,
+                                       int compare) {
+    return aemt_material_set_target_att(m, binding, tg, depth, compare, 0);
+}
+
 int aemt_material_set_target(AemtMaterial* m, int binding, AemtTarget* tg, int depth) {
     return aemt_material_set_target_cmp(m, binding, tg, depth, 0);
 }
+
+/* Colour attachment `n` of a target's newest frame where a texture goes
+ * (#2386); attachment 0 is what set_target binds. */
+int aemt_material_set_target_attachment(AemtMaterial* m, int binding, AemtTarget* tg, int n) {
+    return aemt_material_set_target_att(m, binding, tg, 0, 0, n);
+}
+
+int aemt_pipeline_set_target_attachment(AemtPipeline* p, int binding, AemtTarget* tg, int n) {
+    aemt_clear_error();
+    if (!p || !p->def) return aemt_fail(AEMT_ERR_ARG, "pipeline is null or has no bindings");
+    return aemt_material_set_target_attachment(p->def, binding, tg, n);
+}
+
+int aemt_target_attachments(const AemtTarget* t) { return t ? 1 + t->extra : 0; }
 
 /* A target's depth read through a comparison sampler (#2373): a shadow map.
  * The shader (depth2d::sample_compare) gets the fraction of the footprint
@@ -2226,9 +2331,11 @@ static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m, con
         if (kind[i] == AEMT_BIND_TEXTURE) {
             id tex, sampler;
             if (m->tgt[i]) {
-                tex = m->tgt_depth[i] ? m->tgt[i]->depth : m->tgt[i]->color;
+                int a = m->tgt_att[i];
+                tex = m->tgt_depth[i] ? m->tgt[i]->depth : a ? m->tgt[i]->xcolor[a - 1] : m->tgt[i]->color;
                 sampler = m->tgt_cmp[i] ? m->tgt[i]->compare_sampler[m->tgt_cmp[i]]
-                        : m->tgt_depth[i] ? m->tgt[i]->depth_sampler : m->tgt[i]->sampler;
+                        : m->tgt_depth[i] ? m->tgt[i]->depth_sampler
+                        : a ? m->tgt[i]->xsampler[a - 1] : m->tgt[i]->sampler;
             } else {
                 tex = m->tex[i]->tex;
                 sampler = m->tex[i]->sampler;
@@ -2304,6 +2411,21 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
         MT_SEND(void, id)(ca, mt_sel("setTexture:"), t->color);
         MT_SEND(void, AemtUInt)(ca, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_STORE);
     }
+    /* Attachments 1.. (#2386): cleared to the same colour, resolved the
+     * same way. */
+    for (int x = 0; x < t->extra; x++) {
+        id xa = mt_at(MT_SEND(id)(rpd, mt_sel("colorAttachments")), (AemtUInt)(x + 1));
+        MT_SEND(void, AemtUInt)(xa, mt_sel("setLoadAction:"), (AemtUInt)MTL_LOAD_CLEAR);
+        MT_SEND(void, AemtClearColor)(xa, mt_sel("setClearColor:"), cc);
+        if (t->samples > 1) {
+            MT_SEND(void, id)(xa, mt_sel("setTexture:"), t->xmsaa[x]);
+            MT_SEND(void, id)(xa, mt_sel("setResolveTexture:"), t->xcolor[x]);
+            MT_SEND(void, AemtUInt)(xa, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_RESOLVE);
+        } else {
+            MT_SEND(void, id)(xa, mt_sel("setTexture:"), t->xcolor[x]);
+            MT_SEND(void, AemtUInt)(xa, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_STORE);
+        }
+    }
     if (t->has_depth) {
         id da = MT_SEND(id)(rpd, mt_sel("depthAttachment"));
         MT_SEND(void, id)(da, mt_sel("setTexture:"), t->depth);
@@ -2374,6 +2496,13 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
             blit, mt_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:"
                          "toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
             t->color, 0, 0, origin, size, fr->readback, 0, row, row * (AemtUInt)t->height);
+        for (int x = 0; x < t->extra; x++) {
+            AemtUInt xrow = (AemtUInt)t->width * (AemtUInt)t->xbpp[x];
+            MT_SEND(void, id, AemtUInt, AemtUInt, AemtOrigin, AemtSize, id, AemtUInt, AemtUInt, AemtUInt)(
+                blit, mt_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:"
+                             "toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+                t->xcolor[x], 0, 0, origin, size, fr->xreadback[x], 0, xrow, xrow * (AemtUInt)t->height);
+        }
         MT_SEND(void)(blit, mt_sel("endEncoding"));
     }
     return cb;
@@ -2546,6 +2675,48 @@ static const unsigned char* aemt_readable(AemtTarget* t) {
     }
     if (aemt_wait_frame(t, t->last_submitted) != AEMT_OK) return NULL;
     return t->frames[t->last_submitted].readback_ptr;
+}
+
+/* Channel `c` of a pixel in format `f`, as aemt_channel_value reads a
+ * target's own format (#2386). */
+static float aemt_format_channel(int f, const unsigned char* px, int c) {
+    switch (f) {
+        case AEMT_FORMAT_R16G16B16A16_SFLOAT: {
+            uint16_t h;
+            memcpy(&h, px + c * 2, sizeof(h));
+            return aemt_half_to_float(h);
+        }
+        case AEMT_FORMAT_R32G32B32A32_SFLOAT: {
+            float v;
+            memcpy(&v, px + c * 4, sizeof(v));
+            return v;
+        }
+        default:
+            return (float)px[c] / 255.0f;
+    }
+}
+
+double aemt_ae_pixel_value(void* tp, int x, int y, int channel);
+
+/* One channel of one pixel of colour attachment `att` (#2386). */
+double aemt_ae_pixel_value_at(void* tp, int att, int x, int y, int channel) {
+    AemtTarget* t = (AemtTarget*)tp;
+    aemt_clear_error();
+    if (!t) { aemt_fail(AEMT_ERR_ARG, "target is null"); return (double)NAN; }
+    if (att < 0 || att > t->extra) {
+        aemt_fail(AEMT_ERR_ARG, "the target has colour attachments 0..%d, not %d", t->extra, att);
+        return (double)NAN;
+    }
+    if (att == 0) return aemt_ae_pixel_value(tp, x, y, channel);
+    if (x < 0 || y < 0 || x >= t->width || y >= t->height) {
+        aemt_fail(AEMT_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, t->width, t->height);
+        return (double)NAN;
+    }
+    if (channel < 0 || channel > 3) { aemt_fail(AEMT_ERR_ARG, "channel %d is not 0..3", channel); return (double)NAN; }
+    if (!aemt_readable(t)) return (double)NAN;
+    const unsigned char* base = t->frames[t->last_submitted].xreadback_ptr[att - 1];
+    const unsigned char* px = base + ((size_t)y * (size_t)t->width + (size_t)x) * (size_t)t->xbpp[att - 1];
+    return (double)aemt_format_channel(t->xformat[att - 1], px, channel);
 }
 
 static const unsigned char* aemt_px(const AemtTarget* t, const unsigned char* base, int x, int y) {
@@ -3358,6 +3529,21 @@ AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int z, int
     (void)d; (void)w; (void)h; (void)z; (void)f; aemt_no(); return NULL;
 }
 int    aemt_texture_layers(const AemtTexture* t) { (void)t; return 0; }
+AemtTarget* aemt_target_create_mrt(AemtDevice* d, int w, int h, int n, int f0, int f1, int f2, int f3, int z, int s) {
+    (void)d; (void)w; (void)h; (void)n; (void)f0; (void)f1; (void)f2; (void)f3; (void)z; (void)s;
+    aemt_no();
+    return NULL;
+}
+int    aemt_target_attachments(const AemtTarget* t) { (void)t; return 0; }
+int    aemt_pipeline_set_target_attachment(AemtPipeline* p, int b, AemtTarget* t, int n) {
+    (void)p; (void)b; (void)t; (void)n; return aemt_no();
+}
+int    aemt_material_set_target_attachment(AemtMaterial* m, int b, AemtTarget* t, int n) {
+    (void)m; (void)b; (void)t; (void)n; return aemt_no();
+}
+double aemt_ae_pixel_value_at(void* t, int n, int x, int y, int c) {
+    (void)t; (void)n; (void)x; (void)y; (void)c; aemt_no(); return (double)NAN;
+}
 int    aemt_bindings_storage_texture(AemtBindings* b, int n) { (void)b; (void)n; return aemt_no(); }
 int    aemt_compute_set_storage_texture(AemtCompute* c, int b, AemtTexture* t) {
     (void)c; (void)b; (void)t; return aemt_no();
@@ -3655,6 +3841,17 @@ void* aemt_ae_texture_create_storage(void* d, int w, int h, int depth, int forma
     return (void*)aemt_texture_create_storage((AemtDevice*)d, w, h, depth, format);
 }
 int   aemt_ae_texture_layers(void* tex) { return aemt_texture_layers((const AemtTexture*)tex); }
+void* aemt_ae_target_create_mrt(void* d, int w, int h, int count, int f0, int f1, int f2, int f3,
+                                int depth, int samples) {
+    return (void*)aemt_target_create_mrt((AemtDevice*)d, w, h, count, f0, f1, f2, f3, depth, samples);
+}
+int   aemt_ae_target_attachments(void* t) { return aemt_target_attachments((const AemtTarget*)t); }
+int   aemt_ae_set_target_attachment(void* p, int binding, void* t, int n) {
+    return aemt_pipeline_set_target_attachment((AemtPipeline*)p, binding, (AemtTarget*)t, n);
+}
+int   aemt_ae_material_set_target_attachment(void* m, int binding, void* t, int n) {
+    return aemt_material_set_target_attachment((AemtMaterial*)m, binding, (AemtTarget*)t, n);
+}
 int   aemt_ae_bindings_storage_texture(void* b, int binding) {
     return aemt_bindings_storage_texture((AemtBindings*)b, binding);
 }
