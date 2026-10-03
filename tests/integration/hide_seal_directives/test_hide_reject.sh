@@ -161,19 +161,110 @@ main() {
 EOF
 run_reject "seal except inside actor receive arm" /tmp/ae_seal_actor_receive.ae
 
-# Case 9: hide on qualified name blocks prefix.member access
+# Case 9: hide on qualified name blocks prefix.member access. (This used
+# `hide string`, which failed for the wrong reason: `string` is a reserved
+# keyword, so the build stopped at E0100 before any hide check ran.)
 cat > /tmp/ae_hide_qualified.ae << 'EOF'
-import std.string
+import std.fs
 extern println(s: string)
 main() {
     {
-        hide string
-        x = string.new("hello")   // E0304: string is hidden
-        println(x)
+        hide fs
+        println(fs.exists("/tmp"))   // rejected: fs is hidden
     }
 }
 EOF
 run_reject "hide blocks qualified name access" /tmp/ae_hide_qualified.ae
+
+# Cases 10-13: a hidden or sealed-out module prefix stays blocked in every
+# block nested inside the hiding one, as a bare name does (case 4). The
+# qualified check used to look only at the innermost scope, so one level
+# of nesting walked straight past `hide fs`.
+cat > /tmp/ae_hide_qualified_nested.ae << 'EOF'
+import std.fs
+extern println(s: string)
+main() {
+    {
+        hide fs
+        {
+            println(fs.exists("/tmp"))
+        }
+    }
+}
+EOF
+run_reject "hide blocks qualified access in a nested block" /tmp/ae_hide_qualified_nested.ae
+
+cat > /tmp/ae_hide_qualified_if.ae << 'EOF'
+import std.fs
+check() -> int {
+    hide fs
+    if 1 == 1 {
+        return fs.exists("/tmp")
+    }
+    return 0
+}
+main() { check() }
+EOF
+run_reject "hide blocks qualified access in an if body" /tmp/ae_hide_qualified_if.ae
+
+cat > /tmp/ae_hide_qualified_closure.ae << 'EOF'
+import std.fs
+extern println(s: string)
+main() {
+    {
+        hide fs
+        g = || { println(fs.exists("/tmp")) }
+        g()
+    }
+}
+EOF
+run_reject "hide blocks qualified access in a closure" /tmp/ae_hide_qualified_closure.ae
+
+cat > /tmp/ae_seal_qualified_nested.ae << 'EOF'
+import std.fs
+extern println(s: string)
+main() {
+    {
+        seal except println
+        {
+            println(fs.exists("/tmp"))
+        }
+    }
+}
+EOF
+run_reject "seal except blocks qualified access in a nested block" /tmp/ae_seal_qualified_nested.ae
+
+# Cases 14-15: a hide covers its own block and what is nested in it,
+# nothing else; a seal lets its whitelist through at any depth.
+cat > /tmp/ae_hide_qualified_sibling.ae << 'EOF'
+import std.fs
+extern println(s: string)
+main() {
+    {
+        hide fs
+        println("no fs here")
+    }
+    {
+        println(fs.exists("/tmp"))
+    }
+    println(fs.exists("/tmp"))
+}
+EOF
+run_accept "hide on a qualified prefix does not leak to sibling or outer blocks" /tmp/ae_hide_qualified_sibling.ae
+
+cat > /tmp/ae_seal_qualified_whitelisted.ae << 'EOF'
+import std.fs
+extern println(s: string)
+main() {
+    {
+        seal except println, fs
+        {
+            println(fs.exists("/tmp"))
+        }
+    }
+}
+EOF
+run_accept "seal except lets a whitelisted prefix through nested blocks" /tmp/ae_seal_qualified_whitelisted.ae
 
 # Cleanup
 rm -f /tmp/ae_hide_*.ae /tmp/ae_seal_*.ae /tmp/ae_hide_out

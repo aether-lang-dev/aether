@@ -165,6 +165,40 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
     return 0;
 }
 
+// Returns 1 if a `hide` or `seal except` between `table` and the root
+// blocks `prefix` as the head of a qualified name (`http` in `http.get`).
+// The same rule lookup_symbol() applies to a bare name as it walks up:
+// a binding of `prefix` in a scope at or below the blocking one wins,
+// and a block or seal anywhere further up applies to every scope nested
+// inside it, not only the scope that declared it.
+static int qualified_prefix_blocked(SymbolTable* table, const char* prefix) {
+    for (SymbolTable* t = table; t; t = t->parent) {
+        int blocked_here = scope_name_is_hidden(t, prefix) ||
+                           (t->is_sealed && !scope_name_in_whitelist(t, prefix));
+        if (blocked_here) {
+            for (SymbolTable* c = table; c; c = c->parent) {
+                if (lookup_symbol_local(c, prefix)) return 0;
+                if (c == t) break;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// The member half of a qualified name whose prefix has already passed
+// qualified_prefix_blocked(): `fs.exists` resolves through the mangled
+// `fs_exists`, a name the user never wrote and could never whitelist.
+// Checking it against hide/seal again made `seal except fs` refuse every
+// `fs.<member>` call, so walk the chain without those checks.
+static Symbol* lookup_member_symbol(SymbolTable* table, const char* name) {
+    for (SymbolTable* t = table; t; t = t->parent) {
+        Symbol* s = lookup_symbol_local(t, name);
+        if (s) return s;
+    }
+    return NULL;
+}
+
 /* ------------------------------------------------------------------
  * #2007: the per-scope hash index.
  *
@@ -595,9 +629,10 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         const char* suffix = dot + 1;
 
         // Enforce hide / seal on the prefix before any namespace resolution.
-        // `hide http` must block both bare `http` AND `http.get(url)`.
-        if (scope_name_is_hidden(table, prefix) ||
-            (table->is_sealed && !scope_name_in_whitelist(table, prefix))) {
+        // `hide http` must block both bare `http` AND `http.get(url)`, in
+        // the hiding block and in every block, closure and trailing block
+        // nested inside it.
+        if (qualified_prefix_blocked(table, prefix)) {
             if (name_heap) free(name_copy);
             return NULL;
         }
@@ -630,7 +665,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
             // import form. (export visibility + hide/seal above still apply.)
             char c_func_name[512];
             snprintf(c_func_name, sizeof(c_func_name), "%s_%s", prefix, suffix);
-            Symbol* sym = lookup_symbol(table, c_func_name);
+            Symbol* sym = lookup_member_symbol(table, c_func_name);
             /* #924 re-export: `hub.fn()` where hub re-exports an imported
              * `fn`. No local `hub_fn` symbol exists; redirect to the
              * defining module's `<origin>_fn`. */
@@ -641,7 +676,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                     char c_origin[512];
                     snprintf(c_origin, sizeof(c_origin), "%s_%s",
                              module_namespace_of(origin->name), suffix);
-                    sym = lookup_symbol(table, c_origin);
+                    sym = lookup_member_symbol(table, c_origin);
                 }
             }
             /* #1035: exports that don't carry the module-name prefix —
@@ -656,7 +691,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                 AetherModule* mod = module_find_by_name_or_leaf(prefix);
                 if (mod && mod->export_count > 0 &&
                     module_is_exported(mod, suffix)) {
-                    sym = lookup_symbol(table, suffix);
+                    sym = lookup_member_symbol(table, suffix);
                 }
             }
             if (name_heap) free(name_copy);
