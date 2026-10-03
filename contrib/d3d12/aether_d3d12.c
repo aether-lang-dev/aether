@@ -1698,7 +1698,7 @@ int aedx_layout_attr(AedxLayout* l, int location, int binding, int format, int o
 }
 
 enum { AEDX_BIND_NONE = 0, AEDX_BIND_UNIFORM, AEDX_BIND_TEXTURE, AEDX_BIND_STORAGE,
-       AEDX_BIND_UNIFORM_DYNAMIC };
+       AEDX_BIND_UNIFORM_DYNAMIC, AEDX_BIND_STORAGE_TEXTURE };
 
 struct AedxBindings {
     int  kind[AEDX_MAX_DESC];
@@ -1730,6 +1730,12 @@ static int aedx_bindings_add(AedxBindings* b, int binding, int kind) {
 int aedx_bindings_uniform(AedxBindings* b, int binding) { return aedx_bindings_add(b, binding, AEDX_BIND_UNIFORM); }
 int aedx_bindings_texture(AedxBindings* b, int binding) { return aedx_bindings_add(b, binding, AEDX_BIND_TEXTURE); }
 int aedx_bindings_storage(AedxBindings* b, int binding) { return aedx_bindings_add(b, binding, AEDX_BIND_STORAGE); }
+
+/* A texture a compute pass writes (#2388): a RWTexture2D or RWTexture3D at
+ * uN, through a descriptor table. Compute passes only. */
+int aedx_bindings_storage_texture(AedxBindings* b, int binding) {
+    return aedx_bindings_add(b, binding, AEDX_BIND_STORAGE_TEXTURE);
+}
 
 /* A uniform read as a `bytes` window of a caller's buffer, at the offset
  * each draw chooses: a root CBV whose address moves per draw (#2198). */
@@ -1778,6 +1784,10 @@ static int aedx_make_root(AedxDevice* d, const AedxBindings* b, int push_bytes, 
             return aedx_fail(AEDX_ERR_ARG,
                              "binding %d is a dynamic uniform, which draws take and compute passes do not", i);
         }
+        if (!compute && b->kind[i] == AEDX_BIND_STORAGE_TEXTURE) {
+            return aedx_fail(AEDX_ERR_ARG,
+                             "binding %d is a storage texture, which compute passes take and draws do not", i);
+        }
         out->dyn_range[i] = b->dyn_range[i];
         out->param[i] = (int)np;
         switch (b->kind[i]) {
@@ -1791,6 +1801,16 @@ static int aedx_make_root(AedxDevice* d, const AedxBindings* b, int push_bytes, 
             case AEDX_BIND_STORAGE:
                 params[np].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
                 params[np].Descriptor.ShaderRegister = (UINT)i;
+                params[np].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+                np++;
+                break;
+            case AEDX_BIND_STORAGE_TEXTURE:
+                ranges[nr].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+                ranges[nr].NumDescriptors = 1;
+                ranges[nr].BaseShaderRegister = (UINT)i;
+                params[np].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                params[np].DescriptorTable.NumDescriptorRanges = 1;
+                params[np].DescriptorTable.pDescriptorRanges = &ranges[nr++];
                 params[np].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
                 np++;
                 break;
@@ -1844,13 +1864,28 @@ static int aedx_make_root(AedxDevice* d, const AedxBindings* b, int push_bytes, 
 /* Textures                                                                  */
 /* ------------------------------------------------------------------------ */
 
+/* What a texture is (#2387, #2388). */
+#define AEDX_TEX_2D    0
+#define AEDX_TEX_3D    1
+#define AEDX_TEX_CUBE  2
+#define AEDX_TEX_ARRAY 3
+
 struct AedxTexture {
     AedxDevice*     dev;
     int             width, height;
     int             depth;          /* 1 for a 2D texture; slices for a 3D one (#2198) */
+    int             layers;         /* 6 for a cube, an array's layers, 1 otherwise (#2387) */
+    int             kind;           /* AEDX_TEX_* */
+    DXGI_FORMAT     format;
+    int             bpp;            /* bytes a texel */
     int             mips;
     ID3D12Resource* res;
     int             srv_slot, sampler_slot;
+    /* A storage texture (#2388): an unordered-access view in the shader-
+     * visible heap. It rests in the shader-resource state like any texture,
+     * and a dispatch that writes it moves it to UNORDERED_ACCESS and back. */
+    int             storage;
+    int             uav_slot;
     int             uploaded;
 };
 
@@ -1868,48 +1903,76 @@ AedxTexture* aedx_texture_create(AedxDevice* d, int w, int h) {
     return aedx_texture_create_ex(d, w, h, 0, 0, 0);
 }
 
-/* A 3D texture resource, RGBA8, one level, waiting for its upload. */
-static ID3D12Resource* aedx_make_texture3d(AedxDevice* d, int w, int h, int depth) {
+static int aedx_format_bytes(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
+        default:                             return 4;
+    }
+}
+
+/* A texture resource of `kind`: 2D with `layers` slices (6 for a cube), or
+ * 3D with `depth`, waiting for its upload in COPY_DEST. */
+static ID3D12Resource* aedx_make_texture_kind(AedxDevice* d, int w, int h, int depth, int layers, int kind,
+                                              int mips, DXGI_FORMAT format, int storage) {
     D3D12_HEAP_PROPERTIES hp;
     memset(&hp, 0, sizeof(hp));
     hp.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC rd;
     memset(&rd, 0, sizeof(rd));
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    rd.Dimension = kind == AEDX_TEX_3D ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = (UINT64)w;
     rd.Height = (UINT)h;
-    rd.DepthOrArraySize = (UINT16)depth;
-    rd.MipLevels = 1;
-    rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    rd.DepthOrArraySize = (UINT16)(kind == AEDX_TEX_3D ? depth : layers);
+    rd.MipLevels = (UINT16)mips;
+    rd.Format = format;
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    rd.Flags = storage ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
     ID3D12Resource* r = NULL;
     HRESULT hr = ID3D12Device_CreateCommittedResource(d->device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
                                                       D3D12_RESOURCE_STATE_COPY_DEST, NULL,
                                                       &IID_ID3D12Resource, (void**)&r);
     if (FAILED(hr)) {
-        aedx_fail(aedx_hr_status(hr), "CreateCommittedResource (%dx%dx%d texture) failed (0x%08lx)",
-                  w, h, depth, (unsigned long)hr);
+        aedx_fail(aedx_hr_status(hr), "CreateCommittedResource (%dx%dx%d texture, %d layers) failed (0x%08lx)",
+                  w, h, depth, layers, (unsigned long)hr);
         return NULL;
     }
     return r;
 }
 
-/* A 2D texture (`is_3d` 0, `depth` 1) or a 3D one of `depth` slices
- * (#2198): the clouds' tileable noise, a colour grading cube, a volume. */
-static AedxTexture* aedx_texture_make(AedxDevice* d, int w, int h, int depth, int is_3d,
-                                      int mipmapped, int linear_filter, int repeat) {
+/* A texture of `kind` (AEDX_TEX_*), in `format`, sampled or, with
+ * `storage`, also written by compute passes. */
+static AedxTexture* aedx_texture_make_kind(AedxDevice* d, int w, int h, int depth, int layers, int kind,
+                                           int mipmapped, int linear_filter, int repeat,
+                                           DXGI_FORMAT format, int storage) {
     aedx_clear_error();
     if (!d) { aedx_fail(AEDX_ERR_ARG, "device is null"); return NULL; }
-    if (w <= 0 || h <= 0 || depth <= 0) {
-        aedx_fail(AEDX_ERR_ARG, "texture size %dx%dx%d is not positive", w, h, depth);
+    if (w <= 0 || h <= 0 || depth <= 0 || layers <= 0) {
+        aedx_fail(AEDX_ERR_ARG, "texture size %dx%dx%d with %d layers is not positive", w, h, depth, layers);
         return NULL;
     }
-    int limit = is_3d ? D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION : D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+    int limit = kind == AEDX_TEX_3D ? D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION
+              : kind == AEDX_TEX_CUBE ? D3D12_REQ_TEXTURECUBE_DIMENSION : D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     if (w > limit || h > limit || depth > limit) {
         aedx_fail(AEDX_ERR_UNSUPPORTED, "texture %dx%dx%d exceeds the Direct3D 12 limit of %d",
                   w, h, depth, limit);
         return NULL;
+    }
+    if (layers > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) {
+        aedx_fail(AEDX_ERR_UNSUPPORTED, "%d layers exceeds the Direct3D 12 limit of %d", layers,
+                  D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION);
+        return NULL;
+    }
+    if (storage) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT fs;
+        memset(&fs, 0, sizeof(fs));
+        fs.Format = format;
+        if (FAILED(ID3D12Device_CheckFeatureSupport(d->device, D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
+            !(fs.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW)) {
+            aedx_fail(AEDX_ERR_UNSUPPORTED, "the device cannot write format %d from a compute pass", (int)format);
+            return NULL;
+        }
     }
     AedxTexture* tex = (AedxTexture*)calloc(1, sizeof(*tex));
     if (!tex) { aedx_fail(AEDX_ERR_OOM, "out of memory"); return NULL; }
@@ -1917,19 +1980,57 @@ static AedxTexture* aedx_texture_make(AedxDevice* d, int w, int h, int depth, in
     tex->width = w;
     tex->height = h;
     tex->depth = depth;
+    tex->layers = layers;
+    tex->kind = kind;
+    tex->format = format;
+    tex->bpp = aedx_format_bytes(format);
+    tex->storage = storage;
     tex->mips = mipmapped ? aedx_mip_levels_for(w, h) : 1;
     tex->srv_slot = -1;
     tex->sampler_slot = -1;
-    tex->res = is_3d ? aedx_make_texture3d(d, w, h, depth)
-                     : aedx_make_texture2d(d, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, 1, (UINT16)tex->mips,
-                                           D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, NULL);
+    tex->uav_slot = -1;
+    tex->res = aedx_make_texture_kind(d, w, h, depth, layers, kind, tex->mips, format, storage);
     if (!tex->res) goto fail;
     AcquireSRWLockExclusive(&d->lock);
     tex->srv_slot = aedx_slot_take(&d->srv, "shader-visible");
     if (tex->srv_slot >= 0) tex->sampler_slot = aedx_slot_take(&d->samplers, "sampler");
+    if (storage && tex->sampler_slot >= 0) tex->uav_slot = aedx_slot_take(&d->srv, "shader-visible");
     ReleaseSRWLockExclusive(&d->lock);
-    if (tex->srv_slot < 0 || tex->sampler_slot < 0) goto fail;
-    ID3D12Device_CreateShaderResourceView(d->device, tex->res, NULL, aedx_slot_cpu(&d->srv, tex->srv_slot));
+    if (tex->srv_slot < 0 || tex->sampler_slot < 0 || (storage && tex->uav_slot < 0)) goto fail;
+    /* A cube and an array need their view spelled out: the default view of a
+     * six-slice resource is an array, not a cube. */
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv;
+    memset(&sv, 0, sizeof(sv));
+    sv.Format = format;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    if (kind == AEDX_TEX_CUBE) {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sv.TextureCube.MipLevels = (UINT)tex->mips;
+    } else if (kind == AEDX_TEX_ARRAY) {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        sv.Texture2DArray.MipLevels = (UINT)tex->mips;
+        sv.Texture2DArray.ArraySize = (UINT)layers;
+    } else if (kind == AEDX_TEX_3D) {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        sv.Texture3D.MipLevels = (UINT)tex->mips;
+    } else {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = (UINT)tex->mips;
+    }
+    ID3D12Device_CreateShaderResourceView(d->device, tex->res, &sv, aedx_slot_cpu(&d->srv, tex->srv_slot));
+    if (storage) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uv;
+        memset(&uv, 0, sizeof(uv));
+        uv.Format = format;
+        if (kind == AEDX_TEX_3D) {
+            uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+            uv.Texture3D.WSize = (UINT)depth;
+        } else {
+            uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        }
+        ID3D12Device_CreateUnorderedAccessView(d->device, tex->res, NULL, &uv,
+                                               aedx_slot_cpu(&d->srv, tex->uav_slot));
+    }
     D3D12_SAMPLER_DESC sd;
     memset(&sd, 0, sizeof(sd));
     sd.Filter = linear_filter ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
@@ -1939,15 +2040,61 @@ static AedxTexture* aedx_texture_make(AedxDevice* d, int w, int h, int depth, in
     sd.MaxAnisotropy = 1;
     sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
     ID3D12Device_CreateSampler(d->device, &sd, aedx_slot_cpu(&d->samplers, tex->sampler_slot));
+    if (storage) {
+        /* Zeroed by an upload of zeros, whatever the format, so a draw that
+         * samples it before any pass has written reads zeros. */
+        size_t bytes = (size_t)w * (size_t)h * (size_t)depth * (size_t)tex->bpp;
+        void* zeros = calloc(1, bytes);
+        if (!zeros) { aedx_fail(AEDX_ERR_OOM, "out of memory"); goto fail; }
+        int urc = aedx_texture_upload(tex, zeros, bytes);
+        free(zeros);
+        if (urc != AEDX_OK) goto fail;
+    }
     return tex;
 fail:
     aedx_texture_destroy(tex);
     return NULL;
 }
 
+static AedxTexture* aedx_texture_make(AedxDevice* d, int w, int h, int depth, int is_3d,
+                                      int mipmapped, int linear_filter, int repeat) {
+    return aedx_texture_make_kind(d, w, h, depth, 1, is_3d ? AEDX_TEX_3D : AEDX_TEX_2D, mipmapped,
+                                  linear_filter, repeat, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
 AedxTexture* aedx_texture_create_ex(AedxDevice* d, int w, int h, int mipmapped, int linear_filter, int repeat) {
     return aedx_texture_make(d, w, h, 1, 0, mipmapped, linear_filter, repeat);
 }
+
+/* A cube map (#2387): six square faces uploaded +X, -X, +Y, -Y, +Z, -Z,
+ * read through a TextureCube. */
+AedxTexture* aedx_texture_create_cube(AedxDevice* d, int size, int mipmapped, int linear_filter) {
+    return aedx_texture_make_kind(d, size, size, 1, 6, AEDX_TEX_CUBE, mipmapped, linear_filter, 0,
+                                  DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
+/* A 2D array (#2387): `layers` images uploaded one after another, read
+ * through a Texture2DArray with the layer as the third coordinate. */
+AedxTexture* aedx_texture_create_array(AedxDevice* d, int w, int h, int layers, int mipmapped,
+                                       int linear_filter, int repeat) {
+    return aedx_texture_make_kind(d, w, h, 1, layers, AEDX_TEX_ARRAY, mipmapped, linear_filter, repeat,
+                                  DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
+/* A texture compute passes write (#2388): 2D, or 3D with `depth` above 1,
+ * in R8G8B8A8_UNORM, R16G16B16A16_FLOAT or R32G32B32A32_FLOAT. */
+AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int depth, int format) {
+    if (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_R16G16B16A16_FLOAT &&
+        format != DXGI_FORMAT_R32G32B32A32_FLOAT) {
+        aedx_fail(AEDX_ERR_ARG, "a storage texture is FORMAT_R8G8B8A8_UNORM, FORMAT_R16G16B16A16_SFLOAT "
+                  "or FORMAT_R32G32B32A32_SFLOAT, not %d", format);
+        return NULL;
+    }
+    return aedx_texture_make_kind(d, w, h, depth, 1, depth > 1 ? AEDX_TEX_3D : AEDX_TEX_2D, 0, 0, 0,
+                                  (DXGI_FORMAT)format, 1);
+}
+
+int aedx_texture_layers(const AedxTexture* tex) { return tex ? tex->layers : 0; }
 
 /* A 3D texture: `depth` slices of w x h RGBA, read through a Texture3D. No
  * mip chain; upload is w * h * depth * 4 bytes, slice by slice. */
@@ -1966,6 +2113,7 @@ void aedx_texture_destroy(AedxTexture* tex) {
     /* A draw may still be sampling it. */
     aedx_idle(d);
     aedx_slot_give(&d->srv, tex->srv_slot);
+    aedx_slot_give(&d->srv, tex->uav_slot);
     aedx_slot_give(&d->samplers, tex->sampler_slot);
     ReleaseSRWLockExclusive(&d->lock);
     if (tex->res) ID3D12Resource_Release(tex->res);
@@ -1979,69 +2127,95 @@ void aedx_texture_destroy(AedxTexture* tex) {
 int aedx_texture_upload(AedxTexture* tex, const void* rgba, size_t len) {
     aedx_clear_error();
     if (!tex || !rgba) return aedx_fail(AEDX_ERR_ARG, "texture or pixel data is null");
-    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * 4u;
+    int bpp = tex->bpp;
+    size_t layer_bytes = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * (size_t)bpp;
+    size_t need = layer_bytes * (size_t)tex->layers;
     if (len < need) {
-        return aedx_fail(AEDX_ERR_ARG, "need %zu bytes for %dx%dx%d RGBA, got %zu",
-                         need, tex->width, tex->height, tex->depth, len);
+        return aedx_fail(AEDX_ERR_ARG, "need %zu bytes for %dx%dx%d with %d layers, got %zu",
+                         need, tex->width, tex->height, tex->depth, tex->layers, len);
     }
     AedxDevice* d = tex->dev;
     D3D12_RESOURCE_DESC desc = ID3D12Resource_GetDesc(tex->res);
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[16];
-    UINT rows[16];
-    UINT64 row_bytes[16];
+    /* One subresource a level a layer, layer-major: level L of layer A is
+     * subresource L + A * mips. */
+    UINT subs = (UINT)tex->mips * (UINT)tex->layers;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT* fp =
+        (D3D12_PLACED_SUBRESOURCE_FOOTPRINT*)calloc(subs, sizeof(*fp));
+    UINT* rows = (UINT*)calloc(subs, sizeof(*rows));
+    UINT64* row_bytes = (UINT64*)calloc(subs, sizeof(*row_bytes));
+    if (!fp || !rows || !row_bytes) {
+        free(fp); free(rows); free(row_bytes);
+        return aedx_fail(AEDX_ERR_OOM, "out of memory");
+    }
     UINT64 total = 0;
-    ID3D12Device_GetCopyableFootprints(d->device, &desc, 0, (UINT)tex->mips, 0, fp, rows, row_bytes, &total);
+    ID3D12Device_GetCopyableFootprints(d->device, &desc, 0, subs, 0, fp, rows, row_bytes, &total);
 
     ID3D12Resource* staging = aedx_make_buffer(d, D3D12_HEAP_TYPE_UPLOAD, total,
                                                D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
-    if (!staging) return AEDX_ERR_OOM;
+    if (!staging) { free(fp); free(rows); free(row_bytes); return AEDX_ERR_OOM; }
     unsigned char* map = NULL;
     D3D12_RANGE none = { 0, 0 };
     HRESULT hr = ID3D12Resource_Map(staging, 0, &none, (void**)&map);
     if (FAILED(hr)) {
         ID3D12Resource_Release(staging);
+        free(fp); free(rows); free(row_bytes);
         return aedx_fail(AEDX_ERR_OOM, "Map (upload) failed (0x%08lx)", (unsigned long)hr);
     }
 
-    /* Level 0 is the caller's pixels; each later level is built from the
-     * one before it, kept in a scratch buffer. */
-    unsigned char* prev = (unsigned char*)malloc(need);
-    if (!prev) { ID3D12Resource_Release(staging); return aedx_fail(AEDX_ERR_OOM, "out of memory"); }
-    memcpy(prev, rgba, need);
-    int pw = tex->width, ph = tex->height;
-    for (int level = 0; level < tex->mips; level++) {
-        if (level > 0) {
-            int nw = pw > 1 ? pw / 2 : 1, nh = ph > 1 ? ph / 2 : 1;
-            unsigned char* next = (unsigned char*)malloc((size_t)nw * (size_t)nh * 4u);
-            if (!next) { free(prev); ID3D12Resource_Release(staging); return aedx_fail(AEDX_ERR_OOM, "out of memory"); }
-            for (int y = 0; y < nh; y++) {
-                int y0 = y * 2 < ph ? y * 2 : ph - 1, y1 = y * 2 + 1 < ph ? y * 2 + 1 : ph - 1;
-                for (int x = 0; x < nw; x++) {
-                    int x0 = x * 2 < pw ? x * 2 : pw - 1, x1 = x * 2 + 1 < pw ? x * 2 + 1 : pw - 1;
-                    for (int c = 0; c < 4; c++) {
-                        int s = prev[((size_t)y0 * pw + x0) * 4 + c] + prev[((size_t)y0 * pw + x1) * 4 + c] +
-                                prev[((size_t)y1 * pw + x0) * 4 + c] + prev[((size_t)y1 * pw + x1) * 4 + c];
-                        next[((size_t)y * nw + x) * 4 + c] = (unsigned char)((s + 2) / 4);
+    /* Each layer in turn: its level 0 is the caller's pixels, and each later
+     * level is built from the one before it, kept in a scratch buffer. A
+     * mip chain is only ever RGBA8. */
+    for (int layer = 0; layer < tex->layers; layer++) {
+        unsigned char* prev = (unsigned char*)malloc(layer_bytes);
+        if (!prev) {
+            ID3D12Resource_Release(staging);
+            free(fp); free(rows); free(row_bytes);
+            return aedx_fail(AEDX_ERR_OOM, "out of memory");
+        }
+        memcpy(prev, (const unsigned char*)rgba + (size_t)layer * layer_bytes, layer_bytes);
+        int pw = tex->width, ph = tex->height;
+        for (int level = 0; level < tex->mips; level++) {
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT* lf = &fp[level + layer * tex->mips];
+            UINT lrows = rows[level + layer * tex->mips];
+            if (level > 0) {
+                int nw = pw > 1 ? pw / 2 : 1, nh = ph > 1 ? ph / 2 : 1;
+                unsigned char* next = (unsigned char*)malloc((size_t)nw * (size_t)nh * 4u);
+                if (!next) {
+                    free(prev);
+                    ID3D12Resource_Release(staging);
+                    free(fp); free(rows); free(row_bytes);
+                    return aedx_fail(AEDX_ERR_OOM, "out of memory");
+                }
+                for (int y = 0; y < nh; y++) {
+                    int y0 = y * 2 < ph ? y * 2 : ph - 1, y1 = y * 2 + 1 < ph ? y * 2 + 1 : ph - 1;
+                    for (int x = 0; x < nw; x++) {
+                        int x0 = x * 2 < pw ? x * 2 : pw - 1, x1 = x * 2 + 1 < pw ? x * 2 + 1 : pw - 1;
+                        for (int c = 0; c < 4; c++) {
+                            int s = prev[((size_t)y0 * pw + x0) * 4 + c] + prev[((size_t)y0 * pw + x1) * 4 + c] +
+                                    prev[((size_t)y1 * pw + x0) * 4 + c] + prev[((size_t)y1 * pw + x1) * 4 + c];
+                            next[((size_t)y * nw + x) * 4 + c] = (unsigned char)((s + 2) / 4);
+                        }
                     }
                 }
+                free(prev);
+                prev = next;
+                pw = nw;
+                ph = nh;
             }
-            free(prev);
-            prev = next;
-            pw = nw;
-            ph = nh;
-        }
-        /* A 3D texture's slices follow one another, each `rows` rows of
-         * RowPitch bytes (a 2D texture is one slice). */
-        size_t slice_pitch = (size_t)fp[level].Footprint.RowPitch * (size_t)rows[level];
-        int slices = level == 0 ? tex->depth : 1;
-        for (int z = 0; z < slices; z++) {
-            for (int y = 0; y < ph; y++) {
-                memcpy(map + fp[level].Offset + (size_t)z * slice_pitch + (size_t)y * fp[level].Footprint.RowPitch,
-                       prev + ((size_t)z * (size_t)ph + (size_t)y) * (size_t)pw * 4u, (size_t)pw * 4u);
+            /* A 3D texture's slices follow one another, each `rows` rows of
+             * RowPitch bytes (a 2D texture is one slice). */
+            size_t slice_pitch = (size_t)lf->Footprint.RowPitch * (size_t)lrows;
+            int slices = level == 0 ? tex->depth : 1;
+            for (int z = 0; z < slices; z++) {
+                for (int y = 0; y < ph; y++) {
+                    memcpy(map + lf->Offset + (size_t)z * slice_pitch + (size_t)y * lf->Footprint.RowPitch,
+                           prev + ((size_t)z * (size_t)ph + (size_t)y) * (size_t)pw * (size_t)bpp,
+                           (size_t)pw * (size_t)bpp);
+                }
             }
         }
+        free(prev);
     }
-    free(prev);
     ID3D12Resource_Unmap(staging, 0, NULL);
 
     ID3D12CommandAllocator* alloc = NULL;
@@ -2055,16 +2229,16 @@ int aedx_texture_upload(AedxTexture* tex, const void* rgba, size_t len) {
                                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                          D3D12_RESOURCE_STATE_COPY_DEST);
         }
-        for (int level = 0; level < tex->mips; level++) {
+        for (UINT sub = 0; sub < subs; sub++) {
             D3D12_TEXTURE_COPY_LOCATION dst, src;
             memset(&dst, 0, sizeof(dst));
             memset(&src, 0, sizeof(src));
             dst.pResource = tex->res;
             dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            dst.SubresourceIndex = (UINT)level;
+            dst.SubresourceIndex = sub;
             src.pResource = staging;
             src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            src.PlacedFootprint = fp[level];
+            src.PlacedFootprint = fp[sub];
             ID3D12GraphicsCommandList_CopyTextureRegion(list, &dst, 0, 0, 0, &src, NULL);
         }
         aedx_barrier(list, tex->res, D3D12_RESOURCE_STATE_COPY_DEST,
@@ -2085,6 +2259,9 @@ int aedx_texture_upload(AedxTexture* tex, const void* rgba, size_t len) {
     if (list) ID3D12GraphicsCommandList_Release(list);
     if (alloc) ID3D12CommandAllocator_Release(alloc);
     ID3D12Resource_Release(staging);
+    free(fp);
+    free(rows);
+    free(row_bytes);
     if (rc == AEDX_OK) tex->uploaded = 1;
     return rc;
 }
@@ -2629,6 +2806,12 @@ static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, c
         int k = rl->kind[i];
         if (!k) continue;
         UINT param = (UINT)rl->param[i];
+        if (k == AEDX_BIND_STORAGE_TEXTURE) {
+            /* Compute only: make_root refuses it for a draw. */
+            ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(list, param,
+                                                                    aedx_slot_gpu(&d->srv, m->tex[i]->uav_slot));
+            continue;
+        }
         if (k == AEDX_BIND_TEXTURE) {
             int srv_slot, smp_slot;
             if (m->tgt[i]) {
@@ -3238,6 +3421,24 @@ int aedx_compute_set_buffer(AedxCompute* c, int binding, AedxBuffer* buf) {
     return AEDX_OK;
 }
 
+/* Binds a storage texture for the pass to write (#2388). */
+int aedx_compute_set_storage_texture(AedxCompute* c, int binding, AedxTexture* tex) {
+    aedx_clear_error();
+    if (!c) return aedx_fail(AEDX_ERR_ARG, "compute is null");
+    if (binding < 0 || binding >= AEDX_MAX_DESC) {
+        return aedx_fail(AEDX_ERR_ARG, "binding must be 0..%d", AEDX_MAX_DESC - 1);
+    }
+    if (c->rl.kind[binding] != AEDX_BIND_STORAGE_TEXTURE) {
+        return aedx_fail(AEDX_ERR_ARG, "binding %d is not declared as a storage texture", binding);
+    }
+    if (!tex) return aedx_fail(AEDX_ERR_ARG, "texture is null");
+    if (tex->dev != c->dev) return aedx_fail(AEDX_ERR_ARG, "the texture belongs to another device");
+    if (!tex->storage) return aedx_fail(AEDX_ERR_ARG, "the texture was not made with texture_create_storage");
+    c->args.tex[binding] = tex;
+    c->args.set[binding] = 1;
+    return AEDX_OK;
+}
+
 int aedx_compute_set_texture(AedxCompute* c, int binding, AedxTexture* tex) {
     aedx_clear_error();
     int rc = aedx_compute_binding(c, binding);
@@ -3331,6 +3532,14 @@ int aedx_dispatch_async(AedxCompute* c, int gx, int gy, int gz) {
         ID3D12GraphicsCommandList_SetComputeRoot32BitConstants(l, 0, c->rl.push_words, c->push, 0);
     }
     aedx_bind_material(d, l, &c->rl, &c->args, 1, NULL);
+    /* Storage textures rest in the shader-resource state; the pass writes
+     * them in UNORDERED_ACCESS (#2388). */
+    for (int i = 0; i < AEDX_MAX_DESC; i++) {
+        if (c->rl.kind[i] != AEDX_BIND_STORAGE_TEXTURE) continue;
+        aedx_barrier(l, c->args.tex[i]->res,
+                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
     ID3D12GraphicsCommandList_Dispatch(l, (UINT)gx, (UINT)gy, (UINT)gz);
     /* Writes made visible to whatever reads the buffers next: a later
      * dispatch, a draw, or (after the fence) the CPU. */
@@ -3339,6 +3548,11 @@ int aedx_dispatch_async(AedxCompute* c, int gx, int gy, int gz) {
     uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav.UAV.pResource = NULL;
     ID3D12GraphicsCommandList_ResourceBarrier(l, 1, &uav);
+    for (int i = 0; i < AEDX_MAX_DESC; i++) {
+        if (c->rl.kind[i] != AEDX_BIND_STORAGE_TEXTURE) continue;
+        aedx_barrier(l, c->args.tex[i]->res, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
     if (c->timed) {
         ID3D12GraphicsCommandList_EndQuery(l, c->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
         ID3D12GraphicsCommandList_ResolveQueryData(l, c->timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
@@ -4012,6 +4226,20 @@ int    aedx_pipeline_set_target_depth_compare(AedxPipeline* p, int b, AedxTarget
     (void)p; (void)b; (void)t; (void)op; return aedx_no();
 }
 int    aedx_target_depth_linear(const AedxTarget* t) { (void)t; return 0; }
+AedxTexture* aedx_texture_create_cube(AedxDevice* d, int s, int m, int l) {
+    (void)d; (void)s; (void)m; (void)l; aedx_no(); return NULL;
+}
+AedxTexture* aedx_texture_create_array(AedxDevice* d, int w, int h, int n, int m, int l, int r) {
+    (void)d; (void)w; (void)h; (void)n; (void)m; (void)l; (void)r; aedx_no(); return NULL;
+}
+AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int z, int f) {
+    (void)d; (void)w; (void)h; (void)z; (void)f; aedx_no(); return NULL;
+}
+int    aedx_texture_layers(const AedxTexture* t) { (void)t; return 0; }
+int    aedx_bindings_storage_texture(AedxBindings* b, int n) { (void)b; (void)n; return aedx_no(); }
+int    aedx_compute_set_storage_texture(AedxCompute* c, int b, AedxTexture* t) {
+    (void)c; (void)b; (void)t; return aedx_no();
+}
 double aedx_compute_gpu_ms(const AedxCompute* c) { (void)c; return -1.0; }
 AedxSwapchain* aedx_swapchain_create(AedxDevice* d, int k, void* dp, void* w, int x, int y) {
     (void)d; (void)k; (void)dp; (void)w; (void)x; (void)y; aedx_no(); return NULL;
@@ -4279,6 +4507,22 @@ int   aedx_ae_material_set_target_depth_compare(void* m, int binding, void* t, i
     return aedx_material_set_target_depth_compare((AedxMaterial*)m, binding, (AedxTarget*)t, op);
 }
 int   aedx_ae_target_depth_linear(void* t) { return aedx_target_depth_linear((const AedxTarget*)t); }
+void* aedx_ae_texture_create_cube(void* d, int size, int mipmapped, int linear) {
+    return (void*)aedx_texture_create_cube((AedxDevice*)d, size, mipmapped, linear);
+}
+void* aedx_ae_texture_create_array(void* d, int w, int h, int layers, int mipmapped, int linear, int repeat) {
+    return (void*)aedx_texture_create_array((AedxDevice*)d, w, h, layers, mipmapped, linear, repeat);
+}
+void* aedx_ae_texture_create_storage(void* d, int w, int h, int depth, int format) {
+    return (void*)aedx_texture_create_storage((AedxDevice*)d, w, h, depth, format);
+}
+int   aedx_ae_texture_layers(void* tex) { return aedx_texture_layers((const AedxTexture*)tex); }
+int   aedx_ae_bindings_storage_texture(void* b, int binding) {
+    return aedx_bindings_storage_texture((AedxBindings*)b, binding);
+}
+int   aedx_ae_compute_set_storage_texture(void* c, int binding, void* tex) {
+    return aedx_compute_set_storage_texture((AedxCompute*)c, binding, (AedxTexture*)tex);
+}
 double aedx_ae_compute_gpu_ms(void* c) { return aedx_compute_gpu_ms((const AedxCompute*)c); }
 
 void* aedx_ae_swapchain_create(void* d, int kind, void* display, void* window, int w, int h) {

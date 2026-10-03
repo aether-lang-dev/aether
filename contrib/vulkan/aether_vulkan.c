@@ -262,6 +262,8 @@ struct AevkDevice {
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t         max_dim;
     uint32_t         max_dim_3d;   /* a 3D texture's largest side (#2198) */
+    uint32_t         max_dim_cube; /* a cube face's largest side (#2387) */
+    uint32_t         max_layers;   /* the most layers an array can have */
     /* Indirect draws (#2198): whether one call takes several commands, and
      * whether a command's first instance is honoured. Both are optional
      * features, enabled when the device has them. */
@@ -522,10 +524,24 @@ struct AevkBindings {
     uint32_t dyn_range[AEVK_MAX_DESC];
 };
 
+/* What a texture is (#2387, #2388): its image type and view type follow. */
+#define AEVK_TEX_2D    0
+#define AEVK_TEX_3D    1
+#define AEVK_TEX_CUBE  2
+#define AEVK_TEX_ARRAY 3
+
 struct AevkTexture {
     AevkDevice*    dev;
     int            width, height;
     int            depth;      /* 1 for a 2D texture; slices for a 3D one (#2198) */
+    int            layers;     /* 6 for a cube, the layers of an array, 1 otherwise (#2387) */
+    int            kind;       /* AEVK_TEX_* */
+    VkFormat       format;     /* RGBA8 unless a storage texture asked for another */
+    int            bpp;        /* bytes a texel */
+    /* A storage texture (#2388) is written by compute passes and sampled by
+     * draws. It stays in GENERAL, the one layout both take, so the dispatch's
+     * memory barriers are all the synchronisation it needs. */
+    int            storage;
     uint32_t       mip_levels;
     VkImage        image;
     VkDeviceMemory mem;
@@ -926,6 +942,8 @@ AevkDevice* aevk_device_create(void) {
     d->ia.vkGetPhysicalDeviceProperties(d->phys, &props);
     d->max_dim = props.limits.maxImageDimension2D;
     d->max_dim_3d = props.limits.maxImageDimension3D;
+    d->max_dim_cube = props.limits.maxImageDimensionCube;
+    d->max_layers = props.limits.maxImageArrayLayers;
     d->max_groups[0] = props.limits.maxComputeWorkGroupCount[0];
     d->max_groups[1] = props.limits.maxComputeWorkGroupCount[1];
     d->max_groups[2] = props.limits.maxComputeWorkGroupCount[2];
@@ -2350,6 +2368,14 @@ int aevk_bindings_uniform_dynamic(AevkBindings* b, int binding, int bytes) {
     return rc;
 }
 
+/* A texture a compute pass writes (#2388): `layout(binding = N, rgba8)
+ * uniform image2D` (or image3D, with the texture's format). Compute passes
+ * only. */
+int aevk_bindings_storage_texture(AevkBindings* b, int binding) {
+    aevk_clear_error();
+    return aevk_bindings_add(b, binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+}
+
 /* A storage buffer: `layout(std430, binding = N) buffer`. What a compute pass
  * reads and writes, and what a vertex shader pulls computed data from. */
 int aevk_bindings_storage(AevkBindings* b, int binding) {
@@ -2416,7 +2442,8 @@ static void aevk_image_barrier_levels(AevkDevice* d, VkCommandBuffer cmd, VkImag
     b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     b.subresourceRange.baseMipLevel = base_level;
     b.subresourceRange.levelCount = level_count;
-    b.subresourceRange.layerCount = 1;
+    /* Every layer: a cube's six faces and an array's layers move together. */
+    b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
     b.srcAccessMask = src_access;
     b.dstAccessMask = dst_access;
     d->da.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &b);
@@ -2464,20 +2491,46 @@ AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
  * over CLAMP_TO_EDGE for addressing. */
 /* A 2D texture (`is_3d` 0, `depth` 1) or a 3D one of `depth` slices (#2198):
  * the clouds' tileable noise, a colour grading cube, a volume. */
-static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int depth,
-                                      int is_3d, int mipmapped, int linear_filter,
-                                      int repeat) {
+static int aevk_format_bytes(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return 8;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+        default:                            return 4;
+    }
+}
+
+/* A texture of `kind` (AEVK_TEX_*): `depth` slices for a 3D one, `layers`
+ * for an array (6 for a cube), in `format`, sampled or, with `storage`, also
+ * written by compute passes. */
+static AevkTexture* aevk_texture_make_kind(AevkDevice* d, int width, int height, int depth, int layers,
+                                           int kind, int mipmapped, int linear_filter, int repeat,
+                                           VkFormat format, int storage) {
     aevk_clear_error();
     if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
-    if (width <= 0 || height <= 0 || depth <= 0) {
-        aevk_fail(AEVK_ERR_ARG, "texture size %dx%dx%d is not positive", width, height, depth);
+    int is_3d = kind == AEVK_TEX_3D;
+    if (width <= 0 || height <= 0 || depth <= 0 || layers <= 0) {
+        aevk_fail(AEVK_ERR_ARG, "texture size %dx%dx%d with %d layers is not positive",
+                  width, height, depth, layers);
         return NULL;
     }
-    uint32_t limit = is_3d ? d->max_dim_3d : d->max_dim;
+    uint32_t limit = is_3d ? d->max_dim_3d : kind == AEVK_TEX_CUBE ? d->max_dim_cube : d->max_dim;
     if ((uint32_t)width > limit || (uint32_t)height > limit || (uint32_t)depth > limit) {
         aevk_fail(AEVK_ERR_UNSUPPORTED, "texture %dx%dx%d exceeds the device limit of %u",
                   width, height, depth, limit);
         return NULL;
+    }
+    if ((uint32_t)layers > d->max_layers) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED, "%d layers exceeds the device limit of %u", layers, d->max_layers);
+        return NULL;
+    }
+    if (storage) {
+        VkFormatProperties sfp;
+        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, format, &sfp);
+        if (!(sfp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot write format %d from a compute pass",
+                      (int)format);
+            return NULL;
+        }
     }
 
     uint32_t levels = 1;
@@ -2509,23 +2562,29 @@ static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int 
     tex->width = width;
     tex->height = height;
     tex->depth = depth;
+    tex->layers = layers;
+    tex->kind = kind;
+    tex->format = format;
+    tex->bpp = aevk_format_bytes(format);
+    tex->storage = storage;
     tex->mip_levels = levels;
 
     VkImageCreateInfo ii = {0};
     ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ii.flags = kind == AEVK_TEX_CUBE ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     ii.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-    ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ii.format = format;
     ii.extent.width = (uint32_t)width;
     ii.extent.height = (uint32_t)height;
     ii.extent.depth = (uint32_t)depth;
     ii.mipLevels = levels;
-    ii.arrayLayers = 1;
+    ii.arrayLayers = (uint32_t)layers;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     /* TRANSFER_SRC as well as DST: building the chain blits level N-1 into
      * level N, so the image reads from itself. */
     ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-               VK_IMAGE_USAGE_SAMPLED_BIT;
+               VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0);
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkResult r = aevk_create_image(d, &ii, &tex->image);
@@ -2550,11 +2609,13 @@ static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int 
     VkImageViewCreateInfo vi = {0};
     vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vi.image = tex->image;
-    vi.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
-    vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vi.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D
+                : kind == AEVK_TEX_CUBE ? VK_IMAGE_VIEW_TYPE_CUBE
+                : kind == AEVK_TEX_ARRAY ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = format;
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vi.subresourceRange.levelCount = levels;
-    vi.subresourceRange.layerCount = 1;
+    vi.subresourceRange.layerCount = (uint32_t)layers;
     r = d->da.vkCreateImageView(d->device, &vi, NULL, &tex->view);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateImageView failed (%d)", (int)r); goto fail; }
 
@@ -2574,6 +2635,36 @@ static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int 
     si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
     r = d->da.vkCreateSampler(d->device, &si, NULL, &tex->sampler);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateSampler failed (%d)", (int)r); goto fail; }
+    if (storage) {
+        /* Zeroed and laid out once, so a draw that samples it before any
+         * compute pass has written reads zeros rather than nothing defined. */
+        AEVK_MUTEX_LOCK(&d->lock);
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        int src = aevk_run_once(d, &cmd);
+        if (src == AEVK_OK) {
+            aevk_image_barrier_levels(d, cmd, tex->image, 0, levels, VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkClearColorValue zero;
+            memset(&zero, 0, sizeof(zero));
+            VkImageSubresourceRange all = {0};
+            all.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            all.levelCount = levels;
+            all.layerCount = (uint32_t)layers;
+            d->da.vkCmdClearColorImage(cmd, tex->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+            aevk_image_barrier_levels(d, cmd, tex->image, 0, levels, VK_IMAGE_LAYOUT_GENERAL,
+                                      VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            src = aevk_submit_once(d, cmd);
+        }
+        AEVK_MUTEX_UNLOCK(&d->lock);
+        if (src != AEVK_OK) goto fail;
+        tex->uploaded = 1;
+    }
 
     return tex;
 fail:
@@ -2581,10 +2672,49 @@ fail:
     return NULL;
 }
 
+static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int depth,
+                                      int is_3d, int mipmapped, int linear_filter, int repeat) {
+    return aevk_texture_make_kind(d, width, height, depth, 1, is_3d ? AEVK_TEX_3D : AEVK_TEX_2D,
+                                  mipmapped, linear_filter, repeat, VK_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
 AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
                                     int mipmapped, int linear_filter, int repeat) {
     return aevk_texture_make(d, width, height, 1, 0, mipmapped, linear_filter, repeat);
 }
+
+/* A cube map (#2387): six square faces of RGBA, uploaded +X, -X, +Y, -Y,
+ * +Z, -Z, read through a samplerCube, which picks the face and the texel
+ * from a direction the same way in all three APIs. */
+AevkTexture* aevk_texture_create_cube(AevkDevice* d, int size, int mipmapped, int linear_filter) {
+    return aevk_texture_make_kind(d, size, size, 1, 6, AEVK_TEX_CUBE, mipmapped, linear_filter, 0,
+                                  VK_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
+/* A 2D array (#2387): `layers` RGBA images of one size, uploaded one after
+ * another and read through a sampler2DArray with the layer as the third
+ * coordinate. */
+AevkTexture* aevk_texture_create_array(AevkDevice* d, int width, int height, int layers,
+                                       int mipmapped, int linear_filter, int repeat) {
+    return aevk_texture_make_kind(d, width, height, 1, layers, AEVK_TEX_ARRAY, mipmapped, linear_filter,
+                                  repeat, VK_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
+/* A texture compute passes write (#2388): 2D, or 3D with `depth` above 1,
+ * in RGBA8, RGBA16F or RGBA32F (a FORMAT_* value). Draws sample it by nearest
+ * texel. It starts zeroed. */
+AevkTexture* aevk_texture_create_storage(AevkDevice* d, int width, int height, int depth, int format) {
+    if (format != VK_FORMAT_R8G8B8A8_UNORM && format != VK_FORMAT_R16G16B16A16_SFLOAT &&
+        format != VK_FORMAT_R32G32B32A32_SFLOAT) {
+        aevk_fail(AEVK_ERR_ARG, "a storage texture is FORMAT_R8G8B8A8_UNORM, FORMAT_R16G16B16A16_SFLOAT "
+                  "or FORMAT_R32G32B32A32_SFLOAT, not %d", format);
+        return NULL;
+    }
+    return aevk_texture_make_kind(d, width, height, depth, 1, depth > 1 ? AEVK_TEX_3D : AEVK_TEX_2D, 0, 0, 0,
+                                  (VkFormat)format, 1);
+}
+
+int aevk_texture_layers(const AevkTexture* tex) { return tex ? tex->layers : 0; }
 
 /* A 3D texture: `depth` slices of width x height RGBA, sampled with a
  * sampler3D. No mip chain; upload is width*height*depth*4 bytes, slice by
@@ -2615,11 +2745,13 @@ void aevk_texture_destroy(AevkTexture* tex) {
 int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     aevk_clear_error();
     if (!tex || !rgba) return aevk_fail(AEVK_ERR_ARG, "texture or pixel data is null");
-    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * 4u;
+    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth *
+                  (size_t)tex->layers * (size_t)tex->bpp;
     if (len < need) {
-        return aevk_fail(AEVK_ERR_ARG, "need %zu bytes for %dx%dx%d RGBA, got %zu",
-                         need, tex->width, tex->height, tex->depth, len);
+        return aevk_fail(AEVK_ERR_ARG, "need %zu bytes for %dx%dx%d with %d layers, got %zu",
+                         need, tex->width, tex->height, tex->depth, tex->layers, len);
     }
+    VkImageLayout rest = tex->storage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     AevkDevice* d = tex->dev;
 
     VkBuffer staging = VK_NULL_HANDLE;
@@ -2648,16 +2780,19 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     rc = aevk_run_once(d, &cmd);
     if (rc == AEVK_OK) {
+        /* A storage texture may be in use by an earlier dispatch or draw;
+         * the barrier waits for those and keeps nothing it held. */
         aevk_image_barrier_levels(d, cmd, tex->image, 0, tex->mip_levels,
                                   VK_IMAGE_LAYOUT_UNDEFINED,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                   0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  tex->storage ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                               : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                   VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         VkBufferImageCopy copy = {0};
         copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.imageSubresource.layerCount = 1;
+        copy.imageSubresource.layerCount = (uint32_t)tex->layers;
         copy.imageExtent.width = (uint32_t)tex->width;
         copy.imageExtent.height = (uint32_t)tex->height;
         copy.imageExtent.depth = (uint32_t)tex->depth;
@@ -2683,13 +2818,13 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
                 VkImageBlit blit = {0};
                 blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 blit.srcSubresource.mipLevel = level - 1;
-                blit.srcSubresource.layerCount = 1;
+                blit.srcSubresource.layerCount = (uint32_t)tex->layers;
                 blit.srcOffsets[1].x = mw;
                 blit.srcOffsets[1].y = mh;
                 blit.srcOffsets[1].z = 1;
                 blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 blit.dstSubresource.mipLevel = level;
-                blit.dstSubresource.layerCount = 1;
+                blit.dstSubresource.layerCount = (uint32_t)tex->layers;
                 blit.dstOffsets[1].x = nw;
                 blit.dstOffsets[1].y = nh;
                 blit.dstOffsets[1].z = 1;
@@ -2716,12 +2851,14 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         } else {
-            aevk_image_barrier(d, cmd, tex->image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                               VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            aevk_image_barrier_levels(d, cmd, tex->image, 0, 1,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest,
+                                      VK_ACCESS_TRANSFER_WRITE_BIT,
+                                      VK_ACCESS_SHADER_READ_BIT |
+                                      (tex->storage ? VK_ACCESS_SHADER_WRITE_BIT : 0),
+                                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                      (tex->storage ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : 0));
         }
         rc = aevk_submit_once(d, cmd);
     }
@@ -2876,6 +3013,11 @@ AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
     }
     for (uint32_t i = 0; bindings && i < bindings->count; i++) {
         uint32_t bn = bindings->b[i].binding;
+        if (bindings->b[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+            aevk_fail(AEVK_ERR_ARG, "binding %u is a storage texture, which compute passes take and draws do not",
+                      bn);
+            return NULL;
+        }
         if (bindings->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC &&
             bindings->dyn_range[bn] > d->max_uniform_range) {
             aevk_fail(AEVK_ERR_UNSUPPORTED, "binding %u's %u-byte window is past the device's %u",
@@ -3282,7 +3424,7 @@ int aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex) {
     VkDescriptorImageInfo ii = {0};
     ii.sampler = tex->sampler;
     ii.imageView = tex->view;
-    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    ii.imageLayout = tex->storage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w.dstSet = m->set;
@@ -4312,7 +4454,7 @@ AevkCompute* aevk_compute_create(AevkDevice* d, const void* spv, size_t len,
         /* The same declarations a graphics pipeline takes, visible to the
          * compute stage instead. */
         VkDescriptorSetLayoutBinding b[AEVK_MAX_DESC];
-        uint32_t n_ub = 0, n_sb = 0, n_img = 0;
+        uint32_t n_ub = 0, n_sb = 0, n_img = 0, n_si = 0;
         for (uint32_t i = 0; i < bindings->count; i++) {
             if (bindings->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
                 aevk_fail(AEVK_ERR_ARG,
@@ -4326,6 +4468,7 @@ AevkCompute* aevk_compute_create(AevkDevice* d, const void* spv, size_t len,
             c->desc_type[b[i].binding] = b[i].descriptorType;
             if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_ub++;
             else if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) n_sb++;
+            else if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) n_si++;
             else n_img++;
         }
         VkDescriptorSetLayoutCreateInfo dli = {0};
@@ -4335,8 +4478,10 @@ AevkCompute* aevk_compute_create(AevkDevice* d, const void* spv, size_t len,
         r = d->da.vkCreateDescriptorSetLayout(d->device, &dli, NULL, &c->set_layout);
         if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateDescriptorSetLayout failed (%d)", (int)r); goto fail; }
 
-        VkDescriptorPoolSize sizes[3];
+        VkDescriptorPoolSize sizes[4];
         uint32_t nsizes = 0;
+        if (n_si)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                     sizes[nsizes++].descriptorCount = n_si; }
         if (n_ub)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                      sizes[nsizes++].descriptorCount = n_ub; }
         if (n_sb)  { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -4447,7 +4592,7 @@ int aevk_compute_set_texture(AevkCompute* c, int binding, AevkTexture* tex) {
     if (!tex) return aevk_fail(AEVK_ERR_ARG, "texture is null");
     if (tex->dev != c->dev) return aevk_fail(AEVK_ERR_ARG, "the texture belongs to another device");
     if (c->desc_type[binding] != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-        return aevk_fail(AEVK_ERR_ARG, "binding %d is declared as a buffer, not a texture", binding);
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a sampled texture", binding);
     }
     if (!tex->uploaded) {
         return aevk_fail(AEVK_ERR_ARG, "texture has no pixels yet, upload before binding");
@@ -4455,13 +4600,43 @@ int aevk_compute_set_texture(AevkCompute* c, int binding, AevkTexture* tex) {
     VkDescriptorImageInfo ii = {0};
     ii.sampler = tex->sampler;
     ii.imageView = tex->view;
-    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    ii.imageLayout = tex->storage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w.dstSet = c->set;
     w.dstBinding = (uint32_t)binding;
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    c->dev->da.vkUpdateDescriptorSets(c->dev->device, 1, &w, 0, NULL);
+    c->written[binding] = 1;
+    return AEVK_OK;
+}
+
+/* Binds a storage texture for the pass to write (#2388). Draws that sample it
+ * after the dispatch see what it wrote: the dispatch's closing barrier makes
+ * its writes visible to every later shader read. */
+int aevk_compute_set_storage_texture(AevkCompute* c, int binding, AevkTexture* tex) {
+    aevk_clear_error();
+    int rc = aevk_compute_check_binding(c, binding);
+    if (rc != AEVK_OK) return rc;
+    if (!tex) return aevk_fail(AEVK_ERR_ARG, "texture is null");
+    if (tex->dev != c->dev) return aevk_fail(AEVK_ERR_ARG, "the texture belongs to another device");
+    if (c->desc_type[binding] != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+        return aevk_fail(AEVK_ERR_ARG, "binding %d is not declared as a storage texture", binding);
+    }
+    if (!tex->storage) {
+        return aevk_fail(AEVK_ERR_ARG, "the texture was not made with texture_create_storage");
+    }
+    VkDescriptorImageInfo ii = {0};
+    ii.imageView = tex->view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet w = {0};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = c->set;
+    w.dstBinding = (uint32_t)binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w.pImageInfo = &ii;
     c->dev->da.vkUpdateDescriptorSets(c->dev->device, 1, &w, 0, NULL);
     c->written[binding] = 1;
@@ -5735,6 +5910,23 @@ void* aevk_ae_texture_create_3d(void* d, int w, int h, int depth, int linear, in
 }
 
 int aevk_ae_texture_depth(void* tex) { return aevk_texture_depth((const AevkTexture*)tex); }
+
+void* aevk_ae_texture_create_cube(void* d, int size, int mipmapped, int linear) {
+    return (void*)aevk_texture_create_cube((AevkDevice*)d, size, mipmapped, linear);
+}
+void* aevk_ae_texture_create_array(void* d, int w, int h, int layers, int mipmapped, int linear, int repeat) {
+    return (void*)aevk_texture_create_array((AevkDevice*)d, w, h, layers, mipmapped, linear, repeat);
+}
+void* aevk_ae_texture_create_storage(void* d, int w, int h, int depth, int format) {
+    return (void*)aevk_texture_create_storage((AevkDevice*)d, w, h, depth, format);
+}
+int aevk_ae_texture_layers(void* tex) { return aevk_texture_layers((const AevkTexture*)tex); }
+int aevk_ae_bindings_storage_texture(void* b, int binding) {
+    return aevk_bindings_storage_texture((AevkBindings*)b, binding);
+}
+int aevk_ae_compute_set_storage_texture(void* c, int binding, void* tex) {
+    return aevk_compute_set_storage_texture((AevkCompute*)c, binding, (AevkTexture*)tex);
+}
 
 int aevk_ae_material_set_uniform(void* mp, int binding, const void* data, int len) {
     if (len < 0) return aevk_fail(AEVK_ERR_ARG, "negative uniform length");

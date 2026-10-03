@@ -97,6 +97,7 @@
     X(vkCmdCopyBufferToImage) \
     X(vkCmdBlitImage) \
     X(vkCmdCopyImage) \
+    X(vkCmdClearColorImage) \
     X(vkCreateSemaphore) \
     X(vkDestroySemaphore) \
     X(vkCreateComputePipelines) \

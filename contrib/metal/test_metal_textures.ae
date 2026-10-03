@@ -1,0 +1,379 @@
+// contrib.metal: cube maps, 2D arrays, and textures compute passes write
+// (#2387, #2388).
+//
+// Every check reads pixels back through a draw that samples the texture: a
+// face picked from a direction, a layer picked by number, a mip chain built
+// per layer, and what a compute pass wrote.
+//
+// Runs on macOS; elsewhere every case skips. MTL_DEBUG_LAYER=1 adds
+// Metal's API validation.
+
+import std.bytes
+import std.string
+import std.fs
+import contrib.metal
+import std.spec
+
+load_src(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// The seven-float quad layout of the textured vertex shader: x, y, a normal
+// it ignores, u, v. The quad covers the target, UV 0,0 at the top left:
+// Metal's y points up, so the top edge (y 1) has v 0.
+quad_layout() -> ptr {
+    lay = metal.layout_create()
+    _ = metal.layout_binding(lay, 0, 28, metal.PER_VERTEX)
+    _ = metal.layout_attr(lay, 0, 0, metal.FORMAT_R32G32_SFLOAT, 0)
+    _ = metal.layout_attr(lay, 1, 0, metal.FORMAT_R32G32B32_SFLOAT, 8)
+    _ = metal.layout_attr(lay, 2, 0, metal.FORMAT_R32G32_SFLOAT, 20)
+    return lay
+}
+
+write_fullscreen_quad(t: ptr) {
+    _ = metal.verts_reserve_n(t, 4, 7)
+    xs = [-1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    us = [0.0, 1.0, 1.0, 0.0]
+    vs = [1.0, 1.0, 0.0, 0.0]
+    i = 0
+    while i < 4 {
+        f = i * 7
+        _ = metal.verts_set_float(t, f, xs[i])
+        _ = metal.verts_set_float(t, f + 1, ys[i])
+        _ = metal.verts_set_float(t, f + 2, 0.0)
+        _ = metal.verts_set_float(t, f + 3, 0.0)
+        _ = metal.verts_set_float(t, f + 4, 1.0)
+        _ = metal.verts_set_float(t, f + 5, us[i])
+        _ = metal.verts_set_float(t, f + 6, vs[i])
+        i = i + 1
+    }
+    _ = metal.indices_reserve(t, 6)
+    order = [0, 1, 2, 2, 3, 0]
+    k = 0
+    while k < 6 {
+        _ = metal.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
+// A pipeline sampling binding 0 with `frag`, `push` bytes of push constants.
+sampling_pipeline(dev: ptr, t: ptr, tvs: string, tvl: int, fs: string, fl: int, push: int) -> ptr {
+    lay = quad_layout()
+    binds = metal.bindings_create()
+    _ = metal.bindings_texture(binds, 0)
+    pipe = metal.pipeline_create_ex(dev, t, tvs, tvl, fs, fl, lay, push, binds)
+    metal.bindings_destroy(binds)
+    metal.layout_destroy(lay)
+    return pipe
+}
+
+// 0xRRGGBBAA for a byte colour.
+packed(r: int, g: int, b: int, a: int) -> long {
+    return r * 16777216 + g * 65536 + b * 256 + a
+}
+
+near(a: float, b: float) -> int {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    if d < 0.001 { return 1 }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+
+    ready = 0
+    reason = "no Metal device"
+    dev = null
+    tvs = ""
+    tvl = 0
+    tfs = ""
+    tfl = 0
+    cfs = ""
+    cfl = 0
+    afs = ""
+    afl = 0
+    vfs = ""
+    vfl = 0
+    sws = ""
+    swl = 0
+    s3s = ""
+    s3l = 0
+    if metal.available() == 1 {
+        dev = metal.device_create()
+        if dev == null {
+            reason = "device_create failed (${metal.last_error()})"
+        } else {
+            tvs, tvl = load_src("contrib/metal/shaders/textured_vs.metal")
+            tfs, tfl = load_src("contrib/metal/shaders/textured_fs.metal")
+            cfs, cfl = load_src("contrib/metal/shaders/cube_fs.metal")
+            afs, afl = load_src("contrib/metal/shaders/array_fs.metal")
+            vfs, vfl = load_src("contrib/metal/shaders/volume_fs.metal")
+            sws, swl = load_src("contrib/metal/shaders/storage_write_cs.metal")
+            s3s, s3l = load_src("contrib/metal/shaders/storage_write3d_cs.metal")
+            if tvl == 0 || tfl == 0 || cfl == 0 || afl == 0 || vfl == 0 || swl == 0 || s3l == 0 {
+                reason = "Metal shaders not found"
+            } else {
+                ready = 1
+            }
+        }
+    } else {
+        reason = "no Metal device (${metal.last_error()})"
+    }
+
+    spec.describe(fw, "metal: cube maps") {
+        spec.it_when(ready, "picks the face and the texel from a direction", reason) callback {
+            cube = metal.texture_create_cube(dev, 2, 0, 0)
+            spec.assert_true(cube != null, "texture_create_cube (${metal.last_error()})")
+            spec.assert_eq(metal.texture_layers(cube), 6, "six faces")
+            // Face f, texel i (row-major): red f * 40, green i * 60, blue 200.
+            px = bytes.new(96)
+            _ = bytes.set_length(px, 96)
+            f = 0
+            while f < 6 {
+                i = 0
+                while i < 4 {
+                    o = (f * 4 + i) * 4
+                    _ = bytes.set(px, o, f * 40)
+                    _ = bytes.set(px, o + 1, i * 60)
+                    _ = bytes.set(px, o + 2, 200)
+                    _ = bytes.set(px, o + 3, 255)
+                    i = i + 1
+                }
+                f = f + 1
+            }
+            spec.assert_eq(metal.texture_upload(cube, bytes.data(px), 95), metal.ERR_ARG, "a short upload")
+            spec.assert_eq(metal.texture_upload(cube, bytes.data(px), 96), metal.OK, "six faces uploaded")
+            bytes.free(px)
+
+            t = metal.target_create(dev, 2, 2)
+            pipe = sampling_pipeline(dev, t, tvs, tvl, cfs, cfl, 16)
+            spec.assert_true(pipe != null, "the cube pipeline (${metal.last_error()})")
+            write_fullscreen_quad(t)
+            spec.assert_eq(metal.set_texture(pipe, 0, cube), metal.OK, "bound")
+            _ = metal.push_floats(t, 4)
+            // A direction, the face it lands on and the texel there, from the
+            // face-selection table the three APIs share.
+            dx = [1.0, 1.0, -1.0, 0.5, 0.5, 0.5, 0.5]
+            dy = [0.5, -0.5, 0.5, 1.0, -1.0, 0.5, 0.5]
+            dz = [0.5, -0.5, 0.5, 0.5, 0.5, 1.0, -1.0]
+            face = [0, 0, 1, 2, 3, 4, 5]
+            texel = [0, 3, 1, 3, 1, 1, 0]
+            k = 0
+            while k < 7 {
+                _ = metal.push_float(t, 0, dx[k])
+                _ = metal.push_float(t, 1, dy[k])
+                _ = metal.push_float(t, 2, dz[k])
+                _ = metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+                want = packed(face[k] * 40, texel[k] * 60, 200, 255)
+                spec.assert_eq(metal.pixel(t, 0, 0), want,
+                    "direction ${k}: face ${face[k]}, texel ${texel[k]} (got ${metal.pixel(t, 0, 0)})")
+                k = k + 1
+            }
+            spec.assert_true(metal.texture_create_cube(dev, 0, 0, 0) == null, "a cube of size 0")
+
+            metal.pipeline_destroy(pipe)
+            metal.target_destroy(t)
+            metal.texture_destroy(cube)
+        }
+    }
+
+    spec.describe(fw, "metal: 2D arrays") {
+        spec.it_when(ready, "reads the layer asked for", reason) callback {
+            arr = metal.texture_create_array(dev, 2, 2, 3, 0, 0, 0)
+            spec.assert_true(arr != null, "texture_create_array (${metal.last_error()})")
+            spec.assert_eq(metal.texture_layers(arr), 3, "three layers")
+            reds = [255, 0, 0]
+            greens = [0, 255, 0]
+            blues = [0, 0, 255]
+            px = bytes.new(48)
+            _ = bytes.set_length(px, 48)
+            l = 0
+            while l < 3 {
+                i = 0
+                while i < 4 {
+                    o = (l * 4 + i) * 4
+                    _ = bytes.set(px, o, reds[l])
+                    _ = bytes.set(px, o + 1, greens[l])
+                    _ = bytes.set(px, o + 2, blues[l])
+                    _ = bytes.set(px, o + 3, 255)
+                    i = i + 1
+                }
+                l = l + 1
+            }
+            spec.assert_eq(metal.texture_upload(arr, bytes.data(px), 48), metal.OK, "uploaded")
+            bytes.free(px)
+
+            t = metal.target_create(dev, 2, 2)
+            pipe = sampling_pipeline(dev, t, tvs, tvl, afs, afl, 4)
+            write_fullscreen_quad(t)
+            _ = metal.set_texture(pipe, 0, arr)
+            _ = metal.push_floats(t, 1)
+            l = 0
+            while l < 3 {
+                _ = metal.push_float(t, 0, l * 1.0)
+                _ = metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(metal.pixel(t, 1, 1), packed(reds[l], greens[l], blues[l], 255),
+                    "layer ${l} (got ${metal.pixel(t, 1, 1)})")
+                l = l + 1
+            }
+            metal.pipeline_destroy(pipe)
+            metal.target_destroy(t)
+            metal.texture_destroy(arr)
+        }
+
+        spec.it_when(ready, "builds a mip chain for every layer", reason) callback {
+            // Layer 0 a one-texel black and white checkerboard, layer 1 red,
+            // drawn four times smaller: the chain's last level is each
+            // layer's average.
+            arr = metal.texture_create_array(dev, 4, 4, 2, 1, 1, 0)
+            spec.assert_true(arr != null, "a mipmapped array (${metal.last_error()})")
+            px = bytes.new(128)
+            _ = bytes.set_length(px, 128)
+            i = 0
+            while i < 16 {
+                v = 0
+                if ((i / 4) + (i % 4)) % 2 == 0 { v = 255 }
+                _ = bytes.set(px, i * 4, v)
+                _ = bytes.set(px, i * 4 + 1, v)
+                _ = bytes.set(px, i * 4 + 2, v)
+                _ = bytes.set(px, i * 4 + 3, 255)
+                o = 64 + i * 4
+                _ = bytes.set(px, o, 255)
+                _ = bytes.set(px, o + 1, 0)
+                _ = bytes.set(px, o + 2, 0)
+                _ = bytes.set(px, o + 3, 255)
+                i = i + 1
+            }
+            spec.assert_eq(metal.texture_upload(arr, bytes.data(px), 128), metal.OK, "uploaded")
+            bytes.free(px)
+
+            t = metal.target_create(dev, 1, 1)
+            pipe = sampling_pipeline(dev, t, tvs, tvl, afs, afl, 4)
+            write_fullscreen_quad(t)
+            _ = metal.set_texture(pipe, 0, arr)
+            _ = metal.push_floats(t, 1)
+            _ = metal.push_float(t, 0, 0.0)
+            _ = metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+            grey = metal.pixel_value(t, 0, 0, 0)
+            spec.assert_true(grey > 0.4, "layer 0 averages its checkerboard (${grey})")
+            spec.assert_true(grey < 0.6, "to grey (${grey})")
+            _ = metal.push_float(t, 0, 1.0)
+            _ = metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(metal.pixel(t, 0, 0), packed(255, 0, 0, 255), "layer 1 stays red")
+            metal.pipeline_destroy(pipe)
+            metal.target_destroy(t)
+            metal.texture_destroy(arr)
+        }
+    }
+
+    spec.describe(fw, "metal: textures compute passes write") {
+        spec.it_when(ready, "draws what a compute pass wrote into a 2D texture", reason) callback {
+            img = metal.texture_create_storage(dev, 4, 4, 1, metal.FORMAT_R32G32B32A32_SFLOAT)
+            spec.assert_true(img != null, "texture_create_storage (${metal.last_error()})")
+            spec.assert_true(metal.texture_create_storage(dev, 4, 4, 1, 12345) == null, "an unknown format")
+
+            out = metal.target_create_format(dev, 4, 4, metal.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            lay = quad_layout()
+            binds = metal.bindings_create()
+            _ = metal.bindings_texture(binds, 0)
+            _ = metal.bindings_uniform(binds, 1)
+            pipe = metal.pipeline_create_ex(dev, out, tvs, tvl, tfs, tfl, lay, 0, binds)
+            _ = metal.uniform_floats(pipe, 1, 4)
+            j = 0
+            while j < 4 { _ = metal.uniform_float(pipe, 1, j, 1.0); j = j + 1 }
+            write_fullscreen_quad(out)
+            spec.assert_eq(metal.set_texture(pipe, 0, img), metal.OK, "bound for sampling")
+            _ = metal.draw(out, pipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(near(metal.pixel_value(out, 2, 1, 2), 0.0), 1, "zeroed before any pass")
+
+            cb = metal.bindings_create()
+            _ = metal.bindings_storage_texture(cb, 0)
+            spec.assert_true(metal.pipeline_create_ex(dev, out, tvs, tvl, tfs, tfl, lay, 0, cb) == null,
+                "a draw refuses a storage-texture binding")
+            c = metal.compute_create(dev, sws, swl, cb, 0)
+            if c != null { _ = metal.compute_set_group_size(c, 1, 1, 1) }
+            spec.assert_true(c != null, "the writer (${metal.last_error()})")
+            plain = metal.texture_create(dev, 4, 4)
+            spec.assert_eq(metal.compute_set_storage_texture(c, 0, plain), metal.ERR_ARG,
+                "a texture not made for storage")
+            spec.assert_eq(metal.compute_set_texture(c, 0, img), metal.ERR_ARG,
+                "a storage binding is not a sampled one")
+            spec.assert_eq(metal.compute_set_storage_texture(c, 0, img), metal.OK, "bound for writing")
+            spec.assert_eq(metal.dispatch(c, 4, 4, 1), metal.OK, "written (${metal.last_error()})")
+
+            _ = metal.draw(out, pipe, 0.0, 0.0, 0.0, 1.0)
+            ok = 1
+            y = 0
+            while y < 4 {
+                x = 0
+                while x < 4 {
+                    if near(metal.pixel_value(out, x, y, 0), x * 0.25) == 0 { ok = 0 }
+                    if near(metal.pixel_value(out, x, y, 1), y * 0.25) == 0 { ok = 0 }
+                    if near(metal.pixel_value(out, x, y, 2), 0.5) == 0 { ok = 0 }
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            spec.assert_eq(ok, 1, "every texel the pass wrote (2,1: ${metal.pixel_value(out, 2, 1, 0)} ${metal.pixel_value(out, 2, 1, 1)})")
+
+            metal.compute_destroy(c)
+            metal.bindings_destroy(cb)
+            metal.pipeline_destroy(pipe)
+            metal.bindings_destroy(binds)
+            metal.layout_destroy(lay)
+            metal.texture_destroy(plain)
+            metal.target_destroy(out)
+            metal.texture_destroy(img)
+        }
+
+        spec.it_when(ready, "draws what a compute pass wrote into a 3D texture", reason) callback {
+            vol = metal.texture_create_storage(dev, 2, 2, 2, metal.FORMAT_R8G8B8A8_UNORM)
+            spec.assert_true(vol != null, "a 3D storage texture (${metal.last_error()})")
+            spec.assert_eq(metal.texture_depth(vol), 2, "two slices")
+            cb = metal.bindings_create()
+            _ = metal.bindings_storage_texture(cb, 0)
+            c = metal.compute_create(dev, s3s, s3l, cb, 0)
+            if c != null { _ = metal.compute_set_group_size(c, 1, 1, 1) }
+            _ = metal.compute_set_storage_texture(c, 0, vol)
+            spec.assert_eq(metal.dispatch(c, 2, 2, 2), metal.OK, "written (${metal.last_error()})")
+
+            t = metal.target_create(dev, 2, 2)
+            pipe = sampling_pipeline(dev, t, tvs, tvl, vfs, vfl, 4)
+            write_fullscreen_quad(t)
+            _ = metal.set_texture(pipe, 0, vol)
+            _ = metal.push_floats(t, 1)
+            _ = metal.push_float(t, 0, 0.25)
+            _ = metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(metal.pixel(t, 0, 0), packed(0, 0, 0, 255), "slice 0 at 0,0: black")
+            spec.assert_eq(metal.pixel(t, 1, 0), packed(255, 0, 0, 255), "slice 0 at 1,0: red")
+            spec.assert_eq(metal.pixel(t, 0, 1), packed(0, 255, 0, 255), "slice 0 at 0,1: green")
+            _ = metal.push_float(t, 0, 0.75)
+            _ = metal.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+            spec.assert_eq(metal.pixel(t, 0, 0), packed(0, 0, 255, 255), "slice 1 at 0,0: blue")
+            spec.assert_eq(metal.pixel(t, 1, 1), packed(255, 255, 255, 255), "slice 1 at 1,1: white")
+
+            metal.pipeline_destroy(pipe)
+            metal.target_destroy(t)
+            metal.compute_destroy(c)
+            metal.bindings_destroy(cb)
+            metal.texture_destroy(vol)
+        }
+    }
+
+    string.free(tvs)
+    string.free(tfs)
+    string.free(cfs)
+    string.free(afs)
+    string.free(vfs)
+    string.free(sws)
+    string.free(s3s)
+    _rc = spec.run_summary(fw)
+    if dev != null { metal.device_destroy(dev) }
+    return _rc
+}

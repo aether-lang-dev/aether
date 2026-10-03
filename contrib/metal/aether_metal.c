@@ -144,9 +144,12 @@ enum {
     MTL_STORAGE_PRIVATE        = 2,
     MTL_RESOURCE_SHARED        = 0x0,
     MTL_TEXTURE_2D             = 2,
+    MTL_TEXTURE_2D_ARRAY       = 3,
+    MTL_TEXTURE_CUBE           = 5,
     MTL_TEXTURE_2D_MULTISAMPLE = 4,
     MTL_TEXTURE_3D             = 7,
     MTL_USAGE_SHADER_READ      = 1,
+    MTL_USAGE_SHADER_WRITE     = 2,
     MTL_USAGE_RENDER_TARGET    = 4,
 
     MTL_PRIMITIVE_TRIANGLE     = 3,
@@ -1442,7 +1445,7 @@ int aemt_layout_attr(AemtLayout* l, int location, int binding, int format, int o
 }
 
 enum { AEMT_BIND_NONE = 0, AEMT_BIND_UNIFORM, AEMT_BIND_TEXTURE, AEMT_BIND_STORAGE,
-       AEMT_BIND_UNIFORM_DYNAMIC };
+       AEMT_BIND_UNIFORM_DYNAMIC, AEMT_BIND_STORAGE_TEXTURE };
 
 struct AemtBindings {
     int kind[AEMT_MAX_DESC];
@@ -1475,6 +1478,12 @@ int aemt_bindings_uniform(AemtBindings* b, int binding) { return aemt_bindings_a
 int aemt_bindings_texture(AemtBindings* b, int binding) { return aemt_bindings_add(b, binding, AEMT_BIND_TEXTURE); }
 int aemt_bindings_storage(AemtBindings* b, int binding) { return aemt_bindings_add(b, binding, AEMT_BIND_STORAGE); }
 
+/* A texture a compute pass writes (#2388): a texture2d or texture3d with
+ * access::write at [[texture(N)]]. Compute passes only. */
+int aemt_bindings_storage_texture(AemtBindings* b, int binding) {
+    return aemt_bindings_add(b, binding, AEMT_BIND_STORAGE_TEXTURE);
+}
+
 /* A uniform read as a `bytes` window of a caller's buffer, at the offset
  * each draw chooses: the buffer bound at an offset per draw (#2198). */
 int aemt_bindings_uniform_dynamic(AemtBindings* b, int binding, int bytes) {
@@ -1489,10 +1498,21 @@ int aemt_bindings_uniform_dynamic(AemtBindings* b, int binding, int bytes) {
 /* Textures                                                                  */
 /* ------------------------------------------------------------------------ */
 
+/* What a texture is (#2387, #2388). */
+#define AEMT_TEX_2D    0
+#define AEMT_TEX_3D    1
+#define AEMT_TEX_CUBE  2
+#define AEMT_TEX_ARRAY 3
+#define AEMT_MAX_LAYERS 2048   /* an array's layers, on every Mac GPU */
+
 struct AemtTexture {
     AemtDevice* dev;
     int         width, height;
     int         depth;          /* 1 for a 2D texture; slices for a 3D one (#2198) */
+    int         layers;         /* 6 for a cube, an array's layers, 1 otherwise (#2387) */
+    int         kind;           /* AEMT_TEX_* */
+    int         bpp;            /* bytes a texel */
+    int         storage;        /* written by compute passes too (#2388) */
     int         mips;
     id          tex;
     id          sampler;
@@ -1513,37 +1533,49 @@ AemtTexture* aemt_texture_create(AemtDevice* d, int w, int h) {
     return aemt_texture_create_ex(d, w, h, 0, 0, 0);
 }
 
-/* A private RGBA8 3D texture of `depth` slices, one level. Owned. */
-static id aemt_make_texture3d(AemtDevice* d, int w, int h, int depth) {
+/* A private texture of `kind`: 3D with `depth` slices, a cube, an array of
+ * `layers`, or 2D. Owned. */
+static id aemt_make_texture_kind(AemtDevice* d, int w, int h, int depth, int layers, int kind, int mips,
+                                 AemtUInt pixel_format, AemtUInt usage) {
     id desc = mt_new("MTLTextureDescriptor");
     if (!desc) { aemt_fail(AEMT_ERR_OOM, "MTLTextureDescriptor is missing"); return NULL; }
-    MT_SEND(void, AemtUInt)(desc, mt_sel("setTextureType:"), (AemtUInt)MTL_TEXTURE_3D);
-    MT_SEND(void, AemtUInt)(desc, mt_sel("setPixelFormat:"), (AemtUInt)MTL_PIXEL_RGBA8_UNORM);
+    AemtUInt type = kind == AEMT_TEX_3D ? (AemtUInt)MTL_TEXTURE_3D
+                  : kind == AEMT_TEX_CUBE ? (AemtUInt)MTL_TEXTURE_CUBE
+                  : kind == AEMT_TEX_ARRAY ? (AemtUInt)MTL_TEXTURE_2D_ARRAY : (AemtUInt)MTL_TEXTURE_2D;
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setTextureType:"), type);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setPixelFormat:"), pixel_format);
     MT_SEND(void, AemtUInt)(desc, mt_sel("setWidth:"), (AemtUInt)w);
     MT_SEND(void, AemtUInt)(desc, mt_sel("setHeight:"), (AemtUInt)h);
     MT_SEND(void, AemtUInt)(desc, mt_sel("setDepth:"), (AemtUInt)depth);
-    MT_SEND(void, AemtUInt)(desc, mt_sel("setMipmapLevelCount:"), (AemtUInt)1);
-    MT_SEND(void, AemtUInt)(desc, mt_sel("setUsage:"), (AemtUInt)MTL_USAGE_SHADER_READ);
+    /* A cube's six faces are its type's, not array layers. */
+    if (kind == AEMT_TEX_ARRAY) MT_SEND(void, AemtUInt)(desc, mt_sel("setArrayLength:"), (AemtUInt)layers);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setMipmapLevelCount:"), (AemtUInt)mips);
+    MT_SEND(void, AemtUInt)(desc, mt_sel("setUsage:"), usage);
     MT_SEND(void, AemtUInt)(desc, mt_sel("setStorageMode:"), (AemtUInt)MTL_STORAGE_PRIVATE);
     id t = MT_SEND(id, id)(d->device, mt_sel("newTextureWithDescriptor:"), desc);
     mt_release(desc);
-    if (!t) aemt_fail(AEMT_ERR_OOM, "newTextureWithDescriptor (%dx%dx%d 3D texture) failed", w, h, depth);
+    if (!t) aemt_fail(AEMT_ERR_OOM, "newTextureWithDescriptor (%dx%dx%d, %d layers) failed", w, h, depth, layers);
     return t;
 }
 
-/* A 2D texture (`is_3d` 0, `depth` 1) or a 3D one of `depth` slices
- * (#2198): the clouds' tileable noise, a colour grading cube, a volume. */
-static AemtTexture* aemt_texture_make(AemtDevice* d, int w, int h, int depth, int is_3d,
-                                      int mipmapped, int linear_filter, int repeat) {
+/* A texture of `kind` (AEMT_TEX_*), in `format` (an AEMT_FORMAT_*), sampled
+ * or, with `storage`, also written by compute passes (#2387, #2388). */
+static AemtTexture* aemt_texture_make_kind(AemtDevice* d, int w, int h, int depth, int layers, int kind,
+                                           int mipmapped, int linear_filter, int repeat, int format,
+                                           int storage) {
     aemt_clear_error();
     if (!d) { aemt_fail(AEMT_ERR_ARG, "device is null"); return NULL; }
-    if (w <= 0 || h <= 0 || depth <= 0) {
-        aemt_fail(AEMT_ERR_ARG, "texture size %dx%dx%d is not positive", w, h, depth);
+    if (w <= 0 || h <= 0 || depth <= 0 || layers <= 0) {
+        aemt_fail(AEMT_ERR_ARG, "texture size %dx%dx%d with %d layers is not positive", w, h, depth, layers);
         return NULL;
     }
-    int limit = is_3d ? AEMT_MAX_TEXTURE_3D : AEMT_MAX_TEXTURE;
+    int limit = kind == AEMT_TEX_3D ? AEMT_MAX_TEXTURE_3D : AEMT_MAX_TEXTURE;
     if (w > limit || h > limit || depth > limit) {
         aemt_fail(AEMT_ERR_UNSUPPORTED, "texture %dx%dx%d exceeds the Metal limit of %d", w, h, depth, limit);
+        return NULL;
+    }
+    if (layers > AEMT_MAX_LAYERS) {
+        aemt_fail(AEMT_ERR_UNSUPPORTED, "%d layers exceeds the Metal limit of %d", layers, AEMT_MAX_LAYERS);
         return NULL;
     }
     AemtTexture* tex = (AemtTexture*)calloc(1, sizeof(*tex));
@@ -1552,12 +1584,16 @@ static AemtTexture* aemt_texture_make(AemtDevice* d, int w, int h, int depth, in
     tex->width = w;
     tex->height = h;
     tex->depth = depth;
+    tex->layers = layers;
+    tex->kind = kind;
+    tex->bpp = aemt_format_bpp(format);
+    tex->storage = storage;
     tex->mips = mipmapped ? aemt_mip_levels_for(w, h) : 1;
     void* pool = g_mt.pool_push();
     /* Render-target usage too: generating the mip chain renders into it. */
-    tex->tex = is_3d ? aemt_make_texture3d(d, w, h, depth)
-                     : aemt_make_texture(d, w, h, MTL_PIXEL_RGBA8_UNORM, 1, tex->mips,
-                                         MTL_USAGE_SHADER_READ | (tex->mips > 1 ? MTL_USAGE_RENDER_TARGET : 0));
+    tex->tex = aemt_make_texture_kind(d, w, h, depth, layers, kind, tex->mips, aemt_pixel_format(format),
+                                      MTL_USAGE_SHADER_READ | (storage ? MTL_USAGE_SHADER_WRITE : 0) |
+                                      (tex->mips > 1 ? MTL_USAGE_RENDER_TARGET : 0));
     if (tex->tex) {
         id sd = mt_new("MTLSamplerDescriptor");
         AemtUInt filter = linear_filter ? MTL_FILTER_LINEAR : MTL_FILTER_NEAREST;
@@ -1578,12 +1614,60 @@ static AemtTexture* aemt_texture_make(AemtDevice* d, int w, int h, int depth, in
         aemt_texture_destroy(tex);
         return NULL;
     }
+    if (storage) {
+        /* Zeroed by an upload of zeros, so a draw that samples it before any
+         * pass has written reads zeros. */
+        size_t bytes = (size_t)w * (size_t)h * (size_t)depth * (size_t)tex->bpp;
+        void* zeros = calloc(1, bytes);
+        int urc = zeros ? aemt_texture_upload(tex, zeros, bytes) : aemt_fail(AEMT_ERR_OOM, "out of memory");
+        free(zeros);
+        if (urc != AEMT_OK) {
+            aemt_texture_destroy(tex);
+            return NULL;
+        }
+    }
     return tex;
+}
+
+static AemtTexture* aemt_texture_make(AemtDevice* d, int w, int h, int depth, int is_3d,
+                                      int mipmapped, int linear_filter, int repeat) {
+    return aemt_texture_make_kind(d, w, h, depth, 1, is_3d ? AEMT_TEX_3D : AEMT_TEX_2D, mipmapped,
+                                  linear_filter, repeat, AEMT_FORMAT_R8G8B8A8_UNORM, 0);
 }
 
 AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int mipmapped, int linear_filter, int repeat) {
     return aemt_texture_make(d, w, h, 1, 0, mipmapped, linear_filter, repeat);
 }
+
+/* A cube map (#2387): six square faces uploaded +X, -X, +Y, -Y, +Z, -Z,
+ * read through a texturecube. */
+AemtTexture* aemt_texture_create_cube(AemtDevice* d, int size, int mipmapped, int linear_filter) {
+    return aemt_texture_make_kind(d, size, size, 1, 6, AEMT_TEX_CUBE, mipmapped, linear_filter, 0,
+                                  AEMT_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
+/* A 2D array (#2387): `layers` images uploaded one after another, read
+ * through a texture2d_array with the layer as its own argument. */
+AemtTexture* aemt_texture_create_array(AemtDevice* d, int w, int h, int layers, int mipmapped,
+                                       int linear_filter, int repeat) {
+    return aemt_texture_make_kind(d, w, h, 1, layers, AEMT_TEX_ARRAY, mipmapped, linear_filter, repeat,
+                                  AEMT_FORMAT_R8G8B8A8_UNORM, 0);
+}
+
+/* A texture compute passes write (#2388): 2D, or 3D with `depth` above 1,
+ * in FORMAT_R8G8B8A8_UNORM, FORMAT_R16G16B16A16_SFLOAT or
+ * FORMAT_R32G32B32A32_SFLOAT. */
+AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int depth, int format) {
+    if (format != AEMT_FORMAT_R8G8B8A8_UNORM && format != AEMT_FORMAT_R16G16B16A16_SFLOAT &&
+        format != AEMT_FORMAT_R32G32B32A32_SFLOAT) {
+        aemt_fail(AEMT_ERR_ARG, "a storage texture is FORMAT_R8G8B8A8_UNORM, FORMAT_R16G16B16A16_SFLOAT "
+                  "or FORMAT_R32G32B32A32_SFLOAT, not %d", format);
+        return NULL;
+    }
+    return aemt_texture_make_kind(d, w, h, depth, 1, depth > 1 ? AEMT_TEX_3D : AEMT_TEX_2D, 0, 0, 0, format, 1);
+}
+
+int aemt_texture_layers(const AemtTexture* tex) { return tex ? tex->layers : 0; }
 
 /* A 3D texture: `depth` slices of w x h RGBA, read through a texture3d. No
  * mip chain; upload is w * h * depth * 4 bytes, slice by slice. */
@@ -1612,10 +1696,11 @@ void aemt_texture_destroy(AemtTexture* tex) {
 int aemt_texture_upload(AemtTexture* tex, const void* rgba, size_t len) {
     aemt_clear_error();
     if (!tex || !rgba) return aemt_fail(AEMT_ERR_ARG, "texture or pixel data is null");
-    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * 4u;
+    size_t layer_bytes = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth * (size_t)tex->bpp;
+    size_t need = layer_bytes * (size_t)tex->layers;
     if (len < need) {
-        return aemt_fail(AEMT_ERR_ARG, "need %zu bytes for %dx%dx%d RGBA, got %zu",
-                         need, tex->width, tex->height, tex->depth, len);
+        return aemt_fail(AEMT_ERR_ARG, "need %zu bytes for %dx%dx%d with %d layers, got %zu",
+                         need, tex->width, tex->height, tex->depth, tex->layers, len);
     }
     AemtDevice* d = tex->dev;
     void* pool = g_mt.pool_push();
@@ -1629,14 +1714,18 @@ int aemt_texture_upload(AemtTexture* tex, const void* rgba, size_t len) {
     if (!blit) {
         rc = aemt_fail(AEMT_ERR_OOM, "cannot make a blit encoder");
     } else {
-        /* Slice after slice: each image is one slice of a 3D texture. */
+        /* Layer after layer (a cube's faces are its slices 0..5), and within
+         * a 3D texture image after image: each image one depth slice. */
         AemtSize size = { (AemtUInt)tex->width, (AemtUInt)tex->height, (AemtUInt)tex->depth };
         AemtOrigin origin = { 0, 0, 0 };
-        AemtUInt row = (AemtUInt)tex->width * 4u;
-        MT_SEND(void, id, AemtUInt, AemtUInt, AemtUInt, AemtSize, id, AemtUInt, AemtUInt, AemtOrigin)(
-            blit, mt_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:"
-                         "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-            staging, 0, row, row * (AemtUInt)tex->height, size, tex->tex, 0, 0, origin);
+        AemtUInt row = (AemtUInt)tex->width * (AemtUInt)tex->bpp;
+        for (int layer = 0; layer < tex->layers; layer++) {
+            MT_SEND(void, id, AemtUInt, AemtUInt, AemtUInt, AemtSize, id, AemtUInt, AemtUInt, AemtOrigin)(
+                blit, mt_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:"
+                             "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
+                staging, (AemtUInt)((size_t)layer * layer_bytes), row, row * (AemtUInt)tex->height, size,
+                tex->tex, (AemtUInt)layer, 0, origin);
+        }
         if (tex->mips > 1) MT_SEND(void, id)(blit, mt_sel("generateMipmapsForTexture:"), tex->tex);
         MT_SEND(void)(blit, mt_sel("endEncoding"));
         MT_SEND(void)(cb, mt_sel("commit"));
@@ -1809,6 +1898,12 @@ AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const voi
     AemtState none;
     memset(&none, 0, sizeof(none));
     const AemtState* st = state ? state : &none;
+    for (int i = 0; bindings && i < AEMT_MAX_DESC; i++) {
+        if (bindings->kind[i] == AEMT_BIND_STORAGE_TEXTURE) {
+            aemt_fail(AEMT_ERR_ARG, "binding %d is a storage texture, which compute passes take and draws do not", i);
+            return NULL;
+        }
+    }
     if (st->depth_set && !t->has_depth) {
         aemt_fail(AEMT_ERR_ARG, "the state sets a depth test, but the target was created without depth");
         return NULL;
@@ -2617,13 +2712,29 @@ int aemt_compute_set_buffer(AemtCompute* c, int binding, AemtBuffer* buf) {
     return AEMT_OK;
 }
 
+/* Binds a storage texture for the pass to write (#2388). Metal tracks the
+ * hazard between the pass that writes it and the draws that sample it. */
+int aemt_compute_set_storage_texture(AemtCompute* c, int binding, AemtTexture* tex) {
+    aemt_clear_error();
+    int rc = aemt_compute_binding(c, binding);
+    if (rc != AEMT_OK) return rc;
+    if (!tex) return aemt_fail(AEMT_ERR_ARG, "texture is null");
+    if (c->kind[binding] != AEMT_BIND_STORAGE_TEXTURE) {
+        return aemt_fail(AEMT_ERR_ARG, "binding %d is not declared as a storage texture", binding);
+    }
+    if (!tex->storage) return aemt_fail(AEMT_ERR_ARG, "the texture was not made with texture_create_storage");
+    c->args.tex[binding] = tex;
+    c->args.set[binding] = 1;
+    return AEMT_OK;
+}
+
 int aemt_compute_set_texture(AemtCompute* c, int binding, AemtTexture* tex) {
     aemt_clear_error();
     int rc = aemt_compute_binding(c, binding);
     if (rc != AEMT_OK) return rc;
     if (!tex) return aemt_fail(AEMT_ERR_ARG, "texture is null");
     if (c->kind[binding] != AEMT_BIND_TEXTURE) {
-        return aemt_fail(AEMT_ERR_ARG, "binding %d is declared as a buffer, not a texture", binding);
+        return aemt_fail(AEMT_ERR_ARG, "binding %d is not declared as a sampled texture", binding);
     }
     if (!tex->uploaded) return aemt_fail(AEMT_ERR_ARG, "texture has no pixels yet, upload before binding");
     c->args.tex[binding] = tex;
@@ -2681,6 +2792,8 @@ int aemt_dispatch_async(AemtCompute* c, int gx, int gy, int gz) {
         if (c->kind[i] == AEMT_BIND_TEXTURE) {
             MT_SEND(void, id, AemtUInt)(enc, mt_sel("setTexture:atIndex:"), c->args.tex[i]->tex, (AemtUInt)i);
             MT_SEND(void, id, AemtUInt)(enc, mt_sel("setSamplerState:atIndex:"), c->args.tex[i]->sampler, (AemtUInt)i);
+        } else if (c->kind[i] == AEMT_BIND_STORAGE_TEXTURE) {
+            MT_SEND(void, id, AemtUInt)(enc, mt_sel("setTexture:atIndex:"), c->args.tex[i]->tex, (AemtUInt)i);
         } else {
             MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setBuffer:offset:atIndex:"),
                                                   c->args.buf[i]->buf, 0, (AemtUInt)i);
@@ -3235,6 +3348,20 @@ int    aemt_pipeline_set_target_depth_compare(AemtPipeline* p, int b, AemtTarget
     (void)p; (void)b; (void)t; (void)op; return aemt_no();
 }
 int    aemt_target_depth_linear(const AemtTarget* t) { (void)t; return 0; }
+AemtTexture* aemt_texture_create_cube(AemtDevice* d, int s, int m, int l) {
+    (void)d; (void)s; (void)m; (void)l; aemt_no(); return NULL;
+}
+AemtTexture* aemt_texture_create_array(AemtDevice* d, int w, int h, int n, int m, int l, int r) {
+    (void)d; (void)w; (void)h; (void)n; (void)m; (void)l; (void)r; aemt_no(); return NULL;
+}
+AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int z, int f) {
+    (void)d; (void)w; (void)h; (void)z; (void)f; aemt_no(); return NULL;
+}
+int    aemt_texture_layers(const AemtTexture* t) { (void)t; return 0; }
+int    aemt_bindings_storage_texture(AemtBindings* b, int n) { (void)b; (void)n; return aemt_no(); }
+int    aemt_compute_set_storage_texture(AemtCompute* c, int b, AemtTexture* t) {
+    (void)c; (void)b; (void)t; return aemt_no();
+}
 double aemt_compute_gpu_ms(const AemtCompute* c) { (void)c; return -1.0; }
 int    aemt_batch_count(const AemtTarget* t) { (void)t; return 0; }
 int    aemt_draw(AemtTarget* t, AemtPipeline* p, AemtMaterial* m, float r, float g, float b, float a) {
@@ -3518,6 +3645,22 @@ int   aemt_ae_material_set_target_depth_compare(void* m, int binding, void* t, i
     return aemt_material_set_target_depth_compare((AemtMaterial*)m, binding, (AemtTarget*)t, op);
 }
 int   aemt_ae_target_depth_linear(void* t) { return aemt_target_depth_linear((const AemtTarget*)t); }
+void* aemt_ae_texture_create_cube(void* d, int size, int mipmapped, int linear) {
+    return (void*)aemt_texture_create_cube((AemtDevice*)d, size, mipmapped, linear);
+}
+void* aemt_ae_texture_create_array(void* d, int w, int h, int layers, int mipmapped, int linear, int repeat) {
+    return (void*)aemt_texture_create_array((AemtDevice*)d, w, h, layers, mipmapped, linear, repeat);
+}
+void* aemt_ae_texture_create_storage(void* d, int w, int h, int depth, int format) {
+    return (void*)aemt_texture_create_storage((AemtDevice*)d, w, h, depth, format);
+}
+int   aemt_ae_texture_layers(void* tex) { return aemt_texture_layers((const AemtTexture*)tex); }
+int   aemt_ae_bindings_storage_texture(void* b, int binding) {
+    return aemt_bindings_storage_texture((AemtBindings*)b, binding);
+}
+int   aemt_ae_compute_set_storage_texture(void* c, int binding, void* tex) {
+    return aemt_compute_set_storage_texture((AemtCompute*)c, binding, (AemtTexture*)tex);
+}
 
 void* aemt_ae_state_create(void) { return (void*)aemt_state_create(); }
 void  aemt_ae_state_destroy(void* s) { aemt_state_destroy((AemtState*)s); }

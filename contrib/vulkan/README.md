@@ -312,6 +312,19 @@ not by address. A pipeline destroyed and another made in its memory would
 otherwise pass for the same one, and the cached frame would submit commands
 that name destroyed objects.
 
+## Cube maps, arrays and storage textures
+
+A cube map is a `CUBE_COMPATIBLE` image of six layers with a `CUBE` view,
+and an array is a `2D_ARRAY` view. Uploads copy every layer in one region,
+and the mip chain is blitted level by level across all layers at once.
+
+A storage texture has `STORAGE` usage, checked against the format's
+`STORAGE_IMAGE` feature. It is cleared to zero when made and stays in
+`GENERAL`, the one layout both a compute pass writing it and a draw
+sampling it can use. The dispatch's existing memory barriers then order the
+compute writes before later shader reads. A storage binding is a
+`STORAGE_IMAGE` descriptor, which graphics pipelines refuse.
+
 ## Colour formats and image files
 
 `target_create` renders to RGBA8 UNORM. `target_create_format` takes any of
