@@ -515,7 +515,10 @@ main() {
         spec.it_when(ready, "filters anisotropically", reason) callback {
             // One-texel vertical stripes, squeezed 16:1 vertically: an
             // isotropic sampler picks the level the squeeze calls for and
-            // reads grey; an anisotropic one keeps the stripes.
+            // reads grey; an anisotropic one keeps the stripes. How sharp
+            // is the implementation's (the API leaves the approximation to
+            // it: a GPU keeps nearly all the contrast, lavapipe about a
+            // fifth), so the check is that it keeps clearly more.
             n = 64 * 64 * 4
             stripes = bytes.new(n)
             _ = bytes.set_length(stripes, n)
@@ -540,14 +543,15 @@ main() {
             bytes.free(stripes)
             a = sampled(dev, iso, 64, 4, 10, 2, 0, tvs, tvl, tfs, tfl)
             b = sampled(dev, iso, 64, 4, 11, 2, 0, tvs, tvl, tfs, tfl)
-            d = a - b
-            if d < 0.0 { d = 0.0 - d }
-            spec.assert_true(d < 0.2, "isotropic: the stripes blur to grey (${a}, ${b})")
+            blur = a - b
+            if blur < 0.0 { blur = 0.0 - blur }
+            spec.assert_true(blur < 0.05, "isotropic: the stripes blur to grey (${a}, ${b})")
             a = sampled(dev, ani, 64, 4, 10, 2, 0, tvs, tvl, tfs, tfl)
             b = sampled(dev, ani, 64, 4, 11, 2, 0, tvs, tvl, tfs, tfl)
-            d = a - b
-            if d < 0.0 { d = 0.0 - d }
-            spec.assert_true(d > 0.4, "anisotropic: the stripes stay (${a}, ${b})")
+            kept = a - b
+            if kept < 0.0 { kept = 0.0 - kept }
+            println("    (stripe contrast: ${blur} isotropic, ${kept} anisotropic)")
+            spec.assert_true(kept > blur + 0.15, "anisotropic: the stripes stay (${a}, ${b})")
             metal.texture_destroy(ani)
             metal.texture_destroy(iso)
         }
