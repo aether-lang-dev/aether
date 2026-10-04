@@ -48,6 +48,10 @@ struct AemtState {
     int stencil_ref;
     int stencil_pass, stencil_fail, stencil_depth_fail;
     int stencil_read, stencil_write;
+    /* The channels a draw writes (#2411): COLOR_* bits, Vulkan's order,
+     * which MTLColorWriteMask reverses; all four unless set. */
+    int color_mask_set;
+    int color_mask;
 };
 
 AemtState* aemt_state_create(void) {
@@ -105,6 +109,18 @@ int aemt_state_stencil(AemtState* s, int compare, int ref, int pass_op, int fail
     s->stencil_depth_fail = depth_fail_op;
     s->stencil_read = read_mask;
     s->stencil_write = write_mask;
+    return AEMT_OK;
+}
+
+/* The channels a draw writes (#2411), as contrib.vulkan's. */
+int aemt_state_color_mask(AemtState* s, int mask) {
+    g_err[0] = '\0';
+    if (!s) return aemt_fail(AEMT_ERR_ARG, "state is null");
+    if (mask < 0 || mask > 15) {
+        return aemt_fail(AEMT_ERR_ARG, "a colour mask is COLOR_* bits, 0..15, not %d", mask);
+    }
+    s->color_mask_set = 1;
+    s->color_mask = mask;
     return AEMT_OK;
 }
 
@@ -722,6 +738,9 @@ typedef struct {
     /* The draw's own stencil reference (#2399); unset, the pipeline's. */
     int           stencil_ref_set;
     uint32_t      stencil_ref;
+    /* A pipeline of the draw's own (#2411), made for the same target; NULL
+     * draws with the frame's. */
+    AemtPipeline* pipe;
 } AemtDrawItem;
 
 /* The bytes of one indirect draw command, indexed and not: the layouts of
@@ -761,6 +780,11 @@ struct AemtTarget {
     int            cube;
     int            layer;
     id             color_array;
+    /* A layered target's depth read as a texture (#2412): a cube's depth is
+     * a cube texture too, with `depth_array` its 2D-array view.
+     * `layers_fresh` until the first frame has cleared every slice. */
+    id             depth_array;
+    int            layers_fresh;
     id             color;          /* single-sample: resolved into, read back, presented */
     id             msaa;
     /* Colour attachments past the first (#2386): a target_create_mrt
@@ -935,6 +959,8 @@ fail:
 static void aemt_target_free_images(AemtTarget* t) {
     mt_release(t->color_array);
     t->color_array = NULL;
+    mt_release(t->depth_array);
+    t->depth_array = NULL;
     mt_release(t->color);
     mt_release(t->msaa);
     mt_release(t->depth);
@@ -985,11 +1011,32 @@ static int aemt_target_make_layered(AemtTarget* t) {
             t->pixel_format, (AemtUInt)MTL_TEXTURE_2D_ARRAY, levels, slices);
         if (!t->color_array) return aemt_fail(AEMT_ERR_OOM, "newTextureViewWithPixelFormat failed");
     }
-    if (t->has_depth) {
-        t->depth = aemt_make_layered_texture(d, t->width, t->height, t->depth_format, t->layers, 0,
-                                             MTL_USAGE_RENDER_TARGET);
+    if (t->samples > 1) {
+        /* Multisampled (#2412): one image each frame renders into and
+         * resolves into the slice drawn, and a depth to match. */
+        t->msaa = aemt_make_texture(d, t->width, t->height, t->pixel_format, t->samples, 1, MTL_USAGE_RENDER_TARGET);
+        if (!t->msaa) return AEMT_ERR_OOM;
+        if (t->has_depth) {
+            t->depth = aemt_make_texture(d, t->width, t->height, t->depth_format, t->samples, 1,
+                                         MTL_USAGE_RENDER_TARGET);
+            if (!t->depth) return AEMT_ERR_OOM;
+        }
+    } else if (t->has_depth) {
+        /* Layered like the colour, a cube for a cube, and readable once a
+         * material samples it (#2412). */
+        t->depth = aemt_make_layered_texture(d, t->width, t->height, t->depth_format, t->layers, t->cube,
+                                             MTL_USAGE_RENDER_TARGET |
+                                             (t->depth_sampled ? MTL_USAGE_SHADER_READ : 0));
         if (!t->depth) return AEMT_ERR_OOM;
+        if (t->cube && t->depth_sampled) {
+            AemtRange levels = { 0, 1 }, slices = { 0, 6 };
+            t->depth_array = MT_SEND(id, AemtUInt, AemtUInt, AemtRange, AemtRange)(
+                t->depth, mt_sel("newTextureViewWithPixelFormat:textureType:levels:slices:"),
+                t->depth_format, (AemtUInt)MTL_TEXTURE_2D_ARRAY, levels, slices);
+            if (!t->depth_array) return aemt_fail(AEMT_ERR_OOM, "newTextureViewWithPixelFormat failed");
+        }
     }
+    t->layers_fresh = 1;
     return AEMT_OK;
 }
 
@@ -1098,12 +1145,18 @@ AemtTarget* aemt_target_create_format(AemtDevice* d, int width, int height, int 
 /* A target of `layers` slices (#2399), as contrib.vulkan's. */
 AemtTarget* aemt_target_create_layered(AemtDevice* d, int width, int height, int layers, int format,
                                        int want_depth, int cube) {
+    return aemt_target_create_layered_ex(d, width, height, layers, format, want_depth, cube, 1);
+}
+
+/* A layered target multisampled `samples` times (#2412). */
+AemtTarget* aemt_target_create_layered_ex(AemtDevice* d, int width, int height, int layers, int format,
+                                          int want_depth, int cube, int samples) {
     if (layers < 1) {
         aemt_clear_error();
         aemt_fail(AEMT_ERR_ARG, "a layered target has at least one layer, not %d", layers);
         return NULL;
     }
-    return aemt_target_create_mrt_impl(d, width, height, 1, &format, want_depth, 1, layers, cube ? 1 : 0);
+    return aemt_target_create_mrt_impl(d, width, height, 1, &format, want_depth, samples, layers, cube ? 1 : 0);
 }
 
 /* A target with `count` colour attachments, 1..4, each in its own format
@@ -2332,6 +2385,7 @@ struct AemtPipeline {
     int           stream_instanced[AEMT_MAX_BINDINGS];
     AemtMaterial* def;
     uint32_t      stencil_ref;   /* the state's, unless a draw has its own (#2399) */
+    AemtTarget*   target;        /* the target it was made for (#2411) */
 };
 
 AemtPipeline* aemt_pipeline_create(AemtDevice* d, AemtTarget* t, const void* vs, size_t vs_len,
@@ -2428,6 +2482,7 @@ AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const voi
     AemtPipeline* p = (AemtPipeline*)calloc(1, sizeof(*p));
     if (!p) { aemt_fail(AEMT_ERR_OOM, "out of memory"); return NULL; }
     p->dev = d;
+    p->target = t;
     p->push_bytes = push_bytes;
     p->cull = st->cull == 1 ? MTL_CULL_BACK : st->cull == 2 ? MTL_CULL_FRONT : MTL_CULL_NONE;
     p->prim = st->topology == 1 ? (AemtUInt)MTL_PRIMITIVE_TRIANGLE_STRIP
@@ -2466,6 +2521,13 @@ AemtPipeline* aemt_pipeline_create_state(AemtDevice* d, AemtTarget* t, const voi
             id ca = mt_at(MT_SEND(id)(desc, mt_sel("colorAttachments")), (AemtUInt)c);
             MT_SEND(void, AemtUInt)(ca, mt_sel("setPixelFormat:"),
                                     c == 0 ? t->pixel_format : aemt_pixel_format(t->xformat[c - 1]));
+            if (st->color_mask_set) {
+                /* COLOR_* runs red 1 to alpha 8; MTLColorWriteMask runs red
+                 * 8 to alpha 1 (#2411). */
+                int m = st->color_mask;
+                AemtUInt wm = (AemtUInt)(((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3));
+                MT_SEND(void, AemtUInt)(ca, mt_sel("setWriteMask:"), wm);
+            }
             if (st->blend) {
                 /* 1 alpha, 2 premultiplied, 3 additive (#2385); the
                  * operations are Metal's default, add. */
@@ -2712,6 +2774,36 @@ int aemt_material_set_target_cube(AemtMaterial* m, int binding, AemtTarget* tg) 
     return aemt_material_set_target_view(m, binding, tg, 0, 0, 0, 2);
 }
 
+/* A layered target's depth as a depth2d_array or a cube's as a depthcube
+ * (#2412): raw with `op` 0, or through a comparison sampler. */
+static int aemt_material_set_target_depth_view(AemtMaterial* m, int binding, AemtTarget* tg, int op, int view) {
+    if (op < 0 || op >= AEMT_COMPARE_OPS) {
+        aemt_clear_error();
+        return aemt_fail(AEMT_ERR_ARG, "op %d is not 0 (raw) or COMPARE_LESS..COMPARE_NEVER (1..8)", op);
+    }
+    return aemt_material_set_target_view(m, binding, tg, 1, op, 0, view);
+}
+
+int aemt_material_set_target_depth_array(AemtMaterial* m, int binding, AemtTarget* tg, int op) {
+    return aemt_material_set_target_depth_view(m, binding, tg, op, 1);
+}
+
+int aemt_material_set_target_depth_cube(AemtMaterial* m, int binding, AemtTarget* tg, int op) {
+    return aemt_material_set_target_depth_view(m, binding, tg, op, 2);
+}
+
+int aemt_pipeline_set_target_depth_array(AemtPipeline* p, int binding, AemtTarget* tg, int op) {
+    aemt_clear_error();
+    if (!p || !p->def) return aemt_fail(AEMT_ERR_ARG, "pipeline is null or has no bindings");
+    return aemt_material_set_target_depth_array(p->def, binding, tg, op);
+}
+
+int aemt_pipeline_set_target_depth_cube(AemtPipeline* p, int binding, AemtTarget* tg, int op) {
+    aemt_clear_error();
+    if (!p || !p->def) return aemt_fail(AEMT_ERR_ARG, "pipeline is null or has no bindings");
+    return aemt_material_set_target_depth_cube(p->def, binding, tg, op);
+}
+
 int aemt_pipeline_set_target_array(AemtPipeline* p, int binding, AemtTarget* tg) {
     aemt_clear_error();
     if (!p || !p->def) return aemt_fail(AEMT_ERR_ARG, "pipeline is null or has no bindings");
@@ -2760,6 +2852,18 @@ int aemt_target_set_layer(AemtTarget* t, int layer) {
 }
 
 int aemt_target_layers(const AemtTarget* t) { return t ? t->layers : 0; }
+
+/* Draw `item`'s own pipeline (#2411), as contrib.vulkan's. */
+int aemt_batch_set_pipeline(AemtTarget* t, int item, AemtPipeline* p) {
+    aemt_clear_error();
+    if (!t) return aemt_fail(AEMT_ERR_ARG, "target is null");
+    if (p && p->target != t) return aemt_fail(AEMT_ERR_ARG, "the pipeline was made for another target");
+    if (item < 0 || item >= t->batch_count) {
+        return aemt_fail(AEMT_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    t->batch[item].pipe = p;
+    return AEMT_OK;
+}
 
 /* A target's depth read through a comparison sampler (#2373): a shadow map.
  * The shader (depth2d::sample_compare) gets the fraction of the footprint
@@ -2839,8 +2943,13 @@ static void aemt_bind_render(id enc, const int* kind, const AemtMaterial* m, con
                 int a = m->tgt_att[i];
                 /* A cube target's colour is the cube; its array view is
                  * `color_array` (#2399). */
-                tex = m->tgt_view[i] == 1 && m->tgt[i]->cube ? m->tgt[i]->color_array
-                    : m->tgt_depth[i] ? m->tgt[i]->depth : a ? m->tgt[i]->xcolor[a - 1] : m->tgt[i]->color;
+                const AemtTarget* tg = m->tgt[i];
+                int as_array = m->tgt_view[i] == 1 && tg->cube;
+                if (m->tgt_depth[i]) {
+                    tex = as_array ? tg->depth_array : tg->depth;
+                } else {
+                    tex = as_array ? tg->color_array : a ? tg->xcolor[a - 1] : tg->color;
+                }
                 sampler = m->tgt_cmp[i] ? m->tgt[i]->compare_sampler[m->tgt_cmp[i]]
                         : m->tgt_depth[i] ? m->tgt[i]->depth_sampler
                         : a ? m->tgt[i]->xsampler[a - 1] : m->tgt[i]->sampler;
@@ -2900,12 +3009,70 @@ static void aemt_draw_item(AemtTarget* t, id enc, const AemtDrawItem* it, AemtUI
     }
 }
 
+/* Sets a pipeline on the frame's encoder with what it reads besides its
+ * bindings: its depth-stencil state, its cull mode (the encoder's in Metal,
+ * not the pipeline's, #2385), the push block sized to its range so a caller
+ * who set fewer bytes still gets a defined block, and the vertex streams. */
+static void aemt_record_pipeline(AemtTarget* t, id enc, AemtPipeline* p) {
+    MT_SEND(void, id)(enc, mt_sel("setRenderPipelineState:"), p->pso);
+    if (p->depth_state) MT_SEND(void, id)(enc, mt_sel("setDepthStencilState:"), p->depth_state);
+    MT_SEND(void, AemtUInt)(enc, mt_sel("setCullMode:"), (AemtUInt)p->cull);
+    if (p->push_bytes > 0) {
+        unsigned char block[AEMT_MAX_PUSH];
+        memset(block, 0, sizeof(block));
+        int n = t->push_size < p->push_bytes ? t->push_size : p->push_bytes;
+        if (n) memcpy(block, t->push, (size_t)n);
+        MT_SEND(void, const void*, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBytes:length:atIndex:"),
+                                                       block, (AemtUInt)p->push_bytes, (AemtUInt)AEMT_PUSH_INDEX);
+        MT_SEND(void, const void*, AemtUInt, AemtUInt)(enc, mt_sel("setFragmentBytes:length:atIndex:"),
+                                                       block, (AemtUInt)p->push_bytes, (AemtUInt)AEMT_PUSH_INDEX);
+    }
+    if (p->vertex_input) {
+        MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"),
+                                              t->vbuf, 0, (AemtUInt)AEMT_STREAM_BASE);
+    }
+    /* The caller's streams past binding 0, which the draw check made sure
+     * are bound (#2198). */
+    for (int sb = 1; sb < AEMT_MAX_BINDINGS; sb++) {
+        if (!p->stream_declared[sb]) continue;
+        MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"),
+                                              t->streams[sb]->buf, 0, (AemtUInt)(AEMT_STREAM_BASE + sb));
+    }
+}
+
 /* Records one frame into a new command buffer: the pass (cleared, drawn,
  * resolved when multisampled) and the readback copy. Autoreleased. */
 static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMaterial* mat, const float clear[4]) {
     AemtDevice* d = t->dev;
     id cb = MT_SEND(id)(d->queue, mt_sel("commandBuffer"));
     if (!cb) { aemt_fail(AEMT_ERR_OOM, "cannot make a command buffer"); return NULL; }
+    if (t->layered && t->layers_fresh) {
+        /* A new layered target's first frame clears every slice: colour 0,
+         * and depth at the far plane, so a slice never drawn reads defined
+         * values (#2412). A pass a slice, each only a clear. */
+        AemtClearColor zero = { 0.0, 0.0, 0.0, 0.0 };
+        for (int s = 0; s < t->layers; s++) {
+            id cpd = MT_SEND(id)(mt_cls("MTLRenderPassDescriptor"), mt_sel("renderPassDescriptor"));
+            id cca = mt_at(MT_SEND(id)(cpd, mt_sel("colorAttachments")), 0);
+            MT_SEND(void, id)(cca, mt_sel("setTexture:"), t->color);
+            MT_SEND(void, AemtUInt)(cca, mt_sel("setSlice:"), (AemtUInt)s);
+            MT_SEND(void, AemtUInt)(cca, mt_sel("setLoadAction:"), (AemtUInt)MTL_LOAD_CLEAR);
+            MT_SEND(void, AemtClearColor)(cca, mt_sel("setClearColor:"), zero);
+            MT_SEND(void, AemtUInt)(cca, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_STORE);
+            if (t->has_depth && t->samples == 1) {
+                id cda = MT_SEND(id)(cpd, mt_sel("depthAttachment"));
+                MT_SEND(void, id)(cda, mt_sel("setTexture:"), t->depth);
+                MT_SEND(void, AemtUInt)(cda, mt_sel("setSlice:"), (AemtUInt)s);
+                MT_SEND(void, AemtUInt)(cda, mt_sel("setLoadAction:"), (AemtUInt)MTL_LOAD_CLEAR);
+                MT_SEND(void, double)(cda, mt_sel("setClearDepth:"), 1.0);
+                MT_SEND(void, AemtUInt)(cda, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_STORE);
+            }
+            id cenc = MT_SEND(id, id)(cb, mt_sel("renderCommandEncoderWithDescriptor:"), cpd);
+            if (!cenc) { aemt_fail(AEMT_ERR_OOM, "cannot make a render encoder"); return NULL; }
+            MT_SEND(void)(cenc, mt_sel("endEncoding"));
+        }
+        t->layers_fresh = 0;
+    }
     id rpd = MT_SEND(id)(mt_cls("MTLRenderPassDescriptor"), mt_sel("renderPassDescriptor"));
     id ca = mt_at(MT_SEND(id)(rpd, mt_sel("colorAttachments")), 0);
     AemtClearColor cc = { clear[0], clear[1], clear[2], clear[3] };
@@ -2915,6 +3082,8 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
         MT_SEND(void, id)(ca, mt_sel("setTexture:"), t->msaa);
         MT_SEND(void, id)(ca, mt_sel("setResolveTexture:"), t->color);
         MT_SEND(void, AemtUInt)(ca, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_RESOLVE);
+        /* Into the slice drawn, for a layered target (#2412). */
+        if (t->layered) MT_SEND(void, AemtUInt)(ca, mt_sel("setResolveSlice:"), (AemtUInt)t->layer);
     } else {
         MT_SEND(void, id)(ca, mt_sel("setTexture:"), t->color);
         MT_SEND(void, AemtUInt)(ca, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_STORE);
@@ -2944,7 +3113,7 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
         /* Kept only when a later pass samples it (#2198). */
         MT_SEND(void, AemtUInt)(da, mt_sel("setStoreAction:"),
                                 t->depth_sampled ? (AemtUInt)MTL_STORE_STORE : (AemtUInt)MTL_STORE_DONT_CARE);
-        if (t->layered) MT_SEND(void, AemtUInt)(da, mt_sel("setSlice:"), (AemtUInt)t->layer);
+        if (t->layered && t->samples == 1) MT_SEND(void, AemtUInt)(da, mt_sel("setSlice:"), (AemtUInt)t->layer);
         if (t->has_stencil) {
             /* The stencil clears to 0 with the depth (#2399). */
             id sa = MT_SEND(id)(rpd, mt_sel("stencilAttachment"));
@@ -2952,7 +3121,7 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
             MT_SEND(void, AemtUInt)(sa, mt_sel("setLoadAction:"), (AemtUInt)MTL_LOAD_CLEAR);
             MT_SEND(void, uint32_t)(sa, mt_sel("setClearStencil:"), 0u);
             MT_SEND(void, AemtUInt)(sa, mt_sel("setStoreAction:"), (AemtUInt)MTL_STORE_DONT_CARE);
-            if (t->layered) MT_SEND(void, AemtUInt)(sa, mt_sel("setSlice:"), (AemtUInt)t->layer);
+            if (t->layered && t->samples == 1) MT_SEND(void, AemtUInt)(sa, mt_sel("setSlice:"), (AemtUInt)t->layer);
         }
     }
     id enc = MT_SEND(id, id)(cb, mt_sel("renderCommandEncoderWithDescriptor:"), rpd);
@@ -2960,40 +3129,24 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
     if (p && t->vertex_count > 0) {
         AemtViewport vp = { 0.0, 0.0, (double)t->width, (double)t->height, 0.0, 1.0 };
         MT_SEND(void, AemtViewport)(enc, mt_sel("setViewport:"), vp);
-        MT_SEND(void, id)(enc, mt_sel("setRenderPipelineState:"), p->pso);
-        if (p->depth_state) MT_SEND(void, id)(enc, mt_sel("setDepthStencilState:"), p->depth_state);
-        /* Culling is the encoder's in Metal, not the pipeline's (#2385).
-         * Metal's window coordinates run down like the screen's, so its
+        /* Metal's window coordinates run down like the screen's, so its
          * counter-clockwise is the screen's. */
         MT_SEND(void, AemtUInt)(enc, mt_sel("setFrontFacingWinding:"), (AemtUInt)MTL_WINDING_CCW);
-        MT_SEND(void, AemtUInt)(enc, mt_sel("setCullMode:"), (AemtUInt)p->cull);
-        if (p->push_bytes > 0) {
-            unsigned char block[AEMT_MAX_PUSH];
-            memset(block, 0, sizeof(block));
-            int n = t->push_size < p->push_bytes ? t->push_size : p->push_bytes;
-            if (n) memcpy(block, t->push, (size_t)n);
-            MT_SEND(void, const void*, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBytes:length:atIndex:"),
-                                                           block, (AemtUInt)p->push_bytes, (AemtUInt)AEMT_PUSH_INDEX);
-            MT_SEND(void, const void*, AemtUInt, AemtUInt)(enc, mt_sel("setFragmentBytes:length:atIndex:"),
-                                                           block, (AemtUInt)p->push_bytes, (AemtUInt)AEMT_PUSH_INDEX);
-        }
-        if (p->vertex_input) {
-            MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"),
-                                                  t->vbuf, 0, (AemtUInt)AEMT_STREAM_BASE);
-        }
-        /* The caller's streams past binding 0, which the draw check made
-         * sure are bound (#2198). */
-        for (int sb = 1; sb < AEMT_MAX_BINDINGS; sb++) {
-            if (!p->stream_declared[sb]) continue;
-            MT_SEND(void, id, AemtUInt, AemtUInt)(enc, mt_sel("setVertexBuffer:offset:atIndex:"),
-                                                  t->streams[sb]->buf, 0, (AemtUInt)(AEMT_STREAM_BASE + sb));
-        }
+        aemt_record_pipeline(t, enc, p);
         AemtMaterial* bind_mat = mat ? mat : p->def;
         if (t->batch_count > 0) {
+            AemtPipeline* bound = p;
             for (int i = 0; i < t->batch_count; i++) {
                 AemtDrawItem* it = &t->batch[i];
-                AemtMaterial* im = it->mat ? it->mat : bind_mat;
-                if (im) aemt_bind_render(enc, p->kind, im, it->offsets);
+                /* A draw's own pipeline is set for it, and the frame's again
+                 * after it (#2411). */
+                AemtPipeline* ip = it->pipe ? it->pipe : p;
+                if (ip != bound) {
+                    aemt_record_pipeline(t, enc, ip);
+                    bound = ip;
+                }
+                AemtMaterial* im = it->mat ? it->mat : it->pipe ? ip->def : bind_mat;
+                if (im) aemt_bind_render(enc, ip->kind, im, it->offsets);
                 /* Each draw's own scissor and viewport, or the whole target
                  * (#2398). */
                 AemtViewport ivp = vp;
@@ -3009,8 +3162,8 @@ static id aemt_record(AemtTarget* t, AemtFrame* fr, AemtPipeline* p, AemtMateria
                 MT_SEND(void, AemtViewport)(enc, mt_sel("setViewport:"), ivp);
                 MT_SEND(void, AemtScissorRect)(enc, mt_sel("setScissorRect:"), isc);
                 MT_SEND(void, uint32_t)(enc, mt_sel("setStencilReferenceValue:"),
-                                        it->stencil_ref_set ? it->stencil_ref : p->stencil_ref);
-                aemt_draw_item(t, enc, it, p->prim);
+                                        it->stencil_ref_set ? it->stencil_ref : ip->stencil_ref);
+                aemt_draw_item(t, enc, it, ip->prim);
             }
         } else {
             if (bind_mat) aemt_bind_render(enc, p->kind, bind_mat, NULL);
@@ -3131,17 +3284,24 @@ static int aemt_submit_frame(AemtTarget* t, AemtPipeline* p, AemtMaterial* mat, 
                 rc = aemt_check_index_start(t, it->first);
                 if (rc != AEMT_OK) return rc;
             }
-            if (it->mat && it->mat->pipe != p) {
+            /* A draw with its own pipeline is checked against it (#2411). */
+            AemtPipeline* ip = it->pipe ? it->pipe : p;
+            if (it->mat && it->mat->pipe != ip) {
                 return aemt_fail(AEMT_ERR_ARG, "draw %d uses a material of another pipeline", i);
+            }
+            if (it->pipe) {
+                if (ip->vertex_input && !t->vbuf) return aemt_fail(AEMT_ERR_ARG, "vertices were never uploaded");
+                rc = aemt_streams_check(t, ip);
+                if (rc != AEMT_OK) return rc;
             }
             if (it->scissor_set && ((long long)it->sx + it->sw > t->width || (long long)it->sy + it->sh > t->height)) {
                 return aemt_fail(AEMT_ERR_ARG, "draw %d's scissor %d,%d %dx%d runs outside the %dx%d target",
                                  i, it->sx, it->sy, it->sw, it->sh, t->width, t->height);
             }
-            AemtMaterial* im = it->mat ? it->mat : (mat ? mat : p->def);
-            rc = aemt_material_ready(p, im);
+            AemtMaterial* im = it->mat ? it->mat : it->pipe ? ip->def : (mat ? mat : p->def);
+            rc = aemt_material_ready(ip, im);
             if (rc == AEMT_OK) rc = aemt_material_sampleable(t, im);
-            if (rc == AEMT_OK) rc = aemt_offsets_check(p, im, it->offsets, i);
+            if (rc == AEMT_OK) rc = aemt_offsets_check(ip, im, it->offsets, i);
             if (rc != AEMT_OK) return rc;
         }
         if (t->batch_count == 0) {
@@ -4073,11 +4233,27 @@ AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int z, int
 }
 int    aemt_texture_layers(const AemtTexture* t) { (void)t; return 0; }
 int    aemt_batch_set_stencil_ref(AemtTarget* t, int i, int r) { (void)t; (void)i; (void)r; return aemt_no(); }
+int    aemt_batch_set_pipeline(AemtTarget* t, int i, AemtPipeline* p) { (void)t; (void)i; (void)p; return aemt_no(); }
 AemtTarget* aemt_target_create_layered(AemtDevice* d, int w, int h, int n, int f, int z, int c) {
     (void)d; (void)w; (void)h; (void)n; (void)f; (void)z; (void)c; aemt_no(); return NULL;
 }
 int    aemt_target_set_layer(AemtTarget* t, int l) { (void)t; (void)l; return aemt_no(); }
 int    aemt_target_layers(const AemtTarget* t) { (void)t; return 0; }
+AemtTarget* aemt_target_create_layered_ex(AemtDevice* d, int w, int h, int n, int f, int z, int c, int s) {
+    (void)d; (void)w; (void)h; (void)n; (void)f; (void)z; (void)c; (void)s; aemt_no(); return NULL;
+}
+int    aemt_pipeline_set_target_depth_array(AemtPipeline* p, int b, AemtTarget* t, int o) {
+    (void)p; (void)b; (void)t; (void)o; return aemt_no();
+}
+int    aemt_pipeline_set_target_depth_cube(AemtPipeline* p, int b, AemtTarget* t, int o) {
+    (void)p; (void)b; (void)t; (void)o; return aemt_no();
+}
+int    aemt_material_set_target_depth_array(AemtMaterial* m, int b, AemtTarget* t, int o) {
+    (void)m; (void)b; (void)t; (void)o; return aemt_no();
+}
+int    aemt_material_set_target_depth_cube(AemtMaterial* m, int b, AemtTarget* t, int o) {
+    (void)m; (void)b; (void)t; (void)o; return aemt_no();
+}
 int    aemt_pipeline_set_target_array(AemtPipeline* p, int b, AemtTarget* t) { (void)p; (void)b; (void)t; return aemt_no(); }
 int    aemt_pipeline_set_target_cube(AemtPipeline* p, int b, AemtTarget* t) { (void)p; (void)b; (void)t; return aemt_no(); }
 int    aemt_material_set_target_array(AemtMaterial* m, int b, AemtTarget* t) { (void)m; (void)b; (void)t; return aemt_no(); }
@@ -4413,6 +4589,10 @@ int   aemt_ae_state_stencil(void* st, int compare, int ref, int pass_op, int fai
     return aemt_state_stencil((AemtState*)st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask,
                               write_mask);
 }
+int   aemt_ae_state_color_mask(void* st, int mask) { return aemt_state_color_mask((AemtState*)st, mask); }
+int   aemt_ae_batch_set_pipeline(void* t, int item, void* p) {
+    return aemt_batch_set_pipeline((AemtTarget*)t, item, (AemtPipeline*)p);
+}
 int   aemt_ae_batch_set_stencil_ref(void* t, int item, int ref) {
     return aemt_batch_set_stencil_ref((AemtTarget*)t, item, ref);
 }
@@ -4421,6 +4601,22 @@ void* aemt_ae_target_create_layered(void* d, int w, int h, int layers, int forma
 }
 int   aemt_ae_target_set_layer(void* t, int layer) { return aemt_target_set_layer((AemtTarget*)t, layer); }
 int   aemt_ae_target_layers(void* t) { return aemt_target_layers((const AemtTarget*)t); }
+void* aemt_ae_target_create_layered_ex(void* d, int w, int h, int layers, int format, int depth, int cube,
+                                       int samples) {
+    return (void*)aemt_target_create_layered_ex((AemtDevice*)d, w, h, layers, format, depth, cube, samples);
+}
+int   aemt_ae_set_target_depth_array(void* p, int binding, void* t, int op) {
+    return aemt_pipeline_set_target_depth_array((AemtPipeline*)p, binding, (AemtTarget*)t, op);
+}
+int   aemt_ae_set_target_depth_cube(void* p, int binding, void* t, int op) {
+    return aemt_pipeline_set_target_depth_cube((AemtPipeline*)p, binding, (AemtTarget*)t, op);
+}
+int   aemt_ae_material_set_target_depth_array(void* m, int binding, void* t, int op) {
+    return aemt_material_set_target_depth_array((AemtMaterial*)m, binding, (AemtTarget*)t, op);
+}
+int   aemt_ae_material_set_target_depth_cube(void* m, int binding, void* t, int op) {
+    return aemt_material_set_target_depth_cube((AemtMaterial*)m, binding, (AemtTarget*)t, op);
+}
 int   aemt_ae_set_target_array(void* p, int binding, void* t) {
     return aemt_pipeline_set_target_array((AemtPipeline*)p, binding, (AemtTarget*)t);
 }

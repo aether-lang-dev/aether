@@ -273,6 +273,18 @@ int        aemt_state_topology(AemtState* s, int topology);
  * which MTLStencilOperation shares). */
 int        aemt_state_stencil(AemtState* s, int compare, int ref, int pass_op, int fail_op,
                               int depth_fail_op, int read_mask, int write_mask);
+/* A batch entry's own pipeline, made for the same target, and the channels
+ * a pipeline writes (#2411). */
+int        aemt_batch_set_pipeline(AemtTarget* t, int item, AemtPipeline* p);
+int        aemt_state_color_mask(AemtState* s, int mask);
+/* A layered target's depth as an array or a cube, raw (op 0) or compared,
+ * and a multisampled layered target (#2412). */
+int        aemt_pipeline_set_target_depth_array(AemtPipeline* p, int binding, AemtTarget* t, int op);
+int        aemt_pipeline_set_target_depth_cube(AemtPipeline* p, int binding, AemtTarget* t, int op);
+int        aemt_material_set_target_depth_array(AemtMaterial* m, int binding, AemtTarget* t, int op);
+int        aemt_material_set_target_depth_cube(AemtMaterial* m, int binding, AemtTarget* t, int op);
+AemtTarget* aemt_target_create_layered_ex(AemtDevice* d, int width, int height, int layers, int format,
+                                          int want_depth, int cube, int samples);
 int        aemt_pipeline_set_target_array(AemtPipeline* p, int binding, AemtTarget* t);
 int        aemt_pipeline_set_target_cube(AemtPipeline* p, int binding, AemtTarget* t);
 int        aemt_material_set_target_array(AemtMaterial* m, int binding, AemtTarget* t);

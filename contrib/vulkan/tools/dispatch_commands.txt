@@ -85,6 +85,7 @@ vkCmdCopyBufferToImage
 vkCmdBlitImage
 vkCmdCopyImage
 vkCmdClearColorImage
+vkCmdClearDepthStencilImage
 vkCreateSemaphore
 vkDestroySemaphore
 vkCreateComputePipelines

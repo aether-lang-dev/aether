@@ -355,6 +355,10 @@ int        aevk_state_topology(AevkState* s, int topology);
 int          aevk_state_stencil(AevkState* s, int compare, int ref, int pass_op, int fail_op,
                                 int depth_fail_op, int read_mask, int write_mask);
 int          aevk_batch_set_stencil_ref(AevkTarget* t, int item, int ref);
+/* A batch entry's own pipeline, made for the same target, and the channels
+ * a pipeline writes (#2411). */
+int          aevk_batch_set_pipeline(AevkTarget* t, int item, AevkPipeline* p);
+int          aevk_state_color_mask(AevkState* s, int mask);
 AevkTarget*  aevk_target_create_layered(AevkDevice* d, int width, int height, int layers, int format,
                                         int want_depth, int cube);
 int          aevk_target_set_layer(AevkTarget* t, int layer);
@@ -363,6 +367,14 @@ int          aevk_pipeline_set_target_array(AevkPipeline* p, int binding, AevkTa
 int          aevk_pipeline_set_target_cube(AevkPipeline* p, int binding, AevkTarget* t);
 int          aevk_material_set_target_array(AevkMaterial* m, int binding, AevkTarget* t);
 int          aevk_material_set_target_cube(AevkMaterial* m, int binding, AevkTarget* t);
+/* A layered target multisampled, and its depth read as an array or a cube,
+ * raw (op 0) or compared (COMPARE_*) (#2412). */
+AevkTarget*  aevk_target_create_layered_ex(AevkDevice* d, int width, int height, int layers, int format,
+                                           int want_depth, int cube, int samples);
+int          aevk_pipeline_set_target_depth_array(AevkPipeline* p, int binding, AevkTarget* t, int op);
+int          aevk_pipeline_set_target_depth_cube(AevkPipeline* p, int binding, AevkTarget* t, int op);
+int          aevk_material_set_target_depth_array(AevkMaterial* m, int binding, AevkTarget* t, int op);
+int          aevk_material_set_target_depth_cube(AevkMaterial* m, int binding, AevkTarget* t, int op);
 /* A batch entry's scissor and viewport, in pixels from the target's top
  * left (#2398); a width of 0 goes back to the whole target. */
 int        aevk_batch_set_scissor(AevkTarget* t, int item, int x, int y, int w, int h);

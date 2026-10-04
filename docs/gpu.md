@@ -375,9 +375,33 @@ vulkan.batch_add(t, null, 6, 6)              // drawn only inside it
 vulkan.batch_set_stencil_ref(t, 1, 1)
 ```
 
-A stencil state on a target without a stencil is refused. A batch entry's
-own pipeline, which outlines and portals need alongside a colour write mask,
-is [#2411](https://github.com/aether-lang-dev/aether/issues/2411).
+A stencil state on a target without a stencil is refused.
+
+A batch entry can also have its own pipeline, made for the same target, so
+one frame can mark a stencil with one set of shaders and state and draw
+through it with another: outlines, portals and light volumes.
+`state_color_mask(st, COLOR_*)` picks the channels a pipeline writes. With 0
+it writes none, for a draw that only marks the stencil or the depth:
+
+```aether,fragment
+mark = vulkan.state_create()
+vulkan.state_color_mask(mark, 0)
+vulkan.state_stencil(mark, vulkan.COMPARE_ALWAYS, 1, vulkan.STENCIL_REPLACE,
+                     vulkan.STENCIL_KEEP, vulkan.STENCIL_KEEP, 255, 255)
+fill = vulkan.state_create()
+vulkan.state_stencil(fill, vulkan.COMPARE_NOT_EQUAL, 1, vulkan.STENCIL_KEEP,
+                     vulkan.STENCIL_KEEP, vulkan.STENCIL_KEEP, 255, 255)
+pmark = vulkan.pipeline_create_state(dev, t, vs, vl, fs, fl, layout, 0, null, mark)
+pfill = vulkan.pipeline_create_state(dev, t, vs, vl, ofs, ofl, layout, 0, null, fill)
+vulkan.batch_add(t, null, 0, 36)              // the shape, marked
+vulkan.batch_add(t, null, 36, 36)             // its outline, outside the mark
+vulkan.batch_set_pipeline(t, 1, pfill)
+vulkan.draw(t, pmark, 0.0, 0.0, 0.0, 1.0)
+```
+
+The entry's material, if it has one, belongs to its own pipeline. Without
+one it uses that pipeline's default. `null` goes back to the frame's
+pipeline.
 
 ## Rendering into a layer
 
@@ -386,8 +410,9 @@ of `layers` layers. With `cube` set it has six square faces, in the order
 `texture_create_cube` takes them: +X, -X, +Y, -Y, +Z, -Z.
 `target_set_layer(t, n)` picks the layer the next draws render into. Each
 frame clears and draws its own layer, leaves the others as they were, and
-is what `pixel` and `read_rgba` read back. A shadow cascade or a reflection
-probe face is a draw like any other:
+is what `pixel` and `read_rgba` read back. A layer never drawn reads 0, and
+its depth reads the far plane. A shadow cascade or a reflection probe face is
+a draw like any other:
 
 ```aether,fragment
 probe = vulkan.target_create_layered(dev, 256, 256, 6, vulkan.FORMAT_R16G16B16A16_SFLOAT, vulkan.DEPTH, 1)
@@ -403,10 +428,19 @@ vulkan.set_target_cube(sky_pipe, 0, probe)    // a samplerCube
 
 `set_target_array` binds every layer as a 2D array (`sampler2DArray`,
 `Texture2DArray`, `texture2d_array`), and `set_target_cube` binds a cube
-target's faces as a cube. A layer never drawn reads as zero. A layered target
-is not sampled as one 2D image, and is not presented. It is single-sampled
-with one colour attachment, and its depth is not sampled yet; that and
-multisampling are [#2412](https://github.com/aether-lang-dev/aether/issues/2412).
+target's faces as a cube. `set_target_depth_array(p, binding, t, op)` and
+`set_target_depth_cube` do the same for the depth. With `op` 0 they read it
+raw; with a `COMPARE_*` op they read it through a comparison sampler,
+which is how cascaded shadow maps (`sampler2DArrayShadow`,
+`Texture2DArray.SampleCmp`, `depth2d_array::sample_compare`) and a point
+light's cube of them are read. As with a plain target, bind the depth before
+drawing what it will read: its first binding remakes the target's images.
+
+`target_create_layered_ex` adds a sample count. Each frame renders into one
+multisampled image and resolves it into the layer drawn. A multisampled
+layered target's depth is not sampled, as a multisampled target's is not.
+A layered target has one colour attachment, is not sampled as one 2D image,
+and is not presented.
 
 ## Windows belong to someone else
 
@@ -461,7 +495,5 @@ Each gap has an issue:
 | Missing | Issue |
 |---|---|
 | BC6H, ASTC and ETC2, signed formats, and cubes and arrays in other formats | [#2402](https://github.com/aether-lang-dev/aether/issues/2402) |
-| A batch entry's own pipeline, and colour write masks | [#2411](https://github.com/aether-lang-dev/aether/issues/2411) |
-| A layered target's depth as a texture, and multisampled layered targets | [#2412](https://github.com/aether-lang-dev/aether/issues/2412) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

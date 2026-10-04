@@ -248,7 +248,14 @@ when it is sampled, read through `R24_UNORM_X8_TYPELESS`.
 A layered target is a texture array with `layers` slices. It has a
 `TEXTURE2DARRAY` render target view and depth view a slice, and is sampled
 through a `TEXTURE2DARRAY` or `TEXTURECUBE` shader view. A frame clears and
-draws the slice picked, and reads back its subresource.
+draws the slice picked, and reads back its subresource. The first frame
+clears every slice. A sampled depth is typeless, read through the same two
+kinds of view. A multisampled layered target draws into one multisampled
+texture and `ResolveSubresource`s it into the slice.
+
+A batch entry's own pipeline sets its root signature, pipeline state,
+topology, root constants and vertex buffers before its draw.
+`state_color_mask` is the render target's `RenderTargetWriteMask`.
 
 ## Shadow maps and pipeline state
 

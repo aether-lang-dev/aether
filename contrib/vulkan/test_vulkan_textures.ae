@@ -215,6 +215,14 @@ main() {
     swl = 0
     s3s = ""
     s3l = 0
+    dafs = ""
+    dafl = 0
+    safs = ""
+    safl = 0
+    dcfs = ""
+    dcfl = 0
+    scfs = ""
+    scfl = 0
     if vulkan.available() == 1 {
         dev = vulkan.device_create()
         if dev == null {
@@ -227,7 +235,12 @@ main() {
             vfs, vfl = load_spv("contrib/vulkan/shaders/volume.frag.spv")
             sws, swl = load_spv("contrib/vulkan/shaders/storage_write.comp.spv")
             s3s, s3l = load_spv("contrib/vulkan/shaders/storage_write3d.comp.spv")
-            if tvl == 0 || tfl == 0 || cfl == 0 || afl == 0 || vfl == 0 || swl == 0 || s3l == 0 {
+            dafs, dafl = load_spv("contrib/vulkan/shaders/depth_array.frag.spv")
+            safs, safl = load_spv("contrib/vulkan/shaders/shadow_array.frag.spv")
+            dcfs, dcfl = load_spv("contrib/vulkan/shaders/depth_cube.frag.spv")
+            scfs, scfl = load_spv("contrib/vulkan/shaders/shadow_cube.frag.spv")
+            if tvl == 0 || tfl == 0 || cfl == 0 || afl == 0 || vfl == 0 || swl == 0 || s3l == 0 ||
+               dafl == 0 || safl == 0 || dcfl == 0 || scfl == 0 {
                 reason = "SPIR-V shaders not built"
             } else {
                 ready = 1
@@ -488,6 +501,158 @@ main() {
             vulkan.pipeline_destroy(lp)
             vulkan.texture_destroy(white)
             vulkan.target_destroy(ct)
+        }
+    }
+
+    spec.describe(fw, "vulkan: a layered target's depth and samples") {
+        spec.it_when(ready, "reads each layer's depth as an array, raw and compared", reason) callback {
+            lt = vulkan.target_create_layered(dev, 2, 2, 3, vulkan.FORMAT_R8G8B8A8_UNORM, vulkan.DEPTH, 0)
+            t = vulkan.target_create_format(dev, 2, 2, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            write_fullscreen_quad(t)
+            rp = sampling_pipeline(dev, t, tvs, tvl, dafs, dafl, 8)
+            sp = sampling_pipeline(dev, t, tvs, tvl, safs, safl, 8)
+            spec.assert_true(rp != null && sp != null, "the reading pipelines (${vulkan.last_error()})")
+            spec.assert_eq(vulkan.set_target_depth_cube(rp, 0, lt, 0), vulkan.ERR_ARG, "not a cube")
+            spec.assert_eq(vulkan.set_target_depth_array(rp, 0, lt, 9), vulkan.ERR_ARG, "op 9")
+            spec.assert_eq(vulkan.set_target_depth_array(rp, 0, t, 0), vulkan.ERR_ARG, "a target that is not layered")
+            // Bound before drawing: the first binding of a target's depth
+            // makes it storable, which is new images.
+            spec.assert_eq(vulkan.set_target_depth_array(rp, 0, lt, 0), vulkan.OK, "the depth, raw")
+            spec.assert_eq(vulkan.set_target_depth_array(sp, 0, lt, vulkan.COMPARE_LESS_EQUAL), vulkan.OK,
+                "the depth, compared")
+
+            // Each layer a quad at its own depth: the viewport pins it.
+            white = white_texture(dev)
+            lp = plain_pipeline(dev, lt, tvs, tvl, tfs, tfl)
+            write_fullscreen_quad(lt)
+            _ = vulkan.set_texture(lp, 0, white)
+            _ = vulkan.batch_add(lt, null, 0, 6)
+            depths = [0.25, 0.5, 0.75]
+            l = 0
+            while l < 2 {
+                _ = vulkan.target_set_layer(lt, l)
+                _ = vulkan.batch_set_viewport(lt, 0, 0.0, 0.0, 2.0, 2.0, depths[l], depths[l])
+                draw_tint(lt, lp, 255, 255, 255)
+                l = l + 1
+            }
+            // Layer 2 is never drawn: it reads the far plane.
+            _ = vulkan.push_floats(t, 2)
+            wants = [0.25, 0.5, 1.0]
+            l = 0
+            while l < 3 {
+                _ = vulkan.push_float(t, 0, l * 1.0)
+                _ = vulkan.draw(t, rp, 0.0, 0.0, 0.0, 1.0)
+                v = vulkan.pixel_value(t, 1, 1, 0)
+                spec.assert_eq(close(v, wants[l], 0.0001), 1, "layer ${l}'s depth (${v})")
+                l = l + 1
+            }
+            // reference <= stored: 0.4 passes the layers at 0.5 and 1.
+            l = 0
+            while l < 3 {
+                _ = vulkan.push_float(t, 0, l * 1.0)
+                _ = vulkan.push_float(t, 1, 0.4)
+                _ = vulkan.draw(t, sp, 0.0, 0.0, 0.0, 1.0)
+                v = vulkan.pixel_value(t, 1, 1, 0)
+                want = 1.0
+                if l == 0 { want = 0.0 }
+                spec.assert_eq(close(v, want, 0.0001), 1, "layer ${l} compared with 0.4 (${v})")
+                l = l + 1
+            }
+            vulkan.pipeline_destroy(lp)
+            vulkan.texture_destroy(white)
+            vulkan.pipeline_destroy(sp)
+            vulkan.pipeline_destroy(rp)
+            vulkan.target_destroy(t)
+            vulkan.target_destroy(lt)
+        }
+
+        spec.it_when(ready, "reads a cube target's depth as a cube, raw and compared", reason) callback {
+            ct = vulkan.target_create_layered(dev, 2, 2, 6, vulkan.FORMAT_R8G8B8A8_UNORM, vulkan.DEPTH, 1)
+            t = vulkan.target_create_format(dev, 2, 2, vulkan.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            write_fullscreen_quad(t)
+            rp = sampling_pipeline(dev, t, tvs, tvl, dcfs, dcfl, 16)
+            sp = sampling_pipeline(dev, t, tvs, tvl, scfs, scfl, 16)
+            spec.assert_eq(vulkan.set_target_depth_cube(rp, 0, ct, 0), vulkan.OK, "the depth, raw")
+            spec.assert_eq(vulkan.set_target_depth_cube(sp, 0, ct, vulkan.COMPARE_LESS_EQUAL), vulkan.OK,
+                "the depth, compared")
+
+            white = white_texture(dev)
+            lp = plain_pipeline(dev, ct, tvs, tvl, tfs, tfl)
+            write_fullscreen_quad(ct)
+            _ = vulkan.set_texture(lp, 0, white)
+            _ = vulkan.batch_add(ct, null, 0, 6)
+            f = 0
+            while f < 6 {
+                _ = vulkan.target_set_layer(ct, f)
+                _ = vulkan.batch_set_viewport(ct, 0, 0.0, 0.0, 2.0, 2.0, (f + 1) * 0.125, (f + 1) * 0.125)
+                draw_tint(ct, lp, 255, 255, 255)
+                f = f + 1
+            }
+            _ = vulkan.push_floats(t, 4)
+            dx = [1.0, -1.0, 0.5, 0.5, 0.5, 0.5]
+            dy = [0.5, 0.5, 1.0, -1.0, 0.5, 0.5]
+            dz = [0.5, 0.5, 0.5, 0.5, 1.0, -1.0]
+            f = 0
+            while f < 6 {
+                _ = vulkan.push_float(t, 0, dx[f])
+                _ = vulkan.push_float(t, 1, dy[f])
+                _ = vulkan.push_float(t, 2, dz[f])
+                _ = vulkan.push_float(t, 3, 0.3)
+                _ = vulkan.draw(t, rp, 0.0, 0.0, 0.0, 1.0)
+                v = vulkan.pixel_value(t, 0, 0, 0)
+                spec.assert_eq(close(v, (f + 1) * 0.125, 0.0001), 1, "face ${f}'s depth (${v})")
+                // 0.3 <= stored from face 2 (0.375) on.
+                _ = vulkan.draw(t, sp, 0.0, 0.0, 0.0, 1.0)
+                v = vulkan.pixel_value(t, 0, 0, 0)
+                want = 1.0
+                if f < 2 { want = 0.0 }
+                spec.assert_eq(close(v, want, 0.0001), 1, "face ${f} compared with 0.3 (${v})")
+                f = f + 1
+            }
+            vulkan.pipeline_destroy(lp)
+            vulkan.texture_destroy(white)
+            vulkan.pipeline_destroy(sp)
+            vulkan.pipeline_destroy(rp)
+            vulkan.target_destroy(t)
+            vulkan.target_destroy(ct)
+        }
+
+        spec.it_when(ready, "multisamples each layer and resolves it into its own", reason) callback {
+            fmt = vulkan.FORMAT_R8G8B8A8_UNORM
+            spec.assert_true(vulkan.target_create_layered_ex(dev, 2, 2, 2, fmt, 0, 0, 3) == null, "3 samples")
+            mt = vulkan.target_create_layered_ex(dev, 2, 2, 2, fmt, vulkan.DEPTH, 0, 4)
+            spec.assert_true(mt != null, "a 4x layered target (${vulkan.last_error()})")
+            white = white_texture(dev)
+            lp = plain_pipeline(dev, mt, tvs, tvl, tfs, tfl)
+            write_fullscreen_quad(mt)
+            _ = vulkan.set_texture(lp, 0, white)
+            _ = vulkan.target_set_layer(mt, 0)
+            draw_tint(mt, lp, 255, 0, 0)
+            spec.assert_eq(vulkan.pixel(mt, 1, 1), packed(255, 0, 0, 255), "layer 0 resolved (${vulkan.pixel(mt, 1, 1)})")
+            _ = vulkan.target_set_layer(mt, 1)
+            draw_tint(mt, lp, 0, 255, 0)
+            spec.assert_eq(vulkan.pixel(mt, 1, 1), packed(0, 255, 0, 255), "layer 1 resolved (${vulkan.pixel(mt, 1, 1)})")
+
+            t = vulkan.target_create(dev, 2, 2)
+            ap = sampling_pipeline(dev, t, tvs, tvl, afs, afl, 4)
+            write_fullscreen_quad(t)
+            spec.assert_true(vulkan.set_target_depth_array(ap, 0, mt, 0) != vulkan.OK,
+                "a multisampled depth is not sampled")
+            _ = vulkan.set_target_array(ap, 0, mt)
+            _ = vulkan.push_floats(t, 1)
+            wants = [packed(255, 0, 0, 255), packed(0, 255, 0, 255)]
+            l = 0
+            while l < 2 {
+                _ = vulkan.push_float(t, 0, l * 1.0)
+                _ = vulkan.draw(t, ap, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(vulkan.pixel(t, 1, 1), wants[l], "layer ${l} sampled (${vulkan.pixel(t, 1, 1)})")
+                l = l + 1
+            }
+            vulkan.pipeline_destroy(ap)
+            vulkan.target_destroy(t)
+            vulkan.pipeline_destroy(lp)
+            vulkan.texture_destroy(white)
+            vulkan.target_destroy(mt)
         }
     }
 

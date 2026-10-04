@@ -288,8 +288,15 @@ both faces; `MTLStencilOperation` is numbered as `STENCIL_*` is. Each draw
 sets its reference with `setStencilReferenceValue:`.
 
 A layered target is an `MTLTextureType2DArray`, or an `MTLTextureTypeCube`
-with a 2D-array view for `set_target_array`. Its depth is a 2D array, and the
-pass's attachments render into slice `layer`.
+with a 2D-array view for `set_target_array`. Its depth is a 2D array, or a
+cube for a cube, and the pass's attachments render into slice `layer`. The
+first frame clears every slice in a pass of its own. A multisampled layered
+target resolves into the slice through `resolveSlice`.
+
+A batch entry's own pipeline sets its pipeline state, depth-stencil state,
+cull mode, push block and vertex buffers on the encoder before its draw.
+`state_color_mask` is the colour attachment's `writeMask`, whose bits run
+the other way.
 
 ## Shadow maps and pipeline state
 
