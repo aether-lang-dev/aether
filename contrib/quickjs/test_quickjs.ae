@@ -104,6 +104,37 @@ main() {
         }
     }
 
+    spec.describe(fw, "contrib.quickjs: exceptions through host functions") {
+        spec.it("rethrow hands the script the very exception a nested call raised") callback {
+            each = quickjs.function(q, "each", 1, | q: ptr, this_h: int, args: int | {
+                    f = quickjs.arg(q, args, 0)
+                    r, err = quickjs.call(q, f, 0, 0)
+                    quickjs.release(q, f)
+                    if err != "" { return quickjs.rethrow(q) }
+                    quickjs.release(q, r)
+                    return 0
+                })
+            quickjs.set_global(q, "each", each)
+            quickjs.release(q, each)
+            s = eval_string(q, "function thrower() { throw new RangeError('deep') }\ntry { each(thrower); 'no throw' } catch (e) { [e instanceof RangeError, e.message, e.stack.indexOf('thrower') >= 0].join(' ') }")
+            spec.assert_str_eq(s, "true deep true", "type, message and stack intact")
+            _h, err = quickjs.eval(q, "each(function () { null.x })", "t.js")
+            spec.assert_contains(err, "TypeError", "uncaught, it reaches the host as itself")
+        }
+        spec.it("with no exception value, rethrow raises an InternalError with the text") callback {
+            bad = quickjs.function(q, "bad", 0, | q: ptr, this_h: int, args: int | {
+                    notfn = quickjs.new_int(q, 1)
+                    _r, err = quickjs.call(q, notfn, 0, 0)
+                    quickjs.release(q, notfn)
+                    return quickjs.rethrow(q)
+                })
+            quickjs.set_global(q, "bad", bad)
+            quickjs.release(q, bad)
+            spec.assert_str_eq(eval_string(q, "try { bad() } catch (e) { e.name + ': ' + e.message }"),
+                "InternalError: TypeError: not a function", "the host's own error")
+        }
+    }
+
     spec.describe(fw, "contrib.quickjs: limits") {
         spec.it("stops a runaway script at the time limit, and keeps working") callback {
             quickjs.set_time_limit(q, 50)
