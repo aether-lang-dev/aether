@@ -325,19 +325,31 @@ classify(req: Request) -> int { ... }            // must touch no filesystem
 
 ### Path resolution before fs match
 
-For `fs_read` / `fs_write` grants the LD_PRELOAD layer resolves the
-resource path with `realpath(3)` *before* running the pattern match.
-This closes the path-identity bypass: a grant for `/tmp/*` can no
-longer be subverted by `/tmp/../etc/shadow`, and a symlink under a
-granted prefix can no longer escape it.
+An fs resource is matched where it leads, not as it is spelt, by both
+layers: the in-process checks in std and the LD_PRELOAD library share one
+resolver (`runtime/aether_sandbox_path.h`). It walks the path a component
+at a time, as the kernel does: `.` is dropped, `..` goes to the parent of
+what is resolved so far, and a component that exists is resolved with
+`realpath(3)`, so a symlink is followed to where it points. A component
+that does not exist yet (a file about to be created, directories `mkdir
+-p` will make) is kept as written, and a `..` after it removes it again.
+So a grant for `/box/*` is not left through `/box/../etc/shadow`,
+`mkdir -p /box/../x/y`, a symlink in `/box` that points out,
+`/box/link/../x` when `link` points out, or a dangling symlink in `/box`
+whose target is outside.
 
-When the path doesn't exist yet (writing a new file), the resolver
-falls back to resolving the parent directory and reattaching the
-basename, the kernel will refuse the create syscall otherwise, and
-the parent must be real for any meaningful operation. If even the
-parent can't be resolved (truly unusable path), the original string
-is matched as a baseline, same behaviour as before this fix, so the
-gate never silently tightens or loosens at the edges.
+Resolving `..` as text first would be wrong: with `link` pointing at
+`/elsewhere/dir`, `/box/link/../x` opens `/elsewhere/x`.
+
+A path that cannot be resolved (a dangling symlink, a loop, a directory
+that cannot be searched) is refused, not matched as written.
+
+An fs grant's pattern is resolved the same way when it is made
+(`grant_fs_read("/var/x/*")` covers `/private/var/x/...` on macOS, and a
+grant named through a symlink covers where the symlink leads); `*` and
+suffix patterns such as `*.log` are kept as written. On Windows paths are
+made absolute and normalised with `_fullpath`; symlinks there are not
+followed.
 
 Non-fs categories (`tcp`, `env`, `exec`) carry no path semantics;
 their resources are matched verbatim.

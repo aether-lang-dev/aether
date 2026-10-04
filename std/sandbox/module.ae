@@ -24,7 +24,10 @@
 // and deny silently.
 //
 // Patterns: "*" matches anything, "/etc/*" a prefix, "*.example.com" a
-// suffix, anything else exactly. A grant list with no grants denies
+// suffix, anything else exactly. A file-system path is matched where it
+// leads: ".." and symlinks in it are resolved first (an fs grant's directory
+// too, when it is made), and a path that cannot be resolved, such as a
+// dangling symlink, is refused. A grant list with no grants denies
 // everything; grant_all() allows everything. Nested enforce() blocks
 // intersect: an inner block can only narrow what the outer one allows.
 //
@@ -41,6 +44,10 @@ import std.list
 // copies the list owns: a caller's interpolated pattern ("${dir}/*") is a
 // temporary, and storing its pointer left a dangling grant.
 extern strdup(s: string) -> ptr
+// An fs grant's directory resolved as the checks resolve paths (runtime/
+// aether_sandbox_path.h), so "/var/x/*" covers what is under /private/var/x
+// on macOS and a grant named through a symlink covers where it leads.
+extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
 @extern("free") libc_free(p: ptr)
 
 exports(
@@ -51,7 +58,7 @@ exports(
 
 fn add_grant(perms: ptr, category: string, pattern: string) {
     list.add(perms, strdup(category))
-    list.add(perms, strdup(pattern))
+    list.add(perms, aether_sandbox_grant_pattern(category, pattern))
 }
 
 // A new, empty grant list named `name` (the name is for the reader and for

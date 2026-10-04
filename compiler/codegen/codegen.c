@@ -6643,8 +6643,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // that don't use sandboxing.
     bool has_sandbox = uses_sandbox(program);
     gen->uses_sandbox = has_sandbox ? 1 : 0;
-    print_line(gen, "static void* _aether_sandbox_stack[64];");
-    print_line(gen, "static int _aether_sandbox_depth = 0;");
+    /* Per thread: an enforce block contains the code that runs on its own
+     * thread. With one stack for the process, every other thread (an actor's,
+     * a std.worker's) was checked against the block's grants while it ran,
+     * and the stack itself was raced. These live in this translation unit,
+     * written and read only by its own code, so the TLS model never crosses
+     * an archive boundary (#1751). */
+    print_line(gen, "static AETHER_TLS void* _aether_sandbox_stack[64];");
+    print_line(gen, "static AETHER_TLS int _aether_sandbox_depth = 0;");
     if (has_sandbox) {
         /* Trusted names in `sandbox.enforce(perms, foo) { ... }`: each level
          * of the stack records which enforce site pushed it (0 for any other
@@ -6653,8 +6659,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
          * the enforce. Never higher: the depth only ever goes down, and a
          * site found nowhere on the live stack (a block that escaped its
          * enforce, a level a panic abandoned) lowers nothing. */
-        print_line(gen, "static int _aether_sandbox_site_at[64];");
-        print_line(gen, "static int _aether_sandbox_pending_site = 0;");
+        print_line(gen, "static AETHER_TLS int _aether_sandbox_site_at[64];");
+        print_line(gen, "static AETHER_TLS int _aether_sandbox_pending_site = 0;");
         print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
         print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_site_at[l] == site) { _aether_sandbox_depth = l; break; } } return saved; }");
     } else {

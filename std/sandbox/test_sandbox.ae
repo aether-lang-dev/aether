@@ -5,9 +5,9 @@
 // inside sandbox.enforce, against a grant that should let it through and a
 // neighbour that should not. The paths are this test's own fixtures, in a
 // fresh temp directory written before any sandbox is in force, so the suite
-// reads the same on Linux, macOS and FreeBSD. The in-process check matches
-// the path as written; it does not resolve symlinks (that is the LD_PRELOAD
-// layer's job), so a macOS /tmp -> /private/tmp would not matter either way.
+// reads the same on Linux, macOS and FreeBSD. Paths and fs grants are both
+// resolved before they are compared (test_sandbox_paths.ae has the escapes
+// that makes necessary), so a macOS /tmp -> /private/tmp does not matter.
 //
 // The env cases set their own variables rather than rely on HOME or USER
 // being present on a CI runner.

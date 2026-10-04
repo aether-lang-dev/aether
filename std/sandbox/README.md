@@ -116,6 +116,19 @@ The same grant list goes to:
 - the `contrib/host/<lang>` modules, which run embedded Lua, Python, Ruby and
   others under it: `python.run_sandboxed(worker, code)`.
 
+## Paths and threads
+
+A file-system path is matched where it leads: `..` and symlinks in it are
+resolved first (a grant's directory too, when it is made), so a grant for
+`/box/*` cannot be left through `/box/../x`, a symlink in `/box` that points
+out, or a dangling one. A path that cannot be resolved is refused.
+
+`enforce` contains the code that runs on its own thread inside the block.
+Work it hands to another thread, an actor or a `std.worker`, runs with that
+thread's authority, and other threads are not checked against the block's
+grants while it runs. Contain a worker by entering `enforce` in the work it
+runs.
+
 ## Limits
 
 The checks sit in std and, for spawned children, in libc via LD_PRELOAD. Code
