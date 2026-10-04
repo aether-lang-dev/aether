@@ -347,7 +347,8 @@ compute writes before later shader reads. A storage binding is a
 `SAMPLED_IMAGE`, plus `SAMPLED_IMAGE_FILTER_LINEAR` for a linear sampler.
 A mipmapped uncompressed texture also needs `BLIT_SRC`, `BLIT_DST` and
 linear filtering, since its chain is blitted. The BC formats need the
-`textureCompressionBC` feature, enabled when the device has it, and
+`textureCompressionBC` feature, ETC2 `textureCompressionETC2` and ASTC
+`textureCompressionASTC_LDR`, each enabled when the device has it, and
 anisotropy needs `samplerAnisotropy`, capped at `maxSamplerAnisotropy`.
 `texture_upload_level` moves only its own level to `TRANSFER_DST_OPTIMAL`
 and back, so levels already uploaded keep their pixels.

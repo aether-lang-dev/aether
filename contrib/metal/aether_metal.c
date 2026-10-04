@@ -185,7 +185,20 @@ typedef struct { double x, y, width, height; } AemtCGRect;
 
 enum {
     MTL_PIXEL_R8_UNORM         = 10,
+    MTL_PIXEL_R8_SNORM         = 12,
     MTL_PIXEL_RG8_UNORM        = 30,
+    MTL_PIXEL_RG8_SNORM        = 32,
+    MTL_PIXEL_BC4_R_SNORM      = 141,
+    MTL_PIXEL_BC5_RG_SNORM     = 143,
+    MTL_PIXEL_BC6H_RGB_FLOAT   = 150,
+    MTL_PIXEL_BC6H_RGB_UFLOAT  = 151,
+    MTL_PIXEL_EAC_RGBA8        = 178,
+    MTL_PIXEL_EAC_RGBA8_SRGB   = 179,
+    MTL_PIXEL_ETC2_RGB8        = 180,
+    MTL_PIXEL_ETC2_RGB8_SRGB   = 181,
+    MTL_PIXEL_ASTC_4X4_SRGB    = 186,
+    MTL_PIXEL_ASTC_4X4_LDR     = 204,
+    MTL_GPU_FAMILY_APPLE2      = 1002,
     MTL_PIXEL_BC1_RGBA         = 130,
     MTL_PIXEL_BC1_RGBA_SRGB    = 131,
     MTL_PIXEL_BC3_RGBA         = 134,
@@ -422,6 +435,7 @@ struct AemtDevice {
     int             msaa32;          /* resolves multisampled 32-bit float */
     int             filter32;        /* filters 32-bit float textures linearly */
     int             bc;              /* samples the BC block formats (#2397) */
+    int             etc_astc;        /* samples ETC2 and ASTC: an Apple GPU (#2402) */
     /* The present pass (a textured full-screen triangle), made on first use:
      * [0] writes a UNORM drawable, [1] an sRGB one. The nearest sampler is
      * for a 32-bit float target on a device that cannot filter one. */
@@ -488,6 +502,10 @@ AemtDevice* aemt_device_create(void) {
     /* Every Mac GPU before the property existed (macOS 11) samples BC. */
     d->bc = mt_responds(d->device, "supportsBCTextureCompression")
           ? mt_flag(d->device, "supportsBCTextureCompression") : 1;
+    /* ETC2 and ASTC are the Apple GPU families' (Apple silicon), not an
+     * Intel or AMD Mac's (#2402). */
+    d->etc_astc = mt_responds(d->device, "supportsFamily:") &&
+                  MT_SEND(BOOL, long)(d->device, mt_sel("supportsFamily:"), (long)MTL_GPU_FAMILY_APPLE2) ? 1 : 0;
     snprintf(d->name, sizeof(d->name), "%s", mt_utf8(MT_SEND(id)(d->device, mt_sel("name"))));
     g_mt.pool_pop(pool);
     return d;
@@ -1897,30 +1915,55 @@ struct AemtTexture {
     int         aniso;
 };
 
-/* The formats a sampled texture can be in (#2397), as the Metal pixel
- * format, with the bytes a texel or, with *block set, a 4x4 block. 0 for
- * any other format. */
+/* Which family a block format is (#2402): BC, or ETC2 and ASTC. */
+#define AEMT_BLOCK_BC       1
+#define AEMT_BLOCK_ETC_ASTC 2
+
+/* The formats a sampled texture can be in (#2397, #2402), as the Metal pixel
+ * format, with the bytes a texel or, with *block set to its family, a 4x4
+ * block. 0 for any other format. */
 static int aemt_sampled_format(int f, int* block, AemtUInt* pixel) {
     *block = 0;
+    *pixel = 0;
     switch (f) {
         case AEMT_FORMAT_R8_UNORM:            *pixel = MTL_PIXEL_R8_UNORM;            return 1;
+        case AEMT_FORMAT_R8_SNORM:            *pixel = MTL_PIXEL_R8_SNORM;            return 1;
         case AEMT_FORMAT_R8G8_UNORM:          *pixel = MTL_PIXEL_RG8_UNORM;           return 2;
+        case AEMT_FORMAT_R8G8_SNORM:          *pixel = MTL_PIXEL_RG8_SNORM;           return 2;
         case AEMT_FORMAT_R8G8B8A8_UNORM:      *pixel = MTL_PIXEL_RGBA8_UNORM;         return 4;
         case AEMT_FORMAT_R8G8B8A8_SRGB:       *pixel = MTL_PIXEL_RGBA8_UNORM_SRGB;    return 4;
         case AEMT_FORMAT_R16G16B16A16_SFLOAT: *pixel = MTL_PIXEL_RGBA16_FLOAT;        return 8;
         case AEMT_FORMAT_R32G32B32A32_SFLOAT: *pixel = MTL_PIXEL_RGBA32_FLOAT;        return 16;
-        case AEMT_FORMAT_BC1_RGBA_UNORM:      *pixel = MTL_PIXEL_BC1_RGBA;            break;
-        case AEMT_FORMAT_BC1_RGBA_SRGB:       *pixel = MTL_PIXEL_BC1_RGBA_SRGB;       break;
-        case AEMT_FORMAT_BC4_UNORM:           *pixel = MTL_PIXEL_BC4_R_UNORM;         break;
-        case AEMT_FORMAT_BC3_UNORM:           *pixel = MTL_PIXEL_BC3_RGBA;            *block = 1; return 16;
-        case AEMT_FORMAT_BC3_SRGB:            *pixel = MTL_PIXEL_BC3_RGBA_SRGB;       *block = 1; return 16;
-        case AEMT_FORMAT_BC5_UNORM:           *pixel = MTL_PIXEL_BC5_RG_UNORM;        *block = 1; return 16;
-        case AEMT_FORMAT_BC7_UNORM:           *pixel = MTL_PIXEL_BC7_RGBA_UNORM;      *block = 1; return 16;
-        case AEMT_FORMAT_BC7_SRGB:            *pixel = MTL_PIXEL_BC7_RGBA_UNORM_SRGB; *block = 1; return 16;
-        default:                              *pixel = 0;                             return 0;
+        default: break;
     }
-    *block = 1;
-    return 8;
+    *block = AEMT_BLOCK_BC;
+    switch (f) {
+        case AEMT_FORMAT_BC1_RGBA_UNORM:      *pixel = MTL_PIXEL_BC1_RGBA;            return 8;
+        case AEMT_FORMAT_BC1_RGBA_SRGB:       *pixel = MTL_PIXEL_BC1_RGBA_SRGB;       return 8;
+        case AEMT_FORMAT_BC4_UNORM:           *pixel = MTL_PIXEL_BC4_R_UNORM;         return 8;
+        case AEMT_FORMAT_BC4_SNORM:           *pixel = MTL_PIXEL_BC4_R_SNORM;         return 8;
+        case AEMT_FORMAT_BC3_UNORM:           *pixel = MTL_PIXEL_BC3_RGBA;            return 16;
+        case AEMT_FORMAT_BC3_SRGB:            *pixel = MTL_PIXEL_BC3_RGBA_SRGB;       return 16;
+        case AEMT_FORMAT_BC5_UNORM:           *pixel = MTL_PIXEL_BC5_RG_UNORM;        return 16;
+        case AEMT_FORMAT_BC5_SNORM:           *pixel = MTL_PIXEL_BC5_RG_SNORM;        return 16;
+        case AEMT_FORMAT_BC6H_UFLOAT:         *pixel = MTL_PIXEL_BC6H_RGB_UFLOAT;     return 16;
+        case AEMT_FORMAT_BC6H_SFLOAT:         *pixel = MTL_PIXEL_BC6H_RGB_FLOAT;      return 16;
+        case AEMT_FORMAT_BC7_UNORM:           *pixel = MTL_PIXEL_BC7_RGBA_UNORM;      return 16;
+        case AEMT_FORMAT_BC7_SRGB:            *pixel = MTL_PIXEL_BC7_RGBA_UNORM_SRGB; return 16;
+        default: break;
+    }
+    *block = AEMT_BLOCK_ETC_ASTC;
+    switch (f) {
+        case AEMT_FORMAT_ETC2_R8G8B8_UNORM:   *pixel = MTL_PIXEL_ETC2_RGB8;           return 8;
+        case AEMT_FORMAT_ETC2_R8G8B8_SRGB:    *pixel = MTL_PIXEL_ETC2_RGB8_SRGB;      return 8;
+        case AEMT_FORMAT_ETC2_R8G8B8A8_UNORM: *pixel = MTL_PIXEL_EAC_RGBA8;           return 16;
+        case AEMT_FORMAT_ETC2_R8G8B8A8_SRGB:  *pixel = MTL_PIXEL_EAC_RGBA8_SRGB;      return 16;
+        case AEMT_FORMAT_ASTC_4x4_UNORM:      *pixel = MTL_PIXEL_ASTC_4X4_LDR;        return 16;
+        case AEMT_FORMAT_ASTC_4x4_SRGB:       *pixel = MTL_PIXEL_ASTC_4X4_SRGB;       return 16;
+        default: break;
+    }
+    *block = 0;
+    return 0;
 }
 
 /* 1 when the device samples `format` (#2397), filtering it linearly too
@@ -1929,7 +1972,7 @@ static int aemt_format_samples(AemtDevice* d, int format, int linear) {
     int block = 0;
     AemtUInt pixel = 0;
     if (!aemt_sampled_format(format, &block, &pixel)) return 0;
-    if (block && !d->bc) return 0;
+    if ((block == AEMT_BLOCK_BC && !d->bc) || (block == AEMT_BLOCK_ETC_ASTC && !d->etc_astc)) return 0;
     if (linear && format == AEMT_FORMAT_R32G32B32A32_SFLOAT && !d->filter32) return 0;
     return 1;
 }
@@ -2109,6 +2152,18 @@ AemtTexture* aemt_texture_create_ex(AemtDevice* d, int w, int h, int mipmapped, 
 AemtTexture* aemt_texture_create_cube(AemtDevice* d, int size, int mipmapped, int linear_filter) {
     return aemt_texture_make_kind(d, size, size, 1, 6, AEMT_TEX_CUBE, mipmapped, linear_filter, 0,
                                   AEMT_FORMAT_R8G8B8A8_UNORM, 0, 1);
+}
+
+/* A cube map or a 2D array in any sampled format (#2402). */
+AemtTexture* aemt_texture_create_cube_format(AemtDevice* d, int size, int format, int mipmapped,
+                                             int linear_filter) {
+    return aemt_texture_make_kind(d, size, size, 1, 6, AEMT_TEX_CUBE, mipmapped, linear_filter, 0, format, 0, 1);
+}
+
+AemtTexture* aemt_texture_create_array_format(AemtDevice* d, int w, int h, int layers, int format,
+                                              int mipmapped, int linear_filter, int repeat) {
+    return aemt_texture_make_kind(d, w, h, 1, layers, AEMT_TEX_ARRAY, mipmapped, linear_filter, repeat,
+                                  format, 0, 1);
 }
 
 /* A 2D array (#2387): `layers` images uploaded one after another, read
@@ -4232,6 +4287,12 @@ AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int z, int
     (void)d; (void)w; (void)h; (void)z; (void)f; aemt_no(); return NULL;
 }
 int    aemt_texture_layers(const AemtTexture* t) { (void)t; return 0; }
+AemtTexture* aemt_texture_create_cube_format(AemtDevice* d, int s, int f, int m, int l) {
+    (void)d; (void)s; (void)f; (void)m; (void)l; aemt_no(); return NULL;
+}
+AemtTexture* aemt_texture_create_array_format(AemtDevice* d, int w, int h, int n, int f, int m, int l, int r) {
+    (void)d; (void)w; (void)h; (void)n; (void)f; (void)m; (void)l; (void)r; aemt_no(); return NULL;
+}
 int    aemt_batch_set_stencil_ref(AemtTarget* t, int i, int r) { (void)t; (void)i; (void)r; return aemt_no(); }
 int    aemt_batch_set_pipeline(AemtTarget* t, int i, AemtPipeline* p) { (void)t; (void)i; (void)p; return aemt_no(); }
 AemtTarget* aemt_target_create_layered(AemtDevice* d, int w, int h, int n, int f, int z, int c) {
@@ -4584,6 +4645,14 @@ void* aemt_ae_texture_create_storage(void* d, int w, int h, int depth, int forma
     return (void*)aemt_texture_create_storage((AemtDevice*)d, w, h, depth, format);
 }
 int   aemt_ae_texture_layers(void* tex) { return aemt_texture_layers((const AemtTexture*)tex); }
+void* aemt_ae_texture_create_cube_format(void* d, int size, int format, int mipmapped, int linear) {
+    return (void*)aemt_texture_create_cube_format((AemtDevice*)d, size, format, mipmapped, linear);
+}
+void* aemt_ae_texture_create_array_format(void* d, int w, int h, int layers, int format, int mipmapped,
+                                          int linear, int repeat) {
+    return (void*)aemt_texture_create_array_format((AemtDevice*)d, w, h, layers, format, mipmapped, linear,
+                                                   repeat);
+}
 int   aemt_ae_state_stencil(void* st, int compare, int ref, int pass_op, int fail_op, int depth_fail_op,
                             int read_mask, int write_mask) {
     return aemt_state_stencil((AemtState*)st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask,

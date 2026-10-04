@@ -362,6 +362,9 @@ exports (
     DEPTH, DEPTH_STENCIL, COMPARE_EQUAL, COMPARE_NOT_EQUAL, COMPARE_ALWAYS, COMPARE_NEVER, STENCIL_KEEP, STENCIL_ZERO, STENCIL_REPLACE, STENCIL_INCREMENT_CLAMP, STENCIL_DECREMENT_CLAMP, STENCIL_INVERT, STENCIL_INCREMENT_WRAP, STENCIL_DECREMENT_WRAP,
     aevk_ae_state_color_mask, aevk_ae_batch_set_pipeline, state_color_mask, batch_set_pipeline,
     COLOR_RED, COLOR_GREEN, COLOR_BLUE, COLOR_ALPHA, COLOR_ALL,
+    aevk_ae_texture_create_cube_format, aevk_ae_texture_create_array_format,
+    texture_create_cube_format, texture_create_array_format,
+    FORMAT_R8_SNORM, FORMAT_R8G8_SNORM, FORMAT_BC4_SNORM, FORMAT_BC5_SNORM, FORMAT_BC6H_UFLOAT, FORMAT_BC6H_SFLOAT, FORMAT_ETC2_R8G8B8_UNORM, FORMAT_ETC2_R8G8B8_SRGB, FORMAT_ETC2_R8G8B8A8_UNORM, FORMAT_ETC2_R8G8B8A8_SRGB, FORMAT_ASTC_4x4_UNORM, FORMAT_ASTC_4x4_SRGB,
     aevk_ae_target_create_layered_ex, aevk_ae_set_target_depth_array, aevk_ae_set_target_depth_cube, aevk_ae_material_set_target_depth_array, aevk_ae_material_set_target_depth_cube,
     target_create_layered_ex, set_target_depth_array, set_target_depth_cube, material_set_target_depth_array, material_set_target_depth_cube
 )
@@ -454,6 +457,8 @@ extern aevk_ae_texture_create_format(dev: ptr, w: int, h: int, format: int, mipm
 extern aevk_ae_texture_format_supported(dev: ptr, format: int) -> int
 extern aevk_ae_texture_anisotropy(tex: ptr) -> int
 extern aevk_ae_texture_upload_level(tex: ptr, level: int, data: ptr, len: int) -> int
+extern aevk_ae_texture_create_cube_format(dev: ptr, size: int, format: int, mipmapped: int, linear: int) -> ptr
+extern aevk_ae_texture_create_array_format(dev: ptr, w: int, h: int, layers: int, format: int, mipmapped: int, linear: int, repeat: int) -> ptr
 extern aevk_ae_state_topology(s: ptr, topology: int) -> int
 extern aevk_ae_batch_set_scissor(t: ptr, item: int, x: int, y: int, w: int, h: int) -> int
 extern aevk_ae_batch_set_viewport(t: ptr, item: int, x: float, y: float, w: float, h: float, min_depth: float, max_depth: float) -> int
@@ -652,6 +657,23 @@ const FORMAT_BC4_UNORM = 139
 const FORMAT_BC5_UNORM = 141
 const FORMAT_BC7_UNORM = 145
 const FORMAT_BC7_SRGB = 146
+// More sampled formats (#2402): signed normalised ones, which read -1..1, BC6H
+// for HDR, and the ETC2 and ASTC 4x4 block formats (8 bytes a block for
+// ETC2 RGB, 16 for the rest).
+// ETC2 and ASTC are sampled where the GPU has them (Apple and mobile GPUs,
+// lavapipe), as texture_format_supported reports.
+const FORMAT_R8_SNORM = 10
+const FORMAT_R8G8_SNORM = 17
+const FORMAT_BC4_SNORM = 140
+const FORMAT_BC5_SNORM = 142
+const FORMAT_BC6H_UFLOAT = 143
+const FORMAT_BC6H_SFLOAT = 144
+const FORMAT_ETC2_R8G8B8_UNORM = 147
+const FORMAT_ETC2_R8G8B8_SRGB = 148
+const FORMAT_ETC2_R8G8B8A8_UNORM = 151
+const FORMAT_ETC2_R8G8B8A8_SRGB = 152
+const FORMAT_ASTC_4x4_UNORM = 157
+const FORMAT_ASTC_4x4_SRGB = 158
 const FORMAT_R16G16B16A16_SFLOAT = 97
 
 // Input rate for layout_binding.
@@ -1012,6 +1034,17 @@ texture_create_format(dev: ptr, w: int, h: int, format: int, mipmapped: int, lin
 }
 texture_format_supported(dev: ptr, format: int) -> int { return aevk_ae_texture_format_supported(dev, format) }
 texture_anisotropy(tex: ptr) -> int { return aevk_ae_texture_anisotropy(tex) }
+
+// A cube map or a 2D array in any sampled format (#2402): a BC6H sky, BC7
+// terrain layers, an sRGB atlas. Layers upload one after another, a block
+// format's level by level with texture_upload_level.
+texture_create_cube_format(dev: ptr, size: int, format: int, mipmapped: int, linear: int) -> ptr {
+    return aevk_ae_texture_create_cube_format(dev, size, format, mipmapped, linear)
+}
+texture_create_array_format(dev: ptr, w: int, h: int, layers: int, format: int, mipmapped: int, linear: int,
+                            repeat: int) -> ptr {
+    return aevk_ae_texture_create_array_format(dev, w, h, layers, format, mipmapped, linear, repeat)
+}
 texture_upload_level(tex: ptr, level: int, data: ptr, len: int) -> int {
     return aevk_ae_texture_upload_level(tex, level, data, len)
 }

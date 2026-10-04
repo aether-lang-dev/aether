@@ -105,6 +105,7 @@ Every call returns one of the same codes, or a null handle with the reason in
 | A cube map, an array, a storage texture | `samplerCube`, `sampler2DArray`, `image2D`/`image3D` with its format | `TextureCube`, `Texture2DArray`, `RWTexture2D`/`RWTexture3D` at `uN` | `texturecube`, `texture2d_array`, `texture2d`/`texture3d` with `access::write` |
 | `DEPTH_STENCIL` | D24S8 where the device has it, otherwise D32S8 | D24S8 | Depth32Float_Stencil8 |
 | BC formats | where the device has `textureCompressionBC` | always | where `supportsBCTextureCompression` |
+| ETC2 and ASTC 4x4 | where the device has `textureCompressionETC2` / `textureCompressionASTC_LDR` | never | on an Apple GPU (`MTLGPUFamilyApple2`) |
 | A mipmapped texture's chain | blits, so the format must be linear-blittable | built on the CPU | `generateMipmapsForTexture:`, so the format must be filterable |
 | Vertex stream B | `binding = B` in the layout | input slot B | `[[buffer(16 + B)]]` |
 | Instance index in the shader | `gl_InstanceIndex`, counting from the first instance | `SV_InstanceID`, counting from 0 | `[[instance_id]]`, counting from the first instance |
@@ -225,16 +226,27 @@ anisotropy)` is a 2D texture in any of these sampled formats:
 | Format | Bytes | Reads as |
 |---|---|---|
 | `FORMAT_R8_UNORM`, `FORMAT_R8G8_UNORM` | 1 or 2 a texel | red, or red and green, from 0 to 1 |
+| `FORMAT_R8_SNORM`, `FORMAT_R8G8_SNORM` | 1 or 2 a texel | -1 to 1; -128 reads as -1, like -127 |
 | `FORMAT_R8G8B8A8_UNORM` | 4 a texel | 0 to 1 |
 | `FORMAT_R8G8B8A8_SRGB` | 4 a texel | linear light, decoded before filtering |
 | `FORMAT_R16G16B16A16_SFLOAT`, `FORMAT_R32G32B32A32_SFLOAT` | 8 or 16 a texel | the floats as stored |
-| `FORMAT_BC1_RGBA_UNORM`, `_SRGB`, `FORMAT_BC4_UNORM` | 8 a 4x4 block | BC1 colour with 1-bit alpha; BC4 one channel |
-| `FORMAT_BC3_UNORM`, `_SRGB`, `FORMAT_BC5_UNORM`, `FORMAT_BC7_UNORM`, `_SRGB` | 16 a 4x4 block | BC3 colour and alpha; BC5 two channels; BC7 colour and alpha |
+| `FORMAT_BC1_RGBA_UNORM`, `_SRGB`, `FORMAT_BC4_UNORM`, `_SNORM` | 8 a 4x4 block | BC1 colour with 1-bit alpha; BC4 one channel |
+| `FORMAT_BC3_UNORM`, `_SRGB`, `FORMAT_BC5_UNORM`, `_SNORM`, `FORMAT_BC7_UNORM`, `_SRGB` | 16 a 4x4 block | BC3 colour and alpha; BC5 two channels (a normal map's x and y); BC7 colour and alpha |
+| `FORMAT_BC6H_UFLOAT`, `_SFLOAT` | 16 a 4x4 block | half-float colour: an HDR sky or lightmap |
+| `FORMAT_ETC2_R8G8B8_UNORM`, `_SRGB` | 8 a 4x4 block | ETC2 colour |
+| `FORMAT_ETC2_R8G8B8A8_UNORM`, `_SRGB`, `FORMAT_ASTC_4x4_UNORM`, `_SRGB` | 16 a 4x4 block | ETC2 colour and alpha; ASTC 4x4 |
 
 A block-compressed texture is a whole number of 4x4 blocks, since
 Direct3D 12 requires it. `texture_format_supported(dev, format)` asks
 whether the device samples a format; a format it cannot sample is refused
-when the texture is made.
+when the texture is made. Desktop GPUs sample BC, and Apple and mobile GPUs
+sample ETC2 and ASTC. Direct3D 12 has no ETC2 or ASTC formats at all, so an
+asset pipeline that ships both picks one per device by asking first.
+
+`texture_create_cube_format(dev, size, format, mipmapped, linear)` and
+`texture_create_array_format(dev, w, h, layers, format, mipmapped, linear,
+repeat)` are a cube map and a 2D array in any of these formats: a BC6H sky,
+BC7 terrain layers, an sRGB atlas.
 
 `texture_upload` takes level 0, and a mipmapped texture builds the rest of
 its chain from it. The chain is a 2:1 linear filter per level, with sRGB
@@ -494,6 +506,5 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
-| BC6H, ASTC and ETC2, signed formats, and cubes and arrays in other formats | [#2402](https://github.com/aether-lang-dev/aether/issues/2402) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

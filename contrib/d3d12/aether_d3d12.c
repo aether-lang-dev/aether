@@ -2421,18 +2421,24 @@ static int aedx_format_bytes(DXGI_FORMAT f) {
 static int aedx_sampled_format(DXGI_FORMAT f, int* block) {
     *block = 0;
     switch (f) {
-        case DXGI_FORMAT_R8_UNORM:            return 1;
-        case DXGI_FORMAT_R8G8_UNORM:          return 2;
+        case DXGI_FORMAT_R8_UNORM:
+        case DXGI_FORMAT_R8_SNORM:            return 1;
+        case DXGI_FORMAT_R8G8_UNORM:
+        case DXGI_FORMAT_R8G8_SNORM:          return 2;
         case DXGI_FORMAT_R8G8B8A8_UNORM:
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:  return 8;
         case DXGI_FORMAT_R32G32B32A32_FLOAT:  return 16;
         case DXGI_FORMAT_BC1_UNORM:
         case DXGI_FORMAT_BC1_UNORM_SRGB:
-        case DXGI_FORMAT_BC4_UNORM:           *block = 1; return 8;
+        case DXGI_FORMAT_BC4_UNORM:
+        case DXGI_FORMAT_BC4_SNORM:           *block = 1; return 8;
         case DXGI_FORMAT_BC3_UNORM:
         case DXGI_FORMAT_BC3_UNORM_SRGB:
         case DXGI_FORMAT_BC5_UNORM:
+        case DXGI_FORMAT_BC5_SNORM:
+        case DXGI_FORMAT_BC6H_UF16:
+        case DXGI_FORMAT_BC6H_SF16:
         case DXGI_FORMAT_BC7_UNORM:
         case DXGI_FORMAT_BC7_UNORM_SRGB:      *block = 1; return 16;
         default:                              return 0;
@@ -2513,7 +2519,9 @@ static uint16_t aedx_float_to_half(float f) {
  * float as floats, and the rest as bytes. */
 static void aedx_downsample(DXGI_FORMAT f, int bpp, const unsigned char* src, int pw, int ph,
                             unsigned char* dst, int nw, int nh) {
-    int chans = f == DXGI_FORMAT_R8_UNORM ? 1 : f == DXGI_FORMAT_R8G8_UNORM ? 2 : 4;
+    int chans = f == DXGI_FORMAT_R8_UNORM || f == DXGI_FORMAT_R8_SNORM ? 1
+              : f == DXGI_FORMAT_R8G8_UNORM || f == DXGI_FORMAT_R8G8_SNORM ? 2 : 4;
+    int snorm = f == DXGI_FORMAT_R8_SNORM || f == DXGI_FORMAT_R8G8_SNORM;
     for (int y = 0; y < nh; y++) {
         int y0 = y * 2 < ph ? y * 2 : ph - 1, y1 = y * 2 + 1 < ph ? y * 2 + 1 : ph - 1;
         for (int x = 0; x < nw; x++) {
@@ -2546,6 +2554,15 @@ static void aedx_downsample(DXGI_FORMAT f, int bpp, const unsigned char* src, in
                     float s = 0.0f;
                     for (int k = 0; k < 4; k++) s += aedx_srgb_to_linear(t[k][c]);
                     out[c] = aedx_linear_to_srgb(s * 0.25f);
+                } else if (snorm) {
+                    /* -128 reads as -1 like -127 does (#2402). */
+                    float s = 0.0f;
+                    for (int k = 0; k < 4; k++) {
+                        int v = (signed char)t[k][c];
+                        s += (v < -127 ? -127 : v) / 127.0f;
+                    }
+                    int q = (int)lrintf(s * 0.25f * 127.0f);
+                    out[c] = (unsigned char)(signed char)q;
                 } else {
                     int s = t[0][c] + t[1][c] + t[2][c] + t[3][c];
                     out[c] = (unsigned char)((s + 2) / 4);
@@ -2621,6 +2638,10 @@ static AedxTexture* aedx_texture_make_kind(AedxDevice* d, int w, int h, int dept
     int block = 0;
     int texel_bytes = aedx_sampled_format(format, &block);
     if (!storage) {
+        if ((int)format > 1000 && (int)format < 1200) {
+            aedx_fail(AEDX_ERR_UNSUPPORTED, "Direct3D 12 has no ETC2 or ASTC formats (format %d)", (int)format);
+            return NULL;
+        }
         if (!texel_bytes) {
             aedx_fail(AEDX_ERR_ARG, "format %d is not a texture format", (int)format);
             return NULL;
@@ -2744,6 +2765,19 @@ AedxTexture* aedx_texture_create_ex(AedxDevice* d, int w, int h, int mipmapped, 
 AedxTexture* aedx_texture_create_cube(AedxDevice* d, int size, int mipmapped, int linear_filter) {
     return aedx_texture_make_kind(d, size, size, 1, 6, AEDX_TEX_CUBE, mipmapped, linear_filter, 0,
                                   DXGI_FORMAT_R8G8B8A8_UNORM, 0, 1);
+}
+
+/* A cube map or a 2D array in any sampled format (#2402). */
+AedxTexture* aedx_texture_create_cube_format(AedxDevice* d, int size, int format, int mipmapped,
+                                             int linear_filter) {
+    return aedx_texture_make_kind(d, size, size, 1, 6, AEDX_TEX_CUBE, mipmapped, linear_filter, 0,
+                                  (DXGI_FORMAT)format, 0, 1);
+}
+
+AedxTexture* aedx_texture_create_array_format(AedxDevice* d, int w, int h, int layers, int format,
+                                              int mipmapped, int linear_filter, int repeat) {
+    return aedx_texture_make_kind(d, w, h, 1, layers, AEDX_TEX_ARRAY, mipmapped, linear_filter, repeat,
+                                  (DXGI_FORMAT)format, 0, 1);
 }
 
 /* A 2D array (#2387): `layers` images uploaded one after another, read
@@ -5361,6 +5395,12 @@ AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int z, int
     (void)d; (void)w; (void)h; (void)z; (void)f; aedx_no(); return NULL;
 }
 int    aedx_texture_layers(const AedxTexture* t) { (void)t; return 0; }
+AedxTexture* aedx_texture_create_cube_format(AedxDevice* d, int s, int f, int m, int l) {
+    (void)d; (void)s; (void)f; (void)m; (void)l; aedx_no(); return NULL;
+}
+AedxTexture* aedx_texture_create_array_format(AedxDevice* d, int w, int h, int n, int f, int m, int l, int r) {
+    (void)d; (void)w; (void)h; (void)n; (void)f; (void)m; (void)l; (void)r; aedx_no(); return NULL;
+}
 int    aedx_batch_set_stencil_ref(AedxTarget* t, int i, int r) { (void)t; (void)i; (void)r; return aedx_no(); }
 int    aedx_batch_set_pipeline(AedxTarget* t, int i, AedxPipeline* p) { (void)t; (void)i; (void)p; return aedx_no(); }
 AedxTarget* aedx_target_create_layered(AedxDevice* d, int w, int h, int n, int f, int z, int c) {
@@ -5706,6 +5746,14 @@ void* aedx_ae_texture_create_storage(void* d, int w, int h, int depth, int forma
     return (void*)aedx_texture_create_storage((AedxDevice*)d, w, h, depth, format);
 }
 int   aedx_ae_texture_layers(void* tex) { return aedx_texture_layers((const AedxTexture*)tex); }
+void* aedx_ae_texture_create_cube_format(void* d, int size, int format, int mipmapped, int linear) {
+    return (void*)aedx_texture_create_cube_format((AedxDevice*)d, size, format, mipmapped, linear);
+}
+void* aedx_ae_texture_create_array_format(void* d, int w, int h, int layers, int format, int mipmapped,
+                                          int linear, int repeat) {
+    return (void*)aedx_texture_create_array_format((AedxDevice*)d, w, h, layers, format, mipmapped, linear,
+                                                   repeat);
+}
 int   aedx_ae_state_stencil(void* st, int compare, int ref, int pass_op, int fail_op, int depth_fail_op,
                             int read_mask, int write_mask) {
     return aedx_state_stencil((AedxState*)st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask,

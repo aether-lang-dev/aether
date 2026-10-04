@@ -83,6 +83,19 @@ extern "C" {
 #define AEMT_FORMAT_BC5_UNORM           141
 #define AEMT_FORMAT_BC7_UNORM           145
 #define AEMT_FORMAT_BC7_SRGB            146
+/* More sampled formats (#2402), numbered as VkFormat like the rest. */
+#define AEMT_FORMAT_R8_SNORM            10
+#define AEMT_FORMAT_R8G8_SNORM          17
+#define AEMT_FORMAT_BC4_SNORM           140
+#define AEMT_FORMAT_BC5_SNORM           142
+#define AEMT_FORMAT_BC6H_UFLOAT         143
+#define AEMT_FORMAT_BC6H_SFLOAT         144
+#define AEMT_FORMAT_ETC2_R8G8B8_UNORM   147
+#define AEMT_FORMAT_ETC2_R8G8B8_SRGB    148
+#define AEMT_FORMAT_ETC2_R8G8B8A8_UNORM 151
+#define AEMT_FORMAT_ETC2_R8G8B8A8_SRGB  152
+#define AEMT_FORMAT_ASTC_4x4_UNORM      157
+#define AEMT_FORMAT_ASTC_4x4_SRGB       158
 
 typedef struct AemtDevice    AemtDevice;
 typedef struct AemtTarget    AemtTarget;
@@ -247,6 +260,11 @@ AemtTexture* aemt_texture_create_format(AemtDevice* d, int w, int h, int format,
 int          aemt_texture_format_supported(AemtDevice* d, int format);
 int          aemt_texture_anisotropy(const AemtTexture* tex);
 int          aemt_texture_upload_level(AemtTexture* tex, int level, const void* data, size_t len);
+/* Cubes and arrays in any sampled format (#2402). */
+AemtTexture* aemt_texture_create_cube_format(AemtDevice* d, int size, int format, int mipmapped,
+                                             int linear_filter);
+AemtTexture* aemt_texture_create_array_format(AemtDevice* d, int w, int h, int layers, int format,
+                                              int mipmapped, int linear_filter, int repeat);
 
 /* Targets with several colour attachments (#2386), as in contrib/vulkan. */
 AemtTarget* aemt_target_create_mrt(AemtDevice* d, int width, int height, int count, int f0, int f1,
