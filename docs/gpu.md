@@ -103,6 +103,8 @@ Every call returns one of the same codes, or a null handle with the reason in
 | `FORMAT_*` numbers | VkFormat | DXGI_FORMAT | VkFormat, translated where used |
 | A point's size | `gl_PointSize`, which the vertex shader must write | always one pixel | `[[point_size]]`, which the vertex shader must write |
 | A cube map, an array, a storage texture | `samplerCube`, `sampler2DArray`, `image2D`/`image3D` with its format | `TextureCube`, `Texture2DArray`, `RWTexture2D`/`RWTexture3D` at `uN` | `texturecube`, `texture2d_array`, `texture2d`/`texture3d` with `access::write` |
+| BC formats | where the device has `textureCompressionBC` | always | where `supportsBCTextureCompression` |
+| A mipmapped texture's chain | blits, so the format must be linear-blittable | built on the CPU | `generateMipmapsForTexture:`, so the format must be filterable |
 | Vertex stream B | `binding = B` in the layout | input slot B | `[[buffer(16 + B)]]` |
 | Instance index in the shader | `gl_InstanceIndex`, counting from the first instance | `SV_InstanceID`, counting from 0 | `[[instance_id]]`, counting from the first instance |
 | Dynamic uniform offsets are multiples of | the device's `minUniformBufferOffsetAlignment` | 256 | 256 |
@@ -213,6 +215,46 @@ vulkan.compute_set_storage_texture(blur, 0, img)
 vulkan.dispatch(blur, 32, 32, 1)
 vulkan.set_texture(post_pipe, 0, img)
 ```
+
+## Texture formats and anisotropic filtering
+
+`texture_create_format(dev, w, h, format, mipmapped, linear, repeat,
+anisotropy)` is a 2D texture in any of these sampled formats:
+
+| Format | Bytes | Reads as |
+|---|---|---|
+| `FORMAT_R8_UNORM`, `FORMAT_R8G8_UNORM` | 1 or 2 a texel | red, or red and green, from 0 to 1 |
+| `FORMAT_R8G8B8A8_UNORM` | 4 a texel | 0 to 1 |
+| `FORMAT_R8G8B8A8_SRGB` | 4 a texel | linear light, decoded before filtering |
+| `FORMAT_R16G16B16A16_SFLOAT`, `FORMAT_R32G32B32A32_SFLOAT` | 8 or 16 a texel | the floats as stored |
+| `FORMAT_BC1_RGBA_UNORM`, `_SRGB`, `FORMAT_BC4_UNORM` | 8 a 4x4 block | BC1 colour with 1-bit alpha; BC4 one channel |
+| `FORMAT_BC3_UNORM`, `_SRGB`, `FORMAT_BC5_UNORM`, `FORMAT_BC7_UNORM`, `_SRGB` | 16 a 4x4 block | BC3 colour and alpha; BC5 two channels; BC7 colour and alpha |
+
+A block-compressed texture is a whole number of 4x4 blocks, since
+Direct3D 12 requires it. `texture_format_supported(dev, format)` asks
+whether the device samples a format; a format it cannot sample is refused
+when the texture is made.
+
+`texture_upload` takes level 0, and a mipmapped texture builds the rest of
+its chain from it. The chain is a 2:1 linear filter per level, with sRGB
+averaged as light. A block format's chain cannot be built that way, so each
+of its levels is uploaded with `texture_upload_level(tex, level, data,
+len)`. That also works for a chain made off the GPU. The texture binds once
+every level has pixels:
+
+```aether,fragment
+sky = vulkan.texture_create_format(dev, 256, 256, vulkan.FORMAT_BC7_SRGB, 1, 1, 1, 8)
+level = 0
+while level < vulkan.texture_mip_levels(sky) {
+    vulkan.texture_upload_level(sky, level, bytes.data(blocks[level]), bytes.length(blocks[level]))
+    level = level + 1
+}
+```
+
+`anisotropy` above 1 filters anisotropically, which keeps a texture seen at
+a grazing angle sharp: a road, a floor, a wall alongside the camera. The
+device's limit caps it, 16 everywhere so far, and `texture_anisotropy(tex)`
+reports what was granted.
 
 ## Drawing many things
 
@@ -357,7 +399,7 @@ Each gap has an issue:
 
 | Missing | Issue |
 |---|---|
-| Sampled texture formats past RGBA8 (sRGB, R8, RG8, half and float, BC compression) and anisotropic filtering | [#2397](https://github.com/aether-lang-dev/aether/issues/2397) |
+| BC6H, ASTC and ETC2, signed formats, and cubes and arrays in other formats | [#2402](https://github.com/aether-lang-dev/aether/issues/2402) |
 | Stencil, and rendering into one layer of an array or one face of a cube | [#2399](https://github.com/aether-lang-dev/aether/issues/2399) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

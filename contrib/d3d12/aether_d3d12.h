@@ -205,6 +205,15 @@ AedxTexture* aedx_texture_create_array(AedxDevice* d, int w, int h, int layers, 
 AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int depth, int format);
 int          aedx_texture_layers(const AedxTexture* tex);
 
+/* Sampled textures in other formats, and anisotropic filtering (#2397), as
+ * in contrib/vulkan, with DXGI_FORMAT values. A mipmapped uncompressed
+ * chain is built on the CPU per format (sRGB averaged as linear light). */
+AedxTexture* aedx_texture_create_format(AedxDevice* d, int w, int h, int format, int mipmapped,
+                                        int linear_filter, int repeat, int anisotropy);
+int          aedx_texture_format_supported(AedxDevice* d, int format);
+int          aedx_texture_anisotropy(const AedxTexture* tex);
+int          aedx_texture_upload_level(AedxTexture* tex, int level, const void* data, size_t len);
+
 /* Targets with several colour attachments (#2386), as in contrib/vulkan. */
 AedxTarget* aedx_target_create_mrt(AedxDevice* d, int width, int height, int count, int f0, int f1,
                                    int f2, int f3, int want_depth, int samples);

@@ -264,6 +264,10 @@ struct AevkDevice {
     uint32_t         max_dim_3d;   /* a 3D texture's largest side (#2198) */
     uint32_t         max_dim_cube; /* a cube face's largest side (#2387) */
     uint32_t         max_layers;   /* the most layers an array can have */
+    /* The most anisotropy a sampler can have, 1 where the device has no
+     * anisotropic filtering, and whether it samples BC formats (#2397). */
+    float            max_aniso;
+    int              bc;
     /* Indirect draws (#2198): whether one call takes several commands, and
      * whether a command's first instance is honoured. Both are optional
      * features, enabled when the device has them. */
@@ -577,6 +581,13 @@ struct AevkTexture {
      * draws. It stays in GENERAL, the one layout both take, so the dispatch's
      * memory barriers are all the synchronisation it needs. */
     int            storage;
+    /* A block-compressed format (#2397): `bpp` is then the bytes of a 4x4
+     * block. `levels_mask` has a bit for each level with pixels, and the
+     * texture can be bound once every level has them. `aniso` is the
+     * anisotropy its sampler was granted. */
+    int            block;
+    uint32_t       levels_mask;
+    float          aniso;
     uint32_t       mip_levels;
     VkImage        image;
     VkDeviceMemory mem;
@@ -1014,6 +1025,12 @@ AevkDevice* aevk_device_create(void) {
     d->ia.vkGetPhysicalDeviceFeatures(d->phys, &have);
     want.multiDrawIndirect = have.multiDrawIndirect;
     want.drawIndirectFirstInstance = have.drawIndirectFirstInstance;
+    /* Anisotropic filtering and the BC block formats (#2397). */
+    want.samplerAnisotropy = have.samplerAnisotropy;
+    want.textureCompressionBC = have.textureCompressionBC;
+    d->max_aniso = have.samplerAnisotropy == VK_TRUE ? props.limits.maxSamplerAnisotropy : 1.0f;
+    if (d->max_aniso < 1.0f) d->max_aniso = 1.0f;
+    d->bc = have.textureCompressionBC == VK_TRUE;
     d->multi_draw_indirect = have.multiDrawIndirect == VK_TRUE;
     d->indirect_first_instance = have.drawIndirectFirstInstance == VK_TRUE;
 
@@ -2720,12 +2737,62 @@ static int aevk_format_bytes(VkFormat f) {
     }
 }
 
+/* The formats a sampled texture can be in (#2397): bytes a texel, or with
+ * *block set, bytes a 4x4 block. 0 for any other format. */
+static int aevk_sampled_format(VkFormat f, int* block) {
+    *block = 0;
+    switch (f) {
+        case VK_FORMAT_R8_UNORM:            return 1;
+        case VK_FORMAT_R8G8_UNORM:          return 2;
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:       return 4;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return 8;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+        case VK_FORMAT_BC4_UNORM_BLOCK:     *block = 1; return 8;
+        case VK_FORMAT_BC3_UNORM_BLOCK:
+        case VK_FORMAT_BC3_SRGB_BLOCK:
+        case VK_FORMAT_BC5_UNORM_BLOCK:
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK:      *block = 1; return 16;
+        default:                            return 0;
+    }
+}
+
+/* Bytes of one layer of `level` of a texture: texels, or 4x4 blocks
+ * rounded up at the edges. */
+static size_t aevk_level_bytes(const AevkTexture* tex, uint32_t level) {
+    size_t w = (size_t)tex->width >> level, h = (size_t)tex->height >> level;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (tex->block) return ((w + 3) / 4) * ((h + 3) / 4) * (size_t)tex->bpp;
+    return w * h * (size_t)tex->depth * (size_t)tex->bpp;
+}
+
+/* 1 when the device samples `format` (#2397), filtering it linearly too
+ * when `linear`. */
+static int aevk_format_samples(AevkDevice* d, VkFormat format, int linear) {
+    int block = 0;
+    if (!aevk_sampled_format(format, &block)) return 0;
+    if (block && !d->bc) return 0;
+    VkFormatProperties fp;
+    d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, format, &fp);
+    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                (linear ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0);
+    return (fp.optimalTilingFeatures & need) == need;
+}
+
+int aevk_texture_format_supported(AevkDevice* d, int format) {
+    return d ? aevk_format_samples(d, (VkFormat)format, 0) : 0;
+}
+
 /* A texture of `kind` (AEVK_TEX_*): `depth` slices for a 3D one, `layers`
  * for an array (6 for a cube), in `format`, sampled or, with `storage`, also
  * written by compute passes. */
 static AevkTexture* aevk_texture_make_kind(AevkDevice* d, int width, int height, int depth, int layers,
                                            int kind, int mipmapped, int linear_filter, int repeat,
-                                           VkFormat format, int storage) {
+                                           VkFormat format, int storage, int aniso) {
     aevk_clear_error();
     if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
     int is_3d = kind == AEVK_TEX_3D;
@@ -2754,25 +2821,48 @@ static AevkTexture* aevk_texture_make_kind(AevkDevice* d, int width, int height,
         }
     }
 
+    int block = 0;
+    int texel_bytes = aevk_sampled_format(format, &block);
+    if (!storage) {
+        if (!texel_bytes) {
+            aevk_fail(AEVK_ERR_ARG, "format %d is not a texture format", (int)format);
+            return NULL;
+        }
+        if (block && (kind == AEVK_TEX_3D)) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "a 3D texture cannot be block compressed");
+            return NULL;
+        }
+        /* Direct3D 12 requires it, so every module does. */
+        if (block && (width % 4 != 0 || height % 4 != 0)) {
+            aevk_fail(AEVK_ERR_ARG, "a block-compressed texture is whole 4x4 blocks, not %dx%d", width, height);
+            return NULL;
+        }
+        if (!aevk_format_samples(d, format, linear_filter)) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot sample format %d%s", (int)format,
+                      linear_filter ? " with linear filtering" : "");
+            return NULL;
+        }
+    }
+
     uint32_t levels = 1;
     if (mipmapped) {
-        /* Generating the chain is a chain of blits, and vkCmdBlitImage names
-         * three format features as required: BLIT_SRC on the source, BLIT_DST
-         * on the destination (the same image, different levels), and
-         * SAMPLED_IMAGE_FILTER_LINEAR on the source for VK_FILTER_LINEAR.
-         * Checking only the filter bit, as this did, left the blit itself
-         * unchecked. Refusing beats generating a black chain nobody notices. */
-        VkFormatProperties fp;
-        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, VK_FORMAT_R8G8B8A8_UNORM, &fp);
-        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
-                                          VK_FORMAT_FEATURE_BLIT_DST_BIT |
-                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-        if ((fp.optimalTilingFeatures & need) != need) {
-            aevk_fail(AEVK_ERR_UNSUPPORTED,
-                      "device cannot linear-blit R8G8B8A8_UNORM (features 0x%x), "
-                      "so it cannot build mipmaps",
-                      (unsigned)fp.optimalTilingFeatures);
-            return NULL;
+        /* An uncompressed chain is generated on upload by a chain of blits,
+         * and vkCmdBlitImage needs BLIT_SRC, BLIT_DST and, for VK_FILTER_LINEAR,
+         * SAMPLED_IMAGE_FILTER_LINEAR on the format itself. A block format's
+         * levels cannot be filtered on upload: the caller uploads each one
+         * with texture_upload_level (#2397). */
+        if (!block) {
+            VkFormatProperties fp;
+            d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, format, &fp);
+            const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                              VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+            if ((fp.optimalTilingFeatures & need) != need) {
+                aevk_fail(AEVK_ERR_UNSUPPORTED,
+                          "the device cannot linear-blit format %d, so it cannot build its mipmaps; "
+                          "upload each level with texture_upload_level", (int)format);
+                return NULL;
+            }
         }
         levels = aevk_mip_levels_for(width, height);
     }
@@ -2786,7 +2876,8 @@ static AevkTexture* aevk_texture_make_kind(AevkDevice* d, int width, int height,
     tex->layers = layers;
     tex->kind = kind;
     tex->format = format;
-    tex->bpp = aevk_format_bytes(format);
+    tex->bpp = storage ? aevk_format_bytes(format) : texel_bytes;
+    tex->block = block;
     tex->storage = storage;
     tex->mip_levels = levels;
 
@@ -2854,6 +2945,13 @@ static AevkTexture* aevk_texture_make_kind(AevkDevice* d, int width, int height,
     si.addressModeW = mode;
     si.maxLod = (float)levels;
     si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    /* Anisotropy as asked, up to the device's limit (#2397). */
+    tex->aniso = 1.0f;
+    if (aniso > 1 && d->max_aniso > 1.0f) {
+        tex->aniso = (float)aniso < d->max_aniso ? (float)aniso : d->max_aniso;
+        si.anisotropyEnable = VK_TRUE;
+        si.maxAnisotropy = tex->aniso;
+    }
     r = d->da.vkCreateSampler(d->device, &si, NULL, &tex->sampler);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateSampler failed (%d)", (int)r); goto fail; }
     if (storage) {
@@ -2885,6 +2983,7 @@ static AevkTexture* aevk_texture_make_kind(AevkDevice* d, int width, int height,
         AEVK_MUTEX_UNLOCK(&d->lock);
         if (src != AEVK_OK) goto fail;
         tex->uploaded = 1;
+        tex->levels_mask = (levels >= 32) ? ~0u : ((1u << levels) - 1u);
     }
 
     return tex;
@@ -2896,7 +2995,7 @@ fail:
 static AevkTexture* aevk_texture_make(AevkDevice* d, int width, int height, int depth,
                                       int is_3d, int mipmapped, int linear_filter, int repeat) {
     return aevk_texture_make_kind(d, width, height, depth, 1, is_3d ? AEVK_TEX_3D : AEVK_TEX_2D,
-                                  mipmapped, linear_filter, repeat, VK_FORMAT_R8G8B8A8_UNORM, 0);
+                                  mipmapped, linear_filter, repeat, VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
 }
 
 AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
@@ -2909,7 +3008,7 @@ AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
  * from a direction the same way in all three APIs. */
 AevkTexture* aevk_texture_create_cube(AevkDevice* d, int size, int mipmapped, int linear_filter) {
     return aevk_texture_make_kind(d, size, size, 1, 6, AEVK_TEX_CUBE, mipmapped, linear_filter, 0,
-                                  VK_FORMAT_R8G8B8A8_UNORM, 0);
+                                  VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
 }
 
 /* A 2D array (#2387): `layers` RGBA images of one size, uploaded one after
@@ -2918,7 +3017,7 @@ AevkTexture* aevk_texture_create_cube(AevkDevice* d, int size, int mipmapped, in
 AevkTexture* aevk_texture_create_array(AevkDevice* d, int width, int height, int layers,
                                        int mipmapped, int linear_filter, int repeat) {
     return aevk_texture_make_kind(d, width, height, 1, layers, AEVK_TEX_ARRAY, mipmapped, linear_filter,
-                                  repeat, VK_FORMAT_R8G8B8A8_UNORM, 0);
+                                  repeat, VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
 }
 
 /* A texture compute passes write (#2388): 2D, or 3D with `depth` above 1,
@@ -2932,10 +3031,26 @@ AevkTexture* aevk_texture_create_storage(AevkDevice* d, int width, int height, i
         return NULL;
     }
     return aevk_texture_make_kind(d, width, height, depth, 1, depth > 1 ? AEVK_TEX_3D : AEVK_TEX_2D, 0, 0, 0,
-                                  (VkFormat)format, 1);
+                                  (VkFormat)format, 1, 1);
 }
 
 int aevk_texture_layers(const AevkTexture* tex) { return tex ? tex->layers : 0; }
+
+/* A 2D texture in any sampled format (#2397), with anisotropic filtering of
+ * up to `anisotropy` samples (1 for none). A block format's mip chain is the
+ * caller's, level by level with texture_upload_level. */
+AevkTexture* aevk_texture_create_format(AevkDevice* d, int width, int height, int format, int mipmapped,
+                                        int linear_filter, int repeat, int anisotropy) {
+    if (anisotropy < 1) {
+        aevk_clear_error();
+        aevk_fail(AEVK_ERR_ARG, "anisotropy is at least 1, not %d", anisotropy);
+        return NULL;
+    }
+    return aevk_texture_make_kind(d, width, height, 1, 1, AEVK_TEX_2D, mipmapped, linear_filter, repeat,
+                                  (VkFormat)format, 0, anisotropy);
+}
+
+int aevk_texture_anisotropy(const AevkTexture* tex) { return tex ? (int)tex->aniso : 0; }
 
 /* A 3D texture: `depth` slices of width x height RGBA, sampled with a
  * sampler3D. No mip chain; upload is width*height*depth*4 bytes, slice by
@@ -2963,11 +3078,14 @@ void aevk_texture_destroy(AevkTexture* tex) {
     free(tex);
 }
 
+int aevk_texture_upload_level(AevkTexture* tex, int level, const void* data, size_t len);
+
 int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     aevk_clear_error();
     if (!tex || !rgba) return aevk_fail(AEVK_ERR_ARG, "texture or pixel data is null");
-    size_t need = (size_t)tex->width * (size_t)tex->height * (size_t)tex->depth *
-                  (size_t)tex->layers * (size_t)tex->bpp;
+    /* A block format's levels are each the caller's (#2397). */
+    if (tex->block) return aevk_texture_upload_level(tex, 0, rgba, len);
+    size_t need = aevk_level_bytes(tex, 0) * (size_t)tex->layers;
     if (len < need) {
         return aevk_fail(AEVK_ERR_ARG, "need %zu bytes for %dx%dx%d with %d layers, got %zu",
                          need, tex->width, tex->height, tex->depth, tex->layers, len);
@@ -3087,7 +3205,86 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
 
     d->da.vkDestroyBuffer(d->device, staging, NULL);
     d->da.vkFreeMemory(d->device, staging_mem, NULL);
-    if (rc == AEVK_OK) tex->uploaded = 1;
+    if (rc == AEVK_OK) {
+        tex->uploaded = 1;
+        tex->levels_mask = (tex->mip_levels >= 32) ? ~0u : ((1u << tex->mip_levels) - 1u);
+    }
+    return rc;
+}
+
+/* One level of every layer, as given: a block format's chain, or a chain
+ * made off the GPU (#2397). Only that level's layout moves, so levels
+ * already uploaded keep their pixels; the texture can be bound once every
+ * level has some. */
+int aevk_texture_upload_level(AevkTexture* tex, int level, const void* data, size_t len) {
+    aevk_clear_error();
+    if (!tex || !data) return aevk_fail(AEVK_ERR_ARG, "texture or pixel data is null");
+    if (level < 0 || (uint32_t)level >= tex->mip_levels) {
+        return aevk_fail(AEVK_ERR_ARG, "the texture has levels 0..%u, not %d", tex->mip_levels - 1, level);
+    }
+    if (tex->storage) return aevk_fail(AEVK_ERR_ARG, "a storage texture is uploaded whole");
+    size_t layer = aevk_level_bytes(tex, (uint32_t)level);
+    size_t need = layer * (size_t)tex->layers;
+    if (len < need) {
+        return aevk_fail(AEVK_ERR_ARG, "level %d needs %zu bytes, got %zu", level, need, len);
+    }
+    AevkDevice* d = tex->dev;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+    int rc = aevk_make_buffer(d, (VkDeviceSize)need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              &staging, &staging_mem);
+    if (rc != AEVK_OK) return rc;
+    void* map = NULL;
+    VkResult r = d->da.vkMapMemory(d->device, staging_mem, 0, (VkDeviceSize)need, 0, &map);
+    if (r != VK_SUCCESS) {
+        d->da.vkDestroyBuffer(d->device, staging, NULL);
+        d->da.vkFreeMemory(d->device, staging_mem, NULL);
+        return aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r);
+    }
+    memcpy(map, data, need);
+    d->da.vkUnmapMemory(d->device, staging_mem);
+
+    uint32_t bit = 1u << (uint32_t)level;
+    VkImageLayout from = (tex->levels_mask & bit) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                  : VK_IMAGE_LAYOUT_UNDEFINED;
+    AEVK_MUTEX_LOCK(&d->lock);
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    rc = aevk_run_once(d, &cmd);
+    if (rc == AEVK_OK) {
+        aevk_image_barrier_levels(d, cmd, tex->image, (uint32_t)level, 1, from,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  (tex->levels_mask & bit) ? VK_ACCESS_SHADER_READ_BIT : 0,
+                                  VK_ACCESS_TRANSFER_WRITE_BIT,
+                                  (tex->levels_mask & bit) ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                                           : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy copy = {0};
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.mipLevel = (uint32_t)level;
+        copy.imageSubresource.layerCount = (uint32_t)tex->layers;
+        uint32_t lw = (uint32_t)tex->width >> level, lh = (uint32_t)tex->height >> level;
+        copy.imageExtent.width = lw ? lw : 1;
+        copy.imageExtent.height = lh ? lh : 1;
+        copy.imageExtent.depth = (uint32_t)tex->depth;
+        d->da.vkCmdCopyBufferToImage(cmd, staging, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        aevk_image_barrier_levels(d, cmd, tex->image, (uint32_t)level, 1,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        rc = aevk_submit_once(d, cmd);
+    }
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    d->da.vkDestroyBuffer(d->device, staging, NULL);
+    d->da.vkFreeMemory(d->device, staging_mem, NULL);
+    if (rc == AEVK_OK) {
+        tex->levels_mask |= bit;
+        uint32_t all = (tex->mip_levels >= 32) ? ~0u : ((1u << tex->mip_levels) - 1u);
+        tex->uploaded = tex->levels_mask == all;
+    }
     return rc;
 }
 
@@ -3646,7 +3843,9 @@ int aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex) {
     if (!tex->uploaded) {
         /* Sampling an image still in UNDEFINED layout is undefined behaviour
          * and reads as garbage, so refuse rather than render nonsense. */
-        return aevk_fail(AEVK_ERR_ARG, "texture has no pixels yet, upload before binding");
+        return aevk_fail(AEVK_ERR_ARG, tex->levels_mask ? "texture has levels without pixels yet: upload each "
+                                                          "level before binding"
+                                                        : "texture has no pixels yet, upload before binding");
     }
     if (!p->declared[binding] ||
         p->desc_type[binding] != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
@@ -6231,6 +6430,18 @@ void* aevk_ae_texture_create_storage(void* d, int w, int h, int depth, int forma
     return (void*)aevk_texture_create_storage((AevkDevice*)d, w, h, depth, format);
 }
 int aevk_ae_texture_layers(void* tex) { return aevk_texture_layers((const AevkTexture*)tex); }
+void* aevk_ae_texture_create_format(void* d, int w, int h, int format, int mipmapped, int linear, int repeat,
+                                    int anisotropy) {
+    return (void*)aevk_texture_create_format((AevkDevice*)d, w, h, format, mipmapped, linear, repeat, anisotropy);
+}
+int aevk_ae_texture_format_supported(void* d, int format) {
+    return aevk_texture_format_supported((AevkDevice*)d, format);
+}
+int aevk_ae_texture_anisotropy(void* tex) { return aevk_texture_anisotropy((const AevkTexture*)tex); }
+int aevk_ae_texture_upload_level(void* tex, int level, const void* data, int len) {
+    if (len < 0) return aevk_fail(AEVK_ERR_ARG, "negative length");
+    return aevk_texture_upload_level((AevkTexture*)tex, level, data, (size_t)len);
+}
 int aevk_ae_bindings_storage_texture(void* b, int binding) {
     return aevk_bindings_storage_texture((AevkBindings*)b, binding);
 }

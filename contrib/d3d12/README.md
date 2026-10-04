@@ -228,6 +228,16 @@ texture. A dispatch that writes it moves it to `UNORDERED_ACCESS` and back
 in the same command list. The pass binds it through a descriptor table at
 `uN`.
 
+## Texture formats
+
+`texture_create_format` checks the format for `TEXTURE2D` and
+`SHADER_SAMPLE` support. A mipmapped uncompressed texture's chain is built
+on the CPU in the texture's own format: bytes averaged as bytes, half and
+float as floats, and sRGB colour as linear light. Anisotropy above 1 makes
+the sampler `D3D12_FILTER_ANISOTROPIC`, capped at 16.
+`texture_upload_level` copies one subresource per layer, moving only those
+between `COPY_DEST` and the shader-resource state.
+
 ## Shadow maps and pipeline state
 
 `set_target_depth_compare` binds the depth's `R32_FLOAT` view with a

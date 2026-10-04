@@ -72,6 +72,17 @@ extern "C" {
 #define AEMT_FORMAT_R32G32_SFLOAT       103
 #define AEMT_FORMAT_R32G32B32_SFLOAT    106
 #define AEMT_FORMAT_R32G32B32A32_SFLOAT 109
+/* Sampled texture formats (#2397), numbered as VkFormat like the rest. */
+#define AEMT_FORMAT_R8_UNORM            9
+#define AEMT_FORMAT_R8G8_UNORM          16
+#define AEMT_FORMAT_BC1_RGBA_UNORM      133
+#define AEMT_FORMAT_BC1_RGBA_SRGB       134
+#define AEMT_FORMAT_BC3_UNORM           137
+#define AEMT_FORMAT_BC3_SRGB            138
+#define AEMT_FORMAT_BC4_UNORM           139
+#define AEMT_FORMAT_BC5_UNORM           141
+#define AEMT_FORMAT_BC7_UNORM           145
+#define AEMT_FORMAT_BC7_SRGB            146
 
 typedef struct AemtDevice    AemtDevice;
 typedef struct AemtTarget    AemtTarget;
@@ -218,6 +229,15 @@ AemtTexture* aemt_texture_create_array(AemtDevice* d, int w, int h, int layers, 
                                        int linear_filter, int repeat);
 AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int depth, int format);
 int          aemt_texture_layers(const AemtTexture* tex);
+
+/* Sampled textures in other formats, and anisotropic filtering (#2397), as
+ * in contrib/vulkan. The BC formats need a GPU that samples them
+ * (supportsBCTextureCompression). */
+AemtTexture* aemt_texture_create_format(AemtDevice* d, int w, int h, int format, int mipmapped,
+                                        int linear_filter, int repeat, int anisotropy);
+int          aemt_texture_format_supported(AemtDevice* d, int format);
+int          aemt_texture_anisotropy(const AemtTexture* tex);
+int          aemt_texture_upload_level(AemtTexture* tex, int level, const void* data, size_t len);
 
 /* Targets with several colour attachments (#2386), as in contrib/vulkan. */
 AemtTarget* aemt_target_create_mrt(AemtDevice* d, int width, int height, int count, int f0, int f1,

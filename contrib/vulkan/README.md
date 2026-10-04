@@ -341,6 +341,17 @@ sampling it can use. The dispatch's existing memory barriers then order the
 compute writes before later shader reads. A storage binding is a
 `STORAGE_IMAGE` descriptor, which graphics pipelines refuse.
 
+## Texture formats
+
+`texture_create_format` checks the format's optimal-tiling features:
+`SAMPLED_IMAGE`, plus `SAMPLED_IMAGE_FILTER_LINEAR` for a linear sampler.
+A mipmapped uncompressed texture also needs `BLIT_SRC`, `BLIT_DST` and
+linear filtering, since its chain is blitted. The BC formats need the
+`textureCompressionBC` feature, enabled when the device has it, and
+anisotropy needs `samplerAnisotropy`, capped at `maxSamplerAnisotropy`.
+`texture_upload_level` moves only its own level to `TRANSFER_DST_OPTIMAL`
+and back, so levels already uploaded keep their pixels.
+
 ## Colour formats and image files
 
 `target_create` renders to RGBA8 UNORM. `target_create_format` takes any of

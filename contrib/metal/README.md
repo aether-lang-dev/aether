@@ -268,6 +268,17 @@ A storage texture adds `MTLTextureUsageShaderWrite` and starts zeroed by an
 upload. A compute pass binds it with `setTexture:atIndex:`, and Metal's
 hazard tracking orders the pass's writes before the draws that sample it.
 
+## Texture formats
+
+`texture_create_format` maps each format to its `MTLPixelFormat`. The BC
+formats need `supportsBCTextureCompression`, which every Mac GPU had before
+the property existed. A mipmapped uncompressed texture's chain comes from
+`generateMipmapsForTexture:`, so a 32-bit float one needs
+`supports32BitFloatFiltering`. A block-compressed texture cannot be rendered
+to, so it has no render-target usage, and its levels come from
+`texture_upload_level`. Anisotropy is the sampler's `maxAnisotropy`,
+capped at 16.
+
 ## Shadow maps and pipeline state
 
 `set_target_depth_compare` binds the depth with a sampler whose
