@@ -19,7 +19,6 @@ import std.fs
 import std.list
 import std.string
 
-extern setenv(name: string, value: string, overwrite: int) -> int
 extern exit(code: int)
 
 fn same(a: string, b: string) -> int { return string.equals(a, b) }
@@ -40,8 +39,10 @@ main() {
     }
     _ = fs.write("${dir}/allowed.txt", "allowed")
     _ = fs.write("${dir}/other.txt", "other")
-    setenv("AE_SANDBOX_TEST_OPEN", "visible", 1)
-    setenv("AE_SANDBOX_TEST_SECRET", "hidden", 1)
+    env_err = os.setenv("AE_SANDBOX_TEST_OPEN", "visible")
+    if env_err != "" { println("cannot set the test variable: ${env_err}") }
+    env_err2 = os.setenv("AE_SANDBOX_TEST_SECRET", "hidden")
+    if env_err2 != "" { println("cannot set the test variable: ${env_err2}") }
 
     spec.describe(fw, "std.sandbox grant lists") {
         spec.it("spells each grant as the category the runtime checks") callback {

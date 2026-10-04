@@ -3,10 +3,9 @@ import std.sandbox
 import std.os
 import audit
 
-extern setenv(name: string, value: string, overwrite: int) -> int
-
 main() {
-    setenv("AE_TRUST_SECRET", "s3cret", 1)
+    env_err = os.setenv("AE_TRUST_SECRET", "s3cret")
+    if env_err != "" { println("cannot set the test variable: ${env_err}") }
     w = sandbox.new("nothing") {}
     sandbox.enforce(w, audit) callback {
         direct = os.getenv("AE_TRUST_SECRET")

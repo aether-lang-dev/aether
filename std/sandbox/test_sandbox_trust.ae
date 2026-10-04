@@ -16,8 +16,6 @@ import std.spec
 import std.sandbox
 import std.os
 
-extern setenv(name: string, value: string, overwrite: int) -> int
-
 // Defined before any enforce; reads an ungranted variable.
 peek() -> string {
     v = os.getenv("AE_TRUST_SECRET")
@@ -61,7 +59,8 @@ fn direct_read() -> string {
 
 main() {
     fw = spec.init()
-    setenv("AE_TRUST_SECRET", "s3cret", 1)
+    env_err = os.setenv("AE_TRUST_SECRET", "s3cret")
+    if env_err != "" { println("cannot set the test variable: ${env_err}") }
 
     spec.describe(fw, "sandbox.enforce trusted names") {
         spec.it("refuses the read when it is written in the block") callback {
