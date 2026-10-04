@@ -867,9 +867,11 @@ Linux leg skips that one case. The Linux leg runs it twice: on Xvfb, where the
 screen is read back, and against weston's headless backend with
 `AETHER_TEST_WINDOW_SYSTEM=wayland`
 ([#2197](https://github.com/aether-lang-dev/aether/issues/2197)). There weston
-runs its kiosk shell with `--debug`, which offers `weston_capture_v1`, and the
-fixture reads the screen by capturing the output into a `wl_shm` buffer and
-finding the window where the kiosk shell centres it
+runs with `--debug`, which lets any client capture an output
+(`weston_capture_v1` from weston 12, `weston_screenshooter` before it). The
+fixture opens its window fullscreen, captures the output into a `wl_shm`
+buffer, and reads the window where weston centres a fullscreen window
+smaller than the output
 ([#2389](https://github.com/aether-lang-dev/aether/issues/2389)). So the cases
 that check pixels on screen run there too. Only the case where the window
 outgrows the swapchain skips, since a Wayland window's size is the
