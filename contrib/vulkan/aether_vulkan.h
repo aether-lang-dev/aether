@@ -213,6 +213,12 @@ AevkTexture* aevk_texture_create_format(AevkDevice* d, int width, int height, in
 int          aevk_texture_format_supported(AevkDevice* d, int format);
 int          aevk_texture_anisotropy(const AevkTexture* tex);
 int          aevk_texture_upload_level(AevkTexture* tex, int level, const void* data, size_t len);
+/* Cubes and arrays in any sampled format (#2402); BC6H, the signed formats,
+ * ETC2 and ASTC 4x4 join the sampled formats where the device has them. */
+AevkTexture* aevk_texture_create_cube_format(AevkDevice* d, int size, int format, int mipmapped,
+                                             int linear_filter);
+AevkTexture* aevk_texture_create_array_format(AevkDevice* d, int width, int height, int layers, int format,
+                                              int mipmapped, int linear_filter, int repeat);
 
 /* Textures compute passes write (#2388): 2D, or 3D when depth > 1, in
  * VK_FORMAT_R8G8B8A8_UNORM, R16G16B16A16_SFLOAT or R32G32B32A32_SFLOAT;

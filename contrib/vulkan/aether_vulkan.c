@@ -268,6 +268,10 @@ struct AevkDevice {
      * anisotropic filtering, and whether it samples BC formats (#2397). */
     float            max_aniso;
     int              bc;
+    /* The ETC2 and ASTC 4x4 block formats (#2402): Apple and mobile GPUs and
+     * lavapipe have them, desktop ones mostly not. */
+    int              etc2;
+    int              astc;
     /* Indirect draws (#2198): whether one call takes several commands, and
      * whether a command's first instance is honoured. Both are optional
      * features, enabled when the device has them. */
@@ -1085,9 +1089,13 @@ AevkDevice* aevk_device_create(void) {
     /* Anisotropic filtering and the BC block formats (#2397). */
     want.samplerAnisotropy = have.samplerAnisotropy;
     want.textureCompressionBC = have.textureCompressionBC;
+    want.textureCompressionETC2 = have.textureCompressionETC2;
+    want.textureCompressionASTC_LDR = have.textureCompressionASTC_LDR;
     d->max_aniso = have.samplerAnisotropy == VK_TRUE ? props.limits.maxSamplerAnisotropy : 1.0f;
     if (d->max_aniso < 1.0f) d->max_aniso = 1.0f;
     d->bc = have.textureCompressionBC == VK_TRUE;
+    d->etc2 = have.textureCompressionETC2 == VK_TRUE;
+    d->astc = have.textureCompressionASTC_LDR == VK_TRUE;
     d->multi_draw_indirect = have.multiDrawIndirect == VK_TRUE;
     d->indirect_first_instance = have.drawIndirectFirstInstance == VK_TRUE;
 
@@ -3220,25 +3228,43 @@ static int aevk_format_bytes(VkFormat f) {
     }
 }
 
-/* The formats a sampled texture can be in (#2397): bytes a texel, or with
- * *block set, bytes a 4x4 block. 0 for any other format. */
+/* Which family a block format is (#2402), each its own device feature. */
+#define AEVK_BLOCK_BC   1
+#define AEVK_BLOCK_ETC2 2
+#define AEVK_BLOCK_ASTC 3
+
+/* The formats a sampled texture can be in (#2397, #2402): bytes a texel, or
+ * with *block set to its family, bytes a 4x4 block. 0 for any other
+ * format. */
 static int aevk_sampled_format(VkFormat f, int* block) {
     *block = 0;
     switch (f) {
-        case VK_FORMAT_R8_UNORM:            return 1;
-        case VK_FORMAT_R8G8_UNORM:          return 2;
+        case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_SNORM:            return 1;
+        case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_SNORM:          return 2;
         case VK_FORMAT_R8G8B8A8_UNORM:
         case VK_FORMAT_R8G8B8A8_SRGB:       return 4;
         case VK_FORMAT_R16G16B16A16_SFLOAT: return 8;
         case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
-        case VK_FORMAT_BC4_UNORM_BLOCK:     *block = 1; return 8;
+        case VK_FORMAT_BC4_UNORM_BLOCK:
+        case VK_FORMAT_BC4_SNORM_BLOCK:     *block = AEVK_BLOCK_BC; return 8;
         case VK_FORMAT_BC3_UNORM_BLOCK:
         case VK_FORMAT_BC3_SRGB_BLOCK:
         case VK_FORMAT_BC5_UNORM_BLOCK:
+        case VK_FORMAT_BC5_SNORM_BLOCK:
+        case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+        case VK_FORMAT_BC6H_SFLOAT_BLOCK:
         case VK_FORMAT_BC7_UNORM_BLOCK:
-        case VK_FORMAT_BC7_SRGB_BLOCK:      *block = 1; return 16;
+        case VK_FORMAT_BC7_SRGB_BLOCK:      *block = AEVK_BLOCK_BC; return 16;
+        case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK: *block = AEVK_BLOCK_ETC2; return 8;
+        case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK: *block = AEVK_BLOCK_ETC2; return 16;
+        case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_4x4_SRGB_BLOCK: *block = AEVK_BLOCK_ASTC; return 16;
         default:                            return 0;
     }
 }
@@ -3258,7 +3284,10 @@ static size_t aevk_level_bytes(const AevkTexture* tex, uint32_t level) {
 static int aevk_format_samples(AevkDevice* d, VkFormat format, int linear) {
     int block = 0;
     if (!aevk_sampled_format(format, &block)) return 0;
-    if (block && !d->bc) return 0;
+    if ((block == AEVK_BLOCK_BC && !d->bc) || (block == AEVK_BLOCK_ETC2 && !d->etc2) ||
+        (block == AEVK_BLOCK_ASTC && !d->astc)) {
+        return 0;
+    }
     VkFormatProperties fp;
     d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, format, &fp);
     VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
@@ -3494,6 +3523,14 @@ AevkTexture* aevk_texture_create_cube(AevkDevice* d, int size, int mipmapped, in
                                   VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
 }
 
+/* A cube map in any sampled format (#2402): a BC6H or RGBA16F sky, an sRGB
+ * probe. Each face uploads as texture_upload_level lays layers out. */
+AevkTexture* aevk_texture_create_cube_format(AevkDevice* d, int size, int format, int mipmapped,
+                                             int linear_filter) {
+    return aevk_texture_make_kind(d, size, size, 1, 6, AEVK_TEX_CUBE, mipmapped, linear_filter, 0,
+                                  (VkFormat)format, 0, 1);
+}
+
 /* A 2D array (#2387): `layers` RGBA images of one size, uploaded one after
  * another and read through a sampler2DArray with the layer as the third
  * coordinate. */
@@ -3501,6 +3538,14 @@ AevkTexture* aevk_texture_create_array(AevkDevice* d, int width, int height, int
                                        int mipmapped, int linear_filter, int repeat) {
     return aevk_texture_make_kind(d, width, height, 1, layers, AEVK_TEX_ARRAY, mipmapped, linear_filter,
                                   repeat, VK_FORMAT_R8G8B8A8_UNORM, 0, 1);
+}
+
+/* A 2D array in any sampled format (#2402): terrain layers in BC7, a
+ * texture atlas in sRGB. */
+AevkTexture* aevk_texture_create_array_format(AevkDevice* d, int width, int height, int layers, int format,
+                                              int mipmapped, int linear_filter, int repeat) {
+    return aevk_texture_make_kind(d, width, height, 1, layers, AEVK_TEX_ARRAY, mipmapped, linear_filter,
+                                  repeat, (VkFormat)format, 0, 1);
 }
 
 /* A texture compute passes write (#2388): 2D, or 3D with `depth` above 1,
@@ -7070,6 +7115,14 @@ void* aevk_ae_texture_create_storage(void* d, int w, int h, int depth, int forma
     return (void*)aevk_texture_create_storage((AevkDevice*)d, w, h, depth, format);
 }
 int aevk_ae_texture_layers(void* tex) { return aevk_texture_layers((const AevkTexture*)tex); }
+void* aevk_ae_texture_create_cube_format(void* d, int size, int format, int mipmapped, int linear) {
+    return (void*)aevk_texture_create_cube_format((AevkDevice*)d, size, format, mipmapped, linear);
+}
+void* aevk_ae_texture_create_array_format(void* d, int w, int h, int layers, int format, int mipmapped,
+                                          int linear, int repeat) {
+    return (void*)aevk_texture_create_array_format((AevkDevice*)d, w, h, layers, format, mipmapped, linear,
+                                                   repeat);
+}
 int aevk_ae_state_stencil(void* st, int compare, int ref, int pass_op, int fail_op, int depth_fail_op,
                           int read_mask, int write_mask) {
     return aevk_state_stencil((AevkState*)st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask,

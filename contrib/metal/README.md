@@ -272,7 +272,8 @@ hazard tracking orders the pass's writes before the draws that sample it.
 
 `texture_create_format` maps each format to its `MTLPixelFormat`. The BC
 formats need `supportsBCTextureCompression`, which every Mac GPU had before
-the property existed. A mipmapped uncompressed texture's chain comes from
+the property existed. ETC2 and ASTC need an Apple GPU, which
+`supportsFamily:` with `MTLGPUFamilyApple2` answers. A mipmapped uncompressed texture's chain comes from
 `generateMipmapsForTexture:`, so a 32-bit float one needs
 `supports32BitFloatFiltering`. A block-compressed texture cannot be rendered
 to, so it has no render-target usage, and its levels come from

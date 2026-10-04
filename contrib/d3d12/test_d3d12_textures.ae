@@ -805,6 +805,212 @@ main() {
             }
         }
 
+        spec.it_when(ready, "samples the signed formats from -1 to 1", reason) callback {
+            r8 = d3d12.texture_create_format(dev, 2, 2, d3d12.FORMAT_R8_SNORM, 0, 0, 0, 1)
+            spec.assert_true(r8 != null, "R8 signed (${d3d12.last_error()})")
+            // 127, -127, 64 and -128 as bytes.
+            px = bytes_of([127, 129, 64, 128], 4, 1)
+            _ = d3d12.texture_upload(r8, bytes.data(px), 4)
+            bytes.free(px)
+            wants = [1.0, -1.0, 0.5039, -1.0]
+            xs = [0, 1, 0, 1]
+            ys = [0, 0, 1, 1]
+            i = 0
+            while i < 4 {
+                v = sampled(dev, r8, 2, 2, xs[i], ys[i], 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, wants[i], 0.001), 1, "R8 signed texel ${i} (${v})")
+                i = i + 1
+            }
+            d3d12.texture_destroy(r8)
+
+            rg = d3d12.texture_create_format(dev, 2, 2, d3d12.FORMAT_R8G8_SNORM, 0, 0, 0, 1)
+            px = bytes_of([127, 129], 2, 4)
+            _ = d3d12.texture_upload(rg, bytes.data(px), 8)
+            bytes.free(px)
+            v = sampled(dev, rg, 2, 2, 1, 1, 1, tvs, tvl, tfs, tfl)
+            spec.assert_eq(close(v, -1.0, 0.001), 1, "RG8 signed green (${v})")
+            d3d12.texture_destroy(rg)
+
+            // A signed chain averages signed values: three quarters of -1.
+            ring = d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_R8_SNORM, 1, 1, 0, 1)
+            if ring == null {
+                println("    (this device cannot build an R8 signed chain: ${d3d12.last_error()})")
+            } else {
+                px = ring_bytes([129], [0], 1)
+                _ = d3d12.texture_upload(ring, bytes.data(px), 16)
+                bytes.free(px)
+                v = sampled(dev, ring, 1, 1, 0, 0, 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, -0.75, 0.01), 1, "R8 signed chain's last level (${v})")
+                d3d12.texture_destroy(ring)
+            }
+        }
+
+        spec.it_when(ready, "decodes BC6H and the signed BC formats", reason) callback {
+            if d3d12.texture_format_supported(dev, d3d12.FORMAT_BC6H_UFLOAT) == 0 {
+                println("    (this device samples no BC formats)")
+            } else {
+                // BC6H mode 11, one solid colour: half 1.0, 0 and 0.5005.
+                hdr = d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_BC6H_UFLOAT, 0, 0, 0, 1)
+                spec.assert_true(hdr != null, "BC6H (${d3d12.last_error()})")
+                px = bytes_of([227, 61, 0, 156, 123, 15, 0, 231, 0, 0, 0, 0, 0, 0, 0, 0], 16, 1)
+                _ = d3d12.texture_upload(hdr, bytes.data(px), 16)
+                bytes.free(px)
+                v = sampled(dev, hdr, 4, 4, 1, 2, 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 1.0, 0.001), 1, "BC6H red (${v})")
+                v = sampled(dev, hdr, 4, 4, 1, 2, 1, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 0.0, 0.001), 1, "BC6H green (${v})")
+                v = sampled(dev, hdr, 4, 4, 1, 2, 2, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 0.5005, 0.001), 1, "BC6H blue (${v})")
+                d3d12.texture_destroy(hdr)
+
+                // BC4 signed: endpoints 127 and -127, texel 0 at index 0 and
+                // texel 1 at index 1.
+                bc4 = d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_BC4_SNORM, 0, 0, 0, 1)
+                px = bytes_of([127, 129, 8, 0, 0, 0, 0, 0], 8, 1)
+                _ = d3d12.texture_upload(bc4, bytes.data(px), 8)
+                bytes.free(px)
+                v = sampled(dev, bc4, 4, 4, 0, 0, 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, 1.0, 0.01), 1, "BC4 signed index 0 (${v})")
+                v = sampled(dev, bc4, 4, 4, 1, 0, 0, tvs, tvl, tfs, tfl)
+                spec.assert_eq(close(v, -1.0, 0.01), 1, "BC4 signed index 1 (${v})")
+                d3d12.texture_destroy(bc4)
+            }
+        }
+
+        spec.it_when(ready, "decodes ETC2 and ASTC where the device has them", reason) callback {
+            if d3d12.texture_format_supported(dev, d3d12.FORMAT_ETC2_R8G8B8_UNORM) == 0 {
+                spec.assert_true(d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_ETC2_R8G8B8_UNORM, 0, 0, 0, 1) == null,
+                    "a device without ETC2 refuses it")
+                println("    (this device samples no ETC2)")
+            } else {
+                // Individual mode, base colours 15, 0 and 8 with table 0 and
+                // index 0 everywhere: each base times 17, plus 2.
+                etc = d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_ETC2_R8G8B8_UNORM, 0, 0, 0, 1)
+                spec.assert_true(etc != null, "ETC2 (${d3d12.last_error()})")
+                px = bytes_of([255, 0, 136, 0, 0, 0, 0, 0], 8, 1)
+                _ = d3d12.texture_upload(etc, bytes.data(px), 8)
+                bytes.free(px)
+                rgb = [1.0, 2.0 / 255.0, 138.0 / 255.0]
+                c = 0
+                while c < 3 {
+                    v = sampled(dev, etc, 4, 4, 2, 1, c, tvs, tvl, tfs, tfl)
+                    spec.assert_eq(close(v, rgb[c], 0.005), 1, "ETC2 channel ${c} (${v})")
+                    c = c + 1
+                }
+                d3d12.texture_destroy(etc)
+            }
+            if d3d12.texture_format_supported(dev, d3d12.FORMAT_ASTC_4x4_UNORM) == 0 {
+                spec.assert_true(d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_ASTC_4x4_UNORM, 0, 0, 0, 1) == null,
+                    "a device without ASTC refuses it")
+                println("    (this device samples no ASTC)")
+            } else {
+                // A void-extent block: one colour, 1, 0, 0.5 and 1.
+                astc = d3d12.texture_create_format(dev, 4, 4, d3d12.FORMAT_ASTC_4x4_UNORM, 0, 0, 0, 1)
+                spec.assert_true(astc != null, "ASTC (${d3d12.last_error()})")
+                px = bytes_of([252, 253, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 128, 255, 255], 16, 1)
+                _ = d3d12.texture_upload(astc, bytes.data(px), 16)
+                bytes.free(px)
+                rgb = [1.0, 0.0, 0.5]
+                c = 0
+                while c < 3 {
+                    v = sampled(dev, astc, 4, 4, 3, 3, c, tvs, tvl, tfs, tfl)
+                    spec.assert_eq(close(v, rgb[c], 0.01), 1, "ASTC channel ${c} (${v})")
+                    c = c + 1
+                }
+                d3d12.texture_destroy(astc)
+            }
+        }
+
+        spec.it_when(ready, "makes cubes and arrays in any format", reason) callback {
+            // An sRGB array: layer 0 grey 188, which reads linear 0.503, and
+            // layer 1 red.
+            arr = d3d12.texture_create_array_format(dev, 2, 2, 2, d3d12.FORMAT_R8G8B8A8_SRGB, 0, 0, 0)
+            spec.assert_true(arr != null, "an sRGB array (${d3d12.last_error()})")
+            spec.assert_eq(d3d12.texture_layers(arr), 2, "two layers")
+            px = bytes.new(32)
+            _ = bytes.set_length(px, 32)
+            i = 0
+            while i < 4 {
+                _ = bytes.set(px, i * 4, 188)
+                _ = bytes.set(px, i * 4 + 1, 188)
+                _ = bytes.set(px, i * 4 + 2, 188)
+                _ = bytes.set(px, i * 4 + 3, 255)
+                _ = bytes.set(px, 16 + i * 4, 255)
+                _ = bytes.set(px, 16 + i * 4 + 1, 0)
+                _ = bytes.set(px, 16 + i * 4 + 2, 0)
+                _ = bytes.set(px, 16 + i * 4 + 3, 255)
+                i = i + 1
+            }
+            spec.assert_eq(d3d12.texture_upload(arr, bytes.data(px), 32), d3d12.OK, "both layers uploaded")
+            bytes.free(px)
+            t = d3d12.target_create_format(dev, 2, 2, d3d12.FORMAT_R32G32B32A32_SFLOAT, 0, 1)
+            pipe = sampling_pipeline(dev, t, tvs, tvl, afs, afl, 4)
+            write_fullscreen_quad(t)
+            _ = d3d12.set_texture(pipe, 0, arr)
+            _ = d3d12.push_floats(t, 1)
+            _ = d3d12.push_float(t, 0, 0.0)
+            _ = d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+            v = d3d12.pixel_value(t, 1, 1, 0)
+            spec.assert_eq(close(v, 0.5029, 0.01), 1, "layer 0 reads linear light (${v})")
+            _ = d3d12.push_float(t, 0, 1.0)
+            _ = d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+            v = d3d12.pixel_value(t, 1, 1, 0)
+            spec.assert_eq(close(v, 1.0, 0.001), 1, "layer 1's red (${v})")
+            d3d12.pipeline_destroy(pipe)
+            d3d12.target_destroy(t)
+            d3d12.texture_destroy(arr)
+
+            if d3d12.texture_format_supported(dev, d3d12.FORMAT_BC1_RGBA_UNORM) != 0 {
+                spec.assert_true(d3d12.texture_create_cube_format(dev, 2, d3d12.FORMAT_BC1_RGBA_UNORM, 0, 0) == null,
+                    "a block-compressed cube of a size that is not whole blocks")
+                // A BC1 cube, each face one solid block of its own colour.
+                cube = d3d12.texture_create_cube_format(dev, 4, d3d12.FORMAT_BC1_RGBA_UNORM, 0, 0)
+                spec.assert_true(cube != null, "a BC1 cube (${d3d12.last_error()})")
+                colours = [63488, 2016, 31, 65535, 65504, 2047]
+                px = bytes.new(48)
+                _ = bytes.set_length(px, 48)
+                f = 0
+                while f < 6 {
+                    c = colours[f]
+                    _ = bytes.set(px, f * 8, c % 256)
+                    _ = bytes.set(px, f * 8 + 1, c / 256)
+                    _ = bytes.set(px, f * 8 + 2, c % 256)
+                    _ = bytes.set(px, f * 8 + 3, c / 256)
+                    k = 4
+                    while k < 8 {
+                        _ = bytes.set(px, f * 8 + k, 0)
+                        k = k + 1
+                    }
+                    f = f + 1
+                }
+                spec.assert_eq(d3d12.texture_upload(cube, bytes.data(px), 48), d3d12.OK, "six blocks")
+                bytes.free(px)
+                t = d3d12.target_create(dev, 2, 2)
+                pipe = sampling_pipeline(dev, t, tvs, tvl, cfs, cfl, 16)
+                write_fullscreen_quad(t)
+                _ = d3d12.set_texture(pipe, 0, cube)
+                _ = d3d12.push_floats(t, 4)
+                dx = [1.0, -1.0, 0.5, 0.5, 0.5, 0.5]
+                dy = [0.5, 0.5, 1.0, -1.0, 0.5, 0.5]
+                dz = [0.5, 0.5, 0.5, 0.5, 1.0, -1.0]
+                // red, green, blue, white, yellow, cyan
+                wants = [packed(255, 0, 0, 255), packed(0, 255, 0, 255), packed(0, 0, 255, 255),
+                         packed(255, 255, 255, 255), packed(255, 255, 0, 255), packed(0, 255, 255, 255)]
+                f = 0
+                while f < 6 {
+                    _ = d3d12.push_float(t, 0, dx[f])
+                    _ = d3d12.push_float(t, 1, dy[f])
+                    _ = d3d12.push_float(t, 2, dz[f])
+                    _ = d3d12.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+                    spec.assert_eq(d3d12.pixel(t, 0, 0), wants[f], "face ${f} (${d3d12.pixel(t, 0, 0)})")
+                    f = f + 1
+                }
+                d3d12.pipeline_destroy(pipe)
+                d3d12.target_destroy(t)
+                d3d12.texture_destroy(cube)
+            }
+        }
+
         spec.it_when(ready, "filters anisotropically", reason) callback {
             // One-texel vertical stripes, squeezed 16:1 vertically: an
             // isotropic sampler picks the level the squeeze calls for and
