@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.778.0]
+
+### Fixed
+
+- **A source install (`install.sh`, and aeb's `get.sh` when it falls back to one) now ships contrib.quickjs's engine.** The pinned QuickJS amalgamation is not in git; the release tarball fetched it but `install.sh` copied `contrib/` as the checkout had it, so `import contrib.quickjs` failed to build against a source install. `install.sh` now runs `scripts/fetch-quickjs-amalgamation.sh` first, and says so when it cannot (offline).
+
 ## [0.777.0]
 
 ### Added
