@@ -169,6 +169,39 @@ write_two_depths(t: ptr, z1: float, z2: float) {
     }
 }
 
+// A red quad over the left half, then a green one over the whole target,
+// both at depth 0.5, as depth.vert reads them: what a stencil mask is
+// written with and then tested against.
+write_mask_quads(t: ptr) {
+    _ = d3d12.verts_reserve_n(t, 8, 6)
+    xs = [-1.0, 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0]
+    i = 0
+    while i < 8 {
+        f = i * 6
+        r = 1.0
+        g = 0.0
+        if i >= 4 {
+            r = 0.0
+            g = 1.0
+        }
+        _ = d3d12.verts_set_float(t, f, xs[i])
+        _ = d3d12.verts_set_float(t, f + 1, ys[i])
+        _ = d3d12.verts_set_float(t, f + 2, 0.5)
+        _ = d3d12.verts_set_float(t, f + 3, r)
+        _ = d3d12.verts_set_float(t, f + 4, g)
+        _ = d3d12.verts_set_float(t, f + 5, 0.0)
+        i = i + 1
+    }
+    _ = d3d12.indices_reserve(t, 12)
+    order = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
+    k = 0
+    while k < 12 {
+        _ = d3d12.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
 close_to(a: float, b: float) -> int {
     d = a - b
     if d < 0.0 { d = 0.0 - d }
@@ -678,6 +711,71 @@ main() {
             d3d12.state_destroy(st)
             d3d12.layout_destroy(lay)
             d3d12.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "d3d12: stencil") {
+        spec.it_when(ready, "limits a draw to the pixels a stencil mask allows", reason) callback {
+            st = d3d12.state_create()
+            keep = d3d12.STENCIL_KEEP
+            spec.assert_eq(d3d12.state_stencil(st, 0, 0, keep, keep, keep, 255, 255), d3d12.ERR_ARG, "compare op 0")
+            spec.assert_eq(d3d12.state_stencil(st, d3d12.COMPARE_EQUAL, 256, keep, keep, keep, 255, 255), d3d12.ERR_ARG,
+                "a reference past 255")
+            spec.assert_eq(d3d12.state_stencil(st, d3d12.COMPARE_EQUAL, 0, 8, keep, keep, 255, 255), d3d12.ERR_ARG,
+                "a stencil op past 7")
+            _ = d3d12.state_depth(st, d3d12.COMPARE_LESS_EQUAL, 1)
+            // A fragment passes where the stored value equals the reference,
+            // and adds one to it.
+            spec.assert_eq(d3d12.state_stencil(st, d3d12.COMPARE_EQUAL, 0, d3d12.STENCIL_INCREMENT_CLAMP, keep, keep,
+                255, 255), d3d12.OK, "a stencil test")
+            lay = d3d12.layout_create()
+            _ = d3d12.layout_binding(lay, 0, 24, d3d12.PER_VERTEX)
+            _ = d3d12.layout_attr(lay, 0, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 0)
+            _ = d3d12.layout_attr(lay, 1, 0, d3d12.FORMAT_R32G32B32_SFLOAT, 12)
+
+            dt = d3d12.target_create_ex(dev, 8, 8, d3d12.DEPTH, 1)
+            spec.assert_true(d3d12.pipeline_create_state(dev, dt, dvs, dvl, dfs, dfl, lay, 0, null, st) == null,
+                "a target without a stencil refuses the test")
+            d3d12.target_destroy(dt)
+            spec.assert_true(d3d12.target_create_ex(dev, 8, 8, 3, 1) == null, "depth 3")
+
+            t = d3d12.target_create_ex(dev, 8, 8, d3d12.DEPTH_STENCIL, 1)
+            spec.assert_true(t != null, "a depth-stencil target (${d3d12.last_error()})")
+            write_mask_quads(t)
+            p = d3d12.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            spec.assert_true(p != null, "a stencil pipeline (${d3d12.last_error()})")
+            _ = d3d12.batch_add(t, null, 0, 6)
+            _ = d3d12.batch_add(t, null, 6, 6)
+
+            // Both at the state's reference, 0: the red marks the left half,
+            // and the green passes only where nothing is marked.
+            _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 1, 4), RED, "left: the red that marked it (${d3d12.pixel(t, 1, 4)})")
+            spec.assert_eq(d3d12.pixel(t, 6, 4), GREEN, "right: green where unmarked (${d3d12.pixel(t, 6, 4)})")
+
+            // The green at reference 1 passes only inside the mask.
+            spec.assert_eq(d3d12.batch_set_stencil_ref(t, 2, 1), d3d12.ERR_ARG, "no draw 2")
+            spec.assert_eq(d3d12.batch_set_stencil_ref(t, 1, 256), d3d12.ERR_ARG, "a reference past 255")
+            spec.assert_eq(d3d12.batch_set_stencil_ref(t, 1, 1), d3d12.OK, "draw 1's own reference")
+            k = 0
+            while k < 2 {
+                // Twice: the stencil clears with every frame, so the second
+                // frame masks exactly as the first.
+                _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+                spec.assert_eq(d3d12.pixel(t, 1, 4), GREEN,
+                    "frame ${k}, left: green inside the mask (${d3d12.pixel(t, 1, 4)})")
+                spec.assert_eq(d3d12.pixel(t, 6, 4), BLUE,
+                    "frame ${k}, right: the clear outside it (${d3d12.pixel(t, 6, 4)})")
+                k = k + 1
+            }
+            _ = d3d12.batch_set_stencil_ref(t, 1, -1)
+            _ = d3d12.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(d3d12.pixel(t, 6, 4), GREEN, "-1 goes back to the state's reference")
+
+            d3d12.pipeline_destroy(p)
+            d3d12.target_destroy(t)
+            d3d12.layout_destroy(lay)
+            d3d12.state_destroy(st)
         }
     }
 

@@ -322,7 +322,7 @@ main() {
             spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, colour, vulkan.COMPARE_LESS), vulkan.ERR_ARG,
                 "a target without depth")
             spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, 0), vulkan.ERR_ARG, "compare op 0")
-            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, 5), vulkan.ERR_ARG, "compare op 5")
+            spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, 9), vulkan.ERR_ARG, "compare op 9")
             spec.assert_eq(vulkan.set_target_depth_compare(spipe, 0, ds, vulkan.COMPARE_LESS), vulkan.OK,
                 "bound (${vulkan.last_error()})")
             spec.assert_eq(vulkan.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "the depth pass")

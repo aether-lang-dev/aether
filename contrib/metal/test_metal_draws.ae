@@ -168,6 +168,39 @@ write_two_depths(t: ptr, z1: float, z2: float) {
     }
 }
 
+// A red quad over the left half, then a green one over the whole target,
+// both at depth 0.5, as depth.vert reads them: what a stencil mask is
+// written with and then tested against.
+write_mask_quads(t: ptr) {
+    _ = metal.verts_reserve_n(t, 8, 6)
+    xs = [-1.0, 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, -1.0]
+    ys = [-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0]
+    i = 0
+    while i < 8 {
+        f = i * 6
+        r = 1.0
+        g = 0.0
+        if i >= 4 {
+            r = 0.0
+            g = 1.0
+        }
+        _ = metal.verts_set_float(t, f, xs[i])
+        _ = metal.verts_set_float(t, f + 1, ys[i])
+        _ = metal.verts_set_float(t, f + 2, 0.5)
+        _ = metal.verts_set_float(t, f + 3, r)
+        _ = metal.verts_set_float(t, f + 4, g)
+        _ = metal.verts_set_float(t, f + 5, 0.0)
+        i = i + 1
+    }
+    _ = metal.indices_reserve(t, 12)
+    order = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
+    k = 0
+    while k < 12 {
+        _ = metal.indices_set(t, k, order[k])
+        k = k + 1
+    }
+}
+
 close_to(a: float, b: float) -> int {
     d = a - b
     if d < 0.0 { d = 0.0 - d }
@@ -678,6 +711,71 @@ main() {
             metal.state_destroy(st)
             metal.layout_destroy(lay)
             metal.target_destroy(t)
+        }
+    }
+
+    spec.describe(fw, "metal: stencil") {
+        spec.it_when(ready, "limits a draw to the pixels a stencil mask allows", reason) callback {
+            st = metal.state_create()
+            keep = metal.STENCIL_KEEP
+            spec.assert_eq(metal.state_stencil(st, 0, 0, keep, keep, keep, 255, 255), metal.ERR_ARG, "compare op 0")
+            spec.assert_eq(metal.state_stencil(st, metal.COMPARE_EQUAL, 256, keep, keep, keep, 255, 255), metal.ERR_ARG,
+                "a reference past 255")
+            spec.assert_eq(metal.state_stencil(st, metal.COMPARE_EQUAL, 0, 8, keep, keep, 255, 255), metal.ERR_ARG,
+                "a stencil op past 7")
+            _ = metal.state_depth(st, metal.COMPARE_LESS_EQUAL, 1)
+            // A fragment passes where the stored value equals the reference,
+            // and adds one to it.
+            spec.assert_eq(metal.state_stencil(st, metal.COMPARE_EQUAL, 0, metal.STENCIL_INCREMENT_CLAMP, keep, keep,
+                255, 255), metal.OK, "a stencil test")
+            lay = metal.layout_create()
+            _ = metal.layout_binding(lay, 0, 24, metal.PER_VERTEX)
+            _ = metal.layout_attr(lay, 0, 0, metal.FORMAT_R32G32B32_SFLOAT, 0)
+            _ = metal.layout_attr(lay, 1, 0, metal.FORMAT_R32G32B32_SFLOAT, 12)
+
+            dt = metal.target_create_ex(dev, 8, 8, metal.DEPTH, 1)
+            spec.assert_true(metal.pipeline_create_state(dev, dt, dvs, dvl, dfs, dfl, lay, 0, null, st) == null,
+                "a target without a stencil refuses the test")
+            metal.target_destroy(dt)
+            spec.assert_true(metal.target_create_ex(dev, 8, 8, 3, 1) == null, "depth 3")
+
+            t = metal.target_create_ex(dev, 8, 8, metal.DEPTH_STENCIL, 1)
+            spec.assert_true(t != null, "a depth-stencil target (${metal.last_error()})")
+            write_mask_quads(t)
+            p = metal.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            spec.assert_true(p != null, "a stencil pipeline (${metal.last_error()})")
+            _ = metal.batch_add(t, null, 0, 6)
+            _ = metal.batch_add(t, null, 6, 6)
+
+            // Both at the state's reference, 0: the red marks the left half,
+            // and the green passes only where nothing is marked.
+            _ = metal.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(metal.pixel(t, 1, 4), RED, "left: the red that marked it (${metal.pixel(t, 1, 4)})")
+            spec.assert_eq(metal.pixel(t, 6, 4), GREEN, "right: green where unmarked (${metal.pixel(t, 6, 4)})")
+
+            // The green at reference 1 passes only inside the mask.
+            spec.assert_eq(metal.batch_set_stencil_ref(t, 2, 1), metal.ERR_ARG, "no draw 2")
+            spec.assert_eq(metal.batch_set_stencil_ref(t, 1, 256), metal.ERR_ARG, "a reference past 255")
+            spec.assert_eq(metal.batch_set_stencil_ref(t, 1, 1), metal.OK, "draw 1's own reference")
+            k = 0
+            while k < 2 {
+                // Twice: the stencil clears with every frame, so the second
+                // frame masks exactly as the first.
+                _ = metal.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+                spec.assert_eq(metal.pixel(t, 1, 4), GREEN,
+                    "frame ${k}, left: green inside the mask (${metal.pixel(t, 1, 4)})")
+                spec.assert_eq(metal.pixel(t, 6, 4), BLUE,
+                    "frame ${k}, right: the clear outside it (${metal.pixel(t, 6, 4)})")
+                k = k + 1
+            }
+            _ = metal.batch_set_stencil_ref(t, 1, -1)
+            _ = metal.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(metal.pixel(t, 6, 4), GREEN, "-1 goes back to the state's reference")
+
+            metal.pipeline_destroy(p)
+            metal.target_destroy(t)
+            metal.layout_destroy(lay)
+            metal.state_destroy(st)
         }
     }
 

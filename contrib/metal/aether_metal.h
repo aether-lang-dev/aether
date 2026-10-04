@@ -230,6 +230,15 @@ AemtTexture* aemt_texture_create_array(AemtDevice* d, int w, int h, int layers, 
 AemtTexture* aemt_texture_create_storage(AemtDevice* d, int w, int h, int depth, int format);
 int          aemt_texture_layers(const AemtTexture* tex);
 
+/* Stencil, and rendering into a layer (#2399), as in contrib.vulkan: depth 2
+ * (DEPTH_STENCIL) is Depth32Float_Stencil8; a layered target is a 2D array
+ * (a cube texture for a cube) rendered a slice at a time. */
+AemtTarget*  aemt_target_create_layered(AemtDevice* d, int width, int height, int layers, int format,
+                                        int want_depth, int cube);
+int          aemt_target_set_layer(AemtTarget* t, int layer);
+int          aemt_target_layers(const AemtTarget* t);
+int          aemt_batch_set_stencil_ref(AemtTarget* t, int item, int ref);
+
 /* Sampled textures in other formats, and anisotropic filtering (#2397), as
  * in contrib/vulkan. The BC formats need a GPU that samples them
  * (supportsBCTextureCompression). */
@@ -260,6 +269,14 @@ int        aemt_state_blend(AemtState* s, int mode);
 int        aemt_state_cull(AemtState* s, int mode);
 int        aemt_state_depth(AemtState* s, int op, int write);
 int        aemt_state_topology(AemtState* s, int topology);
+/* The stencil test (#2399): COMPARE_* and STENCIL_* (Vulkan's numbering,
+ * which MTLStencilOperation shares). */
+int        aemt_state_stencil(AemtState* s, int compare, int ref, int pass_op, int fail_op,
+                              int depth_fail_op, int read_mask, int write_mask);
+int        aemt_pipeline_set_target_array(AemtPipeline* p, int binding, AemtTarget* t);
+int        aemt_pipeline_set_target_cube(AemtPipeline* p, int binding, AemtTarget* t);
+int        aemt_material_set_target_array(AemtMaterial* m, int binding, AemtTarget* t);
+int        aemt_material_set_target_cube(AemtMaterial* m, int binding, AemtTarget* t);
 int        aemt_batch_set_scissor(AemtTarget* t, int item, int x, int y, int w, int h);
 int        aemt_batch_set_viewport(AemtTarget* t, int item, float x, float y, float w, float h,
                                   float min_depth, float max_depth);

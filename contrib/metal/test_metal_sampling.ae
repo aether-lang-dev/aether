@@ -324,7 +324,7 @@ main() {
             spec.assert_eq(metal.set_target_depth_compare(spipe, 0, colour, metal.COMPARE_LESS), metal.ERR_ARG,
                 "a target without depth")
             spec.assert_eq(metal.set_target_depth_compare(spipe, 0, ds, 0), metal.ERR_ARG, "compare op 0")
-            spec.assert_eq(metal.set_target_depth_compare(spipe, 0, ds, 5), metal.ERR_ARG, "compare op 5")
+            spec.assert_eq(metal.set_target_depth_compare(spipe, 0, ds, 9), metal.ERR_ARG, "compare op 9")
             spec.assert_eq(metal.set_target_depth_compare(spipe, 0, ds, metal.COMPARE_LESS), metal.OK,
                 "bound (${metal.last_error()})")
             spec.assert_eq(metal.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0), metal.OK, "the depth pass")

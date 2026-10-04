@@ -238,6 +238,18 @@ the sampler `D3D12_FILTER_ANISOTROPIC`, capped at 16.
 `texture_upload_level` copies one subresource per layer, moving only those
 between `COPY_DEST` and the shader-resource state.
 
+## Stencil and layered targets
+
+A `DEPTH_STENCIL` target's depth is `D24_UNORM_S8_UINT`: `R24G8_TYPELESS`
+when it is sampled, read through `R24_UNORM_X8_TYPELESS`.
+`ClearDepthStencilView` clears both, and each draw sets its reference with
+`OMSetStencilRef`.
+
+A layered target is a texture array with `layers` slices. It has a
+`TEXTURE2DARRAY` render target view and depth view a slice, and is sampled
+through a `TEXTURE2DARRAY` or `TEXTURECUBE` shader view. A frame clears and
+draws the slice picked, and reads back its subresource.
+
 ## Shadow maps and pipeline state
 
 `set_target_depth_compare` binds the depth's `R32_FLOAT` view with a

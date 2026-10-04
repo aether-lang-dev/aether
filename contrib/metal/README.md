@@ -279,6 +279,18 @@ to, so it has no render-target usage, and its levels come from
 `texture_upload_level`. Anisotropy is the sampler's `maxAnisotropy`,
 capped at 16.
 
+## Stencil and layered targets
+
+A `DEPTH_STENCIL` target's depth is `Depth32Float_Stencil8`, one texture
+attached as both the pass's depth and its stencil, cleared to 0. The
+pipeline's `MTLDepthStencilState` carries an `MTLStencilDescriptor` for
+both faces; `MTLStencilOperation` is numbered as `STENCIL_*` is. Each draw
+sets its reference with `setStencilReferenceValue:`.
+
+A layered target is an `MTLTextureType2DArray`, or an `MTLTextureTypeCube`
+with a 2D-array view for `set_target_array`. Its depth is a 2D array, and the
+pass's attachments render into slice `layer`.
+
 ## Shadow maps and pipeline state
 
 `set_target_depth_compare` binds the depth with a sampler whose

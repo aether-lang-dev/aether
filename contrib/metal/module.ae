@@ -94,6 +94,10 @@
 //   metal.texture_create_format(dev, w, h, format, mipmapped, linear, repeat, anisotropy) /
 //         texture_format_supported(dev, format) / texture_upload_level(tex, level, data, len) /
 //         texture_anisotropy(tex)       sampled formats and anisotropic filtering
+//   metal.state_stencil(st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask, write_mask) /
+//         batch_set_stencil_ref(t, item, ref)   the stencil test (DEPTH_STENCIL targets)
+//   metal.target_create_layered(dev, w, h, layers, format, depth, cube) / target_set_layer(t, n) /
+//         target_layers(t) / set_target_array(p, binding, t) / set_target_cube(p, binding, t)
 //   metal.target_create_mrt(dev, w, h, count, f0, f1, f2, f3, depth, samples) / target_attachments(t)
 //   metal.set_target_attachment(p, binding, t, n) / material_set_target_attachment /
 //         pixel_value_at(t, n, x, y, channel)   several colour attachments
@@ -223,7 +227,10 @@ exports(
     aemt_ae_texture_create_format, aemt_ae_texture_format_supported, aemt_ae_texture_anisotropy,
     aemt_ae_texture_upload_level,
     texture_create_format, texture_format_supported, texture_anisotropy, texture_upload_level,
-    FORMAT_R8_UNORM, FORMAT_R8G8_UNORM, FORMAT_BC1_RGBA_UNORM, FORMAT_BC1_RGBA_SRGB, FORMAT_BC3_UNORM, FORMAT_BC3_SRGB, FORMAT_BC4_UNORM, FORMAT_BC5_UNORM, FORMAT_BC7_UNORM, FORMAT_BC7_SRGB
+    FORMAT_R8_UNORM, FORMAT_R8G8_UNORM, FORMAT_BC1_RGBA_UNORM, FORMAT_BC1_RGBA_SRGB, FORMAT_BC3_UNORM, FORMAT_BC3_SRGB, FORMAT_BC4_UNORM, FORMAT_BC5_UNORM, FORMAT_BC7_UNORM, FORMAT_BC7_SRGB,
+    aemt_ae_state_stencil, aemt_ae_batch_set_stencil_ref, aemt_ae_target_create_layered, aemt_ae_target_set_layer, aemt_ae_target_layers, aemt_ae_set_target_array, aemt_ae_set_target_cube, aemt_ae_material_set_target_array, aemt_ae_material_set_target_cube,
+    state_stencil, batch_set_stencil_ref, target_create_layered, target_set_layer, target_layers, set_target_array, set_target_cube, material_set_target_array, material_set_target_cube,
+    DEPTH, DEPTH_STENCIL, COMPARE_EQUAL, COMPARE_NOT_EQUAL, COMPARE_ALWAYS, COMPARE_NEVER, STENCIL_KEEP, STENCIL_ZERO, STENCIL_REPLACE, STENCIL_INCREMENT_CLAMP, STENCIL_DECREMENT_CLAMP, STENCIL_INVERT, STENCIL_INCREMENT_WRAP, STENCIL_DECREMENT_WRAP
 )
 
 extern aemt_ae_available() -> int
@@ -273,6 +280,15 @@ extern aemt_ae_set_target_depth_compare(p: ptr, binding: int, t: ptr, op: int) -
 extern aemt_ae_material_set_target_depth_compare(m: ptr, binding: int, t: ptr, op: int) -> int
 extern aemt_ae_target_depth_linear(t: ptr) -> int
 extern aemt_ae_state_create() -> ptr
+extern aemt_ae_state_stencil(st: ptr, compare: int, ref: int, pass_op: int, fail_op: int, depth_fail_op: int, read_mask: int, write_mask: int) -> int
+extern aemt_ae_batch_set_stencil_ref(t: ptr, item: int, ref: int) -> int
+extern aemt_ae_target_create_layered(dev: ptr, w: int, h: int, layers: int, format: int, depth: int, cube: int) -> ptr
+extern aemt_ae_target_set_layer(t: ptr, layer: int) -> int
+extern aemt_ae_target_layers(t: ptr) -> int
+extern aemt_ae_set_target_array(p: ptr, binding: int, t: ptr) -> int
+extern aemt_ae_set_target_cube(p: ptr, binding: int, t: ptr) -> int
+extern aemt_ae_material_set_target_array(m: ptr, binding: int, t: ptr) -> int
+extern aemt_ae_material_set_target_cube(m: ptr, binding: int, t: ptr) -> int
 extern aemt_ae_texture_create_format(dev: ptr, w: int, h: int, format: int, mipmapped: int, linear: int, repeat: int, anisotropy: int) -> ptr
 extern aemt_ae_texture_format_supported(dev: ptr, format: int) -> int
 extern aemt_ae_texture_anisotropy(tex: ptr) -> int
@@ -402,6 +418,29 @@ const COMPARE_LESS = 1
 const COMPARE_LESS_EQUAL = 2
 const COMPARE_GREATER = 3
 const COMPARE_GREATER_EQUAL = 4
+// The rest of the compare ops (#2399), for the stencil test, the depth test
+// and comparison samplers alike.
+const COMPARE_EQUAL = 5
+const COMPARE_NOT_EQUAL = 6
+const COMPARE_ALWAYS = 7
+const COMPARE_NEVER = 8
+
+// A target's depth (#2399): the last-but-one argument of every target
+// create, 0 for none, DEPTH, or DEPTH_STENCIL for a depth with an 8-bit
+// stencil, cleared to 0 with the depth.
+const DEPTH = 1
+const DEPTH_STENCIL = 2
+
+// What the stencil test does to the stored value (#2399): numbered as
+// Vulkan's VkStencilOp in every module.
+const STENCIL_KEEP = 0
+const STENCIL_ZERO = 1
+const STENCIL_REPLACE = 2              // the reference
+const STENCIL_INCREMENT_CLAMP = 3
+const STENCIL_DECREMENT_CLAMP = 4
+const STENCIL_INVERT = 5
+const STENCIL_INCREMENT_WRAP = 6
+const STENCIL_DECREMENT_WRAP = 7
 
 // Pipeline state (#2385): how a fragment's colour meets the target's, and
 // which faces are culled. A face is front-facing when its corners run
@@ -613,6 +652,20 @@ state_cull(s: ptr, mode: int) -> int { return aemt_ae_state_cull(s, mode) }
 state_depth(s: ptr, op: int, write: int) -> int { return aemt_ae_state_depth(s, op, write) }
 state_topology(s: ptr, topology: int) -> int { return aemt_ae_state_topology(s, topology) }
 
+// The stencil test (#2399): `reference compare stored`, both ANDed with
+// `read_mask`; then `pass_op` where the stencil and depth tests pass,
+// `fail_op` where the stencil test fails and `depth_fail_op` where only the
+// depth test does, writing the bits of `write_mask`. The same for front and
+// back faces. Needs a target made with DEPTH_STENCIL.
+state_stencil(s: ptr, compare: int, ref: int, pass_op: int, fail_op: int, depth_fail_op: int,
+              read_mask: int, write_mask: int) -> int {
+    return aemt_ae_state_stencil(s, compare, ref, pass_op, fail_op, depth_fail_op, read_mask, write_mask)
+}
+
+// A batch entry's own stencil reference (#2399), 0..255, in place of the
+// state's; -1 goes back to the state's.
+batch_set_stencil_ref(t: ptr, item: int, ref: int) -> int { return aemt_ae_batch_set_stencil_ref(t, item, ref) }
+
 // A batch entry's scissor and viewport (#2398), in pixels from the target's
 // top left in every module. The scissor must lie inside the target when the
 // frame is drawn; a width of 0 sets either back to the whole target.
@@ -641,6 +694,25 @@ texture_create_array(dev: ptr, w: int, h: int, layers: int, mipmapped: int, line
 }
 // 6 for a cube, the layers of an array, 1 for a 2D or 3D texture.
 texture_layers(tex: ptr) -> int { return aemt_ae_texture_layers(tex) }
+
+// A target of `layers` layers (#2399), or with `cube` 1 a cube's six square
+// faces: target_set_layer picks the one the next draws render into, each
+// draw clearing only its own, and set_target_array / set_target_cube sample
+// them all, as an array or as a cube. `depth` is 0, DEPTH or DEPTH_STENCIL,
+// layered too. A layered target is single-sampled with one attachment.
+target_create_layered(dev: ptr, w: int, h: int, layers: int, format: int, depth: int, cube: int) -> ptr {
+    return aemt_ae_target_create_layered(dev, w, h, layers, format, depth, cube)
+}
+target_set_layer(t: ptr, layer: int) -> int { return aemt_ae_target_set_layer(t, layer) }
+target_layers(t: ptr) -> int { return aemt_ae_target_layers(t) }
+set_target_array(p: ptr, binding: int, t: ptr) -> int { return aemt_ae_set_target_array(p, binding, t) }
+set_target_cube(p: ptr, binding: int, t: ptr) -> int { return aemt_ae_set_target_cube(p, binding, t) }
+material_set_target_array(m: ptr, binding: int, t: ptr) -> int {
+    return aemt_ae_material_set_target_array(m, binding, t)
+}
+material_set_target_cube(m: ptr, binding: int, t: ptr) -> int {
+    return aemt_ae_material_set_target_cube(m, binding, t)
+}
 
 // A 2D texture in any sampled format (#2397): FORMAT_R8_UNORM,
 // FORMAT_R8G8_UNORM, FORMAT_R8G8B8A8_UNORM and _SRGB (sampled in linear

@@ -65,6 +65,7 @@ vkCmdBindPipeline
 vkCmdBindVertexBuffers
 vkCmdSetViewport
 vkCmdSetScissor
+vkCmdSetStencilReference
 vkCmdDraw
 vkCmdCopyImageToBuffer
 vkCmdPushConstants
