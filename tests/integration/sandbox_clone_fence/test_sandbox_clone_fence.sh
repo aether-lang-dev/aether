@@ -38,6 +38,17 @@ case "$(uname -s 2>/dev/null)" in
         exit 0 ;;
 esac
 
+# The fence filters x86_64 syscall numbers and allows every other
+# architecture (install_clone_fence_seccomp in
+# runtime/sandbox/spawn_sandboxed_linux.c), so on aarch64 Linux the probes
+# fork freely inside the sandbox and the DENIED checks below cannot pass.
+case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) ;;
+    *)
+        echo "  [SKIP] the seccomp clone fence covers x86_64 only (this is $(uname -m))"
+        exit 0 ;;
+esac
+
 AE="$ROOT/build/ae"
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] $AE not built (run make first)"
