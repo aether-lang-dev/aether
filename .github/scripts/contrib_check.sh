@@ -135,6 +135,12 @@ TESTS=(
   # file (aether_jq.c) is pulled in by value.ae's @source, so no --extra.
   # Unit specs (value, lexer, parser) through behaviour (eval, paths,
   # builtins) to the facade (jq); every one is written leak-clean.
+  # quickjs: the QuickJS engine (quickjs-ng's amalgamation, pinned in
+  # contrib/quickjs/amalgamation.lock and fetched below), compiled through
+  # aether_quickjs.c's @source. Leak-clean: the test releases every handle
+  # and checks the runtime holds none. SKIPs if the amalgamation could not
+  # be fetched.
+  "quickjs/engine|contrib/quickjs/test_quickjs.ae||leak|"
   "jq/value|contrib/jq/test_value.ae||leak|"
   "jq/lexer|contrib/jq/test_lexer.ae||leak|"
   "jq/parser|contrib/jq/test_parser.ae||leak|"
@@ -234,6 +240,13 @@ reap_orphans() {
 }
 reap_orphans
 
+# contrib.quickjs compiles the pinned QuickJS amalgamation, which is fetched,
+# not committed (scripts/fetch-quickjs-amalgamation.sh; a no-op once
+# fetched). Without it the quickjs/ entries SKIP rather than fail to build.
+if ! sh scripts/fetch-quickjs-amalgamation.sh >/dev/null 2>&1; then
+  echo "  note: the QuickJS amalgamation could not be fetched; quickjs/ entries will SKIP"
+fi
+
 # The LSan gate needs its dlclose shim (see lsan_keep_modules.c: without it the
 # driver is unloaded before the leak check and its frames resolve to
 # <unknown module>, which no module suppression can match).
@@ -259,6 +272,13 @@ for entry in "${TESTS[@]}"; do
     printf '  SKIP  %-22s (%s not found)\n' "$label" "$src"
     continue
   fi
+  case "$label" in
+    quickjs/*)
+      if [ ! -f contrib/quickjs/amalgamation/quickjs-amalgam.c ]; then
+        printf '  SKIP  %-22s (the QuickJS amalgamation is not fetched)\n' "$label"
+        continue
+      fi ;;
+  esac
 
   # LSAN=1 is a focused leak leg: it builds the flagged entries with
   # LeakSanitizer and runs only those. Everything else is already covered by

@@ -83,6 +83,7 @@ and `zlib` uses for libz.
 | Module | Reason for `contrib/` |
 |---|---|
 | `contrib/sqlite/` | DB driver, fails rubric Q1 (not universal) and Q3 (4 MiB amalgamation). |
+| `contrib/quickjs/` | An embedded JavaScript engine (quickjs-ng): not universal (Q1) and a 3 MB amalgamation (Q3). |
 | `contrib/tinyweb/` | Builder DSL for HTTP services, competes with `std.http.server`'s closure-config approach; opinionated shape that's better off evolving without the stability constraint. |
 | `contrib/templating/{native,liquid}/` | Escape-correct output emission, `native` (Aether-as-template-language) and `liquid` (Shopify Liquid port). Opinionated template surfaces; fail Q2. |
 | `contrib/parsers/xml_expat/` | Expat-backed streaming XML parser, third-party C dependency; fails Q3 (`std.xml` covers the in-tree case). |

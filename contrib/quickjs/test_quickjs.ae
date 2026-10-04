@@ -1,0 +1,189 @@
+// contrib.quickjs tests — co-located with the module.
+//
+// Each case runs real JavaScript in a real runtime: modern syntax passed
+// through untouched, host functions both ways, exceptions with their stack,
+// the time limit and memory cap, JSON, a script awaiting a promise Aether
+// settles later, and the absence of quickjs-libc. Every case releases what
+// it took, and the last checks the runtime holds no handles.
+//
+// DEPENDENCY: the amalgamation (scripts/fetch-quickjs-amalgamation.sh).
+
+import contrib.quickjs
+import std.spec
+import std.string
+
+extern exit(code: int)
+
+// The promise a host function handed a script, for a later case to settle.
+var pending_: int = 0
+
+eval_string(q: ptr, code: string) -> string {
+    h, err = quickjs.eval(q, code, "test.js")
+    if err != "" { return "ERROR: ${err}" }
+    s = quickjs.to_string(q, h)
+    quickjs.release(q, h)
+    return s
+}
+
+main() {
+    fw = spec.init()
+    q = quickjs.runtime(16384, 0)
+    if q == null {
+        println("cannot make a QuickJS runtime")
+        exit(1)
+    }
+
+    spec.describe(fw, "contrib.quickjs: running code") {
+        spec.it("evaluates and reads back numbers") callback {
+            h, err = quickjs.eval(q, "1 + 2", "t.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.to_int(q, h), 3, "1 + 2")
+            spec.assert_str_eq(quickjs.type_of(q, h), "number", "a number")
+            quickjs.release(q, h)
+        }
+        spec.it("runs modern JavaScript as written") callback {
+            cls = "class A { #n = 0; inc() { this.#n++; return this } get n() { return this.#n } }\n"
+            map = "const m = new Map([['k', [1, 2, 3]]]);\n"
+            use = "[new A().inc().inc().n, Math.max(...m.get('k')), ({}).a?.b ?? 'none', [...'ab'].join('-')].join(' ')"
+            s = eval_string(q, string.concat(string.concat(cls, map), use))
+            spec.assert_str_eq(s, "2 3 none a-b", "private fields, Map, spread, ?., ??")
+        }
+        spec.it("reports an exception with its kind, message and stack") callback {
+            h, err = quickjs.eval(q, "function f() { return null.x }\nf()", "boom.js")
+            spec.assert_eq(h, 0, "no value")
+            spec.assert_contains(err, "TypeError", "kind")
+            spec.assert_contains(err, "boom.js", "where")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: host functions") {
+        spec.it("calls an Aether closure from JS and returns its value") callback {
+            add = quickjs.function(q, "add", 2, | q: ptr, this_h: int, args: int | {
+                    return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
+                })
+            quickjs.set_global(q, "add", add)
+            quickjs.release(q, add)
+            spec.assert_str_eq(eval_string(q, "add(2, 3) * 10"), "50", "add(2, 3) * 10")
+            spec.assert_str_eq(eval_string(q, "add.name + '/' + add.length"), "add/2", "named, with its arity")
+        }
+        spec.it("passes strings both ways") callback {
+            shout = quickjs.function(q, "shout", 1, | q: ptr, this_h: int, args: int | {
+                    return quickjs.new_string(q, string.concat(quickjs.arg_string(q, args, 0), "!"))
+                })
+            quickjs.set_global(q, "shout", shout)
+            quickjs.release(q, shout)
+            spec.assert_str_eq(eval_string(q, "shout('héllo ' + 'wörld')"), "héllo wörld!", "UTF-8 round trip")
+        }
+        spec.it("a host function's throw is a JS exception the script can catch") callback {
+            refuse = quickjs.function(q, "refuse", 1, | q: ptr, this_h: int, args: int | {
+                    return quickjs.throw_error(q, "TypeError", "refused: ${quickjs.arg_string(q, args, 0)}")
+                })
+            quickjs.set_global(q, "refuse", refuse)
+            quickjs.release(q, refuse)
+            spec.assert_str_eq(eval_string(q, "try { refuse('fs') } catch (e) { e.name + ': ' + e.message }"),
+                "TypeError: refused: fs", "caught in JS")
+            _h, err = quickjs.eval(q, "refuse('shell')", "t.js")
+            spec.assert_contains(err, "TypeError: refused: shell", "or reported to the host")
+        }
+        spec.it("calls a JS function from Aether") callback {
+            f, err = quickjs.eval(q, "(a, b) => a + '-' + b", "t.js")
+            spec.assert_str_eq(err, "", "a function")
+            args = quickjs.new_array(q)
+            x = quickjs.new_string(q, "x")
+            _s1 = quickjs.set_index(q, args, 0, x)
+            seven = quickjs.new_int(q, 7)
+            _s2 = quickjs.set_index(q, args, 1, seven)
+            r, cerr = quickjs.call(q, f, 0, args)
+            spec.assert_str_eq(cerr, "", "called")
+            spec.assert_str_eq(quickjs.to_string(q, r), "x-7", "its result")
+            quickjs.release(q, r)
+            quickjs.release(q, seven)
+            quickjs.release(q, x)
+            quickjs.release(q, args)
+            quickjs.release(q, f)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: limits") {
+        spec.it("stops a runaway script at the time limit, and keeps working") callback {
+            quickjs.set_time_limit(q, 50)
+            _h, err = quickjs.eval(q, "for (;;) {}", "loop.js")
+            spec.assert_contains(err, "interrupted", "stopped")
+            spec.assert_str_eq(eval_string(q, "6 * 7"), "42", "the runtime still runs code")
+            quickjs.set_time_limit(q, 0)
+        }
+        spec.it("refuses to grow past the memory cap") callback {
+            small = quickjs.runtime(1024, 0)
+            _h, err = quickjs.eval(small, "const a = []; for (let i = 0; i < 1e7; i++) a.push('x' + i); a.length", "big.js")
+            spec.assert_contains(err, "out of memory", "refused")
+            quickjs.dispose(small)
+        }
+        spec.it("gives scripts no file or OS access of their own") callback {
+            spec.assert_str_eq(eval_string(q, "[typeof std, typeof os, typeof require, typeof process].join(' ')"),
+                "undefined undefined undefined undefined", "no quickjs-libc, no Node")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: data") {
+        spec.it("round-trips JSON and reads properties") callback {
+            o, err = quickjs.parse_json(q, "{\"name\":\"ana\",\"tags\":[\"a\",\"b\"]}")
+            spec.assert_str_eq(err, "", "parsed")
+            name, _e1 = quickjs.get(q, o, "name")
+            spec.assert_str_eq(quickjs.to_string(q, name), "ana", "a property")
+            tags, _e2 = quickjs.get(q, o, "tags")
+            spec.assert_eq(quickjs.length(q, tags), 2, "an array's length")
+            spec.assert_str_eq(quickjs.type_of(q, tags), "array", "an array")
+            ks = quickjs.keys(q, o)
+            spec.assert_str_eq(quickjs.to_json(q, ks), "[\"name\",\"tags\"]", "its keys")
+            spec.assert_str_eq(quickjs.to_json(q, o), "{\"name\":\"ana\",\"tags\":[\"a\",\"b\"]}", "back to JSON")
+            _b, bad = quickjs.parse_json(q, "{nope")
+            spec.assert_contains(bad, "SyntaxError", "bad JSON refused")
+            quickjs.release(q, ks)
+            quickjs.release(q, tags)
+            quickjs.release(q, name)
+            quickjs.release(q, o)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: promises") {
+        spec.it("a script awaits a promise Aether settles later") callback {
+            later = quickjs.function(q, "later", 0, | q: ptr, this_h: int, args: int | {
+                    pending_ = quickjs.new_promise(q)
+                    p, _e = quickjs.get(q, pending_, "promise")
+                    return p
+                })
+            quickjs.set_global(q, "later", later)
+            quickjs.release(q, later)
+            h, err = quickjs.eval(q, "globalThis.got = 'waiting'; (async () => { globalThis.got = (await later()) * 2 })(); got", "t.js")
+            spec.assert_str_eq(err, "", "started")
+            spec.assert_str_eq(quickjs.to_string(q, h), "waiting", "still waiting")
+            quickjs.release(q, h)
+            // The answer arrives (from an actor, say): resolve, then run the jobs.
+            resolve, _e2 = quickjs.get(q, pending_, "resolve")
+            args = quickjs.new_array(q)
+            v = quickjs.new_int(q, 21)
+            _s = quickjs.set_index(q, args, 0, v)
+            r, cerr = quickjs.call(q, resolve, 0, args)
+            spec.assert_str_eq(cerr, "", "resolved")
+            n, jerr = quickjs.run_jobs(q)
+            spec.assert_str_eq(jerr, "", "jobs ran")
+            spec.assert_true(n > 0, "some jobs ran")
+            spec.assert_str_eq(eval_string(q, "got"), "42", "the await carried on")
+            quickjs.release(q, r)
+            quickjs.release(q, v)
+            quickjs.release(q, args)
+            quickjs.release(q, resolve)
+            quickjs.release(q, pending_)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: bookkeeping") {
+        spec.it("holds no handles once every case released what it took") callback {
+            spec.assert_eq(quickjs.handles(q), 0, "no handles")
+            spec.assert_true(quickjs.memory_used(q) > 0, "memory is accounted")
+        }
+    }
+
+    quickjs.dispose(q)
+    exit(spec.run_summary(fw))
+}

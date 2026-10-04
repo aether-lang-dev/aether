@@ -130,3 +130,6 @@ compiler/aether_frontend_id.h
 # Fetched by scripts/fetch-sqlite-amalgamation.sh (#1372); pinned in
 # contrib/sqlite/amalgamation.lock, never committed.
 /contrib/sqlite/amalgamation/
+# Fetched by scripts/fetch-quickjs-amalgamation.sh; pinned in
+# contrib/quickjs/amalgamation.lock, never committed.
+/contrib/quickjs/amalgamation/
