@@ -88,10 +88,12 @@ void* tw_handle(const TwWindow* w);
 void* tw_display(const TwWindow* w);
 
 /* The colour on screen at client pixel (x, y), packed 0xRRGGBB, or -1 with
- * the reason in tw_last_error. Windows and X11; macOS refuses, because
- * reading another layer's pixels off the screen needs the screen-recording
- * permission a test runner does not have, and Wayland refuses, because a
- * client cannot read the screen at all there. */
+ * the reason in tw_last_error. Windows and X11 read the window; Wayland
+ * captures the output through weston_capture_v1, which weston offers when
+ * started with --debug, and finds the window where weston's kiosk shell
+ * puts it: fullscreen, centred when smaller than the output (#2389). macOS
+ * refuses, because reading another layer's pixels off the screen needs the
+ * screen-recording permission a test runner does not have. */
 int tw_pixel(TwWindow* w, int x, int y);
 
 #ifdef __cplusplus

@@ -209,13 +209,21 @@ main() {
             }
         }
     }
-    // Reading the screen back is what proves a frame arrived; on macOS and
-    // Wayland the fixture cannot (the screen-recording permission there, no
-    // way for a client to read the screen here), so those cases say so
-    // instead of passing vacuously. What those kinds still check is that
-    // every present succeeded and was counted.
+    // Reading the screen back is what proves a frame arrived. On macOS the
+    // fixture cannot (it needs the screen-recording permission), and on
+    // Wayland it can only through weston's capture protocol, which weston
+    // offers when started with --debug (#2389); where it cannot, those cases
+    // say so instead of passing vacuously. What those kinds still check is
+    // that every present succeeded and was counted.
     readable = 0
-    if ready == 1 && kind != vulkan.WINDOW_NSVIEW && kind != vulkan.WINDOW_WAYLAND { readable = 1 }
+    if ready == 1 && kind != vulkan.WINDOW_NSVIEW { readable = 1 }
+    if readable == 1 && kind == vulkan.WINDOW_WAYLAND {
+        if tw_ae_pixel(win, 0, 0) < 0 {
+            readable = 0
+        } else {
+            println("  the screen is read through weston_capture_v1")
+        }
+    }
     read_reason = reason
     read_owned = 0
     if ready == 1 && readable == 0 {
