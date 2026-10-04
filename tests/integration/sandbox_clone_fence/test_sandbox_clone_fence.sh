@@ -33,8 +33,9 @@ case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
         echo "  [SKIP-WIN] seccomp-bpf is Linux-only"
         exit 0 ;;
-    Darwin)
-        echo "  [SKIP] seccomp-bpf is Linux-only"
+    Linux) ;;
+    *)
+        echo "  [SKIP] seccomp-bpf is Linux-only (this is $(uname -s))"
         exit 0 ;;
 esac
 
