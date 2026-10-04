@@ -51,6 +51,10 @@ struct AedxState {
     int stencil_ref;
     int stencil_pass, stencil_fail, stencil_depth_fail;
     int stencil_read, stencil_write;
+    /* The channels a draw writes (#2411): COLOR_* bits, D3D12_COLOR_WRITE_
+     * ENABLE's own; all four unless set. */
+    int color_mask_set;
+    int color_mask;
 };
 
 AedxState* aedx_state_create(void) {
@@ -108,6 +112,18 @@ int aedx_state_stencil(AedxState* s, int compare, int ref, int pass_op, int fail
     s->stencil_depth_fail = depth_fail_op;
     s->stencil_read = read_mask;
     s->stencil_write = write_mask;
+    return AEDX_OK;
+}
+
+/* The channels a draw writes (#2411), as contrib.vulkan's. */
+int aedx_state_color_mask(AedxState* s, int mask) {
+    aedx_clear_error();
+    if (!s) return aedx_fail(AEDX_ERR_ARG, "state is null");
+    if (mask < 0 || mask > 15) {
+        return aedx_fail(AEDX_ERR_ARG, "a colour mask is COLOR_* bits, 0..15, not %d", mask);
+    }
+    s->color_mask_set = 1;
+    s->color_mask = mask;
     return AEDX_OK;
 }
 
@@ -759,6 +775,9 @@ typedef struct {
     /* The draw's own stencil reference (#2399); unset, the pipeline's. */
     int           stencil_ref_set;
     UINT          stencil_ref;
+    /* A pipeline of the draw's own (#2411), made for the same target; NULL
+     * draws with the frame's. */
+    AedxPipeline* pipe;
 } AedxDrawItem;
 
 /* The bytes of one indirect draw command, indexed and not: the layouts of
@@ -804,6 +823,12 @@ struct AedxTarget {
     int             cube;
     int             layer;
     int             cube_srv_slot;
+    /* A layered target's depth read as a texture (#2412): `depth_srv_slot`
+     * all its slices as a Texture2DArray, this one a cube's as a
+     * TextureCube. `layers_fresh` until the first frame has cleared every
+     * slice, so one never drawn reads 0 colour and the far plane. */
+    int             depth_cube_srv_slot;
+    int             layers_fresh;
     ID3D12Resource* color;          /* single-sample: resolved into, read back, presented */
     ID3D12Resource* msaa;
     ID3D12Resource* depth;
@@ -1015,6 +1040,7 @@ static void aedx_target_free_images(AedxTarget* t) {
     AcquireSRWLockExclusive(&t->dev->lock);
     aedx_slot_give(&t->dev->srv, t->srv_slot);
     aedx_slot_give(&t->dev->srv, t->cube_srv_slot);
+    aedx_slot_give(&t->dev->srv, t->depth_cube_srv_slot);
     aedx_slot_give(&t->dev->srv, t->depth_srv_slot);
     for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) {
         aedx_slot_give(&t->dev->srv, t->xsrv_slot[x]);
@@ -1023,6 +1049,7 @@ static void aedx_target_free_images(AedxTarget* t) {
     ReleaseSRWLockExclusive(&t->dev->lock);
     t->srv_slot = -1;
     t->cube_srv_slot = -1;
+    t->depth_cube_srv_slot = -1;
     t->depth_srv_slot = -1;
     for (int x = 0; x < AEDX_MAX_COLOR - 1; x++) {
         if (t->xcolor[x]) ID3D12Resource_Release(t->xcolor[x]);
@@ -1093,8 +1120,9 @@ static int aedx_target_make_layered(AedxTarget* t) {
     t->color_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
     D3D12_DESCRIPTOR_HEAP_DESC hd;
     memset(&hd, 0, sizeof(hd));
+    /* A view a slice, and after them the multisampled image's (#2412). */
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    hd.NumDescriptors = n;
+    hd.NumDescriptors = n + (t->samples > 1 ? 1u : 0u);
     HRESULT hr = ID3D12Device_CreateDescriptorHeap(d->device, &hd, &IID_ID3D12DescriptorHeap, (void**)&t->rtv_heap);
     if (FAILED(hr)) return aedx_fail(AEDX_ERR_OOM, "CreateDescriptorHeap (RTV) failed (0x%08lx)", (unsigned long)hr);
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->rtv_heap);
@@ -1108,32 +1136,76 @@ static int aedx_target_make_layered(AedxTarget* t) {
         ID3D12Device_CreateRenderTargetView(d->device, t->color, &rv, rtv);
         rtv.ptr += d->rtv_inc;
     }
+    if (t->samples > 1) {
+        /* Multisampled (#2412): one image each frame renders into and
+         * resolves into the slice drawn, and a depth to match. */
+        t->msaa = aedx_make_texture2d(d, t->width, t->height, t->format, t->samples, 1,
+                                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                      D3D12_RESOURCE_STATE_RENDER_TARGET, NULL);
+        if (!t->msaa) return AEDX_ERR_OOM;
+        ID3D12Device_CreateRenderTargetView(d->device, t->msaa, NULL, rtv);
+    }
     if (t->has_depth) {
         D3D12_CLEAR_VALUE cv;
         memset(&cv, 0, sizeof(cv));
         cv.Format = t->dsv_format;
         cv.DepthStencil.Depth = 1.0f;
-        t->depth = aedx_make_texture2d_layers(d, t->width, t->height, t->dsv_format, 1, 1, n,
+        int ms = t->samples > 1;
+        /* Typeless when a later pass samples it (#2412), as a plain
+         * target's depth is. */
+        t->depth = aedx_make_texture2d_layers(d, t->width, t->height,
+                                              t->depth_sampled ? t->depth_typeless : t->dsv_format,
+                                              t->samples, 1, ms ? 1 : n,
                                               D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
-                                              D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE,
+                                              (t->depth_sampled ? D3D12_RESOURCE_FLAG_NONE
+                                                                : D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE),
                                               D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv);
         if (!t->depth) return AEDX_ERR_OOM;
         t->depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        hd.NumDescriptors = ms ? 1 : n;
         hr = ID3D12Device_CreateDescriptorHeap(d->device, &hd, &IID_ID3D12DescriptorHeap, (void**)&t->dsv_heap);
         if (FAILED(hr)) return aedx_fail(AEDX_ERR_OOM, "CreateDescriptorHeap (DSV) failed (0x%08lx)", (unsigned long)hr);
         D3D12_CPU_DESCRIPTOR_HANDLE dsv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->dsv_heap);
-        for (UINT l = 0; l < n; l++) {
+        for (UINT l = 0; l < (ms ? 1u : n); l++) {
             D3D12_DEPTH_STENCIL_VIEW_DESC dvd;
             memset(&dvd, 0, sizeof(dvd));
             dvd.Format = t->dsv_format;
-            dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-            dvd.Texture2DArray.FirstArraySlice = l;
-            dvd.Texture2DArray.ArraySize = 1;
+            if (ms) {
+                dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+            } else {
+                dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                dvd.Texture2DArray.FirstArraySlice = l;
+                dvd.Texture2DArray.ArraySize = 1;
+            }
             ID3D12Device_CreateDepthStencilView(d->device, t->depth, &dvd, dsv);
             dsv.ptr += d->dsv_inc;
         }
+        if (t->depth_sampled) {
+            AcquireSRWLockExclusive(&d->lock);
+            t->depth_srv_slot = aedx_slot_take(&d->srv, "shader-visible");
+            if (t->cube && t->depth_srv_slot >= 0) t->depth_cube_srv_slot = aedx_slot_take(&d->srv, "shader-visible");
+            ReleaseSRWLockExclusive(&d->lock);
+            if (t->depth_srv_slot < 0 || (t->cube && t->depth_cube_srv_slot < 0)) return AEDX_ERR_OOM;
+            D3D12_SHADER_RESOURCE_VIEW_DESC dsv_srv;
+            memset(&dsv_srv, 0, sizeof(dsv_srv));
+            dsv_srv.Format = t->depth_srv_format;
+            dsv_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            dsv_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            dsv_srv.Texture2DArray.MipLevels = 1;
+            dsv_srv.Texture2DArray.ArraySize = n;
+            ID3D12Device_CreateShaderResourceView(d->device, t->depth, &dsv_srv,
+                                                  aedx_slot_cpu(&d->srv, t->depth_srv_slot));
+            if (t->cube) {
+                memset(&dsv_srv.Texture2DArray, 0, sizeof(dsv_srv.Texture2DArray));
+                dsv_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                dsv_srv.TextureCube.MipLevels = 1;
+                ID3D12Device_CreateShaderResourceView(d->device, t->depth, &dsv_srv,
+                                                      aedx_slot_cpu(&d->srv, t->depth_cube_srv_slot));
+            }
+        }
     }
+    t->layers_fresh = 1;
     AcquireSRWLockExclusive(&d->lock);
     t->srv_slot = aedx_slot_take(&d->srv, "shader-visible");
     if (t->cube && t->srv_slot >= 0) t->cube_srv_slot = aedx_slot_take(&d->srv, "shader-visible");
@@ -1356,12 +1428,18 @@ AedxTarget* aedx_target_create_format(AedxDevice* d, int width, int height, int 
 /* A target of `layers` array slices (#2399), as contrib.vulkan's. */
 AedxTarget* aedx_target_create_layered(AedxDevice* d, int width, int height, int layers, int format,
                                        int want_depth, int cube) {
+    return aedx_target_create_layered_ex(d, width, height, layers, format, want_depth, cube, 1);
+}
+
+/* A layered target multisampled `samples` times (#2412). */
+AedxTarget* aedx_target_create_layered_ex(AedxDevice* d, int width, int height, int layers, int format,
+                                          int want_depth, int cube, int samples) {
     if (layers < 1) {
         aedx_clear_error();
         aedx_fail(AEDX_ERR_ARG, "a layered target has at least one layer, not %d", layers);
         return NULL;
     }
-    return aedx_target_create_mrt_impl(d, width, height, 1, &format, want_depth, 1, layers, cube ? 1 : 0);
+    return aedx_target_create_mrt_impl(d, width, height, 1, &format, want_depth, samples, layers, cube ? 1 : 0);
 }
 
 /* A target with `count` colour attachments, 1..4, each in its own format
@@ -1486,6 +1564,7 @@ static AedxTarget* aedx_target_create_mrt_impl(AedxDevice* d, int width, int hei
     t->layers = layers ? layers : 1;
     t->cube = cube;
     t->cube_srv_slot = -1;
+    t->depth_cube_srv_slot = -1;
     t->srv_slot = -1;
     t->sampler_slot = -1;
     t->depth_sampler_slot = -1;
@@ -3119,6 +3198,7 @@ struct AedxPipeline {
     int                  stream_instanced[AEDX_MAX_BINDINGS];
     AedxMaterial*        def;
     UINT                 stencil_ref;  /* the state's, unless a draw has its own (#2399) */
+    AedxTarget*          target;       /* the target it was made for (#2411) */
 };
 
 AedxPipeline* aedx_pipeline_create(AedxDevice* d, AedxTarget* t, const void* vs, size_t vs_len,
@@ -3178,6 +3258,7 @@ AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const voi
     AedxPipeline* p = (AedxPipeline*)calloc(1, sizeof(*p));
     if (!p) { aedx_fail(AEDX_ERR_OOM, "out of memory"); goto fail; }
     p->dev = d;
+    p->target = t;
     p->push_bytes = push_bytes;
     if (aedx_make_root(d, bindings, push_bytes, 0, &p->rl) != AEDX_OK) goto fail;
 
@@ -3237,7 +3318,8 @@ AedxPipeline* aedx_pipeline_create_state(AedxDevice* d, AedxTarget* t, const voi
     gd.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(pblob);
     gd.PS.BytecodeLength = ID3D10Blob_GetBufferSize(pblob);
     D3D12_RENDER_TARGET_BLEND_DESC* rtb = &gd.BlendState.RenderTarget[0];
-    rtb->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    /* COLOR_* is D3D12_COLOR_WRITE_ENABLE's numbering (#2411). */
+    rtb->RenderTargetWriteMask = st->color_mask_set ? (UINT8)st->color_mask : (UINT8)D3D12_COLOR_WRITE_ENABLE_ALL;
     rtb->BlendEnable = st->blend ? TRUE : FALSE;
     rtb->BlendOp = D3D12_BLEND_OP_ADD;
     rtb->BlendOpAlpha = D3D12_BLEND_OP_ADD;
@@ -3535,6 +3617,36 @@ int aedx_material_set_target_cube(AedxMaterial* m, int binding, AedxTarget* tg) 
     return aedx_material_set_target_view(m, binding, tg, 0, 0, 0, 2);
 }
 
+/* A layered target's depth as a Texture2DArray or a cube's as a
+ * TextureCube (#2412): raw with `op` 0, or through a comparison sampler. */
+static int aedx_material_set_target_depth_view(AedxMaterial* m, int binding, AedxTarget* tg, int op, int view) {
+    if (op < 0 || op >= AEDX_COMPARE_OPS) {
+        aedx_clear_error();
+        return aedx_fail(AEDX_ERR_ARG, "op %d is not 0 (raw) or COMPARE_LESS..COMPARE_NEVER (1..8)", op);
+    }
+    return aedx_material_set_target_view(m, binding, tg, 1, op, 0, view);
+}
+
+int aedx_material_set_target_depth_array(AedxMaterial* m, int binding, AedxTarget* tg, int op) {
+    return aedx_material_set_target_depth_view(m, binding, tg, op, 1);
+}
+
+int aedx_material_set_target_depth_cube(AedxMaterial* m, int binding, AedxTarget* tg, int op) {
+    return aedx_material_set_target_depth_view(m, binding, tg, op, 2);
+}
+
+int aedx_pipeline_set_target_depth_array(AedxPipeline* p, int binding, AedxTarget* tg, int op) {
+    aedx_clear_error();
+    if (!p || !p->def) return aedx_fail(AEDX_ERR_ARG, "pipeline is null or has no bindings");
+    return aedx_material_set_target_depth_array(p->def, binding, tg, op);
+}
+
+int aedx_pipeline_set_target_depth_cube(AedxPipeline* p, int binding, AedxTarget* tg, int op) {
+    aedx_clear_error();
+    if (!p || !p->def) return aedx_fail(AEDX_ERR_ARG, "pipeline is null or has no bindings");
+    return aedx_material_set_target_depth_cube(p->def, binding, tg, op);
+}
+
 int aedx_pipeline_set_target_array(AedxPipeline* p, int binding, AedxTarget* tg) {
     aedx_clear_error();
     if (!p || !p->def) return aedx_fail(AEDX_ERR_ARG, "pipeline is null or has no bindings");
@@ -3581,6 +3693,18 @@ int aedx_target_set_layer(AedxTarget* t, int layer) {
 }
 
 int aedx_target_layers(const AedxTarget* t) { return t ? t->layers : 0; }
+
+/* Draw `item`'s own pipeline (#2411), as contrib.vulkan's. */
+int aedx_batch_set_pipeline(AedxTarget* t, int item, AedxPipeline* p) {
+    aedx_clear_error();
+    if (!t) return aedx_fail(AEDX_ERR_ARG, "target is null");
+    if (p && p->target != t) return aedx_fail(AEDX_ERR_ARG, "the pipeline was made for another target");
+    if (item < 0 || item >= t->batch_count) {
+        return aedx_fail(AEDX_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    }
+    t->batch[item].pipe = p;
+    return AEDX_OK;
+}
 
 /* A target's depth read through a comparison sampler (#2373): a shadow map.
  * The shader (Texture2D.SampleCmp with a SamplerComparisonState) gets the
@@ -3651,8 +3775,12 @@ static void aedx_bind_material(AedxDevice* d, ID3D12GraphicsCommandList* list, c
             if (m->tgt[i]) {
                 const AedxTarget* tg = m->tgt[i];
                 int a = m->tgt_att[i];
-                srv_slot = m->tgt_view[i] == 2 ? tg->cube_srv_slot
-                         : m->tgt_depth[i] ? tg->depth_srv_slot : a ? tg->xsrv_slot[a - 1] : tg->srv_slot;
+                int view = m->tgt_view[i];
+                if (m->tgt_depth[i]) {
+                    srv_slot = view == 2 ? tg->depth_cube_srv_slot : tg->depth_srv_slot;
+                } else {
+                    srv_slot = view == 2 ? tg->cube_srv_slot : a ? tg->xsrv_slot[a - 1] : tg->srv_slot;
+                }
                 smp_slot = m->tgt_cmp[i] ? tg->compare_slot[m->tgt_cmp[i]]
                          : m->tgt_depth[i] ? tg->depth_sampler_slot
                          : a ? tg->xsampler_slot[a - 1] : tg->sampler_slot;
@@ -3800,6 +3928,40 @@ static void aedx_record_draw(AedxDevice* d, AedxTarget* t, ID3D12GraphicsCommand
     }
 }
 
+/* Sets a pipeline inside the frame with what it reads besides its
+ * bindings: its root signature, topology, push constants sized to its range
+ * so a caller who set fewer bytes still gets a defined block, and the vertex
+ * streams. */
+static void aedx_record_pipeline(AedxTarget* t, ID3D12GraphicsCommandList* l, AedxPipeline* p) {
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(l, p->rl.root);
+    ID3D12GraphicsCommandList_SetPipelineState(l, p->pso);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(l, p->prim);
+    if (p->rl.push_words > 0) {
+        unsigned char block[AEDX_MAX_PUSH];
+        memset(block, 0, sizeof(block));
+        UINT n = t->push_size < (UINT)p->push_bytes ? t->push_size : (UINT)p->push_bytes;
+        if (n) memcpy(block, t->push, n);
+        ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(l, 0, p->rl.push_words, block, 0);
+    }
+    if (p->vertex_input) {
+        D3D12_VERTEX_BUFFER_VIEW vbv;
+        vbv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->vbuf);
+        vbv.SizeInBytes = (UINT)(t->vertex_count * t->vertex_floats * 4);
+        vbv.StrideInBytes = p->stride ? p->stride : (UINT)(t->vertex_floats * 4);
+        ID3D12GraphicsCommandList_IASetVertexBuffers(l, 0, 1, &vbv);
+    }
+    /* The caller's streams past slot 0, which the draw check made sure are
+     * bound (#2198). */
+    for (UINT sb = 1; sb < AEDX_MAX_BINDINGS; sb++) {
+        if (!p->stream_declared[sb]) continue;
+        D3D12_VERTEX_BUFFER_VIEW sv;
+        sv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->streams[sb]->res);
+        sv.SizeInBytes = (UINT)t->streams[sb]->size;
+        sv.StrideInBytes = p->stream_stride[sb];
+        ID3D12GraphicsCommandList_IASetVertexBuffers(l, sb, 1, &sv);
+    }
+}
+
 /* Records one frame into slot `fr`. Direct3D 12 lists are recorded fresh
  * every frame: recording is cheap, and a list re-executed with a stale state
  * assumption would be the kind of bug caching invites. */
@@ -3813,7 +3975,9 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         int src = AEDX_OK;
         if (t->batch_count > 0) {
             for (int i = 0; i < t->batch_count && src == AEDX_OK; i++) {
-                src = aedx_collect_sampled(t, t->batch[i].mat ? t->batch[i].mat : use, sampled, &n_sampled);
+                AedxDrawItem* it = &t->batch[i];
+                src = aedx_collect_sampled(t, it->mat ? it->mat : it->pipe ? it->pipe->def : use, sampled,
+                                           &n_sampled);
             }
         } else {
             src = aedx_collect_sampled(t, use, sampled, &n_sampled);
@@ -3839,8 +4003,11 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         rtvs[c] = rtv0;
         rtvs[c].ptr += (SIZE_T)(2 * c + (t->samples > 1 ? 1 : 0)) * d->rtv_inc;
     }
-    /* A layered target's views are a slice each (#2399). */
-    if (t->layered) rtvs[0].ptr = rtv0.ptr + (SIZE_T)t->layer * d->rtv_inc;
+    /* A layered target's views are a slice each (#2399), and a multisampled
+     * one draws into its one multisampled image, after them (#2412). */
+    if (t->layered) {
+        rtvs[0].ptr = rtv0.ptr + (SIZE_T)(t->samples > 1 ? t->layers : t->layer) * d->rtv_inc;
+    }
     if (t->samples == 1) {
         aedx_barrier(l, t->color, t->color_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         t->color_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -3849,11 +4016,32 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
             t->xstate[x] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
     }
+    /* A new layered target's first frame clears every slice: colour 0, and
+     * depth at the far plane, so a slice never drawn reads defined values
+     * (#2412). */
+    if (t->layered && t->layers_fresh) {
+        const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        aedx_barrier(l, t->color, t->color_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        t->color_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        for (int s = 0; s < t->layers; s++) {
+            D3D12_CPU_DESCRIPTOR_HANDLE r = rtv0;
+            r.ptr += (SIZE_T)s * d->rtv_inc;
+            ID3D12GraphicsCommandList_ClearRenderTargetView(l, r, zero, 0, NULL);
+            if (t->has_depth && t->samples == 1) {
+                D3D12_CPU_DESCRIPTOR_HANDLE z = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->dsv_heap);
+                z.ptr += (SIZE_T)s * d->dsv_inc;
+                ID3D12GraphicsCommandList_ClearDepthStencilView(l, z, D3D12_CLEAR_FLAG_DEPTH |
+                                                                (t->has_stencil ? D3D12_CLEAR_FLAG_STENCIL : 0),
+                                                                1.0f, 0, 0, NULL);
+            }
+        }
+        t->layers_fresh = 0;
+    }
     D3D12_CPU_DESCRIPTOR_HANDLE dsv;
     dsv.ptr = 0;
     if (t->has_depth) {
         dsv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(t->dsv_heap);
-        if (t->layered) dsv.ptr += (SIZE_T)t->layer * d->dsv_inc;
+        if (t->layered && t->samples == 1) dsv.ptr += (SIZE_T)t->layer * d->dsv_inc;
         /* The stencil clears to 0 with the depth (#2399). */
         ID3D12GraphicsCommandList_ClearDepthStencilView(l, dsv, D3D12_CLEAR_FLAG_DEPTH |
                                                         (t->has_stencil ? D3D12_CLEAR_FLAG_STENCIL : 0),
@@ -3867,35 +4055,9 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         D3D12_RECT sc = { 0, 0, t->width, t->height };
         ID3D12GraphicsCommandList_RSSetViewports(l, 1, &vp);
         ID3D12GraphicsCommandList_RSSetScissorRects(l, 1, &sc);
-        ID3D12GraphicsCommandList_SetGraphicsRootSignature(l, p->rl.root);
-        ID3D12GraphicsCommandList_SetPipelineState(l, p->pso);
         ID3D12DescriptorHeap* heaps[2] = { d->srv.heap, d->samplers.heap };
         ID3D12GraphicsCommandList_SetDescriptorHeaps(l, 2, heaps);
-        ID3D12GraphicsCommandList_IASetPrimitiveTopology(l, p->prim);
-        if (p->rl.push_words > 0) {
-            unsigned char block[AEDX_MAX_PUSH];
-            memset(block, 0, sizeof(block));
-            UINT n = t->push_size < (UINT)p->push_bytes ? t->push_size : (UINT)p->push_bytes;
-            if (n) memcpy(block, t->push, n);
-            ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(l, 0, p->rl.push_words, block, 0);
-        }
-        if (p->vertex_input) {
-            D3D12_VERTEX_BUFFER_VIEW vbv;
-            vbv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->vbuf);
-            vbv.SizeInBytes = (UINT)(t->vertex_count * t->vertex_floats * 4);
-            vbv.StrideInBytes = p->stride ? p->stride : (UINT)(t->vertex_floats * 4);
-            ID3D12GraphicsCommandList_IASetVertexBuffers(l, 0, 1, &vbv);
-        }
-        /* The caller's streams past slot 0, which the draw check made sure
-         * are bound (#2198). */
-        for (UINT sb = 1; sb < AEDX_MAX_BINDINGS; sb++) {
-            if (!p->stream_declared[sb]) continue;
-            D3D12_VERTEX_BUFFER_VIEW sv;
-            sv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->streams[sb]->res);
-            sv.SizeInBytes = (UINT)t->streams[sb]->size;
-            sv.StrideInBytes = p->stream_stride[sb];
-            ID3D12GraphicsCommandList_IASetVertexBuffers(l, sb, 1, &sv);
-        }
+        aedx_record_pipeline(t, l, p);
         if (t->index_count > 0) {
             D3D12_INDEX_BUFFER_VIEW ibv;
             ibv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(t->ibuf);
@@ -3905,10 +4067,18 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
         }
         AedxMaterial* bind_mat = mat ? mat : p->def;
         if (t->batch_count > 0) {
+            AedxPipeline* bound = p;
             for (int i = 0; i < t->batch_count; i++) {
                 AedxDrawItem* it = &t->batch[i];
-                AedxMaterial* im = it->mat ? it->mat : bind_mat;
-                if (im) aedx_bind_material(d, l, &p->rl, im, 0, it->offsets);
+                /* A draw's own pipeline is set for it, and the frame's again
+                 * after it (#2411). */
+                AedxPipeline* ip = it->pipe ? it->pipe : p;
+                if (ip != bound) {
+                    aedx_record_pipeline(t, l, ip);
+                    bound = ip;
+                }
+                AedxMaterial* im = it->mat ? it->mat : it->pipe ? ip->def : bind_mat;
+                if (im) aedx_bind_material(d, l, &ip->rl, im, 0, it->offsets);
                 /* Each draw's own scissor and viewport, or the whole target
                  * (#2398). */
                 D3D12_VIEWPORT ivp = vp;
@@ -3923,7 +4093,7 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
                 }
                 ID3D12GraphicsCommandList_RSSetViewports(l, 1, &ivp);
                 ID3D12GraphicsCommandList_RSSetScissorRects(l, 1, &isc);
-                ID3D12GraphicsCommandList_OMSetStencilRef(l, it->stencil_ref_set ? it->stencil_ref : p->stencil_ref);
+                ID3D12GraphicsCommandList_OMSetStencilRef(l, it->stencil_ref_set ? it->stencil_ref : ip->stencil_ref);
                 aedx_record_draw(d, t, l, it);
             }
         } else {
@@ -3941,7 +4111,8 @@ static int aedx_record(AedxTarget* t, AedxFrame* fr, AedxPipeline* p, AedxMateri
     if (t->samples > 1) {
         aedx_barrier(l, t->msaa, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
         aedx_barrier(l, t->color, t->color_state, D3D12_RESOURCE_STATE_RESOLVE_DEST);
-        ID3D12GraphicsCommandList_ResolveSubresource(l, t->color, 0, t->msaa, 0, t->format);
+        /* Into the slice drawn, for a layered target (#2412). */
+        ID3D12GraphicsCommandList_ResolveSubresource(l, t->color, (UINT)t->layer, t->msaa, 0, t->format);
         aedx_barrier(l, t->msaa, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         aedx_barrier(l, t->color, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
         for (int x = 0; x < t->extra; x++) {
@@ -4075,16 +4246,23 @@ static int aedx_submit_locked(AedxTarget* t, AedxPipeline* p, AedxMaterial* mat,
                 return aedx_fail(AEDX_ERR_ARG, "draw %d covers %d..%lld but only %d are uploaded",
                                  i, it->first, (long long)it->first + it->count - 1, limit);
             }
-            if (it->mat && it->mat->pipe != p) {
+            /* A draw with its own pipeline is checked against it (#2411). */
+            AedxPipeline* ip = it->pipe ? it->pipe : p;
+            if (it->mat && it->mat->pipe != ip) {
                 return aedx_fail(AEDX_ERR_ARG, "draw %d uses a material of another pipeline", i);
+            }
+            if (it->pipe) {
+                if (ip->vertex_input && !t->vbuf) return aedx_fail(AEDX_ERR_ARG, "vertices were never uploaded");
+                int src = aedx_streams_check(t, ip);
+                if (src != AEDX_OK) return src;
             }
             if (it->scissor_set && ((long long)it->sx + it->sw > t->width || (long long)it->sy + it->sh > t->height)) {
                 return aedx_fail(AEDX_ERR_ARG, "draw %d's scissor %d,%d %dx%d runs outside the %dx%d target",
                                  i, it->sx, it->sy, it->sw, it->sh, t->width, t->height);
             }
-            AedxMaterial* im = it->mat ? it->mat : (mat ? mat : p->def);
-            int rc = aedx_material_ready(p, im);
-            if (rc == AEDX_OK) rc = aedx_offsets_check(p, im, it->offsets, i);
+            AedxMaterial* im = it->mat ? it->mat : it->pipe ? ip->def : (mat ? mat : p->def);
+            int rc = aedx_material_ready(ip, im);
+            if (rc == AEDX_OK) rc = aedx_offsets_check(ip, im, it->offsets, i);
             if (rc != AEDX_OK) return rc;
         }
         if (t->batch_count == 0) {
@@ -5184,11 +5362,27 @@ AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int z, int
 }
 int    aedx_texture_layers(const AedxTexture* t) { (void)t; return 0; }
 int    aedx_batch_set_stencil_ref(AedxTarget* t, int i, int r) { (void)t; (void)i; (void)r; return aedx_no(); }
+int    aedx_batch_set_pipeline(AedxTarget* t, int i, AedxPipeline* p) { (void)t; (void)i; (void)p; return aedx_no(); }
 AedxTarget* aedx_target_create_layered(AedxDevice* d, int w, int h, int n, int f, int z, int c) {
     (void)d; (void)w; (void)h; (void)n; (void)f; (void)z; (void)c; aedx_no(); return NULL;
 }
 int    aedx_target_set_layer(AedxTarget* t, int l) { (void)t; (void)l; return aedx_no(); }
 int    aedx_target_layers(const AedxTarget* t) { (void)t; return 0; }
+AedxTarget* aedx_target_create_layered_ex(AedxDevice* d, int w, int h, int n, int f, int z, int c, int s) {
+    (void)d; (void)w; (void)h; (void)n; (void)f; (void)z; (void)c; (void)s; aedx_no(); return NULL;
+}
+int    aedx_pipeline_set_target_depth_array(AedxPipeline* p, int b, AedxTarget* t, int o) {
+    (void)p; (void)b; (void)t; (void)o; return aedx_no();
+}
+int    aedx_pipeline_set_target_depth_cube(AedxPipeline* p, int b, AedxTarget* t, int o) {
+    (void)p; (void)b; (void)t; (void)o; return aedx_no();
+}
+int    aedx_material_set_target_depth_array(AedxMaterial* m, int b, AedxTarget* t, int o) {
+    (void)m; (void)b; (void)t; (void)o; return aedx_no();
+}
+int    aedx_material_set_target_depth_cube(AedxMaterial* m, int b, AedxTarget* t, int o) {
+    (void)m; (void)b; (void)t; (void)o; return aedx_no();
+}
 int    aedx_pipeline_set_target_array(AedxPipeline* p, int b, AedxTarget* t) { (void)p; (void)b; (void)t; return aedx_no(); }
 int    aedx_pipeline_set_target_cube(AedxPipeline* p, int b, AedxTarget* t) { (void)p; (void)b; (void)t; return aedx_no(); }
 int    aedx_material_set_target_array(AedxMaterial* m, int b, AedxTarget* t) { (void)m; (void)b; (void)t; return aedx_no(); }
@@ -5517,6 +5711,10 @@ int   aedx_ae_state_stencil(void* st, int compare, int ref, int pass_op, int fai
     return aedx_state_stencil((AedxState*)st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask,
                               write_mask);
 }
+int   aedx_ae_state_color_mask(void* st, int mask) { return aedx_state_color_mask((AedxState*)st, mask); }
+int   aedx_ae_batch_set_pipeline(void* t, int item, void* p) {
+    return aedx_batch_set_pipeline((AedxTarget*)t, item, (AedxPipeline*)p);
+}
 int   aedx_ae_batch_set_stencil_ref(void* t, int item, int ref) {
     return aedx_batch_set_stencil_ref((AedxTarget*)t, item, ref);
 }
@@ -5525,6 +5723,22 @@ void* aedx_ae_target_create_layered(void* d, int w, int h, int layers, int forma
 }
 int   aedx_ae_target_set_layer(void* t, int layer) { return aedx_target_set_layer((AedxTarget*)t, layer); }
 int   aedx_ae_target_layers(void* t) { return aedx_target_layers((const AedxTarget*)t); }
+void* aedx_ae_target_create_layered_ex(void* d, int w, int h, int layers, int format, int depth, int cube,
+                                       int samples) {
+    return (void*)aedx_target_create_layered_ex((AedxDevice*)d, w, h, layers, format, depth, cube, samples);
+}
+int   aedx_ae_set_target_depth_array(void* p, int binding, void* t, int op) {
+    return aedx_pipeline_set_target_depth_array((AedxPipeline*)p, binding, (AedxTarget*)t, op);
+}
+int   aedx_ae_set_target_depth_cube(void* p, int binding, void* t, int op) {
+    return aedx_pipeline_set_target_depth_cube((AedxPipeline*)p, binding, (AedxTarget*)t, op);
+}
+int   aedx_ae_material_set_target_depth_array(void* m, int binding, void* t, int op) {
+    return aedx_material_set_target_depth_array((AedxMaterial*)m, binding, (AedxTarget*)t, op);
+}
+int   aedx_ae_material_set_target_depth_cube(void* m, int binding, void* t, int op) {
+    return aedx_material_set_target_depth_cube((AedxMaterial*)m, binding, (AedxTarget*)t, op);
+}
 int   aedx_ae_set_target_array(void* p, int binding, void* t) {
     return aedx_pipeline_set_target_array((AedxPipeline*)p, binding, (AedxTarget*)t);
 }

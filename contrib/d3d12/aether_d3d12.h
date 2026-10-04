@@ -247,6 +247,18 @@ int        aedx_state_topology(AedxState* s, int topology);
 /* The stencil test (#2399): COMPARE_* and STENCIL_* (Vulkan's numbering). */
 int        aedx_state_stencil(AedxState* s, int compare, int ref, int pass_op, int fail_op,
                               int depth_fail_op, int read_mask, int write_mask);
+/* A batch entry's own pipeline, made for the same target, and the channels
+ * a pipeline writes (#2411). */
+int        aedx_batch_set_pipeline(AedxTarget* t, int item, AedxPipeline* p);
+int        aedx_state_color_mask(AedxState* s, int mask);
+/* A layered target's depth as an array or a cube, raw (op 0) or compared,
+ * and a multisampled layered target (#2412). */
+int        aedx_pipeline_set_target_depth_array(AedxPipeline* p, int binding, AedxTarget* t, int op);
+int        aedx_pipeline_set_target_depth_cube(AedxPipeline* p, int binding, AedxTarget* t, int op);
+int        aedx_material_set_target_depth_array(AedxMaterial* m, int binding, AedxTarget* t, int op);
+int        aedx_material_set_target_depth_cube(AedxMaterial* m, int binding, AedxTarget* t, int op);
+AedxTarget* aedx_target_create_layered_ex(AedxDevice* d, int width, int height, int layers, int format,
+                                          int want_depth, int cube, int samples);
 int        aedx_pipeline_set_target_array(AedxPipeline* p, int binding, AedxTarget* t);
 int        aedx_pipeline_set_target_cube(AedxPipeline* p, int binding, AedxTarget* t);
 int        aedx_material_set_target_array(AedxMaterial* m, int binding, AedxTarget* t);

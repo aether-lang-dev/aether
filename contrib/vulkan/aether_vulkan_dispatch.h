@@ -99,6 +99,7 @@
     X(vkCmdBlitImage) \
     X(vkCmdCopyImage) \
     X(vkCmdClearColorImage) \
+    X(vkCmdClearDepthStencilImage) \
     X(vkCreateSemaphore) \
     X(vkDestroySemaphore) \
     X(vkCreateComputePipelines) \

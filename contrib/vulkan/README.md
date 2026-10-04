@@ -369,7 +369,18 @@ over the same render pass. Sampling uses a `2D_ARRAY` view or a `CUBE` view
 of all the layers. A new layered target is cleared and moved to
 `TRANSFER_SRC_OPTIMAL` before its first frame, the layout every rendered
 layer rests in. That way a barrier over all the layers is valid before each
-one has been drawn.
+one has been drawn. Its depth layers are cleared to 1.0 at the same time and
+left in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, which needs
+`vkCmdClearDepthStencilImage`. Sampled, the depth gets `2D_ARRAY` and
+`CUBE` views of its depth aspect. A multisampled layered target has one
+transient multisampled colour image and depth, and a framebuffer per layer
+that resolves into that layer.
+
+A batch entry's own pipeline is bound inside the frame's render pass when the
+entry's turn comes, with its push block and vertex streams. The frame's
+recording is reused only while the entries' pipeline serials match those it
+was recorded with. `state_color_mask` is the blend attachment's
+`colorWriteMask`.
 
 ## Colour formats and image files
 

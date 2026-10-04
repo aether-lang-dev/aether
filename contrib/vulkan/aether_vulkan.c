@@ -368,6 +368,9 @@ typedef struct {
      * the pipeline state's. */
     int           stencil_ref_set;
     uint32_t      stencil_ref;
+    /* A pipeline of the draw's own (#2411), made for the same target; NULL
+     * draws with the frame's. Its material, if any, is one of its own. */
+    AevkPipeline* pipe;
 } AevkDrawItem;
 
 typedef struct {
@@ -402,6 +405,10 @@ typedef struct {
      * recorded. */
     unsigned        rec_batch_version;
     int             rec_batch_count;
+    /* The batch's own pipelines' serials, folded together (#2411): a draw's
+     * pipeline destroyed and remade where it was re-records the frame, as
+     * the frame's own pipeline does. */
+    unsigned long long rec_item_pipes;
     unsigned        rec_bind_epoch;   /* the device's bind_epoch when recorded */
     /* Whether the recorded commands write the slot's two timestamps, so the
      * wait that retires it reads them, and which submission of the target
@@ -505,6 +512,10 @@ struct AevkTarget {
     VkImageView*   depth_layer_views;
     VkFramebuffer* fbs;
     VkImageView    cube_view;
+    /* A layered target's depth read as a texture (#2412): all its layers as a
+     * 2D array, and a cube's six as a cube, the depth aspect alone. */
+    VkImageView    depth_array_view;
+    VkImageView    depth_cube_view;
 
     VkBuffer       vbuf;
     VkDeviceMemory vbuf_mem;
@@ -585,6 +596,10 @@ struct AevkState {
     int stencil_ref;
     int stencil_pass, stencil_fail, stencil_depth_fail;
     int stencil_read, stencil_write;
+    /* The channels a draw writes (#2411): COLOR_* bits, VkColorComponent-
+     * FlagBits' own; all four unless set. */
+    int color_mask_set;
+    int color_mask;
 };
 
 /* What a shader may read besides vertex attributes: uniform buffers and
@@ -726,6 +741,9 @@ struct AevkPipeline {
     /* The state's stencil reference, which each draw sets dynamically
      * unless it has one of its own (#2399). */
     uint32_t         stencil_ref;
+    /* The target the pipeline was made for: a batch entry's own pipeline
+     * must be one made for the target it draws into (#2411). */
+    AevkTarget*      target;
 };
 
 /* ------------------------------------------------------------------------ */
@@ -1522,23 +1540,59 @@ static int aevk_target_make_layered(AevkTarget* t) {
                             l, 1, &t->layer_views[l]);
     }
     if (rc != AEVK_OK) return rc;
-    if (t->has_depth) {
-        ici.flags = 0;
+    if (t->samples > 1) {
+        /* Multisampled (#2412): one multisampled colour image, and depth,
+         * which each frame renders into and resolves into its own layer. A
+         * frame draws one layer, so one is all it needs. */
+        rc = aevk_make_attachment(d, t->width, t->height, t->color_format, aevk_sample_bit(t->samples),
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, &t->msaa_image, &t->msaa_mem, &t->msaa_view);
+        if (rc == AEVK_OK && t->has_depth) {
+            rc = aevk_make_attachment(d, t->width, t->height, t->depth_format, aevk_sample_bit(t->samples),
+                                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                      aevk_depth_aspects(t), &t->depth_image, &t->depth_mem, &t->depth_view);
+        }
+        if (rc != AEVK_OK) return rc;
+    } else if (t->has_depth) {
+        /* Layered like the colour, and cleared with it on first use; sampled
+         * as an array or a cube once a material asks (#2412). */
+        ici.flags = t->cube && t->depth_sampled ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
         ici.format = t->depth_format;
-        ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    (t->depth_sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
         rc = aevk_make_image_memory(d, &ici, &t->depth_image, &t->depth_mem);
         for (uint32_t l = 0; rc == AEVK_OK && l < n; l++) {
             rc = aevk_make_view(d, t->depth_image, t->depth_format, VK_IMAGE_VIEW_TYPE_2D, aevk_depth_aspects(t),
                                 l, 1, &t->depth_layer_views[l]);
         }
+        if (rc == AEVK_OK && t->depth_sampled) {
+            rc = aevk_make_view(d, t->depth_image, t->depth_format, VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, 0, n, &t->depth_array_view);
+            if (rc == AEVK_OK && t->cube) {
+                rc = aevk_make_view(d, t->depth_image, t->depth_format, VK_IMAGE_VIEW_TYPE_CUBE,
+                                    VK_IMAGE_ASPECT_DEPTH_BIT, 0, 6, &t->depth_cube_view);
+            }
+        }
         if (rc != AEVK_OK) return rc;
     }
     for (uint32_t l = 0; l < n; l++) {
-        VkImageView views[2] = { t->layer_views[l], t->has_depth ? t->depth_layer_views[l] : VK_NULL_HANDLE };
+        /* In the render pass's order: the colour written, its resolve when
+         * multisampled, and depth. */
+        VkImageView views[3];
+        uint32_t nv = 0;
+        if (t->samples > 1) {
+            views[nv++] = t->msaa_view;
+            views[nv++] = t->layer_views[l];
+            if (t->has_depth) views[nv++] = t->depth_view;
+        } else {
+            views[nv++] = t->layer_views[l];
+            if (t->has_depth) views[nv++] = t->depth_layer_views[l];
+        }
         VkFramebufferCreateInfo fci = {0};
         fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fci.renderPass = t->pass;
-        fci.attachmentCount = t->has_depth ? 2 : 1;
+        fci.attachmentCount = nv;
         fci.pAttachments = views;
         fci.width = (uint32_t)t->width;
         fci.height = (uint32_t)t->height;
@@ -1666,6 +1720,10 @@ static void aevk_target_free_images(AevkTarget* t) {
     t->depth_layer_views = NULL;
     if (t->cube_view)       d->da.vkDestroyImageView(d->device, t->cube_view, NULL);
     if (t->depth_read_view) d->da.vkDestroyImageView(d->device, t->depth_read_view, NULL);
+    if (t->depth_array_view) d->da.vkDestroyImageView(d->device, t->depth_array_view, NULL);
+    if (t->depth_cube_view)  d->da.vkDestroyImageView(d->device, t->depth_cube_view, NULL);
+    t->depth_array_view = VK_NULL_HANDLE;
+    t->depth_cube_view = VK_NULL_HANDLE;
     t->cube_view = VK_NULL_HANDLE;
     t->depth_read_view = VK_NULL_HANDLE;
     if (t->fb)          d->da.vkDestroyFramebuffer(d->device, t->fb, NULL);
@@ -2014,12 +2072,19 @@ AevkTarget* aevk_target_create_format(AevkDevice* d, int width, int height, int 
  * square faces sampled as a cube. Depth, when asked for, is layered too. */
 AevkTarget* aevk_target_create_layered(AevkDevice* d, int width, int height, int layers, int format,
                                        int want_depth, int cube) {
+    return aevk_target_create_layered_ex(d, width, height, layers, format, want_depth, cube, 1);
+}
+
+/* A layered target multisampled `samples` times (#2412): each frame renders
+ * into one multisampled image and resolves into the layer drawn. */
+AevkTarget* aevk_target_create_layered_ex(AevkDevice* d, int width, int height, int layers, int format,
+                                          int want_depth, int cube, int samples) {
     if (layers < 1) {
         aevk_clear_error();
         aevk_fail(AEVK_ERR_ARG, "a layered target has at least one layer, not %d", layers);
         return NULL;
     }
-    return aevk_target_create_mrt_impl(d, width, height, 1, &format, want_depth, 1, layers, cube ? 1 : 0);
+    return aevk_target_create_mrt_impl(d, width, height, 1, &format, want_depth, samples, layers, cube ? 1 : 0);
 }
 
 /* A target with `count` colour attachments, 1..4, each in its own format
@@ -2318,6 +2383,33 @@ static int aevk_target_init_layers(AevkTarget* t) {
                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                               VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                               VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    if (t->has_depth && t->samples == 1) {
+        /* Every depth layer at the far plane, resting where a drawn layer's
+         * pass leaves it, so the whole array can be sampled (#2412). */
+        VkImageMemoryBarrier db = {0};
+        db.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        db.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        db.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        db.image = t->depth_image;
+        db.subresourceRange.aspectMask = aevk_depth_aspects(t);
+        db.subresourceRange.levelCount = 1;
+        db.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        db.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        d->da.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   0, 0, NULL, 0, NULL, 1, &db);
+        VkClearDepthStencilValue far_plane = { 1.0f, 0 };
+        d->da.vkCmdClearDepthStencilImage(cmd, t->depth_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far_plane, 1,
+                                          &db.subresourceRange);
+        db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        db.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        db.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        d->da.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                   0, 0, NULL, 0, NULL, 1, &db);
+    }
     rc = aevk_submit_once(d, cmd);
     if (rc == AEVK_OK) t->layers_fresh = 0;
     return rc;
@@ -2481,6 +2573,38 @@ int aevk_batch_set_scissor(AevkTarget* t, int item, int x, int y, int w, int h) 
     return rc;
 }
 
+/* Draw `item`'s own pipeline (#2411): one made for this target, with its
+ * own shaders and state, so one frame can mark a stencil with one pipeline
+ * and test it with another. NULL goes back to the frame's. The pipeline must
+ * outlive the batch entry. */
+int aevk_batch_set_pipeline(AevkTarget* t, int item, AevkPipeline* p) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (p && p->target != t) {
+        return aevk_fail(AEVK_ERR_ARG, "the pipeline was made for another target");
+    }
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    int rc = AEVK_OK;
+    if (item < 0 || item >= t->batch_count) {
+        rc = aevk_fail(AEVK_ERR_ARG, "draw %d is outside the batch of %d", item, t->batch_count);
+    } else {
+        t->batch[item].pipe = p;
+        t->batch_version++;
+    }
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return rc;
+}
+
+/* The batch's own pipelines' serials, folded into one value (#2411). */
+static unsigned long long aevk_item_pipes(const AevkTarget* t) {
+    unsigned long long h = 0;
+    for (int i = 0; i < t->batch_count; i++) {
+        const AevkPipeline* ip = t->batch[i].pipe;
+        h = h * 1099511628211ull + (ip ? ip->serial : 0) + 1u;
+    }
+    return h;
+}
+
 /* Draw `item`'s stencil reference (#2399), 0..255, which its stencil test
  * compares with and REPLACE writes; -1 goes back to the pipeline state's. */
 int aevk_batch_set_stencil_ref(AevkTarget* t, int item, int ref) {
@@ -2642,7 +2766,8 @@ static int aevk_batch_check(AevkTarget* t, AevkPipeline* p) {
                              "draw %d covers %s %d..%lld but only %d are uploaded",
                              i, what, it->first, (long long)it->first + it->count - 1, limit);
         }
-        if (it->mat && p && it->mat->pipe != p) {
+        AevkPipeline* ip = it->pipe ? it->pipe : p;
+        if (it->mat && ip && it->mat->pipe != ip) {
             return aevk_fail(AEVK_ERR_ARG, "draw %d uses a material of another pipeline", i);
         }
         if (it->scissor_set && ((long long)it->sx + it->sw > t->width || (long long)it->sy + it->sh > t->height)) {
@@ -2731,7 +2856,14 @@ static int aevk_draw_check(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat) {
     if (t->batch_count == 0) return aevk_offsets_check(p, use, NULL, -1);
     for (int i = 0; i < t->batch_count && rc == AEVK_OK; i++) {
         AevkDrawItem* it = &t->batch[i];
-        rc = aevk_offsets_check(p, it->mat ? it->mat : use, it->offsets, i);
+        /* A draw with its own pipeline reads that pipeline's streams and
+         * bindings, its default material where it names none (#2411). */
+        if (it->pipe) {
+            rc = aevk_streams_check(t, it->pipe);
+            if (rc == AEVK_OK) rc = aevk_offsets_check(it->pipe, it->mat ? it->mat : it->pipe->def, it->offsets, i);
+        } else {
+            rc = aevk_offsets_check(p, it->mat ? it->mat : use, it->offsets, i);
+        }
     }
     return rc;
 }
@@ -2875,6 +3007,19 @@ int aevk_state_stencil(AevkState* s, int compare, int ref, int pass_op, int fail
     s->stencil_depth_fail = depth_fail_op;
     s->stencil_read = read_mask;
     s->stencil_write = write_mask;
+    return AEVK_OK;
+}
+
+/* The channels a draw writes (#2411), COLOR_* bits; 0 writes none, which a
+ * draw that only marks the stencil or the depth wants. */
+int aevk_state_color_mask(AevkState* s, int mask) {
+    aevk_clear_error();
+    if (!s) return aevk_fail(AEVK_ERR_ARG, "state is null");
+    if (mask < 0 || mask > 15) {
+        return aevk_fail(AEVK_ERR_ARG, "a colour mask is COLOR_* bits, 0..15, not %d", mask);
+    }
+    s->color_mask_set = 1;
+    s->color_mask = mask;
     return AEVK_OK;
 }
 
@@ -3794,6 +3939,7 @@ AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
     AevkPipeline* p = (AevkPipeline*)calloc(1, sizeof(*p));
     if (!p) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     p->dev = d;
+    p->target = t;
     AEVK_MUTEX_LOCK(&d->lock);
     p->serial = ++d->serial;
     AEVK_MUTEX_UNLOCK(&d->lock);
@@ -4004,8 +4150,10 @@ AevkPipeline* aevk_pipeline_create_state(AevkDevice* d, AevkTarget* t,
     }
 
     VkPipelineColorBlendAttachmentState cba = {0};
-    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    /* COLOR_* is VkColorComponentFlagBits' numbering (#2411). */
+    cba.colorWriteMask = st->color_mask_set ? (VkColorComponentFlags)st->color_mask
+                                            : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
     if (st->blend != AEVK_BLEND_NONE) {
         cba.blendEnable = VK_TRUE;
         cba.colorBlendOp = VK_BLEND_OP_ADD;
@@ -4242,9 +4390,13 @@ static void aevk_material_write_target(AevkMaterial* m, int binding) {
                : m->tgt_depth[binding] ? tg->depth_sampler
                : att ? tg->xsampler[att - 1] : tg->sampler;
     /* A layered target's `view` is all its layers as an array (#2399). */
-    ii.imageView = m->tgt_view[binding] == 2 ? tg->cube_view
-                 : m->tgt_depth[binding] ? (tg->depth_read_view ? tg->depth_read_view : tg->depth_view)
-                 : att ? tg->xview[att - 1] : tg->view;
+    int view = m->tgt_view[binding];
+    if (m->tgt_depth[binding]) {
+        ii.imageView = view == 2 ? tg->depth_cube_view : view == 1 ? tg->depth_array_view
+                     : tg->depth_read_view ? tg->depth_read_view : tg->depth_view;
+    } else {
+        ii.imageView = view == 2 ? tg->cube_view : att ? tg->xview[att - 1] : tg->view;
+    }
     ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -4322,7 +4474,7 @@ static int aevk_material_set_target_view(AevkMaterial* m, int binding, AevkTarge
     if (view == 2 && !tg->cube) {
         return aevk_fail(AEVK_ERR_ARG, "the target is not a cube: sample it with set_target_array");
     }
-    if (view && !tg->sampleable) {
+    if (view && !depth && !tg->sampleable) {
         return aevk_fail(AEVK_ERR_UNSUPPORTED, "the device cannot sample the target's format %d",
                          (int)tg->color_format);
     }
@@ -4368,6 +4520,46 @@ static int aevk_material_set_target_view(AevkMaterial* m, int binding, AevkTarge
 static int aevk_material_set_target_att(AevkMaterial* m, int binding, AevkTarget* tg, int depth,
                                        int compare, int att) {
     return aevk_material_set_target_view(m, binding, tg, depth, compare, att, 0);
+}
+
+/* A layered target's depth, every layer as a 2D array or a cube target's
+ * six faces as a cube (#2412): read raw with `op` 0, or through a
+ * comparison sampler with a COMPARE_* op, which is what a cascade of shadow
+ * maps or a point light's cube of them is. */
+static int aevk_material_set_target_depth_view(AevkMaterial* m, int binding, AevkTarget* tg, int op, int view) {
+    if (op < 0 || op >= AEVK_COMPARE_OPS) {
+        aevk_clear_error();
+        return aevk_fail(AEVK_ERR_ARG, "op %d is not 0 (raw) or COMPARE_LESS..COMPARE_NEVER (1..8)", op);
+    }
+    return aevk_material_set_target_view(m, binding, tg, 1, op, 0, view);
+}
+
+int aevk_material_set_target_depth_array(AevkMaterial* m, int binding, AevkTarget* tg, int op) {
+    return aevk_material_set_target_depth_view(m, binding, tg, op, 1);
+}
+
+int aevk_material_set_target_depth_cube(AevkMaterial* m, int binding, AevkTarget* tg, int op) {
+    return aevk_material_set_target_depth_view(m, binding, tg, op, 2);
+}
+
+int aevk_pipeline_set_target_depth_array(AevkPipeline* p, int binding, AevkTarget* tg, int op) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_target_depth_array(p->def, binding, tg, op);
+}
+
+int aevk_pipeline_set_target_depth_cube(AevkPipeline* p, int binding, AevkTarget* tg, int op) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_target_depth_cube(p->def, binding, tg, op);
 }
 
 static int aevk_material_set_target_cmp(AevkMaterial* m, int binding, AevkTarget* tg, int depth,
@@ -4652,8 +4844,10 @@ static void aevk_sampled_barriers(AevkDevice* d, VkCommandBuffer cmd,
         VkPipelineStageFlags src, dst;
         if (list[i].depth) {
             ib.image = tg->depth_image;
-            /* Both aspects move together where there is a stencil. */
+            /* Both aspects move together where there is a stencil, and every
+             * layer of a layered target (#2412). */
             ib.subresourceRange.aspectMask = aevk_depth_aspects(tg);
+            if (tg->layered) ib.subresourceRange.layerCount = (uint32_t)tg->layers;
             VkImageLayout attach = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             if (to_read) {
                 ib.oldLayout = attach;
@@ -4751,6 +4945,32 @@ static void aevk_record_draw(AevkDevice* d, AevkTarget* t, VkCommandBuffer cmd, 
     }
 }
 
+/* Binds a pipeline inside the frame's pass with what it reads besides its
+ * set: the push block, sized to the pipeline's range so a caller who set
+ * fewer bytes still gets a defined block, and the vertex streams. */
+static void aevk_record_pipeline(AevkDevice* d, AevkTarget* t, VkCommandBuffer cmd, AevkPipeline* p) {
+    d->da.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
+    if (p->push_bytes > 0) {
+        unsigned char block[AEVK_MAX_PUSH];
+        memset(block, 0, sizeof(block));
+        uint32_t n = t->push_size < p->push_bytes ? t->push_size : p->push_bytes;
+        if (n) memcpy(block, t->push_data, n);
+        d->da.vkCmdPushConstants(cmd, p->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                 0, p->push_bytes, block);
+    }
+    if (p->vertex_input) {
+        VkDeviceSize off = 0;
+        d->da.vkCmdBindVertexBuffers(cmd, 0, 1, &t->vbuf, &off);
+    }
+    /* The caller's streams past binding 0; the draw check made sure each one
+     * the pipeline reads is bound (#2198). */
+    for (uint32_t sb = 1; sb < AEVK_MAX_BINDINGS; sb++) {
+        if (!p->stream_declared[sb]) continue;
+        VkDeviceSize off = 0;
+        d->da.vkCmdBindVertexBuffers(cmd, sb, 1, &t->streams[sb]->buf, &off);
+    }
+}
+
 static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMaterial* mat,
                        float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
@@ -4764,7 +4984,8 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
         int src = AEVK_OK;
         if (t->batch_count > 0) {
             for (int i = 0; i < t->batch_count && src == AEVK_OK; i++) {
-                AevkMaterial* im = t->batch[i].mat ? t->batch[i].mat : use;
+                AevkDrawItem* it = &t->batch[i];
+                AevkMaterial* im = it->mat ? it->mat : it->pipe ? it->pipe->def : use;
                 src = aevk_collect_sampled(t, im, sampled, &n_sampled);
             }
         } else {
@@ -4827,34 +5048,12 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
         VkRect2D sc = {{0, 0}, {(uint32_t)t->width, (uint32_t)t->height}};
         d->da.vkCmdSetViewport(fr->cmd, 0, 1, &vp);
         d->da.vkCmdSetScissor(fr->cmd, 0, 1, &sc);
-        d->da.vkCmdBindPipeline(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
+        aevk_record_pipeline(d, t, fr->cmd, p);
         /* The material decides which set is bound; without one the pipeline's
          * default is used, which is what a caller that never asked for
          * materials has. */
         AevkMaterial* bind_mat = mat ? mat : p->def;
         if (t->batch_count == 0) aevk_bind_material(d, fr->cmd, p, bind_mat, NULL);
-        /* Push whatever the pipeline declared room for, so a caller who set
-         * fewer bytes than the range still gets a defined block. */
-        if (p->push_bytes > 0) {
-            unsigned char block[AEVK_MAX_PUSH];
-            memset(block, 0, sizeof(block));
-            uint32_t n = t->push_size < p->push_bytes ? t->push_size : p->push_bytes;
-            if (n) memcpy(block, t->push_data, n);
-            d->da.vkCmdPushConstants(fr->cmd, p->layout,
-                                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                     0, p->push_bytes, block);
-        }
-        if (p->vertex_input) {
-            VkDeviceSize off = 0;
-            d->da.vkCmdBindVertexBuffers(fr->cmd, 0, 1, &t->vbuf, &off);
-        }
-        /* The caller's streams past binding 0; the draw check made sure each
-         * one the pipeline reads is bound (#2198). */
-        for (uint32_t sb = 1; sb < AEVK_MAX_BINDINGS; sb++) {
-            if (!p->stream_declared[sb]) continue;
-            VkDeviceSize off = 0;
-            d->da.vkCmdBindVertexBuffers(fr->cmd, sb, 1, &t->streams[sb]->buf, &off);
-        }
         if (t->index_count > 0) {
             d->da.vkCmdBindIndexBuffer(fr->cmd, t->ibuf, 0,
                                        (t->index_bits == 16) ? VK_INDEX_TYPE_UINT16
@@ -4865,9 +5064,17 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
              * own material. Rebinding the set between draws is the whole
              * reason per-draw sets exist: with one set per pipeline the second
              * draw would overwrite what the first is still going to read. */
+            AevkPipeline* bound = p;
             for (int i = 0; i < t->batch_count; i++) {
                 AevkDrawItem* it = &t->batch[i];
-                aevk_bind_material(d, fr->cmd, p, it->mat ? it->mat : bind_mat, it->offsets);
+                /* A draw's own pipeline is bound for it, and the frame's
+                 * again after it (#2411). */
+                AevkPipeline* ip = it->pipe ? it->pipe : p;
+                if (ip != bound) {
+                    aevk_record_pipeline(d, t, fr->cmd, ip);
+                    bound = ip;
+                }
+                aevk_bind_material(d, fr->cmd, ip, it->mat ? it->mat : it->pipe ? ip->def : bind_mat, it->offsets);
                 /* Each draw's own scissor and viewport, or the whole target
                  * (#2398). */
                 VkViewport ivp = vp;
@@ -4883,7 +5090,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
                 d->da.vkCmdSetViewport(fr->cmd, 0, 1, &ivp);
                 d->da.vkCmdSetScissor(fr->cmd, 0, 1, &isc);
                 d->da.vkCmdSetStencilReference(fr->cmd, VK_STENCIL_FACE_FRONT_AND_BACK,
-                                               it->stencil_ref_set ? it->stencil_ref : p->stencil_ref);
+                                               it->stencil_ref_set ? it->stencil_ref : ip->stencil_ref);
                 aevk_record_draw(d, t, fr->cmd, it);
             }
         } else {
@@ -4929,6 +5136,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
     if (t->push_size) memcpy(fr->rec_push, t->push_data, t->push_size);
     fr->rec_batch_version = t->batch_version;
     fr->rec_batch_count = t->batch_count;
+    fr->rec_item_pipes = aevk_item_pipes(t);
     fr->rec_bind_epoch = d->bind_epoch;
     return AEVK_OK;
 }
@@ -5025,6 +5233,7 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                 fr->rec_push_size != t->push_size ||
                 fr->rec_batch_version != t->batch_version ||
                 fr->rec_batch_count != t->batch_count ||
+                fr->rec_item_pipes != aevk_item_pipes(t) ||
                 fr->rec_bind_epoch != d->bind_epoch ||
                 (t->push_size && memcmp(fr->rec_push, t->push_data, t->push_size) != 0);
     if (stale) {
@@ -6866,6 +7075,10 @@ int aevk_ae_state_stencil(void* st, int compare, int ref, int pass_op, int fail_
     return aevk_state_stencil((AevkState*)st, compare, ref, pass_op, fail_op, depth_fail_op, read_mask,
                               write_mask);
 }
+int aevk_ae_state_color_mask(void* st, int mask) { return aevk_state_color_mask((AevkState*)st, mask); }
+int aevk_ae_batch_set_pipeline(void* t, int item, void* p) {
+    return aevk_batch_set_pipeline((AevkTarget*)t, item, (AevkPipeline*)p);
+}
 int aevk_ae_batch_set_stencil_ref(void* t, int item, int ref) {
     return aevk_batch_set_stencil_ref((AevkTarget*)t, item, ref);
 }
@@ -6874,6 +7087,22 @@ void* aevk_ae_target_create_layered(void* d, int w, int h, int layers, int forma
 }
 int aevk_ae_target_set_layer(void* t, int layer) { return aevk_target_set_layer((AevkTarget*)t, layer); }
 int aevk_ae_target_layers(void* t) { return aevk_target_layers((const AevkTarget*)t); }
+void* aevk_ae_target_create_layered_ex(void* d, int w, int h, int layers, int format, int depth, int cube,
+                                       int samples) {
+    return (void*)aevk_target_create_layered_ex((AevkDevice*)d, w, h, layers, format, depth, cube, samples);
+}
+int aevk_ae_set_target_depth_array(void* p, int binding, void* t, int op) {
+    return aevk_pipeline_set_target_depth_array((AevkPipeline*)p, binding, (AevkTarget*)t, op);
+}
+int aevk_ae_set_target_depth_cube(void* p, int binding, void* t, int op) {
+    return aevk_pipeline_set_target_depth_cube((AevkPipeline*)p, binding, (AevkTarget*)t, op);
+}
+int aevk_ae_material_set_target_depth_array(void* m, int binding, void* t, int op) {
+    return aevk_material_set_target_depth_array((AevkMaterial*)m, binding, (AevkTarget*)t, op);
+}
+int aevk_ae_material_set_target_depth_cube(void* m, int binding, void* t, int op) {
+    return aevk_material_set_target_depth_cube((AevkMaterial*)m, binding, (AevkTarget*)t, op);
+}
 int aevk_ae_set_target_array(void* p, int binding, void* t) {
     return aevk_pipeline_set_target_array((AevkPipeline*)p, binding, (AevkTarget*)t);
 }

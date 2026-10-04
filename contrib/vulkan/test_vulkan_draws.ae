@@ -787,6 +787,100 @@ main() {
         }
     }
 
+    spec.describe(fw, "vulkan: a draw's own pipeline") {
+        spec.it_when(ready, "marks a stencil with one pipeline and draws through it with another", reason) callback {
+            keep = vulkan.STENCIL_KEEP
+            lay = vulkan.layout_create()
+            _ = vulkan.layout_binding(lay, 0, 24, vulkan.PER_VERTEX)
+            _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 0)
+            _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 12)
+            t = vulkan.target_create_ex(dev, 8, 8, vulkan.DEPTH_STENCIL, 1)
+            write_mask_quads(t)
+
+            // The mask: everywhere it draws, the stencil becomes 1, and no
+            // colour is written.
+            mark = vulkan.state_create()
+            spec.assert_eq(vulkan.state_color_mask(mark, 16), vulkan.ERR_ARG, "a mask past COLOR_ALL")
+            _ = vulkan.state_color_mask(mark, 0)
+            _ = vulkan.state_depth(mark, vulkan.COMPARE_LESS_EQUAL, 1)
+            _ = vulkan.state_stencil(mark, vulkan.COMPARE_ALWAYS, 1, vulkan.STENCIL_REPLACE, keep, keep, 255, 255)
+            pm = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, mark)
+            spec.assert_true(pm != null, "the marking pipeline (${vulkan.last_error()})")
+            // The fill: only where the stencil is not 1.
+            fill = vulkan.state_create()
+            _ = vulkan.state_depth(fill, vulkan.COMPARE_LESS_EQUAL, 1)
+            _ = vulkan.state_stencil(fill, vulkan.COMPARE_NOT_EQUAL, 1, keep, keep, keep, 255, 255)
+            pf = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, fill)
+            spec.assert_true(pf != null, "the fill pipeline (${vulkan.last_error()})")
+
+            other = vulkan.target_create_ex(dev, 8, 8, vulkan.DEPTH_STENCIL, 1)
+            po = vulkan.pipeline_create_state(dev, other, dvs, dvl, dfs, dfl, lay, 0, null, fill)
+            _ = vulkan.batch_add(t, null, 0, 6)
+            _ = vulkan.batch_add(t, null, 6, 6)
+            spec.assert_eq(vulkan.batch_set_pipeline(t, 1, po), vulkan.ERR_ARG, "a pipeline made for another target")
+            spec.assert_eq(vulkan.batch_set_pipeline(t, 2, pf), vulkan.ERR_ARG, "no draw 2")
+            spec.assert_eq(vulkan.batch_set_pipeline(t, 1, pf), vulkan.OK, "draw 1's own pipeline")
+
+            // The red half marks without colouring; the green fills the rest.
+            k = 0
+            while k < 2 {
+                _ = vulkan.draw(t, pm, 0.0, 0.0, 1.0, 1.0)
+                spec.assert_eq(vulkan.pixel(t, 1, 4), BLUE,
+                    "frame ${k}, left: marked, and left the clear (${vulkan.pixel(t, 1, 4)})")
+                spec.assert_eq(vulkan.pixel(t, 6, 4), GREEN,
+                    "frame ${k}, right: filled (${vulkan.pixel(t, 6, 4)})")
+                k = k + 1
+            }
+
+            // A pipeline destroyed and made again where it was is drawn with,
+            // not a stale recording of the old one.
+            vulkan.pipeline_destroy(pf)
+            _ = vulkan.state_stencil(fill, vulkan.COMPARE_EQUAL, 1, keep, keep, keep, 255, 255)
+            pf = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, fill)
+            _ = vulkan.batch_set_pipeline(t, 1, pf)
+            _ = vulkan.draw(t, pm, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 1, 4), GREEN, "EQUAL now: the green inside the mark")
+            spec.assert_eq(vulkan.pixel(t, 6, 4), BLUE, "and not outside it")
+
+            // null goes back to the frame's pipeline, which writes no colour.
+            _ = vulkan.batch_set_pipeline(t, 1, null)
+            _ = vulkan.draw(t, pm, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 6, 4), BLUE, "both draws with the marking pipeline")
+
+            vulkan.pipeline_destroy(po)
+            vulkan.target_destroy(other)
+            vulkan.pipeline_destroy(pf)
+            vulkan.pipeline_destroy(pm)
+            vulkan.state_destroy(fill)
+            vulkan.state_destroy(mark)
+            vulkan.target_destroy(t)
+            vulkan.layout_destroy(lay)
+        }
+
+        spec.it_when(ready, "writes only the channels a colour mask lets through", reason) callback {
+            lay = vulkan.layout_create()
+            _ = vulkan.layout_binding(lay, 0, 24, vulkan.PER_VERTEX)
+            _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 0)
+            _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 12)
+            t = vulkan.target_create_ex(dev, 8, 8, vulkan.DEPTH, 1)
+            // A red quad, then a green one, both at 0.5.
+            write_two_depths(t, 0.5, 0.5)
+            st = vulkan.state_create()
+            _ = vulkan.state_depth(st, vulkan.COMPARE_LESS_EQUAL, 1)
+            _ = vulkan.state_color_mask(st, vulkan.COLOR_GREEN + vulkan.COLOR_ALPHA)
+            p = vulkan.pipeline_create_state(dev, t, dvs, dvl, dfs, dfl, lay, 0, null, st)
+            spec.assert_true(p != null, "a masked pipeline (${vulkan.last_error()})")
+            // Only green and alpha are written over the blue clear: the red
+            // never lands, the green does, and the blue stays.
+            _ = vulkan.draw(t, p, 0.0, 0.0, 1.0, 1.0)
+            spec.assert_eq(vulkan.pixel(t, 4, 4), 16777215, "cyan: green written, red masked, blue kept (${vulkan.pixel(t, 4, 4)})")
+            vulkan.pipeline_destroy(p)
+            vulkan.state_destroy(st)
+            vulkan.target_destroy(t)
+            vulkan.layout_destroy(lay)
+        }
+    }
+
     spec.describe(fw, "vulkan: topology, scissor and viewport") {
         spec.it_when(ready, "draws lines, points and strips", reason) callback {
             t = vulkan.target_create(dev, 8, 8)
