@@ -114,6 +114,8 @@ extra=$(echo "$shipped_c" | while IFS= read -r f; do
     # contrib.sqlite's veneer and fetched amalgamation, which
     # `ae build --target` compiles for the target (#1372).
     case "$f" in */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;; esac
+    # aether_quickjs.c #includes the fetched QuickJS amalgamation (no @source).
+    case "$f" in */contrib/quickjs/amalgamation/*.c) continue ;; esac
     echo "$sourced" | grep -qxF -- "$(physical "$f")" && continue
     echo "$f"
 done)

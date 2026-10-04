@@ -440,6 +440,12 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # share/aether/std/<X>/module.ae. The matching .a archives are
     # built+installed separately by `make install-contrib`, which
     # probes for system dependencies (sqlite3-dev, etc.).
+    # contrib.quickjs #includes a pinned amalgamation that git does not
+    # hold (contrib/quickjs/amalgamation.lock); fetch it before the copy
+    # so a source install ships it as the release tarball does. Offline,
+    # the module installs without it and says so when built against.
+    sh scripts/fetch-quickjs-amalgamation.sh >/dev/null 2>&1 ||
+        echo "  note: QuickJS amalgamation not fetched; contrib.quickjs will not build (scripts/fetch-quickjs-amalgamation.sh)"
     cp -r contrib "$SRC_DIR/" 2>/dev/null || true
     # Trim source-tree noise from contrib: tests, benchmarks, example
     # .ae, build/CI scripts, and the .c/.m files (those compile into

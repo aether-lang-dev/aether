@@ -51,7 +51,8 @@ sourced_c_files() {
 }
 
 # The .c files an installed tree may hold: the @source'd ones above (as
-# `find` prints them, under $1), contrib.sqlite's cross-build sources, and,
+# `find` prints them, under $1), contrib.sqlite's cross-build sources,
+# contrib.quickjs's amalgamation, and,
 # when $2 is "host", the host bridges.
 # Anything else `find` lists is noise the trim step let through.
 unexpected_c_files() {
@@ -61,6 +62,9 @@ unexpected_c_files() {
         # contrib.sqlite's veneer and fetched amalgamation ship in both
         # layouts: `ae build --target` compiles them for the target (#1372).
         case "$f" in */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;; esac
+        # aether_quickjs.c #includes the fetched QuickJS amalgamation, so no
+        # @source names it; it ships with the module that needs it.
+        case "$f" in */contrib/quickjs/amalgamation/*.c) continue ;; esac
         printf '%s\n' "$allowed" | grep -qxF -- "$f" || printf '%s\n' "$f"
     done
 }
