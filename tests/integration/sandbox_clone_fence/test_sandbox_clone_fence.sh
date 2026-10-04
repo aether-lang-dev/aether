@@ -130,6 +130,14 @@ if ! grep -q '^vfork-ok$' "$TMPDIR/vfork.out"; then
     exit 1
 fi
 if ! "$TMPDIR/probe_clone3" > "$TMPDIR/clone3.out" 2>&1; then
+    # No clone3 at all (a kernel before 5.3, or an x86_64 emulator such as
+    # Rosetta for Linux, which also hands the kernel translated aarch64
+    # syscalls, so an x86_64 seccomp filter never matches): there is no
+    # fence to exercise here, rather than a fence that failed.
+    if grep -q 'Function not implemented' "$TMPDIR/clone3.out"; then
+        echo "  [SKIP] clone3 is not implemented here (old kernel, or an x86_64 emulator)"
+        exit 0
+    fi
     echo "  [FAIL] baseline probe_clone3 outside sandbox failed:"
     cat "$TMPDIR/clone3.out"
     exit 1
