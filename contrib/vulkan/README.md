@@ -352,6 +352,25 @@ anisotropy needs `samplerAnisotropy`, capped at `maxSamplerAnisotropy`.
 `texture_upload_level` moves only its own level to `TRANSFER_DST_OPTIMAL`
 and back, so levels already uploaded keep their pixels.
 
+## Stencil and layered targets
+
+A `DEPTH_STENCIL` target's depth format is `D24_UNORM_S8_UINT` where the
+device can attach it, and `D32_SFLOAT_S8_UINT` otherwise. AMD and Apple
+GPUs have only the second. D24S8 comes first because it is half the size,
+and because lavapipe crashes drawing into D32S8 (#2410). The attachment's
+view has both aspects and its stencil loads with a clear; a sampled depth
+gets a second view of the depth aspect alone. Every pipeline declares
+`VK_DYNAMIC_STATE_STENCIL_REFERENCE`, and each draw sets the reference with
+`vkCmdSetStencilReference`.
+
+A layered target is one image with `layers` array layers
+(`CUBE_COMPATIBLE` for a cube), with a view and a framebuffer per layer
+over the same render pass. Sampling uses a `2D_ARRAY` view or a `CUBE` view
+of all the layers. A new layered target is cleared and moved to
+`TRANSFER_SRC_OPTIMAL` before its first frame, the layout every rendered
+layer rests in. That way a barrier over all the layers is valid before each
+one has been drawn.
+
 ## Colour formats and image files
 
 `target_create` renders to RGBA8 UNORM. `target_create_format` takes any of

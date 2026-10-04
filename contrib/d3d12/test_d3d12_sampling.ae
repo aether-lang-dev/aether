@@ -324,7 +324,7 @@ main() {
             spec.assert_eq(d3d12.set_target_depth_compare(spipe, 0, colour, d3d12.COMPARE_LESS), d3d12.ERR_ARG,
                 "a target without depth")
             spec.assert_eq(d3d12.set_target_depth_compare(spipe, 0, ds, 0), d3d12.ERR_ARG, "compare op 0")
-            spec.assert_eq(d3d12.set_target_depth_compare(spipe, 0, ds, 5), d3d12.ERR_ARG, "compare op 5")
+            spec.assert_eq(d3d12.set_target_depth_compare(spipe, 0, ds, 9), d3d12.ERR_ARG, "compare op 9")
             spec.assert_eq(d3d12.set_target_depth_compare(spipe, 0, ds, d3d12.COMPARE_LESS), d3d12.OK,
                 "bound (${d3d12.last_error()})")
             spec.assert_eq(d3d12.draw(ds, dpipe, 0.0, 0.0, 0.0, 1.0), d3d12.OK, "the depth pass")

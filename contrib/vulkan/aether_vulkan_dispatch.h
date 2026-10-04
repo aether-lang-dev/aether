@@ -79,6 +79,7 @@
     X(vkCmdBindVertexBuffers) \
     X(vkCmdSetViewport) \
     X(vkCmdSetScissor) \
+    X(vkCmdSetStencilReference) \
     X(vkCmdDraw) \
     X(vkCmdCopyImageToBuffer) \
     X(vkCmdPushConstants) \

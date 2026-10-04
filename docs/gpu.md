@@ -103,6 +103,7 @@ Every call returns one of the same codes, or a null handle with the reason in
 | `FORMAT_*` numbers | VkFormat | DXGI_FORMAT | VkFormat, translated where used |
 | A point's size | `gl_PointSize`, which the vertex shader must write | always one pixel | `[[point_size]]`, which the vertex shader must write |
 | A cube map, an array, a storage texture | `samplerCube`, `sampler2DArray`, `image2D`/`image3D` with its format | `TextureCube`, `Texture2DArray`, `RWTexture2D`/`RWTexture3D` at `uN` | `texturecube`, `texture2d_array`, `texture2d`/`texture3d` with `access::write` |
+| `DEPTH_STENCIL` | D24S8 where the device has it, otherwise D32S8 | D24S8 | Depth32Float_Stencil8 |
 | BC formats | where the device has `textureCompressionBC` | always | where `supportsBCTextureCompression` |
 | A mipmapped texture's chain | blits, so the format must be linear-blittable | built on the CPU | `generateMipmapsForTexture:`, so the format must be filterable |
 | Vertex stream B | `binding = B` in the layout | input slot B | `[[buffer(16 + B)]]` |
@@ -347,6 +348,66 @@ on screen, in all three modules, whichever way each API's y points. A depth
 state on a target without depth is refused, and so is blending a format the
 device cannot blend.
 
+## Stencil
+
+A target made with `DEPTH_STENCIL` where it would take `DEPTH` has an 8-bit
+stencil beside the depth, cleared to 0 with it every frame. The pipeline
+state's stencil test compares `reference op stored`, both masked by a read
+mask, and then changes the stored value by one of eight `STENCIL_*` ops:
+`pass_op` where both tests pass, `fail_op` where the stencil test fails, and
+`depth_fail_op` where only the depth test does. Front and back faces are
+tested the same way. `COMPARE_EQUAL`, `COMPARE_NOT_EQUAL`, `COMPARE_ALWAYS`
+and `COMPARE_NEVER` join the four depth compare ops, and every compare op
+works for the depth test, the stencil test and comparison samplers alike.
+
+A batch entry can carry its own reference, so one pipeline masks with one
+draw and tests the mask with the next:
+
+```aether,fragment
+t = vulkan.target_create_ex(dev, 1280, 720, vulkan.DEPTH_STENCIL, 1)
+st = vulkan.state_create()
+// Pass where the stored value equals the reference, and count up.
+vulkan.state_stencil(st, vulkan.COMPARE_EQUAL, 0, vulkan.STENCIL_INCREMENT_CLAMP,
+                     vulkan.STENCIL_KEEP, vulkan.STENCIL_KEEP, 255, 255)
+pipe = vulkan.pipeline_create_state(dev, t, vs, vl, fs, fl, layout, 0, binds, st)
+vulkan.batch_add(t, null, 0, 6)              // the mask, at reference 0
+vulkan.batch_add(t, null, 6, 6)              // drawn only inside it
+vulkan.batch_set_stencil_ref(t, 1, 1)
+```
+
+A stencil state on a target without a stencil is refused. A batch entry's
+own pipeline, which outlines and portals need alongside a colour write mask,
+is [#2411](https://github.com/aether-lang-dev/aether/issues/2411).
+
+## Rendering into a layer
+
+`target_create_layered(dev, w, h, layers, format, depth, cube)` is a target
+of `layers` layers. With `cube` set it has six square faces, in the order
+`texture_create_cube` takes them: +X, -X, +Y, -Y, +Z, -Z.
+`target_set_layer(t, n)` picks the layer the next draws render into. Each
+frame clears and draws its own layer, leaves the others as they were, and
+is what `pixel` and `read_rgba` read back. A shadow cascade or a reflection
+probe face is a draw like any other:
+
+```aether,fragment
+probe = vulkan.target_create_layered(dev, 256, 256, 6, vulkan.FORMAT_R16G16B16A16_SFLOAT, vulkan.DEPTH, 1)
+face = 0
+while face < 6 {
+    vulkan.target_set_layer(probe, face)
+    // ... the camera for this face ...
+    vulkan.draw(probe, scene_pipe, 0.0, 0.0, 0.0, 1.0)
+    face = face + 1
+}
+vulkan.set_target_cube(sky_pipe, 0, probe)    // a samplerCube
+```
+
+`set_target_array` binds every layer as a 2D array (`sampler2DArray`,
+`Texture2DArray`, `texture2d_array`), and `set_target_cube` binds a cube
+target's faces as a cube. A layer never drawn reads as zero. A layered target
+is not sampled as one 2D image, and is not presented. It is single-sampled
+with one colour attachment, and its depth is not sampled yet; that and
+multisampling are [#2412](https://github.com/aether-lang-dev/aether/issues/2412).
+
 ## Windows belong to someone else
 
 None of the modules makes a window, and the language does not own windowing. A
@@ -400,6 +461,7 @@ Each gap has an issue:
 | Missing | Issue |
 |---|---|
 | BC6H, ASTC and ETC2, signed formats, and cubes and arrays in other formats | [#2402](https://github.com/aether-lang-dev/aether/issues/2402) |
-| Stencil, and rendering into one layer of an array or one face of a cube | [#2399](https://github.com/aether-lang-dev/aether/issues/2399) |
+| A batch entry's own pipeline, and colour write masks | [#2411](https://github.com/aether-lang-dev/aether/issues/2411) |
+| A layered target's depth as a texture, and multisampled layered targets | [#2412](https://github.com/aether-lang-dev/aether/issues/2412) |
 | The pixels a Wayland compositor shows are not checked: the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |
 | `native_view` on GTK4 and AppKit, so aether-ui hands out kinds 2 to 4 | [aether-ui#208](https://github.com/aether-lang-dev/aether-ui/issues/208) |

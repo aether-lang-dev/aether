@@ -345,6 +345,24 @@ int        aevk_state_depth(AevkState* s, int op, int write);
 /* Topology (#2398): 0 triangles, 1 triangle strip, 2 lines, 3 line strip,
  * 4 points (the vertex shader writes gl_PointSize). */
 int        aevk_state_topology(AevkState* s, int topology);
+
+/* Stencil, and rendering into a layer (#2399). Depth 2 (DEPTH_STENCIL) on
+ * any target create adds a stencil, cleared to 0 with the depth; the
+ * pipeline state's stencil test uses COMPARE_* and STENCIL_* (VkStencilOp's
+ * numbering), and a draw may carry its own reference. A layered target has
+ * `layers` layers (a cube's six faces), rendered one at a time after
+ * target_set_layer and sampled whole, as a sampler2DArray or samplerCube. */
+int          aevk_state_stencil(AevkState* s, int compare, int ref, int pass_op, int fail_op,
+                                int depth_fail_op, int read_mask, int write_mask);
+int          aevk_batch_set_stencil_ref(AevkTarget* t, int item, int ref);
+AevkTarget*  aevk_target_create_layered(AevkDevice* d, int width, int height, int layers, int format,
+                                        int want_depth, int cube);
+int          aevk_target_set_layer(AevkTarget* t, int layer);
+int          aevk_target_layers(const AevkTarget* t);
+int          aevk_pipeline_set_target_array(AevkPipeline* p, int binding, AevkTarget* t);
+int          aevk_pipeline_set_target_cube(AevkPipeline* p, int binding, AevkTarget* t);
+int          aevk_material_set_target_array(AevkMaterial* m, int binding, AevkTarget* t);
+int          aevk_material_set_target_cube(AevkMaterial* m, int binding, AevkTarget* t);
 /* A batch entry's scissor and viewport, in pixels from the target's top
  * left (#2398); a width of 0 goes back to the whole target. */
 int        aevk_batch_set_scissor(AevkTarget* t, int item, int x, int y, int w, int h);

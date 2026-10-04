@@ -205,6 +205,15 @@ AedxTexture* aedx_texture_create_array(AedxDevice* d, int w, int h, int layers, 
 AedxTexture* aedx_texture_create_storage(AedxDevice* d, int w, int h, int depth, int format);
 int          aedx_texture_layers(const AedxTexture* tex);
 
+/* Stencil, and rendering into a layer (#2399), as in contrib.vulkan: depth 2
+ * (DEPTH_STENCIL) is D24_UNORM_S8_UINT; a layered target is a texture array
+ * (a cube's six slices) with a render target view a slice. */
+AedxTarget*  aedx_target_create_layered(AedxDevice* d, int width, int height, int layers, int format,
+                                        int want_depth, int cube);
+int          aedx_target_set_layer(AedxTarget* t, int layer);
+int          aedx_target_layers(const AedxTarget* t);
+int          aedx_batch_set_stencil_ref(AedxTarget* t, int item, int ref);
+
 /* Sampled textures in other formats, and anisotropic filtering (#2397), as
  * in contrib/vulkan, with DXGI_FORMAT values. A mipmapped uncompressed
  * chain is built on the CPU per format (sRGB averaged as linear light). */
@@ -235,6 +244,13 @@ int        aedx_state_blend(AedxState* s, int mode);
 int        aedx_state_cull(AedxState* s, int mode);
 int        aedx_state_depth(AedxState* s, int op, int write);
 int        aedx_state_topology(AedxState* s, int topology);
+/* The stencil test (#2399): COMPARE_* and STENCIL_* (Vulkan's numbering). */
+int        aedx_state_stencil(AedxState* s, int compare, int ref, int pass_op, int fail_op,
+                              int depth_fail_op, int read_mask, int write_mask);
+int        aedx_pipeline_set_target_array(AedxPipeline* p, int binding, AedxTarget* t);
+int        aedx_pipeline_set_target_cube(AedxPipeline* p, int binding, AedxTarget* t);
+int        aedx_material_set_target_array(AedxMaterial* m, int binding, AedxTarget* t);
+int        aedx_material_set_target_cube(AedxMaterial* m, int binding, AedxTarget* t);
 int        aedx_batch_set_scissor(AedxTarget* t, int item, int x, int y, int w, int h);
 int        aedx_batch_set_viewport(AedxTarget* t, int item, float x, float y, float w, float h,
                                   float min_depth, float max_depth);

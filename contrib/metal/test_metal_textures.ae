@@ -166,6 +166,25 @@ chain_level(dev: ptr, format: int, one: int[], zero: int[], n: int,
     return v
 }
 
+// A 1x1 white texture, for drawing a tint's colour with textured.frag.
+white_texture(dev: ptr) -> ptr {
+    tex = metal.texture_create(dev, 1, 1)
+    px = bytes_of([255, 255, 255, 255], 4, 1)
+    _ = metal.texture_upload(tex, bytes.data(px), 4)
+    bytes.free(px)
+    return tex
+}
+
+// Draws the bound white texture over the target's current layer in a
+// colour of bytes r, g, b.
+draw_tint(t: ptr, p: ptr, r: int, g: int, b: int) {
+    _ = metal.uniform_float(p, 1, 0, r / 255.0)
+    _ = metal.uniform_float(p, 1, 1, g / 255.0)
+    _ = metal.uniform_float(p, 1, 2, b / 255.0)
+    _ = metal.uniform_float(p, 1, 3, 1.0)
+    _ = metal.draw(t, p, 0.0, 0.0, 0.0, 1.0)
+}
+
 // 0xRRGGBBAA for a byte colour.
 packed(r: int, g: int, b: int, a: int) -> long {
     return r * 16777216 + g * 65536 + b * 256 + a
@@ -363,6 +382,114 @@ main() {
             metal.pipeline_destroy(pipe)
             metal.target_destroy(t)
             metal.texture_destroy(arr)
+        }
+    }
+
+    spec.describe(fw, "metal: layered targets") {
+        spec.it_when(ready, "renders each layer and samples them as an array", reason) callback {
+            fmt = metal.FORMAT_R8G8B8A8_UNORM
+            spec.assert_true(metal.target_create_layered(dev, 2, 2, 0, fmt, 0, 0) == null, "no layers")
+            spec.assert_true(metal.target_create_layered(dev, 4, 2, 6, fmt, 0, 1) == null, "a cube's faces are square")
+            spec.assert_true(metal.target_create_layered(dev, 2, 2, 3, fmt, 0, 1) == null, "a cube has six faces")
+            lt = metal.target_create_layered(dev, 2, 2, 3, fmt, metal.DEPTH, 0)
+            spec.assert_true(lt != null, "a 3-layer target (${metal.last_error()})")
+            spec.assert_eq(metal.target_layers(lt), 3, "three layers")
+            spec.assert_eq(metal.target_set_layer(lt, 3), metal.ERR_ARG, "no layer 3")
+            plain = metal.target_create(dev, 2, 2)
+            spec.assert_eq(metal.target_set_layer(plain, 0), metal.ERR_ARG, "a target that is not layered")
+
+            white = white_texture(dev)
+            lp = plain_pipeline(dev, lt, tvs, tvl, tfs, tfl)
+            spec.assert_true(lp != null, "a pipeline drawing into it (${metal.last_error()})")
+            write_fullscreen_quad(lt)
+            _ = metal.set_texture(lp, 0, white)
+            reds = [255, 0, 0]
+            greens = [0, 255, 0]
+            blues = [0, 0, 255]
+            l = 0
+            while l < 3 {
+                _ = metal.target_set_layer(lt, l)
+                draw_tint(lt, lp, reds[l], greens[l], blues[l])
+                spec.assert_eq(metal.pixel(lt, 1, 1), packed(reds[l], greens[l], blues[l], 255),
+                    "layer ${l} read back as drawn (${metal.pixel(lt, 1, 1)})")
+                l = l + 1
+            }
+
+            sp = sampling_pipeline(dev, plain, tvs, tvl, afs, afl, 4)
+            write_fullscreen_quad(plain)
+            spec.assert_eq(metal.set_target(sp, 0, lt), metal.ERR_ARG, "a layered target is not one 2D image")
+            spec.assert_eq(metal.set_target_cube(sp, 0, lt), metal.ERR_ARG, "nor a cube")
+            spec.assert_eq(metal.set_target_array(sp, 0, plain), metal.ERR_ARG, "a plain target is not an array")
+            spec.assert_eq(metal.set_target_array(sp, 0, lt), metal.OK, "bound as an array")
+            _ = metal.push_floats(plain, 1)
+            l = 0
+            while l < 3 {
+                _ = metal.push_float(plain, 0, l * 1.0)
+                _ = metal.draw(plain, sp, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(metal.pixel(plain, 1, 1), packed(reds[l], greens[l], blues[l], 255),
+                    "layer ${l} through a sampler2DArray (${metal.pixel(plain, 1, 1)})")
+                l = l + 1
+            }
+
+            // Drawing one layer again leaves the others as they were.
+            _ = metal.target_set_layer(lt, 1)
+            draw_tint(lt, lp, 255, 255, 0)
+            wants = [packed(255, 0, 0, 255), packed(255, 255, 0, 255), packed(0, 0, 255, 255)]
+            l = 0
+            while l < 3 {
+                _ = metal.push_float(plain, 0, l * 1.0)
+                _ = metal.draw(plain, sp, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(metal.pixel(plain, 1, 1), wants[l],
+                    "after redrawing layer 1, layer ${l} (${metal.pixel(plain, 1, 1)})")
+                l = l + 1
+            }
+
+            metal.pipeline_destroy(sp)
+            metal.pipeline_destroy(lp)
+            metal.texture_destroy(white)
+            metal.target_destroy(plain)
+            metal.target_destroy(lt)
+        }
+
+        spec.it_when(ready, "renders each face of a cube and samples it as a cube", reason) callback {
+            ct = metal.target_create_layered(dev, 2, 2, 6, metal.FORMAT_R8G8B8A8_UNORM, 0, 1)
+            spec.assert_true(ct != null, "a cube target (${metal.last_error()})")
+            white = white_texture(dev)
+            lp = plain_pipeline(dev, ct, tvs, tvl, tfs, tfl)
+            write_fullscreen_quad(ct)
+            _ = metal.set_texture(lp, 0, white)
+            f = 0
+            while f < 6 {
+                _ = metal.target_set_layer(ct, f)
+                draw_tint(ct, lp, f * 40, 60, 200)
+                f = f + 1
+            }
+
+            t = metal.target_create(dev, 2, 2)
+            sp = sampling_pipeline(dev, t, tvs, tvl, cfs, cfl, 16)
+            write_fullscreen_quad(t)
+            spec.assert_eq(metal.set_target_cube(sp, 0, ct), metal.OK, "bound as a cube")
+            _ = metal.push_floats(t, 4)
+            // The directions the cube texture's case reads, and their faces.
+            dx = [1.0, 1.0, -1.0, 0.5, 0.5, 0.5, 0.5]
+            dy = [0.5, -0.5, 0.5, 1.0, -1.0, 0.5, 0.5]
+            dz = [0.5, -0.5, 0.5, 0.5, 0.5, 1.0, -1.0]
+            face = [0, 0, 1, 2, 3, 4, 5]
+            k = 0
+            while k < 7 {
+                _ = metal.push_float(t, 0, dx[k])
+                _ = metal.push_float(t, 1, dy[k])
+                _ = metal.push_float(t, 2, dz[k])
+                _ = metal.draw(t, sp, 0.0, 0.0, 0.0, 1.0)
+                spec.assert_eq(metal.pixel(t, 0, 0), packed(face[k] * 40, 60, 200, 255),
+                    "direction ${k}: face ${face[k]} (got ${metal.pixel(t, 0, 0)})")
+                k = k + 1
+            }
+            metal.pipeline_destroy(sp)
+            metal.target_destroy(t)
+            metal.pipeline_destroy(lp)
+            metal.texture_destroy(white)
+            metal.target_destroy(ct)
         }
     }
 
