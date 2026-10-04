@@ -94,7 +94,7 @@ handle_upstream_bigbody(req: ptr, res: ptr, ud: ptr) {
 }
 
 handle_upstream_slow(req: ptr, res: ptr, ud: ptr) {
-    sleep(3000) // 3s — exceeds the 1s proxy timeout
+    sleep(10000) // 10s — far past the 1s proxy timeout (see T10)
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
     http.response_set_body(res, "slow-ok\n")
