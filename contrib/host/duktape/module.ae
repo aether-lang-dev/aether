@@ -7,7 +7,7 @@
 // Usage:
 //   import contrib.host.duktape
 //
-//   worker = sandbox("worker") {
+//   worker = sandbox.new("worker") {
 //       grant_env("HOME")
 //       grant_fs_read("/etc/*")
 //   }

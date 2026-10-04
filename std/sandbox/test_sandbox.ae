@@ -1,0 +1,193 @@
+// std.sandbox tests — co-located with the module (#1584).
+//
+// Each grant is checked the way a contained program meets it: through the
+// ordinary std call it gates (os.getenv, fs.read, fs.write, os.exec), run
+// inside sandbox.enforce, against a grant that should let it through and a
+// neighbour that should not. The paths are this test's own fixtures, in a
+// fresh temp directory written before any sandbox is in force, so the suite
+// reads the same on Linux, macOS and FreeBSD. The in-process check matches
+// the path as written; it does not resolve symlinks (that is the LD_PRELOAD
+// layer's job), so a macOS /tmp -> /private/tmp would not matter either way.
+//
+// The env cases set their own variables rather than rely on HOME or USER
+// being present on a CI runner.
+
+import std.spec
+import std.sandbox
+import std.os
+import std.fs
+import std.list
+import std.string
+
+extern setenv(name: string, value: string, overwrite: int) -> int
+extern exit(code: int)
+
+fn same(a: string, b: string) -> int { return string.equals(a, b) }
+
+// 1 when grant number i in `perms` is the (category, pattern) pair given.
+fn has_grant(perms: ptr, i: int, category: string, pattern: string) -> int {
+    if same(list_get_raw(perms, i * 2), category) != 1 { return 0 }
+    return same(list_get_raw(perms, i * 2 + 1), pattern)
+}
+
+main() {
+    fw = spec.init()
+
+    dir, terr = fs.make_temp_dir("", "ae_sandbox_test")
+    if terr != "" {
+        println("cannot make a fixture directory: ${terr}")
+        exit(1)
+    }
+    _ = fs.write("${dir}/allowed.txt", "allowed")
+    _ = fs.write("${dir}/other.txt", "other")
+    setenv("AE_SANDBOX_TEST_OPEN", "visible", 1)
+    setenv("AE_SANDBOX_TEST_SECRET", "hidden", 1)
+
+    spec.describe(fw, "std.sandbox grant lists") {
+        spec.it("spells each grant as the category the runtime checks") callback {
+            g = sandbox.new("all-kinds") {
+                grant_fs_read("/r/*")
+                grant_fs_write("/w/*")
+                grant_exec("echo *")
+                grant_env("HOME")
+                grant_tcp("*.corp")
+                grant_tcp_listen()
+                grant_udp("dns.local")
+                grant_native("/opt/lib/*")
+                grant_all()
+            }
+            spec.assert_eq(list.size(g), 18, "nine grants, two entries each")
+            spec.assert_true(has_grant(g, 0, "fs_read", "/r/*"), "grant_fs_read")
+            spec.assert_true(has_grant(g, 1, "fs_write", "/w/*"), "grant_fs_write")
+            spec.assert_true(has_grant(g, 2, "exec", "echo *"), "grant_exec")
+            spec.assert_true(has_grant(g, 3, "env", "HOME"), "grant_env")
+            spec.assert_true(has_grant(g, 4, "tcp", "*.corp"), "grant_tcp")
+            spec.assert_true(has_grant(g, 5, "tcp_listen", "*"), "grant_tcp_listen")
+            spec.assert_true(has_grant(g, 6, "udp", "dns.local"), "grant_udp")
+            spec.assert_true(has_grant(g, 7, "native", "/opt/lib/*"), "grant_native")
+            spec.assert_true(has_grant(g, 8, "*", "*"), "grant_all")
+            sandbox.free(g)
+        }
+
+        spec.it("grant_fs covers reads, writes and directory operations") callback {
+            g = sandbox.new("fs") {
+                grant_fs("/data/*")
+            }
+            spec.assert_eq(list.size(g), 6, "three grants")
+            spec.assert_true(has_grant(g, 0, "fs_read", "/data/*"), "read")
+            spec.assert_true(has_grant(g, 1, "fs_write", "/data/*"), "write")
+            spec.assert_true(has_grant(g, 2, "fs", "/data/*"), "directory operations")
+            sandbox.free(g)
+        }
+    }
+
+    spec.describe(fw, "std.sandbox enforce") {
+        spec.it("lets a granted env variable through and hides the rest") callback {
+            g = sandbox.new("env") {
+                grant_env("AE_SANDBOX_TEST_OPEN")
+            }
+            sandbox.enforce(g) callback {
+                spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_OPEN"), "visible", "granted variable reads")
+                spec.assert_true(os.getenv("AE_SANDBOX_TEST_SECRET") == null, "ungranted variable is hidden")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("matches fs_read grants by prefix") callback {
+            g = sandbox.new("reader") {
+                grant_fs_read("${dir}/allowed*")
+            }
+            sandbox.enforce(g) callback {
+                a, aerr = fs.read("${dir}/allowed.txt")
+                spec.assert_ok(aerr, "granted file reads")
+                spec.assert_str_eq(a, "allowed", "with its content")
+                _o, oerr = fs.read("${dir}/other.txt")
+                spec.assert_err(oerr, "a file outside the prefix is refused")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("keeps writes separate from reads") callback {
+            g = sandbox.new("read-only") {
+                grant_fs_read("${dir}/*")
+            }
+            sandbox.enforce(g) callback {
+                werr = fs.write("${dir}/written.txt", "no")
+                spec.assert_err(werr, "fs_read alone does not allow a write")
+            }
+            sandbox.free(g)
+            spec.assert_eq(fs.exists("${dir}/written.txt"), 0, "and nothing was written")
+        }
+
+        spec.it("matches exec grants against the command line") callback {
+            g = sandbox.new("echoer") {
+                grant_exec("echo *")
+            }
+            sandbox.enforce(g) callback {
+                out, err = os.exec("echo sandboxed")
+                spec.assert_ok(err, "a granted command runs")
+                spec.assert_contains(out, "sandboxed", "and produces its output")
+                _o2, err2 = os.exec("uname")
+                spec.assert_err(err2, "a command outside the pattern is refused")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("denies everything when nothing is granted") callback {
+            g = sandbox.new("nothing") {}
+            sandbox.enforce(g) callback {
+                spec.assert_true(os.getenv("AE_SANDBOX_TEST_OPEN") == null, "env is hidden")
+                _a, err = fs.read("${dir}/allowed.txt")
+                spec.assert_err(err, "files are refused")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("grant_all allows everything") callback {
+            g = sandbox.new("app") {
+                grant_all()
+            }
+            sandbox.enforce(g) callback {
+                spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_SECRET"), "hidden", "env reads")
+                _a, err = fs.read("${dir}/other.txt")
+                spec.assert_ok(err, "files read")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("narrows in a nested enforce: the inner block gets the intersection") callback {
+            outer = sandbox.new("outer") {
+                grant_env("AE_SANDBOX_TEST_OPEN")
+                grant_env("AE_SANDBOX_TEST_SECRET")
+            }
+            inner = sandbox.new("inner") {
+                grant_env("AE_SANDBOX_TEST_OPEN")
+                grant_fs_read("${dir}/*")
+            }
+            sandbox.enforce(outer) callback {
+                spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_SECRET"), "hidden", "outer allows the secret")
+                sandbox.enforce(inner) callback {
+                    spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_OPEN"), "visible", "granted by both")
+                    spec.assert_true(os.getenv("AE_SANDBOX_TEST_SECRET") == null, "inner did not grant it")
+                    _a, err = fs.read("${dir}/allowed.txt")
+                    spec.assert_err(err, "inner's fs grant cannot exceed outer, which has none")
+                }
+                spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_SECRET"), "hidden", "outer's grants are back")
+            }
+            sandbox.free(inner)
+            sandbox.free(outer)
+        }
+
+        spec.it("stops applying when the enforced block returns") callback {
+            g = sandbox.new("nothing") {}
+            sandbox.enforce(g) callback {
+                spec.assert_true(os.getenv("AE_SANDBOX_TEST_OPEN") == null, "hidden inside")
+            }
+            spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_OPEN"), "visible", "visible again after")
+            sandbox.free(g)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    _ = fs.remove_tree(dir)
+}

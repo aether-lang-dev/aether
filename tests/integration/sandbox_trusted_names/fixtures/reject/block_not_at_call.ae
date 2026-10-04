@@ -1,0 +1,8 @@
+import std.sandbox
+peek() -> int { return 1 }
+main() {
+    w = sandbox.new("w") {}
+    blk = || { println("x") }
+    sandbox.enforce(w, peek, blk)
+    sandbox.free(w)
+}

@@ -13,7 +13,7 @@
 //   import std.list
 //   import contrib.host.java
 //
-//   worker = sandbox("my-java-app") {
+//   worker = sandbox.new("my-java-app") {
 //       grant_jvm_runtime()              // JVM bring-up
 //       grant_fs_read("/app/data/*")     // application-specific
 //       grant_tcp("api.example.com")

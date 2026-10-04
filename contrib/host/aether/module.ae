@@ -14,7 +14,7 @@
 // Usage:
 //   import contrib.host.aether
 //
-//   worker = sandbox("worker") {
+//   worker = sandbox.new("worker") {
 //       grant_fs_read("/etc/app/config.yaml")
 //       grant_env("PRICING_VERSION")
 //   }

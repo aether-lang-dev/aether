@@ -157,11 +157,14 @@ diagnostic.
 ### Worked example
 
 ```aether,fragment
-sandbox("payment-handler") {
+handler = sandbox.new("payment-handler") {
     grant_tcp("payments.example.com")
+}
+sandbox.enforce(handler) callback {
     seal except req, res, payment_client, logger
 
-    // This block can only see the five whitelisted names.
+    // This block can only see the four whitelisted names, and its
+    // network access is limited to payments.example.com.
     // It cannot spawn any actor type not named here.
     // It cannot send to any actor reference not named here.
     // It cannot ask any outside service.
@@ -177,7 +180,7 @@ sandbox("payment-handler") {
 ```
 
 The subtree rooted at this block has both lifetime containment (the
-`sandbox` scope's containment runtime) and capability containment (the
+`sandbox.enforce` block's runtime checks) and capability containment (the
 `seal except` list). A malicious or buggy handler cannot spawn a
 crypto-miner actor because it cannot name one.
 

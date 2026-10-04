@@ -525,6 +525,12 @@ typedef struct {
     ASTNode** synthesised_nodes;
     int synthesised_count;
     int synthesised_cap;
+    /* The program uses the sandbox builtins (sandbox_push and friends), so
+     * the sandbox stack and checker are emitted. A `try` then saves the
+     * sandbox depth and its catch restores it: a panic that unwinds out of
+     * an enforced block, or out of a trusted call inside one, must not leave
+     * the depth where the panic found it. */
+    int uses_sandbox;
 } CodeGenerator;
 
 // Code generation functions

@@ -1,0 +1,140 @@
+// std.sandbox — build a grant list and run code under it.
+// Import with: import std.sandbox
+//
+//   worker = sandbox.new("db-worker") {
+//       grant_fs_read("/etc/app/*")
+//       grant_tcp("db.internal")
+//       grant_env("DATABASE_URL")
+//   }
+//   sandbox.enforce(worker) callback {
+//       // std.fs / std.net / std.os calls here are checked against
+//       // worker's grants; anything not granted is refused
+//   }
+//   sandbox.enforce(worker, audit_log) callback {
+//       audit_log("started")   // trusted: runs with the caller's authority
+//   }
+//   sandbox.free(worker)
+//
+// The grant list is what docs/containment-sandbox.md describes: a list of
+// (category, pattern) pairs that the in-process checks in std and the
+// LD_PRELOAD library (libaether_sandbox.so) consult, and that the
+// contrib/host/<lang> modules take as their `perms` argument
+// (`lua.run_sandboxed(worker, code)`). This module is the one place those
+// category names are spelt; a hand-written "fs-read" would match nothing
+// and deny silently.
+//
+// Patterns: "*" matches anything, "/etc/*" a prefix, "*.example.com" a
+// suffix, anything else exactly. A grant list with no grants denies
+// everything; grant_all() allows everything. Nested enforce() blocks
+// intersect: an inner block can only narrow what the outer one allows.
+//
+// What is checked: std's own fs / net / os / udp entry points, and, under
+// the LD_PRELOAD library, libc's open / connect / listen / accept / execve
+// / dlopen. Code that bypasses libc (raw syscall(), statically linked
+// binaries, io_uring) is not contained by this layer; on FreeBSD,
+// std.capsicum adds kernel enforcement. See docs/containment-sandbox.md.
+
+import std.list
+
+// Grants are stored as plain C strings, which is what the runtime's checker
+// and the host modules read (strcmp, no Aether string header), and as
+// copies the list owns: a caller's interpolated pattern ("${dir}/*") is a
+// temporary, and storing its pointer left a dangling grant.
+extern strdup(s: string) -> ptr
+@extern("free") libc_free(p: ptr)
+
+exports(
+    new, enforce, free,
+    grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
+    grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native
+)
+
+fn add_grant(perms: ptr, category: string, pattern: string) {
+    list.add(perms, strdup(category))
+    list.add(perms, strdup(pattern))
+}
+
+// A new, empty grant list named `name` (the name is for the reader and for
+// denial logs; it does not change what is allowed). Give it grants in the
+// trailing block; with none it denies everything. Release with free().
+new(name: string) -> ptr {
+    _ = name
+    return list.new()
+}
+
+// Run `code` with `perms` in force: every sandbox-checked operation inside
+// it, and in anything it calls, must match one of the grants. The grants
+// stop applying when `code` returns.
+//
+// Trusted names: `sandbox.enforce(perms, audit_log, db) callback { ... }`.
+// A call written in the block to a named function (`audit_log(...)`), or into
+// a named module (`db.query(...)`), runs with the authority of the code that
+// wrote the enforce instead of the block's grants. The compiler handles the
+// extra names (compiler/analysis/sandbox_trust.c): it checks them, routes
+// those calls through wrappers, and leaves this two-argument function to do
+// the rest. Trust is lexical and narrow on purpose:
+//   - a trusted call's arguments are still evaluated inside the sandbox;
+//   - a function called from somewhere else, even one that calls a trusted
+//     name, stays sandboxed;
+//   - the names cannot be used as values in the block;
+//   - only Aether functions can be trusted, not C externs;
+//   - an enforce written by contained code records the sandboxed authority
+//     it runs under, so trusting a name there gains nothing.
+enforce(perms: ptr, code: fn) {
+    sandbox_push(perms)
+    sandbox_install()
+    call(code, perms)
+    sandbox_uninstall()
+    sandbox_pop()
+}
+
+// Release a grant list made by new(), and the grant strings it owns.
+free(perms: ptr) {
+    if perms == null { return }
+    n = list.size(perms)
+    i = 0
+    while i < n {
+        libc_free(list_get_raw(perms, i))
+        i = i + 1
+    }
+    list.free(perms)
+}
+
+// ---- Grants: call these in new()'s trailing block ----
+
+// Everything: the equivalent of no sandbox.
+grant_all(_ctx: ptr) { add_grant(_ctx, "*", "*") }
+
+// Opening files for reading whose resolved path matches `path`.
+grant_fs_read(_ctx: ptr, path: string) { add_grant(_ctx, "fs_read", path) }
+
+// Opening, creating or writing files whose resolved path matches `path`.
+grant_fs_write(_ctx: ptr, path: string) { add_grant(_ctx, "fs_write", path) }
+
+// Reading and writing under `path`, plus directory operations on it (such
+// as os.chdir, which std checks under its own "fs" category).
+grant_fs(_ctx: ptr, path: string) {
+    add_grant(_ctx, "fs_read", path)
+    add_grant(_ctx, "fs_write", path)
+    add_grant(_ctx, "fs", path)
+}
+
+// Running commands whose command line matches `cmd` ("echo *").
+grant_exec(_ctx: ptr, cmd: string) { add_grant(_ctx, "exec", cmd) }
+
+// Reading the environment variables whose names match `name`.
+grant_env(_ctx: ptr, name: string) { add_grant(_ctx, "env", name) }
+
+// Outbound TCP to hosts matching `host` ("db.internal", "*.corp"). The
+// LD_PRELOAD layer sees only the resolved address, so grant the IP too for
+// code that connects outside std.net. Ports are not checked.
+grant_tcp(_ctx: ptr, host: string) { add_grant(_ctx, "tcp", host) }
+
+// Listening for and accepting inbound TCP connections, on any port.
+grant_tcp_listen(_ctx: ptr) { add_grant(_ctx, "tcp_listen", "*") }
+
+// UDP to and from hosts matching `host`.
+grant_udp(_ctx: ptr, host: string) { add_grant(_ctx, "udp", host) }
+
+// Loading native code (dlopen) from paths matching `path`.
+grant_native(_ctx: ptr, path: string) { add_grant(_ctx, "native", path) }

@@ -39,11 +39,11 @@ JVM startup needs ~30 grants for the linker, trust stores, locale, and
 keeps spawn scripts readable:
 
 ```aether
-import std.list
 import contrib.host.java
+import std.sandbox
 
 main() {
-    worker = sandbox("my-java-app") {
+    worker = sandbox.new("my-java-app") {
         java.grant_jvm_runtime()         // JVM bring-up (29 grants)
         grant_fs_read("/app/data/*")      // application-specific
         grant_tcp("api.example.com")
@@ -52,7 +52,7 @@ main() {
         "--enable-native-access=ALL-UNNAMED",
         "-javaagent:build/aether-sandbox.jar",
         "-jar", "my-app.jar")
-    list.free(worker)
+    sandbox.free(worker)
 }
 ```
 

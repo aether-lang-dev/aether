@@ -4,37 +4,9 @@
 // It doesn't know it's sandboxed. The stdlib checks permissions transparently.
 // "The contained should not know for sure it is contained."
 
-import std.list
+import std.sandbox
 import std.fs
 import std.os
-
-// ---- Sandbox library ----
-
-add_perm(target: ptr, cat: string, pat: string) {
-    list.add(target, cat)
-    list.add(target, pat)
-}
-
-grant_all(_ctx: ptr) { add_perm(_ctx, "*", "*") }
-grant_tcp(_ctx: ptr, host: string) { add_perm(_ctx, "tcp", host) }
-grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
-grant_fs_write(_ctx: ptr, path: string) { add_perm(_ctx, "fs_write", path) }
-grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
-
-sandbox(name: string) {
-    perms = list.new()
-    println("sandbox: ${name}")
-    return perms
-}
-
-run_sandboxed(perms: ptr, code: fn) {
-    sandbox_push(perms)
-    sandbox_install()
-    call(code, perms)
-    sandbox_uninstall()
-    sandbox_pop()
-}
 
 // ---- Contained code: uses NORMAL stdlib ----
 
@@ -76,7 +48,7 @@ main() {
     println("\x1b[90mIt has no idea it's sandboxed.\x1b[0m\n")
 
     // Define sandboxes — like Docker --cap-add / --cap-drop
-    worker = sandbox("db-worker") {
+    worker = sandbox.new("db-worker") {
         grant_env("HOME")
         grant_env("USER")
         grant_tcp("*.internal") // suffix: any *.internal host
@@ -85,18 +57,18 @@ main() {
         grant_exec("echo *") // prefix: echo anything
     }
 
-    plugin = sandbox("untrusted-plugin") {
+    plugin = sandbox.new("untrusted-plugin") {
         grant_env("TERM")
         grant_tcp("api.example.com") // exact: one host only
     }
 
-    app = sandbox("app") {
+    app = sandbox.new("app") {
         grant_all()
     }
 
     // Run contained code — closures use normal stdlib functions
     println("\n\x1b[1m--- db-worker (glob patterns) ---\x1b[0m")
-    run_sandboxed(worker) | ctx: ptr | {
+    sandbox.enforce(worker) | ctx: ptr | {
         try_env("HOME")
         try_env("AWS_SECRET_KEY")
         try_read("/etc/hostname") // /etc/* — allowed
@@ -107,7 +79,7 @@ main() {
     }
 
     println("\n\x1b[1m--- untrusted-plugin (restricted) ---\x1b[0m")
-    run_sandboxed(plugin) | ctx: ptr | {
+    sandbox.enforce(plugin) | ctx: ptr | {
         try_env("TERM")
         try_env("HOME")
         try_read("/etc/hostname") // no fs_read grant — hidden
@@ -116,13 +88,13 @@ main() {
     }
 
     println("\n\x1b[1m--- app (grant_all) ---\x1b[0m")
-    run_sandboxed(app) | ctx: ptr | {
+    sandbox.enforce(app) | ctx: ptr | {
         try_env("HOME")
         try_exec("echo hello")
         try_read("/etc/hostname")
     }
 
-    list.free(worker)
-    list.free(plugin)
-    list.free(app)
+    sandbox.free(worker)
+    sandbox.free(plugin)
+    sandbox.free(app)
 }

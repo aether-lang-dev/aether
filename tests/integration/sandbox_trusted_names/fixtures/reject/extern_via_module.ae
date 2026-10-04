@@ -1,0 +1,9 @@
+import std.sandbox
+import std.os
+main() {
+    w = sandbox.new("w") {}
+    sandbox.enforce(w, os) callback {
+        _ = os.getenv("HOME")
+    }
+    sandbox.free(w)
+}
