@@ -56,6 +56,8 @@ typedef struct AeQjs {
     int64_t limit_ms;       /* per entry; 0 = none */
     int64_t deadline_ms;    /* now + limit_ms at the current entry */
     char *err;              /* the last exception, as text */
+    JSValue exc;            /* ... and as the value itself, for qjs_rethrow */
+    int has_exc;
     char *scratch;          /* the last string handed out */
 } AeQjs;
 
@@ -82,7 +84,13 @@ static void enter_(AeQjs *q) {
     JS_UpdateStackTop(q->rt);
 }
 
+static void drop_exc_(AeQjs *q) {
+    if (q->has_exc) { JS_FreeValue(q->ctx, q->exc); q->has_exc = 0; }
+}
+
+/* An error with no exception value behind it (a host-side refusal). */
 static void set_err_(AeQjs *q, const char *s) {
+    drop_exc_(q);
     free(q->err);
     q->err = strdup(s ? s : "");
 }
@@ -162,7 +170,10 @@ static int fail_(AeQjs *q) {
         }
         JS_FreeValue(q->ctx, st);
     }
-    JS_FreeValue(q->ctx, e);
+    /* Kept, so a host function can throw this very value on (qjs_rethrow). */
+    drop_exc_(q);
+    q->exc = e;
+    q->has_exc = 1;
     free(q->err);
     q->err = text;
     return -1;
@@ -200,6 +211,7 @@ void qjs_free(void *qp) {
     for (int h = 1; h < q->cap; h++) {
         if (q->used[h]) { JS_FreeValue(q->ctx, q->vals[h]); q->used[h] = 0; }
     }
+    drop_exc_(q);
     JS_FreeContext(q->ctx);
     JS_FreeRuntime(q->rt);
     for (int i = 0; i < q->nfns; i++) {
@@ -349,6 +361,21 @@ int qjs_throw(void *qp, const char *kind, const char *msg) {
         JS_DefinePropertyValueStr(q->ctx, e, "message", JS_NewString(q->ctx, msg),
                                   JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
         JS_Throw(q->ctx, e);
+    }
+    return -1;
+}
+
+/* Throw the last exception again, the same value (its type, message and
+ * stack), from inside a host function whose nested qjs_call or qjs_eval
+ * failed; returns -1, which the host function returns. With no value kept
+ * (the heap was full, or the error was the host's), an InternalError with
+ * its text. */
+int qjs_rethrow(void *qp) {
+    AeQjs *q = (AeQjs *)qp;
+    if (q->has_exc) {
+        JS_Throw(q->ctx, JS_DupValue(q->ctx, q->exc));
+    } else {
+        JS_ThrowInternalError(q->ctx, "%s", q->err ? q->err : "error");
     }
     return -1;
 }

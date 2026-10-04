@@ -44,7 +44,7 @@ import std.string
 exports(
     runtime, dispose, set_time_limit, last_error, handles, memory_used,
     eval, eval_module, call, run_jobs,
-    function, throw_error, set_global, get_global,
+    function, throw_error, rethrow, set_global, get_global,
     release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
     parse_json, to_json, to_string, to_int, to_float, to_bool, type_of,
     get, set, get_index, set_index, length, keys,
@@ -63,6 +63,7 @@ extern qjs_call(q: ptr, f: int, this_h: int, args: int) -> int
 extern qjs_run_jobs(q: ptr) -> int
 extern qjs_function(q: ptr, name: string, arity: int, cb: fn) -> int
 extern qjs_throw(q: ptr, kind: string, msg: string) -> int
+extern qjs_rethrow(q: ptr) -> int
 extern qjs_release(q: ptr, h: int)
 extern qjs_dup(q: ptr, h: int) -> int
 extern qjs_global(q: ptr) -> int
@@ -155,6 +156,11 @@ function(q: ptr, name: string, arity: int, cb: fn) -> int { return qjs_function(
 // Throw from a host function: `return quickjs.throw_error(q, "TypeError", "...")`.
 // kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError" or "Error".
 throw_error(q: ptr, kind: string, msg: string) -> int { return qjs_throw(q, kind, msg) }
+
+// Throw again, from a host function, the exception a nested call or eval
+// just failed with: the same value, so its type, message and stack reach
+// the script intact. `return quickjs.rethrow(q)`.
+rethrow(q: ptr) -> int { return qjs_rethrow(q) }
 
 // globalThis[name] = v; v stays held by its handle.
 set_global(q: ptr, name: string, v: int) {
