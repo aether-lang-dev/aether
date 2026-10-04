@@ -1,0 +1,18 @@
+# The QuickJS (quickjs-ng) amalgamation contrib.quickjs compiles from source.
+#
+# Not committed: scripts/fetch-quickjs-amalgamation.sh downloads QUICKJS_URL,
+# refuses it unless its SHA-256 is QUICKJS_SHA256, and extracts
+# quickjs-amalgam.c and quickjs.h into contrib/quickjs/amalgamation/
+# (gitignored). CI and release packaging run it; release archives ship the
+# extracted files, so an installed toolchain never needs the network.
+#
+# The amalgamation is quickjs-ng's own release asset: the engine, regexp,
+# unicode and dtoa in one file, with quickjs-libc (scripts' own file and OS
+# access) behind QJS_BUILD_LIBC, which contrib.quickjs never defines.
+#
+# To bump: change the three values, run the fetch script, run
+# contrib/quickjs/test_quickjs.ae, and update the version in
+# contrib/quickjs/README.md.
+QUICKJS_VERSION=0.17.0
+QUICKJS_URL=https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/quickjs-amalgam.zip
+QUICKJS_SHA256=a0955463c74809173a253ff87365095e6972e8b171cfb6aa8a1e781adf35cfeb

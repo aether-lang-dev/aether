@@ -1516,6 +1516,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
+	test -f "$$verdir/share/aether/contrib/quickjs/amalgamation/quickjs-amalgam.c" || (echo "  FAIL: the QuickJS amalgamation is missing"; exit 1) && \
 	test -s "$$verdir/share/aether/MANIFEST" || (echo "  FAIL: share/aether/MANIFEST missing; ae cannot build from source without it"; exit 1) && \
 	shipped_specs=$$(find "$$verdir/share/aether" -type f -name 'test_*.ae' | head -5) && \
 	{ test -z "$$shipped_specs" || (echo "  FAIL: co-located specs shipped in the archive (#1584):"; echo "$$shipped_specs" | sed 's/^/        /'; exit 1); } && \

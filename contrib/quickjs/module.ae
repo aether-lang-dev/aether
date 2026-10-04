@@ -1,0 +1,279 @@
+// contrib.quickjs — QuickJS (quickjs-ng), embedded: modern JavaScript
+// (ES2023: classes, async/await, Map/Set, ?., ??, modules) run inside an
+// Aether program, with per-entry time limits and a memory cap.
+// Import with: import contrib.quickjs
+//
+//   import contrib.quickjs
+//
+//   main() {
+//       q = quickjs.runtime(8192, 0)          // 8 MB heap cap, default stack
+//       quickjs.set_time_limit(q, 100)        // each entry: at most 100 ms
+//       add = quickjs.function(q, "add", 2, |q: ptr, this_h: int, args: int| {
+//           return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
+//       })
+//       quickjs.set_global(q, "add", add)
+//       quickjs.release(q, add)
+//       v, err = quickjs.eval(q, "add(2, 3) * 10", "demo.js")
+//       if err != "" { println(err); return }
+//       println(quickjs.to_int(q, v))         // 50
+//       quickjs.release(q, v)
+//       quickjs.dispose(q)
+//   }
+//
+// Values are HANDLES (ints): every function that returns one hands the
+// caller a reference to release with quickjs.release (or that a host
+// function returns, which hands it to the engine). quickjs.handles(q) is 0
+// when everything taken has been released. A JSValue never crosses into
+// Aether: on 64-bit it is a 16-byte struct (aether_quickjs.c has why).
+//
+// A script reaches only what the host gives it: quickjs-libc (the engine's
+// own file and OS modules) is not compiled in. Host functions are Aether
+// closures, |q: ptr, this_h: int, args: int| (returning int), where args is an array
+// of the arguments (the arg_* helpers read it without leaving handles
+// behind); they return a handle, 0 for undefined, or quickjs.throw_error(...).
+//
+// The engine is quickjs-ng's amalgamation, pinned in amalgamation.lock and
+// fetched by scripts/fetch-quickjs-amalgamation.sh (release archives ship
+// it). README.md has the details.
+
+import std.string
+
+@source("aether_quickjs.c")
+@link("-lm")
+
+exports(
+    runtime, dispose, set_time_limit, last_error, handles, memory_used,
+    eval, eval_module, call, run_jobs,
+    function, throw_error, set_global, get_global,
+    release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
+    parse_json, to_json, to_string, to_int, to_float, to_bool, type_of,
+    get, set, get_index, set_index, length, keys,
+    arg, arg_int, arg_float, arg_string, arg_bool, arg_count,
+    new_promise
+)
+
+extern qjs_new(memory_kb: int, stack_kb: int) -> ptr
+extern qjs_free(q: ptr)
+extern qjs_set_time_limit(q: ptr, ms: int)
+extern qjs_error(q: ptr) -> string
+extern qjs_handles(q: ptr) -> int
+extern qjs_memory_used(q: ptr) -> long
+extern qjs_eval(q: ptr, code: string, filename: string, flags: int) -> int
+extern qjs_call(q: ptr, f: int, this_h: int, args: int) -> int
+extern qjs_run_jobs(q: ptr) -> int
+extern qjs_function(q: ptr, name: string, arity: int, cb: fn) -> int
+extern qjs_throw(q: ptr, kind: string, msg: string) -> int
+extern qjs_release(q: ptr, h: int)
+extern qjs_dup(q: ptr, h: int) -> int
+extern qjs_global(q: ptr) -> int
+extern qjs_undefined(q: ptr) -> int
+extern qjs_null(q: ptr) -> int
+extern qjs_bool(q: ptr, b: int) -> int
+extern qjs_int(q: ptr, n: int) -> int
+extern qjs_float(q: ptr, d: float) -> int
+extern qjs_string(q: ptr, s: string) -> int
+extern qjs_object(q: ptr) -> int
+extern qjs_array(q: ptr) -> int
+extern qjs_parse_json(q: ptr, text: string) -> int
+extern qjs_to_json(q: ptr, h: int) -> string
+extern qjs_to_string(q: ptr, h: int) -> string
+extern qjs_to_int(q: ptr, h: int) -> int
+extern qjs_to_float(q: ptr, h: int) -> float
+extern qjs_to_bool(q: ptr, h: int) -> int
+extern qjs_type(q: ptr, h: int) -> string
+extern qjs_get(q: ptr, obj: int, name: string) -> int
+extern qjs_set(q: ptr, obj: int, name: string, v: int) -> int
+extern qjs_get_index(q: ptr, obj: int, i: int) -> int
+extern qjs_set_index(q: ptr, obj: int, i: int, v: int) -> int
+extern qjs_length(q: ptr, obj: int) -> int
+extern qjs_keys(q: ptr, obj: int) -> int
+extern qjs_new_promise(q: ptr) -> int
+
+// ---- runtimes ----
+
+// A runtime with one context. memory_kb caps the heap (0: no cap);
+// stack_kb caps the JS stack (0: QuickJS's default). null if it cannot be
+// made.
+runtime(memory_kb: int, stack_kb: int) -> ptr { return qjs_new(memory_kb, stack_kb) }
+
+// Frees the runtime, every handle still held, and the host closures.
+dispose(q: ptr) { qjs_free(q) }
+
+// Milliseconds each entry into JS (an eval, a call, a run of the job queue)
+// may take before it is stopped with "InternalError: interrupted"; 0 for no
+// limit.
+set_time_limit(q: ptr, ms: int) { qjs_set_time_limit(q, ms) }
+
+// The text of the last exception, with its stack.
+last_error(q: ptr) -> string { return string.copy(qjs_error(q)) }
+
+// Handles held now (0 when everything taken was released).
+handles(q: ptr) -> int { return qjs_handles(q) }
+
+// Bytes the runtime has allocated.
+memory_used(q: ptr) -> long { return qjs_memory_used(q) }
+
+// ---- running code ----
+
+// Run a script; (its value, "") or (0, the exception's text).
+eval(q: ptr, code: string, filename: string) -> (int, string) {
+    h = qjs_eval(q, code, filename, 0)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// Run a module (import/export, top-level await); its value is a promise.
+eval_module(q: ptr, code: string, filename: string) -> (int, string) {
+    h = qjs_eval(q, code, filename, 1)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// Call f with this_h (0: undefined) and the elements of array args (0: none).
+call(q: ptr, f: int, this_h: int, args: int) -> (int, string) {
+    h = qjs_call(q, f, this_h, args)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// Run the promise jobs that await and .then() queued, until none are left:
+// (number run, "") or (-1, the exception's text). Call it after anything
+// that may settle a promise (a host callback, a resolve).
+run_jobs(q: ptr) -> (int, string) {
+    n = qjs_run_jobs(q)
+    if n < 0 { return -1, string.copy(qjs_error(q)) }
+    return n, ""
+}
+
+// ---- host functions ----
+
+// A JS function that calls cb(q, this_h, args), where args is an array of
+// its arguments. cb returns a handle (the engine takes it), 0 for undefined,
+// or quickjs.throw_error(...).
+function(q: ptr, name: string, arity: int, cb: fn) -> int { return qjs_function(q, name, arity, cb) }
+
+// Throw from a host function: `return quickjs.throw_error(q, "TypeError", "...")`.
+// kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError" or "Error".
+throw_error(q: ptr, kind: string, msg: string) -> int { return qjs_throw(q, kind, msg) }
+
+// globalThis[name] = v; v stays held by its handle.
+set_global(q: ptr, name: string, v: int) {
+    g = qjs_global(q)
+    _r = qjs_set(q, g, name, v)
+    qjs_release(q, g)
+}
+
+// globalThis[name]: (handle, "") or (0, error).
+get_global(q: ptr, name: string) -> (int, string) {
+    g = qjs_global(q)
+    h = qjs_get(q, g, name)
+    qjs_release(q, g)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// ---- values ----
+
+release(q: ptr, h: int) { qjs_release(q, h) }
+dup(q: ptr, h: int) -> int { return qjs_dup(q, h) }
+global(q: ptr) -> int { return qjs_global(q) }
+new_undefined(q: ptr) -> int { return qjs_undefined(q) }
+new_null(q: ptr) -> int { return qjs_null(q) }
+new_bool(q: ptr, b: int) -> int { return qjs_bool(q, b) }
+new_int(q: ptr, n: int) -> int { return qjs_int(q, n) }
+new_float(q: ptr, d: float) -> int { return qjs_float(q, d) }
+new_string(q: ptr, s: string) -> int { return qjs_string(q, s) }
+new_object(q: ptr) -> int { return qjs_object(q) }
+new_array(q: ptr) -> int { return qjs_array(q) }
+
+// JSON.parse: (handle, "") or (0, error).
+parse_json(q: ptr, text: string) -> (int, string) {
+    h = qjs_parse_json(q, text)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// JSON.stringify(h) ("" if it has no JSON form).
+to_json(q: ptr, h: int) -> string { return string.copy(qjs_to_json(q, h)) }
+to_string(q: ptr, h: int) -> string { return string.copy(qjs_to_string(q, h)) }
+to_int(q: ptr, h: int) -> int { return qjs_to_int(q, h) }
+to_float(q: ptr, h: int) -> float { return qjs_to_float(q, h) }
+to_bool(q: ptr, h: int) -> int { return qjs_to_bool(q, h) }
+
+// "undefined", "null", "boolean", "number", "bigint", "string", "symbol",
+// "function", "array", "error", "promise" or "object".
+type_of(q: ptr, h: int) -> string { return string.copy(qjs_type(q, h)) }
+
+// ---- properties ----
+
+// obj[name]: (handle, "") or (0, error) (a getter can throw).
+get(q: ptr, obj: int, name: string) -> (int, string) {
+    h = qjs_get(q, obj, name)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// obj[name] = v (v stays held by its handle): "" or the error.
+set(q: ptr, obj: int, name: string, v: int) -> string {
+    if qjs_set(q, obj, name, v) < 0 { return string.copy(qjs_error(q)) }
+    return ""
+}
+
+get_index(q: ptr, obj: int, i: int) -> (int, string) {
+    h = qjs_get_index(q, obj, i)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+set_index(q: ptr, obj: int, i: int, v: int) -> string {
+    if qjs_set_index(q, obj, i, v) < 0 { return string.copy(qjs_error(q)) }
+    return ""
+}
+
+// obj.length (-1 if it has none that is a number).
+length(q: ptr, obj: int) -> int { return qjs_length(q, obj) }
+
+// An array of obj's own enumerable string keys.
+keys(q: ptr, obj: int) -> int { return qjs_keys(q, obj) }
+
+// ---- reading a host function's arguments ----
+
+arg_count(q: ptr, args: int) -> int { return qjs_length(q, args) }
+
+// Argument i (a handle to release; undefined past the end).
+arg(q: ptr, args: int, i: int) -> int { return qjs_get_index(q, args, i) }
+
+arg_int(q: ptr, args: int, i: int) -> int {
+    h = qjs_get_index(q, args, i)
+    n = qjs_to_int(q, h)
+    qjs_release(q, h)
+    return n
+}
+
+arg_float(q: ptr, args: int, i: int) -> float {
+    h = qjs_get_index(q, args, i)
+    d = qjs_to_float(q, h)
+    qjs_release(q, h)
+    return d
+}
+
+arg_string(q: ptr, args: int, i: int) -> string {
+    h = qjs_get_index(q, args, i)
+    s = string.copy(qjs_to_string(q, h))
+    qjs_release(q, h)
+    return s
+}
+
+arg_bool(q: ptr, args: int, i: int) -> int {
+    h = qjs_get_index(q, args, i)
+    b = qjs_to_bool(q, h)
+    qjs_release(q, h)
+    return b
+}
+
+// ---- promises ----
+
+// A new promise as an object { promise, resolve, reject }: give the script
+// `promise`, and call `resolve` or `reject` when the answer arrives (say,
+// from an actor), then run_jobs so its awaits carry on.
+new_promise(q: ptr) -> int { return qjs_new_promise(q) }

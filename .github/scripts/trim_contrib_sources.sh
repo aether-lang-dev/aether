@@ -9,6 +9,8 @@
 #     as contrib.d3d12 and contrib.metal do with theirs (#2208);
 #   - contrib/sqlite/aether_sqlite.c and the fetched SQLite amalgamation,
 #     which `ae build --target` compiles for the target (#1372);
+#   - the fetched QuickJS amalgamation, which contrib/quickjs/aether_quickjs.c
+#     (kept by its @source) #includes rather than naming with @source;
 #   - with --keep-host-bridges, contrib/host/<lang>/aether_host_<lang>.c,
 #     which a plain `make install` ships because it builds no
 #     libaether_host_<lang>.a for a downstream `import contrib.host.<lang>`
@@ -55,6 +57,10 @@ find "$dir" -type f \( -name '*.c' -o -name '*.m' \) | while IFS= read -r f; do
     # foreign target, so they ship as source.
     case "$f" in
         */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;;
+        # aether_quickjs.c #includes the QuickJS amalgamation, so no @source
+        # names it; without this it was deleted and an installed
+        # contrib.quickjs could not build.
+        */contrib/quickjs/amalgamation/*.c) continue ;;
     esac
     abs="$(physical "$f")" || abs="$f"
     if ! grep -qxF -- "$abs" "$keep"; then

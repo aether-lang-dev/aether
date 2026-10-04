@@ -80,6 +80,9 @@ cp "$bin/MANIFEST" "$out/share/aether/"
 # from it, and an installed toolchain must not need the network to do so. A
 # failed fetch fails the staging.
 sh scripts/fetch-sqlite-amalgamation.sh >/dev/null
+# The same for contrib.quickjs: its pinned amalgamation ships, because
+# aether_quickjs.c compiles it into every program that imports the module.
+sh scripts/fetch-quickjs-amalgamation.sh >/dev/null
 cp -r contrib "$out/share/aether/"
 c="$out/share/aether/contrib"
 find "$c" -type d \( -name tests -o -name benchmarks \) -prune -exec rm -rf {} +
@@ -88,6 +91,8 @@ find "$c" -type f \( -name 'example_*.ae' -o -name 'test_*.ae' -o -name 'test_*.
 sh .github/scripts/trim_contrib_sources.sh "$c" --keep-host-bridges
 [ -f "$c/sqlite/amalgamation/sqlite3.c" ] || {
     echo "$0: the SQLite amalgamation is missing from the staged contrib" >&2; exit 1; }
+[ -f "$c/quickjs/amalgamation/quickjs-amalgam.c" ] || {
+    echo "$0: the QuickJS amalgamation is missing from the staged contrib" >&2; exit 1; }
 
 # Compiled module artifacts (#1746), made by the aetherc this release ships.
 if [ -n "$modules_aetherc" ]; then
