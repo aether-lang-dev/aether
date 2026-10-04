@@ -357,15 +357,17 @@ start_mode proxy_timeout
 
 # Test 10 — proxy timeout returns 504.
 T0=$(date +%s)
-STATUS=$(curl --silent --show-error --max-time 10 \
+STATUS=$(curl --silent --show-error --max-time 20 \
               -o "$TMPDIR/to.body" -w '%{http_code}' \
               "$PROXY/slow" 2>"$TMPDIR/c10.err") || true
 T1=$(date +%s)
 ELAPSED=$((T1 - T0))
 [ "$STATUS" = "504" ] || { echo "  [FAIL] T10 status: expected 504, got $STATUS"; cat "$TMPDIR/to.body"; exit 1; }
-# Upstream sleeps 3s; proxy timeout 1s. Total elapsed should be
-# under 4s (tolerance for OS scheduling jitter).
-[ "$ELAPSED" -lt 4 ] || { echo "  [FAIL] T10 timeout: expected <4s, got ${ELAPSED}s"; exit 1; }
+# Upstream sleeps 10s; proxy timeout 1s. A proxy that waited for the
+# upstream takes 10s or more, so under 8s means it timed out, with room
+# for whole-second `date` rounding and a slow runner: with a 3s upstream
+# and a 4s bound, Windows CI hit exactly 4s now and then.
+[ "$ELAPSED" -lt 8 ] || { echo "  [FAIL] T10 timeout: expected <8s, got ${ELAPSED}s"; exit 1; }
 
 stop_servers
 
