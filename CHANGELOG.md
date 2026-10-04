@@ -14,6 +14,76 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.772.0]
+
+### Added
+
+- **`std.sandbox`: grant lists and the blocks that enforce them.**
+  `sandbox.new(name) { grant_fs_read("/etc/app/*") grant_env("HOME") }` builds
+  a grant list and `sandbox.enforce(perms) { … }` runs a block with it in
+  force, so std's file, environment, process and network calls inside it are
+  checked against the grants. The same list goes to `spawn_sandboxed` and to
+  the `contrib/host/<lang>` modules' `run_sandboxed`. Before this every
+  program wrote its own `grant_*` helpers, and the copies had drifted: the
+  docs showed a `grant_tcp(host, port)` whose port nothing checks, and no copy
+  could grant `tcp_listen`, `udp` or `native`, which the runtime does check.
+  The module spells each category the runtime checks (`grant_fs`,
+  `grant_tcp_listen`, `grant_udp` and `grant_native` are new), keeps its own
+  copies of the patterns so an interpolated `"${dir}/*"` cannot dangle, and
+  nested `enforce` blocks intersect. The five examples and
+  `docs/containment-sandbox.md` now use it; the doc's worked example is a
+  real enforced program instead of a simulation with its own checker.
+
+- **Trusted names in `sandbox.enforce(perms, foo, db) { … }`.** Inside an
+  enforced block every sandbox check applies to whatever code makes it,
+  including functions defined before the block. Names after the grant list
+  are exempt: a call written in the block to a named function, or into a
+  named module, runs with the authority of the code that wrote the
+  `enforce`. The exemption cannot be claimed by contained code (an `enforce`
+  it writes is entered already sandboxed), is lexical (a helper that calls
+  `foo` from elsewhere stays sandboxed, and the names cannot be used as
+  values in the block), and leaves the trusted call's arguments evaluated
+  inside the sandbox. Each trusted Aether function gets a generated wrapper
+  with its exact signature; C externs cannot be trusted, and every misuse is
+  a compile error that says what is wrong.
+
+### Fixed
+
+- **`fs.make_temp_dir("", prefix)` and `fs.make_temp_file("", prefix)` use the
+  OS temp dir, as documented.** The C side defaulted only a NULL directory, so
+  the empty string the functions document became the template
+  `/<prefix>XXXXXX` at the filesystem root, and the call failed with "cannot
+  create temp dir" for any ordinary user. An empty prefix now means `"ae"` as
+  documented, too.
+
+- **A panic out of a sandboxed block no longer leaves the sandbox in force.**
+  A panic that unwound out of a `sandbox_push` / `sandbox.enforce` block
+  skipped the pop, so code after the catching `try` was still held to the
+  block's grants. In a program that uses the sandbox, a `try` now records
+  the sandbox depth and its `catch` restores it: a catch outside the block
+  is no longer sandboxed, and a catch inside it stays sandboxed.
+
+- **`sandbox.enforce` contains its own thread, not the whole process.** The
+  sandbox stack the checks walk was one for the process, so while a block
+  ran, every other thread (an actor's, a `std.worker`'s) was checked
+  against its grants, and the stack was written by threads without a lock.
+  It is per thread now: work a block hands to another thread runs with that
+  thread's authority.
+
+### Security
+
+- **A sandbox's fs grants are matched where a path leads, not as it is
+  spelt.** The in-process check compared the path string with the grant, so
+  a grant for `/box/*` let `fs.write("/box/../x")`, `fs.mkdir_p("/box/../x/y")`,
+  a symlink in `/box` followed by `..`, and a dangling symlink in `/box`
+  pointing out all write outside the box. Paths are now resolved a component
+  at a time, as the kernel resolves them (`..`, then symlinks followed), by
+  one resolver the in-process checks and the LD_PRELOAD library share; a
+  path that cannot be resolved is refused, where the LD_PRELOAD layer used
+  to fall back to matching it as written. An fs grant's directory is
+  resolved the same way when it is made, so `/var/...` grants match on
+  macOS, where the temp directory is under `/private/var`.
+
 ## [0.771.0]
 
 ### Added
