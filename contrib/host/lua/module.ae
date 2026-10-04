@@ -5,7 +5,7 @@
 //  1. Fire-and-forget (the original surface): run a Lua string in a
 //     sandbox, intercepting Lua's io/os via the LD_PRELOAD libc gate.
 //
-//         worker = sandbox("worker") { grant_env("HOME") }
+//         worker = sandbox.new("worker") { grant_env("HOME") }
 //         lua.run_sandboxed(worker, "print(os.getenv('HOME'))")
 //
 //  2. Bidirectional embedding (#904): a persistent, host-owned VM that

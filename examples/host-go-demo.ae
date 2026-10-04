@@ -19,27 +19,9 @@
 // Linux: sandbox enforcement is real (LD_PRELOAD intercepts libc).
 // macOS: sandbox is advisory (SIP blocks DYLD_INSERT_LIBRARIES).
 
-import std.list
+import std.sandbox
 import std.io
 import contrib.host.go
-
-// --- Minimal sandbox library (matches examples/sandbox-demo.ae) ---
-
-add_perm(target: ptr, cat: string, pat: string) {
-    list.add(target, cat)
-    list.add(target, pat)
-}
-
-grant_all(_ctx: ptr) { add_perm(_ctx, "*", "*") }
-grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
-grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
-
-sandbox(name: string) {
-    perms = list.new()
-    println("sandbox: ${name}")
-    return perms
-}
 
 main() {
     println("=== host-go demo ===")
@@ -69,7 +51,7 @@ GOCODE
     // Wide-open sandbox: grant_all lets `go run` read everything it
     // needs from $GOROOT, $GOPATH, and the linker toolchain. Useful
     // as a baseline "does the bridge even work?" check.
-    open_box = sandbox("open") {
+    open_box = sandbox.new("open") {
         grant_all()
     }
 
@@ -82,7 +64,7 @@ GOCODE
     // Narrow sandbox: only HOME env + /tmp/* fs_read. `go run` itself
     // needs more grants than this, so it's expected to fail. Shows
     // the deny path is live.
-    narrow = sandbox("narrow") {
+    narrow = sandbox.new("narrow") {
         grant_env("HOME")
         grant_fs_read("/tmp/*")
     }
@@ -99,8 +81,8 @@ GOCODE
         println("         with `go build` and run via go.run_sandboxed for tighter grants.")
     }
 
-    list.free(open_box)
-    list.free(narrow)
+    sandbox.free(open_box)
+    sandbox.free(narrow)
 
     println()
     println("=== done ===")

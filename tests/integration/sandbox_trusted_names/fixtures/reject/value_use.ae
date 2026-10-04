@@ -1,0 +1,11 @@
+import std.sandbox
+peek() -> int { return 1 }
+takes(f: fn) -> int { return 0 }
+main() {
+    w = sandbox.new("w") {}
+    sandbox.enforce(w, peek) callback {
+        _ = takes(peek)
+        _ = peek()
+    }
+    sandbox.free(w)
+}

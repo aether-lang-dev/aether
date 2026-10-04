@@ -1,0 +1,156 @@
+// Trusted names in sandbox.enforce(perms, foo, ...) (co-located, #1584).
+//
+// Inside an enforced block every sandbox-checked operation is held to the
+// grants, whoever wrote the code that makes it and wherever it was defined.
+// A trusted name is the exception: a call to it, written in the block, runs
+// with the authority of the code that wrote the enforce. Each case below reads
+// one environment variable the grants do not allow, so "s3cret" means the read
+// ran unsandboxed and "hidden" means it was refused.
+//
+// The cases that matter most for safety are the ones where trust must NOT
+// apply: the trusted call's own arguments, a helper that calls the trusted
+// function by name, contained code writing its own enforce to escalate, and a
+// panic that unwinds through a trusted call.
+
+import std.spec
+import std.sandbox
+import std.os
+
+// Defined before any enforce; reads an ungranted variable.
+peek() -> string {
+    v = os.getenv("AE_TRUST_SECRET")
+    if v == null { return "hidden" }
+    return v
+}
+
+// Returns its argument, so a test can see how the argument was evaluated.
+echo_arg(s: string) -> string {
+    return s
+}
+
+// Calls peek by name but is not trusted itself.
+helper() -> string {
+    return peek()
+}
+
+// Contained code trying to escalate: its own enforce, granting everything
+// and trusting peek. The depth it records is already the sandboxed one, so
+// the trusted call drops back no further than the sandbox it was called in.
+sneaky() {
+    everything = sandbox.new("everything") {
+        grant_all()
+    }
+    sandbox.enforce(everything, peek) callback {
+        spec.assert_str_eq(peek(), "hidden", "a trusted call made from inside the sandbox stays inside it")
+    }
+    sandbox.free(everything)
+}
+
+boom() -> int {
+    panic("boom")
+    return 0
+}
+
+fn direct_read() -> string {
+    v = os.getenv("AE_TRUST_SECRET")
+    if v == null { return "hidden" }
+    return v
+}
+
+main() {
+    fw = spec.init()
+    env_err = os.setenv("AE_TRUST_SECRET", "s3cret")
+    if env_err != "" { println("cannot set the test variable: ${env_err}") }
+
+    spec.describe(fw, "sandbox.enforce trusted names") {
+        spec.it("refuses the read when it is written in the block") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w) callback {
+                spec.assert_str_eq(direct_read(), "hidden", "an untrusted function is sandboxed")
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("lets a trusted function make it") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w, peek) callback {
+                spec.assert_str_eq(peek(), "s3cret", "peek runs with the enforcing code's authority")
+                spec.assert_str_eq(direct_read(), "hidden", "the rest of the block is still sandboxed")
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("still evaluates a trusted call's arguments inside the sandbox") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w, echo_arg) callback {
+                v = echo_arg(os.getenv("AE_TRUST_SECRET"))
+                spec.assert_true(v == null, "the argument was read sandboxed, so it is null")
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("does not extend to a helper that calls the trusted function by name") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w, peek) callback {
+                spec.assert_str_eq(helper(), "hidden", "trust is lexical: only calls written in the block")
+                spec.assert_str_eq(peek(), "s3cret", "while the block's own call is trusted")
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("gives contained code nothing by writing its own enforce") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w) callback {
+                sneaky()
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("restores the sandbox when a trusted call panics and the block catches it") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w, boom) callback {
+                caught = ""
+                try {
+                    _ = boom()
+                } catch e {
+                    caught = e
+                }
+                spec.assert_str_eq(caught, "boom", "the panic reached the block's catch")
+                spec.assert_str_eq(direct_read(), "hidden", "and the block is sandboxed again")
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("lifts the sandbox when a panic leaves the block and is caught outside it") callback {
+            w = sandbox.new("nothing") {}
+            caught = ""
+            try {
+                sandbox.enforce(w) callback {
+                    panic("out")
+                }
+            } catch e {
+                caught = e
+            }
+            spec.assert_str_eq(caught, "out", "the panic left the block")
+            spec.assert_str_eq(direct_read(), "s3cret", "outside the block nothing is held to its grants")
+            sandbox.free(w)
+        }
+
+        spec.it("applies the innermost enforce's trust in nested blocks") callback {
+            outer = sandbox.new("outer") {
+                grant_env("AE_TRUST_SECRET")
+            }
+            inner = sandbox.new("inner") {}
+            sandbox.enforce(outer) callback {
+                sandbox.enforce(inner, peek) callback {
+                    spec.assert_str_eq(direct_read(), "hidden", "inner refuses it")
+                    spec.assert_str_eq(peek(), "s3cret", "a trusted call drops back to outer, which grants it")
+                }
+            }
+            sandbox.free(inner)
+            sandbox.free(outer)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+}

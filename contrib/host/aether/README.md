@@ -31,9 +31,10 @@ The `ae` compiler must be on `$PATH` (or set `AETHER_AE_PATH`), and
 
 ```aether
 import contrib.host.aether
+import std.sandbox
 
 // Set up sandbox grants
-worker = sandbox("worker") {
+worker = sandbox.new("worker") {
     grant_fs_read("/etc/app/config.yaml")
     grant_env("PRICING_VERSION")
     // No network, no exec, no other filesystem access
@@ -55,6 +56,7 @@ println(output)
 
 ```aether
 import contrib.host.aether
+import std.sandbox
 
 // Create shared map with inputs
 map, token = shared_map_new()
@@ -63,7 +65,7 @@ shared_map_put(map, "quantity", "5")
 
 // Run script — it reads inputs via aether_map_get("sku")
 // and writes outputs via aether_map_put("result", "...")
-worker = sandbox("worker") { grant_env("AETHER_MAP_SHM") }
+worker = sandbox.new("worker") { grant_env("AETHER_MAP_SHM") }
 aether.run_script_sandboxed_with_map(worker, "rules/pricing.ae", token)
 
 // Read outputs back

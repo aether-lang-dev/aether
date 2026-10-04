@@ -25,7 +25,7 @@
 // Usage:
 //   import contrib.host.go
 //
-//   worker = sandbox("worker") {
+//   worker = sandbox.new("worker") {
 //       grant_env("HOME")
 //       grant_fs_read("/usr/local/go/*")
 //       grant_fs_read("/tmp/*")

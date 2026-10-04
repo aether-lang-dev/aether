@@ -15,31 +15,15 @@
 // print "not available" and return -1.
 
 import std.list
+import std.sandbox
 import contrib.host.tcl
-
-// --- Minimal sandbox library (matches examples/sandbox-demo.ae) ---
-
-add_perm(target: ptr, cat: string, pat: string) {
-    list.add(target, cat)
-    list.add(target, pat)
-}
-
-grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
-grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
-
-sandbox(name: string) {
-    perms = list.new()
-    println("sandbox: ${name}")
-    return perms
-}
 
 main() {
     println("=== host-tcl demo ===")
     println()
 
     // Sandbox 1 — can read HOME, can read /etc/*, can exec /bin/echo.
-    worker = sandbox("worker") {
+    worker = sandbox.new("worker") {
         grant_env("HOME")
         grant_fs_read("/etc/*")
         grant_exec("/bin/echo")
@@ -56,7 +40,7 @@ main() {
     if rc != 0 { println("  [DENY]  /etc/hostname") }
 
     // Sandbox 2 — only TERM grant. Everything else denies.
-    minimal = sandbox("minimal") {
+    minimal = sandbox.new("minimal") {
         grant_env("TERM")
     }
 
@@ -72,8 +56,8 @@ main() {
         "set f [open /etc/hostname r]; puts [read $f]; close $f")
     if rc != 0 { println("  [DENY]  /etc/hostname (expected)") }
 
-    list.free(worker)
-    list.free(minimal)
+    sandbox.free(worker)
+    sandbox.free(minimal)
 
     tcl.finalize()
     println()

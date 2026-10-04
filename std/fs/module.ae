@@ -605,12 +605,31 @@ readlink(path: string) -> {
     return target, ""
 }
 
+// The documented defaults for make_temp_dir / make_temp_file. The C side only
+// defaulted a NULL dir, so the empty string these document became the
+// template "/<prefix>XXXXXX" at the filesystem root and failed.
+extern os_temp_dir_raw() -> string @heap
+
+fn temp_parent(dir: string) -> string {
+    if dir == "" {
+        return os_temp_dir_raw()
+    }
+    return dir
+}
+
+fn temp_prefix(prefix: string) -> string {
+    if prefix == "" {
+        return "ae"
+    }
+    return prefix
+}
+
 // make_temp_dir(dir, prefix) — atomically create and return a uniquely-named
 // temp DIRECTORY under `dir`, name starting `prefix` (mkdtemp — no race). The
 // caller owns it: clean up with remove_tree(). Returns (path, "") or ("", err).
 // Empty `dir` → the OS temp dir (os.temp_dir); empty `prefix` → "ae".
 make_temp_dir(dir: string, prefix: string) -> {
-    p = fs_make_temp_dir_raw(dir, prefix)
+    p = fs_make_temp_dir_raw(temp_parent(dir), temp_prefix(prefix))
     if p == null { return "", "cannot create temp dir" }
     return p, ""
 }
@@ -619,7 +638,7 @@ make_temp_dir(dir: string, prefix: string) -> {
 // temp FILE under `dir` (mkstemp — created O_EXCL, no race). The caller owns
 // it: delete() when done. Returns (path, "") or ("", err).
 make_temp_file(dir: string, prefix: string) -> {
-    p = fs_make_temp_file_raw(dir, prefix)
+    p = fs_make_temp_file_raw(temp_parent(dir), temp_prefix(prefix))
     if p == null { return "", "cannot create temp file" }
     // p is @heap-owned; hand it straight back (string_concat here would leak
     // the original and double-allocate).

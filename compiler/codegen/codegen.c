@@ -8,6 +8,7 @@
 #include "../aether_module.h"
 #include "../aether_error.h"
 #include "../analysis/actor_reply.h"
+#include "../analysis/sandbox_trust.h"
 
 /* #2292: defined with the constant rename, used by the symbol catalog. */
 static const char* const_public_name(const ASTNode* cd);
@@ -415,6 +416,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->synthesised_nodes = NULL;
     gen->synthesised_count = 0;
     gen->synthesised_cap = 0;
+    gen->uses_sandbox = 0;
     gen->output = output;
     gen->indent_level = 0;
     gen->actor_count = 0;
@@ -5638,6 +5640,153 @@ static void emit_entry_point(CodeGenerator* gen, ASTNode* program) {
     }
 }
 
+/* ---- trusted names in sandbox.enforce (see analysis/sandbox_trust.h) ----
+ *
+ * A call to a trusted function inside an enforced block is routed through a
+ * wrapper with the target's exact signature. The caller evaluates the
+ * arguments as usual, still inside the sandbox; the wrapper drops the sandbox
+ * depth to the level its enforce site was entered at, calls the target, and
+ * puts the depth back. Wrapping the call expression inline instead would
+ * evaluate the arguments after the drop, so `foo(fs.read(secret))` would read
+ * the secret unsandboxed. A panic that unwinds out of the target skips the
+ * restore; the catching `try` restores the depth instead (gen->uses_sandbox). */
+
+/* The function a trusted call resolves to, or NULL (an extern, a closure). */
+ASTNode* sandbox_trust_target(CodeGenerator* gen, const ASTNode* call) {
+    if (!gen || !gen->program || !call || !call->value) return NULL;
+    char name[512];
+    snprintf(name, sizeof name, "%s", call->value);
+    ASTNode* def = find_function_definition_by_name(gen->program, name);
+    if (def) return def;
+    for (char* p = name; *p; p++) {
+        if (*p == '.') *p = '_';
+    }
+    return find_function_definition_by_name(gen->program, name);
+}
+
+/* The C name of the wrapper for `def` at enforce site `site`. */
+void sandbox_trust_wrapper_name(ASTNode* def, int site, char* out, size_t n) {
+    const char* cb = c_callback_symbol(def);
+    char base[300];
+    snprintf(base, sizeof base, "%s", cb ? cb : safe_c_name(def->value));
+    snprintf(out, n, "_aether_sbx%d_%s", site, base);
+}
+
+/* The return type exactly as the forward declaration spells it. */
+static int emit_trust_return_type(CodeGenerator* gen, ASTNode* def) {
+    Type* ret_type = def->node_type;
+    int has_ret = has_return_value(def);
+    int unannotated = (!ret_type || ret_type->kind == TYPE_VOID || ret_type->kind == TYPE_UNKNOWN);
+    if (unannotated && has_ret) {
+        fprintf(gen->output, "int");
+        return 1;
+    }
+    if (unannotated) {
+        fprintf(gen->output, "void");
+        return 0;
+    }
+    generate_type(gen, ret_type);
+    return 1;
+}
+
+static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
+    (void)program;
+    int n = sandbox_trust_call_count();
+    if (n == 0 || !gen->uses_sandbox) return;
+    ASTNode** seen_def = calloc((size_t)n, sizeof(ASTNode*));
+    int* seen_site = calloc((size_t)n, sizeof(int));
+    int seen = 0;
+    print_line(gen, "// sandbox.enforce trusted-call wrappers");
+    for (int i = 0; i < n; i++) {
+        const ASTNode* call = sandbox_trust_call_at(i);
+        int site = sandbox_trust_site_of_call(call);
+        if (site == 0) continue;
+        ASTNode* def = sandbox_trust_target(gen, call);
+        if (!def) {
+            fprintf(gen->output,
+                    "#error \"sandbox.enforce: '%s' is trusted, but only an Aether function can be "
+                    "(this one is an extern or not a function)\"\n",
+                    call->value ? call->value : "?");
+            continue;
+        }
+        int dup = 0;
+        for (int k = 0; k < seen; k++) {
+            if (seen_def[k] == def && seen_site[k] == site) { dup = 1; break; }
+        }
+        if (dup) continue;
+        seen_def[seen] = def;
+        seen_site[seen] = site;
+        seen++;
+        if (def->type == AST_BUILDER_FUNCTION ||
+            annotation_has_marker(def->annotation, "varargs")) {
+            fprintf(gen->output,
+                    "#error \"sandbox.enforce: '%s' cannot be trusted: builder and C-variadic "
+                    "functions are not supported; trust a plain function that calls it\"\n",
+                    def->value);
+            continue;
+        }
+        int unsupported = 0;
+        for (int j = 0; j < def->child_count; j++) {
+            ASTNode* p = def->children[j];
+            if (p && (p->type == AST_PATTERN_LIST || p->type == AST_PATTERN_CONS ||
+                      p->type == AST_PATTERN_LITERAL || p->type == AST_PATTERN_STRUCT)) {
+                unsupported = 1;
+            }
+        }
+        if (unsupported) {
+            fprintf(gen->output,
+                    "#error \"sandbox.enforce: '%s' cannot be trusted: it matches on its "
+                    "parameters; trust a plain function that calls it\"\n",
+                    def->value);
+            continue;
+        }
+        char wname[400];
+        sandbox_trust_wrapper_name(def, site, wname, sizeof wname);
+        const char* cb = c_callback_symbol(def);
+        char target[300];
+        snprintf(target, sizeof target, "%s", cb ? cb : safe_c_name(def->value));
+
+        fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
+        int returns = emit_trust_return_type(gen, def);
+        fprintf(gen->output, " %s(", wname);
+        int pc = 0;
+        for (int j = 0; j < def->child_count; j++) {
+            ASTNode* p = def->children[j];
+            if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK) continue;
+            if (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION) continue;
+            if (pc > 0) fprintf(gen->output, ", ");
+            char pname[32];
+            snprintf(pname, sizeof pname, "_aether_sbx_p%d", pc);
+            if (is_fnptr_type(p->node_type)) {
+                emit_fnptr_decl(gen, p->node_type, pname);
+            } else {
+                generate_type(gen, p->node_type);
+                fprintf(gen->output, " %s", pname);
+            }
+            pc++;
+        }
+        if (pc == 0) fprintf(gen->output, "void");
+        fprintf(gen->output, ") {\n");
+        fprintf(gen->output, "    int _aether_sbx_saved = _aether_sandbox_trust_enter(%d);\n", site);
+        fprintf(gen->output, "    ");
+        if (returns) {
+            emit_trust_return_type(gen, def);
+            fprintf(gen->output, " _aether_sbx_r = ");
+        }
+        fprintf(gen->output, "%s(", target);
+        for (int k = 0; k < pc; k++) {
+            fprintf(gen->output, "%s_aether_sbx_p%d", k ? ", " : "", k);
+        }
+        fprintf(gen->output, ");\n");
+        fprintf(gen->output, "    _aether_sandbox_depth = _aether_sbx_saved;\n");
+        if (returns) fprintf(gen->output, "    return _aether_sbx_r;\n");
+        fprintf(gen->output, "}\n");
+    }
+    free(seen_def);
+    free(seen_site);
+}
+
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -6489,14 +6638,35 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * permission list, found no entries, and denied everything: the same
      * grant that worked in a plain function was refused inside a
      * `spec.describe` block. Two different things were sharing one stack. */
-    print_line(gen, "static void* _aether_sandbox_stack[64];");
-    print_line(gen, "static int _aether_sandbox_depth = 0;");
-    print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
-    print_line(gen, "static inline void _aether_sandbox_pop(void) { if (_aether_sandbox_depth > 0) _aether_sandbox_depth--; }");
     // Only emit sandbox bridge code if the program actually uses sandbox builtins.
     // This avoids preamble bloat and the list_size/list_get dependency for programs
     // that don't use sandboxing.
     bool has_sandbox = uses_sandbox(program);
+    gen->uses_sandbox = has_sandbox ? 1 : 0;
+    /* Per thread: an enforce block contains the code that runs on its own
+     * thread. With one stack for the process, every other thread (an actor's,
+     * a std.worker's) was checked against the block's grants while it ran,
+     * and the stack itself was raced. These live in this translation unit,
+     * written and read only by its own code, so the TLS model never crosses
+     * an archive boundary (#1751). */
+    print_line(gen, "static AETHER_TLS void* _aether_sandbox_stack[64];");
+    print_line(gen, "static AETHER_TLS int _aether_sandbox_depth = 0;");
+    if (has_sandbox) {
+        /* Trusted names in `sandbox.enforce(perms, foo) { ... }`: each level
+         * of the stack records which enforce site pushed it (0 for any other
+         * push). A trusted call drops the depth to the level its own site was
+         * entered at, so it runs with the authority of the code that wrote
+         * the enforce. Never higher: the depth only ever goes down, and a
+         * site found nowhere on the live stack (a block that escaped its
+         * enforce, a level a panic abandoned) lowers nothing. */
+        print_line(gen, "static AETHER_TLS int _aether_sandbox_site_at[64];");
+        print_line(gen, "static AETHER_TLS int _aether_sandbox_pending_site = 0;");
+        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_site_at[l] == site) { _aether_sandbox_depth = l; break; } } return saved; }");
+    } else {
+        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
+    }
+    print_line(gen, "static inline void _aether_sandbox_pop(void) { if (_aether_sandbox_depth > 0) _aether_sandbox_depth--; }");
     if (has_sandbox) {
         // Sandbox bridge: connects compiler-generated context stack to runtime checks.
         print_line(gen, "typedef int (*aether_sandbox_check_fn)(const char*, const char*);");
@@ -7225,6 +7395,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
         fprintf(gen->output, ");\n");
     }
+
+    emit_sandbox_trust_wrappers(gen, program);
 
     /* Forward typedef for each actor, so the BARE name is usable before the
      * actor's own `typedef struct X { ... } X;` is emitted.

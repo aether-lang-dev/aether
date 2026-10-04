@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (86 modules)
+## Module index (87 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -69,6 +69,7 @@ header comment is the authoritative description.
 | `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 68 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
+| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 13 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 23 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |

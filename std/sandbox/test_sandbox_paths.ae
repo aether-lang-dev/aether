@@ -1,0 +1,140 @@
+// std.sandbox: a path is matched where it leads, not as it is spelt, and an
+// enforce block contains its own thread, not the process.
+//
+// Each fs case is an escape a grant for "<dir>/box/*" must not allow: a ".."
+// after the granted prefix, the same through directories that do not exist
+// yet (mkdir -p), a symlink inside the box followed by "..", and a dangling
+// symlink inside the box whose target is outside. The file the escape would
+// create is checked to be absent afterwards, so a refusal that came too late
+// still fails. The grant itself is written through a symlink to the box, and
+// the temp directory is under /var on macOS (a symlink to /private/var), so
+// grants and paths both have to be resolved for the allowed cases to pass.
+
+import std.spec
+import std.sandbox
+import std.os
+import std.fs
+import std.worker
+
+extern exit(code: int)
+
+// What the worker thread saw, written there and read on the main thread
+// after worker.wait().
+var thread_saw: int = 0 - 1
+
+main() {
+    fw = spec.init()
+
+    tmp, terr = fs.make_temp_dir("", "ae_sandbox_paths")
+    if terr != "" {
+        println("cannot make a fixture directory: ${terr}")
+        exit(1)
+    }
+    box = "${tmp}/box"
+    outside = "${tmp}/outside"
+    _m1 = fs.mkdir_p("${box}/sub")
+    _m2 = fs.mkdir_p("${outside}/deep")
+    _l1 = fs.symlink("${outside}/deep", "${box}/link")
+    _l2 = fs.symlink("${outside}/new.txt", "${box}/dangling")
+    _l3 = fs.symlink(box, "${tmp}/boxlink")
+    // Symlinks are followed where the kernel follows them. On Windows a
+    // symlink needs Developer Mode or an administrator to create, and the
+    // resolver there normalises with _fullpath without following links, so
+    // the symlink cases run only where links exist and are followed.
+    have_links = 0
+    if os.platform() != "windows" && fs.fs_is_symlink("${box}/link") == 1 && fs.fs_is_symlink("${tmp}/boxlink") == 1 {
+        have_links = 1
+    }
+    no_links = "symlinks not created or not followed on this platform"
+    env_err = os.setenv("AE_SANDBOX_PATHS_VAR", "visible")
+    if env_err != "" { println("cannot set the test variable: ${env_err}") }
+
+    // Spelt as the paths below are, so a matcher that compares strings
+    // would let every escape through.
+    in_box = sandbox.new("box") {
+        grant_fs_write("${box}/*")
+        grant_fs_read("${box}/*")
+    }
+    // The same box named through a symlink to it.
+    via_link = sandbox.new("box, through a symlink") {
+        grant_fs_write("${tmp}/boxlink/*")
+    }
+    nothing = sandbox.new("nothing") {}
+
+    spec.describe(fw, "std.sandbox fs grants match where a path leads") {
+        spec.it_when(have_links, "allows a file in the box, the grant written through a symlink", no_links) callback {
+            err = ""
+            sandbox.enforce(via_link) callback {
+                err = fs.write("${box}/inside.txt", "ok")
+            }
+            spec.assert_str_eq(err, "", "written")
+            spec.assert_eq(fs.exists("${box}/inside.txt"), 1, "and there")
+        }
+        spec.it("allows a .. that stays in the box") callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.write("${box}/sub/../back.txt", "ok")
+            }
+            spec.assert_str_eq(err, "", "written")
+            spec.assert_eq(fs.exists("${box}/back.txt"), 1, "and there")
+        }
+        spec.it("refuses a .. that climbs out of the box") callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.write("${box}/../escaped.txt", "no")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${tmp}/escaped.txt"), 0, "nothing written beside the box")
+        }
+        spec.it("refuses mkdir -p climbing out through directories that do not exist") callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.mkdir_p("${box}/../made/x")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${tmp}/made"), 0, "nothing made beside the box")
+        }
+        spec.it_when(have_links, "refuses a symlink in the box followed by ..", no_links) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                // link -> outside/deep, so link/.. is outside, not the box
+                err = fs.write("${box}/link/../via_link.txt", "no")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${outside}/via_link.txt"), 0, "nothing written outside")
+        }
+        spec.it_when(have_links, "refuses a dangling symlink in the box that points out", no_links) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.write("${box}/dangling", "no")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${outside}/new.txt"), 0, "its target not created")
+        }
+    }
+
+    spec.describe(fw, "std.sandbox enforce contains its own thread") {
+        spec.it("a worker thread is not under the main thread's enforce") callback {
+            sandbox.enforce(nothing) callback {
+                ok = worker.run(| _c: ptr | {
+                        if os.getenv("AE_SANDBOX_PATHS_VAR") != null { thread_saw = 1 } else { thread_saw = 0 }
+                    }, | _c: ptr | {})
+                if ok { worker.wait() }
+            }
+            worker.drain(16)
+            spec.assert_eq(thread_saw, 1, "the worker saw the variable the block may not")
+            seen_here = 1
+            sandbox.enforce(nothing) callback {
+                if os.getenv("AE_SANDBOX_PATHS_VAR") == null { seen_here = 0 }
+            }
+            spec.assert_eq(seen_here, 0, "while the block itself still may not")
+        }
+    }
+
+    sandbox.free(in_box)
+    sandbox.free(via_link)
+    sandbox.free(nothing)
+    worker.pool_shutdown()
+    _r = fs.remove_tree(tmp)
+    exit(spec.run_summary(fw))
+}

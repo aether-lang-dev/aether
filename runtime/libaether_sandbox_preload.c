@@ -49,70 +49,11 @@ static void* (*real_mmap)(void*, size_t, int, int, int, off_t) = NULL;
 static int (*real_mprotect)(void*, size_t, int) = NULL;
 static void* (*real_dlopen)(const char*, int) = NULL;
 
-// For fs_* categories, resolve the resource path with realpath()
-// before grant matching. Closes the path-identity bypass: an attacker
-// with a grant for `/tmp/*` could otherwise open `/tmp/../etc/shadow`
-// (or a symlink to it under /tmp) and the kernel would resolve the
-// path AFTER our pattern_match check, escalating the granted scope.
-//
-// realpath requires the path to exist. For fs_write to a freshly-
-// created file the path doesn't yet — fall back to resolving the
-// parent and reattaching the basename; the parent must exist for any
-// meaningful create syscall to succeed anyway. If even the parent
-// can't be resolved (truly unusable path), reuse the original. The
-// grant check then proceeds on the unresolved path — same behaviour
-// as before this fix, so we never tighten or loosen for these edge
-// cases relative to the prior baseline.
-//
-// `out` must point at a buffer of at least PATH_MAX. Returns 1 if
-// `out` was written with a resolved path, 0 if the original was
-// kept (caller may still use `in` directly in that case).
-static int sandbox_resolve_fs_path(const char* in, char* out, size_t out_size) {
-    if (!in || !out || out_size < PATH_MAX) return 0;
-
-    // Direct realpath: handles existing files, defeats `..` and symlinks.
-    if (realpath(in, out)) return 1;
-
-    // ENOENT: the file likely doesn't exist yet (creation case). Walk
-    // back to the parent and resolve that, then reattach the basename
-    // to the resolved parent. Anything other than ENOENT is a true
-    // failure — leave the original path as-is.
-    if (errno != ENOENT) return 0;
-
-    char tmp[4096];
-    size_t in_len = strlen(in);
-    if (in_len == 0 || in_len >= sizeof(tmp)) return 0;
-    memcpy(tmp, in, in_len + 1);
-
-    // Find the last '/'. If there is none, the parent is the cwd
-    // (`getcwd`) and the basename is the whole input.
-    char* slash = strrchr(tmp, '/');
-    const char* basename;
-    char parent_resolved[PATH_MAX];
-
-    if (slash == tmp) {
-        // Path is "/foo" — parent is "/", root is its own canonical form.
-        basename = slash + 1;
-        if (out_size < 2) return 0;
-        out[0] = '/'; out[1] = '\0';
-        if (snprintf(out, out_size, "/%s", basename) >= (int)out_size) return 0;
-        return 1;
-    }
-    if (slash) {
-        *slash = '\0';
-        basename = slash + 1;
-        if (!realpath(tmp, parent_resolved)) return 0;
-    } else {
-        // No slash → relative path. Parent is cwd.
-        basename = in;
-        if (!realpath(".", parent_resolved)) return 0;
-    }
-
-    if (snprintf(out, out_size, "%s/%s", parent_resolved, basename) >= (int)out_size) {
-        return 0;
-    }
-    return 1;
-}
+// For fs_* categories, the resource is matched where it leads, resolved
+// component by component (".." and symlinks) by aether_sandbox_path.h, the
+// same code the in-process checks use. A path that cannot be resolved (a
+// dangling symlink, a loop) is refused rather than matched as written.
+#include "aether_sandbox_path.h"
 
 // Pattern matching (same logic as Aether's in-process checker)
 static int pattern_match(const char* pat, const char* resource) {
@@ -174,8 +115,14 @@ static int check_grant(const char* category, const char* resource) {
     // is meaningful only for filesystem paths.
     char resolved[PATH_MAX];
     const char* match_target = resource;
-    if (category && strncmp(category, "fs_", 3) == 0 && resource &&
-        sandbox_resolve_fs_path(resource, resolved, sizeof(resolved))) {
+    if (category && strncmp(category, "fs_", 3) == 0 && resource) {
+        if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) {
+            if ((&_aether_sandbox_checker && _aether_sandbox_checker) || sandbox_active) {
+                log_deny(category, resource);
+                return 0;
+            }
+            return 1;
+        }
         match_target = resolved;
     }
 

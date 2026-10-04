@@ -52,6 +52,19 @@ main() {
     if e3 != "" { println("FAIL make_temp_file: ${e3}"); exit(1) }
     if fs.exists(tf1) == 0 { println("FAIL make_temp_file: ${tf1} not created"); exit(1) }
 
+    // Empty dir means the OS temp dir and empty prefix means "ae", as the
+    // functions document. The C side defaulted only NULL, so "" became a
+    // template at the filesystem root and both calls failed.
+    td0, e0 = fs.make_temp_dir("", "")
+    if e0 != "" { println("FAIL make_temp_dir(\"\", \"\"): ${e0}"); exit(1) }
+    if string.starts_with(td0, os.temp_dir()) != 1 { println("FAIL make_temp_dir(\"\", \"\"): ${td0} is not under ${os.temp_dir()}"); exit(1) }
+    if string.contains(td0, "ae") != 1 { println("FAIL make_temp_dir(\"\", \"\"): ${td0} lacks the ae prefix"); exit(1) }
+    tf0, ef0 = fs.make_temp_file("", "f-")
+    if ef0 != "" { println("FAIL make_temp_file(\"\", ...): ${ef0}"); exit(1) }
+    if fs.exists(tf0) == 0 { println("FAIL make_temp_file(\"\", ...): ${tf0} not created"); exit(1) }
+    _r0 = fs.remove_tree(td0)
+    _r1 = fs.delete(tf0)
+
     // --- find_ext / find_ext_excluding ---------------------------------------
     // A source-tree shape: prod + *Test / *Tests files.
     _fm = fs.mkdir_p("${base}/proj/deep")

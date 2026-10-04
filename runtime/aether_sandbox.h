@@ -21,10 +21,19 @@ typedef int (*aether_sandbox_check_fn)(const char* category, const char* resourc
 // Global: set by compiler-generated code when inside a sandbox block
 extern aether_sandbox_check_fn _aether_sandbox_checker;
 
+// The checker, with an fs path resolved to where it leads first (".." and
+// symlinks), so a grant for "/box/*" cannot be left through "/box/../x" or a
+// symlink in /box; an fs path that cannot be resolved is refused.
+int aether_sandbox_check_slow(const char* category, const char* resource);
+
+// A grant pattern as the checks compare it: an fs pattern's directory
+// resolved the same way; malloc'd.
+char* aether_sandbox_grant_pattern(const char* category, const char* pattern);
+
 // Check if an operation is allowed (returns 1 if no sandbox or if permitted)
 static inline int aether_sandbox_check(const char* category, const char* resource) {
     if (!_aether_sandbox_checker) return 1;  // no sandbox = allow all
-    return _aether_sandbox_checker(category, resource);
+    return aether_sandbox_check_slow(category, resource);
 }
 
 #else

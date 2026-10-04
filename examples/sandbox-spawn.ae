@@ -1,34 +1,14 @@
 // Spawn a sandboxed Python process — no temp files, no manual LD_PRELOAD
 // Aether writes grants to shared memory, forks, sets LD_PRELOAD, execs.
 
-import std.list
-
-// ---- Sandbox library ----
-
-add_perm(target: ptr, cat: string, pat: string) {
-    list.add(target, cat)
-    list.add(target, pat)
-}
-
-grant_all(_ctx: ptr) { add_perm(_ctx, "*", "*") }
-grant_tcp(_ctx: ptr, host: string) { add_perm(_ctx, "tcp", host) }
-grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
-grant_fs_write(_ctx: ptr, path: string) { add_perm(_ctx, "fs_write", path) }
-grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
-
-sandbox(name: string) {
-    perms = list.new()
-    println("sandbox: ${name}")
-    return perms
-}
+import std.sandbox
 
 // ---- Main ----
 
 main() {
     println("\x1b[1m=== Aether spawn_sandboxed Demo ===\x1b[0m\n")
 
-    worker = sandbox("python-worker") {
+    worker = sandbox.new("python-worker") {
         grant_env("HOME")
         grant_env("USER")
         grant_env("PATH")
@@ -48,5 +28,5 @@ main() {
     exit_code = spawn_sandboxed(worker, "python3", "tests/sandbox/sandbox-escape-test.py")
     println("\nPython exited with code: ${exit_code}")
 
-    list.free(worker)
+    sandbox.free(worker)
 }

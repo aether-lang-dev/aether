@@ -354,6 +354,9 @@ void emit_schema_tables(CodeGenerator* gen, ASTNode* program);
    position reference. */
 int is_c_callback(ASTNode* func);
 const char* c_callback_symbol(ASTNode* func);
+/* sandbox.enforce trusted calls (codegen.c, see analysis/sandbox_trust.h). */
+ASTNode* sandbox_trust_target(CodeGenerator* gen, const ASTNode* call);
+void sandbox_trust_wrapper_name(ASTNode* def, int site, char* out, size_t n);
 /* Whether a top-level function is emitted `static`. All three emit sites
    (definition, combined multi-clause definition, forward declaration) must
    agree or C rejects the file with "static declaration follows non-static

@@ -1,0 +1,9 @@
+import std.sandbox
+extern my_c_thing() -> int
+main() {
+    w = sandbox.new("w") {}
+    sandbox.enforce(w, my_c_thing) callback {
+        _ = my_c_thing()
+    }
+    sandbox.free(w)
+}

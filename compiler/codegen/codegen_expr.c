@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
 #include "../aether_error.h"
 #include <errno.h>
@@ -2924,6 +2925,8 @@ static int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
 /* Re-entrancy guard for the view wrap below: the node being wrapped is
  * generated once more through the ordinary path. */
 static const ASTNode* g_slice_view_wrapping = NULL;
+/* The enforce call whose site tag is being emitted (see AST_FUNCTION_CALL). */
+static const ASTNode* g_sandbox_site_wrapping = NULL;
 
 /* The block of a call's trailing DSL closure, or NULL. A closure the
  * function declares a `fn` parameter for, where the block sits, is an
@@ -4368,6 +4371,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_FUNCTION_CALL:
+            /* `sandbox.enforce(perms, foo) { ... }` with trusted names: tag the
+             * push the call is about to make with its site, so a trusted call
+             * in the block can find the level to drop back to. The args are
+             * evaluated after the tag is set, but only a push consumes it, and
+             * enforce's own push is the first one it reaches. */
+            if (gen->uses_sandbox && expr != g_sandbox_site_wrapping) {
+                int site = sandbox_trust_site_of_enforce(expr);
+                if (site) {
+                    const ASTNode* saved_site = g_sandbox_site_wrapping;
+                    g_sandbox_site_wrapping = expr;
+                    fprintf(gen->output, "(_aether_sandbox_pending_site = %d, ", site);
+                    generate_expression(gen, expr);
+                    fprintf(gen->output, ")");
+                    g_sandbox_site_wrapping = saved_site;
+                    break;
+                }
+            }
             if (expr != gen->trailing_stmt_call && emit_trailing_call_expression(gen, expr)) {
                 break;
             }
@@ -5813,6 +5833,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * free below. */
                     }
 
+                    /* A trusted call in an enforced block goes through its
+                     * wrapper (codegen.c emit_sandbox_trust_wrappers), which
+                     * has the same signature, so everything below that is
+                     * keyed on the callee still holds. */
+                    if (gen->uses_sandbox) {
+                        int tsite = sandbox_trust_site_of_call(expr);
+                        ASTNode* tdef = tsite ? sandbox_trust_target(gen, expr) : NULL;
+                        if (tdef) {
+                            sandbox_trust_wrapper_name(tdef, tsite, c_func_name, sizeof(c_func_name));
+                        }
+                    }
                     fprintf(gen->output, "%s(", c_func_name);
                     int arg_printed = 0;
                     // Auto-inject builder context for builder functions

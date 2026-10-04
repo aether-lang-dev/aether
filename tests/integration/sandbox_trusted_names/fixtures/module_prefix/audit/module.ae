@@ -1,0 +1,15 @@
+// A service module the program trusts as a whole (`sandbox.enforce(w, audit)`).
+import std.os
+
+exports(secret, also_secret)
+
+// Reads a variable the sandbox does not grant.
+secret() -> string {
+    v = os.getenv("AE_TRUST_SECRET")
+    if v == null { return "hidden" }
+    return v
+}
+
+also_secret() -> string {
+    return secret()
+}

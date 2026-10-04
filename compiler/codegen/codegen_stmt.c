@@ -7784,6 +7784,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
             print_line(gen, "{");
             indent(gen);
+            /* A panic that unwinds out of an enforced block (or out of a
+             * trusted call inside one) skips the code that pops the sandbox
+             * or restores its depth. Catching it puts the depth back to what
+             * it was here, so a catch inside the block stays sandboxed and
+             * one outside it is no longer held to the block's grants. */
+            if (gen->uses_sandbox) {
+                print_line(gen, "int _aether_try_sbx_%d = _aether_sandbox_depth;", uid);
+            }
             print_line(gen, "AetherJmpFrame* _aether_try_%d = aether_try_push();", uid);
             print_line(gen, "if (AETHER_SIGSETJMP(_aether_try_%d->buf, 1) == 0) {", uid);
             indent(gen);
@@ -7795,6 +7803,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             unindent(gen);
             print_line(gen, "} else {");
             indent(gen);
+            if (gen->uses_sandbox) {
+                print_line(gen, "_aether_sandbox_depth = _aether_try_sbx_%d;", uid);
+            }
             print_line(gen, "const char* %s = _aether_try_%d->reason ? _aether_try_%d->reason : \"panic\";",
                       catch_clause->value, uid, uid);
             if (catch_binding_can_own(gen, catch_clause->value)) {

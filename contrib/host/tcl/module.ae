@@ -8,7 +8,7 @@
 // Usage:
 //   import contrib.host.tcl
 //
-//   worker = sandbox("worker") {
+//   worker = sandbox.new("worker") {
 //       grant_env("HOME")
 //       grant_fs_read("/etc/*")
 //   }

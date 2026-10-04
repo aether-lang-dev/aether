@@ -1,0 +1,17 @@
+// A trusted module covers every call into it written in the block.
+import std.sandbox
+import std.os
+import audit
+
+main() {
+    env_err = os.setenv("AE_TRUST_SECRET", "s3cret")
+    if env_err != "" { println("cannot set the test variable: ${env_err}") }
+    w = sandbox.new("nothing") {}
+    sandbox.enforce(w, audit) callback {
+        direct = os.getenv("AE_TRUST_SECRET")
+        println("direct: ${direct == null}")
+        println("audit.secret: ${audit.secret()}")
+        println("audit.also_secret: ${audit.also_secret()}")
+    }
+    sandbox.free(w)
+}

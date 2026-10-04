@@ -3,6 +3,7 @@
 #include <string.h>
 #include "typechecker.h"
 #include "slice_coerce.h"
+#include "sandbox_trust.h"
 #include "hoist.h"
 #include "type_inference.h"
 #include "../aether_strmap.h"
@@ -3765,6 +3766,12 @@ int typecheck_program(ASTNode* program) {
     namespace_count = 0;  // Reset imported namespaces
     user_explicit_namespace_count = 0;  // Reset user-explicit namespaces (issue #243)
     // (#878: per-module selective-import filter removed — nothing to reset)
+
+    // Trusted names in `sandbox.enforce(perms, foo, bar) { ... }`: validate
+    // them, mark the calls they cover, and reduce each such call to the
+    // plain enforce(perms, block) the rest of checking sees. Its errors go
+    // through type_error, so they count like any other.
+    sandbox_trust_pass(program);
 
     // #480: resolve `type X = distinct Y` placeholders into distinct Types
     // across the whole AST before any type-checking or inference runs.
