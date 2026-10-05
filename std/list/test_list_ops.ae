@@ -119,6 +119,7 @@ main() {
             spec.assert_true(same_ptr(item, null),
                 "...but hands back null, so the pointer must be checked")
             neg, nerr = list.get(l, -1)
+            spec.assert_ok(nerr, "a negative index reports success too")
             spec.assert_true(same_ptr(neg, null),
                 "a negative index behaves the same way")
             list.list_free(l)
