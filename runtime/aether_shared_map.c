@@ -191,7 +191,9 @@ void aether_shared_map_freeze_inputs_by_token(uint64_t token) {
 
 // --- Cross-process shared memory (Linux/macOS only) ---
 // Format: frozen_count(4 bytes) + entries as key\0value\0...key\0value\0\0
-#if defined(__linux__) || defined(__APPLE__)
+// Android's bionic has no POSIX shared memory (shm_open), so it takes the
+// stubs below, as Windows does.
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__APPLE__)
 
 char* aether_shared_map_to_shm(AetherSharedMap* map) {
     if (!map) return NULL;

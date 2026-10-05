@@ -369,11 +369,54 @@ ifeq ($(WINDOWS),1)
   # cross-build + link of compiler/ae/stdlib.
 endif
 
+# ---------------------------------------------------------------------------
+# Android cross-build (ANDROID=1) — build the ae/aetherc toolchain FOR Android
+# (bionic libc) from a Linux or macOS host, with the Android NDK's clang. Zig
+# can name the target but ships no bionic, so the NDK is the toolchain here;
+# GitHub's ubuntu runners carry one ($ANDROID_NDK_LATEST_HOME).
+#
+# Required input:
+#   ANDROID_NDK   an Android NDK (r26+)       e.g. .../android-ndk-r27c
+# Optional:
+#   ANDROID_CPU   aarch64 (default)
+#   ANDROID_API   minimum API level, 29 (Android 10) by default
+#
+# Capability-lean like the other cross builds, for the same reason: the host's
+# pkg-config would report the host's libraries. The optional Tier-2 libs are
+# off (std ships those features as their "unavailable" stubs); PCRE2 is the
+# vendored copy, so std.regex survives. The result is built, not tested: no
+# Android runner runs the suite.
+ANDROID_CPU ?= aarch64
+ANDROID_API ?= 29
+ifeq ($(ANDROID),1)
+  ifeq ($(ANDROID_NDK),)
+    $(error ANDROID=1 needs ANDROID_NDK=<path to an Android NDK>)
+  endif
+  ifeq ($(shell uname -s),Darwin)
+    ANDROID_NDK_HOST := darwin-x86_64
+  else
+    ANDROID_NDK_HOST := linux-x86_64
+  endif
+  ANDROID_NDK_BIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(ANDROID_NDK_HOST)/bin
+  CC := $(ANDROID_NDK_BIN)/$(ANDROID_CPU)-linux-android$(ANDROID_API)-clang
+  AR := $(ANDROID_NDK_BIN)/llvm-ar
+  RANLIB := $(ANDROID_NDK_BIN)/llvm-ranlib
+  OPENSSL := 0
+  ZLIB := 0
+  NGHTTP2 := 0
+  YAML := 0
+  BROTLI := 0
+  ZSTD := 0
+  PCRE2 := vendored
+endif
+
 # Objects and archives of different targets do not mix (a native link against
 # PE objects dies deep in the link with confusing errors), so each target
 # builds into its own tree, named by BUILD_TARGET_ID.
 ifeq ($(WINDOWS),1)
   BUILD_TARGET_ID := windows-$(WINDOWS_CPU)
+else ifeq ($(ANDROID),1)
+  BUILD_TARGET_ID := android-$(ANDROID_CPU)
 else ifeq ($(FREEBSD),1)
   BUILD_TARGET_ID := freebsd-$(FREEBSD_CPU)
 else
@@ -718,6 +761,9 @@ AUDIO_LDFLAGS :=
 # library 'pthread'"). Windows folds audio into WIN_LINK_LIBS either way.
 ifeq ($(WINDOWS),1)
   AUDIO_LDFLAGS :=
+else ifeq ($(ANDROID),1)
+  # bionic has threads in libc (no separate libpthread to link).
+  AUDIO_LDFLAGS := -ldl -lm
 else ifeq ($(shell uname -s),Linux)
   AUDIO_LDFLAGS := -lpthread -ldl -lm
 else ifeq ($(shell uname -s),FreeBSD)

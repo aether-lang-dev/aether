@@ -364,6 +364,24 @@ jobs:
         file $X/aetherc $X/ae
         file $X/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
 
+  # Android cross-compile gate: the release builds an android-aarch64
+  # toolchain with the NDK (Makefile ANDROID=1); this catches a bionic break
+  # (no shm_open, no pthread_setaffinity_np, ...) on the PR, not at release.
+  ci-android-cross:
+    name: Android / cross-compile (aarch64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cross-build for Android (ANDROID=1)
+      run: |
+        NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+        test -d "$NDK" || { echo "no Android NDK on this runner"; exit 1; }
+        make compiler ae stdlib ANDROID=1 ANDROID_NDK="$NDK"
+        X=build/.alien/android-aarch64
+        file $X/aetherc $X/ae
+        file $X/ae | grep -q '/system/bin/linker64' || { echo "ae is not an Android binary"; exit 1; }
+
   # ============================================================
   # FreeBSD native build + test (#402)
   # Scoped to `make test`; the .ae suites would rebuild through the

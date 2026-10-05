@@ -596,7 +596,13 @@ static void pin_to_core(int core_id) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
+#if defined(__ANDROID__)
+    // bionic has no pthread_setaffinity_np; sched_setaffinity on the calling
+    // thread's own id (0) is the same request.
+    sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+#else
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#endif
 #elif defined(__APPLE__)
     // macOS uses thread affinity tags - threads with same tag tend to run on same core
     // This is a hint to the scheduler, not a hard binding (macOS design philosophy)

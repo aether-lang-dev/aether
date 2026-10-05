@@ -5,7 +5,9 @@
 // latter for the kernel-level fence on clone/clone3/fork/vfork).
 // Other platforms get a stub that returns -1 with a clear message.
 
-#if defined(__linux__)
+// Android: bionic has no shm_open, and an app has no LD_PRELOAD to fence;
+// it takes the stub in spawn_sandboxed_stub.c.
+#if defined(__linux__) && !defined(__ANDROID__)
 
 #include <stdio.h>
 #include <stdlib.h>
