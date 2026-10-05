@@ -469,12 +469,9 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     sh .github/scripts/trim_contrib_sources.sh "$SRC_DIR/contrib" --keep-host-bridges 2>/dev/null || true
     # Trim install-noise that confuses external consumers
     # (aetherBuild and the like). runtime/examples/ holds standalone
-    # benches with their own main() — never link-suitable.
-    # runtime/io/ is an orphaned poller hub; the active poller
-    # variants live under runtime/scheduler/. Both trip naive
-    # `find runtime -name '*.c'` consumers.
+    # benches with their own main(): never link-suitable, and it trips
+    # naive `find runtime -name '*.c'` consumers.
     rm -rf "$SRC_DIR/runtime/examples" 2>/dev/null || true
-    rm -rf "$SRC_DIR/runtime/io"       2>/dev/null || true
     # Authoritative MANIFEST listing link-suitable .c files (#329).
     # Downstream consumers (aetherBuild's aeb-link et al.) read this
     # instead of trying to enumerate via `find` — the latter pulls

@@ -2473,7 +2473,7 @@ contrib:
 
 # install-contrib — install the .a archives built by `make contrib`
 # plus each module's module.ae and headers. Trims test/example noise
-# the same way `install:` trims runtime/examples and runtime/io.
+# the same way `install:` trims runtime/examples.
 #
 # Layout:
 #   $(PREFIX)/lib/aether/libaether_<module>.a       — link target

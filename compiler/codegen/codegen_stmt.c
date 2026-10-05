@@ -5065,8 +5065,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         int escaped = is_escaped_string_var(gen, var->value);
                         int new_heap = pos_is_string ? pos_is_heap : 0;
                         if (escaped) {
-                            fprintf(gen->output, "%s = _tup%d._%d;\n",
-                                    var->value, tmp_id, j);
+                            /* The old value is not freed (a recipient may
+                             * still hold it), but the tracker still records
+                             * whether the NEW value is owned: a struct field
+                             * store moves this flag into the field's tracker,
+                             * and a stale 0 there left a destructured @heap
+                             * string owned by nobody (#2366). The escaped
+                             * var's own scope-exit free stays suppressed, as
+                             * on the declaration path. */
+                            fprintf(gen->output, "%s = _tup%d._%d; _heap_%s = %d;\n",
+                                    var->value, tmp_id, j, var->value, new_heap);
                         } else {
                             fprintf(gen->output,
                                 "{ const char* _tmp_old = %s; "

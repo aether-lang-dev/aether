@@ -14,6 +14,34 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.780.0]
+
+### Fixed
+
+- **A heap string destructured from a tuple and stored in a struct field is
+  owned by the field.** When the destructured local escaped into the field,
+  the destructure skipped recording that it owned the new value. The field
+  store then moved a 0 into the field's `_heap_` tracker, so the struct's
+  destructor never freed the string and nothing else did. The escaped path
+  now records the value's ownership, as a plain declaration already did
+  (#2366).
+- **`contrib/host/aether` and `contrib/host/factor` READMEs describe their
+  current specs.** Their Testing sections still pointed at
+  `tests/integration/host_aether/` and `host_factor/`, which the co-located
+  `test_host_aether.ae` and `test_host_factor.ae` replaced.
+- **`cbor.diagnose` is linear in the size of its output.** Arrays and maps
+  concatenated each item onto the text so far, re-copying it every time.
+  They now build into one `strbuilder`. A 40,000-item array diagnoses in
+  4 ms instead of 81 ms, to the same text.
+- **`AGENTS.md` no longer sends agents to `docs/next-steps.md`.** That
+  roadmap was removed (the issue tracker owns scheduling), but the
+  orientation file still told agents to check it before speccing a stdlib
+  addition. It now points at the open issues and the shipped `std/` and
+  `contrib/` trees.
+- **`runtime/io/` is no longer described as trimmed from installs.** The
+  directory was deleted as dead code; `docs/install-layout.md`,
+  `install.sh` and the Makefile still described or removed it.
+
 ## [0.779.0]
 
 ### Added

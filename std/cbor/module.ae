@@ -6,6 +6,7 @@
 
 import std.list
 import std.string
+import std.strbuilder
 import std.bytes
 import std.mem
 import std.encoding
@@ -1226,39 +1227,44 @@ to_diagnose_string(cv: ptr) -> string {
         child_str = to_diagnose_string(cv_val.tag_child)
         return string.concat(string.from_long(cv_val.tag_val), string.concat("(", string.concat(child_str, ")")))
     }
+    // Arrays and maps build into one builder: concatenating each item onto
+    // the text so far re-copied that text every time, quadratic in the
+    // length of the output.
     if cv_val.type == CBOR_ARRAY {
         n = list.size(cv_val.list_val)
         if n == 0 { return "[]" }
-        s = "["
+        b = strbuilder.new(16 * n)
+        strbuilder.append(b, "[")
         i = 0
         while i < n {
             item, _ = list.get(cv_val.list_val, i)
             item_str = to_diagnose_string(item)
-            if i > 0 {
-                s = string.concat(s, ", ")
-            }
-            s = string.concat(s, item_str)
+            if i > 0 { strbuilder.append(b, ", ") }
+            strbuilder.append(b, item_str)
             i = i + 1
         }
-        return string.concat(s, "]")
+        strbuilder.append(b, "]")
+        return strbuilder.finish(b)
     }
     if cv_val.type == CBOR_MAP {
         n = list.size(cv_val.map_keys)
         if n == 0 { return "{}" }
-        s = "{"
+        b = strbuilder.new(32 * n)
+        strbuilder.append(b, "{")
         i = 0
         while i < n {
             k_ptr, _ = list.get(cv_val.map_keys, i)
             v_ptr, _ = list.get(cv_val.map_values, i)
             k_str = to_diagnose_string(k_ptr)
             v_str = to_diagnose_string(v_ptr)
-            if i > 0 {
-                s = string.concat(s, ", ")
-            }
-            s = string.concat(s, string.concat(k_str, string.concat(": ", v_str)))
+            if i > 0 { strbuilder.append(b, ", ") }
+            strbuilder.append(b, k_str)
+            strbuilder.append(b, ": ")
+            strbuilder.append(b, v_str)
             i = i + 1
         }
-        return string.concat(s, "}")
+        strbuilder.append(b, "}")
+        return strbuilder.finish(b)
     }
     return ""
 }

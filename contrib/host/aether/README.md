@@ -104,30 +104,23 @@ binaries bypass LD_PRELOAD).
 
 ## Testing
 
-The end-to-end test lives at
-[`tests/integration/host_aether/`](../../../tests/integration/host_aether/).
-Unlike the VM-host tests (which embed one interpreter and call into it),
-this one exercises Aether-hosting-Aether: a host program compiles a
-*second* Aether program to a native binary and runs it as a subprocess.
-So there are two `.ae` files —
-[`uses_aether.ae`](../../../tests/integration/host_aether/uses_aether.ae)
-is the host/driver, and
-[`child.ae`](../../../tests/integration/host_aether/child.ae) is the
-trivial child it compiles and spawns (it just prints a sentinel line).
-The driver calls `aether_host_run_script(child)` on the **unsandboxed**
-rung (the `run_sandboxed` / `*_with_map` paths need
-`libaether_sandbox.so` + LD_PRELOAD, so they stay out of the portable CI
-path), and asserts the child exited `0`.
+The spec is [`test_host_aether.ae`](test_host_aether.ae), beside the bridge,
+written against `std.spec`. Unlike the VM-host specs, which embed one
+interpreter and call into it, this one exercises Aether hosting Aether: it
+writes a trivial child `.ae` under a PID-scoped temp directory, has the bridge
+compile it to a native binary through the `ae` driver, and runs it as a
+subprocess. It checks four outcomes on the **unsandboxed** rung: the child
+compiles and runs, a non-zero child exit code comes back, a child that fails
+to compile is reported, and a missing script path is reported. The
+`run_sandboxed` and `*_with_map` paths need `libaether_sandbox.so` and
+LD_PRELOAD, so they stay out of the portable spec.
 
-The runner is
-[`test_host_aether.sh`](../../../tests/integration/host_aether/test_host_aether.sh).
-It **SKIPs** (never fails) in two cases: when `build/ae` hasn't been
-built, and when the platform isn't Linux/macOS (the bridge `.c` compiles
-to an empty stub elsewhere, so there's nothing to link).  Where it does
-run, it compiles the bridge into `build/contrib/`, points
-`AETHER_AE_PATH` at the freshly built `ae`, sets `AETHER_HOST_CHILD` to
-`child.ae`, runs the driver, and greps stdout for the
-`PASS: aether host compile + run round-trip` line.
+The contrib check's discovery phase builds `libaether_host_aether.a` on
+demand. The spec points `AETHER_AE_PATH` at `build/ae` when it is unset, so a
+bare `ae run contrib/host/aether/test_host_aether.ae` works from the
+repository root. Its cases **skip** (never fail) when there is no `ae` driver
+to shell out to. On platforms other than Linux and macOS the bridge compiles
+to an empty stub, and the discovery phase skips it.
 
 ## TODO
 
