@@ -116,9 +116,9 @@ var current_fw: ptr = null
 // ---------------------------------------------------------------------------
 
 // Build a fresh framework context. Holds the test-run counters
-// (passed / failed) and the indentation depth (depth) as refs. The
-// caller threads the returned ptr through every spec.* call; the suite
-// contexts created by describe() carry it as an inner field.
+// (passed / failed / skipped) as refs. The caller threads the returned
+// ptr through every spec.* call; the suite contexts created by
+// describe() carry it as an inner field.
 //
 // Also stamps the run-start timestamp + a per-it() record list +
 // a "current_it" pointer-cell. These exist whether or not structured
@@ -131,7 +131,6 @@ init() -> ptr {
     map.put_raw(fw, "passed", ref(0))
     map.put_raw(fw, "failed", ref(0))
     map.put_raw(fw, "skipped", ref(0))
-    map.put_raw(fw, "depth", ref(0))
     // Per-it() telemetry (for the structured report path).
     // "current_it" stores the in-flight it-record map directly (or null
     // when no it() is running) — bypasses ref cells because ref_get
@@ -162,7 +161,10 @@ init() -> ptr {
 //   "befores"  — list of boxed closures (run before each it())
 //   "afters"   — list of boxed closures (run after each it())
 //   "fw"       — back-pointer to the framework context (so it / assertions
-//                inside the trailing block can find passed/failed/depth)
+//                inside the trailing block can find passed/failed)
+//   "parent"   — the enclosing suite, or null at top level; how deep the
+//                suite is nested, and so how far its lines are indented,
+//                is read off this chain (_depth_of)
 // ---------------------------------------------------------------------------
 
 _suite_new(name: string, fw: ptr, parent: ptr) -> ptr {
@@ -175,6 +177,23 @@ _suite_new(name: string, fw: ptr, parent: ptr) -> ptr {
     sl = map.get_raw(fw, "suites")
     list.add(sl, s)
     return s
+}
+
+// How many describe() blocks enclose `ctx`: 0 for the framework context
+// (top level), 1 for a top-level suite, and one more for each suite it is
+// nested in. Read off the parent chain rather than kept in a counter: a
+// describe's trailing block runs after describe() has returned, so no
+// counter it bumped could be wound back when the block ends, and every
+// later sibling printed one level deeper (#2380).
+_depth_of(ctx: ptr) -> int {
+    if map.has(ctx, "fw") == 0 { return 0 }
+    d = 1
+    p = map.get_raw(ctx, "parent")
+    while p != null {
+        d = d + 1
+        p = map.get_raw(p, "parent")
+    }
+    return d
 }
 
 // Return the framework context for a given _ctx (which may itself be
@@ -196,11 +215,9 @@ _fw_of(ctx: ptr) -> ptr {
 
 describe(_ctx: ptr, description: string) -> ptr {
     fw = _fw_of(_ctx)
-    depth_ref = map.get_raw(fw, "depth")
-    d = ref_get(depth_ref)
+    d = _depth_of(_ctx)
     for (i = 0; i < d; i++) { print("  ") }
     println(description)
-    ref_set(depth_ref, d + 1)
 
     parent = null
     if map.has(_ctx, "fw") == 1 {
@@ -299,10 +316,9 @@ it(_ctx: ptr, description: string, test_fn: fn) {
 _record_skip(_ctx: ptr, description: string, reason: string) {
     fw = _fw_of(_ctx)
     skipped_ref = map.get_raw(fw, "skipped")
-    depth_ref = map.get_raw(fw, "depth")
     its_list = map.get_raw(fw, "its")
 
-    d = ref_get(depth_ref)
+    d = _depth_of(_ctx)
     for (i = 0; i < d; i++) { print("  ") }
     if string.equals(reason, "") == 1 {
         print("\x1b[33m  ⊘\x1b[0m ${description}\n")
@@ -427,7 +443,6 @@ _it_end(_ctx: ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns
     fw = _fw_of(_ctx)
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
-    depth_ref = map.get_raw(fw, "depth")
     its_list = map.get_raw(fw, "its")
     t_end_ns = os.now_monotonic_ns()
     elapsed_ns = t_end_ns - t_start_ns
@@ -449,7 +464,7 @@ _it_end(_ctx: ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns
     map.put_raw(fw, "current_it", null)
 
     // Indent + result line
-    d = ref_get(depth_ref)
+    d = _depth_of(_ctx)
     for (i = 0; i < d; i++) { print("  ") }
     is_fail = 0
     if ref_get(failed_ref) == old_failed {
@@ -1028,7 +1043,6 @@ run_summary(fw: ptr) -> int {
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
     skipped_ref = map.get_raw(fw, "skipped")
-    depth_ref = map.get_raw(fw, "depth")
     passed = ref_get(passed_ref)
     failed = ref_get(failed_ref)
     skipped = ref_get(skipped_ref)
@@ -1059,7 +1073,6 @@ run_summary(fw: ptr) -> int {
     ref_free(passed_ref)
     ref_free(failed_ref)
     ref_free(skipped_ref)
-    ref_free(depth_ref)
     _teardown(fw)
 
     // Return the verdict on BOTH paths; do not exit. Exiting on failure

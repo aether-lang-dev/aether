@@ -1,0 +1,36 @@
+// #2366: a heap string destructured from a tuple and then stored in a struct
+// field must be owned by the field. The destructured local escapes into the
+// field, which suppresses the local's own frees; the field store moves the
+// local's tracker into the field's, so the tracker has to say the value is
+// owned or the struct's destructor never frees it.
+import std.string
+
+struct Clip {
+    data: string
+    length: int
+}
+
+// Position 0 is a fresh heap string, position 1 a plain int.
+read_clip(n: int) -> (string, int) {
+    s = string.copy("clip-${n}")
+    return (s, n)
+}
+
+keep(n: int) -> *Clip {
+    content, length = read_clip(n)
+    c = heap.new(Clip)
+    c.data = content
+    c.length = length
+    return c
+}
+
+main() {
+    i = 0
+    while i < 3 {
+        c = keep(i)
+        println(c.data)
+        heap.free(c)
+        i = i + 1
+    }
+    println("done")
+}

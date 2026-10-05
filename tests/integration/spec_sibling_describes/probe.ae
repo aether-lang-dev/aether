@@ -1,0 +1,21 @@
+// Fixture for #2380: sibling describe blocks print at the same depth.
+// Three top-level siblings, a suite nested in the second, and a skip in
+// the third. The harness reads the indentation of each line.
+import std.spec
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "first") {
+        spec.it("a") callback { spec.assert_true(1, "a") }
+    }
+    spec.describe(fw, "second") {
+        spec.it("b") callback { spec.assert_true(1, "b") }
+        spec.describe("inner") {
+            spec.it("c") callback { spec.assert_true(1, "c") }
+        }
+    }
+    spec.describe(fw, "third") {
+        spec.it_when(0, "d", "off") callback { spec.assert_true(1, "d") }
+    }
+    return spec.run_summary(fw)
+}

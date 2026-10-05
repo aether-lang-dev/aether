@@ -220,20 +220,23 @@ experiment:
 
 ## Testing
 
-The dedicated end-to-end test lives at
-[`tests/integration/host_factor/`](../../../tests/integration/host_factor/) —
-[`uses_factor.ae`](../../../tests/integration/host_factor/uses_factor.ae) is the
-driver (the fib(10)=55 set-piece: a Factor script defines a recursive `fib`,
-`eval` captures its printed output, and a second script writes the first ten
-terms into the shared namespace under `fib0..fib9` for Aether to read back as a
-k-v map — also pinning the stack-effect error contract, a read-mutate-write
-round-trip, and the absent-key `""` shape), and
-[`test_host_factor.sh`](../../../tests/integration/host_factor/test_host_factor.sh)
-is the runner: it builds the factor host `.a` (skipped by the default contrib
-build), runs the driver, and greps for `PASS`. Because this host needs the fork,
-it **SKIPs** (never fails) when `$AETHER_FACTOR_SONAME` / `$AETHER_FACTOR_IMAGE`
-are unset or don't point at real files — CI machines without the runtime no-op
-cleanly.
+The spec is [`test_host_factor.ae`](test_host_factor.ae), beside the bridge,
+written against `std.spec`. It covers:
+- the fib(10)=55 set-piece: a Factor script defines a recursive `fib`, and
+  `eval` captures its printed output;
+- the stack-effect error contract;
+- a populated k-v map carried across calls, with a second script writing the
+  first ten terms under `fib0..fib9` for Aether to read back;
+- a read-mutate-write round trip on a shared key;
+- a string value round trip, and `""` for an absent key;
+- `run` returning 0 on success.
+
+Each is its own case, so one failure does not hide the rest. The contrib
+check's discovery phase builds the factor host `.a` on demand. Because this
+host needs the fork, every case **skips** (never fails) when
+`$AETHER_FACTOR_SONAME` / `$AETHER_FACTOR_IMAGE` are unset or don't point at
+real files, so CI machines without the runtime report the skip rather than
+pass silently.
 
 Factor is also covered by the cross-host shared-map test
 [`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh),
