@@ -1,0 +1,24 @@
+// Fixture for test_spec_describe_indent.sh (#2380): the printed tree of
+// sibling and nested describes. Every case passes or skips; what is under
+// test is the indentation, which the shell test compares exactly.
+import std.spec
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "first") {
+        spec.it("a") callback { spec.assert_true(1, "a") }
+    }
+    spec.describe(fw, "second") {
+        spec.it("b") callback { spec.assert_true(1, "b") }
+        spec.describe("nested") {
+            spec.it("c") callback { spec.assert_true(1, "c") }
+            spec.it_when(0, "d", "not here") callback { spec.assert_true(1, "d") }
+        }
+        spec.it("e") callback { spec.assert_true(1, "e") }
+    }
+    spec.describe(fw, "third") {
+        spec.it_when(0, "f", "not here") callback { spec.assert_true(1, "f") }
+        spec.it("g") callback { spec.assert_true(1, "g") }
+    }
+    return spec.run_summary(fw)
+}
