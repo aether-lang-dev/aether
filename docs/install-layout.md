@@ -128,11 +128,6 @@ that aren't link-suitable:
 - `runtime/examples/` standalone benches with their own `main()`.
   Compiling these into a downstream link would produce duplicate-
   `main` link errors.
-- `runtime/io/` orphaned poller dispatch hub plus four platform
-  variants from an earlier design iteration. The active poller
-  variants live under `runtime/scheduler/aether_io_poller_*.c`;
-  the orphaned dir would produce missing-typedef errors if a
-  downstream tool tried to compile it.
 - `contrib/<X>/{tests,benchmarks,example_*.ae,test_*.sh,build.sh,
   ci.sh,*.m}`, contrib source-tree noise. `.c` files are also
   dropped EXCEPT the host-language bridges at

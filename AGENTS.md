@@ -104,11 +104,10 @@ plays that role), no interfaces.
   touching `std.cryptography` or anything comparing a secret. Its point is
   that these failures **pass their tests**: a handshake completes, a
   signature verifies, and the key is still disclosed.
-- `docs/next-steps.md` roadmap, in priority order. Check it before
-  speccing a new stdlib addition, but treat its "done" ticks as
-  authoritative over its priority labels, the `std.fs` completeness
-  bundle (`fs.copy` / `fs.move` / `fs.chmod` / `fs.symlink` /
-  `fs.realpath`) has shipped, for instance.
+- The issue tracker owns the roadmap: before speccing a new stdlib
+  addition, search the open issues
+  (`gh issue list -R aether-lang-dev/aether --search <topic>`) and the
+  `std/` and `contrib/` trees, which are what has shipped.
 - `std/<module>/module.ae` the Aether-facing surface. Raw externs
   end in `_raw`; Go-style wrappers return `(value, err)` tuples.
 - `std/<module>/aether_<module>.c` the C runtime behind the externs.
