@@ -640,6 +640,15 @@ static int is_local_var(ASTNode* block, const char* name);
 static int is_closure_param(ASTNode* closure, const char* name);
 static ASTNode* closure_body_block(ASTNode* closure);
 
+/* `_` is the discard binding (`_ = f()`, `a, _ = g()`): it names no storage,
+ * so it is never a free variable of a closure. Each `_ = ...` reads like a
+ * declaration of `_`, so without this a closure nested in another closure
+ * that also discards treated the inner `_ = ...` as a write through to the
+ * outer's `_`, captured it, and emitted C that referenced an undeclared `_`. */
+static int is_discard_name(const char* name) {
+    return name && name[0] == '_' && name[1] == '\0';
+}
+
 static void collect_ident_append(const char* name, char*** names, int* count, int* cap) {
     for (int i = 0; i < *count; i++) {
         if (strcmp((*names)[i], name) == 0) return;
@@ -1386,7 +1395,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         int cap_count = 0, cap_cap = 0;
         for (int i = 0; i < id_count; i++) {
             int is_cap = 0;
-            if (!is_closure_param(node, all_ids[i]) &&
+            if (!is_discard_name(all_ids[i]) &&
+                !is_closure_param(node, all_ids[i]) &&
                 !is_builtin_name(all_ids[i]) &&
                 !is_local_var(body, all_ids[i])) {
                 if (enclosing_func) {
@@ -1437,8 +1447,9 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                     if (strcmp(captures[k], writes[i]) == 0) { already = 1; break; }
                 }
                 if (already) { free(writes[i]); continue; }
-                // Skip closure params / builtins.
-                if (is_closure_param(node, writes[i]) || is_builtin_name(writes[i])) {
+                // Skip the discard `_`, closure params and builtins.
+                if (is_discard_name(writes[i]) ||
+                    is_closure_param(node, writes[i]) || is_builtin_name(writes[i])) {
                     free(writes[i]);
                     continue;
                 }
@@ -1781,6 +1792,7 @@ int is_promoted_capture(CodeGenerator* gen, const char* name) {
 
 // Add `name` to closure ci's capture list if not already present.
 static void add_capture(CodeGenerator* gen, int ci, const char* name) {
+    if (is_discard_name(name)) return;
     for (int i = 0; i < gen->closures[ci].capture_count; i++) {
         if (strcmp(gen->closures[ci].captures[i], name) == 0) return;
     }

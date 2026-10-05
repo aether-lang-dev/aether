@@ -1,0 +1,93 @@
+// The discard `_` inside a nested closure was captured as a variable named `_`.
+//
+// Every `_ = f()` (and every `_` slot of `a, _ = g()`) reads like a
+// declaration of `_`. So when a closure that discards sits inside another
+// closure that also discards, the inner `_ = ...` looked like a write through
+// to the enclosing closure's `_`: the inner closure captured `_`, and the
+// enclosing closure's C built the inner env from a `_` that was never
+// declared -- "use of undeclared identifier '_'" from the C compiler.
+// aether-ui's tests/state_batch hit it as nested `ui_batch() callback { ... }`
+// blocks each doing `_ = ui_set_s(...)`. Top level and a single closure were
+// fine.
+//
+// `_` names no storage, so it is never a capture at any depth. The real
+// captures alongside it (`base`, `a`, `p`, `total`) must keep working, and
+// each discarded call must still run once.
+
+extern exit(code: int)
+
+var calls = 0
+var bad = 0
+
+f(h: int) -> int {
+    calls = calls + h
+    return h
+}
+g() -> (int, int) { return 10, 20 }
+batch(body: fn) { body() }
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("MISMATCH: ${label} got=${got} want=${want}")
+        bad = bad + 1
+    }
+}
+
+// A trailing-block closure inside another, both discarding.
+nested_trailing() {
+    base = 1
+    total = 0
+    batch() callback {
+        _ = f(base)
+        a, _ = g()
+        batch() callback {
+            _ = f(base)
+            x, _ = g()
+            _, y = g()
+            total = total + x + y + a
+        }
+    }
+    check("nested trailing: real captures", total, 40)
+}
+
+// A `||` closure built and called inside another `||` closure.
+closure_in_closure() {
+    base = 2
+    total = 0
+    outer = || {
+        _ = f(base)
+        p, _ = g()
+        inner = || {
+            _ = f(base)
+            q, _ = g()
+            total = total + p + q
+        }
+        call(inner)
+    }
+    call(outer)
+    check("closure in closure: real captures", total, 20)
+}
+
+// Only the inner closure discards; the outer has no `_` of its own.
+inner_only() {
+    total = 0
+    batch() callback {
+        batch() callback {
+            _ = f(3)
+            _, b = g()
+            total = total + b
+        }
+    }
+    check("inner only: real capture", total, 20)
+}
+
+main() {
+    _ = f(0)
+    nested_trailing()
+    closure_in_closure()
+    inner_only()
+    // 1 + 1 (nested_trailing) + 2 + 2 (closure_in_closure) + 3 (inner_only)
+    check("every discarded call ran once", calls, 9)
+    if bad != 0 { exit(1) }
+    println("ok")
+}
