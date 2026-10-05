@@ -213,6 +213,27 @@ make test-valgrind
 make test-asan
 ```
 
+### Prove the test can fail
+
+A test that has never failed has not been shown to work. A green run proves
+the test ran, not that it would notice the bug.
+
+- **A bug-fix test must fail against the unfixed code.** Revert the fix
+  locally (or `git stash` the source change), rebuild, run the new test, and
+  watch it fail with the symptom from the issue. Then restore the fix. Say so
+  in one line of the PR description: "fails on main with ..., passes with the
+  fix."
+- **Logic changes in a std module: run the mutation tester on it.**
+  `ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae>` makes
+  small semantic changes to the subject (`>=` to `<`, `==` to `!=`, a string
+  literal to empty) and reruns the suite; see `docs/mutation-testing.md`.
+  Add tests that kill the survivors on the lines you changed, or say in the
+  PR why a survivor is acceptable (an equivalent mutant, a cosmetic path).
+- **Safety properties get this deliberately.** In crypto, TLS,
+  authentication and the sandbox, remove the guard and confirm a test
+  notices. `docs/writing-security-sensitive-code.md` has the review
+  checklist for crypto, TLS and authentication changes.
+
 ### Aether-level tests (`std.spec` + `ae test`)
 
 The `TEST(...)` macros above are the C unit layer. Tests written *in

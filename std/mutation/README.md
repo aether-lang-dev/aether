@@ -8,25 +8,31 @@ subject — `>=` to `<`, `==` to `!=`, a string literal to empty — and rerunni
 the suite. A mutant the tests still pass is a **survivor**: a change to the
 code that nothing objected to, which is a gap in the tests.
 
-Driven through `ae mutate` rather than called directly; the module is the
-engine behind that subcommand.
+Driven through the runnable front-end in `examples/mutation-testing/`
+rather than called directly. There is no `ae mutate` subcommand yet:
 
 ```
-ae mutate --sut std/foo/module.ae --test std/foo/test_foo.ae
+ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
 ```
+
+`lib_dir` is where the test's `import` of the subject resolves; it defaults
+to the subject's directory. `docs/mutation-testing.md` has a worked example.
 
 Output is a score plus the survivors, located by source line:
 
 ```
 Aether mutation testing (std.mutation)
-baseline: suite passes on unmutated SUT ✓
+  SUT:  calc.ae
+  test: calc_test.ae
 
-killed  module.ae:42 GTE->LT
-SURVIVED module.ae:87 EQ->NE
-...
-14/15 mutants killed — mutation score 93%
-1 survived (test gaps):
-  - module.ae:87 EQ->NE
+  baseline: suite passes on unmutated SUT ✓
+
+  killed     calc.ae:42  GTE->LT
+  SURVIVED   calc.ae:87  EQ->NE
+  ...
+  14/15 mutants killed — mutation score 93%
+  1 survived (test gaps):
+    - calc.ae:87  EQ->NE
 ```
 
 The operators are the arithmetic and comparison swaps (`>=`→`<`, `==`→`!=`,
