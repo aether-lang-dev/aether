@@ -866,11 +866,16 @@ cannot depend on the toolkit. X11 does not shrink a minimised window, so the
 Linux leg skips that one case. The Linux leg runs it twice: on Xvfb, where the
 screen is read back, and against weston's headless backend with
 `AETHER_TEST_WINDOW_SYSTEM=wayland`
-([#2197](https://github.com/aether-lang-dev/aether/issues/2197)), where a
-client cannot read the screen and the window's size is the application's,
-so the cases that check pixels on screen and the one where the window
-outgrows the swapchain skip and say so; every present is still checked to
-succeed and be counted, and the target read back. The same test also makes a
+([#2197](https://github.com/aether-lang-dev/aether/issues/2197)). There weston
+runs with `--debug`, which lets any client capture an output
+(`weston_capture_v1` from weston 12, `weston_screenshooter` before it). The
+fixture opens its window fullscreen, captures the output into a `wl_shm`
+buffer, and reads the window where weston centres a fullscreen window
+smaller than the output
+([#2389](https://github.com/aether-lang-dev/aether/issues/2389)). So the cases
+that check pixels on screen run there too. Only the case where the window
+outgrows the swapchain skips, since a Wayland window's size is the
+application's. The same test also makes a
 `VkSurfaceKHR` over the window through `vk.surface_create`, on an instance of
 its own, and queries its capabilities with the module's own command.
 
@@ -912,4 +917,3 @@ plan in someone's head.
 
 | Missing | Issue |
 |---|---|
-| The pixels a Wayland compositor shows are not checked: a client cannot read the screen there, so the Wayland leg checks presents and the target, not the screen | [#2389](https://github.com/aether-lang-dev/aether/issues/2389) |

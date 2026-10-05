@@ -611,21 +611,27 @@ jobs:
         done
 
     # The Wayland presentation path (#2197): the same present binary, told to
-    # open a wl_surface, against weston's headless backend. A Wayland client
-    # cannot read the screen, so the cases that check pixels on screen skip
-    # and say so, and the window's size is the application's, so the case
-    # where the window outgrows the swapchain skips too; the rest must pass,
-    # and the output must say it went through Wayland, not X11.
+    # open a wl_surface, against weston's headless backend, rendering with
+    # pixman so there is something to read. The fixture asks for a
+    # fullscreen window, which weston centres on the output when it is
+    # smaller, and --debug lets any client capture the output (weston 9 here
+    # has weston_screenshooter; 12 and later weston_capture_v1), through which
+    # the fixture reads the screen (#2389): the cases that check pixels on
+    # screen run here too. The window's size is the application's, so the
+    # case where the window outgrows the swapchain skips, and so does the
+    # minimised one, which is Win32's; the rest must pass, and the output must
+    # say the screen was read back through weston.
     - name: Present to a Wayland surface (weston headless)
       env:
         VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         XDG_RUNTIME_DIR: /tmp/aether-xdg-runtime
         WAYLAND_DISPLAY: aether-ci
         AETHER_TEST_WINDOW_SYSTEM: wayland
+        AETHER_TEST_WAYLAND_FULLSCREEN: 1
       run: |
         mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-        weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" \
-               --width=1280 --height=1024 --idle-time=0 > weston.log 2>&1 &
+        weston --backend=headless-backend.so --use-pixman --debug \
+               --socket="$WAYLAND_DISPLAY" --width=1280 --height=1024 --idle-time=0 > weston.log 2>&1 &
         for i in $(seq 1 100); do
           [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break
           sleep 0.1
@@ -638,11 +644,12 @@ jobs:
         passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
         skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
         failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
-        if ! printf '%s' "$out" | grep -q "not readable on Wayland"; then
-          echo "contrib/vulkan present did not go through Wayland; weston and libwayland should be present on this leg"
+        if ! printf '%s' "$out" | grep -q "read back through weston's capture"; then
+          echo "contrib/vulkan present did not read the screen back through weston; weston (with --debug) and libwayland should be present on this leg"
+          cat weston.log
           exit 1
         fi
-        if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt 7 ]; then
+        if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ "${skipped:-0}" -gt 2 ]; then
           echo "contrib/vulkan present did not run against the Wayland surface"
           echo "  passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
           exit 1

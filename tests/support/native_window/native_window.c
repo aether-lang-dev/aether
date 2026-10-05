@@ -509,8 +509,11 @@ int tw_pixel(TwWindow* w, int x, int y) {
 #else
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #if defined(__has_include)
 #  if __has_include(<X11/Xlib.h>) && __has_include(<X11/Xutil.h>)
@@ -555,6 +558,28 @@ struct TwWindow {
         struct wl_proxy*    xdg_surface;
         struct wl_proxy*    toplevel;
         int                 configured;
+        /* Reading the screen back (#2389), through what weston offers when
+         * started with --debug: weston_capture_v1 (weston 12 and later) or,
+         * before it, weston_screenshooter. Either fills a wl_shm buffer with
+         * the output. `out_w` x `out_h` and `out_format` (a DRM fourcc) are
+         * the buffer it wants: the capture source says, and for the
+         * screenshooter the output's current mode and XRGB8888. `shot` is
+         * the mapped buffer of the last capture. `capture_state` is 0 while
+         * one is in flight, then 1 complete, 2 retry, 3 failed. */
+        struct wl_proxy*    output;
+        struct wl_proxy*    shm;
+        struct wl_proxy*    capture;
+        struct wl_proxy*    shooter;
+        int                 shooter_bound;
+        int                 mode_w, mode_h;
+        struct wl_proxy*    capture_source;
+        struct wl_proxy*    shot_buffer;
+        unsigned char*      shot;
+        size_t              shot_bytes;
+        int                 out_w, out_h;
+        int                 shot_w, shot_h;
+        uint32_t            out_format;
+        int                 capture_state;
     } w;
 #endif
 };
@@ -830,6 +855,10 @@ static struct {
     const struct wl_interface* registry;
     const struct wl_interface* compositor;
     const struct wl_interface* surface;
+    const struct wl_interface* output;
+    const struct wl_interface* shm;
+    const struct wl_interface* shm_pool;
+    const struct wl_interface* buffer;
 } g_wl;
 
 /* xdg-shell, the part a top-level window needs, spelled as wayland-scanner
@@ -896,6 +925,52 @@ static const struct wl_interface tw_xdg_toplevel_interface = {
     "xdg_toplevel", 1, 14, tw_xdg_toplevel_requests, 2, tw_xdg_toplevel_events,
 };
 
+/* weston-output-capture (weston 12 and later, #2389), spelled the same way
+ * from weston-output-capture.xml, version 1: weston_capture_v1.create takes
+ * a wl_output and a pixel source and makes a weston_capture_source_v1,
+ * whose capture request fills a wl_buffer and answers with complete, retry
+ * or failed. */
+static const struct wl_interface tw_capture_source_interface;
+static const struct wl_interface* tw_capture_create_types[3] = { NULL, NULL, &tw_capture_source_interface };
+static const struct wl_interface* tw_capture_buffer_types[1] = { NULL };
+
+static const struct wl_message tw_capture_requests[] = {
+    { "destroy", "",    tw_no_types },
+    { "create",  "oun", tw_capture_create_types },
+};
+static const struct wl_interface tw_capture_interface = {
+    "weston_capture_v1", 1, 2, tw_capture_requests, 0, NULL,
+};
+
+static const struct wl_message tw_capture_source_requests[] = {
+    { "destroy", "",  tw_no_types },
+    { "capture", "o", tw_capture_buffer_types },
+};
+static const struct wl_message tw_capture_source_events[] = {
+    { "format",   "u",  tw_no_types },
+    { "size",     "ii", tw_no_types },
+    { "complete", "",   tw_no_types },
+    { "retry",    "",   tw_no_types },
+    { "failed",   "?s", tw_no_types },
+};
+static const struct wl_interface tw_capture_source_interface = {
+    "weston_capture_source_v1", 1, 2, tw_capture_source_requests, 5, tw_capture_source_events,
+};
+
+/* weston-screenshooter (weston 11 and earlier), from weston-screenshooter.xml:
+ * shoot copies an output into a wl_shm buffer at least its size, and answers
+ * with done. Any client may bind it when weston runs with --debug. */
+static const struct wl_interface* tw_shooter_shoot_types[2] = { NULL, NULL };
+static const struct wl_message tw_shooter_requests[] = {
+    { "shoot", "oo", tw_shooter_shoot_types },
+};
+static const struct wl_message tw_shooter_events[] = {
+    { "done", "", tw_no_types },
+};
+static const struct wl_interface tw_shooter_interface = {
+    "weston_screenshooter", 1, 1, tw_shooter_requests, 1, tw_shooter_events,
+};
+
 /* Opcodes of the core requests this fixture sends. */
 #define TW_WL_DISPLAY_GET_REGISTRY      1
 #define TW_WL_REGISTRY_BIND             0
@@ -911,6 +986,21 @@ static const struct wl_interface tw_xdg_toplevel_interface = {
 #define TW_XDG_TOPLEVEL_DESTROY         0
 #define TW_XDG_TOPLEVEL_SET_TITLE       2
 #define TW_XDG_TOPLEVEL_SET_APP_ID      3
+#define TW_WL_SHM_CREATE_POOL           0
+#define TW_WL_SHM_POOL_CREATE_BUFFER    0
+#define TW_WL_SHM_POOL_DESTROY          1
+#define TW_WL_BUFFER_DESTROY            0
+#define TW_CAPTURE_DESTROY              0
+#define TW_CAPTURE_CREATE               1
+#define TW_CAPTURE_SOURCE_DESTROY       0
+#define TW_CAPTURE_SOURCE_CAPTURE       1
+#define TW_CAPTURE_SOURCE_FRAMEBUFFER   1   /* weston_capture_v1.source */
+#define TW_SHOOTER_SHOOT                0
+#define TW_XDG_TOPLEVEL_SET_FULLSCREEN  11
+#define TW_WL_OUTPUT_MODE_CURRENT       1u
+/* DRM fourcc codes, and wl_shm's own numbers for the two it renames. */
+#define TW_DRM_ARGB8888                 0x34325241u   /* 'AR24' */
+#define TW_DRM_XRGB8888                 0x34325258u   /* 'XR24' */
 
 static int tw_wl_load(void) {
     if (g_wl.loaded) return g_wl.loaded > 0;
@@ -932,16 +1022,45 @@ static int tw_wl_load(void) {
     g_wl.registry   = (const struct wl_interface*)dlsym(g_wl.lib, "wl_registry_interface");
     g_wl.compositor = (const struct wl_interface*)dlsym(g_wl.lib, "wl_compositor_interface");
     g_wl.surface    = (const struct wl_interface*)dlsym(g_wl.lib, "wl_surface_interface");
-    if (!g_wl.registry || !g_wl.compositor || !g_wl.surface) {
+    g_wl.output     = (const struct wl_interface*)dlsym(g_wl.lib, "wl_output_interface");
+    g_wl.shm        = (const struct wl_interface*)dlsym(g_wl.lib, "wl_shm_interface");
+    g_wl.shm_pool   = (const struct wl_interface*)dlsym(g_wl.lib, "wl_shm_pool_interface");
+    g_wl.buffer     = (const struct wl_interface*)dlsym(g_wl.lib, "wl_buffer_interface");
+    if (!g_wl.registry || !g_wl.compositor || !g_wl.surface || !g_wl.output || !g_wl.shm ||
+        !g_wl.shm_pool || !g_wl.buffer) {
         tw_fail(TW_ERR_UNAVAILABLE, "libwayland-client exports no core interfaces");
         return 0;
     }
     tw_get_xdg_surface_types[1] = g_wl.surface;
+    tw_capture_create_types[0] = g_wl.output;
+    tw_capture_buffer_types[0] = g_wl.buffer;
+    tw_shooter_shoot_types[0] = g_wl.output;
+    tw_shooter_shoot_types[1] = g_wl.buffer;
     g_wl.loaded = 1;
     return 1;
 }
 
 /* Listeners. Each proxy carries its TwWindow as user data. */
+static void tw_wl_on_output_geometry(void* data, struct wl_proxy* output, int32_t x, int32_t y,
+                                     int32_t pw, int32_t ph, int32_t subpixel, const char* make,
+                                     const char* model, int32_t transform) {
+    (void)data; (void)output; (void)x; (void)y; (void)pw; (void)ph; (void)subpixel; (void)make;
+    (void)model; (void)transform;
+}
+static void tw_wl_on_output_mode(void* data, struct wl_proxy* output, uint32_t flags, int32_t width,
+                                 int32_t height, int32_t refresh) {
+    (void)output; (void)refresh;
+    TwWindow* w = (TwWindow*)data;
+    if (flags & TW_WL_OUTPUT_MODE_CURRENT) {
+        w->w.mode_w = width;
+        w->w.mode_h = height;
+    }
+}
+static void (*tw_wl_output_listener[])(void) = {
+    (void (*)(void))tw_wl_on_output_geometry,
+    (void (*)(void))tw_wl_on_output_mode,
+};
+
 static void tw_wl_on_global(void* data, struct wl_proxy* registry, uint32_t name,
                             const char* interface, uint32_t version) {
     TwWindow* w = (TwWindow*)data;
@@ -952,6 +1071,20 @@ static void tw_wl_on_global(void* data, struct wl_proxy* registry, uint32_t name
     } else if (strcmp(interface, "xdg_wm_base") == 0 && !w->w.wm_base) {
         w->w.wm_base = g_wl.wl_proxy_marshal_constructor_versioned(
             registry, TW_WL_REGISTRY_BIND, &tw_xdg_wm_base_interface, 1, name, "xdg_wm_base", 1, NULL);
+    } else if (strcmp(interface, "wl_output") == 0 && !w->w.output) {
+        /* The first output: weston's headless backend has the one. */
+        w->w.output = g_wl.wl_proxy_marshal_constructor_versioned(
+            registry, TW_WL_REGISTRY_BIND, g_wl.output, 1, name, g_wl.output->name, 1, NULL);
+        if (w->w.output) g_wl.wl_proxy_add_listener(w->w.output, tw_wl_output_listener, w);
+    } else if (strcmp(interface, "wl_shm") == 0 && !w->w.shm) {
+        w->w.shm = g_wl.wl_proxy_marshal_constructor_versioned(
+            registry, TW_WL_REGISTRY_BIND, g_wl.shm, 1, name, g_wl.shm->name, 1, NULL);
+    } else if (strcmp(interface, "weston_capture_v1") == 0 && !w->w.capture) {
+        w->w.capture = g_wl.wl_proxy_marshal_constructor_versioned(
+            registry, TW_WL_REGISTRY_BIND, &tw_capture_interface, 1, name, "weston_capture_v1", 1, NULL);
+    } else if (strcmp(interface, "weston_screenshooter") == 0 && !w->w.shooter) {
+        w->w.shooter = g_wl.wl_proxy_marshal_constructor_versioned(
+            registry, TW_WL_REGISTRY_BIND, &tw_shooter_interface, 1, name, "weston_screenshooter", 1, NULL);
     }
 }
 static void tw_wl_on_global_remove(void* data, struct wl_proxy* registry, uint32_t name) {
@@ -1024,7 +1157,28 @@ static int tw_wl_available(void) {
     return 1;
 }
 
+static void tw_wl_free_shot(TwWindow* w) {
+    if (w->w.shot_buffer) {
+        g_wl.wl_proxy_marshal(w->w.shot_buffer, TW_WL_BUFFER_DESTROY);
+        g_wl.wl_proxy_destroy(w->w.shot_buffer);
+    }
+    if (w->w.shot) munmap(w->w.shot, w->w.shot_bytes);
+    w->w.shot_buffer = NULL;
+    w->w.shot = NULL;
+    w->w.shot_bytes = 0;
+    w->w.shot_w = w->w.shot_h = 0;
+}
+
 static void tw_wl_destroy(TwWindow* w) {
+    tw_wl_free_shot(w);
+    if (w->w.capture_source) {
+        g_wl.wl_proxy_marshal(w->w.capture_source, TW_CAPTURE_SOURCE_DESTROY);
+        g_wl.wl_proxy_destroy(w->w.capture_source);
+    }
+    if (w->w.capture) { g_wl.wl_proxy_marshal(w->w.capture, TW_CAPTURE_DESTROY); g_wl.wl_proxy_destroy(w->w.capture); }
+    if (w->w.shooter) g_wl.wl_proxy_destroy(w->w.shooter);
+    if (w->w.shm)     g_wl.wl_proxy_destroy(w->w.shm);
+    if (w->w.output)  g_wl.wl_proxy_destroy(w->w.output);
     if (w->w.toplevel)    { g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_DESTROY); g_wl.wl_proxy_destroy(w->w.toplevel); }
     if (w->w.xdg_surface) { g_wl.wl_proxy_marshal(w->w.xdg_surface, TW_XDG_SURFACE_DESTROY); g_wl.wl_proxy_destroy(w->w.xdg_surface); }
     if (w->w.surface)     { g_wl.wl_proxy_marshal(w->w.surface, TW_WL_SURFACE_DESTROY); g_wl.wl_proxy_destroy(w->w.surface); }
@@ -1089,6 +1243,13 @@ static TwWindow* tw_wl_create(const char* title, int width, int height) {
     g_wl.wl_proxy_add_listener(w->w.toplevel, tw_wl_toplevel_listener, w);
     g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_SET_TITLE, title ? title : "");
     g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_SET_APP_ID, "aether-contrib-test");
+    /* AETHER_TEST_WAYLAND_FULLSCREEN puts the window where weston's shells
+     * put a fullscreen one, centred on the output when it is smaller, which
+     * is where tw_pixel reads it (#2389). Unset, it is an ordinary window. */
+    const char* fs = getenv("AETHER_TEST_WAYLAND_FULLSCREEN");
+    if (fs && fs[0] && strcmp(fs, "0") != 0) {
+        g_wl.wl_proxy_marshal(w->w.toplevel, TW_XDG_TOPLEVEL_SET_FULLSCREEN, NULL);
+    }
     /* The initial commit, with no buffer, asks for the first configure;
      * only after acknowledging it may anything attach a buffer, which is
      * what the Vulkan swapchain will do. */
@@ -1123,6 +1284,199 @@ static int tw_wl_set_size(TwWindow* w, int width, int height) {
     }
     tw_wl_drain(w);
     return TW_OK;
+}
+
+/* The capture source's events (#2389). */
+static void tw_wl_on_capture_format(void* data, struct wl_proxy* src, uint32_t format) {
+    (void)src;
+    ((TwWindow*)data)->w.out_format = format;
+}
+static void tw_wl_on_capture_size(void* data, struct wl_proxy* src, int32_t width, int32_t height) {
+    (void)src;
+    TwWindow* w = (TwWindow*)data;
+    w->w.out_w = width;
+    w->w.out_h = height;
+}
+static void tw_wl_on_capture_complete(void* data, struct wl_proxy* src) {
+    (void)src;
+    ((TwWindow*)data)->w.capture_state = 1;
+}
+static void tw_wl_on_capture_retry(void* data, struct wl_proxy* src) {
+    (void)src;
+    ((TwWindow*)data)->w.capture_state = 2;
+}
+static void tw_wl_on_capture_failed(void* data, struct wl_proxy* src, const char* msg) {
+    (void)src;
+    TwWindow* w = (TwWindow*)data;
+    w->w.capture_state = 3;
+    tw_fail(TW_ERR_SYSTEM, "weston could not capture the output: %s", msg ? msg : "no reason given");
+}
+static void (*tw_wl_capture_source_listener[])(void) = {
+    (void (*)(void))tw_wl_on_capture_format,
+    (void (*)(void))tw_wl_on_capture_size,
+    (void (*)(void))tw_wl_on_capture_complete,
+    (void (*)(void))tw_wl_on_capture_retry,
+    (void (*)(void))tw_wl_on_capture_failed,
+};
+
+static void tw_wl_on_shooter_done(void* data, struct wl_proxy* shooter) {
+    (void)shooter;
+    ((TwWindow*)data)->w.capture_state = 1;
+}
+static void (*tw_wl_shooter_listener[])(void) = { (void (*)(void))tw_wl_on_shooter_done };
+
+/* Waits, up to `ms`, for the compositor's events to set *flag. */
+static int tw_wl_wait(TwWindow* w, const int* flag, int ms) {
+    for (int waited = 0; !*flag && waited < ms; waited += 5) {
+        tw_wl_drain(w);
+        if (!*flag) tw_sleep_ms(5);
+    }
+    return *flag;
+}
+
+/* A wl_shm buffer of the output's size and format, mapped, kept until the
+ * capture source asks for another. */
+static int tw_wl_make_shot(TwWindow* w) {
+    tw_wl_free_shot(w);
+    int stride = w->w.out_w * 4;
+    size_t bytes = (size_t)stride * (size_t)w->w.out_h;
+    char path[] = "/tmp/aether-tw-capture-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return tw_fail(TW_ERR_SYSTEM, "cannot make a file for the capture buffer");
+    unlink(path);
+    if (ftruncate(fd, (off_t)bytes) != 0) {
+        close(fd);
+        return tw_fail(TW_ERR_SYSTEM, "cannot size the capture buffer");
+    }
+    void* map = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        close(fd);
+        return tw_fail(TW_ERR_SYSTEM, "cannot map the capture buffer");
+    }
+    /* wl_shm names ARGB8888 and XRGB8888 0 and 1; every other format is
+     * its DRM fourcc. */
+    uint32_t shm_format = w->w.out_format == TW_DRM_ARGB8888 ? 0u
+                        : w->w.out_format == TW_DRM_XRGB8888 ? 1u : w->w.out_format;
+    struct wl_proxy* pool = g_wl.wl_proxy_marshal_constructor(w->w.shm, TW_WL_SHM_CREATE_POOL, g_wl.shm_pool,
+                                                              NULL, fd, (int32_t)bytes);
+    struct wl_proxy* buffer = pool
+        ? g_wl.wl_proxy_marshal_constructor(pool, TW_WL_SHM_POOL_CREATE_BUFFER, g_wl.buffer, NULL, 0,
+                                            w->w.out_w, w->w.out_h, stride, shm_format)
+        : NULL;
+    if (pool) {
+        g_wl.wl_proxy_marshal(pool, TW_WL_SHM_POOL_DESTROY);
+        g_wl.wl_proxy_destroy(pool);
+    }
+    close(fd);
+    if (!buffer) {
+        munmap(map, bytes);
+        return tw_fail(TW_ERR_SYSTEM, "cannot make the capture buffer");
+    }
+    w->w.shot = (unsigned char*)map;
+    w->w.shot_bytes = bytes;
+    w->w.shot_buffer = buffer;
+    w->w.shot_w = w->w.out_w;
+    w->w.shot_h = w->w.out_h;
+    return TW_OK;
+}
+
+/* The colour on screen at client pixel (x, y): the output captured through
+ * weston_capture_v1, read where the window is on it. The fixture is meant
+ * for weston's kiosk shell, which shows the window fullscreen, centred on
+ * the output when its buffer is smaller (weston_shell_utils_center_on_output);
+ * that is where the client pixel is looked up. */
+static int tw_wl_shoot(TwWindow* w);
+static int tw_wl_read(TwWindow* w, int x, int y);
+
+static int tw_wl_pixel(TwWindow* w, int x, int y) {
+    if (!w->w.output || !w->w.shm || (!w->w.capture && !w->w.shooter)) {
+        tw_fail(TW_ERR_UNSUPPORTED, "the screen is not readable on Wayland: the compositor offers no %s "
+                "(weston offers both with --debug)",
+                !w->w.output || !w->w.shm ? "wl_output or wl_shm" : "weston_capture_v1 or weston_screenshooter");
+        return -1;
+    }
+    if (!w->w.capture) return tw_wl_shoot(w) == TW_OK ? tw_wl_read(w, x, y) : -1;
+    if (!w->w.capture_source) {
+        w->w.capture_source = g_wl.wl_proxy_marshal_constructor(w->w.capture, TW_CAPTURE_CREATE,
+                                                                &tw_capture_source_interface, w->w.output,
+                                                                (uint32_t)TW_CAPTURE_SOURCE_FRAMEBUFFER, NULL);
+        if (!w->w.capture_source) { tw_fail(TW_ERR_SYSTEM, "weston_capture_v1.create failed"); return -1; }
+        g_wl.wl_proxy_add_listener(w->w.capture_source, tw_wl_capture_source_listener, w);
+        g_wl.wl_display_roundtrip(w->w.display);   /* format and size */
+    }
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (w->w.out_w <= 0 || w->w.out_h <= 0) {
+            tw_fail(TW_ERR_SYSTEM, "the capture source reported no output size");
+            return -1;
+        }
+        if (w->w.out_format != TW_DRM_ARGB8888 && w->w.out_format != TW_DRM_XRGB8888) {
+            tw_fail(TW_ERR_UNSUPPORTED, "the output captures as DRM format 0x%08x, not 8-bit RGB",
+                    (unsigned)w->w.out_format);
+            return -1;
+        }
+        if (!w->w.shot || w->w.shot_w != w->w.out_w || w->w.shot_h != w->w.out_h) {
+            if (tw_wl_make_shot(w) != TW_OK) return -1;
+        }
+        w->w.capture_state = 0;
+        g_wl.wl_proxy_marshal(w->w.capture_source, TW_CAPTURE_SOURCE_CAPTURE, w->w.shot_buffer);
+        g_wl.wl_display_flush(w->w.display);
+        if (!tw_wl_wait(w, &w->w.capture_state, 2000)) {
+            tw_fail(TW_ERR_SYSTEM, "weston did not capture the output within 2 s");
+            return -1;
+        }
+        if (w->w.capture_state == 1) break;
+        if (w->w.capture_state == 3) return -1;
+        /* retry: the size or format changed, and the next round reallocates. */
+    }
+    if (w->w.capture_state != 1) {
+        tw_fail(TW_ERR_SYSTEM, "weston asked to retry the capture three times");
+        return -1;
+    }
+    return tw_wl_read(w, x, y);
+}
+
+/* weston 11 and earlier: weston_screenshooter.shoot into a buffer of the
+ * output's current mode, XRGB8888 (weston copies its own read-back format
+ * into it, BGRA bytes either way, flipped upright). */
+static int tw_wl_shoot(TwWindow* w) {
+    if (!w->w.shooter_bound) {
+        g_wl.wl_proxy_add_listener(w->w.shooter, tw_wl_shooter_listener, w);
+        w->w.shooter_bound = 1;
+    }
+    if (w->w.mode_w <= 0 || w->w.mode_h <= 0) g_wl.wl_display_roundtrip(w->w.display);
+    if (w->w.mode_w <= 0 || w->w.mode_h <= 0) {
+        return tw_fail(TW_ERR_SYSTEM, "the output reported no current mode");
+    }
+    w->w.out_w = w->w.mode_w;
+    w->w.out_h = w->w.mode_h;
+    w->w.out_format = TW_DRM_XRGB8888;
+    if (!w->w.shot || w->w.shot_w != w->w.out_w || w->w.shot_h != w->w.out_h) {
+        int rc = tw_wl_make_shot(w);
+        if (rc != TW_OK) return rc;
+    }
+    w->w.capture_state = 0;
+    g_wl.wl_proxy_marshal(w->w.shooter, TW_SHOOTER_SHOOT, w->w.output, w->w.shot_buffer);
+    g_wl.wl_display_flush(w->w.display);
+    if (!tw_wl_wait(w, &w->w.capture_state, 2000)) {
+        return tw_fail(TW_ERR_SYSTEM, "weston did not take the screenshot within 2 s");
+    }
+    return TW_OK;
+}
+
+/* Client pixel (x, y) of the last capture, the window centred on the output
+ * as weston's shells put a fullscreen one. */
+static int tw_wl_read(TwWindow* w, int x, int y) {
+    int ox = (w->w.out_w - w->width) / 2;
+    int oy = (w->w.out_h - w->height) / 2;
+    int sx = ox + x, sy = oy + y;
+    if (sx < 0 || sy < 0 || sx >= w->w.out_w || sy >= w->w.out_h) {
+        tw_fail(TW_ERR_ARG, "client pixel %d,%d is off the %dx%d output", x, y, w->w.out_w, w->w.out_h);
+        return -1;
+    }
+    /* [AX]RGB8888 is a little-endian 32-bit word: blue, green, red, then
+     * alpha or padding. */
+    const unsigned char* p = w->w.shot + ((size_t)sy * (size_t)w->w.out_w + (size_t)sx) * 4u;
+    return (int)(((unsigned)p[2] << 16) | ((unsigned)p[1] << 8) | (unsigned)p[0]);
 }
 
 #endif /* TW_HAVE_WAYLAND */
@@ -1270,13 +1624,12 @@ int tw_pixel(TwWindow* w, int x, int y) {
 #if defined(TW_HAVE_X11)
         case TW_KIND_X11:     return tw_x11_pixel(w, x, y);
 #endif
+#if defined(TW_HAVE_WAYLAND)
         case TW_KIND_WAYLAND:
-            /* A Wayland client cannot read another surface, its own on
-             * screen included; a compositor's screenshot protocol is its
-             * own. What was presented is checked from the swapchain's
-             * count and the target's readback instead. */
-            tw_fail(TW_ERR_UNSUPPORTED, "the screen is not readable on Wayland");
-            return -1;
+            /* A Wayland client cannot read the screen through the core
+             * protocol; weston's capture protocol is what reads it (#2389). */
+            return tw_wl_pixel(w, x, y);
+#endif
         default:
             tw_fail(TW_ERR_ARG, "not a window");
             return -1;
