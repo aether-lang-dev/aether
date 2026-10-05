@@ -47,9 +47,14 @@ if [ "$rc" -ne 0 ]; then
     sed 's/^/        /' "$TMP/raw.log"
     exit 1
 fi
-if ! diff -u "$TMP/expected.log" "$TMP/tree.log" > "$TMP/diff.log"; then
+# Compared in the shell rather than with diff(1), which the Windows runners'
+# MSYS2 does not install.
+if [ "$(cat "$TMP/expected.log")" != "$(cat "$TMP/tree.log")" ]; then
     echo "  [FAIL] spec_describe_indent: the printed tree is not indented by nesting"
-    sed 's/^/        /' "$TMP/diff.log"
+    echo "      expected:"
+    sed 's/^/        |/' "$TMP/expected.log"
+    echo "      got:"
+    sed 's/^/        |/' "$TMP/tree.log"
     exit 1
 fi
 echo "  [PASS] spec_describe_indent: siblings align, nesting indents, and a test after a nested describe returns to its suite's level"
