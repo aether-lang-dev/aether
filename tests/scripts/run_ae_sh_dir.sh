@@ -44,6 +44,21 @@ else
     TO=""
 fi
 
+# The last lines of a failed test's stdout and stderr, printed right under its
+# [FAIL] / [TIMEOUT] / [SIGNAL] line. The summary's FAILURE DETAILS repeats
+# them in full, but only if the sweep reaches the summary: a CI job that dies
+# or is cancelled part-way through the shell phase used to leave nothing but
+# the [FAIL] line to go on (#2391).
+print_tail() {
+    for stream in out err; do
+        f="$tmpdir/run_$1.$stream"
+        if [ -s "$f" ]; then
+            echo "      ($stream, last ${AE_SH_FAIL_TAIL:-20} lines)"
+            tail -n "${AE_SH_FAIL_TAIL:-20}" "$f" | sed 's/^/      | /'
+        fi
+    done
+}
+
 for sh_test in $scripts; do
     name=$(echo "$sh_test" | sed "s|tests/||;s|/|_|g;s|\.sh$||")
     sh "$root/tests/scripts/sweep_resource_probe.sh" "$name" 2>/dev/null
@@ -72,6 +87,7 @@ for sh_test in $scripts; do
         fi
     elif [ $sh_rc -eq 124 ]; then
         echo "  [TIMEOUT] $name (shell test exceeded ${AE_SH_TEST_TIMEOUT:-420}s)"
+        print_tail "$name"
         printf timeout > "$tmpdir/phase_$name.txt"
         touch "$tmpdir/FAIL_$name"
     elif [ $sh_rc -gt 128 ] && [ $sh_rc -lt 160 ]; then
@@ -84,10 +100,12 @@ for sh_test in $scripts; do
             *)  what="signal $sig" ;;
         esac
         echo "  [SIGNAL] $name - $what (rc=$sh_rc)"
+        print_tail "$name"
         printf signal > "$tmpdir/phase_$name.txt"
         touch "$tmpdir/FAIL_$name"
     else
         echo "  [FAIL] $name (shell test)"
+        print_tail "$name"
         printf shell > "$tmpdir/phase_$name.txt"
         touch "$tmpdir/FAIL_$name"
     fi
