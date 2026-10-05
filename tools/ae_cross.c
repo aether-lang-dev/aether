@@ -320,6 +320,7 @@ static bool cross_android_setup(const char* ztriple, const char* sr,
         return false;
     }
     const char* tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = getenv("TEMP");   /* Windows */
     if (!tmp || !*tmp) tmp = "/tmp";
     static char libc_file[1200];
     snprintf(libc_file, sizeof(libc_file), "%s/aether-zig-libc-%s-android%s-%ld.txt",
@@ -334,7 +335,11 @@ static bool cross_android_setup(const char* ztriple, const char* sr,
     fprintf(f, "crt_dir=%s/%s\n", libdir, api);
     fprintf(f, "msvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n");
     fclose(f);
+#ifdef _WIN32
+    _putenv_s("ZIG_LIBC", libc_file);   /* MinGW has no setenv */
+#else
     setenv("ZIG_LIBC", libc_file, 1);
+#endif
     /* Android only runs position-independent executables, so every object
      * that goes into one (libaether.a's included) is compiled -fPIC. */
     snprintf(flags, fsz, "-fPIC -L%s/%s -L%s", libdir, api, libdir);
