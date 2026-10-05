@@ -10,3 +10,8 @@
 - **`std.list`'s test checks the error for a negative index, as well as the
   value.** The pinned out-of-range behaviour (#2439) was half-asserted for
   negative indices.
+- **Correction to 0.781.0's #2432 entry.** It said fixed-size arrays were
+  handled "nested ones included". The type grammar takes a single `[N]`
+  suffix, so a nested fixed array such as `Cell[2][3]` does not parse. The fix
+  covers fixed-size array fields of one dimension, the only kind that can be
+  written.

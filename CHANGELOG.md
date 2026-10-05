@@ -34,9 +34,9 @@ cut while your branch is open cannot fold your entry into the released section.
   `Item`'s body before the struct that holds it. Struct emission is ordered by
   field dependencies (#1856), but it only looked at direct struct fields, and
   a fixed-array field of an imported struct failed with "array type has
-  incomplete element type". Fixed-size array fields now count as
-  dependencies; slices (`Item[]`) still need only the forward typedef
-  (#2432).
+  incomplete element type". Fixed-size arrays, nested ones included, now
+  count as dependencies; slices (`Item[]`) still need only the forward
+  typedef (#2432).
 - **`CONTRIBUTING.md` and `AGENTS.md` ask contributors to prove a new test
   can fail.** Before committing, revert the fix and watch the test fail, or
   run the mutation tester on a changed std module and deal with the
