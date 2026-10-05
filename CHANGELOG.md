@@ -14,6 +14,39 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.781.0]
+
+### Added
+
+- **An Android (aarch64, bionic) toolchain in every release: `aether-<v>-android-aarch64.tar.gz`.** `make ANDROID=1 ANDROID_NDK=<ndk>` cross-builds `ae`, `aetherc` and `libaether.a` with the NDK's clang (API 29+); the release builds it on the Linux runner and PR CI cross-compiles it, so a bionic break fails the PR. It is built, not tested: no Android runner runs the suite (the archive says so). Like the other cross builds it is capability-lean (no OpenSSL/zlib/nghttp2; vendored PCRE2). Two runtime pieces have no bionic equivalent and take their existing stubs there: `spawn_sandboxed` (no `shm_open`, no `LD_PRELOAD` fence in an app) and the hosted-language shared map's cross-process path; thread pinning uses `sched_setaffinity`, as bionic has no `pthread_setaffinity_np`.
+
+### Fixed
+
+- **`std.spec` indents sibling `describe` blocks at the same level (#2380).**
+  `describe` incremented an indentation counter that nothing decremented, so
+  each sibling `describe` printed one level deeper than the one before, and a
+  test written after a nested `describe` printed at the nested level. The
+  depth is now derived from the suite's parent chain. Output only: pass/fail
+  counts, exit status and the structured report were never affected.
+
+- **A fixed-size array of another module's struct compiles as a field.**
+  `items: Item[4]` holds its elements by value, so the generated C needs
+  `Item`'s body before the struct that holds it. Struct emission is ordered by
+  field dependencies (#1856), but it only looked at direct struct fields, and
+  a fixed-array field of an imported struct failed with "array type has
+  incomplete element type". Fixed-size arrays, nested ones included, now
+  count as dependencies; slices (`Item[]`) still need only the forward
+  typedef (#2432).
+- **`CONTRIBUTING.md` and `AGENTS.md` ask contributors to prove a new test
+  can fail.** Before committing, revert the fix and watch the test fail, or
+  run the mutation tester on a changed std module and deal with the
+  survivors (#2431).
+- **`std/mutation/README.md` shows the command that exists.** It documented
+  an `ae mutate --sut ... --test ...` subcommand that `ae` does not have. It
+  now gives the real front-end,
+  `ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]`,
+  and sample output in the format the module prints.
+
 ## [0.780.0]
 
 ### Fixed
