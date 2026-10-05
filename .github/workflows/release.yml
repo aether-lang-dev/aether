@@ -866,16 +866,88 @@ jobs:
   # ================================================================== #
   # PUBLISH -- create or update the GitHub Release                      #
   # ================================================================== #
+  # ================================================================== #
+  # BUILD-ANDROID -- cross-compile the Android (aarch64, bionic) zip     #
+  #                                                                    #
+  # Built, not tested: there is no Android runner, so the toolchain is  #
+  # cross-built on the Linux runner with the Android NDK's clang        #
+  # (Makefile ANDROID=1 mode) and packaged without running the suite.   #
+  # GitHub's ubuntu image carries the NDK ($ANDROID_NDK_LATEST_HOME).    #
+  # Required like the FreeBSD leg, for the same reason (#402): a broken #
+  # cross build must break the release, not ship it short an asset.     #
+  # PR CI cross-compiles for Android too (ci-android-cross).            #
+  # ================================================================== #
+  build-android:
+    name: Build -- android-aarch64 (cross)
+    needs: tag
+    if: |
+      always() && (
+        (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
+        startsWith(github.ref, 'refs/tags/')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.tag.outputs.tag || github.ref }}
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Setup
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils file
+
+    - name: Locate the Android NDK
+      id: ndk
+      run: |
+        NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+        test -d "$NDK" || { echo "no Android NDK on this runner"; exit 1; }
+        echo "NDK: $NDK ($(grep Pkg.Revision "$NDK/source.properties"))"
+        echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+
+    - name: Cross-build (ANDROID=1)
+      run: |
+        make compiler ae stdlib ANDROID=1 ANDROID_NDK="${{ steps.ndk.outputs.ndk }}"
+        X=build/.alien/android-aarch64
+        # Android's dynamic linker, not glibc's: proof these are bionic binaries.
+        file $X/aetherc $X/ae
+        file $X/ae | grep -q '/system/bin/linker64' || { echo "ae is not an Android binary"; exit 1; }
+        sh scripts/check_archive_exports.sh $X/libaether.a
+
+    - name: Strip
+      run: |
+        S="${{ steps.ndk.outputs.ndk }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+        "$S" build/.alien/android-aarch64/aetherc build/.alien/android-aarch64/ae
+
+    - name: Package
+      run: |
+        VERSION=$(cat VERSION | tr -d '[:space:]')
+        TARGET=android-aarch64
+        # The cross-built aetherc cannot run here, so no module artifacts:
+        # the archive's imports parse the sources.
+        sh scripts/stage-release.sh build/.alien/android-aarch64 release
+        echo "Cross-built for Android (aarch64, bionic, API 29+) with the NDK's clang; not run through the test suite on Android." \
+          > release/ANDROID-CROSS-BUILD.txt
+        cd release && tar -czf "../aether-${VERSION}-${TARGET}.tar.gz" *
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aether-android-aarch64
+        path: aether-*-android-aarch64.tar.gz
+
   publish:
     name: Publish release
     # build-freebsd is in the `if` gate, not just in `needs`: a release that
     # quietly drops a platform because its build broke is worse than no
     # release, and dropping it silently is what hid the last FreeBSD break.
-    needs: [tag, build, build-freebsd]
+    needs: [tag, build, build-freebsd, build-android]
     runs-on: ubuntu-latest
     if: |
       always() && needs.build.result == 'success'
-      && needs.build-freebsd.result == 'success' && (
+      && needs.build-freebsd.result == 'success'
+      && needs.build-android.result == 'success' && (
         (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
         startsWith(github.ref, 'refs/tags/')
       )
