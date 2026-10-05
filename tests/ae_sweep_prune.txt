@@ -231,3 +231,4 @@ tests/integration/http_sse_upgrade/
 tests/integration/slice_bounds/
 tests/integration/slice_diag_path_escape/
 tests/integration/sandbox_trusted_names/
+tests/integration/spec_describe_indent/
