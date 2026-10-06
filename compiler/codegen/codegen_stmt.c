@@ -4224,6 +4224,307 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
     hoist_loop_decls(body, hoist_loop_var, gen);
 }
 
+/* ---- #2378: threaded dispatch for interpreter loops -----------------------
+ *
+ *     while true {
+ *         <head statements>
+ *         switch <selector> { case ...: { ... continue } ... }
+ *         <tail statements>
+ *     }
+ *
+ * is an interpreter's dispatch loop. Where the C compiler has labels-as-values
+ * (GCC, Clang, MinGW, Emscripten), each arm gets a C label and a static table
+ * maps a selector value to it, and a `continue` that targets the loop runs the
+ * head again and jumps straight to the next arm (`goto *table[sel]`) instead of
+ * going round the loop. Each arm then ends in its own indirect branch, which
+ * predicts far better than the one shared jump a `switch` compiles to, and the
+ * loop head drops out of the hot path. Actor message dispatch already lowers
+ * this way (codegen_actor.c).
+ *
+ * Correctness never depends on the table. The loop and the `switch` are
+ * emitted exactly as before; the labels and the table are added under
+ * AE_TD_GUARD, and a selector with no table entry jumps back to the `switch`,
+ * which handles it as it always did. Without labels-as-values (MSVC), or with
+ * AETHER_NO_THREADED_DISPATCH defined, a `continue` is the plain `continue;` of
+ * today's output. An arm that falls off the end of the `switch` also goes round
+ * the loop as before, so a loop that only partly matches the shape is still
+ * correct, just less threaded.
+ *
+ * The tail runs only when an arm breaks or falls off, or nothing matches, as
+ * in the plain loop, and is emitted once, so it is unrestricted (interpreters
+ * put their slow-path exit and unknown-opcode error there).
+ *
+ * The shape is recognised conservatively: the head is re-emitted at every
+ * `continue` site, so it may only assign scalar values (no strings, closures or
+ * interpolation, whose ownership tracking is per-site); the selector must be an
+ * integer; and every case value must be an integer known at compile time,
+ * between 0 and AE_TD_MAX_TABLE, since it is a table index. Anything else
+ * lowers exactly as today. */
+static int find_labeled_loop_level(CodeGenerator* gen, const char* name);
+
+#define AE_TD_MAX_TABLE 4096
+#define AE_TD_GUARD "#if (defined(__GNUC__) || defined(__clang__)) && !defined(AETHER_NO_THREADED_DISPATCH)"
+
+static int td_type_is_int(Type* t) {
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
+        case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE: case TYPE_ENUM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* No closure, interpolation, value-producing block, or string anywhere in e. */
+static int td_tree_is_plain(ASTNode* e) {
+    if (!e) return 1;
+    switch (e->type) {
+        case AST_CLOSURE: case AST_STRING_INTERP: case AST_IF_EXPRESSION:
+        case AST_MATCH_STATEMENT: case AST_BLOCK: case AST_DEFER_STATEMENT:
+        case AST_TRY_STATEMENT:
+            return 0;
+        default:
+            break;
+    }
+    if (e->node_type && e->node_type->kind == TYPE_STRING) return 0;
+    for (int i = 0; i < e->child_count; i++) {
+        if (!td_tree_is_plain(e->children[i])) return 0;
+    }
+    return 1;
+}
+
+/* The case values of one arm, appended to vals/arms. 0 when one is not a
+ * compile-time integer in [0, AE_TD_MAX_TABLE). */
+static int td_case_values(CodeGenerator* gen, ASTNode* sel, int arm,
+                          int64_t* vals, int* arms, int* n, int cap) {
+    if (!sel) return 0;
+    if (sel->type == AST_MATCH_ALT) {
+        for (int a = 0; a < sel->child_count; a++) {
+            if (!td_case_values(gen, sel->children[a], arm, vals, arms, n, cap)) return 0;
+        }
+        return 1;
+    }
+    int64_t v;
+    if (!contract_eval_int64(sel, gen->program, &v)) return 0;
+    if (v < 0 || v >= AE_TD_MAX_TABLE || *n >= cap) return 0;
+    vals[*n] = v;
+    arms[*n] = arm;
+    (*n)++;
+    return 1;
+}
+
+/* 1 when some `continue` in `n` targets the loop: an unlabeled one not
+ * inside a nested loop, or one naming `label` at any depth. Closures are not
+ * searched: a continue cannot leave one. */
+static int td_has_continue(ASTNode* n, const char* label, int nested) {
+    if (!n) return 0;
+    if (n->type == AST_CLOSURE) return 0;
+    if (n->type == AST_CONTINUE_STATEMENT) {
+        if (n->value) return label && strcmp(n->value, label) == 0;
+        return !nested;
+    }
+    int inner = nested;
+    if (n->type == AST_WHILE_LOOP || n->type == AST_FOR_LOOP) inner = 1;
+    for (int i = 0; i < n->child_count; i++) {
+        if (td_has_continue(n->children[i], label, inner)) return 1;
+    }
+    return 0;
+}
+
+/* 1 while the loop head is being emitted (the loop's own pass, or a copy at
+ * a continue site). A `continue` in the head then stays a plain `continue;`
+ * instead of expanding into another copy of the head, which would recurse;
+ * inside a copy it still leaves the switch for the loop, so it is correct. */
+static int g_td_in_head = 0;
+
+/* A head statement can be copied to every continue site: no closures,
+ * interpolation, strings, defers, try, nested loops or switches, and no
+ * `break` (in a copy, which sits inside the switch, it would leave the switch
+ * instead of the loop). `if` statements and `continue` are fine. */
+static int td_head_ok(ASTNode* n) {
+    if (!n) return 1;
+    switch (n->type) {
+        case AST_CLOSURE: case AST_STRING_INTERP: case AST_IF_EXPRESSION:
+        case AST_MATCH_STATEMENT: case AST_DEFER_STATEMENT: case AST_TRY_STATEMENT:
+        case AST_WHILE_LOOP: case AST_FOR_LOOP: case AST_SWITCH_STATEMENT:
+        case AST_BREAK_STATEMENT:
+            return 0;
+        default:
+            break;
+    }
+    if (n->node_type && n->node_type->kind == TYPE_STRING) return 0;
+    for (int i = 0; i < n->child_count; i++) {
+        if (!td_head_ok(n->children[i])) return 0;
+    }
+    return 1;
+}
+
+/* Index of the loop body's dispatch switch: its first top-level `switch`, or
+ * -1. Statements before it are the head; statements after it are the tail,
+ * which runs only when an arm breaks or falls off, or no arm matches, exactly
+ * as in the plain loop, so it is emitted once and is not restricted. */
+static int td_switch_index(ASTNode* body) {
+    if (!body || body->type != AST_BLOCK) return -1;
+    for (int i = 0; i < body->child_count; i++) {
+        if (body->children[i] && body->children[i]->type == AST_SWITCH_STATEMENT) return i;
+    }
+    return -1;
+}
+
+/* AETHER_EXPLAIN_THREADED=1: say why a loop that looks like a dispatch loop
+ * (`while <always true> { ...; switch ... }`) was not threaded. */
+static void td_explain(ASTNode* loop, const char* why) {
+    static int on = -1;
+    if (on < 0) {
+        const char* v = getenv("AETHER_EXPLAIN_THREADED");
+        on = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+    }
+    if (!on || !loop || loop->child_count < 2 || !loop->children[1]) return;
+    /* Neither the while nor the switch node carries a position; the
+     * switch's selector expression does. */
+    ASTNode* body = loop->children[1];
+    int si = td_switch_index(body);
+    ASTNode* at = si >= 0 ? body->children[si] : loop;
+    if (at->child_count > 0 && at->children[0] && at->children[0]->line > 0) at = at->children[0];
+    fprintf(stderr, "%s:%d: note: dispatch loop not threaded: %s\n",
+            at->source_file ? at->source_file : "?", at->line, why);
+}
+
+/* The loop's switch when `loop` has the threaded shape, else NULL. */
+static ASTNode* td_loop_switch(CodeGenerator* gen, ASTNode* loop) {
+    if (!loop || loop->child_count < 2) return NULL;
+    ASTNode* cond = loop->children[0];
+    ASTNode* body = loop->children[1];
+    int si = td_switch_index(body);
+    if (si < 0) return NULL;
+    ASTNode* sw = body->children[si];
+    if (sw->child_count < 2) return NULL;
+    /* An always-true condition: `true`, `1`, `1 == 1`, a true const. */
+    ContractEnv env;
+    memset(&env, 0, sizeof env);
+    env.program = gen->program;
+    if (!cond || contract_eval_predicate(cond, &env) != CONTRACT_TRUE) return NULL;
+    /* From here the loop has the shape; anything that stops it is worth saying. */
+    ASTNode* sel = sw->children[0];
+    if (!sel || !td_type_is_int(sel->node_type)) {
+        td_explain(loop, "the switch selector is not an integer");
+        return NULL;
+    }
+    if (!td_tree_is_plain(sel)) {
+        td_explain(loop, "the switch selector is not a plain expression");
+        return NULL;
+    }
+    for (int i = 0; i < si; i++) {
+        if (!td_head_ok(body->children[i])) {
+            td_explain(loop, "a statement before the switch cannot be repeated at each continue "
+                             "(it has a string, closure, defer, try, nested loop, switch or break)");
+            return NULL;
+        }
+    }
+    int64_t vals[512];
+    int arms[512];
+    int n = 0;
+    for (int i = 1; i < sw->child_count; i++) {
+        ASTNode* c = sw->children[i];
+        if (!c || c->type != AST_CASE_STATEMENT) return NULL;
+        if (c->value && strcmp(c->value, "default") == 0) continue;
+        if (c->child_count < 1 || selector_has_range(c->children[0])) {
+            td_explain(loop, "a case is a range");
+            return NULL;
+        }
+        if (!td_case_values(gen, c->children[0], i, vals, arms, &n, 512)) {
+            td_explain(loop, "a case value is not an integer constant in 0..4095 known at compile time");
+            return NULL;
+        }
+    }
+    if (n == 0) return NULL;
+    /* Threading pays off only through a `continue` that targets this loop,
+     * and without one the table and labels would go unreferenced. */
+    for (int i = 1; i < sw->child_count; i++) {
+        if (td_has_continue(sw->children[i], loop->value, 0)) return sw;
+    }
+    td_explain(loop, "no arm continues the loop");
+    return NULL;
+}
+
+/* The static table: one entry per case value, pointing at its arm's label. */
+static void td_emit_table(CodeGenerator* gen, ASTNode* sw, int id) {
+    int64_t vals[512];
+    int arms[512];
+    int n = 0;
+    int64_t max = 0;
+    for (int i = 1; i < sw->child_count; i++) {
+        ASTNode* c = sw->children[i];
+        if (c->value && strcmp(c->value, "default") == 0) continue;
+        td_case_values(gen, c->children[0], i, vals, arms, &n, 512);
+    }
+    for (int k = 0; k < n; k++) {
+        if (vals[k] > max) max = vals[k];
+    }
+    print_line(gen, AE_TD_GUARD);
+    print_line(gen, "int64_t _ae_td_sel_%d = 0;", id);
+    print_indent(gen);
+    fprintf(gen->output, "static void* const _ae_td_tbl_%d[%lld] = {", id, (long long)(max + 1));
+    for (int k = 0; k < n; k++) {
+        fprintf(gen->output, "%s[%lld] = &&_ae_td_%d_arm%d", k ? ", " : " ",
+                (long long)vals[k], id, arms[k]);
+    }
+    fprintf(gen->output, " };\n");
+    print_line(gen, "#endif");
+}
+
+/* What a `continue` targeting threaded loop `level` becomes: the loop-head
+ * checks, the head statements, the selector, then a jump to the next arm (or
+ * back to the switch when the value has no entry). `fallback` is the line the
+ * continue lowers to without labels-as-values. */
+static void td_emit_dispatch(CodeGenerator* gen, int level, const char* fallback) {
+    ASTNode* loop = gen->loop_td_node[level];
+    int id = gen->loop_td_id[level];
+    ASTNode* body = loop->children[1];
+    int si = td_switch_index(body);
+    ASTNode* sw = body->children[si];
+    print_line(gen, AE_TD_GUARD);
+    print_line(gen, "{");
+    indent(gen);
+    if (gen->preempt_loops) {
+        print_line(gen, "if (--_aether_reductions <= 0) { _aether_reductions = 10000; sched_yield(); }");
+    }
+    if (gen->emit_lib) {
+        print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
+    }
+    g_td_in_head++;
+    for (int i = 0; i < si; i++) {
+        generate_statement(gen, body->children[i]);
+    }
+    g_td_in_head--;
+    print_indent(gen);
+    fprintf(gen->output, "_ae_td_sel_%d = (int64_t)(", id);
+    generate_expression(gen, sw->children[0]);
+    fprintf(gen->output, ");\n");
+    print_line(gen, "if ((uint64_t)_ae_td_sel_%d < (uint64_t)(sizeof(_ae_td_tbl_%d) / sizeof(_ae_td_tbl_%d[0])) && _ae_td_tbl_%d[_ae_td_sel_%d]) goto *_ae_td_tbl_%d[_ae_td_sel_%d];",
+               id, id, id, id, id, id, id);
+    print_line(gen, "goto _ae_td_sw_%d;", id);
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "#else");
+    print_line(gen, "%s", fallback);
+    print_line(gen, "#endif");
+}
+
+/* The threaded loop a `continue` targets, as its loop level, or -1. */
+static int td_continue_target(CodeGenerator* gen, ASTNode* stmt) {
+    if (g_td_in_head) return -1;
+    int lvl;
+    if (stmt->value) {
+        lvl = find_labeled_loop_level(gen, stmt->value);
+    } else {
+        lvl = gen->loop_nest_depth - 1;
+    }
+    if (lvl < 0 || lvl >= AETHER_MAX_LOOP_NEST) return -1;
+    return gen->loop_td_id[lvl] ? lvl : -1;
+}
+
 // Pre-hoist variables first-declared inside if-statement branches at
 // the enclosing function-body scope, when:
 //   (a) the variable is referenced *outside* (after) the if-block, and
@@ -6793,6 +7094,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 hoist_loop_vars(gen, stmt->children[1]);
             }
 
+            /* #2378: an interpreter dispatch loop gets a threaded-dispatch
+             * table (see td_loop_switch). Not under batched sends, whose loop
+             * shape is managed separately. */
+            ASTNode* td_sw = NULL;
+            int td_id = 0;
+            if (!has_sends && gen->loop_nest_depth < AETHER_MAX_LOOP_NEST) {
+                td_sw = td_loop_switch(gen, stmt);
+                if (td_sw) {
+                    td_id = ++gen->next_td_id;
+                    td_emit_table(gen, td_sw, td_id);
+                }
+            }
+
+            if (td_id) print_indent(gen);   /* the table ended on a fresh line */
             fprintf(gen->output, "while (");
             if (stmt->child_count > 0) {
                 gen->in_condition = 1;
@@ -6824,10 +7139,29 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_id[while_lbl_idx] = gen->next_loop_label_id++;
                 gen->loop_label_break_used[while_lbl_idx] = 0;
                 gen->loop_label_continue_used[while_lbl_idx] = 0;
+                gen->loop_td_id[while_lbl_idx] = td_id;
+                gen->loop_td_node[while_lbl_idx] = td_id ? stmt : NULL;
                 gen->loop_nest_depth++;
+            }
+            ASTNode* saved_td_switch = gen->td_switch;
+            int saved_td_id = gen->td_id;
+            int saved_in_head = g_td_in_head;
+            if (td_id) {
+                gen->td_switch = td_sw;
+                gen->td_id = td_id;
+                g_td_in_head = 1;   /* cleared when the dispatch switch starts */
             }
             if (stmt->child_count > 1) {
                 generate_statement(gen, stmt->children[1]);
+            }
+            gen->td_switch = saved_td_switch;
+            gen->td_id = saved_td_id;
+            g_td_in_head = saved_in_head;
+            /* The slot is reused by the next loop at this depth, whatever
+             * kind it is; a stale id would thread that loop's continues. */
+            if (while_lbl_idx >= 0) {
+                gen->loop_td_id[while_lbl_idx] = 0;
+                gen->loop_td_node[while_lbl_idx] = NULL;
             }
             if (gen->loop_nest_depth > 0) gen->loop_nest_depth--;
             /* #893: labeled-continue target — end of the loop body, after the
@@ -6844,6 +7178,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (while_lbl_idx >= 0 && gen->loop_label[while_lbl_idx] &&
                 gen->loop_label_break_used[while_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[while_lbl_idx]);
+            }
+            /* #2378: where a threaded continue lands when the --emit=lib
+             * deadline trips (the loop head's own check uses `break`). */
+            if (td_id && gen->emit_lib) {
+                print_line(gen, AE_TD_GUARD);
+                print_line(gen, "_ae_td_exit_%d: ;", td_id);
+                print_line(gen, "#endif");
             }
 
             if (has_sends && gen->current_actor == NULL) {
@@ -7152,7 +7493,44 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     selector_has_range(c->children[0])) { needs_chain = 1; break; }
             }
 
+            if (!needs_chain && stmt == gen->td_switch && gen->td_id && stmt->child_count > 0) {
+                /* #2378: the dispatch switch of a threaded loop. The selector
+                 * goes through _ae_td_sel_N so a continue whose value has no
+                 * table entry can jump back to the switch (_ae_td_sw_N)
+                 * without re-running the head; each arm gets a label (see
+                 * AST_CASE_STATEMENT). Without labels-as-values this is the
+                 * plain switch of today. */
+                int id = gen->td_id;
+                gen->td_switch = NULL;   /* a nested switch is not the dispatch */
+                g_td_in_head = 0;        /* the head is done; arms dispatch */
+                fprintf(gen->output, "\n");
+                print_line(gen, AE_TD_GUARD);
+                print_indent(gen);
+                fprintf(gen->output, "_ae_td_sel_%d = (int64_t)(", id);
+                generate_expression(gen, stmt->children[0]);
+                fprintf(gen->output, ");\n");
+                print_line(gen, "_ae_td_sw_%d: ;", id);
+                print_line(gen, "switch (_ae_td_sel_%d) {", id);
+                print_line(gen, "#else");
+                print_indent(gen);
+                fprintf(gen->output, "switch (");
+                generate_expression(gen, stmt->children[0]);
+                fprintf(gen->output, ") {\n");
+                print_line(gen, "#endif");
+                indent(gen);
+                for (int i = 1; i < stmt->child_count; i++) {
+                    gen->td_arm = i;
+                    generate_statement(gen, stmt->children[i]);
+                }
+                gen->td_arm = -1;
+                unindent(gen);
+                print_line(gen, "}");
+                break;
+            }
+
             if (!needs_chain) {
+                int saved_td_arm = gen->td_arm;
+                gen->td_arm = -1;
                 fprintf(gen->output, "switch (");
                 if (stmt->child_count > 0) generate_expression(gen, stmt->children[0]);
                 fprintf(gen->output, ") {\n");
@@ -7161,6 +7539,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     generate_statement(gen, stmt->children[i]);
                 unindent(gen);
                 print_line(gen, "}");
+                gen->td_arm = saved_td_arm;
                 break;
             }
 
@@ -7229,6 +7608,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, ":\n");
                 }
             }
+
+            /* #2378: an arm of a threaded loop's dispatch switch gets the
+             * label its table entries point at. Consumed here, so a switch
+             * nested in the arm's body is never labelled. */
+            if (!is_default && gen->td_arm >= 0 && gen->td_id) {
+                print_line(gen, AE_TD_GUARD);
+                print_line(gen, "_ae_td_%d_arm%d: ;", gen->td_id, gen->td_arm);
+                print_line(gen, "#endif");
+            }
+            gen->td_arm = -1;
 
             indent(gen);
             // Generate all statements in the case block (skip first child which is the case value)
@@ -7730,13 +8119,26 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "aether_try_pop();\n");
                 }
                 gen->loop_label_continue_used[lvl] = 1;
-                print_line(gen, "goto __ae_cont_%d;", gen->loop_label_id[lvl]);
+                if (gen->loop_td_id[lvl] && !g_td_in_head) {
+                    /* #2378: into a threaded loop — dispatch directly. */
+                    char fallback[64];
+                    snprintf(fallback, sizeof fallback, "goto __ae_cont_%d;", gen->loop_label_id[lvl]);
+                    td_emit_dispatch(gen, lvl, fallback);
+                } else {
+                    print_line(gen, "goto __ae_cont_%d;", gen->loop_label_id[lvl]);
+                }
             } else {
                 // Emit defers for current scope before continue
                 emit_defers_for_scope(gen);
                 /* Issue #501: drain inside-loop try frames. */
                 emit_try_pops_for_break_continue(gen);
-                print_line(gen, "continue;");
+                int td_lvl = td_continue_target(gen, stmt);
+                if (td_lvl >= 0) {
+                    /* #2378: run the head and jump to the next arm. */
+                    td_emit_dispatch(gen, td_lvl, "continue;");
+                } else {
+                    print_line(gen, "continue;");
+                }
             }
             break;
         }

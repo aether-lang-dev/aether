@@ -13,6 +13,7 @@ tests/integration/ae_inspect/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
 tests/integration/aether_string_ffi_unwrap/
+tests/integration/threaded_dispatch/
 tests/integration/aether_string_to_c_extern/
 tests/integration/bare_fn_cross_module/
 tests/integration/bare_fn_in_closure/

@@ -365,3 +365,15 @@ void contract_sprint_expr(ContractStr* s, ASTNode* e) {
     }
     cstr_puts(s, "<expr>");
 }
+
+int contract_eval_int64(ASTNode* e, ASTNode* program, int64_t* out) {
+    if (!e || !out) return 0;
+    ContractEnv env;
+    memset(&env, 0, sizeof env);
+    env.program = program;
+    ConstVal v;
+    if (!eval_value(e, &env, &v, 0)) return 0;
+    if (v.kind != CV_INT) return 0;
+    *out = v.i;
+    return 1;
+}

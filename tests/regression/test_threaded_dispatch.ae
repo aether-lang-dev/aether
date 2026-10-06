@@ -1,0 +1,285 @@
+// #2378: a `while <always true> { head; switch sel { ... } }` interpreter loop
+// lowers to threaded dispatch (computed goto) where the C compiler supports
+// labels-as-values. The lowering must not change what the loop does, so every
+// case below computes a value with a known answer, and each one exercises a
+// way control can leave an arm:
+//
+//   continue        -> the next arm, through the table
+//   break           -> out of the switch only, then round the loop (head again)
+//   falling off     -> the same as break
+//   return          -> out of the function
+//   no matching arm -> round the loop (no default) or the default arm
+//
+// plus the shapes around them: a value with no table entry, a head with its own
+// `continue`, a labeled `continue` from an inner loop, a switch nested in an
+// arm, a threaded loop nested in an arm, `defer` and `try` in an arm,
+// strings in an arm, a uint64 selector, and statements after the switch. tests/integration/threaded_dispatch builds this file with
+// and without threading and checks both print the same thing.
+
+extern exit(code: int)
+
+// Opcodes: 1 add, 2 sub, 3 break, 4 fall off, 5 end, 300 a far value. Case
+// labels are literals so the test also runs under `ae run` (-O0): an Aether
+// `const` in a C `case` needs an optimising build today, which the integration
+// test (module constants, -O2) covers.
+
+fn check(got: long, want: long, what: string) -> int {
+    if got != want {
+        println("FAIL: ${what}: got ${got}, want ${want}")
+        return 1
+    }
+    println("ok: ${what} = ${got}")
+    return 0
+}
+
+// continue / break / fall-off / return, and a value with no arm at all.
+fn basic(prog: int[]) -> long {
+    long acc = 0
+    long heads = 0
+    pc = 0
+    op = 0
+    while true {
+        op = prog[pc]
+        pc = pc + 1
+        heads = heads + 1
+        switch op {
+            case 1: { acc = acc + 10 continue }
+            case 2: { acc = acc - 3 continue }
+            case 3: { acc = acc + 100 break }
+            case 4: { acc = acc + 1000 }
+            case 5: { return acc * 100000 + heads }
+        }
+    }
+    return -1
+}
+
+// A default arm, a value past the table (300 is the largest case, 7 is
+// none), and a selector the table cannot hold (5000).
+fn with_default(prog: int[]) -> long {
+    long acc = 0
+    pc = 0
+    op = 0
+    while true {
+        op = prog[pc]
+        pc = pc + 1
+        switch op {
+            case 1: { acc = acc + 1 continue }
+            case 300: { acc = acc + 50 continue }
+            case 5: { return acc }
+            default: { acc = acc + 1000 continue }
+        }
+    }
+    return -1
+}
+
+// The head has its own fast path that continues.
+fn head_continue(prog: int[]) -> long {
+    long acc = 0
+    pc = 0
+    op = 0
+    while 1 == 1 {
+        op = prog[pc]
+        pc = pc + 1
+        if op >= 20 { if op <= 23 {
+                acc = acc + op - 20
+                continue
+            } }
+        switch op {
+            case 1: { acc = acc + 100 continue }
+            case 5: { return acc }
+        }
+    }
+    return -1
+}
+
+// A labeled continue from an inner loop inside an arm targets the threaded
+// loop; the inner loop's own unlabeled continue does not.
+fn labeled(prog: int[]) -> long {
+    long acc = 0
+    pc = 0
+    op = 0
+    vm: while true {
+        op = prog[pc]
+        pc = pc + 1
+        switch op {
+            case 1: {
+                k = 0
+                while k < 5 {
+                    k = k + 1
+                    if k == 2 { continue }
+                    acc = acc + k
+                    if k == 4 { continue vm }
+                }
+                acc = acc + 1000000
+                continue
+            }
+            case 5: { return acc }
+        }
+    }
+    return -1
+}
+
+// A switch nested in an arm, and a threaded loop nested in an arm.
+fn nested(prog: int[], inner_prog: int[]) -> long {
+    long acc = 0
+    pc = 0
+    op = 0
+    while true {
+        op = prog[pc]
+        pc = pc + 1
+        switch op {
+            case 1: {
+                switch pc {
+                    case 1: { acc = acc + 1 }
+                    case 2: { acc = acc + 2 }
+                    default: { acc = acc + 4 }
+                }
+                continue
+            }
+            case 2: {
+                ip = 0
+                iop = 0
+                inner: while true {
+                    iop = inner_prog[ip]
+                    ip = ip + 1
+                    switch iop {
+                        case 1: { acc = acc + 100 continue }
+                        case 5: { break inner }
+                    }
+                }
+                continue
+            }
+            case 3: {
+                // A for loop at the depth the threaded inner loop used: its
+                // continue must stay a plain continue.
+                for k in 1..5 {
+                    if k == 2 { continue }
+                    acc = acc + 1000
+                }
+                continue
+            }
+            case 5: { return acc }
+        }
+    }
+    return -1
+}
+
+// defer and try inside arms, and a string built in an arm.
+fn cleanups(prog: int[]) -> long {
+    long acc = 0
+    long deferred = 0
+    pc = 0
+    op = 0
+    while true {
+        op = prog[pc]
+        pc = pc + 1
+        switch op {
+            case 1: {
+                defer deferred = deferred + 1
+                acc = acc + 1
+                continue
+            }
+            case 2: {
+                try {
+                    acc = acc + 10
+                    continue
+                } catch e {
+                    acc = acc - 1
+                }
+                continue
+            }
+            case 3: {
+                s = "x${acc}"
+                if s == "never" { acc = 0 }
+                acc = acc + 1000
+                continue
+            }
+            case 5: { return acc * 1000 + deferred }
+        }
+    }
+    return -1
+}
+
+// A uint64 selector, including a value with the top bit set: it must miss
+// the table and every arm, and reach the default.
+fn wide(prog: int[]) -> long {
+    long acc = 0
+    pc = 0
+    uint64 op = 0
+    while true {
+        op = prog[pc]
+        if pc == 2 { op = 0xFFFFFFFFFFFFFFF1 }
+        pc = pc + 1
+        switch op {
+            case 1: { acc = acc + 1 continue }
+            case 5: { return acc }
+            default: { acc = acc + 100 continue }
+        }
+    }
+    return -1
+}
+
+// Head variables first declared inside the loop (each continue site repeats
+// the head, so a copy must assign, not redeclare), and a tail after the
+// switch: it runs for a breaking arm and an unmatched value, never for a
+// continuing one.
+fn with_tail(prog: int[]) -> long {
+    long acc = 0
+    long tails = 0
+    pc = 0
+    while true {
+        cur = prog[pc]
+        int next = pc + 1
+        pc = next
+        switch cur {
+            case 1: { acc = acc + 1 continue }
+            case 3: { acc = acc + 10 break }
+            case 5: { return acc * 1000 + tails }
+        }
+        tails = tails + 1
+        if cur == 9 { acc = acc + 100 }
+    }
+    return -1
+}
+
+main() {
+    fails = 0
+    int[9] p1 = [1, 1, 2, 3, 4, 1, 99, 2, 5]
+    // heads: 9 opcodes fetched; acc: 10+10-3+100+1000+10-3 = 1124
+    fails = fails + check(basic(p1), 1124 * 100000 + 9, "continue, break, fall-off, no-arm value, return")
+
+    int[7] p2 = [1, 7, 300, 5000, 1, 300, 5]
+    // 1 + 1000 + 50 + 1000 + 1 + 50 = 2102
+    fails = fails + check(with_default(p2), 2102, "default arm, value past the table, out-of-range selector")
+
+    int[6] p3 = [20, 23, 1, 22, 21, 5]
+    // 0 + 3 + 100 + 2 + 1 = 106
+    fails = fails + check(head_continue(p3), 106, "head with its own continue")
+
+    int[3] p4 = [1, 1, 5]
+    // each OP_ADD adds 1+3+4 = 8 and leaves through `continue vm`
+    fails = fails + check(labeled(p4), 16, "labeled continue from an inner loop")
+
+    int[5] p5 = [1, 1, 2, 3, 5]
+    int[3] inner = [1, 1, 5]
+    // pc=1 -> +1, pc=2 -> +2, inner threaded loop +200, plain loop k=1,3,4 +3000
+    fails = fails + check(nested(p5, inner), 3203, "nested switch, nested threaded loop, then a plain loop")
+
+    int[6] p6 = [1, 2, 3, 1, 2, 5]
+    // acc 1+10+1000+1+10 = 1022; two defers ran
+    fails = fails + check(cleanups(p6), 1022 * 1000 + 2, "defer, try and a string in arms")
+
+    int[5] p7 = [1, 1, 1, 1, 5]
+    // 1 + 1 + (top-bit value -> default) 100 + 1 = 103
+    fails = fails + check(wide(p7), 103, "uint64 selector with the top bit set")
+
+    int[7] p8 = [1, 3, 1, 9, 1, 7, 5]
+    // acc 1 + 10 + 1 + 100 + 1 = 113; tails ran for 3, 9 and 7
+    fails = fails + check(with_tail(p8), 113 * 1000 + 3, "head declarations in the loop, and a tail")
+
+    if fails > 0 {
+        println("${fails} failure(s)")
+        exit(1)
+    }
+    println("threaded dispatch: all cases agree")
+}

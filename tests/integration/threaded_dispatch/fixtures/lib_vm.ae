@@ -1,0 +1,21 @@
+// A threaded loop in an --emit=lib build: the deadline tripwire that the loop
+// head carries must also run on every threaded dispatch.
+step(code: int[]) -> int {
+    acc = 0
+    pc = 0
+    op = 0
+    while true {
+        op = code[pc]
+        pc = pc + 1
+        switch op {
+            case 1: { acc = acc + 1 continue }
+            case 2: { return acc }
+        }
+    }
+    return -1
+}
+
+count_ones(n: int) -> int {
+    int[4] code = [1, 1, 1, 2]
+    return step(code) + n
+}

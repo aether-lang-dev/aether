@@ -1,0 +1,20 @@
+exports(
+    OP_NOP, OP_INC, OP_DEC, OP_DBL, OP_HALF, OP_XOR, OP_ADDI, OP_SUBI,
+    OP_SWAP, OP_DUP, OP_NEG, OP_MOD, OP_LOOP, OP_HALT, OP_PUSH0, OP_PUSH3
+)
+const OP_NOP = 0
+const OP_INC = 1
+const OP_DEC = 2
+const OP_DBL = 3
+const OP_HALF = 4
+const OP_XOR = 5
+const OP_ADDI = 6
+const OP_SUBI = 7
+const OP_SWAP = 8
+const OP_DUP = 9
+const OP_NEG = 10
+const OP_MOD = 11
+const OP_LOOP = 12
+const OP_HALT = 13
+const OP_PUSH0 = 20
+const OP_PUSH3 = 23

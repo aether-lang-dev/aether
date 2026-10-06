@@ -237,6 +237,17 @@ The code generator detects messages with exactly one scalar field that fits in `
 
 The code generator emits a `dispatch_table[256]` with GCC computed goto (`goto *dispatch_table[_msg_id]`) for message handler selection. This replaces indirect function calls or switch statements with direct label jumps. The message ID is read from `msg.type` (`int _msg_id = msg.type;`) rather than dereferencing the payload pointer.
 
+The same lowering applies to interpreter loops written in Aether (#2378;
+`compiler/codegen/codegen_stmt.c`, `td_loop_switch`): a `while true { head;
+switch sel { ... continue ... } }` loop gets a static label table per loop, and
+each `continue` that targets it repeats the head and jumps with `goto
+*_ae_td_tbl_N[sel]`. A value with no entry jumps back to the plain `switch`, so
+the table is never needed for correctness; under MSVC or
+`-DAETHER_NO_THREADED_DISPATCH` the loop compiles as it did before. In an
+`--emit=lib` build the call-deadline check that sits at the loop head is
+repeated at every threaded dispatch. See the language reference, *Interpreter
+dispatch loops*, for the recognised shape.
+
 ### Progressive Backoff Strategy
 
 **Implementation:** `runtime/scheduler/multicore_scheduler.c`
