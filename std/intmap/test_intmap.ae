@@ -90,17 +90,26 @@ main() {
     check(intmap.get(m, 0 - 1024, 0) == 14, "a negative strided key")
 
     // ---- iteration visits every key once ----
+    // Each visited key is marked in `seen`. A key visited twice fails here,
+    // and with no repeats, count == size() means no key was skipped. The
+    // count alone passes a walk that visits one key twice and skips another.
     count = 0
-    long key_sum = 0
+    seen = intmap.new(0)
     s = intmap.next(m, 0)
     while s >= 0 {
         count = count + 1
-        if intmap.key_at(m, s) == 100 {
+        k = intmap.key_at(m, s)
+        check(!intmap.has(seen, k), "iteration visits no key twice")
+        check(intmap.has(m, k), "an iterated key is in the map")
+        intmap.put(seen, k, 1)
+        if k == 100 {
             check(intmap.value_at(m, s) == -3, "the value beside its key")
         }
         s = intmap.next(m, s + 1)
     }
     check(count == intmap.size(m), "iteration visits size() slots")
+    check(intmap.size(seen) == intmap.size(m), "iteration visits every key")
+    intmap.free(seen)
     check(intmap.next(m, -1) == -1, "a negative slot has no next")
 
     // ---- clear, and a null map ----
