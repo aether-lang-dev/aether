@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.783.0]
+
+### Added
+
+- **`ae build --target=aarch64-linux-android`: Android (bionic) with zig alone.** zig names the target but ships no bionic, so this is a Tier-B target like FreeBSD: point `AETHER_SYSROOT` at a lean Android sysroot (aether-crossbuild's `fetch-android-sysroot.sh aarch64 29`, or the release's new `aether-<v>-android-aarch64-sysroot.tar.xz`, about 38 MB with the NDK's NOTICE files) and `ae` hands zig the bionic headers and startup objects through a libc file, compiles everything `-fPIC` (Android runs only PIE), and links `-ldl -lm`. No NDK compiler, no 2 GB NDK. `AETHER_ANDROID_API` raises the minimum API level from 29. A sysroot that is not an Android one is refused up front, naming the script that fetches the right one.
+
 ## [0.782.0]
 
 ### Fixed
