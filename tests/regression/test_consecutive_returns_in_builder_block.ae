@@ -1,0 +1,143 @@
+// Two `return`s back to back failed to compile when the function had
+// defers to unwind.
+//
+// A return in a function with pending defers saves its value into a C
+// temporary, `_builder_ret`, runs the defers, then returns the temporary.
+// The temporary was declared straight into the enclosing C block, so a
+// second return in the same Aether block -- `return os.system(...)` then an
+// unreachable `return 0`, as a build file converted to aeb's
+// `bldr.build() { ... }` had -- declared it again, and clang/gcc stopped
+// with "redefinition of '_builder_ret'". A heap-string local or an explicit
+// `defer` is enough to put a function on that path; a call's trailing block
+// is where the build files hit it. Each such return now declares
+// `_builder_ret` in its own C scope. (The second return is still reported
+// as unreachable code, W1002, now inside trailing blocks too.)
+
+import std.string
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+var bad = 0
+var unwound = 0
+
+struct Bag {
+    items: int
+}
+
+new_bag() -> ptr {
+    b = malloc(sizeof(Bag)) as *Bag
+    b.items = 0
+    return b
+}
+
+add(_ctx: ptr) {
+    b = _ctx as *Bag
+    b.items = b.items + 1
+}
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+note() {
+    unwound = unwound + 1
+}
+
+// Trailing block, heap-string local (its free is the pending defer), then
+// two returns back to back -- the build-file shape.
+in_block(n: int) -> int {
+    new_bag() {
+        add()
+        p = string.concat("n", string.from_int(n))
+        return string.length(p) + n
+        return 0
+    }
+    return -1
+}
+
+// Same, with an explicit defer instead of a heap-string local.
+in_block_defer(n: int) -> int {
+    defer note()
+    new_bag() {
+        add()
+        return n * 2
+        return 0
+    }
+    return -1
+}
+
+// Returns in both branches of an if inside the block, then a third.
+in_block_branches(n: int) -> int {
+    defer note()
+    new_bag() {
+        add()
+        if n > 0 {
+            return 1
+        } else {
+            return 2
+        }
+        return 3
+    }
+    return -1
+}
+
+// Plain function body, no block at all.
+top_level(n: int) -> int {
+    defer note()
+    return n + 100
+    return 0
+}
+
+// Multi-value return: the tuple path declares `_builder_ret` too.
+pair(n: int) -> (int, string) {
+    defer note()
+    return n, ""
+    return 0, "unreachable"
+}
+
+pair_in_block(n: int) -> (int, string) {
+    defer note()
+    new_bag() {
+        add()
+        return n + 1, "ok"
+        return 0, "unreachable"
+    }
+    return -1, "fell through"
+}
+
+main() {
+    check("in_block", in_block(7), 9)
+
+    unwound = 0
+    check("in_block_defer", in_block_defer(5), 10)
+    check("in_block_defer unwound", unwound, 1)
+
+    unwound = 0
+    check("branches then", in_block_branches(1), 1)
+    check("branches else", in_block_branches(0), 2)
+    check("branches unwound", unwound, 2)
+
+    unwound = 0
+    check("top_level", top_level(1), 101)
+    check("top_level unwound", unwound, 1)
+
+    unwound = 0
+    a, err = pair(4)
+    check("pair value", a, 4)
+    check("pair err empty", string.length(err), 0)
+    b, msg = pair_in_block(4)
+    check("pair_in_block value", b, 5)
+    check("pair_in_block msg", string.length(msg), 2)
+    check("pair unwound", unwound, 2)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("consecutive returns in builder blocks: ok")
+}

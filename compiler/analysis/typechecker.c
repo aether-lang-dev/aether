@@ -3433,6 +3433,23 @@ static int is_terminating(ASTNode* node) {
     return 0;
 }
 
+static void check_unreachable_code(ASTNode* body);
+
+/* Check every statement block nested anywhere under `node`: if/else and
+ * loop bodies, but also a call's trailing block (`build() { ... }`), a
+ * closure body, a bare `{ }` block and match arms. Only the if and while
+ * bodies used to be visited, so `return a` followed by `return b` inside a
+ * trailing block went unwarned. */
+static void check_unreachable_in_nested_blocks(ASTNode* node) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        if (!c) continue;
+        if (c->type == AST_BLOCK) check_unreachable_code(c);
+        else check_unreachable_in_nested_blocks(c);
+    }
+}
+
 static void check_unreachable_code(ASTNode* body) {
     if (!body) return;
 
@@ -3462,14 +3479,10 @@ static void check_unreachable_code(ASTNode* body) {
             break;  // Only warn once per block
         }
 
-        // Recurse into blocks (if/else bodies, while bodies, etc.)
-        if (stmt->type == AST_IF_STATEMENT) {
-            for (int j = 1; j < stmt->child_count; j++) {
-                check_unreachable_code(stmt->children[j]);
-            }
-        } else if (stmt->type == AST_WHILE_LOOP && stmt->child_count > 1) {
-            check_unreachable_code(stmt->children[1]);
-        }
+        // Recurse into nested blocks (if/else and loop bodies, trailing
+        // blocks, closures, bare blocks, match arms).
+        if (stmt && stmt->type == AST_BLOCK) check_unreachable_code(stmt);
+        else check_unreachable_in_nested_blocks(stmt);
     }
 }
 

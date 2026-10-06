@@ -7407,6 +7407,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 // line — same tuple-literal shape, just stuffed into
                 // _builder_ret first.
                 if (stmt->child_count > 1) {
+                    /* Each defer-unwinding return declares its own
+                     * `_builder_ret`, so it gets its own C scope: two
+                     * returns in one Aether block (`return a` then an
+                     * unreachable `return b`, as a converted build file
+                     * had) otherwise redeclare it in the same C scope
+                     * and clang/gcc reject the redefinition. */
+                    print_line(gen, "{");
+                    gen->indent_level++;
                     print_indent(gen);
                     Type* tuple = NULL;
                     int owned = 0;
@@ -7473,11 +7481,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     /* Issue #501: drain try frames. */
                     emit_try_pops_for_nonlocal_exit(gen);
                     print_line(gen, "return _builder_ret;");
+                    gen->indent_level--;
+                    print_line(gen, "}");
                     break;
                 }
                 // For return with value, save to temp first
                 if (stmt->child_count > 0 && stmt->children[0] &&
                     stmt->children[0]->type != AST_PRINT_STATEMENT) {
+                    /* Own C scope per return, as in the multi-value
+                     * branch above: a second return in the same block
+                     * would otherwise redeclare `_builder_ret`. */
+                    print_line(gen, "{");
+                    gen->indent_level++;
                     print_indent(gen);
                     /* Pick the C type for `_builder_ret`. Order:
                      *   1. The function's declared return type
@@ -7583,6 +7598,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     /* Issue #501: drain try frames. */
                     emit_try_pops_for_nonlocal_exit(gen);
                     print_line(gen, "return _builder_ret;");
+                    gen->indent_level--;
+                    print_line(gen, "}");
                 } else if (stmt->child_count > 0 && stmt->children[0] &&
                            stmt->children[0]->type == AST_PRINT_STATEMENT) {
                     emit_all_defers(gen);
