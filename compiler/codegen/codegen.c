@@ -7076,7 +7076,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // typedef + full body up top, function bodies below.
     //
     // Emitted in field-dependency order, not in the order the modules were
-    // merged (#1856). A struct that holds another BY VALUE needs that one's
+    // merged (#1856). A struct that holds another BY VALUE, directly or as
+    // the elements of a fixed-size array (#2432), needs that one's
     // body already in scope: a forward typedef is not enough for a field, and
     // the merge order puts an importing module's struct ahead of the struct it
     // imported whenever the inner one was reached transitively. The result was
@@ -7102,8 +7103,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                     for (int f = 0; f < sd->child_count && ready; f++) {
                         ASTNode* fld = sd->children[f];
                         if (!fld || fld->type != AST_STRUCT_FIELD) continue;
-                        if (!fld->node_type || fld->node_type->kind != TYPE_STRUCT) continue;
-                        const char* dep = get_c_type(fld->node_type);
+                        /* A fixed-size array holds its elements by value, so
+                         * `items: Item[4]` needs Item's body as much as
+                         * `item: Item` does (#2432). A slice (`Item[]`) is a
+                         * pointer and length, and needs only the forward
+                         * typedef. The type grammar takes one `[N]` suffix
+                         * today; the loop keeps this right if it takes more. */
+                        Type* ft = fld->node_type;
+                        while (ft && ft->kind == TYPE_ARRAY && type_is_sized_array(ft)) ft = ft->element_type;
+                        if (!ft || ft->kind != TYPE_STRUCT) continue;
+                        const char* dep = get_c_type(ft);
                         if (!dep) continue;
                         /* A struct this program also defines, and not yet out. */
                         for (int j = 0; j < n; j++) {

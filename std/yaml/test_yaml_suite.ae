@@ -168,6 +168,18 @@ main() {
             return 0
         })
 
+    // The corpus exists (checked above), so a walk that failed or found no
+    // cases is a broken run, not a pass: without this, a walk that stopped
+    // part-way passed on whatever it had read.
+    if err != "" {
+        println("=== YAML Test Suite: FAILED (walking ${suite_dir}: ${err}) ===")
+        exit(1)
+    }
+    if total_tests == 0 {
+        println("=== YAML Test Suite: FAILED (no .yaml cases under ${suite_dir}) ===")
+        exit(1)
+    }
+
     println("YAML Test Suite Results:")
     println("  Total cases processed: ${total_tests}")
     println("  Passed:                 ${passed_tests}")
