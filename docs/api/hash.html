@@ -19,6 +19,8 @@
     <li><a href="#fnv64">fnv64</a></li>
     <li><a href="#murmur3_32">murmur3_32</a></li>
     <li><a href="#siphash24">siphash24</a></li>
+    <li><a href="#crc32">crc32</a></li>
+    <li><a href="#crc32_update">crc32_update</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -30,13 +32,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -47,11 +53,16 @@
     <li class="active"><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -59,28 +70,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -92,27 +123,39 @@
   <div class="functions" id="functions">
     <div class="function" id="fnv32" data-name="fnv32">
       <h3 class="function-name">fnv32 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>fnv32(data, length) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>fnv32(data) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">FNV-1a 32-bit. offset basis 0x811c9dc5, prime 0x01000193. Returned as a non-negative 32-bit value in a `long` (masked each step so the multiply wraps like unsigned uint32 regardless of Aether's signed int width).</p>
     </div>
     <div class="function" id="fnv64" data-name="fnv64">
       <h3 class="function-name">fnv64 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>fnv64(data, length) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>fnv64(data) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">FNV-1a 64-bit. offset basis 0xcbf29ce484222325, prime 0x100000001b3. Uses wrapping 64-bit multiply so the product wraps like unsigned uint64.</p>
     </div>
     <div class="function" id="murmur3_32" data-name="murmur3_32">
       <h3 class="function-name">murmur3_32 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>murmur3_32(data, length, seed) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int, seed: int</span></p>
+      <pre class="usage"><code>murmur3_32(data, seed) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[], seed: int</span></p>
       <p class="doc">MurmurHash3 x86 32-bit. `seed` lets callers salt the hash (0 for a plain digest). Processes 4-byte little-endian blocks then the 1..3-byte tail, with the standard fmix32 finalizer. Implemented in 64-bit `long` throughout with an explicit 32-bit mask after every step, so the arithmetic matches unsigned uint32 exactly regardless of Aether's signed-int width, and the final value is a non-negative 32-bit number. Rotates use the 32-bit rotate on the masked value.</p>
     </div>
     <div class="function" id="siphash24" data-name="siphash24">
       <h3 class="function-name">siphash24 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>siphash24(data, length, k0, k1) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int, k0: long, k1: long</span></p>
-      <p class="doc">SipHash-2-4 of `length` bytes of `data` under the 128-bit key (k0, k1).</p>
+      <pre class="usage"><code>siphash24(data, k0, k1) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[], k0: long, k1: long</span></p>
+      <p class="doc">SipHash-2-4 of the bytes of `data` under the 128-bit key (k0, k1).</p>
+    </div>
+    <div class="function" id="crc32" data-name="crc32">
+      <h3 class="function-name">crc32 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>crc32(data) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">CRC-32 of the bytes of `data`.</p>
+    </div>
+    <div class="function" id="crc32_update" data-name="crc32_update">
+      <h3 class="function-name">crc32_update <span class="kind">fn</span></h3>
+      <pre class="usage"><code>crc32_update(crc, data) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">crc: long, data: byte[]</span></p>
+      <p class="doc">Continues a CRC-32 over the bytes of `data`: pass the value a previous crc32 / crc32_update returned (0 to start), and the result is the CRC of everything so far, as crc32 of the whole input would be. Returned as the unsigned 32-bit value in a `long`.</p>
     </div>
   </div>
 </main>

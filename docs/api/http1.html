@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>http1 - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search http1..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#HttpResponse">HttpResponse</a></li>
+    <li><a href="#response_new">response_new</a></li>
+    <li><a href="#response_free">response_free</a></li>
+    <li><a href="#parse_status_line">parse_status_line</a></li>
+    <li><a href="#parse_headers">parse_headers</a></li>
+    <li><a href="#feed">feed</a></li>
+    <li><a href="#read_response_conn">read_response_conn</a></li>
+    <li><a href="#status_code">status_code</a></li>
+    <li><a href="#status_reason">status_reason</a></li>
+    <li><a href="#header">header</a></li>
+    <li><a href="#header_count">header_count</a></li>
+    <li><a href="#body">body</a></li>
+    <li><a href="#decode_chunked">decode_chunked</a></li>
+    <li><a href="#find_header_end">find_header_end</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li class="active"><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>http1</h1>
+    <p class="module-desc">MIT License (https://opensource.org/licenses/MIT) Portions copyright (c) 2026 Aether Developers.</p>
+    <p class="import-line"><code>import std.http1</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="HttpResponse" data-name="HttpResponse">
+      <h3 class="function-name">HttpResponse <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct HttpResponse</code></pre>
+      <p class="doc">A parsed HTTP/1.1 response. `buf` accumulates the raw wire bytes; `body` is a fresh buffer holding the decoded body (dechunked if needed). Headers are two parallel std.lists of owned lower-cased-name / raw-value strings.</p>
+    </div>
+    <div class="function" id="response_new" data-name="response_new">
+      <h3 class="function-name">response_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_new() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="response_free" data-name="response_free">
+      <h3 class="function-name">response_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_free(rp)</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr</span></p>
+    </div>
+    <div class="function" id="parse_status_line" data-name="parse_status_line">
+      <h3 class="function-name">parse_status_line <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse_status_line(r, buf) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">r: *HttpResponse, buf: byte[]</span></p>
+      <p class="doc">Parse the status line at buf[0..): &quot;HTTP/1.x SP code SP reason CRLF&quot;. Sets r.status and r.reason. Returns the offset just past the CRLF, or -1 on a malformed line.</p>
+    </div>
+    <div class="function" id="parse_headers" data-name="parse_headers">
+      <h3 class="function-name">parse_headers <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse_headers(r, buf, header_end, start)</code></pre>
+      <p class="signature"><span class="sig-params">r: *HttpResponse, buf: byte[], header_end: int, start: int</span></p>
+      <p class="doc">Parse header lines from `start` up to the blank line at header_end-2. Each line is &quot;Name: value CRLF&quot;; folds leading/trailing OWS on the value and lower-cases the name for case-insensitive lookup.</p>
+    </div>
+    <div class="function" id="feed" data-name="feed">
+      <h3 class="function-name">feed <span class="kind">fn</span></h3>
+      <pre class="usage"><code>feed(rp, chunk, is_eof) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr, chunk: byte[], is_eof: int</span></p>
+      <p class="doc">Feed a chunk of bytes into the accumulator and try to parse (for callers that already have bytes in hand, e.g. tests or a caller that owns the recv loop). `chunk` is a byte[] (#2301): a string as `string.bytes(s)`, a `std.bytes` buffer as `bytes.view(buf)`; it is copied, so it need not outlive the call. Returns the parse_response result.</p>
+    </div>
+    <div class="function" id="read_response_conn" data-name="read_response_conn">
+      <h3 class="function-name">read_response_conn <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_response_conn(rp, conn) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr, conn: ptr</span></p>
+      <p class="doc">---- streaming driver over a tls13_client connection ---- Read a complete HTTP/1.1 response into `r` from a live tls13_client connection `conn`, by repeatedly calling conn_recv to append the decrypted application-data bytes to r.buf and re-parsing after each read. Returns &quot;&quot; on a complete response, or an error. conn_recv returning (&quot;&quot;, 0, &quot;&quot;) — an orderly close — is treated as EOF (completes a close-delimited body).</p>
+    </div>
+    <div class="function" id="status_code" data-name="status_code">
+      <h3 class="function-name">status_code <span class="kind">fn</span></h3>
+      <pre class="usage"><code>status_code(rp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr</span></p>
+    </div>
+    <div class="function" id="status_reason" data-name="status_reason">
+      <h3 class="function-name">status_reason <span class="kind">fn</span></h3>
+      <pre class="usage"><code>status_reason(rp) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr</span></p>
+    </div>
+    <div class="function" id="header" data-name="header">
+      <h3 class="function-name">header <span class="kind">fn</span></h3>
+      <pre class="usage"><code>header(rp, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr, name: string</span></p>
+      <p class="doc">Case-insensitive header lookup. Returns a FRESH value string (caller frees with string.free) or &quot;&quot; if the header is absent.</p>
+    </div>
+    <div class="function" id="header_count" data-name="header_count">
+      <h3 class="function-name">header_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>header_count(rp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr</span></p>
+    </div>
+    <div class="function" id="body" data-name="body">
+      <h3 class="function-name">body <span class="kind">fn</span></h3>
+      <pre class="usage"><code>body(rp) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">rp: ptr</span></p>
+      <p class="doc">The decoded body (dechunked if needed) as a borrowed byte[] view (#2301), valid until response_free. The empty slice before a body has been framed. Copy it out with bytes.string_from_slice / bytes.from_slice to keep it.</p>
+    </div>
+    <div class="function" id="decode_chunked" data-name="decode_chunked">
+      <h3 class="function-name">decode_chunked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>decode_chunked(buf, start) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">buf: byte[], start: int</span></p>
+      <p class="doc">Decode a chunked body from buf[start..). Returns (decoded_body, &quot;&quot;) on a complete body, or (null, &quot;incomplete&quot;) if the terminating 0-chunk hasn't arrived yet, or (null, err) on a malformed chunk. Caller frees the body.</p>
+    </div>
+    <div class="function" id="find_header_end" data-name="find_header_end">
+      <h3 class="function-name">find_header_end <span class="kind">fn</span></h3>
+      <pre class="usage"><code>find_header_end(buf) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">buf: byte[]</span></p>
+      <p class="doc">Find the end of the header block: the byte offset just past the first CRLFCRLF (&quot;\r\n\r\n&quot;) in `buf`. Returns -1 if not present yet.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

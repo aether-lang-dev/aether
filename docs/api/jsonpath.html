@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>jsonpath - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search jsonpath..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#parse">parse</a></li>
+    <li><a href="#free_query">free_query</a></li>
+    <li><a href="#query">query</a></li>
+    <li><a href="#query_values">query_values</a></li>
+    <li><a href="#query_paths">query_paths</a></li>
+    <li><a href="#query_ast">query_ast</a></li>
+    <li><a href="#result_size">result_size</a></li>
+    <li><a href="#result_value">result_value</a></li>
+    <li><a href="#result_path">result_path</a></li>
+    <li><a href="#free_result">free_result</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li class="active"><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>jsonpath</h1>
+    <p class="module-desc">std.jsonpath — RFC 9535 JSONPath for Aether.</p>
+    <p class="import-line"><code>import std.jsonpath</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="parse" data-name="parse">
+      <h3 class="function-name">parse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse(path) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="free_query" data-name="free_query">
+      <h3 class="function-name">free_query <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free_query(ast)</code></pre>
+      <p class="signature"><span class="sig-params">ast: ptr</span></p>
+    </div>
+    <div class="function" id="query" data-name="query">
+      <h3 class="function-name">query <span class="kind">fn</span></h3>
+      <pre class="usage"><code>query(root, path) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">root: ptr, path: string</span></p>
+    </div>
+    <div class="function" id="query_values" data-name="query_values">
+      <h3 class="function-name">query_values <span class="kind">fn</span></h3>
+      <pre class="usage"><code>query_values(root, path) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">root: ptr, path: string</span></p>
+    </div>
+    <div class="function" id="query_paths" data-name="query_paths">
+      <h3 class="function-name">query_paths <span class="kind">fn</span></h3>
+      <pre class="usage"><code>query_paths(root, path) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">root: ptr, path: string</span></p>
+    </div>
+    <div class="function" id="query_ast" data-name="query_ast">
+      <h3 class="function-name">query_ast <span class="kind">fn</span></h3>
+      <pre class="usage"><code>query_ast(root, ast) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">root: ptr, ast: ptr</span></p>
+    </div>
+    <div class="function" id="result_size" data-name="result_size">
+      <h3 class="function-name">result_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>result_size(results) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">results: ptr</span></p>
+    </div>
+    <div class="function" id="result_value" data-name="result_value">
+      <h3 class="function-name">result_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>result_value(results, i) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">results: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="result_path" data-name="result_path">
+      <h3 class="function-name">result_path <span class="kind">fn</span></h3>
+      <pre class="usage"><code>result_path(results, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">results: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="free_result" data-name="free_result">
+      <h3 class="function-name">free_result <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free_result(results)</code></pre>
+      <p class="signature"><span class="sig-params">results: ptr</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

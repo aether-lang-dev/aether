@@ -17,26 +17,37 @@
   <ul class="function-nav">
     <li><a href="#connect_raw">connect_raw</a></li>
     <li><a href="#send_raw">send_raw</a></li>
-    <li><a href="#send_n_raw">send_n_raw</a></li>
     <li><a href="#receive_raw">receive_raw</a></li>
     <li><a href="#receive_n_raw">receive_n_raw</a></li>
     <li><a href="#close">close</a></li>
     <li><a href="#listen_raw">listen_raw</a></li>
+    <li><a href="#listen_on_raw">listen_on_raw</a></li>
     <li><a href="#accept_raw">accept_raw</a></li>
     <li><a href="#server_close">server_close</a></li>
+    <li><a href="#server_port_raw">server_port_raw</a></li>
+    <li><a href="#server_poll_raw">server_poll_raw</a></li>
+    <li><a href="#set_nodelay_raw">set_nodelay_raw</a></li>
     <li><a href="#fd_raw">fd_raw</a></li>
     <li><a href="#server_fd_raw">server_fd_raw</a></li>
     <li><a href="#poll_raw">poll_raw</a></li>
     <li><a href="#poll2_raw">poll2_raw</a></li>
+    <li><a href="#send_bytes_raw">send_bytes_raw</a></li>
+    <li><a href="#receive_into_raw">receive_into_raw</a></li>
     <li><a href="#connect">connect</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#write_n">write_n</a></li>
+    <li><a href="#write_slice">write_slice</a></li>
     <li><a href="#read">read</a></li>
     <li><a href="#read_n">read_n</a></li>
+    <li><a href="#read_into">read_into</a></li>
     <li><a href="#listen">listen</a></li>
+    <li><a href="#listen_on">listen_on</a></li>
     <li><a href="#accept">accept</a></li>
     <li><a href="#fd">fd</a></li>
     <li><a href="#server_fd">server_fd</a></li>
+    <li><a href="#server_port">server_port</a></li>
+    <li><a href="#server_poll">server_poll</a></li>
+    <li><a href="#set_nodelay">set_nodelay</a></li>
     <li><a href="#poll">poll</a></li>
     <li><a href="#poll2">poll2</a></li>
   </ul>
@@ -50,13 +61,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -67,11 +82,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -79,28 +99,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li class="active"><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -120,11 +160,6 @@
       <h3 class="function-name">send_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>send_raw(sock, data) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, data: string</span></p>
-    </div>
-    <div class="function" id="send_n_raw" data-name="send_n_raw">
-      <h3 class="function-name">send_n_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>send_n_raw(sock, data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">sock: ptr, data: string, length: int</span></p>
     </div>
     <div class="function" id="receive_raw" data-name="receive_raw">
       <h3 class="function-name">receive_raw <span class="kind">extern</span></h3>
@@ -146,6 +181,11 @@
       <pre class="usage"><code>listen_raw(port) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">port: int</span></p>
     </div>
+    <div class="function" id="listen_on_raw" data-name="listen_on_raw">
+      <h3 class="function-name">listen_on_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>listen_on_raw(address, port) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">address: string, port: int</span></p>
+    </div>
     <div class="function" id="accept_raw" data-name="accept_raw">
       <h3 class="function-name">accept_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>accept_raw(server) <span class="arrow">-&gt;</span> ptr</code></pre>
@@ -155,6 +195,21 @@
       <h3 class="function-name">server_close <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_close(server) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_port_raw" data-name="server_port_raw">
+      <h3 class="function-name">server_port_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_port_raw(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_poll_raw" data-name="server_poll_raw">
+      <h3 class="function-name">server_poll_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_poll_raw(server, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ms: int</span></p>
+    </div>
+    <div class="function" id="set_nodelay_raw" data-name="set_nodelay_raw">
+      <h3 class="function-name">set_nodelay_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_nodelay_raw(sock, on) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, on: int</span></p>
     </div>
     <div class="function" id="fd_raw" data-name="fd_raw">
       <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
@@ -176,6 +231,16 @@
       <pre class="usage"><code>poll2_raw(a, b, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">a: ptr, b: ptr, timeout_ms: int</span></p>
     </div>
+    <div class="function" id="send_bytes_raw" data-name="send_bytes_raw">
+      <h3 class="function-name">send_bytes_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>send_bytes_raw(sock, data, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, data: ptr, length: int</span></p>
+    </div>
+    <div class="function" id="receive_into_raw" data-name="receive_into_raw">
+      <h3 class="function-name">receive_into_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>receive_into_raw(sock, buf, cap) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: ptr, cap: int</span></p>
+    </div>
     <div class="function" id="connect" data-name="connect">
       <h3 class="function-name">connect <span class="kind">fn</span></h3>
       <pre class="usage"><code>connect(host, port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
@@ -190,9 +255,15 @@
     </div>
     <div class="function" id="write_n" data-name="write_n">
       <h3 class="function-name">write_n <span class="kind">fn</span></h3>
-      <pre class="usage"><code>write_n(sock, data, length) <span class="arrow">-&gt;</span> (int, string)</code></pre>
-      <p class="signature"><span class="sig-params">sock: ptr, data: string, length: int</span></p>
-      <p class="doc">Length-aware socket write. Writes exactly the caller-supplied byte prefix, so embedded NUL bytes in `data` do not truncate the send. Returns the OS send(2) byte count; callers that require full-buffer delivery should loop until `length` bytes have been accepted.</p>
+      <pre class="usage"><code>write_n(sock, data)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, data: byte[]</span></p>
+      <p class="doc">Length-aware socket write: sends the bytes of `data`, whose length travels with the slice (#2301), so embedded NUL bytes do not truncate the send. Returns the OS send(2) byte count; callers that require full-buffer delivery should loop, sending `data[n..]` until every byte has been accepted. An empty slice sends nothing and returns (0, &quot;&quot;). For a string, send its byte view: `tcp.write_n(sock, string.bytes(s))`, a prefix with `string.bytes(s)[0..n]`; for a `std.bytes` buffer, `bytes.view(buf)`.</p>
+    </div>
+    <div class="function" id="write_slice" data-name="write_slice">
+      <h3 class="function-name">write_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_slice(sock, s) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, s: byte[]</span></p>
+      <p class="doc">Write a `byte[]` slice's bytes, binary-safe: the length travels with the slice (#2301). Returns (bytes_sent, &quot;&quot;) or (0, &quot;send failed&quot;). The count is one send(2) and may be SHORT, as with write_n: a caller that needs the whole slice delivered loops on the rest, `s[sent..]`. An empty slice sends nothing and returns (0, &quot;&quot;). A slice with no bound panics.</p>
     </div>
     <div class="function" id="read" data-name="read">
       <h3 class="function-name">read <span class="kind">fn</span></h3>
@@ -206,11 +277,23 @@
       <p class="signature"><span class="sig-params">sock: ptr, max_bytes: int</span></p>
       <p class="doc">Binary-safe read. Returns (bytes, length, &quot;&quot;) on success, with the byte buffer stored in a length-aware AetherString. The returned length is authoritative; callers should pass it to length-aware consumers rather than re-derive length with strlen-shaped APIs. Error discipline (#1092): a quiet-but-alive peer (recv-timeout / would-block) returns (&quot;&quot;, 0, &quot;timeout&quot;) and leaves the socket connected — retry or poll, do NOT treat it as a close. Only an orderly FIN or a hard error returns &quot;connection closed or receive failed&quot;; that is the terminal state. A full-duplex relay must branch on the &quot;timeout&quot; sentinel rather than collapsing all non-empty errors into &quot;closed.&quot;</p>
     </div>
+    <div class="function" id="read_into" data-name="read_into">
+      <h3 class="function-name">read_into <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_into(sock, buf) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: byte[]</span></p>
+      <p class="doc">Read into a caller-owned `byte[]` (#2301): one receive of at most `buf.len` bytes, nothing allocated, never a byte past `buf.len`. Returns (n, &quot;&quot;) with the data in `buf[0..n]`, which may be fewer bytes than asked. Errors follow read_n: (0, &quot;timeout&quot;) for a quiet peer (the socket stays connected: retry or poll), (0, &quot;connection closed or receive failed&quot;) for an orderly close or an error (terminal). An empty slice returns (0, &quot;receive buffer is empty&quot;) without touching the socket; a slice with no bound panics.</p>
+    </div>
     <div class="function" id="listen" data-name="listen">
       <h3 class="function-name">listen <span class="kind">fn</span></h3>
       <pre class="usage"><code>listen(port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">port: int</span></p>
       <p class="doc">Listen on a port. Returns (server, &quot;&quot;) on success, (null, error) on failure. Caller must tcp.server_close the returned server.</p>
+    </div>
+    <div class="function" id="listen_on" data-name="listen_on">
+      <h3 class="function-name">listen_on <span class="kind">fn</span></h3>
+      <pre class="usage"><code>listen_on(address, port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">address: string, port: int</span></p>
+      <p class="doc">Listen on ONE address (#2136): &quot;127.0.0.1&quot; for a loopback-only channel that the network cannot reach, &quot;0.0.0.0&quot; for every interface (what `listen` does). Port 0 asks the OS for an ephemeral port; read it back with `server_port`. Returns (server, &quot;&quot;) or (null, error).</p>
     </div>
     <div class="function" id="accept" data-name="accept">
       <h3 class="function-name">accept <span class="kind">fn</span></h3>
@@ -229,6 +312,24 @@
       <pre class="usage"><code>server_fd(server) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">server: ptr</span></p>
       <p class="doc">The OS-level listening descriptor inside a server handle, or -1 if the handle is null (#1003). Same ownership rule: released by tcp.server_close, never closed directly.</p>
+    </div>
+    <div class="function" id="server_port" data-name="server_port">
+      <h3 class="function-name">server_port <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_port(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">The port a server is bound to — the one the OS chose for a `listen_on(addr, 0)` — or -1 for a null handle.</p>
+    </div>
+    <div class="function" id="server_poll" data-name="server_poll">
+      <h3 class="function-name">server_poll <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_poll(server, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ms: int</span></p>
+      <p class="doc">Wait up to timeout_ms for a connection to be waiting, so `accept` will not block: 1 = a connection is queued, 0 = timeout, -1 = null handle or error. A serving loop with a stop flag polls this between checks of the flag instead of blocking in `accept` (closing the listener from another thread does not wake `accept` on Linux).</p>
+    </div>
+    <div class="function" id="set_nodelay" data-name="set_nodelay">
+      <h3 class="function-name">set_nodelay <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_nodelay(sock, on) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, on: bool</span></p>
+      <p class="doc">TCP_NODELAY: send each write at once instead of waiting to coalesce it (Nagle). Request/response lines want it on. Returns &quot;&quot; on success or an error; `setsockopt` cannot be declared from Aether because the runtime's headers already declare it with the platform's signature.</p>
     </div>
     <div class="function" id="poll" data-name="poll">
       <h3 class="function-name">poll <span class="kind">fn</span></h3>

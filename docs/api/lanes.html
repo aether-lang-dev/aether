@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>lanes - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search lanes..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#f32x4">f32x4</a></li>
+    <li><a href="#splat4">splat4</a></li>
+    <li><a href="#load4">load4</a></li>
+    <li><a href="#store4">store4</a></li>
+    <li><a href="#lane4">lane4</a></li>
+    <li><a href="#sum4">sum4</a></li>
+    <li><a href="#min4">min4</a></li>
+    <li><a href="#max4">max4</a></li>
+    <li><a href="#select4">select4</a></li>
+    <li><a href="#sqrt4">sqrt4</a></li>
+    <li><a href="#abs4">abs4</a></li>
+    <li><a href="#lt4">lt4</a></li>
+    <li><a href="#le4">le4</a></li>
+    <li><a href="#gt4">gt4</a></li>
+    <li><a href="#ge4">ge4</a></li>
+    <li><a href="#eq4">eq4</a></li>
+    <li><a href="#mask_and">mask_and</a></li>
+    <li><a href="#mask_or">mask_or</a></li>
+    <li><a href="#mask_not">mask_not</a></li>
+    <li><a href="#any4">any4</a></li>
+    <li><a href="#all4">all4</a></li>
+    <li><a href="#mask_lane">mask_lane</a></li>
+    <li><a href="#f64x2">f64x2</a></li>
+    <li><a href="#splat2">splat2</a></li>
+    <li><a href="#load2">load2</a></li>
+    <li><a href="#store2">store2</a></li>
+    <li><a href="#lane2">lane2</a></li>
+    <li><a href="#sum2">sum2</a></li>
+    <li><a href="#min2">min2</a></li>
+    <li><a href="#max2">max2</a></li>
+    <li><a href="#sqrt2">sqrt2</a></li>
+    <li><a href="#abs2">abs2</a></li>
+    <li><a href="#select2">select2</a></li>
+    <li><a href="#lt2">lt2</a></li>
+    <li><a href="#le2">le2</a></li>
+    <li><a href="#gt2">gt2</a></li>
+    <li><a href="#ge2">ge2</a></li>
+    <li><a href="#eq2">eq2</a></li>
+    <li><a href="#mask2_and">mask2_and</a></li>
+    <li><a href="#mask2_or">mask2_or</a></li>
+    <li><a href="#mask2_not">mask2_not</a></li>
+    <li><a href="#any2">any2</a></li>
+    <li><a href="#all2">all2</a></li>
+    <li><a href="#mask2_lane">mask2_lane</a></li>
+    <li><a href="#i32x4">i32x4</a></li>
+    <li><a href="#i32splat">i32splat</a></li>
+    <li><a href="#i32load">i32load</a></li>
+    <li><a href="#i32store">i32store</a></li>
+    <li><a href="#i32lane">i32lane</a></li>
+    <li><a href="#i32sum">i32sum</a></li>
+    <li><a href="#i32add">i32add</a></li>
+    <li><a href="#i32sub">i32sub</a></li>
+    <li><a href="#i32mul">i32mul</a></li>
+    <li><a href="#i32shl">i32shl</a></li>
+    <li><a href="#i32shr">i32shr</a></li>
+    <li><a href="#i32shr_u">i32shr_u</a></li>
+    <li><a href="#i32min">i32min</a></li>
+    <li><a href="#i32max">i32max</a></li>
+    <li><a href="#i16x8">i16x8</a></li>
+    <li><a href="#i16splat">i16splat</a></li>
+    <li><a href="#i16load">i16load</a></li>
+    <li><a href="#i16store">i16store</a></li>
+    <li><a href="#i16lane">i16lane</a></li>
+    <li><a href="#i16add">i16add</a></li>
+    <li><a href="#i16sub">i16sub</a></li>
+    <li><a href="#i16mul">i16mul</a></li>
+    <li><a href="#i16shl">i16shl</a></li>
+    <li><a href="#i16shr">i16shr</a></li>
+    <li><a href="#i16min">i16min</a></li>
+    <li><a href="#i16max">i16max</a></li>
+    <li><a href="#pack_i32_i16">pack_i32_i16</a></li>
+    <li><a href="#pack_i16_u8">pack_i16_u8</a></li>
+    <li><a href="#load4_slice">load4_slice</a></li>
+    <li><a href="#store4_slice">store4_slice</a></li>
+    <li><a href="#load2_slice">load2_slice</a></li>
+    <li><a href="#store2_slice">store2_slice</a></li>
+    <li><a href="#i32load_slice">i32load_slice</a></li>
+    <li><a href="#i32store_slice">i32store_slice</a></li>
+    <li><a href="#i16load_slice">i16load_slice</a></li>
+    <li><a href="#i16store_slice">i16store_slice</a></li>
+    <li><a href="#pack_i16_u8_slice">pack_i16_u8_slice</a></li>
+    <li><a href="#f32x8">f32x8</a></li>
+    <li><a href="#splat8">splat8</a></li>
+    <li><a href="#load8">load8</a></li>
+    <li><a href="#store8">store8</a></li>
+    <li><a href="#lane8">lane8</a></li>
+    <li><a href="#sum8">sum8</a></li>
+    <li><a href="#min8">min8</a></li>
+    <li><a href="#max8">max8</a></li>
+    <li><a href="#select8">select8</a></li>
+    <li><a href="#sqrt8">sqrt8</a></li>
+    <li><a href="#abs8">abs8</a></li>
+    <li><a href="#lt8">lt8</a></li>
+    <li><a href="#le8">le8</a></li>
+    <li><a href="#gt8">gt8</a></li>
+    <li><a href="#ge8">ge8</a></li>
+    <li><a href="#eq8">eq8</a></li>
+    <li><a href="#mask8_and">mask8_and</a></li>
+    <li><a href="#mask8_or">mask8_or</a></li>
+    <li><a href="#mask8_not">mask8_not</a></li>
+    <li><a href="#any8">any8</a></li>
+    <li><a href="#all8">all8</a></li>
+    <li><a href="#mask8_lane">mask8_lane</a></li>
+    <li><a href="#load8_slice">load8_slice</a></li>
+    <li><a href="#store8_slice">store8_slice</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li class="active"><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>lanes</h1>
+    <p class="module-desc">std.lanes - SIMD lanes for the f32x4 / f64x2 / i32x4 / f32x8 types (#2146) Import with: import std.lanes The lane types themselves are language types: `f32x4` is four C floats in one register, `f64x2` two doubles, `i32x4` four 32-bit integers and the mask a lane comparison yields.</p>
+    <p class="import-line"><code>import std.lanes</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="f32x4" data-name="f32x4">
+      <h3 class="function-name">f32x4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>f32x4()</code></pre>
+    </div>
+    <div class="function" id="splat4" data-name="splat4">
+      <h3 class="function-name">splat4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>splat4()</code></pre>
+    </div>
+    <div class="function" id="load4" data-name="load4">
+      <h3 class="function-name">load4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load4()</code></pre>
+    </div>
+    <div class="function" id="store4" data-name="store4">
+      <h3 class="function-name">store4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>store4(buf as ptr, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+    </div>
+    <div class="function" id="lane4" data-name="lane4">
+      <h3 class="function-name">lane4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lane4()</code></pre>
+    </div>
+    <div class="function" id="sum4" data-name="sum4">
+      <h3 class="function-name">sum4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sum4()</code></pre>
+    </div>
+    <div class="function" id="min4" data-name="min4">
+      <h3 class="function-name">min4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>min4()</code></pre>
+    </div>
+    <div class="function" id="max4" data-name="max4">
+      <h3 class="function-name">max4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>max4()</code></pre>
+    </div>
+    <div class="function" id="select4" data-name="select4">
+      <h3 class="function-name">select4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>select4()</code></pre>
+    </div>
+    <div class="function" id="sqrt4" data-name="sqrt4">
+      <h3 class="function-name">sqrt4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sqrt4()</code></pre>
+    </div>
+    <div class="function" id="abs4" data-name="abs4">
+      <h3 class="function-name">abs4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>abs4()</code></pre>
+    </div>
+    <div class="function" id="lt4" data-name="lt4">
+      <h3 class="function-name">lt4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lt4()</code></pre>
+    </div>
+    <div class="function" id="le4" data-name="le4">
+      <h3 class="function-name">le4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>le4()</code></pre>
+    </div>
+    <div class="function" id="gt4" data-name="gt4">
+      <h3 class="function-name">gt4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>gt4()</code></pre>
+    </div>
+    <div class="function" id="ge4" data-name="ge4">
+      <h3 class="function-name">ge4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ge4()</code></pre>
+    </div>
+    <div class="function" id="eq4" data-name="eq4">
+      <h3 class="function-name">eq4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>eq4()</code></pre>
+    </div>
+    <div class="function" id="mask_and" data-name="mask_and">
+      <h3 class="function-name">mask_and <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask_and()</code></pre>
+    </div>
+    <div class="function" id="mask_or" data-name="mask_or">
+      <h3 class="function-name">mask_or <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask_or()</code></pre>
+    </div>
+    <div class="function" id="mask_not" data-name="mask_not">
+      <h3 class="function-name">mask_not <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask_not()</code></pre>
+    </div>
+    <div class="function" id="any4" data-name="any4">
+      <h3 class="function-name">any4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>any4()</code></pre>
+    </div>
+    <div class="function" id="all4" data-name="all4">
+      <h3 class="function-name">all4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>all4()</code></pre>
+    </div>
+    <div class="function" id="mask_lane" data-name="mask_lane">
+      <h3 class="function-name">mask_lane <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask_lane()</code></pre>
+    </div>
+    <div class="function" id="f64x2" data-name="f64x2">
+      <h3 class="function-name">f64x2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>f64x2()</code></pre>
+    </div>
+    <div class="function" id="splat2" data-name="splat2">
+      <h3 class="function-name">splat2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>splat2()</code></pre>
+    </div>
+    <div class="function" id="load2" data-name="load2">
+      <h3 class="function-name">load2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load2()</code></pre>
+    </div>
+    <div class="function" id="store2" data-name="store2">
+      <h3 class="function-name">store2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>store2(buf as ptr, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+    </div>
+    <div class="function" id="lane2" data-name="lane2">
+      <h3 class="function-name">lane2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lane2()</code></pre>
+    </div>
+    <div class="function" id="sum2" data-name="sum2">
+      <h3 class="function-name">sum2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sum2()</code></pre>
+    </div>
+    <div class="function" id="min2" data-name="min2">
+      <h3 class="function-name">min2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>min2()</code></pre>
+    </div>
+    <div class="function" id="max2" data-name="max2">
+      <h3 class="function-name">max2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>max2()</code></pre>
+    </div>
+    <div class="function" id="sqrt2" data-name="sqrt2">
+      <h3 class="function-name">sqrt2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sqrt2()</code></pre>
+    </div>
+    <div class="function" id="abs2" data-name="abs2">
+      <h3 class="function-name">abs2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>abs2()</code></pre>
+    </div>
+    <div class="function" id="select2" data-name="select2">
+      <h3 class="function-name">select2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>select2()</code></pre>
+    </div>
+    <div class="function" id="lt2" data-name="lt2">
+      <h3 class="function-name">lt2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lt2()</code></pre>
+    </div>
+    <div class="function" id="le2" data-name="le2">
+      <h3 class="function-name">le2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>le2()</code></pre>
+    </div>
+    <div class="function" id="gt2" data-name="gt2">
+      <h3 class="function-name">gt2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>gt2()</code></pre>
+    </div>
+    <div class="function" id="ge2" data-name="ge2">
+      <h3 class="function-name">ge2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ge2()</code></pre>
+    </div>
+    <div class="function" id="eq2" data-name="eq2">
+      <h3 class="function-name">eq2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>eq2()</code></pre>
+    </div>
+    <div class="function" id="mask2_and" data-name="mask2_and">
+      <h3 class="function-name">mask2_and <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask2_and()</code></pre>
+    </div>
+    <div class="function" id="mask2_or" data-name="mask2_or">
+      <h3 class="function-name">mask2_or <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask2_or()</code></pre>
+    </div>
+    <div class="function" id="mask2_not" data-name="mask2_not">
+      <h3 class="function-name">mask2_not <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask2_not()</code></pre>
+    </div>
+    <div class="function" id="any2" data-name="any2">
+      <h3 class="function-name">any2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>any2()</code></pre>
+    </div>
+    <div class="function" id="all2" data-name="all2">
+      <h3 class="function-name">all2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>all2()</code></pre>
+    </div>
+    <div class="function" id="mask2_lane" data-name="mask2_lane">
+      <h3 class="function-name">mask2_lane <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask2_lane()</code></pre>
+    </div>
+    <div class="function" id="i32x4" data-name="i32x4">
+      <h3 class="function-name">i32x4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32x4()</code></pre>
+    </div>
+    <div class="function" id="i32splat" data-name="i32splat">
+      <h3 class="function-name">i32splat <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32splat()</code></pre>
+    </div>
+    <div class="function" id="i32load" data-name="i32load">
+      <h3 class="function-name">i32load <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32load()</code></pre>
+    </div>
+    <div class="function" id="i32store" data-name="i32store">
+      <h3 class="function-name">i32store <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32store(buf as ptr, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+    </div>
+    <div class="function" id="i32lane" data-name="i32lane">
+      <h3 class="function-name">i32lane <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32lane()</code></pre>
+    </div>
+    <div class="function" id="i32sum" data-name="i32sum">
+      <h3 class="function-name">i32sum <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32sum()</code></pre>
+    </div>
+    <div class="function" id="i32add" data-name="i32add">
+      <h3 class="function-name">i32add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32add()</code></pre>
+    </div>
+    <div class="function" id="i32sub" data-name="i32sub">
+      <h3 class="function-name">i32sub <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32sub()</code></pre>
+    </div>
+    <div class="function" id="i32mul" data-name="i32mul">
+      <h3 class="function-name">i32mul <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32mul()</code></pre>
+    </div>
+    <div class="function" id="i32shl" data-name="i32shl">
+      <h3 class="function-name">i32shl <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32shl()</code></pre>
+    </div>
+    <div class="function" id="i32shr" data-name="i32shr">
+      <h3 class="function-name">i32shr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32shr()</code></pre>
+    </div>
+    <div class="function" id="i32shr_u" data-name="i32shr_u">
+      <h3 class="function-name">i32shr_u <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32shr_u()</code></pre>
+    </div>
+    <div class="function" id="i32min" data-name="i32min">
+      <h3 class="function-name">i32min <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32min()</code></pre>
+    </div>
+    <div class="function" id="i32max" data-name="i32max">
+      <h3 class="function-name">i32max <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32max()</code></pre>
+    </div>
+    <div class="function" id="i16x8" data-name="i16x8">
+      <h3 class="function-name">i16x8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16x8()</code></pre>
+    </div>
+    <div class="function" id="i16splat" data-name="i16splat">
+      <h3 class="function-name">i16splat <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16splat()</code></pre>
+    </div>
+    <div class="function" id="i16load" data-name="i16load">
+      <h3 class="function-name">i16load <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16load()</code></pre>
+    </div>
+    <div class="function" id="i16store" data-name="i16store">
+      <h3 class="function-name">i16store <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16store(buf as ptr, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+    </div>
+    <div class="function" id="i16lane" data-name="i16lane">
+      <h3 class="function-name">i16lane <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16lane()</code></pre>
+    </div>
+    <div class="function" id="i16add" data-name="i16add">
+      <h3 class="function-name">i16add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16add()</code></pre>
+    </div>
+    <div class="function" id="i16sub" data-name="i16sub">
+      <h3 class="function-name">i16sub <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16sub()</code></pre>
+    </div>
+    <div class="function" id="i16mul" data-name="i16mul">
+      <h3 class="function-name">i16mul <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16mul()</code></pre>
+    </div>
+    <div class="function" id="i16shl" data-name="i16shl">
+      <h3 class="function-name">i16shl <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16shl()</code></pre>
+    </div>
+    <div class="function" id="i16shr" data-name="i16shr">
+      <h3 class="function-name">i16shr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16shr()</code></pre>
+    </div>
+    <div class="function" id="i16min" data-name="i16min">
+      <h3 class="function-name">i16min <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16min()</code></pre>
+    </div>
+    <div class="function" id="i16max" data-name="i16max">
+      <h3 class="function-name">i16max <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16max()</code></pre>
+    </div>
+    <div class="function" id="pack_i32_i16" data-name="pack_i32_i16">
+      <h3 class="function-name">pack_i32_i16 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pack_i32_i16()</code></pre>
+    </div>
+    <div class="function" id="pack_i16_u8" data-name="pack_i16_u8">
+      <h3 class="function-name">pack_i16_u8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pack_i16_u8(a, b, out as ptr)</code></pre>
+      <p class="signature"><span class="sig-params">a, b, out as ptr</span></p>
+    </div>
+    <div class="function" id="load4_slice" data-name="load4_slice">
+      <h3 class="function-name">load4_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load4_slice(buf, index) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">buf: f32[], index: long</span></p>
+    </div>
+    <div class="function" id="store4_slice" data-name="store4_slice">
+      <h3 class="function-name">store4_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>store4_slice(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: f32[], index: long, v: f32x4</span></p>
+    </div>
+    <div class="function" id="load2_slice" data-name="load2_slice">
+      <h3 class="function-name">load2_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load2_slice(buf, index) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">buf: float[], index: long</span></p>
+    </div>
+    <div class="function" id="store2_slice" data-name="store2_slice">
+      <h3 class="function-name">store2_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>store2_slice(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: float[], index: long, v: f64x2</span></p>
+    </div>
+    <div class="function" id="i32load_slice" data-name="i32load_slice">
+      <h3 class="function-name">i32load_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32load_slice(buf, index) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">buf: int[], index: long</span></p>
+    </div>
+    <div class="function" id="i32store_slice" data-name="i32store_slice">
+      <h3 class="function-name">i32store_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32store_slice(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: int[], index: long, v: i32x4</span></p>
+    </div>
+    <div class="function" id="i16load_slice" data-name="i16load_slice">
+      <h3 class="function-name">i16load_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16load_slice(buf, index) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">buf: uint16[], index: long</span></p>
+      <p class="doc">16-bit lanes store into `uint16[]` (the array-element width that matches i16x8's storage), not a signed `int16` — the language has no first-class signed 16-bit element type for arrays, and `i16lane` already sign-extends on the way out, same as the raw `ptr` form.</p>
+    </div>
+    <div class="function" id="i16store_slice" data-name="i16store_slice">
+      <h3 class="function-name">i16store_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i16store_slice(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: uint16[], index: long, v: i16x8</span></p>
+    </div>
+    <div class="function" id="pack_i16_u8_slice" data-name="pack_i16_u8_slice">
+      <h3 class="function-name">pack_i16_u8_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pack_i16_u8_slice(a, b, out)</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8, out: byte[]</span></p>
+      <p class="doc">`out` must have room for all 16 output bytes.</p>
+    </div>
+    <div class="function" id="f32x8" data-name="f32x8">
+      <h3 class="function-name">f32x8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>f32x8()</code></pre>
+    </div>
+    <div class="function" id="splat8" data-name="splat8">
+      <h3 class="function-name">splat8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>splat8()</code></pre>
+    </div>
+    <div class="function" id="load8" data-name="load8">
+      <h3 class="function-name">load8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load8()</code></pre>
+    </div>
+    <div class="function" id="store8" data-name="store8">
+      <h3 class="function-name">store8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>store8(buf as ptr, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+    </div>
+    <div class="function" id="lane8" data-name="lane8">
+      <h3 class="function-name">lane8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lane8()</code></pre>
+    </div>
+    <div class="function" id="sum8" data-name="sum8">
+      <h3 class="function-name">sum8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sum8()</code></pre>
+    </div>
+    <div class="function" id="min8" data-name="min8">
+      <h3 class="function-name">min8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>min8()</code></pre>
+    </div>
+    <div class="function" id="max8" data-name="max8">
+      <h3 class="function-name">max8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>max8()</code></pre>
+    </div>
+    <div class="function" id="select8" data-name="select8">
+      <h3 class="function-name">select8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>select8()</code></pre>
+    </div>
+    <div class="function" id="sqrt8" data-name="sqrt8">
+      <h3 class="function-name">sqrt8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sqrt8()</code></pre>
+    </div>
+    <div class="function" id="abs8" data-name="abs8">
+      <h3 class="function-name">abs8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>abs8()</code></pre>
+    </div>
+    <div class="function" id="lt8" data-name="lt8">
+      <h3 class="function-name">lt8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lt8()</code></pre>
+    </div>
+    <div class="function" id="le8" data-name="le8">
+      <h3 class="function-name">le8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>le8()</code></pre>
+    </div>
+    <div class="function" id="gt8" data-name="gt8">
+      <h3 class="function-name">gt8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>gt8()</code></pre>
+    </div>
+    <div class="function" id="ge8" data-name="ge8">
+      <h3 class="function-name">ge8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ge8()</code></pre>
+    </div>
+    <div class="function" id="eq8" data-name="eq8">
+      <h3 class="function-name">eq8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>eq8()</code></pre>
+    </div>
+    <div class="function" id="mask8_and" data-name="mask8_and">
+      <h3 class="function-name">mask8_and <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask8_and()</code></pre>
+    </div>
+    <div class="function" id="mask8_or" data-name="mask8_or">
+      <h3 class="function-name">mask8_or <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask8_or()</code></pre>
+    </div>
+    <div class="function" id="mask8_not" data-name="mask8_not">
+      <h3 class="function-name">mask8_not <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask8_not()</code></pre>
+    </div>
+    <div class="function" id="any8" data-name="any8">
+      <h3 class="function-name">any8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>any8()</code></pre>
+    </div>
+    <div class="function" id="all8" data-name="all8">
+      <h3 class="function-name">all8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>all8()</code></pre>
+    </div>
+    <div class="function" id="mask8_lane" data-name="mask8_lane">
+      <h3 class="function-name">mask8_lane <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mask8_lane()</code></pre>
+    </div>
+    <div class="function" id="load8_slice" data-name="load8_slice">
+      <h3 class="function-name">load8_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load8_slice(buf, index) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">buf: f32[], index: long</span></p>
+    </div>
+    <div class="function" id="store8_slice" data-name="store8_slice">
+      <h3 class="function-name">store8_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>store8_slice(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: f32[], index: long, v: f32x8</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

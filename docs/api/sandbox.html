@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sandbox - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search sandbox..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#new">new</a></li>
+    <li><a href="#enforce">enforce</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#grant_all">grant_all</a></li>
+    <li><a href="#grant_fs_read">grant_fs_read</a></li>
+    <li><a href="#grant_fs_write">grant_fs_write</a></li>
+    <li><a href="#grant_fs">grant_fs</a></li>
+    <li><a href="#grant_exec">grant_exec</a></li>
+    <li><a href="#grant_env">grant_env</a></li>
+    <li><a href="#grant_tcp">grant_tcp</a></li>
+    <li><a href="#grant_tcp_listen">grant_tcp_listen</a></li>
+    <li><a href="#grant_udp">grant_udp</a></li>
+    <li><a href="#grant_native">grant_native</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li class="active"><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>sandbox</h1>
+    <p class="module-desc">std.sandbox — build a grant list and run code under it.</p>
+    <p class="import-line"><code>import std.sandbox</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="new" data-name="new">
+      <h3 class="function-name">new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new(name) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">name: string</span></p>
+      <p class="doc">A new, empty grant list named `name` (the name is for the reader and for denial logs; it does not change what is allowed). Give it grants in the trailing block; with none it denies everything. Release with free().</p>
+    </div>
+    <div class="function" id="enforce" data-name="enforce">
+      <h3 class="function-name">enforce <span class="kind">fn</span></h3>
+      <pre class="usage"><code>enforce(perms, code)</code></pre>
+      <p class="signature"><span class="sig-params">perms: ptr, code: fn</span></p>
+      <p class="doc">Run `code` with `perms` in force: every sandbox-checked operation inside it, and in anything it calls, must match one of the grants. The grants stop applying when `code` returns. Trusted names: `sandbox.enforce(perms, audit_log, db) callback { ... }`. A call written in the block to a named function (`audit_log(...)`), or into a named module (`db.query(...)`), runs with the authority of the code that wrote the enforce instead of the block's grants. The compiler handles the extra names (compiler/analysis/sandbox_trust.c): it checks them, routes those calls through wrappers, and leaves this two-argument function to do the rest. Trust is lexical and narrow on purpose: - a trusted call's arguments are still evaluated inside the sandbox; - a function called from somewhere else, even one that calls a trusted name, stays sandboxed; - the names cannot be used as values in the block; - only Aether functions can be trusted, not C externs; - an enforce written by contained code records the sandboxed authority it runs under, so trusting a name there gains nothing.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(perms)</code></pre>
+      <p class="signature"><span class="sig-params">perms: ptr</span></p>
+      <p class="doc">Release a grant list made by new(), and the grant strings it owns.</p>
+    </div>
+    <div class="function" id="grant_all" data-name="grant_all">
+      <h3 class="function-name">grant_all <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_all(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">Everything: the equivalent of no sandbox.</p>
+    </div>
+    <div class="function" id="grant_fs_read" data-name="grant_fs_read">
+      <h3 class="function-name">grant_fs_read <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_fs_read(_ctx, path)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="doc">Opening files for reading whose resolved path matches `path`.</p>
+    </div>
+    <div class="function" id="grant_fs_write" data-name="grant_fs_write">
+      <h3 class="function-name">grant_fs_write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_fs_write(_ctx, path)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="doc">Opening, creating or writing files whose resolved path matches `path`.</p>
+    </div>
+    <div class="function" id="grant_fs" data-name="grant_fs">
+      <h3 class="function-name">grant_fs <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_fs(_ctx, path)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="doc">Reading and writing under `path`, plus directory operations on it (such as os.chdir, which std checks under its own &quot;fs&quot; category).</p>
+    </div>
+    <div class="function" id="grant_exec" data-name="grant_exec">
+      <h3 class="function-name">grant_exec <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_exec(_ctx, cmd)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, cmd: string</span></p>
+      <p class="doc">Running commands whose command line matches `cmd` (&quot;echo *&quot;).</p>
+    </div>
+    <div class="function" id="grant_env" data-name="grant_env">
+      <h3 class="function-name">grant_env <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_env(_ctx, name)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, name: string</span></p>
+      <p class="doc">Reading the environment variables whose names match `name`.</p>
+    </div>
+    <div class="function" id="grant_tcp" data-name="grant_tcp">
+      <h3 class="function-name">grant_tcp <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_tcp(_ctx, host)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, host: string</span></p>
+      <p class="doc">Outbound TCP to hosts matching `host` (&quot;db.internal&quot;, &quot;*.corp&quot;). The LD_PRELOAD layer sees only the resolved address, so grant the IP too for code that connects outside std.net. Ports are not checked.</p>
+    </div>
+    <div class="function" id="grant_tcp_listen" data-name="grant_tcp_listen">
+      <h3 class="function-name">grant_tcp_listen <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_tcp_listen(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">Listening for and accepting inbound TCP connections, on any port.</p>
+    </div>
+    <div class="function" id="grant_udp" data-name="grant_udp">
+      <h3 class="function-name">grant_udp <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_udp(_ctx, host)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, host: string</span></p>
+      <p class="doc">UDP to and from hosts matching `host`.</p>
+    </div>
+    <div class="function" id="grant_native" data-name="grant_native">
+      <h3 class="function-name">grant_native <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_native(_ctx, path)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="doc">Loading native code (dlopen) from paths matching `path`.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

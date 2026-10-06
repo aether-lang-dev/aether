@@ -35,7 +35,11 @@
     <li><a href="#aether_bytes_copy_from_bytes">aether_bytes_copy_from_bytes</a></li>
     <li><a href="#aether_bytes_copy_within">aether_bytes_copy_within</a></li>
     <li><a href="#aether_bytes_finish">aether_bytes_finish</a></li>
+    <li><a href="#aether_bytes_to_string">aether_bytes_to_string</a></li>
     <li><a href="#aether_bytes_free">aether_bytes_free</a></li>
+    <li><a href="#aether_bytes_data">aether_bytes_data</a></li>
+    <li><a href="#aether_bytes_capacity">aether_bytes_capacity</a></li>
+    <li><a href="#aether_bytes_set_length">aether_bytes_set_length</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#set">set</a></li>
     <li><a href="#get">get</a></li>
@@ -56,7 +60,19 @@
     <li><a href="#copy_from_bytes">copy_from_bytes</a></li>
     <li><a href="#copy_within">copy_within</a></li>
     <li><a href="#finish">finish</a></li>
+    <li><a href="#to_string">to_string</a></li>
     <li><a href="#free">free</a></li>
+    <li><a href="#data">data</a></li>
+    <li><a href="#capacity">capacity</a></li>
+    <li><a href="#set_length">set_length</a></li>
+    <li><a href="#from_ptr">from_ptr</a></li>
+    <li><a href="#string_from_ptr">string_from_ptr</a></li>
+    <li><a href="#aether_bytes_copy_from_ptr">aether_bytes_copy_from_ptr</a></li>
+    <li><a href="#view">view</a></li>
+    <li><a href="#capacity_view">capacity_view</a></li>
+    <li><a href="#from_slice">from_slice</a></li>
+    <li><a href="#copy_from_slice">copy_from_slice</a></li>
+    <li><a href="#string_from_slice">string_from_slice</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -68,13 +84,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li class="active"><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -85,11 +105,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -97,28 +122,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -232,16 +277,36 @@
       <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
       <p class="doc">`aether_bytes_finish` returns a freshly heap-owned AetherString (`string_new_with_length` — see std/bytes/aether_bytes.c). The `string @heap` return tells the heap-string tracker the caller owns the result, so `x = bytes.finish(...)` gets a `_heap_x = 1` slot and any function returning a `bytes.finish` value is itself classified heap-returning. Mirrors `aether_strbuilder_finish`.</p>
     </div>
+    <div class="function" id="aether_bytes_to_string" data-name="aether_bytes_to_string">
+      <h3 class="function-name">aether_bytes_to_string <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_bytes_to_string(b, length) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
+      <p class="doc">Non-consuming twin of finish: mint a fresh heap AetherString from the first `length` bytes without destroying the buffer, so the buffer's owner can keep it and mint again. See to_string wrapper below.</p>
+    </div>
     <div class="function" id="aether_bytes_free" data-name="aether_bytes_free">
       <h3 class="function-name">aether_bytes_free <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_bytes_free(b)</code></pre>
       <p class="signature"><span class="sig-params">b: ptr</span></p>
     </div>
+    <div class="function" id="aether_bytes_data" data-name="aether_bytes_data">
+      <h3 class="function-name">aether_bytes_data <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_bytes_data(b) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
+    <div class="function" id="aether_bytes_capacity" data-name="aether_bytes_capacity">
+      <h3 class="function-name">aether_bytes_capacity <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_bytes_capacity(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
+    <div class="function" id="aether_bytes_set_length" data-name="aether_bytes_set_length">
+      <h3 class="function-name">aether_bytes_set_length <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_bytes_set_length(b, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
+    </div>
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">fn</span></h3>
       <pre class="usage"><code>new(initial_capacity) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">initial_capacity: int</span></p>
-      <p class="doc">---- Aether-side wrappers ---- Allocate a new mutable byte buffer with at least `initial_capacity` bytes reserved. Returns null on allocation failure or negative capacity. Initial logical length is 0.</p>
     </div>
     <div class="function" id="set" data-name="set">
       <h3 class="function-name">set <span class="kind">fn</span></h3>
@@ -357,11 +422,83 @@
       <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
       <p class="doc">Hand the buffer off to a refcounted AetherString and destroy the AetherBytes wrapper. After this call, `b` is invalid. The string carries the explicit length so embedded NULs survive end-to-end. Pass the prefix you actually want to keep (use bytes.length(b) to take the whole buffer).</p>
     </div>
+    <div class="function" id="to_string" data-name="to_string">
+      <h3 class="function-name">to_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_string(b, length) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
+      <p class="doc">Non-consuming counterpart to finish: return a fresh refcounted string copy of the buffer's first `length` bytes WITHOUT destroying the buffer. Use when you want to keep owning the AetherBytes (e.g. a struct field that holds the payload) and read it out as a string on demand. The returned string is independent of `b`; embedded NULs survive.</p>
+    </div>
     <div class="function" id="free" data-name="free">
       <h3 class="function-name">free <span class="kind">fn</span></h3>
       <pre class="usage"><code>free(b)</code></pre>
       <p class="signature"><span class="sig-params">b: ptr</span></p>
       <p class="doc">Discard the buffer without converting to a string. Idempotent on null. Use this for error paths that mid-way decide the buffer isn't needed.</p>
+    </div>
+    <div class="function" id="data" data-name="data">
+      <h3 class="function-name">data <span class="kind">fn</span></h3>
+      <pre class="usage"><code>data(b) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">Borrowed pointer to the buffer's own memory, for handing the region to a foreign runtime without copying it byte by byte. Valid until the next call that can grow the buffer, which may move the allocation and invalidate it.</p>
+    </div>
+    <div class="function" id="capacity" data-name="capacity">
+      <h3 class="function-name">capacity <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capacity(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">Bytes reserved, which is at least length and may be more.</p>
+    </div>
+    <div class="function" id="set_length" data-name="set_length">
+      <h3 class="function-name">set_length <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_length(b, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
+      <p class="doc">Publish how many bytes a direct write into data()'s region made live. Clamped to the capacity; returns the length actually set.</p>
+    </div>
+    <div class="function" id="from_ptr" data-name="from_ptr">
+      <h3 class="function-name">from_ptr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_ptr(src, length) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, length: int</span></p>
+      <p class="doc">One-call ptr -&gt; bytes crossing: a fresh length-aware bytes holding a COPY of `length` bytes from a raw pointer `src`. The common &quot;I have a raw buffer, give me a bytes I can finish() / walk&quot; case in one call (issue #1782).</p>
+    </div>
+    <div class="function" id="string_from_ptr" data-name="string_from_ptr">
+      <h3 class="function-name">string_from_ptr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>string_from_ptr(src, length) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">src: ptr, length: int</span></p>
+      <p class="doc">One-call ptr -&gt; string crossing: a fresh refcounted binary string copying `length` bytes from a raw pointer `src`, without an intermediate bytes. The direct answer to &quot;I have a ptr + len, I want a string&quot; (issue #1782).</p>
+    </div>
+    <div class="function" id="aether_bytes_copy_from_ptr" data-name="aether_bytes_copy_from_ptr">
+      <h3 class="function-name">aether_bytes_copy_from_ptr <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_bytes_copy_from_ptr(b, dst, src, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, dst: int, src: ptr, length: int</span></p>
+      <p class="doc">Copy `length` bytes from raw memory into the buffer at `dst`, growing it.</p>
+    </div>
+    <div class="function" id="view" data-name="view">
+      <h3 class="function-name">view <span class="kind">fn</span></h3>
+      <pre class="usage"><code>view(b) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">The live contents, `length(b)` bytes, as a borrowed `byte[]`. Valid until the next call that can grow the buffer (it may move the storage) or free. A null handle is the empty slice.</p>
+    </div>
+    <div class="function" id="capacity_view" data-name="capacity_view">
+      <h3 class="function-name">capacity_view <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capacity_view(b) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">The writable storage, `capacity(b)` bytes, as a borrowed `byte[]`: write into it directly, then publish how much is live with set_length (a fresh buffer's length is 0 whatever its capacity). Same validity as view().</p>
+    </div>
+    <div class="function" id="from_slice" data-name="from_slice">
+      <h3 class="function-name">from_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_slice(s) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[]</span></p>
+      <p class="doc">A fresh buffer holding a copy of `s`. Null on allocation failure.</p>
+    </div>
+    <div class="function" id="copy_from_slice" data-name="copy_from_slice">
+      <h3 class="function-name">copy_from_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>copy_from_slice(b, dst, s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, dst: int, s: byte[]</span></p>
+      <p class="doc">Copy `s` into the buffer at offset `dst`, growing it and zero-filling any gap. `s` may be a view of the same buffer. Returns 1 on success, 0 on failure (a null buffer, a negative offset, allocation failure).</p>
+    </div>
+    <div class="function" id="string_from_slice" data-name="string_from_slice">
+      <h3 class="function-name">string_from_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>string_from_slice(s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[]</span></p>
+      <p class="doc">A fresh string holding a copy of `s`'s bytes (binary-safe).</p>
     </div>
   </div>
 </main>

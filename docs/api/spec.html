@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>spec - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search spec..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#init">init</a></li>
+    <li><a href="#describe">describe</a></li>
+    <li><a href="#it">it</a></li>
+    <li><a href="#it_within">it_within</a></li>
+    <li><a href="#it_when">it_when</a></li>
+    <li><a href="#skip_it">skip_it</a></li>
+    <li><a href="#skip_all_if">skip_all_if</a></li>
+    <li><a href="#before_each">before_each</a></li>
+    <li><a href="#after_each">after_each</a></li>
+    <li><a href="#fail">fail</a></li>
+    <li><a href="#assert_true">assert_true</a></li>
+    <li><a href="#assert_false">assert_false</a></li>
+    <li><a href="#assert_eq">assert_eq</a></li>
+    <li><a href="#assert_eq_long">assert_eq_long</a></li>
+    <li><a href="#assert_str_eq">assert_str_eq</a></li>
+    <li><a href="#assert_str_eq_diff">assert_str_eq_diff</a></li>
+    <li><a href="#assert_not_eq">assert_not_eq</a></li>
+    <li><a href="#assert_gt">assert_gt</a></li>
+    <li><a href="#assert_contains">assert_contains</a></li>
+    <li><a href="#assert_null">assert_null</a></li>
+    <li><a href="#assert_not_null">assert_not_null</a></li>
+    <li><a href="#assert_err">assert_err</a></li>
+    <li><a href="#assert_err_contains">assert_err_contains</a></li>
+    <li><a href="#assert_ok">assert_ok</a></li>
+    <li><a href="#expect_elapsed_under">expect_elapsed_under</a></li>
+    <li><a href="#expect_int">expect_int</a></li>
+    <li><a href="#expect_str">expect_str</a></li>
+    <li><a href="#not_">not_</a></li>
+    <li><a href="#IntSubject">IntSubject</a></li>
+    <li><a href="#StrSubject">StrSubject</a></li>
+    <li><a href="#to_equal">to_equal</a></li>
+    <li><a href="#to_be_gt">to_be_gt</a></li>
+    <li><a href="#to_be_lt">to_be_lt</a></li>
+    <li><a href="#to_be_truthy">to_be_truthy</a></li>
+    <li><a href="#to_be_falsy">to_be_falsy</a></li>
+    <li><a href="#to_equal_str">to_equal_str</a></li>
+    <li><a href="#to_contain">to_contain</a></li>
+    <li><a href="#to_start_with">to_start_with</a></li>
+    <li><a href="#satisfies">satisfies</a></li>
+    <li><a href="#satisfies_str">satisfies_str</a></li>
+    <li><a href="#expect_list_size">expect_list_size</a></li>
+    <li><a href="#expect_list_empty">expect_list_empty</a></li>
+    <li><a href="#expect_list_has_str">expect_list_has_str</a></li>
+    <li><a href="#expect_list_contains_all">expect_list_contains_all</a></li>
+    <li><a href="#expect_list_every">expect_list_every</a></li>
+    <li><a href="#run_summary">run_summary</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li class="active"><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>spec</h1>
+    <p class="module-desc">std.spec — BDD-style test framework for Aether A describe / it / before_each / after_each spec framework built on Aether's trailing blocks + closures + the `_ctx` builder context-injection pattern, with a flat assertion layer, a fluent (subject-first, chainable) assertion facade, string-list collection matchers, and Duration-budget timing checks.</p>
+    <p class="import-line"><code>import std.spec</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="init" data-name="init">
+      <h3 class="function-name">init <span class="kind">fn</span></h3>
+      <pre class="usage"><code>init() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">Build a fresh framework context. Holds the test-run counters (passed / failed / skipped) as refs. The caller threads the returned ptr through every spec.* call; the suite contexts created by describe() carry it as an inner field. Also stamps the run-start timestamp + a per-it() record list + a &quot;current_it&quot; pointer-cell. These exist whether or not structured reporting is requested — the cost is bounded (a list of small maps, one per it()) and they feed run_summary's report when AE_SPEC_FORMAT is set. When no format is requested (`ae run foo.ae` from a terminal), run_summary doesn't read them and they get freed at exit.</p>
+    </div>
+    <div class="function" id="describe" data-name="describe">
+      <h3 class="function-name">describe <span class="kind">fn</span></h3>
+      <pre class="usage"><code>describe(_ctx, description) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, description: string</span></p>
+    </div>
+    <div class="function" id="it" data-name="it">
+      <h3 class="function-name">it <span class="kind">fn</span></h3>
+      <pre class="usage"><code>it(_ctx, description, test_fn)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, description: string, test_fn: fn</span></p>
+    </div>
+    <div class="function" id="it_within" data-name="it_within">
+      <h3 class="function-name">it_within <span class="kind">fn</span></h3>
+      <pre class="usage"><code>it_within(_ctx, description, budget, test_fn)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, description: string, budget: Duration, test_fn: fn</span></p>
+      <p class="doc">it_within(_ctx, description, budget, test_fn) — an it() that also fails if the test body takes longer than `budget`. The budget check is layered on top of the normal assertion-based pass/fail: a body that asserts cleanly but runs over budget still goes red. Uses the same monotonic elapsed the report already records, so there's no extra measurement. `budget` is a Duration literal (`50ms`, `2s`).</p>
+    </div>
+    <div class="function" id="it_when" data-name="it_when">
+      <h3 class="function-name">it_when <span class="kind">fn</span></h3>
+      <pre class="usage"><code>it_when(_ctx, cond, description, reason, test_fn)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, cond: int, description: string, reason: string, test_fn: fn</span></p>
+      <p class="doc">it_when(cond, description, reason, test_fn) — run the body only when `cond` is non-zero; otherwise report a skip carrying `reason`. The condition is a plain int the caller computes, so the probe stays visible at the call site rather than hidden behind a predicate: have_ruby = ruby.ruby_init_host() == 0 spec.it_when(have_ruby, &quot;evaluates&quot;, &quot;libruby not loadable&quot;) callback { ... } `reason` is REQUIRED even on the true path, where it is unused: Aether cannot give it a default because a defaulted parameter may not precede a non-defaulted one, and the trailing-block `callback` always occupies the last slot. Pass &quot;&quot; when the condition is a constant true. test_fn is CALLED here rather than forwarded, for the closure-env reason documented on it().</p>
+    </div>
+    <div class="function" id="skip_it" data-name="skip_it">
+      <h3 class="function-name">skip_it <span class="kind">fn</span></h3>
+      <pre class="usage"><code>skip_it(_ctx, description, reason, test_fn)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, description: string, reason: string, test_fn: fn</span></p>
+      <p class="doc">skip_it(description, reason, test_fn) — an it() that never runs. For a PERMANENT exclusion (a known-broken path, an unsupported platform) where the body is kept for the day it is re-enabled. Use it_when for dependency gating; an unconditional skip that is really a missing dependency hides the provisioning gap.</p>
+    </div>
+    <div class="function" id="skip_all_if" data-name="skip_all_if">
+      <h3 class="function-name">skip_all_if <span class="kind">fn</span></h3>
+      <pre class="usage"><code>skip_all_if(fw, cond, reason) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fw: ptr, cond: int, reason: string</span></p>
+      <p class="doc">skip_all_if(fw, cond, reason) — file-level bail-out. Returns 1 when the caller should stop (and has already printed the notice), 0 to proceed: if spec.skip_all_if(fw, have_ruby == 0, &quot;libruby not loadable&quot;) == 1 { return } NB `cond` is evaluated eagerly by the caller, so an expensive probe still runs. When the probe IS the dependency check that is exactly right; when it is costly, guard the probe itself.</p>
+    </div>
+    <div class="function" id="before_each" data-name="before_each">
+      <h3 class="function-name">before_each <span class="kind">fn</span></h3>
+      <pre class="usage"><code>before_each(_ctx, setup)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, setup: fn</span></p>
+    </div>
+    <div class="function" id="after_each" data-name="after_each">
+      <h3 class="function-name">after_each <span class="kind">fn</span></h3>
+      <pre class="usage"><code>after_each(_ctx, teardown)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, teardown: fn</span></p>
+    </div>
+    <div class="function" id="fail" data-name="fail">
+      <h3 class="function-name">fail <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fail(&quot;${description} — exceeded time budget)</code></pre>
+      <p class="signature"><span class="sig-params">&quot;${description} — exceeded time budget: ${elapsed_ms}ms &gt;= ${budget_ms}ms&quot;</span></p>
+    </div>
+    <div class="function" id="assert_true" data-name="assert_true">
+      <h3 class="function-name">assert_true <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_true(condition, msg)</code></pre>
+      <p class="signature"><span class="sig-params">condition: int, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_false" data-name="assert_false">
+      <h3 class="function-name">assert_false <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_false(condition, msg)</code></pre>
+      <p class="signature"><span class="sig-params">condition: int, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_eq" data-name="assert_eq">
+      <h3 class="function-name">assert_eq <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_eq(actual, expected, msg)</code></pre>
+      <p class="signature"><span class="sig-params">actual: int, expected: int, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_eq_long" data-name="assert_eq_long">
+      <h3 class="function-name">assert_eq_long <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_eq_long(actual, expected, msg)</code></pre>
+      <p class="signature"><span class="sig-params">actual: long, expected: long, msg: string</span></p>
+      <p class="doc">64-bit sibling of assert_eq. Passing a long to assert_eq narrows it to int at the call boundary, which on a 64-bit-clean value is not merely a wrong comparison — it corrupted the caller badly enough to abort the process on Windows (exit 127) while passing on Linux, where the truncated halves happened to agree. Anything wider than 32 bits — a mem.get_long, a u64 accessor, an IEEE 754 bit pattern — needs this.</p>
+    </div>
+    <div class="function" id="assert_str_eq" data-name="assert_str_eq">
+      <h3 class="function-name">assert_str_eq <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_str_eq(actual, expected, msg)</code></pre>
+      <p class="signature"><span class="sig-params">actual: string, expected: string, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_str_eq_diff" data-name="assert_str_eq_diff">
+      <h3 class="function-name">assert_str_eq_diff <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_str_eq_diff(actual, expected, msg)</code></pre>
+      <p class="signature"><span class="sig-params">actual: string, expected: string, msg: string</span></p>
+      <p class="doc">assert_str_eq_diff(actual, expected, msg) — exact string equality like assert_str_eq, but on mismatch the message shows the two values aligned with a caret under the first differing byte (Jest/Vitest style). Reach for this over assert_str_eq when the strings are long enough that &quot;expected X got Y&quot; buries the actual difference. The caret column is fixed: the value lines are printed as &quot;        actual:   \&quot;&quot; + value whose prefix is 19 chars (8 spaces + 'actual:   &quot;'), so the caret pads to 19 + index. ASCII byte index, not codepoint — fine for the ASCII test output this targets; a multibyte value just points at the first differing byte.</p>
+    </div>
+    <div class="function" id="assert_not_eq" data-name="assert_not_eq">
+      <h3 class="function-name">assert_not_eq <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_not_eq(actual, expected, msg)</code></pre>
+      <p class="signature"><span class="sig-params">actual: int, expected: int, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_gt" data-name="assert_gt">
+      <h3 class="function-name">assert_gt <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_gt(actual, expected, msg)</code></pre>
+      <p class="signature"><span class="sig-params">actual: int, expected: int, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_contains" data-name="assert_contains">
+      <h3 class="function-name">assert_contains <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_contains(haystack, needle, msg)</code></pre>
+      <p class="signature"><span class="sig-params">haystack: string, needle: string, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_null" data-name="assert_null">
+      <h3 class="function-name">assert_null <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_null(value, msg)</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_not_null" data-name="assert_not_null">
+      <h3 class="function-name">assert_not_null <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_not_null(value, msg)</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr, msg: string</span></p>
+    </div>
+    <div class="function" id="assert_err" data-name="assert_err">
+      <h3 class="function-name">assert_err <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_err(err, msg)</code></pre>
+      <p class="signature"><span class="sig-params">err: string, msg: string</span></p>
+      <p class="doc">The call was expected to fail: `err` must be non-empty.</p>
+    </div>
+    <div class="function" id="assert_err_contains" data-name="assert_err_contains">
+      <h3 class="function-name">assert_err_contains <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_err_contains(err, needle, msg)</code></pre>
+      <p class="signature"><span class="sig-params">err: string, needle: string, msg: string</span></p>
+      <p class="doc">The call was expected to fail FOR A REASON: `err` must be non-empty and contain `needle`. Substring rather than equality on purpose — a test pins the reason without pinning the exact wording, so rephrasing a message does not break every spec that asserts on it.</p>
+    </div>
+    <div class="function" id="assert_ok" data-name="assert_ok">
+      <h3 class="function-name">assert_ok <span class="kind">fn</span></h3>
+      <pre class="usage"><code>assert_ok(err, msg)</code></pre>
+      <p class="signature"><span class="sig-params">err: string, msg: string</span></p>
+      <p class="doc">The call was expected to succeed: `err` must be empty. Printing the error is the whole point — this is the assertion that tells you WHY something that should have worked did not.</p>
+    </div>
+    <div class="function" id="expect_elapsed_under" data-name="expect_elapsed_under">
+      <h3 class="function-name">expect_elapsed_under <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_elapsed_under(elapsed_ns, budget, msg)</code></pre>
+      <p class="signature"><span class="sig-params">elapsed_ns: long, budget: Duration, msg: string</span></p>
+      <p class="doc">Timing-budget matcher expect_elapsed_under(elapsed_ns, budget, msg) — a measured span is under a budget written as a Duration literal. The caller measures the span itself with two monotonic-clock reads: t0 = os.now_monotonic_ns() ... do work ... elapsed = os.now_monotonic_ns() - t0 spec.expect_elapsed_under(elapsed, 50ms, &quot;fast path&quot;) `elapsed_ns` is a plain int64 nanosecond count (what monotonic-ns deltas yield); `budget` is a Duration (`50ms`, `2s`, `200us`). We compare in ns via budget.ns — Duration-vs-plain-number is a type error in Aether, so the .ns accessor is the bridge. Use monotonic (not wall-clock) deltas: only the delta is meaningful and a wall jump would corrupt it. The budget renders directly via ${budget} (Duration interpolation picks the largest readable unit — `50ms`, `1.5s`); the elapsed side is a plain ns count, so we show it as ms.</p>
+    </div>
+    <div class="function" id="expect_int" data-name="expect_int">
+      <h3 class="function-name">expect_int <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_int(v) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">v: int</span></p>
+    </div>
+    <div class="function" id="expect_str" data-name="expect_str">
+      <h3 class="function-name">expect_str <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_str(v) <span class="arrow">-&gt;</span> StrSubject</code></pre>
+      <p class="signature"><span class="sig-params">v: string</span></p>
+      <p class="doc">expect_str COPIES v into the subject (the chain outlives the call, and a caller temporary would be a use-after-free — valgrind confirms borrowing reads freed memory under current semantics). The copy is REGISTERED on the ambient framework's &quot;str_copies&quot; list so run_summary's teardown releases it: the chain has no terminal hook (every link returns the subject), so end-of-run is the only safe release point. Without an init()'d framework the copy is untracked — same single-framework tradeoff as fail() itself.</p>
+    </div>
+    <div class="function" id="not_" data-name="not_">
+      <h3 class="function-name">not_ <span class="kind">fn</span></h3>
+      <pre class="usage"><code>not_(s) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject</span></p>
+      <p class="doc">not_() — flip the sense of the NEXT matcher in the chain.</p>
+    </div>
+    <div class="function" id="IntSubject" data-name="IntSubject">
+      <h3 class="function-name">IntSubject <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct IntSubject</code></pre>
+    </div>
+    <div class="function" id="StrSubject" data-name="StrSubject">
+      <h3 class="function-name">StrSubject <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct StrSubject</code></pre>
+    </div>
+    <div class="function" id="to_equal" data-name="to_equal">
+      <h3 class="function-name">to_equal <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_equal(s, want, msg) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject, want: int, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_be_gt" data-name="to_be_gt">
+      <h3 class="function-name">to_be_gt <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_be_gt(s, bound, msg) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject, bound: int, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_be_lt" data-name="to_be_lt">
+      <h3 class="function-name">to_be_lt <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_be_lt(s, bound, msg) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject, bound: int, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_be_truthy" data-name="to_be_truthy">
+      <h3 class="function-name">to_be_truthy <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_be_truthy(s, msg) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_be_falsy" data-name="to_be_falsy">
+      <h3 class="function-name">to_be_falsy <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_be_falsy(s, msg) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_equal_str" data-name="to_equal_str">
+      <h3 class="function-name">to_equal_str <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_equal_str(s, want, msg) <span class="arrow">-&gt;</span> StrSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: StrSubject, want: string, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_contain" data-name="to_contain">
+      <h3 class="function-name">to_contain <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_contain(s, needle, msg) <span class="arrow">-&gt;</span> StrSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: StrSubject, needle: string, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="to_start_with" data-name="to_start_with">
+      <h3 class="function-name">to_start_with <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_start_with(s, prefix, msg) <span class="arrow">-&gt;</span> StrSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: StrSubject, prefix: string, msg: string = &quot;&quot;</span></p>
+    </div>
+    <div class="function" id="satisfies" data-name="satisfies">
+      <h3 class="function-name">satisfies <span class="kind">fn</span></h3>
+      <pre class="usage"><code>satisfies(s, pred, msg) <span class="arrow">-&gt;</span> IntSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: IntSubject, pred: fn, msg: string</span></p>
+      <p class="doc">satisfies(s, pred, msg) — fluent escape hatch (AssertJ-style). `pred` takes the subject's value and returns 1 (ok) / 0 (fail). Lets a test drop into an arbitrary one-off check mid-chain without defining a whole new matcher: spec.expect_int(n).to_be_gt(0).satisfies(is_prime, &quot;is prime&quot;) `pred` is a top-level fn passed by bare name. One satisfies() per subject type — Aether has no receiver-type overloading.</p>
+    </div>
+    <div class="function" id="satisfies_str" data-name="satisfies_str">
+      <h3 class="function-name">satisfies_str <span class="kind">fn</span></h3>
+      <pre class="usage"><code>satisfies_str(s, pred, msg) <span class="arrow">-&gt;</span> StrSubject</code></pre>
+      <p class="signature"><span class="sig-params">s: StrSubject, pred: fn, msg: string</span></p>
+    </div>
+    <div class="function" id="expect_list_size" data-name="expect_list_size">
+      <h3 class="function-name">expect_list_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_list_size(xs, want, msg)</code></pre>
+      <p class="signature"><span class="sig-params">xs: ptr, want: int, msg: string</span></p>
+      <p class="doc">expect_list_size(xs, want, msg) — the list has exactly `want` items.</p>
+    </div>
+    <div class="function" id="expect_list_empty" data-name="expect_list_empty">
+      <h3 class="function-name">expect_list_empty <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_list_empty(xs, msg)</code></pre>
+      <p class="signature"><span class="sig-params">xs: ptr, msg: string</span></p>
+      <p class="doc">expect_list_empty(xs, msg) — the list has no items.</p>
+    </div>
+    <div class="function" id="expect_list_has_str" data-name="expect_list_has_str">
+      <h3 class="function-name">expect_list_has_str <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_list_has_str(xs, needle, msg)</code></pre>
+      <p class="signature"><span class="sig-params">xs: ptr, needle: string, msg: string</span></p>
+      <p class="doc">expect_list_has_str(xs, needle, msg) — some element equals `needle` (exact string match).</p>
+    </div>
+    <div class="function" id="expect_list_contains_all" data-name="expect_list_contains_all">
+      <h3 class="function-name">expect_list_contains_all <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_list_contains_all(xs, needles, msg)</code></pre>
+      <p class="signature"><span class="sig-params">xs: ptr, needles: ptr, msg: string</span></p>
+      <p class="doc">expect_list_contains_all(xs, needles, msg) — every string in `needles` (also a std.list of strings) appears somewhere in `xs`. Order-independent and tolerant of extra elements in `xs` — the containsInAnyOrder/hasItems shape. Reports the FIRST missing needle.</p>
+    </div>
+    <div class="function" id="expect_list_every" data-name="expect_list_every">
+      <h3 class="function-name">expect_list_every <span class="kind">fn</span></h3>
+      <pre class="usage"><code>expect_list_every(xs, pred, msg)</code></pre>
+      <p class="signature"><span class="sig-params">xs: ptr, pred: fn, msg: string</span></p>
+      <p class="doc">expect_list_every(xs, pred, msg) — every element satisfies `pred` (a fn(string)-&gt;1/0). The everyItem shape. Reports the first failing element and its index. An empty list passes vacuously.</p>
+    </div>
+    <div class="function" id="run_summary" data-name="run_summary">
+      <h3 class="function-name">run_summary <span class="kind">fn</span></h3>
+      <pre class="usage"><code>run_summary(fw) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fw: ptr</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

@@ -26,9 +26,13 @@
     <li><a href="#free">free</a></li>
     <li><a href="#keys_raw">keys_raw</a></li>
     <li><a href="#keys_free">keys_free</a></li>
+    <li><a href="#keys_size_raw">keys_size_raw</a></li>
+    <li><a href="#keys_get_raw">keys_get_raw</a></li>
     <li><a href="#put">put</a></li>
     <li><a href="#get">get</a></li>
     <li><a href="#keys">keys</a></li>
+    <li><a href="#keys_size">keys_size</a></li>
+    <li><a href="#keys_get">keys_get</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -40,13 +44,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -57,11 +65,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -69,28 +82,48 @@
     <li class="active"><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -113,7 +146,7 @@
       <h3 class="function-name">put_string_owned <span class="kind">extern</span></h3>
       <pre class="usage"><code>put_string_owned(map, key, value) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">map: ptr, key: string, value: ptr</span></p>
-      <p class="doc">Heap-string-aware put (#467). Retains the value and tags the map so map_free releases each string value before freeing. Codegen auto-routes `map.put(m, k, heap_string_expr)` here.</p>
+      <p class="doc">Heap-string-aware put. The map acquires its OWN reference: a refcounted string is retained, a plain pointer (a literal, a borrowed char*) is copied. The caller keeps and independently frees theirs, so the same value can live in several containers. map_free releases each owned value. Codegen auto-routes `map.put(m, k, heap_string_expr)` to the adopting sibling instead, where the value is escaping into the map.</p>
     </div>
     <div class="function" id="get_raw" data-name="get_raw">
       <h3 class="function-name">get_raw <span class="kind">extern</span></h3>
@@ -155,6 +188,16 @@
       <pre class="usage"><code>keys_free(keys)</code></pre>
       <p class="signature"><span class="sig-params">keys: ptr</span></p>
     </div>
+    <div class="function" id="keys_size_raw" data-name="keys_size_raw">
+      <h3 class="function-name">keys_size_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>keys_size_raw(keys) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">keys: ptr</span></p>
+    </div>
+    <div class="function" id="keys_get_raw" data-name="keys_get_raw">
+      <h3 class="function-name">keys_get_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>keys_get_raw(keys, index) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">keys: ptr, index: int</span></p>
+    </div>
     <div class="function" id="put" data-name="put">
       <h3 class="function-name">put <span class="kind">fn</span></h3>
       <pre class="usage"><code>put(map, key, value) <span class="arrow">-&gt;</span> string</code></pre>
@@ -172,6 +215,17 @@
       <pre class="usage"><code>keys(map) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">map: ptr</span></p>
       <p class="doc">Snapshot a map's keys. Returns (MapKeys ptr, &quot;&quot;) on success, (null, error) on allocation failure. Caller must free with map.keys_free.</p>
+    </div>
+    <div class="function" id="keys_size" data-name="keys_size">
+      <h3 class="function-name">keys_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>keys_size(keys) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">keys: ptr</span></p>
+    </div>
+    <div class="function" id="keys_get" data-name="keys_get">
+      <h3 class="function-name">keys_get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>keys_get(keys, index) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">keys: ptr, index: int</span></p>
+      <p class="doc">Out of range or null returns &quot;&quot; rather than trapping, so a bad index is a visible empty string instead of a wild read. An empty string is also a legitimate key, so callers who must distinguish check keys_size first.</p>
     </div>
   </div>
 </main>

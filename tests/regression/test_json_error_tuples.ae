@@ -71,9 +71,9 @@ main() {
     else { print("  PASS: array_get[1] == 2\n") }
 
     ag_oob, ag_err_oob = json.array_get(arr, 99)
-    if ag_err_oob != "" { println("  FAIL: oob should be (null, ''): ${ag_err_oob}"); fails = fails + 1 }
+    if ag_err_oob != "index out of range" { println("  FAIL: oob should say 'index out of range', got '${ag_err_oob}'"); fails = fails + 1 }
     else if ag_oob != null { println("  FAIL: expected null for oob"); fails = fails + 1 }
-    else { print("  PASS: array_get oob returns (null, '')\n") }
+    else { print("  PASS: array_get oob returns (null, 'index out of range')\n") }
 
     // --- array_add ---
     print("\narray_add:\n")

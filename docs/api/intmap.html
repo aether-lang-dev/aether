@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>intmap - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search intmap..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#aether_intmap_new">aether_intmap_new</a></li>
+    <li><a href="#aether_intmap_free">aether_intmap_free</a></li>
+    <li><a href="#aether_intmap_put">aether_intmap_put</a></li>
+    <li><a href="#aether_intmap_get">aether_intmap_get</a></li>
+    <li><a href="#aether_intmap_has">aether_intmap_has</a></li>
+    <li><a href="#aether_intmap_add">aether_intmap_add</a></li>
+    <li><a href="#aether_intmap_add_failed">aether_intmap_add_failed</a></li>
+    <li><a href="#aether_intmap_remove">aether_intmap_remove</a></li>
+    <li><a href="#aether_intmap_size">aether_intmap_size</a></li>
+    <li><a href="#aether_intmap_clear">aether_intmap_clear</a></li>
+    <li><a href="#aether_intmap_next">aether_intmap_next</a></li>
+    <li><a href="#aether_intmap_key_at">aether_intmap_key_at</a></li>
+    <li><a href="#aether_intmap_value_at">aether_intmap_value_at</a></li>
+    <li><a href="#new">new</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#put">put</a></li>
+    <li><a href="#get">get</a></li>
+    <li><a href="#has">has</a></li>
+    <li><a href="#add">add</a></li>
+    <li><a href="#remove">remove</a></li>
+    <li><a href="#size">size</a></li>
+    <li><a href="#clear">clear</a></li>
+    <li><a href="#next">next</a></li>
+    <li><a href="#key_at">key_at</a></li>
+    <li><a href="#value_at">value_at</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li class="active"><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>intmap</h1>
+    <p class="module-desc">std.intmap — a hash map from `long` keys to `long` values (#1986).</p>
+    <p class="import-line"><code>import std.intmap</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="aether_intmap_new" data-name="aether_intmap_new">
+      <h3 class="function-name">aether_intmap_new <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_new(capacity_hint) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">capacity_hint: int</span></p>
+      <p class="doc">---- raw externs (std/intmap/aether_intmap.c) ----</p>
+    </div>
+    <div class="function" id="aether_intmap_free" data-name="aether_intmap_free">
+      <h3 class="function-name">aether_intmap_free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_free(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="aether_intmap_put" data-name="aether_intmap_put">
+      <h3 class="function-name">aether_intmap_put <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_put(m, key, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long, value: long</span></p>
+    </div>
+    <div class="function" id="aether_intmap_get" data-name="aether_intmap_get">
+      <h3 class="function-name">aether_intmap_get <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_get(m, key, missing) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long, missing: long</span></p>
+    </div>
+    <div class="function" id="aether_intmap_has" data-name="aether_intmap_has">
+      <h3 class="function-name">aether_intmap_has <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_has(m, key) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long</span></p>
+    </div>
+    <div class="function" id="aether_intmap_add" data-name="aether_intmap_add">
+      <h3 class="function-name">aether_intmap_add <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_add(m, key, delta) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long, delta: long</span></p>
+    </div>
+    <div class="function" id="aether_intmap_add_failed" data-name="aether_intmap_add_failed">
+      <h3 class="function-name">aether_intmap_add_failed <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_add_failed(m) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="aether_intmap_remove" data-name="aether_intmap_remove">
+      <h3 class="function-name">aether_intmap_remove <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_remove(m, key) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long</span></p>
+    </div>
+    <div class="function" id="aether_intmap_size" data-name="aether_intmap_size">
+      <h3 class="function-name">aether_intmap_size <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_size(m) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="aether_intmap_clear" data-name="aether_intmap_clear">
+      <h3 class="function-name">aether_intmap_clear <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_clear(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="aether_intmap_next" data-name="aether_intmap_next">
+      <h3 class="function-name">aether_intmap_next <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_next(m, slot) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
+    </div>
+    <div class="function" id="aether_intmap_key_at" data-name="aether_intmap_key_at">
+      <h3 class="function-name">aether_intmap_key_at <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_key_at(m, slot) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
+    </div>
+    <div class="function" id="aether_intmap_value_at" data-name="aether_intmap_value_at">
+      <h3 class="function-name">aether_intmap_value_at <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_intmap_value_at(m, slot) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
+    </div>
+    <div class="function" id="new" data-name="new">
+      <h3 class="function-name">new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new(capacity_hint) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">capacity_hint: int</span></p>
+      <p class="doc">A map with room for about `capacity_hint` entries before it first grows (0 for the default). Null on allocation failure.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="put" data-name="put">
+      <h3 class="function-name">put <span class="kind">fn</span></h3>
+      <pre class="usage"><code>put(m, key, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long, value: long</span></p>
+      <p class="doc">Set `key` to `value`. 1 when the key was new, 0 when it replaced a value, -1 on allocation failure or a null map.</p>
+    </div>
+    <div class="function" id="get" data-name="get">
+      <h3 class="function-name">get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get(m, key, missing) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long, missing: long</span></p>
+      <p class="doc">The value at `key`, or `missing` when there is none.</p>
+    </div>
+    <div class="function" id="has" data-name="has">
+      <h3 class="function-name">has <span class="kind">fn</span></h3>
+      <pre class="usage"><code>has(m, key) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long</span></p>
+    </div>
+    <div class="function" id="add" data-name="add">
+      <h3 class="function-name">add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>add(m, key, delta) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long, delta: long</span></p>
+      <p class="doc">Add `delta` to the value at `key` (an absent key starts at 0) and return the new value, in one probe: the counting loop's call. Allocation failure while inserting a new key panics, as `make` does.</p>
+    </div>
+    <div class="function" id="remove" data-name="remove">
+      <h3 class="function-name">remove <span class="kind">fn</span></h3>
+      <pre class="usage"><code>remove(m, key) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: long</span></p>
+      <p class="doc">Remove `key`; true when it was present.</p>
+    </div>
+    <div class="function" id="size" data-name="size">
+      <h3 class="function-name">size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>size(m) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+      <p class="doc">How many keys the map holds.</p>
+    </div>
+    <div class="function" id="clear" data-name="clear">
+      <h3 class="function-name">clear <span class="kind">fn</span></h3>
+      <pre class="usage"><code>clear(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="next" data-name="next">
+      <h3 class="function-name">next <span class="kind">fn</span></h3>
+      <pre class="usage"><code>next(m, slot) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
+      <p class="doc">Iteration, in no particular order: the first occupied slot at or after `slot`, or -1 when there are no more. Start at 0 and continue from the returned slot + 1: s = intmap.next(m, 0) while s &gt;= 0 { println(&quot;${intmap.key_at(m, s)} = ${intmap.value_at(m, s)}&quot;) s = intmap.next(m, s + 1) } A put or add of a new key, or clear, may rebuild the table: finish the walk (or collect the keys) before changing the map.</p>
+    </div>
+    <div class="function" id="key_at" data-name="key_at">
+      <h3 class="function-name">key_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>key_at(m, slot) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
+    </div>
+    <div class="function" id="value_at" data-name="value_at">
+      <h3 class="function-name">value_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>value_at(m, slot) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

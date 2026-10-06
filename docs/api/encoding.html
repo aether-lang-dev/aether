@@ -37,13 +37,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -54,11 +58,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -66,28 +75,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -99,9 +128,9 @@
   <div class="functions" id="functions">
     <div class="function" id="hex_encode" data-name="hex_encode">
       <h3 class="function-name">hex_encode <span class="kind">fn</span></h3>
-      <pre class="usage"><code>hex_encode(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-      <p class="doc">Encode `length` bytes of `data` as lowercase hex. Output is 2*length characters; empty input yields &quot;&quot;.</p>
+      <pre class="usage"><code>hex_encode(data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Encode the bytes of `data` as lowercase hex. Output is 2*data.len characters; empty input yields &quot;&quot;.</p>
     </div>
     <div class="function" id="hex_decode" data-name="hex_decode">
       <h3 class="function-name">hex_decode <span class="kind">fn</span></h3>
@@ -111,14 +140,14 @@
     </div>
     <div class="function" id="base64_encode" data-name="base64_encode">
       <h3 class="function-name">base64_encode <span class="kind">fn</span></h3>
-      <pre class="usage"><code>base64_encode(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-      <p class="doc">Standard-alphabet base64 WITHOUT padding (RFC 4648 §4, the `+/` alphabet; no trailing `=`). Encodes `length` bytes of `data`.</p>
+      <pre class="usage"><code>base64_encode(data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Standard-alphabet base64 WITHOUT padding (RFC 4648 §4, the `+/` alphabet; no trailing `=`). Encodes the bytes of `data`.</p>
     </div>
     <div class="function" id="base64_encode_padded" data-name="base64_encode_padded">
       <h3 class="function-name">base64_encode_padded <span class="kind">fn</span></h3>
-      <pre class="usage"><code>base64_encode_padded(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>base64_encode_padded(data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">Standard-alphabet base64 WITH `=` padding to a multiple of 4 — the form some auth headers and JSON blob formats require. (Standard `+/` alphabet; NOT the url-safe `-_` alphabet.)</p>
     </div>
     <div class="function" id="base64_decode" data-name="base64_decode">
@@ -129,9 +158,9 @@
     </div>
     <div class="function" id="base32_encode" data-name="base32_encode">
       <h3 class="function-name">base32_encode <span class="kind">fn</span></h3>
-      <pre class="usage"><code>base32_encode(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-      <p class="doc">Encode `length` bytes of `data` as standard, `=`-padded base32.</p>
+      <pre class="usage"><code>base32_encode(data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Encode the bytes of `data` as standard, `=`-padded base32.</p>
     </div>
     <div class="function" id="base32_decode" data-name="base32_decode">
       <h3 class="function-name">base32_decode <span class="kind">fn</span></h3>

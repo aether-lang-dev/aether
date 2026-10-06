@@ -18,6 +18,8 @@
     <li><a href="#aether_strbuilder_new">aether_strbuilder_new</a></li>
     <li><a href="#aether_strbuilder_append">aether_strbuilder_append</a></li>
     <li><a href="#aether_strbuilder_append_n">aether_strbuilder_append_n</a></li>
+    <li><a href="#aether_strbuilder_append_bytes">aether_strbuilder_append_bytes</a></li>
+    <li><a href="#append_slice">append_slice</a></li>
     <li><a href="#aether_strbuilder_append_byte">aether_strbuilder_append_byte</a></li>
     <li><a href="#aether_strbuilder_append_int">aether_strbuilder_append_int</a></li>
     <li><a href="#aether_strbuilder_append_long">aether_strbuilder_append_long</a></li>
@@ -59,13 +61,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -76,11 +82,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -88,28 +99,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li class="active"><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -129,11 +160,23 @@
       <h3 class="function-name">aether_strbuilder_append <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_strbuilder_append(b, s) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">b: ptr, s: string</span></p>
+      <p class="doc">`s` keeps its AetherString header across the extern boundary (#297's `@aether`), so the C side appends by the string's own length and an embedded NUL survives; a plain literal still arrives as a `char*` and is measured with strlen, as before.</p>
     </div>
     <div class="function" id="aether_strbuilder_append_n" data-name="aether_strbuilder_append_n">
       <h3 class="function-name">aether_strbuilder_append_n <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_strbuilder_append_n(b, s, n) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">b: ptr, s: string, n: int</span></p>
+    </div>
+    <div class="function" id="aether_strbuilder_append_bytes" data-name="aether_strbuilder_append_bytes">
+      <h3 class="function-name">aether_strbuilder_append_bytes <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_strbuilder_append_bytes(b, data, n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, data: ptr, n: int</span></p>
+    </div>
+    <div class="function" id="append_slice" data-name="append_slice">
+      <h3 class="function-name">append_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>append_slice(b, s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, s: byte[]</span></p>
+      <p class="doc">Append a `byte[]` slice's bytes, binary-safe: the length travels with the slice (#2301). A slice with no bound panics. Returns 1, or 0 on allocation failure or a null builder.</p>
     </div>
     <div class="function" id="aether_strbuilder_append_byte" data-name="aether_strbuilder_append_byte">
       <h3 class="function-name">aether_strbuilder_append_byte <span class="kind">extern</span></h3>
@@ -210,7 +253,7 @@
       <h3 class="function-name">append <span class="kind">fn</span></h3>
       <pre class="usage"><code>append(b, s) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">b: ptr, s: string</span></p>
-      <p class="doc">Append a string. Length is taken from the AetherString header if present, else via strlen — so a plain `const char*` containing embedded NULs truncates at the first NUL. For binary-safe content, use `append_n` with an explicit length. Returns 1 on success, 0 on failure.</p>
+      <p class="doc">Append a string. Length is taken from the AetherString header when the value carries one (a heap string, a finished builder, a slice), else via strlen — so only a plain literal with embedded NULs truncates at the first NUL. For content you hold as raw bytes, use `append_n` with an explicit length. Returns 1 on success, 0 on failure.</p>
     </div>
     <div class="function" id="append_n" data-name="append_n">
       <h3 class="function-name">append_n <span class="kind">fn</span></h3>
@@ -290,9 +333,9 @@
     </div>
     <div class="function" id="finish_with_length" data-name="finish_with_length">
       <h3 class="function-name">finish_with_length <span class="kind">fn</span></h3>
-      <pre class="usage"><code>finish_with_length(b) <span class="arrow">-&gt;</span> (ptr, int)</code></pre>
+      <pre class="usage"><code>finish_with_length(b) <span class="arrow">-&gt;</span> byte[]</code></pre>
       <p class="signature"><span class="sig-params">b: ptr</span></p>
-      <p class="doc">Binary-safe finalise: returns the raw data buffer and its exact byte length as `(ptr, int)`, with NO NUL terminator appended — embedded NULs are preserved as content. Use this for binary protocol assembly (CBOR, msgpack, frames, packed records) where the v1 `finish`'s NUL-terminated `string` would be truncated by a strlen-based consumer downstream. The caller owns the returned pointer and MUST free it with a raw libc free (e.g. via `mem`-style handling) — position 0 is `ptr`, so it is not codegen-heap-tracked. An empty builder yields a non-null buffer with length 0. After this call `b` is invalid.</p>
+      <p class="doc">Binary-safe finalise: returns the raw data buffer and its exact byte length as `(ptr, int)`, with NO NUL terminator appended — embedded NULs are preserved as content. Use this for binary protocol assembly (CBOR, msgpack, frames, packed records) where the v1 `finish`'s NUL-terminated `string` would be truncated by a strlen-based consumer downstream. The caller owns the returned slice and MUST free it with `free()` (it decays to the same raw libc pointer `aether_strbuilder_finish_with_length` always returned; still not codegen-heap-tracked). An empty builder yields a non-null, zero-length slice. After this call `b` is invalid.</p>
     </div>
     <div class="function" id="free" data-name="free">
       <h3 class="function-name">free <span class="kind">fn</span></h3>

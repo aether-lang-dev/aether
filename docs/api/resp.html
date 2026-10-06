@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>resp - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search resp..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#RESP_SIMPLE">RESP_SIMPLE</a></li>
+    <li><a href="#RESP_ERROR">RESP_ERROR</a></li>
+    <li><a href="#RESP_INTEGER">RESP_INTEGER</a></li>
+    <li><a href="#RESP_BULK">RESP_BULK</a></li>
+    <li><a href="#RESP_ARRAY">RESP_ARRAY</a></li>
+    <li><a href="#RESP_NULL">RESP_NULL</a></li>
+    <li><a href="#RESP_BOOL">RESP_BOOL</a></li>
+    <li><a href="#RESP_DOUBLE">RESP_DOUBLE</a></li>
+    <li><a href="#RESP_BIGNUM">RESP_BIGNUM</a></li>
+    <li><a href="#RESP_VERBATIM">RESP_VERBATIM</a></li>
+    <li><a href="#RESP_MAP">RESP_MAP</a></li>
+    <li><a href="#RESP_SET">RESP_SET</a></li>
+    <li><a href="#RESP_PUSH">RESP_PUSH</a></li>
+    <li><a href="#new_simple">new_simple</a></li>
+    <li><a href="#new_error">new_error</a></li>
+    <li><a href="#new_integer">new_integer</a></li>
+    <li><a href="#new_bulk">new_bulk</a></li>
+    <li><a href="#new_null">new_null</a></li>
+    <li><a href="#new_bool">new_bool</a></li>
+    <li><a href="#new_double">new_double</a></li>
+    <li><a href="#new_array">new_array</a></li>
+    <li><a href="#new_map">new_map</a></li>
+    <li><a href="#new_set">new_set</a></li>
+    <li><a href="#new_push">new_push</a></li>
+    <li><a href="#array_add">array_add</a></li>
+    <li><a href="#map_add">map_add</a></li>
+    <li><a href="#value_type">value_type</a></li>
+    <li><a href="#is_null">is_null</a></li>
+    <li><a href="#as_integer">as_integer</a></li>
+    <li><a href="#as_bool">as_bool</a></li>
+    <li><a href="#as_double">as_double</a></li>
+    <li><a href="#str_value">str_value</a></li>
+    <li><a href="#array_size">array_size</a></li>
+    <li><a href="#array_get">array_get</a></li>
+    <li><a href="#map_size">map_size</a></li>
+    <li><a href="#map_key">map_key</a></li>
+    <li><a href="#map_value">map_value</a></li>
+    <li><a href="#parse">parse</a></li>
+    <li><a href="#parse_prefix">parse_prefix</a></li>
+    <li><a href="#encode">encode</a></li>
+    <li><a href="#encode_resp2">encode_resp2</a></li>
+    <li><a href="#free_value">free_value</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li class="active"><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>resp</h1>
+    <p class="module-desc">std.resp — the Redis Serialization Protocol (RESP), RESP3-native and RESP2-compatible.</p>
+    <p class="import-line"><code>import std.resp</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="RESP_SIMPLE" data-name="RESP_SIMPLE">
+      <h3 class="function-name">RESP_SIMPLE <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_SIMPLE = 43</code></pre>
+      <p class="doc">RESP type tags. The value matches the wire marker byte where one exists, so a decoder can set `type` straight from the marker and an encoder can emit it.</p>
+    </div>
+    <div class="function" id="RESP_ERROR" data-name="RESP_ERROR">
+      <h3 class="function-name">RESP_ERROR <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_ERROR = 45</code></pre>
+    </div>
+    <div class="function" id="RESP_INTEGER" data-name="RESP_INTEGER">
+      <h3 class="function-name">RESP_INTEGER <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_INTEGER = 58</code></pre>
+    </div>
+    <div class="function" id="RESP_BULK" data-name="RESP_BULK">
+      <h3 class="function-name">RESP_BULK <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_BULK = 36</code></pre>
+    </div>
+    <div class="function" id="RESP_ARRAY" data-name="RESP_ARRAY">
+      <h3 class="function-name">RESP_ARRAY <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_ARRAY = 42</code></pre>
+    </div>
+    <div class="function" id="RESP_NULL" data-name="RESP_NULL">
+      <h3 class="function-name">RESP_NULL <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_NULL = 95</code></pre>
+    </div>
+    <div class="function" id="RESP_BOOL" data-name="RESP_BOOL">
+      <h3 class="function-name">RESP_BOOL <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_BOOL = 35</code></pre>
+    </div>
+    <div class="function" id="RESP_DOUBLE" data-name="RESP_DOUBLE">
+      <h3 class="function-name">RESP_DOUBLE <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_DOUBLE = 44</code></pre>
+    </div>
+    <div class="function" id="RESP_BIGNUM" data-name="RESP_BIGNUM">
+      <h3 class="function-name">RESP_BIGNUM <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_BIGNUM = 40</code></pre>
+    </div>
+    <div class="function" id="RESP_VERBATIM" data-name="RESP_VERBATIM">
+      <h3 class="function-name">RESP_VERBATIM <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_VERBATIM = 61</code></pre>
+    </div>
+    <div class="function" id="RESP_MAP" data-name="RESP_MAP">
+      <h3 class="function-name">RESP_MAP <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_MAP = 37</code></pre>
+    </div>
+    <div class="function" id="RESP_SET" data-name="RESP_SET">
+      <h3 class="function-name">RESP_SET <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_SET = 126</code></pre>
+    </div>
+    <div class="function" id="RESP_PUSH" data-name="RESP_PUSH">
+      <h3 class="function-name">RESP_PUSH <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESP_PUSH = 62</code></pre>
+    </div>
+    <div class="function" id="new_simple" data-name="new_simple">
+      <h3 class="function-name">new_simple <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_simple(s) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+    </div>
+    <div class="function" id="new_error" data-name="new_error">
+      <h3 class="function-name">new_error <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_error(s) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+    </div>
+    <div class="function" id="new_integer" data-name="new_integer">
+      <h3 class="function-name">new_integer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_integer(n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">n: long</span></p>
+    </div>
+    <div class="function" id="new_bulk" data-name="new_bulk">
+      <h3 class="function-name">new_bulk <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_bulk(s) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[]</span></p>
+      <p class="doc">A bulk string holding the bytes of `s` (binary-safe; may contain NUL / CRLF). `s` is a byte[] (#2301): pass a string as `string.bytes(text)`. The value keeps its own copy.</p>
+    </div>
+    <div class="function" id="new_null" data-name="new_null">
+      <h3 class="function-name">new_null <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_null() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="new_bool" data-name="new_bool">
+      <h3 class="function-name">new_bool <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_bool(b) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">b: int</span></p>
+    </div>
+    <div class="function" id="new_double" data-name="new_double">
+      <h3 class="function-name">new_double <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_double(d) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">d: float</span></p>
+    </div>
+    <div class="function" id="new_array" data-name="new_array">
+      <h3 class="function-name">new_array <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_array() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">Empty aggregates; add children with array_add / map_add.</p>
+    </div>
+    <div class="function" id="new_map" data-name="new_map">
+      <h3 class="function-name">new_map <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_map() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="new_set" data-name="new_set">
+      <h3 class="function-name">new_set <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_set() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="new_push" data-name="new_push">
+      <h3 class="function-name">new_push <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_push() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="array_add" data-name="array_add">
+      <h3 class="function-name">array_add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array_add(agg, child)</code></pre>
+      <p class="signature"><span class="sig-params">agg: ptr, child: ptr</span></p>
+      <p class="doc">Append a child to an array/set/push (ownership moves into the aggregate).</p>
+    </div>
+    <div class="function" id="map_add" data-name="map_add">
+      <h3 class="function-name">map_add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_add(m, key, val)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: ptr, val: ptr</span></p>
+      <p class="doc">Append a key/value pair to a map (ownership of both moves into the map).</p>
+    </div>
+    <div class="function" id="value_type" data-name="value_type">
+      <h3 class="function-name">value_type <span class="kind">fn</span></h3>
+      <pre class="usage"><code>value_type(vp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="is_null" data-name="is_null">
+      <h3 class="function-name">is_null <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_null(vp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="as_integer" data-name="as_integer">
+      <h3 class="function-name">as_integer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>as_integer(vp) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="as_bool" data-name="as_bool">
+      <h3 class="function-name">as_bool <span class="kind">fn</span></h3>
+      <pre class="usage"><code>as_bool(vp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="as_double" data-name="as_double">
+      <h3 class="function-name">as_double <span class="kind">fn</span></h3>
+      <pre class="usage"><code>as_double(vp) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="str_value" data-name="str_value">
+      <h3 class="function-name">str_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>str_value(vp) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+      <p class="doc">The text payload (simple/error/bulk/verbatim/bignum) as a caller-owned string. Empty payload yields &quot;&quot;. Non-consuming — the value keeps ownership.</p>
+    </div>
+    <div class="function" id="array_size" data-name="array_size">
+      <h3 class="function-name">array_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array_size(vp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="array_get" data-name="array_get">
+      <h3 class="function-name">array_get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array_get(vp, i) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="map_size" data-name="map_size">
+      <h3 class="function-name">map_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_size(vp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+    </div>
+    <div class="function" id="map_key" data-name="map_key">
+      <h3 class="function-name">map_key <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_key(vp, i) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="map_value" data-name="map_value">
+      <h3 class="function-name">map_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_value(vp, i) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="parse" data-name="parse">
+      <h3 class="function-name">parse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse(data) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">data: string</span></p>
+      <p class="doc">Parse a buffer expected to hold EXACTLY one complete value. Returns the value on success, or errors (`ptr!`) on incomplete/malformed/trailing-garbage. Use parse_prefix for a stream where more frames follow.</p>
+    </div>
+    <div class="function" id="parse_prefix" data-name="parse_prefix">
+      <h3 class="function-name">parse_prefix <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse_prefix(data) <span class="arrow">-&gt;</span> (ptr, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Parse ONE value from the front of `data`, a byte[] whose length travels with it (#2301): a socket reader passes the bytes it has buffered so far, e.g. `bytes.view(buf)`. Parsing borrows `data` only for the call; every payload in the returned tree is an owned copy. Returns (value, consumed, &quot;&quot;)  on success — consumed bytes were used, the rest is the next frame(s); free the value with free_value. (null, 0, &quot;&quot;)          INCOMPLETE — not enough bytes yet; read more and retry with the fuller buffer. Distinct from error. (null, 0, msg)         MALFORMED — a protocol error; msg says why. This is the resumable entry point for a socket reader.</p>
+    </div>
+    <div class="function" id="encode" data-name="encode">
+      <h3 class="function-name">encode <span class="kind">fn</span></h3>
+      <pre class="usage"><code>encode(v) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">v: ptr</span></p>
+    </div>
+    <div class="function" id="encode_resp2" data-name="encode_resp2">
+      <h3 class="function-name">encode_resp2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>encode_resp2(v) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">v: ptr</span></p>
+    </div>
+    <div class="function" id="free_value" data-name="free_value">
+      <h3 class="function-name">free_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free_value(vp)</code></pre>
+      <p class="signature"><span class="sig-params">vp: ptr</span></p>
+      <p class="doc">Free a value tree: every owned bytes payload and every std.list child.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

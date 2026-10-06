@@ -256,16 +256,19 @@ object_entry(obj: ptr, i: int) -> (string, ptr, string) {
 }
 
 // Index into a JSON array.
-// - (value, "")             : index in range
-// - (null, "")              : index out of range (not an error)
-// - (null, "not an array")  : `arr` is not a JSON_ARRAY
+// - (value, "")                    : index in range
+// - (null, "index out of range")   : index < 0 or index >= array_size
+// - (null, "not an array")         : `arr` is not a JSON_ARRAY
+// An empty error means the value is good, as everywhere else in std (#2439).
 // The returned value is borrowed from `arr`.
 array_get(arr: ptr, index: int) -> {
     if json_type(arr) != 4 {
         return null, "not an array"
     }
-    v = json_array_get_raw(arr, index)
-    return v, ""
+    if index < 0 || index >= json_array_size(arr) {
+        return null, "index out of range"
+    }
+    return json_array_get_raw(arr, index), ""
 }
 
 // Append a value to a JSON array. Returns "" on success, error if `arr`

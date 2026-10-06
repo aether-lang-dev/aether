@@ -223,6 +223,8 @@ static int type_src_write(const Type* t, char* buf, size_t cap, size_t* pos) {
         case TYPE_I32X4:      return type_src_put(buf, cap, pos, "i32x4");
         case TYPE_I64X2:      return type_src_put(buf, cap, pos, "i64x2");
         case TYPE_I16X8:      return type_src_put(buf, cap, pos, "i16x8");
+        case TYPE_F32X8:      return type_src_put(buf, cap, pos, "f32x8");
+        case TYPE_I32X8:      return type_src_put(buf, cap, pos, "i32x8");
         case TYPE_BOOL:       return type_src_put(buf, cap, pos, "bool");
         case TYPE_BYTE:       return type_src_put(buf, cap, pos, "byte");
         case TYPE_STRING:     return type_src_put(buf, cap, pos, "string");
@@ -720,6 +722,7 @@ int lane_accessor_index(TypeKind kind, const char* field) {
     int lanes;
     switch (kind) {
         case TYPE_F32X4: case TYPE_I32X4: lanes = 4; break;
+        case TYPE_F32X8: case TYPE_I32X8: lanes = 8; break;
         case TYPE_F64X2: case TYPE_I64X2: lanes = 2; break;
         default: return -1;
     }

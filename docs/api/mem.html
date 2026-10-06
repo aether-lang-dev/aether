@@ -15,6 +15,54 @@
   <input type="text" id="search" placeholder="Search mem..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
+    <li><a href="#aether_mem_get_byte_unchecked">aether_mem_get_byte_unchecked</a></li>
+    <li><a href="#get_byte_unchecked">get_byte_unchecked</a></li>
+    <li><a href="#aether_mem_set_byte_unchecked">aether_mem_set_byte_unchecked</a></li>
+    <li><a href="#set_byte_unchecked">set_byte_unchecked</a></li>
+    <li><a href="#aether_mem_get_byte_sz_unchecked">aether_mem_get_byte_sz_unchecked</a></li>
+    <li><a href="#get_byte_sz_unchecked">get_byte_sz_unchecked</a></li>
+    <li><a href="#aether_mem_set_byte_sz_unchecked">aether_mem_set_byte_sz_unchecked</a></li>
+    <li><a href="#set_byte_sz_unchecked">set_byte_sz_unchecked</a></li>
+    <li><a href="#aether_mem_get_ptr_unchecked">aether_mem_get_ptr_unchecked</a></li>
+    <li><a href="#get_ptr_unchecked">get_ptr_unchecked</a></li>
+    <li><a href="#aether_mem_set_ptr_unchecked">aether_mem_set_ptr_unchecked</a></li>
+    <li><a href="#set_ptr_unchecked">set_ptr_unchecked</a></li>
+    <li><a href="#aether_mem_get_int_unchecked">aether_mem_get_int_unchecked</a></li>
+    <li><a href="#get_int_unchecked">get_int_unchecked</a></li>
+    <li><a href="#aether_mem_set_int_unchecked">aether_mem_set_int_unchecked</a></li>
+    <li><a href="#set_int_unchecked">set_int_unchecked</a></li>
+    <li><a href="#aether_mem_get_long_unchecked">aether_mem_get_long_unchecked</a></li>
+    <li><a href="#get_long_unchecked">get_long_unchecked</a></li>
+    <li><a href="#aether_mem_set_long_unchecked">aether_mem_set_long_unchecked</a></li>
+    <li><a href="#set_long_unchecked">set_long_unchecked</a></li>
+    <li><a href="#aether_mem_get_int8_unchecked">aether_mem_get_int8_unchecked</a></li>
+    <li><a href="#get_int8_unchecked">get_int8_unchecked</a></li>
+    <li><a href="#aether_mem_set_int8_unchecked">aether_mem_set_int8_unchecked</a></li>
+    <li><a href="#set_int8_unchecked">set_int8_unchecked</a></li>
+    <li><a href="#aether_mem_get_uint8_unchecked">aether_mem_get_uint8_unchecked</a></li>
+    <li><a href="#get_uint8_unchecked">get_uint8_unchecked</a></li>
+    <li><a href="#aether_mem_set_uint8_unchecked">aether_mem_set_uint8_unchecked</a></li>
+    <li><a href="#set_uint8_unchecked">set_uint8_unchecked</a></li>
+    <li><a href="#aether_mem_get_int16_unchecked">aether_mem_get_int16_unchecked</a></li>
+    <li><a href="#get_int16_unchecked">get_int16_unchecked</a></li>
+    <li><a href="#aether_mem_set_int16_unchecked">aether_mem_set_int16_unchecked</a></li>
+    <li><a href="#set_int16_unchecked">set_int16_unchecked</a></li>
+    <li><a href="#aether_mem_get_uint16_unchecked">aether_mem_get_uint16_unchecked</a></li>
+    <li><a href="#get_uint16_unchecked">get_uint16_unchecked</a></li>
+    <li><a href="#aether_mem_set_uint16_unchecked">aether_mem_set_uint16_unchecked</a></li>
+    <li><a href="#set_uint16_unchecked">set_uint16_unchecked</a></li>
+    <li><a href="#aether_mem_get_uint32_unchecked">aether_mem_get_uint32_unchecked</a></li>
+    <li><a href="#get_uint32_unchecked">get_uint32_unchecked</a></li>
+    <li><a href="#aether_mem_set_uint32_unchecked">aether_mem_set_uint32_unchecked</a></li>
+    <li><a href="#set_uint32_unchecked">set_uint32_unchecked</a></li>
+    <li><a href="#aether_mem_get_float32_unchecked">aether_mem_get_float32_unchecked</a></li>
+    <li><a href="#get_float32_unchecked">get_float32_unchecked</a></li>
+    <li><a href="#aether_mem_set_float32_unchecked">aether_mem_set_float32_unchecked</a></li>
+    <li><a href="#set_float32_unchecked">set_float32_unchecked</a></li>
+    <li><a href="#aether_mem_get_float64_unchecked">aether_mem_get_float64_unchecked</a></li>
+    <li><a href="#get_float64_unchecked">get_float64_unchecked</a></li>
+    <li><a href="#aether_mem_set_float64_unchecked">aether_mem_set_float64_unchecked</a></li>
+    <li><a href="#set_float64_unchecked">set_float64_unchecked</a></li>
     <li><a href="#aether_mem_get_byte">aether_mem_get_byte</a></li>
     <li><a href="#aether_mem_set_byte">aether_mem_set_byte</a></li>
     <li><a href="#aether_mem_get_byte_sz">aether_mem_get_byte_sz</a></li>
@@ -46,10 +94,17 @@
     <li><a href="#aether_mem_udiv64_32">aether_mem_udiv64_32</a></li>
     <li><a href="#aether_mem_call_fn3_int">aether_mem_call_fn3_int</a></li>
     <li><a href="#aether_mem_call_fn3_void">aether_mem_call_fn3_void</a></li>
+    <li><a href="#aether_mem_call_fn2_void">aether_mem_call_fn2_void</a></li>
+    <li><a href="#aether_mem_ptr_to_long">aether_mem_ptr_to_long</a></li>
+    <li><a href="#aether_mem_long_to_ptr">aether_mem_long_to_ptr</a></li>
     <li><a href="#aether_mem_copy">aether_mem_copy</a></li>
     <li><a href="#aether_mem_move">aether_mem_move</a></li>
     <li><a href="#aether_mem_compare">aether_mem_compare</a></li>
     <li><a href="#aether_mem_set_bulk">aether_mem_set_bulk</a></li>
+    <li><a href="#aether_mem_copy_at">aether_mem_copy_at</a></li>
+    <li><a href="#aether_mem_move_at">aether_mem_move_at</a></li>
+    <li><a href="#aether_mem_fill_at">aether_mem_fill_at</a></li>
+    <li><a href="#aether_mem_compare_at">aether_mem_compare_at</a></li>
     <li><a href="#aether_mem_get_u16_le">aether_mem_get_u16_le</a></li>
     <li><a href="#aether_mem_get_u16_be">aether_mem_get_u16_be</a></li>
     <li><a href="#aether_mem_set_u16_le">aether_mem_set_u16_le</a></li>
@@ -93,10 +148,17 @@
     <li><a href="#udiv64_32">udiv64_32</a></li>
     <li><a href="#call_fn3_int">call_fn3_int</a></li>
     <li><a href="#call_fn3_void">call_fn3_void</a></li>
+    <li><a href="#call_fn2_void">call_fn2_void</a></li>
+    <li><a href="#ptr_to_long">ptr_to_long</a></li>
+    <li><a href="#long_to_ptr">long_to_ptr</a></li>
     <li><a href="#copy">copy</a></li>
     <li><a href="#move">move</a></li>
     <li><a href="#compare">compare</a></li>
     <li><a href="#set">set</a></li>
+    <li><a href="#copy_at">copy_at</a></li>
+    <li><a href="#move_at">move_at</a></li>
+    <li><a href="#fill_at">fill_at</a></li>
+    <li><a href="#compare_at">compare_at</a></li>
     <li><a href="#get_u16_le">get_u16_le</a></li>
     <li><a href="#get_u16_be">get_u16_be</a></li>
     <li><a href="#set_u16_le">set_u16_le</a></li>
@@ -109,6 +171,23 @@
     <li><a href="#get_u64_be">get_u64_be</a></li>
     <li><a href="#set_u64_le">set_u64_le</a></li>
     <li><a href="#set_u64_be">set_u64_be</a></li>
+    <li><a href="#read_u16_le">read_u16_le</a></li>
+    <li><a href="#write_u16_le">write_u16_le</a></li>
+    <li><a href="#read_u16_be">read_u16_be</a></li>
+    <li><a href="#write_u16_be">write_u16_be</a></li>
+    <li><a href="#read_u32_le">read_u32_le</a></li>
+    <li><a href="#write_u32_le">write_u32_le</a></li>
+    <li><a href="#read_u32_be">read_u32_be</a></li>
+    <li><a href="#write_u32_be">write_u32_be</a></li>
+    <li><a href="#read_u64_le">read_u64_le</a></li>
+    <li><a href="#write_u64_le">write_u64_le</a></li>
+    <li><a href="#read_u64_be">read_u64_be</a></li>
+    <li><a href="#write_u64_be">write_u64_be</a></li>
+    <li><a href="#copy_slice">copy_slice</a></li>
+    <li><a href="#fill_slice">fill_slice</a></li>
+    <li><a href="#compare_slice">compare_slice</a></li>
+    <li><a href="#aether_heap_in_use">aether_heap_in_use</a></li>
+    <li><a href="#heap_in_use">heap_in_use</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -120,13 +199,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -137,11 +220,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -149,28 +237,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li class="active"><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -180,6 +288,247 @@
     <p class="import-line"><code>import std.mem</code></p>
   </div>
   <div class="functions" id="functions">
+    <div class="function" id="aether_mem_get_byte_unchecked" data-name="aether_mem_get_byte_unchecked">
+      <h3 class="function-name">aether_mem_get_byte_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_byte_unchecked(p, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: int</span></p>
+      <p class="doc">Native-endian scalar accessors without a null check (#2379). The caller must supply a non-null pointer to a valid slot, with the same size and alignment as the checked counterpart. Null is undefined behaviour; setters return 1. These wrappers lower inline as well.</p>
+    </div>
+    <div class="function" id="get_byte_unchecked" data-name="get_byte_unchecked">
+      <h3 class="function-name">get_byte_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_byte_unchecked(p, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_byte_unchecked" data-name="aether_mem_set_byte_unchecked">
+      <h3 class="function-name">aether_mem_set_byte_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_byte_unchecked(p, i, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: int, value: int</span></p>
+    </div>
+    <div class="function" id="set_byte_unchecked" data-name="set_byte_unchecked">
+      <h3 class="function-name">set_byte_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_byte_unchecked(p, i, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: int, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_byte_sz_unchecked" data-name="aether_mem_get_byte_sz_unchecked">
+      <h3 class="function-name">aether_mem_get_byte_sz_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_byte_sz_unchecked(p, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: size_t</span></p>
+    </div>
+    <div class="function" id="get_byte_sz_unchecked" data-name="get_byte_sz_unchecked">
+      <h3 class="function-name">get_byte_sz_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_byte_sz_unchecked(p, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: size_t</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_byte_sz_unchecked" data-name="aether_mem_set_byte_sz_unchecked">
+      <h3 class="function-name">aether_mem_set_byte_sz_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_byte_sz_unchecked(p, i, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: size_t, value: int</span></p>
+    </div>
+    <div class="function" id="set_byte_sz_unchecked" data-name="set_byte_sz_unchecked">
+      <h3 class="function-name">set_byte_sz_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_byte_sz_unchecked(p, i, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, i: size_t, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_ptr_unchecked" data-name="aether_mem_get_ptr_unchecked">
+      <h3 class="function-name">aether_mem_get_ptr_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_ptr_unchecked(p, offset) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_ptr_unchecked" data-name="get_ptr_unchecked">
+      <h3 class="function-name">get_ptr_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_ptr_unchecked(p, offset) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_ptr_unchecked" data-name="aether_mem_set_ptr_unchecked">
+      <h3 class="function-name">aether_mem_set_ptr_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_ptr_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: ptr</span></p>
+    </div>
+    <div class="function" id="set_ptr_unchecked" data-name="set_ptr_unchecked">
+      <h3 class="function-name">set_ptr_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_ptr_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: ptr</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_int_unchecked" data-name="aether_mem_get_int_unchecked">
+      <h3 class="function-name">aether_mem_get_int_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_int_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_int_unchecked" data-name="get_int_unchecked">
+      <h3 class="function-name">get_int_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_int_unchecked" data-name="aether_mem_set_int_unchecked">
+      <h3 class="function-name">aether_mem_set_int_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_int_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="set_int_unchecked" data-name="set_int_unchecked">
+      <h3 class="function-name">set_int_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_int_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_long_unchecked" data-name="aether_mem_get_long_unchecked">
+      <h3 class="function-name">aether_mem_get_long_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_long_unchecked(p, offset) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_long_unchecked" data-name="get_long_unchecked">
+      <h3 class="function-name">get_long_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_long_unchecked(p, offset) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_long_unchecked" data-name="aether_mem_set_long_unchecked">
+      <h3 class="function-name">aether_mem_set_long_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_long_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
+    </div>
+    <div class="function" id="set_long_unchecked" data-name="set_long_unchecked">
+      <h3 class="function-name">set_long_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_long_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_int8_unchecked" data-name="aether_mem_get_int8_unchecked">
+      <h3 class="function-name">aether_mem_get_int8_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_int8_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_int8_unchecked" data-name="get_int8_unchecked">
+      <h3 class="function-name">get_int8_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int8_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_int8_unchecked" data-name="aether_mem_set_int8_unchecked">
+      <h3 class="function-name">aether_mem_set_int8_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_int8_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="set_int8_unchecked" data-name="set_int8_unchecked">
+      <h3 class="function-name">set_int8_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_int8_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_uint8_unchecked" data-name="aether_mem_get_uint8_unchecked">
+      <h3 class="function-name">aether_mem_get_uint8_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_uint8_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_uint8_unchecked" data-name="get_uint8_unchecked">
+      <h3 class="function-name">get_uint8_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_uint8_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_uint8_unchecked" data-name="aether_mem_set_uint8_unchecked">
+      <h3 class="function-name">aether_mem_set_uint8_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_uint8_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="set_uint8_unchecked" data-name="set_uint8_unchecked">
+      <h3 class="function-name">set_uint8_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_uint8_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_int16_unchecked" data-name="aether_mem_get_int16_unchecked">
+      <h3 class="function-name">aether_mem_get_int16_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_int16_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_int16_unchecked" data-name="get_int16_unchecked">
+      <h3 class="function-name">get_int16_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int16_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_int16_unchecked" data-name="aether_mem_set_int16_unchecked">
+      <h3 class="function-name">aether_mem_set_int16_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_int16_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="set_int16_unchecked" data-name="set_int16_unchecked">
+      <h3 class="function-name">set_int16_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_int16_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_uint16_unchecked" data-name="aether_mem_get_uint16_unchecked">
+      <h3 class="function-name">aether_mem_get_uint16_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_uint16_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_uint16_unchecked" data-name="get_uint16_unchecked">
+      <h3 class="function-name">get_uint16_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_uint16_unchecked(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_uint16_unchecked" data-name="aether_mem_set_uint16_unchecked">
+      <h3 class="function-name">aether_mem_set_uint16_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_uint16_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="set_uint16_unchecked" data-name="set_uint16_unchecked">
+      <h3 class="function-name">set_uint16_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_uint16_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_uint32_unchecked" data-name="aether_mem_get_uint32_unchecked">
+      <h3 class="function-name">aether_mem_get_uint32_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_uint32_unchecked(p, offset) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_uint32_unchecked" data-name="get_uint32_unchecked">
+      <h3 class="function-name">get_uint32_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_uint32_unchecked(p, offset) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_uint32_unchecked" data-name="aether_mem_set_uint32_unchecked">
+      <h3 class="function-name">aether_mem_set_uint32_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_uint32_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
+    </div>
+    <div class="function" id="set_uint32_unchecked" data-name="set_uint32_unchecked">
+      <h3 class="function-name">set_uint32_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_uint32_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_float32_unchecked" data-name="aether_mem_get_float32_unchecked">
+      <h3 class="function-name">aether_mem_get_float32_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_float32_unchecked(p, offset) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_float32_unchecked" data-name="get_float32_unchecked">
+      <h3 class="function-name">get_float32_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_float32_unchecked(p, offset) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_float32_unchecked" data-name="aether_mem_set_float32_unchecked">
+      <h3 class="function-name">aether_mem_set_float32_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_float32_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: float</span></p>
+    </div>
+    <div class="function" id="set_float32_unchecked" data-name="set_float32_unchecked">
+      <h3 class="function-name">set_float32_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_float32_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: float</span></p>
+    </div>
+    <div class="function" id="aether_mem_get_float64_unchecked" data-name="aether_mem_get_float64_unchecked">
+      <h3 class="function-name">aether_mem_get_float64_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_get_float64_unchecked(p, offset) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="get_float64_unchecked" data-name="get_float64_unchecked">
+      <h3 class="function-name">get_float64_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_float64_unchecked(p, offset) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
+    </div>
+    <div class="function" id="aether_mem_set_float64_unchecked" data-name="aether_mem_set_float64_unchecked">
+      <h3 class="function-name">aether_mem_set_float64_unchecked <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_set_float64_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: float</span></p>
+    </div>
+    <div class="function" id="set_float64_unchecked" data-name="set_float64_unchecked">
+      <h3 class="function-name">set_float64_unchecked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_float64_unchecked(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: float</span></p>
+    </div>
     <div class="function" id="aether_mem_get_byte" data-name="aether_mem_get_byte">
       <h3 class="function-name">aether_mem_get_byte <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_mem_get_byte(p, i) <span class="arrow">-&gt;</span> int</code></pre>
@@ -282,13 +631,13 @@
     </div>
     <div class="function" id="aether_mem_get_uint32" data-name="aether_mem_get_uint32">
       <h3 class="function-name">aether_mem_get_uint32 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_mem_get_uint32(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <pre class="usage"><code>aether_mem_get_uint32(p, offset) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
     </div>
     <div class="function" id="aether_mem_set_uint32" data-name="aether_mem_set_uint32">
       <h3 class="function-name">aether_mem_set_uint32 <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_mem_set_uint32(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
     </div>
     <div class="function" id="aether_mem_get_float32" data-name="aether_mem_get_float32">
       <h3 class="function-name">aether_mem_get_float32 <span class="kind">extern</span></h3>
@@ -352,6 +701,24 @@
       <p class="signature"><span class="sig-params">fn: ptr, a: long, b: long, opaque: ptr</span></p>
       <p class="doc">Same shape, void return (e.g. swap callbacks).</p>
     </div>
+    <div class="function" id="aether_mem_call_fn2_void" data-name="aether_mem_call_fn2_void">
+      <h3 class="function-name">aether_mem_call_fn2_void <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_call_fn2_void(fn, a, b)</code></pre>
+      <p class="signature"><span class="sig-params">fn: ptr, a: ptr, b: ptr</span></p>
+      <p class="doc">Two-arg fnptr shim, void return. Driver case: GC user-finalizer tables (`void (*)(JSContext*, void*)`) — both args cross the FFI as ptr.</p>
+    </div>
+    <div class="function" id="aether_mem_ptr_to_long" data-name="aether_mem_ptr_to_long">
+      <h3 class="function-name">aether_mem_ptr_to_long <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_ptr_to_long(p) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr</span></p>
+      <p class="doc">Reinterpret a raw pointer as a 64-bit integer address. Returns the machine address of `p`. Driver case: porting C tagged-pointer code that needs to do bit arithmetic on a pointer (e.g. test the low 3 bits to distinguish a JSValue's tag). Aether's `ptr` doesn't support `&amp;` directly, so the tag test routes through `long`.</p>
+    </div>
+    <div class="function" id="aether_mem_long_to_ptr" data-name="aether_mem_long_to_ptr">
+      <h3 class="function-name">aether_mem_long_to_ptr <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_long_to_ptr(addr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">addr: long</span></p>
+      <p class="doc">Inverse of aether_mem_ptr_to_long. Construct a `ptr` from a 64-bit integer address. Used after stripping the tag bits from a tagged pointer that was loaded as a long; the un-tagged address gets converted back to ptr for indexed reads via mem.get_long / mem.get_ptr. Caller's responsibility to ensure the address is a valid pointer (same contract as POSIX read/write into a buffer).</p>
+    </div>
     <div class="function" id="aether_mem_copy" data-name="aether_mem_copy">
       <h3 class="function-name">aether_mem_copy <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_mem_copy(dst, src, n) <span class="arrow">-&gt;</span> ptr</code></pre>
@@ -372,6 +739,26 @@
       <h3 class="function-name">aether_mem_set_bulk <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_mem_set_bulk(dst, value, n) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">dst: ptr, value: int, n: long</span></p>
+    </div>
+    <div class="function" id="aether_mem_copy_at" data-name="aether_mem_copy_at">
+      <h3 class="function-name">aether_mem_copy_at <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_copy_at(dst, dst_off, src, src_off, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, dst_off: long, src: ptr, src_off: long, n: long</span></p>
+    </div>
+    <div class="function" id="aether_mem_move_at" data-name="aether_mem_move_at">
+      <h3 class="function-name">aether_mem_move_at <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_move_at(dst, dst_off, src, src_off, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, dst_off: long, src: ptr, src_off: long, n: long</span></p>
+    </div>
+    <div class="function" id="aether_mem_fill_at" data-name="aether_mem_fill_at">
+      <h3 class="function-name">aether_mem_fill_at <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_fill_at(dst, off, value, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, off: long, value: int, n: long</span></p>
+    </div>
+    <div class="function" id="aether_mem_compare_at" data-name="aether_mem_compare_at">
+      <h3 class="function-name">aether_mem_compare_at <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_mem_compare_at(a, a_off, b, b_off, n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">a: ptr, a_off: long, b: ptr, b_off: long, n: long</span></p>
     </div>
     <div class="function" id="aether_mem_get_u16_le" data-name="aether_mem_get_u16_le">
       <h3 class="function-name">aether_mem_get_u16_le <span class="kind">extern</span></h3>
@@ -527,13 +914,13 @@
     </div>
     <div class="function" id="get_uint32" data-name="get_uint32">
       <h3 class="function-name">get_uint32 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>get_uint32(p, offset) <span class="arrow">-&gt;</span> int</code></pre>
+      <pre class="usage"><code>get_uint32(p, offset) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">p: ptr, offset: int</span></p>
     </div>
     <div class="function" id="set_uint32" data-name="set_uint32">
       <h3 class="function-name">set_uint32 <span class="kind">fn</span></h3>
       <pre class="usage"><code>set_uint32(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: int</span></p>
+      <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
     </div>
     <div class="function" id="get_float32" data-name="get_float32">
       <h3 class="function-name">get_float32 <span class="kind">fn</span></h3>
@@ -590,6 +977,21 @@
       <pre class="usage"><code>call_fn3_void(fn, a, b, opaque)</code></pre>
       <p class="signature"><span class="sig-params">fn: ptr, a: long, b: long, opaque: ptr</span></p>
     </div>
+    <div class="function" id="call_fn2_void" data-name="call_fn2_void">
+      <h3 class="function-name">call_fn2_void <span class="kind">fn</span></h3>
+      <pre class="usage"><code>call_fn2_void(fn, a, b)</code></pre>
+      <p class="signature"><span class="sig-params">fn: ptr, a: ptr, b: ptr</span></p>
+    </div>
+    <div class="function" id="ptr_to_long" data-name="ptr_to_long">
+      <h3 class="function-name">ptr_to_long <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ptr_to_long(p) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr</span></p>
+    </div>
+    <div class="function" id="long_to_ptr" data-name="long_to_ptr">
+      <h3 class="function-name">long_to_ptr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>long_to_ptr(addr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">addr: long</span></p>
+    </div>
     <div class="function" id="copy" data-name="copy">
       <h3 class="function-name">copy <span class="kind">fn</span></h3>
       <pre class="usage"><code>copy(dst, src, n) <span class="arrow">-&gt;</span> ptr</code></pre>
@@ -610,6 +1012,27 @@
       <h3 class="function-name">set <span class="kind">fn</span></h3>
       <pre class="usage"><code>set(dst, value, n) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">dst: ptr, value: int, n: long</span></p>
+    </div>
+    <div class="function" id="copy_at" data-name="copy_at">
+      <h3 class="function-name">copy_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>copy_at(dst, dst_off, src, src_off, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, dst_off: long, src: ptr, src_off: long, n: long</span></p>
+      <p class="doc">Offset forms of the bulk operations (#1733). The four above can only start at byte 0 of each buffer, and Aether has no pointer arithmetic — so a bulk operation on an INTERIOR span had no spelling at all. Copying one scanline out of a larger framebuffer, or filling a rect's row, meant going byte at a time even though the operation is memcpy-shaped. Contracts match their offset-less twins exactly: a null buffer is a no-op returning `dst` (0 for compare), and offsets are the caller's problem in the same way `n` already is — no range checking is added here, because none exists in the offset-less forms and a bulk primitive that silently clamped would be worse than one that does as it is told. `move_at` matters as much as `copy_at`: an image scrolling within its own buffer is an OVERLAPPING interior copy, so a copy_at-only surface would leave the common case undefined.</p>
+    </div>
+    <div class="function" id="move_at" data-name="move_at">
+      <h3 class="function-name">move_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>move_at(dst, dst_off, src, src_off, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, dst_off: long, src: ptr, src_off: long, n: long</span></p>
+    </div>
+    <div class="function" id="fill_at" data-name="fill_at">
+      <h3 class="function-name">fill_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fill_at(dst, off, value, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, off: long, value: int, n: long</span></p>
+    </div>
+    <div class="function" id="compare_at" data-name="compare_at">
+      <h3 class="function-name">compare_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>compare_at(a, a_off, b, b_off, n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">a: ptr, a_off: long, b: ptr, b_off: long, n: long</span></p>
     </div>
     <div class="function" id="get_u16_le" data-name="get_u16_le">
       <h3 class="function-name">get_u16_le <span class="kind">fn</span></h3>
@@ -671,6 +1094,94 @@
       <h3 class="function-name">set_u64_be <span class="kind">fn</span></h3>
       <pre class="usage"><code>set_u64_be(p, offset, value) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">p: ptr, offset: int, value: long</span></p>
+    </div>
+    <div class="function" id="read_u16_le" data-name="read_u16_le">
+      <h3 class="function-name">read_u16_le <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_u16_le(s, off) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int</span></p>
+    </div>
+    <div class="function" id="write_u16_le" data-name="write_u16_le">
+      <h3 class="function-name">write_u16_le <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_u16_le(s, off, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int, value: int</span></p>
+    </div>
+    <div class="function" id="read_u16_be" data-name="read_u16_be">
+      <h3 class="function-name">read_u16_be <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_u16_be(s, off) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int</span></p>
+    </div>
+    <div class="function" id="write_u16_be" data-name="write_u16_be">
+      <h3 class="function-name">write_u16_be <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_u16_be(s, off, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int, value: int</span></p>
+    </div>
+    <div class="function" id="read_u32_le" data-name="read_u32_le">
+      <h3 class="function-name">read_u32_le <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_u32_le(s, off) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int</span></p>
+    </div>
+    <div class="function" id="write_u32_le" data-name="write_u32_le">
+      <h3 class="function-name">write_u32_le <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_u32_le(s, off, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int, value: long</span></p>
+    </div>
+    <div class="function" id="read_u32_be" data-name="read_u32_be">
+      <h3 class="function-name">read_u32_be <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_u32_be(s, off) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int</span></p>
+    </div>
+    <div class="function" id="write_u32_be" data-name="write_u32_be">
+      <h3 class="function-name">write_u32_be <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_u32_be(s, off, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int, value: long</span></p>
+    </div>
+    <div class="function" id="read_u64_le" data-name="read_u64_le">
+      <h3 class="function-name">read_u64_le <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_u64_le(s, off) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int</span></p>
+    </div>
+    <div class="function" id="write_u64_le" data-name="write_u64_le">
+      <h3 class="function-name">write_u64_le <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_u64_le(s, off, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int, value: long</span></p>
+    </div>
+    <div class="function" id="read_u64_be" data-name="read_u64_be">
+      <h3 class="function-name">read_u64_be <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_u64_be(s, off) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int</span></p>
+    </div>
+    <div class="function" id="write_u64_be" data-name="write_u64_be">
+      <h3 class="function-name">write_u64_be <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_u64_be(s, off, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], off: int, value: long</span></p>
+    </div>
+    <div class="function" id="copy_slice" data-name="copy_slice">
+      <h3 class="function-name">copy_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>copy_slice(dst, src) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">dst: byte[], src: byte[]</span></p>
+      <p class="doc">Copy all of `src` to the start of `dst` (the two may overlap, as within one buffer). `dst` must be at least as long as `src`. Returns src.len.</p>
+    </div>
+    <div class="function" id="fill_slice" data-name="fill_slice">
+      <h3 class="function-name">fill_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fill_slice(s, value)</code></pre>
+      <p class="signature"><span class="sig-params">s: byte[], value: int</span></p>
+      <p class="doc">Set every byte of `s` to `value` (its low 8 bits).</p>
+    </div>
+    <div class="function" id="compare_slice" data-name="compare_slice">
+      <h3 class="function-name">compare_slice <span class="kind">fn</span></h3>
+      <pre class="usage"><code>compare_slice(a, b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">a: byte[], b: byte[]</span></p>
+      <p class="doc">Lexicographic byte comparison, &lt;0 / 0 / &gt;0 as mem.compare: compares the overlapping prefix (the shorter of the two lengths) first, and if every shared byte matches, the shorter slice sorts first. Two different-length slices are therefore never &quot;equal&quot; even when one is a prefix of the other — check `.len` yourself first if that is the equality you want.</p>
+    </div>
+    <div class="function" id="aether_heap_in_use" data-name="aether_heap_in_use">
+      <h3 class="function-name">aether_heap_in_use <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_heap_in_use() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">---- how much the heap holds (#2310; runtime/aether_process_mem.c) ----</p>
+    </div>
+    <div class="function" id="heap_in_use" data-name="heap_in_use">
+      <h3 class="function-name">heap_in_use <span class="kind">fn</span></h3>
+      <pre class="usage"><code>heap_in_use() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">The bytes the C allocator has handed out and not taken back: every malloc in the process, Aether's (heap.new, strings, closures, collections) and the ones C code reached through an extern makes, from the allocator's own statistics. -1 where the platform's allocator keeps none (musl), and where the platform's allocator is not the one serving malloc (under valgrind, or with an allocator preloaded in front of glibc's): its statistics would stand still while the program allocates. For a same-process leak check, run the workload a few rounds and compare two later rounds: the growth is what each round leaks. Allocators keep a bounded cache of freed blocks that some count as in use, so a single before/after is not zero even when nothing leaks.</p>
     </div>
   </div>
 </main>

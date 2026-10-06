@@ -18,9 +18,15 @@
     <li><a href="#ints">ints</a></li>
     <li><a href="#longs">longs</a></li>
     <li><a href="#floats">floats</a></li>
+    <li><a href="#strings">strings</a></li>
     <li><a href="#int_search">int_search</a></li>
     <li><a href="#long_search">long_search</a></li>
     <li><a href="#float_search">float_search</a></li>
+    <li><a href="#string_search">string_search</a></li>
+    <li><a href="#ints_by">ints_by</a></li>
+    <li><a href="#longs_by">longs_by</a></li>
+    <li><a href="#floats_by">floats_by</a></li>
+    <li><a href="#strings_by">strings_by</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -32,13 +38,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -49,11 +59,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -61,68 +76,128 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li class="active"><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
   <div class="module-header">
     <h1>sort</h1>
-    <p class="module-desc">std.sort — in-place ascending sort + binary search over the concrete numeric array types (std.intarr / std.longarr / std.floatarr).</p>
+    <p class="module-desc">std.sort — in-place ascending sort and binary search over slices: `int[]`, `long[]`, `float[]` and `string[]`.</p>
     <p class="import-line"><code>import std.sort</code></p>
   </div>
   <div class="functions" id="functions">
     <div class="function" id="ints" data-name="ints">
       <h3 class="function-name">ints <span class="kind">fn</span></h3>
-      <pre class="usage"><code>ints(arr)</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr</span></p>
-      <p class="doc">Sort an intarr ascending, in place.</p>
+      <pre class="usage"><code>ints(xs)</code></pre>
+      <p class="signature"><span class="sig-params">xs: int[]</span></p>
+      <p class="doc">Sort `xs` ascending, in place.</p>
     </div>
     <div class="function" id="longs" data-name="longs">
       <h3 class="function-name">longs <span class="kind">fn</span></h3>
-      <pre class="usage"><code>longs(arr)</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <pre class="usage"><code>longs(xs)</code></pre>
+      <p class="signature"><span class="sig-params">xs: long[]</span></p>
+      <p class="doc">Sort `xs` ascending, in place.</p>
     </div>
     <div class="function" id="floats" data-name="floats">
       <h3 class="function-name">floats <span class="kind">fn</span></h3>
-      <pre class="usage"><code>floats(arr)</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <pre class="usage"><code>floats(xs)</code></pre>
+      <p class="signature"><span class="sig-params">xs: float[]</span></p>
+      <p class="doc">Sort `xs` ascending, in place.</p>
+    </div>
+    <div class="function" id="strings" data-name="strings">
+      <h3 class="function-name">strings <span class="kind">fn</span></h3>
+      <pre class="usage"><code>strings(xs)</code></pre>
+      <p class="signature"><span class="sig-params">xs: string[]</span></p>
+      <p class="doc">Sort `xs` ascending, in place.</p>
     </div>
     <div class="function" id="int_search" data-name="int_search">
       <h3 class="function-name">int_search <span class="kind">fn</span></h3>
-      <pre class="usage"><code>int_search(arr, x) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr, x: int</span></p>
-      <p class="doc">Binary search a SORTED intarr for `x`. Returns the index of `x` if present, otherwise the insertion point (the index where `x` would be inserted to keep the array sorted) — matching C3's binarysearch contract.</p>
+      <pre class="usage"><code>int_search(xs, x) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">xs: int[], x: int</span></p>
+      <p class="doc">Binary search a SORTED `xs` for `x`: the index of the first element not ordered before `x`, which is `x`'s index when present and otherwise where it would be inserted to keep `xs` sorted (`xs.len` when every element sorts before it). C3's binarysearch contract.</p>
     </div>
     <div class="function" id="long_search" data-name="long_search">
       <h3 class="function-name">long_search <span class="kind">fn</span></h3>
-      <pre class="usage"><code>long_search(arr, x) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr, x: long</span></p>
+      <pre class="usage"><code>long_search(xs, x) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">xs: long[], x: long</span></p>
+      <p class="doc">Binary search a SORTED `xs` for `x`: the index of the first element not ordered before `x`, which is `x`'s index when present and otherwise where it would be inserted to keep `xs` sorted (`xs.len` when every element sorts before it). C3's binarysearch contract.</p>
     </div>
     <div class="function" id="float_search" data-name="float_search">
       <h3 class="function-name">float_search <span class="kind">fn</span></h3>
-      <pre class="usage"><code>float_search(arr, x) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr, x: double</span></p>
+      <pre class="usage"><code>float_search(xs, x) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">xs: float[], x: float</span></p>
+      <p class="doc">Binary search a SORTED `xs` for `x`: the index of the first element not ordered before `x`, which is `x`'s index when present and otherwise where it would be inserted to keep `xs` sorted (`xs.len` when every element sorts before it). C3's binarysearch contract.</p>
+    </div>
+    <div class="function" id="string_search" data-name="string_search">
+      <h3 class="function-name">string_search <span class="kind">fn</span></h3>
+      <pre class="usage"><code>string_search(xs, x) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">xs: string[], x: string</span></p>
+      <p class="doc">Binary search a SORTED `xs` for `x`: the index of the first element not ordered before `x`, which is `x`'s index when present and otherwise where it would be inserted to keep `xs` sorted (`xs.len` when every element sorts before it). C3's binarysearch contract.</p>
+    </div>
+    <div class="function" id="ints_by" data-name="ints_by">
+      <h3 class="function-name">ints_by <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ints_by(xs, cmp, int) -&gt; int)</code></pre>
+      <p class="signature"><span class="sig-params">xs: int[], cmp: fn(int, int) -&gt; int</span></p>
+      <p class="doc">Sort `xs` in place by `cmp`, which returns &lt;0 when its first argument sorts before its second, 0 when they tie, &gt;0 when it sorts after.</p>
+    </div>
+    <div class="function" id="longs_by" data-name="longs_by">
+      <h3 class="function-name">longs_by <span class="kind">fn</span></h3>
+      <pre class="usage"><code>longs_by(xs, cmp, long) -&gt; int)</code></pre>
+      <p class="signature"><span class="sig-params">xs: long[], cmp: fn(long, long) -&gt; int</span></p>
+      <p class="doc">Sort `xs` in place by `cmp`, which returns &lt;0 when its first argument sorts before its second, 0 when they tie, &gt;0 when it sorts after.</p>
+    </div>
+    <div class="function" id="floats_by" data-name="floats_by">
+      <h3 class="function-name">floats_by <span class="kind">fn</span></h3>
+      <pre class="usage"><code>floats_by(xs, cmp, float) -&gt; int)</code></pre>
+      <p class="signature"><span class="sig-params">xs: float[], cmp: fn(float, float) -&gt; int</span></p>
+      <p class="doc">Sort `xs` in place by `cmp`, which returns &lt;0 when its first argument sorts before its second, 0 when they tie, &gt;0 when it sorts after.</p>
+    </div>
+    <div class="function" id="strings_by" data-name="strings_by">
+      <h3 class="function-name">strings_by <span class="kind">fn</span></h3>
+      <pre class="usage"><code>strings_by(xs, cmp, string) -&gt; int)</code></pre>
+      <p class="signature"><span class="sig-params">xs: string[], cmp: fn(string, string) -&gt; int</span></p>
+      <p class="doc">Sort `xs` in place by `cmp`, which returns &lt;0 when its first argument sorts before its second, 0 when they tie, &gt;0 when it sorts after.</p>
     </div>
   </div>
 </main>

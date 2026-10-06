@@ -35,6 +35,8 @@
     <li><a href="#index_of">index_of</a></li>
     <li><a href="#index_of_from">index_of_from</a></li>
     <li><a href="#substring">substring</a></li>
+    <li><a href="#replace">replace</a></li>
+    <li><a href="#replace_all">replace_all</a></li>
     <li><a href="#substring_n">substring_n</a></li>
     <li><a href="#length_n">length_n</a></li>
     <li><a href="#char_at_n">char_at_n</a></li>
@@ -48,6 +50,8 @@
     <li><a href="#array_get">array_get</a></li>
     <li><a href="#array_free">array_free</a></li>
     <li><a href="#split_to_seq">split_to_seq</a></li>
+    <li><a href="#join">join</a></li>
+    <li><a href="#lines">lines</a></li>
     <li><a href="#seq_empty">seq_empty</a></li>
     <li><a href="#seq_cons">seq_cons</a></li>
     <li><a href="#seq_head">seq_head</a></li>
@@ -62,6 +66,7 @@
     <li><a href="#seq_concat">seq_concat</a></li>
     <li><a href="#seq_take">seq_take</a></li>
     <li><a href="#seq_drop">seq_drop</a></li>
+    <li><a href="#seq_join">seq_join</a></li>
     <li><a href="#seq_each">seq_each</a></li>
     <li><a href="#seq_map">seq_map</a></li>
     <li><a href="#seq_filter">seq_filter</a></li>
@@ -71,6 +76,7 @@
     <li><a href="#from_int">from_int</a></li>
     <li><a href="#from_long">from_long</a></li>
     <li><a href="#from_float">from_float</a></li>
+    <li><a href="#from_double">from_double</a></li>
     <li><a href="#from_int_radix">from_int_radix</a></li>
     <li><a href="#pad_start">pad_start</a></li>
     <li><a href="#pad_end">pad_end</a></li>
@@ -101,6 +107,12 @@
     <li><a href="#glob_match_raw">glob_match_raw</a></li>
     <li><a href="#glob_match">glob_match</a></li>
     <li><a href="#glob_match_pathname">glob_match_pathname</a></li>
+    <li><a href="#version_compare">version_compare</a></li>
+    <li><a href="#aether_string_raw_ptr">aether_string_raw_ptr</a></li>
+    <li><a href="#bytes">bytes</a></li>
+    <li><a href="#array_view">array_view</a></li>
+    <li><a href="#seq_from_strings">seq_from_strings</a></li>
+    <li><a href="#seq_to_strings">seq_to_strings</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -112,13 +124,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -129,11 +145,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -141,34 +162,54 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li class="active"><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
   <div class="module-header">
     <h1>string</h1>
-    <p class="module-desc">std.string - String Module Import with: import std.string</p>
+    <p class="module-desc">std.string - String Module Import with: import std.string Building strings incrementally? Do NOT loop `d = &quot;${d}${piece}&quot;` / `string.concat(d, piece)` — each iteration re-copies the whole prefix, so the loop is O(n²) in total bytes (issue #1346).</p>
     <p class="import-line"><code>import std.string</code></p>
   </div>
   <div class="functions" id="functions">
@@ -201,7 +242,7 @@
       <h3 class="function-name">retain <span class="kind">extern</span></h3>
       <pre class="usage"><code>retain(str)</code></pre>
       <p class="signature"><span class="sig-params">str: string</span></p>
-      <p class="doc">Reference counting. `str` is `@retain` on every refcount call: each one takes ownership of the lifetime decision (release decrements + frees at refcount 0; retain bumps the refcount; free drops the allocation immediately). The escape walker marks any heap- string variable passed at this slot as escaped, so the function-exit defer-free does not also call free() on the same buffer — without `@retain` here, a `defer string.release(s)` paired with the new auto-cleanup (issue #420 v2) would double-free the underlying allocation. After the call the caller's `_heap_&lt;name&gt;` tracker is conservatively kept at its previous value; the var is treated as dead from the reclamation system's perspective.</p>
+      <p class="doc">Reference counting. `str` is `@retain` on every refcount call: each one takes ownership of the lifetime decision (release decrements + frees at refcount 0; retain bumps the refcount; free drops the allocation immediately). The escape walker marks any heap- string variable passed at this slot as escaped, so the function-exit defer-free does not also call free() on the same buffer, without `@retain` here, a `defer string.release(s)` paired with the auto-cleanup would double-free the underlying allocation. After the call the caller's `_heap_&lt;name&gt;` tracker is conservatively kept at its previous value; the var is treated as dead from the reclamation system's perspective. These free what the runtime can SEE is heap: a value carrying the AetherString magic header. A plain malloc'd payload is indistinguishable from a literal here and is left alone, so producing one and handing it to a caller to free would leak it. That is why the uniform-heap return wrap mints the refcounted shape rather than a bare buffer.</p>
     </div>
     <div class="function" id="release" data-name="release">
       <h3 class="function-name">release <span class="kind">extern</span></h3>
@@ -244,6 +285,7 @@
       <h3 class="function-name">compare <span class="kind">extern</span></h3>
       <pre class="usage"><code>compare(a, b) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">a: string, b: string</span></p>
+      <p class="doc">Lexicographic byte order, sign only: -1 when a sorts before b, 0 when they are equal, 1 when a sorts after. Never a raw byte difference, so `string.compare(x, y) == 1` is a valid test. Binary-safe: embedded NULs take part in the comparison.</p>
     </div>
     <div class="function" id="starts_with" data-name="starts_with">
       <h3 class="function-name">starts_with <span class="kind">extern</span></h3>
@@ -276,6 +318,18 @@
       <h3 class="function-name">substring <span class="kind">extern</span></h3>
       <pre class="usage"><code>substring(str, start, end) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">str: string, start: int, end: int</span></p>
+    </div>
+    <div class="function" id="replace" data-name="replace">
+      <h3 class="function-name">replace <span class="kind">extern</span></h3>
+      <pre class="usage"><code>replace(str, old, new) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">str: string, old: string, new: string</span></p>
+      <p class="doc">Replace the first occurrence of `old` with `new`. Returns a new managed string; `str` is untouched. An empty `old` returns a copy of `str` unchanged (no infinite empty-match expansion). Matches are byte-exact and binary-safe (embedded NULs preserved).</p>
+    </div>
+    <div class="function" id="replace_all" data-name="replace_all">
+      <h3 class="function-name">replace_all <span class="kind">extern</span></h3>
+      <pre class="usage"><code>replace_all(str, old, new) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">str: string, old: string, new: string</span></p>
+      <p class="doc">Replace every non-overlapping occurrence of `old` with `new`, scanned left to right. Same lifetimes and empty-`old` guard as string_replace. `new` may be empty (deletion) or longer than `old`.</p>
     </div>
     <div class="function" id="substring_n" data-name="substring_n">
       <h3 class="function-name">substring_n <span class="kind">extern</span></h3>
@@ -349,6 +403,18 @@
       <p class="signature"><span class="sig-params">str: string, delimiter: string</span></p>
       <p class="doc">Producers — sibling of string_split that returns a *StringSeq directly. Same split semantics: empty input → single-cell list with &quot;&quot;, delimiter longer than input → single-cell list with the whole input, trailing/leading delimiters produce empty pieces.</p>
     </div>
+    <div class="function" id="join" data-name="join">
+      <h3 class="function-name">join <span class="kind">extern</span></h3>
+      <pre class="usage"><code>join(seq, sep) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">seq: *StringSeq, sep: string</span></p>
+      <p class="doc">Join a sequence into one string with `sep` between elements — the linear-cost complement to string_split (issue #1346). O(total bytes): one pass to size the result, one allocation, one pass to copy. Empty sequence → &quot;&quot;. The natural pair for `string_split` / `string_split_to_seq`: parts = string.split_to_seq(&quot;a,b,c&quot;, &quot;,&quot;) whole = string.join(parts, &quot;-&quot;)          // &quot;a-b-c&quot; Prefer this over a `d = &quot;${d}${piece}&quot;` accumulation loop, which re-copies the whole prefix every iteration (O(n²)). For incremental building where the pieces aren't already a sequence, reach for std.strbuilder (amortized append). Result is @heap (caller-owned, reclaimed at scope exit).</p>
+    </div>
+    <div class="function" id="lines" data-name="lines">
+      <h3 class="function-name">lines <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lines(s) <span class="arrow">-&gt;</span> *StringSeq</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+      <p class="doc">lines(s) — split on &quot;\n&quot; into a *StringSeq, EMPTY-SAFE: &quot;&quot; → an empty sequence (length 0), not the single &quot;&quot; cell split_to_seq(&quot;&quot;,&quot;\n&quot;) returns. This is the beeline from a newline-joined string (e.g. fs.find_ext's result, or any `... &gt; argfile` output) to an iterable list of items, with no phantom empty entry to guard against at the call site: files = string.lines(fs.find_ext(root, &quot;.java&quot;))   // 0 items when none string.seq_each(files, |f| { compile(f) })</p>
+    </div>
     <div class="function" id="seq_empty" data-name="seq_empty">
       <h3 class="function-name">seq_empty <span class="kind">extern</span></h3>
       <pre class="usage"><code>seq_empty() <span class="arrow">-&gt;</span> *StringSeq</code></pre>
@@ -420,6 +486,12 @@
       <pre class="usage"><code>seq_drop(s, n) <span class="arrow">-&gt;</span> *StringSeq</code></pre>
       <p class="signature"><span class="sig-params">s: *StringSeq, n: int</span></p>
     </div>
+    <div class="function" id="seq_join" data-name="seq_join">
+      <h3 class="function-name">seq_join <span class="kind">extern</span></h3>
+      <pre class="usage"><code>seq_join(s, sep) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: *StringSeq, sep: string</span></p>
+      <p class="doc">Join every element of a *StringSeq with `sep` between adjacent elements: the complement of split_to_seq, and the linear-cost escape from O(n^2) interpolation self-append accumulation (for piecewise building without a seq, use std.strbuilder). Two passes, one exact-size allocation, binary-safe. Returns a fresh owned string; &quot;&quot; for the empty seq.</p>
+    </div>
     <div class="function" id="seq_each" data-name="seq_each">
       <h3 class="function-name">seq_each <span class="kind">extern</span></h3>
       <pre class="usage"><code>seq_each(s, f)</code></pre>
@@ -465,6 +537,11 @@
     <div class="function" id="from_float" data-name="from_float">
       <h3 class="function-name">from_float <span class="kind">extern</span></h3>
       <pre class="usage"><code>from_float(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: float</span></p>
+    </div>
+    <div class="function" id="from_double" data-name="from_double">
+      <h3 class="function-name">from_double <span class="kind">extern</span></h3>
+      <pre class="usage"><code>from_double(value) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">value: float</span></p>
     </div>
     <div class="function" id="from_int_radix" data-name="from_int_radix">
@@ -630,6 +707,42 @@
       <h3 class="function-name">glob_match_pathname <span class="kind">fn</span></h3>
       <pre class="usage"><code>glob_match_pathname(pattern, s) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">pattern: string, s: string</span></p>
+    </div>
+    <div class="function" id="version_compare" data-name="version_compare">
+      <h3 class="function-name">version_compare <span class="kind">fn</span></h3>
+      <pre class="usage"><code>version_compare(a, b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">a: string, b: string</span></p>
+      <p class="doc">Version-aware comparison with GNU `sort -V` (coreutils/gnulib filevercmp) semantics. Returns -1 if `a` sorts before `b`, 0 if equal, 1 if after. Why this exists: plain lexical compare gets versions wrong — &quot;clojure-1.10.jar&quot; sorts BEFORE &quot;clojure-1.9.jar&quot; because '1' == '1' then '0' &lt; '9'. version_compare compares runs of digits NUMERICALLY, so 1.9 &lt; 1.10 and 1.11 &lt; 1.11.1, and it is file-extension aware so whole filenames sort right too. A build tool picking the newest jar off disk (the `ls … | sort -Vr | head -1` idiom) can now do it in-process: newest = matches[0] i = 1 while i &lt; n { if string.version_compare(matches[i], newest) &gt; 0 { newest = matches[i] } i = i + 1 } This is the exact gnulib algorithm, so it matches `sort -V` byte-for-byte (its own verdict — plain `sort -V` adds a final whole-line lexical tiebreak that filevercmp itself does not; here 1.0 and 1.00 compare EQUAL): - digit runs compare numerically, leading zeros ignored  (1.9 &lt; 1.10) - '~' sorts before EVERYTHING including end-of-string  (1.0~rc1 &lt; 1.0) - letters sort before other punctuation, which sorts after a letter and after end-of-string (1.0 &lt; 1.0a &lt; 1.0-x; a release before its own &quot;-rc&quot;) - a trailing file extension is split off and the base compared first, so clojure-1.11.jar &lt; clojure-1.11.1.jar (&quot;.jar&quot; stripped, 1.11 &lt; 1.11.1) Binary-safe over bytes. Allocates nothing (indexes both strings in place). Fuzzed to zero disagreements with `sort -V -s` over thousands of random version/filename pairs. The one intentional deviation is a LEADING '.': gnulib gives dotfiles bespoke hidden-file ordering (for `ls`), which a version comparator has no business replicating — here a leading '.' is just ordinary punctuation, still yielding a stable total order. Targets version strings and artifact filenames (which never start with '.'), not hidden-file listings. CAVEAT — this compares the WHOLE string, prefix first. To pick &quot;newest by version&quot; across names, every candidate must share one prefix, or the prefix decides before the version does. Two footguns: - Pass BASENAMES, not full paths: &quot;/a/x-2.jar&quot; vs &quot;/b/x-9.jar&quot; compares the directory (&quot;/a&quot; &lt; &quot;/b&quot;) before the version. Use path.basename first. - Partition by artifact FAMILY before max-ing: &quot;groovy-&quot; sorts before &quot;groovy-all-&quot;, so version_compare(&quot;groovy-4.0.jar&quot;,&quot;groovy-all-2.4.jar&quot;) is &lt; 0 — it calls the OLDER -all jar &quot;greater&quot; on the prefix alone. Keep one family (all the groovy-all-*, else all the groovy-*), THEN max within it, where the prefix is constant and only the version varies.</p>
+    </div>
+    <div class="function" id="aether_string_raw_ptr" data-name="aether_string_raw_ptr">
+      <h3 class="function-name">aether_string_raw_ptr <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_string_raw_ptr(s) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">The raw data pointer behind `s`, whatever its representation (a plain literal or a heap AetherString* — unwrapped the same way every other FFI accessor in this module is). Exposed so `bytes()` below can bound it; reach for `bytes(s)`, not this, unless you specifically need the bare pointer.</p>
+    </div>
+    <div class="function" id="bytes" data-name="bytes">
+      <h3 class="function-name">bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>bytes(s) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+      <p class="doc">A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII scanning (indexing, sub-slicing) without re-measuring the string on every access the way string_char_at_n's separate known_length parameter does. BORROWED: valid only as long as `s` itself is, exactly like any slice over someone else's storage — do not free it, and do not write through it (an AetherString's payload is shared via its refcount; a byte[] has no way to mark that sharing const, so treat this view as read-only by convention).</p>
+    </div>
+    <div class="function" id="array_view" data-name="array_view">
+      <h3 class="function-name">array_view <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array_view(arr) <span class="arrow">-&gt;</span> string[]</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <p class="doc">A bounded, OWNED string[] snapshot of a native string-array handle's contents (as returned by `string_split` et al.) — each element is an independently owned, refcounted copy (the `string.concat(x, &quot;&quot;)` idiom documented above `string_array_get`), so the result safely outlives the array: call `string_array_free(arr)` right after this returns. Prefer `string_split_to_seq` when you don't need array/index shape at all; this exists for call sites that do, without inheriting the array's borrowed- pointer lifetime hazard.</p>
+    </div>
+    <div class="function" id="seq_from_strings" data-name="seq_from_strings">
+      <h3 class="function-name">seq_from_strings <span class="kind">fn</span></h3>
+      <pre class="usage"><code>seq_from_strings(items) <span class="arrow">-&gt;</span> *StringSeq</code></pre>
+      <p class="signature"><span class="sig-params">items: string[]</span></p>
+      <p class="doc">Build a *StringSeq from a plain string[] (e.g. a runtime slice that isn't a `[...]` literal, where the compiler's own literal-to-seq lowering does not apply). Built tail-first so the result preserves items' order; string_seq_cons takes its own reference to each element, so items itself is left untouched and may be freed/reused independently afterward.</p>
+    </div>
+    <div class="function" id="seq_to_strings" data-name="seq_to_strings">
+      <h3 class="function-name">seq_to_strings <span class="kind">fn</span></h3>
+      <pre class="usage"><code>seq_to_strings(s) <span class="arrow">-&gt;</span> string[]</code></pre>
+      <p class="signature"><span class="sig-params">s: *StringSeq</span></p>
+      <p class="doc">The reverse: an OWNED string[] snapshot of a *StringSeq's elements, each independently copied (same ownership idiom as array_view above), so the result does not alias the sequence's own cells. Walks the seq directly — it does not go through the AetherStringArray handle string_seq_to_array returns, since that handle is its own opaque type, not a raw string[].</p>
     </div>
   </div>
 </main>

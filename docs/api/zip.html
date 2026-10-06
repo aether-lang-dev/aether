@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zip - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search zip..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#METHOD_STORED">METHOD_STORED</a></li>
+    <li><a href="#METHOD_DEFLATE">METHOD_DEFLATE</a></li>
+    <li><a href="#open">open</a></li>
+    <li><a href="#close">close</a></li>
+    <li><a href="#count">count</a></li>
+    <li><a href="#find">find</a></li>
+    <li><a href="#entry_name">entry_name</a></li>
+    <li><a href="#entry_size">entry_size</a></li>
+    <li><a href="#entry_compressed_size">entry_compressed_size</a></li>
+    <li><a href="#entry_method">entry_method</a></li>
+    <li><a href="#entry_crc32">entry_crc32</a></li>
+    <li><a href="#entry_is_dir">entry_is_dir</a></li>
+    <li><a href="#entry_is_encrypted">entry_is_encrypted</a></li>
+    <li><a href="#entry_read">entry_read</a></li>
+    <li><a href="#writer_new">writer_new</a></li>
+    <li><a href="#writer_add">writer_add</a></li>
+    <li><a href="#writer_add_dir">writer_add_dir</a></li>
+    <li><a href="#writer_finish">writer_finish</a></li>
+    <li><a href="#writer_free">writer_free</a></li>
+    <li><a href="#create">create</a></li>
+    <li><a href="#add_dir_tree">add_dir_tree</a></li>
+    <li><a href="#ExtractOptions">ExtractOptions</a></li>
+    <li><a href="#default_extract_options">default_extract_options</a></li>
+    <li><a href="#extract">extract</a></li>
+    <li><a href="#extract_file">extract_file</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li class="active"><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>zip</h1>
+    <p class="module-desc">std.zip — a ZIP archive READER and WRITER over an in-memory byte buffer, plus a safe-by-default extract-to-disk layer (#2010 and follow-ups).</p>
+    <p class="import-line"><code>import std.zip</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="METHOD_STORED" data-name="METHOD_STORED">
+      <h3 class="function-name">METHOD_STORED <span class="kind">const</span></h3>
+      <pre class="usage"><code>METHOD_STORED = 0</code></pre>
+    </div>
+    <div class="function" id="METHOD_DEFLATE" data-name="METHOD_DEFLATE">
+      <h3 class="function-name">METHOD_DEFLATE <span class="kind">const</span></h3>
+      <pre class="usage"><code>METHOD_DEFLATE = 8</code></pre>
+    </div>
+    <div class="function" id="open" data-name="open">
+      <h3 class="function-name">open <span class="kind">fn</span></h3>
+      <pre class="usage"><code>open(data) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Open a ZIP archive held entirely in `data` (#2301: a byte[] whose length travels with it — pass a string as `string.bytes(s)`, a `std.bytes` buffer as `bytes.view(buf)`). Returns (archive_ptr, &quot;&quot;) or (null, err). The archive owns a copy of the bytes, so `data` need not outlive this call; free the archive with close().</p>
+    </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close(arp)</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr</span></p>
+    </div>
+    <div class="function" id="count" data-name="count">
+      <h3 class="function-name">count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>count(arp) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr</span></p>
+    </div>
+    <div class="function" id="find" data-name="find">
+      <h3 class="function-name">find <span class="kind">fn</span></h3>
+      <pre class="usage"><code>find(arp, name) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, name: string</span></p>
+      <p class="doc">Index of the entry named `name`, or -1. Exact byte match on the stored name.</p>
+    </div>
+    <div class="function" id="entry_name" data-name="entry_name">
+      <h3 class="function-name">entry_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_name(arp, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="entry_size" data-name="entry_size">
+      <h3 class="function-name">entry_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_size(arp, i) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="entry_compressed_size" data-name="entry_compressed_size">
+      <h3 class="function-name">entry_compressed_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_compressed_size(arp, i) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="entry_method" data-name="entry_method">
+      <h3 class="function-name">entry_method <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_method(arp, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="entry_crc32" data-name="entry_crc32">
+      <h3 class="function-name">entry_crc32 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_crc32(arp, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="entry_is_dir" data-name="entry_is_dir">
+      <h3 class="function-name">entry_is_dir <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_is_dir(arp, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+      <p class="doc">A directory entry is conventionally a zero-size name ending in '/'.</p>
+    </div>
+    <div class="function" id="entry_is_encrypted" data-name="entry_is_encrypted">
+      <h3 class="function-name">entry_is_encrypted <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_is_encrypted(arp, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+      <p class="doc">General-purpose bit 0 set = the entry is encrypted.</p>
+    </div>
+    <div class="function" id="entry_read" data-name="entry_read">
+      <h3 class="function-name">entry_read <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_read(arp, i) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">arp: ptr, i: int</span></p>
+      <p class="doc">Read and decompress entry `i`, verifying its CRC-32. Returns (bytes_as_string, length, &quot;&quot;) or (&quot;&quot;, 0, err). The local file header is consulted only to skip its variable name+extra fields to reach the data; the sizes/CRC come from the central directory.</p>
+    </div>
+    <div class="function" id="writer_new" data-name="writer_new">
+      <h3 class="function-name">writer_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_new() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">Start a fresh in-memory archive. Free it with writer_free.</p>
+    </div>
+    <div class="function" id="writer_add" data-name="writer_add">
+      <h3 class="function-name">writer_add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_add(wp, name, data, method, level) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">wp: ptr, name: string, data: byte[], method: int, level: int</span></p>
+      <p class="doc">Add a file entry holding the bytes of `data` (#2301: pass a string as `string.bytes(s)`). `name` is the archive path (forward slashes). `method` is zip.METHOD_STORED or zip.METHOD_DEFLATE; `level` is 0..9 (or -1) and is ignored for stored. Returns &quot;&quot; on success, else an error. The bytes are copied into the archive, so `data` need not outlive the call.</p>
+    </div>
+    <div class="function" id="writer_add_dir" data-name="writer_add_dir">
+      <h3 class="function-name">writer_add_dir <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_add_dir(wp, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">wp: ptr, name: string</span></p>
+      <p class="doc">Add a directory entry (a name ending in &quot;/&quot;, zero-length, stored). A &quot;/&quot; is appended if the caller left it off.</p>
+    </div>
+    <div class="function" id="writer_finish" data-name="writer_finish">
+      <h3 class="function-name">writer_finish <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_finish(wp) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">wp: ptr</span></p>
+      <p class="doc">Finish: append the Central Directory and EOCD, and return the archive as (bytes, length, &quot;&quot;). ZIP64 records are emitted when any field overflows 32 bits. The writer's buffer still owns the bytes; free with writer_free after the returned string has been used (it is an independent copy). Inferred return type (`-&gt; {`), not an explicit `(string, int, string)`: the archive bytes come from bytes.to_string, whose `@heap` classification only propagates to the caller's destructure site through an inferred tuple. An explicit tuple type cannot carry the per-position `@heap` flag, so the returned string would leak when passed on (e.g. through create).</p>
+    </div>
+    <div class="function" id="writer_free" data-name="writer_free">
+      <h3 class="function-name">writer_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_free(wp)</code></pre>
+      <p class="signature"><span class="sig-params">wp: ptr</span></p>
+      <p class="doc">Release a writer and every entry it holds. Safe on a null pointer.</p>
+    </div>
+    <div class="function" id="create" data-name="create">
+      <h3 class="function-name">create <span class="kind">fn</span></h3>
+      <pre class="usage"><code>create(name, data, method, level) <span class="arrow">-&gt;</span> (_0, _1, _2)</code></pre>
+      <p class="signature"><span class="sig-params">name: string, data: byte[], method: int, level: int</span></p>
+      <p class="doc">One-shot convenience: build a single-entry archive. For multiple entries use writer_new / writer_add / writer_finish.</p>
+    </div>
+    <div class="function" id="add_dir_tree" data-name="add_dir_tree">
+      <h3 class="function-name">add_dir_tree <span class="kind">fn</span></h3>
+      <pre class="usage"><code>add_dir_tree(wp, fs_root, arc_prefix, method, level) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">wp: ptr, fs_root: string, arc_prefix: string, method: int, level: int</span></p>
+      <p class="doc">Add a filesystem tree to the writer. `arc_prefix` is prepended to every entry name (use &quot;&quot; for none; a trailing &quot;/&quot; is added if missing and prefix is non-empty). `method`/`level` apply to every file. Returns &quot;&quot; or the first error encountered.</p>
+    </div>
+    <div class="function" id="ExtractOptions" data-name="ExtractOptions">
+      <h3 class="function-name">ExtractOptions <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct ExtractOptions</code></pre>
+    </div>
+    <div class="function" id="default_extract_options" data-name="default_extract_options">
+      <h3 class="function-name">default_extract_options <span class="kind">fn</span></h3>
+      <pre class="usage"><code>default_extract_options() <span class="arrow">-&gt;</span> ExtractOptions</code></pre>
+      <p class="doc">Safe defaults: 10k entries, 1 GiB per entry, 10 GiB total, no overwrite.</p>
+    </div>
+    <div class="function" id="extract" data-name="extract">
+      <h3 class="function-name">extract <span class="kind">fn</span></h3>
+      <pre class="usage"><code>extract(data, dest_dir, options) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[], dest_dir: string, options: ExtractOptions</span></p>
+      <p class="doc">Extract the archive held in `data` (a byte[], #2301) under `dest_dir`, applying `options`. Returns &quot;&quot; on success, else a descriptive error; on error, files written so far are left in place (as std.tar does). The destination is created if absent.</p>
+    </div>
+    <div class="function" id="extract_file" data-name="extract_file">
+      <h3 class="function-name">extract_file <span class="kind">fn</span></h3>
+      <pre class="usage"><code>extract_file(zip_path, dest_dir, options) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">zip_path: string, dest_dir: string, options: ExtractOptions</span></p>
+      <p class="doc">Convenience: read a .zip off disk and extract it. The buffer-taking extract is the primary entry point; this wraps fs.read_binary for the common case.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

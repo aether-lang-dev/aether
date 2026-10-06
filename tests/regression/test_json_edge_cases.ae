@@ -232,21 +232,26 @@ main() {
     }
     json.free(j14)
 
-    // Test 15: array_get out of bounds now returns (null, "")
+    // Test 15: array_get out of bounds returns (null, "index out of range"),
+    // past the end and below zero (#2439)
     print("\nTest 15: array_get out of bounds\n")
     j15, _ = json.parse("[1,2]")
-    oob, oob_err = json.array_get(j15, 99)
-    if oob == null {
-        if oob_err == "" {
-            print("  PASS: out of bounds returns (null, empty error)\n")
-        } else {
-            println("  FAIL: expected empty err, got: ${oob_err}")
-            exit(1)
-        }
-    } else {
-        print("  FAIL\n")
+    oob, oob_err = json.array_get(j15, 2)
+    if oob != null || oob_err != "index out of range" {
+        println("  FAIL: one past the end: expected (null, 'index out of range'), got err '${oob_err}'")
         exit(1)
     }
+    neg, neg_err = json.array_get(j15, -1)
+    if neg != null || neg_err != "index out of range" {
+        println("  FAIL: negative index: expected (null, 'index out of range'), got err '${neg_err}'")
+        exit(1)
+    }
+    last, last_err = json.array_get(j15, 1)
+    if last_err != "" || json.get_int(last) != 2 {
+        println("  FAIL: the last valid index: err '${last_err}'")
+        exit(1)
+    }
+    print("  PASS: out of bounds returns (null, 'index out of range'); the last index reads\n")
     json.free(j15)
 
     // Test 16: create and stringify empty object

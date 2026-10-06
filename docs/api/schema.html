@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>schema - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search schema..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#STR">STR</a></li>
+    <li><a href="#INT">INT</a></li>
+    <li><a href="#FLOAT">FLOAT</a></li>
+    <li><a href="#BOOL">BOOL</a></li>
+    <li><a href="#OBJECT">OBJECT</a></li>
+    <li><a href="#array">array</a></li>
+    <li><a href="#record">record</a></li>
+    <li><a href="#field">field</a></li>
+    <li><a href="#items">items</a></li>
+    <li><a href="#min">min</a></li>
+    <li><a href="#max">max</a></li>
+    <li><a href="#len">len</a></li>
+    <li><a href="#present">present</a></li>
+    <li><a href="#optional">optional</a></li>
+    <li><a href="#one_of">one_of</a></li>
+    <li><a href="#email">email</a></li>
+    <li><a href="#refine">refine</a></li>
+    <li><a href="#default_to">default_to</a></li>
+    <li><a href="#positive">positive</a></li>
+    <li><a href="#nonneg">nonneg</a></li>
+    <li><a href="#pattern">pattern</a></li>
+    <li><a href="#trim">trim</a></li>
+    <li><a href="#lowercase">lowercase</a></li>
+    <li><a href="#uppercase">uppercase</a></li>
+    <li><a href="#parse">parse</a></li>
+    <li><a href="#parse_json">parse_json</a></li>
+    <li><a href="#ok">ok</a></li>
+    <li><a href="#error_count">error_count</a></li>
+    <li><a href="#error_field">error_field</a></li>
+    <li><a href="#error_code">error_code</a></li>
+    <li><a href="#error_message">error_message</a></li>
+    <li><a href="#to_json_schema">to_json_schema</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#values_free">values_free</a></li>
+    <li><a href="#errors_free">errors_free</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li class="active"><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>schema</h1>
+    <p class="module-desc">std.schema — declarative, typed data validation &amp; coercion.</p>
+    <p class="import-line"><code>import std.schema</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="STR" data-name="STR">
+      <h3 class="function-name">STR <span class="kind">const</span></h3>
+      <pre class="usage"><code>STR = 0</code></pre>
+      <p class="doc">---- Field type tags ----</p>
+    </div>
+    <div class="function" id="INT" data-name="INT">
+      <h3 class="function-name">INT <span class="kind">const</span></h3>
+      <pre class="usage"><code>INT = 1</code></pre>
+    </div>
+    <div class="function" id="FLOAT" data-name="FLOAT">
+      <h3 class="function-name">FLOAT <span class="kind">const</span></h3>
+      <pre class="usage"><code>FLOAT = 2</code></pre>
+    </div>
+    <div class="function" id="BOOL" data-name="BOOL">
+      <h3 class="function-name">BOOL <span class="kind">const</span></h3>
+      <pre class="usage"><code>BOOL = 3</code></pre>
+    </div>
+    <div class="function" id="OBJECT" data-name="OBJECT">
+      <h3 class="function-name">OBJECT <span class="kind">const</span></h3>
+      <pre class="usage"><code>OBJECT = 4</code></pre>
+      <p class="doc">A field holding fields of its own: a nested record. Declare them in the field's block, as in record()'s.</p>
+    </div>
+    <div class="function" id="array" data-name="array">
+      <h3 class="function-name">array <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array(item_type) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">item_type: int</span></p>
+      <p class="doc">The type of a list of T. Rules in the field's block count its items (min/max/len/present); rules for the items go in items(), and an array of OBJECT takes the item record's fields directly in its block.</p>
+    </div>
+    <div class="function" id="record" data-name="record">
+      <h3 class="function-name">record <span class="kind">fn</span></h3>
+      <pre class="usage"><code>record() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">record() { field(...) ... }  — the top-level container. Its trailing block runs immediately and populates the schema via field() calls.</p>
+    </div>
+    <div class="function" id="field" data-name="field">
+      <h3 class="function-name">field <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field(_ctx, name, ty) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, name: string, ty: int</span></p>
+      <p class="doc">field(name, type) { min(...); max(...); ... } Container-with-config-block: appends a Field to the enclosing record and returns it so the trailing block's rule calls accumulate onto it. Inside an OBJECT field's block it declares one of that object's fields; inside an array(OBJECT) field's block, one of each item's.</p>
+    </div>
+    <div class="function" id="items" data-name="items">
+      <h3 class="function-name">items <span class="kind">fn</span></h3>
+      <pre class="usage"><code>items(_ctx) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">items() { rules }: the rules each item of an array field is checked against, where the field's own rules count the items. For an array of OBJECT, declare the item's fields directly in the field's block instead.</p>
+    </div>
+    <div class="function" id="min" data-name="min">
+      <h3 class="function-name">min <span class="kind">fn</span></h3>
+      <pre class="usage"><code>min(_ctx, n)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, n: long</span></p>
+      <p class="doc">numeric: value &gt;= n  |  STR: length &gt;= n</p>
+    </div>
+    <div class="function" id="max" data-name="max">
+      <h3 class="function-name">max <span class="kind">fn</span></h3>
+      <pre class="usage"><code>max(_ctx, n)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, n: long</span></p>
+      <p class="doc">numeric: value &lt;= n  |  STR: length &lt;= n</p>
+    </div>
+    <div class="function" id="len" data-name="len">
+      <h3 class="function-name">len <span class="kind">fn</span></h3>
+      <pre class="usage"><code>len(_ctx, lo, hi)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, lo: long, hi: long</span></p>
+      <p class="doc">STR length in [lo, hi]</p>
+    </div>
+    <div class="function" id="present" data-name="present">
+      <h3 class="function-name">present <span class="kind">fn</span></h3>
+      <pre class="usage"><code>present(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">non-empty (STR) / present in input</p>
+    </div>
+    <div class="function" id="optional" data-name="optional">
+      <h3 class="function-name">optional <span class="kind">fn</span></h3>
+      <pre class="usage"><code>optional(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">mark field optional (absence is not an error; rules skipped when absent)</p>
+    </div>
+    <div class="function" id="one_of" data-name="one_of">
+      <h3 class="function-name">one_of <span class="kind">fn</span></h3>
+      <pre class="usage"><code>one_of(_ctx, set)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, set: string</span></p>
+      <p class="doc">value must be one of a comma-separated set, e.g. one_of(&quot;admin,user&quot;)</p>
+    </div>
+    <div class="function" id="email" data-name="email">
+      <h3 class="function-name">email <span class="kind">fn</span></h3>
+      <pre class="usage"><code>email(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">value must look like an email</p>
+    </div>
+    <div class="function" id="refine" data-name="refine">
+      <h3 class="function-name">refine <span class="kind">fn</span></h3>
+      <pre class="usage"><code>refine(_ctx, predicate)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, predicate: fn</span></p>
+      <p class="doc">custom predicate: fn(value: string) -&gt; int (1 = ok, 0 = fail)</p>
+    </div>
+    <div class="function" id="default_to" data-name="default_to">
+      <h3 class="function-name">default_to <span class="kind">fn</span></h3>
+      <pre class="usage"><code>default_to(_ctx, v)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, v: string</span></p>
+      <p class="doc">Supply a value when the field is absent from the input (implies optional: an absent field is filled with `v` rather than erroring). A present field is validated normally; the default only fires on absence.</p>
+    </div>
+    <div class="function" id="positive" data-name="positive">
+      <h3 class="function-name">positive <span class="kind">fn</span></h3>
+      <pre class="usage"><code>positive(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">numeric &gt; 0</p>
+    </div>
+    <div class="function" id="nonneg" data-name="nonneg">
+      <h3 class="function-name">nonneg <span class="kind">fn</span></h3>
+      <pre class="usage"><code>nonneg(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">numeric &gt;= 0</p>
+    </div>
+    <div class="function" id="pattern" data-name="pattern">
+      <h3 class="function-name">pattern <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pattern(_ctx, spec)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, spec: string</span></p>
+      <p class="doc">Lightweight string pattern match without a regex dependency. `spec` is &quot;kind:needle&quot; where kind is one of contains / prefix / suffix, e.g. pattern(&quot;prefix:SAVE&quot;) or pattern(&quot;contains:@&quot;). For full regex, use refine().</p>
+    </div>
+    <div class="function" id="trim" data-name="trim">
+      <h3 class="function-name">trim <span class="kind">fn</span></h3>
+      <pre class="usage"><code>trim(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">strip surrounding whitespace</p>
+    </div>
+    <div class="function" id="lowercase" data-name="lowercase">
+      <h3 class="function-name">lowercase <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lowercase(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">lowercase the value</p>
+    </div>
+    <div class="function" id="uppercase" data-name="uppercase">
+      <h3 class="function-name">uppercase <span class="kind">fn</span></h3>
+      <pre class="usage"><code>uppercase(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">uppercase the value</p>
+    </div>
+    <div class="function" id="parse" data-name="parse">
+      <h3 class="function-name">parse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse(schema_ptr, input) <span class="arrow">-&gt;</span> (ptr, ptr)</code></pre>
+      <p class="signature"><span class="sig-params">schema_ptr: ptr, input: ptr</span></p>
+      <p class="doc">parse(schema, input_map) -&gt; (values_map, errors_list) input_map: *Map of string(field name) -&gt; string(raw value) values_map: *Map of field name -&gt; coerced string value (canonical form) errors_list: *List of *SchemaError (empty on success) Both returns are always non-null and owned by the caller (values_free / errors_free). A flat map cannot carry an OBJECT or array field: one given here is an invalid_type error; use parse_json.</p>
+    </div>
+    <div class="function" id="parse_json" data-name="parse_json">
+      <h3 class="function-name">parse_json <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse_json(schema_ptr, root) <span class="arrow">-&gt;</span> (ptr, ptr)</code></pre>
+      <p class="signature"><span class="sig-params">schema_ptr: ptr, root: ptr</span></p>
+      <p class="doc">parse_json(schema, root) -&gt; (values, errors_list) root: a std.json object (json.parse's result) values: a std.json object of the fields that passed, coerced to their types: STR a string, INT an integer, FLOAT a number, BOOL a boolean, OBJECT an object of its own fields, array(T) an array errors_list: as parse's, each error's field its path from the root: &quot;address.city&quot;, &quot;tags[2]&quot;, &quot;lines[0].qty&quot; Both returns are non-null and owned by the caller: json.json_free(values) and errors_free(errors). A JSON null is an absent field. Keys the schema does not declare are left out of values. In lax mode (the default) a string holding a number or boolean is coerced, and a number or boolean given for a STR field is taken as its text; strict mode refuses both.</p>
+    </div>
+    <div class="function" id="ok" data-name="ok">
+      <h3 class="function-name">ok <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ok(errors) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">errors: ptr</span></p>
+      <p class="doc">True (1) if the errors list is empty.</p>
+    </div>
+    <div class="function" id="error_count" data-name="error_count">
+      <h3 class="function-name">error_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>error_count(errors) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">errors: ptr</span></p>
+    </div>
+    <div class="function" id="error_field" data-name="error_field">
+      <h3 class="function-name">error_field <span class="kind">fn</span></h3>
+      <pre class="usage"><code>error_field(errors, idx) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">errors: ptr, idx: int</span></p>
+    </div>
+    <div class="function" id="error_code" data-name="error_code">
+      <h3 class="function-name">error_code <span class="kind">fn</span></h3>
+      <pre class="usage"><code>error_code(errors, idx) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">errors: ptr, idx: int</span></p>
+    </div>
+    <div class="function" id="error_message" data-name="error_message">
+      <h3 class="function-name">error_message <span class="kind">fn</span></h3>
+      <pre class="usage"><code>error_message(errors, idx) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">errors: ptr, idx: int</span></p>
+    </div>
+    <div class="function" id="to_json_schema" data-name="to_json_schema">
+      <h3 class="function-name">to_json_schema <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_json_schema(schema_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">schema_ptr: ptr</span></p>
+      <p class="doc">to_json_schema(schema) -&gt; owned JSON string (draft-07). Caller frees with string_free. Built directly with strbuilder (no JSON DOM) so it is leak-clean by construction and carries no ownership entanglement. An OBJECT field is a nested &quot;object&quot; schema; an array field is &quot;array&quot; with its &quot;items&quot; schema, its counting rules as minItems/maxItems.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(schema_ptr)</code></pre>
+      <p class="signature"><span class="sig-params">schema_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="values_free" data-name="values_free">
+      <h3 class="function-name">values_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>values_free(values)</code></pre>
+      <p class="signature"><span class="sig-params">values: ptr</span></p>
+      <p class="doc">The values map now OWNS each stored value (parse stores coerced/transformed/ defaulted strings via map_put_string_owned). map_free reclaims both the spine and every owned value.</p>
+    </div>
+    <div class="function" id="errors_free" data-name="errors_free">
+      <h3 class="function-name">errors_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>errors_free(errors)</code></pre>
+      <p class="signature"><span class="sig-params">errors: ptr</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

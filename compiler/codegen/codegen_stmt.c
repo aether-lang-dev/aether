@@ -4119,6 +4119,7 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
             case TYPE_ISOLATED:
                 return hoisted_zero_init(t->element_type, c_type);
             case TYPE_F32X4: case TYPE_F64X2: case TYPE_I32X4: case TYPE_I64X2:
+            case TYPE_I16X8: case TYPE_F32X8: case TYPE_I32X8:
                 return " = {0}";   /* #2146: a vector, not a scalar 0 */
             case TYPE_PTR: case TYPE_STRING: case TYPE_ACTOR_REF:
                 return " = NULL";
@@ -7007,11 +7008,50 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                 }
 
-                if (is_state_var) {
-                    fprintf(gen->output, "self->%s %s ", stmt->value, op);
-                } else {
-                    fprintf(gen->output, "%s %s ", stmt->value, op);
+                /* #2428: `v op= x` on an eight-lane value is `v = helper(v, x)`
+                 * (the halves form is a struct; see codegen_expr.c). The
+                 * typechecker records the target's type on the node for this. */
+                TypeKind tk8 = stmt->node_type ? stmt->node_type->kind : TYPE_UNKNOWN;
+                const char* fn8 = NULL;
+                if ((tk8 == TYPE_F32X8 || tk8 == TYPE_I32X8) && op[0] && op[1] == '=') {
+                    switch (op[0]) {
+                        case '+': fn8 = "add"; break;
+                        case '-': fn8 = "sub"; break;
+                        case '*': fn8 = "mul"; break;
+                        case '/': fn8 = "div"; break;
+                        case '%': fn8 = "mod"; break;
+                        default: break;
+                    }
                 }
+                /* The place written. A variable a closure captures by
+                 * reference lives in a shared cell, and its C name is the
+                 * cell's POINTER (`int* x`), in the closure body and in the
+                 * declaring function alike: plain assignment writes `*x`.
+                 * `x += 1` was emitted as is, which is pointer arithmetic on
+                 * the cell, so the value never changed and a later `*x`
+                 * read the wrong memory, with no diagnostic. */
+                char target[300];
+                if (is_state_var)
+                    snprintf(target, sizeof(target), "self->%s", stmt->value);
+                else if (is_promoted_capture(gen, stmt->value))
+                    snprintf(target, sizeof(target), "(*%s)", stmt->value);
+                else
+                    snprintf(target, sizeof(target), "%s", stmt->value);
+                if (fn8) {
+                    const char* pfx = tk8 == TYPE_F32X8 ? "f32x8" : "i32x8";
+                    Type* rt = stmt->children[1]->node_type;
+                    fprintf(gen->output, "%s = _ae_%s_%s(%s, ", target, pfx, fn8, target);
+                    if (rt && rt->kind == tk8) {
+                        generate_expression(gen, stmt->children[1]);
+                    } else {
+                        fprintf(gen->output, "_ae_%s_splat((%s)(", pfx, tk8 == TYPE_F32X8 ? "float" : "int");
+                        generate_expression(gen, stmt->children[1]);
+                        fprintf(gen->output, "))");
+                    }
+                    fprintf(gen->output, ");\n");
+                    break;
+                }
+                fprintf(gen->output, "%s %s ", target, op);
                 generate_expression(gen, stmt->children[1]);
                 fprintf(gen->output, ";\n");
             }

@@ -133,15 +133,15 @@ main() {
     }
     print("  PASS: indices at growth boundaries still correct\n")
 
-    print("\nTest 9: get() out of bounds returns (null, empty err)\n")
+    print("\nTest 9: get() out of bounds returns (null, 'index out of range')\n")
     vo, eo = list.get(l, 99999)
     if vo != null {
         print("  FAIL: value not null\n"); exit(1)
     }
-    if eo != "" {
-        println("  FAIL: err unexpected: ${eo}"); exit(1)
+    if eo != "index out of range" {
+        println("  FAIL: expected 'index out of range', got '${eo}'"); exit(1)
     }
-    print("  PASS: (null, '') for OOB\n")
+    print("  PASS: (null, 'index out of range') for OOB\n")
 
     list.free(l)
 

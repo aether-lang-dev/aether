@@ -17,7 +17,6 @@
   <ul class="function-nav">
     <li><a href="#tcp_connect_raw">tcp_connect_raw</a></li>
     <li><a href="#tcp_send_raw">tcp_send_raw</a></li>
-    <li><a href="#tcp_send_n_raw">tcp_send_n_raw</a></li>
     <li><a href="#tcp_receive_raw">tcp_receive_raw</a></li>
     <li><a href="#tcp_receive_n_raw">tcp_receive_n_raw</a></li>
     <li><a href="#tcp_close">tcp_close</a></li>
@@ -61,7 +60,6 @@
     <li><a href="#http_response_set_status">http_response_set_status</a></li>
     <li><a href="#http_response_set_header">http_response_set_header</a></li>
     <li><a href="#http_response_set_body">http_response_set_body</a></li>
-    <li><a href="#http_response_set_body_n">http_response_set_body_n</a></li>
     <li><a href="#http_response_json">http_response_json</a></li>
     <li><a href="#http_server_response_free">http_server_response_free</a></li>
     <li><a href="#http_server_set_actor_handler">http_server_set_actor_handler</a></li>
@@ -95,13 +93,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -112,11 +114,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -124,28 +131,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li class="active"><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -166,15 +193,11 @@
       <pre class="usage"><code>tcp_send_raw(sock, data) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, data: string</span></p>
     </div>
-    <div class="function" id="tcp_send_n_raw" data-name="tcp_send_n_raw">
-      <h3 class="function-name">tcp_send_n_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>tcp_send_n_raw(sock, data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">sock: ptr, data: string, length: int</span></p>
-    </div>
     <div class="function" id="tcp_receive_raw" data-name="tcp_receive_raw">
       <h3 class="function-name">tcp_receive_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>tcp_receive_raw(sock, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, max_bytes: int</span></p>
+      <p class="doc">tcp_send_n_raw is not declared here (#2301): std.tcp declares it with a `ptr` data parameter for its byte[] write_n, and two declarations of one C symbol with different parameter types are a C compile error in any program importing both modules. Send binary data with tcp.write_n.</p>
     </div>
     <div class="function" id="tcp_receive_n_raw" data-name="tcp_receive_n_raw">
       <h3 class="function-name">tcp_receive_n_raw <span class="kind">extern</span></h3>
@@ -395,16 +418,11 @@
       <pre class="usage"><code>http_response_set_body(res, body)</code></pre>
       <p class="signature"><span class="sig-params">res: ptr, body: string</span></p>
     </div>
-    <div class="function" id="http_response_set_body_n" data-name="http_response_set_body_n">
-      <h3 class="function-name">http_response_set_body_n <span class="kind">extern</span></h3>
-      <pre class="usage"><code>http_response_set_body_n(res, body, length)</code></pre>
-      <p class="signature"><span class="sig-params">res: ptr, body: string, length: int</span></p>
-      <p class="doc">Length-aware sibling — binary-safe set_body. Use when the body may contain embedded NULs (binary content, gzip, packed binary); plain http_response_set_body uses strlen and truncates at the first NUL.</p>
-    </div>
     <div class="function" id="http_response_json" data-name="http_response_json">
       <h3 class="function-name">http_response_json <span class="kind">extern</span></h3>
       <pre class="usage"><code>http_response_json(res, json)</code></pre>
       <p class="signature"><span class="sig-params">res: ptr, json: string</span></p>
+      <p class="doc">Length-aware sibling — binary-safe set_body. Use when the body may contain embedded NULs (binary content, gzip, packed binary); plain http_response_set_body uses strlen and truncates at the first NUL. http_response_set_body_n is not declared here (#2301): std.http declares it with a `ptr` body for response_set_body_bytes, and two declarations of one C symbol with different parameter types are a C compile error in a program importing both. Set a binary body with http.response_set_body_bytes.</p>
     </div>
     <div class="function" id="http_server_response_free" data-name="http_server_response_free">
       <h3 class="function-name">http_server_response_free <span class="kind">extern</span></h3>

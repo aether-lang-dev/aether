@@ -256,10 +256,13 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
             left->kind == TYPE_F64X2 || right->kind == TYPE_F64X2 ||
             left->kind == TYPE_I32X4 || right->kind == TYPE_I32X4 ||
             left->kind == TYPE_I64X2 || right->kind == TYPE_I64X2 ||
-            left->kind == TYPE_I16X8 || right->kind == TYPE_I16X8) {
+            left->kind == TYPE_I16X8 || right->kind == TYPE_I16X8 ||
+            left->kind == TYPE_F32X8 || right->kind == TYPE_F32X8 ||
+            left->kind == TYPE_I32X8 || right->kind == TYPE_I32X8) {
             TypeKind lane = (left->kind == TYPE_F32X4 || left->kind == TYPE_F64X2 ||
                              left->kind == TYPE_I32X4 || left->kind == TYPE_I64X2 ||
-                             left->kind == TYPE_I16X8)
+                             left->kind == TYPE_I16X8 ||
+                             left->kind == TYPE_F32X8 || left->kind == TYPE_I32X8)
                             ? left->kind : right->kind;
             return create_type(lane);
         }
@@ -339,6 +342,9 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
             return create_type(TYPE_I64X2);   /* same width as its operands */
         if (left->kind == TYPE_I16X8 || right->kind == TYPE_I16X8)
             return create_type(TYPE_I16X8);   /* eight 16-bit mask lanes */
+        if (left->kind == TYPE_F32X8 || right->kind == TYPE_F32X8 ||
+            left->kind == TYPE_I32X8 || right->kind == TYPE_I32X8)
+            return create_type(TYPE_I32X8);   /* eight 32-bit mask lanes */
         return create_type(TYPE_BOOL);
     }
     
@@ -464,6 +470,29 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             }
             break;
             
+        case AST_UNARY_EXPRESSION:
+            /* The same rule as the typechecker's infer_unary_type: `-x` and
+             * `~x` have x's type, `!x` is a bool. Without it a local bound
+             * from a unary expression had no type in this pass, so
+             * `n = -v` then `w = n * 2.0` on a lane `v` was a "type mismatch
+             * in variable initialization". Address-of is left to the
+             * typechecker. */
+            if (node->child_count == 1 && node->value) {
+                collect_constraints(node->children[0], ctx);
+                Type* ot = node->children[0]->node_type;
+                Type* rt = NULL;
+                if (strcmp(node->value, "!") == 0)
+                    rt = create_type(TYPE_BOOL);
+                else if ((strcmp(node->value, "-") == 0 || strcmp(node->value, "~") == 0) &&
+                         ot && ot->kind != TYPE_UNKNOWN)
+                    rt = clone_type(ot);
+                if (rt) {
+                    if (node->node_type) free_type(node->node_type);
+                    node->node_type = rt;
+                }
+            }
+            break;
+
         case AST_COMPOUND_ASSIGNMENT:
             // children[0] = operator, children[1] = RHS expression
             if (node->child_count >= 2) {

@@ -153,15 +153,18 @@ list_add(list: ptr, item: ptr) -> {
 }
 
 // Index into a list.
-// - (item, "")            : index in range
-// - (null, "")            : index out of range (not an error)
-// - (null, "null list")   : `list` is null
+// - (item, "")                     : index in range
+// - (null, "index out of range")   : index < 0 or index >= size
+// - (null, "null list")            : `list` is null
+// An empty error means the value is good, as everywhere else in std (#2439).
 list_get(list: ptr, index: int) -> {
     if list == null {
         return null, "null list"
     }
-    item = list_get_raw(list, index)
-    return item, ""
+    if index < 0 || index >= list_size(list) {
+        return null, "index out of range"
+    }
+    return list_get_raw(list, index), ""
 }
 
 // Insert or update a key-value pair. Returns "" on success, error on

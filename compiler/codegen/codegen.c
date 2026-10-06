@@ -336,6 +336,8 @@ const char* const_array_elem_c_type(Type* t) {
         case TYPE_I32X4:   return "AeI32x4";
         case TYPE_I64X2:   return "AeI64x2";
         case TYPE_I16X8:   return "AeI16x8";
+        case TYPE_F32X8:   return "AeF32x8";
+        case TYPE_I32X8:   return "AeI32x8";
         case TYPE_PTR:     return "void*";
         case TYPE_BYTE:    return "unsigned char";
         case TYPE_BOOL:    return "_Bool";
@@ -1820,11 +1822,12 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
             mark_lhs_root_var(gen, node->children[0]);
         }
     }
-    // AST_COMPOUND_ASSIGNMENT: a few parser paths produce this
-    // discrete node type instead of folding into AST_BINARY_EXPRESSION.
-    if (node->type == AST_COMPOUND_ASSIGNMENT && node->child_count > 0 &&
-        node->children[0]) {
-        mark_lhs_root_var(gen, node->children[0]);
+    // AST_COMPOUND_ASSIGNMENT: the statement form `x op= y`. The target's
+    // name is node->value; children[0] is the operator literal, which this
+    // used to mark instead, so a variable changed by `+=` in a try body was
+    // never made volatile and could read stale after an error unwound.
+    if (node->type == AST_COMPOUND_ASSIGNMENT && node->value) {
+        mark_try_clobbered_var(gen, node->value);
     }
     for (int i = 0; i < node->child_count; i++) {
         scan_try_body_for_writes(gen, node->children[i]);
@@ -2381,6 +2384,8 @@ const char* get_c_type(Type* type) {
         case TYPE_I32X4: return "AeI32x4";
         case TYPE_I64X2: return "AeI64x2";
         case TYPE_I16X8: return "AeI16x8";
+        case TYPE_F32X8: return "AeF32x8";
+        case TYPE_I32X8: return "AeI32x8";
         case TYPE_BOOL: return "int";
         /* `unsigned char` (not `uint8_t`) so the compiler's strict-aliasing
          * exemption applies: code may legally read or write any other
@@ -2624,6 +2629,8 @@ static const char* get_abi_type(Type* type) {
         case TYPE_I32X4: return "AeI32x4";
         case TYPE_I64X2: return "AeI64x2";
         case TYPE_I16X8: return "AeI16x8";
+        case TYPE_F32X8: return "AeF32x8";
+        case TYPE_I32X8: return "AeI32x8";
         case TYPE_BOOL:   return "int32_t";
         case TYPE_BYTE:   return "unsigned char";
         case TYPE_STRING: return "const char*";
@@ -2773,6 +2780,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 "typedef int32_t AeI32x4 __attribute__((vector_size(16)));\n"
                 "typedef int64_t AeI64x2 __attribute__((vector_size(16)));\n"
                 "typedef int16_t AeI16x8 __attribute__((vector_size(16)));\n"
+                "#if defined(__AVX2__)\n"
+                "typedef float   AeF32x8 __attribute__((vector_size(32), aligned(16)));\n"
+                "typedef int32_t AeI32x8 __attribute__((vector_size(32), aligned(16)));\n"
+                "#else\n"
+                "typedef struct { AeF32x4 lo, hi; } AeF32x8;\n"
+                "typedef struct { AeI32x4 lo, hi; } AeI32x8;\n"
+                "#endif\n"
                 "#endif\n"
                 "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
     }
@@ -6033,6 +6047,42 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef int64_t AeI64x2 __attribute__((vector_size(16)));");
     print_line(gen, "typedef int16_t AeI16x8 __attribute__((vector_size(16)));");
     print_line(gen, "typedef uint32_t AeU32x4 __attribute__((vector_size(16)));");
+    /* #2428: eight lanes, 32 bytes. With AVX2 an f32x8 is one 256-bit
+       register and each operation one instruction. Without it the type is
+       a struct of two four-lane halves. A plain 32-byte vector would compile
+       there too, but a target with no 32-byte registers (SSE, NEON) has no
+       machine mode for it: GCC keeps every such value in memory and splits
+       only the arithmetic, so a loop paid a load and a store per value per
+       iteration and ran 25% behind the same loop on f32x4, and a 32-byte
+       comparison it did not split at all (a comiss and cmov per lane, 9x
+       behind). Two halves live in two registers and cost exactly two f32x4
+       operations. Every f32x8 / i32x8 operation goes through an _ae_f32x8_*
+       / _ae_i32x8_* helper, codegen routes the operators there, so the
+       source is the same either way and the build flag picks the form:
+       `-mavx2` or `-march=native` through aether.toml's [build] cflags.
+       The two forms are different C types, so C compiled separately that
+       exchanges these by value must use the same -m flags as the program.
+       The native type is declared 16-byte aligned, the alignment heap
+       storage guarantees: at its natural 32, GCC moved through calloc'd
+       slices and malloc'd closure environments with vmovaps, which faults
+       when the block is only 16-aligned (glibc, macOS). */
+    print_line(gen, "#if defined(__AVX2__)");
+    print_line(gen, "#  define AETHER_LANES8_NATIVE 1");
+    print_line(gen, "typedef float   AeF32x8 __attribute__((vector_size(32), aligned(16)));");
+    print_line(gen, "typedef int32_t AeI32x8 __attribute__((vector_size(32), aligned(16)));");
+    print_line(gen, "#else");
+    print_line(gen, "#  define AETHER_LANES8_NATIVE 0");
+    print_line(gen, "typedef struct { AeF32x4 lo, hi; } AeF32x8;");
+    print_line(gen, "typedef struct { AeI32x4 lo, hi; } AeI32x8;");
+    print_line(gen, "#endif");
+    /* `.x` .. `.w` name lanes 0-3, which in the halves form all live in
+       `.lo`. The macro is an lvalue in both forms, so `v.x = 1.0` and
+       `v.y += d` work as on f32x4. */
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "#  define _AE_LANE8_LOW(v, i) ((v)[i])");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_LANE8_LOW(v, i) ((v).lo[i])");
+    print_line(gen, "#endif");
     /* SSE2 intrinsics for the saturating packs (_mm_packs_epi32 /
        _mm_packus_epi16). Only needed on x86 with SSE2; elsewhere the packs use
        a scalar fallback and this header is not referenced. */
@@ -6189,6 +6239,276 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    unsigned char* o = (unsigned char*)out;");
     print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = a[i]; o[i] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
     print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = b[i]; o[i + 8] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    /* #2428: f32x8 and its i32x8 mask, the f32x4 surface at twice the
+       width, each with a native body (AVX2) and a two-halves body (see the
+       typedefs). Sums add lanes 0..7 in order, as a scalar loop would, so a
+       sum is the same bits in either form and on every instruction set. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_splat(float v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeF32x8){v, v, v, v, v, v, v, v};");
+    print_line(gen, "#else");
+    print_line(gen, "    AeF32x4 h = _ae_f32x4_splat(v); return (AeF32x8){h, h};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_set(float a, float b, float c, float d, float e, float f, float g, float h) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeF32x8){a, b, c, d, e, f, g, h};");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_set(a, b, c, d), _ae_f32x4_set(e, f, g, h)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_splat(int v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeI32x8){v, v, v, v, v, v, v, v};");
+    print_line(gen, "#else");
+    print_line(gen, "    AeI32x4 h = _ae_i32x4_splat(v); return (AeI32x8){h, h};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_load(void* p, int64_t i) { AeF32x8 v; memcpy(&v, (char*)p + (size_t)i * 4u, 32); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_f32x8_store(void* p, int64_t i, AeF32x8 v) { memcpy((char*)p + (size_t)i * 4u, &v, 32); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x8_lane(AeF32x8 v, int64_t i) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return v[i & 7];");
+    print_line(gen, "#else");
+    print_line(gen, "    return (i & 7) < 4 ? v.lo[i & 3] : v.hi[i & 3];");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x8_lane(AeI32x8 v, int64_t i) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return v[i & 7];");
+    print_line(gen, "#else");
+    print_line(gen, "    return (i & 7) < 4 ? v.lo[i & 3] : v.hi[i & 3];");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x8_sum(AeF32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return v[0] + v[1] + v[2] + v[3] + v[4] + v[5] + v[6] + v[7];");
+    print_line(gen, "#else");
+    print_line(gen, "    return v.lo[0] + v.lo[1] + v.lo[2] + v.lo[3] + v.hi[0] + v.hi[1] + v.hi[2] + v.hi[3];");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_add(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a + b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){a.lo + b.lo, a.hi + b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_sub(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a - b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){a.lo - b.lo, a.hi - b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_mul(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a * b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){a.lo * b.lo, a.hi * b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_div(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a / b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){a.lo / b.lo, a.hi / b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_add(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a + b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo + b.lo, a.hi + b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_sub(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a - b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo - b.lo, a.hi - b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_mul(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a * b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo * b.lo, a.hi * b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_div(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a / b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo / b.lo, a.hi / b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_mod(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a %% b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo %% b.lo, a.hi %% b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_and(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a & b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo & b.lo, a.hi & b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_or(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a | b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo | b.lo, a.hi | b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_neg(AeF32x8 a) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return -a;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){-a.lo, -a.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_neg(AeI32x8 a) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return -a;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){-a.lo, -a.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_not(AeI32x8 a) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return ~a;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){~a.lo, ~a.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_lt(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a < b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo < b.lo, a.hi < b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_lt(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a < b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo < b.lo, a.hi < b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_le(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a <= b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo <= b.lo, a.hi <= b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_le(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a <= b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo <= b.lo, a.hi <= b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_gt(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a > b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo > b.lo, a.hi > b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_gt(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a > b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo > b.lo, a.hi > b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_ge(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a >= b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo >= b.lo, a.hi >= b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_ge(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a >= b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo >= b.lo, a.hi >= b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_eq(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a == b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo == b.lo, a.hi == b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_eq(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a == b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo == b.lo, a.hi == b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_ne(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a != b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo != b.lo, a.hi != b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_ne(AeI32x8 a, AeI32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return a != b;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){a.lo != b.lo, a.hi != b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "typedef union { AeF32x8 f; AeI32x8 i; } _AeF32x8Bits;");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_select(AeI32x8 m, AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    _AeF32x8Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_select(m.lo, a.lo, b.lo), _ae_f32x4_select(m.hi, a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_min(AeF32x8 a, AeF32x8 b) { return _ae_f32x8_select(_ae_f32x8_lt(a, b), a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_max(AeF32x8 a, AeF32x8 b) { return _ae_f32x8_select(_ae_f32x8_gt(a, b), a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_sqrt(AeF32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE && AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
+    print_line(gen, "#elif AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeF32x8)__builtin_ia32_sqrtps256(v);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_sqrt(v.lo), _ae_f32x4_sqrt(v.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_abs(AeF32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    _AeF32x8Bits b, r; b.f = v; r.i = b.i & _ae_i32x8_splat(0x7fffffff); return r.f;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_abs(v.lo), _ae_f32x4_abs(v.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i32x8_any(AeI32x8 m) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (m[0] | m[1] | m[2] | m[3] | m[4] | m[5] | m[6] | m[7]) != 0;");
+    print_line(gen, "#else");
+    print_line(gen, "    return _ae_i32x4_any(m.lo | m.hi);");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i32x8_all(AeI32x8 m) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return m[0] != 0 && m[1] != 0 && m[2] != 0 && m[3] != 0 && m[4] != 0 && m[5] != 0 && m[6] != 0 && m[7] != 0;");
+    print_line(gen, "#else");
+    print_line(gen, "    return _ae_i32x4_all(m.lo) && _ae_i32x4_all(m.hi);");
     print_line(gen, "#endif");
     print_line(gen, "}");
     print_line(gen, "#endif /* AETHER_HAS_LANES */");

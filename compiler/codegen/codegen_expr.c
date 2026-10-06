@@ -665,6 +665,12 @@ static void collect_identifiers(ASTNode* node, char*** names, int* count, int* c
     if (node->type == AST_IDENTIFIER && node->value) {
         collect_ident_append(node->value, names, count, cap);
     }
+    /* `name op= x` reads and writes `name`, held in node->value rather than
+     * an identifier child: without this, a closure whose only use of a
+     * variable was `+=` did not capture it. */
+    if (node->type == AST_COMPOUND_ASSIGNMENT && node->value) {
+        collect_ident_append(node->value, names, count, cap);
+    }
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* child = node->children[i];
         if (child && child->type == AST_CLOSURE) {
@@ -1270,6 +1276,11 @@ static int any_return_is_string(ASTNode* node) {
 static int is_assigned_to(ASTNode* node, const char* name) {
     if (!node) return 0;
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
+        strcmp(node->value, name) == 0) {
+        return 1;
+    }
+    /* `name op= x` writes `name` too; its target is node->value. */
+    if (node->type == AST_COMPOUND_ASSIGNMENT && node->value &&
         strcmp(node->value, name) == 0) {
         return 1;
     }
@@ -3715,6 +3726,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* #2146: a lane read — `v.x` is the C vector's `v[0]`. */
                 if (child->node_type && expr->value) {
                     int lane = lane_accessor_index(child->node_type->kind, expr->value);
+                    if (lane >= 0 && (child->node_type->kind == TYPE_F32X8 ||
+                                      child->node_type->kind == TYPE_I32X8)) {
+                        /* #2428: the halves form is a struct. The macro is
+                         * `v[i]` natively and `v.lo[i]` in halves (.x-.w are
+                         * lanes 0-3), an lvalue either way, so a lane write
+                         * works as a read does. */
+                        fprintf(gen->output, "_AE_LANE8_LOW(");
+                        generate_expression(gen, child);
+                        fprintf(gen->output, ", %d)", lane);
+                        break;
+                    }
                     if (lane >= 0) {
                         fprintf(gen->output, "(");
                         generate_expression(gen, child);
@@ -3973,9 +3995,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * typechecker retypes such literals where it types the
                  * expression; this is the authority for every context —
                  * `return v * 0.5` reaches the statement walker and not
-                 * infer_binary_type, and a `v * -0.5` there is typed by
-                 * neither pass (the early pass does not type unary nodes),
-                 * so the decision is made from the operands. A comparison
+                 * infer_binary_type, and a `v * -0.5` there reaches neither
+                 * literal rule (the early pass types the unary node as the
+                 * literal's double), so the decision is made from the
+                 * operands, retyping the unary node with its literal. A comparison
                  * takes it too: `v < 0.5` compares floats. */
                 for (int k = 0; k < 2; k++) {
                     ASTNode* opnd = expr->children[k];
@@ -3989,6 +4012,45 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (opnd != lit && opnd->node_type && opnd->node_type->kind == TYPE_FLOAT)
                             opnd->node_type->kind = TYPE_FLOAT32;
                     }
+                }
+            }
+            /* #2428: an operator on an eight-lane value is a call to its
+             * _ae_f32x8_* / _ae_i32x8_* helper, never C's operator: without
+             * AVX2 the type is a struct of two halves, which C's operators do
+             * not apply to (see the typedefs in codegen.c). With AVX2 the
+             * helper is the operator. A scalar operand splats, as it does for
+             * the four-lane types, which keep C's operators: their width is
+             * native on every target. */
+            if (expr->child_count >= 2 && expr->value) {
+                static const char* const lane8_ops[11][2] = {
+                    {"+", "add"}, {"-", "sub"}, {"*", "mul"}, {"/", "div"}, {"%", "mod"},
+                    {"<", "lt"}, {"<=", "le"}, {">", "gt"}, {">=", "ge"}, {"==", "eq"}, {"!=", "ne"}
+                };
+                const char* lane8_fn = NULL;
+                for (int k = 0; k < 11; k++)
+                    if (strcmp(expr->value, lane8_ops[k][0]) == 0) lane8_fn = lane8_ops[k][1];
+                Type* lt8 = expr->children[0]->node_type;
+                Type* rt8 = expr->children[1]->node_type;
+                TypeKind vk8 = TYPE_UNKNOWN;
+                if (lt8 && (lt8->kind == TYPE_F32X8 || lt8->kind == TYPE_I32X8)) vk8 = lt8->kind;
+                else if (rt8 && (rt8->kind == TYPE_F32X8 || rt8->kind == TYPE_I32X8)) vk8 = rt8->kind;
+                if (lane8_fn && vk8 != TYPE_UNKNOWN) {
+                    const char* pfx = vk8 == TYPE_F32X8 ? "f32x8" : "i32x8";
+                    const char* scalar_cast = vk8 == TYPE_F32X8 ? "float" : "int";
+                    fprintf(gen->output, "_ae_%s_%s(", pfx, lane8_fn);
+                    for (int k = 0; k < 2; k++) {
+                        Type* ot = expr->children[k]->node_type;
+                        if (k) fprintf(gen->output, ", ");
+                        if (ot && ot->kind == vk8) {
+                            generate_expression(gen, expr->children[k]);
+                        } else {
+                            fprintf(gen->output, "_ae_%s_splat((%s)(", pfx, scalar_cast);
+                            generate_expression(gen, expr->children[k]);
+                            fprintf(gen->output, "))");
+                        }
+                    }
+                    fprintf(gen->output, ")");
+                    break;
                 }
             }
             if (expr->child_count >= 2) {
@@ -4372,6 +4434,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_UNARY_EXPRESSION:
+            /* #2428: `-v` / `~m` on an eight-lane value, through its helper
+             * (the halves form is a struct; see the binary case). */
+            if (expr->child_count >= 1 && expr->value && expr->children[0]->node_type &&
+                (expr->children[0]->node_type->kind == TYPE_F32X8 ||
+                 expr->children[0]->node_type->kind == TYPE_I32X8) &&
+                (strcmp(expr->value, "-") == 0 || strcmp(expr->value, "~") == 0)) {
+                const char* pfx = expr->children[0]->node_type->kind == TYPE_F32X8 ? "f32x8" : "i32x8";
+                fprintf(gen->output, "_ae_%s_%s(", pfx, expr->value[0] == '-' ? "neg" : "not");
+                generate_expression(gen, expr->children[0]);
+                fprintf(gen->output, ")");
+                break;
+            }
             if (expr->child_count >= 1) {
                 // Wrap the entire unary expression in parens: (!x) not !(x).
                 // This prevents GCC -Wlogical-not-parentheses when the unary
