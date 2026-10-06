@@ -360,7 +360,10 @@ main() {
 
 When a function call has a trailing block, Aether automatically pushes the function's
 return value onto a **builder context stack** before executing the block, and pops it
-after. Library functions can access the current context via `builder_context()`.
+when the block is left, however it is left: falling off the end, a `return` from
+inside it, or a `break`/`continue` to a loop outside it. The pop runs after the
+block's own `defer`s. Library functions can access the current context via
+`builder_context()`.
 
 This enables automatic parent-child wiring without the caller specifying parents:
 

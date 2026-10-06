@@ -1,0 +1,309 @@
+// A `return` from inside a trailing block left its builder context on the
+// context stack.
+//
+// Calling `f() { ... }` pushes a builder context (f's value, or a builder
+// function's fresh config object) before the block runs and pops it after.
+// The pop was emitted once, after the block, so only the fall-through end
+// reached it: a `return` from inside the block (aeb's `bldr.build() { ...
+// return 1 }` on error), and a `break`/`continue` out of a block inside a
+// loop, left without popping. Each call leaked one context. The stack holds
+// 64; past that, pushes are silently dropped, so every later block's DSL
+// calls (`add()` here) went to a stale parent instead of their own, and the
+// pops underneath tore down the caller's real contexts.
+//
+// The pop is now a defer of the block's scope, so every exit runs it, after
+// the block's own defers.
+
+import std.string
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+var bad = 0
+var unwound = 0
+var order = 0
+var defer_saw_depth = -1
+
+struct Bag {
+    items: int
+}
+
+new_bag() -> ptr {
+    b = malloc(sizeof(Bag)) as *Bag
+    b.items = 0
+    return b
+}
+
+add(_ctx: ptr) {
+    b = _ctx as *Bag
+    b.items = b.items + 1
+}
+
+items(b: ptr) -> int {
+    bb = b as *Bag
+    return bb.items
+}
+
+// Builder flavour: the block fills a fresh Bag, then the function runs.
+builder collect(want: int) with new_bag -> int {
+    got = items(_builder)
+    if got != want {
+        return -1
+    }
+    return got
+}
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        if bad < 20 {
+            println("FAIL ${label}: got ${got}, want ${want}")
+        }
+        bad = bad + 1
+    }
+}
+
+note() {
+    unwound = unwound + 1
+}
+
+// The early `return` on a condition, aeb's error-exit shape.
+early(n: int) -> int {
+    new_bag() {
+        add()
+        if n > 0 {
+            return n
+        }
+    }
+    return 0
+}
+
+// A builder block returning straight out of the function: the config
+// is never handed to collect().
+early_builder(n: int) -> int {
+    x = collect(1) {
+        add()
+        if n > 0 {
+            return n
+        }
+    }
+    return x
+}
+
+// Return with a value computed inside the block, from a nested if/while.
+nested(n: int) -> int {
+    new_bag() {
+        i = 0
+        while i < 3 {
+            if i == n {
+                if n >= 0 {
+                    return i * 10
+                }
+            }
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+// With a user defer in the block and one outside it. LIFO: the block's
+// defer runs first and still sees its context; the pop follows; the
+// function's defer runs last.
+defer_inner() {
+    defer_saw_depth = builder_depth()
+    order = order * 10 + 1
+}
+
+defer_outer() {
+    order = order * 10 + 2
+    note()
+}
+
+with_defers(n: int) -> int {
+    defer defer_outer()
+    new_bag() {
+        defer defer_inner()
+        add()
+        if n > 0 {
+            return n
+        }
+    }
+    return 0
+}
+
+// Multi-value return from inside the block, with a heap string around.
+pair(n: int) -> (int, string) {
+    new_bag() {
+        add()
+        msg = string.concat("n=", string.from_int(n))
+        if n > 0 {
+            return n, msg
+        }
+    }
+    return 0, ""
+}
+
+// Nested blocks: a return from the inner one pops both.
+two_deep(n: int) -> int {
+    new_bag() {
+        new_bag() {
+            add()
+            if n > 0 {
+                return n
+            }
+        }
+    }
+    return 0
+}
+
+// break / continue out of a block inside the loop.
+breaks() -> int {
+    i = 0
+    while i < 10 {
+        new_bag() {
+            add()
+            if i == 3 {
+                break
+            }
+        }
+        i = i + 1
+    }
+    return i
+}
+
+continues() -> int {
+    i = 0
+    n = 0
+    while i < 10 {
+        i = i + 1
+        new_bag() {
+            add()
+            if i > 2 {
+                continue
+            }
+            n = n + 1
+        }
+    }
+    return n
+}
+
+// A break inside a loop that is itself inside the block stays in the block.
+loop_in_block() -> int {
+    d = -1
+    new_bag() {
+        j = 0
+        while j < 5 {
+            if j == 2 {
+                break
+            }
+            j = j + 1
+        }
+        d = builder_depth()
+    }
+    return d
+}
+
+// No trailing block: an unlabeled break from an `if` inside the loop body
+// leaves the body's scope too, so the body's defer runs on that iteration
+// as well. It used to run only the `if` scope's defers.
+break_runs_body_defer() -> int {
+    unwound = 0
+    i = 0
+    while i < 5 {
+        defer note()
+        if i == 2 {
+            break
+        }
+        i = i + 1
+    }
+    return unwound
+}
+
+// After all that, an unrelated pair of nested blocks: each one's DSL calls
+// must reach its own Bag, not a parent's or a leaked one.
+fresh_parent(label: string) {
+    inner = new_bag()
+    outer = new_bag() {
+        add()
+        inner = new_bag() {
+            add()
+            add()
+        }
+    }
+    check("${label}: outer block's own bag", items(outer), 1)
+    check("${label}: inner block's own bag", items(inner), 2)
+    check("${label}: depth after fresh blocks", builder_depth(), 0)
+}
+
+main() {
+    i = 0
+    while i < 10000 {
+        check("early value", early(1), 1)
+        early(0)
+        i = i + 1
+    }
+    check("depth after early returns", builder_depth(), 0)
+    fresh_parent("early")
+
+    i = 0
+    while i < 10000 {
+        check("early_builder value", early_builder(1), 1)
+        i = i + 1
+    }
+    check("early_builder fall-through", early_builder(0), 1)
+    check("depth after builder returns", builder_depth(), 0)
+    fresh_parent("builder")
+
+    i = 0
+    while i < 100 {
+        check("nested value", nested(2), 20)
+        check("nested fall-through", nested(5), -1)
+        i = i + 1
+    }
+    check("depth after nested returns", builder_depth(), 0)
+
+    i = 0
+    while i < 100 {
+        order = 0
+        unwound = 0
+        check("with_defers value", with_defers(3), 3)
+        check("defer order (block's defer, then outer)", order, 12)
+        check("block's defer ran before the pop", defer_saw_depth, 1)
+        check("outer defer ran", unwound, 1)
+        i = i + 1
+    }
+    check("depth after defer returns", builder_depth(), 0)
+
+    i = 0
+    while i < 100 {
+        a, msg = pair(7)
+        check("pair value", a, 7)
+        check("pair msg", string.length(msg), 3)
+        i = i + 1
+    }
+    check("depth after multi-value returns", builder_depth(), 0)
+
+    i = 0
+    while i < 100 {
+        check("two_deep value", two_deep(4), 4)
+        i = i + 1
+    }
+    check("depth after two-deep returns", builder_depth(), 0)
+
+    i = 0
+    while i < 100 {
+        check("break index", breaks(), 3)
+        check("continue count", continues(), 2)
+        i = i + 1
+    }
+    check("depth after break/continue", builder_depth(), 0)
+    check("break inside the block's own loop", loop_in_block(), 1)
+    check("depth at end", builder_depth(), 0)
+    check("unlabeled break runs the loop body's defer", break_runs_body_defer(), 3)
+    fresh_parent("end")
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("returns from trailing blocks pop their builder context: ok")
+}
