@@ -1,0 +1,170 @@
+// A heap string returned from inside a trailing (builder) block leaked.
+//
+// `f() { ... }` runs its block inline in the enclosing function, so a
+// `return` in the block returns from that function. The return-ownership
+// classifiers skipped the block as if it were a separate closure, so they
+// never saw `return n, msg` / `return s` there: the function was classified
+// as not returning a heap string at that position, the return site handed
+// `msg` over raw, and the caller never freed it. Every call leaked the
+// string (two allocations: the AetherString and its bytes).
+//
+// The related tuple shape, plain function body or block alike: a string a
+// tuple return hands over on one path was never freed on another path that
+// returns something else (`return 0, ""`), because the function-exit free
+// is suppressed for it and only the single-value return drained it.
+//
+// Each shape here runs many times. The values are checked below, and the
+// macOS leaks gate (which allows this program no leaks) holds the
+// ownership side; an over-eager free would show as a wrong value or an
+// ASan/leaks(1) error instead.
+
+import std.string
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+var bad = 0
+var keep: ptr = null
+
+// A context factory for the blocks; one shared cell, freed at the end.
+new_bag() -> ptr {
+    if keep == null { keep = malloc(16) }
+    return keep
+}
+
+builder configure() with new_bag -> int {
+    return 1
+}
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        if bad < 20 { println("FAIL ${label}: got ${got}, want ${want}") }
+        bad = bad + 1
+    }
+}
+
+check_s(label: string, got: string, want: string) {
+    if string.equals(got, want) == 0 {
+        if bad < 20 { println("FAIL ${label}: got '${got}', want '${want}'") }
+        bad = bad + 1
+    }
+}
+
+// The reported shape: an early tuple return from an `if` in the block.
+pair(n: int) -> (int, string) {
+    new_bag() {
+        msg = string.concat("n=", string.from_int(n))
+        if n > 0 { return n, msg }
+    }
+    return 0, ""
+}
+
+// Single-value return from the block.
+one(n: int) -> string {
+    new_bag() {
+        s = string.concat("s=", string.from_int(n))
+        if n > 0 { return s }
+    }
+    return "none"
+}
+
+// Return nested two ifs deep, string in the second position of three.
+triple(n: int) -> (int, string, int) {
+    new_bag() {
+        t = string.concat("t", string.from_int(n))
+        if n > 0 {
+            if n % 2 == 0 { return n, t, 2 }
+            return n, t, 1
+        }
+    }
+    return -1, "neg", 0
+}
+
+// The returned string is rebuilt in a loop inside the block; earlier
+// iterations' strings are freed by the reassignment.
+looped(n: int) -> (int, string) {
+    new_bag() {
+        i = 0
+        acc = ""
+        while i < n {
+            acc = string.concat(acc, "x")
+            if i == 3 { return i, acc }
+            i = i + 1
+        }
+    }
+    return n, "short"
+}
+
+// A builder call's block, returning from inside it.
+from_builder(n: int) -> (int, string) {
+    configure() {
+        b = string.concat("b", string.from_int(n))
+        if n > 0 { return n, b }
+    }
+    return 0, ""
+}
+
+// Plain-body counterpart of the fall-through path, for comparison.
+plain(n: int) -> (int, string) {
+    p = string.concat("p", string.from_int(n))
+    if n > 0 { return n, p }
+    return 0, "zero"
+}
+
+main() {
+    i = 0
+    while i < 200 {
+        a, msg = pair(7)
+        check("pair value", a, 7)
+        check_s("pair msg", msg, "n=7")
+        z, zmsg = pair(0)
+        check("pair fallthrough value", z, 0)
+        check_s("pair fallthrough msg", zmsg, "")
+
+        check_s("one", one(12), "s=12")
+        check_s("one fallthrough", one(0), "none")
+
+        x, tm, k = triple(4)
+        check("triple even value", x, 4)
+        check_s("triple even msg", tm, "t4")
+        check("triple even tag", k, 2)
+        y, tm2, k2 = triple(5)
+        check("triple odd value", y, 5)
+        check_s("triple odd msg", tm2, "t5")
+        check("triple odd tag", k2, 1)
+        w, tm3, k3 = triple(-2)
+        check("triple fallthrough value", w, -1)
+        check_s("triple fallthrough msg", tm3, "neg")
+        check("triple fallthrough tag", k3, 0)
+
+        li, lacc = looped(10)
+        check("looped index", li, 3)
+        check_s("looped acc", lacc, "xxxx")
+        ln, lacc2 = looped(2)
+        check("looped fallthrough", ln, 2)
+        check_s("looped fallthrough acc", lacc2, "short")
+
+        bn, bs = from_builder(9)
+        check("builder value", bn, 9)
+        check_s("builder msg", bs, "b9")
+        bz, bzs = from_builder(0)
+        check("builder fallthrough", bz, 0)
+        check_s("builder fallthrough msg", bzs, "")
+
+        pn, ps = plain(3)
+        check("plain value", pn, 3)
+        check_s("plain msg", ps, "p3")
+        pz, pzs = plain(0)
+        check("plain fallthrough", pz, 0)
+        check_s("plain fallthrough msg", pzs, "zero")
+        i = i + 1
+    }
+    free(keep)
+    keep = null
+    if bad > 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("heap strings returned from trailing blocks are owned by the caller: ok")
+}
