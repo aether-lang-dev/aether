@@ -1285,6 +1285,30 @@ typedef struct {
     int count;
 } CatchScope;
 
+/* The node the return/heap classifiers below descend into for child `i`
+ * of `node`. They skip closures (another function's returns and locals),
+ * but a call's trailing DSL block is not one: it is emitted inline in the
+ * enclosing function, so its `return`s leave that function and the
+ * locals it assigns are that function's. Without this the classifiers
+ * never saw a `return v` / `return n, v` inside `f() { ... }`: the
+ * function was classified non-heap at that position, the return site did
+ * not route the value through `aether_uniform_heap_str`, and the caller
+ * never freed what it received, so every call leaked the string. The
+ * test is codegen's own (`trailing_dsl_block`), so a closure handed to a
+ * `fn` parameter stays a closure. */
+static ASTNode* classifier_child(CodeGenerator* gen, ASTNode* node, int i) {
+    ASTNode* c = node->children[i];
+    if (c && c->type == AST_CLOSURE && c->value &&
+        strcmp(c->value, "trailing") == 0 &&
+        node->type == AST_FUNCTION_CALL && gen) {
+        ASTNode* blk = trailing_dsl_block(gen, node);
+        for (int bi = 0; blk && bi < c->child_count; bi++) {
+            if (c->children[bi] == blk) return blk;
+        }
+    }
+    return c;
+}
+
 static int catch_scope_has(const CatchScope* cs, ASTNode* expr) {
     if (!cs || !expr || expr->type != AST_IDENTIFIER || !expr->value) return 0;
     for (int i = cs->count - 1; i >= 0; i--) {
@@ -1374,7 +1398,8 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        if (body_assigns_var_from_heap_in(gen, node->children[i], var_name, cs)) return 1;
+        if (body_assigns_var_from_heap_in(gen, classifier_child(gen, node, i),
+                                          var_name, cs)) return 1;
     }
     return 0;
 }
@@ -1431,7 +1456,8 @@ static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        if (body_tuple_destructure_binds_heap(gen, node->children[i], var_name)) {
+        if (body_tuple_destructure_binds_heap(gen, classifier_child(gen, node, i),
+                                              var_name)) {
             return 1;
         }
     }
@@ -1549,7 +1575,7 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
         pushed = 1;
     }
     for (int i = 0; i < node->child_count; i++) {
-        walk_returns_for_heap_check_in(gen, node->children[i],
+        walk_returns_for_heap_check_in(gen, classifier_child(gen, node, i),
                                        fn_being_analyzed, fn_body_root,
                                        any_heap, any_non_heap, cs);
     }
@@ -1637,6 +1663,53 @@ static void emit_return_escape_drains_for_unreturned(CodeGenerator* gen,
         const char* name = gen->return_escaped_string_vars[i];
         if (!name) continue;
         if (preserve && strcmp(name, preserve) == 0) continue;
+        print_indent(gen);
+        fprintf(gen->output,
+                "if (_heap_%s) { aether_heap_str_free(%s); %s = NULL; _heap_%s = 0; }\n",
+                name, name, name, name);
+    }
+}
+
+/* The multi-value form of the drain above, for `return e0, e1, ...`.
+ * Every return-escape var that no position of THIS return hands over as
+ * a bare identifier is freed: `m = string.concat(...); if c { return n, m }
+ * ... return 0, ""` otherwise leaked `m` on the second path (the
+ * function-exit free is suppressed for `m` because the first path returns
+ * it). Emitted after the tuple value is built, so a position that merely
+ * reads a drained var (`return string.length(m), ""`) reads it first.
+ * Returns how many drains it emitted.
+ *
+ * A var that also escaped into a container (call argument, field, capture)
+ * is left alone: its buffer may be owned elsewhere, so a missed free is
+ * the safe side. The single-value drain predates that check and keeps its
+ * own contract. */
+static int count_tuple_return_drains(CodeGenerator* gen, ASTNode* stmt) {
+    int n = 0;
+    for (int i = 0; gen && i < gen->return_escaped_string_var_count; i++) {
+        const char* name = gen->return_escaped_string_vars[i];
+        if (!name || is_escaped_string_var(gen, name)) continue;
+        int returned = 0;
+        for (int j = 0; j < stmt->child_count && !returned; j++) {
+            ASTNode* c = stmt->children[j];
+            returned = c && c->type == AST_IDENTIFIER && c->value &&
+                       strcmp(c->value, name) == 0;
+        }
+        if (!returned) n++;
+    }
+    return n;
+}
+
+static void emit_tuple_return_escape_drains(CodeGenerator* gen, ASTNode* stmt) {
+    for (int i = 0; gen && i < gen->return_escaped_string_var_count; i++) {
+        const char* name = gen->return_escaped_string_vars[i];
+        if (!name || is_escaped_string_var(gen, name)) continue;
+        int returned = 0;
+        for (int j = 0; j < stmt->child_count && !returned; j++) {
+            ASTNode* c = stmt->children[j];
+            returned = c && c->type == AST_IDENTIFIER && c->value &&
+                       strcmp(c->value, name) == 0;
+        }
+        if (returned) continue;
         print_indent(gen);
         fprintf(gen->output,
                 "if (_heap_%s) { aether_heap_str_free(%s); %s = NULL; _heap_%s = 0; }\n",
@@ -2255,7 +2328,7 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
         pushed = 1;
     }
     for (int i = 0; i < node->child_count && !*vetoed; i++) {
-        walk_returns_for_heap_at_in(gen, node->children[i], position,
+        walk_returns_for_heap_at_in(gen, classifier_child(gen, node, i), position,
                                     fn_body_root, found, any_heap, vetoed, cs);
     }
     if (pushed) cs->count--;
@@ -7831,6 +7904,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                     fprintf(gen->output, "};\n");
                     if (owned) free_type(tuple);
+                    emit_tuple_return_escape_drains(gen, stmt);
                     /* #752: any struct element of the returned tuple
                      * escapes — suppress its exit-time `<Struct>_destroy`
                      * so its heap-string fields aren't freed under the
@@ -8039,12 +8113,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                     ensure_tuple_typedef(gen, tuple);
                     const char* tname = get_c_type(tuple);
-                    fprintf(gen->output, "return (%s){", tname);
+                    /* Unreturned return-escape vars are drained after the
+                     * value is built (see emit_tuple_return_escape_drains),
+                     * so that shape goes through a local; the common shape
+                     * keeps the bare `return (T){...};`. */
+                    int drains = count_tuple_return_drains(gen, stmt);
+                    if (drains > 0) fprintf(gen->output, "{ %s _no_defer_ret = (%s){", tname, tname);
+                    else fprintf(gen->output, "return (%s){", tname);
                     for (int j = 0; j < stmt->child_count; j++) {
                         if (j > 0) fprintf(gen->output, ", ");
                         emit_tuple_return_position(gen, stmt->children[j], j);
                     }
                     fprintf(gen->output, "};\n");
+                    if (drains > 0) {
+                        gen->indent_level++;
+                        emit_tuple_return_escape_drains(gen, stmt);
+                        print_line(gen, "return _no_defer_ret;");
+                        gen->indent_level--;
+                        print_line(gen, "}");
+                    }
                     if (owned) free_type(tuple);
                 } else {
                     /* No-defer single-value path. To drain unreturned
