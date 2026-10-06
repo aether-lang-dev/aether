@@ -1,0 +1,103 @@
+import std.string
+
+// Loops that look like dispatch loops but must lower exactly as before.
+
+// A ranged case: lowers to an if-chain, so there is no switch to thread.
+ranged(xs: int[]) -> int {
+    acc = 0
+    i = 0
+    while true {
+        x = xs[i]
+        i = i + 1
+        switch x {
+            case 1..=3: { acc = acc + 1 continue }
+            case 9: { return acc }
+        }
+    }
+    return -1
+}
+
+// A case value too large to index a table.
+too_big(xs: int[]) -> int {
+    acc = 0
+    i = 0
+    while true {
+        x = xs[i]
+        i = i + 1
+        switch x {
+            case 1: { acc = acc + 1 continue }
+            case 5000: { acc = acc + 2 continue }
+            case 9: { return acc }
+        }
+    }
+    return -1
+}
+
+// A negative case value.
+negative(xs: int[]) -> int {
+    acc = 0
+    i = 0
+    while true {
+        x = xs[i]
+        i = i + 1
+        switch x {
+            case -1: { acc = acc + 2 continue }
+            case 1: { acc = acc + 1 continue }
+            case 9: { return acc }
+        }
+    }
+    return -1
+}
+
+// A string in the head: the head is repeated at every continue, and string
+// ownership is tracked per site, so it is not copied.
+string_head(xs: int[]) -> int {
+    acc = 0
+    i = 0
+    while true {
+        x = xs[i]
+        tag = "op${x}"
+        i = i + 1
+        switch x {
+            case 1: { acc = acc + 1 continue }
+            case 9: { return acc + string.length(tag) - 2 }
+        }
+    }
+    return -1
+}
+
+// No arm continues the loop.
+no_continue(xs: int[]) -> int {
+    acc = 0
+    i = 0
+    while true {
+        x = xs[i]
+        i = i + 1
+        switch x {
+            case 1: { acc = acc + 1 }
+            case 9: { return acc }
+        }
+    }
+    return -1
+}
+
+// Not always true.
+conditional(xs: int[]) -> int {
+    acc = 0
+    i = 0
+    while i < 3 {
+        x = xs[i]
+        i = i + 1
+        switch x {
+            case 1: { acc = acc + 1 continue }
+            case 9: { return acc }
+        }
+    }
+    return acc
+}
+
+main() {
+    int[4] a = [1, 2, 3, 9]
+    int[4] b = [1, 5000, -1, 9]
+    println("${ranged(a)} ${too_big(b)} ${negative(b)} ${string_head(a)} ${no_continue(a)} ${conditional(a)}")
+}

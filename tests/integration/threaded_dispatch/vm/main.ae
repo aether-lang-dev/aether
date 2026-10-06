@@ -1,0 +1,48 @@
+import ops
+
+// A dispatch loop shaped like mquickjs-ae's: `while 1 == 1`, a head that
+// fetches and has its own fast path with a `continue`, case labels from an
+// imported module, and a less regular opcode mix than a two-op toy.
+run(prog: int[], iters: int) -> long {
+    long a = 1
+    long b = 7
+    long sum = 0
+    pc = 0
+    left = iters
+    op = 0
+    while 1 == 1 {
+        op = prog[pc]
+        pc = pc + 1
+        if op >= ops.OP_PUSH0 { if op <= ops.OP_PUSH3 {
+                a = a + op - ops.OP_PUSH0
+                continue
+            } }
+        switch op {
+            case ops.OP_NOP: { continue }
+            case ops.OP_INC: { a = a + 1 continue }
+            case ops.OP_DEC: { a = a - 1 continue }
+            case ops.OP_DBL: { a = a * 2 continue }
+            case ops.OP_HALF: { a = a / 2 continue }
+            case ops.OP_XOR: { a = a ^ b continue }
+            case ops.OP_ADDI: { a = a + prog[pc] pc = pc + 1 continue }
+            case ops.OP_SUBI: { a = a - prog[pc] pc = pc + 1 continue }
+            case ops.OP_SWAP: { t = a a = b b = t continue }
+            case ops.OP_DUP: { b = a continue }
+            case ops.OP_NEG: { a = 0 - a continue }
+            case ops.OP_MOD: { a = a % 1000003 continue }
+            case ops.OP_LOOP: {
+                sum = (sum * 31 + a) % 1000000007
+                left = left - 1
+                if left > 0 { pc = 0 }
+                continue
+            }
+            case ops.OP_HALT: { return sum }
+        }
+    }
+    return -1
+}
+
+main() {
+    int[24] prog = [1, 6, 5, 9, 3, 11, 21, 8, 5, 2, 7, 3, 10, 11, 4, 0, 23, 9, 8, 5, 11, 1, 12, 13]
+    println("${run(prog, 1000)}")
+}

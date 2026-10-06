@@ -1014,6 +1014,43 @@ Alternatives are the comma-list, in `switch` and `match` alike. A `|` between
 values is the bitwise OR — `1 | 2 | 3` is the number 3 — so the compiler
 refuses it in a selector and names the comma form.
 
+### Interpreter dispatch loops
+
+A `switch` as the body of a `while` loop that is always true is an
+interpreter's dispatch loop, and the compiler lowers it to threaded dispatch
+(computed `goto`) where the C compiler supports it (GCC, Clang, MinGW):
+
+```aether,fragment
+while true {
+    op = code[pc]            // head: runs before every dispatch
+    pc = pc + 1
+    switch op {
+        case OP_PUSH: { push(code[pc])  pc = pc + 1  continue }
+        case OP_ADD:  { add()  continue }
+        case OP_HALT: { return pop() }
+    }
+    // tail: reached when an arm breaks or falls off, or nothing matches
+}
+```
+
+Each `continue` that targets the loop runs the head again and jumps straight to
+the next arm through a table, so every arm ends in its own indirect jump instead
+of all of them sharing the one a `switch` compiles to; on a mixed opcode stream
+that branch predicts far better. Nothing is annotated, and nothing about what
+the loop does changes: a value with no arm goes through the `switch` as before,
+and the code after the `switch` runs exactly when it did. Under MSVC, or when
+built with `-DAETHER_NO_THREADED_DISPATCH`, the output is the plain loop and
+`switch`.
+
+The loop is recognised when its condition is always true (`true`, `1 == 1`, a
+true constant), the `switch` is a statement of the loop body, its selector is an
+integer, every case is an integer constant from 0 to 4095 (literals, `const`s,
+enum members, module constants; no ranges), and some arm `continue`s. The
+statements before the `switch` are repeated at each `continue`, so they may not
+build strings, capture closures, or contain `defer`, `try`, a loop, a `switch`
+or a `break`. Set `AETHER_EXPLAIN_THREADED=1` when compiling to have the
+compiler say why a loop of this shape was not threaded.
+
 ### Switch vs Match
 
 | Feature | `switch` | `match` |

@@ -194,6 +194,19 @@ typedef struct {
     int loop_label_break_used[AETHER_MAX_LOOP_NEST];
     int loop_label_continue_used[AETHER_MAX_LOOP_NEST];
     int next_loop_label_id;
+    /* #2378 threaded dispatch: a `while true { head; switch sel { ... } }`
+     * loop lowers to computed goto where the C compiler has labels-as-values.
+     * loop_td_id[level] is the loop's threaded id (0 = not threaded), and
+     * loop_td_node[level] the loop, so a `continue` that targets it can emit
+     * the head and the indirect jump. td_switch / td_id / td_arm mark the
+     * loop's own switch while its arms are generated, so each arm gets a label.
+     * next_td_id numbers threaded loops per translation unit. */
+    int loop_td_id[AETHER_MAX_LOOP_NEST];
+    struct ASTNode* loop_td_node[AETHER_MAX_LOOP_NEST];
+    struct ASTNode* td_switch;
+    int td_id;
+    int td_arm;
+    int next_td_id;
 
     // try-clobbered locals: variable names modified inside any try
     // body of the current function.  Such locals — when declared

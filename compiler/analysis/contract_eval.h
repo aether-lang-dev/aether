@@ -78,4 +78,12 @@ typedef struct { char* buf; size_t cap; size_t off; } ContractStr;
 void contract_str_terminate(ContractStr* s);
 void contract_sprint_expr(ContractStr* s, ASTNode* e);
 
+/* The int64 value of a compile-time integer expression (a literal, a
+ * top-level `const`, an enum member, or arithmetic over them), resolving
+ * names against `program`. Returns 1 and sets *out when the value is an
+ * integer known at compile time; 0 otherwise (a float, a bool, a call,
+ * anything unknown). Used by codegen to place a `switch` case in a
+ * threaded-dispatch table (#2378). */
+int contract_eval_int64(ASTNode* e, ASTNode* program, int64_t* out);
+
 #endif /* CONTRACT_EVAL_H */

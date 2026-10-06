@@ -470,6 +470,14 @@ CodeGenerator* create_code_generator(FILE* output) {
     memset(gen->loop_label_break_used, 0, sizeof(gen->loop_label_break_used));
     memset(gen->loop_label_continue_used, 0, sizeof(gen->loop_label_continue_used));
     gen->next_loop_label_id = 0;
+    for (int i = 0; i < AETHER_MAX_LOOP_NEST; i++) {
+        gen->loop_td_id[i] = 0;
+        gen->loop_td_node[i] = NULL;
+    }
+    gen->td_switch = NULL;
+    gen->td_id = 0;
+    gen->td_arm = -1;
+    gen->next_td_id = 0;
     // Issue #501 follow-up: try-clobbered locals tracking
     gen->try_clobbered_vars = NULL;
     gen->try_clobbered_var_count = 0;
