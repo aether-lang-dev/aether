@@ -14,6 +14,7 @@
 // as unreachable code, W1002, now inside trailing blocks too.)
 
 import std.string
+import std.list
 
 extern exit(code: int)
 extern malloc(size: int) -> ptr
@@ -26,10 +27,29 @@ struct Bag {
     items: int
 }
 
+// Every bag is recorded and freed before the test ends, so the macOS
+// leaks gate (which allows this program none) sees no leaks.
+var bags_: ptr = null
+
 new_bag() -> ptr {
     b = malloc(sizeof(Bag)) as *Bag
     b.items = 0
+    if bags_ == null { bags_ = list.new() }
+    list.add(bags_, b as ptr)
     return b
+}
+
+free_bags() {
+    if bags_ == null { return }
+    n = list.size(bags_)
+    i = 0
+    while i < n {
+        v, _ = list.get(bags_, i)
+        free(v)
+        i = i + 1
+    }
+    list.free(bags_)
+    bags_ = null
 }
 
 add(_ctx: ptr) {
@@ -135,6 +155,7 @@ main() {
     check("pair_in_block msg", string.length(msg), 2)
     check("pair unwound", unwound, 2)
 
+    free_bags()
     if bad != 0 {
         println("${bad} check(s) failed")
         exit(1)
