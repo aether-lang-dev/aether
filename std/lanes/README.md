@@ -2,7 +2,9 @@
 
 SIMD lanes: four single-precision values in one register (`f32x4`), two
 double-precision ones (`f64x2`), four 32-bit integers (`i32x4`, which also
-doubles as the mask `select4` takes) and eight 16-bit integers (`i16x8`).
+doubles as the mask `select4` takes), eight 16-bit integers (`i16x8`), and
+eight single-precision values (`f32x8`) with their eight-lane mask
+(`i32x8`).
 
 The lane types are language types, so arithmetic and comparison are written
 as ordinary operators and happen lane-wise; this module is what a lane value
@@ -70,6 +72,60 @@ rebuild. The transcendentals are deliberately absent: `sin` and `exp` per
 lane are approximations with an accuracy choice to make, and a caller who
 wants one should make that choice explicitly.
 
+## Eight float lanes (#2428)
+
+`f32x8` is the `f32x4` surface at twice the width: `f32x8(a, ..., h)`,
+`splat8`, `load8` / `store8` (32 bytes at an element index), `lane8`, `sum8`,
+`min8` / `max8`, `select8`, `sqrt8`, `abs8`, the comparisons `lt8` / `le8` /
+`gt8` / `ge8` / `eq8`, and an `i32x8` mask with `mask8_and` / `mask8_or` /
+`mask8_not`, `any8` / `all8` and `mask8_lane`. Operators work as they do on
+`f32x4`. `.x` to `.w` read lanes 0-3; `lane8` reads any of the eight.
+
+```aether,run
+import std.lanes
+
+main() {
+    v = lanes.f32x8(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+    w = v * 2.0 - 1.0                          // eight lanes, two operators
+    upper = lanes.select8(w > 8.0, w, lanes.splat8(0.0))
+    println("${lanes.lane8(w, 7)} ${lanes.sum8(w)} ${lanes.sum8(upper)}")
+}
+```
+```output
+15 64 48
+```
+
+**The width is a build choice, not a source one.** With AVX2 enabled, an
+`f32x8` is one 256-bit register and each operation one instruction. Turn it
+on in aether.toml:
+
+```toml
+[build]
+cflags = "-mavx2"        # or "-march=native" for the machine that builds it
+```
+
+Without AVX2 (the default x86-64 build, and ARM's NEON), an `f32x8` is two
+four-lane halves held in two registers, so it costs exactly what two `f32x4`
+operations cost. The program and its results are the same either way: a
+kernel written eight-wide is never slower than its four-lane version, and is
+twice as wide where AVX2 is on. Sums add lanes 0..7 in order, as a scalar
+loop would, so `sum8` is the same bits in either form.
+
+Measured on an eight-term polynomial with a clamp, per element, over 64 Ki
+floats (`-O2`, Windows/MinGW, i7-13700K):
+
+| build | `f32x4` | `f32x8` |
+|---|---|---|
+| default | 99 ms | 97-105 ms |
+| `-mavx2` | 98 ms | **50 ms** |
+
+A kernel bound by the square root gains less: this CPU's 256-bit `vsqrtps`
+retires at half the rate of the 128-bit one, so `sqrt8` under AVX2 matches
+two `sqrt4`s.
+
+The two forms are different C types, so C compiled separately that takes or
+returns an `f32x8` by value has to use the same `-m` flags as the program.
+
 ## Integer lanes (#2212)
 
 For the integer image and audio kernels — a JPEG IDCT, YCbCr→RGB, PNG
@@ -113,7 +169,7 @@ saturated value, never a wrapped one.
 Every load/store above takes a raw `ptr` and trusts the caller's bound, like
 `std.mem`'s accessors. The `_slice` siblings take a typed slice instead and
 check that the WHOLE vector width fits before decaying it to a pointer —
-`load4_slice`/`store4_slice` (`f32[]`), `load2_slice`/`store2_slice`
+`load4_slice`/`store4_slice` and `load8_slice`/`store8_slice` (`f32[]`), `load2_slice`/`store2_slice`
 (`float[]`), `i32load_slice`/`i32store_slice` (`int[]`),
 `i16load_slice`/`i16store_slice` (`uint16[]` — the lane width the array
 element type matches; there is no first-class signed 16-bit array element),
@@ -135,8 +191,8 @@ without going via `make`/a fixed array.
 ## Requirements
 
 The types lower to the GCC/Clang vector extensions
-(`__attribute__((vector_size(16)))`), which every compiler the toolchain
-drives has — gcc, clang and `zig cc` on every target. A compiler without them
+(`__attribute__((vector_size(16)))`, and `(32)` for an AVX2 `f32x8`), which
+every compiler the toolchain drives has — gcc, clang and `zig cc` on every target. A compiler without them
 defines `AETHER_HAS_LANES` as 0 and the generated file simply carries no lane
 types; a program that uses one will not compile there, and one that does not
 is unaffected. Each entry point here is a `static inline`
@@ -150,7 +206,10 @@ Float: `f32x4`, `splat4`, `load4`, `store4`, `lane4`, `sum4`, `min4`, `max4`,
 `mask_or`, `mask_not`, `any4`, `all4`, `mask_lane`; `f64x2`, `splat2`,
 `load2`, `store2`, `lane2`, `sum2`, `min2`, `max2`, `sqrt2`, `abs2`,
 `select2`, `lt2`, `le2`, `gt2`, `ge2`, `eq2`, `mask2_and`, `mask2_or`,
-`mask2_not`, `any2`, `all2`, `mask2_lane`.
+`mask2_not`, `any2`, `all2`, `mask2_lane`; `f32x8`, `splat8`, `load8`,
+`store8`, `lane8`, `sum8`, `min8`, `max8`, `select8`, `sqrt8`, `abs8`, `lt8`,
+`le8`, `gt8`, `ge8`, `eq8`, `mask8_and`, `mask8_or`, `mask8_not`, `any8`,
+`all8`, `mask8_lane`.
 
 Integer: `i32x4`, `i32splat`, `i32load`, `i32store`, `i32lane`, `i32sum`,
 `i32add`, `i32sub`, `i32mul`, `i32shl`, `i32shr`, `i32shr_u`, `i32min`,
@@ -159,5 +218,5 @@ Integer: `i32x4`, `i32splat`, `i32load`, `i32store`, `i32lane`, `i32sum`,
 `pack_i16_u8`.
 
 Slice-checked: `load4_slice`, `store4_slice`, `load2_slice`, `store2_slice`,
-`i32load_slice`, `i32store_slice`, `i16load_slice`, `i16store_slice`,
-`pack_i16_u8_slice`.
+`load8_slice`, `store8_slice`, `i32load_slice`, `i32store_slice`,
+`i16load_slice`, `i16store_slice`, `pack_i16_u8_slice`.

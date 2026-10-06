@@ -21,6 +21,7 @@
     <li><a href="#aether_worker_deliver">aether_worker_deliver</a></li>
     <li><a href="#aether_worker_drain">aether_worker_drain</a></li>
     <li><a href="#aether_worker_pending">aether_worker_pending</a></li>
+    <li><a href="#aether_worker_wait">aether_worker_wait</a></li>
     <li><a href="#aether_worker_pool_configure">aether_worker_pool_configure</a></li>
     <li><a href="#aether_worker_pool_shutdown">aether_worker_pool_shutdown</a></li>
     <li><a href="#run">run</a></li>
@@ -29,6 +30,8 @@
     <li><a href="#deliver">deliver</a></li>
     <li><a href="#drain">drain</a></li>
     <li><a href="#pending">pending</a></li>
+    <li><a href="#wait">wait</a></li>
+    <li><a href="#map">map</a></li>
     <li><a href="#pool_size">pool_size</a></li>
     <li><a href="#pool_shutdown">pool_shutdown</a></li>
   </ul>
@@ -42,13 +45,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -59,11 +66,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -71,28 +83,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li class="active"><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -131,6 +163,10 @@
     <div class="function" id="aether_worker_pending" data-name="aether_worker_pending">
       <h3 class="function-name">aether_worker_pending <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_worker_pending() <span class="arrow">-&gt;</span> int</code></pre>
+    </div>
+    <div class="function" id="aether_worker_wait" data-name="aether_worker_wait">
+      <h3 class="function-name">aether_worker_wait <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_worker_wait() <span class="arrow">-&gt;</span> int</code></pre>
     </div>
     <div class="function" id="aether_worker_pool_configure" data-name="aether_worker_pool_configure">
       <h3 class="function-name">aether_worker_pool_configure <span class="kind">extern</span></h3>
@@ -175,6 +211,17 @@
       <h3 class="function-name">pending <span class="kind">fn</span></h3>
       <pre class="usage"><code>pending() <span class="arrow">-&gt;</span> int</code></pre>
       <p class="doc">Launched jobs not yet delivered (running, ready-but-undrained, or in flight through the poster). For backpressure and test synchronisation.</p>
+    </div>
+    <div class="function" id="wait" data-name="wait">
+      <h3 class="function-name">wait <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">Block until every submitted job has completed AND had its completion delivered, running those completions on the calling thread. Returns how many completions ran, or -1 when a main-thread poster is installed (there the host loop delivers, so waiting on that thread would block the very thread that has to deliver; pump the host loop instead). This is the headless batch join: no poll loop, and unlike pool_shutdown it leaves the pool running, so a reusable function can wait once per batch and be called again. i = 0 while i &lt; n { worker.run(|| { return compute(i) }, |r: ptr| { collect(r) }) i = i + 1 } worker.wait()          // every collect() has run by here</p>
+    </div>
+    <div class="function" id="map" data-name="map">
+      <h3 class="function-name">map <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map(items, f) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">items: ptr, f: fn</span></p>
+      <p class="doc">Bounded parallel map: apply `f` to every element of `items` on the worker pool and collect the results into a new list, index-aligned with the input. Concurrency is bounded by the pool (job N+1 queues behind the N in flight), which is the Go errgroup.SetLimit / bounded-semaphore shape. doubled = worker.map(nums, |x: ptr| { return double(x) }) `f` runs on a worker thread, so it must not touch shared mutable state without synchronisation; the result slots are written on the calling thread during the wait, so the returned list needs no locking. The caller owns the returned list (free it with list.free) and keeps ownership of `items`. Returns an empty list when a main-thread poster is installed: completions go to the host loop there, so this helper cannot join them (wait() reports the same condition on stderr).</p>
     </div>
     <div class="function" id="pool_size" data-name="pool_size">
       <h3 class="function-name">pool_size <span class="kind">fn</span></h3>

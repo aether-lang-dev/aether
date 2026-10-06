@@ -15,19 +15,7 @@
   <input type="text" id="search" placeholder="Search cryptography..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#sha1_hex_raw">sha1_hex_raw</a></li>
-    <li><a href="#sha256_hex_raw">sha256_hex_raw</a></li>
-    <li><a href="#hash_hex_raw">hash_hex_raw</a></li>
-    <li><a href="#hash_supported">hash_supported</a></li>
-    <li><a href="#md4_hex_raw">md4_hex_raw</a></li>
-    <li><a href="#md5_hex_raw">md5_hex_raw</a></li>
-    <li><a href="#hmac_sha256_hex_raw">hmac_sha256_hex_raw</a></li>
-    <li><a href="#hmac_sha256_bytes_raw">hmac_sha256_bytes_raw</a></li>
-    <li><a href="#md4_bytes_raw">md4_bytes_raw</a></li>
-    <li><a href="#md5_bytes_raw">md5_bytes_raw</a></li>
-    <li><a href="#sha1_bytes_raw">sha1_bytes_raw</a></li>
-    <li><a href="#sha256_bytes_raw">sha256_bytes_raw</a></li>
-    <li><a href="#hash_bytes_raw">hash_bytes_raw</a></li>
+    <li><a href="#hash_supported_raw">hash_supported_raw</a></li>
     <li><a href="#get_binary_digest">get_binary_digest</a></li>
     <li><a href="#get_binary_digest_length">get_binary_digest_length</a></li>
     <li><a href="#release_binary_digest">release_binary_digest</a></li>
@@ -36,13 +24,14 @@
     <li><a href="#get_random_bytes_length">get_random_bytes_length</a></li>
     <li><a href="#release_random_bytes">release_random_bytes</a></li>
     <li><a href="#digest_new_raw">digest_new_raw</a></li>
-    <li><a href="#digest_update_raw">digest_update_raw</a></li>
     <li><a href="#digest_final_hex_raw">digest_final_hex_raw</a></li>
     <li><a href="#digest_final_bytes_raw">digest_final_bytes_raw</a></li>
     <li><a href="#digest_free_raw">digest_free_raw</a></li>
     <li><a href="#sha1_hex">sha1_hex</a></li>
     <li><a href="#sha256_hex">sha256_hex</a></li>
+    <li><a href="#sha256_file">sha256_file</a></li>
     <li><a href="#hash_hex">hash_hex</a></li>
+    <li><a href="#hash_supported">hash_supported</a></li>
     <li><a href="#md4_hex">md4_hex</a></li>
     <li><a href="#md5_hex">md5_hex</a></li>
     <li><a href="#hmac_sha256_hex">hmac_sha256_hex</a></li>
@@ -71,13 +60,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li class="active"><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -88,11 +81,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -100,28 +98,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -131,70 +149,11 @@
     <p class="import-line"><code>import std.cryptography</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="sha1_hex_raw" data-name="sha1_hex_raw">
-      <h3 class="function-name">sha1_hex_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>sha1_hex_raw(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="sha256_hex_raw" data-name="sha256_hex_raw">
-      <h3 class="function-name">sha256_hex_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>sha256_hex_raw(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="hash_hex_raw" data-name="hash_hex_raw">
-      <h3 class="function-name">hash_hex_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>hash_hex_raw(algo, data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">algo: string, data: string, length: int</span></p>
-    </div>
-    <div class="function" id="hash_supported" data-name="hash_supported">
-      <h3 class="function-name">hash_supported <span class="kind">extern</span></h3>
-      <pre class="usage"><code>hash_supported(algo) <span class="arrow">-&gt;</span> int</code></pre>
+    <div class="function" id="hash_supported_raw" data-name="hash_supported_raw">
+      <h3 class="function-name">hash_supported_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>hash_supported_raw(algo) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">algo: string</span></p>
-    </div>
-    <div class="function" id="md4_hex_raw" data-name="md4_hex_raw">
-      <h3 class="function-name">md4_hex_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>md4_hex_raw(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="md5_hex_raw" data-name="md5_hex_raw">
-      <h3 class="function-name">md5_hex_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>md5_hex_raw(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="hmac_sha256_hex_raw" data-name="hmac_sha256_hex_raw">
-      <h3 class="function-name">hmac_sha256_hex_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>hmac_sha256_hex_raw(key, key_len, msg, msg_len) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">key: string, key_len: int, msg: string, msg_len: int</span></p>
-    </div>
-    <div class="function" id="hmac_sha256_bytes_raw" data-name="hmac_sha256_bytes_raw">
-      <h3 class="function-name">hmac_sha256_bytes_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>hmac_sha256_bytes_raw(key, key_len, msg, msg_len) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">key: string, key_len: int, msg: string, msg_len: int</span></p>
-    </div>
-    <div class="function" id="md4_bytes_raw" data-name="md4_bytes_raw">
-      <h3 class="function-name">md4_bytes_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>md4_bytes_raw(data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="md5_bytes_raw" data-name="md5_bytes_raw">
-      <h3 class="function-name">md5_bytes_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>md5_bytes_raw(data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="sha1_bytes_raw" data-name="sha1_bytes_raw">
-      <h3 class="function-name">sha1_bytes_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>sha1_bytes_raw(data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="sha256_bytes_raw" data-name="sha256_bytes_raw">
-      <h3 class="function-name">sha256_bytes_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>sha256_bytes_raw(data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-    </div>
-    <div class="function" id="hash_bytes_raw" data-name="hash_bytes_raw">
-      <h3 class="function-name">hash_bytes_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>hash_bytes_raw(algo, data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">algo: string, data: string, length: int</span></p>
+      <p class="doc">Bound under a _raw name like its siblings. The module function below is called `hash_supported`, which mangles to `cryptography_hash_supported` -- exactly this C symbol. The two collided, and the extern won, so every addition to hash_supported() was silently discarded at the call site while the source read as though it worked. Invisible until the body did more than forward to the extern, which is why it survived this long.</p>
     </div>
     <div class="function" id="get_binary_digest" data-name="get_binary_digest">
       <h3 class="function-name">get_binary_digest <span class="kind">extern</span></h3>
@@ -230,11 +189,6 @@
       <pre class="usage"><code>digest_new_raw(algo) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">algo: string</span></p>
     </div>
-    <div class="function" id="digest_update_raw" data-name="digest_update_raw">
-      <h3 class="function-name">digest_update_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>digest_update_raw(handle, data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">handle: ptr, data: string, length: int</span></p>
-    </div>
     <div class="function" id="digest_final_hex_raw" data-name="digest_final_hex_raw">
       <h3 class="function-name">digest_final_hex_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>digest_final_hex_raw(handle) <span class="arrow">-&gt;</span> string</code></pre>
@@ -252,71 +206,82 @@
     </div>
     <div class="function" id="sha1_hex" data-name="sha1_hex">
       <h3 class="function-name">sha1_hex <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sha1_hex(data, length) <span class="arrow">-&gt;</span> (string, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>sha1_hex(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">Compute the SHA-1 hex digest of the first `length` bytes of `data`. Returns (digest, &quot;&quot;) on success, (&quot;&quot;, error) when OpenSSL is unavailable or the hash context could not be created. SHA-1 is included for interop with legacy formats (Git object IDs, Subversion rep-stores, HMAC-SHA1 fixtures). Prefer SHA-256 for new work.</p>
     </div>
     <div class="function" id="sha256_hex" data-name="sha256_hex">
       <h3 class="function-name">sha256_hex <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sha256_hex(data, length) <span class="arrow">-&gt;</span> (string, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>sha256_hex(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">Compute the SHA-256 hex digest of the first `length` bytes of `data`. Returns (digest, &quot;&quot;) on success, (&quot;&quot;, error) on failure.</p>
+    </div>
+    <div class="function" id="sha256_file" data-name="sha256_file">
+      <h3 class="function-name">sha256_file <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sha256_file(path) <span class="arrow">-&gt;</span> (string, _1)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">sha256_file(path) — the SHA-256 of a whole file, as lowercase hex. Reads the file's bytes (binary-safe, via std.fs) then digests them with sha256_hex, so it matches `sha256sum &lt;path&gt;`'s hash. Returns (hex, &quot;&quot;) on success, (&quot;&quot;, err) when the file can't be read or the digest is unavailable. The one-shot form callers reach for instead of shelling out to `sha256sum`.</p>
     </div>
     <div class="function" id="hash_hex" data-name="hash_hex">
       <h3 class="function-name">hash_hex <span class="kind">fn</span></h3>
-      <pre class="usage"><code>hash_hex(algo, data, length) <span class="arrow">-&gt;</span> (string, string)</code></pre>
-      <p class="signature"><span class="sig-params">algo: string, data: string, length: int</span></p>
-      <p class="doc">Algorithm-by-name digest dispatch. `algo` is a string like &quot;sha1&quot; or &quot;sha256&quot; — useful when the algorithm is config-driven rather than compile-time. Returns the same lowercase-hex shape as sha1_hex / sha256_hex, or (&quot;&quot;, error) when: - OpenSSL isn't linked - the algorithm name is unknown (&quot;unknown algorithm&quot;) - the digest computation itself fails Whatever names libcrypto recognizes work here (&quot;sha384&quot;, &quot;sha512&quot;, &quot;sha3-256&quot;, ...), but the supported set may vary by OpenSSL build. Use hash_supported() to check before passing user-supplied names.</p>
+      <pre class="usage"><code>hash_hex(algo, data)</code></pre>
+      <p class="signature"><span class="sig-params">algo: string, data: byte[]</span></p>
+    </div>
+    <div class="function" id="hash_supported" data-name="hash_supported">
+      <h3 class="function-name">hash_supported <span class="kind">fn</span></h3>
+      <pre class="usage"><code>hash_supported(algo) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">algo: string</span></p>
+      <p class="doc">Probe whether this build can compute `algo`. Returns 1 (yes) or 0 (no). Always succeeds — never errors. Use this at config time to validate user-supplied algorithm names before they get written somewhere persistent.</p>
     </div>
     <div class="function" id="md4_hex" data-name="md4_hex">
       <h3 class="function-name">md4_hex <span class="kind">fn</span></h3>
-      <pre class="usage"><code>md4_hex(data, length) <span class="arrow">-&gt;</span> (string, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>md4_hex(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">MD4 hex digest. Legacy — included for interop with formats that bake it into the wire shape (zsync's per-block strong checksum, some pre-2000 packet captures). NOT collision-resistant; do not use for security. Bound to EVP_md4() directly so it works on stock OpenSSL 3 (whose by-name dispatcher skips the legacy provider). Returns (&quot;&quot;, &quot;md4 unavailable&quot;) on builds whose OpenSSL was compiled without MD4 at all.</p>
     </div>
     <div class="function" id="md5_hex" data-name="md5_hex">
       <h3 class="function-name">md5_hex <span class="kind">fn</span></h3>
-      <pre class="usage"><code>md5_hex(data, length) <span class="arrow">-&gt;</span> (string, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>md5_hex(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">MD5 hex digest. Legacy — Content-MD5, ETag, and various pre-SHA1 fixtures. NOT collision-resistant; do not use for security.</p>
     </div>
     <div class="function" id="hmac_sha256_hex" data-name="hmac_sha256_hex">
       <h3 class="function-name">hmac_sha256_hex <span class="kind">fn</span></h3>
-      <pre class="usage"><code>hmac_sha256_hex(key, key_len, msg, msg_len) <span class="arrow">-&gt;</span> (string, string)</code></pre>
-      <p class="signature"><span class="sig-params">key: string, key_len: int, msg: string, msg_len: int</span></p>
+      <pre class="usage"><code>hmac_sha256_hex(key, msg)</code></pre>
+      <p class="signature"><span class="sig-params">key: byte[], msg: byte[]</span></p>
       <p class="doc">HMAC-SHA256 hex digest (RFC 2104 + FIPS 198-1, RFC 4231 test vectors). The hex form is the natural shape for opaque token signing and bearer-token derivation; for SigV4-style chained key derivation (each round's output keys the next), use the raw bytes form `hmac_sha256_bytes` so intermediate steps don't round-trip through hex.</p>
     </div>
     <div class="function" id="hmac_sha256_bytes" data-name="hmac_sha256_bytes">
       <h3 class="function-name">hmac_sha256_bytes <span class="kind">fn</span></h3>
-      <pre class="usage"><code>hmac_sha256_bytes(key, key_len, msg, msg_len) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">key: string, key_len: int, msg: string, msg_len: int</span></p>
+      <pre class="usage"><code>hmac_sha256_bytes(key, msg)</code></pre>
+      <p class="signature"><span class="sig-params">key: byte[], msg: byte[]</span></p>
       <p class="doc">HMAC-SHA256 raw 32-byte digest. Returns (bytes, length, &quot;&quot;) on success — `bytes` is an owned AetherString preserving every digest byte including embedded NULs. Use this for chained key derivation (SigV4, HKDF-shaped flows) where each round's output keys the next.</p>
     </div>
     <div class="function" id="md4_bytes" data-name="md4_bytes">
       <h3 class="function-name">md4_bytes <span class="kind">fn</span></h3>
-      <pre class="usage"><code>md4_bytes(data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>md4_bytes(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
       <p class="doc">Raw-bytes digest accessors. Same tuple shape as base64_decode and the HMAC-bytes form above. Use when the wire format expects a fixed-width digest (zsync's truncated 3–16 byte MD4 per block, binary git object IDs, etc.) — hex would double the size and lose the embedded-NUL semantics.</p>
     </div>
     <div class="function" id="md5_bytes" data-name="md5_bytes">
       <h3 class="function-name">md5_bytes <span class="kind">fn</span></h3>
-      <pre class="usage"><code>md5_bytes(data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>md5_bytes(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
     </div>
     <div class="function" id="sha1_bytes" data-name="sha1_bytes">
       <h3 class="function-name">sha1_bytes <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sha1_bytes(data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>sha1_bytes(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
     </div>
     <div class="function" id="sha256_bytes" data-name="sha256_bytes">
       <h3 class="function-name">sha256_bytes <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sha256_bytes(data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>sha256_bytes(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
     </div>
     <div class="function" id="hash_bytes" data-name="hash_bytes">
       <h3 class="function-name">hash_bytes <span class="kind">fn</span></h3>
-      <pre class="usage"><code>hash_bytes(algo, data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">algo: string, data: string, length: int</span></p>
+      <pre class="usage"><code>hash_bytes(algo, data)</code></pre>
+      <p class="signature"><span class="sig-params">algo: string, data: byte[]</span></p>
       <p class="doc">Algorithm-by-name binary digest. Same dispatcher rules as hash_hex — useful when the algorithm is config-driven. Returns (&quot;&quot;, 0, error) when: - OpenSSL isn't linked - the algorithm name is unknown (&quot;unknown algorithm&quot;) - the digest computation fails</p>
     </div>
     <div class="function" id="random_bytes" data-name="random_bytes">
@@ -345,8 +310,8 @@
     </div>
     <div class="function" id="digest_update" data-name="digest_update">
       <h3 class="function-name">digest_update <span class="kind">fn</span></h3>
-      <pre class="usage"><code>digest_update(ctx, data, length) <span class="arrow">-&gt;</span> (int, string)</code></pre>
-      <p class="signature"><span class="sig-params">ctx: ptr, data: string, length: int</span></p>
+      <pre class="usage"><code>digest_update(ctx, data)</code></pre>
+      <p class="signature"><span class="sig-params">ctx: ptr, data: byte[]</span></p>
       <p class="doc">Feed `length` bytes of `data` into the context. Binary-safe (`data` may be an owned AetherString from fs.pread / a window buffer; embedded NULs survive). Returns (1, &quot;&quot;) on success, (0, error) on failure. Feeding 0 bytes is a no-op success. Does NOT free the context.</p>
     </div>
     <div class="function" id="digest_final_hex" data-name="digest_final_hex">

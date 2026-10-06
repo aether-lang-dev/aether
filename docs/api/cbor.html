@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cbor - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search cbor..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#CBOR_INT">CBOR_INT</a></li>
+    <li><a href="#CBOR_BYTES">CBOR_BYTES</a></li>
+    <li><a href="#CBOR_TEXT">CBOR_TEXT</a></li>
+    <li><a href="#CBOR_ARRAY">CBOR_ARRAY</a></li>
+    <li><a href="#CBOR_MAP">CBOR_MAP</a></li>
+    <li><a href="#CBOR_TAG">CBOR_TAG</a></li>
+    <li><a href="#CBOR_SIMPLE">CBOR_SIMPLE</a></li>
+    <li><a href="#CBOR_FLOAT">CBOR_FLOAT</a></li>
+    <li><a href="#parse">parse</a></li>
+    <li><a href="#encode">encode</a></li>
+    <li><a href="#stringify">stringify</a></li>
+    <li><a href="#type">type</a></li>
+    <li><a href="#is_null">is_null</a></li>
+    <li><a href="#is_undefined">is_undefined</a></li>
+    <li><a href="#get_bool">get_bool</a></li>
+    <li><a href="#get_int">get_int</a></li>
+    <li><a href="#get_long">get_long</a></li>
+    <li><a href="#get_float">get_float</a></li>
+    <li><a href="#get_string">get_string</a></li>
+    <li><a href="#get_bytes">get_bytes</a></li>
+    <li><a href="#get_tag_val">get_tag_val</a></li>
+    <li><a href="#get_tag_child">get_tag_child</a></li>
+    <li><a href="#object_get">object_get</a></li>
+    <li><a href="#map_get">map_get</a></li>
+    <li><a href="#object_set">object_set</a></li>
+    <li><a href="#array_add">array_add</a></li>
+    <li><a href="#map_set">map_set</a></li>
+    <li><a href="#object_size">object_size</a></li>
+    <li><a href="#array_size">array_size</a></li>
+    <li><a href="#object_entry">object_entry</a></li>
+    <li><a href="#obj">obj</a></li>
+    <li><a href="#arr">arr</a></li>
+    <li><a href="#str">str</a></li>
+    <li><a href="#bytes">bytes</a></li>
+    <li><a href="#num">num</a></li>
+    <li><a href="#from_int">from_int</a></li>
+    <li><a href="#boolean">boolean</a></li>
+    <li><a href="#null_value">null_value</a></li>
+    <li><a href="#undefined_value">undefined_value</a></li>
+    <li><a href="#tag">tag</a></li>
+    <li><a href="#set">set</a></li>
+    <li><a href="#push">push</a></li>
+    <li><a href="#map_push">map_push</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#diagnose">diagnose</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li class="active"><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>cbor</h1>
+    <p class="module-desc">MIT License (https://opensource.org/licenses/MIT) Portions copyright (c) 2019-present Faye Amacker (https://github.com/fxamacker/cbor) Portions copyright (c) 2026 Aether Developers.</p>
+    <p class="import-line"><code>import std.cbor</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="CBOR_INT" data-name="CBOR_INT">
+      <h3 class="function-name">CBOR_INT <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_INT = 0</code></pre>
+    </div>
+    <div class="function" id="CBOR_BYTES" data-name="CBOR_BYTES">
+      <h3 class="function-name">CBOR_BYTES <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_BYTES = 1</code></pre>
+    </div>
+    <div class="function" id="CBOR_TEXT" data-name="CBOR_TEXT">
+      <h3 class="function-name">CBOR_TEXT <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_TEXT = 2</code></pre>
+    </div>
+    <div class="function" id="CBOR_ARRAY" data-name="CBOR_ARRAY">
+      <h3 class="function-name">CBOR_ARRAY <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_ARRAY = 3</code></pre>
+    </div>
+    <div class="function" id="CBOR_MAP" data-name="CBOR_MAP">
+      <h3 class="function-name">CBOR_MAP <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_MAP = 4</code></pre>
+    </div>
+    <div class="function" id="CBOR_TAG" data-name="CBOR_TAG">
+      <h3 class="function-name">CBOR_TAG <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_TAG = 5</code></pre>
+    </div>
+    <div class="function" id="CBOR_SIMPLE" data-name="CBOR_SIMPLE">
+      <h3 class="function-name">CBOR_SIMPLE <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_SIMPLE = 6</code></pre>
+    </div>
+    <div class="function" id="CBOR_FLOAT" data-name="CBOR_FLOAT">
+      <h3 class="function-name">CBOR_FLOAT <span class="kind">const</span></h3>
+      <pre class="usage"><code>CBOR_FLOAT = 7</code></pre>
+    </div>
+    <div class="function" id="parse" data-name="parse">
+      <h3 class="function-name">parse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse(cbor_data) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">cbor_data: string</span></p>
+      <p class="doc">Parse a CBOR binary string. Returns (value_ptr, &quot;&quot;) on success, (null, error) on failure. Caller owns the returned value and must free with cbor.free.</p>
+    </div>
+    <div class="function" id="encode" data-name="encode">
+      <h3 class="function-name">encode <span class="kind">fn</span></h3>
+      <pre class="usage"><code>encode(value) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">Serialize a CBOR value tree to a binary string. Returns (encoded_bytes, &quot;&quot;) on success, (&quot;&quot;, error) on failure.</p>
+    </div>
+    <div class="function" id="stringify" data-name="stringify">
+      <h3 class="function-name">stringify <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stringify(value) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">Alias of encode for JSON symmetry.</p>
+    </div>
+    <div class="function" id="type" data-name="type">
+      <h3 class="function-name">type <span class="kind">fn</span></h3>
+      <pre class="usage"><code>type(value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="is_null" data-name="is_null">
+      <h3 class="function-name">is_null <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_null(value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="is_undefined" data-name="is_undefined">
+      <h3 class="function-name">is_undefined <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_undefined(value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_bool" data-name="get_bool">
+      <h3 class="function-name">get_bool <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_bool(value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_int" data-name="get_int">
+      <h3 class="function-name">get_int <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int(value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_long" data-name="get_long">
+      <h3 class="function-name">get_long <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_long(value) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_float" data-name="get_float">
+      <h3 class="function-name">get_float <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_float(value) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_string" data-name="get_string">
+      <h3 class="function-name">get_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_string(value) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_bytes" data-name="get_bytes">
+      <h3 class="function-name">get_bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_bytes(value) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_tag_val" data-name="get_tag_val">
+      <h3 class="function-name">get_tag_val <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_tag_val(value) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="get_tag_child" data-name="get_tag_child">
+      <h3 class="function-name">get_tag_child <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_tag_child(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="object_get" data-name="object_get">
+      <h3 class="function-name">object_get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>object_get(obj_ptr, key) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, key: string</span></p>
+    </div>
+    <div class="function" id="map_get" data-name="map_get">
+      <h3 class="function-name">map_get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_get(obj_ptr, key_ptr) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, key_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="object_set" data-name="object_set">
+      <h3 class="function-name">object_set <span class="kind">fn</span></h3>
+      <pre class="usage"><code>object_set(obj_ptr, key, value) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, key: string, value: ptr</span></p>
+    </div>
+    <div class="function" id="array_add" data-name="array_add">
+      <h3 class="function-name">array_add <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array_add(arr_ptr, value) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arr_ptr: ptr, value: ptr</span></p>
+    </div>
+    <div class="function" id="map_set" data-name="map_set">
+      <h3 class="function-name">map_set <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_set(obj_ptr, key_ptr, value_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="object_size" data-name="object_size">
+      <h3 class="function-name">object_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>object_size(obj_ptr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="array_size" data-name="array_size">
+      <h3 class="function-name">array_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array_size(arr_ptr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arr_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="object_entry" data-name="object_entry">
+      <h3 class="function-name">object_entry <span class="kind">fn</span></h3>
+      <pre class="usage"><code>object_entry(obj_ptr, i) <span class="arrow">-&gt;</span> (ptr, ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="obj" data-name="obj">
+      <h3 class="function-name">obj <span class="kind">fn</span></h3>
+      <pre class="usage"><code>obj() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="arr" data-name="arr">
+      <h3 class="function-name">arr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>arr() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="str" data-name="str">
+      <h3 class="function-name">str <span class="kind">fn</span></h3>
+      <pre class="usage"><code>str(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: string</span></p>
+    </div>
+    <div class="function" id="bytes" data-name="bytes">
+      <h3 class="function-name">bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>bytes(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: string</span></p>
+    </div>
+    <div class="function" id="num" data-name="num">
+      <h3 class="function-name">num <span class="kind">fn</span></h3>
+      <pre class="usage"><code>num(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: float</span></p>
+    </div>
+    <div class="function" id="from_int" data-name="from_int">
+      <h3 class="function-name">from_int <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_int(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: long</span></p>
+    </div>
+    <div class="function" id="boolean" data-name="boolean">
+      <h3 class="function-name">boolean <span class="kind">fn</span></h3>
+      <pre class="usage"><code>boolean(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">value: int</span></p>
+    </div>
+    <div class="function" id="null_value" data-name="null_value">
+      <h3 class="function-name">null_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>null_value() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="undefined_value" data-name="undefined_value">
+      <h3 class="function-name">undefined_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>undefined_value() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="tag" data-name="tag">
+      <h3 class="function-name">tag <span class="kind">fn</span></h3>
+      <pre class="usage"><code>tag(tag_num, child) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">tag_num: long, child: ptr</span></p>
+    </div>
+    <div class="function" id="set" data-name="set">
+      <h3 class="function-name">set <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set(obj_ptr, key, value) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, key: string, value: ptr</span></p>
+      <p class="doc">Terse helper alias for object_set (similar to json.set)</p>
+    </div>
+    <div class="function" id="push" data-name="push">
+      <h3 class="function-name">push <span class="kind">fn</span></h3>
+      <pre class="usage"><code>push(arr_ptr, value) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arr_ptr: ptr, value: ptr</span></p>
+      <p class="doc">Terse helper alias for array_add (similar to json.push)</p>
+    </div>
+    <div class="function" id="map_push" data-name="map_push">
+      <h3 class="function-name">map_push <span class="kind">fn</span></h3>
+      <pre class="usage"><code>map_push(obj_ptr, key_ptr, value_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr</span></p>
+      <p class="doc">Terse helper alias for map_set</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(value)</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+    </div>
+    <div class="function" id="diagnose" data-name="diagnose">
+      <h3 class="function-name">diagnose <span class="kind">fn</span></h3>
+      <pre class="usage"><code>diagnose(value) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">Convert a parsed CBOR value or input bytes to Extended Diagnostic Notation (EDN).</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

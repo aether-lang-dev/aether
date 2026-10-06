@@ -36,9 +36,9 @@
     <li><a href="#fd_open_read_tuple">fd_open_read_tuple</a></li>
     <li><a href="#fd_open_write_tuple">fd_open_write_tuple</a></li>
     <li><a href="#fd_close_raw">fd_close_raw</a></li>
-    <li><a href="#fd_write_n">fd_write_n</a></li>
     <li><a href="#fd_read_n_tuple">fd_read_n_tuple</a></li>
     <li><a href="#fd_read_line_tuple">fd_read_line_tuple</a></li>
+    <li><a href="#fd_read_into_raw">fd_read_into_raw</a></li>
     <li><a href="#read_file">read_file</a></li>
     <li><a href="#write_file">write_file</a></li>
     <li><a href="#append_file">append_file</a></li>
@@ -53,7 +53,9 @@
     <li><a href="#fd_open_read">fd_open_read</a></li>
     <li><a href="#fd_open_write">fd_open_write</a></li>
     <li><a href="#fd_close">fd_close</a></li>
+    <li><a href="#fd_write">fd_write</a></li>
     <li><a href="#fd_read_n">fd_read_n</a></li>
+    <li><a href="#fd_read_into">fd_read_into</a></li>
     <li><a href="#fd_read_line">fd_read_line</a></li>
   </ul>
   <hr>
@@ -66,13 +68,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -83,11 +89,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li class="active"><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -95,28 +106,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -225,7 +256,7 @@
       <h3 class="function-name">fd_open_read_tuple <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_open_read_tuple(path) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">Full fd-level I/O surface. Section 1 of nuther-ask-of-aether-team.md. fd_open_read       → POSIX O_RDONLY  / Win _O_RDONLY | _O_BINARY fd_open_write      → POSIX O_WRONLY|O_CREAT|O_TRUNC, mode 0644 / Win _O_WRONLY|_O_CREAT|_O_TRUNC|_O_BINARY fd_close           → close(fd) or _close(fd) fd_write_n         → looped write, retries EINTR; 0 ok / -1 fail fd_read_n          → looped read of up to `n` bytes; (bytes, count, err); bytes is a refcounted AetherString (binary-safe; embedded NULs survive) fd_read_line       → reads until '\n', stripping trailing CR/LF; (&quot;&quot;, &quot;&quot;) on clean EOF before any byte; partial line returned on EOF mid-line</p>
+      <p class="doc">Full fd-level I/O surface. Section 1 of nuther-ask-of-aether-team.md. fd_open_read       → POSIX O_RDONLY  / Win _O_RDONLY | _O_BINARY fd_open_write      → POSIX O_WRONLY|O_CREAT|O_TRUNC, mode 0644 / Win _O_WRONLY|_O_CREAT|_O_TRUNC|_O_BINARY fd_close           → close(fd) or _close(fd) fd_write           → looped write of a byte[], retries EINTR; 0 ok / -1 fail fd_read_n          → looped read of up to `n` bytes; (bytes, count, err); bytes is a refcounted AetherString (binary-safe; embedded NULs survive) fd_read_line       → reads until '\n', stripping trailing CR/LF; (&quot;&quot;, &quot;&quot;) on clean EOF before any byte; partial line returned on EOF mid-line</p>
     </div>
     <div class="function" id="fd_open_write_tuple" data-name="fd_open_write_tuple">
       <h3 class="function-name">fd_open_write_tuple <span class="kind">extern</span></h3>
@@ -237,11 +268,6 @@
       <pre class="usage"><code>fd_close_raw(fd) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
     </div>
-    <div class="function" id="fd_write_n" data-name="fd_write_n">
-      <h3 class="function-name">fd_write_n <span class="kind">extern</span></h3>
-      <pre class="usage"><code>fd_write_n(fd, data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fd: int, data: string, length: int</span></p>
-    </div>
     <div class="function" id="fd_read_n_tuple" data-name="fd_read_n_tuple">
       <h3 class="function-name">fd_read_n_tuple <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_read_n_tuple(fd, n) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
@@ -252,6 +278,11 @@
       <h3 class="function-name">fd_read_line_tuple <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_read_line_tuple(fd) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="fd_read_into_raw" data-name="fd_read_into_raw">
+      <h3 class="function-name">fd_read_into_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_read_into_raw(fd, buf, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, buf: ptr, length: int</span></p>
     </div>
     <div class="function" id="read_file" data-name="read_file">
       <h3 class="function-name">read_file <span class="kind">fn</span></h3>
@@ -336,11 +367,23 @@
       <p class="signature"><span class="sig-params">fd: int</span></p>
       <p class="doc">Close `fd`. Returns &quot;&quot; on success, error string on failure.</p>
     </div>
+    <div class="function" id="fd_write" data-name="fd_write">
+      <h3 class="function-name">fd_write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_write(fd, data) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, data: byte[]</span></p>
+      <p class="doc">Write every byte of `data` to `fd` — the length travels with the slice (#2301). Loops on partial writes; retries EINTR on POSIX. `data` may contain NULs. Returns 0 on success, -1 on error. An empty slice writes nothing and succeeds; a slice with no bound panics. n = io.fd_write(fd, bytes.view(frame)) if n != 0 { return &quot;write failed&quot; } For a string, take its byte view: `io.fd_write(fd, string.bytes(s))`, and a prefix of it with `string.bytes(s)[0..n]`. Formerly `fd_write_n(fd, data, length)`. It is not `fd_write_n` any more because a module function's C name is `&lt;module&gt;_&lt;name&gt;`, and `io_fd_write_n` is the C function itself: the two names were one symbol, so `io.fd_write_n(...)` always bound the extern, whatever this wrapper said.</p>
+    </div>
     <div class="function" id="fd_read_n" data-name="fd_read_n">
       <h3 class="function-name">fd_read_n <span class="kind">fn</span></h3>
       <pre class="usage"><code>fd_read_n(fd, n) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">fd: int, n: int</span></p>
       <p class="doc">Read up to `n` bytes from `fd`. Returns (bytes, count, err): - On success: (bytes, count, &quot;&quot;) with `count` between 1 and `n`. - On clean EOF before any byte: (&quot;&quot;, 0, &quot;&quot;). - On error: (&quot;&quot;, 0, &quot;&lt;reason&gt;&quot;). `bytes` is a refcounted AetherString carrying the explicit byte count, so embedded NULs survive (binary-safe). Inferred return type (`-&gt; {`) so the extern's `@heap` tuple flag on position 0 propagates to callers' destructure sites — an explicit tuple type can't carry the per-position annotation. Mirrors std.fs's read_binary / realpath wrappers.</p>
+    </div>
+    <div class="function" id="fd_read_into" data-name="fd_read_into">
+      <h3 class="function-name">fd_read_into <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_read_into(fd, buf) <span class="arrow">-&gt;</span> int!</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, buf: byte[]</span></p>
+      <p class="doc">Zero-allocation sibling of `fd_read_n` (#1471): read into a buffer the caller owns instead of minting a fresh string per call. Mirrors `fs.pread_into`, which is the same shape for files. Returns (n, err). `n == 0` means EOF; `0 &lt; n &lt; buf.len` is a normal SHORT READ, not an error — unlike `fd_read_n`, this returns as soon as any bytes are available rather than looping to fill the buffer. That is precisely what makes it usable on a live pipe: waiting to fill would stall until the producer happened to send a whole buffer's worth. Reads at most `buf.len` bytes into `buf` (#2301): the slice is the writable space, so its bound is the read limit and the bytes read are `buf[0..n]`. Loop until it returns 0 to consume a stream to EOF. Reading a frame at a time into one reused buffer avoids ~250 MB/s of allocator churn at 1080p30 versus the allocating form. A zero-length slice is an error, the same as a zero length was before; an unbounded one panics. For a `std.bytes` buffer, read into its writable storage and then publish the count — writing through the view does not move the buffer's length, and `bytes.to_string` reads that length: n, e = io.fd_read_into(fd, bytes.capacity_view(buf)) _ = bytes.set_length(buf, n)          // &lt;- required before to_string s = bytes.to_string(buf, n) A caller passing the bytes straight on (another write, the video case) uses `buf[0..n]` and never needs set_length.</p>
     </div>
     <div class="function" id="fd_read_line" data-name="fd_read_line">
       <h3 class="function-name">fd_read_line <span class="kind">fn</span></h3>

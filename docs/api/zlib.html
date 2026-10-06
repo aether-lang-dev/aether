@@ -16,21 +16,33 @@
   <h2>Exports</h2>
   <ul class="function-nav">
     <li><a href="#backend_available">backend_available</a></li>
-    <li><a href="#try_deflate">try_deflate</a></li>
     <li><a href="#get_deflate_bytes">get_deflate_bytes</a></li>
     <li><a href="#get_deflate_length">get_deflate_length</a></li>
     <li><a href="#release_deflate">release_deflate</a></li>
-    <li><a href="#try_inflate">try_inflate</a></li>
     <li><a href="#get_inflate_bytes">get_inflate_bytes</a></li>
     <li><a href="#get_inflate_length">get_inflate_length</a></li>
     <li><a href="#release_inflate">release_inflate</a></li>
-    <li><a href="#try_gzip_deflate">try_gzip_deflate</a></li>
-    <li><a href="#try_gzip_inflate">try_gzip_inflate</a></li>
+    <li><a href="#try_stream_new">try_stream_new</a></li>
+    <li><a href="#try_stream_flush">try_stream_flush</a></li>
+    <li><a href="#try_stream_finish">try_stream_finish</a></li>
+    <li><a href="#get_stream_bytes">get_stream_bytes</a></li>
+    <li><a href="#get_stream_length">get_stream_length</a></li>
+    <li><a href="#release_stream">release_stream</a></li>
     <li><a href="#available">available</a></li>
     <li><a href="#deflate">deflate</a></li>
     <li><a href="#inflate">inflate</a></li>
     <li><a href="#gzip_deflate">gzip_deflate</a></li>
     <li><a href="#gzip_inflate">gzip_inflate</a></li>
+    <li><a href="#deflate_raw">deflate_raw</a></li>
+    <li><a href="#inflate_raw">inflate_raw</a></li>
+    <li><a href="#stream_new">stream_new</a></li>
+    <li><a href="#stream_write">stream_write</a></li>
+    <li><a href="#stream_flush">stream_flush</a></li>
+    <li><a href="#stream_finish">stream_finish</a></li>
+    <li><a href="#stream_free">stream_free</a></li>
+    <li><a href="#RAW">RAW</a></li>
+    <li><a href="#ZLIB">ZLIB</a></li>
+    <li><a href="#GZIP">GZIP</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -42,13 +54,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -59,11 +75,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -71,28 +92,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li class="active"><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -107,12 +148,6 @@
       <pre class="usage"><code>backend_available() <span class="arrow">-&gt;</span> int</code></pre>
       <p class="doc">Probe: returns 1 when the toolchain was built with zlib detected, 0 otherwise. Lets callers / tests distinguish &quot;no backend&quot; from &quot;backend returned an error at runtime&quot;. C-side name is `zlib_backend_available` to avoid colliding with the Aether-side `zlib.available()` wrapper's mangled name.</p>
     </div>
-    <div class="function" id="try_deflate" data-name="try_deflate">
-      <h3 class="function-name">try_deflate <span class="kind">extern</span></h3>
-      <pre class="usage"><code>try_deflate(data, length, level) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int, level: int</span></p>
-      <p class="doc">Split-accessor boundary: try_ performs the op and stashes the result in a TLS buffer; get_ returns a borrowed pointer and length; release_ frees early (otherwise the buffer is freed on the next try_ call on the same thread).</p>
-    </div>
     <div class="function" id="get_deflate_bytes" data-name="get_deflate_bytes">
       <h3 class="function-name">get_deflate_bytes <span class="kind">extern</span></h3>
       <pre class="usage"><code>get_deflate_bytes() <span class="arrow">-&gt;</span> string</code></pre>
@@ -124,11 +159,6 @@
     <div class="function" id="release_deflate" data-name="release_deflate">
       <h3 class="function-name">release_deflate <span class="kind">extern</span></h3>
       <pre class="usage"><code>release_deflate()</code></pre>
-    </div>
-    <div class="function" id="try_inflate" data-name="try_inflate">
-      <h3 class="function-name">try_inflate <span class="kind">extern</span></h3>
-      <pre class="usage"><code>try_inflate(data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
     </div>
     <div class="function" id="get_inflate_bytes" data-name="get_inflate_bytes">
       <h3 class="function-name">get_inflate_bytes <span class="kind">extern</span></h3>
@@ -142,42 +172,118 @@
       <h3 class="function-name">release_inflate <span class="kind">extern</span></h3>
       <pre class="usage"><code>release_inflate()</code></pre>
     </div>
-    <div class="function" id="try_gzip_deflate" data-name="try_gzip_deflate">
-      <h3 class="function-name">try_gzip_deflate <span class="kind">extern</span></h3>
-      <pre class="usage"><code>try_gzip_deflate(data, length, level) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int, level: int</span></p>
+    <div class="function" id="try_stream_new" data-name="try_stream_new">
+      <h3 class="function-name">try_stream_new <span class="kind">extern</span></h3>
+      <pre class="usage"><code>try_stream_new(format, level) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">format: int, level: int</span></p>
+      <p class="doc">Streaming deflate (#1890). The handle keeps ONE deflate stream open across many writes, so a long-lived response (an SSE connection, a chunked body) is a single continuous stream the client can decode.</p>
     </div>
-    <div class="function" id="try_gzip_inflate" data-name="try_gzip_inflate">
-      <h3 class="function-name">try_gzip_inflate <span class="kind">extern</span></h3>
-      <pre class="usage"><code>try_gzip_inflate(data, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+    <div class="function" id="try_stream_flush" data-name="try_stream_flush">
+      <h3 class="function-name">try_stream_flush <span class="kind">extern</span></h3>
+      <pre class="usage"><code>try_stream_flush(handle) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+    </div>
+    <div class="function" id="try_stream_finish" data-name="try_stream_finish">
+      <h3 class="function-name">try_stream_finish <span class="kind">extern</span></h3>
+      <pre class="usage"><code>try_stream_finish(handle) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+    </div>
+    <div class="function" id="get_stream_bytes" data-name="get_stream_bytes">
+      <h3 class="function-name">get_stream_bytes <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_stream_bytes(handle) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+    </div>
+    <div class="function" id="get_stream_length" data-name="get_stream_length">
+      <h3 class="function-name">get_stream_length <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_stream_length(handle) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+    </div>
+    <div class="function" id="release_stream" data-name="release_stream">
+      <h3 class="function-name">release_stream <span class="kind">extern</span></h3>
+      <pre class="usage"><code>release_stream(handle)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
     </div>
     <div class="function" id="available" data-name="available">
       <h3 class="function-name">available <span class="kind">fn</span></h3>
       <pre class="usage"><code>available() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Compress `length` bytes of `data` at the given level (0..9, or -1 for the library default). Returns (bytes, byte_count, &quot;&quot;) on success, (&quot;&quot;, 0, error) on failure. The returned string is length-aware: string.length(bytes) == byte_count. Alias for the capability probe. Use when skipping a test or choosing a fallback path.</p>
+      <p class="doc">Compress the bytes of `data` at the given level (0..9, or -1 for the library default). Returns (bytes, byte_count, &quot;&quot;) on success, (&quot;&quot;, 0, error) on failure. The returned string is length-aware: string.length(bytes) == byte_count. Alias for the capability probe. Use when skipping a test or choosing a fallback path.</p>
     </div>
     <div class="function" id="deflate" data-name="deflate">
       <h3 class="function-name">deflate <span class="kind">fn</span></h3>
-      <pre class="usage"><code>deflate(data, length, level) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int, level: int</span></p>
+      <pre class="usage"><code>deflate(data, level)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[], level: int</span></p>
     </div>
     <div class="function" id="inflate" data-name="inflate">
       <h3 class="function-name">inflate <span class="kind">fn</span></h3>
-      <pre class="usage"><code>inflate(data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
-      <p class="doc">Decompress `length` bytes of `data` (a zlib stream — RFC 1950). Returns (bytes, byte_count, &quot;&quot;) on success, (&quot;&quot;, 0, error) on corruption, truncation, or empty input. The output buffer grows geometrically — callers don't need to know the decompressed size in advance.</p>
+      <pre class="usage"><code>inflate(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Decompress the bytes of `data` (a zlib stream — RFC 1950). Returns (bytes, byte_count, &quot;&quot;) on success, (&quot;&quot;, 0, error) on corruption, truncation, or empty input. The output buffer grows geometrically — callers don't need to know the decompressed size in advance.</p>
     </div>
     <div class="function" id="gzip_deflate" data-name="gzip_deflate">
       <h3 class="function-name">gzip_deflate <span class="kind">fn</span></h3>
-      <pre class="usage"><code>gzip_deflate(data, length, level) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int, level: int</span></p>
+      <pre class="usage"><code>gzip_deflate(data, level)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[], level: int</span></p>
       <p class="doc">gzip-framed siblings (RFC 1952), intended for HTTP Content-Encoding: gzip.</p>
     </div>
     <div class="function" id="gzip_inflate" data-name="gzip_inflate">
       <h3 class="function-name">gzip_inflate <span class="kind">fn</span></h3>
-      <pre class="usage"><code>gzip_inflate(data, length) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">data: string, length: int</span></p>
+      <pre class="usage"><code>gzip_inflate(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+    </div>
+    <div class="function" id="deflate_raw" data-name="deflate_raw">
+      <h3 class="function-name">deflate_raw <span class="kind">fn</span></h3>
+      <pre class="usage"><code>deflate_raw(data, level)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[], level: int</span></p>
+      <p class="doc">Raw DEFLATE (RFC 1951) — no zlib/gzip wrapper — the COMPRESSING side. This is the framing a ZIP entry stores for method 8: the archive's central directory carries the sizes and CRC, so the stream has no header of its own. `level` is 0..9 (0 = store, 9 = best); -1 for the zlib default. std.zip's writer is the primary caller.</p>
+    </div>
+    <div class="function" id="inflate_raw" data-name="inflate_raw">
+      <h3 class="function-name">inflate_raw <span class="kind">fn</span></h3>
+      <pre class="usage"><code>inflate_raw(data)</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">Raw DEFLATE (RFC 1951) — no zlib/gzip wrapper — the DECOMPRESSING side. This is the framing a ZIP entry stores for method 8 (deflate): the archive's central directory carries the sizes and CRC, so the stream itself has no header. std.zip is the primary caller.</p>
+    </div>
+    <div class="function" id="stream_new" data-name="stream_new">
+      <h3 class="function-name">stream_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_new(format, level) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">format: int, level: int</span></p>
+      <p class="doc">Open a stream. Returns (handle, &quot;&quot;) on success, (null, error) when zlib is absent, the format/level is out of range, or allocation fails. Every other stream call needs the handle, so an unavailable backend fails HERE rather than silently producing nothing later.</p>
+    </div>
+    <div class="function" id="stream_write" data-name="stream_write">
+      <h3 class="function-name">stream_write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_write(handle, data)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr, data: byte[]</span></p>
+      <p class="doc">Feed bytes into the stream. Returns (bytes, byte_count, &quot;&quot;) -- and the byte count is USUALLY 0, because deflate buffers internally for compression ratio. Emit whatever comes back, then call stream_flush when the event is complete.</p>
+    </div>
+    <div class="function" id="stream_flush" data-name="stream_flush">
+      <h3 class="function-name">stream_flush <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_flush(handle) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Z_SYNC_FLUSH: emit everything buffered and end on a byte boundary the decoder can consume, WITHOUT closing the stream. This is the call that makes per-event streaming work.</p>
+    </div>
+    <div class="function" id="stream_finish" data-name="stream_finish">
+      <h3 class="function-name">stream_finish <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_finish(handle) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Z_FINISH: emit the tail and any trailer. The handle takes no further writes; calling it twice is harmless and yields no bytes the second time. Still requires stream_free afterwards.</p>
+    </div>
+    <div class="function" id="stream_free" data-name="stream_free">
+      <h3 class="function-name">stream_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_free(handle)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Release the handle. Safe on null.</p>
+    </div>
+    <div class="function" id="RAW" data-name="RAW">
+      <h3 class="function-name">RAW <span class="kind">const</span></h3>
+      <pre class="usage"><code>RAW = 0</code></pre>
+      <p class="doc">Framing for stream_new. RAW is bare DEFLATE (RFC 1951), ZLIB adds the RFC 1950 wrapper, GZIP the RFC 1952 one -- the last is what `Content-Encoding: gzip` means.</p>
+    </div>
+    <div class="function" id="ZLIB" data-name="ZLIB">
+      <h3 class="function-name">ZLIB <span class="kind">const</span></h3>
+      <pre class="usage"><code>ZLIB = 1</code></pre>
+    </div>
+    <div class="function" id="GZIP" data-name="GZIP">
+      <h3 class="function-name">GZIP <span class="kind">const</span></h3>
+      <pre class="usage"><code>GZIP = 2</code></pre>
     </div>
   </div>
 </main>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>truetype - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search truetype..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#Typeface">Typeface</a></li>
+    <li><a href="#GlyphPoints">GlyphPoints</a></li>
+    <li><a href="#GlyphOutline">GlyphOutline</a></li>
+    <li><a href="#load">load</a></li>
+    <li><a href="#load_bytes">load_bytes</a></li>
+    <li><a href="#typeface_free">typeface_free</a></li>
+    <li><a href="#last_error">last_error</a></li>
+    <li><a href="#glyph_index">glyph_index</a></li>
+    <li><a href="#advance">advance</a></li>
+    <li><a href="#left_bearing">left_bearing</a></li>
+    <li><a href="#kerning">kerning</a></li>
+    <li><a href="#glyph_bounds">glyph_bounds</a></li>
+    <li><a href="#full_name">full_name</a></li>
+    <li><a href="#is_monospace">is_monospace</a></li>
+    <li><a href="#is_serif">is_serif</a></li>
+    <li><a href="#glyph_points">glyph_points</a></li>
+    <li><a href="#points_free">points_free</a></li>
+    <li><a href="#point_x">point_x</a></li>
+    <li><a href="#point_y">point_y</a></li>
+    <li><a href="#point_on">point_on</a></li>
+    <li><a href="#contour_end">contour_end</a></li>
+    <li><a href="#outline">outline</a></li>
+    <li><a href="#outline_free">outline_free</a></li>
+    <li><a href="#segment">segment</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li class="active"><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>truetype</h1>
+    <p class="module-desc">std.truetype: a TrueType font read from its bytes (#2365).</p>
+    <p class="import-line"><code>import std.truetype</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="Typeface" data-name="Typeface">
+      <h3 class="function-name">Typeface <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct Typeface</code></pre>
+      <p class="doc">A font, as the tables it was read from: offsets into its bytes.</p>
+    </div>
+    <div class="function" id="GlyphPoints" data-name="GlyphPoints">
+      <h3 class="function-name">GlyphPoints <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct GlyphPoints</code></pre>
+      <p class="doc">A glyph's points: font units, each on or off the curve, and the index of each contour's last point. A compound glyph's components arrive placed.</p>
+    </div>
+    <div class="function" id="GlyphOutline" data-name="GlyphOutline">
+      <h3 class="function-name">GlyphOutline <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct GlyphOutline</code></pre>
+      <p class="doc">A glyph's outline as line segments: font units times a scale, y up, the pen's origin at 0.</p>
+    </div>
+    <div class="function" id="load" data-name="load">
+      <h3 class="function-name">load <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load(path) <span class="arrow">-&gt;</span> *Typeface</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">The font at `path`, or null with last_error() saying why.</p>
+    </div>
+    <div class="function" id="load_bytes" data-name="load_bytes">
+      <h3 class="function-name">load_bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>load_bytes(data, size, name) <span class="arrow">-&gt;</span> *Typeface</code></pre>
+      <p class="signature"><span class="sig-params">data: ptr, size: int, name: string</span></p>
+      <p class="doc">A font already in memory (a pack's entry, say): its `size` bytes are copied, and `name` is what errors call it.</p>
+    </div>
+    <div class="function" id="typeface_free" data-name="typeface_free">
+      <h3 class="function-name">typeface_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>typeface_free(f)</code></pre>
+      <p class="signature"><span class="sig-params">f</span></p>
+    </div>
+    <div class="function" id="last_error" data-name="last_error">
+      <h3 class="function-name">last_error <span class="kind">fn</span></h3>
+      <pre class="usage"><code>last_error() <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="doc">What the last failed load, glyph_points or outline found wrong.</p>
+    </div>
+    <div class="function" id="glyph_index" data-name="glyph_index">
+      <h3 class="function-name">glyph_index <span class="kind">fn</span></h3>
+      <pre class="usage"><code>glyph_index(f, codepoint) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, codepoint: int</span></p>
+      <p class="doc">The font's glyph for a Unicode codepoint; 0, the missing glyph, when it has none.</p>
+    </div>
+    <div class="function" id="advance" data-name="advance">
+      <h3 class="function-name">advance <span class="kind">fn</span></h3>
+      <pre class="usage"><code>advance(f, glyph) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, glyph: int</span></p>
+      <p class="doc">How far the pen moves after a glyph, in em units.</p>
+    </div>
+    <div class="function" id="left_bearing" data-name="left_bearing">
+      <h3 class="function-name">left_bearing <span class="kind">fn</span></h3>
+      <pre class="usage"><code>left_bearing(f, glyph) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, glyph: int</span></p>
+      <p class="doc">The glyph's left edge right of the pen, em units.</p>
+    </div>
+    <div class="function" id="kerning" data-name="kerning">
+      <h3 class="function-name">kerning <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kerning(f, left, right) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, left: int, right: int</span></p>
+      <p class="doc">The adjustment between two glyphs, em units: negative draws them closer.</p>
+    </div>
+    <div class="function" id="glyph_bounds" data-name="glyph_bounds">
+      <h3 class="function-name">glyph_bounds <span class="kind">fn</span></h3>
+      <pre class="usage"><code>glyph_bounds(f, glyph) <span class="arrow">-&gt;</span> (int, int, int, int)</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, glyph: int</span></p>
+      <p class="doc">A glyph's box as glyf's header gives it, em units: (x_min, y_min, x_max, y_max); all 0 for a glyph with no outline or one outside the font.</p>
+    </div>
+    <div class="function" id="full_name" data-name="full_name">
+      <h3 class="function-name">full_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>full_name(f) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface</span></p>
+      <p class="doc">The face's full name (&quot;DejaVu Sans Bold&quot;), `name` record 4. The English Macintosh record (plain bytes) is preferred, then the English Windows record (UTF-16BE, its Latin-1 characters kept), then any record 4: fonts carry the same name in several languages, and a non-English record would give another script's name. &quot;&quot; when the font names itself nowhere.</p>
+    </div>
+    <div class="function" id="is_monospace" data-name="is_monospace">
+      <h3 class="function-name">is_monospace <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_monospace(f) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface</span></p>
+      <p class="doc">Fixed pitch, as `post` declares it (isFixedPitch). False when the font carries no `post` table.</p>
+    </div>
+    <div class="function" id="is_serif" data-name="is_serif">
+      <h3 class="function-name">is_serif <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_serif(f) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface</span></p>
+      <p class="doc">A serif face, as OS/2's PANOSE declares it: family kind 2 (Latin text) with a serif style of 2 to 10 (11 to 15 are the sans styles). False when the font carries no OS/2 table or classifies itself otherwise.</p>
+    </div>
+    <div class="function" id="glyph_points" data-name="glyph_points">
+      <h3 class="function-name">glyph_points <span class="kind">fn</span></h3>
+      <pre class="usage"><code>glyph_points(f, glyph) <span class="arrow">-&gt;</span> *GlyphPoints</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, glyph: int</span></p>
+      <p class="doc">A glyph's points and contours, font units: empty for a glyph with nothing to draw (a space), null for one the font cannot give, with last_error() saying why. points_free releases it.</p>
+    </div>
+    <div class="function" id="points_free" data-name="points_free">
+      <h3 class="function-name">points_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>points_free(p)</code></pre>
+      <p class="signature"><span class="sig-params">p: *GlyphPoints</span></p>
+    </div>
+    <div class="function" id="point_x" data-name="point_x">
+      <h3 class="function-name">point_x <span class="kind">fn</span></h3>
+      <pre class="usage"><code>point_x(p, i) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">p: *GlyphPoints, i: int</span></p>
+      <p class="doc">Point i of a glyph, font units.</p>
+    </div>
+    <div class="function" id="point_y" data-name="point_y">
+      <h3 class="function-name">point_y <span class="kind">fn</span></h3>
+      <pre class="usage"><code>point_y(p, i) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">p: *GlyphPoints, i: int</span></p>
+    </div>
+    <div class="function" id="point_on" data-name="point_on">
+      <h3 class="function-name">point_on <span class="kind">fn</span></h3>
+      <pre class="usage"><code>point_on(p, i) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">p: *GlyphPoints, i: int</span></p>
+      <p class="doc">Whether point i is on the curve (false: a quadratic's control point).</p>
+    </div>
+    <div class="function" id="contour_end" data-name="contour_end">
+      <h3 class="function-name">contour_end <span class="kind">fn</span></h3>
+      <pre class="usage"><code>contour_end(p, c) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: *GlyphPoints, c: int</span></p>
+      <p class="doc">The index of contour c's last point.</p>
+    </div>
+    <div class="function" id="outline" data-name="outline">
+      <h3 class="function-name">outline <span class="kind">fn</span></h3>
+      <pre class="usage"><code>outline(f, glyph, scale, tolerance) <span class="arrow">-&gt;</span> *GlyphOutline</code></pre>
+      <p class="signature"><span class="sig-params">f: *Typeface, glyph: int, scale: float, tolerance: float</span></p>
+      <p class="doc">A glyph's outline as segments, in font units times `scale` (pixels when scale is pixels per em over units per em), curves within `tolerance` of true. Empty for a glyph with nothing to draw; null for one the font cannot give, with last_error() saying why.</p>
+    </div>
+    <div class="function" id="outline_free" data-name="outline_free">
+      <h3 class="function-name">outline_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>outline_free(o)</code></pre>
+      <p class="signature"><span class="sig-params">o: *GlyphOutline</span></p>
+    </div>
+    <div class="function" id="segment" data-name="segment">
+      <h3 class="function-name">segment <span class="kind">fn</span></h3>
+      <pre class="usage"><code>segment(o, k) <span class="arrow">-&gt;</span> (float, float, float, float)</code></pre>
+      <p class="signature"><span class="sig-params">o: *GlyphOutline, k: int</span></p>
+      <p class="doc">Segment k of an outline: (x0, y0, x1, y1).</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

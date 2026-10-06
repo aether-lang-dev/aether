@@ -80,6 +80,14 @@ main() {
     // i32x4 there would reinterpret the register and scramble the lanes
     pm = p > lanes.splat2(2.0)   // 1.5 no, 2.5 yes
     println("f64mask ${lanes.mask2_lane(pm, 0)} ${lanes.mask2_lane(pm, 1)} ${lanes.any2(pm)} ${lanes.all2(pm)} ${lanes.sum2(lanes.select2(pm, p, q))}")
+
+    // A lane read on a local bound from a unary expression. The early
+    // inference pass does not type unary nodes, so `inv.x` reached the C as
+    // a member access on a vector, which does not compile.
+    inv = ~sm
+    neg = -a
+    twice = neg * 2.0   // the unary-bound local in arithmetic: it had no type
+    println("unary ${inv.x} ${inv.w} ${neg.x} ${neg.w} ${twice.w}")
 }
 AE
 want='arith 3 5 7 9 24
@@ -90,7 +98,8 @@ mem 10 26 6 12
 f64x2 3 5 3.5 5
 masks -1 0 true
 splat 0 -1 true
-f64mask 0 -1 true false 4.5'
+f64mask 0 -1 true false 4.5
+unary -1 0 -1 -4 -8'
 got="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] lane_types: program output differs"
@@ -151,6 +160,81 @@ main() {
 AE
 if "$AE" run "$tmp/bad3.ae" >/dev/null 2>&1; then
     echo "  [FAIL] lane_types: f32x4 + f64x2 was accepted"
+    fail=1
+fi
+# `%` and `~` have no meaning on float lanes. Both used to pass the checker
+# and fail in the C compiler on an invalid operand; they are refused at the
+# source line now, while the integer lanes keep them.
+cat > "$tmp/bad4.ae" <<'AE'
+import std.lanes
+main() {
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    r = a % lanes.splat4(1.5)
+    println("${r.x}")
+}
+AE
+out="$("$AE" run "$tmp/bad4.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "Invalid operation for given types"; then
+    echo "  [FAIL] lane_types: '%' on an f32x4 was not refused by the type checker"
+    printf '%s\n' "$out" | head -3 | sed 's/^/        /'
+    fail=1
+fi
+cat > "$tmp/bad5.ae" <<'AE'
+import std.lanes
+main() {
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    r = ~a
+    println("${r.x}")
+}
+AE
+out="$("$AE" run "$tmp/bad5.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "'~' is not defined on f32x4"; then
+    echo "  [FAIL] lane_types: '~' on an f32x4 was not refused by the type checker"
+    printf '%s\n' "$out" | head -3 | sed 's/^/        /'
+    fail=1
+fi
+cat > "$tmp/bad6.ae" <<'AE'
+import std.lanes
+main() {
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    w = lanes.splat8(1.0)
+    println("${lanes.sum8(w + a)}")
+}
+AE
+out="$("$AE" run "$tmp/bad6.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "Invalid operation for given types"; then
+    echo "  [FAIL] lane_types: f32x8 + f32x4 was not refused by the type checker"
+    printf '%s\n' "$out" | head -3 | sed 's/^/        /'
+    fail=1
+fi
+# A mask is not a bool: `&&` and `!` on one are refused at the source line
+# (they were typed bool and failed in the C compiler).
+cat > "$tmp/bad7.ae" <<'AE'
+import std.lanes
+main() {
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    m = a > 1.0
+    if m && m { println("x") }
+}
+AE
+out="$("$AE" run "$tmp/bad7.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "Invalid operation for given types"; then
+    echo "  [FAIL] lane_types: '&&' on masks was not refused by the type checker"
+    printf '%s\n' "$out" | head -3 | sed 's/^/        /'
+    fail=1
+fi
+cat > "$tmp/bad8.ae" <<'AE'
+import std.lanes
+main() {
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    m = a > 1.0
+    if !m { println("x") }
+}
+AE
+out="$("$AE" run "$tmp/bad8.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "'!' is not defined on i32x4"; then
+    echo "  [FAIL] lane_types: '!' on a mask was not refused by the type checker"
+    printf '%s\n' "$out" | head -3 | sed 's/^/        /'
     fail=1
 fi
 

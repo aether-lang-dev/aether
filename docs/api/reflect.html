@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>reflect - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search reflect..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#aether_schema_name">aether_schema_name</a></li>
+    <li><a href="#aether_schema_size">aether_schema_size</a></li>
+    <li><a href="#aether_schema_field_count">aether_schema_field_count</a></li>
+    <li><a href="#aether_schema_field_index">aether_schema_field_index</a></li>
+    <li><a href="#aether_schema_field_name">aether_schema_field_name</a></li>
+    <li><a href="#aether_schema_field_type">aether_schema_field_type</a></li>
+    <li><a href="#aether_schema_field_kind">aether_schema_field_kind</a></li>
+    <li><a href="#aether_schema_field_elem_kind">aether_schema_field_elem_kind</a></li>
+    <li><a href="#aether_schema_field_len">aether_schema_field_len</a></li>
+    <li><a href="#aether_schema_field_offset">aether_schema_field_offset</a></li>
+    <li><a href="#aether_schema_field_size">aether_schema_field_size</a></li>
+    <li><a href="#aether_schema_field_heap_offset">aether_schema_field_heap_offset</a></li>
+    <li><a href="#aether_schema_field_schema">aether_schema_field_schema</a></li>
+    <li><a href="#aether_schema_attr_count">aether_schema_attr_count</a></li>
+    <li><a href="#aether_schema_attr_index">aether_schema_attr_index</a></li>
+    <li><a href="#aether_schema_attr_name">aether_schema_attr_name</a></li>
+    <li><a href="#aether_schema_attr_arg_count">aether_schema_attr_arg_count</a></li>
+    <li><a href="#aether_schema_attr_arg_kind">aether_schema_attr_arg_kind</a></li>
+    <li><a href="#aether_schema_attr_int">aether_schema_attr_int</a></li>
+    <li><a href="#aether_schema_attr_float">aether_schema_attr_float</a></li>
+    <li><a href="#aether_schema_attr_text">aether_schema_attr_text</a></li>
+    <li><a href="#KIND_OTHER">KIND_OTHER</a></li>
+    <li><a href="#KIND_BOOL">KIND_BOOL</a></li>
+    <li><a href="#KIND_BYTE">KIND_BYTE</a></li>
+    <li><a href="#KIND_INT">KIND_INT</a></li>
+    <li><a href="#KIND_LONG">KIND_LONG</a></li>
+    <li><a href="#KIND_UINT8">KIND_UINT8</a></li>
+    <li><a href="#KIND_UINT16">KIND_UINT16</a></li>
+    <li><a href="#KIND_UINT32">KIND_UINT32</a></li>
+    <li><a href="#KIND_ULONG">KIND_ULONG</a></li>
+    <li><a href="#KIND_FLOAT">KIND_FLOAT</a></li>
+    <li><a href="#KIND_F32">KIND_F32</a></li>
+    <li><a href="#KIND_LONGDOUBLE">KIND_LONGDOUBLE</a></li>
+    <li><a href="#KIND_DURATION">KIND_DURATION</a></li>
+    <li><a href="#KIND_STRING">KIND_STRING</a></li>
+    <li><a href="#KIND_PTR">KIND_PTR</a></li>
+    <li><a href="#KIND_STRUCT">KIND_STRUCT</a></li>
+    <li><a href="#KIND_ARRAY">KIND_ARRAY</a></li>
+    <li><a href="#KIND_SLICE">KIND_SLICE</a></li>
+    <li><a href="#KIND_ENUM">KIND_ENUM</a></li>
+    <li><a href="#KIND_FN">KIND_FN</a></li>
+    <li><a href="#ARG_INT">ARG_INT</a></li>
+    <li><a href="#ARG_FLOAT">ARG_FLOAT</a></li>
+    <li><a href="#ARG_STRING">ARG_STRING</a></li>
+    <li><a href="#ARG_BOOL">ARG_BOOL</a></li>
+    <li><a href="#name">name</a></li>
+    <li><a href="#size">size</a></li>
+    <li><a href="#field_count">field_count</a></li>
+    <li><a href="#field_index">field_index</a></li>
+    <li><a href="#field_name">field_name</a></li>
+    <li><a href="#field_type">field_type</a></li>
+    <li><a href="#field_kind">field_kind</a></li>
+    <li><a href="#field_elem_kind">field_elem_kind</a></li>
+    <li><a href="#field_len">field_len</a></li>
+    <li><a href="#field_offset">field_offset</a></li>
+    <li><a href="#field_size">field_size</a></li>
+    <li><a href="#field_heap_offset">field_heap_offset</a></li>
+    <li><a href="#field_schema">field_schema</a></li>
+    <li><a href="#attr_count">attr_count</a></li>
+    <li><a href="#attr_index">attr_index</a></li>
+    <li><a href="#has_attr">has_attr</a></li>
+    <li><a href="#attr_name">attr_name</a></li>
+    <li><a href="#attr_arg_count">attr_arg_count</a></li>
+    <li><a href="#attr_arg_kind">attr_arg_kind</a></li>
+    <li><a href="#attr_int">attr_int</a></li>
+    <li><a href="#attr_float">attr_float</a></li>
+    <li><a href="#attr_text">attr_text</a></li>
+    <li><a href="#kind_name">kind_name</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li class="active"><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>reflect</h1>
+    <p class="module-desc">std.reflect — read the field tables `@derive(schema)` emits (#2298) `@derive(schema)` on a struct makes the compiler emit, as static constant data, a table of the struct's fields: each one's name, type, offset and size, and the `@attr(...)` attributes written after its type.</p>
+    <p class="import-line"><code>import std.reflect</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="aether_schema_name" data-name="aether_schema_name">
+      <h3 class="function-name">aether_schema_name <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_name(s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">---- raw externs (runtime/aether_schema.c) ---- The C convention: a missing name is null. The wrappers below read it as &quot;&quot;.</p>
+    </div>
+    <div class="function" id="aether_schema_size" data-name="aether_schema_size">
+      <h3 class="function-name">aether_schema_size <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_size(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_count" data-name="aether_schema_field_count">
+      <h3 class="function-name">aether_schema_field_count <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_count(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_index" data-name="aether_schema_field_index">
+      <h3 class="function-name">aether_schema_field_index <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_index(s, name) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, name: string</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_name" data-name="aether_schema_field_name">
+      <h3 class="function-name">aether_schema_field_name <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_name(s, field) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_type" data-name="aether_schema_field_type">
+      <h3 class="function-name">aether_schema_field_type <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_type(s, field) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_kind" data-name="aether_schema_field_kind">
+      <h3 class="function-name">aether_schema_field_kind <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_kind(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_elem_kind" data-name="aether_schema_field_elem_kind">
+      <h3 class="function-name">aether_schema_field_elem_kind <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_elem_kind(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_len" data-name="aether_schema_field_len">
+      <h3 class="function-name">aether_schema_field_len <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_len(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_offset" data-name="aether_schema_field_offset">
+      <h3 class="function-name">aether_schema_field_offset <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_offset(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_size" data-name="aether_schema_field_size">
+      <h3 class="function-name">aether_schema_field_size <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_size(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_heap_offset" data-name="aether_schema_field_heap_offset">
+      <h3 class="function-name">aether_schema_field_heap_offset <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_heap_offset(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_field_schema" data-name="aether_schema_field_schema">
+      <h3 class="function-name">aether_schema_field_schema <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_field_schema(s, field) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_count" data-name="aether_schema_attr_count">
+      <h3 class="function-name">aether_schema_attr_count <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_count(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_index" data-name="aether_schema_attr_index">
+      <h3 class="function-name">aether_schema_attr_index <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_index(s, field, name) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, name: string</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_name" data-name="aether_schema_attr_name">
+      <h3 class="function-name">aether_schema_attr_name <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_name(s, field, attr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_arg_count" data-name="aether_schema_attr_arg_count">
+      <h3 class="function-name">aether_schema_attr_arg_count <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_arg_count(s, field, attr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_arg_kind" data-name="aether_schema_attr_arg_kind">
+      <h3 class="function-name">aether_schema_attr_arg_kind <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_arg_kind(s, field, attr, arg) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_int" data-name="aether_schema_attr_int">
+      <h3 class="function-name">aether_schema_attr_int <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_int(s, field, attr, arg) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_float" data-name="aether_schema_attr_float">
+      <h3 class="function-name">aether_schema_attr_float <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_float(s, field, attr, arg) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+    </div>
+    <div class="function" id="aether_schema_attr_text" data-name="aether_schema_attr_text">
+      <h3 class="function-name">aether_schema_attr_text <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_schema_attr_text(s, field, attr, arg) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+    </div>
+    <div class="function" id="KIND_OTHER" data-name="KIND_OTHER">
+      <h3 class="function-name">KIND_OTHER <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_OTHER = 0</code></pre>
+      <p class="doc">---- field kinds (runtime/aether_schema.h AETHER_SCHEMA_*) ---- The width of an integer or float kind is the field's size.</p>
+    </div>
+    <div class="function" id="KIND_BOOL" data-name="KIND_BOOL">
+      <h3 class="function-name">KIND_BOOL <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_BOOL = 1</code></pre>
+    </div>
+    <div class="function" id="KIND_BYTE" data-name="KIND_BYTE">
+      <h3 class="function-name">KIND_BYTE <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_BYTE = 2</code></pre>
+    </div>
+    <div class="function" id="KIND_INT" data-name="KIND_INT">
+      <h3 class="function-name">KIND_INT <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_INT = 3</code></pre>
+    </div>
+    <div class="function" id="KIND_LONG" data-name="KIND_LONG">
+      <h3 class="function-name">KIND_LONG <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_LONG = 4</code></pre>
+    </div>
+    <div class="function" id="KIND_UINT8" data-name="KIND_UINT8">
+      <h3 class="function-name">KIND_UINT8 <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_UINT8 = 5</code></pre>
+    </div>
+    <div class="function" id="KIND_UINT16" data-name="KIND_UINT16">
+      <h3 class="function-name">KIND_UINT16 <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_UINT16 = 6</code></pre>
+    </div>
+    <div class="function" id="KIND_UINT32" data-name="KIND_UINT32">
+      <h3 class="function-name">KIND_UINT32 <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_UINT32 = 7</code></pre>
+    </div>
+    <div class="function" id="KIND_ULONG" data-name="KIND_ULONG">
+      <h3 class="function-name">KIND_ULONG <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_ULONG = 8</code></pre>
+    </div>
+    <div class="function" id="KIND_FLOAT" data-name="KIND_FLOAT">
+      <h3 class="function-name">KIND_FLOAT <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_FLOAT = 9</code></pre>
+    </div>
+    <div class="function" id="KIND_F32" data-name="KIND_F32">
+      <h3 class="function-name">KIND_F32 <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_F32 = 10</code></pre>
+    </div>
+    <div class="function" id="KIND_LONGDOUBLE" data-name="KIND_LONGDOUBLE">
+      <h3 class="function-name">KIND_LONGDOUBLE <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_LONGDOUBLE = 11</code></pre>
+    </div>
+    <div class="function" id="KIND_DURATION" data-name="KIND_DURATION">
+      <h3 class="function-name">KIND_DURATION <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_DURATION = 12</code></pre>
+    </div>
+    <div class="function" id="KIND_STRING" data-name="KIND_STRING">
+      <h3 class="function-name">KIND_STRING <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_STRING = 13</code></pre>
+    </div>
+    <div class="function" id="KIND_PTR" data-name="KIND_PTR">
+      <h3 class="function-name">KIND_PTR <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_PTR = 14</code></pre>
+    </div>
+    <div class="function" id="KIND_STRUCT" data-name="KIND_STRUCT">
+      <h3 class="function-name">KIND_STRUCT <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_STRUCT = 15</code></pre>
+    </div>
+    <div class="function" id="KIND_ARRAY" data-name="KIND_ARRAY">
+      <h3 class="function-name">KIND_ARRAY <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_ARRAY = 16</code></pre>
+    </div>
+    <div class="function" id="KIND_SLICE" data-name="KIND_SLICE">
+      <h3 class="function-name">KIND_SLICE <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_SLICE = 17</code></pre>
+    </div>
+    <div class="function" id="KIND_ENUM" data-name="KIND_ENUM">
+      <h3 class="function-name">KIND_ENUM <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_ENUM = 18</code></pre>
+    </div>
+    <div class="function" id="KIND_FN" data-name="KIND_FN">
+      <h3 class="function-name">KIND_FN <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_FN = 19</code></pre>
+    </div>
+    <div class="function" id="ARG_INT" data-name="ARG_INT">
+      <h3 class="function-name">ARG_INT <span class="kind">const</span></h3>
+      <pre class="usage"><code>ARG_INT = 1</code></pre>
+      <p class="doc">---- attribute argument kinds ----</p>
+    </div>
+    <div class="function" id="ARG_FLOAT" data-name="ARG_FLOAT">
+      <h3 class="function-name">ARG_FLOAT <span class="kind">const</span></h3>
+      <pre class="usage"><code>ARG_FLOAT = 2</code></pre>
+    </div>
+    <div class="function" id="ARG_STRING" data-name="ARG_STRING">
+      <h3 class="function-name">ARG_STRING <span class="kind">const</span></h3>
+      <pre class="usage"><code>ARG_STRING = 3</code></pre>
+    </div>
+    <div class="function" id="ARG_BOOL" data-name="ARG_BOOL">
+      <h3 class="function-name">ARG_BOOL <span class="kind">const</span></h3>
+      <pre class="usage"><code>ARG_BOOL = 4</code></pre>
+    </div>
+    <div class="function" id="name" data-name="name">
+      <h3 class="function-name">name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>name(s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">The struct's name (&quot;Bob&quot;).</p>
+    </div>
+    <div class="function" id="size" data-name="size">
+      <h3 class="function-name">size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>size(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">sizeof the struct, in bytes: what heap.new allocates for it.</p>
+    </div>
+    <div class="function" id="field_count" data-name="field_count">
+      <h3 class="function-name">field_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_count(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">How many fields it declares.</p>
+    </div>
+    <div class="function" id="field_index" data-name="field_index">
+      <h3 class="function-name">field_index <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_index(s, field_name) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field_name: string</span></p>
+      <p class="doc">The index of the field called `field_name`, or -1.</p>
+    </div>
+    <div class="function" id="field_name" data-name="field_name">
+      <h3 class="function-name">field_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_name(s, field) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+    </div>
+    <div class="function" id="field_type" data-name="field_type">
+      <h3 class="function-name">field_type <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_type(s, field) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">The field's type as written: &quot;float&quot;, &quot;string&quot;, &quot;*Inner&quot;, &quot;int[4]&quot;, &quot;Inner[]&quot;, &quot;Dir&quot;.</p>
+    </div>
+    <div class="function" id="field_kind" data-name="field_kind">
+      <h3 class="function-name">field_kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_kind(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">One of the KIND_* constants.</p>
+    </div>
+    <div class="function" id="field_elem_kind" data-name="field_elem_kind">
+      <h3 class="function-name">field_elem_kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_elem_kind(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">For a KIND_ARRAY or KIND_SLICE field, its element's kind; else KIND_OTHER.</p>
+    </div>
+    <div class="function" id="field_len" data-name="field_len">
+      <h3 class="function-name">field_len <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_len(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">For a KIND_ARRAY field, its element count; else 0.</p>
+    </div>
+    <div class="function" id="field_offset" data-name="field_offset">
+      <h3 class="function-name">field_offset <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_offset(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">The field's byte offset in the struct: the offset std.mem's accessors take. -1 for an index out of range.</p>
+    </div>
+    <div class="function" id="field_size" data-name="field_size">
+      <h3 class="function-name">field_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_size(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">The field's size in bytes (an array's whole size).</p>
+    </div>
+    <div class="function" id="field_heap_offset" data-name="field_heap_offset">
+      <h3 class="function-name">field_heap_offset <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_heap_offset(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">For a KIND_STRING field, the offset of the int that records whether the struct owns the string (1: a heap string it frees when the field is reassigned or the struct is destroyed). A generic writer that stores a heap string sets it to 1, and frees the old string first when it was 1. -1 for every other kind.</p>
+    </div>
+    <div class="function" id="field_schema" data-name="field_schema">
+      <h3 class="function-name">field_schema <span class="kind">fn</span></h3>
+      <pre class="usage"><code>field_schema(s, field) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">The table of the struct a field holds (KIND_STRUCT), points at (KIND_PTR to `*T`), or holds an array of (KIND_ARRAY / KIND_SLICE of structs), when that struct is an Aether struct; null otherwise.</p>
+    </div>
+    <div class="function" id="attr_count" data-name="attr_count">
+      <h3 class="function-name">attr_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_count(s, field) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int</span></p>
+      <p class="doc">How many `@attr` the field carries.</p>
+    </div>
+    <div class="function" id="attr_index" data-name="attr_index">
+      <h3 class="function-name">attr_index <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_index(s, field, attr_name) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr_name: string</span></p>
+      <p class="doc">The index of the field's attribute called `attr_name`, or -1.</p>
+    </div>
+    <div class="function" id="has_attr" data-name="has_attr">
+      <h3 class="function-name">has_attr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>has_attr(s, field, attr_name) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr_name: string</span></p>
+      <p class="doc">True when the field carries `@attr_name`.</p>
+    </div>
+    <div class="function" id="attr_name" data-name="attr_name">
+      <h3 class="function-name">attr_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_name(s, field, attr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int</span></p>
+    </div>
+    <div class="function" id="attr_arg_count" data-name="attr_arg_count">
+      <h3 class="function-name">attr_arg_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_arg_count(s, field, attr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int</span></p>
+      <p class="doc">How many arguments the attribute was written with (`@hidden` has 0).</p>
+    </div>
+    <div class="function" id="attr_arg_kind" data-name="attr_arg_kind">
+      <h3 class="function-name">attr_arg_kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_arg_kind(s, field, attr, arg) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+      <p class="doc">One of the ARG_* constants; 0 for an argument that is not there.</p>
+    </div>
+    <div class="function" id="attr_int" data-name="attr_int">
+      <h3 class="function-name">attr_int <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_int(s, field, attr, arg) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+      <p class="doc">An argument as an integer: an ARG_INT's value, an ARG_FLOAT's truncation, an ARG_BOOL's 0 or 1; 0 for a string.</p>
+    </div>
+    <div class="function" id="attr_float" data-name="attr_float">
+      <h3 class="function-name">attr_float <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_float(s, field, attr, arg) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+      <p class="doc">An argument as a float: an ARG_FLOAT's value, an ARG_INT's conversion, an ARG_BOOL's 0.0 or 1.0; 0.0 for a string.</p>
+    </div>
+    <div class="function" id="attr_text" data-name="attr_text">
+      <h3 class="function-name">attr_text <span class="kind">fn</span></h3>
+      <pre class="usage"><code>attr_text(s, field, attr, arg) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, field: int, attr: int, arg: int</span></p>
+      <p class="doc">An argument's text: an ARG_STRING's value, a number or bool as written.</p>
+    </div>
+    <div class="function" id="kind_name" data-name="kind_name">
+      <h3 class="function-name">kind_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kind_name(kind) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">kind: int</span></p>
+      <p class="doc">A KIND_* constant's name, for a diagnostic or an inspector's label.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

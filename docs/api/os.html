@@ -23,6 +23,10 @@
     <li><a href="#run_pipe_raw">run_pipe_raw</a></li>
     <li><a href="#wait_pid_raw">wait_pid_raw</a></li>
     <li><a href="#run_pipe_drain_and_wait_raw">run_pipe_drain_and_wait_raw</a></li>
+    <li><a href="#spawn_raw">spawn_raw</a></li>
+    <li><a href="#wait_raw">wait_raw</a></li>
+    <li><a href="#wait_any_raw">wait_any_raw</a></li>
+    <li><a href="#wait_any_timeout_raw">wait_any_timeout_raw</a></li>
     <li><a href="#getenv">getenv</a></li>
     <li><a href="#which">which</a></li>
     <li><a href="#aether_args_count">aether_args_count</a></li>
@@ -38,6 +42,7 @@
     <li><a href="#execv">execv</a></li>
     <li><a href="#now_utc_iso8601_raw">now_utc_iso8601_raw</a></li>
     <li><a href="#getpid_raw">getpid_raw</a></li>
+    <li><a href="#user_id_raw">user_id_raw</a></li>
     <li><a href="#exit">exit</a></li>
     <li><a href="#wall_seconds_raw">wall_seconds_raw</a></li>
     <li><a href="#wall_micros_raw">wall_micros_raw</a></li>
@@ -47,6 +52,9 @@
     <li><a href="#now_local_fill_raw">now_local_fill_raw</a></li>
     <li><a href="#now_local_iso8601_raw">now_local_iso8601_raw</a></li>
     <li><a href="#platform_raw">platform_raw</a></li>
+    <li><a href="#arch_raw">arch_raw</a></li>
+    <li><a href="#temp_dir_raw">temp_dir_raw</a></li>
+    <li><a href="#cpu_count_raw">cpu_count_raw</a></li>
     <li><a href="#io_setenv_raw">io_setenv_raw</a></li>
     <li><a href="#io_unsetenv_raw">io_unsetenv_raw</a></li>
     <li><a href="#exec">exec</a></li>
@@ -54,6 +62,7 @@
     <li><a href="#argv0">argv0</a></li>
     <li><a href="#now_utc_iso8601">now_utc_iso8601</a></li>
     <li><a href="#getpid">getpid</a></li>
+    <li><a href="#user_id">user_id</a></li>
     <li><a href="#wall_seconds">wall_seconds</a></li>
     <li><a href="#wall_micros">wall_micros</a></li>
     <li><a href="#now_monotonic_ms">now_monotonic_ms</a></li>
@@ -63,11 +72,18 @@
     <li><a href="#now_local_iso8601">now_local_iso8601</a></li>
     <li><a href="#LocalTime">LocalTime</a></li>
     <li><a href="#platform">platform</a></li>
+    <li><a href="#arch">arch</a></li>
+    <li><a href="#temp_dir">temp_dir</a></li>
+    <li><a href="#cpu_count">cpu_count</a></li>
     <li><a href="#setenv">setenv</a></li>
     <li><a href="#unsetenv">unsetenv</a></li>
     <li><a href="#run_pipe">run_pipe</a></li>
     <li><a href="#wait_pid">wait_pid</a></li>
     <li><a href="#run_pipe_drain_and_wait">run_pipe_drain_and_wait</a></li>
+    <li><a href="#spawn_proc">spawn_proc</a></li>
+    <li><a href="#wait">wait</a></li>
+    <li><a href="#wait_any">wait_any</a></li>
+    <li><a href="#wait_any_timeout">wait_any_timeout</a></li>
     <li><a href="#kill_raw">kill_raw</a></li>
     <li><a href="#wait_pid_timeout_raw">wait_pid_timeout_raw</a></li>
     <li><a href="#run_supervised_raw">run_supervised_raw</a></li>
@@ -80,6 +96,10 @@
     <li><a href="#getcwd_raw">getcwd_raw</a></li>
     <li><a href="#chdir">chdir</a></li>
     <li><a href="#getcwd">getcwd</a></li>
+    <li><a href="#aether_process_resident">aether_process_resident</a></li>
+    <li><a href="#aether_process_private">aether_process_private</a></li>
+    <li><a href="#memory_resident">memory_resident</a></li>
+    <li><a href="#memory_private">memory_private</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -91,13 +111,17 @@
     <li><a href="audit.html">audit</a></li>
     <li><a href="bignum.html">bignum</a></li>
     <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
     <li><a href="bytes.html">bytes</a></li>
     <li><a href="capsicum.html">capsicum</a></li>
     <li><a href="cas.html">cas</a></li>
     <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
     <li><a href="collections.html">collections</a></li>
     <li><a href="config.html">config</a></li>
     <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
     <li><a href="deque.html">deque</a></li>
     <li><a href="dir.html">dir</a></li>
     <li><a href="dl.html">dl</a></li>
@@ -108,11 +132,16 @@
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
     <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
     <li><a href="io.html">io</a></li>
     <li><a href="ipc.html">ipc</a></li>
     <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
     <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
     <li><a href="list.html">list</a></li>
     <li><a href="log.html">log</a></li>
     <li><a href="longarr.html">longarr</a></li>
@@ -120,28 +149,48 @@
     <li><a href="map.html">map</a></li>
     <li><a href="math.html">math</a></li>
     <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
     <li><a href="nanoid.html">nanoid</a></li>
     <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
     <li class="active"><a href="os.html">os</a></li>
     <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
     <li><a href="set.html">set</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
     <li><a href="time.html">time</a></li>
     <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
     <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
     <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
     <li><a href="url.html">url</a></li>
     <li><a href="uuid.html">uuid</a></li>
     <li><a href="worker.html">worker</a></li>
     <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
     <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
   </ul>
 </nav>
 <main class="content">
@@ -185,19 +234,43 @@
       <h3 class="function-name">run_pipe_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>run_pipe_raw(prog, argv, env) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
-      <p class="doc">std.ipc back-channel spawn. Spawns a child with an inherited pipe at fd 3 (write end, child side). Sets AETHER_IPC_FD=3 in the child's environment so the child can locate the fd via std.ipc.parent_channel(). Returns (parent_read_fd, child_pid, err). Caller MUST call os.wait_pid(child_pid) to reap, or use the os.run_pipe_drain_and_wait convenience. Pipe-buffer deadlock window: if the child writes more than the OS pipe buffer (~16K macOS, ~64K Linux) without the parent reading concurrently, the child blocks on its write call and never exits. For payload-at-exit usage with small reports (e.g. Aeocha test summaries), this is fine; for larger or streaming payloads, prefer run_pipe_drain_and_wait. On Windows, returns (-1, -1, &quot;unsupported on Windows&quot;) — fall back to the file-marker pattern there.</p>
+      <p class="doc">std.ipc back-channel spawn. Spawns a child with an inherited pipe at fd 3 (write end, child side). Sets AETHER_IPC_FD=3 in the child's environment so the child can locate the fd via std.ipc.parent_channel(). Returns (parent_read_fd, child_pid, err). Caller MUST call os.wait_pid(child_pid) to reap, or use the os.run_pipe_drain_and_wait convenience. Pipe-buffer deadlock window: if the child writes more than the OS pipe buffer (~16K macOS, ~64K Linux) without the parent reading concurrently, the child blocks on its write call and never exits. For payload-at-exit usage with small reports (e.g. Aeocha test summaries), this is fine; for larger or streaming payloads, prefer run_pipe_drain_and_wait. On Windows the SPAWN works but there is no back-channel pipe: position 0 (the read fd) is always -1 there, and position 1 is a reap token (not an OS pid). For a pipe-less fan-out scheduler prefer the cross-platform spawn / wait / wait_any trio below.</p>
     </div>
     <div class="function" id="wait_pid_raw" data-name="wait_pid_raw">
       <h3 class="function-name">wait_pid_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>wait_pid_raw(pid) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">pid: int</span></p>
-      <p class="doc">Wait for a child to exit and reap it. Companion to os_run_pipe_raw. Returns (exit_code, err). Calling this once per spawn is required to avoid zombies; the run_pipe_drain_and_wait convenience does it internally for callers who don't need the read-fd loop. On Windows, returns (-1, &quot;unsupported on Windows&quot;).</p>
+      <p class="doc">Wait for a child to exit and reap it. Companion to os_run_pipe_raw. Returns (exit_code, err). Calling this once per spawn is required to avoid zombies; the run_pipe_drain_and_wait convenience does it internally for callers who don't need the read-fd loop. Cross-platform (on Windows it reaps the token os_run_pipe_raw returned).</p>
     </div>
     <div class="function" id="run_pipe_drain_and_wait_raw" data-name="run_pipe_drain_and_wait_raw">
       <h3 class="function-name">run_pipe_drain_and_wait_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>run_pipe_drain_and_wait_raw(prog, argv, env) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
       <p class="doc">Convenience: spawn child with back-channel pipe, drain pipe to EOF concurrently with the child running, wait for child, reap. Returns (channel_payload, exit_code, err). No deadlock regardless of payload size — the read loop drains continuously so the pipe buffer never fills. This is the recommended entry point for the common case &quot;child writes a structured report at exit, parent reads it after.&quot; Streaming consumers (parent reading mid-run) should use the lower-level os_run_pipe_raw + os_wait_pid_raw pair instead. On Windows, returns (&quot;&quot;, -1, &quot;unsupported on Windows&quot;). Position 0 (channel_payload) is `@heap`: the C side accumulates the drained pipe contents into a malloc'd buffer that grows via realloc. The destructured LHS owns it; the heap-string-tracker frees it on reassignment / at function exit. Position 2 (err) stays default-borrow — every error path returns a static string literal. Audited callers: no manual string.release on the channel payload anywhere in stdlib, tests/, examples/, tools/, or contrib/. See #420 follow-up.</p>
+    </div>
+    <div class="function" id="spawn_raw" data-name="spawn_raw">
+      <h3 class="function-name">spawn_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>spawn_raw(prog, argv, env) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">Spawn a child without blocking. Returns (token, err). err is &quot;&quot; on a successful spawn regardless of the child's eventual exit code.</p>
+    </div>
+    <div class="function" id="wait_raw" data-name="wait_raw">
+      <h3 class="function-name">wait_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>wait_raw(token) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">token: int</span></p>
+      <p class="doc">Reap one token. Blocks until that child exits. Returns (exit_code, err). err is non-empty only for a bad/unknown token or abnormal termination — a non-zero exit_code with err == &quot;&quot; is a normal failed child, distinct from a spawn/reap failure (exit_code -1, err set).</p>
+    </div>
+    <div class="function" id="wait_any_raw" data-name="wait_any_raw">
+      <h3 class="function-name">wait_any_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>wait_any_raw(tokens) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">tokens: ptr</span></p>
+      <p class="doc">Reap whichever of the given tokens finishes first. `tokens` is a std.list whose elements are the int tokens from spawn, each boxed INLINE via mem.long_to_ptr(token) (small ints stored as the pointer slot itself, not heap-allocated boxes). Returns (token, exit_code, err): which token completed, its exit code, and an error string. Only tokens still live (not already reaped) are waited on. Scheduler fan-in.</p>
+    </div>
+    <div class="function" id="wait_any_timeout_raw" data-name="wait_any_timeout_raw">
+      <h3 class="function-name">wait_any_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>wait_any_timeout_raw(tokens, secs) <span class="arrow">-&gt;</span> (int, int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">tokens: ptr, secs: int</span></p>
+      <p class="doc">Bounded wait-any: reap whichever token finishes first, or give up after `secs`. `tokens` is the same inline-boxed int-token list os_wait_any_raw takes. Returns (token, exit_code, timed_out, err): - timed_out == 1 → no child finished within `secs`; token is -1 and the caller decides what to kill. Live children are left running, so this is a per-CALL deadline, not a batch deadline — call it again to keep reaping the rest. Distinguishable from a child that exited non-zero (timed_out == 0, exit_code set), which is the point for a scheduler that records TIMEOUT vs FAIL differently. - secs &lt;= 0 → block indefinitely (same as os_wait_any_raw). Cross-platform: on Windows the tokens resolve through the same table as wait/wait_any, so kill() / wait_pid_timeout() on a returned token behave identically on POSIX and Windows.</p>
     </div>
     <div class="function" id="getenv" data-name="getenv">
       <h3 class="function-name">getenv <span class="kind">extern</span></h3>
@@ -264,7 +337,7 @@
       <h3 class="function-name">execv <span class="kind">extern</span></h3>
       <pre class="usage"><code>execv(prog, argv_list) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv_list: ptr</span></p>
-      <p class="doc">Replace the current process image with `prog`. `argv_list` is a list&lt;ptr&gt; of C strings (element 0 is argv[0] for the new program and does NOT need to match `prog`). On success this call never returns; on failure it returns -1 with the current process still running. `prog` is looked up on PATH if it does not contain a slash. Not available on Windows — returns -1 there.</p>
+      <p class="doc">Replace the current process image with `prog`. `argv_list` is a list&lt;ptr&gt; of C strings (element 0 is argv[0] for the new program and does NOT need to match `prog`). On success this call never returns; on failure it returns -1 with the current process still running. `prog` is looked up on PATH if it does not contain a slash. Windows cannot replace a running process: there it runs `prog`, waits, and exits with its status. -1 only when it could not be started.</p>
     </div>
     <div class="function" id="now_utc_iso8601_raw" data-name="now_utc_iso8601_raw">
       <h3 class="function-name">now_utc_iso8601_raw <span class="kind">extern</span></h3>
@@ -275,6 +348,10 @@
       <h3 class="function-name">getpid_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>getpid_raw() <span class="arrow">-&gt;</span> int</code></pre>
       <p class="doc">Process identifier of the current process. Useful for tmpfile names (`/tmp/myprog.${os.getpid()}.tmp`), per-process locks, log prefixes, and stable tagging across forked children. POSIX `getpid(2)`; Windows `_getpid()`. Returns 0 on platforms compiled without filesystem support (no-op stub).</p>
+    </div>
+    <div class="function" id="user_id_raw" data-name="user_id_raw">
+      <h3 class="function-name">user_id_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>user_id_raw() <span class="arrow">-&gt;</span> int</code></pre>
     </div>
     <div class="function" id="exit" data-name="exit">
       <h3 class="function-name">exit <span class="kind">extern</span></h3>
@@ -316,7 +393,19 @@
     <div class="function" id="platform_raw" data-name="platform_raw">
       <h3 class="function-name">platform_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>platform_raw() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">Current OS platform as a flat lowercase string. Picked at compile time from the toolchain's predefined macros. Matches Go's runtime.GOOS and Rust's std::env::consts::OS: &quot;linux&quot;      Linux kernel (any libc) &quot;darwin&quot;     macOS / iOS / any Darwin kernel &quot;windows&quot;    Windows (any toolchain) &quot;freebsd&quot;    FreeBSD &quot;openbsd&quot;    OpenBSD &quot;netbsd&quot;     NetBSD &quot;dragonfly&quot;  DragonFly BSD &quot;solaris&quot;    Solaris / illumos &quot;wasm&quot;       WebAssembly (Emscripten or wasi) &quot;unknown&quot;    None of the above matched at compile time Typical use: if os.platform() == &quot;windows&quot; { // Windows-specific path } For &quot;do I have POSIX features?&quot; the rule of thumb is `os.platform() != &quot;windows&quot; &amp;&amp; os.platform() != &quot;wasm&quot;` — but usually probing the specific capability (e.g. net.pipe_open() &lt; 0) gives a sharper answer than the platform name alone. See CONTRIBUTING.md &quot;Coding for portability&quot; for the broader pattern.</p>
+      <p class="doc">Current OS platform as a flat lowercase string. Picked at compile time from the toolchain's predefined macros. Matches Go's runtime.GOOS and Rust's std::env::consts::OS: &quot;linux&quot;      Linux kernel (any libc) &quot;darwin&quot;     macOS / iOS / any Darwin kernel &quot;windows&quot;    Windows (any toolchain) &quot;freebsd&quot;    FreeBSD &quot;openbsd&quot;    OpenBSD &quot;netbsd&quot;     NetBSD &quot;dragonfly&quot;  DragonFly BSD &quot;solaris&quot;    Solaris / illumos &quot;wasm&quot;       WebAssembly (Emscripten or wasi) &quot;unknown&quot;    None of the above matched at compile time Typical use: if os.platform() == &quot;windows&quot; { // Windows-specific path } For &quot;do I have POSIX features?&quot; the rule of thumb is `os.platform() != &quot;windows&quot; &amp;&amp; os.platform() != &quot;wasm&quot;` — but usually probing the specific capability (e.g. net.pipe_open() &lt; 0) gives a sharper answer than the platform name alone. See CONTRIBUTING.md &quot;Coding for portability&quot; for the broader pattern. Both strdup a fresh char* (or null); `@heap` so the heap-tracker frees it. Without it the string_concat below leaked the original (the macOS leaks gate caught this via a test that calls temp_dir()).</p>
+    </div>
+    <div class="function" id="arch_raw" data-name="arch_raw">
+      <h3 class="function-name">arch_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>arch_raw() <span class="arrow">-&gt;</span> string</code></pre>
+    </div>
+    <div class="function" id="temp_dir_raw" data-name="temp_dir_raw">
+      <h3 class="function-name">temp_dir_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>temp_dir_raw() <span class="arrow">-&gt;</span> string</code></pre>
+    </div>
+    <div class="function" id="cpu_count_raw" data-name="cpu_count_raw">
+      <h3 class="function-name">cpu_count_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cpu_count_raw() <span class="arrow">-&gt;</span> int</code></pre>
     </div>
     <div class="function" id="io_setenv_raw" data-name="io_setenv_raw">
       <h3 class="function-name">io_setenv_raw <span class="kind">extern</span></h3>
@@ -339,7 +428,7 @@
       <h3 class="function-name">run_capture <span class="kind">fn</span></h3>
       <pre class="usage"><code>run_capture(prog, argv, env) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
-      <p class="doc">Run a child process and capture its stdout. Returns `(output, status, err)`: - output: child's stdout. Empty string on spawn failure. - status: child's exit code (WEXITSTATUS) on normal exit; -1 when killed by signal or the spawn itself failed. - err:    &quot;&quot; on successful spawn regardless of exit code; non-empty only when the fork/exec couldn't run. Argv-based — no shell, no quoting issues. The status slot lets callers distinguish &quot;ran cleanly&quot; (status == 0) from &quot;ran but exited non-zero&quot; (e.g. `diff3 -m` returning 1 to signal conflicts, `grep` returning 1 for no-match, `gcc` returning non-zero on compile errors). Issue #289.</p>
+      <p class="doc">Run a child process and capture its stdout. Returns `(output, status, err)`: - output: child's stdout. Empty string on spawn failure. - status: child's exit code on normal exit; 128+signo when the child was killed by a signal (the shell convention, so SIGKILL reads 137); -1 when the spawn itself failed. - err:    &quot;&quot; on successful spawn regardless of exit code; non-empty only when the child couldn't be started. On POSIX a missing program is found by exec inside the forked child, so the parent sees status 127 with no err; on Windows the program is looked up in the parent, so it is (-1, &quot;program not found&quot;). Argv-based — no shell, no quoting issues. The status slot lets callers distinguish &quot;ran cleanly&quot; (status == 0) from &quot;ran but exited non-zero&quot; (e.g. `diff3 -m` returning 1 to signal conflicts, `grep` returning 1 for no-match, `gcc` returning non-zero on compile errors). Issue #289.</p>
     </div>
     <div class="function" id="argv0" data-name="argv0">
       <h3 class="function-name">argv0 <span class="kind">fn</span></h3>
@@ -353,6 +442,11 @@
     <div class="function" id="getpid" data-name="getpid">
       <h3 class="function-name">getpid <span class="kind">fn</span></h3>
       <pre class="usage"><code>getpid() <span class="arrow">-&gt;</span> int</code></pre>
+    </div>
+    <div class="function" id="user_id" data-name="user_id">
+      <h3 class="function-name">user_id <span class="kind">fn</span></h3>
+      <pre class="usage"><code>user_id() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">Effective user id of the calling process (POSIX geteuid). Returns -1 on Windows, which has no numeric uid model — treat &lt;0 as &quot;unavailable&quot;. Useful for building per-user runtime paths like /run/user/&lt;uid&gt;/ (#1368).</p>
     </div>
     <div class="function" id="wall_seconds" data-name="wall_seconds">
       <h3 class="function-name">wall_seconds <span class="kind">fn</span></h3>
@@ -393,6 +487,21 @@
       <h3 class="function-name">platform <span class="kind">fn</span></h3>
       <pre class="usage"><code>platform() <span class="arrow">-&gt;</span> string</code></pre>
     </div>
+    <div class="function" id="arch" data-name="arch">
+      <h3 class="function-name">arch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>arch() <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="doc">arch() — the CPU architecture of the build target, the companion to platform(). Returns a normalized token from the ecosystem vocabulary the release assets, aeb, and aeo already use: &quot;x86_64&quot; (never &quot;amd64&quot;), &quot;arm64&quot; (never &quot;aarch64&quot;), &quot;i386&quot;, &quot;arm&quot;, &quot;riscv64&quot;, &quot;ppc64le&quot;, &quot;s390x&quot;, &quot;wasm32&quot;, &quot;wasm64&quot;, or &quot;unknown&quot;. So platform() + arch() reconstruct the &quot;&lt;os&gt;-&lt;arch&gt;&quot; release-asset token (e.g. &quot;linux-x86_64&quot;, &quot;macos-arm64&quot;) with no shell — the thing a fetch-a- prebuilt node needs to pick the right download. Decided at COMPILE time from the toolchain's arch predefines, deliberately not `uname -m`: it needs no process spawn (works with no shell, in a sandbox) AND it reports the TARGET arch under a cross-compile (`ae build --target=aarch64-linux` yields &quot;arm64&quot;), where `uname -m` would report the build host's. Never fails.</p>
+    </div>
+    <div class="function" id="temp_dir" data-name="temp_dir">
+      <h3 class="function-name">temp_dir <span class="kind">fn</span></h3>
+      <pre class="usage"><code>temp_dir() <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="doc">The directory for scratch files, with no trailing separator. Windows resolves it through GetTempPathW, which already performs the documented TMP -&gt; TEMP -&gt; USERPROFILE -&gt; Windows-directory cascade; POSIX reads TMPDIR and falls back to &quot;/tmp&quot;. Always returns a non-empty path, so a caller can write &quot;${os.temp_dir()}/name&quot; without checking. Hardcoding &quot;/tmp&quot; is the thing this replaces: it works on POSIX and under an MSYS2 shell, and fails on a native Windows build, which is a bug that passes every local check (#1702).</p>
+    </div>
+    <div class="function" id="cpu_count" data-name="cpu_count">
+      <h3 class="function-name">cpu_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cpu_count() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">cpu_count() — number of online logical CPUs (the `nproc` value), for sizing build parallelism or worker pools. Always &gt;= 1. sysconf(_SC_NPROCESSORS_ONLN) on POSIX, GetSystemInfo on Windows.</p>
+    </div>
     <div class="function" id="setenv" data-name="setenv">
       <h3 class="function-name">setenv <span class="kind">fn</span></h3>
       <pre class="usage"><code>setenv(name, value) <span class="arrow">-&gt;</span> string</code></pre>
@@ -409,7 +518,7 @@
       <h3 class="function-name">run_pipe <span class="kind">fn</span></h3>
       <pre class="usage"><code>run_pipe(prog, argv, env) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
-      <p class="doc">Spawn child with std.ipc back-channel pipe. Returns (parent_read_fd, child_pid, err). Child sees AETHER_IPC_FD=3 in its env; std.ipc.parent_channel() inside the child resolves to fd 3. Caller MUST call os.wait_pid(child_pid) to reap the child; reading from parent_read_fd is the caller's responsibility. For the common &quot;spawn + read report + wait&quot; case, use os.run_pipe_drain_and_wait — same parent surface but no pipe-buffer deadlock risk and no manual wait_pid call needed. On Windows, returns (-1, -1, &quot;unsupported on Windows&quot;).</p>
+      <p class="doc">Spawn child with std.ipc back-channel pipe. Returns (parent_read_fd, child_pid, err). Child sees AETHER_IPC_FD=3 in its env; std.ipc.parent_channel() inside the child resolves to fd 3. Caller MUST call os.wait_pid(child_pid) to reap the child; reading from parent_read_fd is the caller's responsibility. For the common &quot;spawn + read report + wait&quot; case, use os.run_pipe_drain_and_wait — same parent surface but no pipe-buffer deadlock risk and no manual wait_pid call needed. On Windows there is no back-channel: the child is spawned as spawn_proc would, the read fd comes back as -1, and the pid is the spawn token, which wait_pid reaps. Only the channel is missing; a child that never writes to fd 3 behaves the same on both.</p>
     </div>
     <div class="function" id="wait_pid" data-name="wait_pid">
       <h3 class="function-name">wait_pid <span class="kind">fn</span></h3>
@@ -423,17 +532,41 @@
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
       <p class="doc">Convenience: spawn + drain back-channel pipe + wait + reap, all in one call. Returns (channel_payload, exit_code, err). Recommended entry point for &quot;child writes structured report at exit; parent reads it after.&quot; No pipe-buffer deadlock risk regardless of payload size. On Windows, returns (&quot;&quot;, -1, &quot;unsupported on Windows&quot;).</p>
     </div>
+    <div class="function" id="spawn_proc" data-name="spawn_proc">
+      <h3 class="function-name">spawn_proc <span class="kind">fn</span></h3>
+      <pre class="usage"><code>spawn_proc(prog, argv, env) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">Spawn a child without blocking, no back-channel pipe. Returns (token, err). Cross-platform. Reap the token exactly once via os.wait or os.wait_any. Named spawn_proc because `spawn` is a reserved keyword (actor spawning). See os_spawn_raw.</p>
+    </div>
+    <div class="function" id="wait" data-name="wait">
+      <h3 class="function-name">wait <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait(token) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">token: int</span></p>
+      <p class="doc">Reap a single spawned token. Blocks until it exits. Returns (exit_code, err). See os_wait_raw.</p>
+    </div>
+    <div class="function" id="wait_any" data-name="wait_any">
+      <h3 class="function-name">wait_any <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait_any(tokens) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">tokens: ptr</span></p>
+      <p class="doc">Reap whichever spawned token finishes first. `tokens` is a list of int tokens. Returns (token, exit_code, err). The fan-in half of a spawn-N-wait-any scheduler loop. See os_wait_any_raw.</p>
+    </div>
+    <div class="function" id="wait_any_timeout" data-name="wait_any_timeout">
+      <h3 class="function-name">wait_any_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait_any_timeout(tokens, secs) <span class="arrow">-&gt;</span> (int, int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">tokens: ptr, secs: int</span></p>
+      <p class="doc">Bounded wait-any — (token, exit_code, timed_out, err). Reaps whichever token finishes first, or reports timed_out == 1 after `secs` with the live children left running (a per-call deadline, so a scheduler can bound each node). secs &lt;= 0 blocks indefinitely. See os_wait_any_timeout_raw.</p>
+    </div>
     <div class="function" id="kill_raw" data-name="kill_raw">
       <h3 class="function-name">kill_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>kill_raw(pid, sig) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">pid: int, sig: int</span></p>
-      <p class="doc">Send signal `sig` to `pid` — POSIX kill(2). Returns 0 on success, -1 on failure. Two conventions are deliberately exposed: - a NEGATIVE pid signals the whole process group abs(pid), the building block for tearing down a build and all it spawned; - `sig == 0` delivers nothing but still runs the existence / permission checks — the canonical &quot;is this pid/group alive?&quot; probe (0 = alive, -1 = gone). Signal numbers live in `std.signal` (SIGINT / SIGTERM / SIGKILL …) so callers needn't hard-code 2 / 15 / 9. Windows: `sig == 0` probes via OpenProcess; any other signal maps to a forced TerminateProcess (no catchable SIGTERM); a negative pid (group signalling) returns -1 — there is no pgid-by-negative-pid.</p>
+      <p class="doc">Send signal `sig` to `pid` — POSIX kill(2). Returns 0 on success, -1 on failure. Two conventions are deliberately exposed: - a NEGATIVE pid signals the whole process group abs(pid), the building block for tearing down a build and all it spawned; - `sig == 0` delivers nothing but still runs the existence / permission checks — the canonical &quot;is this pid/group alive?&quot; probe (0 = alive, -1 = gone). Signal numbers live in `std.signal` (SIGINT / SIGTERM / SIGKILL …) so callers needn't hard-code 2 / 15 / 9. Windows: `sig == 0` probes via OpenProcess; any other signal maps to a forced TerminateProcess (no catchable SIGTERM); a negative pid (group signalling) returns -1 — there is no pgid-by-negative-pid. Token contract: `pid` may be a spawn_proc token. On Windows a token is a table index (NOT an OS pid), so kill resolves it through the same process table wait/wait_any use before falling back to treating the int as a pid. So `kill(spawn_token, sig)` works identically on POSIX and Windows.</p>
     </div>
     <div class="function" id="wait_pid_timeout_raw" data-name="wait_pid_timeout_raw">
       <h3 class="function-name">wait_pid_timeout_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>wait_pid_timeout_raw(pid, secs) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">pid: int, secs: int</span></p>
-      <p class="doc">Bounded wait for one child. Returns (status, timed_out, err): - status:    WEXITSTATUS on normal exit, 128+signo when signalled, -1 on timeout or error. - timed_out: 1 if `secs` elapsed before exit (the child is left RUNNING — caller decides whether to os.kill it), else 0. - err:       &quot;&quot; on a clean reap or clean timeout; non-empty on a waitpid error / invalid pid. `secs &lt;= 0` blocks indefinitely (like os.wait_pid, timed_out always 0). Lets a supervisor bound a wait without a separate watchdog process. Windows: OpenProcess + WaitForSingleObject(secs); status is the process exit code (no signal concept).</p>
+      <p class="doc">Bounded wait for one child. Returns (status, timed_out, err): - status:    WEXITSTATUS on normal exit, 128+signo when signalled, -1 on timeout or error. - timed_out: 1 if `secs` elapsed before exit (the child is left RUNNING — caller decides whether to os.kill it), else 0. - err:       &quot;&quot; on a clean reap or clean timeout; non-empty on a waitpid error / invalid pid. `secs &lt;= 0` blocks indefinitely (like os.wait_pid, timed_out always 0). Lets a supervisor bound a wait without a separate watchdog process. Windows: WaitForSingleObject(secs); status is the process exit code (no signal concept). Token contract: `pid` may be a spawn_proc token — on Windows it resolves through the process table (reaping the token on a clean exit) before falling back to an OS pid, so `wait_pid_timeout( spawn_token, secs)` behaves identically on POSIX and Windows.</p>
     </div>
     <div class="function" id="run_supervised_raw" data-name="run_supervised_raw">
       <h3 class="function-name">run_supervised_raw <span class="kind">extern</span></h3>
@@ -490,6 +623,25 @@
       <h3 class="function-name">getcwd <span class="kind">fn</span></h3>
       <pre class="usage"><code>getcwd() <span class="arrow">-&gt;</span> string</code></pre>
       <p class="doc">Current working directory, or &quot;&quot; on failure. Returns a fresh refcounted string the caller owns (the raw strdup is reclaimed by the heap-string tracker — os_getcwd_raw is classified owned-heap in codegen).</p>
+    </div>
+    <div class="function" id="aether_process_resident" data-name="aether_process_resident">
+      <h3 class="function-name">aether_process_resident <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_process_resident() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">---- the process's memory, as the OS charges it (#2310) ---- runtime/aether_process_mem.c. For the bytes the program itself holds on the heap, exact to the allocation, see std.mem's heap_in_use().</p>
+    </div>
+    <div class="function" id="aether_process_private" data-name="aether_process_private">
+      <h3 class="function-name">aether_process_private <span class="kind">extern</span></h3>
+      <pre class="usage"><code>aether_process_private() <span class="arrow">-&gt;</span> long</code></pre>
+    </div>
+    <div class="function" id="memory_resident" data-name="memory_resident">
+      <h3 class="function-name">memory_resident <span class="kind">fn</span></h3>
+      <pre class="usage"><code>memory_resident() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">The resident set: bytes of the process in physical memory, shared pages included. -1 where the platform does not report it.</p>
+    </div>
+    <div class="function" id="memory_private" data-name="memory_private">
+      <h3 class="function-name">memory_private <span class="kind">fn</span></h3>
+      <pre class="usage"><code>memory_private() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">Private memory: what the process alone is charged for (Windows private usage, macOS physical footprint, Linux resident minus shared). Counts mappings the allocator does not see, at page granularity. -1 where the platform does not report it (FreeBSD).</p>
     </div>
   </div>
 </main>

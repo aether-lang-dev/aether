@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tar - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search tar..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#KIND_FILE">KIND_FILE</a></li>
+    <li><a href="#KIND_DIRECTORY">KIND_DIRECTORY</a></li>
+    <li><a href="#KIND_SYMLINK">KIND_SYMLINK</a></li>
+    <li><a href="#KIND_OTHER">KIND_OTHER</a></li>
+    <li><a href="#ExtractOptions">ExtractOptions</a></li>
+    <li><a href="#default_extract_options">default_extract_options</a></li>
+    <li><a href="#extract">extract</a></li>
+    <li><a href="#reader_open">reader_open</a></li>
+    <li><a href="#reader_next">reader_next</a></li>
+    <li><a href="#entry_name">entry_name</a></li>
+    <li><a href="#entry_kind">entry_kind</a></li>
+    <li><a href="#entry_size">entry_size</a></li>
+    <li><a href="#entry_mode">entry_mode</a></li>
+    <li><a href="#entry_mtime">entry_mtime</a></li>
+    <li><a href="#entry_link_name">entry_link_name</a></li>
+    <li><a href="#entry_read">entry_read</a></li>
+    <li><a href="#entry_skip">entry_skip</a></li>
+    <li><a href="#reader_close">reader_close</a></li>
+    <li><a href="#writer_create">writer_create</a></li>
+    <li><a href="#writer_add_file">writer_add_file</a></li>
+    <li><a href="#writer_add_directory">writer_add_directory</a></li>
+    <li><a href="#writer_add_symlink">writer_add_symlink</a></li>
+    <li><a href="#writer_finish">writer_finish</a></li>
+    <li><a href="#writer_abort">writer_abort</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li class="active"><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>tar</h1>
+    <p class="module-desc">std.tar - Streaming POSIX ustar TAR Archive Module Import with: import std.tar</p>
+    <p class="import-line"><code>import std.tar</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="KIND_FILE" data-name="KIND_FILE">
+      <h3 class="function-name">KIND_FILE <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_FILE = 1</code></pre>
+    </div>
+    <div class="function" id="KIND_DIRECTORY" data-name="KIND_DIRECTORY">
+      <h3 class="function-name">KIND_DIRECTORY <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_DIRECTORY = 2</code></pre>
+    </div>
+    <div class="function" id="KIND_SYMLINK" data-name="KIND_SYMLINK">
+      <h3 class="function-name">KIND_SYMLINK <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_SYMLINK = 3</code></pre>
+    </div>
+    <div class="function" id="KIND_OTHER" data-name="KIND_OTHER">
+      <h3 class="function-name">KIND_OTHER <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_OTHER = 4</code></pre>
+    </div>
+    <div class="function" id="ExtractOptions" data-name="ExtractOptions">
+      <h3 class="function-name">ExtractOptions <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct ExtractOptions</code></pre>
+    </div>
+    <div class="function" id="default_extract_options" data-name="default_extract_options">
+      <h3 class="function-name">default_extract_options <span class="kind">fn</span></h3>
+      <pre class="usage"><code>default_extract_options() <span class="arrow">-&gt;</span> ExtractOptions</code></pre>
+    </div>
+    <div class="function" id="extract" data-name="extract">
+      <h3 class="function-name">extract <span class="kind">fn</span></h3>
+      <pre class="usage"><code>extract(archive_path, destination, options) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">archive_path: string, destination: string, options: ExtractOptions</span></p>
+    </div>
+    <div class="function" id="reader_open" data-name="reader_open">
+      <h3 class="function-name">reader_open <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reader_open(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="reader_next" data-name="reader_next">
+      <h3 class="function-name">reader_next <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reader_next(reader_ptr) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_name" data-name="entry_name">
+      <h3 class="function-name">entry_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_name(reader_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_kind" data-name="entry_kind">
+      <h3 class="function-name">entry_kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_kind(reader_ptr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_size" data-name="entry_size">
+      <h3 class="function-name">entry_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_size(reader_ptr) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_mode" data-name="entry_mode">
+      <h3 class="function-name">entry_mode <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_mode(reader_ptr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_mtime" data-name="entry_mtime">
+      <h3 class="function-name">entry_mtime <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_mtime(reader_ptr) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_link_name" data-name="entry_link_name">
+      <h3 class="function-name">entry_link_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_link_name(reader_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="entry_read" data-name="entry_read">
+      <h3 class="function-name">entry_read <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_read(reader_ptr, max_bytes) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr, max_bytes: int</span></p>
+    </div>
+    <div class="function" id="entry_skip" data-name="entry_skip">
+      <h3 class="function-name">entry_skip <span class="kind">fn</span></h3>
+      <pre class="usage"><code>entry_skip(reader_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="reader_close" data-name="reader_close">
+      <h3 class="function-name">reader_close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reader_close(reader_ptr)</code></pre>
+      <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="writer_create" data-name="writer_create">
+      <h3 class="function-name">writer_create <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_create(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="writer_add_file" data-name="writer_add_file">
+      <h3 class="function-name">writer_add_file <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_add_file(writer_ptr, archive_name, source_path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">writer_ptr: ptr, archive_name: string, source_path: string</span></p>
+    </div>
+    <div class="function" id="writer_add_directory" data-name="writer_add_directory">
+      <h3 class="function-name">writer_add_directory <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_add_directory(writer_ptr, archive_name, mode, mtime) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">writer_ptr: ptr, archive_name: string, mode: int, mtime: long</span></p>
+    </div>
+    <div class="function" id="writer_add_symlink" data-name="writer_add_symlink">
+      <h3 class="function-name">writer_add_symlink <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_add_symlink(writer_ptr, archive_name, target, mode, mtime) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">writer_ptr: ptr, archive_name: string, target: string, mode: int, mtime: long</span></p>
+    </div>
+    <div class="function" id="writer_finish" data-name="writer_finish">
+      <h3 class="function-name">writer_finish <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_finish(writer_ptr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">writer_ptr: ptr</span></p>
+    </div>
+    <div class="function" id="writer_abort" data-name="writer_abort">
+      <h3 class="function-name">writer_abort <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_abort(writer_ptr)</code></pre>
+      <p class="signature"><span class="sig-params">writer_ptr: ptr</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

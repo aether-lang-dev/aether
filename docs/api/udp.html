@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>udp - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search udp..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#bind_raw">bind_raw</a></li>
+    <li><a href="#local_port_raw">local_port_raw</a></li>
+    <li><a href="#close">close</a></li>
+    <li><a href="#fd_raw">fd_raw</a></li>
+    <li><a href="#poll_raw">poll_raw</a></li>
+    <li><a href="#set_buffer_sizes_raw">set_buffer_sizes_raw</a></li>
+    <li><a href="#set_broadcast_raw">set_broadcast_raw</a></li>
+    <li><a href="#resolve_raw">resolve_raw</a></li>
+    <li><a href="#addr_new">addr_new</a></li>
+    <li><a href="#addr_clone_raw">addr_clone_raw</a></li>
+    <li><a href="#addr_free">addr_free</a></li>
+    <li><a href="#addr_host_raw">addr_host_raw</a></li>
+    <li><a href="#addr_port_raw">addr_port_raw</a></li>
+    <li><a href="#addr_equal_raw">addr_equal_raw</a></li>
+    <li><a href="#addr_hash_raw">addr_hash_raw</a></li>
+    <li><a href="#send_to_raw">send_to_raw</a></li>
+    <li><a href="#send_to_addr_raw">send_to_addr_raw</a></li>
+    <li><a href="#recv_from_into_raw">recv_from_into_raw</a></li>
+    <li><a href="#recv_from_raw">recv_from_raw</a></li>
+    <li><a href="#bind">bind</a></li>
+    <li><a href="#local_port">local_port</a></li>
+    <li><a href="#fd">fd</a></li>
+    <li><a href="#poll">poll</a></li>
+    <li><a href="#set_buffer_sizes">set_buffer_sizes</a></li>
+    <li><a href="#set_broadcast">set_broadcast</a></li>
+    <li><a href="#resolve">resolve</a></li>
+    <li><a href="#addr_clone">addr_clone</a></li>
+    <li><a href="#addr_host">addr_host</a></li>
+    <li><a href="#addr_port">addr_port</a></li>
+    <li><a href="#addr_string">addr_string</a></li>
+    <li><a href="#addr_equal">addr_equal</a></li>
+    <li><a href="#addr_hash">addr_hash</a></li>
+    <li><a href="#send_to">send_to</a></li>
+    <li><a href="#send_to_addr">send_to_addr</a></li>
+    <li><a href="#recv_from">recv_from</a></li>
+    <li><a href="#recv_from_into">recv_from_into</a></li>
+    <li><a href="#send_slice_to">send_slice_to</a></li>
+    <li><a href="#send_slice_to_addr">send_slice_to_addr</a></li>
+    <li><a href="#recv_slice_from">recv_slice_from</a></li>
+    <li><a href="#recv_slice_from_into">recv_slice_from_into</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li class="active"><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>udp</h1>
+    <p class="module-desc">std.udp - Datagram sockets: bind, send_to, recv_from, poll (#2201) The other half of std.tcp, for game networking: a state snapshot that arrives late is worth less than none, so it must not queue behind a lost one the way TCP's in-order stream makes it.</p>
+    <p class="import-line"><code>import std.udp</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="bind_raw" data-name="bind_raw">
+      <h3 class="function-name">bind_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>bind_raw(host, port) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int</span></p>
+    </div>
+    <div class="function" id="local_port_raw" data-name="local_port_raw">
+      <h3 class="function-name">local_port_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>local_port_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">extern</span></h3>
+      <pre class="usage"><code>close(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
+    <div class="function" id="fd_raw" data-name="fd_raw">
+      <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
+    <div class="function" id="poll_raw" data-name="poll_raw">
+      <h3 class="function-name">poll_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>poll_raw(sock, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, timeout_ms: int</span></p>
+    </div>
+    <div class="function" id="set_buffer_sizes_raw" data-name="set_buffer_sizes_raw">
+      <h3 class="function-name">set_buffer_sizes_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_buffer_sizes_raw(sock, send_bytes, recv_bytes) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, send_bytes: int, recv_bytes: int</span></p>
+    </div>
+    <div class="function" id="set_broadcast_raw" data-name="set_broadcast_raw">
+      <h3 class="function-name">set_broadcast_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_broadcast_raw(sock, on) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, on: int</span></p>
+    </div>
+    <div class="function" id="resolve_raw" data-name="resolve_raw">
+      <h3 class="function-name">resolve_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>resolve_raw(host, port) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int</span></p>
+    </div>
+    <div class="function" id="addr_new" data-name="addr_new">
+      <h3 class="function-name">addr_new <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_new() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="addr_clone_raw" data-name="addr_clone_raw">
+      <h3 class="function-name">addr_clone_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_clone_raw(addr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+    </div>
+    <div class="function" id="addr_free" data-name="addr_free">
+      <h3 class="function-name">addr_free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_free(addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+    </div>
+    <div class="function" id="addr_host_raw" data-name="addr_host_raw">
+      <h3 class="function-name">addr_host_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_host_raw(addr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+    </div>
+    <div class="function" id="addr_port_raw" data-name="addr_port_raw">
+      <h3 class="function-name">addr_port_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_port_raw(addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+    </div>
+    <div class="function" id="addr_equal_raw" data-name="addr_equal_raw">
+      <h3 class="function-name">addr_equal_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_equal_raw(a, b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">a: ptr, b: ptr</span></p>
+    </div>
+    <div class="function" id="addr_hash_raw" data-name="addr_hash_raw">
+      <h3 class="function-name">addr_hash_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>addr_hash_raw(addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+    </div>
+    <div class="function" id="send_to_raw" data-name="send_to_raw">
+      <h3 class="function-name">send_to_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>send_to_raw(sock, host, port, data, n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, host: string, port: int, data: ptr, n: int</span></p>
+    </div>
+    <div class="function" id="send_to_addr_raw" data-name="send_to_addr_raw">
+      <h3 class="function-name">send_to_addr_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>send_to_addr_raw(sock, addr, data, n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, addr: ptr, data: ptr, n: int</span></p>
+    </div>
+    <div class="function" id="recv_from_into_raw" data-name="recv_from_into_raw">
+      <h3 class="function-name">recv_from_into_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>recv_from_into_raw(sock, buf, cap, addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: ptr, cap: int, addr: ptr</span></p>
+    </div>
+    <div class="function" id="recv_from_raw" data-name="recv_from_raw">
+      <h3 class="function-name">recv_from_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>recv_from_raw(sock, buf, cap) <span class="arrow">-&gt;</span> (int, ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: ptr, cap: int</span></p>
+    </div>
+    <div class="function" id="bind" data-name="bind">
+      <h3 class="function-name">bind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>bind(host, port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int</span></p>
+      <p class="doc">Bind a datagram socket on host:port. &quot;0.0.0.0&quot; (or &quot;&quot;) takes every IPv4 interface, &quot;::&quot; IPv6 (dual-stack where the OS allows), &quot;127.0.0.1&quot; or &quot;::1&quot; loopback only. Port 0 asks the OS for an ephemeral port; read it back with `local_port`. The socket is non-blocking. Returns (socket, &quot;&quot;) or (null, error). Caller must udp.close it.</p>
+    </div>
+    <div class="function" id="local_port" data-name="local_port">
+      <h3 class="function-name">local_port <span class="kind">fn</span></h3>
+      <pre class="usage"><code>local_port(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">The port a socket is bound to (the one the OS chose for a bind on 0), or -1 for a null handle.</p>
+    </div>
+    <div class="function" id="fd" data-name="fd">
+      <h3 class="function-name">fd <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">The OS-level descriptor inside a socket, or -1 for a null handle. For a poll across several sockets, or capsicum narrowing. Owned by the handle: do not close it directly, it is released by udp.close.</p>
+    </div>
+    <div class="function" id="poll" data-name="poll">
+      <h3 class="function-name">poll <span class="kind">fn</span></h3>
+      <pre class="usage"><code>poll(sock, timeout_ms) <span class="arrow">-&gt;</span> (_0, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, timeout_ms: int</span></p>
+      <p class="doc">Wait until a datagram is waiting, up to timeout_ms (-1 blocks, 0 polls, &gt;0 waits that many ms). Returns (true, &quot;&quot;) when a recv_from will return a packet, (false, &quot;&quot;) on timeout, (false, error) on a null handle.</p>
+    </div>
+    <div class="function" id="set_buffer_sizes" data-name="set_buffer_sizes">
+      <h3 class="function-name">set_buffer_sizes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_buffer_sizes(sock, send_bytes, recv_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, send_bytes: int, recv_bytes: int</span></p>
+      <p class="doc">SO_SNDBUF / SO_RCVBUF in bytes; 0 leaves that side as it is. A server fanning snapshots out to many peers wants a larger send buffer than the default. Returns &quot;&quot; or an error.</p>
+    </div>
+    <div class="function" id="set_broadcast" data-name="set_broadcast">
+      <h3 class="function-name">set_broadcast <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_broadcast(sock, on) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, on: bool</span></p>
+      <p class="doc">Allow sends to a broadcast address (255.255.255.255 or the subnet's), for LAN discovery on an IPv4 socket. Returns &quot;&quot; or an error.</p>
+    </div>
+    <div class="function" id="resolve" data-name="resolve">
+      <h3 class="function-name">resolve <span class="kind">fn</span></h3>
+      <pre class="usage"><code>resolve(host, port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int</span></p>
+      <p class="doc">Resolve host:port once to an address value for `send_to_addr`. Returns (addr, &quot;&quot;) or (null, error). Caller must addr_free it.</p>
+    </div>
+    <div class="function" id="addr_clone" data-name="addr_clone">
+      <h3 class="function-name">addr_clone <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_clone(addr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+      <p class="doc">A copy of an address, to keep past the receive that produced it.</p>
+    </div>
+    <div class="function" id="addr_host" data-name="addr_host">
+      <h3 class="function-name">addr_host <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_host(addr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+      <p class="doc">The numeric host of an address (&quot;10.0.0.7&quot;, &quot;fe80::1&quot;), or &quot;&quot; for a null or unset one.</p>
+    </div>
+    <div class="function" id="addr_port" data-name="addr_port">
+      <h3 class="function-name">addr_port <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_port(addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+      <p class="doc">The port of an address, or -1 for a null or unset one.</p>
+    </div>
+    <div class="function" id="addr_string" data-name="addr_string">
+      <h3 class="function-name">addr_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_string(addr) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+      <p class="doc">&quot;host:port&quot; (&quot;[host]:port&quot; for IPv6), the natural map key for a peer table. &quot;&quot; for a null or unset address.</p>
+    </div>
+    <div class="function" id="addr_equal" data-name="addr_equal">
+      <h3 class="function-name">addr_equal <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_equal(a, b) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">a: ptr, b: ptr</span></p>
+      <p class="doc">True when both addresses name the same family, host and port. Two null or unset addresses are not equal.</p>
+    </div>
+    <div class="function" id="addr_hash" data-name="addr_hash">
+      <h3 class="function-name">addr_hash <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_hash(addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+      <p class="doc">A non-negative hash of an address, stable for equal addresses within a process. 0 for a null or unset one.</p>
+    </div>
+    <div class="function" id="send_to" data-name="send_to">
+      <h3 class="function-name">send_to <span class="kind">fn</span></h3>
+      <pre class="usage"><code>send_to(sock, host, port, data)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, host: string, port: int, data: byte[]</span></p>
+      <p class="doc">Send one datagram holding the bytes of `data` — its length is the datagram size (#2301) — to host:port, resolving the name each call. For a string pass `string.bytes(s)`; for a `std.bytes` buffer, `bytes.view(buf)`. An empty slice sends a zero-length datagram, which UDP permits. Returns (bytes_sent, &quot;&quot;) or (0, error). A dropped packet (full send buffer) is an error: a datagram protocol expects loss and resends on its own schedule.</p>
+    </div>
+    <div class="function" id="send_to_addr" data-name="send_to_addr">
+      <h3 class="function-name">send_to_addr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>send_to_addr(sock, addr, data)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, addr: ptr, data: byte[]</span></p>
+      <p class="doc">Send to an already-resolved address: the per-peer form for a server answering many peers a tick. Returns (bytes_sent, &quot;&quot;) or (0, error).</p>
+    </div>
+    <div class="function" id="recv_from" data-name="recv_from">
+      <h3 class="function-name">recv_from <span class="kind">fn</span></h3>
+      <pre class="usage"><code>recv_from(sock, buf)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: byte[]</span></p>
+      <p class="doc">Receive one datagram into `buf`, at most `buf.len` bytes (#2301); a longer packet is truncated, and the datagram is `buf[0..n]`. For a `std.bytes` buffer pass `bytes.capacity_view(buf)`. Never blocks. Returns (n, sender, &quot;&quot;) on a packet, (0, null, &quot;would block&quot;) when nothing is waiting (the socket is fine: come back next tick), (0, null, error) on failure, including an empty `buf`; an unbounded one panics. The sender must be addr_free'd; use recv_from_into to reuse one across packets.</p>
+    </div>
+    <div class="function" id="recv_from_into" data-name="recv_from_into">
+      <h3 class="function-name">recv_from_into <span class="kind">fn</span></h3>
+      <pre class="usage"><code>recv_from_into(sock, buf, addr)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: byte[], addr: ptr</span></p>
+      <p class="doc">recv_from with a caller-owned address (`addr_new`) filled in place, so the drain loop allocates nothing. Reads at most `buf.len` bytes; the datagram is `buf[0..n]`. Returns (n, &quot;&quot;) on a packet, (0, &quot;would block&quot;) when nothing is waiting, (0, error) on failure.</p>
+    </div>
+    <div class="function" id="send_slice_to" data-name="send_slice_to">
+      <h3 class="function-name">send_slice_to <span class="kind">fn</span></h3>
+      <pre class="usage"><code>send_slice_to(sock, host, port, s) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, host: string, port: int, s: byte[]</span></p>
+      <p class="doc">send_to over a slice: one datagram of exactly `s.len` bytes to host:port, resolving the name each call. An empty slice sends an empty datagram. Returns (bytes_sent, &quot;&quot;) or (0, error).</p>
+    </div>
+    <div class="function" id="send_slice_to_addr" data-name="send_slice_to_addr">
+      <h3 class="function-name">send_slice_to_addr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>send_slice_to_addr(sock, addr, s) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, addr: ptr, s: byte[]</span></p>
+      <p class="doc">send_to_addr over a slice: one datagram of `s.len` bytes to a resolved address. Returns (bytes_sent, &quot;&quot;) or (0, error).</p>
+    </div>
+    <div class="function" id="recv_slice_from" data-name="recv_slice_from">
+      <h3 class="function-name">recv_slice_from <span class="kind">fn</span></h3>
+      <pre class="usage"><code>recv_slice_from(sock, buf) <span class="arrow">-&gt;</span> (int, ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: byte[]</span></p>
+      <p class="doc">recv_from into a slice: the datagram lands in `buf[0..n]` (truncated to `buf.len`, see above). Never blocks. Returns (n, sender, &quot;&quot;) on a packet, (0, null, &quot;would block&quot;) when nothing is waiting, (0, null, error) on failure. An empty slice returns (0, null, &quot;receive buffer is empty&quot;) without consuming a datagram. The sender must be addr_free'd.</p>
+    </div>
+    <div class="function" id="recv_slice_from_into" data-name="recv_slice_from_into">
+      <h3 class="function-name">recv_slice_from_into <span class="kind">fn</span></h3>
+      <pre class="usage"><code>recv_slice_from_into(sock, buf, addr) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, buf: byte[], addr: ptr</span></p>
+      <p class="doc">recv_from_into into a slice, with a caller-owned address (`addr_new`) filled in place: the allocation-free drain loop. Returns (n, &quot;&quot;) with the datagram in `buf[0..n]`, (0, &quot;would block&quot;) when nothing is waiting, (0, error) on failure, and (0, &quot;receive buffer is empty&quot;) for an empty slice without consuming a datagram.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

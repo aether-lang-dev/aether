@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>clapae - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search clapae..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#command">command</a></li>
+    <li><a href="#arg">arg</a></li>
+    <li><a href="#subcommand">subcommand</a></li>
+    <li><a href="#about">about</a></li>
+    <li><a href="#short">short</a></li>
+    <li><a href="#long_">long_</a></li>
+    <li><a href="#help">help</a></li>
+    <li><a href="#required">required</a></li>
+    <li><a href="#flag">flag</a></li>
+    <li><a href="#string_arg">string_arg</a></li>
+    <li><a href="#int_arg">int_arg</a></li>
+    <li><a href="#positional">positional</a></li>
+    <li><a href="#kind">kind</a></li>
+    <li><a href="#parse">parse</a></li>
+    <li><a href="#parse_list">parse_list</a></li>
+    <li><a href="#get_string">get_string</a></li>
+    <li><a href="#get_int">get_int</a></li>
+    <li><a href="#get_flag">get_flag</a></li>
+    <li><a href="#subcommand_name">subcommand_name</a></li>
+    <li><a href="#subcommand_matches">subcommand_matches</a></li>
+    <li><a href="#print_help">print_help</a></li>
+    <li><a href="#free_command">free_command</a></li>
+    <li><a href="#free_matches">free_matches</a></li>
+    <li><a href="#Command">Command</a></li>
+    <li><a href="#Arg">Arg</a></li>
+    <li><a href="#ArgMatches">ArgMatches</a></li>
+    <li><a href="#KIND_FLAG">KIND_FLAG</a></li>
+    <li><a href="#KIND_STRING">KIND_STRING</a></li>
+    <li><a href="#KIND_INT">KIND_INT</a></li>
+    <li><a href="#RESULT_OK">RESULT_OK</a></li>
+    <li><a href="#RESULT_HELP">RESULT_HELP</a></li>
+    <li><a href="#RESULT_ERROR">RESULT_ERROR</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li class="active"><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>clapae</h1>
+    <p class="module-desc">MIT License (https://opensource.org/licenses/MIT) Copyright (c) 2026 Aether Programming Language Contributors.</p>
+    <p class="import-line"><code>import std.clapae</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="command" data-name="command">
+      <h3 class="function-name">command <span class="kind">fn</span></h3>
+      <pre class="usage"><code>command()</code></pre>
+    </div>
+    <div class="function" id="arg" data-name="arg">
+      <h3 class="function-name">arg <span class="kind">fn</span></h3>
+      <pre class="usage"><code>arg()</code></pre>
+    </div>
+    <div class="function" id="subcommand" data-name="subcommand">
+      <h3 class="function-name">subcommand <span class="kind">fn</span></h3>
+      <pre class="usage"><code>subcommand()</code></pre>
+    </div>
+    <div class="function" id="about" data-name="about">
+      <h3 class="function-name">about <span class="kind">fn</span></h3>
+      <pre class="usage"><code>about(_ctx, text)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, text: string</span></p>
+    </div>
+    <div class="function" id="short" data-name="short">
+      <h3 class="function-name">short <span class="kind">fn</span></h3>
+      <pre class="usage"><code>short(_ctx, c)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, c: int</span></p>
+    </div>
+    <div class="function" id="long_" data-name="long_">
+      <h3 class="function-name">long_ <span class="kind">fn</span></h3>
+      <pre class="usage"><code>long_(_ctx, name)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, name: string</span></p>
+    </div>
+    <div class="function" id="help" data-name="help">
+      <h3 class="function-name">help <span class="kind">fn</span></h3>
+      <pre class="usage"><code>help(_ctx, text)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, text: string</span></p>
+    </div>
+    <div class="function" id="required" data-name="required">
+      <h3 class="function-name">required <span class="kind">fn</span></h3>
+      <pre class="usage"><code>required(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+    </div>
+    <div class="function" id="flag" data-name="flag">
+      <h3 class="function-name">flag <span class="kind">fn</span></h3>
+      <pre class="usage"><code>flag(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="doc">Argument kind setters (replace the old takes_value/is_flag toggles).</p>
+    </div>
+    <div class="function" id="string_arg" data-name="string_arg">
+      <h3 class="function-name">string_arg <span class="kind">fn</span></h3>
+      <pre class="usage"><code>string_arg(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+    </div>
+    <div class="function" id="int_arg" data-name="int_arg">
+      <h3 class="function-name">int_arg <span class="kind">fn</span></h3>
+      <pre class="usage"><code>int_arg(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+    </div>
+    <div class="function" id="positional" data-name="positional">
+      <h3 class="function-name">positional <span class="kind">fn</span></h3>
+      <pre class="usage"><code>positional(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+    </div>
+    <div class="function" id="kind" data-name="kind">
+      <h3 class="function-name">kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kind(_ctx, k)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, k: int</span></p>
+      <p class="doc">Explicit kind, for callers that hold a KIND_* constant.</p>
+    </div>
+    <div class="function" id="parse" data-name="parse">
+      <h3 class="function-name">parse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse(cmd) <span class="arrow">-&gt;</span> (int, ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">cmd: *Command</span></p>
+    </div>
+    <div class="function" id="parse_list" data-name="parse_list">
+      <h3 class="function-name">parse_list <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parse_list(cmd, argv) <span class="arrow">-&gt;</span> (int, ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">cmd: *Command, argv: ptr</span></p>
+    </div>
+    <div class="function" id="get_string" data-name="get_string">
+      <h3 class="function-name">get_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_string(m, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, name: string</span></p>
+      <p class="doc">get_string(matches, name) -&gt; the raw string value, or &quot;&quot; if absent.</p>
+    </div>
+    <div class="function" id="get_int" data-name="get_int">
+      <h3 class="function-name">get_int <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int(m, name) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, name: string</span></p>
+      <p class="doc">get_int(matches, name) -&gt; (value, error). error is non-empty if the argument is absent or (defensively) non-numeric. Because int arguments are validated during parse(), a present int argument always parses here.</p>
+    </div>
+    <div class="function" id="get_flag" data-name="get_flag">
+      <h3 class="function-name">get_flag <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_flag(m, name) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, name: string</span></p>
+      <p class="doc">get_flag(matches, name) -&gt; 1 if the flag was present, else 0.</p>
+    </div>
+    <div class="function" id="subcommand_name" data-name="subcommand_name">
+      <h3 class="function-name">subcommand_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>subcommand_name(m) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+    </div>
+    <div class="function" id="subcommand_matches" data-name="subcommand_matches">
+      <h3 class="function-name">subcommand_matches <span class="kind">fn</span></h3>
+      <pre class="usage"><code>subcommand_matches(m, name) <span class="arrow">-&gt;</span> *ArgMatches</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, name: string</span></p>
+    </div>
+    <div class="function" id="print_help" data-name="print_help">
+      <h3 class="function-name">print_help <span class="kind">fn</span></h3>
+      <pre class="usage"><code>print_help(cmd)</code></pre>
+      <p class="signature"><span class="sig-params">cmd: *Command</span></p>
+    </div>
+    <div class="function" id="free_command" data-name="free_command">
+      <h3 class="function-name">free_command <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free_command(c)</code></pre>
+      <p class="signature"><span class="sig-params">c: *Command</span></p>
+    </div>
+    <div class="function" id="free_matches" data-name="free_matches">
+      <h3 class="function-name">free_matches <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free_matches(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: *ArgMatches</span></p>
+    </div>
+    <div class="function" id="Command" data-name="Command">
+      <h3 class="function-name">Command <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct Command</code></pre>
+    </div>
+    <div class="function" id="Arg" data-name="Arg">
+      <h3 class="function-name">Arg <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct Arg</code></pre>
+    </div>
+    <div class="function" id="ArgMatches" data-name="ArgMatches">
+      <h3 class="function-name">ArgMatches <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct ArgMatches</code></pre>
+    </div>
+    <div class="function" id="KIND_FLAG" data-name="KIND_FLAG">
+      <h3 class="function-name">KIND_FLAG <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_FLAG = 0</code></pre>
+      <p class="doc">---- argument kinds ----</p>
+    </div>
+    <div class="function" id="KIND_STRING" data-name="KIND_STRING">
+      <h3 class="function-name">KIND_STRING <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_STRING = 1</code></pre>
+    </div>
+    <div class="function" id="KIND_INT" data-name="KIND_INT">
+      <h3 class="function-name">KIND_INT <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_INT = 2</code></pre>
+    </div>
+    <div class="function" id="RESULT_OK" data-name="RESULT_OK">
+      <h3 class="function-name">RESULT_OK <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESULT_OK = 0</code></pre>
+      <p class="doc">---- parse result status ----</p>
+    </div>
+    <div class="function" id="RESULT_HELP" data-name="RESULT_HELP">
+      <h3 class="function-name">RESULT_HELP <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESULT_HELP = 1</code></pre>
+    </div>
+    <div class="function" id="RESULT_ERROR" data-name="RESULT_ERROR">
+      <h3 class="function-name">RESULT_ERROR <span class="kind">const</span></h3>
+      <pre class="usage"><code>RESULT_ERROR = 2</code></pre>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>strarr - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search strarr..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#new">new</a></li>
+    <li><a href="#new_hint">new_hint</a></li>
+    <li><a href="#push">push</a></li>
+    <li><a href="#push_copy">push_copy</a></li>
+    <li><a href="#get">get</a></li>
+    <li><a href="#set">set</a></li>
+    <li><a href="#size">size</a></li>
+    <li><a href="#array">array</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#new_raw">new_raw</a></li>
+    <li><a href="#push_raw">push_raw</a></li>
+    <li><a href="#push_copy_raw">push_copy_raw</a></li>
+    <li><a href="#get_raw">get_raw</a></li>
+    <li><a href="#set_raw">set_raw</a></li>
+    <li><a href="#data">data</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li class="active"><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>strarr</h1>
+    <p class="module-desc">std.strarr - a growable array of string pointers whose backing IS a `string[]`, so it feeds std.sort directly.</p>
+    <p class="import-line"><code>import std.strarr</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="new" data-name="new">
+      <h3 class="function-name">new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">A fresh empty growable string array.</p>
+    </div>
+    <div class="function" id="new_hint" data-name="new_hint">
+      <h3 class="function-name">new_hint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new_hint(hint) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">hint: int</span></p>
+      <p class="doc">Empty array pre-sized for `hint` elements (avoids early regrowth when you know roughly how many you'll push).</p>
+    </div>
+    <div class="function" id="push" data-name="push">
+      <h3 class="function-name">push <span class="kind">fn</span></h3>
+      <pre class="usage"><code>push(arr, s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, s: string</span></p>
+      <p class="doc">Append `s` BORROWED — the string must outlive the array (and any sorted read of it). Returns &quot;&quot; on success, an error string on OOM.</p>
+    </div>
+    <div class="function" id="push_copy" data-name="push_copy">
+      <h3 class="function-name">push_copy <span class="kind">fn</span></h3>
+      <pre class="usage"><code>push_copy(arr, s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, s: string</span></p>
+      <p class="doc">Append an OWNED copy of `s` — the array takes its own reference and frees it in `free`, so you can push a string you just built (a per-iteration concat / basename) without keeping it alive yourself. Returns &quot;&quot; on success, an error string on OOM.</p>
+    </div>
+    <div class="function" id="get" data-name="get">
+      <h3 class="function-name">get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get(arr, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, i: int</span></p>
+      <p class="doc">Element at `i` (null if out of range).</p>
+    </div>
+    <div class="function" id="set" data-name="set">
+      <h3 class="function-name">set <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set(arr, i, s)</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, i: int, s: string</span></p>
+      <p class="doc">Overwrite element at `i`.</p>
+    </div>
+    <div class="function" id="size" data-name="size">
+      <h3 class="function-name">size <span class="kind">extern</span></h3>
+      <pre class="usage"><code>size(arr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <p class="doc">Number of elements. -1 if null.</p>
+    </div>
+    <div class="function" id="array" data-name="array">
+      <h3 class="function-name">array <span class="kind">fn</span></h3>
+      <pre class="usage"><code>array(arr) <span class="arrow">-&gt;</span> string[]</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <p class="doc">The elements as a `string[]` bounded by the size (#2301), for std.sort (`sort.strings_by(strarr.array(sa), cmp)` sorts them in place) or any `string[]` parameter. `v[i]` outside it is the slice bounds panic. Valid until the next push (which may reallocate) or free. A null handle is the empty slice.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>free(arr)</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <p class="doc">Free the spine only; borrowed elements are the caller's.</p>
+    </div>
+    <div class="function" id="new_raw" data-name="new_raw">
+      <h3 class="function-name">new_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>new_raw(hint) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">hint: int</span></p>
+      <p class="doc">Allocate an empty array with room for `hint` elements (0 = first push allocates). Returns null on OOM.</p>
+    </div>
+    <div class="function" id="push_raw" data-name="push_raw">
+      <h3 class="function-name">push_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>push_raw(arr, s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, s: string</span></p>
+      <p class="doc">Append `s` (borrowed). Grows 2× when full. 1 on success, 0 on OOM.</p>
+    </div>
+    <div class="function" id="push_copy_raw" data-name="push_copy_raw">
+      <h3 class="function-name">push_copy_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>push_copy_raw(arr, s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, s: string</span></p>
+      <p class="doc">Append an OWNED reference to `s` (retains a managed string / copies a literal), freed at strarr.free. 1 on success, 0 on OOM.</p>
+    </div>
+    <div class="function" id="get_raw" data-name="get_raw">
+      <h3 class="function-name">get_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_raw(arr, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, i: int</span></p>
+      <p class="doc">Read at `i`. null if out of range.</p>
+    </div>
+    <div class="function" id="set_raw" data-name="set_raw">
+      <h3 class="function-name">set_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_raw(arr, i, s)</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr, i: int, s: string</span></p>
+      <p class="doc">Overwrite at `i` (borrowed). No-op if out of range.</p>
+    </div>
+    <div class="function" id="data" data-name="data">
+      <h3 class="function-name">data <span class="kind">extern</span></h3>
+      <pre class="usage"><code>data(arr) <span class="arrow">-&gt;</span> string[]</code></pre>
+      <p class="signature"><span class="sig-params">arr: ptr</span></p>
+      <p class="doc">The raw `string[]` backing — a bare array of `strarr_size` elements, so `sort.strings_by` sorts it in place. Valid until the next push (may realloc) or free.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

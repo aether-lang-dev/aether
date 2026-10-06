@@ -784,6 +784,15 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * audio kernels (JPEG IDCT, YCbCr->RGB): 16-bit fixed
                      * point with 32-bit accumulators and a saturating pack. */
                     type = create_type(TYPE_I16X8);
+                } else if (strcmp(token->value, "f32x8") == 0) {
+                    /* #2428: eight f32 lanes. One AVX register where the
+                     * build enables AVX, two SSE/NEON halves where it does
+                     * not; `std.lanes` has the eight-wide surface. */
+                    type = create_type(TYPE_F32X8);
+                } else if (strcmp(token->value, "i32x8") == 0) {
+                    /* The mask an f32x8 comparison yields: eight 32-bit
+                     * lanes, all-ones or zero, the width of its operands. */
+                    type = create_type(TYPE_I32X8);
                 } else if (strcmp(token->value, "int64") == 0) {
                     /* The signed sibling of the `uint64` keyword, and the
                      * name the reference uses for the widening `int -> int64`.

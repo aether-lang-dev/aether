@@ -14,8 +14,9 @@ name: Aether CI
 # for from the critical path costs nothing and cannot regress a build that
 # never installed from it.
 
-# A change that touches only VERSION and CHANGELOG.md is a release bump, and
-# that tree was already built and tested on main before the release was cut.
+# A change that touches only VERSION, CHANGELOG.md and new_changelogs/ is a
+# release bump, and that tree was already built and tested on main before the
+# release was cut.
 # Running the full matrix on it again gains nothing and costs twice over: the
 # runs queue behind main's, and the release PR is merged before they are given
 # a runner, so every release leaves abandoned runs recorded as failures. Every
@@ -26,13 +27,20 @@ name: Aether CI
 # what left v0.617.0 unpublished for a quarter of an hour after its tag
 # existed. paths-ignore skips only when every changed file matches, so a commit
 # that touches code and the changelog together still runs in full.
+#
+# new_changelogs/ joined the list with the fragment system (#2002): a release
+# PR now also deletes the fragments it folds into CHANGELOG.md, so with only
+# the two files listed, every release from then on ran the whole matrix twice,
+# on the release PR and again on its merge, with nothing to test. On
+# 2026-10-05 that load, on the org's shared runner pool, held ordinary PR jobs
+# queued for up to an hour, and one was cancelled unstarted (#2440).
 on:
   push:
     branches: [ main, develop ]
-    paths-ignore: [ 'CHANGELOG.md', 'VERSION' ]
+    paths-ignore: [ 'CHANGELOG.md', 'VERSION', 'new_changelogs/**' ]
   pull_request:
     branches: [ main, develop ]
-    paths-ignore: [ 'CHANGELOG.md', 'VERSION' ]
+    paths-ignore: [ 'CHANGELOG.md', 'VERSION', 'new_changelogs/**' ]
   workflow_dispatch:
 
 

@@ -83,8 +83,8 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `int` | 32-bit signed integer | `42`, `-17`, `0xFF`, `0b1010` |
 | `float` | 64-bit floating point | `3.14`, `-0.5` |
 | `f32` | 32-bit floating point (C `float`): GPU buffers, C structs, single-precision maths; `f32 op f32` is a `float` op | `f32 x = 1.5`, `v as f32` |
-| `f32x4`, `f64x2` | SIMD lanes — four single-precision or two double-precision values in one register | `lanes.splat4(1.0)`, `a * b`, `v.x` |
-| `i32x4`, `i64x2` | The mask a lane comparison yields (four 32-bit or two 64-bit lanes), and integer lanes in their own right | `a > b`, `lanes.select4(m, a, b)` |
+| `f32x4`, `f64x2`, `f32x8` | SIMD lanes — four single-precision, two double-precision or eight single-precision values | `lanes.splat4(1.0)`, `a * b`, `v.x` |
+| `i32x4`, `i64x2`, `i32x8` | The mask a lane comparison yields (four 32-bit, two 64-bit or eight 32-bit lanes), and integer lanes in their own right | `a > b`, `lanes.select4(m, a, b)` |
 | `string` | UTF-8 encoded strings | `"Hello"` |
 | `bool` | Boolean type | `true`, `false` |
 | `byte` | Unsigned 8-bit (0..255) | `byte b = 0xFF` |
@@ -169,10 +169,11 @@ true 0.05
 
 The other widths follow C's usual arithmetic conversions: `uint8`/`uint16` promote to `int`, `uint32 op int → uint32` (`unsigned int` wins over `int`, so `u + 1` with `u = 4000000000` is `4000000001`, not a negative `int`), and any 64-bit operand makes the result 64-bit. A shift (`<<`, `>>`) has the type of its promoted left operand; the count's type does not take part (`-8 >> n` is `-1` whatever `n`'s width). `print("%d", b)` is the right conversion for a `byte`/`uint8`/`uint16` argument; a `uint32` takes `%u`, and the compiler corrects a mismatched specifier with a warning.
 
-#### `f32x4`, `f64x2`, `i32x4` SIMD lanes
+#### `f32x4`, `f64x2`, `i32x4`, `f32x8` SIMD lanes
 
-Four single-precision values in one register, two double-precision ones, and
-the integer vector a lane comparison yields. Arithmetic and comparison are
+Four single-precision values in one register, two double-precision ones,
+eight single-precision ones, and the integer vector a lane comparison
+yields. Arithmetic and comparison are
 written as ordinary operators and happen **lane-wise**; `std.lanes` is what a
 lane value is built from and read back through (`splat4`, `f32x4`, `load4` /
 `store4`, `lane4`, `sum4`, `min4` / `max4`, `select4`, the mask reductions).
@@ -212,7 +213,21 @@ is wanted. A scalar `if` over lanes is a mistake the type catches.
 
 **A scalar operand splats.** `v * 2.0`, `v + n` (an integer) and `v > 2.0`
 apply to every lane, as in C — arithmetic and comparison alike. Mixing two
-different lane widths does not.
+different lane widths does not. `%` and `~` apply to integer lanes only: a
+float lane has no remainder or bit pattern in that sense, and either one on
+an `f32x4` is a type error at the source line.
+
+**Eight lanes: `f32x8` and its mask `i32x8`.** The `f32x4` surface at twice
+the width (`splat8`, `f32x8(...)`, `load8` / `store8`, `lane8`, `sum8`,
+`min8` / `max8`, `select8`, `sqrt8`, `abs8`, `lt8`…`eq8`, `mask8_and` /
+`mask8_or` / `mask8_not`, `any8` / `all8`). `.x` to `.w` read lanes 0-3, and
+`lanes.lane8` reads any of the eight. The width is a build choice: with
+`-mavx2` (or `-march=native`) in aether.toml's `[build] cflags`, an `f32x8`
+is one 256-bit register and each operation one instruction; without AVX2 it
+is two four-lane halves, which costs what two `f32x4` operations cost. The
+same source runs either way, and gives the same results, so a kernel written
+eight-wide is never slower than the four-lane one and runs twice as wide
+where AVX2 is on.
 
 See [`std/lanes/README.md`](../std/lanes/README.md) for the full surface and
 the measured speedup.

@@ -1,4 +1,4 @@
-// std.lanes - SIMD lanes for the f32x4 / f64x2 / i32x4 types (#2146)
+// std.lanes - SIMD lanes for the f32x4 / f64x2 / i32x4 / f32x8 types (#2146)
 // Import with: import std.lanes
 //
 // The lane types themselves are language types: `f32x4` is four C floats in
@@ -48,7 +48,12 @@ exports(
     pack_i32_i16, pack_i16_u8,
     load4_slice, store4_slice, load2_slice, store2_slice,
     i32load_slice, i32store_slice, i16load_slice, i16store_slice,
-    pack_i16_u8_slice
+    pack_i16_u8_slice,
+    // ---- eight float lanes (#2428) ----
+    f32x8, splat8, load8, store8, lane8, sum8, min8, max8, select8, sqrt8, abs8,
+    lt8, le8, gt8, ge8, eq8,
+    mask8_and, mask8_or, mask8_not, any8, all8, mask8_lane,
+    load8_slice, store8_slice
 )
 
 // ---- f32x4: four single-precision lanes ---------------------------------
@@ -190,6 +195,47 @@ exports(
 // have room for 16 bytes.
 @extern("_ae_i16x8_packus_u8x16") pack_i16_u8(a: i16x8, b: i16x8, out: ptr)
 
+// ---- f32x8: eight single-precision lanes (#2428) ------------------------
+//
+// The f32x4 surface at twice the width. Where the build enables AVX
+// (`-mavx2`, or `-march=native`, through aether.toml's `[build] cflags`)
+// an f32x8 is one 256-bit register and each operation one instruction.
+// Without AVX it is carried as two 128-bit halves, which costs what two
+// f32x4 values would, so code written for eight lanes is never slower than
+// the four-lane version and runs at full width wherever AVX is on.
+//
+// A comparison yields an `i32x8`: eight 32-bit mask lanes, all-ones or
+// zero. `.x .y .z .w` read lanes 0-3; `lane8` reads any of the eight.
+// A load or store moves 32 bytes, at an ELEMENT index, unaligned.
+
+@extern("_ae_f32x8_set") f32x8(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32) -> f32x8
+@extern("_ae_f32x8_splat") splat8(v: f32) -> f32x8
+@extern("_ae_f32x8_load") load8(buf: ptr, index: long) -> f32x8
+@extern("_ae_f32x8_store") store8(buf: ptr, index: long, v: f32x8)
+// Lane `index` (0-7) as an f32.
+@extern("_ae_f32x8_lane") lane8(v: f32x8, index: long) -> f32
+// Lanes 0..7 added in order, as a scalar loop would, so the sum is the same
+// bits on every instruction set.
+@extern("_ae_f32x8_sum") sum8(v: f32x8) -> f32
+@extern("_ae_f32x8_min") min8(a: f32x8, b: f32x8) -> f32x8
+@extern("_ae_f32x8_max") max8(a: f32x8, b: f32x8) -> f32x8
+@extern("_ae_f32x8_select") select8(mask: i32x8, a: f32x8, b: f32x8) -> f32x8
+// Exact, like sqrt4 / abs4.
+@extern("_ae_f32x8_sqrt") sqrt8(v: f32x8) -> f32x8
+@extern("_ae_f32x8_abs") abs8(v: f32x8) -> f32x8
+@extern("_ae_f32x8_lt") lt8(a: f32x8, b: f32x8) -> i32x8
+@extern("_ae_f32x8_le") le8(a: f32x8, b: f32x8) -> i32x8
+@extern("_ae_f32x8_gt") gt8(a: f32x8, b: f32x8) -> i32x8
+@extern("_ae_f32x8_ge") ge8(a: f32x8, b: f32x8) -> i32x8
+@extern("_ae_f32x8_eq") eq8(a: f32x8, b: f32x8) -> i32x8
+@extern("_ae_i32x8_and") mask8_and(a: i32x8, b: i32x8) -> i32x8
+@extern("_ae_i32x8_or") mask8_or(a: i32x8, b: i32x8) -> i32x8
+@extern("_ae_i32x8_not") mask8_not(a: i32x8) -> i32x8
+@extern("_ae_i32x8_any") any8(mask: i32x8) -> bool
+@extern("_ae_i32x8_all") all8(mask: i32x8) -> bool
+// Lane `index` of a mask: 0 or -1 for a comparison result.
+@extern("_ae_i32x8_lane") mask8_lane(v: i32x8, index: long) -> long
+
 // ---- slice-checked wrappers (#2301) -------------------------------------
 //
 // Each load/store above takes a raw `ptr` and trusts the caller's bound,
@@ -199,44 +245,60 @@ exports(
 // checking by itself; the bound check here is the actual work. `index` is
 // still in ELEMENTS (matching the raw forms above), so it is directly
 // `buf.len`-comparable: `buf`'s element type already fixes the byte width.
+// The bound is written `index > buf.len - N`, not `index + N > buf.len`,
+// which an index near the largest long would overflow past the check.
 
 load4_slice(buf: f32[], index: long) -> f32x4 {
-    if index < 0 || index + 4 > buf.len {
+    if index < 0 || index > buf.len - 4 {
         panic("lanes.load4_slice: 4 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     return load4(buf as ptr, index)
 }
 
 store4_slice(buf: f32[], index: long, v: f32x4) {
-    if index < 0 || index + 4 > buf.len {
+    if index < 0 || index > buf.len - 4 {
         panic("lanes.store4_slice: 4 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     store4(buf as ptr, index, v)
 }
 
+load8_slice(buf: f32[], index: long) -> f32x8 {
+    if index < 0 || index > buf.len - 8 {
+        panic("lanes.load8_slice: 8 lanes at element ${index} are outside a slice of ${buf.len}")
+    }
+    return load8(buf as ptr, index)
+}
+
+store8_slice(buf: f32[], index: long, v: f32x8) {
+    if index < 0 || index > buf.len - 8 {
+        panic("lanes.store8_slice: 8 lanes at element ${index} are outside a slice of ${buf.len}")
+    }
+    store8(buf as ptr, index, v)
+}
+
 load2_slice(buf: float[], index: long) -> f64x2 {
-    if index < 0 || index + 2 > buf.len {
+    if index < 0 || index > buf.len - 2 {
         panic("lanes.load2_slice: 2 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     return load2(buf as ptr, index)
 }
 
 store2_slice(buf: float[], index: long, v: f64x2) {
-    if index < 0 || index + 2 > buf.len {
+    if index < 0 || index > buf.len - 2 {
         panic("lanes.store2_slice: 2 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     store2(buf as ptr, index, v)
 }
 
 i32load_slice(buf: int[], index: long) -> i32x4 {
-    if index < 0 || index + 4 > buf.len {
+    if index < 0 || index > buf.len - 4 {
         panic("lanes.i32load_slice: 4 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     return i32load(buf as ptr, index)
 }
 
 i32store_slice(buf: int[], index: long, v: i32x4) {
-    if index < 0 || index + 4 > buf.len {
+    if index < 0 || index > buf.len - 4 {
         panic("lanes.i32store_slice: 4 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     i32store(buf as ptr, index, v)
@@ -247,14 +309,14 @@ i32store_slice(buf: int[], index: long, v: i32x4) {
 // signed 16-bit element type for arrays, and `i16lane` already sign-extends
 // on the way out, same as the raw `ptr` form.
 i16load_slice(buf: uint16[], index: long) -> i16x8 {
-    if index < 0 || index + 8 > buf.len {
+    if index < 0 || index > buf.len - 8 {
         panic("lanes.i16load_slice: 8 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     return i16load(buf as ptr, index)
 }
 
 i16store_slice(buf: uint16[], index: long, v: i16x8) {
-    if index < 0 || index + 8 > buf.len {
+    if index < 0 || index > buf.len - 8 {
         panic("lanes.i16store_slice: 8 lanes at element ${index} are outside a slice of ${buf.len}")
     }
     i16store(buf as ptr, index, v)

@@ -25,12 +25,19 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include <direct.h>
+/* MinGW's mkdir takes the path only; POSIX's also takes a mode, which
+ * Windows has no use for. Without this the generator did not build there. */
+#define docgen_mkdir(p) _mkdir(p)
+#else
+#define docgen_mkdir(p) mkdir((p), 0755)
+#endif
 
 #define MAX_FUNCTIONS 256
 #define MAX_EXPORTS 256
 #define MAX_LINE 4096
 #define MAX_DOC 6144
-#define MAX_MODULES 64
 #define MAX_FILE_BYTES (1 << 20)   /* 1 MiB per module.ae — generous */
 
 typedef enum {
@@ -57,8 +64,14 @@ typedef struct {
     int function_count;
 } Module;
 
-static Module modules[MAX_MODULES];
+/* One heap block per module, found through a growing array of pointers. A
+ * Module carries MAX_FUNCTIONS full doc buffers (about 2 MB), so the old
+ * fixed `modules[64]` could not simply be enlarged, and past 64 the loader
+ * returned NULL and the remaining modules (std has 87) were dropped without
+ * a word: every page after `snapshot` alphabetically went stale. */
+static Module** modules = NULL;
 static int module_count = 0;
+static int module_cap = 0;
 
 /* ---------------------------------------------------------------------- */
 /* Small string helpers                                                    */
@@ -148,12 +161,19 @@ static void html_escape(const char* src, char* dest, size_t dest_size) {
 
 static Module* find_or_create_module(const char* name) {
     for (int i = 0; i < module_count; i++) {
-        if (strcmp(modules[i].name, name) == 0) return &modules[i];
+        if (strcmp(modules[i]->name, name) == 0) return modules[i];
     }
-    if (module_count >= MAX_MODULES) return NULL;
-    Module* m = &modules[module_count++];
-    memset(m, 0, sizeof(*m));
+    if (module_count >= module_cap) {
+        int cap = module_cap ? module_cap * 2 : 64;
+        Module** grown = realloc(modules, (size_t)cap * sizeof(*grown));
+        if (!grown) return NULL;
+        modules = grown;
+        module_cap = cap;
+    }
+    Module* m = calloc(1, sizeof(*m));
+    if (!m) return NULL;
     strncpy(m->name, name, sizeof(m->name) - 1);
+    modules[module_count++] = m;
     return m;
 }
 
@@ -784,7 +804,7 @@ static void emit_head(FILE* f, const char* title) {
 static void generate_index(const char* output_dir) {
     char filepath[600];
     snprintf(filepath, sizeof(filepath), "%s/index.html", output_dir);
-    FILE* f = fopen(filepath, "w");
+    FILE* f = fopen(filepath, "wb");  /* LF on every platform: the pages are committed */
     if (!f) { fprintf(stderr, "Error: cannot create %s\n", filepath); return; }
 
     emit_head(f, "Aether Standard Library");
@@ -798,7 +818,7 @@ static void generate_index(const char* output_dir) {
     fprintf(f, "  <h2>Modules</h2>\n");
     fprintf(f, "  <ul class=\"module-list\">\n");
     for (int i = 0; i < module_count; i++) {
-        fprintf(f, "    <li><a href=\"%s.html\">%s</a></li>\n", modules[i].name, modules[i].name);
+        fprintf(f, "    <li><a href=\"%s.html\">%s</a></li>\n", modules[i]->name, modules[i]->name);
     }
     fprintf(f, "  </ul>\n</nav>\n");
 
@@ -813,12 +833,12 @@ static void generate_index(const char* output_dir) {
     fprintf(f, "  <div class=\"module-grid\">\n");
     for (int i = 0; i < module_count; i++) {
         char desc[600], esc[1200];
-        short_description(&modules[i], desc, sizeof(desc));
+        short_description(modules[i], desc, sizeof(desc));
         html_escape(desc, esc, sizeof(esc));
-        fprintf(f, "    <a href=\"%s.html\" class=\"module-card\">\n", modules[i].name);
-        fprintf(f, "      <h3>%s</h3>\n", modules[i].name);
+        fprintf(f, "    <a href=\"%s.html\" class=\"module-card\">\n", modules[i]->name);
+        fprintf(f, "      <h3>%s</h3>\n", modules[i]->name);
         fprintf(f, "      <p>%s</p>\n", esc);
-        fprintf(f, "      <span class=\"count\">%d exports</span>\n", modules[i].function_count);
+        fprintf(f, "      <span class=\"count\">%d exports</span>\n", modules[i]->function_count);
         fprintf(f, "    </a>\n");
     }
     fprintf(f, "  </div>\n");
@@ -828,14 +848,14 @@ static void generate_index(const char* output_dir) {
     fprintf(f, "    <h2>Search Results</h2>\n");
     fprintf(f, "    <ul class=\"function-list\" id=\"all-functions\">\n");
     for (int i = 0; i < module_count; i++) {
-        for (int j = 0; j < modules[i].function_count; j++) {
-            Function* fn = &modules[i].functions[j];
+        for (int j = 0; j < modules[i]->function_count; j++) {
+            Function* fn = &modules[i]->functions[j];
             char esc[256];
             html_escape(fn->name, esc, sizeof(esc));
             fprintf(f, "      <li class=\"function-item\" data-name=\"%s\">"
                        "<a href=\"%s.html#%s\"><span class=\"fn-name\">%s</span>"
                        "<span class=\"fn-module\">%s</span></a></li>\n",
-                    esc, modules[i].name, esc, esc, modules[i].name);
+                    esc, modules[i]->name, esc, esc, modules[i]->name);
         }
     }
     fprintf(f, "    </ul>\n");
@@ -851,7 +871,7 @@ static void generate_index(const char* output_dir) {
 static void generate_module_page(const char* output_dir, Module* mod) {
     char filepath[600];
     snprintf(filepath, sizeof(filepath), "%s/%s.html", output_dir, mod->name);
-    FILE* f = fopen(filepath, "w");
+    FILE* f = fopen(filepath, "wb");  /* LF on every platform: the pages are committed */
     if (!f) { fprintf(stderr, "Error: cannot create %s\n", filepath); return; }
 
     char title[128];
@@ -881,8 +901,8 @@ static void generate_module_page(const char* output_dir, Module* mod) {
     fprintf(f, "  <h2>Modules</h2>\n");
     fprintf(f, "  <ul class=\"module-list\">\n");
     for (int i = 0; i < module_count; i++) {
-        const char* active = (strcmp(modules[i].name, mod->name) == 0) ? " class=\"active\"" : "";
-        fprintf(f, "    <li%s><a href=\"%s.html\">%s</a></li>\n", active, modules[i].name, modules[i].name);
+        const char* active = (strcmp(modules[i]->name, mod->name) == 0) ? " class=\"active\"" : "";
+        fprintf(f, "    <li%s><a href=\"%s.html\">%s</a></li>\n", active, modules[i]->name, modules[i]->name);
     }
     fprintf(f, "  </ul>\n</nav>\n");
 
@@ -954,7 +974,7 @@ static void generate_module_page(const char* output_dir, Module* mod) {
 static void generate_css(const char* output_dir) {
     char filepath[600];
     snprintf(filepath, sizeof(filepath), "%s/style.css", output_dir);
-    FILE* f = fopen(filepath, "w");
+    FILE* f = fopen(filepath, "wb");  /* LF on every platform: the pages are committed */
     if (!f) { fprintf(stderr, "Error: cannot create %s\n", filepath); return; }
 
     fprintf(f,
@@ -1151,7 +1171,7 @@ static void generate_css(const char* output_dir) {
 static void generate_search_js(const char* output_dir) {
     char filepath[600];
     snprintf(filepath, sizeof(filepath), "%s/search.js", output_dir);
-    FILE* f = fopen(filepath, "w");
+    FILE* f = fopen(filepath, "wb");  /* LF on every platform: the pages are committed */
     if (!f) { fprintf(stderr, "Error: cannot create %s\n", filepath); return; }
 
     fprintf(f,
@@ -1232,7 +1252,7 @@ static void generate_search_js(const char* output_dir) {
 
 /* qsort comparator: modules alphabetically by name. */
 static int module_cmp(const void* a, const void* b) {
-    return strcmp(((const Module*)a)->name, ((const Module*)b)->name);
+    return strcmp((*(Module* const*)a)->name, (*(Module* const*)b)->name);
 }
 
 int main(int argc, char** argv) {
@@ -1245,7 +1265,7 @@ int main(int argc, char** argv) {
     const char* std_dir = argv[1];
     const char* output_dir = argv[2];
 
-    mkdir(output_dir, 0755);
+    docgen_mkdir(output_dir);
 
     DIR* dir = opendir(std_dir);
     if (!dir) {
@@ -1273,12 +1293,12 @@ int main(int argc, char** argv) {
     closedir(dir);
 
     /* Sort modules alphabetically for a stable, predictable layout. */
-    qsort(modules, module_count, sizeof(Module), module_cmp);
+    qsort(modules, module_count, sizeof(*modules), module_cmp);
 
     /* Drop modules whose exports yielded nothing documentable (defensive). */
     int kept = 0;
     for (int i = 0; i < module_count; i++) {
-        if (modules[i].function_count > 0) {
+        if (modules[i]->function_count > 0) {
             if (kept != i) modules[kept] = modules[i];
             kept++;
         }
@@ -1288,8 +1308,8 @@ int main(int argc, char** argv) {
     int total = 0;
     printf("\nParsed %d modules:\n", module_count);
     for (int i = 0; i < module_count; i++) {
-        printf("  - %s: %d exports\n", modules[i].name, modules[i].function_count);
-        total += modules[i].function_count;
+        printf("  - %s: %d exports\n", modules[i]->name, modules[i]->function_count);
+        total += modules[i]->function_count;
     }
     printf("  total exports: %d\n", total);
 
@@ -1298,7 +1318,7 @@ int main(int argc, char** argv) {
     generate_search_js(output_dir);
     generate_index(output_dir);
     for (int i = 0; i < module_count; i++) {
-        generate_module_page(output_dir, &modules[i]);
+        generate_module_page(output_dir, modules[i]);
     }
 
     printf("\nDone! Open %s/index.html in a browser.\n", output_dir);

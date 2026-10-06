@@ -106,22 +106,22 @@ main() {
             spec.assert_err_contains(err, "null list", "get(null) says why")
         }
 
-        spec.it("reports no error for an out-of-range index") callback {
-            // NOT an endorsement. get() guards `list == null` but not the
-            // index, so an out-of-range read yields (null, "") — which a
-            // caller following the (value, err) convention reads as
-            // success. Until that changes, callers must null-check the
-            // returned pointer as well as the error. Pinned so the day
-            // it changes is a deliberate one.
+        spec.it("reports an out-of-range index as an error") callback {
+            // An empty error means the value is good, as everywhere in std
+            // (#2439). Both edges: one past the end, and below zero.
             l = list.list_new()
-            item, err = list.get(l, 99)
-            spec.assert_ok(err, "out-of-range get reports success today")
-            spec.assert_true(same_ptr(item, null),
-                "...but hands back null, so the pointer must be checked")
+            _ = list.add(l, l)
+            item, err = list.get(l, 1)
+            spec.assert_err_contains(err, "index out of range",
+                "one past the end says why")
+            spec.assert_true(same_ptr(item, null), "and hands back null")
             neg, nerr = list.get(l, -1)
-            spec.assert_ok(nerr, "a negative index reports success too")
-            spec.assert_true(same_ptr(neg, null),
-                "a negative index behaves the same way")
+            spec.assert_err_contains(nerr, "index out of range",
+                "a negative index says why")
+            spec.assert_true(same_ptr(neg, null), "and hands back null")
+            last, lerr = list.get(l, 0)
+            spec.assert_ok(lerr, "the last valid index still reads")
+            spec.assert_true(same_ptr(last, l), "and returns its item")
             list.list_free(l)
         }
     }

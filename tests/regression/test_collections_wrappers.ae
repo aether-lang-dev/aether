@@ -25,11 +25,11 @@ main() {
     else if v0 != 10 { println("  FAIL: wrong value ${v0}"); fails = fails + 1 }
     else { print("  PASS: in-range returns (value, '')\n") }
 
-    // Out of range -> (null, "")
+    // Out of range -> (null, "index out of range") (#2439)
     vo, eo = list.get(l, 99)
     if vo != null { println("  FAIL: oob should be null"); fails = fails + 1 }
-    else if eo != "" { println("  FAIL: oob should have empty err: ${eo}"); fails = fails + 1 }
-    else { print("  PASS: oob returns (null, '')\n") }
+    else if eo != "index out of range" { println("  FAIL: oob should say 'index out of range', got '${eo}'"); fails = fails + 1 }
+    else { print("  PASS: oob returns (null, 'index out of range')\n") }
 
     // Null list -> (null, "null list")
     vn, en = list.get(null, 0)

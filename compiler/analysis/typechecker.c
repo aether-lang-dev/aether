@@ -1072,6 +1072,8 @@ static const char* type_name_of_kind(TypeKind k) {
         case TYPE_I32X4: return "i32x4";
         case TYPE_I64X2: return "i64x2";
         case TYPE_I16X8: return "i16x8";
+        case TYPE_F32X8: return "f32x8";
+        case TYPE_I32X8: return "i32x8";
         default: return "a lane type";
     }
 }
@@ -1096,6 +1098,8 @@ static const char* type_name(Type* t) {
         case TYPE_I32X4:    return "i32x4";
         case TYPE_I64X2:    return "i64x2";
         case TYPE_I16X8:    return "i16x8";
+        case TYPE_F32X8:    return "f32x8";
+        case TYPE_I32X8:    return "i32x8";
         case TYPE_BOOL:     return "bool";
         case TYPE_BYTE:     return "byte";
         case TYPE_STRING:   return "string";
@@ -1131,7 +1135,8 @@ static int is_integer_scalar(TypeKind kind) {
 static int is_lane_type(TypeKind kind) {
     return kind == TYPE_F32X4 || kind == TYPE_F64X2 ||
            kind == TYPE_I32X4 || kind == TYPE_I64X2 ||
-           kind == TYPE_I16X8;
+           kind == TYPE_I16X8 ||
+           kind == TYPE_F32X8 || kind == TYPE_I32X8;
 }
 
 /* The mask a comparison of this lane type yields: the SAME register width,
@@ -1142,6 +1147,7 @@ static TypeKind lane_mask_kind(TypeKind kind) {
         case TYPE_F32X4: case TYPE_I32X4: return TYPE_I32X4;
         case TYPE_F64X2: case TYPE_I64X2: return TYPE_I64X2;
         case TYPE_I16X8: return TYPE_I16X8;
+        case TYPE_F32X8: case TYPE_I32X8: return TYPE_I32X8;
         default: return TYPE_UNKNOWN;
     }
 }
@@ -1153,6 +1159,8 @@ static TypeKind lane_scalar_kind(TypeKind kind) {
     if (kind == TYPE_I32X4) return TYPE_INT;
     if (kind == TYPE_I64X2) return TYPE_INT64;
     if (kind == TYPE_I16X8) return TYPE_INT;
+    if (kind == TYPE_F32X8) return TYPE_FLOAT32;
+    if (kind == TYPE_I32X8) return TYPE_INT;
     return TYPE_UNKNOWN;
 }
 
@@ -2927,6 +2935,12 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
             case TOKEN_LESS: case TOKEN_LESS_EQUAL:
             case TOKEN_GREATER: case TOKEN_GREATER_EQUAL:
                 return create_type(operands_ok ? lane_mask_kind(lane) : TYPE_UNKNOWN);
+            /* A mask is not a bool: `m1 && m2` was typed bool below and
+             * reached the C compiler, which rejects a vector there. Masks
+             * combine with lanes.mask_and / mask_or, and reduce to a bool
+             * with any / all. */
+            case TOKEN_AND: case TOKEN_OR:
+                return create_type(TYPE_UNKNOWN);
             default: break;
         }
     }
@@ -2993,6 +3007,8 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
                 TypeKind lane = is_lane_type(left_type->kind) ? left_type->kind : right_type->kind;
                 TypeKind other = is_lane_type(left_type->kind) ? right_type->kind : left_type->kind;
                 TypeKind elem = lane_scalar_kind(lane);
+                if (operator == TOKEN_MODULO && (elem == TYPE_FLOAT32 || elem == TYPE_FLOAT))
+                    return create_type(TYPE_UNKNOWN);   /* no `%` on float lanes */
                 if (other == lane || other == elem || is_integer_scalar(other) ||
                     (elem == TYPE_FLOAT32 && other == TYPE_FLOAT))
                     return create_type(lane);
@@ -7037,6 +7053,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 ASTNode* rhs = stmt->children[1];
                 typecheck_expression(rhs, table);
                 Type* rhs_type = infer_type(rhs, table);
+                /* The target's type, for codegen (#2428: `v op= x` on an
+                 * eight-lane value is a helper call). Always the symbol this
+                 * scope resolved: the early pass stamps the function-level
+                 * one, which is the wrong variable when a closure parameter
+                 * shadows it. */
+                if (stmt->node_type) free_type(stmt->node_type);
+                stmt->node_type = symbol->type ? clone_type(symbol->type) : create_type(TYPE_UNKNOWN);
                 if (rhs_type && (!rhs->node_type || rhs->node_type->kind == TYPE_UNKNOWN)) {
                     set_node_type(rhs, clone_type(rhs_type));
                 }
@@ -7908,6 +7931,27 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
         case AST_UNARY_EXPRESSION: {
             if (expr->child_count > 0) {
                 typecheck_expression(expr->children[0], table);
+                /* `~` flips bits, which a float lane does not have in any
+                 * sense C accepts: it reached the C compiler as an invalid
+                 * operand. Integer lanes (masks) keep it. */
+                Type* ot = expr->children[0]->node_type;
+                if (expr->value && strcmp(expr->value, "!") == 0 && ot && is_lane_type(ot->kind)) {
+                    char msg[200];
+                    snprintf(msg, sizeof(msg),
+                             "'!' is not defined on %s: a mask is not a bool. Reduce it with "
+                             "lanes.any / lanes.all, or flip its lanes with lanes.mask_not",
+                             type_name_of_kind(ot->kind));
+                    type_error(msg, expr->line, expr->column);
+                    return 0;
+                }
+                if (expr->value && strcmp(expr->value, "~") == 0 && ot && is_lane_type(ot->kind) &&
+                    (lane_scalar_kind(ot->kind) == TYPE_FLOAT32 || lane_scalar_kind(ot->kind) == TYPE_FLOAT)) {
+                    char msg[160];
+                    snprintf(msg, sizeof(msg), "'~' is not defined on %s: it has float lanes",
+                             type_name_of_kind(ot->kind));
+                    type_error(msg, expr->line, expr->column);
+                    return 0;
+                }
                 expr->node_type = infer_unary_type(expr->children[0],
                                                  get_token_type_from_string(expr->value));
             }
@@ -8718,10 +8762,20 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                  "'%s' is not a lane of %s: its lanes are %s",
                                  expr->value, type_name_of_kind(objk),
                                  objk == TYPE_F64X2 ? "`.x` and `.y`"
-                                                    : "`.x`, `.y`, `.z` and `.w`");
+                                 : (objk == TYPE_F32X8 || objk == TYPE_I32X8)
+                                     ? "`.x`, `.y`, `.z` and `.w` for lanes 0-3, and `lanes.lane8` for any of the eight"
+                                     : "`.x`, `.y`, `.z` and `.w`");
                         type_error(msg, expr->line, expr->column);
                         return 0;
                     }
+                    /* Pin the object's type too: codegen reads it to emit the
+                     * lane read, and a local bound from a unary expression
+                     * (`inv = ~m`, `n = -v`) is not typed by the early
+                     * inference pass, so `inv.x` reached the C as a member
+                     * access on a vector. */
+                    ASTNode* obj = expr->children[0];
+                    if (!obj->node_type || obj->node_type->kind == TYPE_UNKNOWN)
+                        set_node_type(obj, create_type(objk));
                     set_node_type(expr, create_type(elem));
                     return 1;
                 }

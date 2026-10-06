@@ -36,10 +36,11 @@ add err='' size=1
 same pointer back: true
 ```
 
-**`get` reports an out-of-range index as success.** It guards `list == null`
-but not the index, so `list.get(l, 99)` returns `(null, "")` — a caller
-following the `(value, err)` convention reads that as a hit. Null-check the
-returned pointer as well as the error until that changes.
+**`get` checks the index.** `list.get(l, 99)` on a shorter list returns
+`(null, "index out of range")`, and a null list returns `(null, "null list")`,
+so an empty error always means the value is good. `list_get_raw` is the
+unchecked form, for a loop that has already bounded the index by
+`list_size`.
 
 ## Exports
 
