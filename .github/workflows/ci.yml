@@ -381,6 +381,23 @@ jobs:
         X=build/.alien/android-aarch64
         file $X/aetherc $X/ae
         file $X/ae | grep -q '/system/bin/linker64' || { echo "ae is not an Android binary"; exit 1; }
+    # `ae build --target=aarch64-linux-android`: zig plus a bionic sysroot,
+    # no NDK compiler. The runner's NDK sysroot has the layout
+    # aether-crossbuild's fetch-android-sysroot.sh produces, so it serves as
+    # AETHER_SYSROOT directly.
+    - name: ae build --target=aarch64-linux-android (zig + sysroot)
+      run: |
+        ZIG_DIR="$(dirname "$(sh scripts/get-zig.sh "$GITHUB_WORKSPACE/.zig")")"
+        export PATH="$ZIG_DIR:$PATH"
+        make -s compiler ae stdlib
+        NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+        export AETHER_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        export AETHER_HOME="$PWD"
+        printf '%s\n' 'message Ping { n: int }' 'actor C { state t = 0  receive { Ping(n) -> { t = t + n } } }' \
+          'main() { c = spawn(C())  c ! Ping { n: 1 }  wait_for_idle()  println("ok") }' > /tmp/android_probe.ae
+        ./build/ae build --target=aarch64-linux-android /tmp/android_probe.ae -o /tmp/android_probe
+        file /tmp/android_probe
+        file /tmp/android_probe | grep -q '/system/bin/linker64' || { echo "not an Android binary"; exit 1; }
 
   # ============================================================
   # FreeBSD native build + test (#402)

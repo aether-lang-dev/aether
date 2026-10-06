@@ -931,11 +931,36 @@ jobs:
           > release/ANDROID-CROSS-BUILD.txt
         cd release && tar -czf "../aether-${VERSION}-${TARGET}.tar.gz" *
 
+    # The lean bionic sysroot `ae build --target=aarch64-linux-android` links
+    # against with zig (the slice aether-crossbuild's fetch-android-sysroot.sh
+    # takes): headers, crt objects and libc stubs for API 29, the static
+    # archives, and the NDK NOTICE files that license them. So a user needs
+    # neither the 2 GB NDK nor aether-crossbuild to cross-build for Android.
+    - name: Package Android cross sysroot
+      run: |
+        VERSION=$(cat VERSION | tr -d '[:space:]')
+        NDK="${{ steps.ndk.outputs.ndk }}"
+        SR="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        L=usr/lib/aarch64-linux-android
+        OUT=aarch64-android29
+        rm -rf "$OUT" && mkdir -p "$OUT/$L"
+        cp -R "$SR/usr/include" "$OUT/usr/include"
+        cp -R "$SR/$L/29" "$OUT/$L/29"
+        cp "$SR/$L/"*.a "$OUT/$L/"
+        cp "$NDK/NOTICE" "$OUT/NOTICE.android-ndk"
+        cp "$NDK/NOTICE.toolchain" "$OUT/NOTICE.android-ndk-toolchain" 2>/dev/null || true
+        cp "$NDK/source.properties" "$OUT/source.properties"
+        test -f "$OUT/$L/29/libc.so" || { echo "sysroot has no API 29 libc.so"; exit 1; }
+        tar -cJf "aether-${VERSION}-android-aarch64-sysroot.tar.xz" "$OUT"
+        ls -la "aether-${VERSION}-android-aarch64-sysroot.tar.xz"
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: aether-android-aarch64
-        path: aether-*-android-aarch64.tar.gz
+        path: |
+          aether-*-android-aarch64.tar.gz
+          aether-*-android-aarch64-sysroot.tar.xz
 
   publish:
     name: Publish release

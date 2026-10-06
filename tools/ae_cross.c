@@ -18,6 +18,7 @@
 #include <strings.h>    /* strcasecmp: POSIX puts it here, not in <string.h> */
 #endif
 #include <sys/stat.h>   /* sysroot completeness probe, below */
+#include <unistd.h>     /* getpid: the per-process zig libc file (Android) */
 #ifdef _WIN32
 #  include <process.h>
 #  ifndef getpid
@@ -144,6 +145,20 @@ const char* cross_target_to_zig(const char* t) {
      * State the ABI version so Zig's startup objects match that base. */
     if (!strcmp(t, "aarch64-freebsd") || !strcmp(t, "arm64-freebsd")) return "aarch64-freebsd.15.0";
     if (!strcmp(t, "x86_64-freebsd")  || !strcmp(t, "amd64-freebsd")) return "x86_64-freebsd.15.0";
+    /* Android (Tier B, like FreeBSD): zig names the target but ships no
+     * bionic, so the headers, the startup objects and the libc/libm/libdl
+     * stubs come from an Android sysroot (aether-crossbuild's
+     * fetch-android-sysroot.sh: the NDK's sysroot, lean). The API level is
+     * the minimum Android the binary runs on: 29 (Android 10) unless
+     * AETHER_ANDROID_API says otherwise. */
+    if (!strcmp(t, "aarch64-linux-android") || !strcmp(t, "arm64-linux-android")
+        || !strcmp(t, "aarch64-android") || !strcmp(t, "arm64-android")) {
+        static char android_triple[64];
+        const char* api = getenv("AETHER_ANDROID_API");
+        if (!api || !*api) api = "29";
+        snprintf(android_triple, sizeof(android_triple), "aarch64-linux-android.%s", api);
+        return android_triple;
+    }
     /* WebAssembly (Tier A — self-contained): zig bundles wasi-libc, so no
      * sysroot. NOTE this is the ZIG wasm path, and is deliberately distinct
      * from bare `--target=wasm`, which routes to Emscripten (`emcc`) and stays
@@ -273,7 +288,62 @@ static bool cross_toolchain(const char* ztriple, char* cc_out, size_t cc_sz,
  * self-contained; Tier B (freebsd) is not. */
 static bool cross_target_needs_sysroot(const char* t) {
     if (!t) return false;
-    return strstr(t, "freebsd") != NULL;
+    return strstr(t, "freebsd") != NULL || strstr(t, "android") != NULL;
+}
+
+/* Android: point zig at the sysroot's bionic through a libc file (ZIG_LIBC,
+ * inherited by every zig cc this process runs), since zig cannot provide a
+ * libc for the target itself, and return the -L flags for the API level's
+ * libc/libm/libdl stubs. `ztriple` is "<cpu>-linux-android.<api>". Prints the
+ * fix and returns false if the sysroot is missing or is not an Android one. */
+static bool cross_android_setup(const char* ztriple, const char* sr,
+                                char* flags, size_t fsz) {
+    char cpu[32], api[16];
+    const char* dash = strchr(ztriple, '-');
+    const char* dot = strrchr(ztriple, '.');
+    if (!dash || !dot || (size_t)(dash - ztriple) >= sizeof(cpu)) return false;
+    snprintf(cpu, sizeof(cpu), "%.*s", (int)(dash - ztriple), ztriple);
+    snprintf(api, sizeof(api), "%s", dot + 1);
+    char libdir[1024], probe[1100];
+    snprintf(libdir, sizeof(libdir), "%s/usr/lib/%s-linux-android", sr, cpu);
+    snprintf(probe, sizeof(probe), "%s/%s/libc.so", libdir, api);
+    struct stat st;
+    if (stat(probe, &st) != 0) {
+        fprintf(stderr,
+            "Error: AETHER_SYSROOT=%s has no bionic for %s at API %s (no\n"
+            "  usr/lib/%s-linux-android/%s/libc.so). Fetch the Android sysroot with\n"
+            "  aether-crossbuild:\n"
+            "    ./scripts/fetch-android-sysroot.sh %s %s\n"
+            "  then point AETHER_SYSROOT at <crossbuild>/bases/%s-android%s\n"
+            "  (or set AETHER_ANDROID_API to a level the sysroot has).\n",
+            sr, cpu, api, cpu, api, cpu, api, cpu, api);
+        return false;
+    }
+    const char* tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = getenv("TEMP");   /* Windows */
+    if (!tmp || !*tmp) tmp = "/tmp";
+    static char libc_file[1200];
+    snprintf(libc_file, sizeof(libc_file), "%s/aether-zig-libc-%s-android%s-%ld.txt",
+             tmp, cpu, api, (long)getpid());
+    FILE* f = fopen(libc_file, "w");
+    if (!f) {
+        fprintf(stderr, "Error: cannot write the zig libc file %s\n", libc_file);
+        return false;
+    }
+    fprintf(f, "include_dir=%s/usr/include\n", sr);
+    fprintf(f, "sys_include_dir=%s/usr/include/%s-linux-android\n", sr, cpu);
+    fprintf(f, "crt_dir=%s/%s\n", libdir, api);
+    fprintf(f, "msvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n");
+    fclose(f);
+#ifdef _WIN32
+    _putenv_s("ZIG_LIBC", libc_file);   /* MinGW has no setenv */
+#else
+    setenv("ZIG_LIBC", libc_file, 1);
+#endif
+    /* Android only runs position-independent executables, so every object
+     * that goes into one (libaether.a's included) is compiled -fPIC. */
+    snprintf(flags, fsz, "-fPIC -L%s/%s -L%s", libdir, api, libdir);
+    return true;
 }
 
 /* Locate the authoritative source MANIFEST and the base directory its
@@ -614,6 +684,15 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
     if (cross_target_needs_sysroot(ztriple)) {
         const char* sr = getenv("AETHER_SYSROOT");
         if (!sr || !*sr) {
+            if (strstr(ztriple, "android")) {
+                fprintf(stderr,
+                    "Error: target %s needs an Android sysroot, but AETHER_SYSROOT is unset.\n"
+                    "  Fetch it with aether-crossbuild:\n"
+                    "    ./scripts/fetch-android-sysroot.sh aarch64 29\n"
+                    "  then: AETHER_SYSROOT=<crossbuild>/bases/aarch64-android29 ae build ... --target=aarch64-linux-android\n",
+                    ztriple);
+                return 1;
+            }
             fprintf(stderr,
                 "Error: target %s needs a FreeBSD base sysroot, but AETHER_SYSROOT is unset.\n"
                 "  Provision the FreeBSD system headers with aether-crossbuild:\n"
@@ -622,8 +701,12 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
                 ztriple, ztriple);
             return 1;
         }
-        snprintf(sysroot_flag, sizeof(sysroot_flag),
-                 "--sysroot=%s -I%s/usr/include", sr, sr);
+        if (strstr(ztriple, "android")) {
+            if (!cross_android_setup(ztriple, sr, sysroot_flag, sizeof(sysroot_flag))) return 1;
+        } else {
+            snprintf(sysroot_flag, sizeof(sysroot_flag),
+                     "--sysroot=%s -I%s/usr/include", sr, sr);
+        }
     }
 
     char cc_cmd[3072];
@@ -1020,7 +1103,24 @@ int run_cross_build(const char* c_file, const char* out_file,
         snprintf(win_platform_libs, sizeof(win_platform_libs),
                  "-lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp");
     }
-    if (cross_target_needs_sysroot(ztriple)) {
+    if (cross_target_needs_sysroot(ztriple) && strstr(ztriple, "android")) {
+        /* Android: bionic from the sysroot via a zig libc file. The link
+         * takes the same ELF sysroot path FreeBSD does (fbsd_link non-empty);
+         * bionic has threads in libc, so the tail is only libdl (std.audio's
+         * dlopen) ahead of the -lm that path always adds. */
+        const char* sr = getenv("AETHER_SYSROOT");
+        if (!sr || !*sr) {
+            fprintf(stderr,
+                "Error: target %s needs an Android sysroot, but AETHER_SYSROOT is unset.\n"
+                "  Fetch it with aether-crossbuild:\n"
+                "    ./scripts/fetch-android-sysroot.sh aarch64 29\n"
+                "  then: AETHER_SYSROOT=<crossbuild>/bases/aarch64-android29 ae build ... --target=aarch64-linux-android\n",
+                ztriple);
+            return 1;
+        }
+        if (!cross_android_setup(ztriple, sr, sysroot_flag, sizeof(sysroot_flag))) return 1;
+        snprintf(fbsd_link, sizeof(fbsd_link), "-ldl");
+    } else if (cross_target_needs_sysroot(ztriple)) {
         const char* sr = getenv("AETHER_SYSROOT");
         if (!sr || !*sr) {
             fprintf(stderr,
