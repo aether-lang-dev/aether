@@ -123,9 +123,12 @@ check_same main "745269870"
 check_same reg "threaded dispatch: all cases agree"
 check_same neg "3 3 3 2 1 1"
 
+# The binary's real name: `ae build -o main` writes main.exe on Windows, and
+# MSYS's `[ -f main ]` finds it, but nm needs the name with its suffix.
+exe() { if [ -f "$1.exe" ]; then echo "$1.exe"; else echo "$1"; fi; }
 if command -v nm > /dev/null 2>&1 && [ -f "$tmp/td/main" ] && [ -f "$tmp/sw/main" ]; then
-    if nm "$tmp/td/main" 2>/dev/null | grep -q '_ae_td_tbl' &&
-       ! nm "$tmp/sw/main" 2>/dev/null | grep -q '_ae_td_tbl'; then
+    if nm "$(exe "$tmp/td/main")" 2>/dev/null | grep -q '_ae_td_tbl' &&
+       ! nm "$(exe "$tmp/sw/main")" 2>/dev/null | grep -q '_ae_td_tbl'; then
         ok "the fallback build really has no dispatch table"
     else
         bad "the threaded build lacks a table, or the fallback has one"
