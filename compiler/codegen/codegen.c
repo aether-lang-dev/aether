@@ -7105,9 +7105,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                         if (!fld || fld->type != AST_STRUCT_FIELD) continue;
                         /* A fixed-size array holds its elements by value, so
                          * `items: Item[4]` needs Item's body as much as
-                         * `item: Item` does, nested arrays included (#2432).
-                         * A slice (`Item[]`) is a pointer and length, and
-                         * needs only the forward typedef. */
+                         * `item: Item` does (#2432). A slice (`Item[]`) is a
+                         * pointer and length, and needs only the forward
+                         * typedef. The type grammar takes one `[N]` suffix
+                         * today; the loop keeps this right if it takes more. */
                         Type* ft = fld->node_type;
                         while (ft && ft->kind == TYPE_ARRAY && type_is_sized_array(ft)) ft = ft->element_type;
                         if (!ft || ft->kind != TYPE_STRUCT) continue;
