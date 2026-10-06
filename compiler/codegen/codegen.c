@@ -1476,6 +1476,24 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* Builder-context pop carrier. Annotation: "builder_ctx_pop".
+ * emit_trailing_block_body pushes one as the first defer of every trailing
+ * block's scope, right after the call site pushed the block's builder
+ * context. Riding the defer stack means every way out of the block pops
+ * exactly once, LIFO with the block's own defers: the fall-through end
+ * (exit_scope), a `return` from anywhere inside it (emit_all_defers), and a
+ * labeled or unlabeled break/continue to a loop outside it. A return used
+ * to leave without popping, so a function returning from inside a block
+ * leaked one context per call; at the stack's cap of 64 later pushes were
+ * dropped and builder calls attached to a stale parent. */
+static int try_emit_builder_ctx_pop(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    if (strcmp(deferred->annotation, "builder_ctx_pop") != 0) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "_aether_ctx_pop();\n");
+    return 1;
+}
+
 /* #1140 — should the defer at stack slot `i` fire at the exit currently being
  * emitted?
  *
@@ -1523,7 +1541,8 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         gen->indent_level++;
     }
 
-    if (!try_emit_heap_string_exit_free(gen, deferred) &&
+    if (!try_emit_builder_ctx_pop(gen, deferred) &&
+        !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
         !try_emit_struct_destroy(gen, deferred)) {

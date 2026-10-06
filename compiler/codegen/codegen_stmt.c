@@ -3504,6 +3504,19 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
     fprintf(gen->output, "{\n");
     gen->indent_level++;
     enter_scope(gen);
+    /* Every caller pushed this block's builder context just before calling
+     * here. Its pop is the scope's first defer, so it runs after the
+     * block's own defers on every exit: the fall-through end below, a
+     * return, a break/continue out of the block (see try_emit_builder_ctx_pop
+     * in codegen.c). Callers do not emit the pop themselves. */
+    ASTNode* ctx_pop = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                       body->line, body->column);
+    if (ctx_pop) {
+        if (ctx_pop->annotation) free(ctx_pop->annotation);
+        ctx_pop->annotation = strdup("builder_ctx_pop");
+        codegen_own_node(gen, ctx_pop);
+        push_defer(gen, ctx_pop);
+    }
     gen->in_trailing_block++;
     for (int si = 0; si < body->child_count; si++) {
         generate_statement(gen, body->children[si]);
@@ -6192,8 +6205,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             emit_trailing_block_body(gen, trailing->children[bi]);
                                             print_indent(gen);
-                                            fprintf(gen->output, "_aether_ctx_pop();\n");
-                                            print_indent(gen);
                                             char c_rfn[256];
                                             strncpy(c_rfn, safe_c_name(reinit_call->value), sizeof(c_rfn) - 1);
                                             c_rfn[sizeof(c_rfn) - 1] = '\0';
@@ -6231,8 +6242,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
                                                     safe_c_name(stmt->value));
                                             emit_trailing_block_body(gen, trailing->children[bi]);
-                                            print_indent(gen);
-                                            fprintf(gen->output, "_aether_ctx_pop();\n");
                                             break;
                                         }
                                     }
@@ -6661,8 +6670,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             // Run trailing block
                                             emit_trailing_block_body(gen, trailing->children[bi]);
-                                            print_indent(gen);
-                                            fprintf(gen->output, "_aether_ctx_pop();\n");
                                             // Reassign variable with defer config
                                             print_indent(gen);
                                             char c_dfn[256];
@@ -6707,8 +6714,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
                                                     safe_c_name(stmt->value));
                                             emit_trailing_block_body(gen, trailing->children[bi]);
-                                            print_indent(gen);
-                                            fprintf(gen->output, "_aether_ctx_pop();\n");
                                             break;
                                         }
                                     }
@@ -6853,8 +6858,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                         emit_trailing_block_body(gen, trailing->children[bi]);
-                                        print_indent(gen);
-                                        fprintf(gen->output, "_aether_ctx_pop();\n");
                                         // Reassign with config
                                         print_indent(gen);
                                         gen->generating_lvalue = 1;
@@ -6905,8 +6908,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                         gen->generating_lvalue = 0;
                                         fprintf(gen->output, ");\n");
                                         emit_trailing_block_body(gen, trailing->children[bi]);
-                                        print_indent(gen);
-                                        fprintf(gen->output, "_aether_ctx_pop();\n");
                                         break;
                                     }
                                 }
@@ -8112,8 +8113,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_break_used[lvl] = 1;
                 print_line(gen, "goto __ae_brk_%d;", gen->loop_label_id[lvl]);
             } else {
-                // Emit defers for current scope before break
-                emit_defers_for_scope(gen);
+                /* Unwind every scope nested inside the innermost loop,
+                 * not just the current one: a `break` inside an `if` (or
+                 * a trailing block) inside the loop body leaves those
+                 * scopes too, and their defers -- a trailing block's
+                 * builder-context pop among them -- must run. Same rule
+                 * as the labeled form above. */
+                if (gen->loop_nest_depth > 0)
+                    emit_defers_through_scope(gen, gen->loop_label_scope[gen->loop_nest_depth - 1]);
+                else
+                    emit_defers_for_scope(gen);
                 /* Issue #501: drain try frames pushed inside the current
                  * loop body so `break` from inside a try { } in a loop
                  * doesn't leak the panic frame. */
@@ -8145,8 +8154,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "goto __ae_cont_%d;", gen->loop_label_id[lvl]);
                 }
             } else {
-                // Emit defers for current scope before continue
-                emit_defers_for_scope(gen);
+                /* Unwind every scope nested inside the innermost loop,
+                 * not just the current one: a `continue` inside an `if` (or
+                 * a trailing block) inside the loop body leaves those
+                 * scopes too, and their defers -- a trailing block's
+                 * builder-context pop among them -- must run. Same rule
+                 * as the labeled form above. */
+                if (gen->loop_nest_depth > 0)
+                    emit_defers_through_scope(gen, gen->loop_label_scope[gen->loop_nest_depth - 1]);
+                else
+                    emit_defers_for_scope(gen);
                 /* Issue #501: drain inside-loop try frames. */
                 emit_try_pops_for_break_continue(gen);
                 int td_lvl = td_continue_target(gen, stmt);
@@ -8377,9 +8394,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         }
                     }
 
-                    // 3. Pop context
-                    print_indent(gen);
-                    fprintf(gen->output, "_aether_ctx_pop();\n");
+                    // 3. Context popped by the block's own scope exit
+                    //    (see emit_trailing_block_body).
 
                     // 4. Call function with config as extra last arg
                     print_indent(gen);
@@ -8551,12 +8567,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 if (trailing->children[bi] &&
                                     trailing->children[bi]->type == AST_BLOCK) {
                                     emit_trailing_block_body(gen, trailing->children[bi]);
-
-                                    // Pop the builder context
-                                    if (has_trailing) {
-                                        print_indent(gen);
-                                        fprintf(gen->output, "_aether_ctx_pop();\n");
-                                    }
                                     break;
                                 }
                             }

@@ -45,3 +45,13 @@ test_closure_local_alloc_capture 20
 # this test guards (a C-compile failure, fixed in codegen), which allocates
 # nothing itself. macOS-only gate (Linux doesn't leak-check this).
 test_closure_local_shadows_promoted_capture 1
+
+# ── KNOWN BUG: a heap string returned in a tuple from inside a builder block ─
+# pair() in this test does `new_bag() { msg = string.concat(...);
+# return n, msg }`: each call leaks 2 allocations (the concat result and its
+# from_int temporary), 100 calls = 200. The same function WITHOUT the
+# trailing block leaks nothing, and the leak is identical on main before
+# this test's fix (f41d0e97), so it is codegen's tuple-return ownership
+# inside a trailing block, not the builder-context pop this test guards.
+# Remove this entry with the fix.
+test_return_pops_builder_context 200

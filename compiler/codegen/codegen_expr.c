@@ -2994,7 +2994,7 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
         strncpy(c_fn, safe_c_name(call->value), sizeof(c_fn) - 1);
         c_fn[sizeof(c_fn) - 1] = '\0';
         for (char* q = c_fn; *q; q++) { if (*q == '.') *q = '_'; }
-        fprintf(gen->output, "_aether_ctx_pop(); %s(", c_fn);
+        fprintf(gen->output, "%s(", c_fn);
         int argc = 0;
         for (int i = 0; i < call->child_count; i++) {
             ASTNode* arg = call->children[i];
@@ -3013,7 +3013,7 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     gen->trailing_stmt_call = saved;
     fprintf(gen->output, "; _aether_ctx_push((void*)(intptr_t)_tcv%d);\n", n);
     emit_trailing_block_body(gen, block);
-    fprintf(gen->output, "_aether_ctx_pop(); _tcv%d; })", n);
+    fprintf(gen->output, "_tcv%d; })", n);
     return 1;
 }
 
