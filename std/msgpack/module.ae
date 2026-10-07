@@ -317,7 +317,9 @@ map_set(val: ptr, key: string, value: ptr) -> int {
         let k = list.list_get_raw(m.map_keys, i) as *MsgValue
         if key_matches(k, key) {
             let old_val = list.list_get_raw(m.map_values, i)
-            if old_val != null { free(old_val) }
+            // Setting the value a key already holds must not free it: the
+            // map would keep a freed pointer (#2470).
+            if old_val != null && old_val != value { free(old_val) }
             list.list_set(m.map_values, i, value)
             return 1
         }
@@ -400,6 +402,12 @@ unpack(bytes_str: string) -> ptr! {
     // slot; we discard it here (returning our own ok), so release it or
     // it leaks one byte per unpack call.
     string.release(err)
+    // The input is one value: bytes after it are an error (#2470), where
+    // `0102` used to unpack as 1.
+    if cursor.remaining(c) > 0 {
+        free(val)
+        return null, "trailing bytes after value"
+    }
     return val, ok
 }
 

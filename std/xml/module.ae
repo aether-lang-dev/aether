@@ -6,6 +6,13 @@
 // scope: XSD, XPath, namespaces, DTD validation, custom entity definitions
 // (the five predefined entities + numeric character references are decoded).
 //
+// The reader stops with EVENT_ERROR at the first well-formedness error it
+// checks for: an end tag that does not close the innermost open element,
+// closes none or has no name; an element still open at the end; attributes
+// not separated by whitespace; a character reference that is malformed or
+// names a character XML does not allow (&#0;, a surrogate, past U+10FFFF).
+// `error` then ends in "(line L, column C, byte N)".
+//
 // Reader — pull one event at a time:
 //   p = xml.parser(body)
 //   while 1 == 1 {

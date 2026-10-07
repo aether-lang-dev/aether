@@ -354,6 +354,23 @@ main() {
     fails = fails + expect_error_bytes(nested_arrays(257), "257 levels", "nesting deeper than 256")
     fails = fails + expect_error_bytes(nested_arrays(200000), "200000 levels", "nesting deeper than 256")
 
+    // 15. One value (#2470): bytes after it are an error, not ignored;
+    // `0102` used to unpack as 1.
+    fails = fails + expect_error("0102", "trailing bytes after value")
+    fails = fails + expect_error("9001", "trailing bytes after value")
+    fails = fails + expect_error("c0c0", "trailing bytes after value")
+
+    // 16. Setting the value a key already holds keeps it alive: map_set
+    // freed the old value even when it was the new one.
+    let same_map = msgpack.map()
+    let same_val = msgpack.str("kept")
+    msgpack.map_set(same_map, "k", same_val)
+    msgpack.map_set(same_map, "k", same_val)
+    fails = fails + check(msgpack.map_size(same_map) == 1, "map_set same value: one entry")
+    fails = fails + check(msgpack.get_string(msgpack.map_get(same_map, "k")) == "kept", "map_set same value: value intact")
+    fails = fails + assert_hex(same_map, "81a16ba46b657074", "map_set same value: packs")
+    msgpack.free(same_map)
+
     if fails != 0 {
         println("msgpack: ${fails} failure(s)")
         exit(1)

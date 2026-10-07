@@ -34,14 +34,16 @@ err='' value=42
 ```
 
 Every constructed value is owned by the caller and freed with `msgpack.free`;
-freeing a container frees what it holds.
+freeing a container frees what it holds. `map_set` on a key the map already
+has frees the old value, unless it is the very value being set.
 
 `get_type` returns the type tag, so a reader dispatches on the wire type
 rather than assuming — the same discipline `std.json`'s `json_type` asks for.
 
-`unpack` treats its input as untrusted. It refuses, with an error rather
-than a value:
+`unpack` treats its input as untrusted, and reads one value that must be
+the whole input. It refuses, with an error rather than a value:
 
+- bytes after the value (`trailing bytes after value`): `0102` is not 1;
 - nesting deeper than 256 levels, the same limit as `std.json`
   (`nesting deeper than 256`);
 - a str, bin or ext length, or an array or map count, larger than the bytes

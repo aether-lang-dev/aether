@@ -65,7 +65,9 @@ static char* sb_finish(Sb* s) {
 /* Entity decode (& < > " ' and numeric &#NN; / &#xHH;)               */
 /* ------------------------------------------------------------------ */
 
-/* Encode a Unicode code point as UTF-8 into sb. */
+/* Encode a code point as UTF-8 into sb. The caller has checked it is an XML
+ * Char (is_xml_char), so it is a scalar value: never a surrogate, never
+ * past U+10FFFF. */
 static void sb_put_utf8(Sb* s, unsigned long cp) {
     if (cp <= 0x7F) {
         sb_putc(s, (char)cp);
@@ -76,26 +78,76 @@ static void sb_put_utf8(Sb* s, unsigned long cp) {
         sb_putc(s, (char)(0xE0 | (cp >> 12)));
         sb_putc(s, (char)(0x80 | ((cp >> 6) & 0x3F)));
         sb_putc(s, (char)(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0x10FFFF) {
+    } else {
         sb_putc(s, (char)(0xF0 | (cp >> 18)));
         sb_putc(s, (char)(0x80 | ((cp >> 12) & 0x3F)));
         sb_putc(s, (char)(0x80 | ((cp >> 6) & 0x3F)));
         sb_putc(s, (char)(0x80 | (cp & 0x3F)));
     }
-    /* out-of-range code points are dropped */
 }
 
-/* Decode XML character data [p, p+n) into a freshly malloc'd string with
- * entities resolved. Returns NULL on alloc failure. Unknown/malformed
- * `&...;` runs are passed through verbatim (lenient — matches what real
- * S3/SOAP bodies need without rejecting odd-but-harmless input). */
-static char* xml_decode(const char* p, size_t n) {
+/* XML 1.0 production [2] Char: #x9 | #xA | #xD | [#x20-#xD7FF] |
+ * [#xE000-#xFFFD] | [#x10000-#x10FFFF]. Section 4.1 makes it a
+ * well-formedness constraint that a character reference names one (#2471):
+ * &#0; used to cut the text short at the NUL, a surrogate came out as
+ * invalid UTF-8, and a reference past U+10FFFF vanished. */
+static int is_xml_char(unsigned long cp) {
+    return cp == 0x9 || cp == 0xA || cp == 0xD ||
+           (cp >= 0x20 && cp <= 0xD7FF) ||
+           (cp >= 0xE000 && cp <= 0xFFFD) ||
+           (cp >= 0x10000 && cp <= 0x10FFFF);
+}
+
+/* Read the character reference at p[i] == '&', p[i+1] == '#' in [p, p+n):
+ * '&#' [0-9]+ ';' or '&#x' [0-9a-fA-F]+ ';' (lowercase x only, as the
+ * production has it). Returns the offset just past the ';' and sets *cp, or
+ * 0 when the reference is malformed. The value saturates past U+10FFFF, so
+ * any number of leading zeros or digits is read without overflow. */
+static size_t read_char_ref(const char* p, size_t n, size_t i, unsigned long* cp) {
+    size_t k = i + 2;
+    int hex = 0;
+    if (k < n && p[k] == 'x') { hex = 1; k++; }
+    size_t digits = k;
+    unsigned long v = 0;
+    for (; k < n; k++) {
+        char h = p[k];
+        int d = (h >= '0' && h <= '9') ? h - '0'
+              : (hex && h >= 'a' && h <= 'f') ? h - 'a' + 10
+              : (hex && h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
+        if (d < 0) break;
+        v = v * (hex ? 16 : 10) + (unsigned long)d;
+        if (v > 0x10FFFF) v = 0x110000;
+    }
+    if (k == digits || k >= n || p[k] != ';') return 0;
+    *cp = v;
+    return k + 1;
+}
+
+/* Decode XML character data [p, p+n) into a freshly malloc'd string in
+ * *out with references resolved. Returns 0 on success, -1 on allocation
+ * failure, and -2 (not a Char) or -3 (malformed) with *bad set to the
+ * offset of the '&' when a character reference is not well-formed (#2471).
+ * Named references other than the five predefined ones are passed through
+ * verbatim (lenient, as before: this reader declares no entities). */
+static int xml_decode(const char* p, size_t n, char** out_text, size_t* bad) {
     Sb out;
     sb_init(&out);
     size_t i = 0;
     while (i < n) {
         char c = p[i];
         if (c != '&') { sb_putc(&out, c); i++; continue; }
+        if (i + 1 < n && p[i + 1] == '#') {
+            unsigned long cp = 0;
+            size_t next = read_char_ref(p, n, i, &cp);
+            if (next == 0 || !is_xml_char(cp)) {
+                free(out.data);
+                *bad = i;
+                return next == 0 ? -3 : -2;
+            }
+            sb_put_utf8(&out, cp);
+            i = next;
+            continue;
+        }
         /* Find the terminating ';' within a sane window. */
         size_t semi = i + 1;
         while (semi < n && semi < i + 12 && p[semi] != ';') semi++;
@@ -107,32 +159,11 @@ static char* xml_decode(const char* p, size_t n) {
         else if (elen == 2 && memcmp(e, "gt", 2) == 0)   sb_putc(&out, '>');
         else if (elen == 4 && memcmp(e, "quot", 4) == 0) sb_putc(&out, '"');
         else if (elen == 4 && memcmp(e, "apos", 4) == 0) sb_putc(&out, '\'');
-        else if (elen >= 2 && e[0] == '#') {
-            unsigned long cp = 0;
-            int ok = 0;
-            if (e[1] == 'x' || e[1] == 'X') {
-                for (size_t k = 2; k < elen; k++) {
-                    char h = e[k];
-                    int d = (h >= '0' && h <= '9') ? h - '0'
-                          : (h >= 'a' && h <= 'f') ? h - 'a' + 10
-                          : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
-                    if (d < 0) { ok = 0; break; }
-                    cp = cp * 16 + (unsigned long)d; ok = 1;
-                }
-            } else {
-                for (size_t k = 1; k < elen; k++) {
-                    if (e[k] < '0' || e[k] > '9') { ok = 0; break; }
-                    cp = cp * 10 + (unsigned long)(e[k] - '0'); ok = 1;
-                }
-            }
-            if (ok) sb_put_utf8(&out, cp);
-            else { sb_append(&out, p + i, semi - i + 1); }  /* pass through */
-        } else {
-            sb_append(&out, p + i, semi - i + 1);  /* unknown entity: verbatim */
-        }
+        else sb_append(&out, p + i, semi - i + 1);  /* unknown entity: verbatim */
         i = semi + 1;
     }
-    return sb_finish(&out);
+    *out_text = sb_finish(&out);
+    return *out_text ? 0 : -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -151,6 +182,9 @@ struct XmlParser {
     int      attr_count;
     int      attr_cap;
     char*    pending_end;     /* self-close: deferred </name> */
+    char**   open;            /* names of the elements open at pos, outermost first */
+    int      depth;
+    int      open_cap;
     int      errored;
     char     err[256];
 };
@@ -193,14 +227,65 @@ void xml_parser_free(XmlParser* p) {
     reset_event(p);
     free(p->attrs);
     free(p->pending_end);
+    for (int i = 0; i < p->depth; i++) free(p->open[i]);
+    free(p->open);
     free(p->buf);
     aether_caps_free(p, sizeof(XmlParser));
 }
 
-static int xml_fail(XmlParser* p, const char* msg) {
+/* Record the first error, positioned at byte `at` of the document as a
+ * 1-based line and column (in bytes) and the byte offset. Every later
+ * xml_next returns XML_EVENT_ERROR again. */
+static int xml_fail_at(XmlParser* p, size_t at, const char* msg) {
+    if (at > p->len) at = p->len;
+    size_t line = 1, col = 1;
+    for (size_t i = 0; i < at; i++) {
+        if (p->buf[i] == '\n') { line++; col = 1; }
+        else col++;
+    }
     p->errored = 1;
-    snprintf(p->err, sizeof(p->err), "%s (at byte %zu)", msg, p->pos);
+    snprintf(p->err, sizeof(p->err), "%s (line %zu, column %zu, byte %zu)", msg, line, col, at);
     return XML_EVENT_ERROR;
+}
+
+static int xml_fail(XmlParser* p, const char* msg) {
+    return xml_fail_at(p, p->pos, msg);
+}
+
+/* xml_decode for the run [start, end) of the document, failing the parser
+ * at the offending reference. Returns the decoded text or NULL (the parser
+ * has then failed). */
+static char* decode_or_fail(XmlParser* p, size_t start, size_t end) {
+    char* text = NULL;
+    size_t bad = 0;
+    int rc = xml_decode(p->buf + start, end - start, &text, &bad);
+    if (rc == -2) {
+        xml_fail_at(p, start + bad, "character reference to a character XML does not allow");
+        return NULL;
+    }
+    if (rc == -3) {
+        xml_fail_at(p, start + bad, "malformed character reference");
+        return NULL;
+    }
+    if (rc != 0) {
+        xml_fail_at(p, start, "out of memory decoding character data");
+        return NULL;
+    }
+    return text;
+}
+
+static int push_open(XmlParser* p, const char* name) {
+    if (p->depth >= p->open_cap) {
+        int ncap = p->open_cap ? p->open_cap * 2 : 16;
+        char** no = (char**)realloc(p->open, (size_t)ncap * sizeof(char*));
+        if (!no) return 0;
+        p->open = no;
+        p->open_cap = ncap;
+    }
+    char* copy = strdup(name);
+    if (!copy) return 0;
+    p->open[p->depth++] = copy;
+    return 1;
 }
 
 /* XML name chars (lenient): not whitespace, and not one of < > / = ? */
@@ -210,12 +295,13 @@ static int is_name_char(char c) {
              c == '\0');
 }
 
+/* Production [3] S: space, tab, CR, LF. */
+static int is_xml_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
 static void skip_ws(XmlParser* p) {
-    while (p->pos < p->len) {
-        char c = p->buf[p->pos];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->pos++;
-        else break;
-    }
+    while (p->pos < p->len && is_xml_space(p->buf[p->pos])) p->pos++;
 }
 
 /* Read a name into a freshly malloc'd string (advances pos). */
@@ -259,14 +345,23 @@ int xml_next(XmlParser* p) {
     reset_event(p);
 
     for (;;) {
-        if (p->pos >= p->len) return XML_EVENT_EOF;
+        if (p->pos >= p->len) {
+            /* A document that ends inside an element is truncated (#2471). */
+            if (p->depth > 0) {
+                char msg[160];
+                snprintf(msg, sizeof(msg), "unexpected end of document: <%.100s> is not closed",
+                         p->open[p->depth - 1]);
+                return xml_fail(p, msg);
+            }
+            return XML_EVENT_EOF;
+        }
 
         if (p->buf[p->pos] != '<') {
             /* Character data up to the next '<'. */
             size_t start = p->pos;
             while (p->pos < p->len && p->buf[p->pos] != '<') p->pos++;
-            p->text = xml_decode(p->buf + start, p->pos - start);
-            if (!p->text) return xml_fail(p, "out of memory decoding text");
+            p->text = decode_or_fail(p, start, p->pos);
+            if (!p->text) return XML_EVENT_ERROR;
             return XML_EVENT_TEXT;
         }
 
@@ -314,14 +409,30 @@ int xml_next(XmlParser* p) {
             continue;
         }
         if (remain >= 2 && p->buf[p->pos + 1] == '/') {
-            /* End element </name> */
+            /* End element </name>. It must close the innermost open element
+             * (XML 1.0 WFC: Element Type Match); a pull reader that let a
+             * mismatched, unopened or nameless end tag through handed back
+             * events for a broken tree (#2471). */
+            size_t tag = p->pos;
             p->pos += 2;
             p->name = read_name(p);
             if (!p->name) return xml_fail(p, "out of memory reading end tag");
+            if (p->name[0] == '\0') return xml_fail_at(p, tag, "end tag without a name");
             skip_ws(p);
             if (p->pos >= p->len || p->buf[p->pos] != '>')
                 return xml_fail(p, "malformed end tag");
+            char msg[256];
+            if (p->depth == 0) {
+                snprintf(msg, sizeof(msg), "end tag </%.100s> has no open element to close", p->name);
+                return xml_fail_at(p, tag, msg);
+            }
+            if (strcmp(p->name, p->open[p->depth - 1]) != 0) {
+                snprintf(msg, sizeof(msg), "end tag </%.80s> does not match the open <%.80s>",
+                         p->name, p->open[p->depth - 1]);
+                return xml_fail_at(p, tag, msg);
+            }
             p->pos++;
+            free(p->open[--p->depth]);
             return XML_EVENT_END_ELEMENT;
         }
 
@@ -332,10 +443,17 @@ int xml_next(XmlParser* p) {
         if (p->name[0] == '\0') return xml_fail(p, "empty element name");
 
         for (;;) {
+            /* Attributes are separated by whitespace (production [40]):
+             * `<a x="1"y="2"/>` is not well-formed (#2471). */
+            int spaced = p->pos < p->len && is_xml_space(p->buf[p->pos]);
             skip_ws(p);
             if (p->pos >= p->len) return xml_fail(p, "unterminated start tag");
             char c = p->buf[p->pos];
-            if (c == '>') { p->pos++; break; }
+            if (c == '>') {
+                p->pos++;
+                if (!push_open(p, p->name)) return xml_fail(p, "out of memory");
+                break;
+            }
             if (c == '/') {
                 if (p->pos + 1 >= p->len || p->buf[p->pos + 1] != '>')
                     return xml_fail(p, "malformed self-closing tag");
@@ -345,6 +463,7 @@ int xml_next(XmlParser* p) {
                 if (!p->pending_end) return xml_fail(p, "out of memory");
                 break;
             }
+            if (!spaced) return xml_fail(p, "missing whitespace before attribute");
             /* attribute: name (ws) = (ws) quote value quote */
             char* aname = read_name(p);
             if (!aname) return xml_fail(p, "out of memory reading attribute");
@@ -364,9 +483,9 @@ int xml_next(XmlParser* p) {
             size_t vstart = p->pos;
             while (p->pos < p->len && p->buf[p->pos] != q) p->pos++;
             if (p->pos >= p->len) { free(aname); return xml_fail(p, "unterminated attribute value"); }
-            char* aval = xml_decode(p->buf + vstart, p->pos - vstart);
+            char* aval = decode_or_fail(p, vstart, p->pos);
+            if (!aval) { free(aname); return XML_EVENT_ERROR; }
             p->pos++;  /* past closing quote */
-            if (!aval) { free(aname); return xml_fail(p, "out of memory decoding attribute"); }
             if (!add_attr(p, aname, aval)) return xml_fail(p, "out of memory storing attribute");
         }
         return XML_EVENT_START_ELEMENT;

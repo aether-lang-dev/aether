@@ -7,9 +7,18 @@ mechanism that lets a value carry its semantic type. That is what makes CBOR
 the encoding under COSE, WebAuthn and much of the constrained-device world:
 a timestamp can be tagged as a timestamp rather than agreed by convention.
 
-`diagnose` renders a value in CBOR's diagnostic notation, which is the
-readable form used in specs and test vectors — invaluable when comparing
-against one.
+`diagnose` renders a value in CBOR's diagnostic notation (RFC 8949 §8),
+which is the readable form used in specs and test vectors, and invaluable
+when comparing against one. It writes what the value is exactly: floats in
+the shortest decimal that reads back as the same number (`1.1`,
+`5.960464477539063e-8`, `1.0e+300`, `NaN`, `-Infinity`), text with JSON's
+escapes, tags as `24(h'...')`, `simple(n)`, and the §8.1 encoding
+indicators wherever a parsed item did not use preferred serialization: `_`
+for an indefinite length (`[_ 1, 2]`, `(_ h'01', h'02')`, `''_`) and `_n`
+for an argument in 2^n bytes that would fit in fewer (`1.5_3` is a 1.5
+encoded as a double, `0_0` is 0 in two bytes). Without the `_n` indicators,
+which the RFC's Appendix A leaves out, every example of that appendix
+diagnoses as the RFC prints it.
 
 ```aether,run
 import std.cbor
@@ -41,11 +50,28 @@ Values are built with `from_int`, `num`, `str`, `arr`, `obj`, `boolean` and
 a container frees what it holds.
 
 `set` (`object_set`) on a key the map already has replaces its value and
-frees the old one, as `json.set` does.
+frees the old one, as `json.set` does. `map_get` finds a key of any type by
+content, arrays and maps included (a map's pairs in any order).
 
-`parse` treats its input as untrusted. It refuses, with an error rather than
-a value:
+A parsed value remembers how it was encoded, so `encode` writes it back byte
+for byte: float widths, NaN payloads, indefinite lengths with their chunks,
+and argument sizes. A value built with the constructors encodes in preferred
+serialization: the shortest head, and a float in the narrowest width that
+holds it exactly (`num(1.5)` is `f93e00`).
 
+`parse` treats its input as untrusted, and reads one data item that must be
+the whole input. It refuses, with an error rather than a value:
+
+- bytes after the item (`cbor: trailing bytes after the data item`): `0102`
+  is not 1;
+- anything that is not well-formed (RFC 8949 §3, every case of Appendix F):
+  a reserved additional-information value, a break outside an
+  indefinite-length item or where a map value belongs
+  (`cbor: unexpected break`), an indefinite-length string chunk that is not a
+  definite-length string of the same type, a simple value below 32 in two
+  bytes, a truncated head or body;
+- a text string, or a text chunk, that is not UTF-8
+  (`cbor: invalid UTF-8 in text string`);
 - nesting deeper than 256 levels, the same limit as `std.json`
   (`cbor: nesting deeper than 256`);
 - a string length, or an array or map count, larger than the bytes left in

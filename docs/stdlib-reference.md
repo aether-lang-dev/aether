@@ -1700,7 +1700,7 @@ keys 2
 - `msgpack.array_add(a, v)`, `msgpack.map_set(m, key, v)` - Build
 - `msgpack.array_size(a)` / `array_get(a, i)`, `msgpack.map_size(m)` / `map_get(m, key)` / `map_get_key(m, i)` / `map_get_value(m, i)` - Read
 - `msgpack.get_type(v)` → `int`, and `get_bool` / `get_int` / `get_float` / `get_string` / `get_bin` - Unwrap
-- `msgpack.pack(v)` → `string`, `msgpack.unpack(bytes)` → `(ptr, string)`
+- `msgpack.pack(v)` → `string`, `msgpack.unpack(bytes)` → `(ptr, string)` - `unpack` reads exactly one value; trailing bytes are an error
 - `msgpack.free(v)` - Release a value and everything under it
 
 `TYPE_NIL`, `TYPE_BOOL`, `TYPE_INT`, `TYPE_FLOAT`, `TYPE_STR`, `TYPE_BIN`,
@@ -1759,8 +1759,8 @@ diag {"id": 42, "name": "widget"}
 - `cbor.set(o, key, v)` / `object_set` / `map_set`, `cbor.push(a, v)` / `array_add` - Build
 - `cbor.object_get(o, key)` → `(ptr, string)`, `cbor.map_get`, `cbor.object_size` / `array_size` / `object_entry` - Read
 - `cbor.type(v)` → `int`, `cbor.is_null(v)` / `is_undefined(v)`, and `get_bool` / `get_int` / `get_long` / `get_float` / `get_string` / `get_bytes` / `get_tag_val` / `get_tag_child` - Unwrap
-- `cbor.encode(v)` → `(string, string)`, `cbor.parse(bytes)` → `(ptr, string)`
-- `cbor.diagnose(v)` → `(string, string)` - Diagnostic notation
+- `cbor.encode(v)` → `(string, string)`, `cbor.parse(bytes)` → `(ptr, string)` - `parse` reads exactly one well-formed data item: trailing bytes, anything RFC 8949 Appendix F lists as not well-formed, and invalid UTF-8 in text are errors. A parsed value encodes back byte for byte; a built one in preferred serialization
+- `cbor.diagnose(v)` → `(string, string)` - Diagnostic notation, exact: shortest round-trip floats, JSON text escapes, and the RFC 8949 §8.1 encoding indicators (`[_ 1]`, `1.5_3`) where a parsed item was not in preferred serialization
 - `cbor.free(v)` - Release a value and everything under it
 
 `CBOR_INT`, `CBOR_BYTES`, `CBOR_TEXT`, `CBOR_ARRAY`, `CBOR_MAP`,
@@ -1854,6 +1854,18 @@ main() {
 
 **Event kinds** (returned by `xml.next`): `EVENT_START`, `EVENT_END`,
 `EVENT_TEXT`, `EVENT_EOF`, `EVENT_ERROR`.
+
+**Well-formedness.** The reader returns `EVENT_ERROR` at the first of
+these, rather than handing back events for a broken tree: an end tag that
+does not close the innermost open element (`<a><b></a>`), closes none
+(`</x>`) or has no name (`</>`); an element still open at the end of the
+document (`<root><item>`); attributes not separated by whitespace
+(`<a x="1"y="2"/>`); a character reference that is malformed (`&#x;`,
+`&#X41;`) or names a character XML 1.0 does not allow (`&#0;`, a surrogate
+such as `&#xD800;`, anything past `&#x10FFFF;`). Legal references decode to
+UTF-8, supplementary planes included. `xml.error(p)` names the problem and
+ends in `(line L, column C, byte N)`: the 1-based line, the 1-based column
+in bytes, and the byte offset.
 
 **Reader:**
 - `xml.parser(data)` → `ptr` new pull reader (free with `xml.free`)
