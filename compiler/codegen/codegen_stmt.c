@@ -3695,6 +3695,363 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
 }
 
 /* ------------------------------------------------------------------
+ * Env of a closure bound to a local (#2480)
+ *
+ * `g = || { ... }` mallocs g's env, and the env holds a reference to every
+ * promoted cell and captured string it uses. The declaring scope is the only
+ * owner that can free it, so it does, at scope exit, provided no copy of the
+ * value can outlive the scope. Every use of `g` copies the value except
+ * these, which is all the walk below accepts:
+ *
+ *   - invoking it: `g(...)`, `call(g, ...)`;
+ *   - passing it to a user function whose parameter is itself only used these
+ *     ways (every clause is walked the same way; an extern, a named argument
+ *     or a callee that cannot be resolved keeps the value);
+ *   - capturing it in a closure that is dead after the statement: one passed
+ *     to such a parameter, or one bound to another local whose env is freed
+ *     the same way (`h = || { g() }`, with the ordering rule in
+ *     claim_closure_local_env).
+ *
+ * Any other mention (a return, an alias, a store into a struct, list, map,
+ * message, global or actor state, an operand) keeps the env, as does a
+ * binding that is not a fresh closure literal (a call result, a tuple slot,
+ * another variable: a value someone else may also hold). Keeping is a leak at
+ * worst; a wrong free is a use after free, so every doubt keeps.
+ * ------------------------------------------------------------------ */
+
+#define ENV_SCAN_MAX_DEPTH 8
+#define ENV_SCAN_MAX_CAPTURERS 8
+
+typedef struct {
+    const char* name;      /* the local (or, in param_mode, the parameter) */
+    ASTNode* root;         /* body of the C function the name belongs to */
+    ASTNode* owner;        /* the function / closure whose body root is */
+    ASTNode* decl;         /* the binding being declared; the walk must meet it */
+    int param_mode;
+    int depth;
+    int escapes;
+    int bindings;
+    int saw_decl;
+    int heap_env;          /* some bound closure captures, so its env is malloc'd */
+    int cid;               /* -2 none bound yet, -1 several closures, else the one */
+    const char* capturers[ENV_SCAN_MAX_CAPTURERS];
+    int capturer_count;
+} EnvScan;
+
+static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
+                          ASTNode* parent, int nested);
+
+static int env_scan_is_real_closure(ASTNode* n) {
+    return n && n->type == AST_CLOSURE &&
+           !(n->value && strcmp(n->value, "trailing") == 0);
+}
+
+/* Does `node` use `name` at all? Unlike subtree_mentions_param this counts an
+ * invocation `name(...)` too, which is how a closure body captures a closure. */
+static int env_scan_mentions(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    if (node->value && node->type != AST_LITERAL && node->type != AST_CLOSURE &&
+        strcmp(node->value, name) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++) {
+        if (env_scan_mentions(node->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+static int env_scan_capture_count(CodeGenerator* gen, ASTNode* closure) {
+    for (int ci = 0; ci < gen->closure_count; ci++) {
+        if (gen->closures[ci].closure_node == closure) return gen->closures[ci].capture_count;
+    }
+    return 0;
+}
+
+/* Does anything in `node` bind `name` (a local, a parameter, a pattern)? */
+static int env_scan_binds(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_PATTERN_VARIABLE ||
+         node->type == AST_CLOSURE_PARAM) && node->value && strcmp(node->value, name) == 0) {
+        return 1;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (env_scan_binds(node->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+/* Is the callee name of `call` a variable of the scanned function rather than
+ * the top-level function of that name? Then nothing is known about it. */
+static int env_scan_callee_is_variable(CodeGenerator* gen, EnvScan* s, const char* callee) {
+    if (env_scan_binds(s->root, callee)) return 1;
+    if (s->owner) {
+        for (int i = 0; i < s->owner->child_count; i++) {
+            ASTNode* p = s->owner->children[i];
+            if (p && p != s->root && p->type != AST_BLOCK && env_scan_binds(p, callee)) return 1;
+        }
+    }
+    if (s->param_mode) return 0;
+    if (is_var_declared(gen, callee)) return 1;
+    /* A closure body also sees its captures. */
+    for (int ci = 0; ci < gen->closure_count; ci++) {
+        if (gen->closures[ci].closure_node != s->owner) continue;
+        for (int k = 0; k < gen->closures[ci].capture_count; k++) {
+            if (gen->closures[ci].captures[k] &&
+                strcmp(gen->closures[ci].captures[k], callee) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Callees whose parameter scan is in progress: a recursive call passing the
+ * parameter on does not by itself keep it. */
+static ASTNode* g_env_scan_active[ENV_SCAN_MAX_DEPTH + 2];
+static int g_env_scan_active_param[ENV_SCAN_MAX_DEPTH + 2];
+static int g_env_scan_active_count = 0;
+
+/* May the callee of `call` keep the value passed as `arg` (a direct child)?
+ * Only a user function whose matching parameter the walk proves is used
+ * without being copied answers no. */
+static int env_scan_param_keeps(CodeGenerator* gen, EnvScan* s, ASTNode* call, ASTNode* arg) {
+    if (s->depth >= ENV_SCAN_MAX_DEPTH || !gen->program || !call->value ||
+        strcmp(call->value, "call") == 0) return 1;
+    int pos = -1, user_args = 0;
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (!a) continue;
+        if (a->type == AST_NAMED_ARG) return 1;
+        if (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) continue;
+        if (a == arg) pos = user_args;
+        user_args++;
+    }
+    if (pos < 0) return 1;
+    if (env_scan_callee_is_variable(gen, s, call->value)) return 1;
+    char fn_norm[256];
+    const char* fn = codegen_normalise_callee(call->value, fn_norm, sizeof(fn_norm));
+    const DefClauses* dc = program_index_clauses(gen->program, fn);
+    if (!dc || dc->count == 0) return 1;
+    for (int c = 0; c < dc->count; c++) {
+        ASTNode* fdef = dc->nodes[c];
+        if (!fdef) return 1;
+        ASTNode* params[64];
+        int declared = 0;
+        ASTNode* body = NULL;
+        for (int i = 0; i < fdef->child_count; i++) {
+            ASTNode* p = fdef->children[i];
+            if (!p) continue;
+            if (p->type == AST_BLOCK) { body = p; continue; }
+            if (p->type == AST_GUARD_CLAUSE || p->type == AST_REQUIRES_CLAUSE ||
+                p->type == AST_ENSURES_CLAUSE) continue;
+            if (declared >= 64) return 1;
+            params[declared++] = p;
+        }
+        /* The `_ctx` a builder callee takes is injected, not written. */
+        int pidx = pos;
+        if (user_args == declared - 1 && declared > 0 && params[0]->value &&
+            strcmp(params[0]->value, "_ctx") == 0) {
+            pidx = pos + 1;
+        } else if (user_args > declared) {
+            return 1;
+        }
+        ASTNode* param = params[pidx];
+        if (!body || !param->value ||
+            (param->type != AST_PATTERN_VARIABLE && param->type != AST_VARIABLE_DECLARATION)) {
+            return 1;
+        }
+        int active = 0;
+        for (int a = 0; a < g_env_scan_active_count; a++) {
+            if (g_env_scan_active[a] == fdef && g_env_scan_active_param[a] == pidx) { active = 1; break; }
+        }
+        if (active) continue;
+        EnvScan ps;
+        memset(&ps, 0, sizeof(ps));
+        ps.name = param->value;
+        ps.root = body;
+        ps.owner = fdef;
+        ps.param_mode = 1;
+        ps.depth = s->depth + 1;
+        ps.cid = -2;
+        g_env_scan_active[g_env_scan_active_count] = fdef;
+        g_env_scan_active_param[g_env_scan_active_count] = pidx;
+        g_env_scan_active_count++;
+        env_scan_walk(gen, &ps, body, NULL, 0);
+        g_env_scan_active_count--;
+        if (ps.escapes) return 1;
+    }
+    return 0;
+}
+
+/* Is `name` a local of s->root whose env this scope frees: bound only to
+ * closure literals, its value never copied out? */
+static int env_scan_local_is_freed(CodeGenerator* gen, EnvScan* s, const char* name) {
+    if (s->depth >= ENV_SCAN_MAX_DEPTH) return 0;
+    EnvScan hs;
+    memset(&hs, 0, sizeof(hs));
+    hs.name = name;
+    hs.root = s->root;
+    hs.owner = s->owner;
+    hs.depth = s->depth + 1;
+    hs.cid = -2;
+    env_scan_walk(gen, &hs, s->root, NULL, 0);
+    return !hs.escapes && hs.bindings > 0;
+}
+
+static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
+                          ASTNode* parent, int nested) {
+    if (!node || s->escapes) return;
+    const char* name = s->name;
+    int named = node->value && strcmp(node->value, name) == 0;
+    switch (node->type) {
+        case AST_VARIABLE_DECLARATION:
+            if (named) {
+                ASTNode* rhs = node->child_count > 0 ? node->children[0] : NULL;
+                if (s->param_mode) {
+                    /* Rebinding the parameter overwrites the caller's copy;
+                     * later uses are walked as if they were still it. */
+                    env_scan_walk(gen, s, rhs, node, nested);
+                    return;
+                }
+                /* A binding in a nested closure body is that closure's own
+                 * local; a tuple slot has no initializer; anything but a fresh
+                 * literal may be a value someone else holds. A literal naming
+                 * the variable captures its previous value. */
+                if (nested || !env_scan_is_real_closure(rhs) ||
+                    env_scan_mentions(rhs, name)) {
+                    s->escapes = 1;
+                    return;
+                }
+                s->bindings++;
+                if (node == s->decl) s->saw_decl = 1;
+                if (env_scan_capture_count(gen, rhs) > 0) s->heap_env = 1;
+                int cid = rhs->value ? atoi(rhs->value) : -1;
+                s->cid = (s->cid == -2 || s->cid == cid) ? cid : -1;
+                return;
+            }
+            break;
+        case AST_IDENTIFIER:
+            if (named) {
+                if (parent && parent->type == AST_FUNCTION_CALL && parent->value) {
+                    if (strcmp(parent->value, "call") == 0) {
+                        if (parent->children[0] == node) return;   /* invoked */
+                    } else if (!env_scan_param_keeps(gen, s, parent, node)) {
+                        return;
+                    }
+                }
+                s->escapes = 1;
+            }
+            return;
+        case AST_FUNCTION_CALL:
+            /* `g(...)` invokes it; only the arguments are walked. */
+            break;
+        case AST_CLOSURE:
+            if (!env_scan_is_real_closure(node)) break;   /* a trailing block runs inline */
+            if (!env_scan_mentions(node, name)) return;
+            {
+                int dead_after = 0;
+                if (parent && parent->type == AST_FUNCTION_CALL && parent->value &&
+                    strcmp(parent->value, "call") != 0 &&
+                    !env_scan_param_keeps(gen, s, parent, node)) {
+                    dead_after = 1;
+                } else if (!nested && !s->param_mode && parent &&
+                           parent->type == AST_VARIABLE_DECLARATION && parent->value &&
+                           strcmp(parent->value, name) != 0 &&
+                           s->capturer_count < ENV_SCAN_MAX_CAPTURERS &&
+                           env_scan_local_is_freed(gen, s, parent->value)) {
+                    s->capturers[s->capturer_count++] = parent->value;
+                    dead_after = 1;
+                }
+                if (!dead_after) {
+                    s->escapes = 1;
+                    return;
+                }
+            }
+            for (int i = 0; i < node->child_count; i++) {
+                env_scan_walk(gen, s, node->children[i], node, 1);
+            }
+            return;
+        case AST_LITERAL:
+            return;
+        default:
+            /* A parameter, pattern, field or other binding spelled the same. */
+            if (named) {
+                s->escapes = 1;
+                return;
+            }
+            break;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        env_scan_walk(gen, s, node->children[i], node, nested);
+    }
+}
+
+/* Index on the defer stack of `name`'s env carrier, or -1. */
+static int closure_env_carrier_index(CodeGenerator* gen, const char* name) {
+    const char* prefix = "closure_env_free:";
+    size_t plen = strlen(prefix);
+    for (int i = gen->defer_count - 1; i >= 0; i--) {
+        ASTNode* d = gen->defer_stack[i];
+        if (!d || !d->annotation || strncmp(d->annotation, prefix, plen) != 0) continue;
+        const char* sep = strchr(d->annotation + plen, ':');
+        if (sep && strcmp(sep + 1, name) == 0) return i;
+    }
+    return -1;
+}
+
+/* The closure id the carrier at `idx` frees with, -1 for the generic release. */
+static int closure_env_carrier_cid(CodeGenerator* gen, int idx) {
+    return atoi(gen->defer_stack[idx]->annotation + strlen("closure_env_free:"));
+}
+
+/* #2480: called where the C declaration of local `name` is emitted (its
+ * first binding, `at_binding`, or the hoist that lifts it out of a loop or
+ * branch), with `binding`, one of its bindings. Pushes the scope-exit free of
+ * its env when the walk proves no copy outlives the scope; a rebinding then
+ * frees the env it replaces (see the reassignment path).
+ *
+ * A capturing local `h = || { g() }` holds a copy of g, so g's env must
+ * outlive every call of h. Both die at scope exit, so that holds when h's C
+ * variable is no older than g's (h is not declared yet, so it will be inside
+ * g's scope, or it is declared in this same scope) and g is never rebound
+ * while h holds the old value: g has one binding and it is this declaration. */
+static void claim_closure_local_env(CodeGenerator* gen, const char* name,
+                                    ASTNode* binding, int at_binding) {
+    if (!gen || !name || !binding || gen->scope_depth <= 0 || !gen->hoist_scope_body) return;
+    if (binding->type != AST_VARIABLE_DECLARATION || binding->child_count < 1 ||
+        !env_scan_is_real_closure(binding->children[0])) return;
+    if (is_promoted_capture(gen, name) || is_module_global_var(gen, name)) return;
+    if (gen->current_actor) {
+        for (int i = 0; i < gen->state_var_count; i++) {
+            if (gen->actor_state_vars[i] && strcmp(gen->actor_state_vars[i], name) == 0) return;
+        }
+    }
+    if (closure_env_carrier_index(gen, name) >= 0) return;
+    EnvScan s;
+    memset(&s, 0, sizeof(s));
+    s.name = name;
+    s.root = gen->hoist_scope_body;
+    s.owner = gen->current_function;
+    s.decl = binding;
+    s.cid = -2;
+    env_scan_walk(gen, &s, s.root, NULL, 0);
+    if (s.escapes || !s.saw_decl || !s.heap_env) return;
+    if (s.capturer_count > 0) {
+        if (!at_binding || s.bindings != 1) return;
+        int scope_start = gen->scope_defer_start[gen->scope_depth - 1];
+        for (int i = 0; i < s.capturer_count; i++) {
+            if (!is_var_declared(gen, s.capturers[i])) continue;
+            if (closure_env_carrier_index(gen, s.capturers[i]) < scope_start) return;
+        }
+    }
+    char annot[300];
+    snprintf(annot, sizeof(annot), "closure_env_free:%d:%s", s.cid < 0 ? -1 : s.cid, name);
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                       binding->line, binding->column);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = strdup(annot);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
+/* ------------------------------------------------------------------
  * Closure-capture cell lifetime (#2019)
  *
  * A variable a closure mutates is promoted to a heap cell (`T* n = ...`)
@@ -4250,6 +4607,7 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
         }
         mark_var_declared_typed(gen, n, var_type);
         emit_hoisted_local_decl(gen, var_type, n);
+        claim_closure_local_env(gen, n, decl, 0);   /* #2480 */
         if (joined) free_type(joined);
     }
 }
@@ -4329,6 +4687,10 @@ static void hoist_loop_var(ASTNode* child, void* user) {
             }
         } else {
             emit_hoisted_local_decl(gen, var_type, child->value);
+            /* #2480: the hoisted local is the loop's one C variable, so the
+             * env free is queued here, outside the loop; each iteration's
+             * rebinding frees the env it replaces. */
+            claim_closure_local_env(gen, child->value, child, 0);
         }
         if (joined) free_type(joined);
     }
@@ -4851,6 +5213,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
         }
         fprintf(gen->output, "%s %s%s;\n", c_type, name, hoisted_zero_init(var_type, c_type));
         mark_var_declared_typed(gen, name, var_type);
+        claim_closure_local_env(gen, name, first_decl, 0);   /* #2480 */
         if (joined) free_type(joined);
     }
 }
@@ -6300,6 +6663,26 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, " _heap_%s = 1;", stmt->value);
                         emit_unwind_track_local(gen, stmt->value);
                         fprintf(gen->output, " }\n");
+                    } else if (stmt->child_count > 0 &&
+                               env_scan_is_real_closure(stmt->children[0]) &&
+                               closure_env_carrier_index(gen, stmt->value) >= 0) {
+                        /* #2480: a local whose env this scope frees holds one
+                         * env at a time. Rebinding it (a loop body's closure,
+                         * hoisted out of the loop) frees the env it replaces,
+                         * once the new value is built; the carrier frees the
+                         * last one at scope exit. No copy of the old value is
+                         * live: claim_closure_local_env only owns a local whose
+                         * every use is a call or a non-keeping argument. */
+                        int cidx = closure_env_carrier_index(gen, stmt->value);
+                        int ccid = closure_env_carrier_cid(gen, cidx);
+                        fprintf(gen->output, "{ void* _ae_old_env = %s.env; %s = ",
+                                stmt->value, stmt->value);
+                        generate_expression(gen, stmt->children[0]);
+                        if (ccid >= 0) {
+                            fprintf(gen->output, "; _closure_env_%d_free(_ae_old_env); }\n", ccid);
+                        } else {
+                            fprintf(gen->output, "; _aether_closure_env_release(_ae_old_env); }\n");
+                        }
                     } else {
                         // Plain non-string assignment.
                         /* Struct-reassignment heap cleanup (#465).
@@ -6751,7 +7134,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 break;
                             }
                         }
-                        int is_first_assignment = (existing_idx < 0);
                         if (existing_idx >= 0) {
                             if (gen->closure_var_map[existing_idx].closure_id != cid) {
                                 gen->closure_var_map[existing_idx].closure_id = -1;
@@ -6767,36 +7149,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             gen->closure_var_count++;
                         }
 
-                        // Emit deferred free for heap-allocated closure envs
-                        // only on the FIRST assignment — reassignment replaces
-                        // the env pointer in the variable, and the existing
-                        // defer will free whatever env is live at scope exit.
-                        // Pushing a second defer on reassignment would
-                        // double-free when the scope unwinds.
-                        if (is_first_assignment) {
-                            for (int ci = 0; ci < gen->closure_count; ci++) {
-                                if (gen->closures[ci].id == cid && gen->closures[ci].capture_count > 0) {
-                                    /* #1398: member-aware teardown so the env
-                                       releases what its captures own. */
-                                    char envfree[64];
-                                    snprintf(envfree, sizeof(envfree),
-                                             "_closure_env_%d_free", cid);
-                                    ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, envfree,
-                                        stmt->line, stmt->column);
-                                    char env_access[256];
-                                    snprintf(env_access, sizeof(env_access), "%s.env", safe_c_name(stmt->value));
-                                    ASTNode* env_arg = create_ast_node(AST_IDENTIFIER, env_access,
-                                        stmt->line, stmt->column);
-                                    add_child(free_call, env_arg);
-                                    // Wrap in expression statement so generate_statement handles it
-                                    ASTNode* expr_stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                                        stmt->line, stmt->column);
-                                    add_child(expr_stmt, free_call);
-                                    push_defer(gen, expr_stmt);
-                                    break;
-                                }
-                            }
-                        }
+                        /* Free the env at scope exit when the value stays
+                         * here (#2480). The free used to be pushed only when
+                         * closure_var_map had no entry for the name yet, but
+                         * discover_closures seeds that map for every closure
+                         * binding before any statement is emitted, so the
+                         * free was never pushed and every call leaked the
+                         * env and the cells it holds. */
+                        claim_closure_local_env(gen, stmt->value, stmt, 1);
                     }
                     // Suppress unused-variable warning for arrays used with list
                     // pattern matching — the paired _len variable may be the only

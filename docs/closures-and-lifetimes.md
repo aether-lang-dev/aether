@@ -184,6 +184,17 @@ lifetime"):
   (the `fn → ptr` coercion) and the list owns the box; `list.free` now
   reclaims the captured env as well as the box (`owned_flags == 2`).
 
+- **Bound to a local.** `g = || { ... }` frees its env when the local's
+  scope ends, through `_closure_env_N_free`, provided every use of `g`
+  leaves no copy behind: calling it, passing it to a user function whose
+  parameter is only called or passed on the same way, or capturing it in
+  a closure that is dead after the statement (#2480). Rebinding the local
+  to a new closure literal frees the env it replaces. A return, an alias,
+  a store, an extern argument or a non-literal binding leaves the env to
+  the value's holder. The free used to be queued only on a name's first
+  binding, judged by `closure_var_map`, which discovery fills for every
+  binding beforehand, so it was never queued.
+
 ## Mutated-capture cell lifetime
 
 A capture the closure assigns to is heap-promoted: the enclosing binding
@@ -337,33 +348,33 @@ writes compile to `self->field = ...`. Medium-sized codegen change;
 until it lands, the compile-time rejection prevents silent wrong
 answers.
 
-### L5. Closure-var reassignment leaks the previous env
+### L5. Closure-var reassignment leaked the previous env
 
 ```aether,fragment
 op = |x: int| { return x + 1 }
-op = |x: int| { return x * 2 }  // old env (malloc'd) is leaked
+op = |x: int| { return x * 2 }  // a capturing old env used to leak here
 ```
 
-When a closure variable is reassigned, the auto-defer-free fires only
-on the first assignment (to avoid double-free at scope exit, since
-reassignment overwrites `.env` in the variable). The previous env's
-heap block is unreachable, leaked.
+Fixed for locals whose value never leaves the scope (#2480): an escape
+walk over the function proves every use of the variable is a call or an
+argument to a parameter that keeps nothing, and then each rebinding frees
+the env it replaces and scope exit frees the last one.
 
-**Why not just free on reassignment:** the old env may still be
-reachable via a `box_closure()` copy or another closure's transitive
-capture. Without escape analysis we can't tell if it's safe to free,
-so we lean safe (leak) over unsafe (UAF).
+The old env may still be reachable via a `box_closure()` copy or another
+closure's transitive capture; those are escapes, so such a variable keeps
+the previous behaviour (the replaced env is leaked rather than risk a use
+after free). A variable that a capturing local closure holds a copy of is
+only freed when it has a single binding, so it is never rebound under
+that copy.
 
-Paired tests pin this trade-off:
+Paired tests pin this:
 
 - `tests/syntax/test_closure_reassign_leaks_env.ae` 100-iteration
   reassignment loop exits cleanly.
 - `tests/syntax/test_closure_reassign_after_box.ae` box_closure'd
   copy survives reassignment of the source variable.
-
-**Proper fix:** escape analysis. Track whether a closure variable has
-been captured or stored anywhere before the reassignment; if not, free
-on reassignment. Larger change; deferred.
+- `tests/integration/closure_local_env_free` counts env and cell
+  allocations against frees for owned and escaping shapes.
 
 ## Why the UI calculator works
 

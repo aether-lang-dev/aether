@@ -1,0 +1,109 @@
+// Regression (#2480): a capturing closure bound to a local frees its env at
+// scope exit, and with it the shared cells and strings the env holds.
+//
+// `g = || { ... }` mallocs an env. The scope-exit free for it was pushed
+// only when closure_var_map had no entry for the name, but that map is
+// filled for every closure binding before any statement is emitted, so the
+// free never reached the output: each call leaked the env, and the env's
+// reference kept every promoted cell (#2019) it points at alive, together
+// with the string or the struct's owned strings (#2458) in the cell.
+//
+// Every shape here keeps the closure in its scope: called directly, handed
+// to a parameter that only calls it, captured by another local closure,
+// rebound in a loop. Each must leave nothing allocated for the macOS leaks
+// gate; tests/integration/closure_local_env_free counts the envs and cells
+// exactly, since leaks(1) can miss an env whose pointer is still on a dead
+// stack slot. Strings are built from parameters, because string.concat of
+// two literals folds to a literal that owns nothing.
+
+import std.string
+
+extern exit(code: int)
+
+struct Rec { name: string, count: int }
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+apply(f: fn) { f() }
+
+// A string cell: the closure replaces the string, the cell owns it.
+string_cell(a: string) -> string {
+    s = string.concat(a, "0")
+    g = || { s = string.concat(s, "1") }
+    g()
+    g()
+    return string.copy(s)
+}
+
+// A struct cell whose string field the struct owns.
+struct_cell(a: string) -> int {
+    r = Rec { name: string.concat(a, "r"), count: 0 }
+    g = || {
+        r.count += 1
+        r.name = string.concat(r.name, "+")
+    }
+    g()
+    apply(g)
+    return r.count + string.length(r.name)
+}
+
+// The env holds a reference to a captured heap string.
+captured_string(a: string) -> int {
+    s = string.concat(a, "-captured")
+    n = 0
+    g = || { n = n + string.length(s) }
+    g()
+    return n
+}
+
+// One closure per iteration, rebound each time.
+per_iteration(a: string, times: int) -> int {
+    total = 0
+    i = 0
+    while i < times {
+        piece = string.concat(a, "x")
+        g = || { total = total + string.length(piece) }
+        g()
+        i = i + 1
+    }
+    return total
+}
+
+// A local closure capturing another.
+captured_by_local(a: string) -> int {
+    s = string.concat(a, "y")
+    count = 0
+    g = || { count = count + string.length(s) }
+    h = || {
+        g()
+        g()
+    }
+    h()
+    return count
+}
+
+main() {
+    i = 0
+    while i < 20 {
+        got = string_cell("v")
+        check("string cell", got, "v011")
+        check_int("struct cell", struct_cell("n"), 6)
+        check_int("captured string", captured_string("ab"), 11)
+        check_int("per iteration", per_iteration("ab", 3), 9)
+        check_int("captured by local", captured_by_local("ab"), 6)
+        i = i + 1
+    }
+    println("=== closure local env freed: all passed ===")
+}

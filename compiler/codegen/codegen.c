@@ -1481,6 +1481,35 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* Closure-local env carrier (#2480). Annotation:
+ *   "closure_env_free:<closure id or -1>:<varname>"
+ * Pushed by claim_closure_local_env (codegen_stmt.c) for a local bound only
+ * to closure literals whose value never leaves the scope. Frees the env the
+ * local holds at this exit, through the closure's own destructor so the
+ * promoted cells and strings it references are released too; -1 means the
+ * local is bound to several closures and dispatches through the env header.
+ * Clearing `.env` keeps a drain re-emitted at another exit idempotent. */
+static int try_emit_closure_env_free(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "closure_env_free:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strchr(rest, ':');
+    if (!sep || !sep[1]) return 0;
+    int cid = atoi(rest);
+    const char* name = sep + 1;
+    print_indent(gen);
+    if (cid >= 0) {
+        fprintf(gen->output, "/* deferred */ _closure_env_%d_free(%s.env); %s.env = NULL;\n",
+                cid, name, name);
+    } else {
+        fprintf(gen->output, "/* deferred */ _aether_closure_env_release(%s.env); %s.env = NULL;\n",
+                name, name);
+    }
+    return 1;
+}
+
 /* Builder-context pop carrier. Annotation: "builder_ctx_pop".
  * emit_trailing_block_body pushes one as the first defer of every trailing
  * block's scope, right after the call site pushed the block's builder
@@ -1550,7 +1579,8 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
-        !try_emit_struct_destroy(gen, deferred)) {
+        !try_emit_struct_destroy(gen, deferred) &&
+        !try_emit_closure_env_free(gen, deferred)) {
         print_indent(gen);
         fprintf(gen->output, "/* deferred%s */ ",
                 mode == DEFER_TRY ? " (try)" : mode == DEFER_CATCH ? " (catch)" : "");
@@ -1609,22 +1639,17 @@ void exit_scope(CodeGenerator* gen) {
     }
 }
 
-// Is `deferred` the synthetic "free(<name>.env)" defer for the closure var
-// called `name`? The defers inserted by codegen_stmt.c at closure-variable
-// declaration sites have a fixed shape: EXPRESSION_STATEMENT > FUNCTION_CALL
-// "free" > IDENTIFIER "<name>.env".
+// Is `deferred` the env-free carrier of the closure var called `name`
+// ("closure_env_free:<id>:<name>", see try_emit_closure_env_free)? It used
+// to match a `free(<name>.env)` call, a shape the declaration site stopped
+// producing in #1398 (#2480).
 static int is_env_free_for(ASTNode* deferred, const char* name) {
-    if (!deferred || !name) return 0;
-    if (deferred->type != AST_EXPRESSION_STATEMENT || deferred->child_count < 1) return 0;
-    ASTNode* call = deferred->children[0];
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
-        strcmp(call->value, "free") != 0 || call->child_count < 1) return 0;
-    ASTNode* arg = call->children[0];
-    if (!arg || arg->type != AST_IDENTIFIER || !arg->value) return 0;
-    size_t nlen = strlen(name);
-    if (strncmp(arg->value, name, nlen) != 0) return 0;
-    if (strcmp(arg->value + nlen, ".env") != 0) return 0;
-    return 1;
+    if (!deferred || !name || !deferred->annotation) return 0;
+    const char* prefix = "closure_env_free:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* sep = strchr(deferred->annotation + plen, ':');
+    return sep && strcmp(sep + 1, name) == 0;
 }
 
 // Emit ALL deferred statements (for return - unwinds entire function).
@@ -6912,6 +6937,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
+    /* #2480: frees an env through the destructor every env carries as its
+     * first field (#1398), for a local that is bound to more than one
+     * closure literal and so has no single _closure_env_N_free. */
+    print_line(gen, "static inline void _aether_closure_env_release(void* e) { if (e) (*(void (**)(void*))e)(e); }");
     /* #2220: the post-store hook for `struct T @observable`. Declared
      * unconditionally (it is one prototype); only a store on an observable
      * struct field emits a call to it. Defined in runtime/aether_observe.c. */
