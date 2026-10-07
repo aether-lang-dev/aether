@@ -1539,7 +1539,10 @@ void scheduler_shutdown(void) {
 // Free the per-core tables scheduler_init allocated: the actor slots, the
 // I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
 // follows a scheduler_shutdown() both release them this way.
+static void scheduler_free_spawned_actors(void);
+
 static void scheduler_free_core_tables(void) {
+    scheduler_free_spawned_actors();
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources
         schedulers[i].thread = 0;
@@ -2165,6 +2168,56 @@ void scheduler_send_batch_flush(void) {
 
 // Spawn actor with NUMA-aware allocation.  actor_size must be >= sizeof(ActorBase)
 // and cover the full derived-actor struct (e.g. sizeof(PingActor)).
+// The actors scheduler_spawn_actor allocated and nobody has released: the
+// scheduler owns these, unlike the caller-owned actors a test or embedder
+// hands to scheduler_register_actor. Nothing else frees them (an executable
+// just exits), so when a lifecycle's tables are discarded -- a host running
+// an --emit=lib program's aether_main() again, or scheduler_cleanup() -- they
+// are freed with them instead of leaking every actor of the previous run.
+static OptimizedSpinlock g_spawned_lock = { ATOMIC_FLAG_INIT, {0} };
+static ActorBase** g_spawned = NULL;
+static int g_spawned_count = 0;
+static int g_spawned_cap = 0;
+
+static void spawned_track(ActorBase* actor) {
+    spinlock_lock(&g_spawned_lock);
+    if (g_spawned_count == g_spawned_cap) {
+        int cap = g_spawned_cap ? g_spawned_cap * 2 : 64;
+        ActorBase** grown = realloc(g_spawned, (size_t)cap * sizeof(ActorBase*));
+        if (!grown) { spinlock_unlock(&g_spawned_lock); return; }  // untracked: leaks, as before
+        g_spawned = grown;
+        g_spawned_cap = cap;
+    }
+    g_spawned[g_spawned_count++] = actor;
+    spinlock_unlock(&g_spawned_lock);
+}
+
+static void spawned_untrack(ActorBase* actor) {
+    spinlock_lock(&g_spawned_lock);
+    for (int i = g_spawned_count - 1; i >= 0; i--) {
+        if (g_spawned[i] == actor) {
+            g_spawned[i] = g_spawned[--g_spawned_count];
+            break;
+        }
+    }
+    spinlock_unlock(&g_spawned_lock);
+}
+
+// Only from scheduler_free_core_tables: the scheduler threads are joined by
+// then (scheduler_shutdown), so nothing steps these actors.
+static void scheduler_free_spawned_actors(void) {
+    spinlock_lock(&g_spawned_lock);
+    for (int i = 0; i < g_spawned_count; i++) {
+        ActorBase* a = g_spawned[i];
+        free(a->spsc_queue);
+        aether_numa_free(a, a->alloc_size);
+    }
+    free(g_spawned);
+    g_spawned = NULL;
+    g_spawned_count = g_spawned_cap = 0;
+    spinlock_unlock(&g_spawned_lock);
+}
+
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     scheduler_init_on_demand();
     if (preferred_core < 0 || preferred_core >= num_cores) {
@@ -2242,12 +2295,14 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     }
 
     scheduler_register_actor(actor, preferred_core);
+    spawned_track(actor);
 
     return actor;
 }
 
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
+    spawned_untrack(actor);
 
     // Track actor count for inline mode auto-detection
     aether_on_actor_terminate();
