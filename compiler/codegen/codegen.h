@@ -297,6 +297,11 @@ typedef struct {
     // each value arm takes its value with emit_string_take, setting this C
     // int flag to whether the local owns what it got (-1: no arm assigned).
     const char* match_result_own;
+    // #2497: when non-NULL, the result is a struct of this name that owns
+    // heap strings: each value arm is taken with emit_struct_take, and when
+    // match_result_replace is set it replaces the value the result held.
+    const char* match_result_struct;
+    int match_result_replace;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so

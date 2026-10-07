@@ -375,6 +375,20 @@ int has_return_value(ASTNode* node);
  * scope-exit destroy defer) and at field-write sites (emit the
  * reassign-wrapper free). */
 int struct_has_heap_string_field(ASTNode* struct_def);
+/* #2497: does a value of this struct own heap strings, in a `string` field
+ * of its own or in a field that is itself such a struct held by value? It
+ * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,
+ * which release the nested struct's strings too. */
+int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def);
+ASTNode* owning_struct_field_def(CodeGenerator* gen, ASTNode* field);
+/* #2497: store `e` into a slot that owns a `sname` struct value (see the
+ * definition in codegen_stmt.c). struct_take_shape: is `e` a value that
+ * views a struct owned elsewhere (a variable, a field, an element, an `if`
+ * over such), which a take copies or moves, rather than a fresh one? */
+int struct_take_shape(ASTNode* e);
+void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
+                      const char* target);
+const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters

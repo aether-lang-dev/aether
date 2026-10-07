@@ -4977,7 +4977,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     arg->node_type->element_type->struct_name && gen->program) {
                     ASTNode* sdef = find_struct_definition_by_name(
                         gen->program, arg->node_type->element_type->struct_name);
-                    if (sdef && struct_has_heap_string_field(sdef)) {
+                    if (sdef && struct_owns_heap_strings(gen, sdef)) {
                         typed_free = arg->node_type->element_type->struct_name;
                     }
                 }
@@ -6219,6 +6219,64 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 }
                                 break;
                             }
+                            /* #2497: a value that views a string something
+                             * else owns: a struct field (the struct frees it
+                             * when the field changes or the struct goes), or
+                             * an `if` whose arm is such a view or a local.
+                             * Stored raw, the container kept a pointer the
+                             * owner then freed. A field read goes to the
+                             * owning add, which takes the container's own
+                             * reference (retains a refcounted string, copies
+                             * a plain one). An `if` is taken as a binding
+                             * takes it (emit_string_take): what the take
+                             * owns is adopted, what it borrows is added
+                             * through the owning entry. */
+                            if (val && is_owned_string_field_read(val)) {
+                                if (is_list_shape) {
+                                    fprintf(gen->output, is_wrapper
+                                            ? "_aether_list_add_owned("
+                                            : "list_add_string_owned(");
+                                    generate_expression(gen, expr->children[0]);
+                                    fprintf(gen->output, ", (void*)");
+                                } else {
+                                    fprintf(gen->output, is_wrapper
+                                            ? "_aether_map_put_owned("
+                                            : "map_put_string_owned(");
+                                    generate_expression(gen, expr->children[0]);
+                                    fprintf(gen->output, ", aether_string_data((const void*)");
+                                    generate_expression(gen, expr->children[1]);
+                                    fprintf(gen->output, "), (void*)");
+                                }
+                                generate_expression(gen, val);
+                                fprintf(gen->output, ")");
+                                break;
+                            }
+                            if (val && string_take_is_view(gen, val)) {
+                                char own[32];
+                                string_take_new_flag(own, sizeof(own));
+                                fprintf(gen->output, "({ void* _ae_cc = (void*)(");
+                                generate_expression(gen, expr->children[0]);
+                                fprintf(gen->output, ");");
+                                if (!is_list_shape) {
+                                    fprintf(gen->output, " const char* _ae_ck = aether_string_data((const void*)(");
+                                    generate_expression(gen, expr->children[1]);
+                                    fprintf(gen->output, "));");
+                                }
+                                fprintf(gen->output, " int %s = 0; void* _ae_cv = (void*)", own);
+                                emit_string_take(gen, val, own, NULL);
+                                if (is_list_shape) {
+                                    fprintf(gen->output, "; %s ? %s(_ae_cc, _ae_cv) : %s(_ae_cc, _ae_cv); })",
+                                            own,
+                                            is_wrapper ? "_aether_list_add_adopted" : "list_add_string_adopted",
+                                            is_wrapper ? "_aether_list_add_owned" : "list_add_string_owned");
+                                } else {
+                                    fprintf(gen->output, "; %s ? %s(_ae_cc, _ae_ck, _ae_cv) : %s(_ae_cc, _ae_ck, _ae_cv); })",
+                                            own,
+                                            is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
+                                            is_wrapper ? "_aether_map_put_owned" : "map_put_string_owned");
+                                }
+                                break;
+                            }
                             /* NOTE: a heap string reaching the container only
                              * through a `string` PARAMETER is deliberately
                              * NOT adopted here. The magic header proves the
@@ -7043,7 +7101,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                      fv->node_type->kind == TYPE_STRING;
                         /* NULL stays NULL, as in the field store. */
                         if (unwrap) fprintf(gen->output, "({ const void* _ae_cs = (const void*)(");
+                        /* #2497: a struct field held by value that owns
+                         * strings takes the struct it is given. */
+                        const char* fv_struct = c_imported ? NULL
+                                                : struct_owning_strings(gen, fv ? fv->node_type : NULL);
                         if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
+                        else if (fv_struct && struct_take_shape(fv)) emit_struct_take(gen, fv, fv_struct, NULL);
                         else generate_expression(gen, fv);
                         if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }

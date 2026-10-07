@@ -355,15 +355,16 @@ int is_owned_string_field_read(ASTNode* e) {
     return sname && !aether_is_c_import_struct(sname);
 }
 
-/* A match arm whose body is a value (assigned to the match's result), not a
- * block or a statement (`return`, `print`, a binding), which leave the
- * result untouched. Mirrors the arm dispatch in emit_opt_match_arm and the
- * generic match lowering. */
-static int match_arm_body_is_value(ASTNode* body) {
-    return body && body->type != AST_BLOCK &&
-           body->type != AST_PRINT_STATEMENT &&
-           body->type != AST_RETURN_STATEMENT &&
-           body->type != AST_VARIABLE_DECLARATION;
+/* The type a match expression's arms yield: the first value an arm yields
+ * (match_arm_value, so a block arm's final expression counts, #2496). */
+static Type* match_value_type(ASTNode* m) {
+    for (int i = 1; m && i < m->child_count; i++) {
+        ASTNode* arm = m->children[i];
+        if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+        ASTNode* v = match_arm_value(arm->children[1]);
+        if (v && v->node_type && v->node_type->kind != TYPE_UNKNOWN) return v->node_type;
+    }
+    return NULL;
 }
 
 static int string_take_join(int a, int b) {
@@ -381,9 +382,8 @@ int string_take_kind(CodeGenerator* gen, ASTNode* e) {
         for (int i = 1; i < e->child_count; i++) {
             ASTNode* arm = e->children[i];
             if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
-            ASTNode* body = arm->children[1];
-            int ak = match_arm_body_is_value(body) ? string_take_kind(gen, body)
-                                                   : STR_TAKE_BORROW;
+            ASTNode* value = match_arm_value(arm->children[1]);
+            int ak = value ? string_take_kind(gen, value) : STR_TAKE_BORROW;
             k = k < 0 ? ak : string_take_join(k, ak);
         }
         return k < 0 ? STR_TAKE_BORROW : k;
@@ -1559,9 +1559,9 @@ static int string_bind_owns(CodeGenerator* gen, ASTNode* e, int may) {
         for (int i = 1; i < e->child_count; i++) {
             ASTNode* arm = e->children[i];
             if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
-            ASTNode* body = arm->children[1];
-            /* An arm that is not a value leaves the local as it was. */
-            int o = match_arm_body_is_value(body) && string_bind_owns_arm(gen, body, may);
+            ASTNode* value = match_arm_value(arm->children[1]);
+            /* An arm that yields no value leaves the local as it was. */
+            int o = value && string_bind_owns_arm(gen, value, may);
             any |= o;
             all &= o;
             values++;
@@ -1576,7 +1576,8 @@ static int string_bind_owns_arm(CodeGenerator* gen, ASTNode* e, int may) {
     if (e->type == AST_IDENTIFIER) {
         return may && (!e->node_type || e->node_type->kind == TYPE_STRING);
     }
-    if (e->type == AST_IF_EXPRESSION || is_owned_string_field_read(e)) {
+    if (e->type == AST_IF_EXPRESSION || e->type == AST_MATCH_STATEMENT ||
+        is_owned_string_field_read(e)) {
         return string_bind_owns(gen, e, may);
     }
     return is_heap_string_expr(gen, e);
@@ -1738,8 +1739,9 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
         for (int i = 1; i < expr->child_count; i++) {
             ASTNode* arm = expr->children[i];
             if (arm && arm->type == AST_MATCH_ARM && arm->child_count >= 2 &&
-                match_arm_body_is_value(arm->children[1]) &&
-                return_expr_is_heap(gen, arm->children[1], fn_body_root)) return 1;
+                match_arm_value(arm->children[1]) &&
+                return_expr_is_heap(gen, match_arm_value(arm->children[1]),
+                                    fn_body_root)) return 1;
         }
         return 0;
     }
@@ -2463,23 +2465,43 @@ static void emit_field_store_tracker(CodeGenerator* gen, ASTNode* rhs,
     }
 }
 
+/* #2497: may the trackers of the value struct `obj` (a field held by value,
+ * `o.inner`) be read to release the previous value? Its trackers are its
+ * holder's: a local struct value's are (as for `v.name = ...`); one reached
+ * through a pointer field is as trustworthy as that box. */
+static int value_path_trackers_are_initialised(CodeGenerator* gen, ASTNode* obj) {
+    while (obj && obj->type == AST_MEMBER_ACCESS && obj->child_count == 1 &&
+           obj->children[0] && obj->children[0]->node_type) {
+        ASTNode* holder = obj->children[0];
+        if (holder->node_type->kind == TYPE_PTR) return box_trackers_are_initialised(gen, holder);
+        if (holder->node_type->kind != TYPE_STRUCT) return 0;
+        obj = holder;
+    }
+    return obj && obj->type == AST_IDENTIFIER && obj->node_type &&
+           obj->node_type->kind == TYPE_STRUCT;
+}
+
 static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
                                          ASTNode* rhs, ASTNode* obj) {
     Type* obj_type = obj->node_type;
     if (!obj_type) return 0;
-    /* Only a struct POINTER: a nested value struct is reached by "." and is
-     * covered by the identifier path when written on a local. */
-    if (obj_type->kind != TYPE_PTR || !obj_type->element_type ||
-        obj_type->element_type->kind != TYPE_STRUCT ||
-        !obj_type->element_type->struct_name) return 0;
+    /* A struct POINTER, or (#2497) a struct held by value in another one
+     * (`o.inner.name = ...`). The latter used to be a plain store that left
+     * `o.inner._heap_name` as it was; now that replacing or destroying `o`
+     * releases `o.inner`'s strings, a stale tracker would free a literal. */
+    int by_value = obj_type->kind == TYPE_STRUCT && obj_type->struct_name;
+    const char* sname = by_value ? obj_type->struct_name
+                        : (obj_type->kind == TYPE_PTR && obj_type->element_type &&
+                           obj_type->element_type->kind == TYPE_STRUCT)
+                          ? obj_type->element_type->struct_name : NULL;
+    if (!sname) return 0;
     /* A header-defined struct has no `_heap_<field>` trackers: its fields
      * are the C header's, and the store is a plain one (see
      * emit_struct_field_heap_assign). */
-    if (aether_is_c_import_struct(obj_type->element_type->struct_name)) return 0;
+    if (aether_is_c_import_struct(sname)) return 0;
     if (!gen->program) return 0;
 
-    ASTNode* sdef = find_struct_definition_by_name(gen->program,
-                                                   obj_type->element_type->struct_name);
+    ASTNode* sdef = find_struct_definition_by_name(gen->program, sname);
     if (!sdef) return 0;
     ASTNode* matching_field = NULL;
     for (int fi = 0; fi < sdef->child_count; fi++) {
@@ -2492,7 +2514,7 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     }
     if (!matching_field || !matching_field->node_type ||
         matching_field->node_type->kind != TYPE_STRING) return 0;
-    if (!struct_has_heap_string_field(sdef)) return 0;
+    if (!struct_owns_heap_strings(gen, sdef)) return 0;
 
     int rhs_is_heap = is_heap_string_expr(gen, rhs);
     /* Unique per emission: these blocks nest (an argument to the RHS may
@@ -2505,12 +2527,12 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     snprintf(tracker_lv, sizeof(tracker_lv), "%s->_heap_%s", tgt, lhs->value);
     char own[32];
     field_store_take_flag(gen, rhs, own, sizeof(own));
-    int release_old = box_trackers_are_initialised(gen, obj);
+    int release_old = by_value ? value_path_trackers_are_initialised(gen, obj)
+                               : box_trackers_are_initialised(gen, obj);
     print_indent(gen);
-    fprintf(gen->output, "{ %s* %s = ",
-            obj_type->element_type->struct_name, tgt);
+    fprintf(gen->output, "{ %s* %s = %s(", sname, tgt, by_value ? "&" : "");
     generate_expression(gen, obj);
-    fprintf(gen->output, ";");
+    fprintf(gen->output, ");");
     if (own[0]) fprintf(gen->output, " int %s = 0;", own);
     if (release_old) {
         fprintf(gen->output, " const char* _tmp_old = %s->%s;", tgt, lhs->value);
@@ -2579,11 +2601,46 @@ static int emit_c_import_string_field_store(CodeGenerator* gen, ASTNode* lhs, AS
     return 1;
 }
 
+/* #2497: `o.inner = v` where `inner` is a struct held by value that owns
+ * strings. The field is part of `o`, released with it, so it takes `v`
+ * (emit_struct_take) and replaces what it held. Through a pointer whose
+ * trackers cannot be trusted (#1873) the old value is not read: the store
+ * only takes `v`. */
+static int emit_struct_valued_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    const char* fs = struct_owning_strings(gen, lhs->node_type);
+    if (!fs) return 0;
+    ASTNode* holder = lhs->children[0];
+    Type* ht = holder->node_type;
+    int trusted;
+    if (ht && ht->kind == TYPE_STRUCT) {
+        trusted = value_path_trackers_are_initialised(gen, lhs);
+    } else if (ht && ht->kind == TYPE_PTR) {
+        trusted = box_trackers_are_initialised(gen, holder);
+    } else {
+        return 0;
+    }
+    print_indent(gen);
+    if (trusted) {
+        fprintf(gen->output, "%s_replace(&(", fs);
+        generate_expression(gen, lhs);
+        fprintf(gen->output, "), ");
+        emit_struct_take(gen, rhs, fs, NULL);
+        fprintf(gen->output, ");\n");
+    } else {
+        generate_expression(gen, lhs);
+        fprintf(gen->output, " = ");
+        emit_struct_take(gen, rhs, fs, NULL);
+        fprintf(gen->output, ";\n");
+    }
+    return 1;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
     if (lhs->child_count != 1 || !lhs->children[0]) return 0;
     if (emit_c_import_string_field_store(gen, lhs, rhs)) return 1;
+    if (emit_struct_valued_field_store(gen, lhs, rhs)) return 1;
     /* #1879: a nested path (`o.inner.name`) has a MEMBER_ACCESS object rather
      * than a bare identifier. Handle it separately -- the code below splices
      * the object in as a name. */
@@ -2747,9 +2804,10 @@ static int emit_struct_replace_assign(CodeGenerator* gen, const char* var_name,
     if (var_type->kind != TYPE_STRUCT || !var_type->struct_name) return 0;
     if (!gen->program) return 0;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, var_type->struct_name);
-    if (!sdef || !struct_has_heap_string_field(sdef)) return 0;
+    if (!sdef || !struct_owns_heap_strings(gen, sdef)) return 0;
     fprintf(gen->output, "%s_replace(&%s, ", var_type->struct_name, var_name);
-    generate_expression(gen, value);
+    /* #2497: a struct another owner keeps is copied or moved in. */
+    emit_struct_take(gen, value, var_type->struct_name, var_name);
     fprintf(gen->output, ");\n");
     return 1;
 }
@@ -4944,7 +5002,7 @@ void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
     ASTNode* sdef = (c_type && gen->program && !aether_is_c_import_struct(c_type))
                         ? find_struct_definition_by_name(gen->program, c_type)
                         : NULL;
-    if (sdef && struct_has_heap_string_field(sdef)) {
+    if (sdef && struct_owns_heap_strings(gen, sdef)) {
         snprintf(out, out_size, "%s_cell_release", c_type);
         return;
     }
@@ -5551,7 +5609,7 @@ static void hoist_loop_var(ASTNode* child, void* user) {
             if (var_type->struct_name && gen->program) {
                 ASTNode* sdef = find_struct_definition_by_name(
                     gen->program, var_type->struct_name);
-                if (sdef && struct_has_heap_string_field(sdef)) {
+                if (sdef && struct_owns_heap_strings(gen, sdef)) {
                     char annot[300];
                     snprintf(annot, sizeof(annot),
                              "struct_destroy:%s:%s",
@@ -6112,7 +6170,7 @@ static void mark_returned_struct_escaped(CodeGenerator* gen, ASTNode* expr) {
     Type* t = expr->node_type;
     if (!t || t->kind != TYPE_STRUCT || !t->struct_name) return;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, t->struct_name);
-    if (sdef && struct_has_heap_string_field(sdef)) {
+    if (sdef && struct_owns_heap_strings(gen, sdef)) {
         mark_return_escaped_struct_var(gen, expr->value);
     }
 }
@@ -6122,24 +6180,94 @@ static void mark_returned_struct_escaped(CodeGenerator* gen, ASTNode* expr) {
 const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
     if (!gen || !gen->program || !t || t->kind != TYPE_STRUCT || !t->struct_name) return NULL;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, t->struct_name);
-    return (sdef && struct_has_heap_string_field(sdef)) ? t->struct_name : NULL;
+    return (sdef && struct_owns_heap_strings(gen, sdef)) ? t->struct_name : NULL;
 }
 
 /* `<lvalue>._heap_<f> = 0;` for every string field of `struct_name`: the
  * value at `lvalue` stops owning its strings, which stay with (or move to)
  * whoever else holds them. */
-void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue) {
-    ASTNode* sdef = gen->program ? find_struct_definition_by_name(gen->program, struct_name) : NULL;
-    if (!sdef) return;
-    print_indent(gen);
-    for (int i = 0; i < sdef->child_count; i++) {
+static void emit_struct_disown_fields(CodeGenerator* gen, ASTNode* sdef,
+                                      const char* lvalue, int depth) {
+    for (int i = 0; sdef && depth < 32 && i < sdef->child_count; i++) {
         ASTNode* f = sdef->children[i];
         if (f && f->type == AST_STRUCT_FIELD && f->node_type &&
             f->node_type->kind == TYPE_STRING) {
             fprintf(gen->output, "%s._heap_%s = 0; ", lvalue, f->value);
         }
+        /* #2497: a struct field held by value owns its own strings. */
+        ASTNode* inner = owning_struct_field_def(gen, f);
+        if (inner) {
+            char sub[512];
+            snprintf(sub, sizeof(sub), "%s.%s", lvalue, f->value);
+            emit_struct_disown_fields(gen, inner, sub, depth + 1);
+        }
     }
+}
+
+void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue) {
+    ASTNode* sdef = gen->program ? find_struct_definition_by_name(gen->program, struct_name) : NULL;
+    if (!sdef) return;
+    print_indent(gen);
+    emit_struct_disown_fields(gen, sdef, lvalue, 0);
     fprintf(gen->output, "\n");
+}
+
+/* #2497: the struct counterpart of emit_string_take. A struct that owns
+ * heap strings (directly or in a struct field held by value) is stored into
+ * an owning slot (a local, a field, a match result, a return value) by
+ * taking it: a fresh value (a struct literal, a call) is adopted; a struct
+ * a local owns is moved out of it on its last use (its trackers cleared, so
+ * its scope exit releases nothing); anything else that only views a struct
+ * owned elsewhere (a parameter, a variable still in use, a field, an
+ * element) is copied with `<Name>_dup`. Storing the view as it was made two
+ * owners of every string: `b = a` freed `a`'s strings twice. */
+int struct_take_shape(ASTNode* e) {
+    return e && (e->type == AST_IDENTIFIER || e->type == AST_MEMBER_ACCESS ||
+                 e->type == AST_ARRAY_ACCESS || e->type == AST_IF_EXPRESSION);
+}
+
+/* Does local `name` own its struct value: is its scope-exit destroy
+ * pending? Parameters, pattern bindings and other copies do not. */
+static int struct_local_owns(CodeGenerator* gen, const char* name) {
+    size_t n = strlen(name);
+    for (int i = 0; i < gen->defer_count; i++) {
+        ASTNode* d = gen->defer_stack[i];
+        const char* a = d ? d->annotation : NULL;
+        if (a && strncmp(a, "struct_destroy:", 15) == 0 &&
+            strncmp(a + 15, name, n) == 0 && a[15 + n] == ':') return 1;
+    }
+    return 0;
+}
+
+void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
+                      const char* target) {
+    if (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, e->children[0]);
+        fprintf(gen->output, ") ? ");
+        emit_struct_take(gen, e->children[1], sname, target);
+        fprintf(gen->output, " : ");
+        emit_struct_take(gen, e->children[2], sname, target);
+        fprintf(gen->output, ")");
+        return;
+    }
+    if (!struct_take_shape(e) ||
+        (e->type == AST_IDENTIFIER && target && e->value && strcmp(e->value, target) == 0)) {
+        generate_expression(gen, e);
+        return;
+    }
+    if (e->type == AST_IDENTIFIER && e->value && struct_local_owns(gen, e->value) &&
+        !is_promoted_capture(gen, e->value) && !is_env_capture_name(gen, e->value) &&
+        !alias_source_must_copy(gen, e->value)) {
+        ASTNode* sdef = find_struct_definition_by_name(gen->program, sname);
+        fprintf(gen->output, "({ %s _ae_mv = %s; ", sname, e->value);
+        emit_struct_disown_fields(gen, sdef, e->value, 0);
+        fprintf(gen->output, "_ae_mv; })");
+        return;
+    }
+    fprintf(gen->output, "%s_dup(", sname);
+    generate_expression(gen, e);
+    fprintf(gen->output, ")");
 }
 
 /* A promoted struct returned by name hands its owned strings to the caller
@@ -6169,7 +6297,7 @@ void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
     if (!gen->program || !var_name || !struct_type ||
         struct_type->kind != TYPE_STRUCT || !struct_type->struct_name) return;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, struct_type->struct_name);
-    if (!sdef || !struct_has_heap_string_field(sdef)) return;
+    if (!sdef || !struct_owns_heap_strings(gen, sdef)) return;
     char annot[300];
     snprintf(annot, sizeof(annot), "struct_destroy:%s:%s",
              var_name, struct_type->struct_name);
@@ -6217,17 +6345,50 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
     fprintf(gen->output, " }");
 }
 
+static void emit_match_result_value(CodeGenerator* gen, ASTNode* result);
+
 // #2459: a match arm's block body is its own scope, the way an `if` / `switch`
 // arm's block is (AST_BLOCK): its defers run when the arm ends, only when that
 // arm was taken, and the names it declares do not leak into the next arm. The
 // caller has already opened the arm's C braces.
+//
+// #2496: when the match is an expression, the block yields its final value
+// (match_arm_value) to the match's result, inside the block's scope so its
+// locals are still live and before its defers run, as a return's value is
+// taken before a function's. The block's other statements are statements:
+// a `match` among them is not the outer match's value, so the result
+// variable is out of reach while they are emitted.
 static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
     int saved_var_count = gen->declared_var_count;
+    const char* result_var = gen->match_result_var;
+    const char* result_own = gen->match_result_own;
+    const char* result_struct = gen->match_result_struct;
+    ASTNode* value = result_var ? match_arm_value(block) : NULL;
+    int stmts = block->child_count - (value ? 1 : 0);
+    gen->match_result_var = NULL;
+    gen->match_result_own = NULL;
+    gen->match_result_struct = NULL;
     enter_scope(gen);
-    for (int j = 0; j < block->child_count; j++) {
+    for (int j = 0; j < stmts; j++) {
         generate_statement(gen, block->children[j]);
     }
+    gen->match_result_var = result_var;
+    gen->match_result_own = result_own;
+    gen->match_result_struct = result_struct;
+    if (value && value->type == AST_MATCH_STATEMENT) {
+        /* A nested match yields for this one: its arms assign the same
+         * result. */
+        generate_statement(gen, value);
+    } else if (value) {
+        emit_match_result_value(gen, value);
+    }
+    gen->match_result_var = NULL;
+    gen->match_result_own = NULL;
+    gen->match_result_struct = NULL;
     exit_scope(gen);
+    gen->match_result_var = result_var;
+    gen->match_result_own = result_own;
+    gen->match_result_struct = result_struct;
     truncate_declared_vars(gen, saved_var_count);
 }
 
@@ -6237,6 +6398,18 @@ static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
 // match's flag whether it owns it.
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
     print_indent(gen);
+    if (gen->match_result_var && gen->match_result_struct) {
+        /* #2497: an owning struct result takes the arm's struct. */
+        if (gen->match_result_replace) {
+            fprintf(gen->output, "%s_replace(&%s, ", gen->match_result_struct,
+                    gen->match_result_var);
+        } else {
+            fprintf(gen->output, "%s = ", gen->match_result_var);
+        }
+        emit_struct_take(gen, result, gen->match_result_struct, gen->match_result_var);
+        fprintf(gen->output, gen->match_result_replace ? ");\n" : ";\n");
+        return;
+    }
     if (gen->match_result_var && gen->match_result_own) {
         fprintf(gen->output, "%s = ", gen->match_result_var);
         emit_string_take(gen, result, gen->match_result_own, gen->match_result_var);
@@ -6309,7 +6482,11 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
             int wrap_v0 = v0 && v0->kind == TYPE_STRING &&
                           gen->current_function &&
                           function_def_returns_heap_at(gen, gen->current_function, 0);
-            if (wrap_v0) {
+            if (wrap_v0 && string_take_is_view(gen, v)) {
+                /* #2497: an `if` or field read is taken as a return takes
+                 * it: a fresh arm adopted, not copied and leaked. */
+                emit_string_take_owned(gen, v);
+            } else if (wrap_v0) {
                 fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
                 generate_expression(gen, v);
                 fprintf(gen->output, "), %d)",
@@ -6318,6 +6495,17 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
                 generate_expression(gen, v);
             }
             fprintf(gen->output, ", ._1 = \"\" }");
+            return;
+        }
+    }
+    /* #2497: a struct field or element returned is still owned by its
+     * holder, which may be released at this function's exit; the caller
+     * adopts what it gets, so it gets a copy. */
+    {
+        ASTNode* v = stmt->children[0];
+        const char* rs = struct_owning_strings(gen, gen->current_func_return_type);
+        if (rs && v && (v->type == AST_MEMBER_ACCESS || v->type == AST_ARRAY_ACCESS)) {
+            emit_struct_take(gen, v, rs, NULL);
             return;
         }
     }
@@ -7082,16 +7270,24 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Infer type from first match arm result
                         const char* c_type = get_c_type(stmt->node_type);
                         ASTNode* match_node = stmt->children[0];
-                        if ((!stmt->node_type || stmt->node_type->kind == TYPE_UNKNOWN) &&
-                            match_node->child_count >= 2) {
-                            ASTNode* first_arm = match_node->children[1];
-                            if (first_arm && first_arm->child_count >= 2 && first_arm->children[1]) {
-                                Type* arm_type = first_arm->children[1]->node_type;
-                                if (arm_type) c_type = get_c_type(arm_type);
-                            }
+                        if (!stmt->node_type || stmt->node_type->kind == TYPE_UNKNOWN) {
+                            Type* arm_type = match_value_type(match_node);
+                            if (arm_type) c_type = get_c_type(arm_type);
                         }
+                        /* #2497: a struct that owns strings starts empty
+                         * (its trackers read by the replace each arm does)
+                         * and is released at scope exit, as a struct a
+                         * literal or call initialises is. */
+                        Type* mt = (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN)
+                                   ? stmt->node_type : match_value_type(match_node);
+                        const char* msname = struct_owning_strings(gen, mt);
                         print_indent(gen);
-                        fprintf(gen->output, "%s %s;\n", c_type, stmt->value);
+                        fprintf(gen->output, msname ? "%s %s = {0};\n" : "%s %s;\n",
+                                c_type, stmt->value);
+                        if (msname) {
+                            push_struct_destroy_defer(gen, stmt->value, mt,
+                                                      stmt->line, stmt->column);
+                        }
                         /* #2461: a string local a match binds owns what its
                          * arms hand it, so it needs the tracker the hoist
                          * gives every other string local. */
@@ -7115,6 +7311,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * statement arm leaves the local as it was). */
                     const char* saved_mvar = gen->match_result_var;
                     const char* saved_mown = gen->match_result_own;
+                    const char* saved_mstruct = gen->match_result_struct;
+                    int saved_mreplace = gen->match_result_replace;
+                    /* #2497: a local that owns a string-owning struct takes
+                     * each arm's struct and releases the one it held. */
+                    Type* bound = declared_var_type(gen, stmt->value);
+                    if (!bound || bound->kind != TYPE_STRUCT) bound = stmt->node_type;
+                    if (!bound || bound->kind != TYPE_STRUCT)
+                        bound = match_value_type(stmt->children[0]);
+                    const char* bound_struct =
+                        (!is_promoted_capture(gen, stmt->value) &&
+                         !is_env_capture_name(gen, stmt->value))
+                        ? struct_owning_strings(gen, bound) : NULL;
                     char own[32] = "";
                     int owning = is_heap_string_var(gen, stmt->value) &&
                                  !is_promoted_capture(gen, stmt->value) &&
@@ -7128,9 +7336,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     // Generate match with result assignment
                     gen->match_result_var = stmt->value;
                     gen->match_result_own = owning ? own : NULL;
+                    gen->match_result_struct = bound_struct;
+                    gen->match_result_replace = 1;
                     generate_statement(gen, stmt->children[0]);
                     gen->match_result_var = saved_mvar;
                     gen->match_result_own = saved_mown;
+                    gen->match_result_struct = saved_mstruct;
+                    gen->match_result_replace = saved_mreplace;
                     if (owning) {
                         print_indent(gen);
                         fprintf(gen->output, "if (%s >= 0) {", own);
@@ -7183,12 +7395,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             else
                                 generate_expression(gen, stmt->children[0]);
                             fprintf(gen->output, ");\n");
-                        } else if (sdef && struct_has_heap_string_field(sdef)) {
+                        } else if (sdef && struct_owns_heap_strings(gen, sdef)) {
                             /* A struct cell owns its string fields (#2458):
                              * the struct it held gives them up when a new
                              * one replaces it, as a local's does (#465). */
                             fprintf(gen->output, "%s_replace(%s, ", st->struct_name, stmt->value);
-                            generate_expression(gen, stmt->children[0]);
+                            /* #2497: a struct owned elsewhere is copied in. */
+                            emit_struct_take(gen, stmt->children[0], st->struct_name, NULL);
                             fprintf(gen->output, ");\n");
                         } else {
                             fprintf(gen->output, "*%s", stmt->value);
@@ -7843,6 +8056,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * across each branch below so we only consult
                      * the set once. */
                     const char* vq = try_volatile_qual_for(gen, stmt->value);
+                    /* #2497: set when this local takes a string-owning struct
+                     * that another owner keeps (emit_struct_take). */
+                    const char* decl_struct_take = NULL;
                     if (stmt->node_type && stmt->node_type->kind == TYPE_ARRAY) {
                         const char* elem_type = get_c_type(stmt->node_type->element_type);
                         if (stmt->node_type->array_size > 0) {
@@ -7895,7 +8111,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         if (stmt->children[0]->type == AST_STRUCT_LITERAL && gen->program) {
                             ASTNode* sdef = find_struct_definition_by_name(
                                 gen->program, stmt->children[0]->value);
-                            if (sdef && struct_has_heap_string_field(sdef)) {
+                            if (sdef && struct_owns_heap_strings(gen, sdef)) {
                                 char annot[300];
                                 snprintf(annot, sizeof(annot),
                                          "struct_destroy:%s:%s",
@@ -7969,6 +8185,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             push_struct_destroy_defer(gen, stmt->value, var_type,
                                                       stmt->line, stmt->column);
                         }
+                        /* #2497: `o2 = o`, `x = o.inner`, `e = arr[i]`: the
+                         * local used to alias a struct its owner frees, while
+                         * a later replace of it freed that owner's strings
+                         * too. It now takes the struct (moved out of a local
+                         * on its last use, copied otherwise) and owns it. */
+                        if (stmt->child_count > 0 &&
+                            struct_take_shape(stmt->children[0]) &&
+                            struct_owning_strings(gen, var_type)) {
+                            decl_struct_take = struct_owning_strings(gen, var_type);
+                            push_struct_destroy_defer(gen, stmt->value, var_type,
+                                                      stmt->line, stmt->column);
+                        }
                     }
 
                     if (stmt->child_count > 0) {
@@ -8017,6 +8245,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 fprintf(gen->output, "aether_uniform_heap_str(");
                                 generate_expression(gen, di);
                                 fprintf(gen->output, ", 0)");
+                            } else if (decl_struct_take) {
+                                emit_struct_take(gen, stmt->children[0],
+                                                 decl_struct_take, stmt->value);
                             } else {
                                 generate_expression(gen, stmt->children[0]);
                             }
@@ -9234,12 +9465,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 Type* rt = gen->current_func_return_type;
                 const char* ct = (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN)
                                  ? get_c_type(rt) : NULL;
-                if (!ct && m->child_count >= 2) {
-                    ASTNode* first_arm = m->children[1];
-                    if (first_arm && first_arm->child_count >= 2 &&
-                        first_arm->children[1] && first_arm->children[1]->node_type)
-                        ct = get_c_type(first_arm->children[1]->node_type);
-                }
+                if (!ct && match_value_type(m)) ct = get_c_type(match_value_type(m));
                 if (!ct) ct = "int";
                 static int ret_match_ctr = 0;
                 char tmp[32];
@@ -9261,11 +9487,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
                 const char* saved = gen->match_result_var;
                 const char* saved_own = gen->match_result_own;
+                const char* saved_struct = gen->match_result_struct;
+                int saved_replace = gen->match_result_replace;
                 gen->match_result_var = tmp;
                 gen->match_result_own = own[0] ? own : NULL;
+                /* #2497: the caller adopts a returned struct, so each arm hands
+                 * over one this function no longer owns. */
+                gen->match_result_struct = struct_owning_strings(gen, rt);
+                gen->match_result_replace = 0;
                 generate_statement(gen, m);
                 gen->match_result_var = saved;
                 gen->match_result_own = saved_own;
+                gen->match_result_struct = saved_struct;
+                gen->match_result_replace = saved_replace;
                 // Re-dispatch as `return <tmp>` to reuse all return machinery.
                 ASTNode* rid = create_ast_node(AST_IDENTIFIER, tmp, stmt->line, stmt->column);
                 rid->node_type = rt ? clone_type(rt)

@@ -679,6 +679,32 @@ int annotation_has_marker(const char* annotation, const char* marker) {
     return 0;
 }
 
+ASTNode* match_arm_value(ASTNode* body) {
+    if (!body) return NULL;
+    switch (body->type) {
+        case AST_PRINT_STATEMENT:
+        case AST_RETURN_STATEMENT:
+        case AST_VARIABLE_DECLARATION:
+        case AST_ASSIGNMENT:
+        case AST_EXPRESSION_STATEMENT:
+            return NULL;
+        case AST_BLOCK: {
+            if (body->child_count == 0) return NULL;
+            ASTNode* last = body->children[body->child_count - 1];
+            if (!last) return NULL;
+            if (last->type == AST_MATCH_STATEMENT) return last;
+            if (last->type != AST_EXPRESSION_STATEMENT || last->child_count < 1) return NULL;
+            ASTNode* e = last->children[0];
+            if (!e || !e->node_type || e->node_type->kind == TYPE_VOID) return NULL;
+            if (e->type == AST_BINARY_EXPRESSION && e->value &&
+                strcmp(e->value, "=") == 0) return NULL;
+            return e;
+        }
+        default:
+            return body;
+    }
+}
+
 char* annotation_add_marker(char* annotation, const char* marker) {
     if (!marker || !*marker) return annotation;
     if (!annotation) return strdup(marker);

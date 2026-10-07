@@ -2729,11 +2729,12 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->node_type && expr->node_type->kind != TYPE_UNKNOWN) {
                 return clone_type(expr->node_type);
             }
-            if (expr->child_count >= 2) {
-                ASTNode* first_arm = expr->children[1];
-                if (first_arm && first_arm->child_count >= 2) {
-                    return infer_type(first_arm->children[1], table);
-                }
+            /* #2496: the first arm that yields a value (a block arm yields
+             * its final expression). */
+            for (int i = 1; i < expr->child_count; i++) {
+                ASTNode* arm = expr->children[i];
+                ASTNode* v = (arm && arm->child_count >= 2) ? match_arm_value(arm->children[1]) : NULL;
+                if (v) return infer_type(v, table);
             }
             return create_type(TYPE_UNKNOWN);
 
@@ -8342,10 +8343,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     typecheck_statement(body, arm_table);
                 }
 
-                // Propagate arm result type to the match node (for match-as-expression)
+                // Propagate arm result type to the match node (for match-as-expression).
+                // #2496: a block arm yields its final value, so its type is that
+                // value's; a statement arm yields nothing and says nothing.
+                ASTNode* yielded = match_arm_value(body);
                 if (!stmt->node_type || stmt->node_type->kind == TYPE_UNKNOWN) {
-                    if (body->node_type && body->node_type->kind != TYPE_UNKNOWN) {
-                        set_node_type(stmt, clone_type(body->node_type));
+                    if (yielded && yielded->node_type &&
+                        yielded->node_type->kind != TYPE_UNKNOWN) {
+                        set_node_type(stmt, clone_type(yielded->node_type));
                     }
                 }
 

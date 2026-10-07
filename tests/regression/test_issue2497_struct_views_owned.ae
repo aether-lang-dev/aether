@@ -1,0 +1,179 @@
+// Issue #2497: values that only view a string or struct something else owns
+// were stored as borrowed pointers into slots that outlive the owner.
+//
+//  - `list.add(l, r.name)` / `map.put(m, k, r.name)` stored the field's
+//    pointer raw, so reassigning `r.name` (or `r` leaving scope) freed what
+//    the container held. The same for an `if` whose arm is a field read.
+//  - A tuple position or a `T!` value returned from an `if` with freshly
+//    built arms copied the value and leaked the fresh one.
+//  - A struct held by value inside another (`o.inner`) never had its strings
+//    released when the outer value was replaced or went out of scope, and a
+//    struct whose only strings were nested had no destructor at all.
+//  - `b = a` for a struct that owns strings made two owners of each string
+//    (a double free at scope exit), and `x = o.inner`, `return o.inner`, or
+//    `Wrap { o: o }` borrowed a struct the owner then freed.
+//
+// Post-fix a field read goes to the container's owning add (it takes its own
+// reference), an `if` value is taken as a binding takes it (#2461), a nested
+// struct is released with its holder, and a struct value is taken into an
+// owning slot: moved out of a local on its last use, copied with
+// `<Name>_dup` otherwise. Pre-fix the checks read freed memory ("zz") or the
+// program aborts on a double free; the rounds at the end check that nothing
+// leaks, by the C allocator's own count.
+
+import std.list
+import std.map
+import std.mem
+import std.set
+import std.string
+
+extern exit(code: int)
+
+struct R {
+    name: string
+}
+
+struct Outer {
+    inner: R
+    tag: string
+}
+
+// No string field of its own: everything it owns is nested.
+struct Wrap {
+    o: Outer
+}
+
+var held: ptr = null
+
+fn check(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+fn churn(n: int) {
+    if held != null {
+        list.free(held)
+    }
+    held = list.new()
+    i = 0
+    while i < 2000 {
+        list.add(held, "zz-${n}")
+        i = i + 1
+    }
+}
+
+fn containers(p: string) {
+    r = R { name: string.concat(p, "-first") }
+    l = list.new()
+    list.add(l, r.name)
+    m = map.new()
+    map.put(m, "k", r.name)
+    c = string.length(p)
+    list.add(l, if c > 0 { r.name } else { "lit" })
+    list.add(l, if c > 0 { string.concat(p, "-fresh") } else { "lit" })
+    s = set.new()
+    set.add(s, r.name)
+    r.name = string.concat(p, "-second")
+    churn(c)
+    g0, _ = list.get(l, 0)
+    g1, _ = list.get(l, 1)
+    g2, _ = list.get(l, 2)
+    g3, _ = map.get(m, "k")
+    check("list.add field", g0, "${p}-first")
+    check("list.add if field", g1, "${p}-first")
+    check("list.add if fresh", g2, "${p}-fresh")
+    check("map.put field", g3, "${p}-first")
+    if !set.contains(s, "${p}-first") {
+        println("FAIL set.add field")
+        exit(1)
+    }
+    list.free(l)
+    map.free(m)
+    set.free(s)
+}
+
+fn pair(c: int, a: string) -> (string, int) {
+    return if c > 0 { string.concat(a, "-yes") } else { string.concat(a, "-no") }, c
+}
+
+fn result(c: int, a: string) -> string! {
+    if c < 0 {
+        return "", "negative"
+    }
+    return if c > 0 { string.concat(a, "-p") } else { string.concat(a, "-z") }
+}
+
+fn inner_of(a: string) -> R {
+    o = Outer { inner: R { name: string.concat(a, "-ret") }, tag: "t" }
+    return o.inner
+}
+
+fn param_copy(r: R) -> string {
+    mine = r
+    mine.name = "changed"
+    return string.concat(mine.name, "")
+}
+
+fn nested(p: string) {
+    o = Outer { inner: R { name: string.concat(p, "-in") }, tag: string.concat(p, "-tag") }
+    o = Outer { inner: R { name: string.concat(p, "-in2") }, tag: "u" }
+    o.inner.name = "lit"
+    o.inner = R { name: string.concat(p, "-in3") }
+    w = Wrap { o: o }
+    x = o.inner
+    o = Outer { inner: R { name: "plain" }, tag: "v" }
+    churn(1)
+    check("wrap copy", w.o.inner.name, "${p}-in3")
+    check("field copy", x.name, "${p}-in3")
+    w = Wrap { o: Outer { inner: R { name: string.concat(p, "-w2") }, tag: "w" } }
+    check("wrap replaced", w.o.inner.name, "${p}-w2")
+    a = R { name: string.concat(p, "-a") }
+    b = R { name: "b" }
+    b = a
+    check("struct alias", b.name, "${p}-a")
+    e = R { name: string.concat(p, "-e") }
+    f = e
+    check("struct alias, source live", e.name, "${p}-e")
+    check("struct alias, copy", f.name, "${p}-e")
+    y = inner_of(p)
+    churn(2)
+    check("return nested field", y.name, "${p}-ret")
+    q = R { name: string.concat(p, "-q") }
+    check("param copy", param_copy(q), "changed")
+    check("param untouched", q.name, "${p}-q")
+}
+
+fn run_all(n: int) {
+    p = "a${n}"
+    containers(p)
+    s, k = pair(1, p)
+    check("tuple if", s, "${p}-yes")
+    if k != 1 {
+        exit(1)
+    }
+    v = result(1, p) or "dflt"
+    check("result if", v, "${p}-p")
+    nested(p)
+}
+
+main() {
+    run_all(7)
+    if mem.heap_in_use() >= 0 {
+        run_all(7)
+        start_bytes = mem.heap_in_use()
+        k = 0
+        while k < 60 {
+            run_all(7)
+            k = k + 1
+        }
+        end_bytes = mem.heap_in_use()
+        if end_bytes - start_bytes > 16384 {
+            println("FAIL: 60 rounds grew the heap by ${end_bytes - start_bytes} bytes")
+            exit(1)
+        }
+    }
+    list.free(held)
+    println("=== test_issue2497_struct_views_owned: all passed ===")
+}

@@ -499,6 +499,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
     gen->match_result_own = NULL;
+    gen->match_result_struct = NULL;
+    gen->match_result_replace = 0;
     gen->preempt_loops = 0;
     gen->series_collapse_off = 0;
     gen->in_string_closure = 0;
@@ -6878,6 +6880,17 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
     print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
+    print_line(gen, "}");
+    /* #2497: the owning entries, for a value the container must hold its
+     * own reference to (a struct field it only views: a refcounted string
+     * is retained, a plain one copied). Same string-return contract. */
+    print_line(gen, "extern int list_add_string_owned(void* list, void* item);");
+    print_line(gen, "extern int map_put_string_owned(void* map, const char* key, void* value);");
+    print_line(gen, "static inline const char* _aether_list_add_owned(void* list, void* item) {");
+    print_line(gen, "    return list_add_string_owned(list, item) ? \"\" : \"list.add failed\";");
+    print_line(gen, "}");
+    print_line(gen, "static inline const char* _aether_map_put_owned(void* map, const char* key, void* value) {");
+    print_line(gen, "    return map_put_string_owned(map, key, value) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_list_add_closure(void* list, void* box) {");
     print_line(gen, "    return list_add_closure_owned(list, box) ? \"\" : \"list.add failed\";");

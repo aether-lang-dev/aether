@@ -655,6 +655,16 @@ int lane_accessor_index(TypeKind kind, const char* field);
 int annotation_has_marker(const char* annotation, const char* marker);
 char* annotation_add_marker(char* annotation, const char* marker);
 
+/* #2496: the value a `match` arm body yields when the match is an
+ * expression, or NULL when it yields none and leaves the result as it was.
+ * An expression body yields itself. A `{ ... }` block yields its last
+ * statement when that is a value: an expression that is neither an
+ * assignment nor a call with no value, or a nested `match` (whose arms then
+ * yield for the outer one). A print, a return, a binding, or a block ending
+ * in one yields nothing. One rule, so the typechecker and codegen cannot
+ * disagree about what an arm yields. */
+ASTNode* match_arm_value(ASTNode* body);
+
 // Utility functions
 ASTNode* create_literal_node(Token* token);
 ASTNode* create_identifier_node(Token* token);

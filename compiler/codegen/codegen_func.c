@@ -2291,8 +2291,14 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
      * matching tracker is set. Called from the scope-exit defer
      * for local struct variables (codegen_stmt.c pushes the
      * defer at struct-literal initialization sites). Idempotent —
-     * each free zeroes the tracker so a second call no-ops. */
-    if (has_string_field) {
+     * each free zeroes the tracker so a second call no-ops.
+     *
+     * #2497: a field that is itself a string-owning struct, held by
+     * value, is part of this value: its strings are released with it
+     * (through its own destroy / replace). Without that, `o.inner.name`
+     * leaked whenever `o` was replaced or went out of scope, and a struct
+     * whose only strings were nested got no destructor at all. */
+    if (struct_owns_heap_strings(gen, struct_def)) {
         print_line(gen, "static inline void %s_destroy(%s* s) {",
                    struct_def->value, struct_def->value);
         indent(gen);
@@ -2303,6 +2309,10 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
                 field->node_type && field->node_type->kind == TYPE_STRING) {
                 print_line(gen, "if (s->_heap_%s) { aether_heap_str_free(s->%s); s->%s = (const char*)0; s->_heap_%s = 0; }",
                            field->value, field->value, field->value, field->value);
+            }
+            ASTNode* inner = owning_struct_field_def(gen, field);
+            if (inner) {
+                print_line(gen, "%s_destroy(&s->%s);", inner->value, field->value);
             }
         }
         unindent(gen);
@@ -2368,7 +2378,39 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
             unindent(gen);
             print_line(gen, "}");
         }
+        /* #2497: a nested owning struct is replaced by its own rule, and the
+         * ownership it settles on is what the new outer value carries. */
+        for (int i = 0; i < struct_def->child_count; i++) {
+            ASTNode* f = struct_def->children[i];
+            ASTNode* inner = owning_struct_field_def(gen, f);
+            if (!inner) continue;
+            print_line(gen, "%s_replace(&dst->%s, src.%s); src.%s = dst->%s;",
+                       inner->value, f->value, f->value, f->value, f->value);
+        }
         print_line(gen, "*dst = src;");
+        unindent(gen);
+        print_line(gen, "}");
+
+        /* #2497: `<Name>_dup(src)`: a value of its own, for a slot that takes
+         * a struct another owner keeps (a variable still in use, a field, an
+         * element). Every string src owns is copied; one it only borrows
+         * stays borrowed, as it was in src. */
+        print_line(gen, "static inline %s %s_dup(%s src) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        indent(gen);
+        for (int i = 0; i < struct_def->child_count; i++) {
+            ASTNode* f = struct_def->children[i];
+            if (f->type == AST_STRUCT_FIELD && f->node_type &&
+                f->node_type->kind == TYPE_STRING) {
+                print_line(gen, "if (src._heap_%s) src.%s = aether_uniform_heap_str(src.%s, 0);",
+                           f->value, f->value, f->value);
+            }
+            ASTNode* inner = owning_struct_field_def(gen, f);
+            if (inner) {
+                print_line(gen, "src.%s = %s_dup(src.%s);", f->value, inner->value, f->value);
+            }
+        }
+        print_line(gen, "return src;");
         unindent(gen);
         print_line(gen, "}");
 
@@ -2393,6 +2435,43 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
  * needs heap-ownership tracking? Used by the codegen_stmt.c
  * struct-local-declaration site to decide whether to push the
  * function-exit destructor defer. */
+/* #2497: the definition of `field`'s struct type when the field holds that
+ * struct by value and it owns heap strings; NULL otherwise (a string, a
+ * pointer, a struct with nothing to release). */
+static int struct_owns_heap_strings_at(CodeGenerator* gen, ASTNode* struct_def, int depth);
+
+ASTNode* owning_struct_field_def(CodeGenerator* gen, ASTNode* field) {
+    if (!gen || !gen->program || !field || field->type != AST_STRUCT_FIELD ||
+        !field->node_type || field->node_type->kind != TYPE_STRUCT ||
+        !field->node_type->struct_name ||
+        aether_is_c_import_struct(field->node_type->struct_name)) return NULL;
+    ASTNode* def = find_struct_definition_by_name(gen->program,
+                                                  field->node_type->struct_name);
+    return (def && struct_owns_heap_strings_at(gen, def, 1)) ? def : NULL;
+}
+
+static int struct_owns_heap_strings_at(CodeGenerator* gen, ASTNode* struct_def, int depth) {
+    if (struct_has_heap_string_field(struct_def)) return 1;
+    /* A struct cannot hold itself by value; the bound only stops a
+     * malformed program from recursing forever. */
+    if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION || depth > 32) return 0;
+    if (struct_def->annotation && strcmp(struct_def->annotation, "extern_c_import") == 0) return 0;
+    for (int i = 0; i < struct_def->child_count; i++) {
+        ASTNode* f = struct_def->children[i];
+        if (!f || f->type != AST_STRUCT_FIELD || !f->node_type ||
+            f->node_type->kind != TYPE_STRUCT || !f->node_type->struct_name ||
+            !gen || !gen->program) continue;
+        ASTNode* def = find_struct_definition_by_name(gen->program, f->node_type->struct_name);
+        if (def && def != struct_def &&
+            struct_owns_heap_strings_at(gen, def, depth + 1)) return 1;
+    }
+    return 0;
+}
+
+int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def) {
+    return struct_owns_heap_strings_at(gen, struct_def, 0);
+}
+
 int struct_has_heap_string_field(ASTNode* struct_def) {
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     /* A header-defined struct's string fields borrow; nothing tracks them,
