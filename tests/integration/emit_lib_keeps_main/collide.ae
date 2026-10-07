@@ -1,0 +1,4 @@
+// main_exit's own export would be aether_main_exit, which a library whose
+// program defines main() reserves.
+main_exit() -> int { return 1 }
+main() { println("hi") }

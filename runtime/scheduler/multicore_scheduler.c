@@ -1152,6 +1152,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     return NULL;
 }
 
+static void scheduler_free_core_tables(void);
+
 void scheduler_init(int cores) {
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(&g_sched_state, &expected, 1,
@@ -1163,6 +1165,14 @@ void scheduler_init(int cores) {
         }
         return;
     }
+
+    // A scheduler stopped by scheduler_shutdown() keeps its per-core tables
+    // (an executable exits right after). Starting it again -- a host running
+    // an --emit=lib program's aether_main() a second time -- allocates new
+    // ones below, so release the previous lifecycle's first rather than leak
+    // them. num_cores is still that lifecycle's count; 0 on a first init or
+    // after scheduler_cleanup().
+    scheduler_free_core_tables();
 
     // Opt-in SIGSEGV/SIGFPE/SIGBUS → panic handlers. No-op unless
     // AETHER_CATCH_SIGNALS=1 in the environment. Safe to call multiple times
@@ -1526,8 +1536,10 @@ void scheduler_shutdown(void) {
     atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }
 
-void scheduler_cleanup(void) {
-    // Free allocated scheduler resources
+// Free the per-core tables scheduler_init allocated: the actor slots, the
+// I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
+// follows a scheduler_shutdown() both release them this way.
+static void scheduler_free_core_tables(void) {
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources
         schedulers[i].thread = 0;
@@ -1547,6 +1559,11 @@ void scheduler_cleanup(void) {
         schedulers[i].actor_count = 0;
         schedulers[i].capacity = 0;
     }
+}
+
+void scheduler_cleanup(void) {
+    // Free allocated scheduler resources
+    scheduler_free_core_tables();
     num_cores = 0;
     atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }

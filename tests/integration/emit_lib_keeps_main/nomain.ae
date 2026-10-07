@@ -1,0 +1,2 @@
+// A library without main(): no aether_main is exported.
+add(a: int, b: int) -> int { return a + b }

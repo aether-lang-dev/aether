@@ -4847,7 +4847,11 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
 
     uint8_t inbuf[16 * 1024];
     int goaway_sent = 0;
+#if !defined(_WIN32)
+    /* Only the POSIX poll() path below waits on it; on Windows it would be
+     * an unused variable (an error under -Werror with nghttp2 enabled). */
     int wake_fd = aether_h2_session_wake_fd(sess);  /* -1 when no pool */
+#endif
     while (1) {
         /* Graceful shutdown bridge (#260 Tier 3 + h2). When
          * http_server_stop / http_server_shutdown_graceful flips

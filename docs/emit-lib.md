@@ -56,7 +56,7 @@ int main(void) {
 | Flag | Effect |
 |---|---|
 | `--emit=exe` *(default)* | Current behaviour, produces an executable. |
-| `--emit=lib` | No `main()` in the output; every top-level Aether function gets an `aether_<name>()` C-ABI alias; built with `-fPIC -shared`. |
+| `--emit=lib` | No C `main()` in the output (a program's `main()` becomes [`aether_main` / `aether_main_exit`](#a-programs-main-aether_main-and-aether_main_exit)); every top-level Aether function gets an `aether_<name>()` C-ABI alias; built with `-fPIC -shared`. |
 | `--emit=both` | Produces both an executable AND a shared library from one source. `ae build --emit=both foo.ae -o foo` writes `foo` (the exe) and `foo.dylib` / `foo.so` (the lib) side by side. With no `-o`, defaults are `<base>` (exe) and `lib<base>.<ext>` (lib). Internally dispatches `cmd_build` twice (once per emit mode); the lib pass appends the platform lib extension to the user's `-o` so the second pass doesn't overwrite the first. |
 | `--emit=csrc` | Emits the **portable generated C source** (`foo.c`), a **catalog header** (`foo.h`, the `aether_<name>()` prototypes), and a **machine-readable catalog** (`foo.catalog.json`), and stops. No `gcc`, no native artifact. Same catalog codegen as `--emit=lib`; the difference is you get *source* plus a describable ABI surface, not a host `.so`. |
 | `--emit=obj` | Compiles straight to a single **relocatable object file** (`foo.o`), no link step. Same catalog codegen as `--emit=lib`, so the object exports both the bare Aether names and the `aether_<name>()` C-ABI aliases. For dropping `.ae` into an existing C link line. |
@@ -171,6 +171,90 @@ entry points for ABI stability, the un-prefixed names are an
 implementation detail and may be hidden in a future version. See
 [Symbol visibility matrix](#symbol-visibility-matrix) below for the
 full picture across emit modes.
+
+## A program's `main()`: `aether_main` and `aether_main_exit`
+
+A library built from a `.ae` that defines `main()` keeps it. Under
+`--emit=lib` (and `--emit=staticlib`, `--emit=obj`, `--emit=csrc`, which share
+its codegen) the program's entry point is exported as a pair:
+
+```c
+int  aether_main(int argc, char** argv);   /* run main(), return its result */
+void aether_main_exit(void);               /* stop what main() started      */
+```
+
+`aether_main` runs the same prologue an executable's `main` runs (argument
+setup, the opt-in Capsicum sandbox, and, when the program has actors or
+imports a library that does, the scheduler started with the main thread
+marked as not a scheduler thread), then `main()`'s body, and **returns**. Its
+result is `main()`'s `int` (0 when `main()` returns nothing). Actors the body
+spawned keep running.
+
+`aether_main_exit` runs the executable's epilogue: it waits for the actors to
+go quiet, stops and joins the scheduler threads, and prints the
+message-pool report where the executable would.
+
+An executable is that pair run back to back, from the same emitter:
+
+```c
+int main(int argc, char** argv) {      /* what --emit=exe amounts to */
+    int rc = aether_main(argc, argv);
+    aether_main_exit();
+    return rc;
+}
+```
+
+with one ordering difference: `main()`'s defers (an explicit `defer`, and the
+automatic frees of its local strings and sequences) belong to
+`aether_main`'s stack frame, so in a library they run when `aether_main`
+returns, before the actors are drained, where an executable runs them after.
+Don't `defer` the release of something `main()` hands to its actors.
+
+**When a host calls each.** `aether_main` when it wants the program to start,
+`aether_main_exit` when it is done with it. On Android, where the app *is* the
+library:
+
+```c
+/* AetherActivity's JNI side */
+JNIEXPORT void JNICALL Java_..._onCreate(JNIEnv* env, jobject self) {
+    aether_main(0, NULL);     /* builds the UI, returns into Android's loop */
+}
+JNIEXPORT void JNICALL Java_..._onDestroy(JNIEnv* env, jobject self) {
+    aether_main_exit();       /* drain the program's actors */
+}
+```
+
+A desktop host does the same around its own loop, or calls both back to back
+to behave like the executable.
+
+**Calling them more than once.**
+
+- `aether_main` while the program is already running (no `aether_main_exit`
+  since) is rejected: it prints `aether_main: already running; call
+  aether_main_exit() first` on stderr, runs nothing, and returns `-1`.
+- `aether_main_exit` with nothing running is a no-op, so calling it twice is
+  safe, as is calling it when `aether_main` never ran.
+- After `aether_main_exit`, `aether_main` may run the program again on a fresh
+  scheduler: an Android activity destroyed and recreated in the same process.
+  The previous run's scheduler tables are freed; the actor objects it spawned
+  are not (an executable leaves those to process exit too).
+- Call both from one thread, the host's main or UI thread. They are not
+  synchronized against each other.
+
+**Finding them.** They are plain exported symbols: `dlsym(h, "aether_main")`,
+a weak reference, or the `--emit=csrc` header, which declares both when the
+program has a `main()`. They are not catalog functions (`aether_lib_meta`
+lists the library's callable functions, and an Aether program importing the
+library must not bind a `main`). A library without `main()` has neither. A
+wasm `--emit=lib` exports the catalog by default; add `--export=main
+--export=main_exit` (with the rest of the list you want) to export the pair.
+`--emit=both` keeps the executable's C `main` and adds no pair.
+
+**Reserved names.** Every top-level function exports as `aether_<name>`, so a
+function called `main_exit` would export as `aether_main_exit`. In a program
+that defines `main()`, `--emit=lib` rejects it with a compile error naming
+both. Rename it, or end its name with `_` to keep it private. Without a
+`main()`, or in an executable, `main_exit` is an ordinary name.
 
 ## Type mapping
 
@@ -926,6 +1010,7 @@ The integration suite under `tests/integration/` covers:
 | `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
 | `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, closures both ways with their captures, one module state shared by a host and a second binary library; static runtime (a library panic caught on Linux/FreeBSD) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
 | `binary_import_actors/` | A library's actors in a program with none of its own: the first spawn starts the scheduler, schema 1.7 `actors` passes through a second library, and the program's exit drains a fire-and-forget message (shared runtime everywhere, static on Linux/FreeBSD; elsewhere a warning) (#2297) |
+| `emit_lib_keeps_main/` | A program's `main()` as `aether_main` / `aether_main_exit`: a C host runs it (args, an ask/reply, its return value), the actors outlive `aether_main` and `aether_main_exit` drains them, a second `aether_main` is rejected, a rerun works without leaking scheduler tables (macOS `leaks`), the executable prints the same lines, no pair without `main()`, the reserved `main_exit`, the `--emit=csrc` header, and aarch64-linux / Android cross builds |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 
 Run them with the standard `make test-ae` or individually:
