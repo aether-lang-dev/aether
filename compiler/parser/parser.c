@@ -3002,9 +3002,14 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 // stopped at the operator: "Expected statement in block".
                 Token* cop = peek_token(parser);
                 if (cop && token_is_compound_assign(cop) &&
-                    (expr->type == AST_MEMBER_ACCESS || expr->type == AST_ARRAY_ACCESS)) {
+                    (expr->type == AST_MEMBER_ACCESS || expr->type == AST_ARRAY_ACCESS ||
+                     expr->type == AST_FUNCTION_CALL)) {
                     if (!lvalue_is_repeatable(expr)) {
-                        parser_error(parser, "the target of a compound assignment must be a variable, a field or an element with no call in it; write `target = target op value` with a temporary instead");
+                        /* #2481: `f(x) += v` stopped at the operator with
+                         * "Expected statement in block". */
+                        parser_error(parser, expr->type == AST_FUNCTION_CALL
+                            ? "cannot assign to the result of a call: it is a temporary, so the write would be lost; bind it to a variable first"
+                            : "the target of a compound assignment must be a variable, a field or an element with no call in it; write `target = target op value` with a temporary instead");
                         /* Skip the rest of the statement's line so the
                          * operator and its operand are not reported again. */
                         int eline = cop->line;

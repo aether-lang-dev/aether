@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "typechecker.h"
 #include "slice_coerce.h"
 #include "sandbox_trust.h"
@@ -1843,6 +1844,30 @@ static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode*
              "named function (`f as fn(...)`).",
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_name ? param_name : "f");
+    type_error(emsg, arg->line, arg->column);
+}
+
+/* #2491: a struct value passed where the parameter takes a different struct
+ * (`length2(a: Wide)` given a `Narrow`). Argument checking for user
+ * functions is lenient, so the front end let it through and gcc reported
+ * "incompatible type for argument" against generated code, one error per
+ * compile, while the same values in an assignment were already a type
+ * error. Only by-value struct and sum types on both sides are compared: a
+ * `*T` or `ptr` parameter is a pointer, and a variant struct into its sum
+ * is the wrap is_type_compatible allows. */
+static void reject_struct_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                   Type* param_type, int index, const char* param_name) {
+    if (!arg_type || !param_type) return;
+    int arg_nominal = arg_type->kind == TYPE_STRUCT || arg_type->kind == TYPE_SUM;
+    int param_nominal = param_type->kind == TYPE_STRUCT || param_type->kind == TYPE_SUM;
+    if (!arg_nominal || !param_nominal || !arg_type->struct_name ||
+        !param_type->struct_name || is_type_compatible(arg_type, param_type))
+        return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got %s",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             param_type->struct_name, arg_type->struct_name);
     type_error(emsg, arg->line, arg->column);
 }
 
@@ -4021,6 +4046,133 @@ static void resolve_const_initializer_types(ASTNode* program, SymbolTable* table
     }
 }
 
+/* #2495: the top-level consts, module vars and const arrays, which codegen
+ * emits as file-scope C definitions in program order. A C initializer can
+ * only name a definition above it, so `const HIGH = LOW << 4` ahead of
+ * `const LOW = 3` failed in the C compiler. */
+typedef struct {
+    ASTNode** decls;        /* the declarations, in program order */
+    int* slots;             /* each one's index in program->children */
+    int count;
+    StrMap index;           /* name -> position in decls, plus one */
+    char* state;            /* 0 unvisited, 1 on the DFS path, 2 placed */
+    int* path;              /* the DFS path, for the cycle message */
+    int path_len;
+    ASTNode** order;        /* dependency order, filled as decls are placed */
+    int placed;
+    int reported;
+} ConstOrder;
+
+static void const_order_visit(ConstOrder* co, int k);
+
+/* Visit every const that `n` names. After the second pass a cross-module
+ * `ns.NAME` is already the identifier `ns_NAME`; one not rewritten (a pass
+ * that stopped on an error) is looked up the same way. */
+static void const_order_deps(ConstOrder* co, ASTNode* n) {
+    if (!n || co->reported) return;
+    const char* name = NULL;
+    char qualified[512];
+    if (n->type == AST_IDENTIFIER && n->value) {
+        name = n->value;
+    } else if (n->type == AST_MEMBER_ACCESS && n->value && n->child_count > 0 &&
+               n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+               n->children[0]->value) {
+        snprintf(qualified, sizeof(qualified), "%s_%s", n->children[0]->value, n->value);
+        name = qualified;
+    }
+    if (name) {
+        void* hit = strmap_get(&co->index, name);
+        if (hit) {
+            const_order_visit(co, (int)(intptr_t)hit - 1);
+            return;
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) const_order_deps(co, n->children[i]);
+}
+
+static void const_order_visit(ConstOrder* co, int k) {
+    if (co->reported || co->state[k] == 2) return;
+    if (co->state[k] == 1) {
+        /* A cycle: report it once, at the declaration that starts it. */
+        int start = co->path_len - 1;
+        while (start > 0 && co->path[start] != k) start--;
+        char chain[640];
+        size_t pos = 0;
+        chain[0] = '\0';
+        for (int i = start; i <= co->path_len && pos + 1 < sizeof(chain); i++) {
+            ASTNode* d = co->decls[i < co->path_len ? co->path[i] : k];
+            int w = snprintf(chain + pos, sizeof(chain) - pos, "%s%s",
+                             i > start ? " -> " : "", d->value);
+            if (w < 0) break;
+            pos += (size_t)w;
+            if (pos >= sizeof(chain)) { pos = sizeof(chain) - 1; break; }
+        }
+        ASTNode* at = co->decls[k];
+        char msg[800];
+        snprintf(msg, sizeof(msg), "const '%s' depends on itself: %s",
+                 at->value, chain);
+        const char* saved = g_tc_file;
+        g_tc_file = at->source_file;
+        type_error_hint(msg, "a constant's initializer cannot name the constant "
+                        "it defines, directly or through other constants",
+                        at->line, at->column);
+        g_tc_file = saved;
+        co->reported = 1;
+        return;
+    }
+    co->state[k] = 1;
+    co->path[co->path_len++] = k;
+    const_order_deps(co, co->decls[k]->children[0]);
+    co->path_len--;
+    if (co->reported) return;
+    co->state[k] = 2;
+    co->order[co->placed++] = co->decls[k];
+}
+
+/* Put the top-level consts in dependency order, in the slots they already
+ * occupy, so codegen's program-order emission defines each before any
+ * initializer names it. The sort is stable: a program whose consts are
+ * already in order is left exactly as written. A cycle has no order and is
+ * reported at its first declaration. */
+static void order_const_declarations(ASTNode* program) {
+    ConstOrder co;
+    memset(&co, 0, sizeof(co));
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value && c->child_count > 0)
+            co.count++;
+    }
+    if (co.count == 0) return;
+    co.decls = malloc(sizeof(ASTNode*) * (size_t)co.count);
+    co.slots = malloc(sizeof(int) * (size_t)co.count);
+    co.state = calloc((size_t)co.count, 1);
+    co.path = malloc(sizeof(int) * (size_t)co.count);
+    co.order = malloc(sizeof(ASTNode*) * (size_t)co.count);
+    strmap_init(&co.index);
+    if (co.decls && co.slots && co.state && co.path && co.order) {
+        int k = 0;
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* c = program->children[i];
+            if (!(c && c->type == AST_CONST_DECLARATION && c->value && c->child_count > 0))
+                continue;
+            co.decls[k] = c;
+            co.slots[k] = i;
+            strmap_put(&co.index, c->value, (void*)(intptr_t)(k + 1));
+            k++;
+        }
+        for (int i = 0; i < co.count && !co.reported; i++) const_order_visit(&co, i);
+        if (!co.reported) {
+            for (int i = 0; i < co.count; i++) program->children[co.slots[i]] = co.order[i];
+        }
+    }
+    free(co.decls);
+    free(co.slots);
+    free(co.state);
+    free(co.path);
+    free(co.order);
+    strmap_free(&co.index);
+}
+
 int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
@@ -4818,6 +4970,10 @@ int typecheck_program(ASTNode* program) {
         typecheck_node(top, global_table);
     }
     g_tc_file = NULL;
+
+    /* After the second pass, which turned each `ns.NAME` in an initializer
+     * into the identifier the declaration carries. */
+    order_const_declarations(program);
 
     // Collect module-level `var` global names (#701). A bare
     // `name = expr` inside a function whose `name` is one of these is a
@@ -9457,6 +9613,36 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
     }
 }
 
+/* #2481: the call whose result an assignment target writes into, or NULL.
+ * A call's value is a temporary: `copy(q) = v`, `copy(q).x = v` and
+ * `make_arr(q)[i] = v` (a by-value array) assign to something that no
+ * longer exists, and the C compiler stopped at "lvalue required" against a
+ * line of generated code. A field or element reached through a pointer is
+ * real storage however the pointer was obtained (`get_ptr(q).x = v` with a
+ * `*T` result, `xs(q)[i] = v` over a slice), so the walk stops there. A
+ * call of unknown type inside the target is left alone: it may return a
+ * pointer. */
+static ASTNode* assign_target_temporary(ASTNode* target, SymbolTable* table, int top) {
+    if (!target) return NULL;
+    if (target->type == AST_FUNCTION_CALL) {
+        if (top) return target;   /* no call result is assignable */
+        Type* t = infer_type(target, table);
+        int temp = t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_PTR;
+        if (t) free_type(t);
+        return temp ? target : NULL;
+    }
+    if ((target->type != AST_MEMBER_ACCESS && target->type != AST_ARRAY_ACCESS) ||
+        target->child_count < 1)
+        return NULL;
+    ASTNode* base = target->children[0];
+    Type* bt = infer_type(base, table);
+    int through_value = bt && (target->type == AST_MEMBER_ACCESS
+                                   ? bt->kind == TYPE_STRUCT
+                                   : type_is_sized_array(bt));
+    if (bt) free_type(bt);
+    return through_value ? assign_target_temporary(base, table, 0) : NULL;
+}
+
 int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     if (!expr || expr->type != AST_BINARY_EXPRESSION || expr->child_count < 2) return 0;
     
@@ -9578,6 +9764,21 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     }
 
     if (operator == TOKEN_ASSIGN) {
+        ASTNode* temp = assign_target_temporary(left, table, 1);
+        if (temp) {
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                     "cannot assign to %s of '%s(...)': a call's result is a "
+                     "temporary, so the write would be lost",
+                     temp == left ? "the result" : "a part of the result",
+                     temp->value ? temp->value : "?");
+            type_error_hint(msg, "bind the result to a variable, change it there, "
+                            "and pass or store that variable",
+                            expr->line, expr->column);
+            free_type(left_type);
+            free_type(right_type);
+            return 0;
+        }
         if (!is_assignable(right_type, left_type)) {
             /* #1240: `table.callback = my_fn` where the field is declared
              * `fn(T...) -> R`. A bare function name infers its RETURN type
@@ -10756,6 +10957,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     Type* da = infer_type(darg, table);
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_closure_for_fnptr(table, call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||
                                   (da && da->kind == TYPE_BITSTRUCT);
