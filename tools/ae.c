@@ -8044,11 +8044,13 @@ static int cmd_build(int argc, char** argv) {
                  * cross_uses_unsupported_module). */
                 fprintf(stderr,
                     "Note: '%s' uses %s. Without a CROSSBUILD_SYSROOT, cross binaries link\n"
-                    "no OpenSSL / zlib / nghttp2, so features needing them (HTTPS/TLS,\n"
+                    "no OpenSSL / zlib / nghttp2, so features needing them (OpenSSL TLS,\n"
                     "SHA/MD hashing, base64, compression, HTTP/2) report errors at\n"
                     "runtime on %s. HMAC (pure-Aether), regex (vendored engine) and plain\n"
-                    "sockets still work. Stage a sysroot (aether-crossbuild) and set\n"
-                    "CROSSBUILD_SYSROOT to link the rest for real. Building anyway.\n",
+                    "sockets still work, and std.http.client does HTTPS through the\n"
+                    "pure-Aether TLS 1.3 client when the program imports\n"
+                    "std.cryptography.tls13_client. Stage a sysroot (aether-crossbuild) and\n"
+                    "set CROSSBUILD_SYSROOT to link the rest for real. Building anyway.\n",
                     file, mod, target);
             }
         }

@@ -861,7 +861,7 @@ parse_server_hello(msg: byte[], out: *ShParsed) -> string {
     }
 
     if out.version != 0x0304 {
-        return "server hello: not TLS 1.3 (no supported_versions=0x0304)"
+        return "server hello: not TLS 1.3 (no supported_versions=0x0304): the server negotiated an older TLS version, and this client speaks TLS 1.3 only"
     }
     return ""
 }
