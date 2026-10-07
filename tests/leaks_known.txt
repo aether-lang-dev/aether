@@ -16,15 +16,11 @@
 # changed the leaks count by zero.
 test_cryptography_hmac_md4_md5 122
 
-# test_rsa_pkcs1 uses std.cryptography.random_bytes (OpenSSL RAND) for
-# PKCS#1 v1.5 type-2 padding, so it inherits the same OPENSSL_cleanup
-# atexit false-positive as the entry above (memory returned to the OS at
-# exit; leaks(1) --atExit samples before atexit handlers run). The
-# heap-string-tracker's empty-string ("") quirk on cross-module (ptr, string)
-# success returns (issue #1311, 1 byte per nested asn1 read_*) is now FIXED in
-# codegen (nested tuple-destructure error slots are heap-classified), so the
-# remaining count is the OpenSSL atexit artifact only. Cap kept as a ceiling.
-test_rsa_pkcs1 130
+# test_rsa_pkcs1 and test_closure_local_shadows_promoted_capture used to be
+# listed here (caps 130 and 1). Both report 0 on the macOS ARM64 CI runner and
+# locally (measured 2026-10-07 over four CI runs), so they are held to 0 like
+# every unlisted test: a cap far above the real count would let a new leak of
+# that size through unnoticed.
 
 # The closure UAF fix (a heap string allocated in a closure and published
 # through a captured cell) reclaims the string correctly now — the prior
@@ -34,14 +30,5 @@ test_rsa_pkcs1 130
 # NOT drain its heap env after the call (leak >> UAF; awaits a `@retains`/
 # transient-extern annotation to opt in). Bounded (does not scale with element
 # count), and unrelated to the value-correctness this test asserts.
-test_closure_local_alloc_capture 20
-
-# test_closure_local_shadows_promoted_capture: the one residual leak is the
-# promoted heap cell for the earlier block's captured-and-mutated local (a
-# `bump` closure captures it, forcing capture promotion). That 20-byte cell is
-# reclaimed a generation late by capture-promotion's RCU discipline and is
-# INHERENT to any promoted-capture program — a bump-only program with no name
-# collision leaks the identical cell. It is independent of the shadowing bug
-# this test guards (a C-compile failure, fixed in codegen), which allocates
-# nothing itself. macOS-only gate (Linux doesn't leak-check this).
-test_closure_local_shadows_promoted_capture 1
+# Measured 15 on every CI run (2026-10-07), so capped there, not at 20.
+test_closure_local_alloc_capture 15
