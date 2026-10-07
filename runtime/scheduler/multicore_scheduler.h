@@ -164,6 +164,11 @@ typedef struct {
     pthread_t thread;
     _Atomic(AetherActorTable*) actor_table;
     _Atomic int actor_count;
+    // The reclamation epoch this core's thread last observed at the top of
+    // its loop, or 0 while the thread is not running (#2509). A released
+    // actor is freed only once every core is past the epoch it was released
+    // in; see the reclamation notes in multicore_scheduler.c.
+    _Atomic uint64_t reclaim_epoch;
     // Per-sender SPSC channels: from_queues[src] is written ONLY by core src.
     // Each channel is a true SPSC queue, so no CAS or locks are needed on the
     // producer side. from_queues[MAX_CORES] is the channel for every thread
@@ -262,7 +267,19 @@ void scheduler_send_batch_flush(void);
 
 // NUMA-aware actor lifetime (TIER 1 - always on)
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size);
+/* Ends an actor (#2509): marks it dead, takes it out of its core's table and
+ * frees it once no scheduler thread or table reader can still be looking at
+ * it, which is later, not during the call. Safe to call from the actor's own
+ * step. The caller guarantees nothing sends to the actor any more and no
+ * message to it is still on its way: a message that reaches it before it is
+ * freed is dropped, one that arrives after is a use after free. */
 void scheduler_release_actor(ActorBase* actor);
+/* Released actors not freed yet, for tests and diagnostics (#2509). */
+int scheduler_released_actors_pending(void);
+/* Called by the inline (main-thread-mode) send once the step it ran has
+ * returned and it no longer touches the actor: an actor that released itself
+ * in that step is released now (#2509). */
+void scheduler_inline_step_done(void);
 
 // Ask/reply: send a message and block until a reply arrives or timeout.
 // Returns malloc'd reply payload on success (caller must free), NULL on timeout.

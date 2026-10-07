@@ -350,7 +350,7 @@ Message payloads are managed by thread-local pools. Payloads are returned to the
 ## Memory Model
 
 The actor runtime uses several allocation strategies for automatic cleanup:
-- **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`), freed with `aether_numa_free_aligned` when the actor is destroyed. The mailbox is an inline struct member, not a separate allocation.
+- **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`). `scheduler_release_actor` takes the actor out of its core's table and retires it; it is freed with `aether_numa_free_aligned` once every core's scheduler thread has passed the top of its loop since, and no other thread is walking the tables. The scheduler threads and `aether_scheduler_poll` read the tables without a lock, so the free has to wait for them; a core blocked in a long step delays it. The mailbox is an inline struct member, not a separate allocation.
 - **Message payloads**: thread-local pools with automatic return
 - **Arenas**: a general-purpose arena allocator provides bulk deallocation without per-object tracking for opt-in uses (`std.arena`, JSON parsing). The actor path does not use arenas.
 

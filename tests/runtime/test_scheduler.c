@@ -401,6 +401,117 @@ void test_scheduler_actor_table_growth(void) {
     ASSERT_TRUE(core0_capacity >= 2 * MAX_ACTORS_PER_CORE);
 }
 
+// #2509: actors are spawned and released in rounds while every core scans
+// its table and another thread walks all of them with aether_scheduler_poll().
+// Half release themselves from their own step, the other half are released by
+// the main thread right after their step ran, while the core that ran it may
+// still be touching them. A release takes the actor out of its table at once
+// and frees it only once no reader can hold it (ASan in CI turns a read of a
+// freed actor into a failure here). Afterwards every count is back where it
+// started and every released actor has been freed.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    int self_release;
+} ChurnActor;
+
+static atomic_int g_churn_handled;
+
+static void churn_step(void* self) {
+    ChurnActor* actor = (ChurnActor*)self;
+    Message msg;
+    // One message per call, as a generated step takes them.
+    if (mailbox_receive(&actor->mailbox, &msg)) {
+        int self_release = actor->self_release;
+        atomic_fetch_add(&g_churn_handled, 1);
+        if (self_release) scheduler_release_actor((ActorBase*)actor);
+    }
+}
+
+static int churn_registered(void) {
+    int total = 0;
+    for (int c = 0; c < num_cores; c++) total += atomic_load(&schedulers[c].actor_count);
+    return total;
+}
+
+void test_scheduler_release_churn(void) {
+    enum { ROUNDS = 40, PER_ROUND = 250 };
+    scheduler_init(4);
+
+    // Two actors that live throughout: the first takes main-thread mode, the
+    // second ends it for good and starts the core threads.
+    ActorBase* keep[2];
+    for (int i = 0; i < 2; i++) {
+        keep[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
+        ASSERT_NOT_NULL(keep[i]);
+    }
+    int registered_before = churn_registered();
+    int live_before = atomic_load(&g_aether_config.actor_count);
+
+    TablePollerArgs poll_args;
+    atomic_init(&poll_args.stop, 0);
+    atomic_init(&poll_args.polls, 0);
+    pthread_t poller;
+    int poller_started = pthread_create(&poller, NULL, table_poller, &poll_args) == 0;
+
+    atomic_store(&g_churn_handled, 0);
+    ChurnActor* batch[PER_ROUND];
+    int spawned = 0, handled_all = 1, max_registered = 0;
+    for (int round = 0; round < ROUNDS; round++) {
+        int start = atomic_load(&g_churn_handled);
+        int made = 0;
+        for (int k = 0; k < PER_ROUND; k++) {
+            ChurnActor* a = (ChurnActor*)scheduler_spawn_actor(
+                -1, churn_step, sizeof(ChurnActor));
+            batch[k] = a;
+            if (!a) continue;
+            a->self_release = (k % 2 == 0);
+            made++;
+            spawned++;
+            Message msg = {1, 0, k, NULL, {NULL, 0, 0}, NULL};
+            scheduler_send_remote((ActorBase*)a, msg, -1);
+        }
+        int r = churn_registered();
+        if (r > max_registered) max_registered = r;
+        int waited = 0;
+        while (atomic_load(&g_churn_handled) - start < made && waited < 5000) {
+            sleep_ms(1);
+            waited++;
+        }
+        if (atomic_load(&g_churn_handled) - start < made) handled_all = 0;
+        // The rest are released from here, just after their step: the core
+        // that ran it may still be in that loop iteration.
+        // (The even ones may be freed already: they are not touched here.)
+        for (int k = 1; k < PER_ROUND; k += 2) {
+            if (batch[k]) scheduler_release_actor((ActorBase*)batch[k]);
+        }
+    }
+
+    // Every core passes its quiescent point at least every PARK_MS_MAX.
+    int pending = scheduler_released_actors_pending();
+    for (int w = 0; w < 5000 && pending > 0; w++) {
+        sleep_ms(1);
+        pending = scheduler_released_actors_pending();
+    }
+    int registered_after = churn_registered();
+    int live_after = atomic_load(&g_aether_config.actor_count);
+
+    atomic_store(&poll_args.stop, 1);
+    if (poller_started) pthread_join(poller, NULL);
+    scheduler_shutdown();
+    for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
+    scheduler_cleanup();
+
+    ASSERT_TRUE(poller_started);
+    ASSERT_EQ(ROUNDS * PER_ROUND, spawned);
+    ASSERT_TRUE(handled_all);
+    ASSERT_EQ(ROUNDS * PER_ROUND, atomic_load(&g_churn_handled));
+    ASSERT_EQ(registered_before, registered_after);
+    ASSERT_EQ(live_before, live_after);
+    ASSERT_EQ(0, pending);
+    // Never more than one round's worth in the tables at once.
+    ASSERT_TRUE(max_registered <= registered_before + PER_ROUND);
+}
+
 void test_scheduler_basic_messaging(void) {
     scheduler_init(2);
     
@@ -730,6 +841,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler spawn placement", test_scheduler_spawn_placement, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler spawns 64-byte-aligned actors", test_scheduler_spawn_aligned, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler frees released actors once no reader holds them", test_scheduler_release_churn, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler cross-core messaging", test_scheduler_cross_core, TEST_CATEGORY_RUNTIME);

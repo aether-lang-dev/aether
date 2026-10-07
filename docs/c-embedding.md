@@ -228,7 +228,9 @@ ActorBase* scheduler_spawn_actor(
     size_t actor_size        // sizeof(YourActorType)
 );
 
-// Return actor to pool when done
+// End an actor: out of its core's table now, freed once no scheduler
+// thread can still be looking at it. Safe from the actor's own step. Call it
+// only when nothing sends to the actor any more.
 void scheduler_release_actor(ActorBase* actor);
 
 // Register existing actor (alternative to pooled)
@@ -369,7 +371,7 @@ The C host and the Aether runtime share a process but have distinct ownership ru
 
 1. **State is message-only.** Actor state is owned by the actor; the host reads and writes it exclusively through messages. Reach-in access bypasses message-ordering guarantees and races with the scheduler.
 2. **Sends are fire-and-forget.** There's no synchronous reply from `aether_send_message()`. When you need a value back, either (a) have the actor send a response message to a host-registered event handler, or (b) have the actor write into shared atomic state the host polls.
-3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done.
+3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done, after the last message you send it has been handled: the actor is freed later, once the scheduler threads are past it, but a message that arrives after that is a use after free.
 4. **One runtime per process.** `aether_runtime_init()` initializes process-global scheduler state. Calling it twice from the same process is not supported; use separate processes if you need isolated runtimes.
 
 ## Header Generation

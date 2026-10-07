@@ -8162,19 +8162,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                     
                     print_line(gen, "// Message: %s (%d fields)", child->value, field_count);
                     
-                    // Align large messages to cache line
-                    if (field_count > 4) {
-                        print_line(gen, "#ifdef _MSC_VER");
-                        print_line(gen, "__declspec(align(64))");
-                        print_line(gen, "#endif");
-                        print_line(gen, "typedef struct");
-                        print_line(gen, "#if defined(__GNUC__) || defined(__clang__)");
-                        print_line(gen, "__attribute__((aligned(64)))");
-                        print_line(gen, "#endif");
-                        print_line(gen, "%s {", child->value);
-                    } else {
-                        print_line(gen, "typedef struct %s {", child->value);
-                    }
+                    // Natural alignment only (#2509). Messages with more than
+                    // four fields used to be declared aligned(64), but a
+                    // payload lives in a malloc'd copy (aether_send_message),
+                    // which promises 16 bytes, and the receiver reads it
+                    // through a pointer of this type: undefined behaviour,
+                    // and aligned vector moves the compiler may pick for it
+                    // fault. One reader per copy, so the cache line bought
+                    // nothing, and it padded every such message to 64 bytes.
+                    print_line(gen, "typedef struct %s {", child->value);
                     indent(gen);
                     print_line(gen, "int _message_id;");
                     

@@ -130,10 +130,19 @@ AETHER_TLS int g_skip_free = 0;
 // concurrently with the main thread → data race / crash.
 AETHER_TLS ActorBase* g_sync_step_actor = NULL;
 
+// How many inline sends (below) are touching an actor on this thread, and
+// whether an actor released meanwhile waits for the outermost to finish
+// (#2509): the inline path still touches the actor after its step returns,
+// and a step can release its own actor. scheduler_inline_step_done() runs
+// those releases.
+AETHER_TLS int g_inline_step_depth = 0;
+AETHER_TLS int g_inline_release_pending = 0;
+
 /* Returns 1 when the message was delivered inline, 0 when main-thread
  * mode ended before the payload was written and the caller must send
  * through the scheduler instead. */
 static inline int AETHER_HOT aether_send_message_sync(ActorBase* actor, void* message_data, size_t message_size) {
+    g_inline_step_depth++;
     Message msg;
     msg.type = *(int*)message_data;
     msg.sender_id = 0;
@@ -184,6 +193,7 @@ static inline int AETHER_HOT aether_send_message_sync(ActorBase* actor, void* me
     // standard path.
     if (!aether_main_mode_enqueue(actor, msg)) {
         if (locked) aether_inline_lock_release(actor);
+        g_inline_step_depth--;
         return 0;
     }
 #else
@@ -219,6 +229,11 @@ static inline int AETHER_HOT aether_send_message_sync(ActorBase* actor, void* me
     if (!aether_main_thread_mode_active() &&
         atomic_load_explicit(&actor->main_thread_only, memory_order_relaxed)) {
         atomic_store_explicit(&actor->main_thread_only, 0, memory_order_release);
+    }
+
+    // Done with the actor: a release its step made can go ahead.
+    if (--g_inline_step_depth == 0 && unlikely(g_inline_release_pending)) {
+        scheduler_inline_step_done();
     }
 
     // Track stats

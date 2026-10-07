@@ -157,6 +157,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #include <ctype.h>
 #include <limits.h>
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/scheduler/multicore_scheduler.h"  // ActorBase for actor dispatch (#2509)
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -5319,10 +5320,54 @@ static int create_reuseport_socket(const char* host, int port, int backlog) {
     return fd;
 }
 
+// A worker spawned for one connection (#2509). It runs the server's step,
+// which runs the step the server was given on the connection message and
+// then releases the worker: the connection is finished when that step
+// returns. http_server_drain_connection(), which the step calls, runs the
+// keep-alive loop to its end and closes the socket on an error or when the
+// peer goes, or hands the connection over to the parking lot or the event
+// driver, which own it from then on. Either way the worker has no more to do.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    HttpServer* server;  // written before the connection message is sent
+} HttpConnWorker;
+
+static void http_conn_worker_step(void* self) {
+    HttpConnWorker* worker = (HttpConnWorker*)self;
+    HttpServer* server = worker->server;
+    int had_message = atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) > 0;
+    server->step_fn(self);
+    // The only message a worker gets is its connection; once a step has taken
+    // it, the worker is done. scheduler_release_actor() is safe to call from
+    // the worker's own step: the free waits until the scheduler is done with
+    // the actor.
+    if (had_message && server->release_fn &&
+        atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) == 0) {
+        server->release_fn(self);
+    }
+}
+
 // Dispatch a data-ready fd to a worker actor
 static inline void dispatch_to_worker(HttpServer* server, int fd) {
-    void* worker = server->spawn_fn(-1, server->step_fn, 0);
+    // The worker serves the connection with blocking reads bounded by the
+    // socket receive timeout (conn_serve), as the thread pool does. The fd
+    // arrives non-blocking when it went through the poller, and on BSD and
+    // macOS an accepted socket inherits the listener's O_NONBLOCK: every
+    // wait for the next keep-alive request then failed at once with EAGAIN,
+    // read as an idle timeout, and the connection closed after one response.
+    int fd_flags = fcntl(fd, F_GETFL, 0);
+    if (fd_flags >= 0 && (fd_flags & O_NONBLOCK)) {
+        fcntl(fd, F_SETFL, fd_flags & ~O_NONBLOCK);
+    }
+    void* worker = server->spawn_fn(-1, http_conn_worker_step, sizeof(HttpConnWorker));
     if (worker) {
+        // A worker spawned for this connection runs http_conn_worker_step,
+        // which releases it. One that spawn_fn hands out from a pool of its
+        // own (the benchmarks do) keeps the step it was made with and stays
+        // the pool's: nothing is written into it and it is not released.
+        if (((ActorBase*)worker)->step == http_conn_worker_step) {
+            ((HttpConnWorker*)worker)->server = server;
+        }
         HttpConnectionMessage conn_msg;
         conn_msg.type = MSG_HTTP_CONNECTION;
         conn_msg.client_fd = fd;
@@ -5661,6 +5706,15 @@ static void* http_server_background_main(void* arg) {
 
 int http_server_start_background_raw(HttpServer* server) {
     if (!server) return -1;
+#if !AETHER_HAS_THREADS
+    /* A background server is a thread by definition, and a threadless build
+     * has none to give it. A call-site guard, as in aether_proxy_health.c:
+     * aether_thread.h leaves pthread_create unstubbed because reaching it
+     * there is a logic error. Without the guard a threadless Windows build
+     * did not compile, having no declaration of pthread_create at all. */
+    (void)http_server_background_main;
+    return -1;
+#else
     /* Mark embedded mode before the thread starts so http_server_start_raw
      * suppresses the interactive "Press Ctrl+C to stop" banner. */
     server->background = 1;
@@ -5671,6 +5725,7 @@ int http_server_start_background_raw(HttpServer* server) {
     }
     pthread_detach(tid);
     return 0;
+#endif
 }
 
 void http_server_stop(HttpServer* server) {

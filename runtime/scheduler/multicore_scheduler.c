@@ -41,6 +41,9 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
 // defer main_thread_only=0 in scheduler_spawn_actor and prevent a scheduler
 // thread from entering the same step() concurrently.
 extern AETHER_TLS ActorBase* g_sync_step_actor;
+// Inline-send depth and pending releases, defined in aether_send_message.c.
+extern AETHER_TLS int g_inline_step_depth;
+extern AETHER_TLS int g_inline_release_pending;
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -258,9 +261,15 @@ static inline void aether_step_safe(ActorBase* actor) {
 }
 
 static inline void aether_step_inline(ActorBase* actor) {
+    // As in aether_send_message_sync: a release made in the step waits until
+    // this is done touching the actor (#2509).
+    g_inline_step_depth++;
     int locked = aether_inline_lock_acquire(actor);
     aether_step_safe(actor);
     if (locked) aether_inline_lock_release(actor);
+    if (--g_inline_step_depth == 0 && unlikely(g_inline_release_pending)) {
+        scheduler_inline_step_done();
+    }
 }
 
 /* Layout assertions to catch struct padding/size mismatches between
@@ -747,6 +756,255 @@ static int actor_table_grow_locked(Scheduler* sched, int numa_node) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Actor reclamation (#2509)
+//
+// The table readers above take no lock, so taking a released actor out of its
+// table is not enough to free it: a reader may have loaded its pointer before
+// the removal, or still walk a table that was grown out of and keeps a stale
+// copy of it. A released actor is therefore retired and freed later, once no
+// reader can still hold it. The readers are of two kinds.
+//
+//  - Each core's scheduler thread is always reading: it walks its table and
+//    steps actors for the whole of a loop iteration. The top of the loop is
+//    its quiescent point, where it holds no actor pointer from a table. There
+//    it publishes the global epoch it has just loaded (acquire) in its
+//    `reclaim_epoch`. The thread starts reading only after publishing an
+//    epoch (with a seq_cst fence, below) and stores 0 when it exits.
+//
+//  - Any other thread that walks a table (aether_scheduler_poll(),
+//    scheduler_wait()) brackets the walk: it claims one of the external
+//    slots with the global epoch, issues a seq_cst fence, walks, and stores 0.
+//
+// Releasing removes the actor from its table under the core's lock, issues a
+// seq_cst fence, and takes E = the global epoch while incrementing it. The
+// actor is freed once every published epoch is 0 or greater than E. Why that
+// is safe, for a reader R that could have found the actor:
+//
+//  - R's slot store and fence, against the releaser's removal and fence, is
+//    the store-buffering pattern: one of the two fences comes first in the
+//    single order of seq_cst fences. If the releaser's comes first, R's table
+//    loads after its own fence see the removal (and the newest table, whose
+//    grow happened before the removal under the lock), so R never finds the
+//    actor. If R's comes first, the reclaimer, which reads the slots after the
+//    releaser's fence (through the retired list's lock), sees R's slot store
+//    or a later one, and the epoch R stored was loaded before R's fence, so it
+//    is at most E. Either R does not hold the actor, or its slot keeps it.
+//
+//  - A core thread's per-iteration store has no fence. If the reclaimer reads
+//    a value greater than E there, the thread loaded that value from the
+//    global epoch, which was written by the increment that produced E + 1 or a
+//    later one; its acquire load synchronizes with that release, so
+//    everything the thread reads afterwards sees the removal. A stale (older)
+//    value only delays the free.
+//
+// Hence no reader dereferences a freed actor, and no reader takes a lock. A
+// core blocked in a long step holds the epoch back and delays every free
+// until the step returns; an idle core still wakes every PARK_MS_MAX at most.
+// ---------------------------------------------------------------------------
+
+#define AETHER_EXTERNAL_READER_SLOTS 32
+
+// Set once main-thread mode has been entered or a second actor has existed:
+// the mode is not entered again in this scheduler lifecycle.
+static atomic_int g_main_mode_ended = 0;
+
+static _Atomic uint64_t g_reclaim_epoch = 1;  // never 0: 0 means "not reading"
+static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
+
+// Set on a core's scheduler thread, whose own `reclaim_epoch` already covers
+// any walk it makes (aether_scheduler_poll() called from a step, say).
+static AETHER_TLS int t_reclaim_core_thread = 0;
+
+// Actors released while an inline send was stepping on this thread, released
+// for real when the outermost one is done (scheduler_inline_step_done).
+static AETHER_TLS ActorBase** t_inline_released = NULL;
+static AETHER_TLS int t_inline_released_count = 0;
+static AETHER_TLS int t_inline_released_capacity = 0;
+
+static int inline_release_defer(ActorBase* actor) {
+    if (t_inline_released_count == t_inline_released_capacity) {
+        int cap = t_inline_released_capacity ? t_inline_released_capacity * 2 : 4;
+        ActorBase** grown = realloc(t_inline_released, (size_t)cap * sizeof(ActorBase*));
+        if (!grown) return 0;
+        t_inline_released = grown;
+        t_inline_released_capacity = cap;
+    }
+    t_inline_released[t_inline_released_count++] = actor;
+    g_inline_release_pending = 1;
+    return 1;
+}
+
+typedef struct {
+    ActorBase* actor;
+    uint64_t epoch;
+} RetiredActor;
+
+// Released actors in the order of their epochs, oldest first. Guarded by
+// g_retired_lock, which only releasing and reclaiming take.
+static atomic_flag g_retired_lock = ATOMIC_FLAG_INIT;
+static RetiredActor* g_retired = NULL;
+static int g_retired_count = 0;
+static int g_retired_capacity = 0;
+static _Atomic int g_retired_pending = 0;  // g_retired_count, read without the lock
+
+static inline void retired_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_retired_lock, memory_order_acquire)) {
+        AETHER_PAUSE();
+    }
+}
+
+static inline int retired_trylock(void) {
+    return !atomic_flag_test_and_set_explicit(&g_retired_lock, memory_order_acquire);
+}
+
+static inline void retired_unlock(void) {
+    atomic_flag_clear_explicit(&g_retired_lock, memory_order_release);
+}
+
+// A core thread starts reading: publish an epoch, then the fence that pairs
+// with a releaser's (the first bullet above).
+static void reclaim_core_online(Scheduler* sched) {
+    t_reclaim_core_thread = 1;
+    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    atomic_store_explicit(&sched->reclaim_epoch, epoch, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+}
+
+static void reclaim_core_offline(Scheduler* sched) {
+    atomic_store_explicit(&sched->reclaim_epoch, 0, memory_order_release);
+    t_reclaim_core_thread = 0;
+}
+
+// Claims an external reader slot; returns its index, or -1 when the caller is
+// a core thread, which its own slot already covers.
+static int reclaim_reader_enter(void) {
+    if (t_reclaim_core_thread) return -1;
+    for (;;) {
+        uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+        for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
+            uint64_t expected = 0;
+            if (atomic_load_explicit(&g_external_reader[i], memory_order_relaxed) == 0 &&
+                atomic_compare_exchange_strong_explicit(&g_external_reader[i], &expected, epoch,
+                                                        memory_order_relaxed,
+                                                        memory_order_relaxed)) {
+                atomic_thread_fence(memory_order_seq_cst);
+                return i;
+            }
+        }
+        // More concurrent walkers than slots: wait for one to finish.
+        aether_sched_yield();
+    }
+}
+
+static void reclaim_reader_exit(int slot) {
+    if (slot >= 0) atomic_store_explicit(&g_external_reader[slot], 0, memory_order_release);
+}
+
+static void actor_free_now(ActorBase* actor) {
+    // Whatever is still in the mailbox was sent against the release contract.
+    // Release it and credit it as processed, as a panicked actor's drain does,
+    // or scheduler_wait() would wait for it forever.
+    int drained = 0;
+    Message discard;
+    while (mailbox_receive(&actor->mailbox, &discard)) {
+        if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
+        if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
+        if (discard._reply_slot) reply_slot_decref((ActorReplySlot*)discard._reply_slot);
+        drained++;
+    }
+    if (drained > 0) {
+        atomic_fetch_add_explicit(&schedulers[0].messages_processed,
+                                  (uint64_t)drained, memory_order_relaxed);
+    }
+    // The same-core SPSC queue is the actor's alone (calloc'd by
+    // ensure_spsc_queue / send_buffer_flush); the struct free below does not
+    // cover it.
+    if (actor->spsc_queue) {
+        free(actor->spsc_queue);
+        actor->spsc_queue = NULL;
+    }
+    aether_numa_free_aligned(actor, actor->alloc_size);
+}
+
+// Frees every retired actor that no reader can still hold. `wait` takes the
+// lock even when contended; a core thread passes 0 and tries again next time.
+static void actor_reclaim(int wait) {
+    if (atomic_load_explicit(&g_retired_pending, memory_order_relaxed) == 0) return;
+    if (wait) retired_lock();
+    else if (!retired_trylock()) return;
+
+    // The oldest epoch any reader still holds.
+    uint64_t oldest = UINT64_MAX;
+    for (int c = 0; c < MAX_CORES; c++) {
+        uint64_t e = atomic_load_explicit(&schedulers[c].reclaim_epoch, memory_order_acquire);
+        if (e != 0 && e < oldest) oldest = e;
+    }
+    for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
+        uint64_t e = atomic_load_explicit(&g_external_reader[i], memory_order_acquire);
+        if (e != 0 && e < oldest) oldest = e;
+    }
+
+    int freed = 0;
+    while (freed < g_retired_count && g_retired[freed].epoch < oldest) {
+        actor_free_now(g_retired[freed].actor);
+        freed++;
+    }
+    if (freed > 0) {
+        memmove(g_retired, g_retired + freed,
+                (size_t)(g_retired_count - freed) * sizeof(RetiredActor));
+        g_retired_count -= freed;
+        atomic_store_explicit(&g_retired_pending, g_retired_count, memory_order_relaxed);
+    }
+    retired_unlock();
+}
+
+// Frees every retired actor without asking. Only once no reader is left:
+// the threads are joined and nothing else walks the tables.
+static void actor_reclaim_all(void) {
+    retired_lock();
+    for (int i = 0; i < g_retired_count; i++) actor_free_now(g_retired[i].actor);
+    free(g_retired);
+    g_retired = NULL;
+    g_retired_count = 0;
+    g_retired_capacity = 0;
+    atomic_store_explicit(&g_retired_pending, 0, memory_order_relaxed);
+    retired_unlock();
+}
+
+// Queues an actor that is no longer in any table to be freed.
+static void actor_retire(ActorBase* actor) {
+    // The releaser's fence of the store-buffering pair: it orders the removal
+    // the caller made before the epoch is taken.
+    atomic_thread_fence(memory_order_seq_cst);
+    retired_lock();
+    if (g_retired_count == g_retired_capacity) {
+        int cap = g_retired_capacity ? g_retired_capacity * 2 : 64;
+        RetiredActor* grown = realloc(g_retired, (size_t)cap * sizeof(RetiredActor));
+        if (!grown) {
+            // Freeing now could hand a reader freed memory; keeping the actor
+            // costs only its memory.
+            retired_unlock();
+            fprintf(stderr, "aether: out of memory retiring actor %d; it is not freed\n",
+                    actor->id);
+            return;
+        }
+        g_retired = grown;
+        g_retired_capacity = cap;
+    }
+    // Taken under the lock, so the list stays in epoch order.
+    uint64_t epoch = atomic_fetch_add_explicit(&g_reclaim_epoch, 1, memory_order_seq_cst);
+    g_retired[g_retired_count].actor = actor;
+    g_retired[g_retired_count].epoch = epoch;
+    g_retired_count++;
+    atomic_store_explicit(&g_retired_pending, g_retired_count, memory_order_relaxed);
+    retired_unlock();
+}
+
+int scheduler_released_actors_pending(void) {
+    return atomic_load_explicit(&g_retired_pending, memory_order_relaxed);
+}
+
 // Check if any from_queue on this scheduler has pending cross-core messages.
 // Used to yield early from inner mailbox-drain loops so that external sends
 // (e.g. StopAnimation from main) are not starved by a self-scheduling actor.
@@ -793,8 +1051,28 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     int idle_count = 0;
     int park_ms = PARK_MS_MIN;
 
+    // From here on this thread reads its table: publish an epoch first (#2509).
+    reclaim_core_online(sched);
+    unsigned reclaim_tick = 0;
+
     while (atomic_load_explicit(&sched->running, memory_order_acquire)) {
         int work_done = 0;
+
+        // Quiescent point (#2509): no actor pointer from a table is held here.
+        // Publish the epoch now in effect. Each core tries to free right
+        // after it moves its own epoch on, so the last core to move frees
+        // what all of them have passed. While a free is held back (a core
+        // in a long step, another thread walking the tables) the attempt is
+        // repeated only every 1024 iterations, not on every spin.
+        {
+            uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+            if (epoch != atomic_load_explicit(&sched->reclaim_epoch, memory_order_relaxed)) {
+                atomic_store_explicit(&sched->reclaim_epoch, epoch, memory_order_release);
+                actor_reclaim(0);
+            } else if (unlikely(++reclaim_tick % 1024 == 0)) {
+                actor_reclaim(0);
+            }
+        }
 
         // Flush any deferred sends from the previous iteration before draining
         // from_queues.  This ensures deferred messages land on every loop and
@@ -1285,6 +1563,10 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     // slip in — flush it so no messages are lost.
     overflow_flush(sched->core_id);
 
+    // Done reading: this core no longer holds back any free (#2509).
+    reclaim_core_offline(sched);
+    actor_reclaim(0);
+
     aether_unwind_thread_cleanup();
 
     return NULL;
@@ -1325,6 +1607,8 @@ void scheduler_init(int cores) {
     atomic_store_explicit(&g_threads_ready, 0, memory_order_relaxed);
     // Reset global overflow counter between scheduler lifecycles.
     atomic_store_explicit(&g_overflow_total, 0, memory_order_relaxed);
+    // A new lifecycle's first actor may use main-thread mode again (#2509).
+    atomic_store_explicit(&g_main_mode_ended, 0, memory_order_relaxed);
     // Reset main-thread send counter between scheduler lifecycles.
     // Without this, count_pending_messages() sees a stale sent > processed
     // delta from the prior run and scheduler_wait() spins forever.
@@ -1363,6 +1647,8 @@ void scheduler_init(int cores) {
         
         // NUMA-aware allocation: allocate scheduler data on same NUMA node as core
         int numa_node = aether_numa_node_of_cpu(i);
+        // Not reading until its thread starts (#2509).
+        atomic_store_explicit(&schedulers[i].reclaim_epoch, 0, memory_order_relaxed);
         // Every slot starts NULL (actor_table_alloc); the threads that read the
         // table are created after this, which publishes it to them.
         AetherActorTable* table = actor_table_alloc(MAX_ACTORS_PER_CORE, numa_node);
@@ -1532,15 +1818,18 @@ static inline int count_pending_messages(void) {
 // Safe to call multiple times in a program (e.g. between test phases).
 // Check if any actor has a pending timeout
 static int has_pending_actor_timeout(void) {
-    for (int c = 0; c < num_cores; c++) {
+    int found = 0;
+    int slot = reclaim_reader_enter();  // #2509
+    for (int c = 0; c < num_cores && !found; c++) {
         int count;
         AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
         for (int i = 0; i < count; i++) {
             ActorBase* a = actor_table_read(table, i);
-            if (a && a->timeout_ns > 0) return 1;
+            if (a && a->timeout_ns > 0) { found = 1; break; }
         }
     }
-    return 0;
+    reclaim_reader_exit(slot);
+    return found;
 }
 
 void scheduler_wait(void) {
@@ -1551,6 +1840,7 @@ void scheduler_wait(void) {
         if (has_pending_actor_timeout()) {
             int rounds = 0;
             while (has_pending_actor_timeout() && rounds < 100000) {
+                int slot = reclaim_reader_enter();  // #2509
                 for (int c = 0; c < num_cores; c++) {
                     int count;
                     AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
@@ -1561,6 +1851,7 @@ void scheduler_wait(void) {
                         }
                     }
                 }
+                reclaim_reader_exit(slot);
                 #ifdef _WIN32
                 Sleep(1);
                 #else
@@ -1664,6 +1955,9 @@ void scheduler_shutdown(void) {
         aether_numa_cleanup();
     }
 
+    // The core threads are gone; free what no other walker holds (#2509).
+    actor_reclaim(1);
+
     /* Write the trace here, not from atexit: every scheduler thread has been
      * joined by this point, so the per-core buffers are quiescent and the join
      * supplies the happens-before the merge relies on. It also keeps the exit
@@ -1679,6 +1973,8 @@ void scheduler_shutdown(void) {
 // I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
 // follows a scheduler_shutdown() both release them this way.
 static void scheduler_free_core_tables(void) {
+    // Released actors not freed yet: no reader is left either (#2509).
+    actor_reclaim_all();
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources
         schedulers[i].thread = 0;
@@ -1772,16 +2068,27 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
 
 // Remove an actor from its scheduler's actor array.
 // Must be called before freeing actor memory to avoid dangling pointers.
+// assigned_core is read again under the core's lock (#2509). Every move to
+// another core (migration, work stealing) stores it with the source core's
+// lock held, so while it names the locked core the actor is in that core's
+// table and stays there. Read before the lock, it could name a core the actor
+// had just left, and the removal missed it.
 void scheduler_deregister_actor(ActorBase* actor) {
     if (!actor) return;
-    int core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-    if (core < 0 || core >= num_cores) return;
+    for (;;) {
+        int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        if (core < 0 || core >= num_cores) return;
 
-    Scheduler* sched = &schedulers[core];
-    spinlock_lock(&sched->actor_lock);
-    int at = actor_table_find_locked(sched, actor, -1);
-    if (at >= 0) actor_table_remove_locked(sched, at);
-    spinlock_unlock(&sched->actor_lock);
+        Scheduler* sched = &schedulers[core];
+        spinlock_lock(&sched->actor_lock);
+        if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == core) {
+            int at = actor_table_find_locked(sched, actor, -1);
+            if (at >= 0) actor_table_remove_locked(sched, at);
+            spinlock_unlock(&sched->actor_lock);
+            return;
+        }
+        spinlock_unlock(&sched->actor_lock);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2333,8 +2640,18 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     aether_on_actor_spawn();
     main_mode_unlock();
 
+    // Main-thread mode is for the first actor of a scheduler lifecycle and is
+    // entered at most once (#2509). Released actors bring the count back to
+    // 0, and a later spawn at 0 (the next per-request worker of an HTTP
+    // server, say) would otherwise be stepped inline on whichever thread
+    // spawned it, with the scheduler threads already running.
+    if (prev_count >= 1) {
+        atomic_store_explicit(&g_main_mode_ended, 1, memory_order_relaxed);
+    }
+
     // MAIN THREAD MODE handling
-    if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled)) {
+    if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled) &&
+        !atomic_exchange_explicit(&g_main_mode_ended, 1, memory_order_relaxed)) {
         // First actor: enable main thread mode for synchronous processing
         aether_enable_main_thread_mode(actor);
         g_main_mode_thread = aether_tid_self();
@@ -2371,19 +2688,50 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
+    // Released while an inline send is stepping an actor on this thread (its
+    // own, typically): that send still touches the actor once the step
+    // returns, so the release waits for scheduler_inline_step_done().
+    if (g_inline_step_depth > 0) {
+        if (inline_release_defer(actor)) return;
+        // Out of memory to remember it: keeping the actor is safe, freeing
+        // it is not.
+        fprintf(stderr, "aether: out of memory deferring the release of actor %d; "
+                        "it is not freed\n", actor->id);
+        return;
+    }
+
+    // The lone actor of main-thread mode is going: leave the mode (which
+    // starts the scheduler threads), or the next spawn would be stepped
+    // inline against a main actor that no longer exists.
+    if (aether_main_thread_mode_active() &&
+        (ActorBase*)g_aether_config.main_actor == actor) {
+        aether_leave_main_thread_mode();
+    }
+
+    // A message that still reaches the actor is dropped, not delivered.
+    atomic_store_explicit(&actor->dead, 1, memory_order_release);
+    scheduler_deregister_actor(actor);
+
     // Track actor count for inline mode auto-detection
     aether_on_actor_terminate();
 
-    // Reclaim the lazily-allocated same-core SPSC queue (owned solely by this
-    // actor, calloc'd by ensure_spsc_queue / send_buffer_flush). numa_free
-    // below only releases the actor struct itself, so without this every actor
-    // that ever flushed a same-core batch leaks its multi-KB queue.
-    if (actor->spsc_queue) {
-        free(actor->spsc_queue);
-        actor->spsc_queue = NULL;
-    }
+    // Freed once no reader can hold it (see the reclamation notes), which is
+    // never before this call returns: a step can release its own actor.
+    actor_retire(actor);
+}
 
-    aether_numa_free_aligned(actor, actor->alloc_size);
+void scheduler_inline_step_done(void) {
+    // Releases are taken one at a time from the end: releasing runs no step,
+    // so nothing is added meanwhile, but the list is not walked while it
+    // changes.
+    while (t_inline_released_count > 0) {
+        ActorBase* actor = t_inline_released[--t_inline_released_count];
+        scheduler_release_actor(actor);
+    }
+    free(t_inline_released);
+    t_inline_released = NULL;
+    t_inline_released_capacity = 0;
+    g_inline_release_pending = 0;
 }
 
 
@@ -2489,6 +2837,10 @@ int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
 
+    // A step run here may release its own actor, which the loop touches after
+    // the step: the reader slot keeps it allocated until the walk is over
+    // (#2509).
+    int slot = reclaim_reader_enter();
     for (int c = 0; c < num_cores; c++) {
         Scheduler* sched = &schedulers[c];
 
@@ -2519,6 +2871,7 @@ int aether_scheduler_poll(int max_per_actor) {
                 atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
         }
     }
+    reclaim_reader_exit(slot);
 
     return total;
 }

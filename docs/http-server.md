@@ -441,7 +441,9 @@ max=M` headers per response.
 `http.server_drain_connection(server, client_fd)` is the public
 helper that runs the full per-connection lifecycle (TLS handshake,
 keep-alive request loop, route dispatch, response emission, socket
-close). *When* the actor-dispatch API is completed, user actor step
+close). The server spawns one worker actor per connection and releases it
+through the `release_fn` it was given once the step it was given has
+returned from that connection. *When* the actor-dispatch API is completed, user actor step
 functions registered via `http_server_set_actor_handler` would call
 this on the `MSG_HTTP_CONNECTION` message's client_fd to get identical
 behaviour to the thread-pool worker path.

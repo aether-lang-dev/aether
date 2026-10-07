@@ -816,3 +816,30 @@ TEST(derive_rejects_an_attribute_named_twice) {
     ASSERT_EQ(-1, derive_result(
         "@derive(schema)\nstruct Bob { rate: float @range(0.0, 1.0) @range(1.0, 2.0) }\nmain() { }"));
 }
+
+/* #2509: a message with more than four fields was declared aligned(64), but
+ * its payload travels in a malloc'd copy (16-byte aligned) that the receiver
+ * reads through a pointer of the message type: undefined behaviour, and an
+ * aligned vector move the compiler may choose for it faults. Messages now
+ * take their natural alignment; the actor struct keeps its cache line,
+ * which the runtime allocates on a 64-byte boundary (#2485). */
+TEST(codegen_wide_message_has_natural_alignment) {
+    char* buf = generate_typechecked(
+        "message Wide { a: int, b: int, c: int, d: int, e: int, f: string }\n"
+        "actor Sink {\n"
+        "    state n = 0\n"
+        "    receive {\n"
+        "        Wide(a, b, c, d, e, f) -> { n = n + a + e }\n"
+        "    }\n"
+        "}\n"
+        "main() {\n"
+        "    s = spawn(Sink())\n"
+        "    s ! Wide { a: 1, b: 2, c: 3, d: 4, e: 5, f: \"x\" }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "typedef struct Wide {") != NULL);
+    int aligned = 0;
+    for (const char* p = buf; (p = strstr(p, "aligned(64)")) != NULL; p++) aligned++;
+    ASSERT_EQ(1, aligned);  /* the actor struct only */
+    free(buf);
+}

@@ -10,10 +10,13 @@
 #include "multicore_scheduler.h"
 #include "../config/aether_optimization_config.h"
 #include "../aether_numa.h"
+#include "../actors/aether_send_message.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>  // Sleep() in scheduler_wait
+#else
 #include <unistd.h>
 #endif
 
@@ -31,6 +34,68 @@ AETHER_TLS void* g_current_step_actor = NULL;
 
 // Defined in aether_send_message.c
 extern AETHER_TLS ActorBase* g_sync_step_actor;
+extern AETHER_TLS int g_inline_step_depth;
+extern AETHER_TLS int g_inline_release_pending;
+
+// ============================================================================
+// Released actors (#2509)
+// ============================================================================
+//
+// One thread, but a step can still release its own actor, and whatever ran
+// that step (aether_scheduler_poll, scheduler_wait, an inline send) touches
+// the actor after it returns. So an actor released while any of them is in
+// progress is kept here and freed when the last one is done.
+
+static int g_coop_walk_depth = 0;  // aether_scheduler_poll / scheduler_wait walks in progress
+static ActorBase** g_coop_released = NULL;
+static int g_coop_released_count = 0;
+static int g_coop_released_capacity = 0;
+
+static void coop_free_actor(ActorBase* actor) {
+    // Anything still in the mailbox was sent against the release contract.
+    Message discard;
+    while (mailbox_receive(&actor->mailbox, &discard)) {
+        if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
+        if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
+    }
+    if (actor->spsc_queue) {
+        free(actor->spsc_queue);
+        actor->spsc_queue = NULL;
+    }
+    aether_numa_free_aligned(actor, actor->alloc_size);
+}
+
+// Frees the released actors once no walk and no inline send is running.
+static void coop_free_released(void) {
+    if (g_coop_walk_depth > 0 || g_inline_step_depth > 0) return;
+    while (g_coop_released_count > 0) {
+        coop_free_actor(g_coop_released[--g_coop_released_count]);
+    }
+    free(g_coop_released);
+    g_coop_released = NULL;
+    g_coop_released_capacity = 0;
+}
+
+static int coop_defer_release(ActorBase* actor) {
+    if (g_coop_released_count == g_coop_released_capacity) {
+        int cap = g_coop_released_capacity ? g_coop_released_capacity * 2 : 4;
+        ActorBase** grown = realloc(g_coop_released, (size_t)cap * sizeof(ActorBase*));
+        if (!grown) return 0;
+        g_coop_released = grown;
+        g_coop_released_capacity = cap;
+    }
+    g_coop_released[g_coop_released_count++] = actor;
+    return 1;
+}
+
+int scheduler_released_actors_pending(void) {
+    return g_coop_released_count;
+}
+
+void scheduler_inline_step_done(void) {
+    g_inline_release_pending = 0;
+    coop_free_released();  // waits for an enclosing walk, which frees them at its end
+}
 
 // ============================================================================
 // Initialization
@@ -97,6 +162,14 @@ void scheduler_stop(void) {
 }
 
 void scheduler_cleanup(void) {
+    // Nothing runs a step any more.
+    g_coop_walk_depth = 0;
+    while (g_coop_released_count > 0) {
+        coop_free_actor(g_coop_released[--g_coop_released_count]);
+    }
+    free(g_coop_released);
+    g_coop_released = NULL;
+    g_coop_released_capacity = 0;
     free(atomic_load_explicit(&schedulers[0].actor_table, memory_order_relaxed));
     atomic_store_explicit(&schedulers[0].actor_table, NULL, memory_order_relaxed);
     atomic_store_explicit(&schedulers[0].actor_count, 0, memory_order_relaxed);
@@ -181,6 +254,8 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
+    atomic_store_explicit(&actor->dead, 1, memory_order_relaxed);
+
     // Remove from scheduler's actor list, clearing the vacated slot as the
     // threaded scheduler does.
     Scheduler* sched = &schedulers[0];
@@ -198,7 +273,21 @@ void scheduler_release_actor(ActorBase* actor) {
     }
 
     aether_on_actor_terminate();
-    aether_numa_free_aligned(actor, actor->alloc_size);
+
+    // A step may be releasing its own actor: free it once whatever runs the
+    // step is done with it (#2509).
+    if (g_coop_walk_depth > 0 || g_inline_step_depth > 0) {
+        if (coop_defer_release(actor)) {
+            if (g_inline_step_depth > 0) g_inline_release_pending = 1;
+            return;
+        }
+        // Out of memory to remember it: keep it rather than free it under
+        // the step.
+        fprintf(stderr, "aether: out of memory deferring the release of actor %d; "
+                        "it is not freed\n", actor->id);
+        return;
+    }
+    coop_free_actor(actor);
 }
 
 // ============================================================================
@@ -241,6 +330,7 @@ void scheduler_wait(void) {
         if (processed == 0) {
             // Check if any actor has a pending timeout
             int has_pending_timeout = 0;
+            g_coop_walk_depth++;
             Scheduler* sched = &schedulers[0];
             AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
             int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
@@ -251,6 +341,7 @@ void scheduler_wait(void) {
                     break;
                 }
             }
+            g_coop_walk_depth--;
             if (!has_pending_timeout) break;
             // Sleep briefly to avoid spinning while waiting for timeout
             #ifdef _WIN32
@@ -274,6 +365,7 @@ void scheduler_wait(void) {
 int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
+    g_coop_walk_depth++;
     Scheduler* sched = &schedulers[0];
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
 
@@ -300,6 +392,7 @@ int aether_scheduler_poll(int max_per_actor) {
         total += processed;
     }
 
+    if (--g_coop_walk_depth == 0) coop_free_released();
     return total;
 }
 
