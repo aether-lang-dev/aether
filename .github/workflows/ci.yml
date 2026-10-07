@@ -485,6 +485,20 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # vmactions/freebsd-vm installs these itself, with Acquire::Retries=3
+    # and apt's default connect timeout. When the runner's Azure mirror
+    # stopped answering, each attempt hung on the connect until the job's
+    # 30-minute limit cancelled the run before any test ran. Installed here
+    # first, with short timeouts and more retries, a dead mirror fails this
+    # step in minutes, and the action finds the packages present.
+    - name: Install the VM host packages
+      timeout-minutes: 10
+      run: |
+        APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+        PKGS="qemu-utils qemu-system-x86 ovmf"
+        sudo apt-get $APT install -y -q --no-install-recommends $PKGS \
+          || { sudo apt-get $APT update && sudo apt-get $APT install -y -q --no-install-recommends $PKGS; }
+
     - name: Build and test inside a FreeBSD VM
       uses: vmactions/freebsd-vm@v1
       with:
