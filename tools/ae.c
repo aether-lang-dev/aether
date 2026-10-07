@@ -3025,6 +3025,76 @@ fail:
     return false;
 }
 
+/* #2476: the assembler flag that keeps AVX code from faulting on the Win64
+ * stack, or "" when the build does not need it.
+ *
+ * Win64 only guarantees 16-byte stack alignment and GCC does not realign the
+ * stack for 32-byte values (GCC bug 54412), yet it still spills 256-bit
+ * temporaries with the aligned moves vmovaps / vmovdqa. When the slot lands
+ * on an address that is 16 but not 32 aligned, the move faults: an `f32x8`
+ * kernel built with -mavx2 segfaulted under MinGW GCC 15. binutils 2.38 and
+ * later can encode every aligned vector move as its unaligned twin
+ * (-muse-unaligned-vector-move), which runs at the same speed on aligned
+ * data on any AVX processor and does not fault on the rest, so the fix does
+ * not depend on which GCC is installed or on how a given kernel spills.
+ *
+ * Only a build that enables AVX gets it: the compiler is asked whether
+ * __AVX__ is defined under the user's cflags (which settles -march=native,
+ * -mfma, a later -mno-avx and the like), and only when those cflags carry a
+ * -m option at all, so a build without one runs no probe. The assembler is
+ * then asked whether it takes the option. Both answers hold for the process
+ * (one compiler, one set of cflags), so each probe runs at most once. */
+static const char* win_avx_stack_flags(const char* user_cflags) {
+    static int done = 0;
+    static const char* flags = "";
+    if (done) return flags;
+    done = 1;
+    int selects_isa = 0;
+    for (const char* p = user_cflags; p && *p && !selects_isa; p++) {
+        if ((p == user_cflags || p[-1] == ' ' || p[-1] == '\t') &&
+            p[0] == '-' && p[1] == 'm') selects_isa = 1;
+    }
+    if (!selects_isa) return flags;
+
+    char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
+    int pid = (int)getpid();
+    snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
+    snprintf(probe_out, sizeof(probe_out), "%s/ae_avx_probe_%d.txt", get_temp_dir(), pid);
+    snprintf(probe_o, sizeof(probe_o), "%s/ae_avx_probe_%d.o", get_temp_dir(), pid);
+    FILE* f = fopen(probe_c, "w");
+    if (!f) return flags;
+    fclose(f);
+    int avx = 0;
+    snprintf(cmd, sizeof(cmd), "\"%s\" %s -dM -E \"%s\" -o \"%s\"",
+             s_gcc_bin, user_cflags, probe_c, probe_out);
+    if (run_cmd_quiet(cmd) == 0) {
+        FILE* m = fopen(probe_out, "r");
+        char line[512];
+        while (m && !avx && fgets(line, sizeof(line), m)) {
+            avx = strncmp(line, "#define __AVX__ ", 16) == 0;
+        }
+        if (m) fclose(m);
+    }
+    if (avx) {
+        snprintf(cmd, sizeof(cmd),
+                 "\"%s\" -Wa,-muse-unaligned-vector-move -c \"%s\" -o \"%s\"",
+                 s_gcc_bin, probe_c, probe_o);
+        if (run_cmd_quiet(cmd) == 0) {
+            flags = " -Wa,-muse-unaligned-vector-move";
+        } else {
+            fprintf(stderr,
+                    "warning: AVX is enabled, but this assembler does not take "
+                    "-muse-unaligned-vector-move (binutils 2.38 or later).\n"
+                    "         GCC on Windows can spill 256-bit values with aligned "
+                    "moves to a 16-byte-aligned stack, which faults (GCC bug 54412).\n");
+        }
+    }
+    remove(probe_c);
+    remove(probe_out);
+    remove(probe_o);
+    return flags;
+}
+
 #endif // _WIN32
 
 // Get cflags from aether.toml [build] section (applied only for release/ae-build)
@@ -3638,7 +3708,7 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* yaml_libs = "";
 #endif
-    char opt[768];
+    char opt[1024];   /* user cflags (up to 511) plus the #2476 assembler flag */
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
      * GCC's auto-export switches off the moment any symbol carries an
@@ -3656,8 +3726,9 @@ void build_gcc_cmd(char* cmd, size_t size,
          * `ae` links is one TU: make the definition strong. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= " : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s", emit_lib_flags, opt_flags(optimize),
-                 harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
+        snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
+                 harden_cflags(optimize), harden_ldflags(), user_cflags,
+                 win_avx_stack_flags(user_cflags), trace_def);
     else
         snprintf(opt, sizeof(opt), "-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), trace_def);
@@ -5451,8 +5522,11 @@ static int cmd_run(int argc, char** argv) {
      * under a key nobody computes again). Only when we were already caching and
      * the recompute succeeds; otherwise keep the original slot. */
     if (using_cache && g_emit_deps_path[0]) {
+        /* The same salt as the lookup (#2500): a bare "run" here dropped the
+         * binary-import part, so a program with one published under a key
+         * its next run never computes. */
         unsigned long long dk = compute_cache_key(file, extra_files, "O0",
-                                    ae_define_salt("run", run_salt, sizeof(run_salt)));
+                                    ae_define_salt(run_mode_salt(), run_salt, sizeof(run_salt)));
         if (dk != 0) {
             cache_key = dk;
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -8092,6 +8166,12 @@ static int cmd_build(int argc, char** argv) {
                           !g_coverage;
     char cached_exe[1024] = "";
     unsigned long long cache_key = 0;
+    /* Outlive the cache check: the key is computed again once aetherc has
+     * written the depfile (#2500), from the same salt, and ae_define_salt
+     * hands back build_mode_full itself when there is nothing to add. */
+    char build_salt[4096];
+    char build_mode_full[3000];
+    const char* build_key_salt = NULL;
     if (cache_eligible) {
         /* #1333: the salt distinguishes a traced build from a normal one.
          * Without it `ae build --trace` after a plain build is served the
@@ -8099,7 +8179,6 @@ static int cmd_build(int argc, char** argv) {
          * all: the same silent-staleness shape as the imported-module miss
          * (#1421). Any flag that changes the emitted code has to reach the
          * key. */
-        char build_salt[4096];
         /* Every flag that changes the emitted code, not just --trace. A
          * --coverage build after a plain build of the same source was served
          * the cached uninstrumented binary: it ran, produced no .gcno and no
@@ -8112,12 +8191,10 @@ static int cmd_build(int argc, char** argv) {
         if (g_size)     strncat(build_mode, "+size",     sizeof(build_mode) - strlen(build_mode) - 1);
         char libs_salt[2900];
         ae_binimport_salt(libs_salt, sizeof(libs_salt));
-        char build_mode_full[3000];
         snprintf(build_mode_full, sizeof(build_mode_full), "%s%s", build_mode, libs_salt);
-        cache_key = compute_cache_key(file, extra_files,
-                                      quick ? "O0" : "O2",
-                                      ae_define_salt(build_mode_full,
-                                                     build_salt, sizeof(build_salt)));
+        build_key_salt = ae_define_salt(build_mode_full, build_salt, sizeof(build_salt));
+        cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
+                                      build_key_salt);
         if (cache_key != 0) {
             init_cache_dir();
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
@@ -8173,6 +8250,23 @@ static int cmd_build(int argc, char** argv) {
         return 1;
     }
     remove(clog);
+
+    /* #2500: aetherc has now written the depfile, so the key every later
+     * build of this source computes folds in its exact dependencies, not
+     * the tree walk the key above fell back to. Publishing under the cold
+     * key left the entry where no build looks it up: the second identical
+     * build missed, compiled again and published a second copy, and only
+     * the third hit. `ae run` recomputes here too (#1882). */
+    if (cache_eligible && cache_key != 0 && g_emit_deps_path[0]) {
+        unsigned long long dk = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
+                                                  build_key_salt);
+        if (dk != 0 && dk != cache_key) {
+            if (tc.verbose) fprintf(stderr, "[cache] publish key: %016llx\n", dk);
+            cache_key = dk;
+            snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
+                     s_cache_dir, cache_key);
+        }
+    }
 
     /* #1243 --emit=obj: aetherc has written the generated C; compile it to a
      * single object and stop. No link, no `main`, so the caller drops the .o

@@ -227,7 +227,9 @@ is one 256-bit register and each operation one instruction; without AVX2 it
 is two four-lane halves, which costs what two `f32x4` operations cost. The
 same source runs either way, and gives the same results, so a kernel written
 eight-wide is never slower than the four-lane one and runs twice as wide
-where AVX2 is on.
+where AVX2 is on. On Windows an AVX build is assembled with
+`-Wa,-muse-unaligned-vector-move`, because GCC there can spill a 256-bit
+value with an aligned move to a stack that is only 16-byte aligned (#2476).
 
 See [`std/lanes/README.md`](../std/lanes/README.md) for the full surface and
 the measured speedup.

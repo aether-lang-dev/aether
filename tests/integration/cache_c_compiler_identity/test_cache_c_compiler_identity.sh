@@ -116,11 +116,8 @@ expect_hit() {
 }
 
 # 1. The compiler found on PATH. The switch is measured against a warm
-# entry: the first build of a source writes the depfile that every later key
-# is computed from, so it is the second build that publishes the entry the
-# third one hits.
+# entry, which the first build publishes (#2500).
 build_expect "first build with gcc A on PATH" 1 PATH="$TMP/ccA:$PATH"
-build_expect "second build with gcc A" 1 PATH="$TMP/ccA:$PATH"
 build_expect "unchanged rebuild with gcc A" 1 PATH="$TMP/ccA:$PATH"
 expect_hit "gcc A"
 build_expect "stale binary after putting gcc B first on PATH" 2 PATH="$TMP/ccB:$PATH"

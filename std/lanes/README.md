@@ -111,6 +111,16 @@ kernel written eight-wide is never slower than its four-lane version, and is
 twice as wide where AVX2 is on. Sums add lanes 0..7 in order, as a scalar
 loop would, so `sum8` is the same bits in either form.
 
+**On Windows, AVX builds assemble every vector move unaligned.** The Win64
+stack is only 16-byte aligned and GCC does not realign it for 256-bit values
+(GCC bug 54412), yet it can spill them with the aligned `vmovaps` / `vmovdqa`,
+which fault when the slot is not 32-byte aligned (#2476: an `f32x8` solver
+built with `-mavx2` crashed under MinGW GCC 15). When the cflags enable AVX,
+`ae build` and `ae run` pass `-Wa,-muse-unaligned-vector-move` (binutils 2.38
+or later), so the assembler encodes those moves as `vmovups` / `vmovdqu`:
+the same speed on aligned data, no fault on the rest. An older assembler gets
+a warning instead. Other platforms and builds without AVX are unchanged.
+
 Measured on an eight-term polynomial with a clamp, per element, over 64 Ki
 floats (`-O2`, Windows/MinGW, i7-13700K):
 
