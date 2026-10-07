@@ -535,6 +535,9 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->bare_fn_adapter_count = 0;
     gen->bare_fn_adapter_capacity = 0;
     gen->closure_args_borrowed = 0;
+    gen->order_fn_effects = NULL;
+    gen->order_fn_effect_count = 0;
+    gen->order_fn_effect_capacity = 0;
     // Closure support
     gen->closure_counter = 0;
     gen->closures = NULL;
@@ -662,6 +665,8 @@ CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, con
 void free_code_generator(CodeGenerator* gen) {
     if (gen) {
         program_index_reset();
+        free(gen->order_fn_effects);   /* #2478 */
+        gen->order_fn_effects = NULL;
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -6903,6 +6908,19 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (*cell != v) _aether_str_cell_free_val(*cell);");
     print_line(gen, "    *cell = v;");
     print_line(gen, "}");
+    /* #2474: a string array a closure writes lives in a cell, `const char*
+     * (*arr)[N]`, that owns each element as a string cell owns its one. The
+     * release takes the cell pointer, whose type carries N, so one name
+     * serves every length and the release keeps the one-argument shape of
+     * the other cells' (promoted_cell_release_fn). */
+    print_line(gen, "static inline void _aether_cell_release_strs_n(void* cell, size_t n) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (--h->_refs != 0) return;");
+    print_line(gen, "    for (size_t i = 0; i < n; i++) _aether_str_cell_free_val(((const char**)cell)[i]);");
+    print_line(gen, "    free(h);");
+    print_line(gen, "}");
+    print_line(gen, "#define _aether_cell_release_strs(cell) _aether_cell_release_strs_n((cell), sizeof(*(cell)) / sizeof((*(cell))[0]))");
     /* Prototypes for the magic-aware string builtins the codegen emits
      * directly (char_at -> string_char_at, str_eq / match-on-string ->
      * string_equals). These are not routed through the normal extern-call

@@ -88,37 +88,160 @@ main() {
 }
 AE
 
-# A write to a captured bare fixed-size array cannot reach the caller yet
-# (#2474): it is refused at the source line, not compiled into a lost write.
-# An element write, and a whole-array assignment, which in a closure body is
-# a write to the captured variable too (it used to hide an element write in
-# the same body from the check).
-cat > "$tmp/arr.ae" <<'AE'
+# A write to a captured fixed-size array reaches the caller (#2474). The
+# array lives in a shared cell, a pointer to the whole array, as any other
+# variable a closure writes does: an element write, `++` / `op=`, and a
+# whole-array assignment (which, before cells could hold an array, was
+# refused at compile time rather than compiled into a write the caller
+# never saw). int, float and string elements; the enclosing function
+# writing the array too; nested closures; a closure made in a loop; the
+# array handed to a function after the closure ran; a module constant
+# table read beside it. String elements are owned by the cell, and that is
+# leak-checked by tests/regression/test_closure_array_cell_strings.ae.
+cat > "$tmp/arrays.ae" <<'AE'
+const STEP[] = [10, 20, 30]
+
+total(xs: int[]) -> int {
+    s = 0
+    for i in 0..xs.len {
+        s = s + xs[i]
+    }
+    return s
+}
+
 main() {
     int[3] arr = [1, 2, 3]
     w = || { arr[1] = 9 }
     call(w)
-    println("${arr[1]}")
-}
-AE
-cat > "$tmp/arr_whole.ae" <<'AE'
-main() {
-    int[3] arr = [1, 2, 3]
+    println("element ${arr[1]} len ${arr.len}")
+
+    bump = || {
+        arr[0] += STEP[0]
+        arr[2]++
+    }
+    call(bump)
+    call(bump)
+    arr[1] = arr[1] * 2
+    println("ops ${arr[0]} ${arr[1]} ${arr[2]} total ${total(arr)}")
+
     f = || {
-        if arr[1] > 100 { arr = [4, 5, 6] }
+        if arr[1] > 10 { arr = [4, 5] }
     }
     call(f)
-    println("${arr[1]}")
+    println("whole ${arr[0]} ${arr[1]} ${arr[2]}")
+
+    swap = || { arr = [arr[1], arr[0], arr[2] + 1] }
+    call(swap)
+    println("swap ${arr[0]} ${arr[1]} ${arr[2]}")
+
+    outer = || {
+        inner = || { arr[2] = 100 }
+        inner()
+        arr[0] = arr[0] + 1
+    }
+    outer()
+    println("nested ${arr[0]} ${arr[2]}")
+
+    int[4] counts = [0, 0, 0, 0]
+    i = 0
+    while i < 6 {
+        hit = || { counts[i % 4] += 1 }
+        hit()
+        i = i + 1
+    }
+    println("loop ${counts[0]} ${counts[1]} ${counts[2]} ${counts[3]}")
+
+    float[2] fs = [1.5, 2.5]
+    grow = || { fs[0] = fs[0] + fs[1] }
+    call(grow)
+    println("float ${fs[0]}")
+
+    string[2] names = ["a", "b"]
+    rename = || { names[1] = "${names[0]}${names[1]}!" }
+    call(rename)
+    call(rename)
+    println("string ${names[0]} ${names[1]}")
 }
 AE
-for prog in arr arr_whole; do
-    out="$("$AE" run "$tmp/$prog.ae" 2>&1)"
-    if ! printf '%s\n' "$out" | grep -q "a closure cannot write to 'arr', a fixed-size array it captures"; then
-        echo "  [FAIL] closure_write_through_capture: a captured array write was not refused ($prog)"
-        printf '%s\n' "$out" | head -5 | sed 's/^/        /'
-        exit 1
-    fi
-done
+want_arrays="element 9 len 3
+ops 21 18 5 total 44
+whole 4 5 0
+swap 5 4 1
+nested 6 100
+loop 2 2 1 1
+float 4
+string a aab!!"
+got="$("$AE" run "$tmp/arrays.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+if [ "$got" != "$want_arrays" ]; then
+    echo "  [FAIL] closure_write_through_capture: a write to a captured array did not reach the caller"
+    printf 'got:\n%s\nwant:\n%s\n' "$got" "$want_arrays" | sed 's/^/        /'
+    exit 1
+fi
+
+# An actor's state array is the actor's, not a capture the closure could
+# share in a cell: a closure in a handler that writes an element of one is
+# refused, as a write to any other state field is. An array local to the
+# handler is shared with its closure like any other.
+cat > "$tmp/actor.ae" <<'AE'
+message Push { v: int }
+message Get {}
+
+actor A {
+    state int[4] hist
+    receive {
+        Push(v) -> {
+            local = [0, 0]
+            f = || {
+                local[0] = v
+                local[1] = local[1] + 1
+            }
+            f()
+            f()
+            hist[0] = hist[0] + local[0]
+            hist[1] = hist[1] + local[1]
+        }
+        Get() -> { reply hist[0] * 100 + hist[1] }
+    }
+}
+
+main() {
+    a = spawn(A())
+    a ! Push { v: 3 }
+    a ! Push { v: 4 }
+    n = a ? Get {}
+    println("state ${n}")
+}
+AE
+got="$("$AE" run "$tmp/actor.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+if [ "$got" != "state 704" ]; then
+    echo "  [FAIL] closure_write_through_capture: a handler-local array written by a closure"
+    printf '%s\n' "$got" | head -5 | sed 's/^/        /'
+    exit 1
+fi
+cat > "$tmp/state_write.ae" <<'AE'
+message Push { v: int }
+
+actor A {
+    state int[4] hist
+    receive {
+        Push(v) -> {
+            f = || { hist[1] = v }
+            f()
+        }
+    }
+}
+
+main() {
+    a = spawn(A())
+    a ! Push { v: 3 }
+}
+AE
+out="$("$AE" run "$tmp/state_write.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "closure inside actor 'A' handler writes state field 'hist'"; then
+    echo "  [FAIL] closure_write_through_capture: a closure writing an actor's state array was not refused"
+    printf '%s\n' "$out" | head -5 | sed 's/^/        /'
+    exit 1
+fi
 
 want="inc 2
 dec 9
@@ -135,4 +258,4 @@ if [ "$got" != "$want" ]; then
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'
     exit 1
 fi
-echo "  [PASS] closure_write_through_capture: ++, --, field and element writes in a closure reach the captured variable"
+echo "  [PASS] closure_write_through_capture: ++, --, field, element and fixed-size array writes in a closure reach the captured variable"

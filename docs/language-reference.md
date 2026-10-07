@@ -3014,6 +3014,41 @@ interpolations pass their segments straight to the formatting call. Once a
 segment calls a function, sends a message, or reads varargs, the compiler
 evaluates every segment into a temporary in source order first, so the
 order the C compiler chooses for the call's arguments can no longer show.
+A segment that writes a variable (`${i++}`, `${n = n + 1}`) another segment
+uses is evaluated ahead the same way.
+
+The same holds for every other list of operands: a call's arguments (a
+module call's too), the two sides of a binary operator, the fields of a
+struct literal or a message, the elements of an array literal, and the
+values of a multi-value `return` are evaluated left to right. An operand
+is evaluated first, into a temporary, when a later one depends on it: one
+writes a variable the other uses (`f(i++, i)`, `i++ + i++`), or one makes a
+call that can change what the other reads. A call can change a module
+global, a variable it shares with a closure it runs, and memory it is
+handed by reference; what a function of the program writes is read off its
+body. A list with no such pair compiles as written. An array literal stored
+into an array that already exists is evaluated whole before it is stored:
+
+```aether,run
+pair(a: int, b: int) -> int { return a * 10 + b }
+
+main() {
+    i = 0
+    println("${pair(i++, i)}")
+    a = [1, 2, 3]
+    a = [a[2], a[1], a[0]]
+    println("${a[0]} ${a[1]} ${a[2]}")
+}
+```
+```output
+1
+3 2 1
+```
+
+What a C extern or a C function pointer does is not visible to the
+compiler, so two calls that reach one only through such a function keep
+the order C gives them (`pair(list.pop(l), list.pop(l))`). Bind the results
+to locals first where that order matters.
 
 ### Heredoc strings
 

@@ -55,6 +55,25 @@ static const char* arg_drain_lookup(ASTNode* node) {
     return NULL;
 }
 
+/* #2478: operands evaluated into temps ahead of the construct that uses
+ * them (emit_in_operand_order). generate_expression emits the temp for any
+ * node bound here, of any type, so every emitter of the construct reads it.
+ * Kept apart from the drain registry: a heap argument hoisted for order is
+ * still drained (freed) by its call, which only skips arguments it finds
+ * bound in its own registry. */
+static ArgDrainSub* g_order_subs = NULL;
+static int g_order_count = 0;
+static int g_order_cap = 0;
+static int g_order_counter = 0;
+static ASTNode* g_order_emitting = NULL;
+
+static const char* order_lookup(ASTNode* node) {
+    for (int i = g_order_count - 1; i >= 0; i--) {
+        if (g_order_subs[i].node == node) return g_order_subs[i].name;
+    }
+    return NULL;
+}
+
 /* A bare reference to a top-level Aether function, as opposed to a closure or
  * an fn-typed variable. Its address is a real C symbol, which is the only thing
  * a C function-pointer field can hold. */
@@ -475,6 +494,490 @@ int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
     return is_heap_string_expr(gen, ch);
 }
 
+/* --- Left-to-right operand order (#2478) ------------------------------
+ *
+ * C leaves unspecified the order in which a call's arguments, the two
+ * operands of `+` or `<`, and the initialisers of a compound literal or an
+ * array are evaluated, and two unsequenced writes of one object
+ * (`f(i++, i++)`) are undefined behaviour. GCC evaluates call arguments
+ * right to left on the Windows target, so `f(i++, i)` read the incremented
+ * `i` first. Aether evaluates operands left to right: when an operand
+ * conflicts with a later one (one writes a variable the other reads or
+ * writes, or a call in one can change what the other reads), the earlier
+ * one is evaluated first, into a temporary, in source order. Operands no
+ * later one conflicts with stay inline, where they run after every
+ * temporary, so a list without such a pair is emitted as it always was. */
+
+static int is_assignment_op(const char* op);
+
+/* The variable an assignment target or a `++` / `--` operand writes: the
+ * name itself, or the root of a target reached through a field or an
+ * index. */
+static const char* order_lvalue_root(ASTNode* lhs) {
+    while (lhs) {
+        if (lhs->type == AST_IDENTIFIER) return lhs->value;
+        if ((lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
+            lhs->child_count > 0) {
+            lhs = lhs->children[0];
+            continue;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+/* The variable `node` itself writes (`v++`, `--v`, `v = e`, `a[i] += e`),
+ * or NULL. */
+static const char* order_write_target(ASTNode* node) {
+    if (node->type == AST_UNARY_EXPRESSION && node->value && node->child_count == 1 &&
+        (strcmp(node->value, "++") == 0 || strcmp(node->value, "--") == 0))
+        return order_lvalue_root(node->children[0]);
+    if (((node->type == AST_BINARY_EXPRESSION && is_assignment_op(node->value)) ||
+         node->type == AST_ASSIGNMENT) && node->child_count >= 1)
+        return order_lvalue_root(node->children[0]);
+    if (node->type == AST_COMPOUND_ASSIGNMENT || node->type == AST_VARIABLE_DECLARATION)
+        return node->value;
+    /* `va_arg(vap, T)` advances the list it reads. */
+    if (node->type == AST_VA_ARG && node->child_count >= 1)
+        return order_lvalue_root(node->children[0]);
+    return NULL;
+}
+
+/* A closure literal is opaque to these walks: its body runs when it is
+ * called, not where the literal stands. */
+
+static int order_mentions(ASTNode* node, const char* name) {
+    if (!node || !name || node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (order_mentions(node->children[i], name)) return 1;
+    return 0;
+}
+
+/* Does `x` write a variable that `y` reads or writes? */
+static int order_writes_what_other_uses(ASTNode* x, ASTNode* y) {
+    if (!x || x->type == AST_CLOSURE) return 0;
+    const char* t = order_write_target(x);
+    if (t && order_mentions(y, t)) return 1;
+    for (int i = 0; i < x->child_count; i++)
+        if (order_writes_what_other_uses(x->children[i], y)) return 1;
+    return 0;
+}
+
+static int order_has_call(ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_FUNCTION_CALL || node->type == AST_SEND_FIRE_FORGET ||
+        node->type == AST_SEND_ASK || node->type == AST_VA_ARG ||
+        node->type == AST_VA_START || node->type == AST_VA_END) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (order_has_call(node->children[i])) return 1;
+    return 0;
+}
+
+/* What a call can change. A call reaches no plain local of its caller: it
+ * can write a module global, a variable it shares with a closure it runs
+ * (a promoted capture), and memory it is handed by reference (a pointer, an
+ * array, a slice). What a function of this program writes is read off its
+ * body, through the functions it calls; a closure it runs may write
+ * anything it reaches. What a C extern or a C function pointer does is not
+ * visible, so a call of one is taken to write nothing an operand reads. */
+
+typedef struct OrderFnEffects {
+    ASTNode* fn;
+    int writes_shared;         /* a module global, or runs a closure */
+    unsigned writes_through;   /* bit k: memory its parameter k reaches */
+} OrderFnEffects;
+
+/* The definition a call runs, when it is a function of this program. */
+static ASTNode* order_callee_def(CodeGenerator* gen, ASTNode* call) {
+    if (!call->value || !gen->program) return NULL;
+    char norm[256];
+    const char* fn = codegen_normalise_callee(call->value, norm, sizeof(norm));
+    return fn ? find_function_definition_by_name(gen->program, fn) : NULL;
+}
+
+static int order_is_closure_type(Type* t) {
+    return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
+}
+
+/* Is `name`, in the body of `fn`, a closure: a parameter or a local of
+ * `fn` typed `fn`, or a variable a closure literal is bound to? */
+static int order_names_closure(CodeGenerator* gen, ASTNode* fn, const char* name) {
+    for (int i = 0; fn && i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_CLOSURE_PARAM) &&
+            p->value && strcmp(p->value, name) == 0)
+            return order_is_closure_type(p->node_type);
+    }
+    if (fn == gen->current_function &&
+        order_is_closure_type(declared_var_type(gen, name))) return 1;
+    for (int i = 0; i < gen->closure_var_count; i++)
+        if (gen->closure_var_map[i].var_name &&
+            strcmp(gen->closure_var_map[i].var_name, name) == 0) return 1;
+    return 0;
+}
+
+/* Does `call`, in the body of `fn`, run a closure: `call(f, ...)`, a
+ * closure called by its name, or a callee handed a closure it may run? */
+static int order_call_runs_closure(CodeGenerator* gen, ASTNode* fn, ASTNode* call) {
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (a && (a->type == AST_CLOSURE || order_is_closure_type(a->node_type))) return 1;
+    }
+    if (!call->value || strcmp(call->value, "call") == 0) return 1;
+    return !strchr(call->value, '.') && order_names_closure(gen, fn, call->value);
+}
+
+/* The variable an argument hands a call by reference (a pointer, an array
+ * or a slice, or a field or element reached from one), or NULL. */
+static const char* order_ref_arg_root(ASTNode* arg) {
+    while (arg && (arg->type == AST_SLICE_FROM_ARRAY || arg->type == AST_SLICE_TO_PTR) &&
+           arg->child_count > 0)
+        arg = arg->children[0];
+    if (!arg || !arg->node_type ||
+        (arg->node_type->kind != TYPE_PTR && arg->node_type->kind != TYPE_ARRAY)) return NULL;
+    return order_lvalue_root(arg);
+}
+
+/* The lvalue `node` writes through (`p.x = v`, `a[i]++`), or NULL for a
+ * bare variable, whose write a callee keeps to itself. */
+static ASTNode* order_through_lvalue(ASTNode* node) {
+    ASTNode* lv = NULL;
+    if (node->type == AST_UNARY_EXPRESSION && node->value && node->child_count == 1 &&
+        (strcmp(node->value, "++") == 0 || strcmp(node->value, "--") == 0))
+        lv = node->children[0];
+    else if (((node->type == AST_BINARY_EXPRESSION && is_assignment_op(node->value)) ||
+              node->type == AST_ASSIGNMENT) && node->child_count >= 1)
+        lv = node->children[0];
+    return (lv && (lv->type == AST_MEMBER_ACCESS || lv->type == AST_ARRAY_ACCESS)) ? lv : NULL;
+}
+
+static int order_param_index(ASTNode* fn, const char* name) {
+    for (int i = 0, k = 0; name && i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (!p || p->type != AST_PATTERN_VARIABLE) continue;
+        if (p->value && strcmp(p->value, name) == 0) return k < 32 ? k : -1;
+        k++;
+    }
+    return -1;
+}
+
+static int order_fn_effects(CodeGenerator* gen, ASTNode* fn);
+
+/* The effects of the calls in `node` as seen from `fn`'s own body. */
+static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
+                            int* shared, unsigned* through) {
+    if (!node || node->type == AST_CLOSURE) return;
+    const char* t = order_write_target(node);
+    if (t && is_module_global_var(gen, t)) *shared = 1;
+    ASTNode* lv = order_through_lvalue(node);
+    int k = lv ? order_param_index(fn, order_lvalue_root(lv)) : -1;
+    if (k >= 0) *through |= 1u << k;
+    if (node->type == AST_FUNCTION_CALL) {
+        int c_shared = 1;
+        unsigned c_through = ~0u;
+        if (!order_call_runs_closure(gen, fn, node)) {
+            ASTNode* def = order_callee_def(gen, node);
+            int idx = def ? order_fn_effects(gen, def) : -1;
+            c_shared = idx >= 0 && gen->order_fn_effects[idx].writes_shared;
+            c_through = idx >= 0 ? gen->order_fn_effects[idx].writes_through : 0;
+        }
+        if (c_shared) *shared = 1;
+        for (int i = 0, a = 0; i < node->child_count && a < 32; i++) {
+            ASTNode* arg = node->children[i];
+            if (arg && arg->type == AST_CLOSURE && arg->value &&
+                strcmp(arg->value, "trailing") == 0) continue;
+            if (c_through & (1u << a)) {
+                int pk = order_param_index(fn, order_ref_arg_root(arg));
+                if (pk >= 0) *through |= 1u << pk;
+            }
+            a++;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++)
+        order_scan_body(gen, fn, node->children[i], shared, through);
+}
+
+/* The memoised effects of calling `fn`: an index into gen->order_fn_effects.
+ * A function reached again while its own body is read (recursion) answers
+ * with what is known so far. */
+static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
+    for (int i = 0; i < gen->order_fn_effect_count; i++)
+        if (gen->order_fn_effects[i].fn == fn) return i;
+    if (gen->order_fn_effect_count >= gen->order_fn_effect_capacity) {
+        int cap = gen->order_fn_effect_capacity ? gen->order_fn_effect_capacity * 2 : 32;
+        gen->order_fn_effects = aether_xrealloc(gen->order_fn_effects,
+                                                (size_t)cap * sizeof(OrderFnEffects));
+        gen->order_fn_effect_capacity = cap;
+    }
+    int idx = gen->order_fn_effect_count++;
+    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0 };
+    int shared = 0;
+    unsigned through = 0;
+    for (int i = 0; i < fn->child_count; i++)
+        if (fn->children[i] && fn->children[i]->type == AST_BLOCK)
+            order_scan_body(gen, fn, fn->children[i], &shared, &through);
+    gen->order_fn_effects[idx].writes_shared = shared;
+    gen->order_fn_effects[idx].writes_through = through;
+    return idx;
+}
+
+/* A module global or a variable shared with a closure. */
+static int order_is_shared_var(CodeGenerator* gen, const char* name) {
+    return name && (is_module_global_var(gen, name) || is_promoted_capture(gen, name));
+}
+
+static int order_reads_shared_var(CodeGenerator* gen, ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_IDENTIFIER && order_is_shared_var(gen, node->value)) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (order_reads_shared_var(gen, node->children[i])) return 1;
+    return 0;
+}
+
+static int order_writes_shared_var(CodeGenerator* gen, ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if (order_is_shared_var(gen, order_write_target(node))) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (order_writes_shared_var(gen, node->children[i])) return 1;
+    return 0;
+}
+
+/* Does `node` read memory reached from `root`: a field or an element of it,
+ * or `root` handed to a call by reference (a callee may read through it)?
+ * `root` NULL matches any such read. */
+static int order_reads_through(ASTNode* node, const char* root) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_MEMBER_ACCESS || node->type == AST_ARRAY_ACCESS) {
+        const char* r = order_lvalue_root(node);
+        if (r && (!root || strcmp(r, root) == 0)) return 1;
+    }
+    if (node->type == AST_FUNCTION_CALL) {
+        for (int i = 0; i < node->child_count; i++) {
+            const char* r = order_ref_arg_root(node->children[i]);
+            if (r && (!root || strcmp(r, root) == 0)) return 1;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++)
+        if (order_reads_through(node->children[i], root)) return 1;
+    return 0;
+}
+
+/* Can a call in `x` change what `y` reads, or read what `y` writes? */
+static int order_call_affects(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
+    if (!x || x->type == AST_CLOSURE) return 0;
+    if (x->type == AST_FUNCTION_CALL) {
+        /* Any call may read a shared variable `y` writes. */
+        if (order_writes_shared_var(gen, y)) return 1;
+        int runs_closure = order_call_runs_closure(gen, gen->current_function, x);
+        int shared = runs_closure;
+        unsigned through = runs_closure ? ~0u : 0;
+        if (!runs_closure) {
+            ASTNode* def = order_callee_def(gen, x);
+            int idx = def ? order_fn_effects(gen, def) : -1;
+            if (idx >= 0) {
+                shared = gen->order_fn_effects[idx].writes_shared;
+                through = gen->order_fn_effects[idx].writes_through;
+            }
+        }
+        /* A shared variable it writes, read by `y` or by a call in `y`. */
+        if (shared && (order_reads_shared_var(gen, y) || order_has_call(y))) return 1;
+        if (runs_closure && order_reads_through(y, NULL)) return 1;
+        for (int i = 0, a = 0; i < x->child_count && a < 32; i++) {
+            ASTNode* arg = x->children[i];
+            if (arg && arg->type == AST_CLOSURE && arg->value &&
+                strcmp(arg->value, "trailing") == 0) continue;
+            if (through & (1u << a)) {
+                const char* r = order_ref_arg_root(arg);
+                if (r && order_reads_through(y, r)) return 1;
+            }
+            a++;
+        }
+    }
+    for (int i = 0; i < x->child_count; i++)
+        if (order_call_affects(gen, x->children[i], y)) return 1;
+    return 0;
+}
+
+/* Must `x` and `y` run in source order? `gen` NULL weighs the writes
+ * operands make themselves only. */
+static int order_conflict(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
+    if (order_writes_what_other_uses(x, y) || order_writes_what_other_uses(y, x)) return 1;
+    if (!gen) return 0;
+    return order_call_affects(gen, x, y) || order_call_affects(gen, y, x);
+}
+
+/* An operand that can be held in a temporary. A literal has no order to
+ * keep, a closure literal is left to its env handling, and a fixed-size
+ * array's value is where it lives, which no operand changes. */
+static int order_hoistable(ASTNode* op) {
+    if (!op || op->type == AST_LITERAL || op->type == AST_NULL_LITERAL ||
+        op->type == AST_CLOSURE) return 0;
+    return !(op->node_type && type_is_sized_array(op->node_type));
+}
+
+/* An operand already standing for a temp: evaluated, with nothing left to
+ * order. */
+static int order_bound(ASTNode* op) {
+    return op && (order_lookup(op) || arg_drain_lookup(op));
+}
+
+/* Mark in `hoist` the operands a later operand conflicts with; 1 if any. */
+static int order_hoist_set(CodeGenerator* gen, ASTNode** ops, int n, int* hoist) {
+    int any = 0;
+    for (int x = 0; x < n; x++) {
+        hoist[x] = 0;
+        if (!order_hoistable(ops[x]) || order_bound(ops[x])) continue;
+        for (int y = x + 1; y < n; y++) {
+            if (ops[y] && !order_bound(ops[y]) && order_conflict(gen, ops[x], ops[y])) {
+                hoist[x] = 1;
+                any = 1;
+                break;
+            }
+        }
+    }
+    return any;
+}
+
+#define ORDER_MAX_OPERANDS 32
+
+/* The operands of a construct whose C spelling leaves their order open: a
+ * call's arguments (its receiver among them), the two sides of a binary
+ * operator other than `&&` / `||` (sequenced in C) and an assignment, the
+ * field values of a struct literal or a message, and a send's target with
+ * its message's fields. 0 for anything else, and for a call with named
+ * arguments: a builtin such as a platform select emits only the one it
+ * picks. */
+static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
+    int n = 0;
+    switch (expr->type) {
+        case AST_FUNCTION_CALL:
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* a = expr->children[i];
+                if (a && a->type == AST_CLOSURE && a->value &&
+                    strcmp(a->value, "trailing") == 0) continue;
+                if ((a && a->type == AST_NAMED_ARG) || n == cap) return 0;
+                ops[n++] = a;
+            }
+            return n;
+        case AST_BINARY_EXPRESSION:
+            if (expr->child_count != 2 || !expr->value ||
+                strcmp(expr->value, "&&") == 0 || strcmp(expr->value, "||") == 0 ||
+                is_assignment_op(expr->value)) return 0;
+            ops[0] = expr->children[0];
+            ops[1] = expr->children[1];
+            return 2;
+        case AST_SEND_FIRE_FORGET:
+        case AST_SEND_ASK:
+        case AST_STRUCT_LITERAL:
+        case AST_MESSAGE_CONSTRUCTOR: {
+            ASTNode* fields = expr;
+            if (expr->type == AST_SEND_FIRE_FORGET || expr->type == AST_SEND_ASK) {
+                if (expr->child_count < 2 || !expr->children[1] ||
+                    expr->children[1]->type != AST_MESSAGE_CONSTRUCTOR) return 0;
+                ops[n++] = expr->children[0];
+                fields = expr->children[1];
+            }
+            for (int i = 0; i < fields->child_count; i++) {
+                ASTNode* fi = fields->children[i];
+                if (!fi || (fi->type != AST_ASSIGNMENT && fi->type != AST_FIELD_INIT) ||
+                    fi->child_count < 1) continue;
+                if (n == cap) return 0;
+                ops[n++] = fi->children[0];
+            }
+            return n;
+        }
+        default:
+            return 0;
+    }
+}
+
+static void order_bind(ASTNode* node, const char* name) {
+    if (g_order_count >= g_order_cap) {
+        int cap = g_order_cap ? g_order_cap * 2 : 8;
+        ArgDrainSub* bigger = (ArgDrainSub*)realloc(g_order_subs, sizeof(ArgDrainSub) * (size_t)cap);
+        if (!bigger) {
+            fprintf(stderr, "Fatal: out of memory ordering operands\n");
+            exit(1);
+        }
+        g_order_subs = bigger;
+        g_order_cap = cap;
+    }
+    g_order_subs[g_order_count].node = node;
+    g_order_subs[g_order_count].name = strdup(name);
+    g_order_count++;
+}
+
+/* Evaluate operand `op` into a fresh temp and bind it: `__auto_type _eoN = (op); `. */
+static void order_hoist_operand(CodeGenerator* gen, ASTNode* op) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "_eo%d", g_order_counter++);
+    fprintf(gen->output, "__auto_type %s = (", buf);
+    generate_expression(gen, op);
+    fprintf(gen->output, "); ");
+    order_bind(op, buf);
+}
+
+int order_prelude_depth(void) {
+    return g_order_count;
+}
+
+void order_prelude_end(int depth) {
+    while (g_order_count > depth) {
+        g_order_count--;
+        free(g_order_subs[g_order_count].name);
+    }
+}
+
+/* #2478: an initializer list (an array literal's `{...}`, the tuple a
+ * multi-value `return` builds) leaves the order of its elements open as a
+ * call's arguments do, and cannot be wrapped in a statement expression. So
+ * the elements a later one conflicts with are evaluated into temps as
+ * statements ahead of the declaration, the stores or the `return` the list
+ * feeds, bound until the statement ends (generate_statement gives them
+ * back). `target` is the array an element-by-element store writes (#2289),
+ * or NULL: an element that reads it is evaluated before the first store,
+ * so `a = [a[1], a[0]]` swaps. */
+void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char* target) {
+    if (!items || n < 1 || n > ORDER_MAX_OPERANDS) return;
+    int hoist[ORDER_MAX_OPERANDS];
+    int any = n >= 2 ? order_hoist_set(gen, items, n, hoist) : 0;
+    if (n < 2) hoist[0] = 0;
+    for (int k = 0; target && k < n; k++) {
+        if (order_hoistable(items[k]) && !order_bound(items[k]) &&
+            order_mentions(items[k], target)) {
+            hoist[k] = 1;
+            any = 1;
+        }
+    }
+    if (!any) return;
+    for (int k = 0; k < n; k++)
+        if (hoist[k]) order_hoist_operand(gen, items[k]);
+}
+
+/* Emit `expr` with the operands a later one conflicts with evaluated first,
+ * in source order, into temps it then reads:
+ *     ({ __auto_type _eo0 = (i++); f(_eo0, i); })
+ * Returns 0, emitting nothing, when no operand needs it. */
+static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
+    ASTNode* ops[ORDER_MAX_OPERANDS];
+    int hoist[ORDER_MAX_OPERANDS];
+    if (order_bound(expr)) return 0;   /* emitted as the temp that holds it */
+    int n = order_operands(expr, ops, ORDER_MAX_OPERANDS);
+    if (n < 2 || !order_hoist_set(gen, ops, n, hoist)) return 0;
+    int saved = g_order_count;
+    fprintf(gen->output, "({ ");
+    for (int k = 0; k < n; k++)
+        if (hoist[k]) order_hoist_operand(gen, ops[k]);
+    ASTNode* saved_emitting = g_order_emitting;
+    g_order_emitting = expr;
+    generate_expression(gen, expr);
+    g_order_emitting = saved_emitting;
+    fprintf(gen->output, "; })");
+    order_prelude_end(saved);
+    return 1;
+}
+
 /* Index of the last child that must be evaluated into a temp to keep the
  * segments in source order, or -1 when none must. C leaves vararg
  * evaluation order unspecified, so once any segment has a side effect
@@ -483,16 +986,26 @@ int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
  * either side of `bump(c)` sees a different value depending on which ran
  * first. An all-pure interpolation, or one whose only `${}` segment is
  * the impure one, has no order to observe and stays inline. Heap-call
- * freeing is a separate concern, see interp_segment_is_heap_call. */
+ * freeing is a separate concern, see interp_segment_is_heap_call.
+ *
+ * #2478: a write is an effect too. `"${j++} ${j++} ${j}"` printed `1 0 2`:
+ * a segment that writes a variable a later segment reads or writes is
+ * hoisted, up to the last such segment. */
 int interp_order_hoist_boundary(ASTNode* interp) {
-    int expr_count = 0, last_expr = -1, impure = 0;
+    int expr_count = 0, last_expr = -1, impure = 0, last_written = -1;
     for (int i = 0; i < interp->child_count; i++) {
         ASTNode* ch = interp->children[i];
         if (interp_segment_is_text(ch)) continue;
         expr_count++;
         last_expr = i;
         if (codegen_expr_has_side_effects(ch)) impure = 1;
+        for (int j = i + 1; j < interp->child_count; j++) {
+            ASTNode* later = interp->children[j];
+            if (interp_segment_is_text(later)) continue;
+            if (order_conflict(NULL, ch, later)) { last_written = i; break; }
+        }
     }
+    if (!impure && last_written >= 0) return last_written;
     return (impure && expr_count >= 2) ? last_expr : -1;
 }
 
@@ -2177,12 +2690,15 @@ static void promote_up_from(CodeGenerator* gen, const char* start_scope, const c
 
 static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
 
-/* A capture holding a struct by value (not through a pointer or a
- * reference): a field write in a closure changes the variable itself. */
-static int capture_is_struct_value(CodeGenerator* gen, const char* name,
-                                   const char* parent_func) {
+/* A capture holding a struct or a fixed-size array by value (not through a
+ * pointer, a slice or a reference): a field or element write in a closure
+ * changes the variable itself, so it needs the shared cell as a bare
+ * `name = ...` does (#2458; arrays #2474). */
+static int capture_is_held_by_value(CodeGenerator* gen, const char* name,
+                                    const char* parent_func) {
     Type* t = lookup_var_type(gen, name, parent_func);
-    return t && t->kind == TYPE_STRUCT;
+    return t && (t->kind == TYPE_STRUCT ||
+                 (type_is_sized_array(t) && t->array_size > 0));
 }
 
 static void compute_promoted_captures(CodeGenerator* gen) {
@@ -2196,7 +2712,7 @@ static void compute_promoted_captures(CodeGenerator* gen) {
             if (!cap) continue;
             if (is_assigned_to(body, cap) ||
                 (is_written_through(body, cap) &&
-                 capture_is_struct_value(gen, cap, parent_func))) {
+                 capture_is_held_by_value(gen, cap, parent_func))) {
                 promote_up_from(gen, parent_func, cap);
             }
         }
@@ -2374,7 +2890,12 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
         if (!body) continue;
 
         for (int n = 0; n < state_count; n++) {
-            if (!is_assigned_to(body, state_names[n])) continue;
+            /* An element or field write (`hist[i] = v`, `pos.x += 1`)
+             * writes the state field as much as `hist = ...` does. A state
+             * array is no capture the closure could share in a cell (#2474):
+             * it lives in the actor, which the closure cannot reach. */
+            if (!is_assigned_to(body, state_names[n]) &&
+                !is_written_through(body, state_names[n])) continue;
             // Report error. Location: closure node.
             char msg[512];
             const char* actor_name = actor->value ? actor->value : "actor";
@@ -2799,7 +3320,9 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
             Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
             if (capture_is_promoted(gen, captures[i], parent_func)) {
-                fprintf(gen->output, "    %s* %s;\n", ctype, captures[i]);
+                char cell[600];
+                promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+                fprintf(gen->output, "    %s;\n", cell);
             } else if (arr) {
                 fprintf(gen->output, "    %s %s[%d];\n",
                         get_c_type(arr->element_type), captures[i], arr->array_size);
@@ -2985,8 +3508,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 // Pointer alias: body reads/writes dereference through the
                 // AST_IDENTIFIER emit path when the name is in
                 // current_promoted_captures.
-                fprintf(gen->output, "    %s* %s = _env->%s;\n",
-                        ctype, captures[i], captures[i]);
+                char cell[600];
+                promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+                fprintf(gen->output, "    %s = _env->%s;\n", cell, captures[i]);
             } else if (arr) {
                 // #2464: the env holds the array; the body indexes it in
                 // place through an element pointer, as C passes an array.
@@ -3138,7 +3662,12 @@ void emit_closure_definitions(CodeGenerator* gen) {
                         captured = 1; break;
                     }
                 }
-                if (captured) mark_var_declared(gen, parent_promoted[p]);
+                if (!captured) continue;
+                /* #2474: an array cell records its type, for a whole-array
+                 * store in the body (emit_cell_array_store). */
+                Type* arr = capture_sized_array_type(gen, parent_promoted[p], parent_func);
+                if (arr) mark_var_declared_typed(gen, parent_promoted[p], arr);
+                else mark_var_declared(gen, parent_promoted[p]);
             }
             /* #2462: the closure's parameters are declared by its C
              * signature, the way a function's are (codegen_func.c), so an
@@ -3262,9 +3791,13 @@ void emit_closure_definitions(CodeGenerator* gen) {
                             get_c_type(arr->element_type), captures[i]);
                     continue;
                 }
-                fprintf(gen->output, "%s%s %s", ctype,
-                        capture_is_promoted(gen, captures[i], parent_func) ? "*" : "",
-                        captures[i]);
+                if (capture_is_promoted(gen, captures[i], parent_func)) {
+                    char cell[600];
+                    promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+                    fprintf(gen->output, "%s", cell);
+                    continue;
+                }
+                fprintf(gen->output, "%s %s", ctype, captures[i]);
             }
             fprintf(gen->output, ") {\n");
             fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
@@ -3281,9 +3814,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
                             capture_owning_struct(gen, captures[i], parent_func), captures[i]);
                 } else if (capture_is_promoted(gen, captures[i], parent_func)) {
                     /* env owns a reference to the shared cell (#2019) */
-                    const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
-                    fprintf(gen->output, "    _e->%s = (%s*)_aether_cell_retain(%s);\n",
-                            captures[i], ctype, captures[i]);
+                    char cell[600];
+                    promoted_cell_pointer(lookup_var_c_type(gen, captures[i], parent_func),
+                                          NULL, cell, sizeof(cell));
+                    fprintf(gen->output, "    _e->%s = (%s)_aether_cell_retain(%s);\n",
+                            captures[i], cell, captures[i]);
                 } else if (capture_is_retained_string(gen, captures[i], parent_func)) {
                     /* env owns a reference — see aether_str_capture preamble */
                     const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
@@ -3758,6 +4293,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
     codegen_note_diag_pos(expr);
+
+    /* #2478: an operand already evaluated into a temp, in source order. */
+    if (g_order_count > 0) {
+        const char* sub = order_lookup(expr);
+        if (sub) {
+            fprintf(gen->output, "%s", sub);
+            return;
+        }
+    }
+    if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
 
     /* #1286: a `T*` from C, read as a `T[]`, becomes an unbounded view. */
     if (g_slice_view_wrapping != expr && expr_is_c_view_of_slice(gen, expr) &&
@@ -7724,9 +8269,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 capture_owning_struct(gen, captures[i], cl_parent_func), captures[i]);
                     } else if (capture_is_promoted(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference to the shared cell (#2019) */
-                        const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);
-                        fprintf(gen->output, "_e->%s = (%s*)_aether_cell_retain(%s); ",
-                                captures[i], ctype, captures[i]);
+                        char cell[600];
+                        promoted_cell_pointer(lookup_var_c_type(gen, captures[i], cl_parent_func),
+                                              NULL, cell, sizeof(cell));
+                        fprintf(gen->output, "_e->%s = (%s)_aether_cell_retain(%s); ",
+                                captures[i], cell, captures[i]);
                     } else if (capture_is_retained_string(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference — see aether_str_capture preamble */
                         const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);

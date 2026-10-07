@@ -250,6 +250,16 @@ a closure owned and freed by an extern — leaked one cell per call.)
 The count is a plain integer, like the string reference count it mirrors:
 a closure env is not shared between threads.
 
+A fixed-size array the closure writes (`arr[i] = v`, `arr[i]++`, a whole
+`arr = [...]`) is a cell too (#2474): a pointer to the whole array,
+`int (*arr)[3]`, so `(*arr)`, which every use of a promoted name reads,
+is the array itself, and indexing, `.len`, passing it as a slice and
+nested closures read it as they read the array. A string array's cell
+owns its elements, as a string cell owns its one: a store frees the
+element it replaces and takes a buffer of its own, and the last release
+frees every element. An actor's state array is not a capture: a closure
+in a handler that writes one is refused, as for any state field.
+
 A cell first assigned inside a loop body or an if-arm is hoisted ahead of
 that loop or branch like any other such variable (#2024): declared as the
 cell, zero-filled, at the hoisting scope, and released when that scope

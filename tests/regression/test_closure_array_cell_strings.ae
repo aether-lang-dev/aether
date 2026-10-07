@@ -1,0 +1,131 @@
+// Regression (#2474): a fixed-size array a closure writes lives in a shared
+// cell, and a string array's cell owns its elements.
+//
+// A closure that wrote into a captured fixed-size array (`names[0] = v`,
+// `names = [...]`) was refused at compile time: the shared cell a written
+// capture is promoted to was spelled `T* name`, and `string[3]*` is no C
+// declarator, while a copy capture would have lost the write. The cell is
+// now a pointer to the whole array, `const char* (*names)[3]`, shared by
+// the function and every closure that captures the array.
+//
+// The cell owns the strings it holds, as a string cell owns its one: a
+// store frees the element it replaces and takes a buffer of its own (a
+// fresh value is adopted, a heap local moved or copied, a borrow or a view
+// copied), and its last release frees every element. An element read into
+// a local is copied, so replacing the element does not free what the local
+// holds. The checks read each value after it was replaced; the rounds at the
+// end check that nothing leaks, by the C allocator's own count, and the
+// macOS leaks gate runs this program too. Every string is built from a
+// parameter: `string.concat` of two literals folds to a literal, which owns
+// nothing and would hide both a double free and a leak.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+apply(f: fn) { f() }
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+join(xs: string[]) -> string {
+    out = ""
+    for i in 0..xs.len {
+        out = string.concat(out, xs[i])
+    }
+    return out
+}
+
+// Stores from closures and from the function itself: fresh, borrowed
+// (a parameter and a literal), a heap local on its last use and one read
+// again, another element, and a whole-array replace that reads the array.
+stores(a: string, b: string) {
+    string[3] names = ["x", "y", "z"]
+    t = string.concat(a, "-t")
+    u = string.concat(a, "-u")
+    apply(|| { names[0] = string.concat(a, "-0") })
+    apply(|| { names[1] = b })
+    apply(|| { names[2] = "lit" })
+    check("fresh", names[0], "p-0")
+    check("borrowed", names[1], "q")
+    check("literal", names[2], "lit")
+    kept = names[0]
+    apply(|| { names[0] = string.concat(names[0], "!") })
+    check("kept copy", kept, "p-0")
+    check("self", names[0], "p-0!")
+    names[1] = t
+    names[2] = u
+    check("read again", u, "p-u")
+    check("moved", names[1], "p-t")
+    names[2] = names[1]
+    apply(|| { names = [names[2], string.concat(b, "-w"), names[0]] })
+    check("whole 0", names[0], "p-t")
+    check("whole 1", names[1], "q-w")
+    check("whole 2", names[2], "p-0!")
+    check("joined", join(names), "p-tq-wp-0!")
+}
+
+// A nested closure writes the array an outer closure also writes; a loop
+// stores into it through a closure made each pass.
+nested(a: string) -> string {
+    string[2] log = ["", ""]
+    outer = || {
+        inner = || { log[1] = string.concat(log[1], a) }
+        inner()
+        inner()
+        log[0] = string.concat(log[0], "o")
+    }
+    outer()
+    i = 0
+    while i < 3 {
+        step = || { log[0] = string.concat(log[0], string.from_int(i)) }
+        step()
+        i = i + 1
+    }
+    return string.concat(log[0], log[1])
+}
+
+// A closure that keeps the array outlives the function: it holds a
+// reference to the cell and frees the elements when it is released.
+keeper(a: string) -> fn {
+    string[2] box = [string.concat(a, "-k"), ""]
+    grow_box = || {
+        box[1] = string.concat(box[1], box[0])
+        return box[1]
+    }
+    return grow_box
+}
+
+run_all(p: string, q: string) {
+    stores(p, q)
+    check("nested", nested(p), "o012pp")
+    g = keeper(p)
+    check("keeper 1", call(g), "p-k")
+    check("keeper 2", call(g), "p-kp-k")
+}
+
+main() {
+    p = string.concat("p", "")
+    q = string.concat("q", "")
+    run_all(p, q)
+    if mem.heap_in_use() >= 0 {
+        run_all(p, q)
+        start_bytes = mem.heap_in_use()
+        k = 0
+        while k < 60 {
+            run_all(p, q)
+            k = k + 1
+        }
+        end_bytes = mem.heap_in_use()
+        if end_bytes - start_bytes > 16384 {
+            println("FAIL: 60 rounds grew the heap by ${end_bytes - start_bytes} bytes")
+            exit(1)
+        }
+    }
+    println("=== test_closure_array_cell_strings: all passed ===")
+}

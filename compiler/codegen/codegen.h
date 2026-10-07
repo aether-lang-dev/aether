@@ -414,6 +414,12 @@ typedef struct {
      * hold a caller's string, so an owned string argument to any closure
      * call is freed after it (compute_closure_args_borrowed). */
     int    closure_args_borrowed;
+    /* #2478: what calling each function of the program can change (a module
+     * global, memory a parameter reaches), memoised per definition by
+     * order_fn_effects in codegen_expr.c. */
+    struct OrderFnEffects* order_fn_effects;
+    int    order_fn_effect_count;
+    int    order_fn_effect_capacity;
 
     // Closure support: track closures for hoisted C function generation
     int closure_counter;    // unique ID for closure env structs and functions

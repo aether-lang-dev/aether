@@ -5298,76 +5298,6 @@ static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* tab
     }
 }
 
-/* #2474: a closure may not write into a fixed-size array it captures.
- *
- * A capture the closure writes is promoted to a heap cell shared with the
- * enclosing function. A sized array's C type (`int[3]`) is not a
- * declarator, so its cell cannot be spelled yet, and a copy capture would
- * take the write into the closure's own copy, where it is silently lost.
- * Until cells support arrays, the write is refused here with a pointer to
- * the issue, rather than miscompiling. */
-static const char* closure_write_root(ASTNode* lhs) {
-    /* The variable an assignment target writes: the name itself, or the
-     * root of a target reached through a field or an index; NULL for any
-     * other shape. */
-    while (lhs) {
-        if (lhs->type == AST_IDENTIFIER) return lhs->value;
-        if ((lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
-            lhs->child_count > 0) {
-            lhs = lhs->children[0];
-            continue;
-        }
-        return NULL;
-    }
-    return NULL;
-}
-
-/* #2474: a closure that writes a captured fixed-size array, whole or an
- * element, is refused. In a closure body `arr = ...` on a name the
- * enclosing scope has is a write to that variable, not a new local, as
- * `arr[i] = v` is; either needs the shared cell a sized array cannot be
- * given yet, and without it the write would be lost. */
-static void check_closure_array_writes(ASTNode* n, ASTNode* closure, SymbolTable* outer) {
-    if (!n || n->type == AST_CLOSURE) return;   /* a nested closure checks itself */
-    const char* root = NULL;
-    if ((n->type == AST_BINARY_EXPRESSION || n->type == AST_ASSIGNMENT) && n->child_count >= 1 &&
-        (n->type == AST_ASSIGNMENT ||
-         (n->value && (strcmp(n->value, "=") == 0 ||
-                       (n->value[0] && n->value[1] == '=' && n->value[2] == '\0' &&
-                        strchr("+-*/%&|^", n->value[0]) != NULL) ||
-                       strcmp(n->value, "<<=") == 0 || strcmp(n->value, ">>=") == 0)))) {
-        root = closure_write_root(n->children[0]);
-    } else if (n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
-               (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0)) {
-        root = closure_write_root(n->children[0]);
-    } else if (n->type == AST_VARIABLE_DECLARATION) {
-        root = n->value;
-    }
-    if (root) {
-        int is_param = 0;
-        for (int i = 0; i < closure->child_count; i++) {
-            ASTNode* p = closure->children[i];
-            if (p && p->type == AST_CLOSURE_PARAM && p->value && strcmp(p->value, root) == 0) is_param = 1;
-        }
-        if (!is_param) {
-            Symbol* s = lookup_symbol(outer, root);
-            if (s && s->type && type_is_sized_array(s->type)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
-                         "a closure cannot write to '%s', a fixed-size array it captures: "
-                         "the write would not reach the enclosing function's array (#2474)",
-                         root);
-                aether_error_with_suggestion(msg, n->line, n->column,
-                    "hold the values in a list, or wrap the array in a struct and capture the struct");
-                error_count++;
-                return;
-            }
-        }
-    }
-    for (int i = 0; i < n->child_count; i++)
-        check_closure_array_writes(n->children[i], closure, outer);
-}
-
 int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return 0;
     
@@ -9242,7 +9172,6 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* child = expr->children[i];
                 if (child && child->type == AST_BLOCK) {
-                    check_closure_array_writes(child, expr, table);   /* #2474 */
                     for (int j = 0; j < child->child_count; j++) {
                         typecheck_statement(child->children[j], closure_scope);
                     }

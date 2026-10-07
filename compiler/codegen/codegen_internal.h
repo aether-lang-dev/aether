@@ -92,6 +92,13 @@ int interp_segment_is_text(ASTNode* ch);
 int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch);
 int interp_order_hoist_boundary(ASTNode* interp);
 const char* interp_temp_c_type(Type* t);
+/* #2478: the elements of an initializer list (an array literal, a returned
+ * tuple) evaluated into temps, in source order, ahead of the statement the
+ * list feeds; generate_statement releases the bindings when the statement
+ * ends (order_prelude_end of the depth it saw). See codegen_expr.c. */
+void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char* target);
+int order_prelude_depth(void);
+void order_prelude_end(int depth);
 /* Whether the discarded error slot of an `or`-expression's fallible is a
  * heap-owned string the `or` lowering must release (vs a raw literal it
  * must not free). See the definition in codegen_stmt.c. */
@@ -276,8 +283,14 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
  * C text `init_text`. The cell is reference-counted, so the release is
  * always sound; see the _AeCellHeader helpers in the generated prologue. */
 void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
-                                    const char* c_type, ASTNode* init_expr,
-                                    const char* init_text, int line, int column);
+                                    const char* c_type, Type* var_type,
+                                    ASTNode* init_expr, const char* init_text,
+                                    int line, int column);
+/* #2474: a cell holding a fixed-size array (`E[N]`) is a pointer to the
+ * whole array, `E (*name)[N]`; see the definitions in codegen_stmt.c. */
+int promoted_cell_array_len(const char* c_type, char* elem, size_t n);
+void promoted_cell_pointer(const char* c_type, const char* name,
+                           char* out, size_t n);
 /* The cell for a promoted PARAMETER (a function's or a closure's), seeded
  * from the C parameter `param_cname`; see the definition for why a string
  * cell takes its own reference. */
