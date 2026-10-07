@@ -183,7 +183,7 @@ to_iso8601(dt: DateTime) -> string {
         rest = dt
         rest.year = 0
         tail = string.substring(to_iso8601(rest), 4, 20)
-        ay = dt.year as long   // long: negating INT_MIN in int wraps
+        ay = dt.year as long // long: negating INT_MIN in int wraps
         sign = ""
         if ay < 0 {
             ay = 0 - ay
