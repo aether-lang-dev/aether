@@ -2885,7 +2885,7 @@ const char* get_aether_include_flags(const char* c_file) {
 // is set, so each platform keeps its existing default (gcc on POSIX,
 // WinLibs/gcc on Windows).
 // --------------------------------------------------------------------------
-static const char* c_backend_env_override(void) {
+const char* c_backend_env_override(void) {
     const char* cc = getenv("AE_CC");
     if (cc && *cc) return cc;
     cc = getenv("CC");

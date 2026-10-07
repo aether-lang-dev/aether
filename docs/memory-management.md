@@ -573,7 +573,7 @@ A capturing closure **bound to a local** (`g = || { ... }`) has its environment 
 
 Strings returned from a function whose ownership the compiler can't infer (e.g. an opaque C extern returning `char*` without an `@heap` annotation) need the usual `defer free(s)` pattern, same as any other heap allocation. The automatic tracker covers in-Aether assignments, annotated extern returns, and non-escaped function-scope locals.
 
-Raw-pointer structs reached through a cast (`p as *Slot`, with `malloc`/`free`) are outside the field heap-string tracker, a field write through a raw cast is a plain store with no reassign-free. Manage those fields' strings explicitly (free the old value before overwriting; free fields before the struct), exactly as in C.
+A field store frees the previous string only through a pointer the compiler can see is a `heap.new(T)` box, since only there is the `_heap_<field>` tracker known to be initialised (#1873, #2369). It follows the pointer back to where it was made: `heap.new(T)` itself, a function every `return` of which is such a box, a local every binding of which is one, a struct field every store into which (anywhere in the program) is one, or a cast of one to the same `*T`. Through any other pointer (a parameter, a list element, a C function's result, a `malloc(...) as *T` box) the store records ownership in the tracker but does not free the previous value. Raw-pointer structs made with `malloc` have garbage trackers, so manage their fields' strings explicitly (free the old value before overwriting; free fields before the struct), exactly as in C.
 
 ---
 

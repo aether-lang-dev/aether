@@ -715,6 +715,133 @@ int extras_next(const char** cursor, char* out, size_t out_size) {
     return 1;
 }
 
+/* #2477: find `prog` the way the build's spawn will, writing the file's path
+ * to `out`. A name with a directory part is taken as it stands; a bare name
+ * is searched along PATH (posix_spawnp on POSIX; _spawnvp on Windows, which
+ * also tries the current directory first and the .com/.exe/.bat/.cmd
+ * extensions of an extensionless name). Returns 0 when nothing is found. */
+static int resolve_program(const char* prog, char* out, size_t out_size) {
+    if (!prog || !prog[0]) return 0;
+#ifdef _WIN32
+    static const char* const exts[] = { "", ".com", ".exe", ".bat", ".cmd" };
+    const char* base = prog;
+    for (const char* p = prog; *p; p++) {
+        if (*p == '/' || *p == '\\' || *p == ':') base = p + 1;
+    }
+    /* An extensionless name is tried with each extension only, as _spawnvp
+     * does: a bare `gcc` file (an MSYS shell script, say) is not run. */
+    int has_ext = strchr(base, '.') != NULL;
+    int ext_from = has_ext ? 0 : 1, ext_to = has_ext ? 1 : 5;
+    int has_dir = base != prog;
+    const char* path = has_dir ? "" : getenv("PATH");
+    /* Directory 0 is the name as given (the current directory for a bare
+     * name), then each PATH entry in order. */
+    const char* cursor = path ? path : "";
+    int first = 1;
+    while (first || *cursor) {
+        char dir[1024] = "";
+        if (!first) {
+            size_t len = strcspn(cursor, ";");
+            if (len >= sizeof(dir)) len = sizeof(dir) - 1;
+            memcpy(dir, cursor, len);
+            dir[len] = '\0';
+            cursor += len;
+            if (*cursor == ';') cursor++;
+            if (!dir[0]) continue;
+        }
+        for (int e = ext_from; e < ext_to; e++) {
+            char cand[1200];
+            if (first) snprintf(cand, sizeof(cand), "%s%s", prog, exts[e]);
+            else snprintf(cand, sizeof(cand), "%s\\%s%s", dir, prog, exts[e]);
+            struct stat st;
+            if (stat(cand, &st) == 0 && !(st.st_mode & S_IFDIR)) {
+                snprintf(out, out_size, "%s", cand);
+                return 1;
+            }
+        }
+        if (first && has_dir) return 0;
+        first = 0;
+    }
+    return 0;
+#else
+    if (strchr(prog, '/')) {
+        if (access(prog, X_OK) != 0) return 0;
+        snprintf(out, out_size, "%s", prog);
+        return 1;
+    }
+    const char* path = getenv("PATH");
+    const char* cursor = path ? path : "/usr/bin:/bin";
+    for (;;) {
+        size_t len = strcspn(cursor, ":");
+        char dir[1024];
+        if (len >= sizeof(dir)) len = sizeof(dir) - 1;
+        memcpy(dir, cursor, len);
+        dir[len] = '\0';
+        char cand[1200];
+        /* An empty PATH entry is the current directory. */
+        snprintf(cand, sizeof(cand), "%s/%s", dir[0] ? dir : ".", prog);
+        struct stat st;
+        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode) && access(cand, X_OK) == 0) {
+            snprintf(out, out_size, "%s", cand);
+            return 1;
+        }
+        cursor += len;
+        if (*cursor != ':') break;
+        cursor++;
+    }
+    return 0;
+#endif
+}
+
+/* #2477: the identity of the C compiler the build will run.
+ *
+ * The key covered the source, aetherc, ae, libaether and the flags, but not
+ * the C compiler. The same source built under a different gcc (another one
+ * first on PATH, an upgrade, $CC pointing elsewhere) was served the binary
+ * the previous compiler made, reported as a cache hit; a GCC 16 build handed
+ * back GCC 15's executable byte for byte, crash included.
+ *
+ * The selection mirrors build_gcc_cmd: $AE_CC / $CC verbatim (it may carry
+ * flags, or a launcher such as `ccache gcc`), else `gcc`, else on POSIX `cc`,
+ * else on Windows the WinLibs gcc ae installs. The spec string is folded in,
+ * and each word of it that names a program is resolved as the spawn will
+ * resolve it, folding the path and the file's content: another file is
+ * another compiler, and one upgraded in place has other bytes. Computed once
+ * per process; it reads the compiler driver once, about what hashing aetherc
+ * costs. */
+static unsigned long long c_compiler_fingerprint(void) {
+    static int done = 0;
+    static unsigned long long fp = 0;
+    if (done) return fp;
+    done = 1;
+    char spec[1200];
+    const char* ov = c_backend_env_override();
+    char resolved[1200];
+    if (ov) {
+        snprintf(spec, sizeof(spec), "%s", ov);
+    } else if (resolve_program("gcc", resolved, sizeof(resolved))) {
+        snprintf(spec, sizeof(spec), "gcc");
+    } else {
+#ifdef _WIN32
+        snprintf(spec, sizeof(spec), "%s\\.aether\\tools\\mingw64\\bin\\gcc.exe",
+                 get_home_dir());
+#else
+        snprintf(spec, sizeof(spec), "cc");
+#endif
+    }
+    unsigned long long h = fnv64_str(spec);
+    const char* cursor = spec;
+    char word[1024];
+    while (extras_next(&cursor, word, sizeof(word))) {
+        if (word[0] == '-' || strchr(word, '=')) continue;
+        if (!resolve_program(word, resolved, sizeof(resolved))) continue;
+        h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
+        h = (h * 1099511628211ULL) ^ fnv64_file(resolved);
+    }
+    fp = h ? h : 1ULL;
+    return fp;
+}
+
 unsigned long long compute_cache_key(const char* ae_file,
                                             const char* extra_files,
                                             const char* opt_level,
@@ -748,6 +875,9 @@ unsigned long long compute_cache_key(const char* ae_file,
         unsigned long long ae_hash = fnv64_file(self_path);
         if (ae_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ae=%016llx", ae_hash);
     }
+    /* #2477: and the C compiler that turns aetherc's output into the binary. */
+    pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ccid=%016llx",
+                    c_compiler_fingerprint());
     if (tc.has_lib) {
         unsigned long long lib_hash = fnv64_file(tc.lib);
         if (lib_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=%016llx", lib_hash);

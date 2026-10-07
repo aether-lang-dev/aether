@@ -171,6 +171,9 @@ void init_cache_dir(void);
 void tc_lib_dir_append(const char* spec);
 unsigned long long compute_cache_key(const char* ae_file, const char* extra_files,
                                      const char* opt_level, const char* extra_salt);
+/* $AE_CC, else $CC, else NULL: the C-backend compiler the user picked (ae.c).
+ * The cache key folds in the compiler it names (#2477). */
+const char* c_backend_env_override(void);
 /* The extra C sources of a build (--extra, [[bin]] extra_sources) travel as
  * ONE space-separated string that goes onto the compiler command as-is. A
  * path with a space is stored double-quoted, so the shell sees one argument;

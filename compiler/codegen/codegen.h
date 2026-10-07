@@ -145,6 +145,12 @@ typedef struct {
     StrMap actor_ptr_fields;
     int actor_ptr_fields_ready;
 
+    // #2369: answers to "does this function / struct field / local always
+    // hold a heap.new box?" (codegen_stmt.c, zb_*), keyed by the question.
+    // The field and local questions walk the program or a function body, so
+    // each is answered once.
+    StrMap zeroed_box_memo;
+
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
     ASTNode* defer_stack[MAX_DEFER_STACK];
     // #1140: parallel to defer_stack — which exits this defer fires on.

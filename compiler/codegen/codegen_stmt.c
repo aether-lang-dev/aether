@@ -2029,6 +2029,390 @@ static int is_ptr_struct_param(CodeGenerator* gen, const char* name) {
     return 0;
 }
 
+/* #2369: zero-initialised box provenance.
+ *
+ * Releasing a string field's previous value reads the box's `_heap_<field>`
+ * tracker, and that read is only sound on a box whose trackers are known to
+ * be initialised (#1873): heap.new(T) calloc's the box, and every Aether store
+ * after that keeps the trackers truthful, while `malloc(n) as *T` leaves them
+ * garbage. #790 could only see that for a local bound to heap.new in the same
+ * function. A box returned by a constructor, held in another struct's pointer
+ * field, or passed through a `ptr` and cast back was of unknown origin, so the
+ * store never released the old value and every replaced string leaked.
+ *
+ * zb_expr answers "does this expression always yield a heap.new(T) box, or
+ * null?" by following the value back to where it was made:
+ *   - heap.new(T), and null / none (a store through null faults anyway);
+ *   - a cast (`x as *T`, `x as ptr`) of such a value. The cast does not
+ *     touch the memory, but a box of another struct has its trackers at other
+ *     offsets, so the struct must be the same T;
+ *   - a call to an Aether function every `return` of which is such a value;
+ *   - a local every binding of which, anywhere in its function, is such a
+ *     value (flow-insensitive, so a loop that rebinds it later still counts);
+ *   - a struct field every store into which, anywhere in the program (struct
+ *     literals included), is such a value.
+ * Everything else, a parameter, a C extern's result, a list element, a
+ * global, is of unknown origin and answers no, which keeps the #1873
+ * behaviour for it. "No" is always the safe answer, so a cycle or the depth
+ * limit resolves to it. */
+#define ZB_MAX_DEPTH 24
+#define ZB_IN_PROGRESS ((void*)1)
+#define ZB_YES ((void*)2)
+#define ZB_NO ((void*)3)
+
+static int zb_expr(CodeGenerator* gen, ASTNode* e, ASTNode* ctx,
+                   const char* sname, int depth);
+
+static const char* zb_struct_of(Type* t) {
+    if (!t) return NULL;
+    if (t->kind == TYPE_STRUCT) return t->struct_name;
+    if (t->kind == TYPE_PTR && t->element_type &&
+        t->element_type->kind == TYPE_STRUCT) return t->element_type->struct_name;
+    return NULL;
+}
+
+static int zb_is_name(ASTNode* n, const char* name) {
+    return n && n->type == AST_IDENTIFIER && n->value && strcmp(n->value, name) == 0;
+}
+
+static int zb_mentions(ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (n->value && strcmp(n->value, name) == 0) return 1;
+    for (int i = 0; i < n->child_count; i++) {
+        if (zb_mentions(n->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+/* A node whose `value` names something other than a binding of a local:
+ * a use, a field, a callee, a type. Any other node spelling the name (a
+ * pattern variable, a closure parameter, a catch binding) binds it in a way
+ * the walk below does not follow, so the local is of unknown origin. */
+static int zb_value_not_a_binding(ASTNode* n) {
+    switch (n->type) {
+        case AST_IDENTIFIER: case AST_MEMBER_ACCESS: case AST_OPTIONAL_CHAIN:
+        case AST_FUNCTION_CALL: case AST_LITERAL: case AST_NAMED_ARG:
+        case AST_HEAP_NEW: case AST_STRUCT_LITERAL: case AST_PTR_AS_STRUCT_CAST:
+        case AST_SIZEOF: case AST_OFFSETOF:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Is every binding of local `name` under `n` a zeroed `sname` box? Sets
+ * `*found` when it sees one, so a name never bound here (a global, a capture
+ * the closure does not bind) is not mistaken for a local. */
+static int zb_bindings(CodeGenerator* gen, ASTNode* n, ASTNode* ctx, const char* name,
+                       const char* sname, int depth, int* found) {
+    if (!n) return 1;
+    switch (n->type) {
+        case AST_VARIABLE_DECLARATION:
+            if (n->value && strcmp(n->value, name) == 0) {
+                *found = 1;
+                /* No initialiser: a tuple-destructure target or a bare typed
+                 * declaration, bound to something this walk cannot see. */
+                if (n->child_count == 0 || !n->children[0]) return 0;
+                if (!zb_expr(gen, n->children[0], ctx, sname, depth + 1)) return 0;
+            }
+            break;
+        case AST_ASSIGNMENT:
+        case AST_BINARY_EXPRESSION:
+            if (n->child_count >= 2 && zb_is_name(n->children[0], name) &&
+                (n->type == AST_ASSIGNMENT || (n->value && strcmp(n->value, "=") == 0))) {
+                *found = 1;
+                if (!zb_expr(gen, n->children[1], ctx, sname, depth + 1)) return 0;
+            }
+            break;
+        case AST_COMPOUND_ASSIGNMENT:
+            if (n->child_count >= 1 && zb_is_name(n->children[0], name)) return 0;
+            break;
+        case AST_UNARY_EXPRESSION:
+            /* `&b` can be written through; `b++` rebinds it. */
+            if (n->child_count >= 1 && zb_is_name(n->children[0], name) && n->value &&
+                (strcmp(n->value, "&") == 0 || strcmp(n->value, "++") == 0 ||
+                 strcmp(n->value, "--") == 0)) return 0;
+            break;
+        default:
+            if (n->value && strcmp(n->value, name) == 0 && !zb_value_not_a_binding(n))
+                return 0;
+            break;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        if (!zb_bindings(gen, n->children[i], ctx, name, sname, depth, found)) return 0;
+    }
+    return 1;
+}
+
+static int zb_memo_get(CodeGenerator* gen, const char* key, int* answer) {
+    void* v = strmap_get(&gen->zeroed_box_memo, key);
+    if (!v) return 0;
+    *answer = (v == ZB_YES);
+    return 1;
+}
+
+static int zb_contains(ASTNode* n, ASTNode* target) {
+    if (!n) return 0;
+    if (n == target) return 1;
+    for (int i = 0; i < n->child_count; i++) {
+        if (zb_contains(n->children[i], target)) return 1;
+    }
+    return 0;
+}
+
+/* The function, main or builder whose body holds `closure`, or NULL (a
+ * closure in an actor handler or a global initialiser). */
+static ASTNode* zb_enclosing_function(CodeGenerator* gen, ASTNode* closure) {
+    if (!gen->program) return NULL;
+    char key[64];
+    snprintf(key, sizeof(key), "P|%p", (void*)closure);
+    void* v = strmap_get(&gen->zeroed_box_memo, key);
+    if (v) return v == ZB_NO ? NULL : (ASTNode*)v;
+    ASTNode* found = NULL;
+    for (int i = 0; !found && i < gen->program->child_count; i++) {
+        ASTNode* d = gen->program->children[i];
+        if (d && (d->type == AST_FUNCTION_DEFINITION || d->type == AST_MAIN_FUNCTION ||
+                  d->type == AST_BUILDER_FUNCTION) && zb_contains(d, closure))
+            found = d;
+    }
+    strmap_put(&gen->zeroed_box_memo, key, found ? (void*)found : ZB_NO);
+    return found;
+}
+
+static int zb_local(CodeGenerator* gen, ASTNode* ctx, const char* name,
+                    const char* sname, int depth) {
+    if (!ctx || !name) return 0;
+    if (is_module_global_var(gen, name)) return 0;
+    /* Inside a closure the name is either the closure's own or a capture,
+     * and a closure's write to a capture is a write to the captured
+     * variable (#2458). Both are bindings somewhere in the enclosing
+     * function's body, closures included, so that body is the scope to
+     * walk; a closure parameter of the name anywhere in it is refused by
+     * the walk, which keeps a shadowing parameter from passing as the
+     * captured box. */
+    if (ctx->type == AST_CLOSURE) ctx = zb_enclosing_function(gen, ctx);
+    if (!ctx) return 0;
+    ASTNode* body;
+    if (ctx->type == AST_FUNCTION_DEFINITION || ctx->type == AST_MAIN_FUNCTION ||
+        ctx->type == AST_BUILDER_FUNCTION) {
+        if (ctx->child_count == 0) return 0;
+        /* A parameter: its value is whatever the caller passed. */
+        for (int i = 0; i < ctx->child_count - 1; i++) {
+            if (zb_mentions(ctx->children[i], name)) return 0;
+        }
+        body = ctx->children[ctx->child_count - 1];
+    } else {
+        return 0;
+    }
+    char key[512];
+    snprintf(key, sizeof(key), "L|%p|%s|%s", (void*)ctx, name, sname);
+    int answer;
+    if (zb_memo_get(gen, key, &answer)) return answer;
+    strmap_put(&gen->zeroed_box_memo, key, ZB_IN_PROGRESS);
+    int found = 0;
+    answer = zb_bindings(gen, body, ctx, name, sname, depth, &found) && found;
+    strmap_put(&gen->zeroed_box_memo, key, answer ? ZB_YES : ZB_NO);
+    return answer;
+}
+
+static int zb_returns(CodeGenerator* gen, ASTNode* n, ASTNode* fn, const char* sname,
+                      int depth, int* saw) {
+    if (!n) return 1;
+    if (n->type == AST_CLOSURE) return 1;   /* its returns are its own */
+    if (n->type == AST_RETURN_STATEMENT) {
+        *saw = 1;
+        return n->child_count > 0 && zb_expr(gen, n->children[0], fn, sname, depth + 1);
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        if (!zb_returns(gen, n->children[i], fn, sname, depth, saw)) return 0;
+    }
+    return 1;
+}
+
+/* Does anything in the program bind `name` as a variable: a local, a
+ * parameter, a closure parameter, a pattern, a global? A call spelled with
+ * such a name may invoke that variable's closure rather than the top-level
+ * function of the same name, so the function's returns say nothing about it. */
+static int zb_binds_name(ASTNode* n, const char* name) {
+    if (!n) return 0;
+    switch (n->type) {
+        case AST_FUNCTION_DEFINITION: case AST_BUILDER_FUNCTION:
+            for (int i = 0; i + 1 < n->child_count; i++) {
+                if (zb_mentions(n->children[i], name)) return 1;
+            }
+            break;
+        case AST_ASSIGNMENT: case AST_BINARY_EXPRESSION:
+            if (n->child_count >= 2 && zb_is_name(n->children[0], name) &&
+                (n->type == AST_ASSIGNMENT || (n->value && strcmp(n->value, "=") == 0)))
+                return 1;
+            break;
+        case AST_IDENTIFIER: case AST_MEMBER_ACCESS: case AST_OPTIONAL_CHAIN:
+        case AST_FUNCTION_CALL: case AST_LITERAL: case AST_NAMED_ARG:
+            break;
+        default:
+            /* Declarations, closure parameters, patterns, state. */
+            if (n->value && strcmp(n->value, name) == 0) return 1;
+            break;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        if (zb_binds_name(n->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+static int zb_call(CodeGenerator* gen, const char* name, const char* sname, int depth) {
+    if (!name || !gen->program) return 0;
+    char key[512];
+    snprintf(key, sizeof(key), "R|%s|%s", name, sname);
+    int answer;
+    if (zb_memo_get(gen, key, &answer)) return answer;
+    char bkey[512];
+    snprintf(bkey, sizeof(bkey), "B|%s", name);
+    int bound;
+    if (!zb_memo_get(gen, bkey, &bound)) {
+        bound = is_module_global_var(gen, name);
+        for (int i = 0; !bound && i < gen->program->child_count; i++) {
+            ASTNode* d = gen->program->children[i];
+            /* The definitions themselves name it; look inside them. */
+            if (d && (d->type == AST_FUNCTION_DEFINITION || d->type == AST_EXTERN_FUNCTION ||
+                      d->type == AST_BUILDER_FUNCTION) &&
+                d->value && strcmp(d->value, name) == 0) {
+                for (int j = 0; !bound && j < d->child_count; j++)
+                    bound = zb_binds_name(d->children[j], name);
+                continue;
+            }
+            bound = zb_binds_name(d, name);
+        }
+        strmap_put(&gen->zeroed_box_memo, bkey, bound ? ZB_YES : ZB_NO);
+    }
+    if (bound) {
+        strmap_put(&gen->zeroed_box_memo, key, ZB_NO);
+        return 0;
+    }
+    strmap_put(&gen->zeroed_box_memo, key, ZB_IN_PROGRESS);
+    /* Every definition of the name must qualify (a guarded function has one
+     * per clause); an extern or anything else of that name does not. */
+    int defs = 0;
+    answer = 1;
+    for (int i = 0; answer && i < gen->program->child_count; i++) {
+        ASTNode* d = gen->program->children[i];
+        if (!d || !d->value || strcmp(d->value, name) != 0) continue;
+        if (d->type != AST_FUNCTION_DEFINITION || d->child_count == 0) { answer = 0; break; }
+        int saw = 0;
+        answer = zb_returns(gen, d->children[d->child_count - 1], d, sname, depth, &saw) && saw;
+        defs++;
+    }
+    answer = answer && defs > 0;
+    strmap_put(&gen->zeroed_box_memo, key, answer ? ZB_YES : ZB_NO);
+    return answer;
+}
+
+/* Does `lhs` name field `field` of struct `owner`? 1 yes, 0 no, -1 when it
+ * names a field of that name on an object whose type is not known. */
+static int zb_names_field(ASTNode* lhs, const char* owner, const char* field) {
+    if (!lhs || !lhs->value || strcmp(lhs->value, field) != 0) return 0;
+    if (lhs->type == AST_OPTIONAL_CHAIN) return -1;
+    if (lhs->type != AST_MEMBER_ACCESS) return 0;
+    const char* s = (lhs->child_count > 0 && lhs->children[0])
+                    ? zb_struct_of(lhs->children[0]->node_type) : NULL;
+    if (!s) return -1;
+    return strcmp(s, owner) == 0;
+}
+
+static int zb_field_stores(CodeGenerator* gen, ASTNode* n, ASTNode* ctx, const char* owner,
+                           const char* field, const char* sname, int depth) {
+    if (!n) return 1;
+    /* A closure keeps its enclosing function as the scope (see zb_local). */
+    if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_MAIN_FUNCTION ||
+        n->type == AST_BUILDER_FUNCTION) {
+        ctx = n;
+    } else if (n->type == AST_ACTOR_DEFINITION) {
+        ctx = NULL;
+    }
+    if ((n->type == AST_ASSIGNMENT ||
+         (n->type == AST_BINARY_EXPRESSION && n->value && strcmp(n->value, "=") == 0)) &&
+        n->child_count >= 2) {
+        int hit = zb_names_field(n->children[0], owner, field);
+        if (hit < 0) return 0;
+        if (hit && !zb_expr(gen, n->children[1], ctx, sname, depth + 1)) return 0;
+    }
+    if ((n->type == AST_COMPOUND_ASSIGNMENT ||
+         (n->type == AST_UNARY_EXPRESSION && n->value && strcmp(n->value, "&") == 0)) &&
+        n->child_count >= 1 && zb_names_field(n->children[0], owner, field) != 0) {
+        return 0;
+    }
+    if (n->type == AST_STRUCT_LITERAL) {
+        const char* lit = zb_struct_of(n->node_type);
+        for (int i = 0; i < n->child_count; i++) {
+            ASTNode* fi = n->children[i];
+            if (!fi || fi->type != AST_ASSIGNMENT || fi->child_count < 1 || !fi->value ||
+                strcmp(fi->value, field) != 0) continue;
+            if (!lit && !(n->value && strcmp(n->value, owner) == 0)) return 0;
+            if (lit && strcmp(lit, owner) != 0) continue;
+            if (!zb_expr(gen, fi->children[0], ctx, sname, depth + 1)) return 0;
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        if (!zb_field_stores(gen, n->children[i], ctx, owner, field, sname, depth)) return 0;
+    }
+    return 1;
+}
+
+static int zb_field(CodeGenerator* gen, const char* owner, const char* field,
+                    const char* sname, int depth) {
+    if (!gen->program) return 0;
+    char key[512];
+    snprintf(key, sizeof(key), "F|%s|%s|%s", owner, field, sname);
+    int answer;
+    if (zb_memo_get(gen, key, &answer)) return answer;
+    strmap_put(&gen->zeroed_box_memo, key, ZB_IN_PROGRESS);
+    answer = zb_field_stores(gen, gen->program, NULL, owner, field, sname, depth);
+    strmap_put(&gen->zeroed_box_memo, key, answer ? ZB_YES : ZB_NO);
+    return answer;
+}
+
+static int zb_expr(CodeGenerator* gen, ASTNode* e, ASTNode* ctx,
+                   const char* sname, int depth) {
+    if (!e || !sname || depth > ZB_MAX_DEPTH) return 0;
+    switch (e->type) {
+        case AST_NULL_LITERAL:
+        case AST_NONE_LITERAL:
+            return 1;
+        case AST_HEAP_NEW: {
+            const char* made = NULL;
+            if (e->node_type && e->node_type->kind == TYPE_PTR)
+                made = zb_struct_of(e->node_type);
+            if (!made) made = e->value;
+            return made && strcmp(made, sname) == 0;
+        }
+        case AST_PTR_AS_STRUCT_CAST:
+            if (!e->value || strcmp(e->value, sname) != 0) return 0;
+            return e->child_count > 0 && zb_expr(gen, e->children[0], ctx, sname, depth + 1);
+        case AST_VALUE_CAST:
+            if (!e->node_type || e->node_type->kind != TYPE_PTR) return 0;
+            return e->child_count > 0 && zb_expr(gen, e->children[0], ctx, sname, depth + 1);
+        case AST_IDENTIFIER:
+            return zb_local(gen, ctx, e->value, sname, depth + 1);
+        case AST_FUNCTION_CALL:
+            return zb_call(gen, e->value, sname, depth + 1);
+        case AST_MEMBER_ACCESS: {
+            if (!e->value || e->child_count < 1 || !e->children[0]) return 0;
+            const char* owner = zb_struct_of(e->children[0]->node_type);
+            return owner && zb_field(gen, owner, e->value, sname, depth + 1);
+        }
+        default:
+            return 0;
+    }
+}
+
+/* #2369: is the struct pointer `obj`, about to be stored through, known to
+ * be a heap.new box of its own struct type, so its trackers can be read? */
+static int box_trackers_are_initialised(CodeGenerator* gen, ASTNode* obj) {
+    if (!gen || !obj || !obj->node_type || obj->node_type->kind != TYPE_PTR) return 0;
+    const char* sname = zb_struct_of(obj->node_type);
+    return sname && zb_expr(gen, obj, gen->current_function, sname, 0);
+}
+
 /* #1879: emit a NESTED-path field assignment (`o.inner.name = ...`).
  *
  * The identifier-only path below cannot serve this: it splices `obj->value`
@@ -2042,14 +2426,12 @@ static int is_ptr_struct_param(CodeGenerator* gen, const char* name) {
  * times (store, tracker, and the field read) and re-evaluating it would run
  * any side effects more than once.
  *
- * The previous value is NOT freed here, for the #1873 reason. Reading
- * `_heap_<field>` is only safe on a box we can SEE was zero-initialised by
- * heap.new, and an inner struct reached through a pointer field is not
- * visible that way -- it may have come from `malloc(n) as *T`, whose tracker
- * is garbage, and acting on that frees a garbage pointer. Setting the tracker
- * is safe regardless and is what stops the leak; a repeated assignment
- * through a nested path can still drop the earlier value, which is strictly
- * better than a segfault and matches what a pointer parameter already does. */
+ * The previous value is freed only when the inner box is known to be a
+ * heap.new box (#2369, box_trackers_are_initialised): every store into that
+ * pointer field, program-wide, put one there. Otherwise it may have come from
+ * `malloc(n) as *T`, whose tracker is garbage (#1873), and reading it frees a
+ * garbage pointer; the store then only sets the tracker, which is safe
+ * regardless and lets the destructor reclaim the value. */
 static int emit_field_tracker_from_rhs(CodeGenerator* gen, ASTNode* rhs,
                                        const char* tracker_lvalue);
 
@@ -2123,15 +2505,22 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     snprintf(tracker_lv, sizeof(tracker_lv), "%s->_heap_%s", tgt, lhs->value);
     char own[32];
     field_store_take_flag(gen, rhs, own, sizeof(own));
+    int release_old = box_trackers_are_initialised(gen, obj);
     print_indent(gen);
     fprintf(gen->output, "{ %s* %s = ",
             obj_type->element_type->struct_name, tgt);
     generate_expression(gen, obj);
     fprintf(gen->output, ";");
     if (own[0]) fprintf(gen->output, " int %s = 0;", own);
+    if (release_old) {
+        fprintf(gen->output, " const char* _tmp_old = %s->%s;", tgt, lhs->value);
+    }
     fprintf(gen->output, " %s->%s = ", tgt, lhs->value);
     emit_field_store_value(gen, rhs, own);
     fprintf(gen->output, ";");
+    if (release_old) {
+        fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", tracker_lv);
+    }
     /* Move the source var's runtime ownership when the RHS is a heap-var
      * identifier (it may hold a borrow); otherwise the static classification. */
     emit_field_store_tracker(gen, rhs, own, tracker_lv, rhs_is_heap);
@@ -2236,10 +2625,14 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
         /* #1873: a PARAMETER is not a promise that the box was zeroed — the
          * caller may have handed us `malloc(n) as *T`, whose `_heap_<field>`
          * tracker is garbage. Reading it to decide whether to free the
-         * previous value then frees a garbage pointer. Only a local we can
+         * previous value then frees a garbage pointer. Only a box we can
          * SEE was made by heap.new carries that guarantee, so remember which
-         * branch we are on and suppress just the free for the other. */
-        tracker_is_trustworthy = is_heap_box_var(gen, obj->value);
+         * branch we are on and suppress just the free for the other. #2369:
+         * "see" follows the pointer back through calls, casts, locals and
+         * struct fields (box_trackers_are_initialised), not only a local
+         * bound to heap.new in this function. */
+        tracker_is_trustworthy = is_heap_box_var(gen, obj->value) ||
+                                 box_trackers_are_initialised(gen, obj);
         /* Only a heap.new(T) box has zero-initialised `_heap_<field>`
          * trackers, so only there is reading/freeing the previous field
          * value safe. A raw `malloc(...) as *T` has garbage trackers — its

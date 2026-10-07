@@ -453,6 +453,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     strmap_init(&gen->generated_functions);
     strmap_init(&gen->actor_ptr_fields);
     gen->actor_ptr_fields_ready = 0;
+    strmap_init(&gen->zeroed_box_memo);
     // Initialize defer tracking
     gen->defer_count = 0;
     gen->scope_depth = 0;
@@ -771,6 +772,7 @@ void free_code_generator(CodeGenerator* gen) {
         }
         strmap_free(&gen->generated_functions);
         strmap_free(&gen->actor_ptr_fields);
+        strmap_free(&gen->zeroed_box_memo);
         if (gen->extern_registry) {
             for (int i = 0; i < gen->extern_registry_count; i++) {
                 free(gen->extern_registry[i].name);
