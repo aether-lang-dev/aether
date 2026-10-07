@@ -59,6 +59,12 @@ else 16, else 17. So `0.1` is `0.1` and `0.061234567891` keeps every digit.
 A NaN or an infinity has no JSON form and is written as `null`, as
 JavaScript's `JSON.stringify` writes it.
 
+Strings keep every byte. A string or key may hold U+0000 (written
+`\u0000`): `get_string` and `object_entry` return all of it, `str` and
+`object_set` take all of an Aether string, and `stringify` writes the NUL
+back as `\u0000`. `parse` reads the whole of its input, so bytes after a
+NUL are part of the document, not ignored.
+
 ```aether,run
 import std.json
 

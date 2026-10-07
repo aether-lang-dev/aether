@@ -34,7 +34,9 @@ typedef struct {
 } File;
 
 File* file_open_raw(const char* path, const char* mode);
-char* file_read_all_raw(File* file);
+/* The whole file as a refcounted AetherString of all its bytes (NULs
+ * included); release with string_release. NULL on failure. */
+struct AetherString* file_read_all_raw(File* file);
 int file_write_raw(File* file, const char* data, int length);
 int file_close(File* file);
 int file_exists(const char* path);

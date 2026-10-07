@@ -32,9 +32,11 @@ exports(
 
 // ---- raw externs (std/collections/aether_set.c) ----
 extern aether_set_new() -> ptr
-extern aether_set_add(set: ptr, item: string) -> int
-extern aether_set_has(set: ptr, item: string) -> int
-extern aether_set_remove(set: ptr, item: string)
+// Items cross as `@aether string`, with their length, so an item with an
+// embedded NUL is all of itself (#2469): the set is a map underneath.
+extern aether_set_add(set: ptr, item: @aether string) -> int
+extern aether_set_has(set: ptr, item: @aether string) -> int
+extern aether_set_remove(set: ptr, item: @aether string)
 extern aether_set_size(set: ptr) -> int
 extern aether_set_clear(set: ptr)
 extern aether_set_free(set: ptr)

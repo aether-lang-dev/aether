@@ -373,6 +373,26 @@ static unsigned int hash_cstr_len(const char* key, unsigned int* out_len) {
     return hash;
 }
 
+// A key arrives as an AetherString (an Aether `string` key crosses with its
+// header: the externs declare it `@aether`) or as a plain C string from C
+// callers and literals. The map hashes, compares and copies the key's
+// bytes up to its length, so `"a\0x"` and `"a\0y"` are two keys rather than
+// one `"a"` (#2469). A plain C string keeps the one-pass hash above; its
+// length is where its NUL is. Sets *data / *len to the key's bytes.
+static unsigned int key_hash(const char* key, const char** data, unsigned int* len) {
+    if (is_aether_string(key)) {
+        const AetherString* as = (const AetherString*)key;
+        unsigned int hash = 5381;
+        for (size_t i = 0; i < as->length; i++)
+            hash = ((hash << 5) + hash) + (unsigned char)as->data[i];
+        *data = as->data;
+        *len = (unsigned int)as->length;
+        return hash;
+    }
+    *data = key;
+    return hash_cstr_len(key, len);
+}
+
 // Fast equality: cheap length compare first, memcmp only on match.
 static int key_equals(const HashMapEntry* e, const char* b, unsigned int b_len) {
     if (!e || !e->key || !b) return 0;
@@ -435,14 +455,15 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
     }
 
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* entry = map->buckets[index];
 
     while (entry) {
         // Hash check is a cheap prefilter before key_equals (which
         // still runs memcmp for false hash collisions).
-        if (entry->hash == hash && key_equals(entry, key, key_len)) {
+        if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             /* #467: if the entry was previously owned-put, release
              * the prior heap-string before overwriting with the
              * (unowned) new value. Subsequent map.free won't see
@@ -463,7 +484,7 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
 
     HashMapEntry* new_entry = (HashMapEntry*)aether_caps_malloc(sizeof(HashMapEntry));
     if (!new_entry) return 0;
-    new_entry->key = string_new(key);
+    new_entry->key = string_new_with_length(kd, key_len);
     if (!new_entry->key) { aether_caps_free(new_entry, sizeof(HashMapEntry)); return 0; }
     new_entry->value       = value;
     new_entry->value_owned = 0;
@@ -506,11 +527,12 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
      * the caller never expected ownership transfer for that path. */
     if (map->size > 0) {
         unsigned int key_len = 0;
-        unsigned int hash = hash_cstr_len(key, &key_len);
+        const char* kd = NULL;
+        unsigned int hash = key_hash(key, &kd, &key_len);
         unsigned int index = hash % (unsigned int)map->capacity;
         HashMapEntry* entry = map->buckets[index];
         while (entry) {
-            if (entry->hash == hash && key_equals(entry, key, key_len)) {
+            if (entry->hash == hash && key_equals(entry, kd, key_len)) {
                 if (entry->value_owned && entry->value) {
                     if (is_aether_string(entry->value)) {
                         string_release(entry->value);
@@ -532,7 +554,8 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     int ok = map_put_raw(map, key, (void*)value);
     if (!ok) return 0;
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* head = map->buckets[index];
     if (head) head->value_owned = 1;
@@ -569,12 +592,13 @@ void* map_get_raw(HashMap* map, const char* key) {
     if (!map || !key) return NULL;
 
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* entry = map->buckets[index];
 
     while (entry) {
-        if (entry->hash == hash && key_equals(entry, key, key_len)) {
+        if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             return entry->value;
         }
         entry = entry->next;
@@ -591,13 +615,14 @@ void map_remove(HashMap* map, const char* key) {
     if (!map || !key) return;
 
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* entry = map->buckets[index];
     HashMapEntry* prev = NULL;
 
     while (entry) {
-        if (entry->hash == hash && key_equals(entry, key, key_len)) {
+        if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             if (prev) {
                 prev->next = entry->next;
             } else {

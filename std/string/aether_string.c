@@ -1083,6 +1083,16 @@ int string_to_int_radix_raw(const void* str, int radix, long long* out_value) {
     return 1;
 }
 
+/* Whether the number strtol / strtod read from `data` ends the whole of
+ * `str`, allowing trailing whitespace. Those parsers stop at a NUL, so the
+ * end is checked against the string's length, not against a terminator:
+ * "12\0" + "99" (5 bytes) used to read as 12 (#2469). */
+static int parsed_to_end(const void* str, const char* data, const char* endptr) {
+    const char* end = data + str_len(str);
+    while (endptr < end && isspace((unsigned char)*endptr)) endptr++;
+    return endptr == end;
+}
+
 int string_to_int_raw(const void* str, int* out_value) {
     const char* data = str_data(str);
     if (!str || !data[0] || !out_value) return 0;
@@ -1096,9 +1106,8 @@ int string_to_int_raw(const void* str, int* out_value) {
         return 0;
     }
 
-    // Skip trailing whitespace
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;  // Trailing non-whitespace
+    // Trailing whitespace only, up to the string's length.
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = (int)val;
     return 1;
@@ -1121,8 +1130,7 @@ int string_to_long_raw(const void* str, long long* out_value) {
         return 0;
     }
 
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = val;
     return 1;
@@ -1142,8 +1150,7 @@ int string_to_float_raw(const void* str, float* out_value) {
         return 0;
     }
 
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = val;
     return 1;
@@ -1164,8 +1171,7 @@ int string_to_double_raw(const void* str, double* out_value) {
         return 0;
     }
 
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = val;
     return 1;

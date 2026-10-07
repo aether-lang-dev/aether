@@ -6410,14 +6410,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             ? "_aether_map_put_adopted("
                                             : "map_put_string_adopted(");
                                     generate_expression(gen, expr->children[0]);
-                                    /* Key may now be a magic AetherString
-                                     * (string ops return magic); route the
-                                     * payload bytes through aether_string_data
-                                     * so the map hashes/compares the content,
-                                     * not the struct header. Safe for plain
-                                     * char-pointer / literal keys too
-                                     * (str_data returns them unchanged). */
-                                    fprintf(gen->output, ", aether_string_data((const void*)");
+                                    /* The key goes as it is, an AetherString
+                                     * with its length or a plain char*: the
+                                     * map reads either shape, and unwrapping
+                                     * to the payload here cut a key at its
+                                     * first NUL (#2469). */
+                                    fprintf(gen->output, ", (const char*)(");
                                     generate_expression(gen, expr->children[1]);
                                     fprintf(gen->output, "), (void*)");
                                     generate_expression(gen, val);
@@ -6449,7 +6447,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             ? "_aether_map_put_owned("
                                             : "map_put_string_owned(");
                                     generate_expression(gen, expr->children[0]);
-                                    fprintf(gen->output, ", aether_string_data((const void*)");
+                                    /* The key as it is (#2469), as above. */
+                                    fprintf(gen->output, ", (const char*)(");
                                     generate_expression(gen, expr->children[1]);
                                     fprintf(gen->output, "), (void*)");
                                 }
@@ -6464,9 +6463,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 generate_expression(gen, expr->children[0]);
                                 fprintf(gen->output, ");");
                                 if (!is_list_shape) {
-                                    fprintf(gen->output, " const char* _ae_ck = aether_string_data((const void*)(");
+                                    fprintf(gen->output, " const char* _ae_ck = (const char*)(");
                                     generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, "));");
+                                    fprintf(gen->output, ");");
                                 }
                                 fprintf(gen->output, " int %s = 0; void* _ae_cv = (void*)", own);
                                 emit_string_take(gen, val, own, NULL);

@@ -9,7 +9,7 @@
 #if !AETHER_HAS_FILESYSTEM
 // Stubs when filesystem is unavailable (WASM, embedded)
 File* file_open_raw(const char* p, const char* m) { (void)p; (void)m; return NULL; }
-char* file_read_all_raw(File* f) { (void)f; return NULL; }
+AetherString* file_read_all_raw(File* f) { (void)f; return NULL; }
 int file_write_raw(File* f, const char* d, int l) { (void)f; (void)d; (void)l; return 0; }
 int file_close(File* f) { (void)f; return 0; }
 int file_fd_raw(File* f) { (void)f; return -1; }
@@ -248,14 +248,13 @@ File* file_open_raw(const char* path, const char* mode) {
     return file;
 }
 
-/* Grow-and-read an open stream to EOF into a caller-owned, NUL-terminated
- * buffer. Used as the fallback when the fast size-based path can't work:
- * `/proc` and `/sys` seq-files report size 0 from ftell, and pipes/sockets
- * aren't seekable at all — the size-based path would silently return an empty
- * string. Returns NULL on OOM. Cap-aware via aether_caps_realloc; the caller
- * frees the result with plain libc free per the caller-owned-return contract
- * (#1116). */
-static char* read_stream_to_eof(FILE* fp) {
+/* Grow-and-read an open stream to EOF into a caller-owned AetherString.
+ * Used as the fallback when the fast size-based path can't work: `/proc`
+ * and `/sys` seq-files report size 0 from ftell, and pipes/sockets aren't
+ * seekable at all, and the size-based path would silently return an empty
+ * string. Returns NULL on OOM or a read error (#1116). Cap-aware via
+ * aether_caps_realloc; the grown buffer becomes the string's payload. */
+static AetherString* read_stream_to_eof(FILE* fp) {
     size_t cap = 65536;   /* one page-ish chunk; grows as needed */
     size_t len = 0;
     char* buffer = (char*)aether_caps_malloc(cap);
@@ -274,10 +273,23 @@ static char* read_stream_to_eof(FILE* fp) {
     }
     if (ferror(fp)) { aether_caps_free(buffer, cap); return NULL; }
     buffer[len] = '\0';
-    return buffer;
+    /* Adopt the buffer as the payload: `capacity` is what was allocated,
+     * which is what string_release gives back. */
+    AetherString* out = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    if (!out) { aether_caps_free(buffer, cap); return NULL; }
+    out->magic = AETHER_STRING_MAGIC;
+    out->ref_count = 1;
+    out->length = len;
+    out->capacity = cap;
+    out->data = buffer;
+    return out;
 }
 
-char* file_read_all_raw(File* file) {
+/* The whole file as a refcounted AetherString carrying its byte count, so
+ * fs.read returns every byte of a file with a NUL in it (#2469). It was a
+ * bare `char*`, which the Aether side measured with strlen: a 5-byte
+ * "ab\0cd" read back as "ab", with no error. */
+AetherString* file_read_all_raw(File* file) {
     if (!file || !file->is_open) return NULL;
 
     FILE* fp = (FILE*)file->handle;
@@ -291,11 +303,10 @@ char* file_read_all_raw(File* file) {
         long size = ftell(fp);
         if (size > 0 && fseek(fp, 0, SEEK_SET) == 0) {
             /* Cap-aware (#343): file size is OS-supplied and unbounded.
-             * Caller frees with plain libc free per the caller-owned-return
-             * contract — counter drifts up on this path, same as
-             * string_concat. */
-            char* buffer = (char*)aether_caps_malloc((size_t)size + 1);
-            if (!buffer) return NULL;
+             * One block for header and payload, read in place. */
+            AetherString* out = string_alloc_inline((size_t)size);
+            if (!out) return NULL;
+            char* buffer = out->data;
             errno = 0;
             size_t read = fread(buffer, 1, (size_t)size, fp);
             /* Report a failed or short read instead of returning what we got.
@@ -313,13 +324,13 @@ char* file_read_all_raw(File* file) {
                      * between ftell and fread. Keep what we read rather than
                      * failing; NUL-terminate at the real length. */
                     buffer[read] = '\0';
-                    return buffer;
+                    out->length = read;
+                    return out;
                 }
-                aether_caps_free(buffer, (size_t)size + 1);
+                string_release(out);
                 return NULL;
             }
-            buffer[read] = '\0';
-            return buffer;
+            return out;
         }
         /* size <= 0 or re-seek failed: rewind (best-effort) and stream. */
         fseek(fp, 0, SEEK_SET);

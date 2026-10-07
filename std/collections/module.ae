@@ -53,13 +53,16 @@ extern map_new() -> ptr
 // it must NOT be @retain-marked, or the caller's key leaks (the map
 // only ever owns its copy). The map_clear/map_free path releases the
 // COPY, not the caller's original.
-extern map_put_raw(map: ptr, key: string, value: ptr) -> int
+// Keys cross as `@aether string`: the C map reads the AetherString's length,
+// so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C
+// string, "a\0x" and "a\0y" were one key, "a".
+extern map_put_raw(map: ptr, key: @aether string, value: ptr) -> int
 // Heap-string-aware put (#467). Retains the value and tags the
 // map so map_free releases each string value before freeing.
-extern map_put_string_owned(map: ptr, key: @retain string, value: ptr) -> int
-extern map_get_raw(map: ptr, key: string) -> ptr
-extern map_has(map: ptr, key: string) -> int
-extern map_remove(map: ptr, key: string)
+extern map_put_string_owned(map: ptr, key: @aether @retain string, value: ptr) -> int
+extern map_get_raw(map: ptr, key: @aether string) -> ptr
+extern map_has(map: ptr, key: @aether string) -> int
+extern map_remove(map: ptr, key: @aether string)
 extern map_size(map: ptr) -> int
 extern map_clear(map: ptr)
 extern map_free(map: ptr)
@@ -113,9 +116,9 @@ intarr_view(arr: ptr) -> int[] {
 // is a no-op on values that don't bear the AetherString magic
 // header. Issue #274.
 extern string_list_new() -> ptr
-// `s` is COPIED, not retained: the list owns an independent NUL-
-// terminated copy of the string's bytes and frees it itself (in
-// remove / clear / free / overwriting set). The caller therefore keeps
+// `s` is COPIED, not retained: the list owns an independent copy of
+// all the string's bytes, embedded NULs included (#2469), and frees it
+// itself (in remove / clear / free / overwriting set). The caller therefore keeps
 // ownership of its argument — a `string`-typed param is read-only to
 // the escape walker, so the caller's heap value is reclaimed normally
 // at its own scope exit. This is why there is no `@retain` here: an

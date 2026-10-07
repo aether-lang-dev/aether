@@ -39,6 +39,9 @@
 // tests, regression tests, and callers continue to work unchanged.
 
 #include "aether_json.h"
+/* Only for is_aether_string and the AetherString layout, both in the
+ * header: this file still links on its own (bench, conformance runner). */
+#include "../string/aether_string.h"
 #include "../mem/aether_grow.h"
 #include "../../runtime/aether_resource_caps.h"
 // RFC 8259 fixes '.' as the decimal separator — number text must not follow
@@ -1339,8 +1342,25 @@ JsonValue* json_parse_raw_n(const char* data, size_t n) {
     return root;
 }
 
+/* The bytes of a string argument. An Aether `string` reaches the entry
+ * points below with its header (their externs declare it `@aether`), so it
+ * is read to its length: a document, key or value with an embedded NUL is
+ * not cut there (#2469). `[1]\0x{` used to parse as `[1]`. A plain C string
+ * from a C caller is read to its NUL, as before. */
+static const char* jv_bytes(const char* s, size_t* len) {
+    if (is_aether_string(s)) {
+        const AetherString* as = (const AetherString*)s;
+        *len = as->length;
+        return as->data;
+    }
+    *len = s ? strlen(s) : 0;
+    return s;
+}
+
 JsonValue* json_parse_raw(const char* s) {
-    return json_parse_raw_n(s, s ? strlen(s) : 0);
+    size_t n = 0;
+    const char* d = jv_bytes(s, &n);
+    return json_parse_raw_n(d, n);
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,11 +1422,24 @@ const char* json_get_string_raw(JsonValue* v) {
     return v->data.str.data;
 }
 
+/* The payload and its length, for copying a string value whole: one may
+ * hold U+0000 (`"a\u0000b"`), where the C string above ends (#2469). */
+const void* json_get_string_data(JsonValue* v) {
+    if (!v || v->type != JSON_STRING) return NULL;
+    return v->data.str.data;
+}
+
+int json_get_string_length(JsonValue* v) {
+    if (!v || v->type != JSON_STRING) return -1;
+    return (int)v->data.str.length;
+}
+
 JsonValue* json_object_get_raw(JsonValue* obj, const char* key) {
     if (!obj || obj->type != JSON_OBJECT || !key) return NULL;
     uint32_t n = obj->data.obj.count;
     if (!n) return NULL;
-    size_t klen = strlen(key);
+    size_t klen = 0;
+    key = jv_bytes(key, &klen);
     if (klen > UINT32_MAX) return NULL;
     uint32_t k32 = (uint32_t)klen;
     const JsonObjBlock* blk = obj->data.obj.blk;
@@ -1438,6 +1471,12 @@ const char* json_object_key_at(JsonValue* obj, int i) {
     const JsonObjBlock* blk = obj->data.obj.blk;
     if (!blk) return NULL;
     return blk->keys[i];
+}
+
+/* json_object_key_at typed as a plain pointer, to copy the key whole with
+ * json_object_key_len_at: a key may hold U+0000 too (#2469). */
+const void* json_object_key_data_at(JsonValue* obj, int i) {
+    return json_object_key_at(obj, i);
 }
 
 int json_object_key_len_at(JsonValue* obj, int i) {
@@ -1688,7 +1727,8 @@ int json_object_set_raw(JsonValue* obj, const char* key, JsonValue* value) {
     if (!obj || obj->type != JSON_OBJECT || !key || !value) return 0;
     if (!ensure_container_arena(obj)) return 0;
 
-    size_t klen = strlen(key);
+    size_t klen = 0;
+    key = jv_bytes(key, &klen);
     if (klen > UINT32_MAX) return 0;
     uint32_t k32 = (uint32_t)klen;
 
@@ -1780,7 +1820,8 @@ JsonValue* json_create_string(const char* s) {
     /* Cap-aware (#343): input string is caller-controlled, plugin-
      * host-reachable. heap_free_tree's JSON_STRING branch passes
      * v->data.str.length + 1 back to the caps allocator. */
-    size_t len = s ? strlen(s) : 0;
+    size_t len = 0;
+    s = jv_bytes(s, &len);
     char* copy = (char*)aether_caps_malloc(len + 1);
     if (!copy) { aether_caps_free(v, sizeof(JsonValue)); return NULL; }
     if (len && s) memcpy(copy, s, len);

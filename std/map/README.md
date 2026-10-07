@@ -6,6 +6,9 @@ Like `std.list`, it stores `ptr` and does not own the values. Rebinding a key
 replaces its value without growing the map, and does not free the old one —
 that is the caller's, because the map never claimed it.
 
+A key is all of its bytes: two keys that differ only after an embedded NUL
+are two keys, and `keys_get` returns each one whole.
+
 `std.spec` keeps its whole framework state in one of these, which is a fair
 demonstration of the intended use: a heterogeneous bag of handles keyed by
 name.
