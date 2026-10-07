@@ -5016,6 +5016,14 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "_aether_main_state = 1;");
         unindent(gen);
     } else {
+        /* ESP-IDF starts a firmware image by calling app_main() from its main
+         * FreeRTOS task, and never calls main(). Forward to it, so the same
+         * generated C builds as an ESP-IDF component with no C of the user's
+         * own (see tests/esp32/). */
+        print_line(gen, "#ifdef ESP_PLATFORM");
+        print_line(gen, "int main(int argc, char** argv);");
+        print_line(gen, "void app_main(void) { static char* argv[] = { \"aether\", 0 }; (void)main(1, argv); }");
+        print_line(gen, "#endif");
         print_line(gen, "int main(int argc, char** argv) {");
     }
     begin_main_c_function(gen);
@@ -7092,8 +7100,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // when the closure variable's defer runs.
     print_line(gen, "static inline void _aether_thunk_free(void* p) { if (p) free(p); }");
     // Terminal raw mode helpers for interactive input
-    // Only available on hosted POSIX systems (not embedded/bare-metal or Windows)
-    print_line(gen, "#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && defined(__STDC_HOSTED__) && (__STDC_HOSTED__ == 1) && !defined(__arm__) && !defined(__thumb__)");
+    // Only available on hosted POSIX systems (not embedded/bare-metal, ESP-IDF
+    // (its termios is compiled out unless VFS termios is configured) or Windows)
+    print_line(gen, "#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && defined(__STDC_HOSTED__) && (__STDC_HOSTED__ == 1) && !defined(__arm__) && !defined(__thumb__) && !defined(ESP_PLATFORM)");
     print_line(gen, "#include <termios.h>");
     print_line(gen, "static struct termios _aether_orig_termios;");
     print_line(gen, "static void _aether_raw_mode(void) {");

@@ -744,6 +744,16 @@ On threadless platforms, the cooperative scheduler (`aether_scheduler_coop.c`) r
 
 Stdlib modules that depend on filesystem or networking return errors gracefully (NULL, 0, -1). Console I/O (`print`, `println`) always works.
 
+#### ESP32 (Xtensa)
+
+The generated C builds as an [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) component for the ESP32 (the chip on boards such as the ESP32-2432S028R "cheap yellow display"): ESP-IDF's `xtensa-esp32-elf-gcc` compiles it with the runtime, using the cooperative scheduler, and the generated C supplies the `app_main()` entry point ESP-IDF calls. `tests/esp32/project/` is a working project; its `main/CMakeLists.txt` lists the runtime sources and the settings an ESP32 needs, notably smaller scheduler tables (`MAX_CORES=1 QUEUE_SIZE=64 SCHEDULER_DRAIN_BATCH=32 MAX_ACTORS_PER_CORE=256`; at the defaults they need about 10 MB, against roughly 320 KB of DRAM).
+
+```bash
+make ci-esp32   # needs podman or docker; pulls espressif/idf
+```
+
+builds a few programs (hello-world, a stateful actor, an actor pipeline, ping-pong) into firmware and boots each in Espressif's QEMU, checking the console output. A program is about 150 KB of firmware. Not yet covered: threads (FreeRTOS has pthreads, so the multicore scheduler is a candidate), the filesystem and networking, and real hardware.
+
 ### Platform-Specific Notes
 
 **macOS:**

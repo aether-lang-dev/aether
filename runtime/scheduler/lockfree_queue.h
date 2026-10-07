@@ -9,7 +9,9 @@
 // With MAX_CORES+1 channels per receiver, total capacity per core = 17×1024 = 17408.
 // Overflow beyond this goes to TLS deferred buffers (no deadlock).
 // 1024 balances throughput vs memory: each queue = 1024 × 56 = 57 KB.
+#ifndef QUEUE_SIZE  // overridable with -D; must be a power of two
 #define QUEUE_SIZE 1024  // Slots per sender→receiver SPSC channel
+#endif
 #define QUEUE_MASK (QUEUE_SIZE - 1)
 
 typedef struct {
