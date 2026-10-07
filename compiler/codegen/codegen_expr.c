@@ -6853,11 +6853,34 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     any_moved = 1; break;
                 }
             }
+            /* #2461: a field initialised from a view (another struct's field,
+             * an `if` over owned values) takes the value with
+             * emit_string_take, whose flag sets the field's tracker once the
+             * literal is built. The literal used to borrow it: the source
+             * struct then freed the buffer this one still pointed at. */
+            char (*take_own)[32] = NULL;
+            int any_take = 0;
+            for (int i = 0; !c_imported && i < expr->child_count; i++) {
+                ASTNode* fi = expr->children[i];
+                if (fi && fi->type == AST_ASSIGNMENT && fi->value && fi->child_count > 0 &&
+                    string_take_is_view(gen, fi->children[0])) {
+                    if (!take_own) take_own = calloc((size_t)expr->child_count, sizeof(*take_own));
+                    if (!take_own) break;
+                    string_take_new_flag(take_own[i], sizeof(take_own[i]));
+                    any_take = 1;
+                }
+            }
             /* When a variable is moved into a field, build the struct into a
              * temp inside a statement-expression, clear the moved-from vars'
              * heap flags, then yield the temp. Otherwise emit the literal
              * directly. */
-            if (any_moved) fprintf(gen->output, "({ %s _ae_slit = ", expr->value);
+            if (any_moved || any_take) {
+                fprintf(gen->output, "({ ");
+                for (int i = 0; any_take && i < expr->child_count; i++) {
+                    if (take_own[i][0]) fprintf(gen->output, "int %s = 0; ", take_own[i]);
+                }
+                fprintf(gen->output, "%s _ae_slit = ", expr->value);
+            }
             fprintf(gen->output, c_imported ? "(struct %s){" : "(%s){", expr->value);
             int emitted = 0;
             for (int i = 0; i < expr->child_count; i++) {
@@ -6874,10 +6897,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                      fv->node_type->kind == TYPE_STRING;
                         /* NULL stays NULL, as in the field store. */
                         if (unwrap) fprintf(gen->output, "({ const void* _ae_cs = (const void*)(");
-                        generate_expression(gen, fv);
+                        if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
+                        else generate_expression(gen, fv);
                         if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }
                     emitted++;
+                    if (take_own && take_own[i][0]) continue;  /* tracker set below */
                     /* If the init is heap-classified, also set the hidden
                      * tracker. For a heap-tracked *variable* source, the
                      * ownership is RUNTIME-conditional on the variable's own
@@ -6905,11 +6930,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
             }
             fprintf(gen->output, "}");
-            if (any_moved) {
+            if (any_moved || any_take) {
                 /* #911: disown each moved-from variable so its function-exit
                  * `if (_heap_<v>)` free is a no-op (ownership now in the
                  * struct). Then yield the built struct. */
                 fprintf(gen->output, ";");
+                for (int i = 0; any_take && i < expr->child_count; i++) {
+                    if (take_own[i][0])
+                        fprintf(gen->output, " _ae_slit._heap_%s = %s;",
+                                expr->children[i]->value, take_own[i]);
+                }
                 /* #1301: the struct literal now owns each moved buffer;
                  * the moved-from var's defer is disarmed by the flag
                  * clear, so the unwind journal must drop it too or a
@@ -6920,9 +6950,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             moved_vars[m], moved_vars[m]);
                 fprintf(gen->output, " _ae_slit; })");
             }
+            free(take_own);
             break;
         }
-        
+
         case AST_ARRAY_ACCESS:
             if (expr->child_count >= 2) {
                 /* #1380: a string may be a char* or an AetherString*; index the payload. */

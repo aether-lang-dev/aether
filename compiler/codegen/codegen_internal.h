@@ -111,6 +111,22 @@ int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible);
 int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
                                const char* var_name);
 
+/* #2461: how an owning string slot (a local, a struct field, a return value)
+ * takes a value that may view a buffer someone else owns: a struct field
+ * read, or an `if` / `match` whose arm is one or is a heap-tracked local. See
+ * the comment above is_owned_string_field_read in codegen_stmt.c. */
+enum {
+    STR_TAKE_BORROW = 0,    /* every arm is borrowed (literal, parameter) */
+    STR_TAKE_OWNED = 1,     /* every arm hands the slot a buffer to free */
+    STR_TAKE_RUNTIME = 2    /* depends on the arm taken at run time */
+};
+int is_owned_string_field_read(ASTNode* e);
+int string_take_kind(CodeGenerator* gen, ASTNode* e);
+int string_take_is_view(CodeGenerator* gen, ASTNode* e);
+void string_take_new_flag(char* buf, size_t n);
+void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
+                      const char* target);
+
 /* Escape gate for heap-string arguments: returns 1 if a callee's
  * parameter slot of the given type-kind is treated as storage (the
  * recipient may stash the pointer beyond the call). Used by the

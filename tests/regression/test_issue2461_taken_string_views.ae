@@ -1,0 +1,345 @@
+// Issue #2461: a string read from a struct field, an `if` expression or a
+// `match` expression was BORROWED by the local (or struct field, or return
+// value) it was stored into, not owned.
+//
+// A struct owns the strings in its fields: it frees one when the field is
+// reassigned, when the struct is replaced, and when it goes out of scope.
+// `t = r.name` stored the field's pointer with `_heap_t = 0` and nothing kept
+// the buffer alive, so `r.name = ...` freed what `t` still pointed at. An
+// `if` / `match` whose arm was a heap-tracked local did the same when the
+// local was reassigned or its function returned, and a `match` binding never
+// touched its local's tracker at all: the value it replaced leaked, and a
+// stale flag later freed a literal. Only a bare alias (`b = a`) was handled.
+//
+// Pre-fix, every check below that reads a value after its source let go of
+// it sees freed memory: `churn` refills the allocator's free slots of that
+// size, so the dangling value reads as "zz-..." (or garbage) instead of the
+// value it was given. Post-fix the slot takes the value the way a bare alias
+// is taken: a field read is copied, a heap-tracked local is moved (last use)
+// or copied, a fresh value is adopted, a literal is borrowed, and the slot's
+// tracker records which, so each buffer is freed exactly once. The rounds
+// at the end check that, by the C allocator's own count, nothing leaks.
+
+import std.list
+import std.mem
+
+extern exit(code: int)
+
+struct Rec {
+    name: string
+}
+
+struct Pair {
+    label: string
+    n: int
+}
+
+struct Outer {
+    inner: Rec
+    tag: string
+}
+
+fn check(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+// Hand out every free slot of the size the test strings have, so a block
+// freed out from under a borrower is reused and overwritten. The blocks are
+// held until the next churn, so the expected values the checks build next
+// cannot land back in a freed slot and make a dangling value look right.
+var held: ptr = null
+
+fn churn(n: int) {
+    if held != null {
+        list.free(held)
+    }
+    held = list.new()
+    i = 0
+    while i < 4000 {
+        list.add(held, "zz-${n}")
+        i = i + 1
+    }
+}
+
+// ---- field reads ----
+
+fn field_then_field_reassigned(n: int) {
+    r = Rec { name: "ab-${n}" }
+    t = r.name
+    r.name = "cd-${n}"
+    churn(n)
+    check("field, field reassigned", t, "ab-${n}")
+    check("field, source", r.name, "cd-${n}")
+}
+
+fn field_then_struct_replaced(n: int) {
+    r = Rec { name: "ab-${n}" }
+    t = r.name
+    r = Rec { name: "cd-${n}" }
+    churn(n)
+    check("field, struct replaced", t, "ab-${n}")
+}
+
+fn field_in_loop(n: int) {
+    r = Rec { name: "ab-${n}" }
+    last = ""
+    i = 0
+    while i < 5 {
+        t = r.name
+        r.name = "c${i}-${n}"
+        churn(n)
+        if i == 0 {
+            check("field in loop, first", t, "ab-${n}")
+        } else {
+            check("field in loop", t, "c${i - 1}-${n}")
+        }
+        last = t
+        i = i + 1
+    }
+    check("field in loop, last", last, "c3-${n}")
+}
+
+fn field_bound_returned(n: int) -> string {
+    r = Rec { name: "ab-${n}" }
+    t = r.name
+    return t
+}
+
+fn field_returned(n: int) -> string {
+    r = Rec { name: "ab-${n}" }
+    return r.name
+}
+
+fn getter(r: Rec) -> string {
+    return r.name
+}
+
+fn show(label: string, s: string, want: string) {
+    churn(7)
+    check(label, s, want)
+}
+
+fn field_passed_on(n: int) {
+    r = Rec { name: "ab-${n}" }
+    t = r.name
+    r.name = "cd-${n}"
+    show("field passed on", t, "ab-${n}")
+    x = getter(r)
+    r.name = "ef-${n}"
+    churn(n)
+    check("getter result, field reassigned", x, "cd-${n}")
+}
+
+fn field_into_struct(n: int) {
+    r = Rec { name: "ab-${n}" }
+    p = Pair { label: r.name, n: 1 }
+    t = r.name
+    q = Pair { label: t, n: 2 }
+    s = Pair { label: "x", n: 3 }
+    s.label = r.name
+    r.name = "cd-${n}"
+    churn(n)
+    check("literal from field", p.label, "ab-${n}")
+    check("literal from bound field", q.label, "ab-${n}")
+    check("store from field", s.label, "ab-${n}")
+}
+
+fn field_through_pointer(n: int) {
+    b = heap.new(Rec)
+    b.name = "ab-${n}"
+    t = b.name
+    b.name = "cd-${n}"
+    churn(n)
+    check("pointer field", t, "ab-${n}")
+    b.name = "x"
+    heap.free(b)
+}
+
+fn nested_field(n: int) {
+    o = Outer { inner: Rec { name: "ab-${n}" }, tag: "t" }
+    t = o.inner.name
+    o = Outer { inner: Rec { name: "cd-${n}" }, tag: "u" }
+    churn(n)
+    check("nested field", t, "ab-${n}")
+}
+
+fn field_then_literal(n: int) {
+    r = Rec { name: "ab-${n}" }
+    t = r.name
+    check("field then literal, before", t, "ab-${n}")
+    t = "lit"
+    check("field then literal, after", t, "lit")
+}
+
+// ---- if expressions ----
+
+fn if_local_reassigned(n: int) {
+    a = "ab-${n}"
+    w = if n > 0 { a } else { "lit" }
+    a = "cd-${n}"
+    churn(n)
+    check("if local", w, "ab-${n}")
+    check("if local, source", a, "cd-${n}")
+    v = if n < 0 { a } else { "lit" }
+    check("if literal arm", v, "lit")
+}
+
+fn if_field(n: int) {
+    r = Rec { name: "ab-${n}" }
+    w = if n > 0 { r.name } else { "lit" }
+    r.name = "cd-${n}"
+    churn(n)
+    check("if field", w, "ab-${n}")
+}
+
+fn if_fresh(n: int) {
+    i = 0
+    w = ""
+    while i < 4 {
+        w = if i % 2 == 0 { "e${i}-${n}" } else { "o${i}-${n}" }
+        i = i + 1
+    }
+    check("if fresh", w, "o3-${n}")
+}
+
+fn if_self(n: int) {
+    w = "ab-${n}"
+    w = if n > 0 { w } else { "lit" }
+    churn(n)
+    check("if self", w, "ab-${n}")
+    w = if n < 0 { w } else { "cd-${n}" }
+    check("if self, other arm", w, "cd-${n}")
+}
+
+fn if_returned(n: int) -> string {
+    a = "ab-${n}"
+    return if n > 0 { a } else { "lit" }
+}
+
+fn if_bound_returned(n: int) -> string {
+    a = "ab-${n}"
+    w = if n > 0 { a } else { "lit" }
+    return w
+}
+
+fn if_literal_returned(n: int) -> string {
+    a = "ab-${n}"
+    w = if n < 0 { a } else { "lit" }
+    return w
+}
+
+// ---- match expressions ----
+
+fn match_local_reassigned(n: int) {
+    b = "ab-${n}"
+    m = match n {
+        7 -> b
+        _ -> "other"
+    }
+    b = "cd-${n}"
+    churn(n)
+    check("match local", m, "ab-${n}")
+    check("match local, source", b, "cd-${n}")
+}
+
+fn match_field(n: int) {
+    r = Rec { name: "ab-${n}" }
+    m = match n {
+        7 -> r.name
+        _ -> "other"
+    }
+    r.name = "cd-${n}"
+    churn(n)
+    check("match field", m, "ab-${n}")
+}
+
+fn match_in_loop(n: int) {
+    m = "start-${n}"
+    i = 0
+    while i < 6 {
+        m = match i % 3 {
+            0 -> "z${i}-${n}"
+            1 -> "lit"
+            _ -> m
+        }
+        i = i + 1
+    }
+    check("match in loop", m, "lit")
+}
+
+fn match_returned(n: int) -> string {
+    a = "ab-${n}"
+    return match n {
+        7 -> a
+        _ -> "lit"
+    }
+}
+
+fn match_bound_returned(n: int) -> string {
+    a = "ab-${n}"
+    m = match n {
+        7 -> a
+        _ -> "lit"
+    }
+    return m
+}
+
+fn run_all(n: int) {
+    field_then_field_reassigned(n)
+    field_then_struct_replaced(n)
+    field_in_loop(n)
+    x1 = field_bound_returned(n)
+    x2 = field_returned(n)
+    churn(n)
+    check("field bound, returned", x1, "ab-${n}")
+    check("field returned", x2, "ab-${n}")
+    field_passed_on(n)
+    field_into_struct(n)
+    field_through_pointer(n)
+    nested_field(n)
+    field_then_literal(n)
+    if_local_reassigned(n)
+    if_field(n)
+    if_fresh(n)
+    if_self(n)
+    y1 = if_returned(n)
+    y2 = if_bound_returned(n)
+    y3 = if_literal_returned(n)
+    churn(n)
+    check("if returned", y1, "ab-${n}")
+    check("if bound, returned", y2, "ab-${n}")
+    check("if literal, returned", y3, "lit")
+    match_local_reassigned(n)
+    match_field(n)
+    match_in_loop(n)
+    z1 = match_returned(n)
+    z2 = match_bound_returned(n)
+    churn(n)
+    check("match returned", z1, "ab-${n}")
+    check("match bound, returned", z2, "ab-${n}")
+}
+
+main() {
+    run_all(7)
+    // Every value taken above is freed exactly once: rounds of the whole
+    // workload hold the C allocator's count steady.
+    if mem.heap_in_use() >= 0 {
+        run_all(7)
+        start_bytes = mem.heap_in_use()
+        k = 0
+        while k < 20 {
+            run_all(7)
+            k = k + 1
+        }
+        end_bytes = mem.heap_in_use()
+        if end_bytes - start_bytes > 16384 {
+            println("FAIL: 20 rounds grew the heap by ${end_bytes - start_bytes} bytes")
+            exit(1)
+        }
+    }
+    list.free(held)
+    println("=== test_issue2461_taken_string_views: all passed ===")
+}

@@ -287,6 +287,10 @@ typedef struct {
 
     // Match-as-expression: when non-NULL, match arms assign to this variable
     const char* match_result_var;
+    // #2461: when non-NULL, the result variable is an owning string local:
+    // each value arm takes its value with emit_string_take, setting this C
+    // int flag to whether the local owns what it got (-1: no arm assigned).
+    const char* match_result_own;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so

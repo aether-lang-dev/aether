@@ -497,6 +497,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_file = NULL;
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
+    gen->match_result_own = NULL;
     gen->preempt_loops = 0;
     gen->series_collapse_off = 0;
     gen->in_string_closure = 0;
