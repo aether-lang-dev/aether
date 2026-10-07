@@ -39,6 +39,16 @@ freeing a container frees what it holds.
 `get_type` returns the type tag, so a reader dispatches on the wire type
 rather than assuming — the same discipline `std.json`'s `json_type` asks for.
 
+`unpack` treats its input as untrusted. It refuses, with an error rather
+than a value:
+
+- nesting deeper than 256 levels, the same limit as `std.json`
+  (`nesting deeper than 256`);
+- a str, bin or ext length, or an array or map count, larger than the bytes
+  left in the input (`EOF reading ...`);
+- a uint 64 of 2^63 or more, which the signed 64-bit `get_int` cannot hold
+  (`integer out of range`).
+
 ## Exports
 
 `nil_value`, `boolean`, `from_int`, `num`, `str`, `bin`, `arr`, `map`, `ext`,

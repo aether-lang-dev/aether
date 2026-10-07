@@ -37,6 +37,12 @@ match. That is more than string equality — a request for `en-GB` should be
 served `en` rather than falling through to the default, and `zh-Hant` should
 not be matched by `zh-Hans`.
 
+`match_strings` takes the raw header. Ranges are tried by descending `q`;
+ranges of equal weight keep the order the client sent them in, and a range
+with `q=0` is "not acceptable" (RFC 7231) and is never matched. The base-language
+fallback (`en-GB` served `en`) only applies when the two tags do not name
+different scripts. When nothing matches, the first supported tag is returned.
+
 Pair it with `std.plural` for grammatical number and `std.message` for the
 messages themselves.
 

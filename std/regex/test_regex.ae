@@ -10,6 +10,17 @@ import std.string
 
 extern exit(code: int)
 
+// `n` copies of `s`, for subjects larger than a literal is worth writing.
+rep(s: string, n: int) -> string {
+    out = ""
+    i = 0
+    while i < n {
+        out = "${out}${s}"
+        i = i + 1
+    }
+    return out
+}
+
 fail(msg: string) {
     println("FAIL: ${msg}")
     exit(1)
@@ -101,6 +112,20 @@ main() {
     if all != "[foo at bar] and [baz at qux]" { fail("replace_all = '${all}'") }
     regex.free(re6)
     println("  PASS: replace + replace_all (with \\$1/\\$2 substitution)")
+
+    // ---- a result far larger than the subject ----
+    // The first output buffer is subject + replacement + 64 bytes. A result
+    // past that used to fail with "regex: out of memory": the retry grew to
+    // the size PCRE2 had not been asked to report.
+    rea, _ = regex.compile("a")
+    subj = rep("a", 100)
+    big, berr = regex.replace_all(rea, subj, "xxxxxxxxxx")
+    if berr != "" { fail("replace_all growing past the first buffer: err '${berr}'") }
+    if string.length(big) != 1000 { fail("replace_all growing past the first buffer: length ${string.length(big)}, want 1000") }
+    first, ferr = regex.replace(rea, subj, rep("y", 500))
+    if ferr != "" || string.length(first) != 599 { fail("replace growing past the first buffer: length ${string.length(first)} err '${ferr}'") }
+    regex.free(rea)
+    println("  PASS: replace / replace_all whose result outgrows the first buffer")
 
     // ---- case-insensitive flag ----
     rei, _ = regex.compile_flags("hello", regex.FLAG_CASELESS)

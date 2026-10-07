@@ -27,6 +27,20 @@ fn default_options() -> FormatOptions {
     return opts
 }
 
+// The largest exponent magnitude a decimal string may carry ("1e1000000").
+// Formatting writes every digit out, so the exponent is also the length of
+// the expansion; past this there is nothing a person can read, and an
+// unchecked exponent would overflow an int.
+const DECIMAL_EXPONENT_LIMIT = 1000000
+
+fn append_zeros(sb: ptr, count: int) {
+    k = 0
+    while k < count {
+        strbuilder.append_byte(sb, 48)
+        k = k + 1
+    }
+}
+
 // Parses and validates input decimal string. Returns (negative, integer_part, fraction_part, error).
 fn parse_decimal_string(decimal: string) -> (int, string, string, string) {
     len = string_length(decimal)
@@ -141,15 +155,27 @@ fn parse_decimal_string(decimal: string) -> (int, string, string, string) {
                 frac_part = ""
                 return 0, "", "", "expected digit in exponent"
             }
+            // Stop accumulating once past the limit, so an exponent too
+            // large for an int is reported rather than wrapped; the digits
+            // are still consumed so leading zeros ("1e0003") stay accepted.
             exp_val = 0
             while pos < len {
                 c = string_char_at(decimal, pos)
                 if c >= 48 && c <= 57 {
-                    exp_val = exp_val * 10 + (c - 48)
+                    if exp_val <= DECIMAL_EXPONENT_LIMIT {
+                        exp_val = exp_val * 10 + (c - 48)
+                    }
                     pos = pos + 1
                 } else {
                     break
                 }
+            }
+            if exp_val > DECIMAL_EXPONENT_LIMIT {
+                string_release(int_part)
+                int_part = ""
+                string_release(frac_part)
+                frac_part = ""
+                return 0, "", "", "exponent out of range"
             }
             if exp_neg == 1 {
                 exponent = -exp_val
@@ -167,63 +193,46 @@ fn parse_decimal_string(decimal: string) -> (int, string, string, string) {
         return 0, "", "", "extra garbage at end of decimal string"
     }
 
-    if exponent != 0 {
-        curr_int = int_part
-        curr_frac = frac_part
-        if exponent > 0 {
-            steps = exponent
-            while steps > 0 {
-                frac_len = string_length(curr_frac)
-                if frac_len > 0 {
-                    c = string_char_at(curr_frac, 0)
-                    ch_str = string_from_char(c)
-                    new_int = string_concat(curr_int, ch_str)
-                    string_release(ch_str)
-                    new_frac = string_substring(curr_frac, 1, frac_len)
-                    string_release(curr_int)
-                    string_release(curr_frac)
-                    curr_int = new_int
-                    curr_frac = new_frac
-                } else {
-                    new_int = string_concat(curr_int, "0")
-                    string_release(curr_int)
-                    curr_int = new_int
-                }
-                steps = steps - 1
-            }
-        } else {
-            steps = -exponent
-            while steps > 0 {
-                int_len = string_length(curr_int)
-                if int_len > 1 {
-                    c = string_char_at(curr_int, int_len - 1)
-                    ch_str = string_from_char(c)
-                    new_frac = string_concat(ch_str, curr_frac)
-                    string_release(ch_str)
-                    new_int = string_substring(curr_int, 0, int_len - 1)
-                    string_release(curr_int)
-                    string_release(curr_frac)
-                    curr_int = new_int
-                    curr_frac = new_frac
-                } else if int_len == 1 {
-                    c = string_char_at(curr_int, 0)
-                    ch_str = string_from_char(c)
-                    new_frac = string_concat(ch_str, curr_frac)
-                    string_release(ch_str)
-                    string_release(curr_int)
-                    string_release(curr_frac)
-                    curr_int = string_copy("0")
-                    curr_frac = new_frac
-                } else {
-                    new_frac = string_concat("0", curr_frac)
-                    string_release(curr_frac)
-                    curr_frac = new_frac
-                }
-                steps = steps - 1
-            }
+    // Move the decimal point by the exponent in one pass: the digits that
+    // cross it are copied once, and zeros fill in past the end of the
+    // written digits.
+    if exponent > 0 {
+        frac_len = string_length(frac_part)
+        moved = exponent
+        if moved > frac_len {
+            moved = frac_len
         }
-        int_part = curr_int
-        frac_part = curr_frac
+        int_sb = strbuilder.new(string_length(int_part) + exponent)
+        strbuilder.append(int_sb, int_part)
+        head = string_substring(frac_part, 0, moved)
+        strbuilder.append(int_sb, head)
+        string_release(head)
+        append_zeros(int_sb, exponent - moved)
+        new_frac = string_substring(frac_part, moved, frac_len)
+        string_release(int_part)
+        string_release(frac_part)
+        int_part = strbuilder.finish(int_sb)
+        frac_part = new_frac
+    } else if exponent < 0 {
+        steps = 0 - exponent
+        int_len = string_length(int_part)
+        frac_sb = strbuilder.new(steps + string_length(frac_part))
+        new_int = ""
+        if steps < int_len {
+            new_int = string_substring(int_part, 0, int_len - steps)
+            tail = string_substring(int_part, int_len - steps, int_len)
+            strbuilder.append(frac_sb, tail)
+            string_release(tail)
+        } else {
+            new_int = string_copy("0")
+            append_zeros(frac_sb, steps - int_len)
+            strbuilder.append(frac_sb, int_part)
+        }
+        strbuilder.append(frac_sb, frac_part)
+        string_release(int_part)
+        string_release(frac_part)
+        int_part = new_int
+        frac_part = strbuilder.finish(frac_sb)
     }
 
     // Normalize leading zeros in integer part
@@ -872,7 +881,9 @@ fn format_percent_default(locale: string, value: float) -> string {
 // The unit is chosen as the largest whose divisor does not exceed |n|, and the
 // mantissa is shown to 3 significant figures (2 fraction digits under 10, 1
 // under 100, 0 at/above 100) — the convention Finder/Nautilus/ByteCountFormatter
-// use, so 1_070_000_000 is "1.07 GB", not "1.070 GB" or "1 GB".
+// use, so 1_070_000_000 is "1.07 GB", not "1.070 GB" or "1 GB". The rounding
+// comes first and the precision and unit follow the rounded value, so 9_999 is
+// "10.0 KB" and 999_999 is "1.00 MB" rather than "10.00 KB" and "1000 KB".
 
 const BYTES_SI = 0 // decimal: divisor 1000, units B KB MB GB TB PB EB
 const BYTES_IEC = 1 // binary:  divisor 1024, units B KiB MiB GiB TiB PiB EiB
@@ -897,50 +908,95 @@ fn byte_unit(style: int, index: int) -> string {
 // `locale` sets the decimal separator (use "en-US" for a dot). Returns an
 // owned string.
 fn bytes(n: long, style: int, locale: string) -> string {
-    var neg: int = 0
-    var v: long = n
-    if v < 0 { neg = 1; v = 0 - v }
-
     var divisor: long = 1000
     if style == BYTES_IEC { divisor = 1024 }
 
     // Below one unit: a plain integer byte count, no fraction, no locale
     // grouping (byte counts are not thousands-grouped by these formatters).
-    if v < divisor {
+    // Both bounds are tested on n itself: INT64_MIN has no positive |n|.
+    if n > 0 - divisor && n < divisor {
         u = byte_unit(style, 0)
-        // "${v} B", sign restored.
-        var body: string = ""
-        if neg == 1 { body = "-${v} ${u}" } else { body = "${v} ${u}" }
+        body = "${n} ${u}"
         string_free(u)
         return body
     }
 
-    // Scale down until the value is under one more divisor, tracking the unit.
-    var scaled: float = v as float
-    var idx: int = 0
-    while scaled >= (divisor as float) && idx < 6 {
-        scaled = scaled / (divisor as float)
+    // |n| = whole * unit + rem, where unit = divisor^idx is the largest unit
+    // not above |n| (EB / EiB at most). Quotient and remainder are taken from
+    // n and then made positive: unlike |n| at INT64_MIN, both fit a long.
+    var unit: long = divisor
+    var idx: int = 1
+    var whole: long = n / unit
+    if whole < 0 { whole = 0 - whole }
+    while whole >= divisor && idx < 6 {
+        unit = unit * divisor
         idx = idx + 1
+        whole = n / unit
+        if whole < 0 { whole = 0 - whole }
     }
-    if neg == 1 { scaled = 0.0 - scaled }
+    var rem: long = n % unit
+    if rem < 0 { rem = 0 - rem }
 
     // Significant-figure fraction digits: 2 under 10, 1 under 100, else 0.
-    var abs_scaled: float = scaled
-    if abs_scaled < 0.0 { abs_scaled = 0.0 - abs_scaled }
     var frac: int = 0
-    if abs_scaled < 10.0 { frac = 2 }
-    else if abs_scaled < 100.0 { frac = 1 }
-    else { frac = 0 }
+    if whole < 10 { frac = 2 }
+    else if whole < 100 { frac = 1 }
+
+    // The mantissa rounded half up to `frac` places, as a count of
+    // 10^-frac: exact integer arithmetic, so a tie such as 9_995 B is
+    // decided on the true value. Each fraction digit of rem / unit is
+    // 5 * rem over unit / 2, the same quotient as 10 * rem over unit, but
+    // 5 * rem still fits a long at the EB / EiB unit. Both divisors are even
+    // through the two halvings, so unit stays exact.
+    var mant: long = whole
+    var k: int = 0
+    while k < frac {
+        unit = unit / 2
+        rem = rem * 5
+        mant = mant * 10 + rem / unit
+        rem = rem % unit
+        k = k + 1
+    }
+    if rem >= unit - rem { mant = mant + 1 } // 2 * rem >= unit: half up
+
+    // A carry can reach the next precision step (9.999 -> 10.0,
+    // 99.99 -> 100) or the next unit (999.9 KB -> 1.00 MB): the precision
+    // and unit follow the rounded value, so it keeps 3 significant figures.
+    if frac == 2 && mant == 1000 { frac = 1; mant = 100 }
+    if frac == 1 && mant == 1000 { frac = 0; mant = 100 }
+    if frac == 0 && mant == divisor && idx < 6 { idx = idx + 1; frac = 2; mant = 100 }
+
+    // "-1.50": the rounded digits as a decimal string, localized below
+    // without going through a float.
+    var scale: long = 1
+    k = 0
+    while k < frac {
+        scale = scale * 10
+        k = k + 1
+    }
+    sb = strbuilder.new(24)
+    if n < 0 { strbuilder.append_byte(sb, 45) }
+    strbuilder.append_long(sb, mant / scale)
+    if frac > 0 {
+        strbuilder.append_byte(sb, 46)
+        digits = mant % scale
+        if frac == 2 && digits < 10 { strbuilder.append_byte(sb, 48) }
+        strbuilder.append_long(sb, digits)
+    }
+    text = strbuilder.finish(sb)
 
     opts = default_options()
     opts.min_fraction_digits = frac
     opts.max_fraction_digits = frac
     opts.use_grouping = 0
 
-    mant = format_decimal(locale, scaled, opts)
+    mant_text, err = format_decimal_string(locale, text, opts)
+    string_release(text)
+    string_release(err)
+    err = ""
     u = byte_unit(style, idx)
-    res = "${mant} ${u}"
-    string_free(mant)
+    res = "${mant_text} ${u}"
+    string_release(mant_text)
     string_free(u)
     return res
 }

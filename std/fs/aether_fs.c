@@ -998,14 +998,19 @@ char* fs_readlink_raw(const char* path) {
     BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, rp, (DWORD)buf_bytes, &got, NULL);
     CloseHandle(h);
     char* out = NULL;
-    if (ok && rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+    /* A junction's buffer is the symlink layout without the Flags word, so
+     * its path buffer starts where Flags would be. */
+    const WCHAR* pb = NULL;
+    if (ok && rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) pb = rp->PathBuffer;
+    else if (ok && rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) pb = (const WCHAR*)&rp->Flags;
+    if (pb) {
         const wchar_t* name;
         int len;
         if (rp->PrintNameLength > 0) {
-            name = rp->PathBuffer + rp->PrintNameOffset / sizeof(WCHAR);
+            name = pb + rp->PrintNameOffset / sizeof(WCHAR);
             len = rp->PrintNameLength / sizeof(WCHAR);
         } else {
-            name = rp->PathBuffer + rp->SubstituteNameOffset / sizeof(WCHAR);
+            name = pb + rp->SubstituteNameOffset / sizeof(WCHAR);
             len = rp->SubstituteNameLength / sizeof(WCHAR);
             if (len >= 4 && wcsncmp(name, L"\\??\\", 4) == 0) { name += 4; len -= 4; }
         }
@@ -1057,9 +1062,15 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
     return strdup(out);
 }
-/* 1 when `path` is a symbolic link itself, not what it points at: the
- * directory entry's reparse tag says so without opening anything. A
- * junction or any other reparse point is not a symlink. */
+/* 1 when `path` is a link itself, not what it points at: the directory
+ * entry's reparse tag says so without opening anything. A link here is any
+ * name-surrogate reparse point, a symbolic link or a junction (a mount
+ * point): both redirect path resolution to another name, which is what a
+ * caller asking this question has to know. Counting only symlinks let
+ * archive extraction write through a junction (`mklink /J`, which needs no
+ * privilege) to a directory outside its destination. Other reparse points
+ * (deduplication, cloud placeholders) are not name surrogates and stay
+ * ordinary files. */
 int fs_is_symlink(const char* path) {
     if (!path) return 0;
     if (!aether_sandbox_check("fs_read", path)) return 0;
@@ -1072,7 +1083,7 @@ int fs_is_symlink(const char* path) {
     if (h == INVALID_HANDLE_VALUE) return 0;
     FindClose(h);
     return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-           fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK;
+           IsReparseTagNameSurrogate(fd.dwReserved0);
 }
 int fs_is_socket(const char* p) { (void)p; return 0; }
 /* Remove a file or a symlink, never a directory — the POSIX contract. A
@@ -1283,9 +1294,7 @@ int fs_stat_raw(const char* path, int* out_kind,
 #ifndef _WIN32
     if (aether_lstat64(path, &st) != 0) {
 #else
-    // Windows CRT has no lstat; _stati64 follows symlinks, but Windows
-    // symlinks already go through a different code path we stub out
-    // (fs_is_symlink returns 0). Good enough for v1.
+    // Windows CRT has no lstat; _stati64 follows a link to its target.
     if (aether_stat64(path, &st) != 0) {
 #endif
         if (out_kind)  *out_kind  = 0;
@@ -3556,13 +3565,23 @@ char* path_rel(const char* base, const char* target) {
     }
     /* `bi` is at the first byte of the unmatched base remainder,
      * `ti` at the first byte of the unmatched target remainder. */
-    /* Count remaining base segments → that many ".." */
+    /* Count remaining base segments → that many "..". A remaining base
+     * segment that is itself ".." (only possible as a leading segment of a
+     * relative path, once cleaned) names a directory above the shared root
+     * whose name is unknown, so no relative path reaches target from there:
+     * no answer, as Go's filepath.Rel. Climbing it with another ".." gave
+     * rel("../a", "b") = "../../b", which joined onto base is "../../b",
+     * not "b". */
     size_t up = 0;
     {
         size_t p = bi;
         while (p < bl) {
+            size_t seg = p;
             up++;
             while (p < bl && !path_is_sep(cb[p])) p++;
+            if (p - seg == 2 && cb[seg] == '.' && cb[seg + 1] == '.') {
+                free(cb); free(ct); return NULL;
+            }
             if (p < bl) p++;
         }
     }

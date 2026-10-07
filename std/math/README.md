@@ -40,7 +40,15 @@ pipeline is one float `sqrt`. The double functions take an `f32` too, but
 widen it and return `float`.
 
 `random_*` is a plain PRNG for simulation and sampling — not a CSPRNG. Use
-`std.cryptography.random_bytes` for anything security-bearing.
+`std.cryptography.random_bytes` for anything security-bearing. It is
+splitmix64: the same seed gives the same sequence on every platform.
+`random_int(min, max)` is uniform over `[min, max]`, both ends included, for
+any pair of ints. `random_float()` is uniform over `[0, 1)`, never 1.0, so
+`floor(random_float() * n)` is always below `n`.
+
+`abs_int(INT_MIN)` is `INT_MIN`: an `int` wraps, and its most negative value
+has no positive counterpart. `min_float` / `max_float` return the other
+operand when one is NaN, whichever side it is on.
 
 `round` and `lrint` both round to nearest but differ in two ways that matter:
 

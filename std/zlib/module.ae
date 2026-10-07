@@ -33,7 +33,7 @@ exports(
     zlib_try_stream_finish, zlib_get_stream_bytes, zlib_get_stream_length,
     zlib_release_stream,
     available, deflate, inflate, gzip_deflate, gzip_inflate,
-    deflate_raw, inflate_raw,
+    deflate_raw, inflate_raw, inflate_raw_max,
     stream_new, stream_write, stream_flush, stream_finish, stream_free,
     // Stream formats for stream_new
     RAW, ZLIB, GZIP
@@ -68,6 +68,7 @@ extern zlib_release_inflate()
 extern zlib_try_gzip_deflate(data: ptr, length: int, level: int) -> int
 extern zlib_try_gzip_inflate(data: ptr, length: int) -> int
 extern zlib_try_inflate_raw(data: ptr, length: int) -> int
+extern zlib_try_inflate_raw_max(data: ptr, length: int, max_out: int) -> int
 extern zlib_try_deflate_raw(data: ptr, length: int, level: int) -> int
 
 // Streaming deflate (#1890). The handle keeps ONE deflate stream open
@@ -211,6 +212,30 @@ inflate_raw(data: byte[]) -> {
     return owned, n, ""
 }
 
+// inflate_raw that stops at `max_bytes` of output: a stream that would
+// decompress past it is an error, raised as it crosses the limit rather
+// than after inflating all of it. For a container that states the
+// uncompressed size, as a ZIP entry does, so an entry that lies about its
+// size cannot expand past the claim in memory.
+inflate_raw_max(data: byte[], max_bytes: int) -> {
+    if data.len < 0 { unbounded("inflate_raw_max") }
+    if zlib_backend_available() == 0 {
+        return "", 0, "zlib unavailable"
+    }
+    rc = zlib_try_inflate_raw_max(data, data.len, max_bytes)
+    if rc < 0 {
+        return "", 0, "raw inflate: output exceeds ${max_bytes} bytes"
+    }
+    if rc == 0 {
+        return "", 0, "raw inflate failed"
+    }
+    raw = zlib_get_inflate_bytes()
+    n = zlib_get_inflate_length()
+    owned = string_new_with_length(raw, n)
+    zlib_release_inflate()
+    return owned, n, ""
+}
+
 // ---- Streaming deflate (#1890) -------------------------------------
 //
 // The one-shot calls above each emit a COMPLETE stream, which is wrong
@@ -240,6 +265,14 @@ const GZIP = 2
 stream_new(format: int, level: int) -> {
     if zlib_backend_available() == 0 {
         return null, "zlib unavailable"
+    }
+    // Both are checked here, as documented: an out-of-range level used to
+    // be replaced by the default without a word.
+    if format != RAW && format != ZLIB && format != GZIP {
+        return null, "zlib stream_new: format must be RAW, ZLIB or GZIP"
+    }
+    if level < -1 || level > 9 {
+        return null, "zlib stream_new: level must be -1 (default) to 9"
     }
     h = zlib_try_stream_new(format, level)
     if h == null {

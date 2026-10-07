@@ -152,10 +152,14 @@ extern fs_mkdir_p_raw(path: string) -> int
 //   fs_symlink_raw   — create a symlink at `link_path` pointing to `target`.
 //                      `target` is recorded verbatim (relative stays relative);
 //                      Windows stores its separators as backslashes.
-//   fs_readlink_raw  — read a symlink's target. Returns null if not a symlink.
+//   fs_readlink_raw  — read a symlink's target (on Windows, a junction's too).
+//                      Returns null if not a link.
 //                      `@heap`: a fresh strdup'd string the tracker frees.
 //   fs_is_symlink    — does NOT follow; returns 1 only for the link itself.
-//                      Pure boolean query, no wrapper (matches file_exists).
+//                      On Windows a junction counts: it redirects resolution
+//                      exactly as a symlink does (any name-surrogate reparse
+//                      point). Pure boolean query, no wrapper (matches
+//                      file_exists).
 //   fs_unlink_raw    — remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
 //   fs_hard_link_raw — a second name (`link_path`) for the file at `target`;

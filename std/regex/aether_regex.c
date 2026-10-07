@@ -295,12 +295,18 @@ static const char* regex_substitute(void* h_, const void* s_, const void* repl_,
     PCRE2_SIZE outlen = slen + rlen + 64;
     PCRE2_UCHAR* out = (PCRE2_UCHAR*)malloc(outlen);
     if (!out) { set_last_error("regex: out of memory"); return (const char*)string_new_with_length("", 0); }
-    uint32_t opts = PCRE2_SUBSTITUTE_EXTENDED | extra_options;
+    /* PCRE2_SUBSTITUTE_OVERFLOW_LENGTH: on PCRE2_ERROR_NOMEMORY, PCRE2 keeps
+     * going and writes the size the result needs into outlen. Without it
+     * outlen is left as the buffer's own size, so the retry below grew the
+     * buffer to what had just failed and failed again: a replace_all whose
+     * result outgrew input + replacement + 64 bytes returned "" with
+     * "regex: out of memory". */
+    uint32_t opts = PCRE2_SUBSTITUTE_EXTENDED | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | extra_options;
     int rc = pcre2_substitute(h->code, (PCRE2_SPTR)s, slen, 0, opts,
                                NULL, NULL,
                                (PCRE2_SPTR)repl, rlen, out, &outlen);
     if (rc == PCRE2_ERROR_NOMEMORY) {
-        /* PCRE2 wrote the required size into outlen — grow + retry. */
+        /* outlen now holds the required size (OVERFLOW_LENGTH) — grow + retry. */
         PCRE2_UCHAR* grown = (PCRE2_UCHAR*)realloc(out, outlen);
         if (!grown) { free(out); set_last_error("regex: out of memory"); return (const char*)string_new_with_length("", 0); }
         out = grown;

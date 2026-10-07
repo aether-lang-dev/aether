@@ -82,8 +82,10 @@ int zlib_try_deflate(const char* data, int length, int level) {
     if (!out) return 0;
 
     uLongf out_size = bound;
-    int lvl = (level < -1 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
-    int rc = compress2(out, &out_size, in, (uLong)in_len, lvl);
+    /* The documented levels are 0..9 and -1 (Z_DEFAULT_COMPRESSION); any
+     * other was quietly replaced by the default. */
+    if (level < -1 || level > 9) { aether_caps_free(out, alloc_cap); return 0; }
+    int rc = compress2(out, &out_size, in, (uLong)in_len, level);
     if (rc != Z_OK) { aether_caps_free(out, alloc_cap); return 0; }
 
     tls_deflate_buf = out;
@@ -105,10 +107,10 @@ static int deflate_with_window_bits(const char* data, int length, int level,
     const unsigned char* in = zlib_unwrap_bytes(data, length, &in_len);
     if (in_len > 0 && !in) return 0;
 
+    if (level < -1 || level > 9) return 0;   /* as zlib_try_deflate */
     z_stream strm;
     memset(&strm, 0, sizeof(strm));
-    int lvl = (level < -1 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
-    if (deflateInit2(&strm, lvl, Z_DEFLATED, window_bits, 8,
+    if (deflateInit2(&strm, level, Z_DEFLATED, window_bits, 8,
                      Z_DEFAULT_STRATEGY) != Z_OK) {
         return 0;
     }
@@ -181,7 +183,12 @@ int zlib_try_inflate(const char* data, int length) {
         int rc = inflate(&strm, Z_NO_FLUSH);
         produced = cap - strm.avail_out;
 
-        if (rc == Z_STREAM_END) break;
+        if (rc == Z_STREAM_END) {
+            /* A zlib stream is one stream: input left after its end is not
+             * part of it, and was ignored without a word. */
+            if (strm.avail_in > 0) { aether_caps_free(out, cap); inflateEnd(&strm); return 0; }
+            break;
+        }
         if (rc != Z_OK) { aether_caps_free(out, cap); inflateEnd(&strm); return 0; }
         if (strm.avail_out == 0) {
             size_t new_cap = cap * 2;
@@ -229,7 +236,22 @@ static int inflate_with_window_bits(const char* data, int length, int window_bit
         int rc = inflate(&strm, Z_NO_FLUSH);
         produced = cap - strm.avail_out;
 
-        if (rc == Z_STREAM_END) break;
+        if (rc == Z_STREAM_END) {
+            /* gzip (RFC 1952 2.2): a file is one or more members, and
+             * decompressing it yields them all, as gzip -d does. Only the
+             * first used to come back, the rest dropped with no error.
+             * Input after the last member that is not another member is
+             * malformed. Raw DEFLATE (ZIP entries) is framed by its
+             * container, which states the exact compressed size. */
+            if (window_bits == 15 + 16 && strm.avail_in > 0) {
+                if (strm.avail_in >= 2 && strm.next_in[0] == 0x1f && strm.next_in[1] == 0x8b &&
+                    inflateReset(&strm) == Z_OK) {
+                    continue;
+                }
+                aether_caps_free(out, cap); inflateEnd(&strm); return 0;
+            }
+            break;
+        }
         if (rc != Z_OK) { aether_caps_free(out, cap); inflateEnd(&strm); return 0; }
         if (strm.avail_out == 0) {
             size_t new_cap = cap * 2;
@@ -259,6 +281,66 @@ int zlib_try_gzip_inflate(const char* data, int length) {
  * zlib_get_inflate_bytes / _length / zlib_release_inflate all apply. */
 int zlib_try_inflate_raw(const char* data, int length) {
     return inflate_with_window_bits(data, length, -15);
+}
+
+/* Raw inflate that never produces more than `max_out` bytes: 1 on success,
+ * 0 on a corrupt stream, -1 when the stream would decompress past
+ * `max_out`. The output buffer never grows beyond max_out + 1, so a stream
+ * that lies about its size is stopped as it crosses the limit rather than
+ * after inflating all of it. A ZIP entry states its uncompressed size, and
+ * std.zip extracts against that; a deflate entry claiming 10 bytes could
+ * otherwise expand to about 1032x its compressed size in memory before the
+ * size was checked. */
+int zlib_try_inflate_raw_max(const char* data, int length, int max_out) {
+    free_inflate_tls();
+    if (length < 0 || max_out < 0) return 0;
+
+    size_t in_len;
+    const unsigned char* in = zlib_unwrap_bytes(data, length, &in_len);
+    if (in_len == 0 || !in) return 0;
+
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = (Bytef*)in;
+    strm.avail_in = (uInt)in_len;
+    if (inflateInit2(&strm, -15) != Z_OK) return 0;
+
+    size_t limit = (size_t)max_out + 1;   /* one byte past: detects "too much" */
+    size_t cap = in_len * 4;
+    if (cap < 64) cap = 64;
+    if (cap > limit) cap = limit;
+    unsigned char* out = (unsigned char*)aether_caps_malloc(cap);
+    if (!out) { inflateEnd(&strm); return 0; }
+
+    size_t produced = 0;
+    for (;;) {
+        strm.next_out = out + produced;
+        strm.avail_out = (uInt)(cap - produced);
+        int rc = inflate(&strm, Z_NO_FLUSH);
+        produced = cap - strm.avail_out;
+        if (produced > (size_t)max_out) {
+            aether_caps_free(out, cap); inflateEnd(&strm); return -1;
+        }
+        if (rc == Z_STREAM_END) break;
+        if (rc != Z_OK) { aether_caps_free(out, cap); inflateEnd(&strm); return 0; }
+        if (strm.avail_out == 0) {
+            size_t new_cap = cap * 2;
+            if (new_cap > limit) new_cap = limit;
+            if (new_cap <= cap) {   /* at the limit and still not done */
+                aether_caps_free(out, cap); inflateEnd(&strm); return -1;
+            }
+            unsigned char* bigger = (unsigned char*)aether_caps_realloc(out, cap, new_cap);
+            if (!bigger) { aether_caps_free(out, cap); inflateEnd(&strm); return 0; }
+            out = bigger;
+            cap = new_cap;
+        }
+    }
+    inflateEnd(&strm);
+
+    tls_inflate_buf = out;
+    tls_inflate_cap = cap;
+    tls_inflate_len = (int)produced;
+    return 1;
 }
 
 /* ---- Streaming deflate (#1890) ---------------------------------- */
@@ -343,7 +425,8 @@ static int zlib_stream_pump(ZlibStream* z, int flush) {
 void* zlib_try_stream_new(int format, int level) {
     int wbits = zlib_window_bits(format);
     if (wbits == 0) return NULL;
-    int lvl = (level < -1 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
+    if (level < -1 || level > 9) return NULL;   /* -1 is Z_DEFAULT_COMPRESSION */
+    int lvl = level;
 
     ZlibStream* z = (ZlibStream*)aether_caps_calloc(1, sizeof(ZlibStream));
     if (!z) return NULL;
@@ -430,6 +513,9 @@ int zlib_try_deflate_raw(const char* data, int length, int level) {
 }
 int zlib_try_inflate_raw(const char* data, int length) {
     (void)data; (void)length; return 0;
+}
+int zlib_try_inflate_raw_max(const char* data, int length, int max_out) {
+    (void)data; (void)length; (void)max_out; return 0;
 }
 
 /* Streaming stubs. stream_new returns NULL, which is the one signal a

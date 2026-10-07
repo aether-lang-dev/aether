@@ -64,6 +64,30 @@ main() {
     // base32 round-trip
     b32r, _ = encoding.base32_decode(encoding.base32_encode(string.bytes("hello world")))
     fails = fails + check(b32r == "hello world", "b32 round-trip")
+    // unpadded and lower-case input are accepted (every short-group length)
+    b32u, b32ue = encoding.base32_decode("mzxw6ytboi")
+    fails = fails + check(b32ue == "" && b32u == "foobar", "b32 decode unpadded lower-case")
+    b32u4, b32u4e = encoding.base32_decode("MZXW6YQ")
+    fails = fails + check(b32u4e == "" && b32u4 == "foob", "b32 decode unpadded 7-char group")
+
+    // ---- base32 decode errors (RFC 4648 §6: a final group is 2, 4, 5 or
+    // 7 chars; padding, when present, completes it to 8; spare bits are 0)
+    _, b32l1 = encoding.base32_decode("M")
+    fails = fails + check(b32l1 != "", "b32 1-char group rejected")
+    _, b32l6 = encoding.base32_decode("MZXW6Y")
+    fails = fails + check(b32l6 != "", "b32 6-char group rejected")
+    _, b32l9 = encoding.base32_decode("MZXW6YTBO")
+    fails = fails + check(b32l9 != "", "b32 9-char input rejected")
+    _, b32p1 = encoding.base32_decode("MZXW6=")
+    fails = fails + check(b32p1 != "", "b32 short padding rejected")
+    _, b32p2 = encoding.base32_decode("MY=======")
+    fails = fails + check(b32p2 != "", "b32 over-long padding rejected")
+    _, b32p3 = encoding.base32_decode("MZXW6YTB========")
+    fails = fails + check(b32p3 != "", "b32 padding-only group rejected")
+    _, b32t = encoding.base32_decode("MZ======")
+    fails = fails + check(b32t != "", "b32 non-zero trailing bits rejected")
+    _, b32t2 = encoding.base32_decode("MZ")
+    fails = fails + check(b32t2 != "", "b32 non-zero trailing bits rejected (unpadded)")
 
     // ---- base64 decode (padded and unpadded, from c3 decode) ----
     bd1, be1 = encoding.base64_decode("Zm9vYmFy")
@@ -72,6 +96,22 @@ main() {
     fails = fails + check(be2 == "" && bd2 == "f", "b64 decode padded f")
     bd3, be3 = encoding.base64_decode("Zm8")
     fails = fails + check(be3 == "" && bd3 == "fo", "b64 decode unpadded fo")
+    bd4, be4 = encoding.base64_decode("Zm9v\nYmFy")
+    fails = fails + check(be4 == "" && bd4 == "foobar", "b64 decode across a line break")
+
+    // ---- base64 decode errors: '=' only as trailing padding (at most two,
+    // completing a multiple of 4), no 1-char final group, spare bits 0.
+    // Each of these decoded to something with an empty error.
+    _, b64l1 = encoding.base64_decode("Z")
+    fails = fails + check(b64l1 != "", "b64 1-char group rejected")
+    _, b64mid = encoding.base64_decode("Zm9v=Zm9v")
+    fails = fails + check(b64mid != "", "b64 '=' before data rejected")
+    _, b64pad = encoding.base64_decode("Zg=")
+    fails = fails + check(b64pad != "", "b64 short padding rejected")
+    _, b64pad3 = encoding.base64_decode("Zg===")
+    fails = fails + check(b64pad3 != "", "b64 three '=' rejected")
+    _, b64bits = encoding.base64_decode("Zh==")
+    fails = fails + check(b64bits != "", "b64 non-zero trailing bits rejected")
 
     // ---- round-trip a longer string through both ----
     let msg = "The quick brown fox"

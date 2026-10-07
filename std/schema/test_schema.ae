@@ -180,6 +180,123 @@ main() {
     expect_err("name too long", person, e8, "name", "too_big")
     map_free(e8)
 
+    // 12. a dot in an email's local part is fine; the domain still needs one
+    ok4 = map_new()
+    put(ok4, "age", "25")
+    put(ok4, "name", "Ada")
+    put(ok4, "email", "first.last@example.com")
+    put(ok4, "even", "4")
+    expect_ok("email with a dotted local part", person, ok4)
+    map_free(ok4)
+    e9 = map_new()
+    put(e9, "age", "25")
+    put(e9, "name", "Ada")
+    put(e9, "email", "first.last@localhost")
+    put(e9, "even", "4")
+    expect_err("email whose only dot is before the @", person, e9, "email", "invalid_format")
+    map_free(e9)
+    e10 = map_new()
+    put(e10, "age", "25")
+    put(e10, "name", "Ada")
+    put(e10, "email", "ada@.example.com")
+    put(e10, "even", "4")
+    expect_err("email with a dot right after the @", person, e10, "email", "invalid_format")
+    map_free(e10)
+    e11 = map_new()
+    put(e11, "age", "25")
+    put(e11, "name", "Ada")
+    put(e11, "email", "ada@example.com.")
+    put(e11, "even", "4")
+    expect_err("email with a trailing dot", person, e11, "email", "invalid_format")
+    map_free(e11)
+
+    // 13. one_of matches a whole option, not a run of the set's text
+    ok5 = map_new()
+    put(ok5, "age", "25")
+    put(ok5, "name", "Ada")
+    put(ok5, "role", "guest")
+    put(ok5, "even", "4")
+    expect_ok("one_of last option", person, ok5)
+    map_free(ok5)
+    e12 = map_new()
+    put(e12, "age", "25")
+    put(e12, "name", "Ada")
+    put(e12, "role", "admin,user")
+    put(e12, "even", "4")
+    expect_err("one_of refuses two options joined", person, e12, "role", "invalid_value")
+    map_free(e12)
+    e13 = map_new()
+    put(e13, "age", "25")
+    put(e13, "name", "Ada")
+    put(e13, "role", "user,")
+    put(e13, "even", "4")
+    expect_err("one_of refuses an option with its comma", person, e13, "role", "invalid_value")
+    map_free(e13)
+    e14 = map_new()
+    put(e14, "age", "25")
+    put(e14, "name", "Ada")
+    put(e14, "role", "adm")
+    put(e14, "even", "4")
+    expect_err("one_of refuses an option's prefix", person, e14, "role", "invalid_value")
+    map_free(e14)
+
+    // 14. INT is 64-bit: past int32 the bounds still apply; past int64 it is
+    // not an integer
+    e15 = map_new()
+    put(e15, "age", "5000000000")
+    put(e15, "name", "Ada")
+    put(e15, "even", "4")
+    expect_err("int beyond int32 meets max", person, e15, "age", "too_big")
+    map_free(e15)
+    e16 = map_new()
+    put(e16, "age", "-5000000000")
+    put(e16, "name", "Ada")
+    put(e16, "even", "4")
+    expect_err("int below int32 meets min", person, e16, "age", "too_small")
+    map_free(e16)
+    e17 = map_new()
+    put(e17, "age", "99999999999999999999")
+    put(e17, "name", "Ada")
+    put(e17, "even", "4")
+    expect_err("int beyond int64", person, e17, "age", "invalid_type")
+    map_free(e17)
+
+    // 15. the error getters read "" past the list's end, never crash
+    ok6 = map_new()
+    put(ok6, "age", "25")
+    put(ok6, "name", "Ada")
+    put(ok6, "even", "4")
+    gv, ge = schema.parse(person, ok6)
+    if schema.ok(ge) != 1 {
+        fail("getters: expected ok")
+    }
+    if string_equals(schema.error_field(ge, 0), "") != 1 || string_equals(schema.error_code(ge, 0), "") != 1 ||
+    string_equals(schema.error_message(ge, 0), "") != 1 {
+        fail("getters: index 0 of no errors is not empty")
+    }
+    if string_equals(schema.error_code(ge, -1), "") != 1 {
+        fail("getters: index -1 is not empty")
+    }
+    schema.values_free(gv)
+    schema.errors_free(ge)
+    map_free(ok6)
+    e18 = map_new()
+    put(e18, "age", "12")
+    put(e18, "name", "Ada")
+    put(e18, "even", "4")
+    bv, be = schema.parse(person, e18)
+    n_be = schema.error_count(be)
+    if n_be != 1 || string_equals(schema.error_code(be, 0), "too_small") != 1 {
+        fail("getters: expected one too_small, got ${n_be}")
+    }
+    if string_equals(schema.error_field(be, n_be), "") != 1 || string_equals(schema.error_message(be, n_be), "") != 1 {
+        fail("getters: index error_count is not empty")
+    }
+    schema.values_free(bv)
+    schema.errors_free(be)
+    map_free(e18)
+    print("PASS: error getters out of range read empty\n")
+
     schema.schema_free(person)
 
     // ---- Float + bool coercion in their own small schema ----

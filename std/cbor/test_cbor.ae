@@ -4,6 +4,7 @@
 import std.cbor
 import std.encoding
 import std.string
+import std.bytes
 
 extern exit(code: int)
 
@@ -62,6 +63,83 @@ fn run_test(hex_data: string, expected_diag: string) -> int {
 
     cbor.free(cv_ptr)
     return 0
+}
+
+// Hostile or truncated input must be refused with `expected_err`, never
+// decoded into a value.
+fn expect_error(hex_data: string, expected_err: string) -> int {
+    binary_data, err = encoding.hex_decode(hex_data)
+    if err != "" {
+        println("  FAIL: hex decode failed for ${hex_data}: ${err}")
+        return 1
+    }
+    cv_ptr, err2 = cbor.parse(binary_data)
+    if err2 != expected_err {
+        diag, _ = cbor.diagnose(cv_ptr)
+        println("  FAIL: ${hex_data} should be refused")
+        println("    got:      err='${err2}' value=${diag}")
+        println("    expected: err='${expected_err}'")
+        cbor.free(cv_ptr)
+        return 1
+    }
+    return 0
+}
+
+// `levels` one-element arrays (0x81) around the integer 1.
+fn nested_arrays(levels: int) -> string {
+    b = bytes.new(levels + 1)
+    i = 0
+    while i < levels {
+        bytes.set(b, i, 129)
+        i = i + 1
+    }
+    bytes.set(b, levels, 1)
+    return bytes.finish(b, levels + 1)
+}
+
+fn test_nesting() -> int {
+    fails = 0
+    // 256 arrays put the integer 256 levels down: the deepest accepted.
+    ok_data = nested_arrays(256)
+    v, err = cbor.parse(ok_data)
+    if err != "" {
+        println("  FAIL nesting: 256 levels refused: ${err}")
+        fails = fails + 1
+    }
+    cbor.free(v)
+    // One more, and 200000 more, are refused instead of recursing until the
+    // stack overflows.
+    deep = nested_arrays(257)
+    v2, err2 = cbor.parse(deep)
+    if err2 != "cbor: nesting deeper than 256" {
+        println("  FAIL nesting: 257 levels gave err='${err2}'")
+        fails = fails + 1
+        cbor.free(v2)
+    }
+    hostile = nested_arrays(200000)
+    v3, err3 = cbor.parse(hostile)
+    if err3 != "cbor: nesting deeper than 256" {
+        println("  FAIL nesting: 200000 levels gave err='${err3}'")
+        fails = fails + 1
+        cbor.free(v3)
+    }
+    return fails
+}
+
+fn test_set_replaces() -> int {
+    m = cbor.obj()
+    _ = cbor.set(m, "k", cbor.from_int(1))
+    _ = cbor.set(m, "j", cbor.from_int(7))
+    _ = cbor.set(m, "k", cbor.from_int(2))
+    v, _ = cbor.object_get(m, "k")
+    diag, _ = cbor.diagnose(m)
+    fails = 0
+    if cbor.object_size(m) != 2 || cbor.get_int(v) != 2 || diag != "{\"k\": 2, \"j\": 7}" {
+        println("  FAIL set: an existing key was not replaced: size=${cbor.object_size(m)} ${diag}")
+        fails = 1
+    }
+    cbor.free(m)
+    return fails
 }
 
 fn test_builders() -> int {
@@ -174,6 +252,32 @@ main() {
 
     // ---- Builders ----
     fails = fails + test_builders()
+    fails = fails + test_set_replaces()
+
+    // ---- 64-bit integer limits ----
+    // The extremes of the signed long the API returns round-trip; one past
+    // either end is refused rather than coming back with its sign flipped.
+    fails = fails + run_test("1b7fffffffffffffff", "9223372036854775807")
+    fails = fails + run_test("3b7fffffffffffffff", "-9223372036854775808")
+    fails = fails + expect_error("1bffffffffffffffff", "cbor: integer out of range")
+    fails = fails + expect_error("1b8000000000000000", "cbor: integer out of range")
+    fails = fails + expect_error("3b8000000000000000", "cbor: integer out of range")
+
+    // ---- Hostile lengths ----
+    // Lengths and counts of 2^31 and up, larger than the input, were
+    // narrowed to int and decoded as empty (or as the bytes that were there).
+    fails = fails + expect_error("5a80000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("7a80000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("5b000000010000000141", "cbor: unexpected EOF")
+    fails = fails + expect_error("9a80000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("9b0000000100000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("bb00000001000000010102", "cbor: unexpected EOF")
+    fails = fails + expect_error("5bffffffffffffffff", "cbor: integer out of range")
+    // A map whose count needs more bytes than are left is truncated.
+    fails = fails + expect_error("a201", "cbor: unexpected EOF")
+
+    // ---- Nesting ----
+    fails = fails + test_nesting()
 
     if fails != 0 {
         println("CBOR: ${fails} failure(s)")

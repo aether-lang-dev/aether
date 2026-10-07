@@ -4841,6 +4841,28 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                                     field->children[0]->type == AST_PATTERN_VARIABLE && field->children[0]->value) {
                                     var_name = field->children[0]->value;
                                 }
+                                /* #2454: a binding named like a state field.
+                                 * State is reached by its bare name, so the arm
+                                 * cannot have both: codegen resolved `v` to the
+                                 * state and the message's value was silently
+                                 * lost. Refuse it, and say how to rename. */
+                                for (int s = 0; s < actor->child_count; s++) {
+                                    ASTNode* sd = actor->children[s];
+                                    if (sd && sd->type == AST_STATE_DECLARATION && sd->value &&
+                                        strcmp(sd->value, var_name) == 0) {
+                                        char msg[200], hint[200];
+                                        snprintf(msg, sizeof(msg),
+                                                 "receive pattern binds '%s', which is also a state field of this actor",
+                                                 var_name);
+                                        snprintf(hint, sizeof(hint),
+                                                 "bind the message field under another name: `%s(%s: new_%s)`",
+                                                 pattern->value ? pattern->value : "Msg",
+                                                 field->value, var_name);
+                                        aether_error_with_suggestion(msg, field->line, field->column, hint);
+                                        error_count++;
+                                        break;
+                                    }
+                                }
                                 add_symbol(receive_table, var_name, field_type, 0, 0, 0);
                             }
                         }

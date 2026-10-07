@@ -42,6 +42,11 @@ const TYPE_ARRAY = 6
 const TYPE_MAP = 7
 const TYPE_EXT = 8
 
+// Deepest nesting unpack accepts, the same bound as std.json. The decoder
+// recurses once per level, so without a bound a few hundred kilobytes of
+// one-element arrays overflow the stack.
+const MAX_DEPTH = 256
+
 struct MsgValue {
     type_id: int
     b_val: bool
@@ -387,7 +392,7 @@ unpack(bytes_str: string) -> ptr! {
     }
     defer cursor.free(c)
 
-    let val, err = unpack_inner(c)
+    let val, err = unpack_inner(c, 0)
     if err != "" {
         return null, err
     }
@@ -621,28 +626,51 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
 // buffer as `v`'s owned payload (read_slice returns a freshly-owned
 // AetherBytes, so no copy is needed). Records an empty payload for len==0.
 // Returns an error string ("" on success); on failure the value's payload
-// is left empty and the caller frees the value.
-fn read_payload(v: *MsgValue, c: ptr, len: int, what: string) -> string {
-    if len <= 0 {
+// is left empty and the caller frees the value. `len` is a long so a 32-bit
+// length is compared whole against what is left, before anything is
+// allocated for it.
+fn read_payload(v: *MsgValue, c: ptr, len: long, what: string) -> string {
+    if len == 0 {
         v.s_bytes = null
         v.s_len = 0
         return ""
     }
-    let slice = cursor.read_slice(c, len)
+    if len > (cursor.remaining(c) as long) {
+        return what
+    }
+    let slice = cursor.read_slice(c, len as int)
     if slice == null {
         return what
     }
     v.s_bytes = slice
-    v.s_len = len
+    v.s_len = len as int
     return ""
 }
 
-fn unpack_inner(c: ptr) -> (ptr, string) {
+// Read a 32-bit length or count as the unsigned value it is. read_be_u32
+// returns the bit pattern as an int, so 2^31 and up came back negative and
+// were taken as empty. The caller has checked 4 bytes remain.
+fn read_len32(c: ptr) -> long {
+    let raw = cursor.read_be_u32(c)
+    return (raw as long) & 4294967295
+}
+
+// Whether `count` items of at least `min_size` bytes each fit in what is
+// left. A count beyond that is truncated input, refused before the loop.
+fn count_fits(c: ptr, count: long, min_size: long) -> bool {
+    return count <= (cursor.remaining(c) as long) / min_size
+}
+
+// `depth` counts the values enclosing this one (0 at the root).
+fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
     // Single tracked empty-error binding reused for every success return.
     // A bare `""` literal in the error slot mints a fresh 1-byte heap
     // string per call that the caller discards — leaking one byte per
     // decoded value (see std.yaml / std.asn1 for the same pattern).
     let ok = ""
+    if depth > MAX_DEPTH {
+        return null, "nesting deeper than 256"
+    }
     let m = cursor.read_u8(c)
     if m < 0 {
         return null, "EOF"
@@ -665,13 +693,13 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         v.map_values = list.list_new()
         let i = 0
         while i < sz {
-            let key, err_k = unpack_inner(c)
+            let key, err_k = unpack_inner(c, depth + 1)
             if err_k != "" {
                 free(v)
                 return null, err_k
             }
             string.release(err_k) // success-path heap "" from the child; discard
-            let val, err_v = unpack_inner(c)
+            let val, err_v = unpack_inner(c, depth + 1)
             if err_v != "" {
                 free(key)
                 free(v)
@@ -693,7 +721,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         v.arr_val = list.list_new()
         let i = 0
         while i < sz {
-            let item, err = unpack_inner(c)
+            let item, err = unpack_inner(c, depth + 1)
             if err != "" {
                 free(v)
                 return null, err
@@ -777,7 +805,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     // 10. Bin 32
     if m == 0xc6 {
         if cursor.remaining(c) < 4 { return null, "EOF reading bin 32 length" }
-        let len = cursor.read_be_u32(c)
+        let len = read_len32(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_BIN
         let perr = read_payload(v as *MsgValue, c, len, "EOF reading bin 32 data")
@@ -828,7 +856,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     // 13. Ext 32
     if m == 0xc9 {
         if cursor.remaining(c) < 5 { return null, "EOF reading ext 32 length/type" }
-        let len = cursor.read_be_u32(c)
+        let len = read_len32(c)
         let et = cursor.read_u8(c)
         let ext_type = et
         if ext_type >= 128 { ext_type = ext_type - 256 }
@@ -907,6 +935,9 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     if m == 0xcf {
         if cursor.remaining(c) < 8 { return null, "EOF reading u64" }
         let i = cursor.read_be_u64(c)
+        // get_int returns a signed long: 2^63 and up would come back
+        // negative (2^64-1 as -1), so they are refused.
+        if i < 0 { return null, "integer out of range" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
@@ -1073,7 +1104,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     // 31. Str 32
     if m == 0xdb {
         if cursor.remaining(c) < 4 { return null, "EOF reading str 32 length" }
-        let len = cursor.read_be_u32(c)
+        let len = read_len32(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_STR
         let perr = read_payload(v as *MsgValue, c, len, "EOF reading str 32 data")
@@ -1088,12 +1119,13 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     if m == 0xdc {
         if cursor.remaining(c) < 2 { return null, "EOF reading array 16 size" }
         let sz = cursor.read_be_u16(c)
+        if !count_fits(c, sz, 1) { return null, "EOF reading array 16 items" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_ARRAY
         v.arr_val = list.list_new()
         let i = 0
         while i < sz {
-            let item, err = unpack_inner(c)
+            let item, err = unpack_inner(c, depth + 1)
             if err != "" {
                 free(v)
                 return null, err
@@ -1108,13 +1140,14 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     // 33. Array 32
     if m == 0xdd {
         if cursor.remaining(c) < 4 { return null, "EOF reading array 32 size" }
-        let sz = cursor.read_be_u32(c)
+        let sz = read_len32(c)
+        if !count_fits(c, sz, 1) { return null, "EOF reading array 32 items" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_ARRAY
         v.arr_val = list.list_new()
         let i = 0
         while i < sz {
-            let item, err = unpack_inner(c)
+            let item, err = unpack_inner(c, depth + 1)
             if err != "" {
                 free(v)
                 return null, err
@@ -1130,19 +1163,20 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     if m == 0xde {
         if cursor.remaining(c) < 2 { return null, "EOF reading map 16 size" }
         let sz = cursor.read_be_u16(c)
+        if !count_fits(c, sz, 2) { return null, "EOF reading map 16 entries" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_MAP
         v.map_keys = list.list_new()
         v.map_values = list.list_new()
         let i = 0
         while i < sz {
-            let key, err_k = unpack_inner(c)
+            let key, err_k = unpack_inner(c, depth + 1)
             if err_k != "" {
                 free(v)
                 return null, err_k
             }
             string.release(err_k) // success-path heap "" from the child; discard
-            let val, err_v = unpack_inner(c)
+            let val, err_v = unpack_inner(c, depth + 1)
             if err_v != "" {
                 free(key)
                 free(v)
@@ -1159,20 +1193,21 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     // 35. Map 32
     if m == 0xdf {
         if cursor.remaining(c) < 4 { return null, "EOF reading map 32 size" }
-        let sz = cursor.read_be_u32(c)
+        let sz = read_len32(c)
+        if !count_fits(c, sz, 2) { return null, "EOF reading map 32 entries" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_MAP
         v.map_keys = list.list_new()
         v.map_values = list.list_new()
         let i = 0
         while i < sz {
-            let key, err_k = unpack_inner(c)
+            let key, err_k = unpack_inner(c, depth + 1)
             if err_k != "" {
                 free(v)
                 return null, err_k
             }
             string.release(err_k) // success-path heap "" from the child; discard
-            let val, err_v = unpack_inner(c)
+            let val, err_v = unpack_inner(c, depth + 1)
             if err_v != "" {
                 free(key)
                 free(v)

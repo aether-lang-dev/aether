@@ -29,6 +29,11 @@ const CBOR_TAG = 5
 const CBOR_SIMPLE = 6
 const CBOR_FLOAT = 7
 
+// Deepest nesting parse accepts, the same bound as std.json. The decoder
+// recurses once per level, so without a bound a few hundred kilobytes of
+// one-element arrays overflow the stack.
+const CBOR_MAX_DEPTH = 256
+
 // Memory model: a CborValue tree owns its text/byte-string payloads as an
 // AetherBytes buffer (str_bytes + str_len), NOT a refcounted `string` field.
 // A `string` stored in a heap.new struct field leaks — heap.free reclaims
@@ -270,6 +275,10 @@ read_value(r: ptr, ai: int) -> (long, string) {
     if ai == 27 {
         if reader.offset + 8 > reader.len { return 0, "cbor: unexpected EOF" }
         b0 = rd(reader, reader.offset)
+        // An argument of 2^63 or more does not fit the signed long every
+        // caller holds it in: an integer would flip sign (2^64-1 read as
+        // -1), and a length or count would pass a bounds check as negative.
+        if b0 >= 128 { return 0, "cbor: integer out of range" }
         b1 = rd(reader, reader.offset + 1)
         b2 = rd(reader, reader.offset + 2)
         b3 = rd(reader, reader.offset + 3)
@@ -285,8 +294,12 @@ read_value(r: ptr, ai: int) -> (long, string) {
     return 0, "cbor: invalid additional information"
 }
 
-parse_item(r: ptr) -> (ptr, string) {
+// `depth` counts the items enclosing this one (0 at the root).
+parse_item(r: ptr, depth: int) -> (ptr, string) {
     reader = r as *Reader
+    if depth > CBOR_MAX_DEPTH {
+        return null, "cbor: nesting deeper than 256"
+    }
     if reader.offset >= reader.len {
         return null, "cbor: unexpected EOF"
     }
@@ -311,6 +324,7 @@ parse_item(r: ptr) -> (ptr, string) {
         string.release(err)
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
+        // read_value refuses val >= 2^63, so this bottoms out at -2^63.
         cv.int_val = -1 - val
         return cv as ptr, ""
     }
@@ -330,7 +344,7 @@ parse_item(r: ptr) -> (ptr, string) {
                     reader.offset = reader.offset + 1
                     break
                 }
-                child, err = parse_item(r)
+                child, err = parse_item(r, depth + 1)
                 if err != "" {
                     bytes.free(sb)
                     return null, err
@@ -357,7 +371,9 @@ parse_item(r: ptr) -> (ptr, string) {
         len_val, err = read_value(r, ai)
         if err != "" { return null, err }
         string.release(err)
-        if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
+        // Compared in long against what is left: narrowing a length of 2^31
+        // or more to int first made it negative and passed it as empty.
+        if len_val > ((reader.len - reader.offset) as long) { return null, "cbor: unexpected EOF" }
         cv = heap.new(CborValue)
         cv.type = CBOR_BYTES
         read_str_payload(cv as *CborValue, reader, len_val as int)
@@ -378,7 +394,7 @@ parse_item(r: ptr) -> (ptr, string) {
                     reader.offset = reader.offset + 1
                     break
                 }
-                child, err = parse_item(r)
+                child, err = parse_item(r, depth + 1)
                 if err != "" {
                     bytes.free(sb)
                     return null, err
@@ -405,7 +421,9 @@ parse_item(r: ptr) -> (ptr, string) {
         len_val, err = read_value(r, ai)
         if err != "" { return null, err }
         string.release(err)
-        if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
+        // Compared in long against what is left: narrowing a length of 2^31
+        // or more to int first made it negative and passed it as empty.
+        if len_val > ((reader.len - reader.offset) as long) { return null, "cbor: unexpected EOF" }
         cv = heap.new(CborValue)
         cv.type = CBOR_TEXT
         read_str_payload(cv as *CborValue, reader, len_val as int)
@@ -428,7 +446,7 @@ parse_item(r: ptr) -> (ptr, string) {
                     reader.offset = reader.offset + 1
                     break
                 }
-                child, err = parse_item(r)
+                child, err = parse_item(r, depth + 1)
                 if err != "" {
                     free_value(cv)
                     return null, err
@@ -444,9 +462,16 @@ parse_item(r: ptr) -> (ptr, string) {
             return null, err
         }
         string.release(err)
+        // Every element takes at least one byte, so a count beyond what is
+        // left is truncated input, refused before the loop rather than
+        // narrowed to int (2^32 became 0 elements).
+        if len_val > ((reader.len - reader.offset) as long) {
+            free_value(cv)
+            return null, "cbor: unexpected EOF"
+        }
         i = 0
         while i < (len_val as int) {
-            child, err = parse_item(r)
+            child, err = parse_item(r, depth + 1)
             if err != "" {
                 free_value(cv)
                 return null, err
@@ -475,13 +500,13 @@ parse_item(r: ptr) -> (ptr, string) {
                     reader.offset = reader.offset + 1
                     break
                 }
-                key_cv, err = parse_item(r)
+                key_cv, err = parse_item(r, depth + 1)
                 if err != "" {
                     free_value(cv)
                     return null, err
                 }
                 string.release(err)
-                val_cv, err2 = parse_item(r)
+                val_cv, err2 = parse_item(r, depth + 1)
                 if err2 != "" {
                     free_value(key_cv)
                     free_value(cv)
@@ -499,15 +524,20 @@ parse_item(r: ptr) -> (ptr, string) {
             return null, err
         }
         string.release(err)
+        // Every entry is a key and a value, at least two bytes.
+        if len_val > ((reader.len - reader.offset) as long) / 2 {
+            free_value(cv)
+            return null, "cbor: unexpected EOF"
+        }
         i = 0
         while i < (len_val as int) {
-            key_cv, err = parse_item(r)
+            key_cv, err = parse_item(r, depth + 1)
             if err != "" {
                 free_value(cv)
                 return null, err
             }
             string.release(err)
-            val_cv, err2 = parse_item(r)
+            val_cv, err2 = parse_item(r, depth + 1)
             if err2 != "" {
                 free_value(key_cv)
                 free_value(cv)
@@ -524,7 +554,7 @@ parse_item(r: ptr) -> (ptr, string) {
         tag_val, err = read_value(r, ai)
         if err != "" { return null, err }
         string.release(err)
-        child_cv, err2 = parse_item(r)
+        child_cv, err2 = parse_item(r, depth + 1)
         if err2 != "" { return null, err2 }
         string.release(err2)
         cv = heap.new(CborValue)
@@ -632,7 +662,7 @@ parse(cbor_data: string) -> ptr! {
     r.buf = buf
     r.len = dlen
     r.offset = 0
-    res, err = parse_item(r as ptr)
+    res, err = parse_item(r as ptr, 0)
     bytes.free(r.buf)
     heap.free(r)
     if err != "" {
@@ -954,12 +984,29 @@ map_get(obj_ptr: ptr, key_ptr: ptr) -> ptr! {
     return null, ""
 }
 
+// Insert or update the text key `key` on a map. The map takes ownership of
+// `value`; a value it replaces is freed.
 object_set(obj_ptr: ptr, key: string, value: ptr) -> string {
     if obj_ptr == null { return "null map" }
     cv = obj_ptr as *CborValue
     if cv.type != CBOR_MAP {
         free_value(value as *CborValue)
         return "not a map"
+    }
+    // An existing text key keeps its place and takes the new value, as
+    // json.set and msgpack.map_set do; appending would leave object_get
+    // returning the first, stale, entry.
+    n = list.size(cv.map_keys)
+    i = 0
+    while i < n {
+        k = list.list_get_raw(cv.map_keys, i) as *CborValue
+        if k.type == CBOR_TEXT && str_payload_equals_key(k, key) {
+            old = list.list_get_raw(cv.map_values, i)
+            if old != value { free_value(old) }
+            list.list_set(cv.map_values, i, value)
+            return ""
+        }
+        i = i + 1
     }
     key_cv = str(key)
     _ = list.add(cv.map_keys, key_cv)

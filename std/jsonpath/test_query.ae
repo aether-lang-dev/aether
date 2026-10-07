@@ -226,6 +226,19 @@ main() {
             spec.it("handles negative bounds") callback {
                 spec.assert_str_eq(all_json_of("[0,1,2,3,4]", "$[-2:]"), "3|4", "last two")
             }
+            spec.it("keeps bounds and steps past 32 bits") callback {
+                // RFC 9535 allows +-(2^53-1); truncated to 32 bits, 2^32
+                // was 0 and 2^32+1 was 1, and i + step wrapped past the end.
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[4294967296:]"), "", "start 2^32 is past the end")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[:4294967296]"), "10|20|30", "end 2^32 clamps to the length")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[-4294967296:]"), "10|20|30", "start -2^32 clamps to 0")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[::4294967297]"), "10", "step 2^32+1 takes the first")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[1::2147483647]"), "20", "step INT_MAX does not wrap")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[::-4294967297]"), "30", "step -(2^32+1) takes the last")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[::9007199254740991]"), "10", "step 2^53-1")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[-9007199254740991:9007199254740991:-9007199254740991]"), "", "extreme negative step selects nothing")
+                spec.assert_str_eq(all_json_of("[10,20,30]", "$[9007199254740991:-9007199254740991:-9007199254740991]"), "30", "extreme reverse slice")
+            }
         }
 
         spec.describe("union of selectors") {

@@ -153,14 +153,16 @@ last_error_line() -> int { return json_last_error_line() }
 last_error_col() -> int { return json_last_error_col() }
 
 // Serialize a JSON value to a compact string. Returns (string, "") on
-// success, ("", error) on failure. The returned string is a refcounted
+// success, ("", error) on failure: a value nested deeper than 256 levels,
+// the most `parse` reads back, is an error rather than output with the
+// deep part replaced by null. The returned string is a refcounted
 // Aether string — no manual free required.
 //
 // Uniform-heap shape on both positions: see `parse` for the rationale.
 stringify(value: ptr) -> string! {
     raw = json_stringify_raw(value)
     if raw == null {
-        return string_concat("", ""), string_concat("stringify failed", "")
+        return string_concat("", ""), string_concat("json: stringify: nesting deeper than 256 levels", "")
     }
     return string_concat(raw, ""), string_concat("", "")
 }

@@ -1281,7 +1281,7 @@ main() {
 - `path.clean(path)` → `string` - Lexical normalize: collapses `//`, resolves `.` and `..`, drops a trailing separator. Purely textual, it never touches the filesystem, so unlike `fs.realpath` it works on paths that do not exist yet, which is the case when you are computing an output path before creating it. On Windows it understands both separators and a `C:` / UNC volume prefix, and emits the platform separator.
 - `path.join_clean(a, b)` → `string` - `join` followed by `clean` in one call. Use this rather than `join` whenever `b` is caller-supplied (an object key, an archive entry name) so a `..` is resolved before the path reaches the filesystem: `path.join_clean("bucket", "a/../b")` is `"bucket/b"`. Pair with `is_within_base`.
 - `path.is_within_base(base, target)` → `int` - 1 if `target` lies within `base` after both are cleaned, else 0. The lexical pre-`open` check for a blob store, static-file server or archive extractor: reject the request before you open it. Comparison follows platform rules, so on Windows it accepts either separator and is case-insensitive. Symlinks are not followed, a link under `base` pointing outside is an open-time concern.
-- `path.rel(base, target)` → `string` - The relative path from `base` to `target`, such that joining it onto `base` and cleaning yields `target`. Returns empty when there is no such path (one absolute and one relative, or different Windows volumes).
+- `path.rel(base, target)` → `string` - The relative path from `base` to `target`, such that joining it onto `base` and cleaning yields `target`. Returns empty when there is no such path (one absolute and one relative, different Windows volumes, or a `base` that climbs above where `target` can be reached from, as `rel("../a", "b")`).
 - `path.separator()` → `string` - The platform path separator, `"/"` on POSIX and `"\\"` on Windows. Use it instead of hardcoding a separator.
 
 ### Full-fat filesystem (`std.fs`)
@@ -1562,7 +1562,7 @@ The `parse_strict` shape is the std.fs structured-error pilot extended to a seco
 **Value Getters:**
 - `json.get_number(value)` - Get float value (lossy past 2^53)
 - `json.get_int(value)` - Get 32-bit integer (clamps to +/-2147483647 on overflow)
-- `json.get_long(value)` - Get the full int64 value exactly (IDs, byte-counts)
+- `json.get_long(value)` - Get the full int64 value exactly (IDs, byte-counts); a number outside the int64 range clamps to INT64_MIN / INT64_MAX
 - `json.get_bool(value)` - Get boolean (1/0)
 - `json.get_string(value)` → `(string, string)` - Get string value; `(text, err)` tuple, errors with `"not a string"` if `value` is not a `JSON_STRING`
 
@@ -1944,7 +1944,7 @@ main() {
 **Base64 (RFC 4648 §4 standard alphabet):**
 - `encoding.base64_encode(data: byte[])` → `string` - Encode the bytes of `data`, **unpadded** output.
 - `encoding.base64_encode_padded(data: byte[])` → `string` - Encode the bytes of `data`, **with `=` padding** to a multiple of 4. Reach for this when the wire format on the other end requires padding; most non-strict decoders accept either.
-- `encoding.base64_decode(b64)` → `string!` - Decode, destructured as `(bytes, err)`. `err` is non-empty on malformed input. Accepts both padded and unpadded input; `bytes` is an AetherString preserving embedded NULs.
+- `encoding.base64_decode(b64)` → `string!` - Decode, destructured as `(bytes, err)`. `err` is non-empty on malformed input: `=` anywhere but as trailing padding completing a multiple of 4, a 1-character final group, or non-zero leftover bits. Accepts both padded and unpadded input, and skips line breaks; `bytes` is an AetherString preserving embedded NULs.
 
 Base64 lives in `std.encoding`, not `std.cryptography`: encoding is not a
 security primitive, and the split keeps that honest. `std.cryptography` keeps
@@ -2015,7 +2015,7 @@ fields 3: name
 - `encoding.hex_decode(s)` → `(string, string)` - Bytes, or an error for an odd length or a non-hex digit
 - `encoding.base64_encode(data: byte[])` → `string` - Unpadded Base64
 - `encoding.base64_encode_padded(data: byte[])` → `string` - Padded Base64
-- `encoding.base64_decode(s)` → `(string, string)` - Accepts padded or unpadded input
+- `encoding.base64_decode(s)` → `(string, string)` - Accepts padded or unpadded input; malformed padding or non-zero leftover bits are an error
 - `encoding.base32_encode(data: byte[])` → `string`, `encoding.base32_decode(s)` → `(string, string)` - RFC 4648 Base32
 - `encoding.csv_split(record, sep)` → `ptr` - Split ONE record on `sep`; a trailing carriage return is trimmed
 - `encoding.csv_count(h)` → `int`, `encoding.csv_field(h, i)` → `string` - Field count and field `i`, borrowed from the handle
@@ -2068,8 +2068,12 @@ and remove the incomplete output.
 `default_extract_options()` disables symlinks and overwriting, does not restore
 mode or mtime, and applies conservative entry, per-entry byte, and total-byte
 limits. `extract` rejects absolute, drive-qualified, UNC, and root-escaping
-paths; refuses parents that are symlinks; validates enabled symlink targets;
-and delays directory metadata until children have been created. Reading needs
+paths; checks and writes each entry at its cleaned name; refuses a parent that
+is a symlink or, on Windows, a directory junction; validates enabled symlink
+targets against the link's real depth, refusing a `..` that follows a name; and
+delays directory metadata until children have been created. `std.zip`'s
+`extract` makes the same parent checks and takes the same `ExtractOptions`, so
+the two modules import together. Reading needs
 filesystem-read capability; writing and extraction need filesystem-write
 capability under the normal `--emit=lib` sandbox checks.
 
@@ -2125,7 +2129,7 @@ main() {
 - `zlib.deflate(data: byte[], level)` → `(string, int, string)` - Compress the bytes of `data` at `level` (0..9, or -1 for default). Out-of-range levels are clamped to default. Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on failure.
 - `zlib.inflate(data: byte[])` → `(string, int, string)` - Decompress a zlib stream (RFC 1950). Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on corruption, truncation, or empty input.
 
-Gzip-framed helpers for HTTP `Content-Encoding: gzip` are also available: `zlib.gzip_deflate(data: byte[], level)` and `zlib.gzip_inflate(data: byte[])`. Streaming APIs remain out of scope for v1, additive future work under the same module. See [stdlib-vs-contrib.md](stdlib-vs-contrib.md) for the "one obvious shape" criterion.
+Gzip-framed helpers for HTTP `Content-Encoding: gzip` are also available: `zlib.gzip_deflate(data: byte[], level)` and `zlib.gzip_inflate(data: byte[])`. `gzip_inflate` decompresses every member of a multi-member file, as `gzip -d` does; bytes after the last member, or after a zlib stream, are an error. `zlib.inflate_raw_max(data, max_bytes)` caps a raw inflate at a stated size (std.zip inflates entries through it). A level outside -1..9 is an error. Streaming deflate is `stream_new` / `stream_write` / `stream_flush` / `stream_finish` / `stream_free`. See [stdlib-vs-contrib.md](stdlib-vs-contrib.md) for the "one obvious shape" criterion.
 
 ---
 
@@ -3196,7 +3200,7 @@ seconds between: 2592000
 - `time.is_leap_year(y)` → `bool`, `time.days_in_month(y, m)` → `int` - Calendar queries
 - `time.add_seconds(dt, n)` / `add_minutes` / `add_hours` / `add_days` → `DateTime` - Arithmetic
 - `time.diff_seconds(a, b)` → `long`, `time.is_before(a, b)` / `time.is_after(a, b)` → `bool` - Comparison
-- `time.to_iso8601(dt)` → `string`, `time.parse_iso8601(s)` → `(DateTime, string)` - ISO-8601 round trip
+- `time.to_iso8601(dt)` → `string`, `time.parse_iso8601(s)` → `(DateTime, string)` - ISO-8601 round trip. `parse_iso8601` reads `YYYY-MM-DDTHH:MM:SS` with an optional `Z` and nothing after it (offsets and fractions are `parse_iso8601_offset`'s); `to_iso8601` writes a year outside 0..9999 in full, signed when negative
 - `time.parse_iso8601_offset(s)` → `(DateTime, int, string)` - ISO-8601 as commonly written (a date alone, `T` or a space, optional seconds and fraction, a `Z`, `UTC` or `+HH:MM` zone): the instant and the offset it was written at, in seconds east of UTC
 - `time.strftime(dt, fmt)` / `time.strftime_at(dt, offset, fmt)` → `string` - Ruby's `Time#strftime` conversions and flags, at UTC or at an offset
 
@@ -3437,8 +3441,8 @@ main() {
 
 **Random:**
 - `math.random_seed(seed)` - Seed RNG
-- `math.random_int(min, max)` - Random integer in range
-- `math.random_float()` - Random float 0.0-1.0
+- `math.random_int(min, max)` - Uniform random integer in `[min, max]`, both ends included, for any pair of ints
+- `math.random_float()` - Uniform random float in `[0, 1)`, never 1.0 (splitmix64; the same sequence for a seed on every platform)
 
 ---
 

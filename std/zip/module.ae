@@ -171,11 +171,13 @@ fn find_eocd(b: ptr, blen: int) -> int {
     max_back = 65557
     start = blen - max_back
     if start < 0 { start = 0 }
-    // Scan from the latest possible position backward so a comment that itself
-    // contains the signature does not win over the real record.
+    // The record ends the file: its comment-length field (at +20) must reach
+    // exactly the end of the buffer. A signature inside the comment fails
+    // that test (its own "comment" would end elsewhere), so keep scanning
+    // backward past it to the real record instead of taking the first match.
     pos = blen - 22
     while pos >= start {
-        if u32(b, pos) == SIG_EOCD {
+        if u32(b, pos) == SIG_EOCD && pos + 22 + u16(b, pos + 20) == blen {
             return pos
         }
         pos = pos - 1
@@ -247,6 +249,17 @@ fn parse_central_dir(b: ptr, blen: int, cd_off: long, total: long) -> (ptr, stri
         // fixed order uncompressed, compressed, lfh offset, disk#.
         extra_at = name_at + name_len
         parse_zip64_extra(b, extra_at, extra_len, e)
+
+        // The ZIP64 values are unsigned 64-bit on the wire but held in a
+        // signed long: one at or past 2^63 reads back negative. No archive
+        // has a negative size or offset, and a negative size would slip
+        // under extract's limits (and shrink its running total), so refuse
+        // the archive here, where every caller of entry_size is covered.
+        if e.comp_size < 0 || e.uncomp_size < 0 || e.lfh_offset < 0 {
+            free_entry(e)
+            free_entries(lst)
+            return null, "zip: entry size or offset out of range"
+        }
 
         list.list_add_raw(lst, e as ptr)
 
@@ -325,13 +338,18 @@ open(data: byte[]) -> (ptr, string) {
     if need64 == 1 {
         loc = eocd - 20
         if loc >= 0 && u32(buf, loc) == SIG_EOCD64_LOC {
+            // A 64-bit field read into a signed long: range-check it as a
+            // long, before any narrowing, so a value past 2^31 or 2^63 is
+            // refused rather than wrapped into an in-range int.
             z64 = u64(buf, loc + 8)
-            zi = z64 as int
-            if zi >= 0 && zi + 56 <= len && u32(buf, zi) == SIG_EOCD64 {
-                total = u64(buf, zi + 32)
-                cd_off = u64(buf, zi + 48)
-                cd_disk = u16(buf, zi + 16)
-                disk = cd_disk
+            if z64 >= 0 && z64 <= (len as long) - 56 {
+                zi = z64 as int
+                if u32(buf, zi) == SIG_EOCD64 {
+                    total = u64(buf, zi + 32)
+                    cd_off = u64(buf, zi + 48)
+                    cd_disk = u16(buf, zi + 16)
+                    disk = cd_disk
+                }
             }
         }
     }
@@ -340,7 +358,11 @@ open(data: byte[]) -> (ptr, string) {
         bytes.free(buf)
         return null, "zip: multi-disk / spanned archives are not supported"
     }
-    if cd_off < 0 || cd_off as int > len {
+    if total < 0 {
+        bytes.free(buf)
+        return null, "zip: entry count out of range"
+    }
+    if cd_off < 0 || cd_off > len as long {
         bytes.free(buf)
         return null, "zip: central directory offset out of range"
     }
@@ -444,20 +466,33 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
         return "", 0, "zip: unsupported compression method"
     }
 
+    // Offsets and sizes are longs (ZIP64): bound them against the buffer as
+    // longs, and narrow to int only once they are known to fit.
+    blen_l = blen as long
+    if e.lfh_offset < 0 || e.lfh_offset > blen_l - 30 {
+        return "", 0, "zip: bad local file header"
+    }
     lfh = e.lfh_offset as int
-    if lfh < 0 || lfh + 30 > blen || u32(b, lfh) != SIG_LFH {
+    if u32(b, lfh) != SIG_LFH {
         return "", 0, "zip: bad local file header"
     }
     lname = u16(b, lfh + 26)
     lextra = u16(b, lfh + 28)
-    data_at = lfh + 30 + lname + lextra
-    comp = e.comp_size as int
-    if data_at < 0 || data_at + comp > blen {
+    data_at_l = (lfh as long) + 30 + lname + lextra
+    if e.comp_size < 0 || data_at_l + e.comp_size > blen_l {
         return "", 0, "zip: entry data out of range"
     }
+    data_at = data_at_l as int
+    comp = e.comp_size as int
 
     if e.method == METHOD_STORED {
-        // No compression: data is the content verbatim.
+        // No compression: data is the content verbatim, so its size IS the
+        // uncompressed size. A central directory that says otherwise is
+        // lying about entry_size, and extract's limits are checked against
+        // entry_size — refuse it rather than return more than it claimed.
+        if e.comp_size != e.uncomp_size {
+            return "", 0, "zip: stored entry size mismatch"
+        }
         got = crc32_bytes(b, data_at, comp)
         if (got & 0xFFFFFFFF) != (e.crc32 & 0xFFFFFFFF) {
             return "", 0, "zip: CRC mismatch (stored entry)"
@@ -467,12 +502,19 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
     }
 
     // DEFLATE (method 8): the compressed span is a raw deflate stream.
-    comp_str = slice_string(b, data_at, comp)
-    body, blen2, ie = zlib.inflate_raw(string.bytes(comp_str)[0..comp])
-    if string.equals(ie, "") != 1 {
-        return "", 0, ie
+    // Inflated with a cap at the stated uncompressed size, so an entry
+    // that lies about its size is stopped as it crosses the claim, not
+    // after expanding (up to ~1032x its compressed size) in memory.
+    if e.uncomp_size > 2147483647 {
+        return "", 0, "zip: entry too large to read into memory"
     }
-    // Verify against the central-directory CRC and size.
+    comp_str = slice_string(b, data_at, comp)
+    body, blen2, ie = zlib.inflate_raw_max(string.bytes(comp_str)[0..comp], e.uncomp_size as int)
+    if string.equals(ie, "") != 1 {
+        return "", 0, "zip: ${ie}"
+    }
+    // Verify against the central-directory CRC and size: a stream that
+    // ends short of the stated size is as wrong as one that runs past it.
     if blen2 as long != e.uncomp_size {
         return "", 0, "zip: decompressed size mismatch"
     }
@@ -1040,21 +1082,65 @@ add_dir_tree(wp: ptr, fs_root: string, arc_prefix: string, method: int, level: i
 //   - enforce max_entries / max_entry_bytes / max_total_bytes. ZIP's deflate
 //     ratios make the size caps sharper than tar's.
 
+// One options struct for archive extraction, shared with std.tar: the
+// definition is identical, field for field, to std.tar's ExtractOptions.
+// Struct names are one namespace across modules and identical definitions
+// share one type, so a program can import both modules and pass one
+// module's options to the other. Keep the two definitions in lockstep.
+//
+// std.zip extracts every entry as a regular file or a directory, never as
+// a symlink, so `allow_symlinks` has nothing to allow here. Restoring
+// modes and mtimes is not implemented for zip yet, so extract refuses
+// `preserve_mode` / `preserve_mtime` = 1 rather than ignore them.
 struct ExtractOptions {
     max_entries: int
     max_entry_bytes: long
     max_total_bytes: long
+    allow_symlinks: int
     overwrite: int // 1 = replace an existing file, 0 = error out
+    preserve_mode: int
+    preserve_mtime: int
 }
 
-// Safe defaults: 10k entries, 1 GiB per entry, 10 GiB total, no overwrite.
+// Safe defaults: 10k entries, 1 GiB per entry, 10 GiB total, no overwrite,
+// no symlinks, no metadata restore. The same values std.tar defaults to.
 default_extract_options() -> ExtractOptions {
     ExtractOptions opts
     opts.max_entries = 10000
     opts.max_entry_bytes = 1024 as long * 1024 * 1024 // 1 GiB
     opts.max_total_bytes = 10 as long * 1024 * 1024 * 1024 // 10 GiB
+    opts.allow_symlinks = 0
     opts.overwrite = 0
+    opts.preserve_mode = 0
+    opts.preserve_mtime = 0
     return opts
+}
+
+// Index of the first '/' in `rel` that ends a component already present
+// under `dest_prefix` as a symbolic link (on Windows also a junction:
+// whatever fs.fs_is_symlink reports), or -1 when no parent is one. `rel` is
+// the entry's name after fs.clean, and the path that is then written: with
+// no ".", ".." or empty segments left, its '/'-terminated prefixes are
+// exactly the directories the OS walks to reach the entry. (On the raw name
+// a prefix such as "missing/../link" would be checked before mkdir_p
+// creates "missing", and then walked through "link".) Writing through such
+// a component would land outside the destination. std.tar has the same
+// helper; keep the two in step.
+fn symlinked_parent(dest_prefix: string, rel: string) -> int {
+    n = string_length(rel)
+    var i: int = 1
+    while i < n {
+        if string.char_at(rel, i) == 47 { // '/'
+            part = string.substring(rel, 0, i)
+            full = string.concat(dest_prefix, part)
+            is_link = fs.fs_is_symlink(full)
+            string.free(full)
+            string.free(part)
+            if is_link == 1 { return i }
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 // Validate an archive entry name without normalising unsafe input. A leading
@@ -1104,8 +1190,13 @@ fn last_slash(s: string, n: int) -> int {
 // Extract the archive held in `data` (a byte[], #2301) under `dest_dir`,
 // applying `options`. Returns "" on success, else a descriptive error; on error, files
 // written so far are left in place (as std.tar does). The destination is
-// created if absent.
+// created if absent. An existing file (or symlink) at an entry's path is an
+// error unless `overwrite` is 1, in which case it is unlinked before the
+// entry is written, so the write never follows a link.
 extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
+    if options.preserve_mode != 0 || options.preserve_mtime != 0 {
+        return "zip: preserve_mode / preserve_mtime are not supported"
+    }
     ar, oerr = open(data)
     if string.equals(oerr, "") != 1 { return oerr }
 
@@ -1126,7 +1217,6 @@ extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
             break
         }
         name = entry_name(ar, i)
-        nlen = string_length(name)
 
         if zip_is_unsafe_path(name) == 1 {
             string.free(name)
@@ -1151,16 +1241,28 @@ extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
             break
         }
 
-        full = string.concat(dest_prefix, name)
+        // Everything below works on the cleaned name, the one that is
+        // checked being the one that is written. Safe to clean: the name
+        // never climbs above its root (checked above).
+        rel = fs.clean(name)
+        rlen = string_length(rel)
+        full = string.concat(dest_prefix, rel)
 
-        if entry_is_dir(ar, i) == 1 {
+        // Before anything is created for this entry (mkdir_p would already
+        // follow a link): no parent component may be a symlink.
+        sp = symlinked_parent(dest_prefix, rel)
+        if sp >= 0 {
+            part = string.substring(rel, 0, sp)
+            out_err = "zip: parent component '${part}' of '${name}' resolves through a symlink"
+            string.free(part)
+        } else if entry_is_dir(ar, i) == 1 {
             merr = fs.mkdir_p(full)
             if string.equals(merr, "") != 1 { out_err = "zip: mkdir failed for '${name}'" }
         } else {
             // Ensure parent directories exist.
-            ls = last_slash(name, nlen)
+            ls = last_slash(rel, rlen)
             if ls >= 0 {
-                parent_rel = string.substring(name, 0, ls)
+                parent_rel = string.substring(rel, 0, ls)
                 parent = string.concat(dest_prefix, parent_rel)
                 merr = fs.mkdir_p(parent)
                 string.free(parent_rel)
@@ -1169,13 +1271,27 @@ extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
                     out_err = "zip: mkdir failed for parent of '${name}'"
                 }
             }
+            // Anything already at the target, a symlink too (dangling or
+            // not: fs_is_symlink sees what fs.exists does not on Windows),
+            // is an error, or with overwrite it is removed first, so the
+            // write never follows a link out of the destination. unlink
+            // never removes a directory.
+            var existing: int = 0
             if string.equals(out_err, "") == 1 {
-                if options.overwrite == 0 && fs.exists(full) == 1 {
+                if fs.exists(full) == 1 || fs.fs_is_symlink(full) == 1 { existing = 1 }
+                if existing == 1 && options.overwrite == 0 {
                     out_err = "zip: '${name}' exists and overwrite is disabled"
+                }
+            }
+            if string.equals(out_err, "") == 1 {
+                body, blen, rerr = entry_read(ar, i)
+                if string.equals(rerr, "") != 1 {
+                    out_err = rerr
                 } else {
-                    body, blen, rerr = entry_read(ar, i)
-                    if string.equals(rerr, "") != 1 {
-                        out_err = rerr
+                    var uerr: string = ""
+                    if existing == 1 { uerr = fs.unlink(full) }
+                    if string.equals(uerr, "") != 1 {
+                        out_err = "zip: cannot replace '${name}': ${uerr}"
                     } else {
                         werr = fs.write_binary(full, string.bytes(body)[0..blen])
                         if string.equals(werr, "") != 1 {
@@ -1183,12 +1299,13 @@ extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
                         }
                         total = total + usize
                     }
-                    string.free(body)
                 }
+                string.free(body)
             }
         }
 
         string.free(full)
+        string.free(rel)
         string.free(name)
         if string.equals(out_err, "") != 1 { break }
         i = i + 1

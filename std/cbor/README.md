@@ -40,6 +40,20 @@ Values are built with `from_int`, `num`, `str`, `arr`, `obj`, `boolean` and
 `null_value`, and every constructed value is freed with `cbor.free` — freeing
 a container frees what it holds.
 
+`set` (`object_set`) on a key the map already has replaces its value and
+frees the old one, as `json.set` does.
+
+`parse` treats its input as untrusted. It refuses, with an error rather than
+a value:
+
+- nesting deeper than 256 levels, the same limit as `std.json`
+  (`cbor: nesting deeper than 256`);
+- a string length, or an array or map count, larger than the bytes left in
+  the input (`cbor: unexpected EOF`);
+- an integer, length or tag number of 2^63 or more, which the signed 64-bit
+  `get_long` cannot hold, and a negative integer below -2^63
+  (`cbor: integer out of range`).
+
 Compared with `std.msgpack`: both are binary JSON-shaped formats, and MessagePack
 is slightly more compact for small integers. CBOR is the one with an RFC, tags,
 and the surrounding standards, so pick it when interoperating with anything that

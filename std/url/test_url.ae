@@ -94,6 +94,28 @@ main() {
     }
     print("PASS: query_get_all (repeated keys)\n")
 
+    // A key that decodes to contain '=' (or '%') matches only itself. The
+    // stored "a=b=1" entry used to answer for key "a" with value "b=1".
+    q2, q2err = url.parse_query("a%3Db=1&a=2&p%25c=3")
+    if q2err != "" {
+        print("FAIL: parse_query (escaped keys) err=${q2err}\n")
+        exit(1)
+    }
+    qa = url.query_get(q2, "a")
+    qab = url.query_get(q2, "a=b")
+    qpc = url.query_get(q2, "p%c")
+    if string.equals(qa, "2") != 1 || string.equals(qab, "1") != 1 || string.equals(qpc, "3") != 1 {
+        println("FAIL: escaped keys: a=${qa} a=b=${qab} p-percent-c=${qpc}")
+        exit(1)
+    }
+    qall = url.query_get_all(q2, "a")
+    if string_list_size(qall) != 1 {
+        cnt2 = string_list_size(qall)
+        print("FAIL: query_get_all(a) over an a=b key: count=${cnt2}\n")
+        exit(1)
+    }
+    println("PASS: a key decoding to '=' or a percent sign matches only itself")
+
     // Leading '?' is tolerated.
     list2, _ = url.parse_query("?one=1")
     v = url.query_get(list2, "one")

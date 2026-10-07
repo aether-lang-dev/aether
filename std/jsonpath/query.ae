@@ -455,52 +455,57 @@ _resolve_index(idx: long, n: int) -> int {
 
 // RFC 9535 §2.3.4.2's slice algorithm, transcribed. The bounds/normalize
 // split matters for negative steps, where lower/upper swap roles.
+//
+// The arithmetic is in long: start, end and step reach ±(2^53-1) (the
+// parser's I-JSON range), and truncating them to int turned 2^32 into 0.
+// After clamping, i stays within [-1, len] and moves by at most 2^53-1, so
+// i + step cannot overflow a long.
 _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
     if json.json_type(value) != 4 { return }
-    len = json.json_array_size(value)
+    var len: long = json.json_array_size(value)
 
-    step = 1
-    if sl.has_step == 1 { step = sl.step as int }
+    var step: long = 1
+    if sl.has_step == 1 { step = sl.step }
     if step == 0 { return } // a zero step selects nothing
 
     if step > 0 {
-        start = 0
-        if sl.has_start == 1 { start = _norm(sl.start as int, len) }
-        end = len
-        if sl.has_end == 1 { end = _norm(sl.end as int, len) }
+        var start: long = 0
+        if sl.has_start == 1 { start = _norm(sl.start, len) }
+        var end: long = len
+        if sl.has_end == 1 { end = _norm(sl.end, len) }
 
         lower = _clamp(start, 0, len)
         upper = _clamp(end, 0, len)
 
-        i = lower
+        var i: long = lower
         while i < upper {
-            _push_owned(out, json.json_array_get_raw(value, i), normalize_index_segment(path, i))
+            _push_owned(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
             i = i + step
         }
         return
     }
 
-    start = len - 1
-    if sl.has_start == 1 { start = _norm(sl.start as int, len) }
-    end = 0 - len - 1
-    if sl.has_end == 1 { end = _norm(sl.end as int, len) }
+    var start: long = len - 1
+    if sl.has_start == 1 { start = _norm(sl.start, len) }
+    var end: long = 0 - len - 1
+    if sl.has_end == 1 { end = _norm(sl.end, len) }
 
     upper = _clamp(start, -1, len - 1)
     lower = _clamp(end, -1, len - 1)
 
-    i = upper
+    var i: long = upper
     while i > lower {
-        _push_owned(out, json.json_array_get_raw(value, i), normalize_index_segment(path, i))
+        _push_owned(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
         i = i + step
     }
 }
 
-_norm(i: int, len: int) -> int {
+_norm(i: long, len: long) -> long {
     if i >= 0 { return i }
     return len + i
 }
 
-_clamp(v: int, lo: int, hi: int) -> int {
+_clamp(v: long, lo: long, hi: long) -> long {
     r = v
     if r < lo { r = lo }
     if r > hi { r = hi }

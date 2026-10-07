@@ -173,12 +173,31 @@ fn pad2(buf: ptr, off: int, v: int) -> int {
 }
 
 // Format as "YYYY-MM-DDTHH:MM:SSZ" (RFC-3339 UTC). Years are zero-padded to
-// at least 4 digits.
+// at least 4 digits. A year outside 0..9999 is written in full, with a `-`
+// before a negative one, as ISO 8601's expanded years are: 10000 is
+// "10000-...", -1 is "-0001-...". (RFC 3339 itself covers only 0..9999.)
 to_iso8601(dt: DateTime) -> string {
+    if dt.year < 0 || dt.year > 9999 {
+        // Clamping to 0 and keeping four digits printed both 10000 and -1 as
+        // "0000". The rest of the stamp does not depend on the year's width.
+        rest = dt
+        rest.year = 0
+        tail = string.substring(to_iso8601(rest), 4, 20)
+        ay = dt.year
+        sign = ""
+        if ay < 0 {
+            ay = 0 - ay
+            sign = "-"
+        }
+        digits = "${ay}"
+        while string.length(digits) < 4 {
+            digits = "0${digits}"
+        }
+        return "${sign}${digits}${tail}"
+    }
     // YYYY (4) - (1) MM (2) - (1) DD (2) T (1) HH (2) : MM : SS Z  = 20 chars
     buf = bytes_new(20)
     y = dt.year
-    if y < 0 { y = 0 }
     bytes_set(buf, 0, 48 + (y / 1000) % 10)
     bytes_set(buf, 1, 48 + (y / 100) % 10)
     bytes_set(buf, 2, 48 + (y / 10) % 10)
@@ -199,10 +218,16 @@ to_iso8601(dt: DateTime) -> string {
 
 // Parse "YYYY-MM-DDTHH:MM:SS" with an optional trailing 'Z' (UTC). A space
 // may replace the 'T'. Returns the DateTime, or a non-empty error on a
-// malformed shape / out-of-range field.
+// malformed shape / out-of-range field. Nothing else may follow: an offset
+// or a fraction is parse_iso8601_offset's to read, and this function
+// accepting one meant dropping it (`+05:00` came back as the UTC instant
+// five hours late, with no error).
 parse_iso8601(s: string) -> (DateTime, string) {
     n = string.length(s)
     if n < 19 { return zero_dt(), "time: string too short for ISO-8601" }
+    if n > 20 || (n == 20 && (string.char_at_n(s, n, 19) & 255) != 90) {
+        return zero_dt(), "time: unexpected text after the time (parse_iso8601_offset reads offsets and fractions)"
+    }
     y = digits4(s, n, 0)
     mo = digits2(s, n, 5)
     d = digits2(s, n, 8)
