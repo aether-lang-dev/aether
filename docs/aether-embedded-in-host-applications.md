@@ -139,8 +139,8 @@ language?
 > design was renamed to fit the broader emit-mode taxonomy alongside
 > `--emit=exe` and `--emit=both`). Every top-level Aether function is
 > exported as `aether_<name>(...)` with a fixed-width C signature.
-> The user's `main()` body is dropped in lib-only mode (a future
-> Shape B addition could expose it as `aether_main()`). See
+> The user's `main()` is exported as `aether_main()` /
+> `aether_main_exit()`: run the program, then stop it. See
 > **[`emit-lib.md`](emit-lib.md)** for the full reference.
 
 The original sketch:

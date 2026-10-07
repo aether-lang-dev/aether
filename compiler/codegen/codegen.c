@@ -2789,6 +2789,18 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 "#endif\n"
                 "#endif\n"
                 "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+        /* The program's main(), when it has one, as the entry-point pair
+         * generate_main_function emits (not catalog functions: an Aether
+         * importer must not bind a `main`). */
+        int has_main = 0;
+        for (int i = 0; i < program->child_count; i++)
+            if (program->children[i] && program->children[i]->type == AST_MAIN_FUNCTION) has_main = 1;
+        if (has_main && !gen->emit_exe) {
+            fprintf(gen->csrc_header_file,
+                    "/* The program's main(): run it, then stop it (docs/emit-lib.md). */\n"
+                    "int aether_main(int argc, char** argv);\n"
+                    "void aether_main_exit(void);\n\n");
+        }
     }
     /* A `string`-returning exported function now yields a magic
      * AetherString internally; the C ABI contract is a plain `const char*`,
@@ -4725,27 +4737,56 @@ static int has_return_statement(ASTNode* node) {
     return 0;
 }
 
-void generate_main_function(CodeGenerator* gen, ASTNode* main) {
-    if (!main || main->type != AST_MAIN_FUNCTION) return;
+/* ---- main(): one emitter for the executable and the library entry ----
+ *
+ * A program's main() runs in three parts, and every build that keeps it
+ * emits the same three:
+ *
+ *   prologue  console/args/sandbox setup, and the scheduler started when
+ *             the program runs one (emit_main_prologue)
+ *   body      main()'s statements; a `return` stores main_exit_ret and
+ *             jumps to main_exit (emit_main_body)
+ *   epilogue  drain and join the scheduler, then the message-pool report
+ *             (emit_main_epilogue)
+ *
+ * --emit=exe puts all three in `int main(int argc, char** argv)`, in that
+ * order, with main()'s own defers last, as it always has.
+ *
+ * --emit=lib (and staticlib / obj / csrc, which share its codegen) splits
+ * them across two exported functions, so a host that loads the program as a
+ * library can run its entry point and later stop it:
+ *
+ *   int  aether_main(int argc, char** argv)   prologue + body, then returns
+ *                                             main()'s int result (0 when it
+ *                                             returns nothing); actors keep
+ *                                             running.
+ *   void aether_main_exit(void)               the epilogue.
+ *
+ * The one ordering difference is main()'s defers (an explicit `defer` and
+ * the automatic frees of its local strings/sequences): they belong to
+ * aether_main's stack frame, so they run when aether_main returns, where an
+ * executable runs them after the scheduler has drained. Nothing else
+ * differs: the same calls, from the same code, in the same order.
+ *
+ * aether_main is not re-entrant: a second call before aether_main_exit is
+ * rejected (a message on stderr, -1, nothing run). aether_main_exit with no
+ * aether_main running is a no-op, so it is idempotent; after it, aether_main
+ * may run again on a fresh scheduler (an Android activity recreated in the
+ * same process). Both are to be called from one thread, the host's main or
+ * UI thread. --emit=both keeps only the executable's main(): emitting the
+ * body twice would emit its closures twice. */
 
-    // --emit=lib only: suppress the C `int main(int,char**)` entry point.
-    // If the .ae file defined main(), its body is currently dropped in
-    // lib-only mode — library consumers call the exported top-level
-    // functions directly, not main(). A future Shape B extension could
-    // emit an `aether_main()` wrapper so hosts can invoke the script's
-    // entry point explicitly.
-    if (!gen->emit_exe) return;
+/* Does the program run the scheduler: it has actors, or a binary library it
+ * imports does (#2297). main() then initializes it, and drains and joins it
+ * on the way out, so the library's in-flight messages are delivered before
+ * the program exits. */
+static int main_runs_scheduler(CodeGenerator* gen) {
+    return gen->actor_count > 0 || gen->lib_actors;
+}
 
-    /* Track `main` as the current function so body-structural queries
-     * (e.g. body_assigns_var_from_heap, used by the map/list owned-
-     * value routing) can reach `main`'s body. Restored at function end.
-     * All other `gen->current_function` consumers gate on
-     * `!gen->in_main_function` first, so a main node here is inert
-     * for them. */
-    ASTNode* prev_current_function = gen->current_function;
-    gen->current_function = main;
-
-    print_line(gen, "int main(int argc, char** argv) {");
+/* Reset the per-function codegen state for main()'s C function and open its
+ * scope. Common to `main` and `aether_main`. */
+static void begin_main_c_function(CodeGenerator* gen) {
     indent(gen);
     clear_declared_vars(gen);  // Reset for main function
     clear_fnptr_locals(gen);
@@ -4758,7 +4799,9 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     gen->defer_count = 0;
     gen->scope_depth = 0;
     enter_scope(gen);
+}
 
+static void emit_main_prologue(CodeGenerator* gen, int runs_scheduler, int needs_main_exit) {
     // Set UTF-8 console codepage on Windows so programs can print Unicode correctly
     print_line(gen, "#ifdef _WIN32");
     print_line(gen, "SetConsoleOutputCP(65001);  // CP_UTF8");
@@ -4779,13 +4822,6 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     print_line(gen, "aether_capsicum_autosandbox();");
     // main_exit_ret and main_exit: label are needed when actors exist
     // (scheduler cleanup) or when main() contains return statements.
-    /* The program runs the scheduler when it has actors, or when a binary
-     * library it imports does (#2297): main() then initializes it, and drains
-     * and joins it on the way out, so the library's in-flight messages are
-     * delivered before the program exits. */
-    int runs_scheduler = gen->actor_count > 0 || gen->lib_actors;
-    int needs_main_exit = runs_scheduler || has_return_statement(main);
-    gen->uses_main_exit = needs_main_exit;
     if (needs_main_exit) {
         print_line(gen, "int main_exit_ret = 0;");
     }
@@ -4812,7 +4848,9 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "aether_core_id_set(-1);  // Main thread is not a scheduler thread");
         print_line(gen, "");
     }
-    
+}
+
+static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
     if (main->child_count > 0) {
         gen->in_main_function = 1;
         // Publish main's promoted-captures set so var decls malloc
@@ -4870,42 +4908,127 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         gen->current_promoted_capture_count = prev_promoted_count;
         gen->in_main_function = 0;
     }
-    
-    // Clean up scheduler (all return paths in main() jump here via goto main_exit)
-    // Only emit the label if it's actually targeted by a goto (actors or return
-    // in main), otherwise GCC warns about an unused label.
+}
+
+static void emit_main_epilogue(CodeGenerator* gen, int runs_scheduler) {
+    if (!runs_scheduler) return;
+    print_line(gen, "");
+    print_line(gen, "// Wait for quiescence, stop scheduler threads, and join them");
+    print_line(gen, "scheduler_shutdown();");
+
+    // Print message pool statistics (only for actor programs)
+    print_line(gen, "");
+    print_line(gen, "// Message pool statistics");
+    print_line(gen, "{");
+    indent(gen);
+    print_line(gen, "uint64_t pool_hits = 0, pool_misses = 0, too_large = 0;");
+    print_line(gen, "aether_message_pool_stats(&pool_hits, &pool_misses, &too_large);");
+    print_line(gen, "if (pool_hits + pool_misses + too_large > 0) {");
+    indent(gen);
+    print_line(gen, "printf(\"\\n=== Message Pool Statistics ===\\n\");");
+    print_line(gen, "printf(\"Pool hits:      %%llu\\n\", (unsigned long long)pool_hits);");
+    print_line(gen, "printf(\"Pool misses:    %%llu (exhausted)\\n\", (unsigned long long)pool_misses);");
+    print_line(gen, "printf(\"Too large:      %%llu (>256 bytes)\\n\", (unsigned long long)too_large);");
+    print_line(gen, "uint64_t total = pool_hits + pool_misses + too_large;");
+    print_line(gen, "double hit_rate = (double)pool_hits / total * 100.0;");
+    print_line(gen, "printf(\"Hit rate:       %%.1f%%%%\\n\", hit_rate);");
+    unindent(gen);
+    print_line(gen, "}");
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "");
+}
+
+/* --emit=lib reserves aether_main and aether_main_exit for a program that
+ * defines main(). A top-level function whose own export would take one of
+ * those names (`main_exit` exports as aether_main_exit) is a compile error,
+ * rather than two definitions of one symbol in the generated C or one
+ * silently shadowing the other in the library. Returns 1 when one was
+ * reported. */
+static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program) {
+    int collided = 0;
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* fn = program->children[i];
+        if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
+        if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value) continue;
+        char alias[512];
+        const char* pub_name = NULL;
+        const char* pub_module = NULL;
+        const char* sym = c_callback_symbol(fn);
+        if (!sym) {
+            if (!lib_fn_identity(fn, alias, sizeof(alias), &pub_name, &pub_module)) continue;
+            sym = alias;
+        }
+        if (strcmp(sym, "aether_main") != 0 && strcmp(sym, "aether_main_exit") != 0) continue;
+        char msg[384];
+        snprintf(msg, sizeof(msg),
+                 "function '%s' would be exported as '%s', which --emit=lib reserves "
+                 "for this program's main() (aether_main / aether_main_exit)",
+                 fn->value, sym);
+        AetherError e = {NULL, NULL, fn->line, fn->column, msg,
+                         "rename the function, or end its name with '_' to keep it out of the library's exports",
+                         NULL, AETHER_ERR_NONE};
+        aether_error_report(&e);
+        collided = 1;
+    }
+    (void)gen;
+    return collided;
+}
+
+void generate_main_function(CodeGenerator* gen, ASTNode* main) {
+    if (!main || main->type != AST_MAIN_FUNCTION) return;
+
+    /* --emit=lib without --emit=exe: no C `main`; the body becomes the
+     * library's aether_main / aether_main_exit pair instead (see above). */
+    int lib_entry = !gen->emit_exe && gen->emit_lib;
+    if (!gen->emit_exe && !lib_entry) return;
+    if (lib_entry && report_lib_main_name_collisions(gen, gen->program)) return;
+
+    /* Track `main` as the current function so body-structural queries
+     * (e.g. body_assigns_var_from_heap, used by the map/list owned-
+     * value routing) can reach `main`'s body. Restored at function end.
+     * All other `gen->current_function` consumers gate on
+     * `!gen->in_main_function` first, so a main node here is inert
+     * for them. */
+    ASTNode* prev_current_function = gen->current_function;
+    gen->current_function = main;
+
+    int runs_scheduler = main_runs_scheduler(gen);
+    int needs_main_exit = runs_scheduler || has_return_statement(main);
+    gen->uses_main_exit = needs_main_exit;
+
+    if (lib_entry) {
+        print_line(gen, "");
+        print_line(gen, "/* --- the program's main() as a library entry point (--emit=lib) ---");
+        print_line(gen, " * aether_main runs main() with an executable's prologue and returns;");
+        print_line(gen, " * aether_main_exit runs the executable's epilogue. See docs/emit-lib.md. */");
+        print_line(gen, "static int _aether_main_state = 0;  /* 0 idle, 1 running, 2 exiting */");
+        print_line(gen, "int aether_main(int argc, char** argv) {");
+        indent(gen);
+        print_line(gen, "if (_aether_main_state != 0) {");
+        indent(gen);
+        print_line(gen, "fprintf(stderr, \"aether_main: already running; call aether_main_exit() first\\n\");");
+        print_line(gen, "return -1;");
+        unindent(gen);
+        print_line(gen, "}");
+        print_line(gen, "_aether_main_state = 1;");
+        unindent(gen);
+    } else {
+        print_line(gen, "int main(int argc, char** argv) {");
+    }
+    begin_main_c_function(gen);
+    emit_main_prologue(gen, runs_scheduler, needs_main_exit);
+    emit_main_body(gen, main);
+
+    // All return paths in main() jump here via goto main_exit. Only emit the
+    // label if it's actually targeted by a goto (actors or return in main),
+    // otherwise GCC warns about an unused label.
     if (needs_main_exit) {
         print_line(gen, "main_exit:");
     }
-    if (runs_scheduler) {
-        print_line(gen, "");
-        print_line(gen, "// Wait for quiescence, stop scheduler threads, and join them");
-        print_line(gen, "scheduler_shutdown();");
-    }
-
-    // Print message pool statistics (only for actor programs)
-    if (runs_scheduler) {
-        print_line(gen, "");
-        print_line(gen, "// Message pool statistics");
-        print_line(gen, "{");
-        indent(gen);
-        print_line(gen, "uint64_t pool_hits = 0, pool_misses = 0, too_large = 0;");
-        print_line(gen, "aether_message_pool_stats(&pool_hits, &pool_misses, &too_large);");
-        print_line(gen, "if (pool_hits + pool_misses + too_large > 0) {");
-        indent(gen);
-        print_line(gen, "printf(\"\\n=== Message Pool Statistics ===\\n\");");
-        print_line(gen, "printf(\"Pool hits:      %%llu\\n\", (unsigned long long)pool_hits);");
-        print_line(gen, "printf(\"Pool misses:    %%llu (exhausted)\\n\", (unsigned long long)pool_misses);");
-        print_line(gen, "printf(\"Too large:      %%llu (>256 bytes)\\n\", (unsigned long long)too_large);");
-        print_line(gen, "uint64_t total = pool_hits + pool_misses + too_large;");
-        print_line(gen, "double hit_rate = (double)pool_hits / total * 100.0;");
-        print_line(gen, "printf(\"Hit rate:       %%.1f%%%%\\n\", hit_rate);");
-        unindent(gen);
-        print_line(gen, "}");
-        unindent(gen);
-        print_line(gen, "}");
-        print_line(gen, "");
-    }
+    // The executable drains the scheduler here; a library leaves it running
+    // for the host, which calls aether_main_exit when it is done.
+    if (!lib_entry) emit_main_epilogue(gen, runs_scheduler);
 
     // Emit main function defers before return
     exit_scope(gen);
@@ -4917,6 +5040,18 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     }
     unindent(gen);
     print_line(gen, "}");
+
+    if (lib_entry) {
+        print_line(gen, "");
+        print_line(gen, "void aether_main_exit(void) {");
+        indent(gen);
+        print_line(gen, "if (_aether_main_state != 1) return;");
+        print_line(gen, "_aether_main_state = 2;");
+        emit_main_epilogue(gen, runs_scheduler);
+        print_line(gen, "_aether_main_state = 0;");
+        unindent(gen);
+        print_line(gen, "}");
+    }
     gen->current_function = prev_current_function;
 }
 

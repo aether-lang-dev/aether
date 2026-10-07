@@ -1,0 +1,3 @@
+// The same function name without main(), or kept private with a trailing
+// underscore, collides with nothing.
+main_exit() -> int { return 1 }
