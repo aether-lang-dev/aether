@@ -3524,6 +3524,49 @@ static void cmd_too_long(char* cmd, size_t size, int needed) {
     set_failing_cmd(cmd, size);
 }
 
+/* Homebrew's include and library directories, for a native macOS build.
+ *
+ * Apple's clang searches /usr/local but not /opt/homebrew, which is where
+ * Homebrew lives on Apple Silicon, so a module whose C needs a Homebrew
+ * header (contrib.vulkan: <vulkan/vulkan.h> from vulkan-headers or MoltenVK)
+ * failed with "file not found" unless every program added -I/opt/homebrew/
+ * include itself. HOMEBREW_PREFIX (what `brew shellenv` exports) wins, else
+ * /opt/homebrew when it exists; /usr/local needs nothing, since the toolchain
+ * already searches it.
+ *
+ * -idirafter, not -I: the directory is searched AFTER the SDK's and aether's
+ * own, so a formula's header can fill a gap but never shadow a system or
+ * runtime header of the same name. The -L goes last on the link line for the
+ * same reason, and only when there is a link: on `cc -c` clang reports an
+ * unused -L, and that warning breaks exact-output tests. Native builds only;
+ * a cross build never comes through build_gcc_cmd. */
+static const char* macos_homebrew_flags(int linking) {
+#if defined(__APPLE__)
+    static char flags[2][1200];
+    static int computed = 0;
+    if (!computed) {
+        computed = 1;
+        flags[0][0] = flags[1][0] = '\0';
+        const char* prefix = getenv("HOMEBREW_PREFIX");
+        char inc[1100], lib[1100];
+        if (!prefix || !*prefix) prefix = "/opt/homebrew";
+        snprintf(inc, sizeof(inc), "%s/include", prefix);
+        snprintf(lib, sizeof(lib), "%s/lib", prefix);
+        if (strchr(prefix, '"') == NULL && dir_exists(inc)) {
+            snprintf(flags[0], sizeof(flags[0]), " -idirafter \"%s\"", inc);
+            if (dir_exists(lib))
+                snprintf(flags[1], sizeof(flags[1]), " -idirafter \"%s\" -L\"%s\"", inc, lib);
+            else
+                snprintf(flags[1], sizeof(flags[1]), "%s", flags[0]);
+        }
+    }
+    return flags[linking ? 1 : 0];
+#else
+    (void)linking;
+    return "";
+#endif
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -3978,8 +4021,9 @@ void build_gcc_cmd(char* cmd, size_t size,
         const char* rt_arg = ae_runtime_link_arg();
         if (!rt_arg) { set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
+            macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3988,8 +4032,9 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
+            macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
