@@ -491,6 +491,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         print_line(gen, "%s* _pattern = (%s*)_msg_data;", pattern->value, pattern->value);
                         mark_var_declared(gen, "_pattern");
 
+                        // This arm's Route 1 promoted names (published
+                        // below). The synthetic name matches what
+                        // discover_closures_scoped emitted:
+                        // `__recv_arm_<arm_ptr>`.
+                        char arm_name[256];
+                        snprintf(arm_name, sizeof(arm_name), "__recv_arm_%p", (void*)arm);
+                        char** arm_promoted = NULL;
+                        int arm_promoted_count = 0;
+                        get_promoted_names_for_func(gen, arm_name, &arm_promoted, &arm_promoted_count);
+
                         // Extract pattern fields with correct types from message definition.
                         // Single-int-field messages use intptr_t (matches payload_int width).
                         // Composite-type fields (arrays, structs) use the resolved c_type
@@ -523,6 +533,29 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                     field->children[0]->type == AST_PATTERN_VARIABLE && field->children[0]->value) {
                                     var_name = field->children[0]->value;
                                 }
+                                int promoted = 0;
+                                for (int pp = 0; pp < arm_promoted_count; pp++) {
+                                    if (arm_promoted[pp] && strcmp(arm_promoted[pp], var_name) == 0) {
+                                        promoted = 1;
+                                        break;
+                                    }
+                                }
+                                if (promoted) {
+                                    /* #2492: a closure in the arm writes this
+                                     * binding, so it lives in a shared cell
+                                     * seeded from the message, as a promoted
+                                     * parameter does. The cell holds the
+                                     * field's own type, which is what the
+                                     * closures' envs point at; intptr_t is
+                                     * only the payload width. */
+                                    char from[300];
+                                    snprintf(from, sizeof(from), "_pattern->%s", field->value);
+                                    print_indent(gen);
+                                    emit_promoted_param_cell(gen, var_name,
+                                        strcmp(c_type, "intptr_t") == 0 ? "int" : c_type,
+                                        from, field->line, field->column);
+                                    continue;
+                                }
                                 print_line(gen, "%s %s = _pattern->%s;", c_type, var_name, field->value);
                                 // Pattern fields are now C-locals at the
                                 // top of the handler — record them so a
@@ -534,16 +567,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
                         // Publish this arm's Route 1 promoted names so
                         // variable decls in the handler malloc heap cells
-                        // and reads/writes dereference. The synthetic name
-                        // matches what discover_closures_scoped emitted:
-                        // `__recv_arm_<arm_ptr>`.
+                        // and reads/writes dereference.
                         char** prev_promoted = gen->current_promoted_captures;
                         int prev_promoted_count = gen->current_promoted_capture_count;
-                        char arm_name[256];
-                        snprintf(arm_name, sizeof(arm_name), "__recv_arm_%p", (void*)arm);
-                        get_promoted_names_for_func(gen, arm_name,
-                            &gen->current_promoted_captures,
-                            &gen->current_promoted_capture_count);
+                        gen->current_promoted_captures = arm_promoted;
+                        gen->current_promoted_capture_count = arm_promoted_count;
 
                         // Pre-hoist `_heap_<name>` companions for string
                         // locals in the handler body, exactly as

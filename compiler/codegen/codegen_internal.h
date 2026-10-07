@@ -159,6 +159,12 @@ int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name, int
 int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_name, int param_idx);
 int callee_returns_string(CodeGenerator* gen, const char* func_name);
 
+/* #2493: the same body walk for parameter `param_idx` of the closure
+ * literal `closure` (an AST_CLOSURE). `return_is_escape` picks between the
+ * two questions above. Unresolvable: escapes. Defined in codegen_stmt.c. */
+int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
+                                   int return_is_escape);
+
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
  * call_arg_escapes heuristic. Defined in codegen_stmt.c. */

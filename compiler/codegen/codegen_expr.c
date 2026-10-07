@@ -216,6 +216,210 @@ static void arg_drain_truncate(int target_count) {
     }
 }
 
+/* One call's argument-temp wrap (see ArgDrainSub above): which arguments
+ * are hoisted into `_ad_N` temps and freed after the call, and what the
+ * wrap yields. A named call and a closure call (`call(f, ...)`, `f(...)` on
+ * a closure local) share it; the closure call used to pass a heap-string
+ * argument straight through, so nothing freed it (#2493). */
+typedef struct ArgDrainWrap {
+    int saved_count;    /* registry depth to truncate back to */
+    int count;          /* hoisted arguments */
+    int idx[16];        /* their child indices in the call node */
+    int identity[16];   /* 1 = identity-guarded release (return-escape-only param) */
+    int have_value;     /* the call yields a value: of C type ret_ct, or
+                         * when that is NULL, of type ret_type */
+    const char* ret_ct;
+    Type* ret_type;
+    int discarded;      /* the value is discarded at statement level */
+} ArgDrainWrap;
+
+/* Should the fresh heap argument at child `ai` of a call be freed after the
+ * call? -1: no, the parameter keeps it; 0: yes; 1: yes unless the call
+ * returns that very pointer. The callee is the named function `func_name`,
+ * or, for a closure call, the closure literal `closure` whose parameter
+ * `ai - first_arg` receives it. A closure call whose literal is not known
+ * (an `fn` parameter, a variable bound to several closures) has no body to
+ * read, so the argument is taken to escape: a leak, never a free under a
+ * parameter that kept the pointer.
+ *
+ * Escape decision for the arg's heap pointer. When the callee has a
+ * VISIBLE BODY the body-walk is authoritative: it detects every storage
+ * sink (return, assignment RHS, aggregate element, struct field, closure
+ * capture, escaping nested call-arg), so a "does not escape" verdict is a
+ * proof, and a ptr-typed param that is only read (e.g. an assert helper's
+ * `got: ptr` compared via string.equals) can be safely drained. Without a
+ * visible body (extern / unknown) we fall back to the conservative
+ * call_arg_escapes heuristic, the same gate the escape walker uses; a
+ * storage-shaped param is assumed to stash the pointer.
+ *
+ * Soundness: we only ADD a drain where non-escape is proven; anything
+ * unprovable stays "escapes". False-escape = leak (safe); false-non-escape
+ * = UAF (never introduced). */
+static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode* closure,
+                             int ai, int first_arg, const ArgDrainWrap* w) {
+    if (!func_name) {
+        if (!closure) return -1;
+        int pi = ai - first_arg;
+        if (!closure_param_escapes_via_body(gen, closure, pi, 1)) return 0;
+        /* Return-escape only, into a string result: identity-guarded,
+         * as for a named callee below. */
+        if (!w->have_value || closure_param_escapes_via_body(gen, closure, pi, 0) ||
+            !w->ret_ct || strcmp(w->ret_ct, "const char*") != 0) {
+            return -1;
+        }
+        return 1;
+    }
+    /* @retain parameter: callee stores the pointer (list_add, map_put's
+     * key, etc.). The heap value's lifetime is now the recipient's
+     * responsibility, and freeing here would dangle the stored copy. Same
+     * gate the escape walker uses at codegen_stmt.c:1339-1346. */
+    if (is_retain_extern_param(gen, func_name, ai)) return -1;
+    if (callee_has_visible_body(gen, func_name)) {
+        if (!callee_param_escapes_via_body(gen, func_name, ai, 0)) return 0;
+        /* The param escapes. If it ONLY return-escapes (the callee passes
+         * the value through / may return it) and does NOT store-escape,
+         * and the callee returns a string, we can still reclaim this FRESH
+         * temp at the call site with a pointer-identity guard: free it iff
+         * the call did not return it (r != t). This is the sound fix for
+         * the recursive accumulator (walk_join(t, concat(acc,sep,h))): the
+         * intermediate concat is freed when consumed, preserved when
+         * returned. Only FRESH heap-expr args reach here (the
+         * AST_FUNCTION_CALL/INTERP gate in arg_drain_select), never a
+         * borrowed var, so this can never free a value the caller still
+         * holds.
+         *
+         * Otherwise (store-escape: a container/@retain/field owns it; or a
+         * non-string / value-less call: no result pointer to compare)
+         * leave it. */
+        if (!w->have_value ||
+            callee_param_store_escapes_via_body(gen, func_name, ai) ||
+            !callee_returns_string(gen, func_name)) {
+            return -1;
+        }
+        return 1;
+    }
+    TypeKind param_kind = lookup_callee_param_kind(gen, func_name, ai);
+    if (call_arg_escapes(param_kind)) return -1;
+    if (callee_param_escapes_via_body(gen, func_name, ai, 0)) return -1;
+    return 0;
+}
+
+/* Pick the arguments of `expr` (from child `first_arg` on) to hoist. The
+ * caller has set have_value, ret_ct and discarded. A VOID parent (e.g. an
+ * assert-style helper `check(label, string.from_long(n), want)`) yields no
+ * value, but its heap-returning inline args still leak: they are drained
+ * by a statement-expression that yields void, `({ T t=...; call(...);
+ * free(t); })`, valid wherever a void call appears (it is always a
+ * statement, so `({...});` is well-formed C). A value of unknown type is
+ * drained only when it is discarded at the statement level, where the wrap
+ * yields void and is safe regardless of the declared type. Args that are
+ * themselves substitution-registered (inside a parent wrap already) are
+ * left to the registered entry. */
+static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
+                             const char* func_name, ASTNode* closure, int is_void,
+                             ArgDrainWrap* w) {
+    w->saved_count = g_arg_drain_count;
+    w->count = 0;
+    if (!w->have_value && !is_void) return;
+    for (int ai = first_arg; ai < expr->child_count && w->count < 16; ai++) {
+        ASTNode* arg = expr->children[ai];
+        if (!arg) continue;
+        /* Arg-temp wrapping fires on heap-classified subexpressions:
+         * function calls, AST_STRING_INTERP (`_aether_interp(...)`
+         * allocates a heap buffer the caller is expected to own; inline as
+         * an argument it leaked ~34 bytes per call on the
+         * `outer(string_returning_call("seed-${i}"))` shape), and
+         * AST_OR_ELSE (`f(g() or { ... })` yields a uniformly-heap string,
+         * since the `or` lowering boxes both paths, with no consumer). */
+        if (arg->type != AST_FUNCTION_CALL &&
+            arg->type != AST_STRING_INTERP &&
+            arg->type != AST_OR_ELSE) continue;
+        if (arg_drain_lookup(arg)) continue;
+        if (!is_heap_string_expr(gen, arg)) continue;
+        int verdict = arg_drain_verdict(gen, func_name, closure, ai, first_arg, w);
+        if (verdict < 0) continue;
+        w->identity[w->count] = verdict;
+        w->idx[w->count++] = ai;
+    }
+}
+
+/* Open the wrap: declare and fill each temp, bind the arguments to them
+ * (generate_expression then emits the temp's name for each), and start the
+ * `_ad_r` result. The callee's own emission follows. */
+static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
+    if (w->count == 0) return;
+    char* names[16] = {0};
+    fprintf(gen->output, "({ ");
+    /* Pre-mint all temp names BEFORE recursing into generate_expression:
+     * the recursion may itself open inner wraps and mint their own temps,
+     * advancing g_arg_drain_counter. Reserving names up front keeps the
+     * outer and inner names distinct. */
+    for (int h = 0; h < w->count; h++) {
+        names[h] = arg_drain_mint_name();
+    }
+    /* Emit each temp's decl. The arg's generate_expression may register
+     * inner substitutions on the registry stack; those are bound to
+     * inner-arg nodes and won't collide with our outer names because the
+     * counter advanced. */
+    for (int h = 0; h < w->count; h++) {
+        ASTNode* arg = expr->children[w->idx[h]];
+        /* Non-const: the temp stands in for the argument at whatever
+         * parameter it feeds, and a callee taking `void*` (or `char*`) got
+         * -Wincompatible-pointer-types-discards-qualifiers from a `const
+         * char*` temp. The value is a fresh heap string this wrap owns and
+         * frees, so there is nothing const about it. */
+        fprintf(gen->output, "char* %s = (char*)(", names[h]);
+        generate_expression(gen, arg);
+        fprintf(gen->output, "); ");
+    }
+    /* Now bind the outer-arg to outer-temp substitutions. The bind
+     * transfers ownership of the name string; arg_drain_truncate frees
+     * it. */
+    for (int h = 0; h < w->count; h++) {
+        arg_drain_bind(expr->children[w->idx[h]], names[h]);
+    }
+    /* A void parent emits the call bare (no _ad_r); the statement-
+     * expression yields void via the final free in arg_drain_close. */
+    if (w->have_value) {
+        fprintf(gen->output, "%s _ad_r = ", w->ret_ct ? w->ret_ct : get_c_type(w->ret_type));
+    }
+}
+
+/* Close the wrap, if one was opened: the per-temp free, the statement-
+ * expression's yield value, and the closing brace. */
+static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
+    if (w->count == 0) return;
+    fprintf(gen->output, "; ");
+    for (int h = 0; h < w->count; h++) {
+        /* Look up the temp name we registered. Names are stable across
+         * the wrap's scope. */
+        const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
+        if (!nm) continue;
+        if (w->identity[h]) {
+            /* Return-escape-only param: free the fresh temp ONLY if the
+             * call did not return it (string_release is magic-guarded; the
+             * temp is always a magic string-op result here, never a
+             * literal). */
+            fprintf(gen->output,
+                    "if ((const char*)_ad_r != %s) string_release(%s); ", nm, nm);
+        } else {
+            fprintf(gen->output, "aether_heap_str_free(%s); ", nm);
+        }
+    }
+    if (w->have_value) {
+        /* In statement position the yield is discarded, and a bare
+         * `_ad_r;` there is -Wunused-value in the user's own build
+         * (`fs.delete("${dir}/f")` warned). Cast it away: the wrap then
+         * yields void, which is all a statement wants. */
+        fprintf(gen->output, w->discarded ? "(void)_ad_r; })" : "_ad_r; })");
+    } else {
+        /* void parent: the trailing free is the last statement, so the
+         * ({...}) yields void. */
+        fprintf(gen->output, "})");
+    }
+    arg_drain_truncate(w->saved_count);
+}
+
 /* Returns 1 if the expression has any side effects (function calls, sends).
  * Shared by the series-collapse optimizer in codegen_stmt.c and the
  * interpolation-segment hoist below. */
@@ -850,14 +1054,93 @@ static int is_local_var(ASTNode* block, const char* name) {
     return first_occurrence_kind(block, name) == FL_FRESH;
 }
 
-// Find an AST_RECEIVE_ARM anywhere in the program whose synthetic name
+/* #2492: the two receive-arm shapes generate_actor_definition lowers to a
+ * handler. V2 `Ping(n) -> { ... }` is an AST_RECEIVE_ARM [pattern, body];
+ * the V1 shape is an AST_BLOCK holding an AST_MESSAGE_PATTERN whose last
+ * child is the body. Each is the scope `__recv_arm_<node>` of the closures
+ * in it, and both bind the pattern's names, so every scope query below
+ * goes through these. */
+static ASTNode* v1_arm_pattern(ASTNode* node) {
+    if (!node || node->type != AST_BLOCK) return NULL;
+    for (int k = 0; k < node->child_count; k++) {
+        if (node->children[k] && node->children[k]->type == AST_MESSAGE_PATTERN) {
+            return node->children[k];
+        }
+    }
+    return NULL;
+}
+
+static int is_receive_arm_scope(ASTNode* node) {
+    return node && (node->type == AST_RECEIVE_ARM || v1_arm_pattern(node));
+}
+
+static ASTNode* receive_arm_pattern(ASTNode* arm) {
+    if (arm && arm->type == AST_RECEIVE_ARM) {
+        return arm->child_count > 0 ? arm->children[0] : NULL;
+    }
+    return v1_arm_pattern(arm);
+}
+
+static ASTNode* receive_arm_body(ASTNode* arm) {
+    if (arm && arm->type == AST_RECEIVE_ARM) {
+        return arm->child_count > 1 ? arm->children[1] : NULL;
+    }
+    ASTNode* pattern = v1_arm_pattern(arm);
+    ASTNode* last = (pattern && pattern->child_count > 0)
+                        ? pattern->children[pattern->child_count - 1] : NULL;
+    return (last && last->type == AST_BLOCK) ? last : NULL;
+}
+
+/* The AST_PATTERN_FIELD of `arm`'s message pattern that binds `name`
+ * (`Ping(n)` binds n, `Ping(n: m)` binds m), or NULL. The handler declares
+ * each binding as a C local read from the message (codegen_actor.c), so to
+ * a closure in the arm it is a binding of the arm, like a parameter. */
+static ASTNode* receive_arm_binding(ASTNode* arm, const char* name) {
+    ASTNode* pattern = receive_arm_pattern(arm);
+    if (!pattern || pattern->type != AST_MESSAGE_PATTERN || !name) return NULL;
+    for (int k = 0; k < pattern->child_count; k++) {
+        ASTNode* pf = pattern->children[k];
+        if (!pf || pf->type != AST_PATTERN_FIELD || !pf->value) continue;
+        const char* bound = pf->value;
+        if (pf->child_count > 0 && pf->children[0] &&
+            pf->children[0]->type == AST_PATTERN_VARIABLE && pf->children[0]->value) {
+            bound = pf->children[0]->value;
+        }
+        if (strcmp(bound, name) == 0) return pf;
+    }
+    return NULL;
+}
+
+/* The declared type of field `field` of message `msg`, or NULL. */
+static Type* message_field_type(ASTNode* program, const char* msg, const char* field) {
+    if (!program || !msg || !field) return NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* def = program->children[i];
+        if (def && def->type == AST_EXPORT_STATEMENT && def->child_count > 0) {
+            def = def->children[0];
+        }
+        if (!def || def->type != AST_MESSAGE_DEFINITION || !def->value ||
+            strcmp(def->value, msg) != 0) continue;
+        for (int j = 0; j < def->child_count; j++) {
+            ASTNode* f = def->children[j];
+            if (f && f->type == AST_MESSAGE_FIELD && f->value &&
+                strcmp(f->value, field) == 0) {
+                return f->node_type;
+            }
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+// Find a receive arm anywhere in the program whose synthetic name
 // (format `__recv_arm_<pointer>`) matches `func_name`. Returns NULL if
 // not found. Used so that actor message handlers — which are effectively
 // mini-functions for closure-promotion purposes — can be looked up the
 // same way as top-level functions.
 static ASTNode* find_receive_arm_by_name(ASTNode* node, const char* func_name) {
     if (!node || !func_name) return NULL;
-    if (node->type == AST_RECEIVE_ARM) {
+    if (is_receive_arm_scope(node)) {
         char arm_name[256];
         snprintf(arm_name, sizeof(arm_name), "__recv_arm_%p", (void*)node);
         if (strcmp(arm_name, func_name) == 0) return node;
@@ -988,7 +1271,7 @@ static int find_enclosing_scope_name(ASTNode* node, const char* scope,
         child_scope = node->value ? node->value : scope;
     } else if (node->type == AST_MAIN_FUNCTION) {
         child_scope = "main";
-    } else if (node->type == AST_RECEIVE_ARM) {
+    } else if (is_receive_arm_scope(node)) {
         snprintf(here, sizeof(here), "__recv_arm_%p", (void*)node);
         child_scope = here;
     } else if (is_hoisted_closure(node)) {
@@ -1100,12 +1383,14 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
         }
         return INT_MAX;
     }
-    // Actor receive arms use synthetic function names `__recv_arm_<ptr>`;
-    // the arm body is children[1] (children[0] is the pattern).
+    // Actor receive arms use synthetic function names `__recv_arm_<ptr>`.
+    // A name the message pattern binds precedes the whole body, as a
+    // parameter does (#2492).
     if (strncmp(func_name, "__recv_arm_", 11) == 0) {
         ASTNode* arm = find_receive_arm_by_name(program, func_name);
-        if (!arm || arm->child_count < 2) return INT_MAX;
-        ASTNode* body = arm->children[1];
+        if (!arm) return INT_MAX;
+        if (receive_arm_binding(arm, var_name)) return 0;
+        ASTNode* body = receive_arm_body(arm);
         if (!body || body->type != AST_BLOCK) return INT_MAX;
         return visible_decl_line(body, var_name, viewer);
     }
@@ -1186,8 +1471,13 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
     }
     if (strncmp(func_name, "__recv_arm_", 11) == 0) {
         ASTNode* arm = find_receive_arm_by_name(program, func_name);
-        if (!arm || arm->child_count < 2) return 0;
-        ASTNode* body = arm->children[1];
+        if (!arm) return 0;
+        /* #2492: the message pattern's bindings are the arm's, declared at
+         * the top of the handler. They were not counted, so a closure in
+         * the arm did not capture `n` from `Ping(n)` and its body read an
+         * undeclared `n`. */
+        if (receive_arm_binding(arm, var_name)) return 1;
+        ASTNode* body = receive_arm_body(arm);
         if (!body) return 0;
         return subtree_declares(body, var_name);
     }
@@ -1398,7 +1688,7 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
     // Arm locals don't escape; each arm starts fresh. The name shape
     // `__actor_<ActorName>__arm_<idx>` is emitted by actor codegen when it
     // publishes the promoted set at the handler's generate_statement site.
-    if (node->type == AST_RECEIVE_ARM) {
+    if (is_receive_arm_scope(node)) {   /* V2 and V1 shapes (#2492) */
         char arm_name[256];
         // Use the pointer as a quasi-unique disambiguator since we don't
         // have an arm index accessible here. Actor codegen will use the
@@ -2128,6 +2418,20 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
             }
         }
         return NULL;
+    }
+    /* #2492: a receive arm binds its message pattern's names, typed by the
+     * message's fields, and its body's locals. It resolves them itself: a
+     * handler is no function, so the search below looked through every
+     * function for the name and fell back to int. */
+    if (parent_func && strncmp(parent_func, "__recv_arm_", 11) == 0) {
+        ASTNode* arm = find_receive_arm_by_name(gen->program, parent_func);
+        if (!arm) return NULL;
+        ASTNode* pf = receive_arm_binding(arm, var_name);
+        if (pf) {
+            ASTNode* pattern = receive_arm_pattern(arm);
+            return message_field_type(gen->program, pattern->value, pf->value);
+        }
+        return decl_type_in_scope(receive_arm_body(arm), var_name);
     }
     // Parent-function-first lookup, through the program index (#2007).
     if (parent_func) {
@@ -5559,6 +5863,27 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
 
                     if (found_id >= 0) {
+                        /* #2493: a heap-string argument the closure's
+                         * parameter does not keep is freed after the call,
+                         * by the wrap a named call gets. The literal's
+                         * body decides, as a function's does; the wrap
+                         * yields what the closure's C function returns. */
+                        ArgDrainWrap ad;
+                        ad.have_value = 0;
+                        ad.ret_ct = NULL;
+                        ad.ret_type = NULL;
+                        ad.discarded = ad_call_discarded;
+                        ASTNode* literal = NULL;
+                        for (int cj = 0; cj < gen->closure_count; cj++) {
+                            if (gen->closures[cj].id != found_id) continue;
+                            literal = gen->closures[cj].closure_node;
+                            ad.ret_ct = resolve_closure_return_type(gen, cj);
+                            ad.have_value = strcmp(ad.ret_ct, "void") != 0;
+                            break;
+                        }
+                        arg_drain_select(gen, expr, 1, NULL, literal,
+                                         !ad.have_value || ad_call_discarded, &ad);
+                        arg_drain_open(gen, expr, &ad);
                         // Generate typed call: _closure_fn_N((_closure_env_N*)closure.env, args...)
                         fprintf(gen->output, "_closure_fn_%d((_closure_env_%d*)",
                                 found_id, found_id);
@@ -5576,6 +5901,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                         }
                         fprintf(gen->output, ")");
+                        arg_drain_close(gen, expr, &ad);
                     } else {
                         /* Fallback: generic closure invocation via
                          * function-pointer cast.  Determine the
@@ -5932,171 +6258,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * Skip when the args are themselves substitution-
                      * registered (we're inside a parent wrap already
                      * — the registered entry handles the lifetime). */
-                    int ad_saved_count = g_arg_drain_count;
-                    int ad_arg_idx[16];
-                    int ad_identity[16] = {0};  /* 1 = identity-guarded release (return-escape-only param) */
-                    int ad_arg_count = 0;
-                    Type* ad_ret_type = expr->node_type;
-                    int ad_have_value =
-                        (ad_ret_type &&
-                         ad_ret_type->kind != TYPE_VOID &&
-                         ad_ret_type->kind != TYPE_UNKNOWN);
-                    /* A VOID parent (e.g. an assert-style helper
-                     * `check(label, string.from_long(n), want)`) yields
-                     * no value, but its heap-returning inline args still
-                     * leak. Drain them via a statement-expression that
-                     * yields void: `({ T t=...; call(...); free(t); })`
-                     * — valid wherever a void call appears (it is always
-                     * a statement, so `({...});` is well-formed C).
-                     * TYPE_UNKNOWN stays excluded UNLESS the call's value
-                     * is being discarded at the statement level
-                     * (ad_call_discarded) — there the wrap yields void and
-                     * is provably safe regardless of the declared type. */
-                    int ad_is_void =
-                        (ad_ret_type && ad_ret_type->kind == TYPE_VOID) ||
-                        ad_call_discarded;
-                    if (ad_have_value || ad_is_void) {
-                        for (int ai = 0; ai < expr->child_count && ad_arg_count < 16; ai++) {
-                            ASTNode* arg = expr->children[ai];
-                            if (!arg) continue;
-                            /* Arg-temp wrapping fires on heap-classified
-                             * subexpressions. Originally scoped to
-                             * AST_FUNCTION_CALL only (see commit
-                             * 39446f9), extended here to AST_STRING_INTERP
-                             * — `_aether_interp(...)` allocates a heap
-                             * buffer the caller is expected to own.
-                             * Passing one inline as an argument leaked
-                             * the buffer because no temp captured the
-                             * pointer and no free fired after the outer
-                             * call returned. Observed as ~34 byte/call
-                             * leak on `outer(string_returning_call("seed-${i}"))`
-                             * shape; 100k iterations grew RSS by 3.3 MB. */
-                            /* AST_OR_ELSE included: `f(g() or { … })`
-                             * yields a uniformly-heap string (the `or`
-                             * lowering boxes both paths) with no consumer,
-                             * so it leaks in argument position exactly like
-                             * a bare heap-returning call. is_heap_string_expr
-                             * classifies it, so drain it the same way. */
-                            if (arg->type != AST_FUNCTION_CALL &&
-                                arg->type != AST_STRING_INTERP &&
-                                arg->type != AST_OR_ELSE) continue;
-                            if (arg_drain_lookup(arg)) continue;
-                            if (!is_heap_string_expr(gen, arg)) continue;
-                            /* @retain parameter: callee stores the
-                             * pointer (list_add, map_put's key,
-                             * etc.). The heap value's lifetime is
-                             * now the recipient's responsibility —
-                             * freeing here would dangle the stored
-                             * copy. Same gate the escape walker uses
-                             * at codegen_stmt.c:1339-1346. */
-                            if (is_retain_extern_param(gen, func_name, ai)) continue;
-                            /* Escape decision for the arg's heap pointer.
-                             * When the callee has a VISIBLE BODY the
-                             * body-walk is authoritative: it now detects
-                             * every storage sink (return, assignment RHS,
-                             * aggregate element, struct field, closure
-                             * capture, escaping nested call-arg), so a
-                             * "does not escape" verdict is a proof, and a
-                             * ptr-typed param that is only read (e.g. an
-                             * assert helper's `got: ptr` compared via
-                             * string.equals) can be safely drained.
-                             *
-                             * Without a visible body (extern / unknown)
-                             * we fall back to the conservative
-                             * call_arg_escapes heuristic — same gate the
-                             * escape walker uses; a storage-shaped param
-                             * is assumed to stash the pointer.
-                             *
-                             * Soundness: we only ADD a drain where
-                             * non-escape is proven; anything unprovable
-                             * stays "escapes". False-escape = leak (safe);
-                             * false-non-escape = UAF (never introduced). */
-                            int ad_id_guard = 0;  /* identity-guarded release for this arg */
-                            if (callee_has_visible_body(gen, func_name)) {
-                                if (callee_param_escapes_via_body(gen, func_name, ai, 0)) {
-                                    /* The param escapes. If it ONLY return-escapes
-                                     * (the callee passes the value through / may
-                                     * return it) and does NOT store-escape, and the
-                                     * callee returns a string, we can still reclaim
-                                     * this FRESH temp at the call site with a pointer-
-                                     * identity guard: free it iff the call did not
-                                     * return it (r != t). This is the sound fix for
-                                     * the recursive accumulator (walk_join(t,
-                                     * concat(acc,sep,h))) — the intermediate concat
-                                     * is freed when consumed, preserved when returned.
-                                     * Only FRESH heap-expr args reach here (the
-                                     * AST_FUNCTION_CALL/INTERP gate above), never a
-                                     * borrowed var, so this can never free a value
-                                     * the caller still holds.
-                                     *
-                                     * Otherwise (store-escape → a container/@retain/
-                                     * field owns it; or non-string / value-less call
-                                     * → no result pointer to compare) leave it. */
-                                    if (!ad_have_value ||
-                                        callee_param_store_escapes_via_body(gen, func_name, ai) ||
-                                        !callee_returns_string(gen, func_name)) {
-                                        continue;
-                                    }
-                                    ad_id_guard = 1;
-                                }
-                            } else {
-                                TypeKind param_kind = lookup_callee_param_kind(gen, func_name, ai);
-                                if (call_arg_escapes(param_kind)) continue;
-                                if (callee_param_escapes_via_body(gen, func_name, ai, 0)) continue;
-                            }
-                            ad_identity[ad_arg_count] = ad_id_guard;
-                            ad_arg_idx[ad_arg_count++] = ai;
-                        }
-                    }
-                    char* ad_names[16] = {0};
-                    if (ad_arg_count > 0) {
-                        fprintf(gen->output, "({ ");
-                        /* Pre-mint all temp names BEFORE recursing
-                         * into generate_expression — the recursion
-                         * may itself open inner wraps and mint
-                         * their own temps, advancing
-                         * g_arg_drain_counter. Reserving names up
-                         * front keeps the outer and inner names
-                         * distinct. */
-                        for (int h = 0; h < ad_arg_count; h++) {
-                            ad_names[h] = arg_drain_mint_name();
-                        }
-                        /* Emit each temp's decl. The arg's
-                         * generate_expression may register inner
-                         * substitutions on the registry stack —
-                         * those are bound to inner-arg nodes and
-                         * won't collide with our outer names because
-                         * the counter advanced. */
-                        for (int h = 0; h < ad_arg_count; h++) {
-                            ASTNode* arg = expr->children[ad_arg_idx[h]];
-                            /* Non-const: the temp stands in for the argument
-                             * at whatever parameter it feeds, and a callee
-                             * taking `void*` (or `char*`) got
-                             * -Wincompatible-pointer-types-discards-qualifiers
-                             * from a `const char*` temp. The value is a fresh
-                             * heap string this wrap owns and frees, so there
-                             * is nothing const about it. */
-                            fprintf(gen->output, "char* %s = (char*)(", ad_names[h]);
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, "); ");
-                        }
-                        /* Now bind the outer-arg → outer-temp
-                         * substitutions. The bind transfers
-                         * ownership of the name string; subsequent
-                         * arg_drain_truncate frees it. */
-                        for (int h = 0; h < ad_arg_count; h++) {
-                            ASTNode* arg = expr->children[ad_arg_idx[h]];
-                            arg_drain_bind(arg, ad_names[h]);
-                            ad_names[h] = NULL;
-                        }
-                        if (ad_have_value) {
-                            const char* ad_ret_ct = get_c_type(ad_ret_type);
-                            fprintf(gen->output, "%s _ad_r = ", ad_ret_ct);
-                        }
-                        /* void parent: emit the call bare (no _ad_r); the
-                         * statement-expression yields void via the final
-                         * free below. */
-                    }
+                    ArgDrainWrap ad;
+                    ad.have_value = expr->node_type &&
+                                    expr->node_type->kind != TYPE_VOID &&
+                                    expr->node_type->kind != TYPE_UNKNOWN;
+                    ad.ret_ct = NULL;
+                    ad.ret_type = expr->node_type;
+                    ad.discarded = ad_call_discarded;
+                    arg_drain_select(gen, expr, 0, func_name, NULL,
+                                     (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
+                                         ad_call_discarded,
+                                     &ad);
+                    arg_drain_open(gen, expr, &ad);
 
                     /* A trusted call in an enforced block goes through its
                      * wrapper (codegen.c emit_sandbox_trust_wrappers), which
@@ -6468,47 +6641,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "(void*)0");
                     }
                     fprintf(gen->output, ")");
-                    /* Close the argument-temp lifetime wrap, if any
-                     * was opened. Emits the per-temp free, the
-                     * statement-expression's yield value, and the
-                     * closing brace. */
-                    if (ad_arg_count > 0) {
-                        fprintf(gen->output, "; ");
-                        for (int h = 0; h < ad_arg_count; h++) {
-                            /* Look up the temp name we registered.
-                             * Names are stable across the wrap's
-                             * scope. */
-                            ASTNode* arg = expr->children[ad_arg_idx[h]];
-                            const char* nm = arg_drain_lookup(arg);
-                            if (nm) {
-                                if (ad_identity[h]) {
-                                    /* Return-escape-only param: free the fresh temp
-                                     * ONLY if the call did not return it (string_release
-                                     * is magic-guarded; the temp is always a magic
-                                     * string-op result here, never a literal). */
-                                    fprintf(gen->output,
-                                            "if ((const char*)_ad_r != %s) string_release(%s); ",
-                                            nm, nm);
-                                } else {
-                                    fprintf(gen->output, "aether_heap_str_free(%s); ", nm);
-                                }
-                            }
-                        }
-                        if (ad_have_value) {
-                            /* In statement position the yield is discarded, and
-                             * a bare `_ad_r;` there is -Wunused-value in the
-                             * user's own build (`fs.delete("${dir}/f")` warned).
-                             * Cast it away: the wrap then yields void, which is
-                             * all a statement wants. */
-                            fprintf(gen->output, ad_call_discarded
-                                    ? "(void)_ad_r; })" : "_ad_r; })");
-                        } else {
-                            /* void parent: the trailing free is the last
-                             * statement, so the ({...}) yields void. */
-                            fprintf(gen->output, "})");
-                        }
-                        arg_drain_truncate(ad_saved_count);
-                    }
+                    arg_drain_close(gen, expr, &ad);
                 }
             }
             break;

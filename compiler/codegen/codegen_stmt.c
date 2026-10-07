@@ -3382,6 +3382,22 @@ int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_nam
     return param_escapes_in_subtree(gen, body, pname, 0, /*return_is_escape=*/0);
 }
 
+int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
+                                   int return_is_escape) {
+    if (!gen || !closure || closure->type != AST_CLOSURE || param_idx < 0) return 1;
+    const char* pname = NULL;
+    ASTNode* body = NULL;
+    int seen = 0;
+    for (int i = 0; i < closure->child_count; i++) {
+        ASTNode* c = closure->children[i];
+        if (!c) continue;
+        if (c->type == AST_CLOSURE_PARAM && seen++ == param_idx) pname = c->value;
+        if (c->type == AST_BLOCK) body = c;
+    }
+    if (!pname || !body) return 1;
+    return param_escapes_in_subtree(gen, body, pname, 0, return_is_escape);
+}
+
 /* Does the user function `func_name` declare a `-> string` return? Only
  * then is the call-site identity-drain meaningful (it compares the call
  * result pointer against the passed temp). */
