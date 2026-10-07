@@ -1,0 +1,125 @@
+// Regression (#2508): string.to_double and string.to_float read C99
+// hexadecimal floating constants ("0x1.8p3") the same on every platform,
+// correctly rounded to the result type. glibc and UCRT parse them, but on
+// Windows with msvcrt (MINGW64) to_double("0x1p3") failed: _strtod_l read the
+// "0" and stopped, leaving "x1p3" as trailing garbage.
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+// The double's bits must be exactly `want`.
+dbl(s: string, want: long) -> int {
+    v, err = string.to_double(s)
+    if err != "" || mem.bits_of_float(v) != want {
+        got = string.from_int_radix(mem.bits_of_float(v), 16)
+        println("  FAIL to_double(\"${s}\"): bits ${got} err='${err}'")
+        return 1
+    }
+    return 0
+}
+
+// to_float's result, widened to double, must have exactly the bits `want`.
+flt(s: string, want: long) -> int {
+    v, err = string.to_float(s)
+    if err != "" || mem.bits_of_float(v) != want {
+        got = string.from_int_radix(mem.bits_of_float(v), 16)
+        println("  FAIL to_float(\"${s}\"): bits ${got} err='${err}'")
+        return 1
+    }
+    return 0
+}
+
+dbl_err(s: string) -> int {
+    v, err = string.to_double(s)
+    if err == "" {
+        println("  FAIL to_double(\"${s}\") should error, got ${v}")
+        return 1
+    }
+    return 0
+}
+
+flt_err(s: string) -> int {
+    v, err = string.to_float(s)
+    if err == "" {
+        println("  FAIL to_float(\"${s}\") should error, got ${v}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    println("=== to_double / to_float: hexadecimal floating constants ===")
+    fails = 0
+
+    // The forms: either case, sign, optional point and exponent.
+    fails = fails + dbl("0x1p3", 0x4020000000000000)
+    fails = fails + dbl("0X1P3", 0x4020000000000000)
+    fails = fails + dbl("-0x1p3", 0xc020000000000000)
+    fails = fails + dbl("+0x1.8p1", 0x4008000000000000)
+    fails = fails + dbl("0x1.8", 0x3ff8000000000000)
+    fails = fails + dbl("0x.8p1", 0x3ff0000000000000)
+    fails = fails + dbl("0x1.p3", 0x4020000000000000)
+    fails = fails + dbl("0XaBcDeFp-4", 0x412579bde0000000)
+    fails = fails + dbl(" 0x10", 0x4030000000000000)
+    fails = fails + dbl("0x1p+10 ", 0x4090000000000000)
+    fails = fails + dbl("-0x0p0", 0x8000000000000000)
+
+    // Leading zeros cost no precision; digits past 64 bits still count.
+    fails = fails + dbl("0x00000000000000000000000000000000000001p0", 0x3ff0000000000000)
+    fails = fails + dbl("0x0.000000000000000000000000000000001p132", 0x3ff0000000000000)
+    fails = fails + dbl("0x1000000000000000000000000000000p-120", 0x3ff0000000000000)
+
+    // Round to nearest, ties to even, with the bits past the tie deciding.
+    fails = fails + dbl("0x1.00000000000008p0", 0x3ff0000000000000)
+    fails = fails + dbl("0x1.00000000000018p0", 0x3ff0000000000002)
+    fails = fails + dbl("0x1.0000000000000800000000000000000000000000000000000000000000000000000000000000001p0", 0x3ff0000000000001)
+
+    // The top of the range, and overflow (an error, as for decimal text).
+    fails = fails + dbl("0x1.fffffffffffffp1023", 0x7fefffffffffffff)
+    fails = fails + dbl("0x1.fffffffffffff7ffffffffffffffffp1023", 0x7fefffffffffffff)
+    fails = fails + dbl_err("0x1.fffffffffffff8p1023")
+    fails = fails + dbl_err("0x1p1024")
+    fails = fails + dbl_err("-0x1p99999999999999999999")
+
+    // Subnormals, rounded on their own coarser grid.
+    fails = fails + dbl("0x1p-1022", 0x0010000000000000)
+    fails = fails + dbl("0x0.fffffffffffff8p-1022", 0x0010000000000000)
+    fails = fails + dbl("0x1p-1074", 0x0000000000000001)
+    fails = fails + dbl("0x1.8p-1074", 0x0000000000000002)
+    fails = fails + dbl("0x2.8p-1074", 0x0000000000000002)
+    fails = fails + dbl("0x1.0000000000001p-1075", 0x0000000000000001)
+    fails = fails + dbl("0x1p-1075", 0x0000000000000000)
+    fails = fails + dbl("0x1p-99999999999999999999", 0x0000000000000000)
+
+    // Not a hex constant past the "0": the rest is trailing garbage.
+    fails = fails + dbl_err("0x")
+    fails = fails + dbl_err("0x.")
+    fails = fails + dbl_err("0x.p1")
+    fails = fails + dbl_err("0xg")
+    fails = fails + dbl_err("0x1p")
+    fails = fails + dbl_err("0x1p+")
+    fails = fails + dbl_err("0x1.8p1.5")
+    fails = fails + dbl_err("0x1q")
+    fails = fails + dbl_err("0x 1")
+
+    // to_float rounds the exact value to float directly. 1 + 2^-24 + 2^-60
+    // is just above a float tie: through double it would first become the
+    // tie 1 + 2^-24 and then round to even, 1.0.
+    fails = fails + flt("0x1p3", 0x4020000000000000)
+    fails = fails + flt("0x1.000001p0", 0x3ff0000000000000)
+    fails = fails + flt("0x1.000003p0", 0x3ff0000040000000)
+    fails = fails + flt("0x1.000001000000001p0", 0x3ff0000020000000)
+    fails = fails + flt("0x1.fffffep127", 0x47efffffe0000000)
+    fails = fails + flt("0x1p-149", 0x36a0000000000000)
+    fails = fails + flt("0x1.8p-149", 0x36b0000000000000)
+    fails = fails + flt_err("0x1.ffffffp127")
+    fails = fails + flt_err("0x1p128")
+    fails = fails + flt_err("0x1p")
+
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

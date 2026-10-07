@@ -6,6 +6,8 @@
 //     derandomized test entries, plus implicit rejection.
 //  3. The FIPS 203 input checks (#2482): every malformed ek, dk, ct, m, d
 //     or z gets an error and null outputs, never a key and never a panic.
+//  4. The size helpers (#2508): FIPS 203's sizes for k = 2, 3, 4, and 0 for
+//     any other k.
 import std.cryptography.mlkem
 import std.bytes
 import std.string
@@ -180,6 +182,36 @@ check_inputs(k: int) -> int {
     return fails
 }
 
+// The size helpers against FIPS 203 Table 3, and 0 for a k that is not a
+// parameter set (they used to read uninitialised fields for one).
+check_sizes() -> int {
+    fails = 0
+    k = 2
+    while k <= 4 {
+        ct = 768
+        if k == 3 { ct = 1088 }
+        if k == 4 { ct = 1568 }
+        if mlkem.mlkem_ek_bytes(k) != 384 * k + 32 { println("FAIL mlkem_ek_bytes(${k}) = ${mlkem.mlkem_ek_bytes(k)}") fails = fails + 1 }
+        if mlkem.mlkem_dk_bytes(k) != 768 * k + 96 { println("FAIL mlkem_dk_bytes(${k}) = ${mlkem.mlkem_dk_bytes(k)}") fails = fails + 1 }
+        if mlkem.mlkem_ct_bytes(k) != ct { println("FAIL mlkem_ct_bytes(${k}) = ${mlkem.mlkem_ct_bytes(k)}") fails = fails + 1 }
+        k = k + 1
+    }
+    bad = 0 - 1
+    while bad <= 6 {
+        if bad < 2 || bad > 4 {
+            if mlkem.mlkem_ek_bytes(bad) != 0 || mlkem.mlkem_dk_bytes(bad) != 0 || mlkem.mlkem_ct_bytes(bad) != 0 {
+                println("FAIL mlkem sizes for unsupported k=${bad}: ${mlkem.mlkem_ek_bytes(bad)} ${mlkem.mlkem_dk_bytes(bad)} ${mlkem.mlkem_ct_bytes(bad)}, want 0")
+                fails = fails + 1
+            }
+        }
+        bad = bad + 1
+    }
+    if mlkem.mlkem_ek_bytes(1000000) != 0 { println("FAIL mlkem_ek_bytes(1000000)") fails = fails + 1 }
+    if mlkem.mlkem_ss_bytes() != 32 { println("FAIL mlkem_ss_bytes") fails = fails + 1 }
+    if fails == 0 { println("ok   mlkem size helpers (k = 2, 3, 4; 0 otherwise)") }
+    return fails
+}
+
 // Randomized keygen + encaps + decaps agree on the shared secret, and two
 // keygens differ (the seeds really come from the CSPRNG).
 round_trip_random(k: int) -> int {
@@ -240,6 +272,7 @@ main() {
     kd10, _de10 = mlkem.mlkem1024_decaps(dk10, ct10)
     if bh(kc) == bh(kd10) { println("ok   mlkem1024 round-trip") } else { println("FAIL mlkem1024 K mismatch"); fails = fails + 1 }
 
+    fails = fails + check_sizes()
     k = 2
     while k <= 4 {
         fails = fails + round_trip_random(k)

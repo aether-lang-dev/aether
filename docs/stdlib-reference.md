@@ -970,7 +970,7 @@ For a `split_once`-style operation (find the first `sep` in `s`, return the halv
 - `string.to_float(s)` → `(float, string)` - Parse float
 - `string.to_double(s)` → `(float, string)` - Parse double
 
-Each returns `(value, "")` on success or `(0, "invalid ...")` on parse failure. Except for `to_int_radix` (above), they handle leading whitespace, sign, trailing whitespace; reject trailing non-whitespace. `to_float` and `to_double` also read `inf`, `infinity` and `nan` in any case and with a sign, on every platform, so `from_double`'s `Infinity`, `-Infinity` and `NaN` round-trip.
+Each returns `(value, "")` on success or `(0, "invalid ...")` on parse failure. Except for `to_int_radix` (above), they handle leading whitespace, sign, trailing whitespace; reject trailing non-whitespace. `to_float` and `to_double` also read `inf`, `infinity` and `nan` in any case and with a sign, on every platform, so `from_double`'s `Infinity`, `-Infinity` and `NaN` round-trip, and C99 hexadecimal constants such as `0x1.8p3`, correctly rounded to the result type.
 
 Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_raw`, `string_to_float_raw`, `string_to_double_raw` for callers who need to distinguish zero from parse failure without a tuple destructure.
 
@@ -1962,7 +1962,7 @@ Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return a
 
 Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptography` as explicitly-imported sub-modules (e.g. `std.cryptography.rsa`, `std.cryptography.x25519`, `std.cryptography.aes`), pure-Aether ports, no OpenSSL. The top-level `std.cryptography` module stays focused on the hash/HMAC/Base64/CSPRNG primitives with a single obvious shape.
 
-The post-quantum KEM is `std.cryptography.mlkem` (ML-KEM, FIPS 203), with `mlkem512_*`, `mlkem768_*` and `mlkem1024_*` sets: `keygen() -> (ek, dk, err)` and `encaps(ek) -> (ct, key, err)` draw their randomness from the OS CSPRNG, and `decaps(dk, ct) -> (key, err)` returns the 32-byte shared secret. Each call runs the FIPS 203 input checks (key and ciphertext lengths, the encapsulation-key modulus check, the decapsulation-key hash check) and returns an error with null outputs when one fails. `keygen_derand(d, z)` and `encaps_derand(ek, m)` take the randomness from the caller and are for known-answer tests only.
+The post-quantum KEM is `std.cryptography.mlkem` (ML-KEM, FIPS 203), with `mlkem512_*`, `mlkem768_*` and `mlkem1024_*` sets: `keygen() -> (ek, dk, err)` and `encaps(ek) -> (ct, key, err)` draw their randomness from the OS CSPRNG, and `decaps(dk, ct) -> (key, err)` returns the 32-byte shared secret. Each call runs the FIPS 203 input checks (key and ciphertext lengths, the encapsulation-key modulus check, the decapsulation-key hash check) and returns an error with null outputs when one fails. `keygen_derand(d, z)` and `encaps_derand(ek, m)` take the randomness from the caller and are for known-answer tests only. `mlkem_ek_bytes(k)`, `mlkem_dk_bytes(k)` and `mlkem_ct_bytes(k)` give the sizes for k = 2, 3, 4 and 0 for any other k.
 
 ---
 

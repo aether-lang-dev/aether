@@ -30,7 +30,8 @@
 #include <string.h>
 #include <errno.h>
 #include <locale.h>
-#include <math.h>  // NAN, HUGE_VAL, HUGE_VALF for the inf/nan spellings
+#include <math.h>    // NAN, HUGE_VAL, ldexp for the inf/nan and hex forms
+#include <stdint.h>  // uint64_t for the hex significand
 
 // ---------------------------------------------------------------------------
 // Capability detection
@@ -301,50 +302,168 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
 // errno is deliberately NOT cleared here — callers set errno = 0 before the
 // call and test for ERANGE after, exactly as they would around bare strtod.
 
-// C99 strtod/strtof accept "inf", "infinity", "nan" and "nan(n-char-seq)",
-// in any case and after optional whitespace and sign. msvcrt's _strtod_l /
-// _strtof_l (the MinGW default CRT) accept none of them, so the "Infinity",
-// "-Infinity" and "NaN" that string.from_double writes did not read back on
-// Windows (#2472). These spellings are recognised here, on every platform,
-// before the platform parser sees the text, so every platform agrees by
-// construction rather than by libc. A NaN's n-char-sequence is consumed and
-// its payload ignored (the result is the default quiet NaN with the sign
-// given).
+// C99 strtod/strtof accept more than decimal text: "inf", "infinity", "nan"
+// and "nan(n-char-seq)" in any case (#2472), and hexadecimal floating
+// constants such as "0x1.8p3" (#2508), each after optional whitespace and
+// sign. msvcrt's _strtod_l / _strtof_l (the MinGW default CRT) accept none
+// of them: the "Infinity", "-Infinity" and "NaN" that string.from_double
+// writes did not read back on Windows, and "0x1p3" read as 0 followed by
+// garbage. These forms are read here, on every platform, before the platform
+// parser sees the text, so every platform agrees by construction rather than
+// by libc; only decimal text reaches the platform parser. A NaN's
+// n-char-sequence is consumed and its payload ignored (the result is the
+// default quiet NaN with the sign given).
+
+// The C locale's isspace, spelled out because isspace itself follows the
+// ambient LC_CTYPE.
+static int aether_c_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+static int aether_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    // ASCII case fold: a letter OR 0x20 is its lower case.
+    if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') return (c | 0x20) - 'a' + 10;
+    return -1;
+}
+
+static int aether_bit_length(uint64_t v) {
+    int n = 0;
+    while (n < 64 && (v >> n) != 0) n++;
+    return n;
+}
+
+// Read the hexadecimal constant at `p`, which starts "0x" or "0X", and round
+// it to a binary format of `prec` significand bits (the leading one included)
+// and normal exponents emin..emax: to nearest, ties to even, as a correctly
+// rounded strtod does. The exact value is rounded straight to the format, so
+// a float result is never double-rounded through double. Returns the
+// magnitude as a double, which holds every value of both formats exactly,
+// and sets *end past the constant. Without a hex digit after the prefix the
+// constant is only the "0", the longest valid subject (C99 7.20.1.3), which
+// is how strtod reads "0x" too.
 //
-// Returns 1 with *negative, *is_nan and *end set when `s` spells one of
-// them, 0 otherwise. The whitespace set is the C locale's isspace, spelled
-// out because isspace itself follows the ambient LC_CTYPE.
-static int aether_inf_nan(const char* s, int* negative, int* is_nan, const char** end) {
+// errno, following strtod: ERANGE with HUGE_VAL when the value overflows the
+// format, and ERANGE when a nonzero value comes out inexact below the normal
+// range (subnormal, or rounded to zero), which is glibc's underflow rule.
+static double aether_hex_float(const char* p, int prec, int emin, int emax, const char** end) {
+    const char* q = p + 2;
+    uint64_t mant = 0;  // the leading significant digits, 61 to 64 bits once full
+    int sticky = 0;     // a nonzero digit fell past what mant holds
+    long long exp = 0;  // the value is (mant + a sticky fraction) * 2^exp
+    int digits = 0;
+    int d;
+    // Leading zeros keep mant at 0 and so cost no capacity.
+    for (; (d = aether_hex_digit(*q)) >= 0; q++, digits++) {
+        if (mant >> 60) { sticky |= d != 0; exp += 4; }
+        else mant = (mant << 4) | (uint64_t)d;
+    }
+    if (*q == '.') {
+        const char* f = q + 1;
+        for (; (d = aether_hex_digit(*f)) >= 0; f++, digits++) {
+            if (mant >> 60) { sticky |= d != 0; }
+            else { mant = (mant << 4) | (uint64_t)d; exp -= 4; }
+        }
+        if (digits) q = f;
+    }
+    if (!digits) {
+        *end = p + 1;
+        return 0.0;
+    }
+    if (*q == 'p' || *q == 'P') {
+        const char* e = q + 1;
+        int eneg = 0;
+        if (*e == '+' || *e == '-') { eneg = *e == '-'; e++; }
+        if (*e >= '0' && *e <= '9') {
+            // Saturates: past a billion the result is 0 or inf whatever follows.
+            long long ev = 0;
+            for (; *e >= '0' && *e <= '9'; e++) {
+                if (ev < 1000000000) ev = ev * 10 + (*e - '0');
+            }
+            exp += eneg ? -ev : ev;
+            q = e;
+        }
+    }
+    *end = q;
+    if (mant == 0) return 0.0;
+
+    int nbits = aether_bit_length(mant);
+    long long lead = exp + nbits - 1;  // exponent of the leading bit
+    if (lead > emax) {
+        errno = ERANGE;
+        return HUGE_VAL;
+    }
+    // Below half the least subnormal, 2^(emin - prec): rounds to zero.
+    if (lead < (long long)emin - prec) {
+        errno = ERANGE;
+        return 0.0;
+    }
+    // Significand bits the result keeps: prec, fewer below the normal range,
+    // down to 0 when the value lies in [half the least subnormal, the least
+    // subnormal) and can only round to 0 or to it.
+    int keep = prec;
+    if (lead < emin) keep = prec - (int)(emin - lead);
+    int shift = nbits - keep;  // at most 64, since keep >= 0
+    uint64_t r;
+    int inexact = sticky;
+    if (shift <= 0) {
+        r = mant << -shift;  // exact; sticky is 0 here, mant has under 61 bits
+    } else {
+        uint64_t rest = shift == 64 ? mant : mant & ((1ULL << shift) - 1);
+        uint64_t half = 1ULL << (shift - 1);
+        r = shift == 64 ? 0 : mant >> shift;
+        inexact |= rest != 0;
+        if (rest > half || (rest == half && (sticky || (r & 1)))) r++;
+    }
+    // The result is r * 2^scale; rounding up may have carried a bit.
+    int scale = (int)(exp + shift);
+    int top = scale + aether_bit_length(r) - 1;
+    if (r != 0 && top > emax) {
+        errno = ERANGE;
+        return HUGE_VAL;
+    }
+    if (inexact && (r == 0 || top < emin)) errno = ERANGE;
+    return ldexp((double)r, scale);  // exact: r * 2^scale is in the format
+}
+
+// The forms above, after the whitespace and sign strtod skips. Returns 1 with
+// *value (signed) and *end set when `s` is one of them, 0 to leave `s` to the
+// platform parser. `prec`, `emin`, `emax` give the target format, as for
+// aether_hex_float.
+static int aether_c_special(const char* s, int prec, int emin, int emax,
+                            double* value, const char** end) {
     const char* p = s;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\v' || *p == '\f' || *p == '\r') p++;
-    *negative = 0;
+    while (aether_c_space(*p)) p++;
+    int negative = 0;
     if (*p == '+' || *p == '-') {
-        *negative = (*p == '-');
+        negative = *p == '-';
         p++;
     }
-    // ASCII case fold: a letter OR 0x20 is its lower case.
-    if ((p[0] | 0x20) == 'i' && (p[1] | 0x20) == 'n' && (p[2] | 0x20) == 'f') {
+    double v;
+    if (p[0] == '0' && (p[1] | 0x20) == 'x') {
+        v = aether_hex_float(p, prec, emin, emax, end);
+    } else if ((p[0] | 0x20) == 'i' && (p[1] | 0x20) == 'n' && (p[2] | 0x20) == 'f') {
         p += 3;
         if ((p[0] | 0x20) == 'i' && (p[1] | 0x20) == 'n' && (p[2] | 0x20) == 'i' &&
             (p[3] | 0x20) == 't' && (p[4] | 0x20) == 'y') {
             p += 5;
         }
-        *is_nan = 0;
         *end = p;
-        return 1;
-    }
-    if ((p[0] | 0x20) == 'n' && (p[1] | 0x20) == 'a' && (p[2] | 0x20) == 'n') {
+        v = HUGE_VAL;
+    } else if ((p[0] | 0x20) == 'n' && (p[1] | 0x20) == 'a' && (p[2] | 0x20) == 'n') {
         p += 3;
         if (*p == '(') {
             const char* q = p + 1;
             while ((*q >= '0' && *q <= '9') || ((*q | 0x20) >= 'a' && (*q | 0x20) <= 'z') || *q == '_') q++;
             if (*q == ')') p = q + 1;
         }
-        *is_nan = 1;
         *end = p;
-        return 1;
+        v = (double)NAN;
+    } else {
+        return 0;
     }
-    return 0;
+    *value = negative ? -v : v;
+    return 1;
 }
 
 double aether_c_strtod(const char* s, char** endptr) {
@@ -354,12 +473,11 @@ double aether_c_strtod(const char* s, char** endptr) {
     }
 
     {
-        int negative, is_nan;
+        double v;
         const char* end;
-        if (aether_inf_nan(s, &negative, &is_nan, &end)) {
+        if (aether_c_special(s, 53, -1022, 1023, &v, &end)) {  // binary64
             if (endptr) *endptr = (char*)end;
-            double v = is_nan ? (double)NAN : HUGE_VAL;
-            return negative ? -v : v;
+            return v;
         }
     }
 
@@ -389,12 +507,12 @@ float aether_c_strtof(const char* s, char** endptr) {
     }
 
     {
-        int negative, is_nan;
+        double v;
         const char* end;
-        if (aether_inf_nan(s, &negative, &is_nan, &end)) {
+        // binary32: v is already rounded to float, so the narrowing is exact.
+        if (aether_c_special(s, 24, -126, 127, &v, &end)) {
             if (endptr) *endptr = (char*)end;
-            float v = is_nan ? NAN : HUGE_VALF;
-            return negative ? -v : v;
+            return (float)v;
         }
     }
 
