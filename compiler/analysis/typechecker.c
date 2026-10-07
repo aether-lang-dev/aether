@@ -816,6 +816,14 @@ void type_error(const char* message, int line, int column) {
     error_count++;
 }
 
+/* type_error with a `help:` line, reported against the same file. */
+static void type_error_hint(const char* message, const char* hint, int line, int column) {
+    AetherError e = { g_tc_file, NULL, line, column, message, hint, NULL,
+                      AETHER_ERR_TYPE_MISMATCH };
+    aether_error_report(&e);
+    error_count++;
+}
+
 void type_warning(const char* message, int line, int column);
 
 /* ---- string-interpolation operand check -------------------------------
@@ -1836,6 +1844,46 @@ static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode*
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_name ? param_name : "f");
     type_error(emsg, arg->line, arg->column);
+}
+
+/* #2468: `call(x, ...)` invokes a closure, and codegen lowers it through
+ * `x.fn` / `x.env`. Any callee whose type is known and is not a closure was
+ * let through, and the only report was the C compiler's `'_tuple_ptr_string'
+ * has no member named 'fn'` against generated code; the common way in is a
+ * `(value, err)` return such as `list.get` bound to one name. An unknown type
+ * stays lenient: inference gaps must not reject a real closure. */
+static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
+    if (call->child_count < 1 || !call->children[0]) return;
+    ASTNode* callee = call->children[0];
+    Type* t = infer_type(callee, table);
+    if (!t) return;
+    if (t->kind == TYPE_FUNCTION || t->kind == TYPE_UNKNOWN) {
+        free_type(t);
+        return;
+    }
+    char what[256];
+    if (t->kind == TYPE_TUPLE) tuple_type_spell(t, what, sizeof(what));
+    else snprintf(what, sizeof(what), "%s", type_name(t));
+    char name[200];
+    if (callee->type == AST_IDENTIFIER && callee->value)
+        snprintf(name, sizeof(name), "'%s'", callee->value);
+    else
+        snprintf(name, sizeof(name), "the first argument");
+    char msg[640];
+    snprintf(msg, sizeof(msg),
+             "call() needs a closure, but %s has type %s", name, what);
+    const char* hint =
+        t->kind == TYPE_TUPLE
+            ? "a multi-value return bound to one name stays a tuple; destructure "
+              "it (`value, err = ...`) and call the closure value"
+        : t->kind == TYPE_PTR
+            ? "a closure stored as a ptr (box_closure, a list element) is "
+              "called through `call(unbox_closure(p), ...)`"
+            : "pass a closure, a `fn`-typed value, or a function name";
+    int line = callee->line ? callee->line : call->line;
+    int column = callee->line ? callee->column : call->column;
+    type_error_hint(msg, hint, line, column);
+    free_type(t);
 }
 
 int is_type_compatible(Type* from, Type* to) {
@@ -3883,6 +3931,96 @@ static ASTNode* g_typecheck_program = NULL;
 
 static ASTNode* aether_typecheck_program_node(void) { return g_typecheck_program; }
 
+/* #2475: the type of a const initializer built from operators (`1 << 30`,
+ * `A | B`, `~MASK`, `flags.BASE << 2`), computed from the global table
+ * without stamping the AST. Leaves are typed the way the second pass types
+ * them (a numeric literal through infer_from_literal, a name through its
+ * symbol, `ns.NAME` through the module's prefixed const) and the operators
+ * through infer_binary_type / infer_unary_type, which read only the operand
+ * types, so stack nodes stand in for the operands. Not stamping matters: a
+ * member access that carried a node_type would skip the second pass's
+ * rewrite to the prefixed identifier. TYPE_UNKNOWN when a leaf is not
+ * resolved yet; the caller retries until nothing changes. */
+static Type* const_initializer_type(ASTNode* e, SymbolTable* table) {
+    if (!e) return create_type(TYPE_UNKNOWN);
+    switch (e->type) {
+        case AST_LITERAL:
+            if (e->node_type && e->node_type->kind != TYPE_UNKNOWN)
+                return clone_type(e->node_type);
+            return e->value ? infer_from_literal(e->value) : create_type(TYPE_UNKNOWN);
+        case AST_IDENTIFIER: {
+            Symbol* s = e->value ? lookup_symbol(table, e->value) : NULL;
+            return (s && !s->is_function && s->type) ? clone_type(s->type)
+                                                     : create_type(TYPE_UNKNOWN);
+        }
+        case AST_MEMBER_ACCESS: {
+            ASTNode* ns = e->child_count > 0 ? e->children[0] : NULL;
+            if (!ns || ns->type != AST_IDENTIFIER || !ns->value || !e->value ||
+                lookup_symbol(table, ns->value) || !is_visible_namespace(ns->value, table))
+                return create_type(TYPE_UNKNOWN);
+            char qualified[512];
+            snprintf(qualified, sizeof(qualified), "%s_%s", ns->value, e->value);
+            Symbol* s = lookup_symbol(table, qualified);
+            return (s && !s->is_function && s->type) ? clone_type(s->type)
+                                                     : create_type(TYPE_UNKNOWN);
+        }
+        case AST_BINARY_EXPRESSION: {
+            if (e->child_count < 2) return create_type(TYPE_UNKNOWN);
+            ASTNode l = { 0 }, r = { 0 };
+            l.node_type = const_initializer_type(e->children[0], table);
+            r.node_type = const_initializer_type(e->children[1], table);
+            Type* t = infer_binary_type(&l, &r, get_token_type_from_string(e->value));
+            free_type(l.node_type);
+            free_type(r.node_type);
+            return t;
+        }
+        case AST_UNARY_EXPRESSION: {
+            if (e->child_count < 1) return create_type(TYPE_UNKNOWN);
+            ASTNode o = { 0 };
+            o.node_type = const_initializer_type(e->children[0], table);
+            Type* t = infer_unary_type(&o, get_token_type_from_string(e->value));
+            free_type(o.node_type);
+            return t;
+        }
+        default:
+            return e->node_type ? clone_type(e->node_type) : create_type(TYPE_UNKNOWN);
+    }
+}
+
+/* #2475: a const whose initializer is an expression (`const MOVED = 1 << 30`)
+ * was registered UNKNOWN (registration types a bare literal only, #1857)
+ * and stayed so until the second pass reached the declaration. An imported
+ * const lands at the end of the merged tree, and a same-file const can follow
+ * its users, so every function that read it first bound `n.flags & MOVED`
+ * to an untyped local and codegen guessed int. Type each such const from its
+ * initializer once every const is registered, repeating while a pass makes
+ * progress so a const defined through another (`B = A | 4`, in either order)
+ * resolves too. */
+static void resolve_const_initializer_types(ASTNode* program, SymbolTable* table) {
+    int progress = 1;
+    while (progress) {
+        progress = 0;
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* c = program->children[i];
+            if (!c || c->type != AST_CONST_DECLARATION || !c->value ||
+                c->child_count < 1)
+                continue;
+            Symbol* s = lookup_symbol_local(table, c->value);
+            if (!s || (s->type && s->type->kind != TYPE_UNKNOWN)) continue;
+            Type* t = const_initializer_type(c->children[0], table);
+            if (!t || t->kind == TYPE_UNKNOWN) {
+                if (t) free_type(t);
+                continue;
+            }
+            if (s->type) free_type(s->type);
+            s->type = t;
+            /* Same #929 marker the literal path carries for a global var. */
+            if (c->type_inferred && t->kind == TYPE_INT) s->type_inferred = 1;
+            progress = 1;
+        }
+    }
+}
+
 int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
@@ -4490,7 +4628,10 @@ int typecheck_program(ASTNode* program) {
                 break;
         }
     }
-    
+
+    /* Before the selective-import aliases below clone the const symbols. */
+    resolve_const_initializer_types(program, global_table);
+
     // Register unqualified short names for selective imports.
     // At this point all merged function definitions are in the symbol table,
     // so we can look up their types to register the short aliases.
@@ -10816,6 +10957,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                                          : create_type(TYPE_UNKNOWN));
     if (call->value && strcmp(call->value, "call") == 0) {
         set_node_type(call, call_builtin_result_type(call, table));
+        reject_non_closure_callee(call, table);
     }
 
     // select() infers its type from the first named arg's value

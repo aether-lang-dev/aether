@@ -643,7 +643,7 @@ action = |x: ptr| { ref_set(x, ref_get(x) + 1) }
 list.add(handlers, box_closure(action))
 
 // Later: retrieve and invoke
-boxed = list.get(handlers, 0)
+boxed = list.get_raw(handlers, 0)
 handler = unbox_closure(boxed)
 call(handler, some_ref)
 ```
@@ -674,7 +674,7 @@ g = grid() {
 }
 
 // Event loop: press button → invoke its callback
-handler = unbox_closure(list.get(list.get(g, 1), cur))
+handler = unbox_closure(list.get_raw(list.get_raw(g, 1), cur))
 call(handler, num, prev, op)
 ```
 
