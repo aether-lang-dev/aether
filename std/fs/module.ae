@@ -1335,9 +1335,12 @@ remove_tree(path: string) -> string {
     // file_stat follows links, so a junction looked like a directory and
     // remove_tree deleted the files of the directory it pointed at. Checked
     // before existence, which follows the link and misses a dangling one.
+    // `return unlink(path)`, as the file branch returns delete(path): an
+    // interpolated error built here would make every return of this
+    // function a fresh heap string, which its recursive caller does not
+    // free (each link in a tree leaked one).
     if fs_is_symlink(path) == 1 {
-        if fs_unlink_raw(path) == 0 { return "remove_tree: cannot remove link '${path}'" }
-        return ""
+        return unlink(path)
     }
     // Not present → nothing to do.
     if fs_path_exists(path) == 0 { return "" }
