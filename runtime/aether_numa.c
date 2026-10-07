@@ -3,6 +3,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+
+/* The heap half of aether_numa_alloc_aligned (#2485). malloc only promises
+ * 16 bytes, so an aligned(64) actor needs an aligned allocator, and each one
+ * has its own free: _aligned_free on Windows, plain free after
+ * posix_memalign. Every build that has no NUMA mapping to hand out comes
+ * through here. */
+static void* aligned_heap_alloc(size_t size, size_t align) {
+#ifdef _WIN32
+    return _aligned_malloc(size, align);
+#else
+    void* ptr = NULL;
+    return posix_memalign(&ptr, align, size) == 0 ? ptr : NULL;
+#endif
+}
+
+static void aligned_heap_free(void* ptr) {
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
 
 #if !AETHER_HAS_NUMA
 // Minimal stubs when NUMA is disabled (embedded, WASM, macOS, or -DAETHER_NO_NUMA)
@@ -23,6 +48,11 @@ aether_numa_topology_t aether_numa_init(void) {
 int aether_numa_node_of_cpu(int cpu_id) { (void)cpu_id; return -1; }
 void* aether_numa_alloc(size_t size, int node) { (void)node; return malloc(size); }
 void aether_numa_free(void* ptr, size_t size) { (void)size; free(ptr); }
+void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
+    (void)node;
+    return aligned_heap_alloc(size, align);
+}
+void aether_numa_free_aligned(void* ptr, size_t size) { (void)size; aligned_heap_free(ptr); }
 void aether_numa_cleanup(void) { g_initialized = false; }
 
 #else
@@ -135,6 +165,27 @@ void aether_numa_free(void* ptr, size_t size) {
     }
 }
 
+void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
+    if (g_topology.available && node >= 0 && node < g_topology.num_nodes) {
+        // A VirtualAlloc region starts on the 64 KiB allocation granularity,
+        // which covers any alignment this function accepts.
+        void* ptr = VirtualAllocExNuma(GetCurrentProcess(), NULL, size,
+                                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, node);
+        if (ptr) return ptr;
+    }
+    return aligned_heap_alloc(size, align);
+}
+
+void aether_numa_free_aligned(void* ptr, size_t size) {
+    (void)size;
+    if (!ptr) return;
+    // As in aether_numa_free: only a VirtualAllocExNuma block is the base of a
+    // region, so VirtualFree releases those and refuses a heap block, which
+    // came from _aligned_malloc and goes back through _aligned_free.
+    if (g_topology.available && VirtualFree(ptr, 0, MEM_RELEASE)) return;
+    aligned_heap_free(ptr);
+}
+
 #else // Linux/Unix
 
 aether_numa_topology_t aether_numa_init(void) {
@@ -216,6 +267,31 @@ void aether_numa_free(void* ptr, size_t size) {
     }
 #endif
     free(ptr);
+}
+
+void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
+#ifdef HAVE_LIBNUMA
+    // numa_alloc_* maps whole pages, so the block is page-aligned, which
+    // covers any alignment this function accepts. The free below makes the
+    // same choice on the same flag.
+    if (g_topology.available) return aether_numa_alloc(size, node);
+#else
+    (void)node;
+#endif
+    return aligned_heap_alloc(size, align);
+}
+
+void aether_numa_free_aligned(void* ptr, size_t size) {
+    if (!ptr) return;
+#ifdef HAVE_LIBNUMA
+    if (g_topology.available) {
+        numa_free(ptr, size);
+        return;
+    }
+#else
+    (void)size;
+#endif
+    aligned_heap_free(ptr);
 }
 
 #endif

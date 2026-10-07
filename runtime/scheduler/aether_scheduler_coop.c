@@ -54,16 +54,22 @@ void scheduler_init(int cores) {
     // Initialize the single scheduler slot
     memset(&schedulers[0], 0, sizeof(Scheduler));
     schedulers[0].core_id = 0;
-    schedulers[0].actors = calloc(MAX_ACTORS_PER_CORE, sizeof(ActorBase*));
-    if (!schedulers[0].actors) {
+    // calloc: every slot starts NULL. One thread, so the table never grows
+    // or retires (#2486 concerns the threaded scheduler).
+    size_t table_size = sizeof(AetherActorTable) +
+                        MAX_ACTORS_PER_CORE * sizeof(_Atomic(ActorBase*));
+    AetherActorTable* table = calloc(1, table_size);
+    if (!table) {
         // The scheduler cannot run any actor without this table; leaving it NULL
-        // with a non-zero capacity would crash scheduler_register_actor on the
-        // first spawn. Fail loudly at init instead of a delayed NULL deref.
+        // would crash scheduler_register_actor on the first spawn. Fail loudly
+        // at init instead of a delayed NULL deref.
         fprintf(stderr, "aether: failed to allocate cooperative scheduler actor table\n");
         abort();
     }
-    schedulers[0].actor_count = 0;
-    schedulers[0].capacity = MAX_ACTORS_PER_CORE;
+    table->alloc_size = table_size;
+    table->capacity = MAX_ACTORS_PER_CORE;
+    atomic_store_explicit(&schedulers[0].actor_table, table, memory_order_relaxed);
+    atomic_store_explicit(&schedulers[0].actor_count, 0, memory_order_relaxed);
 
     // Force main-thread mode — all processing is cooperative
     atomic_store(&g_aether_config.main_thread_mode, true);
@@ -91,11 +97,9 @@ void scheduler_stop(void) {
 }
 
 void scheduler_cleanup(void) {
-    if (schedulers[0].actors) {
-        free(schedulers[0].actors);
-        schedulers[0].actors = NULL;
-    }
-    schedulers[0].actor_count = 0;
+    free(atomic_load_explicit(&schedulers[0].actor_table, memory_order_relaxed));
+    atomic_store_explicit(&schedulers[0].actor_table, NULL, memory_order_relaxed);
+    atomic_store_explicit(&schedulers[0].actor_count, 0, memory_order_relaxed);
     g_coop_initialized = 0;
 }
 
@@ -117,13 +121,16 @@ void scheduler_shutdown(void) {
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     (void)preferred_core;
     Scheduler* sched = &schedulers[0];
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
 
-    if (sched->actor_count >= sched->capacity) {
-        fprintf(stderr, "aether: cooperative scheduler: too many actors (%d)\n", sched->actor_count);
+    if (count >= table->capacity) {
+        fprintf(stderr, "aether: cooperative scheduler: too many actors (%d)\n", count);
         return -1;
     }
 
-    sched->actors[sched->actor_count++] = actor;
+    atomic_store_explicit(&table->slots[count], actor, memory_order_relaxed);
+    atomic_store_explicit(&sched->actor_count, count + 1, memory_order_relaxed);
     atomic_store_explicit(&actor->assigned_core, 0, memory_order_relaxed);
     return 0;
 }
@@ -133,8 +140,11 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     scheduler_init(1);  // no-op once initialized; see g_coop_initialized
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
-    ActorBase* actor = calloc(1, actor_size);
+    // Generated actor structs are aligned(64), which calloc does not honour
+    // (#2485); scheduler_release_actor frees with the matching function.
+    ActorBase* actor = aether_numa_alloc_aligned(actor_size, AETHER_ACTOR_ALIGN, -1);
     if (!actor) return NULL;
+    memset(actor, 0, actor_size);
 
     mailbox_init(&actor->mailbox);
     AETHER_STAT_INC(actors_malloced);
@@ -171,18 +181,24 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
-    // Remove from scheduler's actor list
+    // Remove from scheduler's actor list, clearing the vacated slot as the
+    // threaded scheduler does.
     Scheduler* sched = &schedulers[0];
-    for (int i = 0; i < sched->actor_count; i++) {
-        if (sched->actors[i] == actor) {
-            sched->actors[i] = sched->actors[sched->actor_count - 1];
-            sched->actor_count--;
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    for (int i = 0; i < count; i++) {
+        if (atomic_load_explicit(&table->slots[i], memory_order_relaxed) == actor) {
+            atomic_store_explicit(&table->slots[i],
+                                  atomic_load_explicit(&table->slots[count - 1], memory_order_relaxed),
+                                  memory_order_relaxed);
+            atomic_store_explicit(&table->slots[count - 1], NULL, memory_order_relaxed);
+            atomic_store_explicit(&sched->actor_count, count - 1, memory_order_relaxed);
             break;
         }
     }
 
     aether_on_actor_terminate();
-    free(actor);
+    aether_numa_free_aligned(actor, actor->alloc_size);
 }
 
 // ============================================================================
@@ -226,8 +242,10 @@ void scheduler_wait(void) {
             // Check if any actor has a pending timeout
             int has_pending_timeout = 0;
             Scheduler* sched = &schedulers[0];
-            for (int i = 0; i < sched->actor_count; i++) {
-                ActorBase* a = sched->actors[i];
+            AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+            int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+            for (int i = 0; i < count; i++) {
+                ActorBase* a = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
                 if (a && a->timeout_ns > 0) {
                     has_pending_timeout = 1;
                     break;
@@ -257,9 +275,11 @@ int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
     Scheduler* sched = &schedulers[0];
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
 
-    for (int i = 0; i < sched->actor_count; i++) {
-        ActorBase* actor = sched->actors[i];
+    // The count is re-read every iteration: a step may spawn an actor.
+    for (int i = 0; i < atomic_load_explicit(&sched->actor_count, memory_order_relaxed); i++) {
+        ActorBase* actor = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
         if (!actor || !actor->step) continue;
 
         int processed = 0;

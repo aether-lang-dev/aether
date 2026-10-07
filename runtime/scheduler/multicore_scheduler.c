@@ -621,6 +621,132 @@ static void pin_to_core(int core_id) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Per-core actor table (#2486)
+//
+// Every writer (registration, deregistration, migration, work stealing) holds
+// the core's actor_lock. Readers do not: the owning scheduler thread scans its
+// table whenever it is idle, and the main thread walks every table in
+// aether_scheduler_poll() and scheduler_wait(). So each word a reader looks at
+// is atomic, and the orderings carry this protocol:
+//
+//  - A slot is stored with release and loaded with acquire. A reader that
+//    finds an actor pointer also sees that actor's initialization, including
+//    when the pointer reached the slot through a later swap-remove rather than
+//    the append that published it.
+//
+//  - A table is published (release) before any count that needs it, and a
+//    reader loads the count (acquire) BEFORE the table (acquire). The count it
+//    reads was stored after a table large enough to hold it was published, so
+//    the table it loads next is that one or a newer one, and tables only grow:
+//    the count never exceeds the capacity of the table it is paired with. The
+//    other order can pair a new count with the old table and index past its
+//    end.
+//
+//  - A table that is grown out of is not freed: a reader may still be walking
+//    it. It is chained on `retired` and freed by scheduler_cleanup(), after the
+//    threads are joined. Each table doubles the one before, so the chain costs
+//    less than the live table.
+//
+//  - Every slot at or past actor_count is NULL. A new table is zeroed past the
+//    prefix copied into it, and a removal clears the slot it vacates, so a
+//    reader holding an older, larger count finds NULL there and skips it.
+// ---------------------------------------------------------------------------
+
+// A table of `capacity` empty slots. aether_numa_alloc() is plain malloc()
+// without libnuma, so the slots start as garbage until set here.
+static AetherActorTable* actor_table_alloc(int capacity, int numa_node) {
+    size_t size = sizeof(AetherActorTable) + (size_t)capacity * sizeof(_Atomic(ActorBase*));
+    AetherActorTable* table = aether_numa_alloc(size, numa_node);
+    if (!table) return NULL;
+    table->retired = NULL;
+    table->alloc_size = size;
+    table->capacity = capacity;
+    for (int i = 0; i < capacity; i++) atomic_init(&table->slots[i], NULL);
+    return table;
+}
+
+// Frees a table and every table it replaced. Only once no reader is left.
+static void actor_table_free_chain(AetherActorTable* table) {
+    while (table) {
+        AetherActorTable* older = table->retired;
+        aether_numa_free(table, table->alloc_size);
+        table = older;
+    }
+}
+
+// The view of a core's actors for a reader that does not hold actor_lock:
+// returns the table, with the number of slots to visit in *count. The count is
+// loaded first; see the notes above.
+static inline AetherActorTable* actor_table_snapshot(Scheduler* sched, int* count) {
+    *count = atomic_load_explicit(&sched->actor_count, memory_order_acquire);
+    return atomic_load_explicit(&sched->actor_table, memory_order_acquire);
+}
+
+static inline ActorBase* actor_table_read(AetherActorTable* table, int i) {
+    return atomic_load_explicit(&table->slots[i], memory_order_acquire);
+}
+
+// The *_locked helpers below are for a caller holding sched->actor_lock, which
+// orders them against each other; their loads are relaxed for that reason.
+// Their stores are release, for the readers that do not take the lock.
+
+static inline int actor_table_has_room_locked(Scheduler* sched) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    return atomic_load_explicit(&sched->actor_count, memory_order_relaxed) < table->capacity;
+}
+
+// Index of `actor` in the table, or -1 when it is not there. `hint` is the
+// slot the caller last saw it in (-1 for none), checked before the scan.
+static int actor_table_find_locked(Scheduler* sched, ActorBase* actor, int hint) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    if (hint >= 0 && hint < count &&
+        atomic_load_explicit(&table->slots[hint], memory_order_relaxed) == actor) {
+        return hint;
+    }
+    for (int i = 0; i < count; i++) {
+        if (atomic_load_explicit(&table->slots[i], memory_order_relaxed) == actor) return i;
+    }
+    return -1;
+}
+
+// Appends `actor`. The caller has checked there is room.
+static inline void actor_table_push_locked(Scheduler* sched, ActorBase* actor) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    atomic_store_explicit(&table->slots[count], actor, memory_order_release);
+    atomic_store_explicit(&sched->actor_count, count + 1, memory_order_release);
+}
+
+// Removes slot `i` by moving the last actor into it.
+static inline void actor_table_remove_locked(Scheduler* sched, int i) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int last = atomic_load_explicit(&sched->actor_count, memory_order_relaxed) - 1;
+    ActorBase* moved = atomic_load_explicit(&table->slots[last], memory_order_relaxed);
+    atomic_store_explicit(&table->slots[i], moved, memory_order_release);
+    atomic_store_explicit(&table->slots[last], NULL, memory_order_release);
+    atomic_store_explicit(&sched->actor_count, last, memory_order_release);
+}
+
+// Replaces a full table with one twice its size. The new table is published
+// before the caller stores the count that needs it, and the old one is kept
+// for readers still walking it. Returns 0, or -1 when the allocation fails.
+static int actor_table_grow_locked(Scheduler* sched, int numa_node) {
+    AetherActorTable* old = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    AetherActorTable* table = actor_table_alloc(old->capacity * 2, numa_node);
+    if (!table) return -1;
+    for (int i = 0; i < count; i++) {
+        atomic_store_explicit(&table->slots[i],
+                              atomic_load_explicit(&old->slots[i], memory_order_relaxed),
+                              memory_order_relaxed);
+    }
+    table->retired = old;
+    atomic_store_explicit(&sched->actor_table, table, memory_order_release);
+    return 0;
+}
+
 // Check if any from_queue on this scheduler has pending cross-core messages.
 // Used to yield early from inner mailbox-drain loops so that external sends
 // (e.g. StopAnimation from main) are not starved by a self-scheduling actor.
@@ -883,16 +1009,14 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 OptimizedSpinlock* second_lock = (sched->core_id < mig_to) ? &dst->actor_lock : &sched->actor_lock;
                 if (!atomic_flag_test_and_set_explicit(&first_lock->lock, memory_order_acquire)) {
                     if (!atomic_flag_test_and_set_explicit(&second_lock->lock, memory_order_acquire)) {
-                        if (dst->actor_count < dst->capacity) {
+                        if (actor_table_has_room_locked(dst)) {
                             // Find and remove actor from our list
-                            for (int ai = 0; ai < sched->actor_count; ai++) {
-                                if (sched->actors[ai] == mig_actor) {
-                                    sched->actors[ai] = sched->actors[--sched->actor_count];
-                                    atomic_store_explicit(&mig_actor->assigned_core, mig_to, memory_order_relaxed);
-                                    atomic_store_explicit(&mig_actor->migrate_to, -1, memory_order_relaxed);
-                                    dst->actors[dst->actor_count++] = mig_actor;
-                                    break;
-                                }
+                            int ai = actor_table_find_locked(sched, mig_actor, -1);
+                            if (ai >= 0) {
+                                actor_table_remove_locked(sched, ai);
+                                atomic_store_explicit(&mig_actor->assigned_core, mig_to, memory_order_relaxed);
+                                atomic_store_explicit(&mig_actor->migrate_to, -1, memory_order_relaxed);
+                                actor_table_push_locked(dst, mig_actor);
                             }
                         }
                         atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
@@ -905,12 +1029,14 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         // Scan actor list for SPSC messages and migration when idle.
         // With heavy from_queue traffic, migration is already handled above.
         if (sched->coalesce_buffer.count == 0) {
-        atomic_thread_fence(memory_order_acquire);
-        ActorBase** local_actors     = sched->actors;
-        int         local_actor_count = sched->actor_count;
+        // Without the lock: other threads register into, migrate into and
+        // steal from this table meanwhile (#2486, see the actor table notes).
+        int local_actor_count;
+        AetherActorTable* local_table = actor_table_snapshot(sched, &local_actor_count);
         for (int i = 0; i < local_actor_count; i++) {
-            ActorBase* actor = local_actors[i];
+            ActorBase* actor = actor_table_read(local_table, i);
 
+            // A slot vacated since the snapshot reads NULL.
             if (unlikely(!actor)) continue;
 
             // Skip actors processed on main thread
@@ -999,18 +1125,26 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                         &first_lock->lock, memory_order_acquire)) {
                     if (!atomic_flag_test_and_set_explicit(
                             &second_lock->lock, memory_order_acquire)) {
-                        if (dst->actor_count < dst->capacity) {
-                            ActorBase* replacement = sched->actors[--sched->actor_count];
-                            sched->actors[i] = replacement;
-                            local_actors[i]  = replacement;  // keep snapshot in sync
+                        // `i` indexes the snapshot. Since it was taken a steal or
+                        // a deregistration may have moved another actor into
+                        // slot i or taken this one, so the live table is asked
+                        // where the actor is, slot i first (#2486).
+                        int at = actor_table_has_room_locked(dst)
+                                     ? actor_table_find_locked(sched, actor, i) : -1;
+                        if (at >= 0) {
+                            actor_table_remove_locked(sched, at);
                             atomic_store_explicit(&actor->assigned_core, dst_core, memory_order_relaxed);
                             atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
-                            dst->actors[dst->actor_count++] = actor;
+                            actor_table_push_locked(dst, actor);
 
                             atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
                             atomic_flag_clear_explicit(&first_lock->lock, memory_order_release);
 
-                            i--;  // Re-examine this slot (now holds a different actor)
+                            // Re-examine this slot: it now holds the actor
+                            // moved in from the end, or NULL. In a snapshot of
+                            // a table that has since grown it is unchanged,
+                            // and the second look at it finds nothing to do.
+                            i--;
                             continue;
                         }
                         atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
@@ -1054,7 +1188,11 @@ void* AETHER_HOT scheduler_thread(void* arg) {
 
                     if (!atomic_flag_test_and_set_explicit(&first_lock->lock, memory_order_acquire)) {
                         if (!atomic_flag_test_and_set_explicit(&second_lock->lock, memory_order_acquire)) {
-                            if (victim->actor_count > 4 && sched->actor_count < sched->capacity) {
+                            AetherActorTable* victim_table =
+                                atomic_load_explicit(&victim->actor_table, memory_order_relaxed);
+                            int victim_count =
+                                atomic_load_explicit(&victim->actor_count, memory_order_relaxed);
+                            if (victim_count > 4 && actor_table_has_room_locked(sched)) {
                                 // Search backward for a stealable actor.  Only steal actors
                                 // that have been activated (active flag set, or messages in
                                 // mailbox).  A freshly spawned actor whose first messages
@@ -1064,23 +1202,23 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                                 // (e.g. Setup) are still queued on the old core, breaking
                                 // the FIFO ordering that actors depend on for initialization.
                                 ActorBase* stolen = NULL;
-                                for (int s = victim->actor_count - 1; s >= 4; s--) {
-                                    ActorBase* candidate = victim->actors[s];
+                                for (int s = victim_count - 1; s >= 4; s--) {
+                                    ActorBase* candidate = atomic_load_explicit(&victim_table->slots[s],
+                                                                                memory_order_relaxed);
                                     if (!atomic_load_explicit(&candidate->active, memory_order_relaxed) &&
                                         atomic_load_explicit(&candidate->mailbox.count,
                                                              memory_order_relaxed) == 0) {
-                                        continue;  // freshly spawned or fully idle — skip
+                                        continue;  // freshly spawned or fully idle, skip
                                     }
-                                    // Swap candidate to the end and steal it
-                                    victim->actors[s] = victim->actors[victim->actor_count - 1];
-                                    victim->actor_count--;
+                                    // Move the last actor into its slot and steal it
+                                    actor_table_remove_locked(victim, s);
                                     stolen = candidate;
                                     break;
                                 }
                                 if (stolen) {
                                     atomic_store_explicit(&stolen->assigned_core, sched->core_id, memory_order_relaxed);
                                     atomic_store_explicit(&stolen->migrate_to, -1, memory_order_relaxed);
-                                    sched->actors[sched->actor_count++] = stolen;
+                                    actor_table_push_locked(sched, stolen);
                                     work_done = 1;
                                     atomic_fetch_add(&sched->steal_attempts, 1);
                                 }
@@ -1225,18 +1363,15 @@ void scheduler_init(int cores) {
         
         // NUMA-aware allocation: allocate scheduler data on same NUMA node as core
         int numa_node = aether_numa_node_of_cpu(i);
-        schedulers[i].actors = aether_numa_alloc(MAX_ACTORS_PER_CORE * sizeof(ActorBase*), numa_node);
-        if (!schedulers[i].actors) {
+        // Every slot starts NULL (actor_table_alloc); the threads that read the
+        // table are created after this, which publishes it to them.
+        AetherActorTable* table = actor_table_alloc(MAX_ACTORS_PER_CORE, numa_node);
+        if (!table) {
             fprintf(stderr, "ERROR: Failed to allocate memory for scheduler %d actors\n", i);
             exit(1);
         }
-        // Zero the slot array so uninitialized entries read as NULL.
-        // aether_numa_alloc() falls back to malloc() (not calloc) without libnuma,
-        // leaving slots with garbage.  The scheduler loop's null-check relies on
-        // this to guard against stale actor_count reads on ARM64.
-        memset(schedulers[i].actors, 0, MAX_ACTORS_PER_CORE * sizeof(ActorBase*));
-        schedulers[i].actor_count = 0;
-        schedulers[i].capacity = MAX_ACTORS_PER_CORE;
+        atomic_store_explicit(&schedulers[i].actor_table, table, memory_order_relaxed);
+        atomic_store_explicit(&schedulers[i].actor_count, 0, memory_order_relaxed);
         for (int q = 0; q <= MAX_CORES; q++) {
             queue_init(&schedulers[i].from_queues[q]);
         }
@@ -1398,8 +1533,10 @@ static inline int count_pending_messages(void) {
 // Check if any actor has a pending timeout
 static int has_pending_actor_timeout(void) {
     for (int c = 0; c < num_cores; c++) {
-        for (int i = 0; i < schedulers[c].actor_count; i++) {
-            ActorBase* a = schedulers[c].actors[i];
+        int count;
+        AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
+        for (int i = 0; i < count; i++) {
+            ActorBase* a = actor_table_read(table, i);
             if (a && a->timeout_ns > 0) return 1;
         }
     }
@@ -1415,8 +1552,10 @@ void scheduler_wait(void) {
             int rounds = 0;
             while (has_pending_actor_timeout() && rounds < 100000) {
                 for (int c = 0; c < num_cores; c++) {
-                    for (int i = 0; i < schedulers[c].actor_count; i++) {
-                        ActorBase* a = schedulers[c].actors[i];
+                    int count;
+                    AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
+                    for (int i = 0; i < count; i++) {
+                        ActorBase* a = actor_table_read(table, i);
                         if (a && a->timeout_ns > 0 && a->step) {
                             a->step(a);
                         }
@@ -1544,11 +1683,11 @@ static void scheduler_free_core_tables(void) {
         // Clean up thread resources
         schedulers[i].thread = 0;
 
-        if (schedulers[i].actors != NULL) {
-            // Free with the size we allocated, not current capacity
-            aether_numa_free(schedulers[i].actors, MAX_ACTORS_PER_CORE * sizeof(ActorBase*));
-            schedulers[i].actors = NULL;
-        }
+        // The live table and every table it replaced, each with its own size:
+        // a grown table is bigger than MAX_ACTORS_PER_CORE slots (#2486).
+        actor_table_free_chain(atomic_load_explicit(&schedulers[i].actor_table,
+                                                    memory_order_relaxed));
+        atomic_store_explicit(&schedulers[i].actor_table, NULL, memory_order_relaxed);
         // Clean up I/O event loop
         aether_io_poller_destroy(&schedulers[i].io_poller);
         free(schedulers[i].io_map);
@@ -1556,8 +1695,7 @@ static void scheduler_free_core_tables(void) {
         schedulers[i].io_registered_count = 0;
 
         // Reset counters
-        schedulers[i].actor_count = 0;
-        schedulers[i].capacity = 0;
+        atomic_store_explicit(&schedulers[i].actor_count, 0, memory_order_relaxed);
     }
 }
 
@@ -1595,7 +1733,9 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
                 long load = (long)atomic_load_explicit(
                                 &schedulers[c].work_count,
                                 memory_order_relaxed)
-                          + (long)schedulers[c].actor_count;
+                          + (long)atomic_load_explicit(
+                                &schedulers[c].actor_count,
+                                memory_order_relaxed);
                 if (load < best) {
                     best = load;
                     target = c;
@@ -1609,30 +1749,13 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
 
     spinlock_lock(&sched->actor_lock);
 
-    if (sched->actor_count >= sched->capacity) {
-        // Dynamically grow actor array with NUMA-aware reallocation
-        int numa_node = aether_numa_node_of_cpu(preferred_core);
-        size_t old_size = sched->capacity * sizeof(ActorBase*);
-        size_t new_size = sched->capacity * 2 * sizeof(ActorBase*);
-
-        ActorBase** new_actors = aether_numa_alloc(new_size, numa_node);
-        if (!new_actors) {
-            spinlock_unlock(&sched->actor_lock);
-            fprintf(stderr, "Fatal: Failed to grow actor array for core %d\n", preferred_core);
-            return -1;
-        }
-
-        // Copy old data.  Do NOT free the old array here: the scheduler thread
-        // that owns this core may be concurrently iterating sched->actors with
-        // a snapshotted pointer (taken under acquire fence).  Freeing would
-        // create a use-after-free race.  The old array is leaked until
-        // scheduler_cleanup(), which frees only the current (final) pointer.
-        // Waste is bounded: O(log2(final_capacity) * initial_capacity * 8 bytes)
-        // per core — acceptable for typical actor counts.
-        memcpy(new_actors, sched->actors, old_size);
-
-        sched->actors = new_actors;
-        sched->capacity *= 2;
+    // A full table is replaced by one twice its size, published before the
+    // count that needs it; the old one stays for readers still walking it.
+    if (!actor_table_has_room_locked(sched) &&
+        actor_table_grow_locked(sched, aether_numa_node_of_cpu(preferred_core)) != 0) {
+        spinlock_unlock(&sched->actor_lock);
+        fprintf(stderr, "Fatal: Failed to grow actor array for core %d\n", preferred_core);
+        return -1;
     }
 
     atomic_store_explicit(&actor->assigned_core, preferred_core, memory_order_relaxed);
@@ -1640,7 +1763,7 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     // SPSC queue is lazy-allocated: only when auto_process is set.
     // actor->spsc_queue stays NULL for regular actors (saves 3 KB/actor).
 
-    sched->actors[sched->actor_count++] = actor;
+    actor_table_push_locked(sched, actor);
 
     spinlock_unlock(&sched->actor_lock);
 
@@ -1656,12 +1779,8 @@ void scheduler_deregister_actor(ActorBase* actor) {
 
     Scheduler* sched = &schedulers[core];
     spinlock_lock(&sched->actor_lock);
-    for (int i = 0; i < sched->actor_count; i++) {
-        if (sched->actors[i] == actor) {
-            sched->actors[i] = sched->actors[--sched->actor_count];
-            break;
-        }
-    }
+    int at = actor_table_find_locked(sched, actor, -1);
+    if (at >= 0) actor_table_remove_locked(sched, at);
     spinlock_unlock(&sched->actor_lock);
 }
 
@@ -2179,7 +2298,10 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 
     {
         int numa_node = aether_numa_node_of_cpu(preferred_core >= 0 ? preferred_core : 0);
-        actor = aether_numa_alloc(actor_size, numa_node);
+        // Generated actor structs are aligned(64), which plain malloc does not
+        // honour (#2485). scheduler_release_actor frees with the matching
+        // aether_numa_free_aligned.
+        actor = aether_numa_alloc_aligned(actor_size, AETHER_ACTOR_ALIGN, numa_node);
         if (!actor) return NULL;
         mailbox_init(&actor->mailbox);
         AETHER_STAT_INC(actors_malloced);
@@ -2261,7 +2383,7 @@ void scheduler_release_actor(ActorBase* actor) {
         actor->spsc_queue = NULL;
     }
 
-    aether_numa_free(actor, actor->alloc_size);
+    aether_numa_free_aligned(actor, actor->alloc_size);
 }
 
 
@@ -2370,12 +2492,12 @@ int aether_scheduler_poll(int max_per_actor) {
     for (int c = 0; c < num_cores; c++) {
         Scheduler* sched = &schedulers[c];
 
-        // Acquire fence: ensure actor pointer writes (from registration) are visible.
-        atomic_thread_fence(memory_order_acquire);
-        int actor_count = sched->actor_count;
+        // No lock: scheduler threads change the table meanwhile (#2486).
+        int actor_count;
+        AetherActorTable* table = actor_table_snapshot(sched, &actor_count);
 
         for (int i = 0; i < actor_count; i++) {
-            ActorBase* actor = sched->actors[i];
+            ActorBase* actor = actor_table_read(table, i);
             if (!actor || !actor->step) continue;
 
             // Only process actors the scheduler threads are skipping.

@@ -1028,22 +1028,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core_cached ? 0 : -1);");
     print_line(gen, "%s* actor = (%s*)scheduler_spawn_actor(core, (void (*)(void*))%s_step, sizeof(%s));",
                actor->value, actor->value, actor->value, actor->value);
-    print_line(gen, "if (!actor) {");
-    indent(gen);
-    print_line(gen, "// Fallback to aligned allocation if pool exhausted");
-    print_line(gen, "actor = aether_aligned_alloc(64, sizeof(%s));", actor->value);
+    /* NULL means the allocation failed: nothing pools actors any more. The
+     * second allocation that used to follow was no likelier to succeed, and
+     * its block came from an allocator that scheduler_release_actor's free
+     * does not match (#2485). */
     print_line(gen, "if (!actor) return NULL;");
-    /* The scheduler-allocated path records this; the fallback has to as well,
-     * or destroy frees with an uninitialised length. */
-    print_line(gen, "actor->alloc_size = sizeof(%s);", actor->value);
-    print_line(gen, "actor->id = atomic_fetch_add(&next_actor_id, 1);");
-    print_line(gen, "atomic_init(&actor->assigned_core, -1);");
-    print_line(gen, "actor->step = (void (*)(void*))%s_step;", actor->value);
-    print_line(gen, "mailbox_init(&actor->mailbox);");
-    print_line(gen, "atomic_flag_clear_explicit(&actor->step_lock, memory_order_relaxed);");
-    print_line(gen, "scheduler_register_actor((ActorBase*)actor, -1);");
-    unindent(gen);
-    print_line(gen, "}");
     print_line(gen, "atomic_init(&actor->active, 0);  // inactive until first message send");
     print_line(gen, "atomic_init(&actor->migrate_to, -1);");
     print_line(gen, "atomic_init(&actor->dead, 0);");

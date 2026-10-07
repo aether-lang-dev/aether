@@ -150,10 +150,10 @@ void test_scheduler_init_cleanup(void) {
     scheduler_init(2);
 
     ASSERT_EQ(2, num_cores);
-    ASSERT_NOT_NULL(schedulers[0].actors);
-    ASSERT_NOT_NULL(schedulers[1].actors);
-    ASSERT_EQ(0, schedulers[0].actor_count);
-    ASSERT_EQ(0, schedulers[1].actor_count);
+    ASSERT_NOT_NULL(atomic_load(&schedulers[0].actor_table));
+    ASSERT_NOT_NULL(atomic_load(&schedulers[1].actor_table));
+    ASSERT_EQ(0, atomic_load(&schedulers[0].actor_count));
+    ASSERT_EQ(0, atomic_load(&schedulers[1].actor_count));
 
     // Cleanup
     scheduler_cleanup();
@@ -184,7 +184,7 @@ void test_scheduler_spawn_on_demand(void) {
     scheduler_init(1);
     ASSERT_EQ(cores, num_cores);
     int registered = 0;
-    for (int i = 0; i < num_cores; i++) registered += schedulers[i].actor_count;
+    for (int i = 0; i < num_cores; i++) registered += atomic_load(&schedulers[i].actor_count);
     ASSERT_EQ(2, registered);
 
     for (int i = 0; i < 50; i++) {
@@ -238,6 +238,167 @@ void test_scheduler_spawn_placement(void) {
     for (int i = 0; i < 4; i++) ASSERT_EQ(2, placements[i]);
     ASSERT_EQ(3, explicit_core);
     ASSERT_EQ(2, child_core);
+}
+
+// #2485: generated actor structs are declared aligned(64), so every actor
+// scheduler_spawn_actor hands out must sit on a 64-byte boundary, whatever
+// its size. malloc gave 16, and the actors are freed through the matching
+// aligned free, which scheduler_release_actor exercises here.
+void test_scheduler_spawn_aligned(void) {
+    scheduler_init(2);
+    const size_t sizes[] = {
+        sizeof(ActorBase), sizeof(ActorBase) + 8, sizeof(CounterActor),
+        sizeof(ActorBase) + 24, sizeof(ActorBase) + 200, sizeof(ActorBase) + 1000,
+        sizeof(ActorBase) + 5000, sizeof(ActorBase) + 70000,
+    };
+    enum { PER_SIZE = 8, NSIZES = sizeof(sizes) / sizeof(sizes[0]) };
+    ActorBase* actors[NSIZES * PER_SIZE];
+    int misaligned = 0, missing = 0;
+    for (int s = 0; s < NSIZES; s++) {
+        for (int k = 0; k < PER_SIZE; k++) {
+            ActorBase* a = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizes[s]);
+            actors[s * PER_SIZE + k] = a;
+            if (!a) { missing++; continue; }
+            if ((uintptr_t)a % AETHER_ACTOR_ALIGN != 0) misaligned++;
+            // The whole requested size is usable.
+            memset((char*)a + sizeof(ActorBase), 0x5A, sizes[s] - sizeof(ActorBase));
+        }
+    }
+    scheduler_shutdown();
+    for (int i = 0; i < NSIZES * PER_SIZE; i++) scheduler_release_actor(actors[i]);
+    scheduler_cleanup();
+    ASSERT_EQ(0, missing);
+    ASSERT_EQ(0, misaligned);
+}
+
+// #2486: a core's actor table grows past MAX_ACTORS_PER_CORE while its
+// scheduler thread scans it without the lock and the main-thread reader
+// (aether_scheduler_poll) walks it from another thread, with messages
+// flowing. Afterwards every actor is in exactly one table, every slot at or
+// past a table's count is NULL (the grown tail included), and the replaced
+// tables are still chained for scheduler_cleanup() to free.
+typedef struct {
+    atomic_int stop;
+    atomic_int polls;
+} TablePollerArgs;
+
+static void* table_poller(void* arg) {
+    TablePollerArgs* p = (TablePollerArgs*)arg;
+    while (!atomic_load(&p->stop)) {
+        aether_scheduler_poll(1);
+        atomic_fetch_add(&p->polls, 1);
+    }
+    return NULL;
+}
+
+void test_scheduler_actor_table_growth(void) {
+    enum { N = 2 * MAX_ACTORS_PER_CORE + 100 };
+    scheduler_init(2);
+    CounterActor** actors = calloc(N, sizeof(CounterActor*));
+    int* seen = calloc(N, sizeof(int));
+    ASSERT_NOT_NULL(actors);
+    ASSERT_NOT_NULL(seen);
+
+    TablePollerArgs poll_args;
+    atomic_init(&poll_args.stop, 0);
+    atomic_init(&poll_args.polls, 0);
+    pthread_t poller;
+    int poller_started = 0;
+
+    int spawned = 0, sent = 0;
+    for (int i = 0; i < N; i++) {
+        // Just before a grow, leave a freed block of the new table's size
+        // full of garbage, the block malloc is likeliest to hand back: a
+        // grow that does not clear the new table's tail then shows it.
+        AetherActorTable* t = atomic_load(&schedulers[0].actor_table);
+        if (atomic_load(&schedulers[0].actor_count) == t->capacity) {
+            size_t grown = sizeof(AetherActorTable) +
+                           (size_t)t->capacity * 2 * sizeof(_Atomic(ActorBase*));
+            void* dirty = malloc(grown);
+            if (dirty) { memset(dirty, 0xA5, grown); free(dirty); }
+        }
+        CounterActor* a = (CounterActor*)scheduler_spawn_actor(
+            0, (void (*)(void*))counter_step, sizeof(CounterActor));
+        if (!a) break;
+        atomic_init(&a->count, 0);
+        atomic_init(&a->last_value, i);
+        actors[i] = a;
+        spawned++;
+        // Scheduler threads run from the second spawn on; start the second
+        // reader then.
+        if (i == 1 && pthread_create(&poller, NULL, table_poller, &poll_args) == 0) {
+            poller_started = 1;
+        }
+        // A sparse trickle: core 0 keeps going idle, which is when it scans.
+        if (i % 50 == 49) {
+            int target = (i * 7919) % (i + 1);
+            Message msg = {1, 0, target, NULL, {NULL, 0, 0}, NULL};
+            scheduler_send_remote((ActorBase*)actors[target], msg, -1);
+            sent++;
+        }
+    }
+
+    long processed = 0;
+    for (int w = 0; w < 1000; w++) {
+        processed = 0;
+        for (int i = 0; i < spawned; i++) processed += atomic_load(&actors[i]->count);
+        if (processed >= sent) break;
+        sleep_ms(5);
+    }
+    atomic_store(&poll_args.stop, 1);
+    if (poller_started) pthread_join(poller, NULL);
+    scheduler_shutdown();
+
+    // Threads are joined: the tables are quiescent.
+    int registered = 0, bad_live = 0, bad_tail = 0, foreign = 0, chain_ok = 1;
+    int core0_capacity = 0;
+    for (int c = 0; c < num_cores; c++) {
+        AetherActorTable* t = atomic_load(&schedulers[c].actor_table);
+        int count = atomic_load(&schedulers[c].actor_count);
+        if (count > t->capacity) { chain_ok = 0; continue; }
+        registered += count;
+        for (int i = 0; i < count; i++) {
+            CounterActor* a = (CounterActor*)atomic_load(&t->slots[i]);
+            if (!a) { bad_live++; continue; }
+            int idx = atomic_load(&a->last_value);
+            if (idx < 0 || idx >= spawned || actors[idx] != a) { foreign++; continue; }
+            seen[idx]++;
+        }
+        for (int i = count; i < t->capacity; i++) {
+            if (atomic_load(&t->slots[i]) != NULL) bad_tail++;
+        }
+        // Each retired table is half the one that replaced it, down to the
+        // initial size.
+        for (AetherActorTable* r = t; r->retired; r = r->retired) {
+            if (r->retired->capacity * 2 != r->capacity) chain_ok = 0;
+        }
+        AetherActorTable* oldest = t;
+        while (oldest->retired) oldest = oldest->retired;
+        if (oldest->capacity != MAX_ACTORS_PER_CORE) chain_ok = 0;
+        if (c == 0) core0_capacity = t->capacity;
+    }
+    int duplicated = 0, lost = 0;
+    for (int i = 0; i < spawned; i++) {
+        if (seen[i] > 1) duplicated++;
+        if (seen[i] == 0) lost++;
+    }
+
+    for (int i = 0; i < spawned; i++) scheduler_release_actor((ActorBase*)actors[i]);
+    scheduler_cleanup();
+    free(actors);
+    free(seen);
+
+    ASSERT_EQ(N, spawned);
+    ASSERT_EQ(sent, processed);
+    ASSERT_TRUE(poller_started);
+    ASSERT_EQ(N, registered);
+    ASSERT_EQ(0, bad_live);
+    ASSERT_EQ(0, foreign);
+    ASSERT_EQ(0, duplicated);
+    ASSERT_EQ(0, lost);
+    ASSERT_EQ(0, bad_tail);
+    ASSERT_TRUE(chain_ok);
+    ASSERT_TRUE(core0_capacity >= 2 * MAX_ACTORS_PER_CORE);
 }
 
 void test_scheduler_basic_messaging(void) {
@@ -567,6 +728,8 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler init/cleanup", test_scheduler_init_cleanup, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler spawn on demand", test_scheduler_spawn_on_demand, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler spawn placement", test_scheduler_spawn_placement, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler spawns 64-byte-aligned actors", test_scheduler_spawn_aligned, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler cross-core messaging", test_scheduler_cross_core, TEST_CATEGORY_RUNTIME);

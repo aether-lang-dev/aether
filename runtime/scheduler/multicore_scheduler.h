@@ -144,12 +144,26 @@ typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
 
+/* Generated actor structs are declared aligned(64) (codegen_actor.c), one
+ * cache line, so the runtime allocates every actor on this boundary (#2485). */
+#define AETHER_ACTOR_ALIGN 64
+
+/* A core's actor table (#2486). Scheduler threads and the main thread read it
+ * without the core's actor_lock, so the slots are atomic and a table that is
+ * grown out of is kept, chained on `retired`, until scheduler_cleanup(). The
+ * protocol is described above the helpers in multicore_scheduler.c. */
+typedef struct AetherActorTable {
+    struct AetherActorTable* retired;  // the smaller table this one replaced
+    size_t alloc_size;                 // bytes, for aether_numa_free
+    int capacity;
+    _Atomic(ActorBase*) slots[];
+} AetherActorTable;
+
 typedef struct {
     int core_id;
     pthread_t thread;
-    ActorBase** actors;
-    int actor_count;
-    int capacity;
+    _Atomic(AetherActorTable*) actor_table;
+    _Atomic int actor_count;
     // Per-sender SPSC channels: from_queues[src] is written ONLY by core src.
     // Each channel is a true SPSC queue, so no CAS or locks are needed on the
     // producer side. from_queues[MAX_CORES] is the channel for every thread
@@ -164,7 +178,7 @@ typedef struct {
     atomic_int work_count;  // Approximate in-flight message count (used for load reporting)
     atomic_int steal_attempts;  // Cumulative count of successful work-steal operations
     atomic_int idle_cycles;     // Track how long core has been idle
-    OptimizedSpinlock actor_lock;  // Protects actors array during migration and registration
+    OptimizedSpinlock actor_lock;  // Serializes every writer of actor_table / actor_count
 
     // Per-core message counters — only written by owning core, but read
     // cross-thread by count_pending_messages(), so must be _Atomic to avoid

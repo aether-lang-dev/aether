@@ -6136,12 +6136,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <unistd.h>");
     print_line(gen, "#include <sched.h>");
     print_line(gen, "#endif");
-    /* aligned_alloc: C11 POSIX; Windows uses _aligned_malloc with swapped args */
-    print_line(gen, "#ifdef _WIN32");
-    print_line(gen, "#  define aether_aligned_alloc(align, size) _aligned_malloc((size), (align))");
-    print_line(gen, "#else");
-    print_line(gen, "#  define aether_aligned_alloc(align, size) aligned_alloc((align), (size))");
-    print_line(gen, "#endif");
     print_line(gen, "#ifndef likely");
     print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
     print_line(gen, "#    define likely(x)   __builtin_expect(!!(x), 1)");

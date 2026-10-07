@@ -103,15 +103,14 @@ scheduler_shutdown();
 ## Actor Allocation
 
 ```c
-// NUMA-aware allocation with correct derived-struct size
+// NUMA-aware, 64-byte-aligned allocation with the derived-struct size.
+// NULL means the allocation failed.
 ActorBase* actor = scheduler_spawn_actor(preferred_core, step_fn, sizeof(MyActor));
-if (!actor) {
-    // Fallback to manual allocation
-    actor = aligned_alloc(64, sizeof(MyActor));
-    memset(actor, 0, sizeof(MyActor));
-    mailbox_init(&actor->mailbox);
-    spsc_queue_init(&actor->spsc_queue);
-}
+if (!actor) return NULL;
+
+// Release it with the matching free, never free(): on Windows the block
+// comes from _aligned_malloc.
+scheduler_release_actor(actor);
 ```
 
 ## Message Flow
