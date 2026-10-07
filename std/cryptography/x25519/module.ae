@@ -33,7 +33,7 @@
 //     arithmetic (signed) `>>` for the carry/reduce chains, so plain `>>` is
 //     the CORRECT match here — do NOT substitute a logical shift.
 //   * A field element is a struct of ten named int limbs (l0..l9) mutated
-//     through a `*Fe` pointer, mirroring how the ascon modules carry state;
+//     through a `*X25519Fe` pointer, mirroring how the ascon modules carry state;
 //     Aether has no fixed-size inline array fields.
 
 import std.bytes
@@ -60,7 +60,7 @@ const C_A24 = 121666
 // A field element: ten signed limbs. Little-endian limb order l0..l9 with
 // alternating 26/25/26/25... bit widths (l0=26, l1=26, l2=25, l3=26, l4=25,
 // l5=26, l6=26, l7=25, l8=26, l9=25 after Carry; l9 holds 24 after Normalize).
-struct Fe {
+struct X25519Fe {
     l0: int
     l1: int
     l2: int
@@ -73,7 +73,7 @@ struct Fe {
     l9: int
 }
 
-fn fe_zero(z: *Fe) {
+fn fe_zero(z: *X25519Fe) {
     z.l0 = 0
     z.l1 = 0
     z.l2 = 0
@@ -86,7 +86,7 @@ fn fe_zero(z: *Fe) {
     z.l9 = 0
 }
 
-fn fe_copy(src: *Fe, dst: *Fe) {
+fn fe_copy(src: *X25519Fe, dst: *X25519Fe) {
     dst.l0 = src.l0
     dst.l1 = src.l1
     dst.l2 = src.l2
@@ -100,7 +100,7 @@ fn fe_copy(src: *Fe, dst: *Fe) {
 }
 
 // z = x + y (limbwise, no carry — callers carry as needed downstream).
-fn fe_add(x: *Fe, y: *Fe, z: *Fe) {
+fn fe_add(x: *X25519Fe, y: *X25519Fe, z: *X25519Fe) {
     z.l0 = x.l0 + y.l0
     z.l1 = x.l1 + y.l1
     z.l2 = x.l2 + y.l2
@@ -114,7 +114,7 @@ fn fe_add(x: *Fe, y: *Fe, z: *Fe) {
 }
 
 // z = x - y (limbwise).
-fn fe_sub(x: *Fe, y: *Fe, z: *Fe) {
+fn fe_sub(x: *X25519Fe, y: *X25519Fe, z: *X25519Fe) {
     z.l0 = x.l0 - y.l0
     z.l1 = x.l1 - y.l1
     z.l2 = x.l2 - y.l2
@@ -128,7 +128,7 @@ fn fe_sub(x: *Fe, y: *Fe, z: *Fe) {
 }
 
 // (zp, zm) = (x + y, x - y). Both outputs distinct from inputs at call sites.
-fn fe_apm(x: *Fe, y: *Fe, zp: *Fe, zm: *Fe) {
+fn fe_apm(x: *X25519Fe, y: *X25519Fe, zp: *X25519Fe, zm: *X25519Fe) {
     // Snapshot into locals so aliasing (e.g. zp == x) is safe.
     int x0 = x.l0
     int x1 = x.l1
@@ -174,7 +174,7 @@ fn fe_apm(x: *Fe, y: *Fe, zp: *Fe, zm: *Fe) {
 
 // z = x * y where y is a small (<= 121666) non-negative scalar. Single-pass
 // schoolbook with 2^255-19 folding (X25519Field.Mul(int[], int, int[])).
-fn fe_mul_int(x: *Fe, y: int, z: *Fe) {
+fn fe_mul_int(x: *X25519Fe, y: int, z: *X25519Fe) {
     int x0 = x.l0
     int x1 = x.l1
     int x2 = x.l2
@@ -228,7 +228,7 @@ fn fe_mul_int(x: *Fe, y: int, z: *Fe) {
 
 // z = x * y (full field multiply, X25519Field.Mul(int[], int[], int[])).
 // Karatsuba split into lo (limbs 0..4) and hi (limbs 5..9) halves.
-fn fe_mul(x: *Fe, y: *Fe, z: *Fe) {
+fn fe_mul(x: *X25519Fe, y: *X25519Fe, z: *X25519Fe) {
     int x0 = x.l0
     int y0 = y.l0
     int x1 = x.l1
@@ -365,7 +365,7 @@ fn fe_mul(x: *Fe, y: *Fe, z: *Fe) {
 }
 
 // z = x^2. Squaring specialisation (X25519Field.Sqr(int[], int[])).
-fn fe_sqr(x: *Fe, z: *Fe) {
+fn fe_sqr(x: *X25519Fe, z: *X25519Fe) {
     int x0 = x.l0
     int x1 = x.l1
     int x2 = x.l2
@@ -480,7 +480,7 @@ fn fe_sqr(x: *Fe, z: *Fe) {
 }
 
 // z = x^(2^n) — n repeated squarings in place.
-fn fe_sqr_n(x: *Fe, n: int, z: *Fe) {
+fn fe_sqr_n(x: *X25519Fe, n: int, z: *X25519Fe) {
     fe_sqr(x, z)
     int i = n
     while i > 1 {
@@ -490,7 +490,7 @@ fn fe_sqr_n(x: *Fe, n: int, z: *Fe) {
 }
 
 // One pass of the final modular reduction (X25519Field.Reduce).
-fn fe_reduce(z: *Fe, x: int) {
+fn fe_reduce(z: *X25519Fe, x: int) {
     int t = z.l9
     int z9 = t & M24
     t = (t >> 24) + x
@@ -527,14 +527,14 @@ fn fe_reduce(z: *Fe, x: int) {
 }
 
 // Fully reduce z into canonical [0, p) form (X25519Field.Normalize).
-fn fe_normalize(z: *Fe) {
+fn fe_normalize(z: *X25519Fe) {
     int x = (z.l9 >> 23) & 1
     fe_reduce(z, x)
     fe_reduce(z, 0 - x)
 }
 
 // Constant-time conditional swap of a and b when swap == 1 (else no-op).
-fn fe_cswap(swap: int, a: *Fe, b: *Fe) {
+fn fe_cswap(swap: int, a: *X25519Fe, b: *X25519Fe) {
     int mask = 0 - swap
     int ai = 0
     int bi = 0
@@ -602,7 +602,7 @@ fn dec32(b: ptr, off: int) -> long {
 
 // Decode 128 bits (4 LE words at byte offset off) into 5 limbs written to
 // z.l[base..base+4] (X25519Field.Decode128). base is 0 or 5.
-fn dec128(b: ptr, off: int, z: *Fe, base: int) {
+fn dec128(b: ptr, off: int, z: *X25519Fe, base: int) {
     long t0 = dec32(b, off)
     long t1 = dec32(b, off + 4)
     long t2 = dec32(b, off + 8)
@@ -631,7 +631,7 @@ fn dec128(b: ptr, off: int, z: *Fe, base: int) {
 
 // Decode a 255-bit little-endian point u into field element z
 // (X25519Field.Decode255): high bit is masked off.
-fn fe_decode(b: ptr, z: *Fe) {
+fn fe_decode(b: ptr, z: *X25519Fe) {
     dec128(b, 0, z, 0)
     dec128(b, 16, z, 5)
     z.l9 = z.l9 & M24
@@ -639,7 +639,7 @@ fn fe_decode(b: ptr, z: *Fe) {
 
 // Encode 5 limbs (l[base..base+4]) as 4 LE 32-bit words into out at byte
 // offset off (X25519Field.Encode128).
-fn enc128(z: *Fe, base: int, out: ptr, off: int) {
+fn enc128(z: *X25519Fe, base: int, out: ptr, off: int) {
     long x0 = 0
     long x1 = 0
     long x2 = 0
@@ -677,7 +677,7 @@ fn enc32(n: long, out: ptr, off: int) {
 }
 
 // Encode a normalized field element into a 32-byte little-endian buffer.
-fn fe_encode(z: *Fe, out: ptr) {
+fn fe_encode(z: *X25519Fe, out: ptr) {
     enc128(z, 0, out, 0)
     enc128(z, 5, out, 16)
 }
@@ -687,17 +687,17 @@ fn fe_encode(z: *Fe, out: ptr) {
 // x^(p-2) = x^(2^255 - 21). We compute x^((p-5)/8)=x^(2^252-3) and adjust.
 // Concretely: t = x^(2^250-1) (250 ones) then finish to p-2. Follows the
 // standard curve25519 inverse addition chain.
-fn fe_inv(x: *Fe, z: *Fe) {
-    z2 = Fe {}
-    z9 = Fe {}
-    z11 = Fe {}
-    z2_5_0 = Fe {}
-    z2_10_0 = Fe {}
-    z2_20_0 = Fe {}
-    z2_50_0 = Fe {}
-    z2_100_0 = Fe {}
-    t0 = Fe {}
-    t1 = Fe {}
+fn fe_inv(x: *X25519Fe, z: *X25519Fe) {
+    z2 = X25519Fe {}
+    z9 = X25519Fe {}
+    z11 = X25519Fe {}
+    z2_5_0 = X25519Fe {}
+    z2_10_0 = X25519Fe {}
+    z2_20_0 = X25519Fe {}
+    z2_50_0 = X25519Fe {}
+    z2_100_0 = X25519Fe {}
+    t0 = X25519Fe {}
+    t1 = X25519Fe {}
 
     // z2 = x^2
     fe_sqr(x, &z2)
@@ -771,9 +771,9 @@ fn scalar_bit(k: ptr, bit: int) -> int {
 }
 
 // x2 <- 2*(x2:z2) — Montgomery point double (X25519.PointDouble), in place.
-fn point_double(x: *Fe, z: *Fe) {
-    a = Fe {}
-    b = Fe {}
+fn point_double(x: *X25519Fe, z: *X25519Fe) {
+    a = X25519Fe {}
+    b = X25519Fe {}
     fe_apm(x, z, &a, &b)
     fe_sqr(&a, &a)
     fe_sqr(&b, &b)
@@ -790,19 +790,19 @@ fn point_double(x: *Fe, z: *Fe) {
 fn ladder(scalar: ptr, u: ptr) -> ptr {
     k = clamp_scalar(scalar)
 
-    x1 = Fe {}
+    x1 = X25519Fe {}
     fe_decode(u, &x1)
 
-    x2 = Fe {}
+    x2 = X25519Fe {}
     fe_copy(&x1, &x2)
-    z2 = Fe {}
+    z2 = X25519Fe {}
     z2.l0 = 1
-    x3 = Fe {}
+    x3 = X25519Fe {}
     x3.l0 = 1
-    z3 = Fe {}
+    z3 = X25519Fe {}
 
-    t1 = Fe {}
-    t2 = Fe {}
+    t1 = X25519Fe {}
+    t2 = X25519Fe {}
 
     int bit = 254
     int swap = 1

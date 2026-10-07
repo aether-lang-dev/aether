@@ -637,7 +637,7 @@ fn read_tlv_full(r: ptr) -> (ptr, string) {
 
 // Slice [start,end) of the reader's underlying buffer into fresh bytes.
 fn reader_slice(r: ptr, start: int, end: int) -> ptr {
-    rr = r as *ReaderView
+    rr = r as *CertReaderView
     n = end - start
     out = bytes.new(n)
     if n > 0 { bytes.set(out, n - 1, 0) }
@@ -647,7 +647,7 @@ fn reader_slice(r: ptr, start: int, end: int) -> ptr {
 
 // Minimal view of asn1's Reader to reach its buffer for slicing (buf is the
 // first field; this mirrors asn1.Reader's layout).
-struct ReaderView {
+struct CertReaderView {
     buf: ptr
     pos: int
     len: int

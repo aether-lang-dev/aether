@@ -90,7 +90,7 @@ const ZETAS_INV: int[128] = [
 
 // ---- Parameter bundle ----
 
-struct Params {
+struct MlkemParams {
     k: int
     eta1: int
     poly_compressed: int // dv bytes per poly  (128 for dv=4, 160 for dv=5)
@@ -103,9 +103,9 @@ struct Params {
     ct_bytes: int // polyvec_compressed + poly_compressed
 }
 
-// Allocate + populate a Params on the heap. Caller frees with free_params.
-mk_params(k: int) -> *Params {
-    p = malloc(sizeof(Params)) as *Params
+// Allocate + populate a MlkemParams on the heap. Caller frees with free_params.
+mk_params(k: int) -> *MlkemParams {
+    p = malloc(sizeof(MlkemParams)) as *MlkemParams
     p.k = k
     if k == 2 {
         p.eta1 = 3
@@ -131,7 +131,7 @@ mk_params(k: int) -> *Params {
     return p
 }
 
-free_params(p: *Params) {
+free_params(p: *MlkemParams) {
     libc_free(p)
 }
 
@@ -873,7 +873,7 @@ gen_matrix(mat: ptr, seed: ptr, k: int, transpose: int) {
 // ---- K-PKE keygen ----
 
 // Writes IndCpa keypair into kp: [sk polyvec (indcpa_sk)] then [pk (indcpa_pk)].
-indcpa_keygen(p: *Params, d: ptr, kp: ptr) {
+indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
     k = p.k
 
     // G(d || k) -> 64 bytes = rho(32) || sigma(32)
@@ -990,7 +990,7 @@ mat_row(mat: ptr, i: int, k: int) -> ptr {
 
 // pk is the indcpa public key (indcpa_pk bytes) at pk[pk_off..].
 // coins = 32-byte r. Writes ct (ct_bytes) at out[out_off..].
-indcpa_encrypt(p: *Params, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: ptr, out: ptr, out_off: int) {
+indcpa_encrypt(p: *MlkemParams, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: ptr, out: ptr, out_off: int) {
     k = p.k
 
     // Unpack pk -> pkpv, seed(rho)
@@ -1099,7 +1099,7 @@ indcpa_encrypt(p: *Params, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: 
 
 // sk is indcpa secret key bytes at sk[0..]; ct at ct[ct_off..].
 // Writes 32-byte message into msg[0..].
-indcpa_decrypt(p: *Params, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
+indcpa_decrypt(p: *MlkemParams, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
     k = p.k
 
     bp = polyvec_new(k)
@@ -1141,7 +1141,7 @@ indcpa_decrypt(p: *Params, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
 // ---- ML-KEM wrappers ----
 
 // keygen: returns (ek, dk). d, z are 32-byte seed buffers.
-mlkem_keygen(p: *Params, d: ptr, z: ptr) -> {
+mlkem_keygen(p: *MlkemParams, d: ptr, z: ptr) -> {
     dk = bytes.new(p.dk_bytes)
     // Build indcpa keypair into dk: [sk | pk] occupy first indcpa_sk+indcpa_pk.
     indcpa_keygen(p, d, dk)
@@ -1177,7 +1177,7 @@ mlkem_keygen(p: *Params, d: ptr, z: ptr) -> {
 }
 
 // encaps: returns (ct, K). m is the 32-byte message coin.
-mlkem_encaps(p: *Params, ek: ptr, m: ptr) -> {
+mlkem_encaps(p: *MlkemParams, ek: ptr, m: ptr) -> {
     // buf = m || H(ek)   (64 bytes)
     buf = bytes.new(2 * SYM)
     i = 0
@@ -1222,7 +1222,7 @@ mlkem_encaps(p: *Params, ek: ptr, m: ptr) -> {
 }
 
 // decaps: returns K (32 bytes). dk is the ML-KEM private key, ct the ciphertext.
-mlkem_decaps(p: *Params, dk: ptr, ct: ptr) -> ptr {
+mlkem_decaps(p: *MlkemParams, dk: ptr, ct: ptr) -> ptr {
     // Decrypt to recover m'
     mprime = bytes.new(SYM)
     indcpa_decrypt(p, ct, 0, dk, mprime)

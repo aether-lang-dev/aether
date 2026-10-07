@@ -1,0 +1,33 @@
+// A program that imports the pure TLS client keeps the common struct names.
+//
+// Struct names are one namespace across modules, so a top-level struct in a
+// module the program imports -- even one it never exports -- collides with a
+// program's own struct of the same name and a different layout. The TLS
+// client's closure used `Pt` (p384, p521), `Fe` (x25519), `Params` (mlkem) and
+// `ReaderView` (tls13_cert), so sae, whose vector graphics have a 2-D `Pt`,
+// could not add `import std.cryptography.tls13_client` to get HTTPS on
+// Android: "struct 'Pt' is defined differently in two modules". Those names
+// are the program's, not the library's; the library's carry their module.
+
+import std.http.client
+import std.cryptography.tls13_client
+
+extern exit(code: int)
+
+struct Pt { x: float y: float }
+struct Fe { re: int im: int }
+struct Params { name: string count: int }
+struct ReaderView { line: int col: int }
+
+main() {
+    p = Pt { x: 1.5, y: 2.0 }
+    f = Fe { re: 3, im: 4 }
+    q = Params { name: "n", count: 5 }
+    r = ReaderView { line: 6, col: 7 }
+    total = p.x + p.y + (f.re + f.im + q.count + r.line + r.col) as float
+    if total != 28.5 {
+        println("FAIL: the program's own structs read back as ${total}")
+        exit(1)
+    }
+    println("PASS: Pt, Fe, Params and ReaderView are the program's own")
+}
