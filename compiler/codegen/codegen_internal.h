@@ -168,6 +168,9 @@ int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int par
 /* #2499: sets gen->closure_args_borrowed. Run after discover_closures and
  * discover_bare_fn_adapters. Defined in codegen_stmt.c. */
 void compute_closure_args_borrowed(CodeGenerator* gen);
+/* #2499: must closure literal `closure` take its own reference to its
+ * `string` parameter `param_idx` on entry? Defined in codegen_stmt.c. */
+int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx);
 
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative

@@ -1,15 +1,15 @@
 // Regression (#2493): a heap-string argument to a closure call is freed
-// after the call when the closure's parameter does not keep it.
+// after the call.
 //
 // A named call `g(mk("x"))` hoists the argument into a temp and frees it
 // once `g` returns, unless `g`'s body stores it. `call(f, mk("x"))`, and
 // `f(mk("x"))` on a closure local, passed the argument straight through,
 // so every such call leaked the string. The closure call now takes the
-// same wrap, decided by the closure literal's body: a parameter that is
-// only read is freed after the call, one the closure stores (in a captured
-// variable, a list, a nested closure) is left to its new owner, and one
-// returned as the call's string result is freed only when the result is
-// not that same pointer. The macOS leaks gate runs this program.
+// same wrap. A closure that stores a `string` parameter (in a captured
+// variable, a list, a nested closure) holds a reference of its own (#2499),
+// and one it returns as its string result comes back as a copy, so the
+// caller's argument is freed either way. The macOS leaks gate runs this
+// program.
 //
 // Every argument is built at runtime from a parameter, so each is a heap
 // string: `string.concat` of two literals folds to a literal.
@@ -66,10 +66,8 @@ run(seed: string) {
     check_int("interp", call(both, "${seed}-${seed}", "x"), 4)
     check("nested", call(same, call(same, mk(seed))), "s!")
 
-    // Kept by the closure in a captured variable it writes: the variable's
-    // cell owns it now and frees it. (A parameter stored in a list is kept
-    // too; tests/integration/closure_call_frees_heap_arg covers that, since
-    // a list does not own a string it is handed by reference.)
+    // Kept by the closure in a captured variable it writes: the closure
+    // takes its own reference on entry and the variable's cell owns it.
     last = ""
     note = | s: string | {
         last = s

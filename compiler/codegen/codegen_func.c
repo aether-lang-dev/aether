@@ -480,7 +480,26 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
         fprintf(gen->output, "%s(", safe_c_name(fname));
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "_a%d", k);
+            /* #2499: a closure call borrows its arguments, so a `string`
+             * the function keeps gets a reference of its own here, as a
+             * closure that keeps one takes on entry. Returning it is not a
+             * keep when this adapter copies the result anyway. */
+            int pidx = -1;
+            for (int j = 0; j < fdef->child_count; j++) {
+                if (fdef->children[j] == params[k]) { pidx = j; break; }
+            }
+            int keeps = 0;
+            if (params[k] && params[k]->node_type &&
+                params[k]->node_type->kind == TYPE_STRING && pidx >= 0 &&
+                callee_param_escapes_via_body(gen, fname, pidx, 0)) {
+                int copies = owned_string && !function_def_returns_heap_string(gen, fdef);
+                keeps = !copies || callee_param_store_escapes_via_body(gen, fname, pidx);
+            }
+            if (keeps) {
+                fprintf(gen->output, "aether_str_capture(_a%d)", k);
+            } else {
+                fprintf(gen->output, "_a%d", k);
+            }
         }
         fprintf(gen->output, ")");
         if (owned_string) {

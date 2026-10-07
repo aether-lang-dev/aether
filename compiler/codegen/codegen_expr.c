@@ -261,6 +261,16 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
     if (!func_name) {
         if (!closure) return gen->closure_args_borrowed ? 0 : -1;
         int pi = ai - first_arg;
+        /* A closure keeps a `string` parameter only through a reference of
+         * its own (closure_string_param_kept), so the caller's is free. */
+        for (int k = 0, seen = 0; k < closure->child_count; k++) {
+            ASTNode* p = closure->children[k];
+            if (!p || p->type != AST_CLOSURE_PARAM) continue;
+            if (seen++ == pi) {
+                if (p->node_type && p->node_type->kind == TYPE_STRING) return 0;
+                break;
+            }
+        }
         if (!closure_param_escapes_via_body(gen, closure, pi, 1)) return 0;
         /* Return-escape only, into a string result: identity-guarded,
          * as for a named callee below. */
@@ -1517,6 +1527,61 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
 
 // Walk subtree and return the expression of the first return statement
 // carrying a non-print value. Does not descend into inner closures.
+static ASTNode* find_first_return_expr(ASTNode* node);
+
+/* #2501: the first return statement under `node` that carries a value, not
+ * looking into nested closures (find_first_return_expr's walk). */
+static ASTNode* find_first_value_return(ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
+        return node;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* found = find_first_value_return(node->children[i]);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+/* #2501: the tuple a closure returns when its first value return is a
+ * multi-value one, built from the returned expressions' types (the caller
+ * frees it), or NULL. The typechecker types a call of the closure the same
+ * way (closure_literal_result_type). */
+static Type* closure_tuple_return_type(ASTNode* closure) {
+    ASTNode* body = NULL;
+    for (int i = closure ? closure->child_count - 1 : -1; i >= 0; i--) {
+        if (closure->children[i] && closure->children[i]->type == AST_BLOCK) {
+            body = closure->children[i];
+            break;
+        }
+    }
+    ASTNode* ret = find_first_value_return(body);
+    if (!ret || ret->child_count < 2) return NULL;
+    Type* t = create_type(TYPE_TUPLE);
+    t->tuple_count = ret->child_count;
+    t->tuple_types = malloc((size_t)ret->child_count * sizeof(Type*));
+    for (int j = 0; j < ret->child_count; j++) {
+        Type* et = ret->children[j] ? ret->children[j]->node_type : NULL;
+        t->tuple_types[j] = (et && et->kind != TYPE_UNKNOWN) ? clone_type(et) : create_type(TYPE_INT);
+    }
+    return t;
+}
+
+/* A tuple's C name lives in get_c_type's rotating buffers; a closure's
+ * return type is held across other get_c_type calls, so keep one copy. */
+static const char* closure_tuple_c_name(Type* t) {
+    static char** names = NULL;
+    static int count = 0;
+    const char* nm = get_c_type(t);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(names[i], nm) == 0) return names[i];
+    }
+    names = aether_xrealloc(names, (size_t)(count + 1) * sizeof(char*));
+    names[count] = strdup(nm);
+    return names[count++];
+}
+
 static ASTNode* find_first_return_expr(ASTNode* node) {
     if (!node) return NULL;
     if (node->type == AST_CLOSURE) return NULL;
@@ -1960,6 +2025,10 @@ static Type* resolve_call_type(CodeGenerator* gen, ASTNode* call_expr) {
                 break;
             }
         }
+        /* #2501: a tuple result is the typechecker's (the first value
+         * alone is not what the call yields). */
+        ASTNode* first_ret = cbody ? find_first_value_return(cbody) : NULL;
+        if (first_ret && first_ret->child_count > 1) return NULL;
         ASTNode* ret = cbody ? find_first_return_expr(cbody) : NULL;
         if (ret && ret->node_type && ret->node_type->kind != TYPE_UNKNOWN &&
             ret->node_type->kind != TYPE_INT) {
@@ -2498,6 +2567,13 @@ static const char* resolve_closure_return_type(CodeGenerator* gen, int ci) {
     }
     int has_return = body_check ? has_return_value(body_check) : 0;
     if (!has_return) return "void";
+    /* #2501: `return a, b` makes the closure return a tuple. */
+    Type* tuple = closure_tuple_return_type(closure);
+    if (tuple) {
+        const char* nm = closure_tuple_c_name(tuple);
+        free_type(tuple);
+        return nm;
+    }
     const char* ret_type = "int";
     ASTNode* ret_expr = find_first_return_expr(body_check);
     int resolved = 0;
@@ -2524,7 +2600,12 @@ static const char* resolve_closure_return_type(CodeGenerator* gen, int ci) {
                         }
                     }
                     ASTNode* callee_ret = callee_body ? find_first_return_expr(callee_body) : NULL;
-                    if (callee_ret) {
+                    Type* callee_tuple = closure_tuple_return_type(callee_node);   /* #2501 */
+                    if (callee_tuple) {
+                        ret_type = closure_tuple_c_name(callee_tuple);
+                        free_type(callee_tuple);
+                        resolved = 1;
+                    } else if (callee_ret) {
                         if (callee_ret->node_type && callee_ret->node_type->kind != TYPE_UNKNOWN) {
                             ret_type = get_c_type(callee_ret->node_type);
                             resolved = 1;
@@ -2764,6 +2845,12 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
 void emit_closure_declarations(CodeGenerator* gen) {
     for (int ci = 0; ci < gen->closure_count; ci++) {
         emit_closure_env_typedef(gen, ci);
+        /* #2501: a tuple result's typedef precedes the prototype. */
+        Type* tuple = closure_tuple_return_type(gen->closures[ci].closure_node);
+        if (tuple) {
+            ensure_tuple_typedef(gen, tuple);
+            free_type(tuple);
+        }
         const char* ret_type = resolve_closure_return_type(gen, ci);
         emit_closure_signature(gen, ci, ret_type);
         fprintf(gen->output, ";\n");
@@ -2810,6 +2897,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
         emit_closure_signature(gen, ci, ret_type);
         fprintf(gen->output, " {\n");
         gen->in_string_closure = strcmp(ret_type, "const char*") == 0;
+        /* #2501: a multi-value return builds the closure's tuple. */
+        Type* closure_ret_tuple = closure_tuple_return_type(closure);
+        gen->current_func_return_type = closure_ret_tuple;
 
         // Find body first so we can detect which captures are mutated.
         ASTNode* body = NULL;
@@ -3056,6 +3146,22 @@ void emit_closure_definitions(CodeGenerator* gen) {
                                          p->node_type ? get_c_type(p->node_type) : "int",
                                          param_cname, p->line, p->column);
             }
+            /* #2499 copy-on-keep: a `string` parameter the closure keeps
+             * past the call becomes a reference of its own (a refcounted
+             * string retained, a plain buffer copied), so its caller may
+             * free the one it passed. A promoted one already has that in
+             * its cell. */
+            for (int i = 0, pi = 0; i < closure->child_count; i++) {
+                ASTNode* p = closure->children[i];
+                if (!p || p->type != AST_CLOSURE_PARAM) continue;
+                int idx = pi++;
+                if (!p->value || !p->node_type || p->node_type->kind != TYPE_STRING ||
+                    closure_param_is_promoted(gen, closure, p->value) ||
+                    !closure_string_param_kept(gen, closure, idx)) continue;
+                print_indent(gen);
+                fprintf(gen->output, "%s = aether_str_capture(%s);\n",
+                        safe_value_name(p->value), safe_value_name(p->value));
+            }
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
             push_heap_string_exit_free_defers(gen, body);
@@ -3092,6 +3198,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->indent_level = 0;
         }
         gen->in_string_closure = 0;
+        gen->current_func_return_type = NULL;
+        if (closure_ret_tuple) free_type(closure_ret_tuple);
 
         free(env_captures);
 

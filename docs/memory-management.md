@@ -540,6 +540,14 @@ A function that calls itself recursively (e.g. a `walk_join`-style accumulator-p
 
 The wrap is suppressed when the corresponding callee parameter is storage-shaped (`ptr`, `@retain` string, or unknown-typed), the same `call_arg_escapes` gate the escape walker uses. In those cases the recipient takes ownership and freeing here would dangle the stored copy.
 
+### Closure arguments are borrowed
+
+A call through an `fn` value (`call(f, mk(a))`, or `f(mk(a))` on an `fn` parameter) has no body for the compiler to read, so it cannot ask, as it does for a named function, whether the parameter keeps the argument. Closures follow a calling convention instead (#2499): **a closure borrows its arguments**, so the caller frees an owned argument after the call, through the same `_ad_N` wrap.
+
+- A closure that keeps a `string` parameter past the call (stores it in a list, map or struct field, assigns it to a captured variable, passes it to a call that keeps it) takes a reference of its own when it is entered: a refcounted string is retained, a plain buffer copied. Capturing the parameter in a nested closure, or returning it from a string closure, already takes one (the env's capture, the uniform-heap return), so those need nothing more. A function used as a closure value gets the same treatment from its adapter.
+- A `ptr` parameter cannot be copied: nothing knows what it points at. So the convention holds for a program only if no closure it can call keeps a `ptr` parameter (stores it, captures it, returns it), checked over every closure literal and every function used as a closure value. One such closure anywhere turns it off, and closure-call arguments are then left alone (a leak, never a free under a closure that kept the pointer).
+- A closure whose body the compiler did not see could keep anything, so the convention is also off when one can be called: in a library build (`--emit=lib`); when an extern returns a closure, or returns or takes a struct with a closure field; when a C-laid-out struct has a closure field; when a `@c_callback` function takes a closure; when a `ptr` becomes a closure (`unbox_closure`, or a `ptr` passed to an `fn` parameter); and when a raw pointer is viewed as a struct with a closure field.
+
 ### Container value ownership (`map.put` / `list.add`)
 
 A heap string stored as a container *value* is owned by the container and released when the container is freed (`map.free` / `list.free`) **only when the codegen can prove, at the put site, that the value is a fresh owned heap allocation**:

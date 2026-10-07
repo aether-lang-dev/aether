@@ -1,20 +1,18 @@
 #!/bin/sh
 # An owned string argument to a closure called through an `fn` parameter is
-# freed after the call when no closure in the program keeps a parameter
-# (#2499).
+# freed after the call (#2499).
 #
 # `apply(f: fn, s: string) { call(f, s) }` has no closure body to read, so
 # passing `s` on was counted as an escape and `apply(g, mk("x"))` leaked the
-# string, as did `call(f, mk(a))` inside such a function. A closure call now
-# borrows its arguments when every closure the program can call (each
-# closure literal and each function used as a closure value) keeps none:
-# a `string` parameter it captures is held through the env's own reference
-# and one it returns is returned as a copy, while a store keeps it, as does
-# a `ptr` parameter's capture or return. One keeping closure anywhere turns
-# the convention off for the program, and the arguments are left alone as
-# before. This checks the emitted C both ways, that every program prints
-# what it stored, and that a struct literal returned with a parameter in it
-# counts as keeping it (it did not, and the caller freed the field).
+# string, as did `call(f, mk(a))` inside such a function. Closures now
+# borrow their arguments: one that keeps a `string` parameter (a list, map
+# or field store, a captured variable) takes a reference of its own when it
+# is entered, so the caller frees its own after the call either way. A
+# `ptr` parameter cannot be copied, so one closure that keeps one turns the
+# convention off for the program and the arguments are left alone. This
+# checks the emitted C both ways, that every program prints what it stored,
+# and that a struct literal returned with a parameter in it counts as
+# keeping it (it did not, and the caller freed the field).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -81,30 +79,46 @@ main() {
     }
     apply_owned(held, "h")
     println("${count} ${echo(same, "e")}")
+    // A function used as a closure value that returns its parameter: its
+    // adapter returns a copy, so the argument is still the caller's.
+    println(echo(ident, "i"))
+}
+
+ident(s: string) -> string {
+    return s
 }
 AE
 run borrowed "held h!
 h!+
 held h!
 h!+
-8 e!"
+8 e!
+i!"
 grep -q '_ad_[0-9]* = (char\*)(mk("x")); apply(look, _ad_[0-9]*); aether_heap_str_free' "$tmp/borrowed.c" \
     || fail "the argument to apply() is not freed" "$tmp/borrowed.c"
 n="$(grep -c 'char\* _ad_[0-9]* = (char\*)(mk(a)); .*f\.fn)(f\.env, _ad_[0-9]*); aether_heap_str_free' "$tmp/borrowed.c")"
 [ "$n" = "3" ] || fail "an argument to a call through an fn parameter is not freed ($n of 3)" "$tmp/borrowed.c"
 
-# ---- a closure keeps its parameter: nothing is freed under it --------------
-for shape in list cell ptr branch; do
+# ---- a closure keeps its `string` parameter: it takes its own reference
+# on entry, so the caller still frees its argument and the kept value
+# stays good. A `ptr` parameter it keeps cannot be copied: nothing is
+# freed in that program.
+for shape in list map field cell branch ptr; do
     case $shape in
         list)     keeper='kept = list.new()
     keep = | s: string | { list.add(kept, s) }'
                   reader='v, _ = list.get(kept, 0)
     println(v)' ;;
+        map)      keeper='kept = map.new()
+    keep = | s: string | { map.put(kept, "k", s) }'
+                  reader='v, _ = map.get(kept, "k")
+    println(v)' ;;
+        field)    keeper='hb = heap.new(Holder)
+    keep = | s: string | { hb.name = s }'
+                  reader='println(hb.name)' ;;
         cell)     keeper='last = ""
     keep = | s: string | { last = s }'
                   reader='println(last)' ;;
-        ptr)      keeper='keep = | p: ptr | { return p }'
-                  reader='println("ptr")' ;;
         branch)   keeper='kept = list.new()
     keep = | s: string | {
         if true {
@@ -113,10 +127,17 @@ for shape in list cell ptr branch; do
     }'
                   reader='v, _ = list.get(kept, 0)
     println(v)' ;;
+        ptr)      keeper='keep = | p: ptr | { return p }'
+                  reader='println("ptr")' ;;
     esac
     cat > "$tmp/kept_$shape.ae" <<AE
 import std.string
 import std.list
+import std.map
+
+struct Holder {
+    name: string
+}
 
 mk(a: string) -> string {
     return string.concat(a, "!")
@@ -135,14 +156,21 @@ main() {
 }
 AE
     case $shape in
-        list|cell|branch) want="k!
-zzzzzzzzzzzzzzzz!" ;;
         ptr) want="ptr
+zzzzzzzzzzzzzzzz!" ;;
+        *) want="k!
 zzzzzzzzzzzzzzzz!" ;;
     esac
     run "kept_$shape" "$want"
-    if grep -q 'mk("k")); apply(keep, _ad_' "$tmp/kept_$shape.c"; then
-        fail "kept_$shape: an argument a closure keeps is freed" "$tmp/kept_$shape.c"
+    if [ "$shape" = ptr ]; then
+        if grep -q 'mk("k")); apply(keep, _ad_' "$tmp/kept_$shape.c"; then
+            fail "kept_ptr: an argument a closure may keep as a pointer is freed" "$tmp/kept_$shape.c"
+        fi
+    else
+        grep -q 'mk("k")); apply(keep, _ad_[0-9]*); aether_heap_str_free' "$tmp/kept_$shape.c" \
+            || fail "kept_$shape: the closure copies what it keeps, yet the argument is not freed" "$tmp/kept_$shape.c"
+        grep -q 's = aether_str_capture(s);' "$tmp/kept_$shape.c" \
+            || fail "kept_$shape: the closure does not take its own reference to what it keeps" "$tmp/kept_$shape.c"
     fi
 done
 
@@ -173,4 +201,4 @@ if grep -q 'mkrec(_ad_[0-9]*); aether_heap_str_free' "$tmp/struct_field.c"; then
     fail "an argument stored in a returned struct literal is freed" "$tmp/struct_field.c"
 fi
 
-echo "  [PASS] closure_args_borrowed: closure calls free owned arguments unless some closure keeps one"
+echo "  [PASS] closure_args_borrowed: closure calls free owned arguments; string keepers copy, a ptr keeper turns it off"

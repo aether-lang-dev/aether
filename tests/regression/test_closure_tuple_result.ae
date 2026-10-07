@@ -1,0 +1,72 @@
+// Regression (#2501): a closure that returns several values has a tuple
+// result, so its call destructures as a function's does.
+//
+// A closure's call was typed from its first return value, so
+// `s, k = call(f, 4)` was refused ("'call' returns 'string', not a tuple")
+// and a call left whole did not compile: the closure's C function was
+// declared to return `const char*` and returned a `_tuple_string_int`. A
+// multi-value return now gives the closure a tuple result type in the type
+// checker and in its C signature (with the tuple's typedef). Each string
+// slot is handed over owned, as a string closure hands over its result, so
+// the destructured binding frees it. The macOS leaks gate runs this
+// program: each heap string a slot carries must be freed once.
+//
+// Strings are built from parameters, so each is a runtime heap string:
+// `string.concat` of two literals folds to a literal.
+
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+run(seed: string) {
+    // The issue's closure, through both spellings.
+    f = | n: int | { return "v", n }
+    s, k = call(f, 4)
+    check("literal slot", s, "v")
+    check_int("int slot", k, 4)
+
+    // A heap slot on one path, a borrowed one on the other, in a loop.
+    g = | a: string | {
+        if string.length(a) > 1 {
+            return string.concat(a, "!"), 1
+        }
+        return a, 0
+    }
+    i = 0
+    while i < 3 {
+        t, c = call(g, string.concat(seed, "x"))
+        check("heap slot", t, "sx!")
+        check_int("heap flag", c, 1)
+        u, d = g(seed)
+        check("borrowed slot", u, "s")
+        check_int("borrowed flag", d, 0)
+        i = i + 1
+    }
+
+    // A float and a bool slot.
+    h = | x: float | { return x * 2.0, x > 1.0 }
+    y, big = h(1.5)
+    if y != 3.0 || !big {
+        println("  FAIL: float/bool slots")
+        exit(1)
+    }
+}
+
+main() {
+    run(string.substring("xs", 1, 2))
+    println("ok")
+}

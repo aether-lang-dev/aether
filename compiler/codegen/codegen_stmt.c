@@ -3189,6 +3189,26 @@ int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible) {
  * free a string literal on the error branch. The wrap closes both.
  * Non-heap positions and non-string positions emit raw.
  * See string-new-with-length-heap-annotation.md. */
+/* #2501: is `call` a `call(f, ...)` whose `f` is known to be one closure
+ * literal of this program (codegen's closure_var_map), whose tuple string
+ * slots are handed over owned? A function value or an unknown closure may
+ * return borrowed slots, which stay the caller's to leave alone. */
+static int call_targets_closure_literal(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
+        strcmp(call->value, "call") != 0 || call->child_count < 1) return 0;
+    ASTNode* f = call->children[0];
+    if (!f) return 0;
+    if (f->type == AST_CLOSURE) return 1;
+    if (f->type != AST_IDENTIFIER || !f->value) return 0;
+    for (int i = 0; i < gen->closure_var_count; i++) {
+        if (gen->closure_var_map[i].var_name &&
+            strcmp(gen->closure_var_map[i].var_name, f->value) == 0) {
+            return gen->closure_var_map[i].closure_id >= 0;
+        }
+    }
+    return 0;
+}
+
 static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
                                        int j) {
     int pos_heap = 0;
@@ -3196,8 +3216,11 @@ static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
         Type* rt = gen->current_func_return_type;
         if (rt && rt->kind == TYPE_TUPLE && j >= 0 && j < rt->tuple_count &&
             rt->tuple_types[j] && rt->tuple_types[j]->kind == TYPE_STRING) {
-            pos_heap = function_def_returns_heap_at(gen,
-                                                    gen->current_function, j);
+            /* #2501: a closure hands every string slot over owned, as a
+             * string closure does its result (#2054): its caller reaches it
+             * through a value and cannot ask which returns are heap. */
+            pos_heap = gen->current_function->type == AST_CLOSURE ||
+                       function_def_returns_heap_at(gen, gen->current_function, j);
         }
     }
     if (pos_heap) {
@@ -3806,24 +3829,149 @@ static ASTNode* last_block_child_of(ASTNode* node) {
     return NULL;
 }
 
+/* The first value-carrying return under `node`, not looking into a nested
+ * (non-trailing) closure. */
+static ASTNode* closure_first_value_return(ASTNode* node) {
+    if (!node) return NULL;
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
+        return NULL;
+    }
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0] &&
+        node->children[0]->type != AST_PRINT_STATEMENT) return node;
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* r = closure_first_value_return(node->children[i]);
+        if (r) return r;
+    }
+    return NULL;
+}
+
 /* #2499: does every value return of a closure body hand back a copy of a
  * string it returns? A string closure (one return is a string) wraps each
  * single-value return in aether_uniform_heap_str, which copies a string the
- * closure does not own; a multi-value return is not wrapped. */
-static int closure_returns_copy(ASTNode* node, int* saw_string) {
+ * closure does not own; a tuple closure (#2501) wraps each string slot the
+ * same way, a slot being a string slot when the first return's value there
+ * is a string. `first` is that first return. */
+static int closure_returns_copy_walk(ASTNode* node, ASTNode* first, int* saw_string) {
     if (!node) return 1;
     if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
         return 1;   /* a nested closure's returns are its own */
     }
-    if (node->type == AST_RETURN_STATEMENT) {
-        if (node->child_count > 1) return 0;
-        if (node->child_count == 1 && node->children[0] && node->children[0]->node_type &&
-            node->children[0]->node_type->kind == TYPE_STRING) *saw_string = 1;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0) {
+        if ((node->child_count > 1) != (first->child_count > 1)) return 0;
+        if (node->child_count > 1) {
+            for (int j = 0; j < node->child_count; j++) {
+                ASTNode* c = node->children[j];
+                if (!(c && c->node_type && c->node_type->kind == TYPE_STRING)) continue;
+                ASTNode* slot = j < first->child_count ? first->children[j] : NULL;
+                if (!(slot && slot->node_type && slot->node_type->kind == TYPE_STRING)) return 0;
+            }
+            *saw_string = 1;
+        } else if (node->children[0] && node->children[0]->node_type &&
+                   node->children[0]->node_type->kind == TYPE_STRING) {
+            *saw_string = 1;
+        }
     }
     for (int i = 0; i < node->child_count; i++) {
-        if (!closure_returns_copy(node->children[i], saw_string)) return 0;
+        if (!closure_returns_copy_walk(node->children[i], first, saw_string)) return 0;
     }
     return 1;
+}
+
+static int closure_returns_copy(ASTNode* body, int* saw_string) {
+    ASTNode* first = closure_first_value_return(body);
+    if (!first) return 1;   /* returns nothing */
+    return closure_returns_copy_walk(body, first, saw_string);
+}
+
+/* #2499: a closure-typed (`fn`, not a raw C function pointer) value. */
+static int is_closure_type(const Type* t) {
+    return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
+}
+
+/* Does `t` hold a closure in a struct (or through a pointer to one)? */
+static int type_reaches_closure_field(CodeGenerator* gen, const Type* t) {
+    while (t && (t->kind == TYPE_PTR || t->kind == TYPE_ARRAY) && t->element_type) t = t->element_type;
+    if (!t || t->kind != TYPE_STRUCT || !t->struct_name) return 0;
+    ASTNode* sdef = find_struct_definition_by_name(gen->program, t->struct_name);
+    for (int i = 0; sdef && i < sdef->child_count; i++) {
+        ASTNode* f = sdef->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && is_closure_type(f->node_type)) return 1;
+    }
+    return 0;
+}
+
+/* Is any AST node under `n` a way for a closure made outside this program
+ * into it: `unbox_closure(p)` (the ptr may be anyone's box), or a view of a
+ * raw pointer as a struct that has a closure field (`p as *Rec`)? */
+static int subtree_imports_closure(CodeGenerator* gen, ASTNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_FUNCTION_CALL && n->value && strcmp(n->value, "unbox_closure") == 0) return 1;
+    /* A `ptr` argument at an `fn` parameter is unboxed at the call
+     * (generate_expression's argument loop), the same recovery. The
+     * argument may sit one position later in the C call when a builder
+     * context is injected first, so both positions count. */
+    if (n->type == AST_FUNCTION_CALL && n->value && strcmp(n->value, "call") != 0) {
+        ASTNode* fdef = find_function_definition_by_name(gen->program, n->value);
+        int shift = fdef && fdef->child_count > 0 && fdef->children[0] &&
+                    fdef->children[0]->value && strcmp(fdef->children[0]->value, "_ctx") == 0;
+        for (int i = 0; i < n->child_count; i++) {
+            ASTNode* a = n->children[i];
+            if (!a || !a->node_type || a->node_type->kind != TYPE_PTR) continue;
+            if (lookup_callee_param_kind(gen, n->value, i) == TYPE_FUNCTION ||
+                (shift && lookup_callee_param_kind(gen, n->value, i + 1) == TYPE_FUNCTION)) return 1;
+        }
+    }
+    if (n->type == AST_PTR_AS_STRUCT_CAST && type_reaches_closure_field(gen, n->node_type)) return 1;
+    for (int i = 0; i < n->child_count; i++) {
+        if (subtree_imports_closure(gen, n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* #2499: can the program call a closure whose body it does not have? Each
+ * way one gets in:
+ *   - a library build: its exported functions are called from outside,
+ *     with whatever closures the host passes;
+ *   - an extern that returns a closure, or that returns or takes a struct
+ *     with a closure field (C fills the field);
+ *   - a C-laid-out (`extern`) struct with a closure field;
+ *   - a @c_callback function with a closure parameter: C calls it with a
+ *     closure of its own making;
+ *   - a `ptr` converted to a closure, by `unbox_closure` or implicitly at a
+ *     `fn` slot (typecheck_ptr_to_closure_seen): the box may be one a host
+ *     bridge or another library made;
+ *   - a raw pointer viewed as a struct with a closure field. */
+static int closure_from_outside(CodeGenerator* gen) {
+    if (gen->emit_lib || typecheck_ptr_to_closure_seen()) return 1;
+    ASTNode* prog = gen->program;
+    for (int i = 0; i < prog->child_count; i++) {
+        ASTNode* top = prog->children[i];
+        if (top && top->type == AST_EXPORT_STATEMENT && top->child_count > 0) top = top->children[0];
+        if (!top) continue;
+        if (top->type == AST_EXTERN_FUNCTION) {
+            if (is_closure_type(top->node_type) || type_reaches_closure_field(gen, top->node_type)) return 1;
+            for (int k = 0; k < top->child_count; k++) {
+                ASTNode* p = top->children[k];
+                if (p && type_reaches_closure_field(gen, p->node_type)) return 1;
+            }
+        }
+        if (top->type == AST_STRUCT_DEFINITION && top->annotation &&
+            strncmp(top->annotation, "extern", 6) == 0) {
+            for (int k = 0; k < top->child_count; k++) {
+                ASTNode* f = top->children[k];
+                if (f && f->type == AST_STRUCT_FIELD && is_closure_type(f->node_type)) return 1;
+            }
+        }
+        if ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
+            is_c_callback(top)) {
+            for (int k = 0; k < top->child_count; k++) {
+                ASTNode* p = top->children[k];
+                if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
+                    is_closure_type(p->node_type)) return 1;
+            }
+        }
+    }
+    return subtree_imports_closure(gen, prog);
 }
 
 /* #2499: may a caller free the owned string it passes to a closure call
@@ -3832,30 +3980,25 @@ static int closure_returns_copy(ASTNode* node, int* saw_string) {
  * through an `fn` parameter has no body to read, so the answer has to hold
  * for every closure the program can call: every closure literal, and every
  * function used as a closure value (the bare-fn adapters). It does when
- * none of them keeps a parameter that can hold such a string:
- *   - a `string` parameter is kept by a store (a list or map, a struct
- *     field, another variable or cell) or by a nested call that keeps it.
- *     Its capture by a nested closure is not a keep, since the env takes
- *     its own reference, and returning it is not either: a string closure
- *     returns a copy (the uniform-heap return of #2054);
- *   - a `ptr` parameter is kept by all of those, by a capture (a ptr is
- *     captured as it is) and by a return.
+ * none of them keeps a parameter that can hold such a string as it is:
+ *   - a `string` parameter is never kept as it is: a closure that keeps one
+ *     takes its own reference on entry (closure_string_param_kept), and
+ *     the adapter of a function value that keeps one passes it a reference
+ *     of its own;
+ *   - a `ptr` (or unknown) parameter is kept by a store (a list or map, a
+ *     struct field, another variable or cell), a nested call that keeps it,
+ *     a capture (a ptr is captured as it is) or a return, and nothing can
+ *     copy what a pointer points at, so one such closure anywhere turns the
+ *     convention off.
  * The walk assumes the answer it is checking for calls between closures
  * (an argument passed on to `call(g, ...)` is borrowed), which is sound by
  * induction: if no closure keeps one, none keeps one by passing it on.
- * Closures that can come from outside this program break the assumption,
- * so the answer is no when emitting a library or when an extern hands a
- * closure in. */
+ * A closure whose body this walk did not see can keep anything, so the
+ * answer is no whenever one can be called (closure_from_outside). */
 void compute_closure_args_borrowed(CodeGenerator* gen) {
     if (!gen) return;
     gen->closure_args_borrowed = 0;
-    if (!gen->program || gen->emit_lib) return;
-    for (int i = 0; i < gen->program->child_count; i++) {
-        ASTNode* top = gen->program->children[i];
-        if (top && top->type == AST_EXPORT_STATEMENT && top->child_count > 0) top = top->children[0];
-        if (top && top->type == AST_EXTERN_FUNCTION && top->node_type &&
-            top->node_type->kind == TYPE_FUNCTION && !top->node_type->is_fnptr) return;
-    }
+    if (!gen->program || closure_from_outside(gen)) return;
     gen->closure_args_borrowed = 1;   /* the hypothesis the walks use */
     int ok = 1;
     for (int ci = 0; ci < gen->closure_count && ok; ci++) {
@@ -3864,15 +4007,11 @@ void compute_closure_args_borrowed(CodeGenerator* gen) {
         for (int k = 0; lit && k < lit->child_count && ok; k++) {
             ASTNode* p = lit->children[k];
             if (!p || p->type != AST_CLOSURE_PARAM) continue;
-            if (param_may_hold_caller_string(p->node_type)) {
-                int is_string = p->node_type->kind == TYPE_STRING;
-                int saw_string = 0;
-                int returns_copy = is_string &&
-                    closure_returns_copy(last_block_child_of(lit), &saw_string) && saw_string;
-                g_capture_holds_own_ref = is_string;
-                if (closure_param_escapes_via_body(gen, lit, pi, !returns_copy)) ok = 0;
-                g_capture_holds_own_ref = 0;
-            }
+            /* A `string` one the closure keeps is its own copy
+             * (closure_string_param_kept); a pointer cannot be copied. */
+            if (param_may_hold_caller_string(p->node_type) &&
+                p->node_type->kind != TYPE_STRING &&
+                closure_param_escapes_via_body(gen, lit, pi, 1)) ok = 0;
             pi++;
         }
     }
@@ -3884,12 +4023,33 @@ void compute_closure_args_borrowed(CodeGenerator* gen) {
         for (int k = 0; k < fdef->child_count && ok; k++) {
             ASTNode* p = fdef->children[k];
             if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION)) continue;
+            /* The adapter hands a kept `string` its own reference
+             * (emit_bare_fn_adapters). */
             if (param_may_hold_caller_string(p->node_type) &&
+                p->node_type->kind != TYPE_STRING &&
                 callee_param_escapes_via_body(gen, name, pi, 0)) ok = 0;
             pi++;
         }
     }
     gen->closure_args_borrowed = ok;
+}
+
+/* #2499 copy-on-keep: does the closure literal `closure` keep its `string`
+ * parameter `param_idx` past the call, so it must take a reference of its
+ * own when it is entered? Every way of keeping counts (a list, map or set
+ * store, a struct field, a cell or variable it is assigned to, a nested
+ * call that keeps it, a multi-value return) except two that already take
+ * their own reference: a capture by a nested closure, and the return of a
+ * string closure, which is a copy. With the reference taken, the caller's
+ * own one is its to free after the call, whatever the closure does. */
+int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx) {
+    int saw_string = 0;
+    int returns_copy = closure_returns_copy(last_block_child_of(closure), &saw_string) &&
+                       saw_string;
+    g_capture_holds_own_ref = 1;
+    int kept = closure_param_escapes_via_body(gen, closure, param_idx, !returns_copy);
+    g_capture_holds_own_ref = 0;
+    return kept;
 }
 
 /* Does the user function `func_name` declare a `-> string` return? Only
@@ -6882,6 +7042,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         pos_is_heap = function_def_returns_heap_at(gen, callee_def, j);
                     } else if (rhs_type && rhs_type->tuple_heap_flags) {
                         pos_is_heap = rhs_type->tuple_heap_flags[j];
+                    } else if (call_targets_closure_literal(gen, rhs)) {
+                        /* #2501: a closure's string slots are owned
+                         * (emit_tuple_return_position). */
+                        pos_is_heap = 1;
                     }
                 }
 

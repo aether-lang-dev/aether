@@ -1633,6 +1633,20 @@ static ASTNode* closure_first_return_expr(ASTNode* node) {
     return NULL;
 }
 
+/* The return statement closure_first_return_expr finds the value of. */
+static ASTNode* closure_first_return_stmt(ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
+        return node;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* found = closure_first_return_stmt(node->children[i]);
+        if (found) return found;
+    }
+    return NULL;
+}
+
 static int closure_any_return_is_string(ASTNode* node) {
     if (!node || node->type == AST_CLOSURE) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
@@ -1660,6 +1674,20 @@ static Type* closure_literal_result_type(ASTNode* lit) {
             body = lit->children[i];
             break;
         }
+    }
+    /* #2501: a multi-value return gives the closure a tuple result, as it
+     * gives a function one, so `s, k = call(f, 4)` destructures it. */
+    ASTNode* first_ret = closure_first_return_stmt(body);
+    if (first_ret && first_ret->child_count > 1) {
+        Type* t = create_type(TYPE_TUPLE);
+        t->tuple_count = first_ret->child_count;
+        t->tuple_types = malloc((size_t)first_ret->child_count * sizeof(Type*));
+        for (int j = 0; j < first_ret->child_count; j++) {
+            Type* et = first_ret->children[j] ? first_ret->children[j]->node_type : NULL;
+            t->tuple_types[j] = (et && et->kind != TYPE_UNKNOWN) ? clone_type(et)
+                                                                 : create_type(TYPE_INT);
+        }
+        return t;
     }
     ASTNode* ret = closure_first_return_expr(body);
     if (!ret || !ret->node_type || is_erased_call(ret)) return NULL;
@@ -1769,7 +1797,8 @@ static void type_erased_call(ASTNode* call, Type* t, SymbolTable* table, int dep
         }
     }
     ASTNode* first = closure_first_return_expr(body);
-    if (!is_erased_call(first)) return;   /* its result is its own */
+    ASTNode* first_stmt = closure_first_return_stmt(body);
+    if (!is_erased_call(first) || first_stmt->child_count != 1) return;   /* its result is its own */
     type_erased_call(first, t, NULL, depth + 1);
 }
 
@@ -1805,7 +1834,7 @@ static void warn_erased_result_closures(void) {
             }
         }
         ASTNode* first = closure_first_return_expr(body);
-        if (!is_erased_call(first)) continue;
+        if (!is_erased_call(first) || closure_first_return_stmt(body)->child_count != 1) continue;
         type_warning("this closure returns what a closure called through an erased `fn` "
                      "returns, which has no known type, so it is typed to return int; "
                      "bind the result with its type and return that (e.g. `let r: ptr "
@@ -1991,6 +2020,9 @@ static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
     type_error_hint(msg, hint, line, column);
     free_type(t);
 }
+
+static int g_tc_ptr_to_closure = 0;
+int typecheck_ptr_to_closure_seen(void) { return g_tc_ptr_to_closure; }
 
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
@@ -2188,7 +2220,11 @@ int is_type_compatible(Type* from, Type* to) {
      * cast contract; this extends the same compatibility to the
      * `_AeClosure`-shaped form (is_fnptr=0). */
     if (from->kind == TYPE_FUNCTION && to->kind == TYPE_PTR) return 1;
-    if (from->kind == TYPE_PTR && to->kind == TYPE_FUNCTION) return 1;
+    if (from->kind == TYPE_PTR && to->kind == TYPE_FUNCTION) {
+        /* #2499: the closure behind the ptr may come from anywhere. */
+        if (!to->is_fnptr) g_tc_ptr_to_closure = 1;
+        return 1;
+    }
 
     // byte → int / int64 / float: safe widenings.
     // Reverse direction (int → byte) is intentionally NOT here — it's
@@ -4258,6 +4294,7 @@ static void order_const_declarations(ASTNode* program) {
 int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
+    g_tc_ptr_to_closure = 0;
 
     error_count = 0;
     warning_count = 0;
@@ -9236,7 +9273,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         break;
                     }
                 }
-                if (is_erased_call(closure_first_return_expr(body)))
+                if (is_erased_call(closure_first_return_expr(body)) &&
+                    closure_first_return_stmt(body)->child_count == 1)
                     note_erased_result_closure(expr);
             }
             return 1;

@@ -5,11 +5,13 @@
 // handing `s` on counted as an escape: the caller of `apply` never freed its
 // argument, and neither did `call(f, mk(a))` inside such a function. Every
 // call leaked one string. A closure call now borrows its arguments when no
-// closure the program can call keeps a parameter, and none here does: one
-// only reads it, one captures it in a nested closure (whose env takes its
-// own reference), one writes it from a nested closure (a cell with its own
-// reference), one returns it (as a copy). The macOS leaks gate runs this
-// program: each argument must be freed once, by its caller.
+// closure the program can call keeps a `ptr` parameter, and a closure that
+// keeps a `string` one takes its own reference on entry. Here one only reads
+// it, one captures it in a nested closure (whose env takes its own
+// reference), one writes it from a nested closure (a cell with its own
+// reference), one returns it (as a copy) and one keeps it in a captured
+// variable. The macOS leaks gate runs this program: each argument must be
+// freed once, by its caller, and each kept value once, by its keeper.
 //
 // Every argument is built at runtime from a parameter, so each is a heap
 // string: `string.concat` of two literals folds to a literal.
@@ -74,6 +76,17 @@ run(seed: string) {
     }
     apply_owned(held, seed)
     check_int("captured and written", seen, 10)
+
+    // Kept: the closure takes its own reference on entry and the cell owns
+    // it, so the caller still frees what it passed.
+    last = ""
+    note = | s: string | { last = s }
+    j = 0
+    while j < 3 {
+        apply(note, mk(seed))
+        j = j + 1
+    }
+    check("kept", last, "s!")
 }
 
 main() {
