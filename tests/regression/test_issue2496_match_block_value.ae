@@ -240,16 +240,32 @@ fn run_all(n: int) {
 main() {
     run_all(7)
     if mem.heap_in_use() >= 0 {
-        run_all(7)
-        start_bytes = mem.heap_in_use()
+        // A leak grows the heap by the same amount in every window of
+        // rounds. An allocator's cache of freed blocks, which glibc's and
+        // macOS's statistics count as in use, fills once and then holds:
+        // it can grow one window, never both. So warm up, then require one
+        // of two equal later windows to hold steady (mem.heap_in_use's own
+        // rule: compare later rounds, never a single before/after).
         k = 0
-        while k < 60 {
+        while k < 20 {
             run_all(7)
             k = k + 1
         }
-        end_bytes = mem.heap_in_use()
-        if end_bytes - start_bytes > 16384 {
-            println("FAIL: 60 rounds grew the heap by ${end_bytes - start_bytes} bytes")
+        first_bytes = mem.heap_in_use()
+        k = 0
+        while k < 20 {
+            run_all(7)
+            k = k + 1
+        }
+        mid_bytes = mem.heap_in_use()
+        k = 0
+        while k < 20 {
+            run_all(7)
+            k = k + 1
+        }
+        last_bytes = mem.heap_in_use()
+        if mid_bytes - first_bytes > 4096 && last_bytes - mid_bytes > 4096 {
+            println("FAIL: both 20-round windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
             exit(1)
         }
     }
