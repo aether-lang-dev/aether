@@ -73,11 +73,14 @@ returned. The caller received a closure whose env was already freed.
 
 **Fix:** at return emission, walk the return expression to collect every
 closure variable that appears (including `box_closure` wrappers) and
-transitively any closure vars they capture. `emit_all_defers_protected`
-skips the matching env-free defers and emits a
-`/* deferred (suppressed: escapes via return) */` marker in their place.
-Ownership transfers to the caller, matching the documented contract for
-`box_closure`.
+transitively any closure vars they capture, and skip their env-free
+defers. Ownership transfers to the caller, matching the documented
+contract for `box_closure`.
+
+Since #2480 a returned closure local gets no env-free in the first place
+(a return is an escape to the scope-exit claim), and since #2494 a closure
+that captured another holds its own reference to it, so the return-site
+suppression was removed: it only leaked the captured env.
 
 ### 4. Closure return types hardcoded to `int`/`void`
 
@@ -188,12 +191,27 @@ lifetime"):
   scope ends, through `_closure_env_N_free`, provided every use of `g`
   leaves no copy behind: calling it, passing it to a user function whose
   parameter is only called or passed on the same way, or capturing it in
-  a closure that is dead after the statement (#2480). Rebinding the local
-  to a new closure literal frees the env it replaces. A return, an alias,
-  a store, an extern argument or a non-literal binding leaves the env to
-  the value's holder. The free used to be queued only on a name's first
-  binding, judged by `closure_var_map`, which discovery fills for every
-  binding beforehand, so it was never queued.
+  a closure (#2480). Rebinding the local to a new closure frees the env
+  it replaces. A return, an alias, a store, an extern argument or a
+  binding to anything but a fresh closure leaves the env to the value's
+  holder.
+
+- **Captured by another closure.** An env is reference-counted (#2494):
+  the value's owner holds one reference and every env that captured the
+  closure takes one, given back by its destructor (which is what every
+  owner calls to free an env). So a closure captured by another can be
+  freed by its own scope while the capturer, wherever it went, keeps it.
+
+- **Returned to a caller.** A function whose every `return` hands back a
+  closure nothing else holds (a closure literal, a local whose only
+  escape is the return, or another such function's result) gives its
+  reference to the caller, and a local bound to its result is freed like
+  a local bound to a literal (#2494).
+
+- **In a receive arm.** A handler (and a timeout arm) is a defer scope
+  (#2498): its defers, cell releases, env frees and struct destroys run
+  when the handler ends. A struct local stored into actor state, or
+  captured by a closure in the arm, keeps its strings.
 
 ## Mutated-capture cell lifetime
 
@@ -372,12 +390,11 @@ walk over the function proves every use of the variable is a call or an
 argument to a parameter that keeps nothing, and then each rebinding frees
 the env it replaces and scope exit frees the last one.
 
-The old env may still be reachable via a `box_closure()` copy or another
-closure's transitive capture; those are escapes, so such a variable keeps
-the previous behaviour (the replaced env is leaked rather than risk a use
-after free). A variable that a capturing local closure holds a copy of is
-only freed when it has a single binding, so it is never rebound under
-that copy.
+The old env may still be reachable via a `box_closure()` copy; that is
+an escape, so such a variable keeps the previous behaviour (the replaced
+env is leaked rather than risk a use after free). A closure that captured
+the old value holds its own reference to it (#2494), so it is no reason
+to keep the env.
 
 Paired tests pin this:
 

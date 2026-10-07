@@ -1,6 +1,7 @@
 #!/bin/sh
 # A capturing closure bound to a local frees its env exactly once at scope
-# exit, unless the value leaves the scope (#2480).
+# exit, unless the value leaves the scope (#2480); a closure handed to a new
+# owner is freed by that owner, and a receive arm is a scope (#2494, #2498).
 #
 # The scope-exit free was pushed only when closure_var_map had no entry for
 # the name, and discover_closures fills that map for every closure binding
@@ -20,6 +21,12 @@
 #                callee or captured by a kept closure: the values are still
 #                right after the declaring scope ended, and nothing is freed
 #                twice (the list that owns some of them frees them too).
+#   handover.ae  closures handed to another owner (#2494): a function's
+#                returned closure bound by the caller, and envs that captured
+#                another closure, wherever they went: all freed, none twice.
+#   actor_arm.ae a receive arm is a scope (#2494, #2498): its defer runs, the
+#                closures and cells of every message are freed, a struct
+#                stored into state keeps its string.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -101,5 +108,33 @@ if run_probe escaping; then
         echo "  [PASS] closure_local_env_free: returned, stored and kept closures keep their envs"
     fi
 fi
+
+# expect_clean <name> <expected output> <what>: the probe printed exactly
+# the expected output and freed every env and cell it built, none twice.
+expect_clean() {
+    run_probe "$1" || return
+    out="$(tr -d '\r' < "$tmp/$1/out.txt")"
+    envs="$(field "$1" envs)"
+    if [ "$out" != "$2" ]; then
+        echo "  [FAIL] closure_local_env_free: $1 computed the wrong values"
+        printf '%s\n' "$out" | sed 's/^/        /' | tail -5
+        fail=1
+    elif [ -z "$envs" ] || [ "$envs" -eq 0 ]; then
+        echo "  [FAIL] closure_local_env_free: $1 built no env the counter saw"
+        fail=1
+    elif [ "$(field "$1" env_live)" != 0 ] || [ "$(field "$1" cell_live)" != 0 ] ||
+         [ "$(field "$1" double_frees)" != 0 ]; then
+        echo "  [FAIL] closure_local_env_free: $1 leaks or double frees"
+        sed 's/^/        /' "$tmp/$1/count.txt"
+        fail=1
+    else
+        echo "  [PASS] closure_local_env_free: $3 ($envs envs, each freed once)"
+    fi
+}
+
+expect_clean handover "handover ok" "returned and captured closures are freed by their new owner"
+expect_clean actor_arm "hi 3
+bye 3
+kept kept! count 1 total 3725" "a receive arm runs its defer and frees what each message built"
 
 exit $fail

@@ -326,6 +326,72 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
     return 0;
 }
 
+static int is_actor_state_name(CodeGenerator* gen, const char* name) {
+    if (!name) return 0;
+    for (int i = 0; i < gen->state_var_count; i++) {
+        if (gen->actor_state_vars[i] && strcmp(gen->actor_state_vars[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* The variable an assignment target writes through: `x`, `x.f`, `x[i]`. */
+static const char* store_target_root(ASTNode* lhs) {
+    while (lhs && (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
+           lhs->child_count > 0) {
+        lhs = lhs->children[0];
+    }
+    return (lhs && lhs->type == AST_IDENTIFIER) ? lhs->value : NULL;
+}
+
+static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node, int whole) {
+    if (!node) return;
+    if (node->type == AST_IDENTIFIER && node->value) {
+        mark_return_escaped_struct_var(gen, node->value);
+    }
+    /* Reading a scalar or string field shares nothing with the struct: a
+     * string taken from a field is copied where it is stored (#2461). A
+     * struct-typed (or untyped) field may share the struct's strings. */
+    if (!whole && node->type == AST_MEMBER_ACCESS && node->node_type &&
+        node->node_type->kind != TYPE_STRUCT && node->node_type->kind != TYPE_UNKNOWN) {
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        mark_mentioned_struct_vars(gen, node->children[i], whole);
+    }
+}
+
+/* #2498: a value stored into actor state outlives the handler, as a returned
+ * one outlives its function. A struct local named anywhere in a state
+ * store's value (directly, inside a literal, through a call that may hand it
+ * back) therefore gives its strings to the state: its scope-exit destroy is
+ * suppressed the way a return suppresses it (#752). Marked before the body
+ * is emitted, so an earlier `return` in a loop that later stores is covered
+ * too. Naming a non-struct here is harmless: no destroy is keyed to it.
+ *
+ * A closure's env holds a plain copy of a struct it captures, without a
+ * reference to the strings in it, and the closure may outlive the arm (kept
+ * in state, sent, captured by one that is). Its destroy is suppressed too:
+ * leaking those strings is the safe side until a capture owns them. */
+static void mark_state_stored_struct_vars(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    if (node->type == AST_CLOSURE &&
+        !(node->value && strcmp(node->value, "trailing") == 0)) {
+        mark_mentioned_struct_vars(gen, node, 1);   /* captured whole */
+        return;
+    }
+    if (node->type == AST_VARIABLE_DECLARATION && is_actor_state_name(gen, node->value)) {
+        for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i], 0);
+    } else if (node->type == AST_ASSIGNMENT && node->child_count >= 2) {
+        const char* root = store_target_root(node->children[0]);
+        if (root && (strcmp(root, "self") == 0 || is_actor_state_name(gen, root))) {
+            mark_mentioned_struct_vars(gen, node->children[1], 0);
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        mark_state_stored_struct_vars(gen, node->children[i]);
+    }
+}
+
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return;
     
@@ -472,6 +538,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         print_line(gen, "static AETHER_HOT void %s_handle_%s(%s* self, void* _msg_data) {",
                                   actor->value, pattern->value, actor->value);
                         indent(gen);
+                        /* #2498: the handler is a defer scope, as a function
+                         * body is, opened before the pattern bindings so a
+                         * binding's cell (#2492) is released with the rest:
+                         * the arm's defers, its promoted cells, the env of a
+                         * closure bound in it (#2494) and a struct local's
+                         * destroy all run when the handler ends, on every
+                         * exit. They were dropped, and leaked per message. */
+                        enter_scope(gen);
                         // Reset declared-vars / heap-string state for this
                         // handler. Each handler is its own C function with
                         // its own scope; carrying entries over from the
@@ -593,11 +667,27 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         }
 
                         // Generate handler body
+                        /* The handler's own escape marks: the ones the last
+                         * function left would suppress the destroy of a
+                         * local that merely shares a name, and this
+                         * handler's must not reach the next function. */
+                        char** outer_escaped = gen->return_escaped_struct_vars;
+                        int outer_escaped_count = gen->return_escaped_struct_var_count;
+                        gen->return_escaped_struct_vars = NULL;
+                        gen->return_escaped_struct_var_count = 0;
                         if (arm_body && arm_body->type == AST_BLOCK) {
+                            mark_state_stored_struct_vars(gen, arm_body);
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
                         }
+                        exit_scope(gen);
+                        for (int k = 0; k < gen->return_escaped_struct_var_count; k++) {
+                            free(gen->return_escaped_struct_vars[k]);
+                        }
+                        free(gen->return_escaped_struct_vars);
+                        gen->return_escaped_struct_vars = outer_escaped;
+                        gen->return_escaped_struct_var_count = outer_escaped_count;
 
                         gen->current_promoted_captures = prev_promoted;
                         gen->current_promoted_capture_count = prev_promoted_count;
@@ -694,13 +784,20 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         // Generate the timeout body
         if (timeout_arm->child_count >= 2 && timeout_arm->children[1]) {
             ASTNode* tbody = timeout_arm->children[1];
+            /* A defer scope and the hoist scope of its own, as a receive
+             * arm is (#2494). */
+            ASTNode* prev_hoist_scope = gen->hoist_scope_body;
+            enter_scope(gen);
             if (tbody->type == AST_BLOCK) {
+                gen->hoist_scope_body = tbody;
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }
             } else {
                 generate_statement(gen, tbody);
             }
+            exit_scope(gen);
+            gen->hoist_scope_body = prev_hoist_scope;
         }
         print_line(gen, "return;");
         unindent(gen);

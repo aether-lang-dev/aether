@@ -1383,7 +1383,7 @@ void enter_scope(CodeGenerator* gen) {
 // `push_heap_string_exit_free_defers` (codegen_stmt.c) pushes an
 // AST_EXPRESSION_STATEMENT whose annotation encodes the variable
 // name as `"heap_string_exit_free:<name>"`. The defer-emit loops
-// (here and in emit_all_defers_protected) detect the prefix and
+// (here and in emit_all_defers) detect the prefix and
 // render the conditional-free directly:
 //
 //     if (_heap_<name>) { free((void*)<name>); <name> = NULL; _heap_<name> = 0; }
@@ -1645,53 +1645,18 @@ void exit_scope(CodeGenerator* gen) {
     }
 }
 
-// Is `deferred` the env-free carrier of the closure var called `name`
-// ("closure_env_free:<id>:<name>", see try_emit_closure_env_free)? It used
-// to match a `free(<name>.env)` call, a shape the declaration site stopped
-// producing in #1398 (#2480).
-static int is_env_free_for(ASTNode* deferred, const char* name) {
-    if (!deferred || !name || !deferred->annotation) return 0;
-    const char* prefix = "closure_env_free:";
-    size_t plen = strlen(prefix);
-    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
-    const char* sep = strchr(deferred->annotation + plen, ':');
-    return sep && strcmp(sep + 1, name) == 0;
-}
-
-// Emit ALL deferred statements (for return - unwinds entire function).
-// `protected_names` and `protected_count` list closure variable names whose
-// env-free defer should be suppressed — used at return sites where the
-// closure's env is still live through the returned value.
-void emit_all_defers_protected(CodeGenerator* gen, char** protected_names, int protected_count) {
-    // Emit all defers in LIFO order across all scopes. A defer is suppressed
-    // when it frees the env of a closure variable in the protected list. The
-    // promoted cells that env captures are NOT suppressed: the env holds its
-    // own reference to each (#2019), so the scope's release at this return
-    // leaves the cell alive for exactly as long as the returned closure.
+// Emit ALL deferred statements (for return - unwinds entire function), in
+// LIFO order across all scopes. Nothing is held back for the returned value:
+// a closure local it returns has no env-free (a return is an escape to
+// claim_closure_local_env), and the cells and closures a returned closure
+// captured are kept alive by the references its env took (#2019, #2494).
+void emit_all_defers(CodeGenerator* gen) {
     for (int i = gen->defer_count - 1; i >= 0; i--) {
-        ASTNode* deferred = gen->defer_stack[i];
-        if (!deferred) continue;
+        if (!gen->defer_stack[i]) continue;
         /* #1140: skip the conditional defers that don't apply to this exit. */
         if (!defer_fires_at_exit(gen, i)) continue;
-        int skip = 0;
-        for (int p = 0; p < protected_count; p++) {
-            if (!protected_names[p]) continue;
-            if (is_env_free_for(deferred, protected_names[p])) {
-                skip = 1;
-                break;
-            }
-        }
-        if (skip) {
-            print_indent(gen);
-            fprintf(gen->output, "/* deferred (suppressed: escapes via return) */\n");
-            continue;
-        }
         emit_deferred_one(gen, i);
     }
-}
-
-void emit_all_defers(CodeGenerator* gen) {
-    emit_all_defers_protected(gen, NULL, 0);
 }
 
 // Drain any in-flight try-frame pops at a non-local exit inside a
@@ -6954,10 +6919,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
-    /* #2480: frees an env through the destructor every env carries as its
-     * first field (#1398), for a local that is bound to more than one
-     * closure literal and so has no single _closure_env_N_free. */
-    print_line(gen, "static inline void _aether_closure_env_release(void* e) { if (e) (*(void (**)(void*))e)(e); }");
+    /* The head every closure env starts with: its destructor (#1398) and its
+     * reference count (#2494). An env is held by the closure value's owner
+     * and by every env that captured the closure; each holder releases
+     * through the destructor, which tears the env down on the last release.
+     * The count is atomic because a captured closure can be released on a
+     * worker thread while its declaring scope releases on another. */
+    print_line(gen, "typedef struct { void (*_dtor)(void*); atomic_long _refs; } _AeEnvHead;");
+    print_line(gen, "static inline void _aether_closure_env_retain(void* e) { if (e) atomic_fetch_add_explicit(&((_AeEnvHead*)e)->_refs, 1, memory_order_relaxed); }");
+    /* #2480: releases an env without knowing its closure, for a local bound
+     * to more than one closure or to a call's result, and for a captured
+     * closure (#2494). */
+    print_line(gen, "static inline void _aether_closure_env_release(void* e) { if (e) ((_AeEnvHead*)e)->_dtor(e); }");
     /* #2220: the post-store hook for `struct T @observable`. Declared
      * unconditionally (it is one prototype); only a store on an observable
      * struct field emits a call to it. Defined in runtime/aether_observe.c. */

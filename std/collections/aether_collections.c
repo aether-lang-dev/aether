@@ -209,7 +209,8 @@ typedef struct { void (*fn)(void); void* env; } AeClosureBox;
 /* #1398: a closure env's first field is a pointer to its generated destructor,
  * which releases the references its string captures own. Lets an owner with no
  * type for the env reclaim it correctly. Must match the `_dtor` field codegen
- * emits first in every env struct. */
+ * emits first in every env struct. Since #2494 the destructor is a release:
+ * an env another closure captured is only torn down by its last holder. */
 typedef struct { void (*dtor)(void*); } _AeEnvHeader;
 
 void aether_closure_env_free(void* env) {

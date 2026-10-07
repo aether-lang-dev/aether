@@ -42,6 +42,10 @@ static int ec_count = 0;
 static int ec_double = 0;
 static int ec_overflow = 0;
 static int ec_registered = 0;
+/* Actor handlers allocate and free on scheduler threads. */
+static volatile char ec_lock_flag = 0;
+static void ec_lock(void) { while (__atomic_test_and_set(&ec_lock_flag, __ATOMIC_ACQUIRE)) { } }
+static void ec_unlock(void) { __atomic_clear(&ec_lock_flag, __ATOMIC_RELEASE); }
 
 static void ec_report(void) {
     int envs = 0, env_frees = 0, cells = 0, cell_frees = 0;
@@ -62,12 +66,17 @@ __attribute__((constructor)) static void ec_register(void) {
 
 static void* ec_track(void* p, size_t size, int kind) {
     if (!p) return p;
-    if (ec_count >= EC_MAX) { ec_overflow = 1; return p; }
-    ec_blocks[ec_count].p = p;
-    ec_blocks[ec_count].size = size;
-    ec_blocks[ec_count].kind = kind;
-    ec_blocks[ec_count].freed = 0;
-    ec_count++;
+    ec_lock();
+    if (ec_count >= EC_MAX) {
+        ec_overflow = 1;
+    } else {
+        ec_blocks[ec_count].p = p;
+        ec_blocks[ec_count].size = size;
+        ec_blocks[ec_count].kind = kind;
+        ec_blocks[ec_count].freed = 0;
+        ec_count++;
+    }
+    ec_unlock();
     return p;
 }
 
@@ -85,14 +94,20 @@ static void* ec_calloc(size_t k, size_t n, const char* spelled) {
 
 static void ec_free(void* p) {
     if (!p) return;
+    ec_lock();
     /* Newest first: a block is most often freed soon after it is made. */
     for (int i = ec_count - 1; i >= 0; i--) {
         if (ec_blocks[i].p != p) continue;
-        if (ec_blocks[i].freed) { ec_double++; return; }
-        ec_blocks[i].freed = 1;
-        memset(p, 0xA5, ec_blocks[i].size);
+        if (ec_blocks[i].freed) {
+            ec_double++;
+        } else {
+            ec_blocks[i].freed = 1;
+            memset(p, 0xA5, ec_blocks[i].size);
+        }
+        ec_unlock();
         return;
     }
+    ec_unlock();
     free(p);
 }
 

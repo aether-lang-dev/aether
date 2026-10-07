@@ -190,7 +190,6 @@ void push_auto_defer(CodeGenerator* gen, const char* free_fn, const char* var_na
 void emit_defers_for_scope(CodeGenerator* gen);
 void emit_defers_through_scope(CodeGenerator* gen, int floor_depth);
 void emit_all_defers(CodeGenerator* gen);
-void emit_all_defers_protected(CodeGenerator* gen, char** protected_names, int protected_count);
 void enter_scope(CodeGenerator* gen);
 void exit_scope(CodeGenerator* gen);
 
