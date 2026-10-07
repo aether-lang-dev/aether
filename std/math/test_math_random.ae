@@ -30,6 +30,14 @@ main() {
     b2 = math.random_int(0, 1000000)
     b3 = math.random_int(0, 1000000)
     check(a1 == b1 && a2 == b2 && a3 == b3, "a seed replays its sequence")
+    // And it is splitmix64's sequence on every platform: the values below
+    // were computed independently from the published algorithm. Any other
+    // generator (the old rand()) fails this everywhere, not only where
+    // RAND_MAX is small.
+    check(a1 == 964678 && a2 == 892899 && a3 == 478616, "seed 7 gives splitmix64's draws (${a1} ${a2} ${a3})")
+    math.random_seed(7)
+    f1 = math.random_float()
+    check(f1 > 0.38982974839127 && f1 < 0.38982974839128, "seed 7's first random_float is splitmix64's (${f1})")
 
     // The whole span is reachable: 20000 draws from [0, 1000000] reach far
     // past 32767, and stay in range.

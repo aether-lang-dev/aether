@@ -183,6 +183,26 @@ main() {
                 spec.assert_err_contains(oerr, "exceeds 999 bytes", "one byte short of the cap is refused")
             }
 
+            spec.it("skips zero padding after the last gzip member") callback {
+                // Tape and block-padded .tar.gz files end in NULs; gzip -d and
+                // Python skip them.
+                n = string.length(SAMPLE)
+                p1, l1, e1 = zlib.gzip_deflate(string.bytes(SAMPLE)[0..n], 6)
+                spec.assert_ok(e1, "member")
+                b = bytes.new(l1 + 4)
+                bytes.copy_from_string(b, 0, p1, l1)
+                i = 0
+                while i < 4 {
+                    bytes.set(b, l1 + i, 0)
+                    i = i + 1
+                }
+                padded = bytes.finish(b, l1 + 4)
+                back, blen, derr = zlib.gzip_inflate(string.bytes(padded)[0..l1 + 4])
+                spec.assert_ok(derr, "zero padding is not an error")
+                spec.assert_eq(blen, n, "the member's bytes")
+                spec.assert_str_eq(back, SAMPLE, "content")
+            }
+
             spec.it("rejects bytes after the last gzip member") callback {
                 n = string.length(SAMPLE)
                 p1, l1, e1 = zlib.gzip_deflate(string.bytes(SAMPLE)[0..n], 6)

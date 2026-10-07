@@ -185,7 +185,9 @@ int zlib_try_inflate(const char* data, int length) {
 
         if (rc == Z_STREAM_END) {
             /* A zlib stream is one stream: input left after its end is not
-             * part of it, and was ignored without a word. */
+             * part of it, and was ignored without a word. Zero padding is
+             * skipped, as after a gzip member. */
+            while (strm.avail_in > 0 && strm.next_in[0] == 0) { strm.next_in++; strm.avail_in--; }
             if (strm.avail_in > 0) { aether_caps_free(out, cap); inflateEnd(&strm); return 0; }
             break;
         }
@@ -240,10 +242,14 @@ static int inflate_with_window_bits(const char* data, int length, int window_bit
             /* gzip (RFC 1952 2.2): a file is one or more members, and
              * decompressing it yields them all, as gzip -d does. Only the
              * first used to come back, the rest dropped with no error.
-             * Input after the last member that is not another member is
-             * malformed. Raw DEFLATE (ZIP entries) is framed by its
-             * container, which states the exact compressed size. */
+             * Zero bytes after a member are padding (tape and block-padded
+             * .tar.gz files have it; gzip -d and Python skip it). Anything
+             * else after the last member is malformed. Raw DEFLATE (ZIP
+             * entries) is framed by its container, which states the exact
+             * compressed size. */
             if (window_bits == 15 + 16 && strm.avail_in > 0) {
+                while (strm.avail_in > 0 && strm.next_in[0] == 0) { strm.next_in++; strm.avail_in--; }
+                if (strm.avail_in == 0) break;
                 if (strm.avail_in >= 2 && strm.next_in[0] == 0x1f && strm.next_in[1] == 0x8b &&
                     inflateReset(&strm) == Z_OK) {
                     continue;

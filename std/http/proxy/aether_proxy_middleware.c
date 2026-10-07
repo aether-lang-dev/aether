@@ -30,9 +30,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <time.h>
 #if defined(_WIN32)
 #  include <windows.h>
+#else
+#  include <unistd.h>
 #endif
 
 /* The std.http.client surface. Included directly now that the client and
@@ -41,6 +44,36 @@
  * definitions. */
 #include "../../net/aether_http.h"
 #include "../../net/aether_http_internal.h"
+
+/* Per-thread splitmix64 for retry jitter and trace/span ids. These used
+ * rand(), which nothing seeded: every process sent the same trace-id
+ * sequence (the ids collided across processes and restarts), and on
+ * Windows RAND_MAX is 32767. Seeded once per thread from the clock, the
+ * process id and a stack address, which differ across processes and
+ * threads; the values need to be distinct, not secret. */
+static _Thread_local uint64_t proxy_rng_state = 0;
+
+static uint64_t proxy_rng_next(void) {
+    if (proxy_rng_state == 0) {
+        uint64_t seed;
+#if defined(_WIN32)
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        seed = (uint64_t)t.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32);
+#else
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        seed = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 30) ^ ((uint64_t)getpid() << 32);
+#endif
+        int local;
+        seed ^= (uint64_t)(uintptr_t)&local;
+        proxy_rng_state = seed ? seed : 0x9E3779B97F4A7C15ULL;
+    }
+    uint64_t z = (proxy_rng_state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
 
 /* ----- hop-by-hop headers (RFC 7230 §6.1) ----- */
 
@@ -314,21 +347,28 @@ static int retry_backoff_ms(int base_ms, int attempt) {
     long max_ms = (long)base_ms;
     for (int i = 1; i < attempt && max_ms < 10000; i++) max_ms *= 2;
     if (max_ms > 10000) max_ms = 10000;
-    /* Full jitter: random in [0, max_ms]. rand() is fine here —
-     * jitter just spreads the thundering herd. */
-    int jitter = (int)((long)rand() * max_ms / RAND_MAX);
-    if (jitter < 0) jitter = 0;
-    return jitter;
+    /* Full jitter: uniform in [0, max_ms] (max_ms <= 10000, so the modulo
+     * bias over 64 bits is nil). Jitter only spreads the thundering herd. */
+    return (int)(proxy_rng_next() % (uint64_t)(max_ms + 1));
 }
 
 /* W3C Trace-Context: generate a 32-hex-digit trace-id and
- * 16-hex-digit span-id. rand() is sufficient for trace IDs —
- * they're not security-sensitive. */
+ * 16-hex-digit span-id. Distinct, not secret: proxy_rng_next. An all-zero
+ * id is invalid per the spec; 64 random bits per 16 digits make that a
+ * 2^-64 event, and the loop below redraws it rather than trust that. */
 static void trace_gen_id(char* out, size_t hex_chars) {
     static const char* hex = "0123456789abcdef";
-    for (size_t i = 0; i < hex_chars; i++) {
-        out[i] = hex[rand() & 0xf];
-    }
+    int nonzero = 0;
+    do {
+        uint64_t bits = 0;
+        for (size_t i = 0; i < hex_chars; i++) {
+            if ((i & 15) == 0) bits = proxy_rng_next();
+            unsigned d = (unsigned)(bits & 0xf);
+            bits >>= 4;
+            out[i] = hex[d];
+            if (d) nonzero = 1;
+        }
+    } while (!nonzero);
     out[hex_chars] = '\0';
 }
 

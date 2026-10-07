@@ -43,8 +43,8 @@ widen it and return `float`.
 `std.cryptography.random_bytes` for anything security-bearing. It is
 splitmix64: the same seed gives the same sequence on every platform.
 `random_int(min, max)` is uniform over `[min, max]`, both ends included, for
-any pair of ints. `random_float()` is uniform over `[0, 1)`, never 1.0, so
-`floor(random_float() * n)` is always below `n`.
+any pair of ints. `random_float()` is uniform over `[0, 1)`, never 1.0, so a
+random index computed as floor(random_float() * count) is always below count.
 
 `abs_int(INT_MIN)` is `INT_MIN`: an `int` wraps, and its most negative value
 has no positive counterpart. `min_float` / `max_float` return the other

@@ -183,7 +183,7 @@ to_iso8601(dt: DateTime) -> string {
         rest = dt
         rest.year = 0
         tail = string.substring(to_iso8601(rest), 4, 20)
-        ay = dt.year
+        ay = dt.year as long   // long: negating INT_MIN in int wraps
         sign = ""
         if ay < 0 {
             ay = 0 - ay
@@ -216,17 +216,35 @@ to_iso8601(dt: DateTime) -> string {
     return bytes_finish(buf, 20)
 }
 
-// Parse "YYYY-MM-DDTHH:MM:SS" with an optional trailing 'Z' (UTC). A space
-// may replace the 'T'. Returns the DateTime, or a non-empty error on a
-// malformed shape / out-of-range field. Nothing else may follow: an offset
-// or a fraction is parse_iso8601_offset's to read, and this function
-// accepting one meant dropping it (`+05:00` came back as the UTC instant
-// five hours late, with no error).
+// Parse "YYYY-MM-DDTHH:MM:SS" (UTC), optionally followed by a fraction of a
+// second (`.123` or `,123`, dropped: a DateTime holds whole seconds) and a
+// trailing 'Z' or 'z'. A space may replace the 'T'. Returns the DateTime, or
+// a non-empty error on a malformed shape / out-of-range field. An offset is
+// parse_iso8601_offset's to read: this function accepting one meant
+// dropping it (`+05:00` came back as the UTC instant five hours late, with
+// no error), so it is refused, as is any other trailing text. JavaScript's
+// toISOString form, "2024-01-02T03:04:05.123Z", parses.
 parse_iso8601(s: string) -> (DateTime, string) {
     n = string.length(s)
     if n < 19 { return zero_dt(), "time: string too short for ISO-8601" }
-    if n > 20 || (n == 20 && (string.char_at_n(s, n, 19) & 255) != 90) {
-        return zero_dt(), "time: unexpected text after the time (parse_iso8601_offset reads offsets and fractions)"
+    rest = 19
+    if rest < n {
+        c = string.char_at_n(s, n, rest) & 255
+        if c == 46 || c == 44 { // '.' or ','
+            j = rest + 1
+            while j < n && (string.char_at_n(s, n, j) & 255) >= 48 && (string.char_at_n(s, n, j) & 255) <= 57 {
+                j = j + 1
+            }
+            if j == rest + 1 { return zero_dt(), "time: a fraction of a second needs digits" }
+            rest = j
+        }
+    }
+    if rest < n {
+        c = string.char_at_n(s, n, rest) & 255
+        if c == 90 || c == 122 { rest = rest + 1 } // 'Z' / 'z'
+    }
+    if rest != n {
+        return zero_dt(), "time: unexpected text after the time (parse_iso8601_offset reads offsets)"
     }
     y = digits4(s, n, 0)
     mo = digits2(s, n, 5)

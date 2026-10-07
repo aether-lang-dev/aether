@@ -27,7 +27,9 @@
   `zip.open` took the last end-of-central-directory signature in the file
   without checking that the record's comment reached the end of the buffer.
   So a comment holding the signature opened as an empty archive with no
-  error. Only a record that ends the file is accepted now.
+  error. The record whose comment ends the file is preferred now; if bytes
+  were appended after the record and none does, the latest one that fits is
+  used, as Python's zipfile reads such archives.
 - **`std.zip` and `std.tar` can be imported together.** Their
   `ExtractOptions` structs differed, which is a compile error once both are
   imported. zip's now has tar's fields, so the two are one type and either

@@ -171,18 +171,29 @@ fn find_eocd(b: ptr, blen: int) -> int {
     max_back = 65557
     start = blen - max_back
     if start < 0 { start = 0 }
-    // The record ends the file: its comment-length field (at +20) must reach
-    // exactly the end of the buffer. A signature inside the comment fails
-    // that test (its own "comment" would end elsewhere), so keep scanning
-    // backward past it to the real record instead of taking the first match.
+    // The record normally ends the file: its comment-length field (at +20)
+    // reaches exactly the end of the buffer. A signature inside the comment
+    // fails that test (its own "comment" would end elsewhere), so the scan
+    // keeps going backward past it to the real record. An archive with bytes
+    // appended after the record (padding, a signature block) has no exact
+    // match; then the latest candidate whose comment fits inside the buffer
+    // is the record, as Python's zipfile reads it. Refusing those archives
+    // outright was a regression.
+    fallback = 0 - 1
     pos = blen - 22
     while pos >= start {
-        if u32(b, pos) == SIG_EOCD && pos + 22 + u16(b, pos + 20) == blen {
-            return pos
+        if u32(b, pos) == SIG_EOCD {
+            end = pos + 22 + u16(b, pos + 20)
+            if end == blen {
+                return pos
+            }
+            if end < blen && fallback < 0 {
+                fallback = pos
+            }
         }
         pos = pos - 1
     }
-    return -1
+    return fallback
 }
 
 // ---- central-directory parse -----------------------------------------------

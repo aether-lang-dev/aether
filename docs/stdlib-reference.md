@@ -3200,7 +3200,7 @@ seconds between: 2592000
 - `time.is_leap_year(y)` → `bool`, `time.days_in_month(y, m)` → `int` - Calendar queries
 - `time.add_seconds(dt, n)` / `add_minutes` / `add_hours` / `add_days` → `DateTime` - Arithmetic
 - `time.diff_seconds(a, b)` → `long`, `time.is_before(a, b)` / `time.is_after(a, b)` → `bool` - Comparison
-- `time.to_iso8601(dt)` → `string`, `time.parse_iso8601(s)` → `(DateTime, string)` - ISO-8601 round trip. `parse_iso8601` reads `YYYY-MM-DDTHH:MM:SS` with an optional `Z` and nothing after it (offsets and fractions are `parse_iso8601_offset`'s); `to_iso8601` writes a year outside 0..9999 in full, signed when negative
+- `time.to_iso8601(dt)` → `string`, `time.parse_iso8601(s)` → `(DateTime, string)` - ISO-8601 round trip. `parse_iso8601` reads `YYYY-MM-DDTHH:MM:SS`, an optional fraction (dropped) and an optional `Z` / `z`, and nothing else (an offset is `parse_iso8601_offset`'s); `to_iso8601` writes a year outside 0..9999 in full, signed when negative
 - `time.parse_iso8601_offset(s)` → `(DateTime, int, string)` - ISO-8601 as commonly written (a date alone, `T` or a space, optional seconds and fraction, a `Z`, `UTC` or `+HH:MM` zone): the instant and the offset it was written at, in seconds east of UTC
 - `time.strftime(dt, fmt)` / `time.strftime_at(dt, offset, fmt)` → `string` - Ruby's `Time#strftime` conversions and flags, at UTC or at an offset
 

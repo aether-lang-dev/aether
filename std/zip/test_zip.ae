@@ -92,6 +92,22 @@ fn check_eocd_comment() {
     string.free(out)
 }
 
+// Bytes appended after the EOCD record (padding, a signature block) leave
+// the archive readable: no candidate's comment then reaches the end exactly,
+// and the latest one that fits is the record, as Python's zipfile reads it.
+fn check_eocd_trailing_bytes() {
+    out, outn, _e = zip.create("a.txt", string.bytes("hello zip")[0..9], zip.METHOD_STORED, 0)
+    b = patchable(out, outn, 3)
+    ar, err = zip.open(bytes.view(b))
+    check("eocd with trailing bytes: open err", err, "")
+    if string.equals(err, "") == 1 {
+        check_int("eocd with trailing bytes: entry found", zip.count(ar), 1)
+        zip.close(ar)
+    }
+    bytes.free(b)
+    string.free(out)
+}
+
 // A stored entry is its own size: a central directory whose uncompressed
 // size disagrees (here 1 for 100 bytes) would make entry_size lie and let
 // extract write past max_entry_bytes.
@@ -477,6 +493,7 @@ main() {
     // ---- security regressions ----------------------------------------------
     println("--- security ---")
     check_eocd_comment()
+    check_eocd_trailing_bytes()
     check_lying_stored_size(base)
     check_zip64_fields()
     check_symlinked_parent(base)

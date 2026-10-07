@@ -81,6 +81,18 @@ main() {
     fails = fails + ck(be5 != "", "trailing text rejected")
     _, be6 = time.parse_iso8601("2024-01-01T00:00:00X")
     fails = fails + ck(be6 != "", "a 20th character other than Z rejected")
+    // A fraction (dropped) and a lowercase z are UTC stamps as written by
+    // JavaScript's toISOString and allowed by RFC 3339.
+    pf, pfe = time.parse_iso8601("2009-02-13T23:31:30.123Z")
+    fails = fails + ck(pfe == "" && pf.epoch == 1234567890, "fraction before Z accepted")
+    pz, pze = time.parse_iso8601("2009-02-13T23:31:30z")
+    fails = fails + ck(pze == "" && pz.epoch == 1234567890, "lowercase z accepted")
+    pc, pce = time.parse_iso8601("2009-02-13 23:31:30,5")
+    fails = fails + ck(pce == "" && pc.epoch == 1234567890, "comma fraction, no zone")
+    _, be7 = time.parse_iso8601("2009-02-13T23:31:30.Z")
+    fails = fails + ck(be7 != "", "a fraction without digits rejected")
+    _, be8 = time.parse_iso8601("2009-02-13T23:31:30.5+01:00")
+    fails = fails + ck(be8 != "", "an offset after a fraction rejected")
 
     // Years outside 0..9999 are written in full, signed when negative: both
     // were clamped to "0000".
