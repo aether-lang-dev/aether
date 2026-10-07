@@ -95,7 +95,7 @@ header comment is the authoritative description.
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 25 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 29 | [full section](#compression-stdzlib) |
 | `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 21 | — |
 | `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 20 | — |
 
