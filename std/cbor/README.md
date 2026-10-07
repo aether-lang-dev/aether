@@ -75,10 +75,19 @@ the whole input. It refuses, with an error rather than a value:
 - nesting deeper than 256 levels, the same limit as `std.json`
   (`cbor: nesting deeper than 256`);
 - a string length, or an array or map count, larger than the bytes left in
-  the input (`cbor: unexpected EOF`);
-- an integer, length or tag number of 2^63 or more, which the signed 64-bit
-  `get_long` cannot hold, and a negative integer below -2^63
-  (`cbor: integer out of range`).
+  the input, 2^63 and up included (`cbor: unexpected EOF`).
+
+Integers cover all of CBOR's range, 0 to 2^64-1 and -2^64 to -1, and
+round-trip through `encode` and `diagnose` (`18446744073709551615`,
+`-18446744073709551616`). `get_long` holds the signed 64-bit part and gives
+0 for the rest; `get_int64` returns the same value with an error
+(`cbor: integer outside the signed 64-bit range`) when it does not fit.
+`get_uint` reads a non-negative integer and `get_nint` the argument `n` of a
+negative one (the value is -1 - n), each as the bit pattern of a long, the
+way std passes an unsigned 64-bit value: 2^63 and up read negative as a
+long, and `std.bits`' `udiv64`, `urem64` and `ucmp64` treat them as
+unsigned. `from_uint` and `from_nint` build them. A tag number of 2^63 or
+more comes back from `get_tag_val` the same way.
 
 Compared with `std.msgpack`: both are binary JSON-shaped formats, and MessagePack
 is slightly more compact for small integers. CBOR is the one with an RFC, tags,
@@ -87,5 +96,6 @@ specifies it.
 
 ## Exports
 
-`parse`, `encode`, `diagnose`, `from_int`, `num`, `str`, `arr`, `obj`,
-`boolean`, `null_value`, `free`, and the `CBOR_*` type constants.
+`parse`, `encode`, `diagnose`, `from_int`, `from_uint`, `from_nint`, `num`,
+`str`, `arr`, `obj`, `boolean`, `null_value`, `get_long`, `get_int64`,
+`get_uint`, `get_nint`, `free`, and the `CBOR_*` type constants.

@@ -26,6 +26,7 @@ import std.mem
 exports(
     nil_value, boolean, from_int, num, str, bin, arr, map, ext,
     get_type, get_bool, get_int, get_float, get_string, get_bin, get_ext_type,
+    get_int64, get_uint, from_uint,
     array_size, array_get, array_add,
     map_size, map_get_key, map_get_value, map_get, map_set,
     free, pack, unpack,
@@ -47,10 +48,14 @@ const TYPE_EXT = 8
 // one-element arrays overflow the stack.
 const MAX_DEPTH = 256
 
+// An integer is i_val. A uint 64 of 2^63 or more does not fit a signed long:
+// u_big is 1 for one and i_val holds its 64 bits (#2510), the bit pattern
+// std passes an unsigned 64-bit value in.
 struct MsgValue {
     type_id: int
     b_val: bool
     i_val: long
+    u_big: int
     f_val: float
     s_bytes: ptr // owned AetherBytes for str/bin/ext payload (null if empty); freed in free()
     s_len: int // payload byte length
@@ -143,6 +148,16 @@ from_int(val: long) -> ptr {
     return v as ptr
 }
 
+// The non-negative integer whose unsigned 64 bits are `bits` (0..2^64-1),
+// the inverse of get_uint; 2^63 and up pack as a uint 64.
+from_uint(bits: long) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_INT
+    v.i_val = bits
+    if bits < 0 { v.u_big = 1 }
+    return v as ptr
+}
+
 num(val: float) -> ptr {
     let v = heap.new(MsgValue)
     v.type_id = TYPE_FLOAT
@@ -199,9 +214,35 @@ get_bool(val: ptr) -> bool {
     return (val as *MsgValue).b_val
 }
 
+// The integer, or 0 for a uint 64 of 2^63 or more (get_int64 says so;
+// get_uint reads it).
 get_int(val: ptr) -> long {
     if val == null { return 0 }
-    return (val as *MsgValue).i_val
+    let v = val as *MsgValue
+    if v.u_big != 0 { return 0 }
+    return v.i_val
+}
+
+// The integer as a signed long, or an error when `val` is not an integer
+// or is a uint 64 of 2^63 or more (#2510).
+get_int64(val: ptr) -> long! {
+    if val == null { return 0, "not an integer" }
+    let v = val as *MsgValue
+    if v.type_id != TYPE_INT { return 0, "not an integer" }
+    if v.u_big != 0 { return 0, "integer outside the signed 64-bit range" }
+    return v.i_val, ""
+}
+
+// A non-negative integer, 0..2^64-1, as the bit pattern of a long: 2^63 and
+// up read negative as a long, and std.bits' udiv64, urem64 and ucmp64 treat
+// them as the unsigned values they are. An error for a negative integer or
+// anything else.
+get_uint(val: ptr) -> long! {
+    if val == null { return 0, "not an integer" }
+    let v = val as *MsgValue
+    if v.type_id != TYPE_INT { return 0, "not an integer" }
+    if v.u_big != 0 || v.i_val >= 0 { return v.i_val, "" }
+    return 0, "not a non-negative integer"
 }
 
 get_float(val: ptr) -> float {
@@ -440,6 +481,11 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
     }
     if m.type_id == 2 { // TYPE_INT
         let i = m.i_val
+        if m.u_big != 0 {
+            bytes.set(b, offset, 0xcf)
+            bytes.set_be64(b, offset + 1, i)
+            return offset + 9
+        }
         if i >= 0 {
             if i <= 127 {
                 bytes.set(b, offset, i)
@@ -943,12 +989,12 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
     if m == 0xcf {
         if cursor.remaining(c) < 8 { return null, "EOF reading u64" }
         let i = cursor.read_be_u64(c)
-        // get_int returns a signed long: 2^63 and up would come back
-        // negative (2^64-1 as -1), so they are refused.
-        if i < 0 { return null, "integer out of range" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
+        // 2^63 and up read negative as a long: keep the bits and mark them
+        // unsigned, rather than refuse a value MessagePack allows (#2510).
+        if i < 0 { v.u_big = 1 }
         return v as ptr, ok
     }
 

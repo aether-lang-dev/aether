@@ -234,9 +234,8 @@ fn appendix(hex_data: string, want: string) -> int {
     return 0
 }
 
-// RFC 8949 Appendix A, every row. The two integers past 2^63 are refused by
-// design (get_long cannot hold them; see the README), and the bignum tags 2
-// and 3 are shown as the tag they are.
+// RFC 8949 Appendix A, every row, the integers past the signed 64-bit range
+// included (#2510). The bignum tags 2 and 3 are shown as the tag they are.
 fn test_appendix_a() -> int {
     f = 0
     f = f + appendix("00", "0")
@@ -249,9 +248,9 @@ fn test_appendix_a() -> int {
     f = f + appendix("1903e8", "1000")
     f = f + appendix("1a000f4240", "1000000")
     f = f + appendix("1b000000e8d4a51000", "1000000000000")
-    f = f + expect_error("1bffffffffffffffff", "cbor: integer out of range")
+    f = f + appendix("1bffffffffffffffff", "18446744073709551615")
     f = f + appendix("c249010000000000000000", "2(h'010000000000000000')")
-    f = f + expect_error("3bffffffffffffffff", "cbor: integer out of range")
+    f = f + appendix("3bffffffffffffffff", "-18446744073709551616")
     f = f + appendix("c349010000000000000000", "3(h'010000000000000000')")
     f = f + appendix("20", "-1")
     f = f + appendix("29", "-10")
@@ -504,6 +503,70 @@ fn test_container_keys() -> int {
     return f
 }
 
+// Integers outside the signed long: the accessors (#2510).
+fn test_big_integers() -> int {
+    f = 0
+    data, _ = encoding.hex_decode("1bffffffffffffffff") // 2^64 - 1
+    u, err = cbor.parse(data)
+    if err != "" { println("  FAIL parse 2^64-1: ${err}") return 1 }
+    ub, uerr = cbor.get_uint(u)
+    if uerr != "" || ub != -1 { println("  FAIL get_uint(2^64-1) = ${ub} '${uerr}'") f = f + 1 }
+    _l, lerr = cbor.get_int64(u)
+    if lerr != "cbor: integer outside the signed 64-bit range" { println("  FAIL get_int64(2^64-1) err '${lerr}'") f = f + 1 }
+    if cbor.get_long(u) != 0 { println("  FAIL get_long(2^64-1) = ${cbor.get_long(u)}, want 0") f = f + 1 }
+    _n, nerr = cbor.get_nint(u)
+    if nerr == "" { println("  FAIL get_nint of an unsigned integer") f = f + 1 }
+    if cbor.get_float(u) != 18446744073709551615.0 { println("  FAIL get_float(2^64-1) = ${cbor.get_float(u)}") f = f + 1 }
+    cbor.free(u)
+
+    data2, _ = encoding.hex_decode("3bffffffffffffffff") // -2^64
+    n, err2 = cbor.parse(data2)
+    if err2 != "" { println("  FAIL parse -2^64: ${err2}") return f + 1 }
+    nb, nerr2 = cbor.get_nint(n)
+    if nerr2 != "" || nb != -1 { println("  FAIL get_nint(-2^64) = ${nb} '${nerr2}'") f = f + 1 }
+    _u2, uerr2 = cbor.get_uint(n)
+    if uerr2 == "" { println("  FAIL get_uint of a negative integer") f = f + 1 }
+    _l2, lerr2 = cbor.get_int64(n)
+    if lerr2 != "cbor: integer outside the signed 64-bit range" { println("  FAIL get_int64(-2^64) err '${lerr2}'") f = f + 1 }
+    cbor.free(n)
+
+    // In range, the accessors agree with get_long.
+    small = cbor.from_int(-5)
+    sv, serr = cbor.get_int64(small)
+    sn, snerr = cbor.get_nint(small)
+    if serr != "" || sv != -5 || snerr != "" || sn != 4 { println("  FAIL from_int(-5): int64 ${sv} nint ${sn}") f = f + 1 }
+    cbor.free(small)
+
+    // The constructors build the same values, which encode as RFC 8949
+    // Appendix A has them and compare equal to the parsed ones.
+    bu = cbor.from_uint(-1)
+    if enc_hex(bu) != "1bffffffffffffffff" { println("  FAIL from_uint(2^64-1) encodes ${enc_hex(bu)}") f = f + 1 }
+    bn = cbor.from_nint(-1)
+    if enc_hex(bn) != "3bffffffffffffffff" { println("  FAIL from_nint(2^64-1) encodes ${enc_hex(bn)}") f = f + 1 }
+    bnd, _ = cbor.diagnose(bn)
+    if bnd != "-18446744073709551616" { println("  FAIL from_nint(2^64-1) diagnoses ${bnd}") f = f + 1 }
+    small_u = cbor.from_uint(7)
+    if enc_hex(small_u) != "07" { println("  FAIL from_uint(7) encodes ${enc_hex(small_u)}") f = f + 1 }
+    small_n = cbor.from_nint(0)
+    if enc_hex(small_n) != "20" || cbor.get_long(small_n) != -1 { println("  FAIL from_nint(0) encodes ${enc_hex(small_n)}") f = f + 1 }
+
+    // As map keys, a big integer matches only itself.
+    m = cbor.obj()
+    _ = cbor.map_set(m, bu, cbor.str("max"))
+    _ = cbor.map_set(m, cbor.from_int(-1), cbor.str("minus one"))
+    probe = cbor.from_uint(-1)
+    pv, _ = cbor.map_get(m, probe)
+    ps, _ = cbor.get_string(pv)
+    if ps != "max" { println("  FAIL map_get by 2^64-1: '${ps}'") f = f + 1 }
+    cbor.free(probe)
+    cbor.free(m)
+    cbor.free(bn)
+    cbor.free(small_u)
+    cbor.free(small_n)
+    if f == 0 { println("  PASS: integers past the signed 64-bit range") }
+    return f
+}
+
 main() {
     println("=== test_cbor ===")
     fails = 0
@@ -576,13 +639,17 @@ main() {
     fails = fails + test_set_replaces()
 
     // ---- 64-bit integer limits ----
-    // The extremes of the signed long the API returns round-trip; one past
-    // either end is refused rather than coming back with its sign flipped.
+    // The extremes of the signed long round-trip, and so does the rest of
+    // CBOR's range past them (#2510): a value is never read with its sign
+    // flipped, and get_long reports what does not fit instead.
     fails = fails + run_test("1b7fffffffffffffff", "9223372036854775807")
     fails = fails + run_test("3b7fffffffffffffff", "-9223372036854775808")
-    fails = fails + expect_error("1bffffffffffffffff", "cbor: integer out of range")
-    fails = fails + expect_error("1b8000000000000000", "cbor: integer out of range")
-    fails = fails + expect_error("3b8000000000000000", "cbor: integer out of range")
+    fails = fails + run_test("1b8000000000000000", "9223372036854775808")
+    fails = fails + run_test("3b8000000000000000", "-9223372036854775809")
+    fails = fails + run_test("1bfffffffffffffffe", "18446744073709551614")
+    fails = fails + run_test("3bfffffffffffffffe", "-18446744073709551615")
+    fails = fails + run_test("db8000000000000000f6", "9223372036854775808(null)")
+    fails = fails + test_big_integers()
 
     // ---- Hostile lengths ----
     // Lengths and counts of 2^31 and up, larger than the input, were
@@ -593,7 +660,9 @@ main() {
     fails = fails + expect_error("9a80000000", "cbor: unexpected EOF")
     fails = fails + expect_error("9b0000000100000000", "cbor: unexpected EOF")
     fails = fails + expect_error("bb00000001000000010102", "cbor: unexpected EOF")
-    fails = fails + expect_error("5bffffffffffffffff", "cbor: integer out of range")
+    fails = fails + expect_error("5bffffffffffffffff", "cbor: unexpected EOF")
+    fails = fails + expect_error("9b8000000000000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("bbffffffffffffffff", "cbor: unexpected EOF")
     // A map whose count needs more bytes than are left is truncated.
     fails = fails + expect_error("a201", "cbor: unexpected EOF")
 

@@ -22,7 +22,7 @@ header comment is the authoritative description.
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 16 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
-| `std.cbor` | CBOR encoding and decoding (RFC 8949). | 45 | [guide](../std/cbor/README.md) · [source](../std/cbor/module.ae) |
+| `std.cbor` | CBOR encoding and decoding (RFC 8949). | 50 | [guide](../std/cbor/README.md) · [source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 12 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
@@ -56,7 +56,7 @@ header comment is the authoritative description.
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 173 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
-| `std.msgpack` | MessagePack serialisation and deserialisation. | 36 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
+| `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 67 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
@@ -1700,6 +1700,7 @@ keys 2
 - `msgpack.array_add(a, v)`, `msgpack.map_set(m, key, v)` - Build
 - `msgpack.array_size(a)` / `array_get(a, i)`, `msgpack.map_size(m)` / `map_get(m, key)` / `map_get_key(m, i)` / `map_get_value(m, i)` - Read
 - `msgpack.get_type(v)` → `int`, and `get_bool` / `get_int` / `get_float` / `get_string` / `get_bin` - Unwrap
+- `msgpack.get_int64(v)` → `(long, string)` - The integer, or an error for a uint 64 of 2^63 or more; `msgpack.get_uint(v)` → `(long, string)` - A non-negative integer as the bit pattern of a long; `msgpack.from_uint(bits)` builds one
 - `msgpack.pack(v)` → `string`, `msgpack.unpack(bytes)` → `(ptr, string)` - `unpack` reads exactly one value; trailing bytes are an error
 - `msgpack.free(v)` - Release a value and everything under it
 
@@ -1759,6 +1760,7 @@ diag {"id": 42, "name": "widget"}
 - `cbor.set(o, key, v)` / `object_set` / `map_set`, `cbor.push(a, v)` / `array_add` - Build
 - `cbor.object_get(o, key)` → `(ptr, string)`, `cbor.map_get`, `cbor.object_size` / `array_size` / `object_entry` - Read
 - `cbor.type(v)` → `int`, `cbor.is_null(v)` / `is_undefined(v)`, and `get_bool` / `get_int` / `get_long` / `get_float` / `get_string` / `get_bytes` / `get_tag_val` / `get_tag_child` - Unwrap
+- `cbor.get_int64(v)` → `(long, string)` - The integer, or an error when it is outside the signed 64-bit range; `cbor.get_uint(v)` / `cbor.get_nint(v)` → `(long, string)` - A non-negative integer, or the argument n of a negative one (-1 - n), as the bit pattern of a long, so all of CBOR's 0..2^64-1 and -2^64..-1 is reachable; `cbor.from_uint(bits)` / `cbor.from_nint(bits)` build them
 - `cbor.encode(v)` → `(string, string)`, `cbor.parse(bytes)` → `(ptr, string)` - `parse` reads exactly one well-formed data item: trailing bytes, anything RFC 8949 Appendix F lists as not well-formed, and invalid UTF-8 in text are errors. A parsed value encodes back byte for byte; a built one in preferred serialization
 - `cbor.diagnose(v)` → `(string, string)` - Diagnostic notation, exact: shortest round-trip floats, JSON text escapes, and the RFC 8949 §8.1 encoding indicators (`[_ 1]`, `1.5_3`) where a parsed item was not in preferred serialization
 - `cbor.free(v)` - Release a value and everything under it
@@ -1859,11 +1861,17 @@ main() {
 these, rather than handing back events for a broken tree: an end tag that
 does not close the innermost open element (`<a><b></a>`), closes none
 (`</x>`) or has no name (`</>`); an element still open at the end of the
-document (`<root><item>`); attributes not separated by whitespace
-(`<a x="1"y="2"/>`); a character reference that is malformed (`&#x;`,
-`&#X41;`) or names a character XML 1.0 does not allow (`&#0;`, a surrogate
-such as `&#xD800;`, anything past `&#x10FFFF;`). Legal references decode to
-UTF-8, supplementary planes included. `xml.error(p)` names the problem and
+document (`<root><item>`); no root element, a second one (`<a/><b/>`), or
+text or CDATA outside it (`<a/>x`); attributes not separated by whitespace
+(`<a x="1"y="2"/>`) or named twice in one tag (`<a x="1" x="2"/>`); a raw
+control character other than tab, LF and CR in text or an attribute value;
+a character reference that is malformed (`&#x;`, `&#X41;`) or names a
+character XML 1.0 does not allow (`&#0;`, a surrogate such as `&#xD800;`,
+anything past `&#x10FFFF;`); a `&` that starts no reference (`a & b`); a
+reference to an entity other than `&amp; &lt; &gt; &quot; &apos;` (`&nbsp;`):
+the reader reads no DTD, so no other entity is declared. Legal references
+decode to UTF-8, supplementary planes included. Whitespace, the prolog,
+comments and a UTF-8 byte order mark may surround the root element. `xml.error(p)` names the problem and
 ends in `(line L, column C, byte N)`: the 1-based line, the 1-based column
 in bytes, and the byte offset.
 

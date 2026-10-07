@@ -8,10 +8,14 @@
 //
 // The reader stops with EVENT_ERROR at the first well-formedness error it
 // checks for: an end tag that does not close the innermost open element,
-// closes none or has no name; an element still open at the end; attributes
-// not separated by whitespace; a character reference that is malformed or
-// names a character XML does not allow (&#0;, a surrogate, past U+10FFFF).
-// `error` then ends in "(line L, column C, byte N)".
+// closes none or has no name; an element still open at the end; no root
+// element, a second one, or text outside it; attributes not separated by
+// whitespace or named twice in one tag; a raw control character other than
+// tab, LF and CR; a character reference that is malformed or names a
+// character XML does not allow (&#0;, a surrogate, past U+10FFFF); a '&'
+// that starts no reference, or a reference to an entity other than the five
+// predefined ones (no DTD is read). `error` then ends in
+// "(line L, column C, byte N)".
 //
 // Reader — pull one event at a time:
 //   p = xml.parser(body)

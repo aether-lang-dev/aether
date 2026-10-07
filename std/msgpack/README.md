@@ -47,13 +47,20 @@ the whole input. It refuses, with an error rather than a value:
 - nesting deeper than 256 levels, the same limit as `std.json`
   (`nesting deeper than 256`);
 - a str, bin or ext length, or an array or map count, larger than the bytes
-  left in the input (`EOF reading ...`);
-- a uint 64 of 2^63 or more, which the signed 64-bit `get_int` cannot hold
-  (`integer out of range`).
+  left in the input (`EOF reading ...`).
+
+A uint 64 of 2^63 or more unpacks, and packs back as a uint 64. `get_int`
+holds the signed 64-bit part and gives 0 for it; `get_int64` returns the
+same value with an error (`integer outside the signed 64-bit range`) when
+it does not fit, and `get_uint` reads any non-negative integer as the bit
+pattern of a long, the way std passes an unsigned 64-bit value (`std.bits`'
+`udiv64`, `urem64` and `ucmp64` treat it as unsigned). `from_uint` builds
+one.
 
 ## Exports
 
 `nil_value`, `boolean`, `from_int`, `num`, `str`, `bin`, `arr`, `map`, `ext`,
-`pack`, `unpack`, `get_type`, `get_bool`, `get_int`, `get_float`, `get_string`,
+`from_uint`, `pack`, `unpack`, `get_type`, `get_bool`, `get_int`, `get_int64`,
+`get_uint`, `get_float`, `get_string`,
 `get_bin`, `get_ext_type`, `array_size`, `array_get`, `array_add`, `map_size`,
 `map_get`, `map_set`, `map_get_key`, `map_get_value`, `free`.

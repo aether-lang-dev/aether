@@ -62,9 +62,14 @@ const char* xml_event_attr_str(XmlParser* p, const char* name);
  * bytes, and the byte offset of the error in the document. The reader stops
  * at the first well-formedness error it checks for: an end tag that does
  * not close the innermost open element (or closes none, or has no name),
- * an element still open at the end of the document, attributes not
- * separated by whitespace, and a character reference that is malformed or
- * names a character outside production [2] Char. */
+ * an element still open at the end of the document, no root element or a
+ * second one, text or CDATA outside the root element, attributes not
+ * separated by whitespace or named twice in one tag, a raw control
+ * character other than tab, LF and CR in text or an attribute value, a
+ * character reference that is malformed or names a character outside
+ * production [2] Char, a '&' that starts no reference, and a reference to
+ * an entity other than the five predefined ones (no DTD is read, so no
+ * other entity is declared). */
 const char* xml_parser_error(XmlParser* p);
 
 /* ---- Escaping builder --------------------------------------------- */

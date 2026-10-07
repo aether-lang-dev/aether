@@ -123,35 +123,81 @@ static size_t read_char_ref(const char* p, size_t n, size_t i, unsigned long* cp
     return k + 1;
 }
 
+/* A C0 control character other than tab, LF and CR: production [2] Char
+ * leaves them out of every document, raw as much as by reference (#2510). */
+static int is_forbidden_control(char c) {
+    unsigned char u = (unsigned char)c;
+    return u < 0x20 && u != 0x9 && u != 0xA && u != 0xD;
+}
+
+/* ASCII letters, '_' and ':' start a Name; digits, '.' and '-' may follow.
+ * A byte of a multi-byte UTF-8 sequence is taken as a name character, so
+ * non-ASCII names are not refused (the reader does not decode them). */
+static int is_name_start_byte(char c) {
+    unsigned char u = (unsigned char)c;
+    return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_' || u == ':' || u >= 0x80;
+}
+
+static int is_name_byte(char c) {
+    return is_name_start_byte(c) || (c >= '0' && c <= '9') || c == '.' || c == '-';
+}
+
 /* Decode XML character data [p, p+n) into a freshly malloc'd string in
  * *out with references resolved. Returns 0 on success, -1 on allocation
- * failure, and -2 (not a Char) or -3 (malformed) with *bad set to the
- * offset of the '&' when a character reference is not well-formed (#2471).
- * Named references other than the five predefined ones are passed through
- * verbatim (lenient, as before: this reader declares no entities). */
+ * failure, or a negative XML_BAD_* with *bad set to the offset of the
+ * offending byte: a character reference that is malformed or not a Char
+ * (#2471), a '&' that starts no reference, a reference to an entity other
+ * than the five predefined ones (this reader declares none and reads no
+ * DTD, so XML 1.0's WFC: Entity Declared makes it an error), or a raw
+ * control character (#2510). */
+enum {
+    XML_BAD_CHAR = -2,      /* character reference to a non-Char */
+    XML_BAD_CHARREF = -3,   /* malformed character reference */
+    XML_BAD_AMP = -4,       /* '&' that starts no reference */
+    XML_BAD_ENTITY = -5,    /* undeclared entity */
+    XML_BAD_CONTROL = -6    /* raw control character */
+};
+
 static int xml_decode(const char* p, size_t n, char** out_text, size_t* bad) {
     Sb out;
     sb_init(&out);
     size_t i = 0;
     while (i < n) {
         char c = p[i];
-        if (c != '&') { sb_putc(&out, c); i++; continue; }
+        if (c != '&') {
+            if (is_forbidden_control(c)) {
+                free(out.data);
+                *bad = i;
+                return XML_BAD_CONTROL;
+            }
+            sb_putc(&out, c);
+            i++;
+            continue;
+        }
         if (i + 1 < n && p[i + 1] == '#') {
             unsigned long cp = 0;
             size_t next = read_char_ref(p, n, i, &cp);
             if (next == 0 || !is_xml_char(cp)) {
                 free(out.data);
                 *bad = i;
-                return next == 0 ? -3 : -2;
+                return next == 0 ? XML_BAD_CHARREF : XML_BAD_CHAR;
             }
             sb_put_utf8(&out, cp);
             i = next;
             continue;
         }
-        /* Find the terminating ';' within a sane window. */
+        /* EntityRef ::= '&' Name ';'. A bare '&' (production [14] keeps
+         * it out of character data) and a name other than the five
+         * predefined ones used to pass through verbatim. */
         size_t semi = i + 1;
-        while (semi < n && semi < i + 12 && p[semi] != ';') semi++;
-        if (semi >= n || p[semi] != ';') { sb_putc(&out, c); i++; continue; }
+        if (semi < n && is_name_start_byte(p[semi])) {
+            while (semi < n && is_name_byte(p[semi])) semi++;
+        }
+        if (semi == i + 1 || semi >= n || p[semi] != ';') {
+            free(out.data);
+            *bad = i;
+            return XML_BAD_AMP;
+        }
         size_t elen = semi - (i + 1);
         const char* e = p + i + 1;
         if (elen == 3 && memcmp(e, "amp", 3) == 0)       sb_putc(&out, '&');
@@ -159,7 +205,11 @@ static int xml_decode(const char* p, size_t n, char** out_text, size_t* bad) {
         else if (elen == 2 && memcmp(e, "gt", 2) == 0)   sb_putc(&out, '>');
         else if (elen == 4 && memcmp(e, "quot", 4) == 0) sb_putc(&out, '"');
         else if (elen == 4 && memcmp(e, "apos", 4) == 0) sb_putc(&out, '\'');
-        else sb_append(&out, p + i, semi - i + 1);  /* unknown entity: verbatim */
+        else {
+            free(out.data);
+            *bad = i;
+            return XML_BAD_ENTITY;
+        }
         i = semi + 1;
     }
     *out_text = sb_finish(&out);
@@ -185,6 +235,7 @@ struct XmlParser {
     char**   open;            /* names of the elements open at pos, outermost first */
     int      depth;
     int      open_cap;
+    int      roots;           /* top-level elements started so far */
     int      errored;
     char     err[256];
 };
@@ -211,6 +262,12 @@ XmlParser* xml_parser_new(const char* data, size_t len) {
     if (len) memcpy(p->buf, data, len);
     p->buf[len] = '\0';
     p->len = len;
+    /* A UTF-8 byte order mark may open a document; it is not text outside
+     * the root element. */
+    if (len >= 3 && (unsigned char)p->buf[0] == 0xEF && (unsigned char)p->buf[1] == 0xBB &&
+        (unsigned char)p->buf[2] == 0xBF) {
+        p->pos = 3;
+    }
     return p;
 }
 
@@ -259,12 +316,34 @@ static char* decode_or_fail(XmlParser* p, size_t start, size_t end) {
     char* text = NULL;
     size_t bad = 0;
     int rc = xml_decode(p->buf + start, end - start, &text, &bad);
-    if (rc == -2) {
+    if (rc == XML_BAD_CHAR) {
         xml_fail_at(p, start + bad, "character reference to a character XML does not allow");
         return NULL;
     }
-    if (rc == -3) {
+    if (rc == XML_BAD_CHARREF) {
         xml_fail_at(p, start + bad, "malformed character reference");
+        return NULL;
+    }
+    if (rc == XML_BAD_AMP) {
+        xml_fail_at(p, start + bad, "'&' that does not start a reference (write &amp;)");
+        return NULL;
+    }
+    if (rc == XML_BAD_ENTITY) {
+        /* Name the entity: [&, ;] is within the run that was decoded. */
+        const char* e = p->buf + start + bad + 1;
+        const char* semi = memchr(e, ';', end - (start + bad + 1));
+        int nlen = semi ? (int)(semi - e) : 0;
+        char msg[160];
+        snprintf(msg, sizeof(msg), "reference to undeclared entity &%.*s; (only &amp; &lt; &gt; &quot; &apos; are predefined)",
+                 nlen > 60 ? 60 : nlen, e);
+        xml_fail_at(p, start + bad, msg);
+        return NULL;
+    }
+    if (rc == XML_BAD_CONTROL) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "control character 0x%02X, which XML does not allow",
+                 (unsigned)(unsigned char)p->buf[start + bad]);
+        xml_fail_at(p, start + bad, msg);
         return NULL;
     }
     if (rc != 0) {
@@ -353,13 +432,22 @@ int xml_next(XmlParser* p) {
                          p->open[p->depth - 1]);
                 return xml_fail(p, msg);
             }
+            /* A document is exactly one element (production [1]) (#2510). */
+            if (p->roots == 0) return xml_fail(p, "no root element");
             return XML_EVENT_EOF;
         }
 
         if (p->buf[p->pos] != '<') {
-            /* Character data up to the next '<'. */
+            /* Character data up to the next '<'. Outside the root element
+             * only whitespace may appear (productions [1] and [27]). */
             size_t start = p->pos;
             while (p->pos < p->len && p->buf[p->pos] != '<') p->pos++;
+            if (p->depth == 0) {
+                for (size_t k = start; k < p->pos; k++) {
+                    if (!is_xml_space(p->buf[k]))
+                        return xml_fail_at(p, k, "text outside the root element");
+                }
+            }
             p->text = decode_or_fail(p, start, p->pos);
             if (!p->text) return XML_EVENT_ERROR;
             return XML_EVENT_TEXT;
@@ -374,10 +462,19 @@ int xml_next(XmlParser* p) {
             continue;
         }
         if (remain >= 9 && memcmp(p->buf + p->pos, "<![CDATA[", 9) == 0) {
+            if (p->depth == 0) return xml_fail(p, "CDATA outside the root element");
             size_t s = p->pos + 9;
             const char* end = strstr(p->buf + s, "]]>");
             if (!end) return xml_fail(p, "unterminated CDATA");
             size_t n = (size_t)(end - (p->buf + s));
+            for (size_t k = s; k < s + n; k++) {
+                if (is_forbidden_control(p->buf[k])) {
+                    char msg[96];
+                    snprintf(msg, sizeof(msg), "control character 0x%02X, which XML does not allow",
+                             (unsigned)(unsigned char)p->buf[k]);
+                    return xml_fail_at(p, k, msg);
+                }
+            }
             p->text = (char*)malloc(n + 1);
             if (!p->text) return xml_fail(p, "out of memory in CDATA");
             memcpy(p->text, p->buf + s, n);
@@ -437,10 +534,20 @@ int xml_next(XmlParser* p) {
         }
 
         /* Start element <name attr="v" ... > or <name/> */
+        size_t tag = p->pos;
         p->pos++;  /* past '<' */
         p->name = read_name(p);
         if (!p->name) return xml_fail(p, "out of memory reading start tag");
         if (p->name[0] == '\0') return xml_fail(p, "empty element name");
+        if (p->depth == 0) {
+            /* A second top-level element (#2510). */
+            if (p->roots > 0) {
+                char msg[160];
+                snprintf(msg, sizeof(msg), "second root element <%.100s>: a document has one", p->name);
+                return xml_fail_at(p, tag, msg);
+            }
+            p->roots++;
+        }
 
         for (;;) {
             /* Attributes are separated by whitespace (production [40]):
@@ -465,9 +572,19 @@ int xml_next(XmlParser* p) {
             }
             if (!spaced) return xml_fail(p, "missing whitespace before attribute");
             /* attribute: name (ws) = (ws) quote value quote */
+            size_t at = p->pos;
             char* aname = read_name(p);
             if (!aname) return xml_fail(p, "out of memory reading attribute");
             if (aname[0] == '\0') { free(aname); return xml_fail(p, "malformed attribute"); }
+            /* WFC: Unique Att Spec (#2510). */
+            for (int k = 0; k < p->attr_count; k++) {
+                if (strcmp(p->attrs[k].name, aname) == 0) {
+                    char msg[160];
+                    snprintf(msg, sizeof(msg), "attribute %.100s appears twice in one tag", aname);
+                    free(aname);
+                    return xml_fail_at(p, at, msg);
+                }
+            }
             skip_ws(p);
             if (p->pos >= p->len || p->buf[p->pos] != '=') {
                 free(aname);

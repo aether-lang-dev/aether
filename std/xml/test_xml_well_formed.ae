@@ -1,7 +1,8 @@
 // Regression (#2471): std.xml reports the first well-formedness error, with
 // its position, instead of handing back events for a broken tree; and it
 // decodes character references per XML 1.0 section 4.1, refusing any that
-// does not name a legal Char.
+// does not name a legal Char. #2510 adds one root element, unique attribute
+// names, no raw control characters, and no undeclared entities.
 
 import std.xml
 import std.string
@@ -110,6 +111,36 @@ main() {
     fails = fails + accept("<a>&#9;&#xA;&#xd;</a>", raw(9, 10, 13, 0, 3))
     fails = fails + accept("<a x=\"1\"\ty='2'\n/>", "")
     fails = fails + accept("<a><b/><c>t</c></a>", "t")
+
+    // ---- One root element (#2510) ----
+    fails = fails + refuse("<a/><b/>", "second root element <b>: a document has one (line 1, column 5, byte 4)")
+    fails = fails + refuse("<a></a>\n<a></a>", "second root element <a>")
+    fails = fails + refuse("<a/>x", "text outside the root element (line 1, column 5, byte 4)")
+    fails = fails + refuse("x<a/>", "text outside the root element (line 1, column 1, byte 0)")
+    fails = fails + refuse("<![CDATA[x]]><a/>", "CDATA outside the root element (line 1, column 1, byte 0)")
+    fails = fails + refuse("", "no root element")
+    fails = fails + refuse("<?xml version=\"1.0\"?><!-- nothing -->", "no root element")
+    // Whitespace, the prolog, comments and a byte order mark may surround it.
+    fails = fails + accept("<?xml version=\"1.0\"?>\n<!-- c -->\n<a>t</a>\n", "\n")
+    fails = fails + accept(string.concat(raw(239, 187, 191, 0, 3), "<a>t</a>"), "t")
+
+    // ---- Unique attribute names (#2510) ----
+    fails = fails + refuse("<a x=\"1\" x=\"2\"/>", "attribute x appears twice in one tag (line 1, column 10, byte 9)")
+    fails = fails + accept("<a x=\"1\" y=\"1\" X=\"1\">t</a>", "t")
+
+    // ---- No raw control characters but tab, LF and CR (#2510) ----
+    fails = fails + refuse(string.concat("<a>x", string.concat(raw(1, 0, 0, 0, 1), "y</a>")), "control character 0x01, which XML does not allow (line 1, column 5, byte 4)")
+    fails = fails + refuse(string.concat("<a b=\"", string.concat(raw(27, 0, 0, 0, 1), "\"/>")), "control character 0x1B, which XML does not allow (line 1, column 7, byte 6)")
+    fails = fails + refuse(string.concat("<a><![CDATA[", string.concat(raw(31, 0, 0, 0, 1), "]]></a>")), "control character 0x1F, which XML does not allow")
+    fails = fails + accept(string.concat("<a>", string.concat(raw(9, 10, 13, 0, 3), "</a>")), raw(9, 10, 13, 0, 3))
+
+    // ---- Only the five predefined entities (#2510) ----
+    fails = fails + refuse("<a>x&foo;y</a>", "reference to undeclared entity &foo; (only &amp; &lt; &gt; &quot; &apos; are predefined) (line 1, column 5, byte 4)")
+    fails = fails + refuse("<a b=\"&nbsp;\"/>", "reference to undeclared entity &nbsp;")
+    fails = fails + refuse("<a>x & y</a>", "'&' that does not start a reference (write &amp;) (line 1, column 6, byte 5)")
+    fails = fails + refuse("<a>&;</a>", "'&' that does not start a reference")
+    fails = fails + refuse("<a>&amp</a>", "'&' that does not start a reference")
+    fails = fails + accept("<a>&amp;&lt;&gt;&quot;&apos;</a>", "&<>\"'")
 
     if fails > 0 {
         println("FAIL: ${fails} checks failed")

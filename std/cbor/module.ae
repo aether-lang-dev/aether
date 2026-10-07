@@ -17,6 +17,7 @@ exports(
     get_bool, get_int, get_long, get_float, get_string, get_bytes, get_tag_val, get_tag_child,
     object_get, map_get, object_set, array_add, map_set, object_size, array_size, object_entry,
     obj, arr, str, bytes, num, from_int, boolean, null_value, undefined_value, tag,
+    get_int64, get_uint, get_nint, from_uint, from_nint,
     set, push, map_push, free, diagnose
 )
 
@@ -53,6 +54,13 @@ const CBOR_MAX_DEPTH = 256
 // indefinite-length string, array or map. An indefinite-length string keeps
 // its chunks (definite strings) in list_val beside the joined payload, and a
 // parsed float keeps its raw bits, in its own width, in int_val.
+//
+// An integer is int_val when it fits a signed long. CBOR's range is wider,
+// 0..2^64-1 for major type 0 and -2^64..-1 for major type 1, and `big`
+// carries the rest (#2510): 1 for a major type 0 value of 2^63 or more,
+// whose 64 bits are int_val; 2 for a major type 1 value below -2^63, whose
+// argument n (the value is -1 - n, n >= 2^63) is int_val. As elsewhere in
+// std, an unsigned 64-bit value travels as the bit pattern of a long.
 struct CborValue {
     type: int
     int_val: long // integer or simple value; a parsed float's raw bits
@@ -66,6 +74,7 @@ struct CborValue {
     map_values: ptr // list pointer (std.list)
     ind: int // argument size of the head as parsed, see above
     indefinite: int // 1 for an indefinite-length item
+    big: int // an integer outside the signed long range, see above
 }
 
 // ---- str payload helpers (see Memory model above) ----
@@ -287,10 +296,10 @@ read_value(r: ptr, ai: int) -> (long, string) {
     if ai == 27 {
         if reader.offset + 8 > reader.len { return 0, "cbor: unexpected EOF" }
         b0 = rd(reader, reader.offset)
-        // An argument of 2^63 or more does not fit the signed long every
-        // caller holds it in: an integer would flip sign (2^64-1 read as
-        // -1), and a length or count would pass a bounds check as negative.
-        if b0 >= 128 { return 0, "cbor: integer out of range" }
+        // The argument is a full unsigned 64 bits, and in the signed long
+        // every caller holds it, 2^63 and up read as negative: an integer
+        // or tag number keeps it as the bit pattern it is (#2510), and a
+        // length or count refuses it as longer than the input.
         b1 = rd(reader, reader.offset + 1)
         b2 = rd(reader, reader.offset + 2)
         b3 = rd(reader, reader.offset + 3)
@@ -472,6 +481,9 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
         cv.int_val = val
+        if val < 0 {
+            cv.big = 1 // 2^63 or more
+        }
         cv.ind = ind_of(ai)
         return cv as ptr, ""
     }
@@ -481,8 +493,13 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         string.release(err)
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
-        // read_value refuses val >= 2^63, so this bottoms out at -2^63.
-        cv.int_val = -1 - val
+        if val < 0 {
+            // n >= 2^63, so -1 - n is below -2^63: keep n.
+            cv.big = 2
+            cv.int_val = val
+        } else {
+            cv.int_val = -1 - val
+        }
         cv.ind = ind_of(ai)
         return cv as ptr, ""
     }
@@ -495,7 +512,7 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         string.release(err)
         // Compared in long against what is left: narrowing a length of 2^31
         // or more to int first made it negative and passed it as empty.
-        if len_val > ((reader.len - reader.offset) as long) { return null, "cbor: unexpected EOF" }
+        if len_val < 0 || len_val > ((reader.len - reader.offset) as long) { return null, "cbor: unexpected EOF" }
         if mt == 3 && !valid_utf8(reader.buf, reader.offset, len_val as int) {
             return null, "cbor: invalid UTF-8 in text string"
         }
@@ -546,7 +563,7 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         // Every element takes at least one byte, so a count beyond what is
         // left is truncated input, refused before the loop rather than
         // narrowed to int (2^32 became 0 elements).
-        if len_val > ((reader.len - reader.offset) as long) {
+        if len_val < 0 || len_val > ((reader.len - reader.offset) as long) {
             free_value(cv)
             return null, "cbor: unexpected EOF"
         }
@@ -610,7 +627,7 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         string.release(err)
         cv.ind = ind_of(ai)
         // Every entry is a key and a value, at least two bytes.
-        if len_val > ((reader.len - reader.offset) as long) / 2 {
+        if len_val < 0 || len_val > ((reader.len - reader.offset) as long) / 2 {
             free_value(cv)
             return null, "cbor: unexpected EOF"
         }
@@ -758,6 +775,7 @@ write_string(w: ptr, s: string, len: int) {
 // The preferred `ind` for an argument: the fewest bytes that hold it
 // (RFC 8949 §4.2.1).
 fn preferred_ind(val: long) -> int {
+    if val < 0 { return 4 } // an unsigned argument of 2^63 or more
     if val < 24 { return 0 }
     if val <= 255 { return 1 }
     if val <= 65535 { return 2 }
@@ -898,7 +916,11 @@ encode_item(w: ptr, cv: ptr) -> string {
     cv_val = cv as *CborValue
     if cv_val.type == CBOR_INT {
         v = cv_val.int_val
-        if v >= 0 {
+        if cv_val.big == 1 {
+            encode_head(w, 0, v, cv_val.ind)
+        } else if cv_val.big == 2 {
+            encode_head(w, 1, v, cv_val.ind)
+        } else if v >= 0 {
             encode_head(w, 0, v, cv_val.ind)
         } else {
             encode_head(w, 1, -1 - v, cv_val.ind)
@@ -1077,19 +1099,55 @@ get_bool(value: ptr) -> int {
 get_int(value: ptr) -> int {
     if value == null { return 0 }
     cv = value as *CborValue
-    if cv.type == CBOR_INT {
+    if cv.type == CBOR_INT && cv.big == 0 {
         return cv.int_val as int
     }
     return 0
 }
 
+// The integer, or 0 when `value` is not an integer or is one outside the
+// signed long range (get_int64 says which; get_uint / get_nint read those).
 get_long(value: ptr) -> long {
     if value == null { return 0 }
     cv = value as *CborValue
-    if cv.type == CBOR_INT {
+    if cv.type == CBOR_INT && cv.big == 0 {
         return cv.int_val
     }
     return 0
+}
+
+// The integer as a signed long, or an error when `value` is not an integer
+// or is one outside -2^63..2^63-1 (#2510).
+get_int64(value: ptr) -> long! {
+    if value == null { return 0, "not an integer" }
+    cv = value as *CborValue
+    if cv.type != CBOR_INT { return 0, "not an integer" }
+    if cv.big != 0 { return 0, "cbor: integer outside the signed 64-bit range" }
+    return cv.int_val, ""
+}
+
+// A non-negative integer (major type 0), 0..2^64-1, as the bit pattern of a
+// long: 2^63 and up read negative as a long, and std.bits' udiv64, urem64
+// and ucmp64 treat them as the unsigned values they are. An error for a
+// negative integer or anything else.
+get_uint(value: ptr) -> long! {
+    if value == null { return 0, "not an integer" }
+    cv = value as *CborValue
+    if cv.type != CBOR_INT { return 0, "not an integer" }
+    if cv.big == 1 || (cv.big == 0 && cv.int_val >= 0) { return cv.int_val, "" }
+    return 0, "not a non-negative integer"
+}
+
+// A negative integer (major type 1) as its CBOR argument n, the value being
+// -1 - n: n is 0..2^64-1, the bit pattern of a long as for get_uint, so the
+// whole range down to -2^64 is reachable. An error for anything else.
+get_nint(value: ptr) -> long! {
+    if value == null { return 0, "not an integer" }
+    cv = value as *CborValue
+    if cv.type != CBOR_INT { return 0, "not an integer" }
+    if cv.big == 2 { return cv.int_val, "" }
+    if cv.big == 0 && cv.int_val < 0 { return -1 - cv.int_val, "" }
+    return 0, "not a negative integer"
 }
 
 get_float(value: ptr) -> float {
@@ -1099,9 +1157,31 @@ get_float(value: ptr) -> float {
         return cv.float_val
     }
     if cv.type == CBOR_INT {
+        if cv.big == 1 { return u64_to_float(cv.int_val) }
+        if cv.big == 2 { return 0.0 - u64_to_float(cv.int_val) - 1.0 }
         return cv.int_val as float
     }
     return 0.0
+}
+
+// The unsigned 64-bit value whose bits are `u`, as the nearest double.
+// Halving with the low bit kept as a sticky bit, then doubling, rounds once.
+fn u64_to_float(u: long) -> float {
+    if u >= 0 { return u as float }
+    half = ((u >> 1) & (9223372036854775807 as long)) | (u & 1)
+    return (half as float) * 2.0
+}
+
+// The unsigned 64-bit value whose bits are `u`, in decimal.
+fn u64_decimal(u: long) -> string {
+    if u >= 0 { return string.from_long(u) }
+    // u = 2h + b with h = u / 2 (a logical shift) and b its low bit; then
+    // h = 5q + r2 gives u = 10q + (2 r2 + b): quotient and last digit
+    // without leaving the signed range.
+    h = (u >> 1) & (9223372036854775807 as long)
+    q = h / 5
+    r = 2 * (h - q * 5) + (u & 1)
+    return string.concat(string.from_long(q), string.from_long(r))
 }
 
 get_string(value: ptr) -> string! {
@@ -1122,6 +1202,8 @@ get_bytes(value: ptr) -> string! {
     return str_payload_string(cv), ""
 }
 
+// The tag number; one of 2^63 or more as the bit pattern of a long, as for
+// get_uint.
 get_tag_val(value: ptr) -> long {
     if value == null { return 0 }
     cv = value as *CborValue
@@ -1164,7 +1246,7 @@ fn equal_val(a: ptr, b: ptr) -> bool {
     acv = a as *CborValue
     bcv = b as *CborValue
     if acv.type != bcv.type { return false }
-    if acv.type == CBOR_INT { return acv.int_val == bcv.int_val }
+    if acv.type == CBOR_INT { return acv.int_val == bcv.int_val && acv.big == bcv.big }
     if acv.type == CBOR_FLOAT { return acv.float_val == bcv.float_val }
     if acv.type == CBOR_TEXT || acv.type == CBOR_BYTES { return str_payload_equal(acv, bcv) }
     if acv.type == CBOR_SIMPLE { return acv.int_val == bcv.int_val }
@@ -1360,6 +1442,32 @@ from_int(value: long) -> ptr {
     cv = heap.new(CborValue)
     cv.type = CBOR_INT
     cv.int_val = value
+    return cv as ptr
+}
+
+// The non-negative integer whose unsigned 64 bits are `bits` (0..2^64-1),
+// the inverse of get_uint.
+from_uint(bits: long) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_INT
+    cv.int_val = bits
+    if bits < 0 {
+        cv.big = 1
+    }
+    return cv as ptr
+}
+
+// The negative integer -1 - n for the unsigned 64-bit argument n in `bits`
+// (-2^64..-1), the inverse of get_nint.
+from_nint(bits: long) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_INT
+    if bits < 0 {
+        cv.big = 2
+        cv.int_val = bits
+    } else {
+        cv.int_val = -1 - bits
+    }
     return cv as ptr
 }
 
@@ -1739,6 +1847,14 @@ to_diagnose_string(cv: ptr) -> string {
     if cv == null { return "null" }
     cv_val = cv as *CborValue
     if cv_val.type == CBOR_INT {
+        if cv_val.big == 1 {
+            return string.concat(u64_decimal(cv_val.int_val), ind_suffix(cv_val.ind, 4))
+        }
+        if cv_val.big == 2 {
+            // -1 - n = -(n + 1), and n + 1 may be 2^64: add the 1 in decimal.
+            magnitude = digits_plus_one(u64_decimal(cv_val.int_val))
+            return string.concat(string.concat("-", magnitude), ind_suffix(cv_val.ind, 4))
+        }
         arg = cv_val.int_val
         if arg < 0 {
             arg = -1 - arg
@@ -1760,7 +1876,7 @@ to_diagnose_string(cv: ptr) -> string {
     }
     if cv_val.type == CBOR_TAG {
         child_str = to_diagnose_string(cv_val.tag_child)
-        head = string.concat(string.from_long(cv_val.tag_val), ind_suffix(cv_val.ind, preferred_ind(cv_val.tag_val)))
+        head = string.concat(u64_decimal(cv_val.tag_val), ind_suffix(cv_val.ind, preferred_ind(cv_val.tag_val)))
         return string.concat(head, string.concat("(", string.concat(child_str, ")")))
     }
     // Arrays and maps build into one builder: concatenating each item onto

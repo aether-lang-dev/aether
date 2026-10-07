@@ -324,14 +324,33 @@ main() {
     msgpack.free(es_unpacked)
 
     // 12. 64-bit integer limits
-    // u64 values that fit the signed long get_int returns come back; above
-    // that they are refused rather than coming back negative.
+    // u64 values that fit the signed long get_int returns come back. Above
+    // that they used to be refused; they unpack now (#2510), get_uint reads
+    // them as the bit pattern of a long, get_int64 reports that they do not
+    // fit, and they pack back as a uint 64.
     let u63_data, _ = encoding.hex_decode("cf7fffffffffffffff")
     let u63, err_u63 = msgpack.unpack(u63_data)
     fails = fails + check(err_u63 == "" && msgpack.get_int(u63) == 9223372036854775807, "unpack u64 2^63-1")
     msgpack.free(u63)
-    fails = fails + expect_error("cfffffffffffffffff", "integer out of range")
-    fails = fails + expect_error("cf8000000000000000", "integer out of range")
+    let umax_data, _ = encoding.hex_decode("cfffffffffffffffff")
+    let umax, err_umax = msgpack.unpack(umax_data)
+    fails = fails + check(err_umax == "" && msgpack.get_type(umax) == msgpack.TYPE_INT, "unpack u64 2^64-1")
+    let umax_u, umax_uerr = msgpack.get_uint(umax)
+    fails = fails + check(umax_uerr == "" && umax_u == -1, "get_uint 2^64-1")
+    let _umax_l, umax_lerr = msgpack.get_int64(umax)
+    fails = fails + check(umax_lerr == "integer outside the signed 64-bit range", "get_int64 2^64-1 does not fit")
+    fails = fails + check(msgpack.get_int(umax) == 0, "get_int 2^64-1 is 0")
+    fails = fails + assert_hex(umax, "cfffffffffffffffff", "2^64-1 packs back")
+    msgpack.free(umax)
+    let u2p63 = msgpack.from_uint(-9223372036854775807 - 1)
+    fails = fails + assert_hex(u2p63, "cf8000000000000000", "from_uint(2^63) packs as uint 64")
+    msgpack.free(u2p63)
+    let neg = msgpack.from_int(-3)
+    let _neg_u, neg_uerr = msgpack.get_uint(neg)
+    fails = fails + check(neg_uerr == "not a non-negative integer", "get_uint of a negative integer")
+    let neg_l, neg_lerr = msgpack.get_int64(neg)
+    fails = fails + check(neg_lerr == "" && neg_l == -3, "get_int64 in range")
+    msgpack.free(neg)
 
     // 13. Hostile lengths
     // 32-bit lengths and counts of 2^31 and up came back from the cursor
