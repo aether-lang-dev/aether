@@ -16,6 +16,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 if ! command -v curl >/dev/null 2>&1; then
     echo "  [SKIP] curl not on PATH"
@@ -28,10 +29,10 @@ PROXY_PID=""
 
 cleanup() {
     if [ -n "$PROXY_PID" ]; then
-        kill -9 "$PROXY_PID" 2>/dev/null || true
+        kill_server "$PROXY_PID"
     fi
     for pid in $PIDS; do
-        kill -9 "$pid" 2>/dev/null || true
+        kill_server "$pid"
     done
     rm -rf "$TMPDIR"
 }
@@ -49,7 +50,6 @@ start_proc() {
     log="$TMPDIR/$role.log"
     "$TMPDIR/server" "$role" >"$log" 2>&1 &
     new_pid=$!
-    disown "$new_pid" 2>/dev/null || true
     eval "PID_$role=\$new_pid"
 }
 
@@ -59,7 +59,7 @@ wait_for_port() {
     pid=$(eval echo \$PID_$role)
     deadline=$(($(date +%s) + 15))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        if ! server_alive "$pid"; then
             echo "  [FAIL] $role died:"; head -30 "$log"; exit 1
         fi
         if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
@@ -86,7 +86,7 @@ wait_for_port_soft() {
     pid=$(eval echo \$PID_$role)
     deadline=$(($(date +%s) + 15))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        kill -0 "$pid" 2>/dev/null || return 1
+        server_alive "$pid" || return 1
         if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
                 "http://127.0.0.1:$port/health" 2>/dev/null; then
             return 0
@@ -107,7 +107,7 @@ start_proxy() {
         if wait_for_port_soft "$proxy_role" 19100; then
             return 0
         fi
-        kill -9 "$PROXY_PID" 2>/dev/null || true
+        kill_server "$PROXY_PID"
         attempt=$((attempt + 1))
         sleep 0.3
     done
@@ -117,7 +117,7 @@ start_proxy() {
 
 stop_proxy() {
     if [ -n "$PROXY_PID" ]; then
-        kill -9 "$PROXY_PID" 2>/dev/null || true
+        kill_server "$PROXY_PID"
         PROXY_PID=""
     fi
 }
@@ -136,7 +136,7 @@ dump_diagnostics() {
             proxy) pid="$PROXY_PID" ;;
             *)     pid=$(eval echo \$PID_$r) ;;
         esac
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if [ -n "$pid" ] && server_alive "$pid"; then
             echo "  $r (pid=$pid): alive"
         else
             echo "  $r (pid=$pid): DEAD"
