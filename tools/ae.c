@@ -3697,7 +3697,7 @@ void build_gcc_cmd(char* cmd, size_t size,
          * (--export-all-symbols skips it; an explicit dllexport is "symbol
          * wrong type"), so no Windows DLL ever exported its catalog. A DLL
          * `ae` links is one TU: make the definition strong. */
-        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= " : "";
+        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
         snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s", emit_lib_flags, opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
@@ -3825,7 +3825,11 @@ void build_gcc_cmd(char* cmd, size_t size,
     // moment any symbol (e.g. an --extra C shim) carries an explicit
     // __declspec(dllexport). On ELF/Mach-O the catalog symbols are exported by
     // default visibility, so the flag is Windows-only.
-    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared " : "";
+    /* -DAETHER_NO_LIB_MAIN: a library-family build of a program carries a
+     * weak C main() for whoever links the OBJECT into an executable (see
+     * emit_lib_weak_main in codegen.c); a shared library ae links itself has
+     * no use for one, and should not export an entry point. */
+    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared -DAETHER_NO_LIB_MAIN " : "";
     // Coverage builds skip -pipe — gcov works fine with it, but it
     // adds nothing when -O0 -g is already forced. Keeping the flag
     // string short helps the cmd-buffer size budget.
