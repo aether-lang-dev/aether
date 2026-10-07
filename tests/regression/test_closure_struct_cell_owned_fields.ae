@@ -1,0 +1,126 @@
+// Regression (#2458): a struct a closure writes through a field lives in a
+// shared cell, and the cell releases the strings the struct owns.
+//
+// A field write in a closure (`r.count += 1`) promotes the captured struct
+// to a reference-counted cell, as a bare `r = ...` does, so the write
+// reaches the caller. Two things then went wrong for a struct with a
+// `string` field: a heap-string store into the field (`r.name = ...`) was
+// spelled on the bare name, which is the cell pointer, so the program did
+// not compile; and the cell's release was the plain one, which frees the
+// cell but not the strings in it, where the struct's scope exit had run
+// `Rec_destroy`. The macOS leaks gate runs this program: each string the
+// struct owns at exit must be freed by the cell's last holder.
+//
+// Covered: the parent scope as the last holder, a stored closure as the
+// last holder (its env destructor releases), a reassignment of the whole
+// struct inside a closure (its old strings are destroyed through the
+// cell), and a heap.new box, which is shared through its pointer and not
+// promoted at all.
+//
+// Replacing a struct whose new value reuses an old string (`r = Rec {
+// name: r.name }`) moves that string to the new value. Destroying the old
+// value first, as both a cell and a plain local (#465) did, left the field
+// pointing at freed memory.
+//
+// Every string is built from a parameter, so each is a runtime heap
+// string: `string.concat` of two literals folds to a literal, which owns
+// nothing and would hide a leak.
+
+import std.string
+
+extern exit(code: int)
+
+struct Rec { name: string, count: int }
+struct Named { name: string }
+struct Two { a: string, b: string }
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+// The scope is the last holder: the closures are done before it exits.
+scope_holds_last(a: string) {
+    r = Rec { name: string.concat(a, "b"), count: 0 }
+    bump = || { r.count += 1 }
+    bump()
+    bump()
+    rename = || { r.name = string.concat(r.name, "!") }
+    rename()
+    r.name = string.concat(r.name, "+")
+    check("scope name", r.name, "ab!+")
+    check_int("scope count", r.count, 2)
+}
+
+// A stored closure outlives the scope: its env is the last holder.
+make_counter(c: string) -> fn {
+    r = Rec { name: string.concat(c, "d"), count: 0 }
+    return || {
+        r.count += 1
+        r.name = string.concat(r.name, ".")
+        check_int("stored count", r.count, 1)
+        check("stored name", r.name, "cd.")
+    }
+}
+
+// The whole struct reassigned in a closure: the old one's strings go.
+reassign_in_closure(x: string, z: string) {
+    r = Rec { name: string.concat(x, "y"), count: 1 }
+    reset = || { r = Rec { name: string.concat(z, "w"), count: 5 } }
+    reset()
+    check("reassigned name", r.name, "zw")
+    check_int("reassigned count", r.count, 5)
+}
+
+// The new value takes over strings the old one owned: kept once, never
+// freed under it, and the rest of the old value is still reclaimed.
+replace_takes_over(a: string) {
+    r = Rec { name: string.concat(a, "b"), count: 0 }
+    again = || { r = Rec { name: r.name, count: r.count + 1 } }
+    again()
+    check("cell self", r.name, "ab")
+    check_int("cell self count", r.count, 1)
+
+    q = Rec { name: string.concat(a, "q"), count: 0 }
+    q = Rec { name: q.name, count: 1 }
+    check("local self", q.name, "aq")
+    q = Rec { name: string.concat(a, "z"), count: 2 }
+    check("local replaced", q.name, "az")
+
+    t = Two { a: string.concat(a, "1"), b: string.concat(a, "2") }
+    t = Two { a: t.b, b: t.a }
+    check("swap a", t.a, "a2")
+    check("swap b", t.b, "a1")
+    t = Two { a: t.a, b: t.a }
+    check("dup a", t.a, "a2")
+    check("dup b", t.b, "a2")
+}
+
+// A heap.new box: written through its pointer, never promoted.
+box_through_pointer(n: string) {
+    nb = heap.new(Named)
+    nb.name = string.concat(n, "1")
+    g = || { nb.name = string.concat(n, "2") }
+    g()
+    check("box name", nb.name, "n2")
+    heap.free(nb)
+}
+
+main() {
+    scope_holds_last("a")
+    counter = make_counter("c")
+    counter()
+    reassign_in_closure("x", "z")
+    box_through_pointer("n")
+    replace_takes_over("a")
+    println("=== closure struct cell owned fields: all passed ===")
+}

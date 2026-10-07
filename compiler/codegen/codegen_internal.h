@@ -274,6 +274,10 @@ void push_opt_str_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 
 /* Actor generation (codegen_actor.c) */
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor);
+/* #2466: is state field `field` of actor `actor_name` emitted with an atomic
+   C type (so a read from outside the actor goes through atomic_load)? */
+int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
+                                const char* field);
 
 /* Extern function registry — tracks param types for call-site cast emission */
 void register_extern_func(CodeGenerator* gen, ASTNode* ext);
@@ -434,6 +438,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program);
 void get_promoted_names_for_func(CodeGenerator* gen, const char* func_name,
                                  char*** out_names, int* out_count);
 int is_promoted_capture(CodeGenerator* gen, const char* name);
+void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
+                              char* out, size_t out_size);
 
 /* Internal helpers shared across files */
 int contains_send_expression(ASTNode* node);

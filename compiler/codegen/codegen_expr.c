@@ -1273,6 +1273,55 @@ static int any_return_is_string(ASTNode* node) {
 // `name` (i.e., appears as its `value`). Used by closure codegen to detect
 // which captures are mutated inside the body — those captures cannot use
 // the read-only alias prologue and must route writes through _env->.
+/* The variable a field or element write goes through: `p` for `p.x`,
+ * `p.a.b`, `arr[i]` and `p.xs[i].y`; NULL for a bare name or any other
+ * shape. */
+static const char* write_through_root(ASTNode* lhs) {
+    if (!lhs || (lhs->type != AST_MEMBER_ACCESS && lhs->type != AST_ARRAY_ACCESS)) return NULL;
+    while (lhs) {
+        if (lhs->type == AST_IDENTIFIER) return lhs->value;
+        if ((lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
+            lhs->child_count > 0) {
+            lhs = lhs->children[0];
+            continue;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+static int is_assignment_op(const char* op) {
+    if (!op || !op[0]) return 0;
+    if (op[0] == '=' && op[1] == '\0') return 1;
+    if (op[1] == '=' && op[2] == '\0' &&
+        strchr("+-*/%&|^", op[0]) != NULL) return 1;
+    if ((strcmp(op, "<<=") == 0) || (strcmp(op, ">>=") == 0)) return 1;
+    return 0;
+}
+
+/* True when `node` writes a field or an element through `name`: `p.x = v`,
+ * `p.x += v`, `p.inner.y *= 3`, `b.vals[i] = v`, `p.x++` (#2458). For a
+ * struct held by value that changes the variable itself, so a closure doing
+ * it needs the shared cell a bare `p = ...` gets; through a pointer it
+ * changes the pointee, which is shared already (compute_promoted_captures). */
+static int is_written_through(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    ASTNode* target = NULL;
+    if ((node->type == AST_BINARY_EXPRESSION && is_assignment_op(node->value)) ||
+        node->type == AST_ASSIGNMENT) {
+        target = node->child_count >= 1 ? node->children[0] : NULL;
+    } else if (node->type == AST_UNARY_EXPRESSION && node->value && node->child_count == 1 &&
+               (strcmp(node->value, "++") == 0 || strcmp(node->value, "--") == 0)) {
+        target = node->children[0];
+    }
+    const char* root = write_through_root(target);
+    if (root && strcmp(root, name) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++) {
+        if (is_written_through(node->children[i], name)) return 1;
+    }
+    return 0;
+}
+
 static int is_assigned_to(ASTNode* node, const char* name) {
     if (!node) return 0;
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
@@ -1282,6 +1331,13 @@ static int is_assigned_to(ASTNode* node, const char* name) {
     /* `name op= x` writes `name` too; its target is node->value. */
     if (node->type == AST_COMPOUND_ASSIGNMENT && node->value &&
         strcmp(node->value, name) == 0) {
+        return 1;
+    }
+    /* `name++` / `--name` writes `name` as much as `name += 1` does (#2457). */
+    if (node->type == AST_UNARY_EXPRESSION && node->value && node->child_count == 1 &&
+        (strcmp(node->value, "++") == 0 || strcmp(node->value, "--") == 0) &&
+        node->children[0] && node->children[0]->type == AST_IDENTIFIER &&
+        node->children[0]->value && strcmp(node->children[0]->value, name) == 0) {
         return 1;
     }
     // Tuple destructure assigns to each non-discard target; if `name` is
@@ -1757,6 +1813,16 @@ static void promote_up_from(CodeGenerator* gen, const char* start_scope, const c
     }
 }
 
+static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
+
+/* A capture holding a struct by value (not through a pointer or a
+ * reference): a field write in a closure changes the variable itself. */
+static int capture_is_struct_value(CodeGenerator* gen, const char* name,
+                                   const char* parent_func) {
+    Type* t = lookup_var_type(gen, name, parent_func);
+    return t && t->kind == TYPE_STRUCT;
+}
+
 static void compute_promoted_captures(CodeGenerator* gen) {
     for (int ci = 0; ci < gen->closure_count; ci++) {
         const char* parent_func = gen->closures[ci].parent_func;
@@ -1766,7 +1832,9 @@ static void compute_promoted_captures(CodeGenerator* gen) {
         for (int j = 0; j < gen->closures[ci].capture_count; j++) {
             const char* cap = gen->closures[ci].captures[j];
             if (!cap) continue;
-            if (is_assigned_to(body, cap)) {
+            if (is_assigned_to(body, cap) ||
+                (is_written_through(body, cap) &&
+                 capture_is_struct_value(gen, cap, parent_func))) {
                 promote_up_from(gen, parent_func, cap);
             }
         }
@@ -1968,7 +2036,7 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
     return ok;
 }
 
-// Find the C type of a declaration of `var_name` anywhere in `node`'s subtree,
+// Find the type of a declaration of `var_name` anywhere in `node`'s subtree,
 // including inside nested if/for/while blocks, but not inside a hoisted
 // closure (whose locals are a different scope). Returns NULL if not found.
 //
@@ -1979,24 +2047,24 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
 // scope. A top-level-statements-only scan fell through to the "int" default and
 // silently captured a string as an int — a -Wint-conversion warning and a
 // segfault at run time, not a compile error.
-static const char* decl_c_type_in_scope(ASTNode* node, const char* var_name) {
+static Type* decl_type_in_scope(ASTNode* node, const char* var_name) {
     if (!node) return NULL;
     if (is_hoisted_closure(node)) return NULL;
     if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_CONST_DECLARATION) &&
         node->value && strcmp(node->value, var_name) == 0) {
         if (node->node_type && node->node_type->kind != TYPE_UNKNOWN) {
-            return get_c_type(node->node_type);
+            return node->node_type;
         }
         if (node->child_count > 0 && node->children[0] &&
             node->children[0]->node_type &&
             node->children[0]->node_type->kind != TYPE_UNKNOWN) {
-            return get_c_type(node->children[0]->node_type);
+            return node->children[0]->node_type;
         }
         // Declaration found but untyped — keep looking; a later re-declaration
         // or assignment of the same name may carry the resolved type.
     }
     for (int i = 0; i < node->child_count; i++) {
-        const char* t = decl_c_type_in_scope(node->children[i], var_name);
+        Type* t = decl_type_in_scope(node->children[i], var_name);
         if (t) return t;
     }
     return NULL;
@@ -2004,8 +2072,8 @@ static const char* decl_c_type_in_scope(ASTNode* node, const char* var_name) {
 
 // Search a single function node for `var_name` as either a parameter
 // (AST_PATTERN_VARIABLE directly under the function) or a local variable
-// declaration inside the function body. Returns the C type or NULL.
-static const char* lookup_in_function(ASTNode* func, const char* var_name) {
+// declaration inside the function body. Returns its type or NULL.
+static Type* lookup_in_function(ASTNode* func, const char* var_name) {
     if (!func) return NULL;
     int is_main = (func->type == AST_MAIN_FUNCTION);
     // Parameters: for regular functions, direct children that are
@@ -2016,7 +2084,7 @@ static const char* lookup_in_function(ASTNode* func, const char* var_name) {
             if (p && p->type == AST_PATTERN_VARIABLE && p->value &&
                 strcmp(p->value, var_name) == 0 &&
                 p->node_type && p->node_type->kind != TYPE_UNKNOWN) {
-                return get_c_type(p->node_type);
+                return p->node_type;
             }
         }
     }
@@ -2024,19 +2092,19 @@ static const char* lookup_in_function(ASTNode* func, const char* var_name) {
     for (int j = 0; j < func->child_count; j++) {
         ASTNode* body = func->children[j];
         if (!body || body->type != AST_BLOCK) continue;
-        const char* t = decl_c_type_in_scope(body, var_name);
+        Type* t = decl_type_in_scope(body, var_name);
         if (t) return t;
     }
     return NULL;
 }
 
-// Look up a variable's C type. If `parent_func` is non-NULL, prefer the
+// Look up a variable's type (NULL when unknown). If `parent_func` is non-NULL, prefer the
 // parameters and locals of that function — this is the closure's lexical
 // parent and the only correct place to resolve its captures. Fall back to a
 // program-wide search for backward compatibility with call sites that don't
 // yet pass a parent.
-static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func) {
-    if (!gen->program || !var_name) return "int";
+static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const char* parent_func) {
+    if (!gen->program || !var_name) return NULL;
     // The parent scope may be another closure (`__closure_<ptr>`) — resolve
     // against its params/body, then chain up to ITS parent for names it in
     // turn captures. Falls through to the program-wide search below only if
@@ -2049,17 +2117,17 @@ static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, c
                 if (p && p->type == AST_CLOSURE_PARAM && p->value &&
                     strcmp(p->value, var_name) == 0 &&
                     p->node_type && p->node_type->kind != TYPE_UNKNOWN) {
-                    return get_c_type(p->node_type);
+                    return p->node_type;
                 }
             }
-            const char* t = decl_c_type_in_scope(last_block_child(c), var_name);
+            Type* t = decl_type_in_scope(last_block_child(c), var_name);
             if (t) return t;
             char outer[64];
             if (find_enclosing_scope_name(gen->program, NULL, c, outer, sizeof(outer))) {
-                return lookup_var_c_type(gen, var_name, outer);
+                return lookup_var_type(gen, var_name, outer);
             }
         }
-        return "int";
+        return NULL;
     }
     // Parent-function-first lookup, through the program index (#2007).
     if (parent_func) {
@@ -2071,7 +2139,7 @@ static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, c
             top = find_function_definition_by_name(gen->program, parent_func);
         }
         if (top) {
-            const char* t = lookup_in_function(top, var_name);
+            Type* t = lookup_in_function(top, var_name);
             if (t) return t;
             // don't scan other functions — captured names resolve lexically
         }
@@ -2082,11 +2150,28 @@ static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, c
         ASTNode* top = gen->program->children[i];
         if (!top) continue;
         if (top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION || top->type == AST_MAIN_FUNCTION) {
-            const char* t = lookup_in_function(top, var_name);
+            Type* t = lookup_in_function(top, var_name);
             if (t) return t;
         }
     }
-    return "int"; // fallback
+    return NULL;
+}
+
+// The C type of a variable, through lookup_var_type; "int" when it has none.
+static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func) {
+    Type* t = lookup_var_type(gen, var_name, parent_func);
+    return t ? get_c_type(t) : "int"; // fallback
+}
+
+/* #2464: a captured fixed-size array (`int[3] arr`), or NULL. Its C type
+ * spells as `int[3]`, which is not a declarator: the env field, the
+ * constructor parameter and the body alias each spell `int arr[3]` / the
+ * element type instead, as a struct field does (generate_extern_struct_field),
+ * and the capture copies it with memcpy, since a C array does not assign. */
+static Type* capture_sized_array_type(CodeGenerator* gen, const char* name,
+                                      const char* parent_func) {
+    Type* t = lookup_var_type(gen, name, parent_func);
+    return (t && type_is_sized_array(t) && t->array_size > 0) ? t : NULL;
 }
 
 // Resolve a closure's C return type from its body. Extracted so the
@@ -2274,8 +2359,12 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
     } else {
         for (int i = 0; i < cap_count; i++) {
             const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
+            Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
             if (capture_is_promoted(gen, captures[i], parent_func)) {
                 fprintf(gen->output, "    %s* %s;\n", ctype, captures[i]);
+            } else if (arr) {
+                fprintf(gen->output, "    %s %s[%d];\n",
+                        get_c_type(arr->element_type), captures[i], arr->array_size);
             } else {
                 fprintf(gen->output, "    %s %s;\n", ctype, captures[i]);
             }
@@ -2299,14 +2388,12 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
                 released = 1;
             }
             if (promoted) {
-                /* A string-valued cell owns its heap string: the last releaser
-                 * frees the pointee. An int/ptr cell uses the plain release. */
-                const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
-                if (ctype && strcmp(ctype, "const char*") == 0) {
-                    fprintf(gen->output, "    _aether_cell_release_str(_e->%s);\n", captures[i]);
-                } else {
-                    fprintf(gen->output, "    _aether_cell_release(_e->%s);\n", captures[i]);
-                }
+                /* A string cell owns its heap string and a struct cell the
+                 * struct's owned fields: the last releaser frees them. */
+                char release_fn[300];
+                promoted_cell_release_fn(gen, lookup_var_c_type(gen, captures[i], parent_func),
+                                         release_fn, sizeof(release_fn));
+                fprintf(gen->output, "    %s(_e->%s);\n", release_fn, captures[i]);
             } else {
                 fprintf(gen->output, "    aether_string_release_captured(_e->%s);\n", captures[i]);
             }
@@ -2436,12 +2523,18 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 }
             }
             const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
+            Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
             if (is_promoted_for_parent) {
                 // Pointer alias: body reads/writes dereference through the
                 // AST_IDENTIFIER emit path when the name is in
                 // current_promoted_captures.
                 fprintf(gen->output, "    %s* %s = _env->%s;\n",
                         ctype, captures[i], captures[i]);
+            } else if (arr) {
+                // #2464: the env holds the array; the body indexes it in
+                // place through an element pointer, as C passes an array.
+                fprintf(gen->output, "    %s* %s = _env->%s;\n",
+                        get_c_type(arr->element_type), captures[i], captures[i]);
             } else {
                 fprintf(gen->output, "    %s %s = _env->%s;\n",
                         ctype, captures[i], captures[i]);
@@ -2573,6 +2666,15 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 }
                 if (captured) mark_var_declared(gen, parent_promoted[p]);
             }
+            /* #2462: the closure's parameters are declared by its C
+             * signature, the way a function's are (codegen_func.c), so an
+             * assignment to one in the body is a reassignment rather than a
+             * redeclaration, and the heap-string hoist skips them. */
+            for (int i = 0; i < closure->child_count; i++) {
+                ASTNode* p = closure->children[i];
+                if (p && p->type == AST_CLOSURE_PARAM && p->value)
+                    mark_var_declared(gen, p->value);
+            }
             /* A closure body is its own C function — it needs the same
              * heap-string lifecycle as a top-level function, or heap
              * locals it mints (e.g. `trimmed = string.trim(out)`) leak
@@ -2624,7 +2726,14 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 if (i > 0) fprintf(gen->output, ", ");
                 const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
                 /* A promoted capture arrives as the cell pointer, `ctype*`,
-                 * which is also what the env field is. */
+                 * which is also what the env field is. A fixed-size array
+                 * arrives as a pointer to its elements (#2464). */
+                Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
+                if (arr && !capture_is_promoted(gen, captures[i], parent_func)) {
+                    fprintf(gen->output, "%s* %s",
+                            get_c_type(arr->element_type), captures[i]);
+                    continue;
+                }
                 fprintf(gen->output, "%s%s %s", ctype,
                         capture_is_promoted(gen, captures[i], parent_func) ? "*" : "",
                         captures[i]);
@@ -2643,6 +2752,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
                     fprintf(gen->output, "    _e->%s = (%s)aether_str_capture(%s);\n",
                             captures[i], ctype, captures[i]);
+                } else if (capture_sized_array_type(gen, captures[i], parent_func)) {
+                    /* #2464: an array does not assign; copy its bytes. */
+                    fprintf(gen->output, "    memcpy(_e->%s, %s, sizeof(_e->%s));\n",
+                            captures[i], captures[i], captures[i]);
                 } else {
                     fprintf(gen->output, "    _e->%s = %s;\n", captures[i], captures[i]);
                 }
@@ -2833,6 +2946,54 @@ static int utf8_sequence_length(const char* s) {
         if (((unsigned char)s[i] & 0xC0) != 0x80) return 1;
     }
     return len;
+}
+
+/* Emit `s` as a C string literal: quoted, with every byte C cannot carry
+ * raw escaped. The one spelling of an Aether string literal in the C, so a
+ * literal reads the same wherever codegen writes one (an expression, a
+ * function-clause pattern, a guard). */
+void emit_c_string_literal(CodeGenerator* gen, const char* str) {
+    fprintf(gen->output, "\"");
+    while (*str) {
+        unsigned char ch = (unsigned char)*str;
+        switch (*str) {
+            case '\n': fprintf(gen->output, "\\n"); break;
+            case '\t': fprintf(gen->output, "\\t"); break;
+            case '\r': fprintf(gen->output, "\\r"); break;
+            case '\\': fprintf(gen->output, "\\\\"); break;
+            case '"': fprintf(gen->output, "\\\""); break;
+            default:
+                if (ch < 0x20 || ch == 0x7F) {
+                    /* Zero-padded OCTAL, never \x: a C hex escape has no
+                     * length limit, so "\x01a" re-lexes as byte 0x1A
+                     * (silent corruption when the next char is a hex
+                     * digit). \001 is exactly three digits and cannot
+                     * munch. */
+                    fprintf(gen->output, "\\%03o", ch);
+                } else if (ch >= 0x80) {
+                    /* Bytes above ASCII: emit a VALID UTF-8 sequence raw so
+                     * human text stays readable in the generated C; escape
+                     * anything else (decoded \x binary, e.g. CBOR/MsgPack
+                     * test vectors) so the output stays valid text and
+                     * every downstream tool (grep/awk/editors) treats it
+                     * uniformly on all platforms. */
+                    int seq = utf8_sequence_length(str);
+                    if (seq > 1) {
+                        for (int b = 0; b < seq; b++) {
+                            fprintf(gen->output, "%c", str[b]);
+                        }
+                        str += seq - 1;
+                    } else {
+                        fprintf(gen->output, "\\%03o", ch);
+                    }
+                } else {
+                    fprintf(gen->output, "%c", *str);
+                }
+                break;
+        }
+        str++;
+    }
+    fprintf(gen->output, "\"");
 }
 
 /* True when `n` spells the null pointer in a comparison: the identifier
@@ -3065,51 +3226,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     switch (expr->type) {
         case AST_LITERAL:
             if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
-                fprintf(gen->output, "\"");
-                const char* str = expr->value;
-                while (*str) {
-                    unsigned char ch = (unsigned char)*str;
-                    switch (*str) {
-                        case '\n': fprintf(gen->output, "\\n"); break;
-                        case '\t': fprintf(gen->output, "\\t"); break;
-                        case '\r': fprintf(gen->output, "\\r"); break;
-                        case '\\': fprintf(gen->output, "\\\\"); break;
-                        case '"': fprintf(gen->output, "\\\""); break;
-                        default:
-                            if (ch < 0x20 || ch == 0x7F) {
-                                /* Zero-padded OCTAL, never \x: a C hex
-                                 * escape has no length limit, so
-                                 * "\x01a" re-lexes as byte 0x1A (silent
-                                 * corruption when the next char is a
-                                 * hex digit). \001 is exactly three
-                                 * digits and cannot munch. */
-                                fprintf(gen->output, "\\%03o", ch);
-                            } else if (ch >= 0x80) {
-                                /* Bytes above ASCII: emit a VALID UTF-8
-                                 * sequence raw so human text stays
-                                 * readable in the generated C; escape
-                                 * anything else (decoded \x binary,
-                                 * e.g. CBOR/MsgPack test vectors) so
-                                 * the output stays valid text and every
-                                 * downstream tool (grep/awk/editors)
-                                 * treats it uniformly on all platforms. */
-                                int seq = utf8_sequence_length(str);
-                                if (seq > 1) {
-                                    for (int b = 0; b < seq; b++) {
-                                        fprintf(gen->output, "%c", str[b]);
-                                    }
-                                    str += seq - 1;
-                                } else {
-                                    fprintf(gen->output, "\\%03o", ch);
-                                }
-                            } else {
-                                fprintf(gen->output, "%c", *str);
-                            }
-                            break;
-                    }
-                    str++;
-                }
-                fprintf(gen->output, "\"");
+                emit_c_string_literal(gen, expr->value);
             } else if (expr->node_type && expr->node_type->kind == TYPE_DURATION) {
                 fprintf(gen->output, "%lldLL", parse_duration_literal_ns(expr->value));
             } else if (expr->node_type && expr->node_type->kind == TYPE_FLOAT32) {
@@ -3809,13 +3926,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
 
                 int needs_atomic = 0;
-                if (child->node_type && child->node_type->kind == TYPE_ACTOR_REF && expr->value) {
-                    size_t name_len = strlen(expr->value);
-                    int is_ref_field = (name_len > 4 && strcmp(expr->value + name_len - 4, "_ref") == 0);
-
-                    if (!gen->current_actor && !gen->generating_lvalue && !is_ref_field) {
-                        needs_atomic = 1;
-                    }
+                if (child->node_type && child->node_type->kind == TYPE_ACTOR_REF && expr->value &&
+                    !gen->current_actor && !gen->generating_lvalue) {
+                    /* #2466: an atomic_load only for a field the actor struct
+                     * declares atomic, decided by its type, not its name. */
+                    const Type* at = child->node_type->element_type;
+                    needs_atomic = at && at->kind == TYPE_STRUCT &&
+                        actor_state_field_is_atomic(gen, at->struct_name, expr->value);
                 }
 
                 if (needs_atomic) {
@@ -4444,6 +4561,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "_ae_%s_%s(", pfx, expr->value[0] == '-' ? "neg" : "not");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ")");
+                break;
+            }
+            /* #2457: postfix `i++` / `i--` yields the old value, so it must
+             * reach C as postfix too, not as the prefix form. */
+            if (expr->child_count >= 1 && annotation_has_marker(expr->annotation, "postfix")) {
+                fprintf(gen->output, "((");
+                generate_expression(gen, expr->children[0]);
+                fprintf(gen->output, ")%s)", get_c_operator(expr->value));
                 break;
             }
             if (expr->child_count >= 1) {
@@ -7106,6 +7231,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);
                         fprintf(gen->output, "_e->%s = (%s)aether_str_capture(%s); ",
                                 captures[i], ctype, captures[i]);
+                    } else if (capture_sized_array_type(gen, captures[i], cl_parent_func)) {
+                        /* #2464: an array does not assign; copy its bytes. */
+                        fprintf(gen->output, "memcpy(_e->%s, %s, sizeof(_e->%s)); ",
+                                captures[i], captures[i], captures[i]);
                     } else {
                         fprintf(gen->output, "_e->%s = %s; ", captures[i], captures[i]);
                     }

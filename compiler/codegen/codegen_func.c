@@ -1685,11 +1685,13 @@ static void generate_expression_with_subst_inner(CodeGenerator* gen, ASTNode* ex
 
     // For unary operations
     if (expr->type == AST_UNARY_EXPRESSION) {
+        int postfix = annotation_has_marker(expr->annotation, "postfix");  /* #2457 */
         if (add_parens) fprintf(gen->output, "(");
-        fprintf(gen->output, "%s", get_c_operator(expr->value));
+        if (!postfix) fprintf(gen->output, "%s", get_c_operator(expr->value));
         if (expr->child_count > 0) {
             generate_expression_with_subst_inner(gen, expr->children[0], mappings, mapping_count, 1);
         }
+        if (postfix) fprintf(gen->output, "%s", get_c_operator(expr->value));
         if (add_parens) fprintf(gen->output, ")");
         return;
     }
@@ -1697,7 +1699,7 @@ static void generate_expression_with_subst_inner(CodeGenerator* gen, ASTNode* ex
     // For literals, just output value
     if (expr->type == AST_LITERAL) {
         if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
-            fprintf(gen->output, "\"%s\"", expr->value);
+            emit_c_string_literal(gen, expr->value);
         } else {
             fprintf(gen->output, "%s", expr->value);
         }
@@ -1837,7 +1839,16 @@ static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_f
 
         if (child->type == AST_PATTERN_LITERAL && strcmp(child->value, "_") != 0) {
             if (!first_cond) fprintf(gen->output, " && ");
-            fprintf(gen->output, "_arg%d == %s", param_idx, child->value);
+            if (child->node_type && child->node_type->kind == TYPE_STRING) {
+                /* #2467: a string pattern compares by content, NULL-safe, as
+                 * a `match` string arm does (emit_selector_condition): the
+                 * argument is a pointer and may be a magic AetherString. */
+                fprintf(gen->output, "(_arg%d && string_equals(_arg%d, ", param_idx, param_idx);
+                emit_c_string_literal(gen, child->value);
+                fprintf(gen->output, "))");
+            } else {
+                fprintf(gen->output, "_arg%d == %s", param_idx, child->value);
+            }
             first_cond = 0;
         }
 
@@ -2289,6 +2300,53 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
         print_line(gen, "if (!s) return;");
         print_line(gen, "%s_destroy(s);", struct_def->value);
         print_line(gen, "free(s);");
+        unindent(gen);
+        print_line(gen, "}");
+
+        /* `<Name>_replace(dst, src)`: overwrite a struct that owns string
+         * fields with a new value. Each string the old value owns is freed,
+         * unless the new value holds that same string (`r = Rec { name:
+         * r.name }`): then ownership moves to the new value instead. Freeing
+         * first and assigning after (#465) left such a field pointing at
+         * freed memory. One owner per string: a string the new value holds
+         * in two fields moves to the first. */
+        print_line(gen, "static inline void %s_replace(%s* dst, %s src) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        indent(gen);
+        for (int i = 0; i < struct_def->child_count; i++) {
+            ASTNode* f = struct_def->children[i];
+            if (!(f->type == AST_STRUCT_FIELD && f->node_type &&
+                  f->node_type->kind == TYPE_STRING)) continue;
+            print_line(gen, "if (dst->_heap_%s) {", f->value);
+            indent(gen);
+            int first = 1;
+            for (int j = 0; j < struct_def->child_count; j++) {
+                ASTNode* g = struct_def->children[j];
+                if (!(g->type == AST_STRUCT_FIELD && g->node_type &&
+                      g->node_type->kind == TYPE_STRING)) continue;
+                print_line(gen, "%sif (src.%s == dst->%s && !src._heap_%s) src._heap_%s = 1;",
+                           first ? "" : "else ", g->value, f->value, g->value, g->value);
+                first = 0;
+            }
+            print_line(gen, "else aether_heap_str_free(dst->%s);", f->value);
+            unindent(gen);
+            print_line(gen, "}");
+        }
+        print_line(gen, "*dst = src;");
+        unindent(gen);
+        print_line(gen, "}");
+
+        /* #2458: the release for a shared cell holding one of these (a
+         * variable a closure writes; emit_promoted_cell_declaration): the
+         * last holder releases the owned fields, then the cell, as a scope
+         * exit runs `<Name>_destroy` on a local. */
+        print_line(gen, "static inline void %s_cell_release(void* cell) {",
+                   struct_def->value);
+        indent(gen);
+        print_line(gen, "if (!cell) return;");
+        print_line(gen, "_AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+        print_line(gen, "if (--h->_refs == 0) { %s_destroy((%s*)cell); free(h); }",
+                   struct_def->value, struct_def->value);
         unindent(gen);
         print_line(gen, "}");
     }

@@ -1990,8 +1990,16 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
         if (!op) break;
         
         if (op->type == TOKEN_INCREMENT || op->type == TOKEN_DECREMENT) {
+            /* A `++` on the next line is a prefix `++x` starting the next
+             * statement (`z--` then `++z`), not a second postfix on this
+             * operand. */
+            Token* prev = peek_ahead(parser, -1);
+            if (prev && prev->line != op->line) break;
             advance_token(parser);
             expr = create_unary_expression(expr, op);
+            /* #2457: `i++` is the same node as `++i` but marked postfix, so
+             * codegen emits C's `i++` and a used value is the old one. */
+            expr->annotation = annotation_add_marker(expr->annotation, "postfix");
             continue;
         }
 
@@ -2752,6 +2760,23 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             }
             // Explicit type declaration: int x = 42;  byte b = 0x7F;
             return parse_variable_declaration(parser);
+        }
+
+        case TOKEN_PTR: {
+            /* #2465: `ptr p = null` is a typed declaration, like `int x`. The
+             * keyword is also usable as a value name (token_is_value_ident),
+             * so only the `ptr NAME` shape on one line declares; anything
+             * else (`ptr = q`, `ptr.f`) stays an expression statement. */
+            Token* next = peek_ahead(parser, 1);
+            if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
+                return parse_variable_declaration(parser);
+            }
+            ASTNode* expr = parse_expression(parser);
+            if (!expr) return NULL;
+            match_token(parser, TOKEN_SEMICOLON);
+            ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, token->line, token->column);
+            add_child(stmt, expr);
+            return stmt;
         }
 
         case TOKEN_MULTIPLY: {
@@ -4652,13 +4677,34 @@ ASTNode* parse_actor_definition(Parser* parser) {
             // Check if there's an explicit type or Python-style
             Token* next_tok = peek_token(parser);
             ASTNode* state_decl = NULL;
-            
-            if (next_tok && (next_tok->type == TOKEN_INT || next_tok->type == TOKEN_INT64 ||
+            /* #2465: a type spelled by an identifier (`uint8`, `uint16`,
+             * `uint32`, `int64`, `f32`, `longdouble`, a C ABI alias, a struct
+             * name) is recognised by the same shape as a typed local
+             * declaration (parse_statement): `IDENT IDENT`, or the array form
+             * `IDENT [N] IDENT`, on one line. Without it `state uint8 b8 = 1`
+             * became a field named `uint8` and `b8 = 1` a stray statement. */
+            int ident_typed = 0;
+            if (next_tok && next_tok->type == TOKEN_IDENTIFIER) {
+                Token* t1 = peek_ahead(parser, 1);
+                if (t1 && t1->type == TOKEN_IDENTIFIER && t1->line == next_tok->line) {
+                    ident_typed = 1;
+                } else if (t1 && t1->type == TOKEN_LEFT_BRACKET) {
+                    Token* t2 = peek_ahead(parser, 2);
+                    int off = (t2 && t2->type == TOKEN_NUMBER) ? 3 : 2;
+                    Token* rb = peek_ahead(parser, off);
+                    Token* nm = peek_ahead(parser, off + 1);
+                    ident_typed = rb && rb->type == TOKEN_RIGHT_BRACKET &&
+                                  nm && nm->type == TOKEN_IDENTIFIER && nm->line == rb->line;
+                }
+            }
+
+            if (ident_typed ||
+                (next_tok && (next_tok->type == TOKEN_INT || next_tok->type == TOKEN_INT64 ||
                             next_tok->type == TOKEN_UINT64 ||
                             next_tok->type == TOKEN_DURATION ||
                             next_tok->type == TOKEN_FLOAT ||
                             next_tok->type == TOKEN_STRING || next_tok->type == TOKEN_BOOL ||
-                            next_tok->type == TOKEN_BYTE)) {
+                            next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR))) {
                 // Explicit type: state int count = 0  or  state long total = 0
                 state_decl = parse_variable_declaration_with_semicolon(parser, false);
             } else if (next_tok && next_tok->type == TOKEN_IDENTIFIER) {

@@ -139,6 +139,12 @@ typedef struct {
     // that quadratic in the number of functions.
     StrMap generated_functions;
 
+    // #2466: "Actor.field" for every actor state field the program uses as a
+    // pointer (codegen_actor.c, state_field_is_ptr). Built by one walk of
+    // the program on the first ask.
+    StrMap actor_ptr_fields;
+    int actor_ptr_fields_ready;
+
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
     ASTNode* defer_stack[MAX_DEFER_STACK];
     // #1140: parallel to defer_stack — which exits this defer fires on.
@@ -575,6 +581,7 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def);
 void generate_main_function(CodeGenerator* gen, ASTNode* main);
 void generate_statement(CodeGenerator* gen, ASTNode* stmt);
 void generate_expression(CodeGenerator* gen, ASTNode* expr);
+void emit_c_string_literal(CodeGenerator* gen, const char* str);   // #2467
 void generate_type(CodeGenerator* gen, Type* type);
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type);
 void ensure_optional_typedef(CodeGenerator* gen, Type* type);   // #340

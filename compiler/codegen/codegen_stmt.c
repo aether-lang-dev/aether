@@ -1976,9 +1976,18 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
         matching_field->node_type->kind != TYPE_STRING) return 0;
 
     int rhs_is_heap = is_heap_string_expr(gen, rhs);
+    /* A variable a closure writes lives in a shared cell (#2458): the name
+     * is the cell pointer, and the struct is `(*name)`, as every other use
+     * of it spells it (the AST_IDENTIFIER emission). */
+    char objs[160];
+    if (is_promoted_capture(gen, obj->value)) {
+        snprintf(objs, sizeof(objs), "(*%s)", obj->value);
+    } else {
+        snprintf(objs, sizeof(objs), "%s", obj->value);
+    }
     char tracker_lv[256];
     snprintf(tracker_lv, sizeof(tracker_lv), "%s%s_heap_%s",
-             obj->value, acc, lhs->value);
+             objs, acc, lhs->value);
     print_indent(gen);
     if (!tracker_is_trustworthy) {
         /* #1873: store and SET the tracker (so the destructor still reclaims
@@ -1988,7 +1997,7 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
          * pointer. Not freeing here can leak a previous value on a box that
          * was genuinely zeroed; that is strictly better than a segfault, and
          * the caller can use heap.new to get the releasing behaviour. */
-        fprintf(gen->output, "{ %s%s%s = ", obj->value, acc, lhs->value);
+        fprintf(gen->output, "{ %s%s%s = ", objs, acc, lhs->value);
         generate_expression(gen, rhs);
         fprintf(gen->output, ";");
         /* Move the source var's runtime ownership when the RHS is a heap-var
@@ -2001,8 +2010,8 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     }
     fprintf(gen->output,
             "{ const char* _tmp_old = %s%s%s; %s%s%s = ",
-            obj->value, acc, lhs->value,
-            obj->value, acc, lhs->value);
+            objs, acc, lhs->value,
+            objs, acc, lhs->value);
     generate_expression(gen, rhs);
     fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old);", tracker_lv);
     if (!emit_field_tracker_from_rhs(gen, rhs, tracker_lv)) {
@@ -2040,22 +2049,22 @@ static int init_is_builder_with_trailing(CodeGenerator* gen, ASTNode* init) {
     return 0;
 }
 
-/* Struct-reassignment helper (#465). For `<var> = <struct_literal>`
- * where `<var>` is a struct local with heap-string fields, emit
- * `<Struct>_destroy(&<var>)` BEFORE the bare assignment so the
- * previous struct's heap fields are reclaimed. Returns 1 if a
- * destroy call was emitted; the caller still proceeds with the
- * bare assignment emission afterward. */
-static int emit_struct_destroy_before_reassign(CodeGenerator* gen,
-                                                const char* var_name,
-                                                Type* var_type) {
-    if (!gen || !var_name || !var_type) return 0;
+/* Struct-reassignment helper (#465). For `<var> = <value>` where `<var>`
+ * is a struct local with heap-string fields, emit
+ * `<Struct>_replace(&<var>, <value>);`: the previous struct's owned strings
+ * are reclaimed, except one the new value takes over (`r = Rec { name:
+ * r.name }`), which moves to it. Returns 1 if it emitted the assignment;
+ * 0 leaves the caller to emit the bare one. */
+static int emit_struct_replace_assign(CodeGenerator* gen, const char* var_name,
+                                      Type* var_type, ASTNode* value) {
+    if (!gen || !var_name || !var_type || !value) return 0;
     if (var_type->kind != TYPE_STRUCT || !var_type->struct_name) return 0;
     if (!gen->program) return 0;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, var_type->struct_name);
     if (!sdef || !struct_has_heap_string_field(sdef)) return 0;
-    print_indent(gen);
-    fprintf(gen->output, "%s_destroy(&%s);\n", var_type->struct_name, var_name);
+    fprintf(gen->output, "%s_replace(&%s, ", var_type->struct_name, var_name);
+    generate_expression(gen, value);
+    fprintf(gen->output, ");\n");
     return 1;
 }
 
@@ -3708,6 +3717,28 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
  * destructure slot, a promoted parameter) all come through here so the
  * shape is written once.
  * ------------------------------------------------------------------ */
+/* The function that gives back one reference to a promoted cell of C type
+ * `c_type`; the last holder frees the cell. A string cell owns its heap
+ * string and a struct cell the struct's owned string fields, so those free
+ * the value first (`<Name>_cell_release`, generate_struct_definition); an
+ * int / ptr cell is freed as it is. The scope exit and each closure env's
+ * destructor both release through here, so they agree. */
+void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
+                              char* out, size_t out_size) {
+    if (c_type && strcmp(c_type, "const char*") == 0) {
+        snprintf(out, out_size, "_aether_cell_release_str");
+        return;
+    }
+    ASTNode* sdef = (c_type && gen->program && !aether_is_c_import_struct(c_type))
+                        ? find_struct_definition_by_name(gen->program, c_type)
+                        : NULL;
+    if (sdef && struct_has_heap_string_field(sdef)) {
+        snprintf(out, out_size, "%s_cell_release", c_type);
+        return;
+    }
+    snprintf(out, out_size, "_aether_cell_release");
+}
+
 void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
                                     const char* c_type, ASTNode* init_expr,
                                     const char* init_text, int line, int column) {
@@ -3728,12 +3759,8 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     }
     fprintf(gen->output, "\n");
     mark_var_declared(gen, name);
-    /* A string-valued cell owns its heap string, so its scope-exit release
-     * must free the pointee at refcount 0 (mirrors the env-destructor choice
-     * in codegen_expr.c). An int/ptr cell uses the plain release. */
-    const char* release_fn = (c_type && strcmp(c_type, "const char*") == 0)
-                                 ? "_aether_cell_release_str"
-                                 : "_aether_cell_release";
+    char release_fn[300];
+    promoted_cell_release_fn(gen, c_type, release_fn, sizeof(release_fn));
     ASTNode* release_call = create_ast_node(AST_FUNCTION_CALL, release_fn,
                                             line, column);
     ASTNode* arg = create_ast_node(AST_IDENTIFIER, name, line, column);
@@ -4907,15 +4934,27 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
     fprintf(gen->output, " }");
 }
 
+// #2459: a match arm's block body is its own scope, the way an `if` / `switch`
+// arm's block is (AST_BLOCK): its defers run when the arm ends, only when that
+// arm was taken, and the names it declares do not leak into the next arm. The
+// caller has already opened the arm's C braces.
+static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
+    int saved_var_count = gen->declared_var_count;
+    enter_scope(gen);
+    for (int j = 0; j < block->child_count; j++) {
+        generate_statement(gen, block->children[j]);
+    }
+    exit_scope(gen);
+    truncate_declared_vars(gen, saved_var_count);
+}
+
 // #340: emit a match arm's result body — mirrors the generic match dispatch
 // (block / statement / expression), including match-as-expression's
 // `match_result_var` assignment so `let r = match m { ... }` works.
 static void emit_opt_match_arm(CodeGenerator* gen, ASTNode* result) {
     if (!result) return;
     if (result->type == AST_BLOCK) {
-        for (int j = 0; j < result->child_count; j++) {
-            generate_statement(gen, result->children[j]);
-        }
+        emit_match_arm_block(gen, result);
     } else if (result->type == AST_PRINT_STATEMENT ||
                result->type == AST_RETURN_STATEMENT ||
                result->type == AST_VARIABLE_DECLARATION) {
@@ -5770,8 +5809,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         const char* ct = get_c_type(stmt->node_type);
                         int str_cell = (ct && strcmp(ct, "const char*") == 0
                                         && stmt->child_count > 0);
+                        Type* st = stmt->node_type;
+                        ASTNode* sdef = (st && st->kind == TYPE_STRUCT && st->struct_name &&
+                                         gen->program && stmt->child_count > 0)
+                            ? find_struct_definition_by_name(gen->program, st->struct_name)
+                            : NULL;
                         if (str_cell) {
                             fprintf(gen->output, "_aether_str_cell_set(%s, ", stmt->value);
+                            generate_expression(gen, stmt->children[0]);
+                            fprintf(gen->output, ");\n");
+                        } else if (sdef && struct_has_heap_string_field(sdef)) {
+                            /* A struct cell owns its string fields (#2458):
+                             * the struct it held gives them up when a new
+                             * one replaces it, as a local's does (#465). */
+                            fprintf(gen->output, "%s_replace(%s, ", st->struct_name, stmt->value);
                             generate_expression(gen, stmt->children[0]);
                             fprintf(gen->output, ");\n");
                         } else {
@@ -6218,9 +6269,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * wholesale; without an explicit destroy of
                          * the previous instance, every heap-string
                          * field's old buffer leaks. Emit
-                         * `<Struct>_destroy(&<var>)` before the bare
-                         * assignment so any prior heap fields are
-                         * reclaimed. The struct's literal initializer
+                         * `<Struct>_replace(&<var>, <value>)`, which
+                         * reclaims the prior heap fields the new value
+                         * does not take over. The struct's literal initializer
                          * (codegen_expr.c AST_STRUCT_LITERAL) sets
                          * the new `_heap_<field>` bits so the next
                          * destroy at function exit fires correctly. */
@@ -6229,8 +6280,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->child_count > 0 && stmt->children[0]) {
                             vtype = stmt->children[0]->node_type;
                         }
-                        emit_struct_destroy_before_reassign(gen, stmt->value, vtype);
-                        if (stmt->child_count > 0) {
+                        if (stmt->child_count > 0 &&
+                            emit_struct_replace_assign(gen, stmt->value, vtype,
+                                                       stmt->children[0])) {
+                            /* emitted */
+                        } else if (stmt->child_count > 0) {
                             fprintf(gen->output, "%s = ", stmt->value);
                             generate_expression(gen, stmt->children[0]);
                             fprintf(gen->output, ";\n");
@@ -7565,9 +7619,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
                     if (result->type == AST_BLOCK) {
                         // Already a block, generate its statements
-                        for (int j = 0; j < result->child_count; j++) {
-                            generate_statement(gen, result->children[j]);
-                        }
+                        emit_match_arm_block(gen, result);
                     } else if (result->type == AST_PRINT_STATEMENT
                             || result->type == AST_RETURN_STATEMENT
                             || result->type == AST_VARIABLE_DECLARATION) {
