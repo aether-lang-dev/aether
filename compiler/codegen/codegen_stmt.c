@@ -4134,6 +4134,25 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     push_defer(gen, expr_stmt);
 }
 
+/* A string cell owns the refcounted string it holds: overwriting it or the
+ * last release gives that reference back (_aether_str_cell_set /
+ * _aether_cell_release_str). A parameter's string is borrowed from the
+ * caller, so seeding the cell with it as it stands made the first write in
+ * a closure, or the scope exit, free the caller's string (#2463). The cell
+ * takes a reference of its own; string_retain leaves a literal or a plain
+ * buffer alone, which the cell never frees either. */
+void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
+                              const char* c_type, const char* param_cname,
+                              int line, int column) {
+    char init[300];
+    if (c_type && strcmp(c_type, "const char*") == 0) {
+        snprintf(init, sizeof(init), "(string_retain(%s), %s)", param_cname, param_cname);
+    } else {
+        snprintf(init, sizeof(init), "%s", param_cname);
+    }
+    emit_promoted_cell_declaration(gen, name, c_type, NULL, init, line, column);
+}
+
 /* Push function-exit defer-free statements for every hoisted
  * heap-string variable that's not escaped (issue #420 follow-up).
  *

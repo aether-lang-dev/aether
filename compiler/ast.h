@@ -487,6 +487,13 @@ typedef struct Type {
     // look up. NULL on all other types. Borrowed pointer (the AST owns
     // the storage), so don't free on type teardown.
     struct ASTNode* compound_node;
+    // #2460: on a closure's erased TYPE_FUNCTION, the closure literal the
+    // value is known to be (set by the type checker, carried by clone_type to
+    // the binding, an alias of it and a call that returns it), so `call(f,
+    // ...)` takes its result type from the literal's body. The type stays
+    // erased for compatibility; this only informs the call. Borrowed like
+    // compound_node; NULL everywhere else.
+    struct ASTNode* closure_literal;
     // #913: a fallible result type `T!`. Represented as the existing
     // `(T, string)` (value, err) TUPLE so it is ABI-interchangeable with the
     // stdlib convention; this flag marks it as a result so `expr!` PROPAGATES

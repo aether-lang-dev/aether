@@ -29,6 +29,7 @@ Type* create_type(TypeKind kind) {
      * must NOT inherit garbage from malloc. */
     type->is_fnptr = 0;
     type->compound_node = NULL;
+    type->closure_literal = NULL;
     type->is_result = 0;   /* #913 `T!` marker — must not inherit malloc garbage */
     return type;
 }
@@ -521,6 +522,7 @@ Type* clone_type(Type* type) {
     }
     new_type->is_fnptr = type->is_fnptr;
     new_type->compound_node = type->compound_node;  // borrowed; AST owns it.
+    new_type->closure_literal = type->closure_literal;  // borrowed, as above (#2460)
     new_type->is_result = type->is_result;          // #913 `T!` marker
 
     return new_type;

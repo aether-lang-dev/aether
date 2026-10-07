@@ -2301,6 +2301,18 @@ static int capture_is_retained_string(CodeGenerator* gen, const char* name,
                      strcmp(ctype, "char*") == 0);
 }
 
+/* #2463: a parameter of `closure` that a closure nested in it writes. The
+ * nesting closure owns the shared cell (promote_up_from stops at the scope
+ * declaring the name), so it takes the value as `_param_<name>` and the body
+ * declares the cell under the plain name, as a function does for its own
+ * promoted parameters (codegen_func.c). */
+static int closure_param_is_promoted(CodeGenerator* gen, ASTNode* closure,
+                                     const char* name) {
+    char own_scope[64];
+    closure_scope_name(closure, own_scope, sizeof(own_scope));
+    return capture_is_promoted(gen, name, own_scope);
+}
+
 // Emit just the signature (no trailing `;` or `{`) of a closure function.
 // Caller appends `;\n` for forward decls or ` {\n` for bodies.
 //
@@ -2322,7 +2334,11 @@ static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_t
             if (p->node_type) {
                 ptype = get_c_type(p->node_type);
             }
-            fprintf(gen->output, ", %s %s", ptype, safe_value_name(p->value));
+            if (closure_param_is_promoted(gen, closure, p->value)) {
+                fprintf(gen->output, ", %s _param_%s", ptype, p->value);
+            } else {
+                fprintf(gen->output, ", %s %s", ptype, safe_value_name(p->value));
+            }
         }
     }
     fprintf(gen->output, ")");
@@ -2576,6 +2592,24 @@ void emit_closure_definitions(CodeGenerator* gen) {
             int prev_heap_count = gen->heap_string_var_count;
             gen->heap_string_vars = NULL;
             gen->heap_string_var_count = 0;
+            /* The escape sets belong to the body too, as a function clears
+             * them at its start (codegen_func.c). Closures are emitted after
+             * every function, so they inherited the last one's: main's
+             * escape walk reaches into the closures it holds, and a `return
+             * s` in one closure made every string closure's return drain
+             * `if (_heap_s) ...`, an undeclared `s` there. */
+            char** prev_escaped = gen->escaped_string_vars;
+            int prev_escaped_count = gen->escaped_string_var_count;
+            char** prev_ret_escaped = gen->return_escaped_string_vars;
+            int prev_ret_escaped_count = gen->return_escaped_string_var_count;
+            char** prev_ret_escaped_struct = gen->return_escaped_struct_vars;
+            int prev_ret_escaped_struct_count = gen->return_escaped_struct_var_count;
+            gen->escaped_string_vars = NULL;
+            gen->escaped_string_var_count = 0;
+            gen->return_escaped_string_vars = NULL;
+            gen->return_escaped_string_var_count = 0;
+            gen->return_escaped_struct_vars = NULL;
+            gen->return_escaped_struct_var_count = 0;
             /* Track the closure as the current function so
              * body-structural queries (current_fn_body_block /
              * body_assigns_var_from_heap) resolve a value identifier
@@ -2591,20 +2625,20 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->current_env_capture_count = env_capture_count;
             // Publish promoted names visible to this closure body so
             // reads/writes dereference through the pointer alias we just
-            // emitted above. EXCLUDE names that are closure parameters of
-            // this closure — those are regular-typed values (int, string,
-            // etc.), not pointers, and dereferencing them would be wrong.
+            // emitted above.
             //
             // Two sources, and they behave differently:
             //  - the PARENT scope's promoted names: they arrive as `T*` env
             //    slots with a `T* name = _env->name;` prologue alias, and are
-            //    pre-marked declared below;
+            //    pre-marked declared below. One this closure's own parameter
+            //    shadows is not the parent's variable here, and is skipped;
             //  - this closure's OWN promoted names (recorded against its
             //    `__closure_<ptr>` scope because a closure nested inside it
-            //    writes one of its locals): these are its own locals, so the
-            //    ordinary declaration path must mint the heap cell. They go
-            //    into the promoted set — reads/writes dereference — but are
-            //    NOT pre-marked declared and get no prologue alias.
+            //    writes one of its locals or parameters): they go into the
+            //    promoted set, so reads and writes dereference, and get no
+            //    prologue alias. A local's cell is minted by the ordinary
+            //    declaration path; a parameter's right after enter_scope
+            //    below (#2463).
             char** own_promoted = NULL;
             int own_promoted_count = 0;
             get_promoted_names_for_func(gen, own_scope, &own_promoted, &own_promoted_count);
@@ -2636,7 +2670,6 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 }
                 for (int p = 0; p < own_promoted_count; p++) {
                     if (!own_promoted[p]) continue;
-                    if (is_closure_param(closure, own_promoted[p])) continue;
                     int dup = 0;
                     for (int q = 0; q < body_promoted_count; q++) {
                         if (strcmp(body_promoted[q], own_promoted[p]) == 0) { dup = 1; break; }
@@ -2684,6 +2717,20 @@ void emit_closure_definitions(CodeGenerator* gen) {
              * emit_all_defers handles explicit returns). Balanced
              * enter/exit_scope keeps the defer stack closure-local. */
             enter_scope(gen);
+            /* #2463: the cell for each parameter a nested closure writes,
+             * seeded from `_param_<name>` (emit_closure_signature). After
+             * enter_scope, so its release lands in this closure's scope. */
+            for (int i = 0; i < closure->child_count; i++) {
+                ASTNode* p = closure->children[i];
+                if (!p || p->type != AST_CLOSURE_PARAM || !p->value ||
+                    !closure_param_is_promoted(gen, closure, p->value)) continue;
+                char param_cname[300];
+                snprintf(param_cname, sizeof(param_cname), "_param_%s", p->value);
+                print_indent(gen);
+                emit_promoted_param_cell(gen, p->value,
+                                         p->node_type ? get_c_type(p->node_type) : "int",
+                                         param_cname, p->line, p->column);
+            }
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
             push_heap_string_exit_free_defers(gen, body);
@@ -2708,6 +2755,13 @@ void emit_closure_definitions(CodeGenerator* gen) {
     clear_seq_vars(gen);
             gen->heap_string_vars = prev_heap;
             gen->heap_string_var_count = prev_heap_count;
+            clear_escaped_string_vars(gen);
+            gen->escaped_string_vars = prev_escaped;
+            gen->escaped_string_var_count = prev_escaped_count;
+            gen->return_escaped_string_vars = prev_ret_escaped;
+            gen->return_escaped_string_var_count = prev_ret_escaped_count;
+            gen->return_escaped_struct_vars = prev_ret_escaped_struct;
+            gen->return_escaped_struct_var_count = prev_ret_escaped_struct_count;
             gen->current_function = prev_current_function;
             gen->in_trailing_block--;
             gen->indent_level = 0;

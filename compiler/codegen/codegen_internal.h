@@ -247,6 +247,12 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
 void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
                                     const char* c_type, ASTNode* init_expr,
                                     const char* init_text, int line, int column);
+/* The cell for a promoted PARAMETER (a function's or a closure's), seeded
+ * from the C parameter `param_cname`; see the definition for why a string
+ * cell takes its own reference. */
+void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
+                              const char* c_type, const char* param_cname,
+                              int line, int column);
 /* The program's own definition of `name`, or NULL. Shared rather than
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */

@@ -84,7 +84,7 @@ static void buf_text(Buf* b, const char* s) {
 
 static int encode_type(Buf* b, const Type* t, const char** err) {
     if (!t) { buf_put(b, " ~", 2); return 1; }
-    if (t->compound_node) {
+    if (t->compound_node || t->closure_literal) {
         /* Set by the type checker only; a parse never produces it. */
         *err = "a type carries a type-checker back-pointer (not a fresh parse)";
         return 0;

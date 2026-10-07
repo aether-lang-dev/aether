@@ -1606,13 +1606,110 @@ static int fn_type_is_erased(const Type* t) {
  * known int result from a guess. */
 static int function_value_annotate(ASTNode* ident, SymbolTable* table);
 
+static int is_erased_call(const ASTNode* n);
+
+/* The first return statement under `node` that carries a value, not looking
+ * into nested closures; codegen's find_first_return_expr, which picks the
+ * closure's C return type, walks the same way. */
+static ASTNode* closure_first_return_expr(ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
+        return node->children[0];
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* found = closure_first_return_expr(node->children[i]);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static int closure_any_return_is_string(ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
+        return node->children[0]->node_type &&
+               node->children[0]->node_type->kind == TYPE_STRING;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (closure_any_return_is_string(node->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* #2460: what calling the closure literal `lit` yields, read from its
+ * checked body by the rule codegen's resolve_closure_return_type uses for
+ * the C signature (the first value return, a string if any return is one),
+ * so the call and the function it calls agree. NULL when the body says
+ * nothing usable: no value return, an unknown type, or a return that is
+ * itself an erased call. */
+static Type* closure_literal_result_type(ASTNode* lit) {
+    if (!lit || lit->type != AST_CLOSURE) return NULL;
+    ASTNode* body = NULL;
+    for (int i = lit->child_count - 1; i >= 0; i--) {
+        if (lit->children[i] && lit->children[i]->type == AST_BLOCK) {
+            body = lit->children[i];
+            break;
+        }
+    }
+    ASTNode* ret = closure_first_return_expr(body);
+    if (!ret || !ret->node_type || is_erased_call(ret)) return NULL;
+    if (closure_any_return_is_string(body)) return create_type(TYPE_STRING);
+    TypeKind k = ret->node_type->kind;
+    if (k == TYPE_UNKNOWN || k == TYPE_VOID) return NULL;
+    return clone_type(ret->node_type);
+}
+
+/* The closure literal an expression is known to evaluate to, or NULL. */
+static ASTNode* closure_literal_of(ASTNode* e, SymbolTable* table) {
+    if (!e) return NULL;
+    if (e->type == AST_CLOSURE) return e;
+    Type* t = infer_type(e, table);
+    ASTNode* lit = (t && t->kind == TYPE_FUNCTION) ? t->closure_literal : NULL;
+    if (t) free_type(t);
+    return lit;
+}
+
+/* Do two closure literals yield the same result type? */
+static int closure_results_agree(ASTNode* a, ASTNode* b) {
+    if (a == b) return 1;
+    Type* ta = closure_literal_result_type(a);
+    Type* tb = closure_literal_result_type(b);
+    int same = ta && tb && types_equal(ta, tb);
+    if (ta) free_type(ta);
+    if (tb) free_type(tb);
+    return same;
+}
+
+/* #2460: `sym`, which may hold a known closure literal, is assigned `lit`
+ * (NULL: a closure value of unknown origin). The variable keeps telling
+ * calls a result type only while every closure it is given yields that
+ * type; anything else makes it what it was before, an erased `fn`. Returns
+ * the literal the new binding may carry. */
+static ASTNode* closure_rebind(Symbol* sym, ASTNode* lit) {
+    if (!sym || !sym->type || sym->type->kind != TYPE_FUNCTION) return lit;
+    ASTNode* had = sym->type->closure_literal;
+    if (!had) return lit;
+    if (lit && closure_results_agree(had, lit)) return lit;
+    sym->type->closure_literal = NULL;
+    return NULL;
+}
+
 static Type* call_builtin_result_type(ASTNode* call, SymbolTable* table) {
     if (call->child_count < 1 || !call->children[0]) return create_type(TYPE_UNKNOWN);
     function_value_annotate(call->children[0], table);   /* call(add_fn, ...) */
     Type* callee = infer_type(call->children[0], table);
     Type* out;
+    /* #2460: an erased `fn` known to hold a closure literal (or the literal
+     * itself) yields what the literal's body returns. */
+    ASTNode* lit = call->children[0]->type == AST_CLOSURE ? call->children[0]
+                 : (callee && callee->kind == TYPE_FUNCTION) ? callee->closure_literal
+                 : NULL;
+    Type* literal_result = NULL;
     if (callee && callee->kind == TYPE_FUNCTION && callee->return_type) {
         out = clone_type(callee->return_type);
+    } else if ((literal_result = closure_literal_result_type(lit))) {
+        out = literal_result;
     } else {
         out = create_type(TYPE_INT);
         if (!call->annotation) call->annotation = strdup("erased_call");
@@ -7013,6 +7110,25 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     free_type(init_type);
                     return 0;
                 }
+                /* #2460: an erased `fn` binding remembers the closure literal
+                 * it holds, so `call(name, ...)` is typed by the literal's
+                 * body rather than assumed int. The early inference pass
+                 * typed the binding before the literal was checked, so the
+                 * mark is (re)made here, and a re-bind keeps it only while
+                 * the closures agree on their result (closure_rebind). */
+                if (stmt->node_type && stmt->node_type->kind == TYPE_FUNCTION &&
+                    !stmt->node_type->is_fnptr && fn_type_is_erased(stmt->node_type)) {
+                    ASTNode* lit = closure_literal_of(init, table);
+                    /* Only a binding in a local scope is the same variable;
+                     * see `bound` above. */
+                    Symbol* prior = NULL;
+                    for (SymbolTable* t = table; t && t->parent && !prior && stmt->value;
+                         t = t->parent) {
+                        prior = lookup_symbol_local(t, stmt->value);
+                    }
+                    if (prior) lit = closure_rebind(prior, lit);
+                    stmt->node_type->closure_literal = lit;
+                }
                 free_type(init_type);
             }
 
@@ -7121,6 +7237,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     free_type(right_type);
                     return 0;
                 }
+                /* #2460: a closure variable given another closure keeps its
+                 * known literal only if the two agree on their result. */
+                closure_rebind(symbol, closure_literal_of(right, table));
                 free_type(right_type);
             }
             return 1;
@@ -8714,6 +8833,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
 
             if (!expr->node_type) {
                 expr->node_type = create_type(TYPE_FUNCTION);
+            }
+            /* #2460: the literal's type stays the erased `fn` (it flows into
+             * any `fn` slot), but it records which literal it is, so a call
+             * through a binding, an alias, or a closure that returns it takes
+             * the result type its body gives. */
+            if (expr->node_type->kind == TYPE_FUNCTION && !expr->node_type->is_fnptr &&
+                fn_type_is_erased(expr->node_type)) {
+                expr->node_type->closure_literal = expr;
             }
             return 1;
         }

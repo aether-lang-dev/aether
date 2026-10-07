@@ -1432,11 +1432,11 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 if (child->node_type && child->node_type->kind != TYPE_UNKNOWN) {
                     c_type = get_c_type(child->node_type);
                 }
-                char init[300];
-                snprintf(init, sizeof(init), "_param_%s", child->value);
+                char param_cname[300];
+                snprintf(param_cname, sizeof(param_cname), "_param_%s", child->value);
                 print_indent(gen);
-                emit_promoted_cell_declaration(gen, child->value, c_type, NULL, init,
-                                               child->line, child->column);
+                emit_promoted_param_cell(gen, child->value, c_type, param_cname,
+                                         child->line, child->column);
             }
             /* A struct parameter is a copy of the caller's value, strings
              * included, and the caller still owns those strings: the copy

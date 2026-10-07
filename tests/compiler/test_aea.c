@@ -382,9 +382,13 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * at codegen (NULL after a parse), and an artifact holds a fresh parse,
      * so the codec correctly does not carry it and the wire format — and
      * AEA_FORMAT_VERSION — is unchanged. */
+    /* Type grew to 136 with `closure_literal` (#2460), a type-checker
+     * back-pointer like compound_node: NULL after a parse and refused by
+     * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
+     * as well. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
         ASSERT_EQ(104, (int)sizeof(ASTNode));
-        ASSERT_EQ(128, (int)sizeof(Type));
+        ASSERT_EQ(136, (int)sizeof(Type));
     }
 }
 

@@ -650,6 +650,19 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                             func_sym->type->return_type) {
                             free_type(node->node_type);
                             node->node_type = clone_type(func_sym->type->return_type);
+                        } else if (func_sym->type->kind == TYPE_FUNCTION &&
+                                   !func_sym->type->is_fnptr && !func_sym->is_function) {
+                            /* #2460: `f(x)` through a closure-typed local
+                             * yields its result, not the closure: the
+                             * signature's return slot when it has one, else
+                             * nothing yet. The checker types it as it types
+                             * `call(f, x)`, from the closure literal the
+                             * local holds; stamping the closure type here
+                             * made `r = f(x)` bind `r` as a closure. */
+                            if (func_sym->type->return_type) {
+                                free_type(node->node_type);
+                                node->node_type = clone_type(func_sym->type->return_type);
+                            }
                         } else {
                             // Function call inherits the function's return type
                             free_type(node->node_type);
