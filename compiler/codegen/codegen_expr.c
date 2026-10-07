@@ -239,8 +239,9 @@ typedef struct ArgDrainWrap {
  * or, for a closure call, the closure literal `closure` whose parameter
  * `ai - first_arg` receives it. A closure call whose literal is not known
  * (an `fn` parameter, a variable bound to several closures) has no body to
- * read, so the argument is taken to escape: a leak, never a free under a
- * parameter that kept the pointer.
+ * read: its argument is freed only when no closure in the program keeps
+ * one (gen->closure_args_borrowed, #2499), and otherwise taken to escape,
+ * a leak, never a free under a parameter that kept the pointer.
  *
  * Escape decision for the arg's heap pointer. When the callee has a
  * VISIBLE BODY the body-walk is authoritative: it detects every storage
@@ -258,7 +259,7 @@ typedef struct ArgDrainWrap {
 static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode* closure,
                              int ai, int first_arg, const ArgDrainWrap* w) {
     if (!func_name) {
-        if (!closure) return -1;
+        if (!closure) return gen->closure_args_borrowed ? 0 : -1;
         int pi = ai - first_arg;
         if (!closure_param_escapes_via_body(gen, closure, pi, 1)) return 0;
         /* Return-escape only, into a string result: identity-guarded,
@@ -5963,6 +5964,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             ret_t = closure_sig->return_type;
                         }
                         const char* ret = ret_t ? get_c_type(ret_t) : "int";
+                        /* #2499: no literal to read, so an owned string
+                         * argument is freed after the call only under
+                         * the program-wide closure-argument convention
+                         * (arg_drain_verdict). */
+                        ArgDrainWrap ad;
+                        ad.ret_ct = ret;
+                        ad.ret_type = NULL;
+                        ad.have_value = 1;
+                        ad.discarded = ad_call_discarded;
+                        arg_drain_select(gen, expr, 1, NULL, NULL, ad_call_discarded, &ad);
+                        arg_drain_open(gen, expr, &ad);
                         fprintf(gen->output, "((%s(*)(void*", ret);
                         int sig_pi = 0;
                         for (int i = 1; i < expr->child_count; i++) {
@@ -5996,6 +6008,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                         }
                         fprintf(gen->output, ")");
+                        arg_drain_close(gen, expr, &ad);
                     }
                 }
                 else {

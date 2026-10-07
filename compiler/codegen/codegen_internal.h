@@ -165,6 +165,10 @@ int callee_returns_string(CodeGenerator* gen, const char* func_name);
 int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
                                    int return_is_escape);
 
+/* #2499: sets gen->closure_args_borrowed. Run after discover_closures and
+ * discover_bare_fn_adapters. Defined in codegen_stmt.c. */
+void compute_closure_args_borrowed(CodeGenerator* gen);
+
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
  * call_arg_escapes heuristic. Defined in codegen_stmt.c. */

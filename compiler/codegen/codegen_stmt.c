@@ -3720,6 +3720,9 @@ int call_arg_escapes(TypeKind param_kind) {
 static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                                      const char* pname, int depth,
                                      int return_is_escape);
+/* #2499: set while compute_closure_args_borrowed walks a string parameter,
+ * whose capture by a nested closure takes its own reference. */
+static int g_capture_holds_own_ref = 0;
 static int is_nonstoring_builtin(const char* fn);
 static int is_consuming_free(const char* fn);
 
@@ -3791,6 +3794,109 @@ int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int par
     return param_escapes_in_subtree(gen, body, pname, 0, return_is_escape);
 }
 
+/* #2499: can a value of type `t` be a string the caller owns? A closure
+ * call through an erased `fn` checks no argument types, so a string can
+ * reach a `ptr` (or untyped-pointer) parameter as well as a `string` one. */
+static int param_may_hold_caller_string(const Type* t) {
+    if (!t) return 0;   /* an untyped closure parameter is an int */
+    return t->kind == TYPE_STRING || t->kind == TYPE_PTR ||
+           t->kind == TYPE_UNKNOWN || t->kind == TYPE_WILDCARD ||
+           t->kind == TYPE_OPTIONAL;
+}
+
+static ASTNode* last_block_child_of(ASTNode* node) {
+    for (int i = node ? node->child_count - 1 : -1; i >= 0; i--) {
+        if (node->children[i] && node->children[i]->type == AST_BLOCK) return node->children[i];
+    }
+    return NULL;
+}
+
+/* #2499: does every value return of a closure body hand back a copy of a
+ * string it returns? A string closure (one return is a string) wraps each
+ * single-value return in aether_uniform_heap_str, which copies a string the
+ * closure does not own; a multi-value return is not wrapped. */
+static int closure_returns_copy(ASTNode* node, int* saw_string) {
+    if (!node) return 1;
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
+        return 1;   /* a nested closure's returns are its own */
+    }
+    if (node->type == AST_RETURN_STATEMENT) {
+        if (node->child_count > 1) return 0;
+        if (node->child_count == 1 && node->children[0] && node->children[0]->node_type &&
+            node->children[0]->node_type->kind == TYPE_STRING) *saw_string = 1;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (!closure_returns_copy(node->children[i], saw_string)) return 0;
+    }
+    return 1;
+}
+
+/* #2499: may a caller free the owned string it passes to a closure call
+ * once the call returns, whatever closure it calls? A named call decides
+ * that from the callee's body (callee_param_escapes_via_body); a call
+ * through an `fn` parameter has no body to read, so the answer has to hold
+ * for every closure the program can call: every closure literal, and every
+ * function used as a closure value (the bare-fn adapters). It does when
+ * none of them keeps a parameter that can hold such a string:
+ *   - a `string` parameter is kept by a store (a list or map, a struct
+ *     field, another variable or cell) or by a nested call that keeps it.
+ *     Its capture by a nested closure is not a keep, since the env takes
+ *     its own reference, and returning it is not either: a string closure
+ *     returns a copy (the uniform-heap return of #2054);
+ *   - a `ptr` parameter is kept by all of those, by a capture (a ptr is
+ *     captured as it is) and by a return.
+ * The walk assumes the answer it is checking for calls between closures
+ * (an argument passed on to `call(g, ...)` is borrowed), which is sound by
+ * induction: if no closure keeps one, none keeps one by passing it on.
+ * Closures that can come from outside this program break the assumption,
+ * so the answer is no when emitting a library or when an extern hands a
+ * closure in. */
+void compute_closure_args_borrowed(CodeGenerator* gen) {
+    if (!gen) return;
+    gen->closure_args_borrowed = 0;
+    if (!gen->program || gen->emit_lib) return;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* top = gen->program->children[i];
+        if (top && top->type == AST_EXPORT_STATEMENT && top->child_count > 0) top = top->children[0];
+        if (top && top->type == AST_EXTERN_FUNCTION && top->node_type &&
+            top->node_type->kind == TYPE_FUNCTION && !top->node_type->is_fnptr) return;
+    }
+    gen->closure_args_borrowed = 1;   /* the hypothesis the walks use */
+    int ok = 1;
+    for (int ci = 0; ci < gen->closure_count && ok; ci++) {
+        ASTNode* lit = gen->closures[ci].closure_node;
+        int pi = 0;
+        for (int k = 0; lit && k < lit->child_count && ok; k++) {
+            ASTNode* p = lit->children[k];
+            if (!p || p->type != AST_CLOSURE_PARAM) continue;
+            if (param_may_hold_caller_string(p->node_type)) {
+                int is_string = p->node_type->kind == TYPE_STRING;
+                int saw_string = 0;
+                int returns_copy = is_string &&
+                    closure_returns_copy(last_block_child_of(lit), &saw_string) && saw_string;
+                g_capture_holds_own_ref = is_string;
+                if (closure_param_escapes_via_body(gen, lit, pi, !returns_copy)) ok = 0;
+                g_capture_holds_own_ref = 0;
+            }
+            pi++;
+        }
+    }
+    for (int a = 0; a < gen->bare_fn_adapter_count && ok; a++) {
+        const char* name = gen->bare_fn_adapter_names[a];
+        ASTNode* fdef = find_function_definition_by_name(gen->program, name);
+        if (!fdef) { ok = 0; break; }
+        int pi = 0;
+        for (int k = 0; k < fdef->child_count && ok; k++) {
+            ASTNode* p = fdef->children[k];
+            if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION)) continue;
+            if (param_may_hold_caller_string(p->node_type) &&
+                callee_param_escapes_via_body(gen, name, pi, 0)) ok = 0;
+            pi++;
+        }
+    }
+    gen->closure_args_borrowed = ok;
+}
+
 /* Does the user function `func_name` declare a `-> string` return? Only
  * then is the call-site identity-drain meaningful (it compares the call
  * result pointer against the passed temp). */
@@ -3856,6 +3962,23 @@ static int value_directly_carries_param(ASTNode* node, const char* pname) {
             if (value_directly_carries_param(node->children[i], pname)) return 1;
         }
     }
+    /* A struct literal's fields are AST_ASSIGNMENT nodes holding just the
+     * value. `return Rec { name: s }` carries `s` as much as `[s]` does; it
+     * was missed, so the caller freed an argument the returned struct still
+     * pointed at (and #2499's convention relies on this walk). */
+    if (node->type == AST_STRUCT_LITERAL) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* f = node->children[i];
+            if (!f) continue;
+            if (f->type == AST_ASSIGNMENT || f->type == AST_FIELD_INIT) {
+                for (int j = 0; j < f->child_count; j++) {
+                    if (value_directly_carries_param(f->children[j], pname)) return 1;
+                }
+            } else if (value_directly_carries_param(f, pname)) {
+                return 1;
+            }
+        }
+    }
     return 0;
 }
 
@@ -3912,7 +4035,27 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
         }
     }
     if (node->type == AST_CLOSURE && subtree_mentions_param(node, pname)) {
-        return 1;  /* closure capture may outlive the call */
+        /* #2499: a string captured by a nested closure is held by the
+         * closure's env through a reference of its own (aether_str_capture;
+         * a promoted cell takes one too, emit_promoted_param_cell), so the
+         * capture keeps nothing the caller frees. Only the closure-argument
+         * convention check asks for that answer, and only for a string. A
+         * trailing block is inlined, not captured: it is walked like the
+         * rest of the body. */
+        int trailing = node->value && strcmp(node->value, "trailing") == 0;
+        if (!g_capture_holds_own_ref) return 1;  /* closure capture may outlive the call */
+        if (!trailing) return 0;
+    }
+    /* #2499: an argument to a closure call is borrowed when every closure
+     * in the program is known not to keep one (compute_closure_args_
+     * borrowed), so passing the parameter on keeps nothing. */
+    if (node->type == AST_FUNCTION_CALL && node->value &&
+        strcmp(node->value, "call") == 0 && gen->closure_args_borrowed) {
+        for (int i = 0; i < node->child_count; i++) {
+            if (param_escapes_in_subtree(gen, node->children[i], pname, depth,
+                                         return_is_escape)) return 1;
+        }
+        return 0;
     }
     if (node->type == AST_FUNCTION_CALL && node->value) {
         /* An INDIRECT call `cb(...)` lowers to value=="call" with child[0]
@@ -4069,6 +4212,9 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
         ? codegen_normalise_callee(call->value, fn_norm, sizeof(fn_norm))
         : NULL;
     if (fn && (is_nonstoring_builtin(fn) || is_consuming_free(fn))) return 0;
+    /* #2499: under the closure-argument convention a closure call borrows
+     * its arguments (the callee slot, 0, is invoked, not stored). */
+    if (fn && strcmp(fn, "call") == 0 && gen->closure_args_borrowed) return 0;
     if (fn && is_retain_extern_param(gen, fn, arg_idx)) return 1;
     if (callee_has_visible_body(gen, call->value)) {
         /* Visible body → the body-walk is authoritative (sees through
@@ -4853,14 +4999,17 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
  * _aether_cell_release_str). A parameter's string is borrowed from the
  * caller, so seeding the cell with it as it stands made the first write in
  * a closure, or the scope exit, free the caller's string (#2463). The cell
- * takes a reference of its own; string_retain leaves a literal or a plain
- * buffer alone, which the cell never frees either. */
+ * takes a reference of its own. */
 void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
                               const char* c_type, const char* param_cname,
                               int line, int column) {
     char init[300];
     if (c_type && strcmp(c_type, "const char*") == 0) {
-        snprintf(init, sizeof(init), "(string_retain(%s), %s)", param_cname, param_cname);
+        /* aether_str_capture: a refcounted string is retained and a plain
+         * buffer copied, so the cell never holds the caller's pointer
+         * (#2499 relies on it: a caller may free a plain heap argument
+         * after a closure call). */
+        snprintf(init, sizeof(init), "aether_str_capture(%s)", param_cname);
     } else {
         snprintf(init, sizeof(init), "%s", param_cname);
     }

@@ -1734,6 +1734,87 @@ static int is_erased_call(const ASTNode* n) {
            n->annotation && strcmp(n->annotation, "erased_call") == 0;
 }
 
+/* #2484: the closure literal `call` invokes, when known. With no table the
+ * callee's own stamped type is all there is. */
+static ASTNode* call_callee_literal(ASTNode* call, SymbolTable* table) {
+    if (!call || call->child_count < 1 || !call->children[0]) return NULL;
+    ASTNode* callee = call->children[0];
+    if (callee->type == AST_CLOSURE) return callee;
+    if (table) return closure_literal_of(callee, table);
+    return (callee->node_type && callee->node_type->kind == TYPE_FUNCTION)
+               ? callee->node_type->closure_literal : NULL;
+}
+
+/* #2054 / #2484: an erased call takes the type `t` its context supplies (a
+ * typed binding, a declared return). From here on its type is known, so it
+ * stops counting as erased: a closure literal that returns it now yields
+ * `t` (closure_literal_result_type), and codegen gives that closure a `t`
+ * C return. When the callee is itself a closure literal whose result is
+ * unknown because it returns erased calls, those returns take `t` too: a
+ * closure that only passes another call's result through is typed by where
+ * its own result is used. Without this the closure stayed `int` and a
+ * pointer came back through it cut to 32 bits. */
+static void type_erased_call(ASTNode* call, Type* t, SymbolTable* table, int depth) {
+    if (!call || !t || depth > 8) return;
+    set_node_type(call, clone_type(t));
+    if (call->annotation) free(call->annotation);
+    call->annotation = strdup("erased_call_typed");
+    ASTNode* lit = call_callee_literal(call, table);
+    if (!lit || lit->type != AST_CLOSURE) return;
+    ASTNode* body = NULL;
+    for (int i = lit->child_count - 1; i >= 0; i--) {
+        if (lit->children[i] && lit->children[i]->type == AST_BLOCK) {
+            body = lit->children[i];
+            break;
+        }
+    }
+    ASTNode* first = closure_first_return_expr(body);
+    if (!is_erased_call(first)) return;   /* its result is its own */
+    type_erased_call(first, t, NULL, depth + 1);
+}
+
+/* #2484: closure literals whose result comes from an erased call, checked
+ * once the top-level item holding them is done: by then every typed use
+ * that can give them a type (type_erased_call) has. One still unknown is
+ * typed int, which truncates a pointer or a string, and is said so, as an
+ * untyped binding of an erased call is. */
+static ASTNode** g_tc_erased_closures = NULL;
+static int g_tc_erased_closure_count = 0;
+static int g_tc_erased_closure_cap = 0;
+
+static void note_erased_result_closure(ASTNode* lit) {
+    for (int i = 0; i < g_tc_erased_closure_count; i++) {
+        if (g_tc_erased_closures[i] == lit) return;   /* checked twice */
+    }
+    if (g_tc_erased_closure_count >= g_tc_erased_closure_cap) {
+        g_tc_erased_closure_cap = g_tc_erased_closure_cap ? g_tc_erased_closure_cap * 2 : 8;
+        g_tc_erased_closures = aether_xrealloc(g_tc_erased_closures,
+            (size_t)g_tc_erased_closure_cap * sizeof(ASTNode*));
+    }
+    g_tc_erased_closures[g_tc_erased_closure_count++] = lit;
+}
+
+static void warn_erased_result_closures(void) {
+    for (int i = 0; i < g_tc_erased_closure_count; i++) {
+        ASTNode* lit = g_tc_erased_closures[i];
+        ASTNode* body = NULL;
+        for (int j = lit->child_count - 1; j >= 0; j--) {
+            if (lit->children[j] && lit->children[j]->type == AST_BLOCK) {
+                body = lit->children[j];
+                break;
+            }
+        }
+        ASTNode* first = closure_first_return_expr(body);
+        if (!is_erased_call(first)) continue;
+        type_warning("this closure returns what a closure called through an erased `fn` "
+                     "returns, which has no known type, so it is typed to return int; "
+                     "bind the result with its type and return that (e.g. `let r: ptr "
+                     "= call(...)` then `return r`)",
+                     first->line, first->column);
+    }
+    g_tc_erased_closure_count = 0;
+}
+
 /* #2055: a top-level function named in value position -- `op = add_fn`,
  * a branch of `if c { add_fn } else { mul_fn }` -- is a closure value. Its
  * symbol carries only the return type (that is what a call to it yields),
@@ -4968,6 +5049,7 @@ int typecheck_program(ASTNode* program) {
         ASTNode* top = program->children[i];
         g_tc_file = top ? top->source_file : NULL;
         typecheck_node(top, global_table);
+        warn_erased_result_closures();   /* #2484 */
     }
     g_tc_file = NULL;
 
@@ -7222,7 +7304,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * pointer, not a wrong type. */
                 if (is_erased_call(init)) {
                     if (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN) {
-                        set_node_type(init, clone_type(stmt->node_type));
+                        type_erased_call(init, stmt->node_type, table, 0);
                         if (init_type) free_type(init_type);
                         init_type = clone_type(stmt->node_type);
                     } else {
@@ -8416,7 +8498,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 g_tc_return_type->kind != TYPE_VOID &&
                 g_tc_return_type->kind != TYPE_UNKNOWN &&
                 g_tc_return_type->kind != TYPE_TUPLE) {
-                set_node_type(stmt->children[0], clone_type(g_tc_return_type));
+                type_erased_call(stmt->children[0], g_tc_return_type, table, 0);
             }
             return 1;
 
@@ -9138,6 +9220,19 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (expr->node_type->kind == TYPE_FUNCTION && !expr->node_type->is_fnptr &&
                 fn_type_is_erased(expr->node_type)) {
                 expr->node_type->closure_literal = expr;
+            }
+            /* #2484: a closure that returns an erased call has no result
+             * type until a typed use gives it one. */
+            {
+                ASTNode* body = NULL;
+                for (int i = expr->child_count - 1; i >= 0; i--) {
+                    if (expr->children[i] && expr->children[i]->type == AST_BLOCK) {
+                        body = expr->children[i];
+                        break;
+                    }
+                }
+                if (is_erased_call(closure_first_return_expr(body)))
+                    note_erased_result_closure(expr);
             }
             return 1;
         }

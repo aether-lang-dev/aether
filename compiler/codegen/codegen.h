@@ -405,6 +405,10 @@ typedef struct {
     char** bare_fn_adapter_names;
     int    bare_fn_adapter_count;
     int    bare_fn_adapter_capacity;
+    /* #2499: no closure the program can call keeps a parameter that can
+     * hold a caller's string, so an owned string argument to any closure
+     * call is freed after it (compute_closure_args_borrowed). */
+    int    closure_args_borrowed;
 
     // Closure support: track closures for hoisted C function generation
     int closure_counter;    // unique ID for closure env structs and functions

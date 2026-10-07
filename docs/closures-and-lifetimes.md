@@ -286,7 +286,7 @@ int — through either form of the call:
 ```aether,fragment
 string greeting = call(h)
 string again = h()
-ptr p = call(y, 5)
+let p: ptr = call(y, 5)
 float f = y(9)
 ```
 
@@ -298,6 +298,18 @@ told so at the site:
 warning: the closure called here has no known result type, so 'r' is
 assumed int; declare the binding's type (e.g. `string r = call(...)`) for
 any other result
+```
+
+A closure that only passes such a call through, `|| { return call(f, x) }`,
+has no result type of its own either. A typed use of it gives it one (#2484):
+`let r: ptr = call(g)` or `return call(g)` from a `-> ptr` function types
+`g`'s return, so the pointer is not cut to an int on the way out. A closure
+that never meets such a use (one handed to an extern, or returned through
+`-> fn`) is typed int and warned about at its `return`; bind the inner
+result with its type and return that:
+
+```aether,fragment
+task = || { let r: ptr = call(f, item); return r }
 ```
 
 Before #2054 the typed form was refused as a type mismatch and the untyped

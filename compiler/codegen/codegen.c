@@ -532,6 +532,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->bare_fn_adapter_names = NULL;
     gen->bare_fn_adapter_count = 0;
     gen->bare_fn_adapter_capacity = 0;
+    gen->closure_args_borrowed = 0;
     // Closure support
     gen->closure_counter = 0;
     gen->closures = NULL;
@@ -7870,6 +7871,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * bodies still come after (they call the user fns by their real C name,
      * so they must follow the user fn definitions). */
     discover_bare_fn_adapters(gen);
+    compute_closure_args_borrowed(gen);   /* #2499: needs closures and adapters */
     emit_bare_fn_adapter_decls(gen);
 
     if (gen->closure_count > 0) {
