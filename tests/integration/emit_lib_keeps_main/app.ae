@@ -1,0 +1,36 @@
+// A program built as a library: its main() is the entry point a host runs
+// through aether_main, and aether_main_exit drains its actors.
+extern aether_args_count() -> int
+
+message Square { n: int }
+message Squared { v: int }
+message Work { id: int }
+
+actor Squarer {
+    receive {
+        Square(n) -> { reply Squared { v: n * n } }
+    }
+}
+
+actor Worker {
+    receive {
+        Work(id) -> {
+            // Slow on purpose: aether_main has returned to the host long
+            // before this prints, so only aether_main_exit's drain shows it.
+            sleep(200)
+            println("worker done ${id}")
+        }
+    }
+}
+
+main() {
+    println("main: start, ${aether_args_count()} args")
+    s = spawn(Squarer())
+    w = spawn(Worker())
+    r = s ? Square { n: 7 }
+    println("main: 7 squared is ${r}")
+    w ! Work { id: 1 }
+    w ! Work { id: 2 }
+    println("main: returning")
+    return r - 7
+}
