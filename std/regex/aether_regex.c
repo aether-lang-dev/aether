@@ -306,7 +306,7 @@ static const char* regex_substitute(void* h_, const void* s_, const void* repl_,
                                NULL, NULL,
                                (PCRE2_SPTR)repl, rlen, out, &outlen);
     if (rc == PCRE2_ERROR_NOMEMORY) {
-        /* outlen now holds the required size (OVERFLOW_LENGTH) — grow + retry. */
+        /* outlen now holds the required size (OVERFLOW_LENGTH): grow + retry. */
         PCRE2_UCHAR* grown = (PCRE2_UCHAR*)realloc(out, outlen);
         if (!grown) { free(out); set_last_error("regex: out of memory"); return (const char*)string_new_with_length("", 0); }
         out = grown;

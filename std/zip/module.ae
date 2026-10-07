@@ -500,7 +500,7 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
         // No compression: data is the content verbatim, so its size IS the
         // uncompressed size. A central directory that says otherwise is
         // lying about entry_size, and extract's limits are checked against
-        // entry_size — refuse it rather than return more than it claimed.
+        // entry_size: refuse it rather than return more than it claimed.
         if e.comp_size != e.uncomp_size {
             return "", 0, "zip: stored entry size mismatch"
         }

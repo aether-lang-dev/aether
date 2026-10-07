@@ -1651,7 +1651,7 @@ static void heap_free_tree(JsonValue* v) {
  *    heap") and must be freed too, or it leaks (#1447). Snapshot the flag
  *    before arena_destroy since for a parsed root the struct can live inside
  *    the arena; a builder value never does, but be defensive.
- *  - no arena: a plain heap tree — heap_free_tree reclaims struct + children.
+ *  - no arena: a plain heap tree; heap_free_tree reclaims struct + children.
  *  - neither an arena nor JV_FLAG_HEAP_STRUCT: a node inside a parsed
  *    document (object_get / array_get hand those out borrowed). Its document
  *    owns it, so the deep copy is all set/push take, and nothing is freed.
@@ -1817,7 +1817,7 @@ void json_free(JsonValue* v) {
         if (heap_struct) aether_caps_free(v, sizeof(JsonValue));
         return;
     }
-    // Heap path — no arena ever attached. A node with neither an arena nor
+    // Heap path: no arena ever attached. A node with neither an arena nor
     // JV_FLAG_HEAP_STRUCT lives inside a parsed document's arena (handed out
     // borrowed by object_get / array_get); the document frees it, so this is
     // a no-op rather than a free of arena memory.

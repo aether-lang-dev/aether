@@ -392,7 +392,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             if (state_field_is_ptr(gen, actor, child->value)) {
                 // The state field holds a pointer (an actor reference, a
                 // ptr/string payload) though its initializer (typically `0`)
-                // inferred a number — widen to void* so the uses compile.
+                // inferred a number: widen to void* so the uses compile.
                 // The `0` still works as a null pointer constant.
                 fprintf(gen->output, "void* %s;\n", child->value);
             } else if (type_is_sized_array(child->node_type) &&

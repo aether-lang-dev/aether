@@ -258,7 +258,7 @@ fn one_entry_zip(name: string) -> (string, int) {
 }
 
 // An entry under a directory that already exists in the destination as a
-// symlink (or junction) to somewhere else must not be written through it —
+// symlink (or junction) to somewhere else must not be written through it,
 // neither by its plain name nor by a ".." route through a directory that
 // does not exist yet (mkdir_p would create it, and then the OS walks on
 // through the link).
