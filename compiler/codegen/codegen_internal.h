@@ -440,6 +440,10 @@ void get_promoted_names_for_func(CodeGenerator* gen, const char* func_name,
 int is_promoted_capture(CodeGenerator* gen, const char* name);
 void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
                               char* out, size_t out_size);
+const char* struct_owning_strings(CodeGenerator* gen, Type* t);
+void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue);
+void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
+                               Type* struct_type, int line, int col);
 
 /* Internal helpers shared across files */
 int contains_send_expression(ASTNode* node);

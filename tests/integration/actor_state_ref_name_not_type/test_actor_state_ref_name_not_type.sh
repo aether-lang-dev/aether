@@ -79,7 +79,8 @@ fi
 # The reference uses outside a receive arm's bare send: a field set from
 # outside and only forwarded as a `ptr` message field (`back`), one sent
 # through from outside (`h.target ! Go {}`), and `my_ref` used as a number,
-# which spawn no longer overwrites with the actor's address.
+# which spawn no longer overwrites with the actor's address, and a
+# `my_ref` only passed to a `ptr` parameter, which spawn still sets.
 cat > "$tmp/uses.ae" <<'AE'
 message Go {}
 message Fwd { to: ptr }
@@ -111,6 +112,36 @@ actor Holder {
     }
 }
 
+// `my_ref` used as a reference only by passing it to a `ptr` parameter:
+// spawn still sets it to the actor's own address.
+message Hello { from: ptr }
+message Intro { to: ptr }
+
+actor Greeter {
+    state my_ref = 0
+    state greeted = 0
+    receive {
+        Intro(to) -> { introduce(to, my_ref) }
+        Go() -> { greeted = greeted + 1 }
+        Get() -> { reply greeted }
+    }
+}
+
+actor Host {
+    state hellos = 0
+    receive {
+        Hello(from) -> {
+            hellos = hellos + 1
+            from ! Go {}
+        }
+        Get() -> { reply hellos }
+    }
+}
+
+introduce(to: ptr, me: ptr) {
+    to ! Hello { from: me }
+}
+
 actor Tally {
     state my_ref = 4
     receive {
@@ -131,15 +162,20 @@ main() {
     h.target ! Go {}
     k = spawn(Tally())
     k ! Go {}
+    g = spawn(Greeter())
+    ho = spawn(Host())
+    g ! Intro { to: ho }
     wait_for_idle()
     m = k ? Get {}
-    println("hits ${s.hits} ${t.hits} tally ${m}")
+    gh = g ? Get {}
+    hh = ho ? Get {}
+    println("hits ${s.hits} ${t.hits} tally ${m} greeted ${gh} ${hh}")
 }
 AE
 got="$("$AE" run "$tmp/uses.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
-if [ "$got" != "hits 10 2 tally 42" ]; then
+if [ "$got" != "hits 10 2 tally 42 greeted 1 1" ]; then
     echo "  [FAIL] actor_state_ref_name_not_type: a reference field used from outside the actor"
-    printf 'got:\n%s\nwant:\nhits 10 2 tally 42\n' "$got" | sed 's/^/        /'
+    printf 'got:\n%s\nwant:\nhits 10 2 tally 42 greeted 1 1\n' "$got" | sed 's/^/        /'
     exit 1
 fi
 echo "  [PASS] actor_state_ref_name_not_type: a *_ref field used as a number is a number; a send target is a reference under any name"

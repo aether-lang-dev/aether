@@ -1438,6 +1438,24 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 emit_promoted_cell_declaration(gen, child->value, c_type, NULL, init,
                                                child->line, child->column);
             }
+            /* A struct parameter is a copy of the caller's value, strings
+             * included, and the caller still owns those strings: the copy
+             * borrows them. Its trackers are the caller's, so a field store
+             * or a reassignment here freed the caller's string, and a
+             * promoted cell's release freed it again. Clear them: the
+             * callee then owns, and frees at its exit, only the strings it
+             * stores itself, unless it returns the struct (#752). */
+            const char* owning = struct_owning_strings(gen, child->node_type);
+            if (owning && child->type == AST_PATTERN_VARIABLE) {
+                char lv[300];
+                if (is_promoted) snprintf(lv, sizeof(lv), "(*%s)", child->value);
+                else snprintf(lv, sizeof(lv), "%s", child->value);
+                emit_struct_disown(gen, owning, lv);
+                if (!is_promoted) {
+                    push_struct_destroy_defer(gen, child->value, child->node_type,
+                                              child->line, child->column);
+                }
+            }
         }
     }
     
@@ -2306,7 +2324,8 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
         /* `<Name>_replace(dst, src)`: overwrite a struct that owns string
          * fields with a new value. Each string the old value owns is freed,
          * unless the new value holds that same string (`r = Rec { name:
-         * r.name }`): then ownership moves to the new value instead. Freeing
+         * r.name }`, or `r = pass_through(r)`): then it is kept, and moves
+         * to the new value unless the new value already owns it. Freeing
          * first and assigning after (#465) left such a field pointing at
          * freed memory. One owner per string: a string the new value holds
          * in two fields moves to the first. */
@@ -2319,16 +2338,33 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
                   f->node_type->kind == TYPE_STRING)) continue;
             print_line(gen, "if (dst->_heap_%s) {", f->value);
             indent(gen);
+            /* held: the new value holds the string; owned: one of its
+             * fields already owns it (a struct that came back through a
+             * call, say). Held and not owned: the first holder takes it.
+             * Not held: nothing else refers to it, so it is freed. */
+            print_indent(gen);
+            fprintf(gen->output, "int held = 0, owned = 0;");
+            for (int j = 0; j < struct_def->child_count; j++) {
+                ASTNode* g = struct_def->children[j];
+                if (!(g->type == AST_STRUCT_FIELD && g->node_type &&
+                      g->node_type->kind == TYPE_STRING)) continue;
+                fprintf(gen->output, " if (src.%s == dst->%s) { held = 1; owned |= src._heap_%s; }",
+                        g->value, f->value, g->value);
+            }
+            fprintf(gen->output, "\n");
+            print_line(gen, "if (!held) aether_heap_str_free(dst->%s);", f->value);
+            print_indent(gen);
+            fprintf(gen->output, "else if (!owned) {");
             int first = 1;
             for (int j = 0; j < struct_def->child_count; j++) {
                 ASTNode* g = struct_def->children[j];
                 if (!(g->type == AST_STRUCT_FIELD && g->node_type &&
                       g->node_type->kind == TYPE_STRING)) continue;
-                print_line(gen, "%sif (src.%s == dst->%s && !src._heap_%s) src._heap_%s = 1;",
-                           first ? "" : "else ", g->value, f->value, g->value, g->value);
+                fprintf(gen->output, " %sif (src.%s == dst->%s) src._heap_%s = 1;",
+                        first ? "" : "else ", g->value, f->value, g->value);
                 first = 0;
             }
-            print_line(gen, "else aether_heap_str_free(dst->%s);", f->value);
+            fprintf(gen->output, " }\n");
             unindent(gen);
             print_line(gen, "}");
         }

@@ -4872,6 +4872,44 @@ static void mark_returned_struct_escaped(CodeGenerator* gen, ASTNode* expr) {
     }
 }
 
+/* A struct type whose values own heap strings: it has `_heap_<field>`
+ * trackers and a `<Name>_destroy`. NULL otherwise. */
+const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
+    if (!gen || !gen->program || !t || t->kind != TYPE_STRUCT || !t->struct_name) return NULL;
+    ASTNode* sdef = find_struct_definition_by_name(gen->program, t->struct_name);
+    return (sdef && struct_has_heap_string_field(sdef)) ? t->struct_name : NULL;
+}
+
+/* `<lvalue>._heap_<f> = 0;` for every string field of `struct_name`: the
+ * value at `lvalue` stops owning its strings, which stay with (or move to)
+ * whoever else holds them. */
+void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue) {
+    ASTNode* sdef = gen->program ? find_struct_definition_by_name(gen->program, struct_name) : NULL;
+    if (!sdef) return;
+    print_indent(gen);
+    for (int i = 0; i < sdef->child_count; i++) {
+        ASTNode* f = sdef->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && f->node_type &&
+            f->node_type->kind == TYPE_STRING) {
+            fprintf(gen->output, "%s._heap_%s = 0; ", lvalue, f->value);
+        }
+    }
+    fprintf(gen->output, "\n");
+}
+
+/* A promoted struct returned by name hands its owned strings to the caller
+ * with the returned copy (#752). The cell is still released at the scope
+ * exit, and a closure env may hold it longer: it must not free them too. */
+static void disown_returned_promoted_struct(CodeGenerator* gen, ASTNode* expr) {
+    if (!expr || expr->type != AST_IDENTIFIER || !expr->value ||
+        !is_promoted_capture(gen, expr->value)) return;
+    const char* sname = struct_owning_strings(gen, expr->node_type);
+    if (!sname) return;
+    char lv[300];
+    snprintf(lv, sizeof(lv), "(*%s)", expr->value);
+    emit_struct_disown(gen, sname, lv);
+}
+
 /* #752 (caller side): a struct local that RECEIVES ownership of a
  * returned struct — a tuple-unpack target, or a local initialised from a
  * struct-returning call — owns that struct's heap-string fields and must
@@ -4881,7 +4919,7 @@ static void mark_returned_struct_escaped(CodeGenerator* gen, ASTNode* expr) {
  * struct_var), so this is the single owner; no double-free. Gated on the
  * struct actually having heap-string fields (else the defer is a no-op
  * we skip emitting). */
-static void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
+void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
                                       Type* struct_type, int line, int col) {
     if (!gen->program || !var_name || !struct_type ||
         struct_type->kind != TYPE_STRUCT || !struct_type->struct_name) return;
@@ -7904,6 +7942,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                  * the one being returned. See
                  * emit_return_escape_drains_for_unreturned. */
                 emit_return_escape_drains_for_unreturned(gen, stmt->children[0]);
+                mark_returned_struct_escaped(gen, stmt->children[0]);
+                disown_returned_promoted_struct(gen, stmt->children[0]);
                 emit_contract_postconditions(gen, gen->current_function);
                 /* Drain function-level defers BEFORE returning so
                  * cleanup happens between the postcondition check
@@ -8007,6 +8047,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * callee's destroy and left the caller-side leak. */
                     for (int j = 0; j < stmt->child_count; j++) {
                         mark_returned_struct_escaped(gen, stmt->children[j]);
+                        disown_returned_promoted_struct(gen, stmt->children[j]);
                     }
                     // Multi-value returns can't be returning a closure
                     // (closures aren't tuples), so the closure-of-captures
@@ -8138,6 +8179,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * its exit-time destroy (heap-string fields now owned
                      * by the caller). */
                     mark_returned_struct_escaped(gen, stmt->children[0]);
+                    disown_returned_promoted_struct(gen, stmt->children[0]);
                     /* #1140: a single-value `return v` is a SUCCESS exit — in a
                      * `T!` function it is wrapped as `{._0 = v, ._1 = ""}`, and
                      * in an ordinary function there is no error channel at all.

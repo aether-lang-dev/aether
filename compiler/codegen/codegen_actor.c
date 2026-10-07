@@ -161,6 +161,35 @@ static int state_field_passed_as_ptr(CodeGenerator* gen, ASTNode* node, const ch
     return 0;
 }
 
+// True when argument `arg_idx` of `call` goes to a `ptr` or actor-reference
+// parameter: `introduce(s, my_ref)` with `introduce(s: ptr, me: ptr)`, or an
+// extern / stdlib function taking a pointer (`list.add(xs, peer)`).
+static int call_arg_is_ptr_param(CodeGenerator* gen, ASTNode* call, int arg_idx) {
+    if (!call->value) return 0;
+    TypeKind k = lookup_callee_param_kind(gen, call->value, arg_idx);
+    return k == TYPE_PTR || k == TYPE_ACTOR_REF;
+}
+
+// Returns 1 if `node` (recursively) passes the bare name `field_name` as an
+// argument to a `ptr` / actor-reference parameter.
+static int state_field_passed_to_ptr_param(CodeGenerator* gen, ASTNode* node,
+                                           const char* field_name) {
+    if (!node) return 0;
+    if (node->type == AST_FUNCTION_CALL) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            if (a && a->type == AST_IDENTIFIER && a->value &&
+                strcmp(a->value, field_name) == 0 && call_arg_is_ptr_param(gen, node, i)) {
+                return 1;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (state_field_passed_to_ptr_param(gen, node->children[i], field_name)) return 1;
+    }
+    return 0;
+}
+
 // The actor a reference expression names: `Sink` for `r` in `r.field` when
 // `r` is an actor reference to a Sink. NULL for anything else.
 static const char* referenced_actor(ASTNode* obj) {
@@ -214,6 +243,16 @@ static void mark_ptr_field_member_uses(CodeGenerator* gen, ASTNode* node) {
             }
         }
     }
+    if (node->type == AST_FUNCTION_CALL) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* v = node->children[i];
+            if (v && v->type == AST_MEMBER_ACCESS && v->value && v->child_count > 0 &&
+                call_arg_is_ptr_param(gen, node, i)) {
+                const char* actor = referenced_actor(v->children[0]);
+                if (actor) mark_ptr_field(gen, actor, v->value);
+            }
+        }
+    }
     for (int i = 0; i < node->child_count; i++) {
         mark_ptr_field_member_uses(gen, node->children[i]);
     }
@@ -224,14 +263,15 @@ static int state_field_used_as_ptr_in_actor(CodeGenerator* gen, ASTNode* actor,
                                             const char* field_name) {
     return state_field_is_send_target(actor, field_name) ||
            state_field_passed_as_ptr(gen, actor, field_name) ||
+           state_field_passed_to_ptr_param(gen, actor, field_name) ||
            state_field_assigned_ptr(gen, actor, field_name);
 }
 
 // #2466: a state field is stored as `void*` when the program uses it as a
 // pointer, inside the actor or through `r.field` anywhere else: it is
 // assigned a pointer (a `ptr` / actor-reference payload or value), it is the
-// target of a send/ask, or it is passed as a message field that holds a
-// pointer. That is the `state next = 0` ... `a.next = b` ... `next ! Msg {}`
+// target of a send/ask, or it is passed as a message field or a function
+// argument that holds a pointer. That is the `state next = 0` ... `a.next = b` ... `next ! Msg {}`
 // shape, whose `0` initializer infers a number. Only use decides it, never
 // the field's name: `state self_ref = 0` used as a number stays a number.
 //
