@@ -326,14 +326,6 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
     return 0;
 }
 
-static int is_actor_state_name(CodeGenerator* gen, const char* name) {
-    if (!name) return 0;
-    for (int i = 0; i < gen->state_var_count; i++) {
-        if (gen->actor_state_vars[i] && strcmp(gen->actor_state_vars[i], name) == 0) return 1;
-    }
-    return 0;
-}
-
 /* The variable an assignment target writes through: `x`, `x.f`, `x[i]`. */
 static const char* store_target_root(ASTNode* lhs) {
     while (lhs && (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
@@ -343,7 +335,7 @@ static const char* store_target_root(ASTNode* lhs) {
     return (lhs && lhs->type == AST_IDENTIFIER) ? lhs->value : NULL;
 }
 
-static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node, int whole) {
+static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node) {
     if (!node) return;
     if (node->type == AST_IDENTIFIER && node->value) {
         mark_return_escaped_struct_var(gen, node->value);
@@ -351,12 +343,12 @@ static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node, int wh
     /* Reading a scalar or string field shares nothing with the struct: a
      * string taken from a field is copied where it is stored (#2461). A
      * struct-typed (or untyped) field may share the struct's strings. */
-    if (!whole && node->type == AST_MEMBER_ACCESS && node->node_type &&
+    if (node->type == AST_MEMBER_ACCESS && node->node_type &&
         node->node_type->kind != TYPE_STRUCT && node->node_type->kind != TYPE_UNKNOWN) {
         return;
     }
     for (int i = 0; i < node->child_count; i++) {
-        mark_mentioned_struct_vars(gen, node->children[i], whole);
+        mark_mentioned_struct_vars(gen, node->children[i]);
     }
 }
 
@@ -367,24 +359,16 @@ static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node, int wh
  * suppressed the way a return suppresses it (#752). Marked before the body
  * is emitted, so an earlier `return` in a loop that later stores is covered
  * too. Naming a non-struct here is harmless: no destroy is keyed to it.
- *
- * A closure's env holds a plain copy of a struct it captures, without a
- * reference to the strings in it, and the closure may outlive the arm (kept
- * in state, sent, captured by one that is). Its destroy is suppressed too:
- * leaking those strings is the safe side until a capture owns them. */
+ * A closure that captures the struct holds a copy with strings of its own
+ * (#2504), so a capture is no reason to keep them. */
 static void mark_state_stored_struct_vars(CodeGenerator* gen, ASTNode* node) {
     if (!node) return;
-    if (node->type == AST_CLOSURE &&
-        !(node->value && strcmp(node->value, "trailing") == 0)) {
-        mark_mentioned_struct_vars(gen, node, 1);   /* captured whole */
-        return;
-    }
-    if (node->type == AST_VARIABLE_DECLARATION && is_actor_state_name(gen, node->value)) {
-        for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i], 0);
+    if (node->type == AST_VARIABLE_DECLARATION && is_actor_state_var(gen, node->value)) {
+        for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i]);
     } else if (node->type == AST_ASSIGNMENT && node->child_count >= 2) {
         const char* root = store_target_root(node->children[0]);
-        if (root && (strcmp(root, "self") == 0 || is_actor_state_name(gen, root))) {
-            mark_mentioned_struct_vars(gen, node->children[1], 0);
+        if (root && (strcmp(root, "self") == 0 || is_actor_state_var(gen, root))) {
+            mark_mentioned_struct_vars(gen, node->children[1]);
         }
     }
     for (int i = 0; i < node->child_count; i++) {

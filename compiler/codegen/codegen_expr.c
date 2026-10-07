@@ -549,8 +549,10 @@ void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
     arg_drain_bind(closure_node, nm);          /* now substitutes in the call */
     generate_expression(gen, call);
     /* #1398: member-aware teardown, so the env gives back the references its
-       string captures own. Falls back to free() only when the closure is not
-       in the registry (no captures, hence nothing owned). */
+       string captures own. A value that is not a literal in the registry (an
+       owned closure a call returned, #2506) is released through its env
+       header: envs are reference-counted (#2494), so a plain free() would
+       ignore another holder. */
     int env_id = -1;
     for (int ci = 0; ci < gen->closure_count; ci++) {
         if (gen->closures[ci].closure_node == closure_node) {
@@ -562,7 +564,7 @@ void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
         fprintf(gen->output, "; if (%s.env) _closure_env_%d_free((void*)%s.env); }",
                 nm, env_id, nm);
     } else {
-        fprintf(gen->output, "; if (%s.env) free((void*)%s.env); }", nm, nm);
+        fprintf(gen->output, "; _aether_closure_env_release(%s.env); }", nm);
     }
     arg_drain_truncate(saved);                 /* frees nm */
 }
@@ -2700,6 +2702,24 @@ static int capture_is_closure_value(CodeGenerator* gen, const char* name,
     return ctype && strcmp(ctype, "_AeClosure") == 0;
 }
 
+/* #2504: a captured struct VALUE (not a promoted struct cell) whose type
+ * owns heap strings: the struct's name, else NULL. The env must hold a copy
+ * with strings of its own (`<Name>_dup`) and destroy it in its destructor.
+ * A plain copy shared the declaring scope's strings, which its destroy frees
+ * while a returned or stored closure still reads them. */
+static const char* capture_owning_struct(CodeGenerator* gen, const char* name,
+                                         const char* parent_func) {
+    if (capture_is_promoted(gen, name, parent_func) ||
+        capture_sized_array_type(gen, name, parent_func)) return NULL;
+    const char* ctype = lookup_var_c_type(gen, name, parent_func);
+    if (!ctype) return NULL;
+    Type t;
+    memset(&t, 0, sizeof(t));
+    t.kind = TYPE_STRUCT;
+    t.struct_name = (char*)ctype;
+    return struct_owning_strings(gen, &t);
+}
+
 /* #2463: a parameter of `closure` that a closure nested in it writes. The
  * nesting closure owns the shared cell (promote_up_from stops at the scope
  * declaring the name), so it takes the value as `_param_<name>` and the body
@@ -2791,7 +2811,8 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
     fprintf(gen->output, "} _closure_env_%d;\n\n", id);
 
     /* The env owns a reference per retained-string capture (#1398), per
-       promoted cell (#2019) and per captured closure value (#2494), so
+       promoted cell (#2019) and per captured closure value (#2494), and a
+       copy of each captured struct's strings (#2504), so
        teardown has to be member-aware: each is given back here, and a cell
        or a captured env is freed by whichever holder releases last. The env
        itself is reference-counted too (#2494): an env that captured this
@@ -2806,6 +2827,11 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             int promoted = capture_is_promoted(gen, captures[i], parent_func);
             if (capture_is_closure_value(gen, captures[i], parent_func)) {
                 fprintf(gen->output, "    _aether_closure_env_release(_e->%s.env);\n", captures[i]);
+                continue;
+            }
+            const char* owning = capture_owning_struct(gen, captures[i], parent_func);
+            if (owning) {
+                fprintf(gen->output, "    %s_destroy(&_e->%s);\n", owning, captures[i]);
                 continue;
             }
             if (!promoted && !capture_is_retained_string(gen, captures[i], parent_func)) continue;
@@ -3234,6 +3260,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     /* env owns a reference to the captured env (#2494) */
                     fprintf(gen->output, "    _e->%s = %s; _aether_closure_env_retain(%s.env);\n",
                             captures[i], captures[i], captures[i]);
+                } else if (capture_owning_struct(gen, captures[i], parent_func)) {
+                    /* env owns a copy of the struct's strings (#2504) */
+                    fprintf(gen->output, "    _e->%s = %s_dup(%s);\n", captures[i],
+                            capture_owning_struct(gen, captures[i], parent_func), captures[i]);
                 } else if (capture_is_promoted(gen, captures[i], parent_func)) {
                     /* env owns a reference to the shared cell (#2019) */
                     const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
@@ -7652,6 +7682,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         /* env owns a reference to the captured env (#2494) */
                         fprintf(gen->output, "_e->%s = %s; _aether_closure_env_retain(%s.env); ",
                                 captures[i], captures[i], captures[i]);
+                    } else if (capture_owning_struct(gen, captures[i], cl_parent_func)) {
+                        /* env owns a copy of the struct's strings (#2504) */
+                        fprintf(gen->output, "_e->%s = %s_dup(%s); ", captures[i],
+                                capture_owning_struct(gen, captures[i], cl_parent_func), captures[i]);
                     } else if (capture_is_promoted(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference to the shared cell (#2019) */
                         const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);

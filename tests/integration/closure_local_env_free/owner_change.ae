@@ -1,0 +1,132 @@
+// #2504 / #2506 probe: values whose owner changes hands.
+//
+//  - A closure capturing a struct that owns strings holds a copy with
+//    strings of its own, so the declaring scope's destroy cannot pull them
+//    out from under a returned closure (#2504). A struct the closure writes
+//    is a shared cell instead, and stays one.
+//  - A closure a function hands over and the caller passes straight to a
+//    call is freed after the call (#2506).
+//  - A local whose value was handed on still frees the closures it binds
+//    afterwards (#2506).
+//
+// test_closure_local_env_free.sh builds this with env_count.h force-included
+// and checks every env and cell is freed exactly once; on its own it checks
+// the values (a freed string or env read back would give a wrong one).
+
+import std.string
+import std.list
+
+extern exit(code: int)
+
+struct Rec { name: string, count: int }
+struct Outer { inner: Rec, tag: string }
+
+var got = 0
+
+check(label: string, have: int, want: int) {
+    if have != want {
+        println("FAIL ${label}: got ${have} want ${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+// A captured struct read after its scope's destroy.
+mk_reader(p: string) -> fn {
+    w = Rec { name: string.concat(p, "+"), count: 3 }
+    return || {
+        return string.length(w.name) + w.count
+    }
+}
+
+// A captured struct holding another that owns strings.
+mk_outer(p: string) -> fn {
+    o = Outer { inner: Rec { name: string.concat(p, "-in"), count: 1 }, tag: string.concat(p, "-tag") }
+    return || {
+        return string.length(o.inner.name) + string.length(o.tag)
+    }
+}
+
+// A struct the closure writes: a shared cell.
+mk_writer(p: string) -> fn {
+    r = Rec { name: string.concat(p, "w"), count: 0 }
+    return || {
+        r.count = r.count + 1
+        r.name = string.concat(r.name, "!")
+        return string.length(r.name) + r.count
+    }
+}
+
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+run_twice(f: fn) {
+    int a = call(f)
+    int b = call(f)
+    got = a + b
+}
+
+// The first closure goes to the list; the later ones stay here.
+rebind_after_escape(l: ptr, start: int) -> int {
+    total = start
+    g = || { total = total + 1 }
+    stash(l, g)
+    g = || { total = total + 10 }
+    g()
+    g = || { total = total + 100 }
+    g()
+    return total
+}
+
+// Every other iteration's closure goes to the list.
+loop_escape(l: ptr, n: int) -> int {
+    total = 0
+    i = 0
+    while i < n {
+        g = || { total = total + 1 }
+        if i % 2 == 0 {
+            stash(l, g)
+        }
+        g()
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    owners = list.new()
+    r = 0
+    while r < 20 {
+        rd = mk_reader("ab")
+        junk = string.concat("zzzz", "zzzzzzzzzzzzzzzzzzzz")
+        int v = call(rd)
+        check("captured struct", v, 6)
+        check("junk", string.length(junk), 24)
+
+        ou = mk_outer("ab")
+        int ov = call(ou)
+        check("captured nested struct", ov, 11)
+
+        wr = mk_writer("ab")
+        int w1 = call(wr)
+        int w2 = call(wr)
+        check("written struct", w1 + w2, 12)
+
+        run_twice(make_counter(r))
+        check("owned closure passed to a call", got, 2 * r + 3)
+
+        check("rebind after escape", rebind_after_escape(owners, r), r + 110)
+        check("loop escape", loop_escape(owners, 5), 5)
+        r = r + 1
+    }
+    list.free(owners)
+    println("owner change ok")
+}

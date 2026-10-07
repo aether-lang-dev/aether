@@ -477,6 +477,14 @@ static int series_decimal_literal(const ASTNode* n, unsigned long long* out) {
     return 1;
 }
 
+/* A counter or accumulator of the series, read or written: the identifier as
+ * the rest of codegen spells it, so an actor's state field is `self->name`, a
+ * promoted capture its cell and a closure's capture its env slot. Printing
+ * the bare name wrote a local that did not exist (#2505). */
+static void series_var(CodeGenerator* gen, ASTNode* id) {
+    generate_expression(gen, id);
+}
+
 // Try to detect and emit a collapsed arithmetic series loop.
 // Returns 1 if the loop was collapsed and emitted; 0 otherwise (caller emits normally).
 static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
@@ -524,7 +532,7 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     if (stmt_count == 0) return 0;
 
     // 3. Parse each statement
-    const char*        acc_vars[MAX_SERIES_ACCUMULATORS];
+    ASTNode*           acc_ids[MAX_SERIES_ACCUMULATORS];        // its identifier node
     ASTNode*           acc_addends[MAX_SERIES_ACCUMULATORS];
     int                acc_width[MAX_SERIES_ACCUMULATORS];
     int                acc_is_linear[MAX_SERIES_ACCUMULATORS];  // addend is counter or counter*C
@@ -626,7 +634,7 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
                 if (expr_references_var(addend, counter_var)) return 0;
                 if (codegen_expr_has_side_effects(addend)) return 0;
             }
-            acc_vars[acc_count]      = target;
+            acc_ids[acc_count]       = self;
             acc_addends[acc_count]   = addend;
             acc_width[acc_count]     = width;
             acc_is_linear[acc_count] = addend_is_counter;
@@ -663,8 +671,12 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     const char* counter_ctype = counter_width == 32 ? "int" : "int64_t";
     const char* counter_max   = counter_width == 32 ? "INT32_MAX" : "INT64_MAX";
 
+    /* The closed form stands for the loop, so a C error in it is the loop's. */
+    codegen_maybe_emit_line(gen, condition);
     print_indent(gen);
-    fprintf(gen->output, "if ((%s) %s (", counter_var, is_lte ? "<=" : "<");
+    fprintf(gen->output, "if ((");
+    series_var(gen, cond_left);
+    fprintf(gen->output, ") %s (", is_lte ? "<=" : "<");
     generate_expression(gen, cond_right);
     fprintf(gen->output, ")) {\n");
     indent(gen);
@@ -674,10 +686,13 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     print_indent(gen);
     fprintf(gen->output, "uint64_t _ae_sd = (uint64_t)(int64_t)(");
     generate_expression(gen, cond_right);
-    fprintf(gen->output, ") - (uint64_t)(int64_t)%s;\n", counter_var);
+    fprintf(gen->output, ") - (uint64_t)(int64_t)");
+    series_var(gen, cond_left);
+    fprintf(gen->output, ";\n");
     print_indent(gen);
-    fprintf(gen->output, "uint64_t _ae_sh = ((uint64_t)%s - (uint64_t)(int64_t)%s) / %lluULL;\n",
-            counter_max, counter_var, counter_step);
+    fprintf(gen->output, "uint64_t _ae_sh = ((uint64_t)%s - (uint64_t)(int64_t)", counter_max);
+    series_var(gen, cond_left);
+    fprintf(gen->output, ") / %lluULL;\n", counter_step);
 
     // The trip count, when the counter's last step does not wrap.
     print_indent(gen);
@@ -699,6 +714,7 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
     int emitted_linear = 0;
     for (int i = 0; i < acc_count; i++) {
         const char* acc_ctype = acc_width[i] == 32 ? "int" : "int64_t";
+        codegen_maybe_emit_line(gen, stmts[acc_stmt[i]]);
         print_indent(gen);
         if (acc_is_linear[i]) {
             // Sum of the counter values the statement sees: c0 + k*step for
@@ -710,25 +726,33 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
             const char* tri = after
                 ? "(_ae_sn % 2 == 0 ? (_ae_sn / 2) * (_ae_sn + 1) : _ae_sn * (_ae_sn / 2 + 1))"
                 : "(_ae_sn % 2 == 0 ? (_ae_sn / 2) * (_ae_sn - 1) : _ae_sn * ((_ae_sn - 1) / 2))";
-            fprintf(gen->output,
-                    "%s = (%s)((uint64_t)(int64_t)%s + %lluULL * ((uint64_t)(int64_t)%s * _ae_sn + %lluULL * ",
-                    acc_vars[i], acc_ctype, acc_vars[i], acc_scale[i], counter_var, counter_step);
+            series_var(gen, acc_ids[i]);
+            fprintf(gen->output, " = (%s)((uint64_t)(int64_t)", acc_ctype);
+            series_var(gen, acc_ids[i]);
+            fprintf(gen->output, " + %lluULL * ((uint64_t)(int64_t)", acc_scale[i]);
+            series_var(gen, cond_left);
+            fprintf(gen->output, " * _ae_sn + %lluULL * ", counter_step);
             fputs(tri, gen->output);
             fprintf(gen->output, "));\n");
             emitted_linear = 1;
         } else {
             // Invariant addend: added once per trip.
-            fprintf(gen->output, "%s = (%s)((uint64_t)(int64_t)%s + (uint64_t)(int64_t)(",
-                    acc_vars[i], acc_ctype, acc_vars[i]);
+            series_var(gen, acc_ids[i]);
+            fprintf(gen->output, " = (%s)((uint64_t)(int64_t)", acc_ctype);
+            series_var(gen, acc_ids[i]);
+            fprintf(gen->output, " + (uint64_t)(int64_t)(");
             generate_expression(gen, acc_addends[i]);
             fprintf(gen->output, ") * _ae_sn);\n");
         }
     }
 
     // counter = c0 + step * T
+    codegen_maybe_emit_line(gen, stmts[counter_idx]);
     print_indent(gen);
-    fprintf(gen->output, "%s = (%s)((uint64_t)(int64_t)%s + _ae_sn * %lluULL);\n",
-            counter_var, counter_ctype, counter_var, counter_step);
+    series_var(gen, cond_left);
+    fprintf(gen->output, " = (%s)((uint64_t)(int64_t)", counter_ctype);
+    series_var(gen, cond_left);
+    fprintf(gen->output, " + _ae_sn * %lluULL);\n", counter_step);
 
     unindent(gen);
     print_indent(gen);
@@ -4643,14 +4667,20 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
  * unknown-body callees as escaping, the fail-safe direction (leak >> UAF).
  * When the future `@retains` annotation lands, opt-in non-escaping externs
  * can re-enable the drain. */
+static int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);
+
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
     if (!gen || !call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
 
+    /* A closure literal, or a closure a call hands over that nobody else
+     * holds (#2506: `run(make_counter())`): either way the argument is the
+     * only reference, so it is dead once the call returns. */
     ASTNode* cclos = NULL; int cclos_idx = -1;
     for (int ai = 0; ai < call->child_count; ai++) {
         ASTNode* a = call->children[ai];
-        if (a && a->type == AST_CLOSURE &&
-            !(a->value && strcmp(a->value, "trailing") == 0)) {
+        if (a && ((a->type == AST_CLOSURE &&
+                   !(a->value && strcmp(a->value, "trailing") == 0)) ||
+                  call_returns_owned_closure(gen, a))) {
             cclos = a; cclos_idx = ai; break;
         }
     }
@@ -4732,6 +4762,7 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
  * ------------------------------------------------------------------ */
 
 #define ENV_SCAN_MAX_DEPTH 8
+#define ENV_SCAN_MAX_CLEARS 16
 
 typedef struct {
     const char* name;      /* the local (or, in param_mode, the parameter) */
@@ -4746,6 +4777,13 @@ typedef struct {
     int saw_decl;
     int heap_env;          /* some bound closure captures, so its env is malloc'd */
     int cid;               /* -2 none bound yet, -1 several closures, else the one */
+    /* #2506: a use that hands the value on is not fatal when it is a whole
+     * simple statement: the local stops owning its value right before that
+     * statement, and a later fresh binding owns again. */
+    int track_clears;
+    ASTNode* cur_stmt;     /* the statement of the enclosing block being walked */
+    ASTNode* clears[ENV_SCAN_MAX_CLEARS];
+    int clear_count;
 } EnvScan;
 
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
@@ -4987,11 +5025,55 @@ static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* cal
     return 1;
 }
 
+/* Does `n` hold a builder's trailing block anywhere? Such a block can run
+ * before the call it belongs to. */
+static int env_scan_has_trailing(ASTNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_CLOSURE && !env_scan_is_real_closure(n)) return 1;
+    for (int i = 0; i < n->child_count; i++) {
+        if (env_scan_has_trailing(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* The value of s->name is handed on (or replaced by one nobody vouches for).
+ * The local stops owning it, which is sound to mark right before the
+ * statement only when that statement evaluates once, top to bottom: a
+ * simple statement in the scanned function's own body, not a condition, a
+ * deferred statement, a nested closure body or a trailing block that can
+ * run around it. Anything else keeps the env for good. */
+static void env_scan_escape(EnvScan* s, int nested) {
+    ASTNode* st = s->cur_stmt;
+    if (s->track_clears && !nested && st &&
+        (st->type == AST_EXPRESSION_STATEMENT || st->type == AST_VARIABLE_DECLARATION ||
+         st->type == AST_RETURN_STATEMENT || st->type == AST_ASSIGNMENT ||
+         st->type == AST_TUPLE_DESTRUCTURE) &&
+        !env_scan_has_trailing(st)) {
+        for (int i = 0; i < s->clear_count; i++) {
+            if (s->clears[i] == st) return;
+        }
+        if (s->clear_count < ENV_SCAN_MAX_CLEARS) {
+            s->clears[s->clear_count++] = st;
+            return;
+        }
+    }
+    s->escapes = 1;
+}
+
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                           ASTNode* parent, int nested) {
     if (!node || s->escapes) return;
     const char* name = s->name;
     int named = node->value && strcmp(node->value, name) == 0;
+    if (node->type == AST_BLOCK) {
+        ASTNode* saved = s->cur_stmt;
+        for (int i = 0; i < node->child_count && !s->escapes; i++) {
+            s->cur_stmt = node->children[i];
+            env_scan_walk(gen, s, node->children[i], node, nested);
+        }
+        s->cur_stmt = saved;
+        return;
+    }
     switch (node->type) {
         case AST_VARIABLE_DECLARATION:
             if (named) {
@@ -5005,8 +5087,13 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 /* A binding in a nested closure body is that closure's own
                  * local; a tuple slot has no initializer; anything but a fresh
                  * closure may be a value someone else holds. */
-                if (nested || !env_scan_fresh_binding(gen, s, rhs)) {
+                if (nested) {
                     s->escapes = 1;
+                    return;
+                }
+                if (!env_scan_fresh_binding(gen, s, rhs)) {
+                    env_scan_escape(s, nested);
+                    env_scan_walk(gen, s, rhs, node, nested);
                     return;
                 }
                 s->bindings++;
@@ -5035,7 +5122,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                     parent->type == AST_RETURN_STATEMENT && parent->child_count == 1) {
                     return;   /* the reference goes to the caller */
                 }
-                s->escapes = 1;
+                env_scan_escape(s, nested);
             }
             return;
         case AST_FUNCTION_CALL:
@@ -5067,7 +5154,27 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
     }
 }
 
-/* Index on the defer stack of `name`'s env carrier, or -1. */
+/* #2506: is `call` a call whose result is a closure only the caller holds
+ * (returns_owned_closure), in the function being generated? */
+static int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
+        strcmp(call->value, "call") == 0 || !gen->hoist_scope_body) return 0;
+    for (int i = 0; i < call->child_count; i++) {
+        if (call->children[i] && call->children[i]->type == AST_CLOSURE &&
+            !env_scan_is_real_closure(call->children[i])) return 0;
+    }
+    EnvScan s;
+    memset(&s, 0, sizeof(s));
+    s.name = "";
+    s.root = gen->hoist_scope_body;
+    s.owner = gen->current_function;
+    s.cid = -2;
+    return !env_scan_callee_is_variable(gen, &s, call->value) &&
+           returns_owned_closure(gen, &s, call->value);
+}
+
+/* The env carrier's annotation: "closure_env_free:<cid>:<own>:<name>", see
+ * try_emit_closure_env_free. Index on the defer stack of `name`'s, or -1. */
 static int closure_env_carrier_index(CodeGenerator* gen, const char* name) {
     const char* prefix = "closure_env_free:";
     size_t plen = strlen(prefix);
@@ -5075,6 +5182,7 @@ static int closure_env_carrier_index(CodeGenerator* gen, const char* name) {
         ASTNode* d = gen->defer_stack[i];
         if (!d || !d->annotation || strncmp(d->annotation, prefix, plen) != 0) continue;
         const char* sep = strchr(d->annotation + plen, ':');
+        sep = sep ? strchr(sep + 1, ':') : NULL;
         if (sep && strcmp(sep + 1, name) == 0) return i;
     }
     return -1;
@@ -5085,6 +5193,41 @@ static int closure_env_carrier_cid(CodeGenerator* gen, int idx) {
     return atoi(gen->defer_stack[idx]->annotation + strlen("closure_env_free:"));
 }
 
+/* Does the local behind the carrier at `idx` track whether it owns its value
+ * (`_envown_<name>`, #2506)? */
+static int closure_env_carrier_owned_flag(CodeGenerator* gen, int idx) {
+    const char* sep = strchr(gen->defer_stack[idx]->annotation + strlen("closure_env_free:"), ':');
+    return sep && sep[1] == '1';
+}
+
+/* #2506: statements right before which a local stops owning its closure
+ * value (`_envown_<name> = 0;`), registered by claim_closure_local_env and
+ * emitted by generate_statement. A statement is emitted once, in the
+ * function whose scan found it. */
+typedef struct { ASTNode* stmt; char* name; } EnvOwnClear;
+static EnvOwnClear* g_env_own_clears = NULL;
+static int g_env_own_clear_count = 0;
+static int g_env_own_clear_cap = 0;
+
+static void register_env_own_clear(ASTNode* stmt, const char* name) {
+    if (g_env_own_clear_count >= g_env_own_clear_cap) {
+        g_env_own_clear_cap = g_env_own_clear_cap ? g_env_own_clear_cap * 2 : 8;
+        g_env_own_clears = aether_xrealloc(g_env_own_clears,
+                                           g_env_own_clear_cap * sizeof(EnvOwnClear));
+    }
+    g_env_own_clears[g_env_own_clear_count].stmt = stmt;
+    g_env_own_clears[g_env_own_clear_count].name = strdup(name);
+    g_env_own_clear_count++;
+}
+
+static void emit_env_own_clears(CodeGenerator* gen, ASTNode* stmt) {
+    for (int i = 0; i < g_env_own_clear_count; i++) {
+        if (g_env_own_clears[i].stmt != stmt) continue;
+        print_indent(gen);
+        fprintf(gen->output, "_envown_%s = 0;\n", g_env_own_clears[i].name);
+    }
+}
+
 /* #2480: called where the C declaration of local `name` is emitted (its
  * first binding or the hoist that lifts it out of a loop or branch), with
  * `binding`, one of its bindings. Pushes the scope-exit release of its env
@@ -5093,7 +5236,7 @@ static int closure_env_carrier_cid(CodeGenerator* gen, int idx) {
  * A closure that captured the local holds its own reference (#2494), so it
  * may outlive the scope, and the local may be rebound under it. */
 static void claim_closure_local_env(CodeGenerator* gen, const char* name,
-                                    ASTNode* binding) {
+                                    ASTNode* binding, int at_binding) {
     if (!gen || !name || !binding || gen->scope_depth <= 0 || !gen->hoist_scope_body) return;
     if (binding->type != AST_VARIABLE_DECLARATION || binding->child_count < 1) return;
     ASTNode* rhs = binding->children[0];
@@ -5112,12 +5255,8 @@ static void claim_closure_local_env(CodeGenerator* gen, const char* name,
         Type* rt = (dc && dc->count > 0 && dc->nodes[0]) ? dc->nodes[0]->node_type : NULL;
         if (!rt || rt->kind != TYPE_FUNCTION || rt->is_fnptr) return;
     }
-    if (is_promoted_capture(gen, name) || is_module_global_var(gen, name)) return;
-    if (gen->current_actor) {
-        for (int i = 0; i < gen->state_var_count; i++) {
-            if (gen->actor_state_vars[i] && strcmp(gen->actor_state_vars[i], name) == 0) return;
-        }
-    }
+    if (is_promoted_capture(gen, name) || is_module_global_var(gen, name) ||
+        is_actor_state_var(gen, name)) return;
     if (closure_env_carrier_index(gen, name) >= 0) return;
     EnvScan s;
     memset(&s, 0, sizeof(s));
@@ -5126,10 +5265,24 @@ static void claim_closure_local_env(CodeGenerator* gen, const char* name,
     s.owner = gen->current_function;
     s.decl = binding;
     s.cid = -2;
+    /* A local a `try` body writes is volatile: a flag beside it would not
+     * survive the longjmp, so its hand-offs stay fatal. */
+    const char* vq = try_volatile_qual_for(gen, name);
+    s.track_clears = !(vq && vq[0]);
     env_scan_walk(gen, &s, s.root, NULL, 0);
     if (s.escapes || !s.saw_decl || !s.heap_env) return;
+    int owned_flag = s.clear_count > 0;
+    if (owned_flag) {
+        /* #2506: the value is handed on at some statements; the local owns
+         * what a fresh binding gave it until the next such statement. */
+        print_indent(gen);
+        fprintf(gen->output, "int _envown_%s = %d; (void)_envown_%s;\n",
+                name, at_binding ? 1 : 0, name);
+        for (int i = 0; i < s.clear_count; i++) register_env_own_clear(s.clears[i], name);
+    }
     char annot[300];
-    snprintf(annot, sizeof(annot), "closure_env_free:%d:%s", s.cid < 0 ? -1 : s.cid, name);
+    snprintf(annot, sizeof(annot), "closure_env_free:%d:%d:%s", s.cid < 0 ? -1 : s.cid,
+             owned_flag, name);
     ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
                                        binding->line, binding->column);
     if (!carrier) return;
@@ -5690,6 +5843,8 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
          * local — the write is routed to the file-scope static by the
          * variable-declaration emitter. */
         if (is_module_global_var(gen, n)) continue;
+        /* #2505: nor an actor's state field, which `n` writes in a handler. */
+        if (is_actor_state_var(gen, n)) continue;
 
         // Recover a usable type from either branch's initializer.
         ASTNode* decl = hoist_find_decl(then_body, n);
@@ -5722,7 +5877,7 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
         }
         mark_var_declared_typed(gen, n, var_type);
         emit_hoisted_local_decl(gen, var_type, n);
-        claim_closure_local_env(gen, n, decl);   /* #2480 */
+        claim_closure_local_env(gen, n, decl, 0);   /* #2480 */
         if (joined) free_type(joined);
     }
 }
@@ -5737,8 +5892,12 @@ static void hoist_loop_var(ASTNode* child, void* user) {
     CodeGenerator* gen = (CodeGenerator*)user;
     /* #744: don't hoist a module-level `var` global as a loop-
      * scoped local — it would shadow the file-scope static. */
+    /* #2505: nor an actor's state field: `kept = kept + 1` in a handler's
+     * loop writes self->kept, and a hoisted local of that name shadowed it
+     * for the loop's closed form. */
     if (!is_var_declared(gen, child->value) &&
-        !is_module_global_var(gen, child->value)) {
+        !is_module_global_var(gen, child->value) &&
+        !is_actor_state_var(gen, child->value)) {
         // Determine type
         Type* var_type = child->node_type;
         if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
@@ -5805,7 +5964,7 @@ static void hoist_loop_var(ASTNode* child, void* user) {
             /* #2480: the hoisted local is the loop's one C variable, so the
              * env free is queued here, outside the loop; each iteration's
              * rebinding frees the env it replaces. */
-            claim_closure_local_env(gen, child->value, child);
+            claim_closure_local_env(gen, child->value, child, 0);
         }
         if (joined) free_type(joined);
     }
@@ -6306,6 +6465,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
          * AST_VARIABLE_DECLARATION emitter (is_module_global_var), so
          * skip it here exactly as that path does. */
         if (is_module_global_var(gen, name)) continue;
+        if (is_actor_state_var(gen, name)) continue;   /* #2505: self->name */
         ASTNode* first_decl = hoist_if_branch_first_decl(body, name);
         if (!first_decl) continue;
         Type* var_type = first_decl->node_type;
@@ -6328,7 +6488,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
         }
         fprintf(gen->output, "%s %s%s;\n", c_type, name, hoisted_zero_init(var_type, c_type));
         mark_var_declared_typed(gen, name, var_type);
-        claim_closure_local_env(gen, name, first_decl);   /* #2480 */
+        claim_closure_local_env(gen, name, first_decl, 0);   /* #2480 */
         if (joined) free_type(joined);
     }
 }
@@ -6913,6 +7073,7 @@ static ASTNode* stmt_trailing_call(CodeGenerator* gen, ASTNode* stmt) {
 
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
+    if (g_env_own_clear_count) emit_env_own_clears(gen, stmt);   /* #2506 */
     ASTNode* saved_trailing = gen->trailing_stmt_call;
     gen->trailing_stmt_call = stmt_trailing_call(gen, stmt);
     generate_statement_body(gen, stmt);
@@ -8040,7 +8201,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, " }\n");
                     } else if (stmt->child_count > 0 && stmt->children[0] &&
                                (env_scan_is_real_closure(stmt->children[0]) ||
-                                stmt->children[0]->type == AST_FUNCTION_CALL) &&
+                                call_returns_owned_closure(gen, stmt->children[0])) &&
                                closure_env_carrier_index(gen, stmt->value) >= 0) {
                         /* #2480: a local whose env this scope frees holds one
                          * env at a time. Rebinding it (a loop body's closure,
@@ -8054,9 +8215,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * argument or a capture, which retains. */
                         int cidx = closure_env_carrier_index(gen, stmt->value);
                         int ccid = closure_env_carrier_cid(gen, cidx);
-                        fprintf(gen->output, "{ void* _ae_old_env = %s.env; %s = ",
-                                stmt->value, stmt->value);
+                        int flagged = closure_env_carrier_owned_flag(gen, cidx);
+                        fprintf(gen->output, "{ void* _ae_old_env = %s.env; ", stmt->value);
+                        if (flagged) {
+                            /* #2506: the old value is released only if the
+                             * local still owned it; the new one it owns. */
+                            fprintf(gen->output, "if (!_envown_%s) _ae_old_env = NULL; ",
+                                    stmt->value);
+                        }
+                        fprintf(gen->output, "%s = ", stmt->value);
                         generate_expression(gen, stmt->children[0]);
+                        if (flagged) fprintf(gen->output, "; _envown_%s = 1", stmt->value);
                         if (ccid >= 0) {
                             fprintf(gen->output, "; _closure_env_%d_free(_ae_old_env); }\n", ccid);
                         } else {
@@ -8573,12 +8742,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * binding before any statement is emitted, so the
                          * free was never pushed and every call leaked the
                          * env and the cells it holds. */
-                        claim_closure_local_env(gen, stmt->value, stmt);
+                        claim_closure_local_env(gen, stmt->value, stmt, 1);
                     } else if (stmt->child_count > 0 && stmt->children[0] &&
                                stmt->children[0]->type == AST_FUNCTION_CALL && stmt->value) {
                         /* #2494: the result of a function that returns a
                          * closure only its caller holds is freed here too. */
-                        claim_closure_local_env(gen, stmt->value, stmt);
+                        claim_closure_local_env(gen, stmt->value, stmt, 1);
                     }
                     // Suppress unused-variable warning for arrays used with list
                     // pattern matching — the paired _len variable may be the only

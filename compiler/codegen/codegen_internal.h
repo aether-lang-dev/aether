@@ -43,6 +43,7 @@ int is_heap_box_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_box_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_box_var(CodeGenerator* gen, const char* var_name);
 int is_module_global_var(CodeGenerator* gen, const char* name);
+int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
 void register_module_global_var(CodeGenerator* gen, const char* name);
 int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);

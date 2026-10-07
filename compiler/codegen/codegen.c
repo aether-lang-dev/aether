@@ -821,6 +821,17 @@ int is_module_global_var(CodeGenerator* gen, const char* name) {
     return 0;
 }
 
+// Is `name` a state field of the actor being generated? A bare `name` in
+// its handlers reads and writes `self->name`, so it is never a local to
+// declare or hoist (#2505).
+int is_actor_state_var(CodeGenerator* gen, const char* name) {
+    if (!gen || !gen->current_actor || !name) return 0;
+    for (int i = 0; i < gen->state_var_count; i++) {
+        if (gen->actor_state_vars[i] && strcmp(gen->actor_state_vars[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
 // #701: record a module-level `var` global name (deduped).
 void register_module_global_var(CodeGenerator* gen, const char* name) {
     if (!name || is_module_global_var(gen, name)) return;
@@ -1488,12 +1499,14 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
 }
 
 /* Closure-local env carrier (#2480). Annotation:
- *   "closure_env_free:<closure id or -1>:<varname>"
+ *   "closure_env_free:<closure id or -1>:<own flag 0|1>:<varname>"
  * Pushed by claim_closure_local_env (codegen_stmt.c) for a local bound only
- * to closure literals whose value never leaves the scope. Frees the env the
+ * to fresh closures whose value never leaves the scope. Frees the env the
  * local holds at this exit, through the closure's own destructor so the
  * promoted cells and strings it references are released too; -1 means the
  * local is bound to several closures and dispatches through the env header.
+ * An own flag of 1 means the local hands its value on at some statements and
+ * `_envown_<varname>` says whether it still owns it (#2506).
  * Clearing `.env` keeps a drain re-emitted at another exit idempotent. */
 static int try_emit_closure_env_free(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation) return 0;
@@ -1504,13 +1517,19 @@ static int try_emit_closure_env_free(CodeGenerator* gen, ASTNode* deferred) {
     const char* sep = strchr(rest, ':');
     if (!sep || !sep[1]) return 0;
     int cid = atoi(rest);
+    int own_flag = sep[1] == '1';
+    sep = strchr(sep + 1, ':');
+    if (!sep || !sep[1]) return 0;
     const char* name = sep + 1;
     print_indent(gen);
+    /* #2506: a local that hands its value on at some statements frees it
+     * only while it still owns it. */
+    if (own_flag) fprintf(gen->output, "if (_envown_%s) ", name);
     if (cid >= 0) {
-        fprintf(gen->output, "/* deferred */ _closure_env_%d_free(%s.env); %s.env = NULL;\n",
+        fprintf(gen->output, "{ /* deferred */ _closure_env_%d_free(%s.env); %s.env = NULL; }\n",
                 cid, name, name);
     } else {
-        fprintf(gen->output, "/* deferred */ _aether_closure_env_release(%s.env); %s.env = NULL;\n",
+        fprintf(gen->output, "{ /* deferred */ _aether_closure_env_release(%s.env); %s.env = NULL; }\n",
                 name, name);
     }
     return 1;

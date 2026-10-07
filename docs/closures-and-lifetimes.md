@@ -206,12 +206,25 @@ lifetime"):
   closure nothing else holds (a closure literal, a local whose only
   escape is the return, or another such function's result) gives its
   reference to the caller, and a local bound to its result is freed like
-  a local bound to a literal (#2494).
+  a local bound to a literal (#2494). Passed straight to a call whose
+  parameter keeps nothing (`run(make_counter())`), it is freed after the
+  call (#2506).
+
+- **Handed on, then rebound.** A local whose value is handed on at a
+  simple statement (stored, returned, aliased) stops owning it right
+  before that statement; `_envown_<name>` records it, and the closures the
+  local is bound to afterwards are still freed (#2506).
+
+- **Capturing a struct.** A struct that owns strings is captured as a copy
+  with strings of its own (`<Name>_dup`), destroyed with the env (#2504),
+  so the declaring scope's destroy cannot free what a returned or stored
+  closure reads. A struct the closure writes is a shared cell instead.
 
 - **In a receive arm.** A handler (and a timeout arm) is a defer scope
   (#2498): its defers, cell releases, env frees and struct destroys run
   when the handler ends. A struct local stored into actor state, or
-  captured by a closure in the arm, keeps its strings.
+  its strings (a closure that captured it has its own copy, #2504). A
+  state field summed in a loop is written as the field (#2505).
 
 ## Mutated-capture cell lifetime
 
@@ -390,11 +403,12 @@ walk over the function proves every use of the variable is a call or an
 argument to a parameter that keeps nothing, and then each rebinding frees
 the env it replaces and scope exit frees the last one.
 
-The old env may still be reachable via a `box_closure()` copy; that is
-an escape, so such a variable keeps the previous behaviour (the replaced
-env is leaked rather than risk a use after free). A closure that captured
-the old value holds its own reference to it (#2494), so it is no reason
-to keep the env.
+The old env may still be reachable via a `box_closure()` copy; the
+variable stops owning it right before that statement (#2506), so the
+replaced env is left to the copy while later bindings are freed. A
+hand-off in a condition, a `defer` or a nested closure body still keeps
+every env of the variable. A closure that captured the old value holds
+its own reference to it (#2494), so it is no reason to keep the env.
 
 Paired tests pin this:
 

@@ -1,7 +1,8 @@
 #!/bin/sh
 # A capturing closure bound to a local frees its env exactly once at scope
 # exit, unless the value leaves the scope (#2480); a closure handed to a new
-# owner is freed by that owner, and a receive arm is a scope (#2494, #2498).
+# owner is freed by that owner, and a receive arm is a scope (#2494, #2498,
+# #2504, #2505, #2506).
 #
 # The scope-exit free was pushed only when closure_var_map had no entry for
 # the name, and discover_closures fills that map for every closure binding
@@ -26,7 +27,12 @@
 #                another closure, wherever they went: all freed, none twice.
 #   actor_arm.ae a receive arm is a scope (#2494, #2498): its defer runs, the
 #                closures and cells of every message are freed, a struct
-#                stored into state keeps its string.
+#                stored into state keeps its string, a state field summed in
+#                a loop is the field (#2505).
+#   owner_change.ae a captured struct is the closure's own copy (#2504); a
+#                returned closure passed straight to a call, and the later
+#                bindings of a local whose value was handed on, are freed
+#                (#2506).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -135,6 +141,7 @@ expect_clean() {
 expect_clean handover "handover ok" "returned and captured closures are freed by their new owner"
 expect_clean actor_arm "hi 3
 bye 3
-kept kept! count 1 total 3725" "a receive arm runs its defer and frees what each message built"
+kept kept! count 1 total 3730 counted 7" "a receive arm runs its defer and frees what each message built"
+expect_clean owner_change "owner change ok" "captured structs, closures passed on and values handed off are freed once"
 
 exit $fail

@@ -16,11 +16,13 @@ message Ping { n: int }
 message Bump { n: int }
 message Keep { s: string }
 message Bye { n: int }
+message Count { n: int }
 message Show {}
 
 actor Worker {
     state total = 0
     state kept = Rec { name: "", count: 0 }
+    state counted = 0
 
     receive {
         // A closure and the cell it writes, on the fall-through exit, an
@@ -51,17 +53,31 @@ actor Worker {
             f()
             total = total + n
         }
-        // A struct local stored into state keeps its string.
+        // A struct local stored into state keeps its string; a closure
+        // that captured it holds a copy of its own (#2504).
         Keep(s) -> {
             loc = Rec { name: string.concat(s, "!"), count: 1 }
+            g = || {
+                return string.length(loc.name)
+            }
             kept = loc
+            int len = call(g)
+            total = total + len
+        }
+        // A state field summed in a loop (#2505).
+        Count(n) -> {
+            i = 0
+            while i < n {
+                counted = counted + 1
+                i = i + 1
+            }
         }
         Bye(n) -> {
             defer println("bye ${n}")
             println("hi ${n}")
         }
         Show() -> {
-            println("kept ${kept.name} count ${kept.count} total ${total}")
+            println("kept ${kept.name} count ${kept.count} total ${total} counted ${counted}")
         }
     }
 }
@@ -79,6 +95,8 @@ main() {
         i = i + 1
     }
     send_keep(w, "ke")
+    w ! Count { n: 4 }
+    w ! Count { n: 3 }
     w ! Bye { n: 3 }
     w ! Show {}
     wait_for_idle()
