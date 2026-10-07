@@ -265,6 +265,8 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
 void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
+void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
+ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on
  * the definition; the callers' ownership decisions and the bare-fn adapter
  * read the same verdict. */

@@ -3187,6 +3187,21 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 print_indent(gen);
                 fprintf(gen->output, "%s = aether_str_capture(%s);\n",
                         safe_value_name(p->value), safe_value_name(p->value));
+                /* That reference is the closure's to give back: the
+                 * parameter is a heap-tracked string from here on, so a
+                 * keep that is only an alias (`nm = s`) or a store moves it
+                 * as a local's would, a return hands it to the caller, and
+                 * a parameter still holding it at exit is freed. Untracked,
+                 * every keep that did not hand it over leaked it. The
+                 * tracker is spelled with the raw name, as every heap
+                 * local's is, so a renamed one stays untracked. */
+                if (strcmp(safe_value_name(p->value), p->value) == 0 &&
+                    !is_heap_string_var(gen, p->value)) {
+                    print_indent(gen);
+                    fprintf(gen->output, "int _heap_%s = 1; (void)_heap_%s;\n",
+                            p->value, p->value);
+                    mark_heap_string_var(gen, p->value);
+                }
             }
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
@@ -3379,6 +3394,34 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
             msg_arr_count++;
         }
     }
+}
+
+/* The deep copy a string crossing an actor boundary gets (#466), into the
+ * slot `lv` (`_msg.text`, `_reply_val`). `init` is the expression the slot
+ * was filled from: when it is an owned temporary (a call or interpolation
+ * result held by nothing else), the temporary is freed once it is copied.
+ * Nothing else frees it, so every such send leaked one string. */
+void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
+    int owned_temp = init &&
+        (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP) &&
+        is_heap_string_expr(gen, init);
+    fprintf(gen->output,
+            "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
+            "%s = (const char*)string_new_with_length(aether_string_data(_mt), (int)_ml); ",
+            lv, lv, lv);
+    if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
+    fprintf(gen->output, "} ");
+}
+
+/* The expression a message constructor gives field `name`, or NULL. */
+ASTNode* message_field_init_expr(ASTNode* message, const char* name) {
+    for (int i = 0; message && i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (fi && fi->type == AST_FIELD_INIT && fi->value && strcmp(fi->value, name) == 0) {
+            return fi->child_count > 0 ? fi->children[0] : NULL;
+        }
+    }
+    return NULL;
 }
 
 void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode* rhs) {
@@ -7448,13 +7491,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                  * per-call-site re-declaration. */
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
                                     if (f->type_kind == TYPE_STRING) {
-                                        fprintf(gen->output,
-                                                "if (_msg.%s) { "
-                                                "size_t _ml = aether_string_length(_msg.%s); "
-                                                "_msg.%s = (const char*)string_new_with_length("
-                                                "aether_string_data(_msg.%s), (int)_ml); "
-                                                "} ",
-                                                f->name, f->name, f->name, f->name);
+                                        char lv[300];
+                                        snprintf(lv, sizeof(lv), "_msg.%s", f->name);
+                                        emit_message_string_copy(gen, lv,
+                                            message_field_init_expr(message, f->name));
                                     }
                                 }
                             }
@@ -7535,13 +7575,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * receiver's references. */
                         for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
                             if (f->type_kind == TYPE_STRING) {
-                                fprintf(gen->output,
-                                        "if (_msg.%s) { "
-                                        "size_t _ml = aether_string_length(_msg.%s); "
-                                        "_msg.%s = (const char*)string_new_with_length("
-                                        "aether_string_data(_msg.%s), (int)_ml); "
-                                        "} ",
-                                        f->name, f->name, f->name, f->name);
+                                char lv[300];
+                                snprintf(lv, sizeof(lv), "_msg.%s", f->name);
+                                emit_message_string_copy(gen, lv,
+                                    message_field_init_expr(message, f->name));
                             }
                         }
 

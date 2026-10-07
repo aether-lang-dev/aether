@@ -4789,6 +4789,7 @@ typedef struct {
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                           ASTNode* parent, int nested);
 static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* callee);
+static int call_hands_over_closure(CodeGenerator* gen, EnvScan* s, ASTNode* call);
 
 static int env_scan_is_real_closure(ASTNode* n) {
     return n && n->type == AST_CLOSURE &&
@@ -4865,14 +4866,13 @@ static ASTNode* env_scan_fn_body(ASTNode* fdef) {
 static int env_scan_fresh_binding(CodeGenerator* gen, EnvScan* s, ASTNode* rhs) {
     if (!rhs || env_scan_mentions(rhs, s->name)) return 0;
     if (env_scan_is_real_closure(rhs)) return 1;
-    if (rhs->type != AST_FUNCTION_CALL || !rhs->value || strcmp(rhs->value, "call") == 0) return 0;
+    if (rhs->type != AST_FUNCTION_CALL || !rhs->value) return 0;
     for (int i = 0; i < rhs->child_count; i++) {
         /* A builder's trailing block re-emits the call with its config. */
         if (rhs->children[i] && rhs->children[i]->type == AST_CLOSURE &&
             !env_scan_is_real_closure(rhs->children[i])) return 0;
     }
-    if (env_scan_callee_is_variable(gen, s, rhs->value)) return 0;
-    return returns_owned_closure(gen, s, rhs->value);
+    return call_hands_over_closure(gen, s, rhs);
 }
 
 /* Callees whose parameter scan is in progress: a recursive call passing the
@@ -4978,8 +4978,7 @@ static int returns_owned_in(CodeGenerator* gen, ASTNode* fdef, ASTNode* body,
         s.cid = -2;
         if (e->type == AST_FUNCTION_CALL && e->value) {
             s.name = "";
-            return !env_scan_callee_is_variable(gen, &s, e->value) &&
-                   returns_owned_closure(gen, &s, e->value);
+            return call_hands_over_closure(gen, &s, e);
         }
         if (e->type != AST_IDENTIFIER || !e->value) return 0;
         /* A local bound only to fresh closures whose every other use leaves
@@ -5023,6 +5022,68 @@ static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* cal
         if (!ok || returns == 0) return 0;
     }
     return 1;
+}
+
+/* The closure literal local `name` of s->root is bound to: its only binding
+ * in the function (none in a nested closure body), else NULL. */
+static ASTNode* env_scan_sole_literal(ASTNode* node, const char* name, int* count) {
+    if (!node) return NULL;
+    ASTNode* found = NULL;
+    if (node->type == AST_VARIABLE_DECLARATION && node->value && strcmp(node->value, name) == 0) {
+        (*count)++;
+        if (node->child_count > 0 && env_scan_is_real_closure(node->children[0])) {
+            found = node->children[0];
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* f = env_scan_sole_literal(node->children[i], name, count);
+        if (f) found = f;
+    }
+    return found;
+}
+
+/* #2494, #2506: is `call` a call whose result is a closure only the caller
+ * holds? A named function under the contract (returns_owned_closure), or a
+ * local bound once to a closure literal whose returns all hand over such a
+ * closure (`keep = |s| { ...; return leaf }; held = keep(x)`). */
+static int call_hands_over_closure(CodeGenerator* gen, EnvScan* s, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
+    /* A call through a closure local is lowered to `call(f, ...)` by the
+     * time codegen sees it. */
+    const char* callee = call->value;
+    if (strcmp(callee, "call") == 0) {
+        ASTNode* f = call->child_count > 0 ? call->children[0] : NULL;
+        if (!f || f->type != AST_IDENTIFIER || !f->value) return 0;
+        callee = f->value;
+        if (!env_scan_callee_is_variable(gen, s, callee)) return 0;
+    } else if (!env_scan_callee_is_variable(gen, s, callee)) {
+        return returns_owned_closure(gen, s, callee);
+    }
+    if (s->depth >= ENV_SCAN_MAX_DEPTH || !s->root) return 0;
+    /* The result must be a closure value, not a box in a `ptr`. */
+    Type* rt = call->node_type;
+    if (!rt || rt->kind != TYPE_FUNCTION || rt->is_fnptr) return 0;
+    /* A parameter of that name would be the caller's closure until the
+     * binding replaced it. */
+    if (s->owner) {
+        for (int i = 0; i < s->owner->child_count; i++) {
+            ASTNode* p = s->owner->children[i];
+            if (p && p != s->root && p->type != AST_BLOCK && env_scan_binds(p, callee)) return 0;
+        }
+    }
+    int count = 0;
+    ASTNode* lit = env_scan_sole_literal(s->root, callee, &count);
+    if (!lit || count != 1) return 0;
+    for (int a = 0; a < g_owned_ret_active_count; a++) {
+        if (g_owned_ret_active[a] == lit) return 0;
+    }
+    ASTNode* body = env_scan_fn_body(lit);
+    if (!body) return 0;
+    int returns = 0;
+    g_owned_ret_active[g_owned_ret_active_count++] = lit;
+    int ok = returns_owned_in(gen, lit, body, body, s->depth + 1, &returns);
+    g_owned_ret_active_count--;
+    return ok && returns > 0;
 }
 
 /* Does `n` hold a builder's trailing block anywhere? Such a block can run
@@ -5158,7 +5219,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
  * (returns_owned_closure), in the function being generated? */
 static int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
-        strcmp(call->value, "call") == 0 || !gen->hoist_scope_body) return 0;
+        !gen->hoist_scope_body) return 0;
     for (int i = 0; i < call->child_count; i++) {
         if (call->children[i] && call->children[i]->type == AST_CLOSURE &&
             !env_scan_is_real_closure(call->children[i])) return 0;
@@ -5169,8 +5230,7 @@ static int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call) {
     s.root = gen->hoist_scope_body;
     s.owner = gen->current_function;
     s.cid = -2;
-    return !env_scan_callee_is_variable(gen, &s, call->value) &&
-           returns_owned_closure(gen, &s, call->value);
+    return call_hands_over_closure(gen, &s, call);
 }
 
 /* The env carrier's annotation: "closure_env_free:<cid>:<own>:<name>", see
@@ -5246,13 +5306,15 @@ static void claim_closure_local_env(CodeGenerator* gen, const char* name,
     Type* vt = binding->node_type;
     if (vt && vt->kind != TYPE_UNKNOWN && !(vt->kind == TYPE_FUNCTION && !vt->is_fnptr)) return;
     if (rhs->type == AST_FUNCTION_CALL) {
-        /* Cheap gate before the walk: only a user function declared to
-         * return a closure can hand one over. */
+        /* Cheap gate before the walk: only a call typed as a closure (a
+         * user function declared to return one, or a closure local) can
+         * hand one over. */
         if (!rhs->value || !gen->program) return;
         char fn_norm[256];
         const char* fn = codegen_normalise_callee(rhs->value, fn_norm, sizeof(fn_norm));
         const DefClauses* dc = program_index_clauses(gen->program, fn);
-        Type* rt = (dc && dc->count > 0 && dc->nodes[0]) ? dc->nodes[0]->node_type : NULL;
+        Type* rt = (dc && dc->count > 0 && dc->nodes[0]) ? dc->nodes[0]->node_type
+                                                         : rhs->node_type;
         if (!rt || rt->kind != TYPE_FUNCTION || rt->is_fnptr) return;
     }
     if (is_promoted_capture(gen, name) || is_module_global_var(gen, name) ||
@@ -11004,13 +11066,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * handler's defer-free has run. */
                         for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
                             if (f->type_kind == TYPE_STRING) {
-                                fprintf(gen->output,
-                                        "if (_reply.%s) { "
-                                        "size_t _ml = aether_string_length(_reply.%s); "
-                                        "_reply.%s = (const char*)string_new_with_length("
-                                        "aether_string_data(_reply.%s), (int)_ml); "
-                                        "} ",
-                                        f->name, f->name, f->name, f->name);
+                                char lv[300];
+                                snprintf(lv, sizeof(lv), "_reply.%s", f->name);
+                                emit_message_string_copy(gen, lv,
+                                    message_field_init_expr(reply_expr, f->name));
                             }
                         }
 
@@ -11038,11 +11097,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * message-field string replies (#466). */
                         fprintf(gen->output, "{ const char* _reply_val = ");
                         generate_expression(gen, reply_expr);
+                        fprintf(gen->output, "; ");
+                        emit_message_string_copy(gen, "_reply_val", reply_expr);
                         fprintf(gen->output,
-                                "; if (_reply_val) { "
-                                "size_t _ml = aether_string_length(_reply_val); "
-                                "_reply_val = (const char*)string_new_with_length("
-                                "aether_string_data(_reply_val), (int)_ml); } "
                                 "scheduler_reply((ActorBase*)self, &_reply_val, "
                                 "sizeof(const char*)); }\n");
                     } else {
