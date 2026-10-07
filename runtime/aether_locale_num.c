@@ -30,6 +30,7 @@
 #include <string.h>
 #include <errno.h>
 #include <locale.h>
+#include <math.h>  // NAN, HUGE_VAL, HUGE_VALF for the inf/nan spellings
 
 // ---------------------------------------------------------------------------
 // Capability detection
@@ -300,10 +301,66 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
 // errno is deliberately NOT cleared here — callers set errno = 0 before the
 // call and test for ERANGE after, exactly as they would around bare strtod.
 
+// C99 strtod/strtof accept "inf", "infinity", "nan" and "nan(n-char-seq)",
+// in any case and after optional whitespace and sign. msvcrt's _strtod_l /
+// _strtof_l (the MinGW default CRT) accept none of them, so the "Infinity",
+// "-Infinity" and "NaN" that string.from_double writes did not read back on
+// Windows (#2472). These spellings are recognised here, on every platform,
+// before the platform parser sees the text, so every platform agrees by
+// construction rather than by libc. A NaN's n-char-sequence is consumed and
+// its payload ignored (the result is the default quiet NaN with the sign
+// given).
+//
+// Returns 1 with *negative, *is_nan and *end set when `s` spells one of
+// them, 0 otherwise. The whitespace set is the C locale's isspace, spelled
+// out because isspace itself follows the ambient LC_CTYPE.
+static int aether_inf_nan(const char* s, int* negative, int* is_nan, const char** end) {
+    const char* p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\v' || *p == '\f' || *p == '\r') p++;
+    *negative = 0;
+    if (*p == '+' || *p == '-') {
+        *negative = (*p == '-');
+        p++;
+    }
+    // ASCII case fold: a letter OR 0x20 is its lower case.
+    if ((p[0] | 0x20) == 'i' && (p[1] | 0x20) == 'n' && (p[2] | 0x20) == 'f') {
+        p += 3;
+        if ((p[0] | 0x20) == 'i' && (p[1] | 0x20) == 'n' && (p[2] | 0x20) == 'i' &&
+            (p[3] | 0x20) == 't' && (p[4] | 0x20) == 'y') {
+            p += 5;
+        }
+        *is_nan = 0;
+        *end = p;
+        return 1;
+    }
+    if ((p[0] | 0x20) == 'n' && (p[1] | 0x20) == 'a' && (p[2] | 0x20) == 'n') {
+        p += 3;
+        if (*p == '(') {
+            const char* q = p + 1;
+            while ((*q >= '0' && *q <= '9') || ((*q | 0x20) >= 'a' && (*q | 0x20) <= 'z') || *q == '_') q++;
+            if (*q == ')') p = q + 1;
+        }
+        *is_nan = 1;
+        *end = p;
+        return 1;
+    }
+    return 0;
+}
+
 double aether_c_strtod(const char* s, char** endptr) {
     if (!s) {
         if (endptr) *endptr = NULL;
         return 0.0;
+    }
+
+    {
+        int negative, is_nan;
+        const char* end;
+        if (aether_inf_nan(s, &negative, &is_nan, &end)) {
+            if (endptr) *endptr = (char*)end;
+            double v = is_nan ? (double)NAN : HUGE_VAL;
+            return negative ? -v : v;
+        }
     }
 
 #if !AETHER_HAS_LOCALE_CONV
@@ -329,6 +386,16 @@ float aether_c_strtof(const char* s, char** endptr) {
     if (!s) {
         if (endptr) *endptr = NULL;
         return 0.0f;
+    }
+
+    {
+        int negative, is_nan;
+        const char* end;
+        if (aether_inf_nan(s, &negative, &is_nan, &end)) {
+            if (endptr) *endptr = (char*)end;
+            float v = is_nan ? NAN : HUGE_VALF;
+            return negative ? -v : v;
+        }
     }
 
 #if !AETHER_HAS_LOCALE_CONV

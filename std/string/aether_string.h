@@ -243,11 +243,12 @@ int string_to_long_raw(const void* str, long long* out_value);  // 64-bit slot (
 int string_to_float_raw(const void* str, float* out_value);
 int string_to_double_raw(const void* str, double* out_value);
 
-// Base-N parse, radix in 2..36 (strtoll's range). Out-slot is
-// `long long*` for LLP64 safety, matching string_to_long_raw. No
-// "0x" / "0b" prefix recognition — caller passes the digit-only
-// substring. Returns 1 on success, 0 on null/empty/radix-out-of-range
-// /parse-failure/overflow/trailing-garbage.
+// Base-N parse, radix in 2..36. Out-slot is `long long*` for LLP64
+// safety, matching string_to_long_raw. Accepts exactly an optional '-',
+// one or more digits of the radix and optional trailing whitespace: no
+// "0x" / "0b" prefix, no '+', no leading whitespace (#2472). Returns 1 on
+// success, 0 on null/empty/radix-out-of-range/parse-failure/overflow/
+// trailing-garbage.
 int string_to_int_radix_raw(const void* str, int radix, long long* out_value);
 
 // Split-return helpers used by the Go-style wrappers. `_try` returns

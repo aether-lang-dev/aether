@@ -1,9 +1,10 @@
 #!/bin/sh
-# Wycheproof adversarial vector suite — ML-KEM (FIPS 203) decapsulation, wave 5.
+# Wycheproof adversarial vector suite: ML-KEM (FIPS 203) decapsulation,
+# encapsulation and the input checks (#2482).
 #
-# ML-KEM-512/-768/-1024 decaps is symmetric-crypto-fast, so this driver
-# sweeps ALL ~600 cases by default in ~2s (no sampling needed) — no separate
-# nightly-full step required. WYCHEPROOF_STRIDE=N can thin it if ever needed.
+# ML-KEM-512/-768/-1024 is symmetric-crypto-fast, so this driver sweeps ALL
+# ~1400 cases by default in a few seconds (no sampling needed), with no
+# separate nightly-full step. WYCHEPROOF_STRIDE=N can thin it if ever needed.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

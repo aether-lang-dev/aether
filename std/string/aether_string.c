@@ -1024,38 +1024,62 @@ AetherString* string_pad_end(const void* s, int total_width, int pad_char) {
 // The `_raw` variants take an out-parameter and return 1/0 for ok/fail.
 // The Aether-native Go-style wrappers `string.to_int` etc. in module.ae
 // call the `_try`/`_get` pairs below for a cleaner tuple-return shape.
-// Base-N integer parse. `radix` must be 2..36 (strtoll's accepted
-// range; same as C's strtol). No "0x" / "0b" prefix recognition — the
-// caller passes the digit-only substring (strtoll *does* honour an
-// "0x" prefix when radix is 0 or 16, but Aether callers historically
-// pass already-stripped substrings, and base-16 with surprise prefix
-// handling would be a footgun in things like CSV/HSV color parsing).
-// `out_value` is `long long*` (Aether `long` = int64) — same LLP64
-// safety as string_to_long_raw. Returns 1 on success, 0 on:
+// Base-N integer parse. `radix` must be 2..36. The accepted text is
+// exactly: an optional '-', one or more digits of the radix (0-9, then
+// a-z or A-Z for 10..35), then optional trailing ' ', '\t', '\n', '\r'.
+// No "0x" / "0b" prefix, no '+', no leading whitespace (#2472).
+//
+// Hand-rolled rather than strtoll, which accepts more than that: leading
+// whitespace, a '+' sign, and an "0x" prefix when radix is 16, so
+// to_int_radix("0x10", 16) came back as 16. Callers pass the digit-only
+// substring of things like CSV or color fields, where a surprise prefix
+// or sign is a footgun. The walk is bounded by the string's length, so an
+// embedded NUL is trailing garbage rather than a terminator.
+//
+// `out_value` is `long long*` (Aether `long` = int64), the same LLP64
+// safety as string_to_long_raw. The magnitude accumulates in unsigned
+// 64 bits against LLONG_MAX (or LLONG_MAX + 1 after a '-'), so the whole
+// int64 range parses, LLONG_MIN included, and anything past it is an
+// overflow. Returns 1 on success, 0 on:
 //   - null/empty input or null out_value
 //   - radix outside [2, 36]
-//   - no conversion (first char not a valid digit for the radix)
-//   - ERANGE overflow
-//   - trailing non-whitespace garbage
+//   - no digit, or a character that is not a digit of the radix
+//   - overflow of the int64 range
+//   - trailing garbage after the digits (whitespace is allowed)
 int string_to_int_radix_raw(const void* str, int radix, long long* out_value) {
-    const char* data = str_data(str);
-    if (!str || !data[0] || !out_value) return 0;
+    const char* p = str_data(str);
+    size_t len = str_len(str);
+    if (!str || len == 0 || !out_value) return 0;
     if (radix < 2 || radix > 36) return 0;
 
-    char* endptr;
-    errno = 0;
-    long long val = strtoll(data, &endptr, radix);
-
-    if (endptr == data || errno == ERANGE) {
-        return 0;
+    const char* end = p + len;
+    int negative = 0;
+    if (*p == '-') {
+        negative = 1;
+        p++;
     }
-    // Skip trailing whitespace; anything else is an error.
-    while (*endptr == ' ' || *endptr == '\t' || *endptr == '\n' || *endptr == '\r') {
-        endptr++;
+    unsigned long long limit = negative ? (unsigned long long)LLONG_MAX + 1ULL
+                                        : (unsigned long long)LLONG_MAX;
+    unsigned long long acc = 0;
+    const char* digits = p;
+    for (; p < end; p++) {
+        unsigned char c = (unsigned char)*p;
+        unsigned d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+        else break;
+        if (d >= (unsigned)radix) break;
+        if (acc > (limit - d) / (unsigned)radix) return 0;
+        acc = acc * (unsigned)radix + d;
     }
-    if (*endptr != '\0') return 0;
+    if (p == digits) return 0;
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p != end) return 0;
 
-    *out_value = val;
+    // Negate without overflowing: acc may be exactly LLONG_MAX + 1.
+    *out_value = negative ? (acc == 0 ? 0 : -(long long)(acc - 1) - 1)
+                          : (long long)acc;
     return 1;
 }
 

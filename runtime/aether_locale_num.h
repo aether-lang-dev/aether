@@ -45,7 +45,9 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
 
 // strtod/strtof with '.' as the decimal separator regardless of locale.
 // `errno` and `endptr` follow the standard functions exactly, so existing
-// ERANGE and trailing-garbage checks keep working unchanged.
+// ERANGE and trailing-garbage checks keep working unchanged. The C99
+// "inf" / "infinity" / "nan" spellings (any case, optionally signed) parse
+// on every platform, msvcrt included (#2472).
 double aether_c_strtod(const char* s, char** endptr);
 float  aether_c_strtof(const char* s, char** endptr);
 

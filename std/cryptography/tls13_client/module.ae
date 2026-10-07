@@ -870,11 +870,13 @@ connect_pq(host: string, port: int) -> (ptr, string) {
     if sock == null { return null, "connect failed" }
 
     // Ephemerals: an ML-KEM-768 keypair (keep dk to decapsulate) and an X25519
-    // scalar (keep to agree). Seeds from the CSPRNG.
-    d = rand_into(32)
-    z = rand_into(32)
-    ek, dk = mlkem.mlkem768_keygen(d, z)
-    bytes.free(d); bytes.free(z)
+    // scalar (keep to agree). keygen seeds itself from the CSPRNG and fails
+    // rather than hand back a key from a failed draw.
+    ek, dk, kerr = mlkem.mlkem768_keygen()
+    if kerr != "" {
+        net.tcp_close(sock)
+        return null, kerr
+    }
     xpriv = rand_into(32)
     xpub = x25519.base_point(xpriv)
 
@@ -929,9 +931,11 @@ connect_pq(host: string, port: int) -> (ptr, string) {
                 bytes.copy_from_bytes(ct, 0, parsed.key_share, 0, 1088)
                 sxpub = bytes.new(32); bytes.set(sxpub, 31, 0)
                 bytes.copy_from_bytes(sxpub, 0, parsed.key_share, 1088, 32)
-                mlk_ss = mlkem.mlkem768_decaps(dk, ct)
+                mlk_ss, merr = mlkem.mlkem768_decaps(dk, ct)
                 x_ss, xerr = x25519.agree(xpriv, sxpub)
-                if string.equals(xerr, "") != 1 {
+                if string.equals(merr, "") != 1 {
+                    sherr2 = merr
+                } else if string.equals(xerr, "") != 1 {
                     sherr2 = xerr
                 } else {
                     // Hybrid shared secret = ML-KEM ss(32) || X25519 ss(32).

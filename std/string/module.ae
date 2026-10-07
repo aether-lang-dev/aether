@@ -414,7 +414,8 @@ to_long(s: string) -> long! {
 }
 
 // Parse a string to a float. Returns (value, "") on success,
-// (0.0, error) on invalid input.
+// (0.0, error) on invalid input. "inf", "infinity" and "nan" (any case,
+// optionally signed) parse on every platform, as for to_double.
 to_float(s: string) -> {
     ok = string_try_float(s)
     if ok == 0 {
@@ -424,7 +425,9 @@ to_float(s: string) -> {
 }
 
 // Parse a string to a double. Returns (value, "") on success,
-// (0.0, error) on invalid input.
+// (0.0, error) on invalid input. "inf", "infinity" and "nan" (any case,
+// optionally signed) parse identically on every platform, so the
+// "Infinity", "-Infinity" and "NaN" that from_double emits read back.
 to_double(s: string) -> {
     ok = string_try_double(s)
     if ok == 0 {
@@ -436,13 +439,16 @@ to_double(s: string) -> {
 // Base-N parse: like `to_long` but accepts a radix in [2, 36].
 // Headline use cases: hex color decode (`parseInt(hex, 16)` patterns),
 // hex byte fields in config files, binary masks, octal mode bits.
-// Returns (value, "") on success; (0, error) on:
+// The accepted text is exactly an optional '-', one or more digits of
+// the radix (0-9, a-z, A-Z), then optional trailing whitespace; this is
+// what from_int_radix emits. Returns (value, "") on success; (0, error) on:
 //   - radix outside [2, 36]
-//   - empty string or unparseable digits
+//   - empty string, or any character that is not a digit of the radix
+//     (a "0x" / "0b" prefix, a '+' sign, leading whitespace)
 //   - overflow (the int64 range)
 //   - trailing non-whitespace garbage
 //
-// No "0x" / "0b" prefix recognition — pass the digit-only substring.
+// No "0x" / "0b" prefix recognition: pass the digit-only substring.
 // The value is `long` (int64) because radix-16/36 can exceed int32
 // quickly and because callers often want the full 64-bit width
 // (32-bit ARGB colors, file offsets, flag masks). Downcast at the
