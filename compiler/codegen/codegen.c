@@ -4960,9 +4960,11 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
             sym = alias;
         }
         if (strcmp(sym, "aether_main") != 0 && strcmp(sym, "aether_main_exit") != 0) continue;
-        char msg[384];
+        /* sym is "aether_main" or "aether_main_exit" here; the precision
+         * bounds keep gcc's -Wformat-truncation provably satisfied. */
+        char msg[512];
         snprintf(msg, sizeof(msg),
-                 "function '%s' would be exported as '%s', which --emit=lib reserves "
+                 "function '%.200s' would be exported as '%.32s', which --emit=lib reserves "
                  "for this program's main() (aether_main / aether_main_exit)",
                  fn->value, sym);
         AetherError e = {NULL, NULL, fn->line, fn->column, msg,
