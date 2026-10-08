@@ -123,18 +123,15 @@ main() {
         return
     }
     // A leak grows the exact count in every window of rounds; work that
-    // leaks nothing holds it steady once warm. So warm up, then require one
-    // of two equal later windows to hold steady.
+    // leaks nothing holds it steady once warm. So warm up, then require some
+    // later window to hold steady (mem.steady_growth).
     one_round("a")
     one_round("a")
-    first_bytes = mem.heap_in_use()
-    one_round("a")
-    one_round("a")
-    mid_bytes = mem.heap_in_use()
-    one_round("a")
-    one_round("a")
-    last_bytes = mem.heap_in_use()
-    check(mid_bytes - first_bytes == 0 || last_bytes - mid_bytes == 0,
-        "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+    grown = mem.steady_growth(|| {
+            one_round("a")
+            one_round("a")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
     println("OK")
 }

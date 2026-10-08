@@ -11,8 +11,8 @@
 // never with the actor.
 //
 // The check runs where the heap count is exact (mem.heap_in_use_exact):
-// after a warm-up, a window of the same work must not grow the heap, with
-// one of two windows growing by exactly 0. The overwrite window keeps one
+// after a warm-up, a window of the same work must hold the heap exactly
+// steady in some run (mem.steady_growth). The overwrite window keeps one
 // actor alive and drains its mailbox with an ask before each read, and starts
 // only once the actors released during the warm-up are ended, since ending
 // one frees its state and, the first time, grows the scheduler's keep list;
@@ -124,23 +124,18 @@ main() {
         println("OK") // count not exact here: the macOS leaks gate checks this program
         return
     }
-    before = mem.heap_in_use()
-    overwrite_round(k, "a")
-    mid = mem.heap_in_use()
-    overwrite_round(k, "a")
-    after = mem.heap_in_use()
-    check(mid - before == 0 || after - mid == 0,
-        "overwriting state grew the heap: ${mid - before} then ${after - mid} bytes")
+    grown = mem.steady_growth(|| {
+            overwrite_round(k, "a")
+        }, 5)
+    check(grown == 0,
+        "overwriting state grew the heap by ${grown} bytes in every run")
     release_window("a", 250)
     check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
-    before = mem.heap_in_use()
-    release_window("a", 100)
-    check(scheduler_reclaim_released() == 0, "released actors still retired after the first window")
-    mid = mem.heap_in_use()
-    release_window("a", 100)
-    check(scheduler_reclaim_released() == 0, "released actors still retired after the second window")
-    after = mem.heap_in_use()
-    check(mid - before == 0 || after - mid == 0,
-        "spawn, fill and release grew the heap: ${mid - before} then ${after - mid} bytes")
+    grown = mem.steady_growth(|| {
+            release_window("a", 100)
+            check(scheduler_reclaim_released() == 0, "released actors still retired after a window")
+        }, 5)
+    check(grown == 0,
+        "spawn, fill and release grew the heap by ${grown} bytes in every run")
     println("OK")
 }

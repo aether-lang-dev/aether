@@ -161,12 +161,15 @@ main() {
     round(0) // warm up: first-use allocations are not per panic
     round(LITERAL)
     if mem.heap_in_use_exact() {
-        // One of two equal windows grows by exactly 0: a leak per panic
-        // grows both, a one-time allocation at most one.
-        first = two_rounds(0)
-        second = two_rounds(0)
-        if first != 0 && second != 0 {
-            println("FAIL: two rounds of built messages kept ${first}, then ${second} bytes")
+        // A leak per panic grows every run of two rounds; a one-time
+        // allocation, or a thread the system starts, settles
+        // (mem.steady_growth).
+        grown = mem.steady_growth(|| {
+                round(0)
+                round(0)
+            }, 5)
+        if grown != 0 {
+            println("FAIL: two rounds of built messages kept ${grown} bytes in every run")
             exit(1)
         }
         println("OK")

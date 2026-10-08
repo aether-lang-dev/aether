@@ -15,8 +15,8 @@
 //   reference after the call.
 //
 // The check runs where the heap count is exact (mem.heap_in_use_exact):
-// after a warm-up, one of two equal windows of the same work must grow the
-// heap by exactly 0. Elsewhere the macOS leaks gate covers this program.
+// after a warm-up, some window of the same work must grow the heap by
+// exactly 0 (mem.steady_growth). Elsewhere the macOS leaks gate covers this program.
 // Strings are built from parameters, because string.concat of two literals
 // folds to a literal that owns nothing.
 
@@ -144,12 +144,10 @@ main() {
     }
     one_round(g, "a")
     one_round(g, "a")
-    first_bytes = mem.heap_in_use()
-    one_round(g, "a")
-    mid_bytes = mem.heap_in_use()
-    one_round(g, "a")
-    last_bytes = mem.heap_in_use()
-    check(mid_bytes - first_bytes == 0 || last_bytes - mid_bytes == 0,
-        "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+    grown = mem.steady_growth(|| {
+            one_round(g, "a")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
     println("OK")
 }

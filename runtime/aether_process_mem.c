@@ -52,6 +52,8 @@ size_t __sanitizer_get_current_allocated_bytes(void);
 #elif defined(__linux__)
 #  include <stdio.h>
 #  include <unistd.h>
+#  include <fcntl.h>
+#  include <string.h>
 #  if defined(__GLIBC__)
 #    include <malloc.h>
 #    include <dlfcn.h>
@@ -202,6 +204,87 @@ int64_t aether_process_resident(void) {
 #elif defined(__linux__) && !defined(__EMSCRIPTEN__)
     int64_t pages = statm_pages(1);
     return pages < 0 ? -1 : pages * (int64_t)sysconf(_SC_PAGESIZE);
+#else
+    return -1;
+#endif
+}
+
+#if defined(_WIN32)
+/* Every thread that starts or ends in the process: the program's, and the
+ * ones the system starts in it (a thread-pool worker, a loader worker). The
+ * loader calls a TLS callback for each, as it calls DllMain, so the count
+ * sees threads no Aether code created. A TLS callback is an entry in the
+ * image's .CRT$XL* table, which the C runtime's TLS directory (_tls_used)
+ * hands to the loader; winpthreads registers its own the same way. */
+static volatile LONG g_thread_events = 0;
+
+static void NTAPI aether_thread_event(PVOID module, DWORD reason, PVOID reserved) {
+    (void)module;
+    (void)reserved;
+    if (reason == DLL_THREAD_ATTACH || reason == DLL_THREAD_DETACH)
+        InterlockedIncrement(&g_thread_events);
+}
+
+#  if defined(_MSC_VER)
+#    if defined(_M_IX86)
+#      pragma comment(linker, "/INCLUDE:__tls_used")
+#      pragma comment(linker, "/INCLUDE:_aether_thread_event_callback")
+#    else
+#      pragma comment(linker, "/INCLUDE:_tls_used")
+#      pragma comment(linker, "/INCLUDE:aether_thread_event_callback")
+#    endif
+#    pragma section(".CRT$XLB", long, read)
+__declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK aether_thread_event_callback = aether_thread_event;
+#  else
+/* The reference links the C runtime's TLS directory, whose callback list
+ * runs from .CRT$XLA to .CRT$XLZ; without one, nothing pulls it in and the
+ * image has no callbacks at all. */
+extern const IMAGE_TLS_DIRECTORY _tls_used;
+__attribute__((used)) static const void* const aether_tls_directory = &_tls_used;
+__attribute__((section(".CRT$XLB"), used))
+PIMAGE_TLS_CALLBACK aether_thread_event_callback = aether_thread_event;
+#  endif
+#endif
+
+int64_t aether_thread_epoch(void) {
+#if defined(_WIN32)
+    return (int64_t)InterlockedCompareExchange(&g_thread_events, 0, 0);
+#elif defined(__APPLE__)
+    thread_act_array_t list;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS) return -1;
+    for (mach_msg_type_number_t i = 0; i < count; i++) mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof(thread_act_t));
+    return (int64_t)count;
+#elif defined(__FreeBSD__)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
+    struct kinfo_proc kp;
+    size_t len = sizeof(kp);
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0) return -1;
+    return (int64_t)kp.ki_numthreads;
+#elif defined(__linux__) && !defined(__EMSCRIPTEN__)
+    /* Field 20 of /proc/self/stat, num_threads. Read with open and read,
+     * not stdio, so the read allocates nothing the heap count would see.
+     * The command name (field 2) is parenthesised and may hold spaces and
+     * parentheses itself, so the fields are counted from its last ')'. */
+    char buf[1024];
+    int fd = open("/proc/self/stat", O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    char* p = strrchr(buf, ')');
+    if (!p) return -1;
+    int field = 2;
+    while (*p && field < 20) {
+        if (*p == ' ') field++;
+        p++;
+    }
+    if (field != 20) return -1;
+    long long v = 0;
+    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    return (int64_t)v;
 #else
     return -1;
 #endif

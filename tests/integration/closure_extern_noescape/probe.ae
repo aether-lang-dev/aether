@@ -5,8 +5,9 @@
 // alive for the later call from C.
 //
 // The heap check runs where the count is exact (mem.heap_in_use_exact):
-// after a warm-up, one of two equal windows of the same work grows by
-// exactly 0 (a leak grows both, a one-time allocation at most one).
+// after a warm-up, some window of the same work grows by exactly 0 (a
+// leak grows every one; a one-time allocation, or a thread the system
+// starts, settles: mem.steady_growth).
 // Strings are built from parameters so nothing folds to a literal.
 
 import std.mem
@@ -55,13 +56,11 @@ main() {
     check(round("seed") == want, "a round's calls add up")
     if mem.heap_in_use_exact() {
         round("seed")
-        base = mem.heap_in_use()
-        round("seed")
-        mid = mem.heap_in_use()
-        round("seed")
-        after = mem.heap_in_use()
-        check(mid - base == 0 || after - mid == 0,
-            "a round grew the heap by ${mid - base}, then ${after - mid} bytes")
+        grown = mem.steady_growth(|| {
+                round("seed")
+            }, 5)
+        check(grown == 0,
+            "a round grew the heap by ${grown} bytes in every run")
     }
     msg = tag("cap")
     register_cb(|| { println(msg); return 7 })
