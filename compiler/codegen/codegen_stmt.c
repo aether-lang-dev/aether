@@ -1281,11 +1281,12 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
             /* std.fs lexical path ops (#632) and std.io whole-file read:
              * each returns a FRESH malloc'd / caps-allocated string the
              * caller owns (path_clean / path_rel build a new normalised
-             * path; io_read_file_raw returns the file contents). They are
-             * single-value `-> string` externs, so they can't carry the
-             * tuple-only `@heap` annotation — classify them here. Verified
+             * path; io_read_file_raw returns the file contents). Verified
              * owned (never a borrowed/literal pointer): the leak each
-             * produced was exactly the caller never freeing this result. */
+             * produced was exactly the caller never freeing this result.
+             * A new producer is better declared `-> string @heap` at its
+             * extern (extern_returns_heap_string), where the ownership is
+             * stated next to the signature instead of in this list. */
             strcmp(fn, "path_clean") == 0 ||
             strcmp(fn, "path_rel") == 0 ||
             /* Sibling lexical path ops, same ownership contract as

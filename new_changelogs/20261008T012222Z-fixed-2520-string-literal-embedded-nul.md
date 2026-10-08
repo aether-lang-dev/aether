@@ -13,4 +13,6 @@
   literal, and a NUL in the text of an interpolation is a byte of the
   result. A C extern whose parameter is `string` still receives the bytes up
   to the first NUL, all a `const char*` can carry. A literal without a NUL
-  is the plain C string it always was.
+  is the plain C string it always was. A std module read from its compiled
+  artifact keeps such a literal whole too: the `.aea` format is version 2,
+  so an older artifact is parsed from source instead.

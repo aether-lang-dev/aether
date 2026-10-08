@@ -1,0 +1,42 @@
+// Regression: string.from_double returns a fresh string the caller owns.
+// Its extern was declared a plain `-> string`, so the compiler took the
+// result for a borrowed one and never freed it: every call leaked the
+// string (found by the macOS leaks gate on test_string_parse_inf_nan and
+// test_string_embedded_nul). It is declared `-> string @heap` now.
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+round_trips(x: float) -> int {
+    text = string.from_double(x)
+    v, err = string.to_double(text)
+    if err != "" { return 0 }
+    if v != x { return 0 }
+    return 1
+}
+
+main() {
+    fails = 0
+    if round_trips(1.5) != 1 { println("  FAIL 1.5 does not round-trip"); fails = fails + 1 }
+    if round_trips(0.0 - 2.25) != 1 { println("  FAIL -2.25 does not round-trip"); fails = fails + 1 }
+
+    // Where the allocator's count is exact, a thousand calls leave the heap
+    // where it was.
+    if mem.heap_in_use_exact() {
+        before = mem.heap_in_use()
+        i = 0
+        while i < 1000 {
+            round_trips(1.5)
+            i = i + 1
+        }
+        grew = mem.heap_in_use() - before
+        if grew != 0 { println("  FAIL 1000 calls grew the heap by ${grew} bytes"); fails = fails + 1 }
+    }
+
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}
