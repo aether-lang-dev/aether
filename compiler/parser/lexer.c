@@ -270,9 +270,12 @@ Token* read_string(void) {
     }
 
     buffer[i] = '\0';
+    Token* token;
     if (!has_interp) {
         /* A plain literal: decode its escapes in place (a decoded escape is
-         * never longer than its spelling). */
+         * never longer than its spelling). A decoded `\0` or `\x00` is a
+         * byte of the literal, so the token takes the decoded length rather
+         * than reading the bytes as a C string (#2520). */
         int o = 0;
         for (int k = 0; k < i; ) {
             if (buffer[k] == '\\') {
@@ -284,9 +287,10 @@ Token* read_string(void) {
             }
         }
         buffer[o] = '\0';
+        token = create_token_bytes(TOKEN_STRING_LITERAL, buffer, o, token_start_line, token_start_column);
+    } else {
+        token = create_token(TOKEN_INTERP_STRING, buffer, token_start_line, token_start_column);
     }
-    AeTokenType tok_type = has_interp ? TOKEN_INTERP_STRING : TOKEN_STRING_LITERAL;
-    Token* token = create_token(tok_type, buffer, token_start_line, token_start_column);
     free(buffer);
     return token;
 }
@@ -1002,6 +1006,7 @@ Token* create_token(AeTokenType type, const char* value, int line, int column) {
     token->type = type;
     token->line = line;
     token->column = column;
+    token->value_len = 0;
     if (value) {
         size_t len = strlen(value);
         token->value = malloc(len + 1);
@@ -1010,6 +1015,22 @@ Token* create_token(AeTokenType type, const char* value, int line, int column) {
     } else {
         token->value = NULL;
     }
+    return token;
+}
+
+Token* create_token_bytes(AeTokenType type, const char* bytes, int len, int line, int column) {
+    Token* token = malloc(sizeof(Token));
+    if (!token) return NULL;
+    token->type = type;
+    token->line = line;
+    token->column = column;
+    token->value = malloc((size_t)len + 1);
+    if (!token->value) { free(token); return NULL; }
+    memcpy(token->value, bytes, (size_t)len);
+    token->value[len] = '\0';
+    /* Only a literal with a NUL carries its length; every reader of a
+     * token without one keeps treating `value` as a C string (#2520). */
+    token->value_len = memchr(bytes, '\0', (size_t)len) ? len : 0;
     return token;
 }
 

@@ -54,7 +54,7 @@ main() {
     f = f + same("a\qb${e}", "a\qb", "unknown escape")
     f = f + same("a%db%%${e}", "a%db%%", "percent signs")
     f = f + same("a\${e}b${e}", "a\${e}b", "escaped dollar starts no interpolation")
-    // A NUL ends the text in both forms alike: a literal cannot hold one.
+    // A NUL is a byte of the text in both forms alike (#2520).
     f = f + same("a\0b${e}", "a\0b", "NUL escape")
 
     // The interpolated value lands where it should around the escapes.

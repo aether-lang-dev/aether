@@ -104,12 +104,18 @@ static AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t c
 
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str) {
-    if (str && is_aether_string(str)) ((AetherString*)str)->ref_count++;
+    if (!str || !is_aether_string(str)) return;
+    AetherString* s = (AetherString*)str;
+    /* A pinned string (a literal the compiler made static, #2520) is
+     * never freed, so it is not counted either. */
+    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;
+    s->ref_count++;
 }
 
 void string_release(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
+    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
     s->ref_count--;
     if (s->ref_count <= 0) {
         /* Cap accounting: data buffer was allocated with `capacity`

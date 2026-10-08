@@ -419,6 +419,14 @@ big = 1_000_000
 
 All numeric literal formats work with bitwise operators and in any expression context.
 
+### String Literals
+
+A string literal is double-quoted. Its escapes are decoded once, in a plain literal and in the text of an interpolated one alike: `\n`, `\t`, `\r`, `\\`, `\"`, `\xN` / `\xNN` (one or two hex digits), `\N` to `\NNN` (octal), and any other `\c` is the character `c`.
+
+A literal may hold a NUL byte (`"a\0b"`, `"a\x00b"`, `"a\0b ${n}"`), and it keeps every byte: `string.length("a\0b")` is 3, `==` compares all of its bytes, and it is a whole key in a map or set, a whole value for `std.json` and `std.fs`, and a whole operand of `string.concat`, in a `match` arm and in a function-clause pattern, as a string built at run time is. The compiler emits such a literal as a static string that carries its length; it is never freed, and `string.free` on it is a no-op. A literal without a NUL stays the plain C string it always was, at no cost.
+
+One boundary keeps the C view: a C extern whose parameter is `string` receives the literal's bytes up to the first NUL, since that is all a `const char*` can carry; a parameter declared `@aether string` receives the whole string. `print` and `println` write all of the literal's bytes.
+
 ---
 
 ## Variables
@@ -2986,7 +2994,7 @@ age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
 
-The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, and `\${` writes a literal `${` rather than starting an interpolation.
+The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation.
 
 Interpolated strings produce a `ptr` (heap-allocated C string) when used as values:
 

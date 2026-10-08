@@ -342,6 +342,15 @@ typedef struct {
     int opt_type_count;
     int opt_type_capacity;
 
+    /* #2520: the string literals of the program that hold a NUL, one entry
+     * per distinct byte sequence. Each is emitted once, at file scope, as a
+     * static pinned AetherString `_ae_slit_<i>` (emit_static_string_literals),
+     * and every use of the literal is the address of that object. */
+    char** static_str_bytes;
+    int* static_str_lens;
+    int static_str_count;
+    int static_str_capacity;
+
     // Builder function registry: functions with _ctx: ptr as first param
     // get builder_context() auto-injected at call sites inside trailing blocks
     char** builder_funcs;
@@ -608,6 +617,15 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt);
 void generate_expression(CodeGenerator* gen, ASTNode* expr);
 void emit_c_string_literal(CodeGenerator* gen, const char* str);
 void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format);  // #2512
+/* #2520: `len` bytes, NULs included, as the inside of a C string literal. */
+void emit_c_string_bytes(CodeGenerator* gen, const char* str, size_t len, int printf_format);
+/* #2520: a string literal node as a C expression: a C string literal, or,
+ * when the literal holds a NUL, the static AetherString that carries it. */
+void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit);
+/* #2520: `lit` as an fwrite of all its bytes to stdout (print of a literal). */
+void emit_string_literal_fwrite(CodeGenerator* gen, const ASTNode* lit);
+int  static_string_literal_index(CodeGenerator* gen, const char* bytes, int len);
+void emit_static_string_literals(CodeGenerator* gen, ASTNode* program);
 int  binary_is_string_compare(const ASTNode* expr);                      // #2515
 void emit_string_compare_open(CodeGenerator* gen, const char* op);       // #2515
 void emit_string_compare_close(CodeGenerator* gen, const char* op);      // #2515   // #2467

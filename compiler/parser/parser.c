@@ -917,10 +917,12 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
     char* lit_buf = malloc(lit_cap);
     int lit_len = 0;
 
-    // Helper lambda (C-style): flush current literal buffer as a child node
+    // Helper lambda (C-style): flush current literal buffer as a child node.
+    // By length: a decoded `\0` is a byte of the text (#2520).
     #define FLUSH_LIT() do { \
         lit_buf[lit_len] = '\0'; \
-        ASTNode* _lit = create_ast_node(AST_LITERAL, lit_buf, 0, 0); \
+        ASTNode* _lit = create_ast_node(AST_LITERAL, NULL, 0, 0); \
+        ast_set_literal_bytes(_lit, lit_buf, lit_len); \
         _lit->node_type = create_type(TYPE_STRING); \
         add_child(interp, _lit); \
         lit_len = 0; \
@@ -5727,6 +5729,8 @@ ASTNode* parse_pattern(Parser* parser) {
             ASTNode* pattern = create_ast_node(AST_PATTERN_LITERAL, token->value,
                                               token->line, token->column);
             pattern->node_type = create_type(TYPE_STRING);
+            /* A pattern holding a NUL matches by all its bytes (#2520). */
+            if (token->value_len > 0) ast_set_literal_bytes(pattern, token->value, token->value_len);
             return pattern;
         }
         

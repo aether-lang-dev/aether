@@ -6775,7 +6775,18 @@ static int match_arm_is_wildcard(ASTNode* p) {
 static int match_arm_key(ASTNode* p, char* out, size_t cap) {
     if (!p || match_arm_is_wildcard(p)) return 0;
     if (p->type == AST_LITERAL && p->value) {
-        snprintf(out, cap, "lit:%s", p->value);
+        /* By length: a string literal may hold a NUL (#2520). A NUL is
+         * written as `\0` and a backslash as `\\`, so no two literals share
+         * a key. */
+        size_t o = (size_t)snprintf(out, cap, "lit:");
+        int n = ast_literal_length(p);
+        for (int i = 0; i < n && o + 2 < cap; i++) {
+            char c = p->value[i];
+            if (c == '\0') { out[o++] = '\\'; out[o++] = '0'; }
+            else if (c == '\\') { out[o++] = '\\'; out[o++] = '\\'; }
+            else out[o++] = c;
+        }
+        out[o] = '\0';
         return 1;
     }
     if (p->type == AST_MEMBER_ACCESS && p->value &&

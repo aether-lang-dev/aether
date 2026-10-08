@@ -4,11 +4,22 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include "codegen_internal.h"
+#include "../../std/string/aether_string_abi.h"
 #include "aether_stdlib_symbols.h"   /* #1366: generated */
 #include "../aether_module.h"
 #include "../aether_error.h"
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
+
+/* The AetherString header the emitted C inspects, from the definition the
+ * runtime uses (std/string/aether_string_abi.h): its magic's bytes in
+ * memory order, and its field list as text. */
+#define AE_STR_MAGIC_B0 ((unsigned)(AETHER_STRING_MAGIC & 0xFFu))
+#define AE_STR_MAGIC_B1 ((unsigned)((AETHER_STRING_MAGIC >> 8) & 0xFFu))
+#define AE_STR_MAGIC_B2 ((unsigned)((AETHER_STRING_MAGIC >> 16) & 0xFFu))
+#define AE_STR_MAGIC_B3 ((unsigned)((AETHER_STRING_MAGIC >> 24) & 0xFFu))
+#define AE_STR_FIELDS_TEXT_(...) #__VA_ARGS__
+#define AE_STR_FIELDS_TEXT(...) AE_STR_FIELDS_TEXT_(__VA_ARGS__)
 
 /* #2292: defined with the constant rename, used by the symbol catalog. */
 static const char* const_public_name(const ASTNode* cd);
@@ -513,6 +524,10 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->opt_type_names = NULL;       // #340
     gen->opt_type_count = 0;
     gen->opt_type_capacity = 0;
+    gen->static_str_bytes = NULL;     // #2520
+    gen->static_str_lens = NULL;
+    gen->static_str_count = 0;
+    gen->static_str_capacity = 0;
     // Builder function registry
     gen->builder_funcs = NULL;
     gen->builder_func_count = 0;
@@ -683,6 +698,13 @@ void free_code_generator(CodeGenerator* gen) {
         gen->opt_type_names = NULL;
         gen->opt_type_count = 0;
         gen->opt_type_capacity = 0;
+        for (int i = 0; i < gen->static_str_count; i++) free(gen->static_str_bytes[i]);   /* #2520 */
+        free(gen->static_str_bytes);
+        free(gen->static_str_lens);
+        gen->static_str_bytes = NULL;
+        gen->static_str_lens = NULL;
+        gen->static_str_count = 0;
+        gen->static_str_capacity = 0;
         for (int i = 0; i < gen->synthesised_count; i++) {
             free_ast_node(gen->synthesised_nodes[i]);
         }
@@ -6756,11 +6778,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    const unsigned char* _p = (const unsigned char*)s;");
     print_line(gen, "    const char* _data = s;");
     print_line(gen, "    size_t _n;");
-    print_line(gen, "    if (_p[0] == 0xDE && _p[1] == 0xC0 && _p[2] == 0x57 && _p[3] == 0xAE) {");
+    print_line(gen, "    if (_p[0] == 0x%02X && _p[1] == 0x%02X && _p[2] == 0x%02X && _p[3] == 0x%02X) {",
+               AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "        /* Struct layout: magic(u32), ref_count(i32), length(size_t),");
     print_line(gen, "         * capacity(size_t), data(char*). Read length and data via");
     print_line(gen, "         * a typed view, the struct's data pointer is what we copy. */");
-    print_line(gen, "        struct _AeStrHdr { unsigned int magic; int ref_count; size_t length; size_t capacity; char* data; };");
+    print_line(gen, "        struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
     print_line(gen, "        const struct _AeStrHdr* _h = (const struct _AeStrHdr*)s;");
     print_line(gen, "        _n = _h->length;");
     print_line(gen, "        _data = _h->data ? _h->data : s;");
@@ -6807,7 +6830,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!s) return;");
     print_line(gen, "    aether_unwind_forget(s);");
     print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
-    print_line(gen, "    if (_hp[0] == 0xDE && _hp[1] == 0xC0 && _hp[2] == 0x57 && _hp[3] == 0xAE) {");
+    print_line(gen, "    if (_hp[0] == 0x%02X && _hp[1] == 0x%02X && _hp[2] == 0x%02X && _hp[3] == 0x%02X) {",
+               AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "        string_release(s);");
     print_line(gen, "    } else {");
     print_line(gen, "        free((void*)s);");
@@ -6895,7 +6919,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline void _aether_str_cell_free_val(const char* s) {");
     print_line(gen, "    if (!s) return;");
     print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
-    print_line(gen, "    if (_hp[0]==0xDE && _hp[1]==0xC0 && _hp[2]==0x57 && _hp[3]==0xAE) {");
+    print_line(gen, "    if (_hp[0]==0x%02X && _hp[1]==0x%02X && _hp[2]==0x%02X && _hp[3]==0x%02X) {",
+               AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "        aether_unwind_forget(s); string_release(s);");
     print_line(gen, "    }");
     print_line(gen, "}");
@@ -7445,6 +7470,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         gen->builder_funcs_reg[gen->builder_func_reg_count].factory = child->annotation ? strdup(child->annotation) : NULL;
         gen->builder_func_reg_count++;
     }
+
+    /* #2520: the string literals holding a NUL, as static AetherStrings,
+     * before anything of the program that may spell one. */
+    emit_static_string_literals(gen, program);
 
     // Forward-declare struct types BEFORE function forward declarations,
     // so a function signature like `int header_flags(Header*)` resolves

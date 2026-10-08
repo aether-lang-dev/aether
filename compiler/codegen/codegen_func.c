@@ -1751,7 +1751,7 @@ static void generate_expression_with_subst_inner(CodeGenerator* gen, ASTNode* ex
     // For literals, just output value
     if (expr->type == AST_LITERAL) {
         if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
-            emit_c_string_literal(gen, expr->value);
+            emit_string_literal_node(gen, expr);
         } else {
             fprintf(gen->output, "%s", expr->value);
         }
@@ -1896,7 +1896,7 @@ static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_f
                  * a `match` string arm does (emit_selector_condition): the
                  * argument is a pointer and may be a magic AetherString. */
                 fprintf(gen->output, "(_arg%d && string_equals(_arg%d, ", param_idx, param_idx);
-                emit_c_string_literal(gen, child->value);
+                emit_string_literal_node(gen, child);   /* all its bytes (#2520) */
                 fprintf(gen->output, "))");
             } else {
                 fprintf(gen->output, "_arg%d == %s", param_idx, child->value);

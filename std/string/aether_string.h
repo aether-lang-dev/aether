@@ -3,16 +3,13 @@
 
 #include <stddef.h>
 
-// Magic number to distinguish AetherString* from raw char*
-#define AETHER_STRING_MAGIC 0xAE57C0DE
+// AETHER_STRING_MAGIC, AETHER_STRING_PINNED_REFS and the header's fields,
+// shared with the compiler (#2520).
+#include "aether_string_abi.h"
 
 // String structure - immutable, reference counted
 typedef struct AetherString {
-    unsigned int magic;     // Always AETHER_STRING_MAGIC for valid AetherString
-    int ref_count;
-    size_t length;
-    size_t capacity;
-    char* data;
+    AETHER_STRING_FIELDS
 } AetherString;
 
 // Check if a pointer is an AetherString (vs raw char*).
@@ -53,6 +50,11 @@ AetherString* string_from_cstr(const char* cstr);  // Alias for new
 AetherString* string_from_literal(const char* cstr);  // Alias for new
 AetherString* string_new_with_length(const char* data, size_t length);
 AetherString* string_empty(void);
+
+/* AETHER_STRING_PINNED_REFS (aether_string_abi.h) is the ref_count of a
+ * pinned string. The compiler emits a string literal holding a NUL as a
+ * static AetherString with this count, so the literal keeps every byte
+ * (#2520); string_retain and string_release leave such a string alone. */
 
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str);

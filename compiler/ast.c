@@ -572,7 +572,23 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->type_inferred = 0;
     node->warned = 0;
     node->source_name = NULL;
+    node->value_len = 0;
     return node;
+}
+
+void ast_set_literal_bytes(ASTNode* node, const char* bytes, int len) {
+    char* copy = malloc((size_t)len + 1);
+    if (!copy) {
+        fprintf(stderr, "Fatal: out of memory copying a string literal\n");
+        exit(1);
+    }
+    memcpy(copy, bytes, (size_t)len);
+    copy[len] = '\0';
+    free(node->value);
+    node->value = copy;
+    /* Only a literal with a NUL records its length, so a literal without
+     * one is handled exactly as before, as a C string (#2520). */
+    node->value_len = memchr(bytes, '\0', (size_t)len) ? len : 0;
 }
 
 void add_child(ASTNode* parent, ASTNode* child) {
@@ -614,6 +630,7 @@ ASTNode* clone_ast_node(ASTNode* node) {
     clone->source_file = node->source_file ? strdup(node->source_file) : NULL;
     clone->type_inferred = node->type_inferred;
     clone->source_name = node->source_name ? strdup(node->source_name) : NULL;
+    if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     for (int i = 0; i < node->child_count; i++) {
         add_child(clone, clone_ast_node(node->children[i]));
@@ -891,6 +908,8 @@ ASTNode* create_literal_node(Token* token) {
     
     ASTNode* node = create_ast_node(AST_LITERAL, token->value, token->line, token->column);
     node->node_type = type;
+    /* A string literal holding a NUL keeps every byte (#2520). */
+    if (token->value_len > 0) ast_set_literal_bytes(node, token->value, token->value_len);
     return node;
 }
 

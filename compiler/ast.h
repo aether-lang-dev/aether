@@ -2,6 +2,7 @@
 #define AST_H
 
 #include <stddef.h>
+#include <string.h>
 
 #include "parser/tokens.h"
 
@@ -580,6 +581,13 @@ typedef struct ASTNode {
      * NULL otherwise. The symbol catalog and export lists speak the source
      * language, so they read this rather than the emitted C name. */
     char* source_name;
+
+    /* #2520: a string literal (AST_LITERAL or AST_PATTERN_LITERAL typed
+     * string) that holds a NUL carries its byte count here, and `value` is
+     * value_len bytes plus a terminator; codegen emits such a literal as a
+     * static, length-carrying AetherString. 0 on every other node: `value`
+     * is a C string. ast_literal_length reads either. */
+    int value_len;
 } ASTNode;
 
 // Type functions
@@ -626,6 +634,14 @@ Type* make_string_seq_ptr_type(void);
 
 // AST Node functions
 ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int column);
+/* #2520: give a string literal node `len` bytes as its value, which may
+ * include a NUL; replaces any value it had. */
+void ast_set_literal_bytes(ASTNode* node, const char* bytes, int len);
+/* #2520: the byte count of a string literal's value, NULs included. */
+static inline int ast_literal_length(const ASTNode* node) {
+    if (node->value_len > 0) return node->value_len;
+    return node->value ? (int)strlen(node->value) : 0;
+}
 void add_child(ASTNode* parent, ASTNode* child);
 void free_ast_node(ASTNode* node);
 ASTNode* clone_ast_node(ASTNode* node);

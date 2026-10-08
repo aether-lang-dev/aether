@@ -2,6 +2,7 @@
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
 #include "../aether_error.h"
+#include "../../std/string/aether_string_abi.h"
 #include <errno.h>
 #include <limits.h>
 
@@ -4102,9 +4103,19 @@ static int utf8_sequence_length(const char* s) {
  * escaped backslash before `0`, `n` or `x` became a NUL, a newline or a
  * byte (#2512). */
 void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format) {
-    while (*str) {
+    emit_c_string_bytes(gen, str, strlen(str), printf_format);
+}
+
+/* As emit_c_string_body, for `len` bytes that may include a NUL (#2520). In
+ * a printf format a NUL cannot be carried (it would end the format), so it
+ * is written as `%c`, and the caller passes a 0 argument for each one
+ * (emit_text_nul_args); in a C literal it is the octal `\000`. */
+void emit_c_string_bytes(CodeGenerator* gen, const char* str, size_t len, int printf_format) {
+    const char* end = str + len;
+    while (str < end) {
         unsigned char ch = (unsigned char)*str;
         switch (*str) {
+            case '\0': fprintf(gen->output, printf_format ? "%%c" : "\\000"); break;
             case '\n': fprintf(gen->output, "\\n"); break;
             case '\t': fprintf(gen->output, "\\t"); break;
             case '\r': fprintf(gen->output, "\\r"); break;
@@ -4152,6 +4163,102 @@ void emit_c_string_literal(CodeGenerator* gen, const char* str) {
     fprintf(gen->output, "\"");
     emit_c_string_body(gen, str, 0);
     fprintf(gen->output, "\"");
+}
+
+/* #2520: the index of the static AetherString carrying `bytes`, registering
+ * it on first sight. The registry is filled by the pre-pass of
+ * emit_static_string_literals before any program text is emitted, so a use
+ * always finds its entry; a literal first seen after that pass would name
+ * an object the C compiler has not seen, which fails the build rather than
+ * cutting the literal. */
+int static_string_literal_index(CodeGenerator* gen, const char* bytes, int len) {
+    for (int i = 0; i < gen->static_str_count; i++) {
+        if (gen->static_str_lens[i] == len &&
+            memcmp(gen->static_str_bytes[i], bytes, (size_t)len) == 0) return i;
+    }
+    if (gen->static_str_count >= gen->static_str_capacity) {
+        gen->static_str_capacity = gen->static_str_capacity ? gen->static_str_capacity * 2 : 8;
+        gen->static_str_bytes = aether_xrealloc(gen->static_str_bytes,
+                                                gen->static_str_capacity * sizeof(char*));
+        gen->static_str_lens = aether_xrealloc(gen->static_str_lens,
+                                               gen->static_str_capacity * sizeof(int));
+    }
+    char* copy = malloc((size_t)len + 1);
+    if (!copy) {
+        fprintf(stderr, "Fatal: out of memory registering a string literal\n");
+        exit(1);
+    }
+    memcpy(copy, bytes, (size_t)len);
+    copy[len] = '\0';
+    gen->static_str_bytes[gen->static_str_count] = copy;
+    gen->static_str_lens[gen->static_str_count] = len;
+    return gen->static_str_count++;
+}
+
+static void collect_static_string_literals(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    if (node->value_len > 0 &&
+        (node->type == AST_LITERAL || node->type == AST_PATTERN_LITERAL) &&
+        node->node_type && node->node_type->kind == TYPE_STRING) {
+        static_string_literal_index(gen, node->value, node->value_len);
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        collect_static_string_literals(gen, node->children[i]);
+    }
+}
+
+/* #2520: a string literal that holds a NUL cannot be a C string literal,
+ * which ends at its first NUL. Each such literal of the program is emitted
+ * here, once, as a static AetherString with its length, in the layout of
+ * std/string/aether_string.h, pinned (AETHER_STRING_PINNED_REFS) so that
+ * string_retain and string_release leave it alone and it is never freed.
+ * Every string function then sees all of its bytes through str_len and
+ * str_data, as it does for a heap string. A literal without a NUL is not
+ * here: it stays a plain C string literal. */
+void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
+    collect_static_string_literals(gen, program);
+    if (gen->static_str_count == 0) return;
+    fprintf(gen->output, "/* String literals holding a NUL: static, pinned AetherStrings (#2520). */\n");
+    /* The runtime declares AetherString from the same field list, so the
+     * layout written here is the layout the string functions read. */
+#define AE_STR_ABI_TEXT_(...) #__VA_ARGS__
+#define AE_STR_ABI_TEXT(...) AE_STR_ABI_TEXT_(__VA_ARGS__)
+    fprintf(gen->output, "typedef struct { %s } _AeStaticStr;\n",
+            AE_STR_ABI_TEXT(AETHER_STRING_FIELDS));
+#undef AE_STR_ABI_TEXT
+#undef AE_STR_ABI_TEXT_
+    for (int i = 0; i < gen->static_str_count; i++) {
+        int len = gen->static_str_lens[i];
+        fprintf(gen->output, "static const char _ae_slit_%d_bytes[] = \"", i);
+        emit_c_string_bytes(gen, gen->static_str_bytes[i], (size_t)len, 0);
+        fprintf(gen->output, "\";\n");
+        fprintf(gen->output, "static _AeStaticStr _ae_slit_%d = { 0x%Xu, 0x%X, %d, %d, (char*)_ae_slit_%d_bytes };\n",
+                i, (unsigned)AETHER_STRING_MAGIC, (unsigned)AETHER_STRING_PINNED_REFS,
+                len, len + 1, i);
+    }
+}
+
+void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
+    if (lit->value_len > 0) {
+        int idx = static_string_literal_index(gen, lit->value, lit->value_len);
+        fprintf(gen->output, "((const char*)&_ae_slit_%d)", idx);
+    } else {
+        emit_c_string_literal(gen, lit->value);
+    }
+}
+
+void emit_string_literal_fwrite(CodeGenerator* gen, const ASTNode* lit) {
+    fprintf(gen->output, "fwrite(\"");
+    emit_c_string_bytes(gen, lit->value, (size_t)lit->value_len, 0);
+    fprintf(gen->output, "\", 1, %d, stdout)", lit->value_len);
+}
+
+/* #2520: the `0` argument for each `%c` that emit_c_string_bytes wrote for
+ * a NUL of an interpolation's text segment. */
+static void emit_text_nul_args(CodeGenerator* gen, const ASTNode* text) {
+    for (int i = 0; i < text->value_len; i++) {
+        if (text->value[i] == '\0') fprintf(gen->output, ", 0");
+    }
 }
 
 /* True when `n` spells the null pointer in a comparison: the identifier
@@ -4431,7 +4538,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     switch (expr->type) {
         case AST_LITERAL:
             if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
-                emit_c_string_literal(gen, expr->value);
+                emit_string_literal_node(gen, expr);
             } else if (expr->node_type && expr->node_type->kind == TYPE_DURATION) {
                 fprintf(gen->output, "%lldLL", parse_duration_literal_ns(expr->value));
             } else if (expr->node_type && expr->node_type->kind == TYPE_FLOAT32) {
@@ -5980,9 +6087,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else if (expr->child_count == 1) {
                         ASTNode* a = expr->children[0];
                         if (a->type == AST_LITERAL && a->node_type && a->node_type->kind == TYPE_STRING) {
-                            fprintf(gen->output, "printf(");
-                            generate_expression(gen, a);
-                            fprintf(gen->output, ")");
+                            if (a->value_len > 0) {
+                                /* Every byte, NULs included (#2520). */
+                                emit_string_literal_fwrite(gen, a);
+                            } else {
+                                fprintf(gen->output, "printf(");
+                                generate_expression(gen, a);
+                                fprintf(gen->output, ")");
+                            }
                         } else {
                             fprintf(gen->output, "printf(\"%%d\", ");
                             generate_expression(gen, a);
@@ -6084,7 +6196,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_STRING) {
-                            if (arg->type == AST_LITERAL) {
+                            if (arg->type == AST_LITERAL && arg->value_len > 0) {
+                                /* Every byte, NULs included (#2520). */
+                                fprintf(gen->output, "(");
+                                emit_string_literal_fwrite(gen, arg);
+                                fprintf(gen->output, ", putchar('\\n'))");
+                            } else if (arg->type == AST_LITERAL) {
                                 // String literal — never NULL, use puts() directly
                                 fprintf(gen->output, "puts(");
                                 generate_expression(gen, arg);
@@ -7544,8 +7661,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     ASTNode* ch = expr->children[i]; \
                     if (interp_segment_is_text(ch)) { \
                         /* Decoded bytes, escaped for C as a plain literal \
-                         * is; never read again as escapes (#2512). */ \
-                        emit_c_string_body(gen, ch->value ? ch->value : "", 1); \
+                         * is; never read again as escapes (#2512). A NUL \
+                         * of the text is a `%c` fed a 0 (#2520). */ \
+                        emit_c_string_bytes(gen, ch->value ? ch->value : "", \
+                                            (size_t)ast_literal_length(ch), 1); \
                     } else { \
                         TypeKind tk = (ch->node_type) ? ch->node_type->kind : TYPE_UNKNOWN; \
                         switch (tk) { \
@@ -7570,8 +7689,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             #define EMIT_INTERP_ARGS() do { \
                 for (int i = 0; i < expr->child_count; i++) { \
                     ASTNode* ch = expr->children[i]; \
-                    if (interp_segment_is_text(ch)) \
+                    if (interp_segment_is_text(ch)) { \
+                        emit_text_nul_args(gen, ch); \
                         continue; \
+                    } \
                     fprintf(gen->output, ", "); \
                     TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN; \
                     if (tk == TYPE_BOOL) { \
