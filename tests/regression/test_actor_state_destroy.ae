@@ -13,9 +13,11 @@
 // The check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, a window of the same work must not grow the heap, with
 // one of two windows growing by exactly 0. The overwrite window keeps one
-// actor alive and drains its mailbox with an ask before each read; the
-// release window spawns, fills and releases an actor per round, warmed up
-// so the scheduler's retire and keep lists have reached their steady size,
+// actor alive and drains its mailbox with an ask before each read, and starts
+// only once the actors released during the warm-up are ended, since ending
+// one frees its state and, the first time, grows the scheduler's keep list;
+// the release window spawns, fills and releases an actor per round, warmed
+// up so the scheduler's retire and keep lists have reached their steady size,
 // and waits for the scheduler to end every released actor
 // (scheduler_reclaim_released, which returns how many are still retired,
 // asserted 0) before each read, since a released block is ended and kept
@@ -117,6 +119,7 @@ main() {
     // same each round.
     check(second - first == 40, "each message's string is stored and counted")
     release_window("a", 2)
+    check(scheduler_reclaim_released() == 0, "released actors still retired after the first rounds")
     if !mem.heap_in_use_exact() {
         println("OK") // count not exact here: the macOS leaks gate checks this program
         return
