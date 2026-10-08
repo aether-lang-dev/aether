@@ -4500,6 +4500,28 @@ void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
     }
 }
 
+void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit) {
+    /* A print with only a literal format has no conversions (the type
+     * checker refuses one without an argument), so its text is known here:
+     * `%%` is a percent sign and every other byte, a NUL included (#2520),
+     * is written as is, with no printf at run time. */
+    int len = ast_literal_length(lit);
+    char* text = (char*)malloc((size_t)len + 1);
+    if (!text) {
+        fprintf(stderr, "Fatal: out of memory decoding a print format\n");
+        exit(1);
+    }
+    int n = 0;
+    for (int i = 0; i < len; i++) {
+        text[n++] = lit->value[i];
+        if (lit->value[i] == '%' && i + 1 < len && lit->value[i + 1] == '%') i++;
+    }
+    fprintf(gen->output, "aether_write_bytes(stdout, \"");
+    emit_c_string_bytes(gen, text, (size_t)n, 0);
+    fprintf(gen->output, "\", %d, 0)", n);
+    free(text);
+}
+
 void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newline) {
     fprintf(gen->output, "aether_write_bytes(stdout, \"");
     emit_c_string_bytes(gen, lit->value, (size_t)lit->value_len, 0);
@@ -6340,14 +6362,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else if (expr->child_count == 1) {
                         ASTNode* a = expr->children[0];
                         if (a->type == AST_LITERAL && a->node_type && a->node_type->kind == TYPE_STRING) {
-                            if (a->value_len > 0) {
-                                /* Every byte, NULs included (#2520). */
-                                emit_string_literal_write(gen, a, 0);
-                            } else {
-                                fprintf(gen->output, "printf(");
-                                generate_expression(gen, a);
-                                fprintf(gen->output, ")");
-                            }
+                            emit_print_literal_format(gen, a);
                         } else {
                             fprintf(gen->output, "printf(\"%%d\", ");
                             generate_expression(gen, a);

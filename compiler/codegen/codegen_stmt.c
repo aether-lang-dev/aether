@@ -11297,15 +11297,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 } else if (stmt->child_count == 1) {
                     // String literal - print directly
                     ASTNode* arg = stmt->children[0];
-                    if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING &&
-                        arg->value_len > 0) {
-                        /* Every byte, NULs included (#2520). */
-                        emit_string_literal_write(gen, arg, 0);
+                    if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
+                        emit_print_literal_format(gen, arg);
                         fprintf(gen->output, ";\n");
-                    } else if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
-                        fprintf(gen->output, "printf(");
-                        generate_expression(gen, arg);
-                        fprintf(gen->output, ");\n");
                     } else {
                         // Unknown type - default to %d
                         fprintf(gen->output, "printf(\"%%d\", ");

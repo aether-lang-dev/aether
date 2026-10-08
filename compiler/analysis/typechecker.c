@@ -8080,6 +8080,34 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             for (int i = 0; i < stmt->child_count; i++) {
                 typecheck_expression(stmt->children[i], table);
             }
+            /* print's literal is a printf format: a conversion with no
+             * argument read whatever the C stack held, so print("100% done")
+             * printed garbage and print("a %s") crashed. Each conversion
+             * needs an argument; `%%` is a literal percent. */
+            if (stmt->child_count >= 1 &&
+                stmt->children[0]->type == AST_LITERAL &&
+                stmt->children[0]->node_type &&
+                stmt->children[0]->node_type->kind == TYPE_STRING &&
+                stmt->children[0]->value) {
+                const char* fmt = stmt->children[0]->value;
+                int flen = ast_literal_length(stmt->children[0]);
+                int conversions = 0;
+                for (int fi = 0; fi < flen; fi++) {
+                    if (fmt[fi] != '%') continue;
+                    if (fi + 1 < flen && fmt[fi + 1] == '%') { fi++; continue; }
+                    conversions++;
+                    if (conversions < stmt->child_count) continue;
+                    char ebuf[96];
+                    int end = fi + 1;
+                    while (end < flen && end < fi + 8 && !((fmt[end] | 0x20) >= 'a' && (fmt[end] | 0x20) <= 'z')) end++;
+                    if (end < flen && end < fi + 8) end++;
+                    snprintf(ebuf, sizeof(ebuf), "print format '%.*s' has no argument",
+                             end - fi, fmt + fi);
+                    type_error_hint(ebuf, "write '%%' for a literal '%'",
+                                    stmt->children[0]->line, stmt->children[0]->column);
+                    return 0;
+                }
+            }
             if (stmt->child_count >= 2 &&
                 stmt->children[0]->type == AST_LITERAL &&
                 stmt->children[0]->node_type &&

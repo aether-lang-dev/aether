@@ -55,7 +55,7 @@ main() {
     // url.decode — malformed encoding is reported.
     _, derr = url.decode("bad%XYbytes")
     if derr == "" {
-        print("FAIL: decode bad %XY did not error\n")
+        print("FAIL: decode bad %%XY did not error\n")
         exit(1)
     }
     print("PASS: decode malformed reported\n")

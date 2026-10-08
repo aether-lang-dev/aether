@@ -633,6 +633,7 @@ void emit_c_string_bytes(CodeGenerator* gen, const char* str, size_t len, int pr
 void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit);
 /* #2520: `lit` as an fwrite of all its bytes to stdout (print of a literal). */
 void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newline);
+void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit);
 int  static_string_literal_index(CodeGenerator* gen, const char* bytes, int len);
 void emit_static_string_literals(CodeGenerator* gen, ASTNode* program);
 int  binary_is_string_compare(const ASTNode* expr);                      // #2515
