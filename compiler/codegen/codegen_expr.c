@@ -4295,7 +4295,8 @@ ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call) {
  * one it arrives with; the container takes its own, so that one is
  * released after the store. In a statement the drained-call form already
  * holds it in a temporary, which is released by the drain. */
-static void emit_closure_container_store(CodeGenerator* gen, ASTNode* call, ASTNode* val) {
+static void emit_closure_container_store(CodeGenerator* gen, ASTNode* call, ASTNode* val,
+                                         int discarded) {
     const ClosureStoreEntry* e = closure_store_entry(gen, call);
     const char* fn = e->wrapper ? e->wrapper : e->owned;
     int temp_val = !arg_drain_lookup(val) &&
@@ -4321,7 +4322,11 @@ static void emit_closure_container_store(CodeGenerator* gen, ASTNode* call, ASTN
     }
     fprintf(gen->output, ", (void*)_aether_box_closure(");
     if (temp_val) {
-        fprintf(gen->output, "_ae_lv)); _aether_closure_env_release(_ae_lv.env); _ae_lr; })");
+        /* A store whose result nobody reads (a statement) yields nothing:
+         * a trailing value there is an unused expression to the C
+         * compiler (clang -Wunused-value). */
+        fprintf(gen->output, "_ae_lv)); _aether_closure_env_release(_ae_lv.env); %s })",
+                discarded ? "(void)_ae_lr;" : "_ae_lr;");
     } else {
         generate_expression(gen, val);
         fprintf(gen->output, "))");
@@ -7381,7 +7386,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     {
                         ASTNode* cval = closure_container_store_value(gen, expr);
                         if (cval) {
-                            emit_closure_container_store(gen, expr, cval);
+                            emit_closure_container_store(gen, expr, cval, ad_call_discarded);
                             break;
                         }
                     }

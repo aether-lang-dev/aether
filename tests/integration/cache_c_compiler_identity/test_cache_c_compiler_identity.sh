@@ -166,13 +166,16 @@ expect_miss "a compiler upgrade behind an unchanged driver file was served from 
 
 # 4. Many --extra files: the key text used to be built with unchecked
 # snprintf appends into a 2 KiB stack buffer, and about 110 extra files
-# overran it.
-mkdir -p "$TMP/many"
+# overran it. The key holds 17 bytes per file whatever its path, so the
+# files are named by short relative paths: the --extra list itself stays
+# far below ae's 8 KiB limit on every platform (absolute paths under a
+# long temp dir, macOS's, pass it).
+mkdir -p m
 MANY=""
 i=0
 while [ $i -lt 130 ]; do
-    printf 'int many_%d(void) { return %d; }\n' "$i" "$i" > "$TMP/many/s$i.c"
-    MANY="$MANY --extra $(native_path "$TMP/many/s$i.c")"
+    printf 'int many_%d(void) { return %d; }\n' "$i" "$i" > "m/s$i.c"
+    MANY="$MANY --extra m/s$i.c"
     i=$((i + 1))
 done
 cat > many.ae <<'AEOF'

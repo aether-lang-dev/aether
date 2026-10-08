@@ -1118,6 +1118,14 @@ void test_scheduler_teardown_frees_live_actors(void) {
 // scheduler's teardown reclaims what was retired.
 static void live_actor_thread_cycle(void) {
     scheduler_init(1);
+    // An actor thread runs while its core does, so the core threads must be
+    // up: the first actor of a lifecycle takes main-thread mode, the second
+    // ends it and starts them (as in the churn test). Both are spawned, live
+    // into teardown and are ended there with the actor under test.
+    for (int i = 0; i < 2; i++) {
+        ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    }
+    ASSERT_TRUE(atomic_load(&schedulers[0].running));
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
     ASSERT_NOT_NULL(a);

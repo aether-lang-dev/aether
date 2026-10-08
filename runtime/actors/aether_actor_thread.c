@@ -38,6 +38,15 @@ void* aether_actor_thread(void* arg) {
             atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
             if (actor->step) {
                 actor->step(arg);
+                // A step takes one message, as on a core. The send was
+                // counted when it was made, so without the credit
+                // scheduler_wait (and with it scheduler_shutdown) waits
+                // forever on a message an actor thread handled.
+                int core = actor->assigned_core;
+                if (core >= 0 && core < num_cores) {
+                    atomic_fetch_add_explicit(&schedulers[core].messages_processed, 1,
+                                              memory_order_relaxed);
+                }
             }
             continue;
         }

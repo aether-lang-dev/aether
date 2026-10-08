@@ -69,7 +69,7 @@ store_then_use(k: int) -> int {
 // it takes on entry moves into the list.
 kept_by_closure(k: int) -> int {
     l = list.new()
-    f = |x: string| { list.add(l, x) }
+    f = | x: string | { list.add(l, x) }
     call(f, string.concat("v", string.from_int(k)))
     call(f, string.concat("w", string.from_int(k)))
     a, _ = list.get(l, 0)
@@ -83,7 +83,7 @@ kept_by_closure(k: int) -> int {
 kept_twice(k: int) -> int {
     l = list.new()
     m = map.new()
-    f = |x: string| {
+    f = | x: string | {
         list.add(l, x)
         map.put(m, "x", x)
     }
