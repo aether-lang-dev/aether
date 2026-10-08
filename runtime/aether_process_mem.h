@@ -6,11 +6,16 @@
  *   - aether_heap_in_use(): the bytes the C allocator has handed out and not
  *     taken back, from the allocator's own statistics. Every malloc counts:
  *     Aether's (heap.new, strings, closures, collections) and the ones C
- *     code reached through an extern makes. Exact to the allocation, so a
- *     loop that leaks 40 small blocks per round shows it. Allocators keep a
- *     bounded per-thread cache of freed blocks (glibc's tcache, jemalloc's
- *     tcache) that some count as in use, so compare steady states (the
- *     growth between two later rounds), not a single before/after.
+ *     code reached through an extern makes. A loop that leaks 40 small
+ *     blocks per round shows it. glibc, macOS and jemalloc count freed
+ *     blocks parked in per-thread caches as in use, and on a churning
+ *     workload those settle over many rounds, so there compare steady
+ *     states (the growth between two later rounds), never a single
+ *     before/after.
+ *
+ *   - aether_heap_in_use_exact(): 1 where the count is exactly the blocks
+ *     the program holds (Windows' heap walk, a sanitizer's allocator), so
+ *     any growth between steady rounds is a leak; 0 elsewhere.
  *
  *   - aether_process_resident() / aether_process_private(): what the OS
  *     charges the process: resident set, and private (not shared) memory.
@@ -37,6 +42,7 @@ extern "C" {
 #endif
 
 int64_t aether_heap_in_use(void);
+int aether_heap_in_use_exact(void);
 int64_t aether_process_resident(void);
 int64_t aether_process_private(void);
 

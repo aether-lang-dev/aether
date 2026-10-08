@@ -113,7 +113,9 @@ main() {
     p = string.concat("p", "")
     q = string.concat("q", "")
     run_all(p, q)
-    if mem.heap_in_use() >= 0 {
+    // Checked where the heap count is exact (mem.heap_in_use_exact); the
+    // macOS leaks gate covers the other platforms.
+    if mem.heap_in_use_exact() {
         run_all(p, q)
         start_bytes = mem.heap_in_use()
         k = 0

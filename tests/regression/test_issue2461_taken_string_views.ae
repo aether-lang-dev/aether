@@ -326,13 +326,12 @@ main() {
     run_all(7)
     // Every value taken above is freed exactly once: rounds of the whole
     // workload hold the C allocator's count steady.
-    if mem.heap_in_use() >= 0 {
-        // A leak grows the heap by the same amount in every window of
-        // rounds. An allocator's cache of freed blocks, which glibc's and
-        // macOS's statistics count as in use, fills once and then holds:
-        // it can grow one window, never both. So warm up, then require one
-        // of two equal later windows to hold steady (mem.heap_in_use's own
-        // rule: compare later rounds, never a single before/after).
+    // Checked where the heap count is exact (mem.heap_in_use_exact:
+    // Windows, a sanitizer's allocator): after a warm-up, steady rounds of
+    // work that leaks nothing do not grow it. glibc's and macOS's statistics
+    // also count cached freed blocks, which settle over many rounds; there
+    // the macOS leaks gate, which runs this program, is the leak check.
+    if mem.heap_in_use_exact() {
         k = 0
         while k < 20 {
             run_all(7)

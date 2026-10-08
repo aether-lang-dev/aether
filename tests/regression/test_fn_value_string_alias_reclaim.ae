@@ -13,8 +13,9 @@
 //
 // The check measures what the process holds (std.mem's heap_in_use) over
 // two later windows of the same work, after a warm-up: work that leaks
-// nothing holds steady in at least one of them. Where heap_in_use() has no
-// answer it reports -1 and the check is skipped.
+// nothing holds steady in at least one of them. The check runs where the
+// heap count is exact (mem.heap_in_use_exact); elsewhere the macOS leaks
+// gate covers this program.
 
 import std.mem
 import std.string
@@ -62,13 +63,13 @@ fn one_round(p: string) {
 main() {
     keeper = list.new()
     keep_one("ke")
-    if mem.heap_in_use() < 0 {
-        println("OK") // no statistics here
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
         return
     }
-    // A leak grows the heap in every window of rounds; an allocator's cache
-    // of freed blocks fills once and can grow one window, never both. So
-    // warm up, then require one of two equal later windows to hold steady.
+    // A leak grows the exact count in every window of rounds; work that
+    // leaks nothing holds it steady once warm. So warm up, then require one
+    // of two equal later windows to hold steady.
     one_round("ab")
     one_round("ab")
     first_bytes = mem.heap_in_use()
@@ -79,7 +80,7 @@ main() {
     one_round("ab")
     last_bytes = mem.heap_in_use()
     check(mid_bytes - first_bytes <= 4096 || last_bytes - mid_bytes <= 4096,
-          "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+        "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
     check(seen == 6 * PER_ROUND * 7, "every call saw its string (${seen})")
     kept, _ = list.get(keeper, 0)
     check(string.length(kept) == 12, "the kept string is intact")

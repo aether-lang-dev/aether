@@ -145,6 +145,20 @@ int64_t aether_heap_in_use(void) {
 #endif
 }
 
+/* Whether aether_heap_in_use() counts exactly the blocks the program holds.
+ * A sanitizer's allocator counts live allocations, and Windows' heap walk
+ * counts busy blocks. glibc, macOS and jemalloc report from statistics that
+ * also count freed blocks parked in per-thread caches; on a churning
+ * workload those settle over many rounds, so growth between two rounds is
+ * not, by itself, a leak there. */
+int aether_heap_in_use_exact(void) {
+#if defined(AETHER_SANITIZER_ALLOCATOR) || defined(_WIN32)
+    return aether_heap_in_use() >= 0;
+#else
+    return 0;
+#endif
+}
+
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 /* Field `which` (0-based) of /proc/self/statm, in pages; -1 on failure. */
 static int64_t statm_pages(int which) {

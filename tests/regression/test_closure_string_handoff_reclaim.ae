@@ -16,8 +16,9 @@
 //    (`w ! Keep { s: string.concat(p, "pt") }`) is copied for the receiver
 //    (#466); the temporary itself was never freed.
 //
-// Where heap_in_use() has no answer (musl, or valgrind serving malloc) it
-// reports -1 and the check is skipped.
+// The check runs where the heap count is exact (mem.heap_in_use_exact:
+// Windows, a sanitizer's allocator); elsewhere the macOS leaks gate covers
+// this program.
 
 import std.mem
 import std.string
@@ -78,15 +79,15 @@ fn one_round(w: ptr, base: string) {
 }
 
 main() {
-    if mem.heap_in_use() < 0 {
-        println("OK") // no statistics here
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
         return
     }
     w = spawn(Sink())
     base = string.concat("ab", string.from_int(7))
-    // A leak grows the heap in every window of rounds; an allocator's cache
-    // of freed blocks fills once and can grow one window, never both. So
-    // warm up, then require one of two equal later windows to hold steady.
+    // A leak grows the exact count in every window of rounds; work that
+    // leaks nothing holds it steady once warm. So warm up, then require one
+    // of two equal later windows to hold steady.
     one_round(w, base)
     one_round(w, base)
     first_bytes = mem.heap_in_use()
@@ -97,7 +98,7 @@ main() {
     one_round(w, base)
     last_bytes = mem.heap_in_use()
     check(mid_bytes - first_bytes <= 4096 || last_bytes - mid_bytes <= 4096,
-          "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+        "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
     check(seen == 6 * PER_ROUND * 4, "every alias saw its string (${seen})")
     println("OK")
 }
