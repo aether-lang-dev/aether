@@ -7658,6 +7658,7 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "
                         "(aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux, "
                         "aarch64-linux-musl, x86_64-linux-musl, "
+                        "riscv64-linux-musl, loongarch64-linux-musl, "
                         "aarch64-freebsd, x86_64-freebsd, aarch64-linux-android, x86_64-windows, "
                         "aarch64-windows, wasm32-wasi, aarch64-ios, "
                         "aarch64-ios-simulator, x86_64-ios-simulator, "
@@ -7745,7 +7746,8 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "             by default: a wasm --emit=lib drops ~38x)\n");
         fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
         fprintf(stderr, "             aarch64-linux, x86_64-linux (glibc; carries a GLIBC floor),\n");
-        fprintf(stderr, "             aarch64-linux-musl, x86_64-linux-musl (static; no libc floor),\n");
+        fprintf(stderr, "             aarch64-linux-musl, x86_64-linux-musl, riscv64-linux-musl,\n");
+        fprintf(stderr, "             loongarch64-linux-musl (static; no libc floor),\n");
         fprintf(stderr, "             aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             aarch64-linux-android (bionic, API 29+; AETHER_ANDROID_API to change),\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");

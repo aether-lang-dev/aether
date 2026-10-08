@@ -133,6 +133,13 @@ const char* cross_target_to_zig(const char* t) {
      * epoll/spawn_sandboxed_linux selection needs no musl case. */
     if (!strcmp(t, "aarch64-linux-musl") || !strcmp(t, "arm64-linux-musl")) return "aarch64-linux-musl";
     if (!strcmp(t, "x86_64-linux-musl")  || !strcmp(t, "amd64-linux-musl"))  return "x86_64-linux-musl";
+    /* RISC-V 64 and LoongArch 64: the same self-contained musl route. zig
+     * bundles musl for both, so they need no sysroot, and the static binary
+     * runs under qemu-user with nothing else installed. RISC-V is rv64gc
+     * (zig's baseline for riscv64-linux), LoongArch the LP64D ABI.
+     * `loong64` is the name Go and Debian use. */
+    if (!strcmp(t, "riscv64-linux-musl")) return "riscv64-linux-musl";
+    if (!strcmp(t, "loongarch64-linux-musl") || !strcmp(t, "loong64-linux-musl")) return "loongarch64-linux-musl";
     /* Windows (Tier A — self-contained): zig bundles the full MinGW-w64 target
      * (CRT, Win32 headers, import libs), so no base sysroot, no --sysroot, no
      * CRT/libc dance — identical to the linux/macos arms. The runtime's _WIN32
