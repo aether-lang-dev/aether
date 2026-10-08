@@ -11,10 +11,3 @@
   cannot see (a parameter, a list element, a C function's result) still only
   sets the tracker, as before. Code that freed the old value by hand before
   storing through one of the pointers now covered frees it twice; drop that.
-- **`ae build` and `ae run` rebuild when the C compiler changes (#2477).**
-  The cache key covered the source, aetherc, ae, libaether and the flags, but
-  not the C compiler, so the same source built with another `gcc` first on
-  PATH, another `$CC` / `$AE_CC`, or a compiler upgraded in place was handed
-  the binary the previous compiler made, reported as a cache hit. The key now
-  includes the compiler setting and, for each program it names, the resolved
-  path and a hash of the file.
