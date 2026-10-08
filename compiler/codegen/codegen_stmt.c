@@ -4323,8 +4323,12 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
          * escape. Only the actual arguments can escape. For a NAMED call
          * (value == function name) every child is an argument. */
         int first_arg = (strcmp(node->value, "call") == 0) ? 1 : 0;
+        /* #2518: a closure stored into a list or a map is retained by it,
+         * which keeps nothing of the caller's. */
+        ASTNode* list_kept = closure_container_store_value(gen, node);
         for (int i = first_arg; i < node->child_count; i++) {
             ASTNode* a = node->children[i];
+            if (a && a == list_kept) continue;
             if (a && a->type == AST_IDENTIFIER && a->value &&
                 strcmp(a->value, pname) == 0) {
                 char fn_norm[256];
@@ -4766,6 +4770,9 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
         }
     }
     if (!cclos || cclos_idx < 0) return NULL;
+    /* #2518: a container that stores the closure retains it; the argument's own
+     * reference is dead after the call. */
+    if (closure_container_store_value(gen, call) == cclos) return cclos;
 
     /* Map AST arg index -> function-def param index. When the callee is a
      * `_ctx: ptr` builder and the user omitted `_ctx`, codegen auto-injects
@@ -4863,8 +4870,16 @@ typedef struct {
      * statement, and a later fresh binding owns again. */
     int track_clears;
     ASTNode* cur_stmt;     /* the statement of the enclosing block being walked */
+    int cur_stmt_nested;   /* cur_stmt belongs to a nested closure's body */
     ASTNode* clears[ENV_SCAN_MAX_CLEARS];
     int clear_count;
+    /* #2519: hand-offs inside a nested closure's body, one per mention:
+     * the body retains the env for the new holder right before that
+     * statement (a `retain` entry of register_env_own_clear), since the
+     * local's flag is out of its reach. */
+    ASTNode* retain_stmts[ENV_SCAN_MAX_CLEARS];
+    ASTNode* retain_refs[ENV_SCAN_MAX_CLEARS];
+    int retain_count;
 } EnvScan;
 
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
@@ -5183,20 +5198,37 @@ static int env_scan_binds_below(ASTNode* n, const char* name) {
  * the name: a simple statement, a condition or match subject, a loop whose
  * body does not rebind it (#2507), a statement with a trailing block that
  * does not rebind it. A `defer` hands off when it runs, so its deferred
- * statement is the point (each emission of it clears). A hand-off inside a
- * nested closure body happens in another C function, which cannot reach
- * the flag, and keeps the env for good, as does anything that binds the
- * name around the hand-off. */
-static void env_scan_escape(EnvScan* s, int nested) {
+ * statement is the point (each emission of it clears). Anything that binds
+ * the name around the hand-off keeps the env for good.
+ *
+ * A hand-off inside a nested closure body (`g = || { keep(f) }`, #2519)
+ * happens in another C function, which cannot reach the flag; there the
+ * value is the env's own copy, held through the env's reference, and the
+ * hand-off gives the new holder a reference of its own: the body retains
+ * the env right before the statement, once per handed-off mention
+ * (`mention` is that mention). The local then still owns its reference,
+ * and the env its own, so neither frees early. That needs the statement
+ * to be the body's own (a closure without a block is the enclosing
+ * statement's), and the walk visits each mention once. */
+static void env_scan_escape(EnvScan* s, int nested, ASTNode* mention) {
     ASTNode* st = s->cur_stmt;
     if (st && st->type == AST_DEFER_STATEMENT) st = st->child_count > 0 ? st->children[0] : NULL;
-    if (s->track_clears && !nested && st && !env_scan_binds_below(st, s->name)) {
-        for (int i = 0; i < s->clear_count; i++) {
-            if (s->clears[i] == st) return;
-        }
-        if (s->clear_count < ENV_SCAN_MAX_CLEARS) {
-            s->clears[s->clear_count++] = st;
-            return;
+    if (s->track_clears && st && !env_scan_binds_below(st, s->name)) {
+        if (nested) {
+            if (s->cur_stmt_nested && mention && s->retain_count < ENV_SCAN_MAX_CLEARS) {
+                s->retain_stmts[s->retain_count] = st;
+                s->retain_refs[s->retain_count] = mention;
+                s->retain_count++;
+                return;
+            }
+        } else {
+            for (int i = 0; i < s->clear_count; i++) {
+                if (s->clears[i] == st) return;
+            }
+            if (s->clear_count < ENV_SCAN_MAX_CLEARS) {
+                s->clears[s->clear_count++] = st;
+                return;
+            }
         }
     }
     s->escapes = 1;
@@ -5209,11 +5241,14 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
     int named = node->value && strcmp(node->value, name) == 0;
     if (node->type == AST_BLOCK) {
         ASTNode* saved = s->cur_stmt;
+        int saved_nested = s->cur_stmt_nested;
+        s->cur_stmt_nested = nested;
         for (int i = 0; i < node->child_count && !s->escapes; i++) {
             s->cur_stmt = node->children[i];
             env_scan_walk(gen, s, node->children[i], node, nested);
         }
         s->cur_stmt = saved;
+        s->cur_stmt_nested = saved_nested;
         return;
     }
     switch (node->type) {
@@ -5234,7 +5269,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                     return;
                 }
                 if (!env_scan_fresh_binding(gen, s, rhs)) {
-                    env_scan_escape(s, nested);
+                    env_scan_escape(s, nested, NULL);
                     env_scan_walk(gen, s, rhs, node, nested);
                     return;
                 }
@@ -5253,6 +5288,9 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
             break;
         case AST_IDENTIFIER:
             if (named) {
+                /* #2518: a container that stores the closure takes a reference
+                 * of its own, so the store hands nothing over. */
+                if (parent && closure_container_store_value(gen, parent) == node) return;
                 if (parent && parent->type == AST_FUNCTION_CALL && parent->value) {
                     if (strcmp(parent->value, "call") == 0) {
                         if (parent->children[0] == node) return;   /* invoked */
@@ -5264,7 +5302,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                     parent->type == AST_RETURN_STATEMENT && parent->child_count == 1) {
                     return;   /* the reference goes to the caller */
                 }
-                env_scan_escape(s, nested);
+                env_scan_escape(s, nested, node);
             }
             return;
         case AST_FUNCTION_CALL:
@@ -5345,12 +5383,22 @@ static int closure_env_carrier_owned_flag(CodeGenerator* gen, int idx) {
  * value (`_envown_<name> = 0;`), registered by claim_closure_local_env and
  * emitted by generate_statement. A statement is emitted once, in the
  * function whose scan found it. */
-typedef struct { ASTNode* stmt; char* name; } EnvOwnClear;
+/* A `retain` entry (#2519) is a hand-off inside a nested closure's body:
+ * `_aether_closure_env_retain(<mention>.env);` goes before the statement,
+ * one per handed-off mention, so the new holder has a reference of its own
+ * while the env keeps the one its capture took. The mention is emitted as
+ * an expression so it is spelled as the closure body spells the capture. */
+typedef struct { ASTNode* stmt; char* name; ASTNode* retain; } EnvOwnClear;
 static EnvOwnClear* g_env_own_clears = NULL;
 static int g_env_own_clear_count = 0;
 static int g_env_own_clear_cap = 0;
 
-static void register_env_own_clear(ASTNode* stmt, const char* name) {
+static void register_env_own_clear(ASTNode* stmt, const char* name, ASTNode* retain) {
+    /* One retain per mention: a scan that meets the same mention again
+     * must not add a second reference. */
+    for (int i = 0; retain && i < g_env_own_clear_count; i++) {
+        if (g_env_own_clears[i].retain == retain) return;
+    }
     if (g_env_own_clear_count >= g_env_own_clear_cap) {
         g_env_own_clear_cap = g_env_own_clear_cap ? g_env_own_clear_cap * 2 : 8;
         g_env_own_clears = aether_xrealloc(g_env_own_clears,
@@ -5358,6 +5406,7 @@ static void register_env_own_clear(ASTNode* stmt, const char* name) {
     }
     g_env_own_clears[g_env_own_clear_count].stmt = stmt;
     g_env_own_clears[g_env_own_clear_count].name = strdup(name);
+    g_env_own_clears[g_env_own_clear_count].retain = retain;
     g_env_own_clear_count++;
 }
 
@@ -5365,7 +5414,13 @@ static void emit_env_own_clears(CodeGenerator* gen, ASTNode* stmt) {
     for (int i = 0; i < g_env_own_clear_count; i++) {
         if (g_env_own_clears[i].stmt != stmt) continue;
         print_indent(gen);
-        fprintf(gen->output, "_envown_%s = 0;\n", g_env_own_clears[i].name);
+        if (g_env_own_clears[i].retain) {
+            fprintf(gen->output, "_aether_closure_env_retain((");
+            generate_expression(gen, g_env_own_clears[i].retain);
+            fprintf(gen->output, ").env);\n");
+        } else {
+            fprintf(gen->output, "_envown_%s = 0;\n", g_env_own_clears[i].name);
+        }
     }
 }
 
@@ -5421,7 +5476,10 @@ static void claim_closure_local_env(CodeGenerator* gen, const char* name,
         print_indent(gen);
         fprintf(gen->output, "int _envown_%s = %d; (void)_envown_%s;\n",
                 name, at_binding ? 1 : 0, name);
-        for (int i = 0; i < s.clear_count; i++) register_env_own_clear(s.clears[i], name);
+        for (int i = 0; i < s.clear_count; i++) register_env_own_clear(s.clears[i], name, NULL);
+    }
+    for (int i = 0; i < s.retain_count; i++) {
+        register_env_own_clear(s.retain_stmts[i], name, s.retain_refs[i]);   /* #2519 */
     }
     char annot[300];
     snprintf(annot, sizeof(annot), "closure_env_free:%d:%d:%s", s.cid < 0 ? -1 : s.cid,

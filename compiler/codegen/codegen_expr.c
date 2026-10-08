@@ -336,6 +336,22 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
     return 0;
 }
 
+/* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
+ * 0 no (a void function), -1 not known (no single visible definition). The
+ * rule generate_function emits the signature by: the declared type, else
+ * `int` when the body returns a value, else void. */
+static int callee_result_shape(CodeGenerator* gen, const char* func_name) {
+    if (!callee_has_visible_body(gen, func_name)) return -1;
+    char fn_norm[256];
+    const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+    const DefClauses* dc = program_index_clauses(gen->program, fn);
+    if (!dc || dc->count != 1 || !dc->nodes[0]) return -1;
+    ASTNode* fdef = dc->nodes[0];
+    Type* rt = fdef->node_type;
+    if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 1;
+    return has_return_value(fdef) ? 1 : 0;
+}
+
 /* #2507: may the owned closure at child `ai` of call `expr` be released once
  * the call returns? Only with proof its parameter keeps nothing: a named
  * callee with a visible body whose parameter neither escapes nor is
@@ -388,14 +404,19 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * `outer(string_returning_call("seed-${i}"))` shape), and
          * AST_OR_ELSE (`f(g() or { ... })` yields a uniformly-heap string,
          * since the `or` lowering boxes both paths, with no consumer). */
+        /* #2518: a capturing closure literal, as #2507 does a handed-over
+         * closure: its only reference is the argument (a list that stores
+         * it takes its own). */
+        int literal_arg = arg->type == AST_CLOSURE &&
+                          !(arg->value && strcmp(arg->value, "trailing") == 0);
         if (arg->type != AST_FUNCTION_CALL &&
             arg->type != AST_STRING_INTERP &&
-            arg->type != AST_OR_ELSE) continue;
+            arg->type != AST_OR_ELSE && !literal_arg) continue;
         if (arg_drain_lookup(arg)) continue;
         /* #2507: a closure a call hands over (call_returns_owned_closure),
          * passed on as an argument anywhere in an expression: dead after
          * the call when the parameter keeps nothing. */
-        if (call_returns_owned_closure(gen, arg)) {
+        if (literal_arg || call_returns_owned_closure(gen, arg)) {
             if (owned_closure_arg_drainable(gen, expr, func_name, closure, ai, first_arg)) {
                 w->identity[w->count] = 0;
                 w->closure[w->count] = 1;
@@ -4006,6 +4027,132 @@ ASTNode* message_field_init_expr(ASTNode* message, const char* name) {
     return NULL;
 }
 
+/* The C symbol a call to `func_name` is emitted as. */
+void call_c_name(CodeGenerator* gen, const char* func_name, char* out, size_t n) {
+    // Don't mangle extern functions: they refer to real C symbols.
+    // For @extern("c_symbol") aether_name(...), translate the
+    // Aether-side name to its bound C symbol. See #234.
+    const char* mangled = is_extern_func(gen, func_name)
+        ? lookup_extern_c_name(gen, func_name)
+        : safe_c_name(func_name);
+    strncpy(out, mangled, n - 1);
+    out[n - 1] = '\0';
+    for (char* p = out; *p; p++) {
+        if (*p == '.') *p = '_';
+    }
+    /* #1383: substituting '_' for the dot assumes the C symbol is
+       `<module>_<name>`. It is not when the export already carries
+       the module (`intarr.intarr_new_raw`) or carries none
+       (`os.aether_args_count`). Prefer the declared extern. */
+    const char* qdot = strchr(func_name, '.');
+    /* `<module>_<name>` may be an Aether wrapper rather than an
+       extern; redirecting past it would call the raw extern and
+       skip the wrapper's ownership handling. */
+    int qknown = is_extern_func(gen, out);
+    if (!qknown && gen->program &&
+        find_function_definition_by_name(gen->program, out)) {
+        qknown = 1;
+    }
+    if (qdot && qdot[1] && !qknown) {
+        const char* after = qdot + 1;
+        if (is_extern_func(gen, after)) {
+            const char* real = lookup_extern_c_name(gen, after);
+            if (real) {
+                strncpy(out, real, n - 1);
+                out[n - 1] = '\0';
+            }
+        }
+    }
+}
+
+/* #2518: the container entry a call that stores a closure VALUE is lowered
+ * to (closure_container_store_value): the owning add, set or put, whose
+ * wrapper form returns the `"" | error` string. The value is at child
+ * `val_idx`. */
+typedef struct {
+    const char* c_name;
+    int val_idx;
+    const char* owned;      /* the raw owning entry (returns int, or nothing) */
+    const char* wrapper;    /* the string-returning form, NULL when `c_name` is raw */
+} ClosureStoreEntry;
+
+static const ClosureStoreEntry g_closure_store_entries[] = {
+    { "list_add_raw",          1, "list_add_closure_owned", NULL },
+    { "list_add",              1, "list_add_closure_owned", "_aether_list_add_closure" },
+    { "list_add_string_owned", 1, "list_add_closure_owned", NULL },
+    { "list_set",              2, "list_set_closure_owned", NULL },
+    { "map_put_raw",           2, "map_put_closure_owned",  NULL },
+    { "map_put",               2, "map_put_closure_owned",  "_aether_map_put_closure" },
+    { "map_put_string_owned",  2, "map_put_closure_owned",  NULL },
+};
+
+static const ClosureStoreEntry* closure_store_entry(CodeGenerator* gen, ASTNode* call) {
+    if (!gen || !call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
+    char c_name[256];
+    call_c_name(gen, call->value, c_name, sizeof(c_name));
+    for (size_t i = 0; i < sizeof(g_closure_store_entries) / sizeof(g_closure_store_entries[0]); i++) {
+        const ClosureStoreEntry* e = &g_closure_store_entries[i];
+        if (strcmp(c_name, e->c_name) == 0 && call->child_count == e->val_idx + 1) return e;
+    }
+    return NULL;
+}
+
+/* #2518: is `call` a list add or set, or a map put, that stores a closure
+ * VALUE (`fn`-typed, not a raw fn-ptr)? Then the container takes a
+ * reference of its own to the closure's env and releases it when the
+ * element goes, so storing it there is no hand-off of the caller's
+ * reference. Returns the stored value, else NULL. The escape walks
+ * (env_scan, param_escapes_in_subtree) and the drains ask this same
+ * question, so they agree with what emit_closure_container_store emits. */
+ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call) {
+    const ClosureStoreEntry* e = closure_store_entry(gen, call);
+    if (!e) return NULL;
+    ASTNode* val = call->children[e->val_idx];
+    if (!val || !val->node_type || val->node_type->kind != TYPE_FUNCTION ||
+        val->node_type->is_fnptr) return NULL;
+    return val;
+}
+
+/* Emit the store of closure value `val` (closure_container_store_value) by
+ * `call`. The value is heap-boxed (the fn -> ptr coercion) and the
+ * container owns the box and a reference of its own to the env (#2518). A
+ * closure literal or a handed-over one (#2506) has no reference but the
+ * one it arrives with; the container takes its own, so that one is
+ * released after the store. In a statement the drained-call form already
+ * holds it in a temporary, which is released by the drain. */
+static void emit_closure_container_store(CodeGenerator* gen, ASTNode* call, ASTNode* val) {
+    const ClosureStoreEntry* e = closure_store_entry(gen, call);
+    const char* fn = e->wrapper ? e->wrapper : e->owned;
+    int temp_val = !arg_drain_lookup(val) &&
+        ((val->type == AST_CLOSURE && !(val->value && strcmp(val->value, "trailing") == 0)) ||
+         call_returns_owned_closure(gen, val));
+    if (temp_val) {
+        fprintf(gen->output, "({ _AeClosure _ae_lv = ");
+        generate_expression(gen, val);
+        fprintf(gen->output, "; %s _ae_lr = ", e->wrapper ? "const char*" : "int");
+    }
+    fprintf(gen->output, "%s(", fn);
+    for (int i = 0; i < e->val_idx; i++) {
+        if (i) fprintf(gen->output, ", ");
+        if (i == 1 && strcmp(e->owned, "map_put_closure_owned") == 0) {
+            /* The key as it is, an AetherString with its length or a plain
+             * char*: the map reads either shape (#2469). */
+            fprintf(gen->output, "(const char*)(");
+            generate_expression(gen, call->children[i]);
+            fprintf(gen->output, ")");
+        } else {
+            generate_expression(gen, call->children[i]);
+        }
+    }
+    fprintf(gen->output, ", (void*)_aether_box_closure(");
+    if (temp_val) {
+        fprintf(gen->output, "_ae_lv)); _aether_closure_env_release(_ae_lv.env); _ae_lr; })");
+    } else {
+        generate_expression(gen, val);
+        fprintf(gen->output, "))");
+    }
+}
+
 void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode* rhs) {
     // If this field was hoisted by emit_message_array_hoists, emit the
     // hoisted variable name instead of inlining the compound literal.
@@ -6896,9 +7043,25 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ArgDrainWrap ad;
                         ad.ret_ct = ret;
                         ad.ret_type = NULL;
-                        ad.have_value = 1;
+                        ad.have_value = strcmp(ret, "void") != 0;
                         ad.discarded = ad_call_discarded;
-                        arg_drain_select(gen, expr, 1, NULL, NULL, ad_call_discarded, &ad);
+                        arg_drain_select(gen, expr, 1, NULL, NULL,
+                                         !ad.have_value || ad_call_discarded, &ad);
+                        /* #2519: an owned closure used as the callee (a
+                         * literal, or one a call hands over: `call(
+                         * make_counter())`) is held by nothing else. It
+                         * is hoisted into the wrap's temp, which the two
+                         * reads below (`.fn`, `.env`) name instead of
+                         * evaluating the callee twice, and released after
+                         * the call. */
+                        if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
+                            ((closure_arg->type == AST_CLOSURE &&
+                              !(closure_arg->value && strcmp(closure_arg->value, "trailing") == 0)) ||
+                             call_returns_owned_closure(gen, closure_arg))) {
+                            ad.identity[ad.count] = 0;
+                            ad.closure[ad.count] = 1;
+                            ad.idx[ad.count++] = 0;
+                        }
                         arg_drain_open(gen, expr, &ad);
                         fprintf(gen->output, "((%s(*)(void*", ret);
                         int sig_pi = 0;
@@ -6938,42 +7101,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 else {
                     char c_func_name[256];
-                    // Don't mangle extern functions — they refer to real C symbols.
-                    // For @extern("c_symbol") aether_name(...), translate the
-                    // Aether-side name to its bound C symbol. See #234.
-                    const char* mangled = is_extern_func(gen, func_name)
-                        ? lookup_extern_c_name(gen, func_name)
-                        : safe_c_name(func_name);
-                    strncpy(c_func_name, mangled, sizeof(c_func_name) - 1);
-                    c_func_name[sizeof(c_func_name) - 1] = '\0';
-                    for (char* p = c_func_name; *p; p++) {
-                        if (*p == '.') *p = '_';
-                    }
-                    /* #1383: substituting '_' for the dot assumes the C symbol is
-                       `<module>_<name>`. It is not when the export already carries
-                       the module (`intarr.intarr_new_raw`) or carries none
-                       (`os.aether_args_count`). Prefer the declared extern. */
-                    {
-                        const char* qdot = strchr(func_name, '.');
-                        /* `<module>_<name>` may be an Aether wrapper rather than an
-                           extern; redirecting past it would call the raw extern and
-                           skip the wrapper's ownership handling. */
-                        int qknown = is_extern_func(gen, c_func_name);
-                        if (!qknown && gen->program &&
-                            find_function_definition_by_name(gen->program, c_func_name)) {
-                            qknown = 1;
-                        }
-                        if (qdot && qdot[1] && !qknown) {
-                            const char* after = qdot + 1;
-                            if (is_extern_func(gen, after)) {
-                                const char* real = lookup_extern_c_name(gen, after);
-                                if (real) {
-                                    strncpy(c_func_name, real, sizeof(c_func_name) - 1);
-                                    c_func_name[sizeof(c_func_name) - 1] = '\0';
-                                }
-                            }
-                        }
-                    }
+                    call_c_name(gen, func_name, c_func_name, sizeof(c_func_name));
 
                     // spawn_ActorName(preferred_core) — pass core hint or -1.
                     // Only the generated actor spawner: a user function or
@@ -7050,6 +7178,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                          is_explicit_owned_map);
                     int is_wrapper    = (strcmp(c_func_name, "list_add") == 0 ||
                                          strcmp(c_func_name, "map_put") == 0);
+                    /* A closure value (`fn`-typed, not a raw fn-ptr) stored
+                     * into a list or a map is heap-boxed (the fn -> ptr
+                     * coercion) and the container owns the box and a
+                     * reference of its own to the env (#2518), released
+                     * when the element goes. A bare fn -> ptr (is_fnptr)
+                     * is a code address, not heap; it stays on the raw
+                     * path. Decided by closure_container_store_value,
+                     * which the escape walks also ask. */
+                    {
+                        ASTNode* cval = closure_container_store_value(gen, expr);
+                        if (cval) {
+                            emit_closure_container_store(gen, expr, cval);
+                            break;
+                        }
+                    }
                     if (is_list_shape || is_map_shape) {
                         int val_idx           = is_list_shape ? 1 : 2;
                         int expected_arg_count = is_list_shape ? 2 : 3;
@@ -7094,20 +7237,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             } else {
                                 val_is_heap = val && is_heap_string_expr(gen, val);
                             }
-                            /* A closure value (`fn`-typed, not a raw fn-ptr)
-                             * stored into a container is heap-boxed by the
-                             * arg coercion (_aether_box_closure — mirror of
-                             * the condition at the call-arg fn->ptr path).
-                             * The box is a fresh malloc the container should
-                             * own, or it leaks (the list holds an opaque ptr
-                             * with no owner). Route to the owning add so
-                             * list_free reclaims the box. A bare fn -> ptr
-                             * (is_fnptr) is a code address, not heap — it
-                             * stays on the raw path. */
-                            int val_is_closure =
-                                val && val->node_type &&
-                                val->node_type->kind == TYPE_FUNCTION &&
-                                !val->node_type->is_fnptr;
                             if (val_is_heap) {
                                 if (is_list_shape) {
                                     /* The wrapper shape returns `string`, so
@@ -7214,27 +7343,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * when the caller DID transfer ownership is the
                              * safe side of that trade (see
                              * docs/memory-management.md, leaks_known.txt). */
-                            /* Closure value -> the container owns the heap
-                             * box. list_add_string_adopted just stores the
-                             * pointer and sets owned_flags[i]=1 (no string
-                             * semantics); list_free's owned path frees the
-                             * non-magic box via libc free. (map values are a
-                             * `ptr` slot — closures stored in maps are rare
-                             * and keep the existing raw path.) */
-                            if (val_is_closure && is_list_shape) {
-                                /* list_add_closure_owned tags the slot as an
-                                 * owned closure box (owned_flags == 2) so
-                                 * list_free reclaims the box AND its captured
-                                 * env, not just the box. */
-                                fprintf(gen->output, is_wrapper
-                                        ? "_aether_list_add_closure("
-                                        : "list_add_closure_owned(");
-                                generate_expression(gen, expr->children[0]);
-                                fprintf(gen->output, ", (void*)_aether_box_closure(");
-                                generate_expression(gen, val);
-                                fprintf(gen->output, "))");
-                                break;
-                            }
                         }
                     }
 
@@ -7260,10 +7368,25 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     ad.ret_ct = NULL;
                     ad.ret_type = expr->node_type;
                     ad.discarded = ad_call_discarded;
-                    arg_drain_select(gen, expr, 0, func_name, NULL,
-                                     (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
-                                         ad_call_discarded,
-                                     &ad);
+                    int ad_is_void = (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
+                                     ad_call_discarded;
+                    if (!ad.have_value && !ad_is_void) {
+                        /* #2519: the checker stamped no type on the call
+                         * (an unannotated callee), so the wrap could not
+                         * name its result's type and drained nothing. The
+                         * callee's definition says whether its C function
+                         * returns a value (the rule generate_function
+                         * emits the signature by), and the temp takes
+                         * whatever type that is. */
+                        int shape = callee_result_shape(gen, func_name);
+                        if (shape > 0) {
+                            ad.have_value = 1;
+                            ad.ret_ct = "__auto_type";
+                        } else if (shape == 0) {
+                            ad_is_void = 1;
+                        }
+                    }
+                    arg_drain_select(gen, expr, 0, func_name, NULL, ad_is_void, &ad);
                     arg_drain_open(gen, expr, &ad);
 
                     /* A trusted call in an enforced block goes through its

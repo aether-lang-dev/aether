@@ -7,6 +7,15 @@ frees its own storage, not the elements. That is what lets the same container
 hold borrowed references, arena-allocated values, or handles from another
 module without a lifetime argument.
 
+Two kinds of element are the exception, and the list owns them: a heap
+string and a closure value. The compiler routes `list.add` of either to an
+owning add (`list_add_string_owned` takes its own reference to the string,
+or a copy of a plain one; a closure's environment gets a reference of its
+own, #2518), so the caller keeps and frees its own copy. The list gives back
+what it owns when the element leaves it: `list_remove`, `list_clear`,
+`list_free`, and storing over the slot. A pointer read with `get` from such
+an element is valid only while the element is in the list.
+
 `add` and `get` are the `(value, err)` wrappers; the `list_*` forms are the
 direct ones.
 

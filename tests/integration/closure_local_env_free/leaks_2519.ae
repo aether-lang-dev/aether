@@ -1,0 +1,105 @@
+// #2519 probe: closure envs #2507 still leaked.
+//
+//  - A hand-off inside a nested closure's body (`g = || { keep(f) }`). A
+//    keeper that stores into a list takes a reference of its own (#2518),
+//    so the local frees its own. A keeper the walk cannot see through (a
+//    closure variable here) is given a reference by the body right before
+//    the hand-off, so the local and the capturing env still free theirs
+//    and the kept value stays alive; that reference is the one env this
+//    probe keeps.
+//  - An owned closure passed to a callee whose result type the checker
+//    did not stamp (an unannotated function) is drained after the call.
+//  - An owned closure used directly as the callee (`call(make_counter())`)
+//    is evaluated once and freed after the call.
+//
+// test_closure_local_env_free.sh builds this with env_count.h force-included
+// and checks every env and cell but the kept one is freed exactly once; on
+// its own it checks the values (a freed env read back would give a wrong
+// one).
+
+import std.list
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+keep(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+// Result type not declared: unknown to the checker at the call, not void.
+take_untyped(cb: fn) {
+    return call(cb)
+}
+
+// A hand-off to a list keeper inside a nested closure's body.
+nested_to_list(l: ptr, r: int) -> int {
+    acc = 0
+    f = || { acc = acc + 1 }
+    g = || { keep(l, f) }
+    g()
+    g()
+    f()
+    return acc + r
+}
+
+// A hand-off, inside a nested closure's body, to a keeper the walk cannot
+// see through; the local is then rebound to a closure nobody keeps.
+nested_to_opaque(l: ptr, r: int) -> int {
+    k = |cb: fn| { _ = list.add(l, cb) }
+    acc = r
+    f = || {
+        acc = acc + 10
+        return acc
+    }
+    g = || { k(f) }
+    g()
+    f = || {
+        acc = acc + 100
+        return acc
+    }
+    int v = call(f)
+    return v
+}
+
+unknown_result(r: int) -> int {
+    x = take_untyped(make_counter(r))
+    return x
+}
+
+direct_callee(r: int) -> int {
+    int v = call(make_counter(r))
+    int w = call(|| { return v + r })
+    return w
+}
+
+main() {
+    owners = list.new()
+    r = 0
+    while r < 20 {
+        check("nested to list", nested_to_list(owners, r), 1 + r)
+        check("unknown result", unknown_result(r), r + 1)
+        check("direct callee", direct_callee(r), 2 * r + 1)
+        r = r + 1
+    }
+    list.free(owners)
+    kept = list.new()
+    check("nested to opaque", nested_to_opaque(kept, 5), 105)
+    held = unbox_closure(list.get_raw(kept, 0))
+    check("kept by opaque keeper", call(held), 115)
+    list.free(kept)
+    println("leaks 2519 ok")
+}

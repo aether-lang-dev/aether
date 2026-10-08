@@ -40,8 +40,9 @@ stash_ok(l: ptr, f: fn) -> bool {
     return true
 }
 
-// Stores the closure into an empty list only: a list frees each closure
-// it holds, so one closure value must not be stored twice.
+// Stores the closure into an empty list only, so the loop below stores
+// it once (a list slot holds a reference of its own since #2518; this
+// keeps the loop's hand-off count at one).
 stash_first(l: ptr, f: fn) -> bool {
     if list.size(l) == 0 {
         _ = list.add(l, f)

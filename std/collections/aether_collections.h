@@ -51,6 +51,9 @@ int list_add_string_adopted(ArrayList* list, const void* item);
  * reclaims the box AND its captured env. Routed when a `fn`-typed closure
  * value is stored into a list. */
 int list_add_closure_owned(ArrayList* list, void* box);
+/* Store a closure box the list owns into an existing slot, releasing what
+ * the slot owned before (#2518). 0 when the index is out of range. */
+int list_set_closure_owned(ArrayList* list, int index, void* box);
 // Return element at `index`, or NULL for out-of-bounds / null list. The
 // Aether wrapper `list.get` in std/collections/module.ae turns these into
 // Go-style `(value, err)` returns.
@@ -72,6 +75,10 @@ int map_put_raw(HashMap* map, const char* key, void* value);
  * won't release at free). */
 /* Owning put / adopting put: same split as the list pair above. */
 int map_put_string_owned(HashMap* map, const char* key, const void* value);
+/* Put a closure box the map owns (value_owned == 2): the map takes its own
+ * reference to the captured env and releases it with the box when the
+ * entry is overwritten, removed, cleared or freed (#2518). */
+int map_put_closure_owned(HashMap* map, const char* key, void* box);
 int map_put_string_adopted(HashMap* map, const char* key, const void* value);
 // Return value for `key`, or NULL for absent / null-input. The Aether
 // wrapper `map.get` distinguishes "absent" (null, "") from wrong-input

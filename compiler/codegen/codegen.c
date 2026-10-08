@@ -6959,10 +6959,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "int string_equals(const char*, const char*);");
     /* string_compare too: <, <=, >, >= on strings compile to it (#2515). */
     print_line(gen, "int string_compare(const char*, const char*);");
-    /* Codegen-internal: a `fn`-typed closure value stored into a list is
-     * boxed and routed here so list_free reclaims the box + its env. Not
-     * a std.collections extern, so declare it directly. */
+    /* Codegen-internal: a `fn`-typed closure value stored into a list or
+     * a map is boxed and routed here so the container holds its own
+     * reference to the env and reclaims box + env when the element goes
+     * (#2518). Not std.collections externs, so declare them directly. */
     print_line(gen, "int list_add_closure_owned(void*, void*);");
+    print_line(gen, "int list_set_closure_owned(void*, int, void*);");
+    print_line(gen, "int map_put_closure_owned(void*, const char*, void*);");
     /* String interpolation helper — portable, always available */
     print_line(gen, "#include <stdarg.h>");
     /* Returns the REFCOUNTED shape, not a bare buffer. Aether's `string` is
@@ -7054,6 +7057,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_list_add_closure(void* list, void* box) {");
     print_line(gen, "    return list_add_closure_owned(list, box) ? \"\" : \"list.add failed\";");
+    print_line(gen, "}");
+    print_line(gen, "static inline const char* _aether_map_put_closure(void* map, const char* key, void* box) {");
+    print_line(gen, "    return map_put_closure_owned(map, key, box) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_safe_str(const void* s) {");
     print_line(gen, "    if (!s) return \"(null)\";");
