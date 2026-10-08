@@ -8,6 +8,8 @@ import std.bytes
 import std.io
 import std.fs
 import std.path
+import std.os
+import std.tar
 
 extern exit(code: int)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
@@ -56,6 +58,270 @@ fn bytes_finish_str(bb: ptr, n: int) -> string {
     s = bytes.to_string(bb, n)
     bytes.free(bb)
     return s
+}
+
+// A copy of `n` bytes of `s` in a std.bytes buffer whose length is `n + extra`
+// (the extra bytes zeroed), for patching an archive in place.
+fn patchable(s: string, n: int, extra: int) -> ptr {
+    b = bytes.new(n + extra)
+    bytes.set(b, n + extra - 1, 0)
+    bytes.copy_from_string(b, 0, s, n)
+    k = 0
+    while k < extra {
+        bytes.set(b, n + k, 0)
+        k = k + 1
+    }
+    return b
+}
+
+// An end-of-central-directory comment that itself holds the EOCD signature
+// must not hide the real record: open scans past it, as the comment length
+// of a candidate has to reach exactly the end of the buffer.
+fn check_eocd_comment() {
+    out, outn, _e = zip.create("a.txt", string.bytes("hello zip")[0..9], zip.METHOD_STORED, 0)
+    b = patchable(out, outn, 24)
+    bytes.set_le16(b, outn - 2, 24) // the real record's comment length
+    bytes.set_le32(b, outn, 0x06054b50) // the comment starts with "PK\5\6"
+    ar, err = zip.open(bytes.view(b))
+    check("eocd signature in comment: open err", err, "")
+    if string.equals(err, "") == 1 {
+        check_int("eocd signature in comment: real record found", zip.count(ar), 1)
+        zip.close(ar)
+    }
+    bytes.free(b)
+    string.free(out)
+}
+
+// Bytes appended after the EOCD record (padding, a signature block) leave
+// the archive readable: no candidate's comment then reaches the end exactly,
+// and the latest one that fits is the record, as Python's zipfile reads it.
+fn check_eocd_trailing_bytes() {
+    out, outn, _e = zip.create("a.txt", string.bytes("hello zip")[0..9], zip.METHOD_STORED, 0)
+    b = patchable(out, outn, 3)
+    ar, err = zip.open(bytes.view(b))
+    check("eocd with trailing bytes: open err", err, "")
+    if string.equals(err, "") == 1 {
+        check_int("eocd with trailing bytes: entry found", zip.count(ar), 1)
+        zip.close(ar)
+    }
+    bytes.free(b)
+    string.free(out)
+}
+
+// A stored entry is its own size: a central directory whose uncompressed
+// size disagrees (here 1 for 100 bytes) would make entry_size lie and let
+// extract write past max_entry_bytes.
+fn check_lying_stored_size(base: string) {
+    data = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+    out, outn, _e = zip.create("big.bin", string.bytes(data)[0..100], zip.METHOD_STORED, 0)
+    b = patchable(out, outn, 0)
+    cd = bytes.get_le32(b, outn - 22 + 16) // EOCD: central directory offset
+    bytes.set_le32(b, cd + 24, 1) // the entry's uncompressed size: 1
+    ar, err = zip.open(bytes.view(b))
+    check("lying stored size: open err", err, "")
+    if string.equals(err, "") == 1 {
+        _body, blen, rerr = zip.entry_read(ar, 0)
+        check_int("lying stored size: entry_read refused", string.equals(rerr, "") == 0, 1)
+        check_int("lying stored size: entry_read returns nothing", blen, 0)
+        zip.close(ar)
+    }
+    opts = zip.default_extract_options()
+    opts.max_entry_bytes = 10
+    opts.max_total_bytes = 10
+    xerr = zip.extract(bytes.view(b), "${base}/bomb", opts)
+    check_int("lying stored size: extract refused", string.equals(xerr, "") == 0, 1)
+    check_int("lying stored size: nothing written", fs.exists("${base}/bomb/big.bin"), 0)
+    bytes.free(b)
+    string.free(out)
+}
+
+// One stored entry "n.txt" = "hello" whose central-directory sizes and
+// local-header offset all sit in a ZIP64 extra field, set to `uncomp`,
+// `comp` and `lfh`. 141 bytes: local header + data (0..40), central
+// directory (40..119), EOCD (119..141).
+fn zip64_archive(uncomp: long, comp: long, lfh: long) -> ptr {
+    return zip64_archive_crc(uncomp, comp, lfh, 0x3610A686) // CRC-32 of "hello"
+}
+
+fn zip64_archive_crc(uncomp: long, comp: long, lfh: long, crc: int) -> ptr {
+    b = bytes.new(141)
+    bytes.set(b, 140, 0)
+    // local file header
+    bytes.set_le32(b, 0, 0x04034b50)
+    bytes.set_le16(b, 4, 45)
+    bytes.set_le16(b, 6, 0)
+    bytes.set_le16(b, 8, 0) // stored
+    bytes.set_le32(b, 10, 0) // time + date
+    bytes.set_le32(b, 14, crc)
+    bytes.set_le32(b, 18, 5)
+    bytes.set_le32(b, 22, 5)
+    bytes.set_le16(b, 26, 5)
+    bytes.set_le16(b, 28, 0)
+    bytes.copy_from_string(b, 30, "n.txt", 5)
+    bytes.copy_from_string(b, 35, "hello", 5)
+    // central directory header
+    bytes.set_le32(b, 40, 0x02014b50)
+    bytes.set_le16(b, 44, 45)
+    bytes.set_le16(b, 46, 45)
+    bytes.set_le16(b, 48, 0)
+    bytes.set_le16(b, 50, 0) // stored
+    bytes.set_le32(b, 52, 0) // time + date
+    bytes.set_le32(b, 56, crc)
+    bytes.set_le32(b, 60, -1) // compressed size: see ZIP64
+    bytes.set_le32(b, 64, -1) // uncompressed size: see ZIP64
+    bytes.set_le16(b, 68, 5)
+    bytes.set_le16(b, 70, 28) // extra length
+    bytes.set_le16(b, 72, 0)
+    bytes.set_le16(b, 74, 0)
+    bytes.set_le16(b, 76, 0)
+    bytes.set_le32(b, 78, 0)
+    bytes.set_le32(b, 82, -1) // local header offset: see ZIP64
+    bytes.copy_from_string(b, 86, "n.txt", 5)
+    bytes.set_le16(b, 91, 1) // ZIP64 extra block
+    bytes.set_le16(b, 93, 24)
+    bytes.set_le64(b, 95, uncomp)
+    bytes.set_le64(b, 103, comp)
+    bytes.set_le64(b, 111, lfh)
+    // end of central directory
+    bytes.set_le32(b, 119, 0x06054b50)
+    bytes.set_le32(b, 123, 0) // disk numbers
+    bytes.set_le16(b, 127, 1)
+    bytes.set_le16(b, 129, 1)
+    bytes.set_le32(b, 131, 79) // central directory size
+    bytes.set_le32(b, 135, 40) // central directory offset
+    bytes.set_le16(b, 139, 0)
+    return b
+}
+
+// ZIP64 sizes and offsets are 64-bit: one at or past 2^63 must not come back
+// as a negative size (which slips under extract's limits), and one past 2^32
+// must not be narrowed to an in-range int that reads the wrong bytes.
+fn check_zip64_fields() {
+    var five: long = 5
+    var zero: long = 0
+    var past32: long = 4294967296 // 2^32
+    var neg: long = -1 // 0xFFFFFFFFFFFFFFFF on the wire
+
+    ok = zip64_archive(five, five, zero)
+    ar, err = zip.open(bytes.view(ok))
+    check("zip64 control: open err", err, "")
+    if string.equals(err, "") == 1 {
+        body, _bl, rerr = zip.entry_read(ar, 0)
+        check("zip64 control: read err", rerr, "")
+        check("zip64 control: content", body, "hello")
+        zip.close(ar)
+    }
+    bytes.free(ok)
+
+    nb = zip64_archive(neg, five, zero)
+    _na, nerr = zip.open(bytes.view(nb))
+    check_int("zip64 negative size: open refused", string.equals(nerr, "") == 0, 1)
+    bytes.free(nb)
+
+    cb = zip64_archive(past32 + five, past32 + five, zero)
+    car, cerr = zip.open(bytes.view(cb))
+    check("zip64 size past 2^32: open err", cerr, "")
+    if string.equals(cerr, "") == 1 {
+        _cbody, _cl, crerr = zip.entry_read(car, 0)
+        check_int("zip64 size past 2^32: entry_read refused", string.equals(crerr, "") == 0, 1)
+        zip.close(car)
+    }
+    bytes.free(cb)
+
+    // A size just under 2^63: added to the data offset it wrapped negative,
+    // slipped under the bounds check and was narrowed to a garbage count.
+    // With CRC 0, a count narrowed to a negative int matched the CRC of
+    // no bytes and came back as the entry's length.
+    var huge: long = 9223372036854775800
+    hb = zip64_archive_crc(huge, huge, zero, 0)
+    har, herr = zip.open(bytes.view(hb))
+    check("zip64 size near 2^63: open err", herr, "")
+    if string.equals(herr, "") == 1 {
+        _hbody, hl, hrerr = zip.entry_read(har, 0)
+        check_int("zip64 size near 2^63: entry_read refused", string.equals(hrerr, "") == 0, 1)
+        check_int("zip64 size near 2^63: entry_read returns nothing", hl, 0)
+        zip.close(har)
+    }
+    bytes.free(hb)
+
+    lb = zip64_archive(five, five, past32)
+    lar, lerr = zip.open(bytes.view(lb))
+    check("zip64 offset past 2^32: open err", lerr, "")
+    if string.equals(lerr, "") == 1 {
+        _lbody, _ll, lrerr = zip.entry_read(lar, 0)
+        check_int("zip64 offset past 2^32: entry_read refused", string.equals(lrerr, "") == 0, 1)
+        zip.close(lar)
+    }
+    bytes.free(lb)
+}
+
+// Make `link` a link to the directory `target_abs` (an absolute path):
+// a symlink where the host allows one, else on Windows a directory
+// junction, which needs no privilege. Returns 1 for a symlink, 2 for a
+// junction, 0 when neither could be made.
+fn make_dir_link(target_abs: string, link: string, link_win: string) -> int {
+    if string.equals(fs.symlink(target_abs, link), "") == 1 { return 1 }
+    if string.equals(os.platform(), "windows") == 1 {
+        rc = os.os_system("mklink /J \"${link_win}\" \"${target_abs}\" >NUL")
+        if rc == 0 && fs.exists(link) == 1 { return 2 }
+    }
+    return 0
+}
+
+fn one_entry_zip(name: string) -> (string, int) {
+    w = zip.writer_new()
+    zip.writer_add(w, name, string.bytes("pwn")[0..3], zip.METHOD_STORED, 0)
+    out, outn, _e = zip.writer_finish(w)
+    zip.writer_free(w)
+    return out, outn
+}
+
+// An entry under a directory that already exists in the destination as a
+// symlink (or junction) to somewhere else must not be written through it,
+// neither by its plain name nor by a ".." route through a directory that
+// does not exist yet (mkdir_p would create it, and then the OS walks on
+// through the link).
+fn check_symlinked_parent(base: string) {
+    outside = "${base}/outside"
+    dest = "${base}/linkdest"
+    fs.mkdir_p(outside)
+    fs.mkdir_p(dest)
+    outside_abs, _k, _m = fs.realpath(outside)
+    link = "${dest}/link"
+    kind = make_dir_link(outside_abs, link, "${base}\\linkdest\\link")
+    if kind == 0 {
+        println("  skip symlinked parent: this host can make neither a symlink nor a junction")
+        return
+    }
+    opts = zip.default_extract_options()
+
+    a, an = one_entry_zip("link/pwned.txt")
+    aerr = zip.extract(string.bytes(a)[0..an], dest, opts)
+    check_int("symlinked parent: refused", string.contains(aerr, "resolves through a symlink"), 1)
+    check_int("symlinked parent: nothing written outside", fs.exists("${outside}/pwned.txt"), 0)
+
+    d, dn = one_entry_zip("missing/../link/pwned2.txt")
+    derr = zip.extract(string.bytes(d)[0..dn], dest, opts)
+    check_int("symlinked parent via ..: refused", string.contains(derr, "resolves through a symlink"), 1)
+    check_int("symlinked parent via ..: nothing written outside", fs.exists("${outside}/pwned2.txt"), 0)
+
+    // Remove the link itself, never what it points at.
+    if kind == 1 { fs.unlink(link) } else { fs.delete_dir(link) }
+    check_int("symlinked parent: link removed", fs.exists(link), 0)
+}
+
+// std.zip and std.tar share one ExtractOptions definition, so both import
+// together and either module's options drive the other's extract.
+fn check_options_shared_with_tar(base: string) {
+    topts = tar.default_extract_options()
+    out, outn, _e = zip.create("t.txt", string.bytes("tar opts")[0..8], zip.METHOD_STORED, 0)
+    err = zip.extract(string.bytes(out)[0..outn], "${base}/taropts", topts)
+    check("tar options drive zip.extract", err, "")
+    check_int("tar options: file written", fs.exists("${base}/taropts/t.txt"), 1)
+    topts.preserve_mode = 1
+    perr = zip.extract(string.bytes(out)[0..outn], "${base}/taropts2", topts)
+    check_int("preserve_mode refused by zip", string.equals(perr, "") == 0, 1)
+    string.free(out)
 }
 
 // A 2-entry .zip (stored "a.txt" = "hi\n"; deflate "b.txt" = "xyz " * 40),
@@ -242,6 +508,15 @@ main() {
     check_int("absolute path rejected", string.equals(a_err, "") == 0, 1)
     string.free(aout)
     zip.writer_free(aw)
+
+    // ---- security regressions ----------------------------------------------
+    println("--- security ---")
+    check_eocd_comment()
+    check_eocd_trailing_bytes()
+    check_lying_stored_size(base)
+    check_zip64_fields()
+    check_symlinked_parent(base)
+    check_options_shared_with_tar(base)
 
     string.free(src)
     string.free(xdest)

@@ -1,0 +1,176 @@
+// #2480 probe: closures bound to locals whose value leaves the scope. The
+// declaring scope must not free these envs; whoever holds the value later
+// calls it (a freed env would be read here) or frees it (a second free).
+// test_closure_local_env_free.sh builds this with env_count.h force-included,
+// which poisons freed envs and counts double frees; on its own it checks
+// the values.
+
+import std.list
+
+extern exit(code: int)
+
+struct Holder { cb: fn }
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+// Keeps its parameter by returning it inside a struct.
+box_it(cb: fn) -> Holder {
+    return Holder { cb: cb }
+}
+
+// Returned directly.
+make_counter(start: int) -> fn {
+    n = start
+    inc = || {
+        n = n + 1
+        return n
+    }
+    return inc
+}
+
+// Returned through another closure that captures it.
+make_twice(start: int) -> fn {
+    n = start
+    inc = || {
+        n = n + 1
+        return n
+    }
+    twice = || {
+        int a = call(inc)
+        int b = call(inc)
+        return a + b
+    }
+    return twice
+}
+
+// Returned through an alias.
+make_alias(start: int) -> fn {
+    n = start
+    g = || {
+        n = n + 2
+        return n
+    }
+    x = g
+    return x
+}
+
+// Returned inside a struct literal.
+make_holder(start: int) -> Holder {
+    n = start
+    g = || {
+        n = n + 3
+        return n
+    }
+    return Holder { cb: g }
+}
+
+// Handed to a parameter that keeps it, inside a struct that is returned.
+make_boxed(start: int) -> Holder {
+    n = start
+    g = || {
+        n = n + 4
+        return n
+    }
+    h = box_it(g)
+    return h
+}
+
+// Stored into a list, which frees it.
+store_in_list(l: ptr, start: int) {
+    n = start
+    g = || {
+        n = n + 1
+        return n
+    }
+    int first = call(g)
+    check("stored closure called locally", first, start + 1)
+    stash(l, g)
+}
+
+// Captured by a closure stored into a list.
+captured_by_stored(l: ptr, start: int) {
+    n = start
+    g = || {
+        n = n + 1
+        return n
+    }
+    h = || {
+        int v = call(g)
+        return v
+    }
+    stash(l, h)
+}
+
+// Captured by a closure literal handed to a parameter that keeps it.
+captured_by_kept_literal(l: ptr, start: int) {
+    n = start
+    g = || {
+        n = n + 1
+        return n
+    }
+    stash(l) callback {
+        int v = call(g)
+        check("kept literal", v, start + 1)
+    }
+}
+
+// Rebound after it escaped: the list owns the first env.
+rebound_after_escape(l: ptr, start: int) -> int {
+    total = start
+    g = || { total = total + 1 }
+    stash(l, g)
+    g = || { total = total + 10 }
+    g()
+    return total
+}
+
+main() {
+    owners = list.new()
+    r = 0
+    while r < 20 {
+        c = make_counter(r)
+        int c1 = call(c)
+        int c2 = call(c)
+        check("returned counter", c1 + c2, 2 * r + 3)
+
+        t = make_twice(r)
+        int t1 = call(t)
+        check("returned through a capture", t1, 2 * r + 3)
+
+        a = make_alias(r)
+        int a1 = call(a)
+        check("returned through an alias", a1, r + 2)
+
+        h = make_holder(r)
+        int h1 = call(h.cb)
+        check("returned in a struct", h1, r + 3)
+
+        b = make_boxed(r)
+        int b1 = call(b.cb)
+        check("kept by a callee", b1, r + 4)
+
+        // The list frees what was returned, so a free by the declaring
+        // scope would show as a double free.
+        stash(owners, c)
+        stash(owners, a)
+        stash(owners, h.cb)
+        stash(owners, b.cb)
+
+        store_in_list(owners, r)
+        captured_by_stored(owners, r)
+        captured_by_kept_literal(owners, r)
+        check("rebound after escape", rebound_after_escape(owners, r), r + 10)
+        r = r + 1
+    }
+    list.free(owners)
+    println("escaping ok")
+}

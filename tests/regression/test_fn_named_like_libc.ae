@@ -1,0 +1,45 @@
+// Regression (#2526): a top-level function named like a C library function
+// is emitted under another C symbol, so it does not replace the library's.
+// `floor(x: int) -> int` was emitted as a global `floor`, the link resolved
+// libm's `floor` to it, and math.floor(2.5) called the user's function with
+// a double (it returned 2.5). The <math.h> functions (with their `f` and `l`
+// forms) and <ctype.h> are covered now, as the socket, I/O and string names
+// already were. Each function below has a signature C's does not, so a
+// collision would also have been a conflicting-types diagnostic.
+import std.math
+import std.string
+
+extern exit(code: int)
+
+floor(x: int) -> int { return x * 2 }
+round(x: int) -> int { return x + 1 }
+pow(x: int) -> int { return x * x }
+log(msg: string) -> int { return string.length(msg) }
+isdigit(c: int) -> int { return 7 }
+toupper(c: int) -> int { return 0 }
+sqrtf(x: int) -> int { return x - 1 }
+
+main() {
+    fails = 0
+    // The program's own functions.
+    if floor(3) != 6 { println("  FAIL floor(3)"); fails = fails + 1 }
+    if round(3) != 4 { println("  FAIL round(3)"); fails = fails + 1 }
+    if pow(5) != 25 { println("  FAIL pow(5)"); fails = fails + 1 }
+    if log("abc") != 3 { println("  FAIL log"); fails = fails + 1 }
+    if isdigit(1) != 7 { println("  FAIL isdigit"); fails = fails + 1 }
+    if toupper(1) != 0 { println("  FAIL toupper"); fails = fails + 1 }
+    if sqrtf(10) != 9 { println("  FAIL sqrtf"); fails = fails + 1 }
+
+    // The C library's, through std.
+    if math.floor(2.5) != 2.0 { println("  FAIL math.floor(2.5) = ${math.floor(2.5)}"); fails = fails + 1 }
+    if math.round(2.5) != 3.0 { println("  FAIL math.round(2.5) = ${math.round(2.5)}"); fails = fails + 1 }
+    if math.pow(2.0, 10.0) != 1024.0 { println("  FAIL math.pow(2, 10) = ${math.pow(2.0, 10.0)}"); fails = fails + 1 }
+    up = string.to_upper(string.concat("a", "b"))
+    if up != "AB" { println("  FAIL to_upper(ab) = ${up}"); fails = fails + 1 }
+
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

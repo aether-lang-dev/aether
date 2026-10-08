@@ -1,0 +1,144 @@
+// Regression (#2518): a container that keeps a closure value holds a
+// reference of its own to the closure's env and releases it when the
+// element goes, the way it keeps a string.
+//
+// A closure value added to a list was boxed and handed to the list with
+// the caller's single env reference, so adding the same closure twice (or
+// to two lists) gave one reference two owners and list.free released it
+// twice: an access violation. The local's own scope-exit release made a
+// third. Now every holder (the local, each list slot, each map entry)
+// takes and releases exactly one reference: stored twice, stored and still
+// held by a local, stored in two lists, removed, cleared, overwritten, or
+// put in a map, the env is freed once, after its last holder lets go. The
+// macOS leaks gate runs this file.
+
+import std.list
+import std.map
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+// The issue's shape: the same closure added twice, then the list freed.
+twice(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 1
+        return n
+    }
+    l = list.new()
+    list.add(l, f)
+    list.add(l, f)
+    check("stored twice: size", list.size(l), 2)
+    list.free(l)
+    // The local still holds its reference: the env is alive.
+    int v = call(f)
+    return v
+}
+
+// Stored, the list freed, the local still used afterwards.
+held_by_local(r: int) -> int {
+    tag = string.concat("tag-", string.from_long(r))
+    f = || { return string.length(tag) + r }
+    l = list.new()
+    stash(l, f)
+    list.free(l)
+    int v = call(f)
+    return v
+}
+
+// Stored in two lists, both freed.
+two_lists(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 2
+        return n
+    }
+    a = list.new()
+    b = list.new()
+    stash(a, f)
+    stash(b, f)
+    stash(b, f)
+    list.free(a)
+    int first = call(f)
+    list.free(b)
+    int second = call(f)
+    return first + second
+}
+
+// Removed, cleared, overwritten: each release is the slot's own.
+removed_then_freed(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 3
+        return n
+    }
+    l = list.new()
+    stash(l, f)
+    stash(l, f)
+    stash(l, make_counter(r))
+    list.remove(l, 0)
+    check("removed: size", list.size(l), 2)
+    list.list_set(l, 0, f)
+    list.list_set(l, 1, make_counter(r))
+    list.remove(l, 1)
+    stash(l, f)
+    list.clear(l)
+    check("cleared: size", list.size(l), 0)
+    stash(l, f)
+    list.free(l)
+    int v = call(f)
+    return v
+}
+
+// A map entry holds its own reference too, through overwrite and remove.
+in_map(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 4
+        return n
+    }
+    m = map.new()
+    map.put(m, "a", f)
+    map.put(m, "b", f)
+    map.put(m, "a", f)
+    map.put(m, "a", make_counter(r))
+    map.remove(m, "b")
+    map.put(m, "c", f)
+    map.free(m)
+    int v = call(f)
+    return v
+}
+
+main() {
+    println("=== test_closure_list_shared_env ===")
+    r = 0
+    while r < 30 {
+        check("stored twice", twice(r), r + 1)
+        check("held by local", held_by_local(r), string.length("tag-${r}") + r)
+        check("two lists", two_lists(r), 2 * r + 6)
+        check("removed then freed", removed_then_freed(r), r + 3)
+        check("in map", in_map(r), r + 4)
+        r = r + 1
+    }
+    println("  PASS: shared closure envs released once per holder")
+    println("=== test_closure_list_shared_env passed ===")
+}

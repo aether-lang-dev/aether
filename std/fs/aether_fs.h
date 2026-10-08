@@ -34,7 +34,9 @@ typedef struct {
 } File;
 
 File* file_open_raw(const char* path, const char* mode);
-char* file_read_all_raw(File* file);
+/* The whole file as a refcounted AetherString of all its bytes (NULs
+ * included); release with string_release. NULL on failure. */
+struct AetherString* file_read_all_raw(File* file);
 int file_write_raw(File* file, const char* data, int length);
 int file_close(File* file);
 int file_exists(const char* path);
@@ -230,7 +232,9 @@ int path_is_absolute(const char* path);
 //             servers / archive extractors to reject path traversal
 //             BEFORE open(2). Symlinks NOT followed.
 // path_rel: relative path from `base` to `target` (Go filepath.Rel).
-//             NULL when one is absolute and the other relative.
+//             NULL when one is absolute and the other relative, or when
+//             base climbs (`..`) above the point target can be reached
+//             from, as in rel("../a", "b").
 char* path_clean(const char* path);
 int   path_is_within_base(const char* base, const char* target);
 char* path_rel(const char* base, const char* target);

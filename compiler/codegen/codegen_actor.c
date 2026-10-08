@@ -25,7 +25,8 @@ static int rhs_ident_is_ptr_pattern_field(CodeGenerator* gen, ASTNode* pattern,
         MessageFieldDef* fdef = msg_def->fields;
         while (fdef) {
             if (strcmp(fdef->name, pf->value) == 0) {
-                return (fdef->type_kind == TYPE_PTR || fdef->type_kind == TYPE_STRING);
+                return (fdef->type_kind == TYPE_PTR || fdef->type_kind == TYPE_STRING ||
+                        fdef->type_kind == TYPE_ACTOR_REF);
             }
             fdef = fdef->next;
         }
@@ -100,6 +101,343 @@ static int state_field_assigned_ptr(CodeGenerator* gen, ASTNode* node, const cha
     return 0;
 }
 
+// Returns 1 if `node` (recursively) sends or asks through the bare name
+// `field_name`: `field_name ! Msg {}`, `field_name ? Msg {}`, or
+// `send(field_name, ...)`. A send target is an actor reference, whatever
+// its initializer (`state peer = 0`) inferred.
+static int state_field_is_send_target(ASTNode* node, const char* field_name) {
+    if (!node) return 0;
+    if ((node->type == AST_SEND_FIRE_FORGET || node->type == AST_SEND_ASK ||
+         node->type == AST_SEND_STATEMENT) && node->child_count >= 1) {
+        ASTNode* target = node->children[0];
+        if (target && target->type == AST_IDENTIFIER && target->value &&
+            strcmp(target->value, field_name) == 0) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (state_field_is_send_target(node->children[i], field_name)) return 1;
+    }
+    return 0;
+}
+
+// True when field `field` of message `msg` holds a pointer: an actor
+// reference or a `ptr`.
+static int message_field_is_ptr(CodeGenerator* gen, const char* msg, const char* field) {
+    MessageDef* def = lookup_message(gen->message_registry, msg);
+    for (MessageFieldDef* f = def ? def->fields : NULL; f; f = f->next) {
+        if (strcmp(f->name, field) == 0) {
+            return f->type_kind == TYPE_PTR || f->type_kind == TYPE_ACTOR_REF;
+        }
+    }
+    return 0;
+}
+
+static int is_send_node(ASTNode* node) {
+    return (node->type == AST_SEND_FIRE_FORGET || node->type == AST_SEND_ASK ||
+            node->type == AST_SEND_STATEMENT) && node->child_count >= 1;
+}
+
+// Returns 1 if `node` (recursively) passes the bare name `field_name` as a
+// message field that holds a pointer: `peer ! Fwd { to: back }` with
+// `to: ptr` or an actor-reference field.
+static int state_field_passed_as_ptr(CodeGenerator* gen, ASTNode* node, const char* field_name) {
+    if (!node) return 0;
+    if (node->type == AST_MESSAGE_CONSTRUCTOR && node->value) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* fi = node->children[i];
+            if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+            ASTNode* v = fi->children[0];
+            if (v && v->type == AST_IDENTIFIER && v->value &&
+                strcmp(v->value, field_name) == 0 &&
+                message_field_is_ptr(gen, node->value, fi->value)) {
+                return 1;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (state_field_passed_as_ptr(gen, node->children[i], field_name)) return 1;
+    }
+    return 0;
+}
+
+// True when argument `arg_idx` of `call` goes to a `ptr` or actor-reference
+// parameter: `introduce(s, my_ref)` with `introduce(s: ptr, me: ptr)`, or an
+// extern / stdlib function taking a pointer (`list.add(xs, peer)`).
+static int call_arg_is_ptr_param(CodeGenerator* gen, ASTNode* call, int arg_idx) {
+    if (!call->value) return 0;
+    TypeKind k = lookup_callee_param_kind(gen, call->value, arg_idx);
+    return k == TYPE_PTR || k == TYPE_ACTOR_REF;
+}
+
+// Returns 1 if `node` (recursively) passes the bare name `field_name` as an
+// argument to a `ptr` / actor-reference parameter.
+static int state_field_passed_to_ptr_param(CodeGenerator* gen, ASTNode* node,
+                                           const char* field_name) {
+    if (!node) return 0;
+    if (node->type == AST_FUNCTION_CALL) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            if (a && a->type == AST_IDENTIFIER && a->value &&
+                strcmp(a->value, field_name) == 0 && call_arg_is_ptr_param(gen, node, i)) {
+                return 1;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (state_field_passed_to_ptr_param(gen, node->children[i], field_name)) return 1;
+    }
+    return 0;
+}
+
+// The actor a reference expression names: `Sink` for `r` in `r.field` when
+// `r` is an actor reference to a Sink. NULL for anything else.
+static const char* referenced_actor(ASTNode* obj) {
+    if (!obj || !obj->node_type || obj->node_type->kind != TYPE_ACTOR_REF) return NULL;
+    const Type* at = obj->node_type->element_type;
+    return at && at->kind == TYPE_STRUCT ? at->struct_name : NULL;
+}
+
+// Keyed `Actor.field`, whole: a cut key made two long field names of one
+// actor the same entry (#2539).
+static void mark_ptr_field(CodeGenerator* gen, const char* actor, const char* field) {
+    strmap_put(&gen->actor_ptr_fields, cg_internf("%s.%s", actor, field), NULL);
+}
+
+// The uses of `r.field`, from outside the actor or from another one, that
+// make an actor's field a pointer: it is assigned a pointer or an actor
+// reference, it is sent or asked through, or it is passed as a message field
+// that holds a pointer.
+static void mark_ptr_field_member_uses(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    ASTNode* lhs = NULL;
+    ASTNode* rhs = NULL;
+    if ((node->type == AST_ASSIGNMENT ||
+         (node->type == AST_BINARY_EXPRESSION && node->value && strcmp(node->value, "=") == 0)) &&
+        node->child_count >= 2) {
+        lhs = node->children[0];
+        rhs = node->children[1];
+    }
+    if (lhs && lhs->type == AST_MEMBER_ACCESS && lhs->value && lhs->child_count > 0 &&
+        rhs && rhs->node_type &&
+        (rhs->node_type->kind == TYPE_PTR || rhs->node_type->kind == TYPE_ACTOR_REF)) {
+        const char* actor = referenced_actor(lhs->children[0]);
+        if (actor) mark_ptr_field(gen, actor, lhs->value);
+    }
+    if (is_send_node(node)) {
+        ASTNode* target = node->children[0];
+        if (target && target->type == AST_MEMBER_ACCESS && target->value && target->child_count > 0) {
+            const char* actor = referenced_actor(target->children[0]);
+            if (actor) mark_ptr_field(gen, actor, target->value);
+        }
+    }
+    if (node->type == AST_MESSAGE_CONSTRUCTOR && node->value) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* fi = node->children[i];
+            if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+            ASTNode* v = fi->children[0];
+            if (v && v->type == AST_MEMBER_ACCESS && v->value && v->child_count > 0 &&
+                message_field_is_ptr(gen, node->value, fi->value)) {
+                const char* actor = referenced_actor(v->children[0]);
+                if (actor) mark_ptr_field(gen, actor, v->value);
+            }
+        }
+    }
+    if (node->type == AST_FUNCTION_CALL) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* v = node->children[i];
+            if (v && v->type == AST_MEMBER_ACCESS && v->value && v->child_count > 0 &&
+                call_arg_is_ptr_param(gen, node, i)) {
+                const char* actor = referenced_actor(v->children[0]);
+                if (actor) mark_ptr_field(gen, actor, v->value);
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        mark_ptr_field_member_uses(gen, node->children[i]);
+    }
+}
+
+// The uses inside the actor itself, where a field is a bare name.
+static int state_field_used_as_ptr_in_actor(CodeGenerator* gen, ASTNode* actor,
+                                            const char* field_name) {
+    return state_field_is_send_target(actor, field_name) ||
+           state_field_passed_as_ptr(gen, actor, field_name) ||
+           state_field_passed_to_ptr_param(gen, actor, field_name) ||
+           state_field_assigned_ptr(gen, actor, field_name);
+}
+
+// #2466: a state field is stored as `void*` when the program uses it as a
+// pointer, inside the actor or through `r.field` anywhere else: it is
+// assigned a pointer (a `ptr` / actor-reference payload or value), it is the
+// target of a send/ask, or it is passed as a message field or a function
+// argument that holds a pointer. That is the `state next = 0` ... `a.next = b` ... `next ! Msg {}`
+// shape, whose `0` initializer infers a number. Only use decides it, never
+// the field's name: `state self_ref = 0` used as a number stays a number.
+//
+// One walk of the program answers it for every field, on the first ask; the
+// member-access read path asks once per `r.field` it emits.
+static int state_field_is_ptr(CodeGenerator* gen, ASTNode* actor, const char* field_name) {
+    if (!gen->program) return state_field_used_as_ptr_in_actor(gen, actor, field_name);
+    if (!gen->actor_ptr_fields_ready) {
+        gen->actor_ptr_fields_ready = 1;
+        for (int i = 0; i < gen->program->child_count; i++) {
+            ASTNode* a = gen->program->children[i];
+            if (!a || a->type != AST_ACTOR_DEFINITION || !a->value) continue;
+            for (int j = 0; j < a->child_count; j++) {
+                ASTNode* c = a->children[j];
+                if (c && c->type == AST_STATE_DECLARATION && c->value &&
+                    state_field_used_as_ptr_in_actor(gen, a, c->value)) {
+                    mark_ptr_field(gen, a->value, c->value);
+                }
+            }
+        }
+        mark_ptr_field_member_uses(gen, gen->program);
+    }
+    return strmap_has(&gen->actor_ptr_fields,
+                      cg_internf("%s.%s", actor->value ? actor->value : "", field_name));
+}
+
+// The state fields generate_actor_definition emits with an atomic C type:
+// the int / long / Duration ones it does not widen to a pointer.
+static int state_decl_is_atomic(CodeGenerator* gen, ASTNode* actor, ASTNode* decl) {
+    if (!decl->node_type || state_field_is_ptr(gen, actor, decl->value)) return 0;
+    return decl->node_type->kind == TYPE_INT || decl->node_type->kind == TYPE_INT64 ||
+           decl->node_type->kind == TYPE_DURATION;
+}
+
+int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
+                                const char* field) {
+    if (!gen || !gen->program || !actor_name || !field) return 0;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* actor = gen->program->children[i];
+        if (!actor || actor->type != AST_ACTOR_DEFINITION || !actor->value ||
+            strcmp(actor->value, actor_name) != 0) continue;
+        for (int j = 0; j < actor->child_count; j++) {
+            ASTNode* c = actor->children[j];
+            if (c && c->type == AST_STATE_DECLARATION && c->value &&
+                strcmp(c->value, field) == 0) {
+                return state_decl_is_atomic(gen, actor, c);
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* The variable an assignment target writes through: `x`, `x.f`, `x[i]`. */
+static const char* store_target_root(ASTNode* lhs) {
+    while (lhs && (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
+           lhs->child_count > 0) {
+        lhs = lhs->children[0];
+    }
+    return (lhs && lhs->type == AST_IDENTIFIER) ? lhs->value : NULL;
+}
+
+static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    if (node->type == AST_IDENTIFIER && node->value) {
+        mark_return_escaped_struct_var(gen, node->value);
+    }
+    /* Reading a scalar or string field shares nothing with the struct: a
+     * string taken from a field is copied where it is stored (#2461). A
+     * struct-typed (or untyped) field may share the struct's strings. */
+    if (node->type == AST_MEMBER_ACCESS && node->node_type &&
+        node->node_type->kind != TYPE_STRUCT && node->node_type->kind != TYPE_UNKNOWN) {
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        mark_mentioned_struct_vars(gen, node->children[i]);
+    }
+}
+
+/* #2498: a value stored into actor state outlives the handler, as a returned
+ * one outlives its function. A struct local named anywhere in a state
+ * store's value (directly, inside a literal, through a call that may hand it
+ * back) therefore gives its strings to the state: its scope-exit destroy is
+ * suppressed the way a return suppresses it (#752). Marked before the body
+ * is emitted, so an earlier `return` in a loop that later stores is covered
+ * too. Naming a non-struct here is harmless: no destroy is keyed to it.
+ * A closure that captures the struct holds a copy with strings of its own
+ * (#2504), so a capture is no reason to keep them. */
+static void mark_state_stored_struct_vars(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    if (node->type == AST_VARIABLE_DECLARATION && is_actor_state_var(gen, node->value)) {
+        for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i]);
+    } else if (node->type == AST_ASSIGNMENT && node->child_count >= 2) {
+        const char* root = store_target_root(node->children[0]);
+        if (root && (strcmp(root, "self") == 0 || is_actor_state_var(gen, root))) {
+            mark_mentioned_struct_vars(gen, node->children[1]);
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        mark_state_stored_struct_vars(gen, node->children[i]);
+    }
+}
+
+/* #2528: a `string` state field owns what it holds, tracked by
+ * `_heap_<name>` beside it (a `ptr`-widened field is a payload the user
+ * manages). */
+int state_field_owns_string(ASTNode* state_decl) {
+    return state_decl && state_decl->type == AST_STATE_DECLARATION &&
+           state_decl->node_type && state_decl->node_type->kind == TYPE_STRING;
+}
+
+/* #2528: a `string[N]` (1) or `fn[N]` (2) state field, whose elements the
+ * actor owns as a struct's such field does; length in `*len`. */
+int state_array_owned(ASTNode* state_decl, int* len) {
+    if (!state_decl || state_decl->type != AST_STATE_DECLARATION || !state_decl->node_type) return 0;
+    Type* t = state_decl->node_type;
+    if (t->kind != TYPE_ARRAY || t->array_size <= 0 || !t->element_type) return 0;
+    if (len) *len = t->array_size;
+    if (t->element_type->kind == TYPE_STRING) return 1;
+    if (t->element_type->kind == TYPE_FUNCTION && !t->element_type->is_fnptr) return 2;
+    return 0;
+}
+
+/* #2528: `<Actor>_destroy_state(void*)`, the scheduler's hook for what the
+ * state fields own: a heap string per its tracker, a closure's environment
+ * (#2525), a struct that owns strings or closures through its own
+ * destructor. Run once by the free path that ends a scheduler-owned actor,
+ * after it can no longer be stepped. Idempotent, as a struct destroy is. */
+static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
+    print_line(gen, "static void %s_destroy_state(void* _p) {", actor->value);
+    indent(gen);
+    print_line(gen, "%s* self = (%s*)_p;", actor->value, actor->value);
+    print_line(gen, "(void)self;");
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* child = actor->children[i];
+        if (!child || child->type != AST_STATE_DECLARATION || !child->node_type) continue;
+        Type* t = child->node_type;
+        int oalen = 0;
+        int oak = state_array_owned(child, &oalen);
+        if (state_field_owns_string(child)) {
+            print_line(gen, "if (self->_heap_%s) { aether_heap_str_free(self->%s); self->%s = (const char*)0; self->_heap_%s = 0; }",
+                       child->value, child->value, child->value, child->value);
+        } else if (oak == 1) {
+            /* #2528: a `string[N]` state field owns a copy of each element,
+             * a `fn[N]` one a reference per element (as the struct fields). */
+            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (self->%s[_ai]) { aether_heap_str_free(self->%s[_ai]); self->%s[_ai] = (const char*)0; }",
+                       oalen, child->value, child->value, child->value);
+        } else if (oak == 2) {
+            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (self->%s[_ai].env) { _aether_closure_env_release(self->%s[_ai].env); self->%s[_ai].env = (void*)0; }",
+                       oalen, child->value, child->value, child->value);
+        } else if (t->kind == TYPE_FUNCTION && !t->is_fnptr &&
+                   !state_field_is_ptr(gen, actor, child->value)) {
+            print_line(gen, "if (self->%s.env) { _aether_closure_env_release(self->%s.env); self->%s.env = (void*)0; }",
+                       child->value, child->value, child->value);
+        } else {
+            const char* sname = struct_owning_strings(gen, t);
+            if (sname && !state_field_is_ptr(gen, actor, child->value)) {
+                print_line(gen, "%s_destroy(&self->%s);", sname, child->value);
+            }
+        }
+    }
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "");
+}
+
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return;
     
@@ -130,31 +468,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "%s {", actor->value);
     indent(gen);
     
-    // Hot fields (accessed every message) - first cache line
-    print_line(gen, "atomic_int active;       // Hot: checked every loop iteration");
-    print_line(gen, "int id;                  // Hot: used for identification");
-    print_line(gen, "Mailbox mailbox;         // Hot: message queue");
-    print_line(gen, "void (*step)(void*);     // Hot: message handler");
-    
-    // Warm fields (accessed occasionally)
-    print_line(gen, "pthread_t thread;        // Warm: thread handle");
-    print_line(gen, "int auto_process;        // Warm: auto-processing flag");
-    print_line(gen, "atomic_int assigned_core; // Cold: core assignment (atomic for work-stealing)");
-    print_line(gen, "atomic_int migrate_to;    // Cold: affinity hint (-1 = none)");
-    print_line(gen, "atomic_int main_thread_only; // Cold: scheduler skip flag");
-    print_line(gen, "SPSCQueue* spsc_queue;   // Lock-free same-core messaging (lazy alloc)");
-    print_line(gen, "_Atomic(ActorReplySlot*) reply_slot; // Non-NULL only during ask/reply");
-    print_line(gen, "atomic_flag step_lock;   // Prevents concurrent step() during work-steal handoff");
-    print_line(gen, "uint64_t timeout_ns;     // Receive timeout (0 = none)");
-    print_line(gen, "uint64_t last_activity_ns; // Idle start timestamp (0 = not idle)");
-    print_line(gen, "atomic_int dead;         // Set when step() unwound via panic/signal");
     /* The prefix of a generated actor IS an ActorBase: the scheduler is handed
-     * a pointer to it and casts. alloc_size is the last ActorBase field, and
-     * leaving it out put the first user state field at its offset, so
-     * scheduler_spawn_actor wrote the allocation size into that field and
-     * scheduler_destroy_actor later passed the field's value to
-     * aether_numa_free as a length (munmap under libnuma). */
-    print_line(gen, "size_t alloc_size;       // Allocation size, read by scheduler_destroy_actor");
+     * a pointer to it and casts. The fields come from the runtime's one
+     * definition (AETHER_ACTOR_BASE_FIELDS), so a field added there is here
+     * too; a hand-written copy that missed one put the first state field at
+     * its offset, and the scheduler wrote through it. */
+    print_line(gen, "AETHER_ACTOR_BASE_FIELDS");
     print_line(gen, "");
 
     // State fields (user-defined)
@@ -163,16 +482,20 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         ASTNode* child = actor->children[i];
         if (child->type == AST_STATE_DECLARATION) {
             print_indent(gen);
-            // Check if field name ends with "_ref" - these are actor references stored as void*
-            size_t name_len = strlen(child->value);
-            if (name_len > 4 && strcmp(child->value + name_len - 4, "_ref") == 0) {
+            if (state_field_is_ptr(gen, actor, child->value)) {
+                // The state field holds a pointer (an actor reference, a
+                // ptr/string payload) though its initializer (typically `0`)
+                // inferred a number: widen to void* so the uses compile.
+                // The `0` still works as a null pointer constant.
                 fprintf(gen->output, "void* %s;\n", child->value);
-            } else if (state_field_assigned_ptr(gen, actor, child->value)) {
-                // The state field is reassigned from a pointer-typed message
-                // payload somewhere in the receive arms — widen to void* so
-                // the assignment compiles. The initializer (typically `0`)
-                // still works as a null pointer constant.
-                fprintf(gen->output, "void* %s;\n", child->value);
+            } else if (type_is_sized_array(child->node_type) &&
+                       child->node_type->array_size > 0) {
+                /* #2464: `state int[4] hist` is the C declarator
+                 * `int hist[4]`, as a struct field is
+                 * (generate_extern_struct_field), not `int[4] hist`. */
+                fprintf(gen->output, "%s %s[%d];\n",
+                        get_c_type(child->node_type->element_type), child->value,
+                        child->node_type->array_size);
             } else {
                 // Use atomic types for numeric fields to enable safe concurrent access
                 if (child->node_type && child->node_type->kind == TYPE_INT) {
@@ -184,17 +507,27 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                     generate_type(gen, child->node_type);
                     fprintf(gen->output, " %s;\n", child->value);
                 }
-            }        }
+            }
+            /* #2528: a string state field's ownership tracker lives with
+             * the field, for the handlers (which alias `_heap_<name>` to
+             * it) and for the destructor. It used to be a handler local,
+             * reset to 0 on every message: a value stored by an earlier
+             * message was never freed on overwrite, and the one stored
+             * last never at all. */
+            if (state_field_owns_string(child)) {
+                print_line(gen, "int _heap_%s;", child->value);
+            }
+        }
     }
-    
+
     unindent(gen);
     print_line(gen, "} %s;", actor->value);
+    emit_actor_destroy_state(gen, actor);
     /* The scheduler casts this to ActorBase*, so every field it touches has to
      * sit at the ActorBase offset. Checking the last one pins the whole
-     * prefix: a field added to ActorBase without being added here stops the
-     * build instead of writing through the first state field at run time. */
+     * prefix. */
     print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
-    print_line(gen, "_Static_assert(offsetof(%s, alloc_size) == offsetof(ActorBase, alloc_size),",
+    print_line(gen, "_Static_assert(offsetof(%s, scheduler_owned) == offsetof(ActorBase, scheduler_owned),",
                actor->value);
     print_line(gen, "               \"%s prefix must match ActorBase\");", actor->value);
     print_line(gen, "#endif");
@@ -242,6 +575,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         print_line(gen, "static AETHER_HOT void %s_handle_%s(%s* self, void* _msg_data) {",
                                   actor->value, pattern->value, actor->value);
                         indent(gen);
+                        /* #2498: the handler is a defer scope, as a function
+                         * body is, opened before the pattern bindings so a
+                         * binding's cell (#2492) is released with the rest:
+                         * the arm's defers, its promoted cells, the env of a
+                         * closure bound in it (#2494) and a struct local's
+                         * destroy all run when the handler ends, on every
+                         * exit. They were dropped, and leaked per message. */
+                        enter_scope(gen);
                         // Reset declared-vars / heap-string state for this
                         // handler. Each handler is its own C function with
                         // its own scope; carrying entries over from the
@@ -256,10 +597,21 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         clear_declared_vars(gen);
                         clear_fnptr_locals(gen);
                         clear_heap_string_vars(gen);
+                        clear_captured_string_params(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
                         print_line(gen, "%s* _pattern = (%s*)_msg_data;", pattern->value, pattern->value);
                         mark_var_declared(gen, "_pattern");
+
+                        // This arm's Route 1 promoted names (published
+                        // below). The synthetic name matches what
+                        // discover_closures_scoped emitted:
+                        // `__recv_arm_<arm_ptr>`.
+                        char arm_name[256];
+                        snprintf(arm_name, sizeof(arm_name), "__recv_arm_%p", (void*)arm);
+                        char** arm_promoted = NULL;
+                        int arm_promoted_count = 0;
+                        get_promoted_names_for_func(gen, arm_name, &arm_promoted, &arm_promoted_count);
 
                         // Extract pattern fields with correct types from message definition.
                         // Single-int-field messages use intptr_t (matches payload_int width).
@@ -293,6 +645,28 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                     field->children[0]->type == AST_PATTERN_VARIABLE && field->children[0]->value) {
                                     var_name = field->children[0]->value;
                                 }
+                                int promoted = 0;
+                                for (int pp = 0; pp < arm_promoted_count; pp++) {
+                                    if (arm_promoted[pp] && strcmp(arm_promoted[pp], var_name) == 0) {
+                                        promoted = 1;
+                                        break;
+                                    }
+                                }
+                                if (promoted) {
+                                    /* #2492: a closure in the arm writes this
+                                     * binding, so it lives in a shared cell
+                                     * seeded from the message, as a promoted
+                                     * parameter does. The cell holds the
+                                     * field's own type, which is what the
+                                     * closures' envs point at; intptr_t is
+                                     * only the payload width. */
+                                    const char* from = cg_internf("_pattern->%s", field->value);
+                                    print_indent(gen);
+                                    emit_promoted_param_cell(gen, var_name,
+                                        strcmp(c_type, "intptr_t") == 0 ? "int" : c_type,
+                                        from, field->line, field->column);
+                                    continue;
+                                }
                                 print_line(gen, "%s %s = _pattern->%s;", c_type, var_name, field->value);
                                 // Pattern fields are now C-locals at the
                                 // top of the handler — record them so a
@@ -304,16 +678,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
                         // Publish this arm's Route 1 promoted names so
                         // variable decls in the handler malloc heap cells
-                        // and reads/writes dereference. The synthetic name
-                        // matches what discover_closures_scoped emitted:
-                        // `__recv_arm_<arm_ptr>`.
+                        // and reads/writes dereference.
                         char** prev_promoted = gen->current_promoted_captures;
                         int prev_promoted_count = gen->current_promoted_capture_count;
-                        char arm_name[256];
-                        snprintf(arm_name, sizeof(arm_name), "__recv_arm_%p", (void*)arm);
-                        get_promoted_names_for_func(gen, arm_name,
-                            &gen->current_promoted_captures,
-                            &gen->current_promoted_capture_count);
+                        gen->current_promoted_captures = arm_promoted;
+                        gen->current_promoted_capture_count = arm_promoted_count;
+                        const char* prev_closure_var_scope = gen->closure_var_scope;
+                        gen->closure_var_scope = arm_name;   /* #2513 */
 
                         // Pre-hoist `_heap_<name>` companions for string
                         // locals in the handler body, exactly as
@@ -335,14 +706,31 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         }
 
                         // Generate handler body
+                        /* The handler's own escape marks: the ones the last
+                         * function left would suppress the destroy of a
+                         * local that merely shares a name, and this
+                         * handler's must not reach the next function. */
+                        char** outer_escaped = gen->return_escaped_struct_vars;
+                        int outer_escaped_count = gen->return_escaped_struct_var_count;
+                        gen->return_escaped_struct_vars = NULL;
+                        gen->return_escaped_struct_var_count = 0;
                         if (arm_body && arm_body->type == AST_BLOCK) {
+                            mark_state_stored_struct_vars(gen, arm_body);
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
                         }
+                        exit_scope(gen);
+                        for (int k = 0; k < gen->return_escaped_struct_var_count; k++) {
+                            free(gen->return_escaped_struct_vars[k]);
+                        }
+                        free(gen->return_escaped_struct_vars);
+                        gen->return_escaped_struct_vars = outer_escaped;
+                        gen->return_escaped_struct_var_count = outer_escaped_count;
 
                         gen->current_promoted_captures = prev_promoted;
                         gen->current_promoted_capture_count = prev_promoted_count;
+                        gen->closure_var_scope = prev_closure_var_scope;
 
                         unindent(gen);
                         print_line(gen, "}");
@@ -436,13 +824,20 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         // Generate the timeout body
         if (timeout_arm->child_count >= 2 && timeout_arm->children[1]) {
             ASTNode* tbody = timeout_arm->children[1];
+            /* A defer scope and the hoist scope of its own, as a receive
+             * arm is (#2494). */
+            ASTNode* prev_hoist_scope = gen->hoist_scope_body;
+            enter_scope(gen);
             if (tbody->type == AST_BLOCK) {
+                gen->hoist_scope_body = tbody;
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }
             } else {
                 generate_statement(gen, tbody);
             }
+            exit_scope(gen);
+            gen->hoist_scope_body = prev_hoist_scope;
         }
         print_line(gen, "return;");
         unindent(gen);
@@ -635,7 +1030,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             if (msg_def) {
                                 int msg_has_string = 0;
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    if (f->type_kind == TYPE_STRING) { msg_has_string = 1; break; }
+                                    /* #2525: a closure field is released with the strings. */
+                                    if (f->type_kind == TYPE_STRING ||
+                                        (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                         strcmp(f->c_type, "_AeClosure") == 0)) { msg_has_string = 1; break; }
                                 }
                                 if (msg_has_string) {
                                     print_line(gen, "%s_release_fields((%s*)_msg_data);",
@@ -659,7 +1057,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             if (msg_def) {
                                 int msg_has_string = 0;
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    if (f->type_kind == TYPE_STRING) { msg_has_string = 1; break; }
+                                    /* #2525: a closure field is released with the strings. */
+                                    if (f->type_kind == TYPE_STRING ||
+                                        (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                         strcmp(f->c_type, "_AeClosure") == 0)) { msg_has_string = 1; break; }
                                 }
                                 if (msg_has_string) {
                                     print_line(gen, "%s_release_fields((%s*)_msg_data);",
@@ -689,22 +1090,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core_cached ? 0 : -1);");
     print_line(gen, "%s* actor = (%s*)scheduler_spawn_actor(core, (void (*)(void*))%s_step, sizeof(%s));",
                actor->value, actor->value, actor->value, actor->value);
-    print_line(gen, "if (!actor) {");
-    indent(gen);
-    print_line(gen, "// Fallback to aligned allocation if pool exhausted");
-    print_line(gen, "actor = aether_aligned_alloc(64, sizeof(%s));", actor->value);
+    /* NULL means the allocation failed: nothing pools actors any more. The
+     * second allocation that used to follow was no likelier to succeed, and
+     * its block came from an allocator that scheduler_release_actor's free
+     * does not match (#2485). */
     print_line(gen, "if (!actor) return NULL;");
-    /* The scheduler-allocated path records this; the fallback has to as well,
-     * or destroy frees with an uninitialised length. */
-    print_line(gen, "actor->alloc_size = sizeof(%s);", actor->value);
-    print_line(gen, "actor->id = atomic_fetch_add(&next_actor_id, 1);");
-    print_line(gen, "atomic_init(&actor->assigned_core, -1);");
-    print_line(gen, "actor->step = (void (*)(void*))%s_step;", actor->value);
-    print_line(gen, "mailbox_init(&actor->mailbox);");
-    print_line(gen, "atomic_flag_clear_explicit(&actor->step_lock, memory_order_relaxed);");
-    print_line(gen, "scheduler_register_actor((ActorBase*)actor, -1);");
-    unindent(gen);
-    print_line(gen, "}");
     print_line(gen, "atomic_init(&actor->active, 0);  // inactive until first message send");
     print_line(gen, "atomic_init(&actor->migrate_to, -1);");
     print_line(gen, "atomic_init(&actor->dead, 0);");
@@ -714,7 +1104,36 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (child->type == AST_STATE_DECLARATION) {
-            if (child->child_count > 0) {
+            if (type_is_sized_array(child->node_type) && child->node_type->array_size > 0 &&
+                !state_field_is_ptr(gen, actor, child->value)) {
+                /* #2464: an array field does not assign. Zero it, then set
+                 * the elements an array-literal initializer gives. */
+                print_line(gen, "memset(actor->%s, 0, sizeof(actor->%s));",
+                           child->value, child->value);
+                ASTNode* init = child->child_count > 0 ? child->children[0] : NULL;
+                if (init && init->type == AST_ARRAY_LITERAL) {
+                    /* #2528: an owned array's elements are copied or taken. */
+                    int oak = state_array_owned(child, NULL);
+                    for (int e = 0; e < init->child_count &&
+                                    e < child->node_type->array_size; e++) {
+                        print_indent(gen);
+                        fprintf(gen->output, "actor->%s[%d] = ", child->value, e);
+                        if (oak == 1) {
+                            emit_owned_string_element(gen, init->children[e]);
+                        } else if (oak == 2) {
+                            emit_closure_take(gen, init->children[e]);
+                        } else {
+                            generate_expression(gen, init->children[e]);
+                        }
+                        fprintf(gen->output, ";\n");
+                    }
+                } else if (init) {
+                    print_indent(gen);
+                    fprintf(gen->output, "memcpy(actor->%s, ", child->value);
+                    generate_expression(gen, init);
+                    fprintf(gen->output, ", sizeof(actor->%s));\n", child->value);
+                }
+            } else if (child->child_count > 0) {
                 print_indent(gen);
                 fprintf(gen->output, "actor->%s = ", child->value);
                 generate_expression(gen, child->children[0]);
@@ -722,17 +1141,28 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             } else {
                 print_line(gen, "actor->%s = 0;", child->value);
             }
+            /* #2528: the block is not zeroed (a kept one is reused), so the
+             * tracker is set here: the initializer's value is owned when it
+             * is a fresh heap string. */
+            if (state_field_owns_string(child)) {
+                int owned = child->child_count > 0 && child->children[0] &&
+                            is_heap_string_expr(gen, child->children[0]);
+                print_line(gen, "actor->_heap_%s = %d;", child->value, owned ? 1 : 0);
+            }
         }
     }
+    print_line(gen, "actor->destroy_state = %s_destroy_state;   /* #2528 */", actor->value);
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates
     // the race window where my_ref is 0 if Spawn arrives before Setup on
-    // a different core.
+    // a different core. Only a `my_ref` the actor uses as a reference: one
+    // used as a number is an ordinary field (#2466).
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (child->type == AST_STATE_DECLARATION &&
-            strcmp(child->value, "my_ref") == 0) {
+            strcmp(child->value, "my_ref") == 0 &&
+            state_field_is_ptr(gen, actor, child->value)) {
             print_line(gen, "actor->my_ref = (void*)actor;  // self-ref available immediately (no Setup needed)");
             break;
         }
@@ -742,7 +1172,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "#if AETHER_HAS_THREADS");
     print_line(gen, "if (actor->auto_process) {");
     indent(gen);
-    print_line(gen, "pthread_create(&actor->thread, NULL, (void*(*)(void*))aether_actor_thread, actor);");
+    // Without its thread the actor is an ordinary one, stepped by its core
+    // and ended by its release (#2517).
+    print_line(gen, "if (pthread_create(&actor->thread, NULL, (void*(*)(void*))aether_actor_thread, actor) != 0) {");
+    indent(gen);
+    print_line(gen, "actor->thread = 0;");
+    print_line(gen, "actor->auto_process = 0;");
+    unindent(gen);
+    print_line(gen, "}");
     unindent(gen);
     print_line(gen, "}");
     print_line(gen, "#endif");

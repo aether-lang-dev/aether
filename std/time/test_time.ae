@@ -72,6 +72,34 @@ main() {
     fails = fails + ck(be2 != "", "bad month rejected")
     _, be3 = time.parse_iso8601("2023-02-29T00:00:00Z") // not a leap year
     fails = fails + ck(be3 != "", "feb 29 non-leap rejected")
+    // Nothing may follow the seconds but 'Z': an offset was dropped (the
+    // UTC instant came back five hours late) and garbage was accepted, both
+    // with an empty error. Offsets are parse_iso8601_offset's.
+    _, be4 = time.parse_iso8601("2024-01-01T00:00:00+05:00")
+    fails = fails + ck(be4 != "", "offset rejected (parse_iso8601_offset reads it)")
+    _, be5 = time.parse_iso8601("2024-01-01T00:00:00garbage")
+    fails = fails + ck(be5 != "", "trailing text rejected")
+    _, be6 = time.parse_iso8601("2024-01-01T00:00:00X")
+    fails = fails + ck(be6 != "", "a 20th character other than Z rejected")
+    // A fraction (dropped) and a lowercase z are UTC stamps as written by
+    // JavaScript's toISOString and allowed by RFC 3339.
+    pf, pfe = time.parse_iso8601("2009-02-13T23:31:30.123Z")
+    fails = fails + ck(pfe == "" && pf.epoch == 1234567890, "fraction before Z accepted")
+    pz, pze = time.parse_iso8601("2009-02-13T23:31:30z")
+    fails = fails + ck(pze == "" && pz.epoch == 1234567890, "lowercase z accepted")
+    pc, pce = time.parse_iso8601("2009-02-13 23:31:30,5")
+    fails = fails + ck(pce == "" && pc.epoch == 1234567890, "comma fraction, no zone")
+    _, be7 = time.parse_iso8601("2009-02-13T23:31:30.Z")
+    fails = fails + ck(be7 != "", "a fraction without digits rejected")
+    _, be8 = time.parse_iso8601("2009-02-13T23:31:30.5+01:00")
+    fails = fails + ck(be8 != "", "an offset after a fraction rejected")
+
+    // Years outside 0..9999 are written in full, signed when negative: both
+    // were clamped to "0000".
+    fails = fails + ck(time.to_iso8601(time.from_civil(10000, 1, 1, 0, 0, 0)) == "10000-01-01T00:00:00Z", "year 10000")
+    fails = fails + ck(time.to_iso8601(time.from_civil(-1, 12, 31, 23, 59, 59)) == "-0001-12-31T23:59:59Z", "year -1")
+    fails = fails + ck(time.to_iso8601(time.from_civil(9999, 12, 31, 23, 59, 59)) == "9999-12-31T23:59:59Z", "year 9999")
+    fails = fails + ck(time.to_iso8601(time.from_civil(0, 1, 1, 0, 0, 0)) == "0000-01-01T00:00:00Z", "year 0")
 
     // ---- diff + ordering ----
     a = time.from_unix(1000)

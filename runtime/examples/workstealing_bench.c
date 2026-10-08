@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <pthread.h>
+#include <stdatomic.h>
 #include "../actors/actor_state_machine.h"
 #include "../scheduler/multicore_scheduler.h"
 
@@ -19,11 +19,9 @@
 #define MESSAGES_PER_ACTOR 5000
 
 typedef struct Node {
-    atomic_int active;
-    int id;
-    atomic_int assigned_core;
-    Mailbox mailbox;
-    void (*step)(void*);
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     int next_id;
     int count;
 } Node;

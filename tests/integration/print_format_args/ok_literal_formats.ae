@@ -1,0 +1,7 @@
+main() {
+    print("100%% done\n")
+    print("a%%\x00b\n")
+    print("%%%%\n")
+    n = 7
+    print("%d = 7%%\n", n)
+}

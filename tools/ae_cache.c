@@ -5,9 +5,17 @@
  */
 
 #include "ae_internal.h"
+#include "ae_line.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
+#ifdef _WIN32
+#ifndef popen
+#  define popen  _popen
+#  define pclose _pclose
+#endif
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -386,21 +394,38 @@ void init_cache_dir(void) {
     // while this is a writable artifact directory — two variables, two
     // meanings.
     const char* override = getenv("AETHER_CACHE_DIR");
+    int n;
     if (override && override[0]) {
-        snprintf(s_cache_dir, sizeof(s_cache_dir), "%s", override);
+        n = snprintf(s_cache_dir, sizeof(s_cache_dir), "%s", override);
     } else {
         const char* home = get_home_dir();
-        snprintf(s_cache_dir, sizeof(s_cache_dir), "%s/.aether/cache", home);
+        n = snprintf(s_cache_dir, sizeof(s_cache_dir), "%s/.aether/cache", home);
+    }
+    /* Refused rather than cut (#2539): a cut path is another directory,
+     * which the cache would have been made in, and every path built from
+     * it (entries, depfiles, temporaries) is sized for this bound. */
+    if (n < 0 || (size_t)n >= sizeof(s_cache_dir)) {
+        fprintf(stderr,
+                "Error: the build cache directory (%s) is %d bytes long; at most %d\n"
+                "       are supported. Set AETHER_CACHE_DIR to a shorter path.\n",
+                override && override[0] ? "AETHER_CACHE_DIR" : "$HOME/.aether/cache",
+                n, (int)sizeof(s_cache_dir) - 1);
+        exit(1);
     }
     mkdirs(s_cache_dir);
     gc_stale_cache_tmp(s_cache_dir);
 }
 
-// FNV-64 hash of a string
-static unsigned long long fnv64_str(const char* s) {
-    unsigned long long h = 14695981039346656037ULL;
+/* FNV-1a over `s`, continuing from `h`: a string hashed in pieces hashes
+ * as the pieces joined. */
+static unsigned long long fnv64_more(unsigned long long h, const char* s) {
     while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }
     return h;
+}
+
+// FNV-64 hash of a string
+static unsigned long long fnv64_str(const char* s) {
+    return fnv64_more(14695981039346656037ULL, s);
 }
 
 // FNV-64 hash of a file's contents
@@ -497,19 +522,53 @@ static unsigned long long hash_contrib_archives(const char* lib_path) {
  * The depfile lives at a path derived from the ENTRY file's absolute path, so
  * it's stable across content edits (the edit changes a `read` line's hash, not
  * the manifest's location) and found before the content-key is known. */
-static void abspath_of(const char* p, char* out, size_t outsz) {
-    if (p && p[0] == '/') { snprintf(out, outsz, "%s", p); return; }
-    char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd))) snprintf(out, outsz, "%s/%s", cwd, p ? p : "");
-    else snprintf(out, outsz, "%s", p ? p : "");
+/* The current directory however long it is, in a buffer the caller frees;
+ * NULL when it cannot be read. */
+static char* cwd_dup(void) {
+    for (size_t cap = 1024; cap <= ((size_t)1 << 20); cap *= 2) {
+        char* buf = malloc(cap);
+        if (!buf) return NULL;
+        if (getcwd(buf, cap)) return buf;
+        free(buf);
+        if (errno != ERANGE) return NULL;
+    }
+    return NULL;
+}
+
+/* Absolute as this platform reads a path: a leading `/`, and on Windows also
+ * `\` or a drive (`C:`). */
+static int cache_path_is_absolute(const char* p) {
+    if (p[0] == '/') return 1;
+#ifdef _WIN32
+    if (p[0] == '\\') return 1;
+    if (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':')
+        return 1;
+#endif
+    return 0;
 }
 
 // The stable depfile path for an entry source, under the cache dir.
+//
+// Named for a hash of the absolute path (`<cwd>/<file>` for a relative one),
+// hashed in pieces rather than built in a buffer: a 1 KB one cut a longer
+// path, and a cwd past it fell back to the bare relative name, so two
+// projects' `main.ae` shared one slot and each keyed on the other's
+// dependencies (#2537). The bytes hashed are the ones the buffer held, so a
+// slot for a shorter path keeps its name. On Windows a drive or backslash
+// path is absolute too (#2538); it used to get the cwd in front, so one file
+// had a slot per directory it was built from.
 void cache_depfile_path(const char* ae_file, char* out, size_t outsz) {
-    char abs[1024];
-    abspath_of(ae_file, abs, sizeof(abs));
+    const char* p = ae_file ? ae_file : "";
+    unsigned long long h;
+    char* cwd = cache_path_is_absolute(p) ? NULL : cwd_dup();
+    if (cwd) {
+        h = fnv64_more(fnv64_more(fnv64_str(cwd), "/"), p);
+        free(cwd);
+    } else {
+        h = fnv64_str(p);
+    }
     init_cache_dir();
-    snprintf(out, outsz, "%s/%016llx.deps", s_cache_dir, fnv64_str(abs));
+    snprintf(out, outsz, "%s/%016llx.deps", s_cache_dir, h);
 }
 
 /* Fold a depfile's contents into `acc`. Returns 1 if a valid v1 manifest was
@@ -520,22 +579,35 @@ void cache_depfile_path(const char* ae_file, char* out, size_t outsz) {
  *   absent <path>  → path string + a presence bit; the bit is 1 once the file
  *                    EXISTS, so a module dropped in at a previously-missed
  *                    probe flips the key and busts the cache (the shadowing
- *                    case Nic flagged). */
+ *                    case Nic flagged).
+ *
+ * Lines are read whole (#2536). A `read` line past a 2 KB buffer hashed a
+ * cut path, which never exists, so its content hash was the same 0 on every
+ * run and an edit to that file was served from the cache. A line that is
+ * not one of the two above, or that has no newline because the file ends
+ * in the middle of it, makes the whole manifest untrusted (0), as does
+ * running out of memory: the caller then walks the trees, as it does when
+ * there is no depfile. */
 static int fold_depfile(const char* depfile, unsigned long long* acc) {
     FILE* f = fopen(depfile, "r");
     if (!f) return 0;
-    char line[2048];
-    if (!fgets(line, sizeof(line), f) || strncmp(line, "# aether-deps v1", 16) != 0) {
+    char* line = NULL;
+    size_t cap = 0;
+    if (ae_read_line(f, &line, &cap) <= 0 || strncmp(line, "# aether-deps v1", 16) != 0) {
+        free(line);
         fclose(f);
-        return 0;   /* unknown/foreign format — do not trust it */
+        return 0;   /* unknown/foreign format: do not trust it */
     }
     int any = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int trusted = 1;
+    int got;
+    while ((got = ae_read_line(f, &line, &cap)) > 0) {
         size_t n = strlen(line);
+        if (n == 0 || line[n - 1] != '\n') { trusted = 0; break; }   /* cut short */
         while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
         if (n == 0) continue;
         char* sp = strchr(line, ' ');
-        if (!sp) continue;
+        if (!sp) { trusted = 0; break; }
         *sp = '\0';
         const char* kind = line;
         const char* path = sp + 1;
@@ -548,10 +620,14 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
             unsigned long long present = (access(path, F_OK) == 0) ? 0x9E3779B1ULL : 0ULL;
             *acc = (*acc * 1099511628211ULL) ^ present;
             any = 1;
+        } else {
+            trusted = 0;
+            break;
         }
     }
+    free(line);
     fclose(f);
-    return any;
+    return (got < 0 || !trusted) ? 0 : any;
 }
 
 // Compute a cache key from: source content + compiler mtime + lib mtime +
@@ -575,6 +651,106 @@ static void tc_seed_lib_dirs_from_env(void) {
     if (env && *env) tc_lib_dir_append(env);
 }
 
+/* The cold cache key's walk of a source tree: every .ae/.c/.h file under a
+ * root, its path relative to the root and its CONTENT folded in. Modules live
+ * in SUBDIRECTORIES of a lib dir (`std/string/module.ae`,
+ * `contrib/host/lua/module.ae`), so a top-level-only walk misses them; it
+ * recurses, following symlinks (#623). The relative path tells a subdir
+ * module from a same-named top-level file and is stable across runs.
+ * Content rather than mtime+size is what makes a same-second, same-size edit
+ * invalidate the cache (the #1025 Bug B miss: flipping a constant `0.5` to
+ * `0.7` in an editor-save loop kept the same length and second); it also
+ * avoids a spurious miss when a file is `touch`ed without a change.
+ *
+ * Paths are built in buffers grown as needed (#2538): 1 KB ones cut a deeper
+ * path, which named no file, so the module there never reached the key and
+ * an edit to it was served from the cache. The depth and file caps stay, as
+ * a bound on what a cold key reads (and on a symlink cycle), but reaching one
+ * no longer hides what lies past it: `incomplete` says why the walk could not
+ * see every file, and compute_cache_key then makes no key at all. */
+#define TREE_WALK_MAX_DEPTH 8
+#define TREE_WALK_MAX_FILES 4096
+
+typedef struct {
+    unsigned long long acc;
+    int count;
+    const char* incomplete;
+    char* full;
+    size_t full_len, full_cap;
+    char* rel;
+    size_t rel_len, rel_cap;
+} TreeWalk;
+
+/* `sep` then `name` appended to a path buffer grown as needed. 0 when out
+ * of memory. */
+static int walk_path_push(char** buf, size_t* len, size_t* cap,
+                          const char* sep, const char* name) {
+    size_t sl = strlen(sep), nl = strlen(name);
+    size_t need = *len + sl + nl + 1;
+    if (need > *cap) {
+        size_t ncap = *cap ? *cap : 256;
+        while (ncap < need) ncap *= 2;
+        char* nb = realloc(*buf, ncap);
+        if (!nb) return 0;
+        *buf = nb;
+        *cap = ncap;
+    }
+    memcpy(*buf + *len, sep, sl);
+    *len += sl;
+    memcpy(*buf + *len, name, nl + 1);
+    *len += nl;
+    return 1;
+}
+
+static int walk_is_source(const char* name) {
+    size_t n = strlen(name);
+    return (n > 3 && strcmp(name + n - 3, ".ae") == 0) ||
+           (n > 2 && (strcmp(name + n - 2, ".c") == 0 || strcmp(name + n - 2, ".h") == 0));
+}
+
+static void walk_dir(TreeWalk* w, int depth);
+
+/* One entry of the directory being walked, already pushed onto both paths
+ * (w->full names it on disk, w->rel within the tree). */
+static void walk_entry(TreeWalk* w, const char* name, int is_dir, int depth) {
+    if (is_dir) {
+        if (depth + 1 > TREE_WALK_MAX_DEPTH) w->incomplete = "has a directory more than 8 levels deep";
+        else walk_dir(w, depth + 1);
+        return;
+    }
+    if (!walk_is_source(name)) return;
+    if (w->count >= TREE_WALK_MAX_FILES) {
+        w->incomplete = "has more than 4096 source files";
+        return;
+    }
+    w->acc ^= fnv64_str(w->rel);
+    w->acc = (w->acc * 1099511628211ULL) ^ fnv64_file(w->full);
+    w->count++;
+}
+
+/* Push `name` onto both paths, visit it, pop it again. `is_dir` is -1 when
+ * the listing did not say: stat follows symlinks (#623), so a linked module
+ * is hashed by the content it points at, and a name that cannot be stat'ed
+ * (a dangling link) is not a file the compiler can read either. */
+static void walk_child(TreeWalk* w, const char* name, int is_dir, int depth,
+                       const char* sep) {
+    size_t full_len = w->full_len, rel_len = w->rel_len;
+    if (!walk_path_push(&w->full, &w->full_len, &w->full_cap, sep, name) ||
+        !walk_path_push(&w->rel, &w->rel_len, &w->rel_cap, rel_len ? "/" : "", name)) {
+        w->incomplete = "could not be walked (out of memory)";
+        return;
+    }
+    if (is_dir < 0) {
+        struct stat est;
+        is_dir = stat(w->full, &est) != 0 ? -1 : S_ISDIR(est.st_mode) != 0;
+    }
+    if (is_dir >= 0) walk_entry(w, name, is_dir, depth);
+    w->full_len = full_len;
+    w->full[full_len] = '\0';
+    w->rel_len = rel_len;
+    w->rel[rel_len] = '\0';
+}
+
 #ifdef _WIN32
 /* Windows twin of the POSIX walk below (#1235). This walk was compiled out
  * on Windows, so lib-dir contents never entered the cache key: only the
@@ -582,99 +758,75 @@ static void tc_seed_lib_dirs_from_env(void) {
  * Every module edit under lib/ therefore served a stale cached binary until
  * `ae cache clear`. FindFirstFileA works on both MinGW and MSVC; dirent.h
  * does not exist under MSVC, hence a native walk rather than un-guarding
- * the POSIX one. Semantics mirror the POSIX twin exactly: bounded depth,
- * shared entry cap, relative-path + content folding. */
-static int hash_lib_dir_entries(const char* dir, const char* rel,
-                                unsigned long long* acc, int* count, int depth) {
-    if (depth > 8 || *count >= 4096) return *count;
-    char pattern[1024];
-    snprintf(pattern, sizeof(pattern), "%s\\*", dir);
+ * the POSIX one. Semantics mirror the POSIX twin exactly. */
+static void walk_dir(TreeWalk* w, int depth) {
+    size_t full_len = w->full_len;
+    if (!walk_path_push(&w->full, &w->full_len, &w->full_cap, "\\", "*")) {
+        w->incomplete = "could not be walked (out of memory)";
+        return;
+    }
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return *count;
+    HANDLE h = FindFirstFileA(w->full, &fd);
+    DWORD err = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+    w->full_len = full_len;
+    w->full[full_len] = '\0';
+    if (h == INVALID_HANDLE_VALUE) {
+        /* An absent root is a tree with nothing in it (no lib/ dir, say). A
+         * directory the listing showed but that cannot be opened (a path
+         * too long for the ANSI API, no permission) hides its files. */
+        if (depth > 0 || (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND))
+            w->incomplete = "has a directory that could not be read";
+        return;
+    }
     do {
         const char* name = fd.cFileName;
         if (name[0] == '.') continue;  // skip . / .. / dotfiles
-        char full[1024];
-        snprintf(full, sizeof(full), "%s\\%s", dir, name);
-        char childrel[1024];
-        if (rel && rel[0])
-            snprintf(childrel, sizeof(childrel), "%s/%s", rel, name);
-        else
-            snprintf(childrel, sizeof(childrel), "%s", name);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            hash_lib_dir_entries(full, childrel, acc, count, depth + 1);
-            continue;
-        }
-        size_t nlen = strlen(name);
-        int interesting = 0;
-        if (nlen > 3 && strcmp(name + nlen - 3, ".ae") == 0) interesting = 1;
-        else if (nlen > 2 && (strcmp(name + nlen - 2, ".c") == 0 ||
-                              strcmp(name + nlen - 2, ".h") == 0)) interesting = 1;
-        if (!interesting) continue;
-        *acc ^= fnv64_str(childrel);
-        *acc = (*acc * 1099511628211ULL) ^ fnv64_file(full);
-        (*count)++;
-    } while (FindNextFileA(h, &fd) && *count < 4096);
+        walk_child(w, name, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+                   depth, "\\");
+    } while (!w->incomplete && FindNextFileA(h, &fd));
     FindClose(h);
-    return *count;
+}
+#else
+static void walk_dir(TreeWalk* w, int depth) {
+    DIR* d = opendir(w->full);
+    if (!d) {
+        /* An absent root is a tree with nothing in it (no lib/ dir, say). A
+         * directory the listing showed but that cannot be opened hides its
+         * files. */
+        if (depth > 0 || (errno != ENOENT && errno != ENOTDIR))
+            w->incomplete = "has a directory that could not be read";
+        return;
+    }
+    struct dirent* de;
+    while (!w->incomplete && (de = readdir(d)) != NULL) {
+        const char* name = de->d_name;
+        if (name[0] == '.') continue;  // skip . / .. / dotfiles
+        walk_child(w, name, -1, depth, "/");
+    }
+    closedir(d);
 }
 #endif
 
-#ifndef _WIN32
-/* Recursively fold every source file (.ae/.c/.h) under `dir` into `*acc`
- * (name + resolved mtime + size), returning the count hashed. Modules live in
- * SUBDIRECTORIES of a lib dir (`std/string/module.ae`,
- * `contrib/host/lua/module.ae`), so a top-level-only walk misses them — an
- * edit to a subdir module would not invalidate the cache and `ae run`/`build`
- * would serve a stale binary. We recurse (bounded depth + a shared entry cap)
- * so any module edit, at any nesting, bumps the key. `rel` is the path from
- * the lib-dir root, so the same file at the same relative path hashes
- * identically across runs but distinctly from a same-named file elsewhere. */
-static int hash_lib_dir_entries(const char* dir, const char* rel,
-                                unsigned long long* acc, int* count, int depth) {
-    if (depth > 8 || *count >= 4096) return *count;
-    DIR* d = opendir(dir);
-    if (!d) return *count;
-    struct dirent* de;
-    while ((de = readdir(d)) != NULL && *count < 4096) {
-        const char* name = de->d_name;
-        if (name[0] == '.') continue;  // skip . / .. / dotfiles
-        char full[1024];
-        snprintf(full, sizeof(full), "%s/%s", dir, name);
-        char childrel[1024];
-        if (rel && rel[0])
-            snprintf(childrel, sizeof(childrel), "%s/%s", rel, name);
-        else
-            snprintf(childrel, sizeof(childrel), "%s", name);
-        struct stat est;
-        if (stat(full, &est) != 0) continue;   // stat follows symlinks (#623)
-        if (S_ISDIR(est.st_mode)) {
-            hash_lib_dir_entries(full, childrel, acc, count, depth + 1);
-            continue;
-        }
-        size_t nlen = strlen(name);
-        int interesting = 0;
-        if (nlen > 3 && strcmp(name + nlen - 3, ".ae") == 0) interesting = 1;
-        else if (nlen > 2 && (strcmp(name + nlen - 2, ".c") == 0 ||
-                              strcmp(name + nlen - 2, ".h") == 0)) interesting = 1;
-        if (!interesting) continue;
-        /* Hash the RELATIVE path (distinguishes a subdir module from a
-         * same-named top-level file, and is stable across runs) + the file's
-         * CONTENT. Content-hashing rather than mtime+size is what makes a
-         * same-second, same-size edit invalidate the cache (the #1025 Bug B
-         * miss: flipping a constant `0.5`->`0.7` in an editor-save loop kept
-         * the same length and second); it also avoids a spurious cache miss
-         * when a file is `touch`ed without a content change. The 4096-entry /
-         * depth-8 caps above bound the read cost. */
-        *acc ^= fnv64_str(childrel);
-        *acc = (*acc * 1099511628211ULL) ^ fnv64_file(full);
-        (*count)++;
+/* Fold the source files under `root` into `*acc`, adding their number to
+ * `*count`. NULL when the walk saw every one; otherwise why it did not, and
+ * the key must not be used. */
+static const char* hash_tree(const char* root, unsigned long long* acc, int* count) {
+    TreeWalk w;
+    memset(&w, 0, sizeof(w));
+    w.acc = *acc;
+    w.count = *count;
+    if (!walk_path_push(&w.full, &w.full_len, &w.full_cap, "", root) ||
+        !walk_path_push(&w.rel, &w.rel_len, &w.rel_cap, "", "")) {
+        w.incomplete = "could not be walked (out of memory)";
+    } else {
+        walk_dir(&w, 0);
     }
-    closedir(d);
-    return *count;
+    free(w.full);
+    free(w.rel);
+    *acc = w.acc;
+    *count = w.count;
+    return w.incomplete;
 }
-#endif
 
 int extras_append(char* list, size_t cap, const char* path) {
     if (!list || !path || !path[0]) return 0;
@@ -715,17 +867,232 @@ int extras_next(const char** cursor, char* out, size_t out_size) {
     return 1;
 }
 
+/* `a` (its first `alen` bytes), then `b`, `c` and `d`, in a string the
+ * caller frees; NULL when out of memory. */
+static char* str_join4(const char* a, size_t alen, const char* b, const char* c,
+                       const char* d) {
+    size_t bl = strlen(b), cl = strlen(c), dl = strlen(d);
+    char* s = malloc(alen + bl + cl + dl + 1);
+    if (!s) return NULL;
+    memcpy(s, a, alen);
+    memcpy(s + alen, b, bl);
+    memcpy(s + alen + bl, c, cl);
+    memcpy(s + alen + bl + cl, d, dl + 1);
+    return s;
+}
+
+/* #2477: find `prog` the way the build's spawn will. A name with a directory
+ * part is taken as it stands; a bare name is searched along PATH
+ * (posix_spawnp on POSIX; _spawnvp on Windows, which also tries the current
+ * directory first and the .com/.exe/.bat/.cmd extensions of an extensionless
+ * name). Returns the file's path in a string the caller frees, NULL when
+ * nothing is found or memory runs out. Paths of any length (#2538): a PATH
+ * entry past 1 KB was cut, so the search could settle on another file than
+ * the spawn runs, and an upgrade of the real compiler left the key as it was. */
+static char* resolve_program(const char* prog) {
+    if (!prog || !prog[0]) return NULL;
+#ifdef _WIN32
+    static const char* const exts[] = { "", ".com", ".exe", ".bat", ".cmd" };
+    const char* base = prog;
+    for (const char* p = prog; *p; p++) {
+        if (*p == '/' || *p == '\\' || *p == ':') base = p + 1;
+    }
+    /* An extensionless name is tried with each extension only, as _spawnvp
+     * does: a bare `gcc` file (an MSYS shell script, say) is not run. */
+    int has_ext = strchr(base, '.') != NULL;
+    int ext_from = has_ext ? 0 : 1, ext_to = has_ext ? 1 : 5;
+    int has_dir = base != prog;
+    const char* path = has_dir ? "" : getenv("PATH");
+    /* Directory 0 is the name as given (the current directory for a bare
+     * name), then each PATH entry in order. */
+    const char* cursor = path ? path : "";
+    int first = 1;
+    while (first || *cursor) {
+        const char* dir = "";
+        size_t dlen = 0;
+        if (!first) {
+            dlen = strcspn(cursor, ";");
+            dir = cursor;
+            cursor += dlen;
+            if (*cursor == ';') cursor++;
+            if (dlen == 0) continue;
+        }
+        for (int e = ext_from; e < ext_to; e++) {
+            char* cand = first ? str_join4(prog, strlen(prog), exts[e], "", "")
+                               : str_join4(dir, dlen, "\\", prog, exts[e]);
+            if (!cand) return NULL;
+            struct stat st;
+            if (stat(cand, &st) == 0 && !(st.st_mode & S_IFDIR)) return cand;
+            free(cand);
+        }
+        if (first && has_dir) return NULL;
+        first = 0;
+    }
+    return NULL;
+#else
+    if (strchr(prog, '/')) {
+        if (access(prog, X_OK) != 0) return NULL;
+        return strdup(prog);
+    }
+    const char* path = getenv("PATH");
+    const char* cursor = path ? path : "/usr/bin:/bin";
+    for (;;) {
+        size_t len = strcspn(cursor, ":");
+        /* An empty PATH entry is the current directory. */
+        char* cand = len ? str_join4(cursor, len, "/", prog, "")
+                         : str_join4(".", 1, "/", prog, "");
+        if (!cand) return NULL;
+        struct stat st;
+        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode) && access(cand, X_OK) == 0)
+            return cand;
+        free(cand);
+        cursor += len;
+        if (*cursor != ':') break;
+        cursor++;
+    }
+    return NULL;
+#endif
+}
+
+/* #2477: the identity of the C compiler the build will run.
+ *
+ * The key covered the source, aetherc, ae, libaether and the flags, but not
+ * the C compiler. The same source built under a different gcc (another one
+ * first on PATH, an upgrade, $CC pointing elsewhere) was served the binary
+ * the previous compiler made, reported as a cache hit; a GCC 16 build handed
+ * back GCC 15's executable byte for byte, crash included.
+ *
+ * The selection mirrors build_gcc_cmd: $AE_CC / $CC verbatim (it may carry
+ * flags, or a launcher such as `ccache gcc`), else `gcc`, else on POSIX `cc`,
+ * else on Windows the WinLibs gcc ae installs. The spec string is folded in,
+ * and each word of it that names a program is resolved as the spawn will
+ * resolve it, folding the path and the file's content: another file is
+ * another compiler, and one upgraded in place has other bytes. Computed once
+ * per process; it reads the compiler driver once, about what hashing aetherc
+ * costs. The spec and its words are taken whole (#2538), where 1 KB copies
+ * left a longer one's tail out of the key. 0 when out of memory, which makes
+ * no key. */
+static unsigned long long c_compiler_fingerprint(void) {
+    static int done = 0;
+    static unsigned long long fp = 0;
+    if (done) return fp;
+    done = 1;
+    const char* spec = c_backend_env_override();
+    char* owned = NULL;
+    if (!spec) {
+        char* gcc = resolve_program("gcc");
+        if (gcc) {
+            spec = "gcc";
+            free(gcc);
+        } else {
+#ifdef _WIN32
+            const char* home = get_home_dir() ? get_home_dir() : "";
+            spec = owned = str_join4(home, strlen(home),
+                                     "\\.aether\\tools\\mingw64\\bin\\gcc.exe", "", "");
+            if (!owned) return 0;
+#else
+            spec = "cc";
+#endif
+        }
+    }
+    unsigned long long h = fnv64_str(spec);
+    const char* cursor = spec;
+    size_t spec_len = strlen(spec) + 1;
+    char* word = malloc(spec_len);
+    if (!word) { free(owned); return 0; }
+    while (extras_next(&cursor, word, spec_len)) {
+        if (word[0] == '-' || strchr(word, '=')) continue;
+        char* resolved = resolve_program(word);
+        if (!resolved) continue;
+        h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
+        h = (h * 1099511628211ULL) ^ fnv64_file(resolved);
+        /* The file found on PATH may be a trampoline whose bytes never
+         * change when the compiler behind it does: macOS's /usr/bin/gcc
+         * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
+         * Xcode update), a ccache masquerade directory. What the program
+         * says it is comes from the compiler that will actually run, so
+         * its first line of `--version` is folded in too; a program with
+         * no such line folds in nothing. */
+        char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
+        free(resolved);
+        if (!cmd) continue;
+        FILE* pipe = popen(cmd, "r");
+        free(cmd);
+        if (!pipe) continue;
+        char line[512];
+        if (fgets(line, sizeof(line), pipe)) {
+            h = (h * 1099511628211ULL) ^ fnv64_str(line);
+        }
+        pclose(pipe);
+    }
+    free(word);
+    free(owned);
+    fp = h ? h : 1ULL;
+    return fp;
+}
+
+/* The key text, grown as needed (#2538). It was built in 2 KB and cut at the
+ * end, and what fell past the cut never reached the key: with eight long
+ * --lib directories, or a hundred --extra files, the -D defines and the
+ * optimisation level at its end did not count, and a build with other
+ * defines was served the first one's binary. */
+typedef struct {
+    char* buf;
+    size_t len, cap;
+    int oom;
+} KeyText;
+
+static void key_append(KeyText* k, const char* fmt, ...) {
+    if (k->oom) return;
+    for (;;) {
+        va_list ap;
+        va_start(ap, fmt);
+        int n = k->buf ? vsnprintf(k->buf + k->len, k->cap - k->len, fmt, ap) : -1;
+        va_end(ap);
+        if (k->buf && n < 0) { k->oom = 1; return; }
+        if (k->buf && (size_t)n < k->cap - k->len) { k->len += (size_t)n; return; }
+        size_t ncap = k->cap ? k->cap * 2 : 2048;
+        while (n > 0 && ncap <= k->len + (size_t)n) ncap *= 2;
+        char* nb = realloc(k->buf, ncap);
+        if (!nb) { k->oom = 1; return; }
+        if (!k->buf) nb[0] = '\0';
+        k->buf = nb;
+        k->cap = ncap;
+    }
+}
+
+/* Set when the last compute_cache_key made no key only because a source
+ * tree walk could not see every file (#2538). The build can still have
+ * aetherc write a depfile, and the next key comes from that, with no walk. */
+static int s_key_walk_incomplete = 0;
+
+int cache_key_walk_incomplete(void) { return s_key_walk_incomplete; }
+
+/* A tree walk for the key; 0 (after --verbose says why) when it could not see
+ * every file. */
+static int key_hash_tree(const char* root, unsigned long long* acc, int* count) {
+    const char* why = hash_tree(root, acc, count);
+    if (!why) return 1;
+    if (tc.verbose) fprintf(stderr, "[cache] no key: %s %s\n", root, why);
+    s_key_walk_incomplete = 1;
+    return 0;
+}
+
 unsigned long long compute_cache_key(const char* ae_file,
                                             const char* extra_files,
                                             const char* opt_level,
                                             const char* extra_salt) {
+    s_key_walk_incomplete = 0;
+    /* A salt that could not be built (out of memory) would leave part of
+     * the build's identity out of the key: no key, as for an unread file. */
+    if (!extra_salt) return 0;
     unsigned long long src_hash = fnv64_file(ae_file);
     if (src_hash == 0) return 0;
     tc_seed_lib_dirs_from_env();
 
-    char key_buf[2048];
-    int pos = 0;
-    pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, "%016llx", src_hash);
+    KeyText key = { NULL, 0, 0, 0 };
+    int complete = 1;
+    key_append(&key, "%016llx", src_hash);
 
     /* The three toolchain binaries — aetherc (the compiler, which owns
      * codegen), the ae driver (owns the flags passed to the C compiler),
@@ -742,27 +1109,36 @@ unsigned long long compute_cache_key(const char* ae_file,
      * A hash of 0 (unreadable) folds in nothing rather than colliding. */
     struct stat st; (void)st;
     unsigned long long cc_hash = fnv64_file(tc.compiler);
-    if (cc_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":cc=%016llx", cc_hash);
+    if (cc_hash) key_append(&key, ":cc=%016llx", cc_hash);
     char self_path[1200];
     if (get_exe_path(self_path, sizeof(self_path))) {
         unsigned long long ae_hash = fnv64_file(self_path);
-        if (ae_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ae=%016llx", ae_hash);
+        if (ae_hash) key_append(&key, ":ae=%016llx", ae_hash);
     }
+    /* #2477: and the C compiler that turns aetherc's output into the binary. */
+    unsigned long long ccid = c_compiler_fingerprint();
+    if (!ccid) key.oom = 1;
+    key_append(&key, ":ccid=%016llx", ccid);
     if (tc.has_lib) {
         unsigned long long lib_hash = fnv64_file(tc.lib);
-        if (lib_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=%016llx", lib_hash);
+        if (lib_hash) key_append(&key, ":lib=%016llx", lib_hash);
         unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
         if (contrib_hash)
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":contrib=%016llx", contrib_hash);
+            key_append(&key, ":contrib=%016llx", contrib_hash);
     }
 
     if (extra_files && extra_files[0]) {
+        /* Any one path is no longer than the whole list (a 2 KB copy cut a
+         * longer one, which then named no file and hashed as 0). */
+        size_t list_len = strlen(extra_files) + 1;
+        char* tok = malloc(list_len);
+        if (!tok) key.oom = 1;
         const char* cursor = extra_files;
-        char tok[2048];
-        while (extras_next(&cursor, tok, sizeof(tok))) {
+        while (tok && extras_next(&cursor, tok, list_len)) {
             unsigned long long fh = fnv64_file(tok);
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%016llx", fh);
+            key_append(&key, ":%016llx", fh);
         }
+        free(tok);
     }
 
     /* #1882: exact dependencies from a prior build's depfile, in preference to
@@ -778,7 +1154,7 @@ unsigned long long compute_cache_key(const char* ae_file,
         cache_depfile_path(ae_file, depfile, sizeof(depfile));
         unsigned long long dep_acc = 1469598103934665603ULL;
         if (fold_depfile(depfile, &dep_acc)) {
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":deps=%016llx", dep_acc);
+            key_append(&key, ":deps=%016llx", dep_acc);
             used_depfile = 1;
         }
     }
@@ -803,22 +1179,21 @@ unsigned long long compute_cache_key(const char* ae_file,
      * rebuild; under-invalidating costs a wrong answer.
      */
     {
-        char entry_dir[1024];
-        snprintf(entry_dir, sizeof(entry_dir), "%s", ae_file);
-        char* cut = strrchr(entry_dir, '/');
+        /* The entry's directory and the cwd at any length (#2538). */
+        const char* cut = strrchr(ae_file, '/');
 #ifdef _WIN32
-        char* bcut = strrchr(entry_dir, '\\');
+        const char* bcut = strrchr(ae_file, '\\');
         if (!cut || (bcut && bcut > cut)) cut = bcut;
 #endif
-        if (cut) *cut = '\0';
-        else snprintf(entry_dir, sizeof(entry_dir), ".");
+        char* entry_dir = cut ? str_join4(ae_file, (size_t)(cut - ae_file), "", "", "")
+                              : str_join4(".", 1, "", "", "");
+        if (!entry_dir) key.oom = 1;
 
         unsigned long long src_tree = 0;
         int src_count = 0;
-        hash_lib_dir_entries(entry_dir, "", &src_tree, &src_count, 0);
-        if (src_count > 0) {
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
-                            ":src=%016llx", src_tree);
+        if (entry_dir && !key_hash_tree(entry_dir, &src_tree, &src_count)) complete = 0;
+        if (complete && src_count > 0) {
+            key_append(&key, ":src=%016llx", src_tree);
         }
 
         /* #1882: the WORKING DIRECTORY tree, when it is not the entry's own.
@@ -839,33 +1214,28 @@ unsigned long long compute_cache_key(const char* ae_file,
          * resolution root over.
          *
          * Skipped when cwd IS the entry dir, so the ordinary root-entry case
-         * does not hash the same tree twice. */
-        {
-            char cwd[1024];
-            if (getcwd(cwd, sizeof(cwd))) {
-                char entry_abs[1024];
-                int same = 0;
-                if (entry_dir[0] == '/' ) {
-                    same = (strcmp(entry_dir, cwd) == 0);
-                } else if (strcmp(entry_dir, ".") == 0) {
-                    same = 1;
-                } else {
-                    /* A relative entry_dir names a path UNDER cwd, so it can
-                     * only be the same directory when it resolves to it. */
-                    snprintf(entry_abs, sizeof(entry_abs), "%s/%s", cwd, entry_dir);
-                    same = (strcmp(entry_abs, cwd) == 0);
-                }
-                if (!same) {
-                    unsigned long long cwd_tree = 0;
-                    int cwd_count = 0;
-                    hash_lib_dir_entries(cwd, "", &cwd_tree, &cwd_count, 0);
-                    if (cwd_count > 0) {
-                        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
-                                        ":cwd=%016llx", cwd_tree);
-                    }
-                }
-            }
+         * does not hash the same tree twice. A relative entry dir other than
+         * "." names a directory under the cwd, never the cwd itself. */
+        char* cwd = (complete && entry_dir) ? cwd_dup() : NULL;
+        if (complete && entry_dir && !cwd) {
+            /* Not knowing the cwd is not knowing what resolves from it. */
+            if (tc.verbose)
+                fprintf(stderr, "[cache] no key: the working directory could not be read\n");
+            s_key_walk_incomplete = 1;
+            complete = 0;
         }
+        if (cwd) {
+            int same = cache_path_is_absolute(entry_dir) ? strcmp(entry_dir, cwd) == 0
+                                                         : strcmp(entry_dir, ".") == 0;
+            if (!same) {
+                unsigned long long cwd_tree = 0;
+                int cwd_count = 0;
+                if (!key_hash_tree(cwd, &cwd_tree, &cwd_count)) complete = 0;
+                else if (cwd_count > 0) key_append(&key, ":cwd=%016llx", cwd_tree);
+            }
+            free(cwd);
+        }
+        free(entry_dir);
     }
     }   /* end if (!used_depfile) — the entry-dir + cwd tree walk the depfile
          * replaces. The --lib identity below always runs. */
@@ -881,16 +1251,13 @@ unsigned long long compute_cache_key(const char* ae_file,
      * on create/delete/rename of an entry — NOT on an edit-in-place
      * to an existing file inside it (and NOT on `sed -i` of a file
      * *behind* a symlink that points outside the dir). For correct
-     * cache invalidation on module edits, we ALSO fold in the mtime
-     * of every top-level `.ae` entry in each lib dir, resolved
-     * through symlinks via `stat` (which follows; `lstat` would not).
-     * `stat` is the right call here precisely because the symlink
-     * case (#623) needs the target's mtime, not the link's. We cap
-     * the entry count per dir (256) so a runaway lib dir can't
-     * blow the cache-key buffer; the cap is well above any realistic
-     * stdlib/vendored-modules count. */
+     * cache invalidation on module edits, the content walk below folds
+     * in every source file in each lib dir, resolved through symlinks
+     * via `stat` (which follows; `lstat` would not). `stat` is the
+     * right call here precisely because the symlink case (#623) needs
+     * the target's content, not the link's. */
     if (tc.lib_dir_count == 0) {
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=(default)");
+        key_append(&key, ":lib=(default)");
         /* #1025 Bug A: with no --lib flag and no $AETHER_LIB_DIR, the compiler
          * still searches the default lib dir (module_add_lib_dir(
          * AETHER_DEFAULT_LIB_DIR) in aether_module.c) — the canonical
@@ -900,17 +1267,14 @@ unsigned long long compute_cache_key(const char* ae_file,
          * exactly as an explicit lib dir; no contribution when it's absent.
          * Content walk only when no depfile — the depfile records the lib files
          * actually read. */
-        if (!used_depfile) {
+        if (!used_depfile && complete) {
             unsigned long long entry_hash = 0;
             int n = 0;
-            hash_lib_dir_entries(AETHER_DEFAULT_LIB_DIR, "", &entry_hash, &n, 0);
-            if (n > 0) {
-                pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
-                                ":dlent=%d:dlh=%016llx", n, entry_hash);
-            }
+            if (!key_hash_tree(AETHER_DEFAULT_LIB_DIR, &entry_hash, &n)) complete = 0;
+            else if (n > 0) key_append(&key, ":dlent=%d:dlh=%016llx", n, entry_hash);
         }
     }
-    for (int i = 0; i < tc.lib_dir_count; i++) {
+    for (int i = 0; complete && i < tc.lib_dir_count; i++) {
         /* The lib-dir PATH IDENTITY (paths + order) is always part of the key,
          * depfile or not: two builds with different --lib sets or a different
          * --override (overrides join as lib dirs) are materially different even
@@ -918,12 +1282,10 @@ unsigned long long compute_cache_key(const char* ae_file,
          * on the entry source, so it cannot carry this distinction. Dropping it
          * on the depfile path let an `--override` build reuse the
          * non-overridden slot (#1882 depfile regression). */
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
-                        ":lib[%d]=%s", i, tc.lib_dirs[i]);
+        key_append(&key, ":lib[%d]=%s", i, tc.lib_dirs[i]);
         struct stat lst;
         if (stat(tc.lib_dirs[i], &lst) == 0) {
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
-                            ":lmt=%lld", (long long)lst.st_mtime);
+            key_append(&key, ":lmt=%lld", (long long)lst.st_mtime);
         }
         /* The CONTENT walk is what the depfile replaces (it records the lib
          * files actually read). Recurse the whole lib-dir tree only when there
@@ -932,18 +1294,17 @@ unsigned long long compute_cache_key(const char* ae_file,
         if (!used_depfile) {
             unsigned long long entry_hash = 0;
             int n = 0;
-            hash_lib_dir_entries(tc.lib_dirs[i], "", &entry_hash, &n, 0);
-            if (n > 0) {
-                pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
-                                ":lent=%d:lh=%016llx", n, entry_hash);
-            }
+            if (!key_hash_tree(tc.lib_dirs[i], &entry_hash, &n)) complete = 0;
+            else if (n > 0) key_append(&key, ":lent=%d:lh=%016llx", n, entry_hash);
         }
     }
 
-    snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%s:%s",
-             opt_level ? opt_level : "O0",
-             extra_salt ? extra_salt : "");
+    key_append(&key, ":%s:%s", opt_level ? opt_level : "O0",
+               extra_salt ? extra_salt : "");
 
-    unsigned long long h = fnv64_str(key_buf);
+    if (key.oom && tc.verbose) fprintf(stderr, "[cache] no key: out of memory\n");
+    unsigned long long h = (complete && !key.oom) ? fnv64_str(key.buf) : 0;
+    free(key.buf);
+    if (!complete || key.oom) return 0;
     return h ? h : 1ULL;
 }

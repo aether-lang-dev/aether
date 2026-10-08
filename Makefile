@@ -911,12 +911,6 @@ $(OBJ_DIR)/tools/ae_version.o: $(VERSION_HEADER)
 $(OBJ_DIR)/tools/ae.o: $(VERSION_HEADER)
 $(OBJ_DIR)/compiler/aetherc.o: $(VERSION_HEADER)
 
-# Dependency files (include test objects so header changes trigger test recompilation)
-DEPS = $(COMPILER_OBJS:.o=.d) $(RUNTIME_OBJS:.o=.d) $(STD_OBJS:.o=.d) $(COLLECTIONS_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(TOOLS_OBJS:.o=.d)
-
-# Include dependency files
--include $(DEPS)
-
 # Test files using TEST() macro system (exclude standalone tests)
 TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_main.c \
@@ -964,6 +958,14 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/compiler/test_module_orchestrator.c \
            tests/compiler/test_security.c \
            tests/compiler/test_slices.c
+
+# Dependency files, so a header change recompiles every object that includes
+# it, the tests' included. `-include` expands its list where it stands, so it
+# comes after TEST_SRC: above it, $(TEST_OBJS) was empty and a test object
+# built against an older header (an ActorBase without a new field) was linked
+# against a runtime built with the new one.
+DEPS = $(COMPILER_OBJS:.o=.d) $(COMPILER_LIB_OBJS:.o=.d) $(RUNTIME_OBJS:.o=.d) $(STD_OBJS:.o=.d) $(STD_REACTOR_OBJS:.o=.d) $(COLLECTIONS_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(TOOLS_OBJS:.o=.d)
+-include $(DEPS)
 
 # Standalone test programs with their own main() - build separately
 # These are not part of the main test suite but can be built manually

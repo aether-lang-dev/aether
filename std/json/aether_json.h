@@ -98,10 +98,18 @@ int json_object_size_raw(JsonValue* obj);
 const char* json_object_key_at(JsonValue* obj, int i);
 
 // Length of the key at index `i`, matching json_object_key_at(obj, i).
-// Returns -1 if `obj` is not a JSON_OBJECT or `i` is out of range.
-// Useful for callers that want to avoid an extra strlen; JSON per
-// RFC 8259 disallows embedded NULs in keys, so strlen is also correct.
+// Returns -1 if `obj` is not a JSON_OBJECT or `i` is out of range. A key
+// may contain U+0000 (written `\u0000`), so this, not strlen, is its length.
 int json_object_key_len_at(JsonValue* obj, int i);
+
+// json_object_key_at as a plain pointer, for copying a key whole with
+// json_object_key_len_at (#2469).
+const void* json_object_key_data_at(JsonValue* obj, int i);
+
+// A string value's payload and its length in bytes, which counts any
+// U+0000 inside it (#2469). NULL / -1 when `v` is not a JSON_STRING.
+const void* json_get_string_data(JsonValue* v);
+int json_get_string_length(JsonValue* v);
 
 // Value at index `i` — borrowed from the object. Returns NULL only
 // when `obj` is not a JSON_OBJECT or `i` is out of range. A valid

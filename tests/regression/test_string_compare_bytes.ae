@@ -1,0 +1,86 @@
+// Regression (#2515): `==`, `!=`, `<`, `<=`, `>`, `>=` on strings compare
+// by length and bytes. They compiled to strcmp, which stops at the first
+// NUL, so a string holding "x\0y" was equal to "x". A string comparison in
+// a function-clause guard compiled to a C pointer compare, so a guard
+// `when s == "bob"` missed every "bob" built at run time.
+//
+// Every string is built at run time from its parts, so nothing is folded.
+
+import std.string
+import std.bytes
+
+extern exit(code: int)
+
+// `a`, a NUL byte, then `b`.
+with_nul(a: string, b: string) -> string {
+    la = string.length(a)
+    lb = string.length(b)
+    buf = bytes.new(la + 1 + lb)
+    if la > 0 { bytes.copy_from_string(buf, 0, a, la) }
+    bytes.set(buf, la, 0)
+    if lb > 0 { bytes.copy_from_string(buf, la + 1, b, lb) }
+    return bytes.finish(buf, la + 1 + lb)
+}
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+kind(s: string) when s == "bob" -> int { return 1 }
+kind(s: string) when s > "m" -> int { return 2 }
+kind(s: string) -> int { return 0 }
+
+main() {
+    f = 0
+    xy = with_nul("x", "y")
+    xy2 = with_nul("x", "y")
+    xz = with_nul("x", "z")
+    x = string.concat("x", string.substring("q", 0, 0))
+
+    // Equality reads every byte.
+    f = f + check(!(xy == x), "x<NUL>y == x")
+    f = f + check(xy != x, "x<NUL>y != x")
+    f = f + check(xy == xy2, "x<NUL>y == another x<NUL>y")
+    f = f + check(!(xy != xy2), "x<NUL>y != another x<NUL>y")
+    f = f + check(!(xy == "x"), "x<NUL>y == the literal x")
+    f = f + check(xy != xz, "x<NUL>y != x<NUL>z")
+
+    // So does order: the longer string sorts after its prefix, and the
+    // bytes after the NUL decide between two equal prefixes.
+    f = f + check(xy > x && x < xy, "x<NUL>y orders after x")
+    f = f + check(xy >= x && !(xy <= x), "x<NUL>y >= x")
+    f = f + check(xy < xz && xz > xy, "x<NUL>y orders before x<NUL>z")
+    f = f + check(xy <= xy2 && xy >= xy2, "x<NUL>y <= and >= itself")
+
+    // Plain strings are unaffected.
+    abc = string.concat("ab", "c")
+    f = f + check(abc == "abc" && "abc" == abc, "abc == abc")
+    f = f + check("abc" < "abd" && "b" > "abc", "literal order")
+    f = f + check(abc != "abd", "abc != abd")
+
+    // A heap string against a literal, and a comparison with a temporary
+    // operand that is freed after it.
+    f = f + check(string.concat("x", "") == x, "a concat temporary == x")
+    f = f + check(string.concat(xy, "") != x, "a concat temporary keeps the NUL")
+
+    // Optional strings compare their values the same way.
+    let oa: string? = xy
+    let ob: string? = x
+    let oc: string? = xy2
+    f = f + check(!(oa == ob), "optional x<NUL>y == optional x")
+    f = f + check(oa == oc, "optional x<NUL>y == optional x<NUL>y")
+
+    // A guard compares strings by content, as any comparison does.
+    bob = string.concat(string.substring("bobby", 0, 2), "b")
+    f = f + check(kind(bob) == 1, "guard s == \"bob\" with a run-time bob")
+    f = f + check(kind(string.concat("z", "")) == 2, "guard s > \"m\" with a run-time z")
+    f = f + check(kind(with_nul("bob", "")) == 0, "guard s == \"bob\" with bob<NUL>")
+
+    if f > 0 {
+        println("FAIL: ${f} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

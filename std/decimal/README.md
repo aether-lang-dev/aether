@@ -22,7 +22,7 @@ main() {
 
     price, _e3 = decimal.from_string("19.99")
     qty = decimal.from_int(3)
-    total = decimal.multiply(price, qty)
+    total, _e5 = decimal.multiply(price, qty)
     println("3 x 19.99 = ${decimal.to_string(total)}")
 
     // Division cannot always be exact: it rounds half away from zero to 16
@@ -47,8 +47,12 @@ each:      19.99
 
 Values are immutable: every operation returns a new decimal and never touches
 its operands, and each result is the caller's to `free`. Operations that can
-fail, division by zero and a malformed string, return `(value, err)` with a
-null value on failure, so there is nothing to free when `err` is set.
+fail return `(value, err)` with a null value on failure, so there is nothing to
+free when `err` is set: `from_string` (a malformed string), the divisions
+(division by zero), and `multiply`, `shift`, `pow` and the divisions again when
+the result's exponent would leave the `int` range it is held in
+(`"decimal exponent out of range"`). Such an exponent is reported, never
+wrapped: `shift` of `1e2147483647` by one is an error, not `1e-2147483648`.
 
 This is a different type from `std.bignum`, not a wrapper over it in spirit:
 bignum is the integer coefficient underneath and has no fractional part, no

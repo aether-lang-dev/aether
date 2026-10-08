@@ -13,6 +13,7 @@
 // strtof, which obey LC_NUMERIC and therefore break machine text (JSON, wire
 // formats, round-trips) when Aether is embedded in a host that set a locale.
 #include "../../runtime/aether_locale_num.h"
+#include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -60,22 +61,32 @@ AetherString* string_new(const char* cstr) {
 }
 
 AetherString* string_new_with_length(const char* data, size_t length) {
-    /* Issue #343: cap-aware allocation. Both the struct and the data
-     * buffer are accounted; string_release frees both with their
-     * recorded sizes (sizeof(AetherString) and capacity), keeping
-     * the cap counter at current-usage rather than high-water-mark. */
-    AetherString* str = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    /* One block, the header then the payload (string_alloc_inline): one
+     * allocation instead of two, and the layout string_release recognises
+     * by construction. As two blocks, the payload could be the very block
+     * after the header (a size-class allocator hands out neighbours:
+     * LeakSanitizer's, macOS malloc), which string_release took for one
+     * block, freeing the header and leaking the payload. Accounted as one
+     * block of sizeof(AetherString) + capacity (#343). */
+    AetherString* str = string_alloc_inline(length);
     if (!str) return NULL;
-    char* buf = (char*)aether_caps_malloc(length + 1);
-    if (!buf) { aether_caps_free(str, sizeof(AetherString)); return NULL; }
-    str->magic = AETHER_STRING_MAGIC;
-    str->length = length;
-    str->capacity = length + 1;
-    str->data = buf;
-    if (data && length) memcpy(buf, data, length);
-    buf[length] = '\0';
-    str->ref_count = 1;
+    if (data && length) memcpy(str->data, data, length);
     return str;
+}
+
+/* The header of a payload allocated on its own (string_adopt_caps_buffer,
+ * fs.read): never the block right before the payload, which string_release
+ * would take, with it, for one block (`data == s + 1`) and free only the
+ * header of. Offered that block, keep it while taking another, which then
+ * cannot be it. */
+static AetherString* string_header_for(const char* buf) {
+    AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    if (s && (const char*)(s + 1) == buf) {
+        AetherString* other = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+        aether_caps_free(s, sizeof(AetherString));
+        s = other;
+    }
+    return s;
 }
 
 AetherString* string_empty(void) {
@@ -90,9 +101,9 @@ AetherString* string_empty(void) {
  * the zero-copy mint the string ops (concat/substring/upper/lower/trim)
  * use so they yield magic AetherStrings without the extra copy
  * string_new_with_length would make. */
-static AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
+AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     if (!buf) return NULL;
-    AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    AetherString* s = string_header_for(buf);
     if (!s) { aether_caps_free(buf, cap); return NULL; }
     s->magic = AETHER_STRING_MAGIC;
     s->ref_count = 1;
@@ -104,12 +115,18 @@ static AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t c
 
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str) {
-    if (str && is_aether_string(str)) ((AetherString*)str)->ref_count++;
+    if (!str || !is_aether_string(str)) return;
+    AetherString* s = (AetherString*)str;
+    /* A pinned string (a literal the compiler made static, #2520) is
+     * never freed, so it is not counted either. */
+    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;
+    s->ref_count++;
 }
 
 void string_release(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
+    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
     s->ref_count--;
     if (s->ref_count <= 0) {
         /* Cap accounting: data buffer was allocated with `capacity`
@@ -119,8 +136,9 @@ void string_release(const void* str) {
          *
          * A string from string_alloc_inline holds both in ONE block, with
          * `data` pointing just past the header, so freeing it separately
-         * would free an interior pointer. Recognised by position rather
-         * than by a flag: there is nothing to keep in sync. */
+         * would free an interior pointer. Recognised by position, which
+         * holds because no two-block string has its payload there
+         * (string_header_for). */
         if (s->data == (char*)(s + 1)) {
             aether_caps_free(s, sizeof(AetherString) + s->capacity);
         } else {
@@ -197,9 +215,15 @@ int string_char_at(const void* str, int index) {
     return (int)(unsigned char)str_data(str)[index];
 }
 
+/* By length and bytes, embedded NULs included. `==` and `!=` on strings
+ * compile to this (#2515), so it keeps a fast path: two plain C strings
+ * (literals, C returns) carry no length but their NUL, and strcmp settles
+ * them in one pass. */
 int string_equals(const void* a, const void* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
+    if (!is_aether_string(a) && !is_aether_string(b))
+        return strcmp((const char*)a, (const char*)b) == 0;
     size_t la = str_len(a), lb = str_len(b);
     if (la != lb) return 0;
     return memcmp(str_data(a), str_data(b), la) == 0;
@@ -218,6 +242,12 @@ int string_compare(const void* a, const void* b) {
     if (a == b) return 0;
     if (!a) return -1;
     if (!b) return 1;
+    /* `<`, `<=`, `>`, `>=` on strings compile to this (#2515); two plain C
+     * strings take strcmp, as in string_equals. */
+    if (!is_aether_string(a) && !is_aether_string(b)) {
+        int d = strcmp((const char*)a, (const char*)b);
+        return (d > 0) - (d < 0);
+    }
     size_t la = str_len(a), lb = str_len(b);
     size_t n = la < lb ? la : lb;
     if (n > 0) {
@@ -793,6 +823,204 @@ const char* aether_string_data(const void* s) {
     return str_data(s);
 }
 
+/* One print holds the stream's lock across all of its writes, as a single
+ * printf call does, so lines printed by two threads never interleave
+ * (#2521). The lock is recursive, so fwrite inside it is fine. A build
+ * without threads (WASM, bare metal) has nothing to interleave with, and
+ * its libc need not have the lock at all. */
+#if !AETHER_HAS_THREADS
+#define aether_stream_lock(f)   ((void)(f))
+#define aether_stream_unlock(f) ((void)(f))
+#elif defined(_WIN32)
+#define aether_stream_lock(f)   _lock_file(f)
+#define aether_stream_unlock(f) _unlock_file(f)
+#else
+#define aether_stream_lock(f)   flockfile(f)
+#define aether_stream_unlock(f) funlockfile(f)
+#endif
+
+/* Where aether_interp_format writes: a buffer, a stream, or nowhere (a
+ * sizing pass); `len` counts every byte offered. */
+typedef struct {
+    char* out;
+    size_t cap;
+    size_t len;
+    FILE* f;
+} InterpSink;
+
+static void interp_put(InterpSink* k, const char* p, size_t n);
+
+/* A plain %d / %u conversion (codegen writes no flags, width or precision)
+ * in decimal, as printf would, without a call into snprintf: interpolation
+ * is a hot path and most of its segments are integers. */
+static void interp_put_decimal(InterpSink* k, unsigned long long magnitude, int negative) {
+    char buf[24];
+    char* p = buf + sizeof(buf);
+    do {
+        *--p = (char)('0' + (int)(magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude);
+    if (negative) *--p = '-';
+    interp_put(k, p, (size_t)(buf + sizeof(buf) - p));
+}
+
+static void interp_put_signed(InterpSink* k, long long v) {
+    /* The magnitude in unsigned arithmetic, so LLONG_MIN is exact. */
+    if (v < 0) interp_put_decimal(k, 0ULL - (unsigned long long)v, 1);
+    else interp_put_decimal(k, (unsigned long long)v, 0);
+}
+
+static void interp_put(InterpSink* k, const char* p, size_t n) {
+    if (n == 0) return;
+    if (k->f) {
+        fwrite(p, 1, n, k->f);
+    } else if (k->out && k->len + 1 < k->cap) {
+        size_t room = k->cap - 1 - k->len;
+        memcpy(k->out + k->len, p, n < room ? n : room);
+    }
+    k->len += n;
+}
+
+/* Formats one numeric argument of type T with the conversion `sub` and
+ * offers it to the sink: on the stack when it fits, else on the heap, so
+ * no conversion is ever cut short. */
+#define INTERP_NUM(T) do {                                                  \
+        T v_ = va_arg(ap, T);                                               \
+        char small_[64];                                                    \
+        int n_ = snprintf(small_, sizeof(small_), sub, v_);                 \
+        if (n_ < 0) break;                                                  \
+        if ((size_t)n_ < sizeof(small_)) {                                  \
+            interp_put(&k, small_, (size_t)n_);                             \
+        } else {                                                            \
+            char* big_ = (char*)malloc((size_t)n_ + 1);                     \
+            if (big_) {                                                     \
+                snprintf(big_, (size_t)n_ + 1, sub, v_);                    \
+                interp_put(&k, big_, (size_t)n_);                           \
+                free(big_);                                                 \
+            } else {                                                        \
+                /* Out of memory: the sizing pass counted n_ bytes, so   \
+                 * the writing pass must produce n_ bytes too, or the    \
+                 * string's length covers bytes never written. The text  \
+                 * that fits, then spaces. */                             \
+                interp_put(&k, small_, sizeof(small_) - 1);                 \
+                for (size_t p_ = sizeof(small_) - 1; p_ < (size_t)n_; p_++) \
+                    interp_put(&k, " ", 1);                                 \
+            }                                                               \
+        }                                                                   \
+    } while (0)
+
+size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
+    InterpSink k = { out, cap, 0, f };
+    if (f) aether_stream_lock(f);
+    const char* p = fmt;
+    while (*p) {
+        if (*p != '%') {
+            const char* run = p;
+            while (*p && *p != '%') p++;
+            interp_put(&k, run, (size_t)(p - run));
+            continue;
+        }
+        const char* spec = p++;
+        if (*p == '%') { interp_put(&k, "%", 1); p++; continue; }
+        if (*p == 's') {
+            /* By length: an AetherString's bytes, a plain char* to its NUL. */
+            const void* s = va_arg(ap, const void*);
+            if (s) interp_put(&k, str_data(s), str_len(s));
+            else interp_put(&k, "(null)", 6);
+            p++;
+            continue;
+        }
+        if (*p == 'c') {
+            char c = (char)va_arg(ap, int);
+            interp_put(&k, &c, 1);
+            p++;
+            continue;
+        }
+        /* A numeric conversion, with its length modifier, as snprintf
+         * writes it. The spec is at most `%` + 2 modifiers + the letter. */
+        int longs = 0, long_double = 0, size_mod = 0;
+        while (*p == 'l' || *p == 'L' || *p == 'z') {
+            if (*p == 'l') longs++;
+            else if (*p == 'L') long_double = 1;
+            else size_mod = 1;
+            p++;
+        }
+        char conv = *p;
+        char sub[8];
+        size_t sl = (size_t)(p - spec) + 1;
+        if (!conv || sl >= sizeof(sub)) {
+            /* Not a conversion codegen writes: keep the text. */
+            interp_put(&k, spec, (size_t)(p - spec));
+            continue;
+        }
+        memcpy(sub, spec, sl);
+        sub[sl] = '\0';
+        p++;
+        switch (conv) {
+            case 'd': case 'i':
+                if (longs >= 2) interp_put_signed(&k, va_arg(ap, long long));
+                else if (longs == 1) interp_put_signed(&k, va_arg(ap, long));
+                else if (size_mod) interp_put_signed(&k, (long long)(ptrdiff_t)va_arg(ap, size_t));
+                else interp_put_signed(&k, va_arg(ap, int));
+                break;
+            case 'u':
+                if (longs >= 2) interp_put_decimal(&k, va_arg(ap, unsigned long long), 0);
+                else if (longs == 1) interp_put_decimal(&k, va_arg(ap, unsigned long), 0);
+                else if (size_mod) interp_put_decimal(&k, va_arg(ap, size_t), 0);
+                else interp_put_decimal(&k, va_arg(ap, unsigned int), 0);
+                break;
+            case 'x': case 'X': case 'o':
+                if (longs >= 2) INTERP_NUM(unsigned long long);
+                else if (longs == 1) INTERP_NUM(unsigned long);
+                else if (size_mod) INTERP_NUM(size_t);
+                else INTERP_NUM(unsigned int);
+                break;
+            case 'g': case 'G': case 'f': case 'F': case 'e': case 'E':
+                if (long_double) INTERP_NUM(long double);
+                else INTERP_NUM(double);
+                break;
+            default:
+                interp_put(&k, spec, sl);
+                break;
+        }
+    }
+    if (f) aether_stream_unlock(f);
+    if (out && cap > 0) out[k.len < cap ? k.len : cap - 1] = '\0';
+    return k.len;
+}
+
+#undef INTERP_NUM
+
+void* aether_interp_string(const char* fmt, va_list ap) {
+    /* Most interpolations are short: format once into the stack and copy,
+     * and only a result that outgrows it is formatted again, sized. */
+    char small[256];
+    va_list again;
+    va_copy(again, ap);
+    size_t len = aether_interp_format(small, sizeof(small), NULL, fmt, ap);
+    AetherString* owned = string_alloc_inline(len);
+    if (owned) {
+        char* dst = aether_string_mutable_data(owned);
+        if (len < sizeof(small)) memcpy(dst, small, len + 1);
+        else aether_interp_format(dst, len + 1, NULL, fmt, again);
+    }
+    va_end(again);
+    return owned;
+}
+
+size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline) {
+    aether_stream_lock(f);
+    if (n) fwrite(p, 1, n, f);
+    if (newline) fputc('\n', f);
+    aether_stream_unlock(f);
+    return n + (newline ? 1 : 0);
+}
+
+size_t aether_print_string(FILE* f, const void* s, int newline) {
+    if (!s) return aether_write_bytes(f, "(null)", 6, newline);
+    return aether_write_bytes(f, str_data(s), str_len(s), newline);
+}
+
 void* aether_string_raw_ptr(const void* s) {
     return (void*)str_data(s);
 }
@@ -828,6 +1056,7 @@ char* aether_string_mutable_data(void* s) {
 }
 
 AetherString* string_alloc_inline(size_t length) {
+    if (length > (size_t)-1 - sizeof(AetherString) - 1) return NULL;
     AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString) + length + 1);
     if (!s) return NULL;
     s->magic = AETHER_STRING_MAGIC;
@@ -1024,39 +1253,73 @@ AetherString* string_pad_end(const void* s, int total_width, int pad_char) {
 // The `_raw` variants take an out-parameter and return 1/0 for ok/fail.
 // The Aether-native Go-style wrappers `string.to_int` etc. in module.ae
 // call the `_try`/`_get` pairs below for a cleaner tuple-return shape.
-// Base-N integer parse. `radix` must be 2..36 (strtoll's accepted
-// range; same as C's strtol). No "0x" / "0b" prefix recognition — the
-// caller passes the digit-only substring (strtoll *does* honour an
-// "0x" prefix when radix is 0 or 16, but Aether callers historically
-// pass already-stripped substrings, and base-16 with surprise prefix
-// handling would be a footgun in things like CSV/HSV color parsing).
-// `out_value` is `long long*` (Aether `long` = int64) — same LLP64
-// safety as string_to_long_raw. Returns 1 on success, 0 on:
+// Base-N integer parse. `radix` must be 2..36. The accepted text is
+// exactly: an optional '-', one or more digits of the radix (0-9, then
+// a-z or A-Z for 10..35), then optional trailing ' ', '\t', '\n', '\r'.
+// No "0x" / "0b" prefix, no '+', no leading whitespace (#2472).
+//
+// Hand-rolled rather than strtoll, which accepts more than that: leading
+// whitespace, a '+' sign, and an "0x" prefix when radix is 16, so
+// to_int_radix("0x10", 16) came back as 16. Callers pass the digit-only
+// substring of things like CSV or color fields, where a surprise prefix
+// or sign is a footgun. The walk is bounded by the string's length, so an
+// embedded NUL is trailing garbage rather than a terminator.
+//
+// `out_value` is `long long*` (Aether `long` = int64), the same LLP64
+// safety as string_to_long_raw. The magnitude accumulates in unsigned
+// 64 bits against LLONG_MAX (or LLONG_MAX + 1 after a '-'), so the whole
+// int64 range parses, LLONG_MIN included, and anything past it is an
+// overflow. Returns 1 on success, 0 on:
 //   - null/empty input or null out_value
 //   - radix outside [2, 36]
-//   - no conversion (first char not a valid digit for the radix)
-//   - ERANGE overflow
-//   - trailing non-whitespace garbage
+//   - no digit, or a character that is not a digit of the radix
+//   - overflow of the int64 range
+//   - trailing garbage after the digits (whitespace is allowed)
 int string_to_int_radix_raw(const void* str, int radix, long long* out_value) {
-    const char* data = str_data(str);
-    if (!str || !data[0] || !out_value) return 0;
+    const char* p = str_data(str);
+    size_t len = str_len(str);
+    if (!str || len == 0 || !out_value) return 0;
     if (radix < 2 || radix > 36) return 0;
 
-    char* endptr;
-    errno = 0;
-    long long val = strtoll(data, &endptr, radix);
-
-    if (endptr == data || errno == ERANGE) {
-        return 0;
+    const char* end = p + len;
+    int negative = 0;
+    if (*p == '-') {
+        negative = 1;
+        p++;
     }
-    // Skip trailing whitespace; anything else is an error.
-    while (*endptr == ' ' || *endptr == '\t' || *endptr == '\n' || *endptr == '\r') {
-        endptr++;
+    unsigned long long limit = negative ? (unsigned long long)LLONG_MAX + 1ULL
+                                        : (unsigned long long)LLONG_MAX;
+    unsigned long long acc = 0;
+    const char* digits = p;
+    for (; p < end; p++) {
+        unsigned char c = (unsigned char)*p;
+        unsigned d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+        else break;
+        if (d >= (unsigned)radix) break;
+        if (acc > (limit - d) / (unsigned)radix) return 0;
+        acc = acc * (unsigned)radix + d;
     }
-    if (*endptr != '\0') return 0;
+    if (p == digits) return 0;
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p != end) return 0;
 
-    *out_value = val;
+    // Negate without overflowing: acc may be exactly LLONG_MAX + 1.
+    *out_value = negative ? (acc == 0 ? 0 : -(long long)(acc - 1) - 1)
+                          : (long long)acc;
     return 1;
+}
+
+/* Whether the number strtol / strtod read from `data` ends the whole of
+ * `str`, allowing trailing whitespace. Those parsers stop at a NUL, so the
+ * end is checked against the string's length, not against a terminator:
+ * "12\0" + "99" (5 bytes) used to read as 12 (#2469). */
+static int parsed_to_end(const void* str, const char* data, const char* endptr) {
+    const char* end = data + str_len(str);
+    while (endptr < end && isspace((unsigned char)*endptr)) endptr++;
+    return endptr == end;
 }
 
 int string_to_int_raw(const void* str, int* out_value) {
@@ -1072,9 +1335,8 @@ int string_to_int_raw(const void* str, int* out_value) {
         return 0;
     }
 
-    // Skip trailing whitespace
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;  // Trailing non-whitespace
+    // Trailing whitespace only, up to the string's length.
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = (int)val;
     return 1;
@@ -1097,8 +1359,7 @@ int string_to_long_raw(const void* str, long long* out_value) {
         return 0;
     }
 
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = val;
     return 1;
@@ -1118,8 +1379,7 @@ int string_to_float_raw(const void* str, float* out_value) {
         return 0;
     }
 
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = val;
     return 1;
@@ -1140,8 +1400,7 @@ int string_to_double_raw(const void* str, double* out_value) {
         return 0;
     }
 
-    while (*endptr && isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr != '\0') return 0;
+    if (!parsed_to_end(str, data, endptr)) return 0;
 
     *out_value = val;
     return 1;

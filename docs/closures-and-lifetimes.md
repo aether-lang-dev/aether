@@ -1,24 +1,19 @@
 # Closures and Environment Lifetimes
 
 This document covers how closure environments are allocated, captured,
-and freed, and the patterns that currently need workarounds. Earlier
-rounds of the closure/DSL feature shipped with four capture-handling and
-env-lifetime issues plus a chained typechecker hole that surfaced once
-those four were resolved. All five landed together in a single PR
-because testing any one in isolation was blocked by the others; they
-are fixed on main and documented below as the underlying mechanism.
-
-Three more closure-related bugs surfaced during the aether_ui toolkit
-work: emission-ordering for cross-referenced closures, nested-lambda
-return-type bubble-up, and captures across trailing blocks. All three
-are fixed on main.
+and freed: the eight capture and lifetime bugs that shaped the mechanism
+(fixed, and documented below as the mechanism itself), the reclamation
+rules shape by shape, and the patterns that still need a workaround.
+The ownership rules themselves are stated once in
+[`docs/memory-management.md`](memory-management.md) (string tracker,
+container values, closure arguments, closure environment lifetime); this
+document lists how each closure shape meets them.
 
 Five patterns are tracked, three around dynamic `call()` dispatch
 (L1, L2, L3), one correctness hazard in closures inside actor handlers
 (L4), and one memory-handling contract on closure-var reassignment
-(L5). L4 is now rejected at compile time with a clear error; the rest
-are documented with workarounds in the "Closure patterns and
-workarounds" section below.
+(L5). L4 is rejected at compile time with a clear error; the rest
+are documented in the "Closure patterns and workarounds" section below.
 
 Regression tests live at `tests/syntax/test_closure_*.ae` and
 `tests/integration/closure_*/`.
@@ -73,11 +68,14 @@ returned. The caller received a closure whose env was already freed.
 
 **Fix:** at return emission, walk the return expression to collect every
 closure variable that appears (including `box_closure` wrappers) and
-transitively any closure vars they capture. `emit_all_defers_protected`
-skips the matching env-free defers and emits a
-`/* deferred (suppressed: escapes via return) */` marker in their place.
-Ownership transfers to the caller, matching the documented contract for
-`box_closure`.
+transitively any closure vars they capture, and skip their env-free
+defers. Ownership transfers to the caller, matching the documented
+contract for `box_closure`.
+
+Since #2480 a returned closure local gets no env-free in the first place
+(a return is an escape to the scope-exit claim), and since #2494 a closure
+that captured another holds its own reference to it, so the return-site
+suppression was removed: it only leaked the captured env.
 
 ### 4. Closure return types hardcoded to `int`/`void`
 
@@ -161,28 +159,110 @@ Nearly all changes are in the codegen layer. The typechecker is unchanged.
 |---------|------|
 | Capture discovery, type resolution, return-type inference, `call()` node_type propagation | `compiler/codegen/codegen_expr.c` |
 | Mutated-capture write path (routes through `_env->`) | `compiler/codegen/codegen_stmt.c` |
-| Bug-3 return-defer protection | `compiler/codegen/codegen.c`, `codegen_stmt.c` |
+| Env claim and release of closure locals (`claim_closure_local_env`, the env scan) | `codegen_stmt.c` |
 | Small additions to `CodeGenerator` state | `compiler/codegen/codegen.h` |
 | New helpers on the public header | `compiler/codegen/codegen_internal.h` |
 
 ## Environment reclamation
 
-A capturing closure's environment is a heap allocation; two common
-lifetimes now reclaim it automatically (the canonical reference is
+A capturing closure's environment is a heap allocation, reference counted
+(#2494): every holder (the local it is bound to, each container slot,
+struct field, message field, global or state slot that keeps it, each env
+that captured it) holds one reference and gives it back when it lets go,
+and the last one tears the env down. The rules are stated in
 [`docs/memory-management.md`](memory-management.md) → "Closure environment
-lifetime"):
+lifetime"; shape by shape:
 
 - **Transient callback.** A capturing closure created inline and passed to
   a parameter that only *calls* it and neither stores nor returns it
   (`run(cb) { cb() }`) is dead once the call returns, so its env is freed
   right after the call. This is gated on a proven non-escape, invoking a
   closure parameter (`cb()`, an indirect-`call` node whose first child is
-  the callee) is not an escape, whereas a stored or returned closure
-  suppresses the drain so its env follows the owner.
+  the callee) is not an escape, nor is passing it on to a function whose
+  body only calls it (`it(cb) { it_impl(cb) }`), whereas a stored or
+  returned closure suppresses the drain so its env follows the owner. An
+  extern has no body to read, so a closure passed to one is kept unless
+  the extern declares the parameter `@noescape` (used only during the
+  call, #2523): the std seq combinators, `fs.walk` and `string_list_sort`
+  do, so their callbacks are released after the call like any transient
+  callback.
 
-- **Stored in a list.** A closure value stored into a list is heap-boxed
-  (the `fn → ptr` coercion) and the list owns the box; `list.free` now
-  reclaims the captured env as well as the box (`owned_flags == 2`).
+- **Stored in a list or a map.** A closure value stored into a list or a
+  map is heap-boxed (the `fn -> ptr` coercion, or an explicit
+  `box_closure(f)` at the store, which is the same store) and the
+  container owns the box and a reference of its own to the env (#2518),
+  both released when the element leaves (`list.remove`, `list.clear`, a
+  closure set over the slot, `map.remove`, a put over the key, `free`).
+  A literal or a handed-over call result stored this way is released
+  right after the store; a local stored this way keeps its own reference
+  and releases it at scope end.
+
+- **Kept in a struct field, a message field, a global or an actor's
+  state (#2525).** Each such holder has a reference of its own to the env,
+  the way a struct owns its string fields (#2497): a store takes one (a
+  fresh closure's is adopted, a view of one held elsewhere, a local, a
+  parameter, another field, is retained), overwriting the slot and
+  destroying the holder release it, and a copy retains. So `h = Holder {
+  cb: build("a") }; h.cb = build("b")` releases both environments, `b = a`
+  and a struct passed or returned by value share the closure through two
+  references, a fixed-size array field of such structs releases every
+  element, a message's closure field is released with the message once
+  the handler is done (a handler that keeps it in state retained its
+  own), and a global or state slot gives back the env it held when
+  rebound. The closure local stored into a field still releases its own
+  reference at scope end. A local bound to a field read (`x = h.cb`) and
+  a closure a named function returns from a field hold references of
+  their own, so the struct may go first. A `fn[N]` field holds a reference
+  per element, a local array of such structs owns its elements, an
+  actor's closure state is released with the actor (its `destroy_state`
+  hook, run once when the scheduler ends it), a reply's closure fields are
+  the asker's (the one it reads out) or released with the reply, and a
+  closure literal handed to a function that stores it in a field is
+  released by the caller after the call (#2528).
+
+- **Bound to a local.** `g = || { ... }` frees its env when the local's
+  scope ends, through `_closure_env_N_free`, provided every use of `g`
+  leaves no copy behind: calling it, passing it to a user function whose
+  parameter is only called or passed on the same way, or capturing it in
+  a closure, or storing it where the holder takes a reference of its own
+  (a list, a map, a struct field, a message field, a global, actor state,
+  #2480). Rebinding the local to a new closure frees the env it replaces.
+  A return, an alias, an argument to an extern parameter not marked
+  `@noescape` or to a function that keeps it, or a binding to anything
+  but a fresh closure leaves the env to the value's holder.
+
+- **Captured by another closure.** An env is reference-counted (#2494):
+  the value's owner holds one reference and every env that captured the
+  closure takes one, given back by its destructor (which is what every
+  owner calls to free an env). So a closure captured by another can be
+  freed by its own scope while the capturer, wherever it went, keeps it.
+
+- **Returned to a caller.** A function whose every `return` hands back a
+  closure nothing else holds (a closure literal, a local whose only
+  escape is the return, or another such function's result) gives its
+  reference to the caller, and a local bound to its result is freed like
+  a local bound to a literal (#2494). Passed to a call whose parameter
+  keeps nothing, anywhere in an expression (`x = take(make_counter())`),
+  it is freed after that call (#2506, #2507); thrown away, it is freed at
+  once.
+
+- **Handed on, then rebound.** A local whose value is handed on (stored,
+  returned, aliased) stops owning it right before the statement that does
+  it; `_envown_<name>` records it, and the closures the local is bound to
+  afterwards are still freed (#2506). The statement may be a condition, a
+  loop whose body does not rebind the local, a statement with a trailing
+  block, or a `defer`, whose deferred statement is the point (#2507).
+
+- **Capturing a struct.** A struct that owns strings is captured as a copy
+  with strings of its own (`<Name>_dup`), destroyed with the env (#2504),
+  so the declaring scope's destroy cannot free what a returned or stored
+  closure reads. A struct the closure writes is a shared cell instead.
+
+- **In a receive arm.** A handler (and a timeout arm) is a defer scope
+  (#2498): its defers, cell releases, env frees and struct destroys run
+  when the handler ends. A struct local stored into actor state, or
+  its strings (a closure that captured it has its own copy, #2504). A
+  state field summed in a loop is written as the field (#2505).
 
 ## Mutated-capture cell lifetime
 
@@ -205,8 +285,24 @@ an escape walk could prove no env outlived the scope, and every shape the
 walk could not see through — a callback passed inside a tuple destructure,
 a closure owned and freed by an extern — leaked one cell per call.)
 
-The count is a plain integer, like the string reference count it mirrors:
-a closure env is not shared between threads.
+The count is atomic, as the env count is: an env that holds the cell can
+be released on a worker thread while the declaring scope releases its own
+reference on another. A string cell owns a refcounted string: a store
+takes the value as an owning slot does (a fresh value adopted, a local
+moved or copied, a view copied), and a plain owned buffer (an `@heap`
+extern's strdup) becomes a refcounted copy on the way in, so the cell's
+last release frees every value it was ever given; a literal is stored as
+it is and never freed.
+
+A fixed-size array the closure writes (`arr[i] = v`, `arr[i]++`, a whole
+`arr = [...]`) is a cell too (#2474): a pointer to the whole array,
+`int (*arr)[3]`, so `(*arr)`, which every use of a promoted name reads,
+is the array itself, and indexing, `.len`, passing it as a slice and
+nested closures read it as they read the array. A string array's cell
+owns its elements, as a string cell owns its one: a store frees the
+element it replaces and takes a buffer of its own, and the last release
+frees every element. An actor's state array is not a capture: a closure
+in a handler that writes one is refused, as for any state field.
 
 A cell first assigned inside a loop body or an if-arm is hoisted ahead of
 that loop or branch like any other such variable (#2024): declared as the
@@ -220,28 +316,13 @@ matching defer scope, so a cell, or a heap string, declared in the block
 is reclaimed at the end of the block rather than at the end of the
 enclosing function.
 
-Two shapes defeat these paths and leak the env — both bit `std.spec`
-(#1577):
-
-- **Forwarding a `fn` parameter.** The transient-callback drain fires
-  only when the callee *calls* its `fn` parameter. Passing it on to
-  another function (`it(cb) { it_impl(cb) }`) is an escape from the
-  callee's point of view, so the caller keeps the env alive forever.
-  Restructure so the exported function invokes the parameter itself —
-  split the shared logic into begin/end halves around the `call()` if
-  needed (that is exactly how `std.spec`'s `it`/`it_within` are built).
-
-- **Explicit `box_closure()` into a list.** The list-owns-the-env path
-  is keyed off the `fn → ptr` coercion at the `list.add` call site.
-  `list.add(l, box_closure(f))` hands the list a raw pointer it cannot
-  know it owns; nothing reclaims box or env. Add the `fn` value
-  directly (`list.add(l, f)`) and the owned coercion does the boxing
-  and the reclamation.
-
-Still a leak (the safe side of the leak-vs-UAF trade): **L5 below**,
-reassigning a closure *variable* drops the previous env, because without
-whole-program escape analysis the codegen can't prove the old env is
-unreachable (it may be aliased through a `box_closure` copy).
+Two shapes used to defeat these paths and leak the env (both bit
+`std.spec`, #1577): a `fn` parameter passed on to another function
+(`it(cb) { it_impl(cb) }`), which the callee walk counted as kept by its
+kind before reading the callee's body, and `list.add(l, box_closure(f))`,
+which stored a raw pointer the list did not know it owned. Both are the
+ordinary shapes now: the callee's body decides, and the explicit box is
+the store `list.add(l, f)` is.
 
 ## Closure patterns and workarounds
 
@@ -275,7 +356,7 @@ int — through either form of the call:
 ```aether,fragment
 string greeting = call(h)
 string again = h()
-ptr p = call(y, 5)
+let p: ptr = call(y, 5)
 float f = y(9)
 ```
 
@@ -287,6 +368,18 @@ told so at the site:
 warning: the closure called here has no known result type, so 'r' is
 assumed int; declare the binding's type (e.g. `string r = call(...)`) for
 any other result
+```
+
+A closure that only passes such a call through, `|| { return call(f, x) }`,
+has no result type of its own either. A typed use of it gives it one (#2484):
+`let r: ptr = call(g)` or `return call(g)` from a `-> ptr` function types
+`g`'s return, so the pointer is not cut to an int on the way out. A closure
+that never meets such a use (one handed to an extern, or returned through
+`-> fn`) is typed int and warned about at its `return`; bind the inner
+result with its type and return that:
+
+```aether,fragment
+task = || { let r: ptr = call(f, item); return r }
 ```
 
 Before #2054 the typed form was refused as a type mismatch and the untyped
@@ -337,33 +430,34 @@ writes compile to `self->field = ...`. Medium-sized codegen change;
 until it lands, the compile-time rejection prevents silent wrong
 answers.
 
-### L5. Closure-var reassignment leaks the previous env
+### L5. Closure-var reassignment leaked the previous env
 
 ```aether,fragment
 op = |x: int| { return x + 1 }
-op = |x: int| { return x * 2 }  // old env (malloc'd) is leaked
+op = |x: int| { return x * 2 }  // a capturing old env used to leak here
 ```
 
-When a closure variable is reassigned, the auto-defer-free fires only
-on the first assignment (to avoid double-free at scope exit, since
-reassignment overwrites `.env` in the variable). The previous env's
-heap block is unreachable, leaked.
+Fixed for locals whose value never leaves the scope (#2480): an escape
+walk over the function proves every use of the variable is a call or an
+argument to a parameter that keeps nothing, and then each rebinding frees
+the env it replaces and scope exit frees the last one.
 
-**Why not just free on reassignment:** the old env may still be
-reachable via a `box_closure()` copy or another closure's transitive
-capture. Without escape analysis we can't tell if it's safe to free,
-so we lean safe (leak) over unsafe (UAF).
+The old env may still be reachable via a `box_closure()` copy; the
+variable stops owning it right before that statement (#2506), so the
+replaced env is left to the copy while later bindings are freed. A
+hand-off inside a nested closure body (another C function, which cannot
+reach the flag) or around a rebinding of the variable in the same
+statement still keeps every env of the variable. A closure that captured the old value holds
+its own reference to it (#2494), so it is no reason to keep the env.
 
-Paired tests pin this trade-off:
+Paired tests pin this:
 
 - `tests/syntax/test_closure_reassign_leaks_env.ae` 100-iteration
   reassignment loop exits cleanly.
 - `tests/syntax/test_closure_reassign_after_box.ae` box_closure'd
   copy survives reassignment of the source variable.
-
-**Proper fix:** escape analysis. Track whether a closure variable has
-been captured or stored anywhere before the reassignment; if not, free
-on reassignment. Larger change; deferred.
+- `tests/integration/closure_local_env_free` counts env and cell
+  allocations against frees for owned and escaping shapes.
 
 ## Why the UI calculator works
 

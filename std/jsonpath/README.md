@@ -171,7 +171,9 @@ Everything in RFC 9535:
 Notable conformance details the suite checks and this implementation gets
 right: `length()` counts Unicode *codepoints*, not bytes; `match()`/`search()`
 use I-Regexp semantics (RFC 9485), where `.` means `[^\n\r]`; integers are
-constrained to the I-JSON safe range; `-0` and leading zeros are rejected;
+constrained to the I-JSON safe range, ±(2^53−1), and a slice keeps that whole
+range when it is applied (`[::4294967297]` steps past the end, not by 1);
+`-0` and leading zeros are rejected;
 and `<=`/`>=` hold for unordered types via their equality half
 (`null <= null` is true, `null < null` is false).
 

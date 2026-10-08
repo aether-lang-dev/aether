@@ -235,5 +235,52 @@ main() {
     }
     print("PASS: match_strings unsupported fallback\n")
 
+    // 6. Regressions, each counted rather than exiting so one fixed bug
+    // cannot hide another. A differing explicit script is not a
+    // base-language match: zh-Hant must fall through to the default, not
+    // get zh-Hans.
+    bad = 0
+    sup_script = seq2("en", "zh-Hans")
+    defer string_seq_free(sup_script)
+    m_script = language.matcher_create(sup_script)
+    defer language.matcher_free(m_script)
+    res_script = language.match_strings(m_script, "zh-Hant")
+    if string_equals(res_script, "en") != 1 {
+        print("FAIL: match_strings zh-Hant vs [en, zh-Hans], got ${res_script}\n")
+        bad = bad + 1
+    }
+    // A range with no script still takes the base-language fallback.
+    res_noscript = language.match_strings(m_script, "zh-TW")
+    if string_equals(res_noscript, "zh-Hans") != 1 {
+        print("FAIL: match_strings zh-TW vs [en, zh-Hans], got ${res_noscript}\n")
+        bad = bad + 1
+    }
+
+    // Equal q keeps the client's order (a stable sort).
+    sup_order = seq2("fr", "en")
+    defer string_seq_free(sup_order)
+    m_order = language.matcher_create(sup_order)
+    defer language.matcher_free(m_order)
+    res_order = language.match_strings(m_order, "en;q=0.5, fr;q=0.5, de")
+    if string_equals(res_order, "en") != 1 {
+        print("FAIL: match_strings equal q order, got ${res_order}\n")
+        bad = bad + 1
+    }
+
+    // q=0 means "not acceptable" (RFC 7231): en;q=0 must not be chosen.
+    sup_q0 = seq2("de", "en")
+    defer string_seq_free(sup_q0)
+    m_q0 = language.matcher_create(sup_q0)
+    defer language.matcher_free(m_q0)
+    res_q0 = language.match_strings(m_q0, "fr, en;q=0")
+    if string_equals(res_q0, "de") != 1 {
+        print("FAIL: match_strings q=0, got ${res_q0}\n")
+        bad = bad + 1
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    print("PASS: match_strings script mismatch, equal-q order, q=0\n")
+
     print("\nAll PASS\n")
 }

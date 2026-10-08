@@ -14,7 +14,8 @@
 #
 # Checks:
 #   1. both symbols are exported by the native library
-#   2. a C host dlopen()s it: aether_main runs main() (args seen, an ask/reply
+#   2. a C host loads it (dlopen, LoadLibrary on Windows): aether_main runs
+#      main() (args seen, an ask/reply
 #      answered, 42 returned) and returns while the slow workers are still
 #      busy; a second aether_main is rejected (-1); aether_main_exit drains the
 #      workers before it returns, and is idempotent; aether_main runs again
@@ -43,9 +44,7 @@ AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] emit_lib_keeps_main on Windows (the host uses POSIX dlopen)"
-        exit 0 ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     Darwin) LIB_EXT=".dylib" ;;
     *)      LIB_EXT=".so" ;;
 esac
@@ -57,8 +56,14 @@ pass=0; fail=0
 ok()  { echo "  [PASS] $1"; pass=$((pass + 1)); }
 bad() { echo "  [FAIL] $1"; fail=$((fail + 1)); }
 
-# Dynamic symbols, portably: GNU nm -D, else macOS nm -gU (leading '_').
+# Dynamic symbols, portably: a DLL's export table (objdump -p), GNU nm -D,
+# else macOS nm -gU (leading '_').
 syms() {
+    case "$1" in
+        *.dll)
+            objdump -p "$1" 2>/dev/null | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p'
+            return ;;
+    esac
     s="$(nm -D --defined-only "$1" 2>/dev/null || true)"
     [ -n "$s" ] || s="$(nm -gU "$1" 2>/dev/null || true)"
     printf '%s\n' "$s"

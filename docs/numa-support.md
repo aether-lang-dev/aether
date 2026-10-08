@@ -56,6 +56,13 @@ void* aether_numa_alloc(size_t size, int node);
 // Free NUMA-allocated memory
 void aether_numa_free(void* ptr, size_t size);
 
+// Allocate on a NUMA node, aligned to `align` (actors use 64); the heap
+// fallback is _aligned_malloc on Windows and posix_memalign elsewhere
+void* aether_numa_alloc_aligned(size_t size, size_t align, int node);
+
+// Free memory from aether_numa_alloc_aligned (and nothing else)
+void aether_numa_free_aligned(void* ptr, size_t size);
+
 // Cleanup
 void aether_numa_cleanup(void);
 ```

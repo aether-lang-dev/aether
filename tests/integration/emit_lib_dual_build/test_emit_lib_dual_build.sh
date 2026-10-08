@@ -9,16 +9,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_dual_build on Windows"; exit 0 ;;
-esac
-case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     *)      LIB_EXT=".so" ;;
 esac
 
 TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
 pass=0; fail=0
+
+# A library's exported symbols, one " T <name>" per line: a DLL's export
+# table (objdump -p) on Windows, else nm -g.
+lib_syms() {
+    case "$1" in
+        *.dll) objdump -p "$1" 2>/dev/null \
+                   | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/s/.* \([^ ]*\)$/ T \1/p' ;;
+        *)     nm -g "$1" 2>/dev/null ;;
+    esac
+}
 
 # (a) --emit=both should produce both artifacts in a single invocation.
 cd "$SCRIPT_DIR"
@@ -51,12 +58,12 @@ else
         echo "  [FAIL] --emit=both produced no shared library"
         ls -la "$TMPDIR" | head -10
         fail=$((fail + 1))
-    elif nm -g "$BOTH_LIB" 2>/dev/null | grep -qE " T _?aether_greet$"; then
+    elif lib_syms "$BOTH_LIB" | grep -qE " T _?aether_greet$"; then
         echo "  [PASS] --emit=both lib exports aether_greet"
         pass=$((pass + 1))
     else
         echo "  [FAIL] --emit=both lib missing aether_greet symbol"
-        nm -g "$BOTH_LIB" 2>/dev/null | head -20
+        lib_syms "$BOTH_LIB" | head -20
         fail=$((fail + 1))
     fi
 fi
@@ -95,17 +102,17 @@ else
     else
         # aether_greet present? (macOS nm prefixes symbols with `_`, Linux
         # nm does not. `nm -g` is the portable "external symbols only" flag;
-        # grep matches either prefix form.)
-        if nm -g "$LIB_PATH" 2>/dev/null | grep -qE " T _?aether_greet$"; then
+        # grep matches either prefix form. A DLL's are its export table.)
+        if lib_syms "$LIB_PATH" | grep -qE " T _?aether_greet$"; then
             echo "  [PASS] lib artifact exports aether_greet"
             pass=$((pass + 1))
         else
             echo "  [FAIL] aether_greet symbol missing from lib"
-            nm -g "$LIB_PATH" 2>/dev/null | head -20
+            lib_syms "$LIB_PATH" | head -20
             fail=$((fail + 1))
         fi
         # main absent?
-        if nm -g "$LIB_PATH" 2>/dev/null | grep -qE " T _?main$"; then
+        if lib_syms "$LIB_PATH" | grep -qE " T _?main$"; then
             echo "  [FAIL] lib artifact has 'main' symbol — should be suppressed"
             fail=$((fail + 1))
         else

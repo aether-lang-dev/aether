@@ -534,14 +534,26 @@ int cryptography_base64_decode_raw(const char* b64) {
     unsigned char* out = (unsigned char*)aether_caps_malloc(out_alloc);
     if (!out) return 0;
 
+    /* Whitespace (line-wrapped input) is skipped. `=` is padding only: it
+     * may appear only after the last data character, at most twice, and
+     * padded input must come to a multiple of 4. A data length of 1 mod 4
+     * cannot be produced by any encoder, and the bits left over after the
+     * last whole byte must be zero, so every input has one meaning. All
+     * three used to pass: `=` was skipped anywhere ("Zm9v=Zm9v" decoded to
+     * "foofoo"), "Z" decoded to nothing, and "Zh==" to the same byte as
+     * "Zg==", each with no error. */
     unsigned acc = 0;
     int nbits = 0;
     size_t o = 0;
-    for (size_t i = 0; i < in_len; i++) {
+    size_t data_chars = 0, pad_chars = 0;
+    int bad = 0;
+    for (size_t i = 0; i < in_len && !bad; i++) {
         unsigned char c = in[i];
-        if (c == '=' || c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '=') { pad_chars++; continue; }
         int v = ae_b64_value(c);
-        if (v < 0) { aether_caps_free(out, out_alloc); return 0; }
+        if (v < 0 || pad_chars > 0) { bad = 1; break; }   /* data after padding */
+        data_chars++;
         acc = (acc << 6) | (unsigned)v;
         nbits += 6;
         if (nbits >= 8) {
@@ -549,6 +561,12 @@ int cryptography_base64_decode_raw(const char* b64) {
             if (o < out_alloc) out[o++] = (unsigned char)((acc >> nbits) & 0xFF);
         }
     }
+    if (!bad && (data_chars % 4 == 1 || pad_chars > 2 ||
+                 (pad_chars > 0 && (data_chars + pad_chars) % 4 != 0) ||
+                 (acc & ((1u << nbits) - 1u)) != 0)) {
+        bad = 1;
+    }
+    if (bad) { aether_caps_free(out, out_alloc); return 0; }
 
     g_b64_buf = out;
     g_b64_cap = out_alloc;

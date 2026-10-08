@@ -1,0 +1,273 @@
+// Issue #2496: a `match` arm whose body is a `{ ... }` block never yielded
+// its final expression. In `m = match x { 1 -> { t = ...; t } _ -> "other" }`
+// the block ran, but nothing assigned `t` to `m`: the binding kept its
+// previous value (unset on a first binding), with no diagnostic, and the
+// string the block built leaked.
+//
+// Pre-fix every check below that reads a block arm's value sees null (or
+// the value from before), and the struct case reads a freed struct. Post-fix
+// a block arm yields its last expression (or a nested match, whose arms then
+// yield for the outer one) to the result, taken as any binding takes a value
+// (#2461): a local of the block moved out, a field of a block-local struct
+// copied before the block releases the struct, a fresh value adopted. The
+// block's other statements, a statement-position match among them, do not
+// touch the result, and the block's defers run after its value is taken.
+// The rounds at the end check that nothing leaks.
+
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Rec {
+    name: string
+}
+
+var defers_run = 0
+var held: ptr = null
+
+fn check(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+fn check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+// Hand out the free slots of the test strings' size and hold them until the
+// next churn, so a value freed out from under its reader reads as "zz".
+fn churn(n: int) {
+    if held != null {
+        list.free(held)
+    }
+    held = list.new()
+    i = 0
+    while i < 2000 {
+        list.add(held, "zz-${n}")
+        i = i + 1
+    }
+}
+
+fn decl_block(x: int, a: string) -> string {
+    m = match x {
+        1 -> {
+            t = string.concat(a, "-one")
+            t
+        }
+        _ -> "other"
+    }
+    return m
+}
+
+fn reassign_loop(a: string) -> string {
+    m = "start"
+    i = 0
+    while i < 6 {
+        m = match i % 3 {
+            0 -> {
+                t = "z${i}-${a}"
+                t
+            }
+            1 -> "lit"
+            _ -> {
+                u = string.concat(m, "+")
+                u
+            }
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn return_block(x: int, a: string) -> string {
+    return match x {
+        1 -> {
+            t = string.concat(a, "-r")
+            t
+        }
+        _ -> {
+            "dflt"
+        }
+    }
+}
+
+fn int_block(x: int) -> int {
+    k = match x {
+        1 -> {
+            y = x * 10
+            y + 1
+        }
+        2 -> 5
+        _ -> {
+            0
+        }
+    }
+    return k
+}
+
+fn struct_block(x: int, a: string) -> Rec {
+    r = match x {
+        1 -> {
+            local = Rec { name: string.concat(a, "-s") }
+            local
+        }
+        2 -> Rec { name: "lit" }
+        _ -> {
+            keep = Rec { name: string.concat(a, "-k") }
+            other = keep
+            other
+        }
+    }
+    return r
+}
+
+fn struct_reassign(a: string) -> string {
+    r = Rec { name: "start" }
+    i = 0
+    while i < 4 {
+        r = match i % 2 {
+            0 -> {
+                fresh = Rec { name: "e${i}-${a}" }
+                fresh
+            }
+            _ -> Rec { name: "o${i}-${a}" }
+        }
+        i = i + 1
+    }
+    return string.concat(r.name, "")
+}
+
+fn nested(x: int, y: int, a: string) -> string {
+    m = match x {
+        1 -> {
+            match y {
+                1 -> string.length(a)
+                _ -> string.length("unused")
+            }
+            inner = match y {
+                1 -> {
+                    q = string.concat(a, "-in")
+                    q
+                }
+                _ -> "in-other"
+            }
+            match y {
+                1 -> string.concat(inner, "-x")
+                _ -> {
+                    "tail-other"
+                }
+            }
+        }
+        _ -> "outer-other"
+    }
+    return m
+}
+
+fn with_defer(x: int, a: string) -> string {
+    m = match x {
+        1 -> {
+            t = string.concat(a, "-d")
+            defer defers_run = defers_run + 1
+            t
+        }
+        _ -> "nodefer"
+    }
+    return m
+}
+
+fn field_of_block_struct(x: int, a: string) -> string {
+    m = match x {
+        1 -> {
+            local = Rec { name: string.concat(a, "-f") }
+            local.name
+        }
+        _ -> "lit"
+    }
+    churn(x)
+    return m
+}
+
+fn local_still_used(x: int, a: string) -> string {
+    t = string.concat(a, "-u")
+    m = match x {
+        1 -> {
+            note = string.concat(t, "!")
+            if string.length(note) == 0 {
+                exit(1)
+            }
+            t
+        }
+        _ -> "no"
+    }
+    return string.concat(m, t)
+}
+
+fn run_all(n: int) {
+    a = "a${n}"
+    check("decl block", decl_block(1, a), "a${n}-one")
+    check("decl expression arm", decl_block(2, a), "other")
+    check("reassign in loop", reassign_loop(a), "lit+")
+    check("return block", return_block(1, a), "a${n}-r")
+    check("return block, literal", return_block(2, a), "dflt")
+    check_int("int block", int_block(1), 11)
+    check_int("int expression arm", int_block(2), 5)
+    check_int("int block literal", int_block(3), 0)
+    r1 = struct_block(1, a)
+    r2 = struct_block(2, a)
+    r3 = struct_block(3, a)
+    churn(n)
+    check("struct block", r1.name, "a${n}-s")
+    check("struct expression arm", r2.name, "lit")
+    check("struct block alias", r3.name, "a${n}-k")
+    check("struct reassign", struct_reassign(a), "o3-a${n}")
+    check("nested", nested(1, 1, a), "a${n}-in-x")
+    check("nested other", nested(1, 2, a), "tail-other")
+    check("nested outer", nested(2, 1, a), "outer-other")
+    before = defers_run
+    check("defer", with_defer(1, a), "a${n}-d")
+    check_int("defer ran", defers_run, before + 1)
+    check("field of block struct", field_of_block_struct(1, a), "a${n}-f")
+    check("local still used", local_still_used(1, a), "a${n}-ua${n}-u")
+}
+
+main() {
+    run_all(7)
+    // Checked where the heap count is exact (mem.heap_in_use_exact:
+    // Windows, a sanitizer's allocator): after a warm-up, steady rounds of
+    // work that leaks nothing do not grow it. glibc's and macOS's statistics
+    // also count cached freed blocks, which settle over many rounds; there
+    // the macOS leaks gate, which runs this program, is the leak check.
+    if mem.heap_in_use_exact() {
+        k = 0
+        while k < 20 {
+            run_all(7)
+            k = k + 1
+        }
+        first_bytes = mem.heap_in_use()
+        k = 0
+        while k < 20 {
+            run_all(7)
+            k = k + 1
+        }
+        mid_bytes = mem.heap_in_use()
+        k = 0
+        while k < 20 {
+            run_all(7)
+            k = k + 1
+        }
+        last_bytes = mem.heap_in_use()
+        if mid_bytes - first_bytes > 4096 && last_bytes - mid_bytes > 4096 {
+            println("FAIL: both 20-round windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+            exit(1)
+        }
+    }
+    list.free(held)
+    println("=== test_issue2496_match_block_value: all passed ===")
+}

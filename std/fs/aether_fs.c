@@ -9,7 +9,7 @@
 #if !AETHER_HAS_FILESYSTEM
 // Stubs when filesystem is unavailable (WASM, embedded)
 File* file_open_raw(const char* p, const char* m) { (void)p; (void)m; return NULL; }
-char* file_read_all_raw(File* f) { (void)f; return NULL; }
+AetherString* file_read_all_raw(File* f) { (void)f; return NULL; }
 int file_write_raw(File* f, const char* d, int l) { (void)f; (void)d; (void)l; return 0; }
 int file_close(File* f) { (void)f; return 0; }
 int file_fd_raw(File* f) { (void)f; return -1; }
@@ -248,14 +248,13 @@ File* file_open_raw(const char* path, const char* mode) {
     return file;
 }
 
-/* Grow-and-read an open stream to EOF into a caller-owned, NUL-terminated
- * buffer. Used as the fallback when the fast size-based path can't work:
- * `/proc` and `/sys` seq-files report size 0 from ftell, and pipes/sockets
- * aren't seekable at all — the size-based path would silently return an empty
- * string. Returns NULL on OOM. Cap-aware via aether_caps_realloc; the caller
- * frees the result with plain libc free per the caller-owned-return contract
- * (#1116). */
-static char* read_stream_to_eof(FILE* fp) {
+/* Grow-and-read an open stream to EOF into a caller-owned AetherString.
+ * Used as the fallback when the fast size-based path can't work: `/proc`
+ * and `/sys` seq-files report size 0 from ftell, and pipes/sockets aren't
+ * seekable at all, and the size-based path would silently return an empty
+ * string. Returns NULL on OOM or a read error (#1116). Cap-aware via
+ * aether_caps_realloc; the grown buffer becomes the string's payload. */
+static AetherString* read_stream_to_eof(FILE* fp) {
     size_t cap = 65536;   /* one page-ish chunk; grows as needed */
     size_t len = 0;
     char* buffer = (char*)aether_caps_malloc(cap);
@@ -274,10 +273,16 @@ static char* read_stream_to_eof(FILE* fp) {
     }
     if (ferror(fp)) { aether_caps_free(buffer, cap); return NULL; }
     buffer[len] = '\0';
-    return buffer;
+    /* Adopt the buffer as the payload: `capacity` is what was allocated,
+     * which is what string_release gives back. */
+    return string_adopt_caps_buffer(buffer, len, cap);
 }
 
-char* file_read_all_raw(File* file) {
+/* The whole file as a refcounted AetherString carrying its byte count, so
+ * fs.read returns every byte of a file with a NUL in it (#2469). It was a
+ * bare `char*`, which the Aether side measured with strlen: a 5-byte
+ * "ab\0cd" read back as "ab", with no error. */
+AetherString* file_read_all_raw(File* file) {
     if (!file || !file->is_open) return NULL;
 
     FILE* fp = (FILE*)file->handle;
@@ -291,11 +296,10 @@ char* file_read_all_raw(File* file) {
         long size = ftell(fp);
         if (size > 0 && fseek(fp, 0, SEEK_SET) == 0) {
             /* Cap-aware (#343): file size is OS-supplied and unbounded.
-             * Caller frees with plain libc free per the caller-owned-return
-             * contract — counter drifts up on this path, same as
-             * string_concat. */
-            char* buffer = (char*)aether_caps_malloc((size_t)size + 1);
-            if (!buffer) return NULL;
+             * One block for header and payload, read in place. */
+            AetherString* out = string_alloc_inline((size_t)size);
+            if (!out) return NULL;
+            char* buffer = out->data;
             errno = 0;
             size_t read = fread(buffer, 1, (size_t)size, fp);
             /* Report a failed or short read instead of returning what we got.
@@ -313,13 +317,13 @@ char* file_read_all_raw(File* file) {
                      * between ftell and fread. Keep what we read rather than
                      * failing; NUL-terminate at the real length. */
                     buffer[read] = '\0';
-                    return buffer;
+                    out->length = read;
+                    return out;
                 }
-                aether_caps_free(buffer, (size_t)size + 1);
+                string_release(out);
                 return NULL;
             }
-            buffer[read] = '\0';
-            return buffer;
+            return out;
         }
         /* size <= 0 or re-seek failed: rewind (best-effort) and stream. */
         fseek(fp, 0, SEEK_SET);
@@ -998,14 +1002,19 @@ char* fs_readlink_raw(const char* path) {
     BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, rp, (DWORD)buf_bytes, &got, NULL);
     CloseHandle(h);
     char* out = NULL;
-    if (ok && rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+    /* A junction's buffer is the symlink layout without the Flags word, so
+     * its path buffer starts where Flags would be. */
+    const WCHAR* pb = NULL;
+    if (ok && rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) pb = rp->PathBuffer;
+    else if (ok && rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) pb = (const WCHAR*)&rp->Flags;
+    if (pb) {
         const wchar_t* name;
         int len;
         if (rp->PrintNameLength > 0) {
-            name = rp->PathBuffer + rp->PrintNameOffset / sizeof(WCHAR);
+            name = pb + rp->PrintNameOffset / sizeof(WCHAR);
             len = rp->PrintNameLength / sizeof(WCHAR);
         } else {
-            name = rp->PathBuffer + rp->SubstituteNameOffset / sizeof(WCHAR);
+            name = pb + rp->SubstituteNameOffset / sizeof(WCHAR);
             len = rp->SubstituteNameLength / sizeof(WCHAR);
             if (len >= 4 && wcsncmp(name, L"\\??\\", 4) == 0) { name += 4; len -= 4; }
         }
@@ -1057,9 +1066,15 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
     return strdup(out);
 }
-/* 1 when `path` is a symbolic link itself, not what it points at: the
- * directory entry's reparse tag says so without opening anything. A
- * junction or any other reparse point is not a symlink. */
+/* 1 when `path` is a link itself, not what it points at: the directory
+ * entry's reparse tag says so without opening anything. A link here is any
+ * name-surrogate reparse point, a symbolic link or a junction (a mount
+ * point): both redirect path resolution to another name, which is what a
+ * caller asking this question has to know. Counting only symlinks let
+ * archive extraction write through a junction (`mklink /J`, which needs no
+ * privilege) to a directory outside its destination. Other reparse points
+ * (deduplication, cloud placeholders) are not name surrogates and stay
+ * ordinary files. */
 int fs_is_symlink(const char* path) {
     if (!path) return 0;
     if (!aether_sandbox_check("fs_read", path)) return 0;
@@ -1072,7 +1087,7 @@ int fs_is_symlink(const char* path) {
     if (h == INVALID_HANDLE_VALUE) return 0;
     FindClose(h);
     return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-           fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK;
+           IsReparseTagNameSurrogate(fd.dwReserved0);
 }
 int fs_is_socket(const char* p) { (void)p; return 0; }
 /* Remove a file or a symlink, never a directory — the POSIX contract. A
@@ -1283,9 +1298,7 @@ int fs_stat_raw(const char* path, int* out_kind,
 #ifndef _WIN32
     if (aether_lstat64(path, &st) != 0) {
 #else
-    // Windows CRT has no lstat; _stati64 follows symlinks, but Windows
-    // symlinks already go through a different code path we stub out
-    // (fs_is_symlink returns 0). Good enough for v1.
+    // Windows CRT has no lstat; _stati64 follows a link to its target.
     if (aether_stat64(path, &st) != 0) {
 #endif
         if (out_kind)  *out_kind  = 0;
@@ -3556,13 +3569,23 @@ char* path_rel(const char* base, const char* target) {
     }
     /* `bi` is at the first byte of the unmatched base remainder,
      * `ti` at the first byte of the unmatched target remainder. */
-    /* Count remaining base segments → that many ".." */
+    /* Count remaining base segments → that many "..". A remaining base
+     * segment that is itself ".." (only possible as a leading segment of a
+     * relative path, once cleaned) names a directory above the shared root
+     * whose name is unknown, so no relative path reaches target from there:
+     * no answer, as Go's filepath.Rel. Climbing it with another ".." gave
+     * rel("../a", "b") = "../../b", which joined onto base is "../../b",
+     * not "b". */
     size_t up = 0;
     {
         size_t p = bi;
         while (p < bl) {
+            size_t seg = p;
             up++;
             while (p < bl && !path_is_sep(cb[p])) p++;
+            if (p - seg == 2 && cb[seg] == '.' && cb[seg + 1] == '.') {
+                free(cb); free(ct); return NULL;
+            }
             if (p < bl) p++;
         }
     }
@@ -3600,16 +3623,10 @@ char* path_rel(const char* base, const char* target) {
  * is malloc'd by _aether_box_closure and OWNED by the callee. */
 typedef struct { void (*fn)(void); void* env; } AeFsClosure;
 
-extern void aether_closure_env_free(void* env);
-
-static void fs_closure_free(void* box) {
-    if (!box) return;
-    AeFsClosure* clo = (AeFsClosure*)box;
-    /* #1398: through the env's own destructor, so the references its string
-     * captures own are released, not just the struct. */
-    if (clo->env) aether_closure_env_free(clo->env);
-    free(box);
-}
+/* The callback is read only during the walk: `fs_walk_raw`'s `cb` is
+ * declared `@noescape` (#2523), so the box is the caller's stack and the
+ * env the caller's to release once the walk returns. Nothing here frees
+ * either. */
 
 /* Walk paths are built into one shared heap buffer (append the entry name,
  * recurse, truncate back) so recursion costs no per-level path storage. */
@@ -3707,18 +3724,12 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
 }
 
 int fs_walk_raw(const char* root, void* cb_box) {
-    if (!root || !cb_box) { fs_closure_free(cb_box); return -1; }
-    if (!aether_sandbox_check("fs_read", root)) {
-        fs_closure_free(cb_box);
-        return -1;
-    }
+    if (!root || !cb_box) return -1;
+    if (!aether_sandbox_check("fs_read", root)) return -1;
     size_t rlen = strlen(root);
-    if (rlen == 0 || rlen >= FS_WALK_PATH_CAP) {
-        fs_closure_free(cb_box);
-        return -1;
-    }
+    if (rlen == 0 || rlen >= FS_WALK_PATH_CAP) return -1;
     int root_kind = fs_walk_stat_kind(root);
-    if (root_kind == 0) { fs_closure_free(cb_box); return -1; }
+    if (root_kind == 0) return -1;
 
     AeFsClosure clo = *(AeFsClosure*)cb_box;
     int (*cb)(void*, const char*, int, int) =
@@ -3727,7 +3738,7 @@ int fs_walk_raw(const char* root, void* cb_box) {
     /* #462: the path buffer goes through the capability allocator like the
      * rest of the module's traversal storage. */
     char* buf = (char*)aether_caps_malloc(FS_WALK_PATH_CAP);
-    if (!buf) { fs_closure_free(cb_box); return -1; }
+    if (!buf) return -1;
     memcpy(buf, root, rlen + 1);
     /* Trim trailing separators so joined paths don't double the slash. */
     while (rlen > 1 && buf[rlen - 1] == '/') buf[--rlen] = '\0';
@@ -3739,7 +3750,6 @@ int fs_walk_raw(const char* root, void* cb_box) {
     }
 
     aether_caps_free(buf, FS_WALK_PATH_CAP);
-    fs_closure_free(cb_box);
     return count;
 }
 

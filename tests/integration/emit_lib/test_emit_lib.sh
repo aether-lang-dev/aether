@@ -1,9 +1,7 @@
 #!/bin/sh
-# Test: --emit=lib produces a .so/.dylib with aether_<name> symbols that
-# a C host can dlopen and call with the correct ABI.
-#
-# Skips on Windows (no dlopen; the test needs to be rewritten with
-# LoadLibrary/GetProcAddress for that platform).
+# Test: --emit=lib produces a .so/.dylib/.dll with aether_<name> symbols
+# that a C host can load (dlopen, or LoadLibrary on Windows) and call with
+# the correct ABI.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -11,17 +9,11 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 pass=0
 fail=0
 
-# Skip on Windows — different dlopen API + different library extension.
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib on Windows (uses POSIX dlopen)"
-        exit 0
-        ;;
-esac
-
-# Platform: Linux uses .so, macOS uses .dylib
+# Platform: Linux uses .so, macOS .dylib, Windows .dll (which needs no -ldl)
+LDL="-ldl"
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll"; LDL="" ;;
     *)      LIB_EXT=".so" ;;
 esac
 
@@ -52,14 +44,15 @@ else
         fail=$((fail + 1))
     else
         # Step 2: compile the C consumer
-        if ! gcc "$SCRIPT_DIR/consume.c" -ldl -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
+        # shellcheck disable=SC2086
+        if ! gcc "$SCRIPT_DIR/consume.c" $LDL -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
             echo "  [FAIL] gcc could not compile consume.c"
             cat "$TMPDIR/gcc.log"
             fail=$((fail + 1))
         else
             # Step 3: run the consumer against the library
             if "$TMPDIR/consume" "$LIB_PATH" >"$TMPDIR/run.out" 2>&1; then
-                echo "  [PASS] aether_* symbols callable via dlopen"
+                echo "  [PASS] aether_* symbols callable through the loaded library"
                 pass=$((pass + 1))
             else
                 echo "  [FAIL] consume reported an error"

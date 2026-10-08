@@ -226,17 +226,11 @@ StringSeq* string_seq_drop(StringSeq* s, int n) {
  * `AeClosureBox` in aether_collections.c. */
 typedef struct { void (*fn)(void); void* env; } AeSeqClosure;
 
-/* Reclaim a boxed closure handed in through a `ptr`-typed parameter.
- * `_aether_box_closure` malloc'd both the box and (for a capturing
- * closure) the env it points at; ownership transferred to us, so we
- * free env first, then the box. NULL-safe — a non-capturing closure
- * has env == NULL, and an absent callback has box == NULL. */
-static void seq_closure_free(void* box) {
-    if (!box) return;
-    AeSeqClosure* clo = (AeSeqClosure*)box;
-    if (clo->env) free(clo->env);
-    free(box);
-}
+/* The callback parameters are declared `@noescape` (#2523): the box and
+ * the env it points at are the caller's, read here only during the call
+ * and released by the caller once it returns. Nothing below frees them;
+ * doing so here used to skip the env's destructor, so the cells and
+ * strings a capturing closure held leaked on every call. */
 
 void string_seq_each(StringSeq* s, void* f) {
     if (!f) return;
@@ -249,7 +243,6 @@ void string_seq_each(StringSeq* s, void* f) {
         body(clo.env, (const char*)cur->head);
         cur = cur->tail;
     }
-    seq_closure_free(f);
 }
 
 StringSeq* string_seq_map(StringSeq* s, void* f) {
@@ -278,7 +271,6 @@ StringSeq* string_seq_map(StringSeq* s, void* f) {
         string_release(mapped);
         if (!cell) {
             string_seq_free(reversed);
-            seq_closure_free(f);
             return NULL;
         }
         /* cons retained `reversed`; drop our local so the new cell is
@@ -289,7 +281,6 @@ StringSeq* string_seq_map(StringSeq* s, void* f) {
     }
     StringSeq* result = string_seq_reverse(reversed);
     string_seq_free(reversed);
-    seq_closure_free(f);
     return result;
 }
 
@@ -307,7 +298,6 @@ StringSeq* string_seq_filter(StringSeq* s, void* pred) {
             StringSeq* cell = string_seq_cons((const char*)cur->head, reversed);
             if (!cell) {
                 string_seq_free(reversed);
-                seq_closure_free(pred);
                 return NULL;
             }
             string_seq_free(reversed);
@@ -317,7 +307,6 @@ StringSeq* string_seq_filter(StringSeq* s, void* pred) {
     }
     StringSeq* result = string_seq_reverse(reversed);
     string_seq_free(reversed);
-    seq_closure_free(pred);
     return result;
 }
 
@@ -335,7 +324,6 @@ void* string_seq_reduce(StringSeq* s, void* init, void* f) {
         acc = step(clo.env, acc, (const char*)cur->head);
         cur = cur->tail;
     }
-    seq_closure_free(f);
     return acc;
 }
 
@@ -353,7 +341,6 @@ void string_seq_zip_each(StringSeq* a, StringSeq* b, void* f) {
         ca = ca->tail;
         cb = cb->tail;
     }
-    seq_closure_free(f);
 }
 
 void* string_seq_to_array(StringSeq* s) {

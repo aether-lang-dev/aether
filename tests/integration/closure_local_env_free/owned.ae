@@ -1,0 +1,184 @@
+// #2480 probe: closures bound to locals whose value never leaves the scope.
+// Every env built here must be freed exactly once, and every promoted cell
+// with it. test_closure_local_env_free.sh builds this with env_count.h
+// force-included and checks the counts; on its own it checks the values.
+
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+apply(f: fn) { f() }
+
+apply_n(n: int, f: fn) {
+    i = 0
+    while i < n {
+        f()
+        i = i + 1
+    }
+}
+
+// Recursion passes the parameter on without keeping it.
+apply_rec(n: int, f: fn) {
+    if n > 0 {
+        f()
+        apply_rec(n - 1, f)
+    }
+}
+
+// Captures an int and a cell, invoked directly.
+basic(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    g()
+    g()
+    return total
+}
+
+// Captures a heap string: the env owns a reference to it.
+captures_string(p: string) -> int {
+    s = string.concat(p, "-suffix")
+    n = 0
+    g = || { n = n + string.length(s) }
+    g()
+    return n
+}
+
+// Handed to parameters that only call it.
+passed_to_callers(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    apply(g)
+    apply_n(3, g)
+    apply_rec(2, g)
+    call(g)
+    return total
+}
+
+// One closure per iteration: each rebinding frees the env it replaces,
+// through `continue` and `break` too.
+per_iteration(n: int) -> int {
+    total = 0
+    i = 0
+    while i < n {
+        k = i
+        g = || { total = total + k }
+        i = i + 1
+        if k == 2 {
+            continue
+        }
+        g()
+        if k == 6 {
+            break
+        }
+    }
+    return total
+}
+
+// Rebound to a different closure: the first env is freed at the rebinding.
+rebound(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    g()
+    g = || { total = total + a * 10 }
+    g()
+    return total
+}
+
+// A local closure capturing another: both envs are freed.
+captured_by_local(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    h = || {
+        g()
+        g()
+    }
+    h()
+    apply(h)
+    return total
+}
+
+// Captured by a closure literal passed to a caller that does not keep it.
+captured_by_argument(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    apply(|| { g() })
+    apply_n(2, || { g() })
+    return total
+}
+
+// Declared in a branch; freed on the early return as well.
+early_return(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    g()
+    if a > 3 {
+        h = || { total = total + 100 }
+        h()
+        return total
+    }
+    return total
+}
+
+// A deferred call runs before the env is freed.
+deferred_call(a: int) -> int {
+    total = 0
+    g = || { total = total + a }
+    defer g()
+    g()
+    return total
+}
+
+// Declared inside a closure body, which is its own C function.
+nested_body(a: int) -> int {
+    total = 0
+    outer = || {
+        inner = || { total = total + a }
+        inner()
+        inner()
+    }
+    outer()
+    return total
+}
+
+run_round(r: int) -> int {
+    sum = 0
+    sum = sum + basic(r)
+    sum = sum + captures_string("ab")
+    sum = sum + passed_to_callers(r)
+    sum = sum + per_iteration(9)
+    sum = sum + rebound(r)
+    sum = sum + captured_by_local(r)
+    sum = sum + captured_by_argument(r)
+    sum = sum + early_return(r)
+    sum = sum + deferred_call(r)
+    sum = sum + nested_body(r)
+    return sum
+}
+
+main() {
+    check("basic", basic(3), 6)
+    check("captures_string", captures_string("ab"), 9)
+    check("passed_to_callers", passed_to_callers(2), 14)
+    check("per_iteration", per_iteration(9), 19)
+    check("rebound", rebound(2), 22)
+    check("captured_by_local", captured_by_local(2), 8)
+    check("captured_by_argument", captured_by_argument(2), 6)
+    check("early_return small", early_return(2), 2)
+    check("early_return big", early_return(5), 105)
+    check("deferred_call", deferred_call(4), 4)
+    check("nested_body", nested_body(3), 6)
+    total = 0
+    r = 0
+    while r < 50 {
+        total = total + run_round(r % 7)
+        r = r + 1
+    }
+    println("owned ok ${total}")
+}

@@ -58,11 +58,21 @@ number.bytes(1070000000, number.BYTES_SI, "de-DE")   // "1,07 GB"  (locale decim
 ```
 
 The mantissa is shown to 3 significant figures (2 fraction digits under 10, 1
-under 100, 0 at/above 100) — the convention Finder / Nautilus /
+under 100, 0 at/above 100), the convention Finder, Nautilus and
 `ByteCountFormatter` use, so `1_070_000_000` is `1.07 GB`, not `1.070 GB` or
-`1 GB` — and its decimal separator follows `locale`. A count below one unit is
-a plain integer (`512 B`, no grouping). `bytes_si` / `bytes_iec` are en-US
-convenience forms.
+`1 GB`. Its decimal separator follows `locale`. The value is rounded
+(half up, exactly, in integers) before the precision and unit are chosen, so a
+carry moves on with it: `9_999` is `10.0 KB` and `999_999` is `1.00 MB`, not
+`10.00 KB` or `1000 KB`. A count below one unit is a plain integer (`512 B`,
+no grouping). Every `long` renders, `INT64_MIN` included (`-9.22 EB`).
+`bytes_si` / `bytes_iec` are en-US convenience forms.
+
+## Exponents in decimal strings
+
+The `*_string` functions accept an exponent (`1.5e3`, `2E-4`) of at most
+1,000,000 in magnitude. The expansion is written out digit by digit, so the
+exponent is also its length; a larger one is rejected with
+`"exponent out of range"` rather than wrapped into a small one.
 
 ## Exports
 

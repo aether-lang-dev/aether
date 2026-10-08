@@ -277,6 +277,11 @@ jobs:
       # See ci.yml::ci-windows for why SSL_CERT_FILE is exported here.
       # Hardcoded probe paths in aether_http.c don't match the GitHub
       # runner's MSYS2 install location.
+      # AE_SWEEP_RESOURCE_TRACE logs each shell test as it starts, so a
+      # sweep killed outright (exit code 2304, #2479) leaves the tests that
+      # were in flight named in the log.
+      env:
+        AE_SWEEP_RESOURCE_TRACE: "1"
       run: |
         export SSL_CERT_FILE="$(cygpath -w /${{ matrix.root }}/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"

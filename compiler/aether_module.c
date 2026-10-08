@@ -40,6 +40,10 @@ typedef struct { char* path; int found; int is_read; } DepEntry;
 static DepEntry* g_deps = NULL;
 static int g_dep_count = 0, g_dep_cap = 0;
 static int g_dep_recording = 0;
+/* Set when a path could not be recorded (out of memory). The manifest is
+ * then incomplete, and a key built from it would not change when the
+ * missing file does, so module_dep_write writes none (#2537). */
+static int g_dep_incomplete = 0;
 
 void module_dep_recording_enable(void) { g_dep_recording = 1; }
 
@@ -60,13 +64,18 @@ static void dep_record(const char* path, int found, int is_read) {
         if (is_read) e->is_read = 1;
         return;
     }
+    /* A dropped entry under-invalidates: an edit to a file the manifest does
+     * not name leaves the key as it was. So a failure here poisons the whole
+     * manifest rather than losing one line of it. */
     if (g_dep_count == g_dep_cap) {
         int ncap = g_dep_cap ? g_dep_cap * 2 : 32;
         DepEntry* nd = realloc(g_deps, (size_t)ncap * sizeof(DepEntry));
-        if (!nd) return;   /* best-effort: a dropped entry over-invalidates, never under */
+        if (!nd) { g_dep_incomplete = 1; return; }
         g_deps = nd; g_dep_cap = ncap;
     }
-    g_deps[g_dep_count].path = strdup(path);
+    char* copy = strdup(path);
+    if (!copy) { g_dep_incomplete = 1; return; }
+    g_deps[g_dep_count].path = copy;
     g_deps[g_dep_count].found = found;
     g_deps[g_dep_count].is_read = is_read;
     g_dep_count++;
@@ -80,9 +89,21 @@ int module_probe(const char* path) {
 
 void module_dep_record_read(const char* path) { dep_record(path, 1, 1); }
 
+/* On any failure (an incomplete recording, a file that cannot be opened or
+ * written in full) there is no manifest at `out_path` afterwards, not even
+ * the previous build's: ae then keys on the source tree. A partial or stale
+ * manifest would name fewer files than the build read, and an edit to one
+ * it leaves out would be served from the cache (#2537). */
 int module_dep_write(const char* out_path) {
+    if (g_dep_incomplete) {
+        remove(out_path);
+        return 1;
+    }
     FILE* f = fopen(out_path, "w");
-    if (!f) return 1;
+    if (!f) {
+        remove(out_path);
+        return 1;
+    }
     /* v1 header lets the reader reject a format it doesn't understand and fall
      * back to the tree hash rather than trust a stale/foreign layout. */
     fprintf(f, "# aether-deps v1\n");
@@ -94,7 +115,12 @@ int module_dep_write(const char* out_path) {
          * captured by the sibling `absent` lines it would flip, so it needs
          * no line of its own. */
     }
-    fclose(f);
+    int failed = ferror(f) != 0;
+    if (fclose(f) != 0) failed = 1;
+    if (failed) {
+        remove(out_path);
+        return 1;
+    }
     return 0;
 }
 
@@ -146,19 +172,25 @@ int module_check_source_directives(ASTNode* ast) {
 
 void module_set_source_dir(const char* source_path) {
     module_registry_init();
-    if (!source_path) { global_module_registry->source_dir[0] = '\0'; return; }
-    strncpy(global_module_registry->source_dir, source_path, sizeof(global_module_registry->source_dir) - 1);
-    global_module_registry->source_dir[sizeof(global_module_registry->source_dir) - 1] = '\0';
-    // Strip filename to get directory
-    char* last_sep = NULL;
-    for (char* p = global_module_registry->source_dir; *p; p++) {
-        if (*p == '/' || *p == '\\') last_sep = p;
+    /* The directory part of the path, whole (#2543): a 2048-byte copy cut
+     * a longer one, and the modules beside the file were not found. Strip
+     * the filename, keeping the trailing slash; "" when there is no
+     * directory component. */
+    size_t len = 0;
+    if (source_path) {
+        for (size_t i = 0; source_path[i]; i++) {
+            if (source_path[i] == '/' || source_path[i] == '\\') len = i + 1;
+        }
     }
-    if (last_sep) {
-        *(last_sep + 1) = '\0';  // keep trailing slash
-    } else {
-        global_module_registry->source_dir[0] = '\0';  // no directory component
+    char* dir = (char*)malloc(len + 1);
+    if (!dir) {
+        fprintf(stderr, "aetherc: out of memory recording the source directory\n");
+        exit(1);
     }
+    if (len) memcpy(dir, source_path, len);
+    dir[len] = '\0';
+    free(global_module_registry->source_dir);
+    global_module_registry->source_dir = dir;
 }
 
 void module_add_lib_dir(const char* dir) {
@@ -172,37 +204,26 @@ void module_add_lib_dir(const char* dir) {
      * would change semantics. ALSO translate MSYS2 POSIX-form
      * (`/d/foo`) to native Windows (`D:/foo`) so a `;`-joined
      * path-list reaches us in the same shape as a sequence of
-     * separate `--lib` flags. `aether_lib_path_normalize` is a
-     * no-op on POSIX.
-     *
-     * memcpy with an explicit length (rather than strncpy with
-     * `sizeof(dst)-1`) keeps GCC's `-Wstringop-truncation` happy
-     * AND is the faster shape. */
-    char norm[256];
-    aether_lib_path_normalize(dir, norm, sizeof(norm));
-    size_t nlen = strlen(norm);
-    while (nlen > 1 &&
-           (norm[nlen - 1] == '/' || norm[nlen - 1] == '\\') &&
-           norm[nlen - 2] != ':') {
-        norm[--nlen] = '\0';
+     * separate `--lib` flags. Both are aether_lib_path_normalize's,
+     * which keeps the whole path (#2539). */
+    char* norm = aether_lib_path_normalize(dir);
+    if (!norm) {
+        fprintf(stderr, "aetherc: out of memory adding the --lib directory '%s'\n", dir);
+        exit(1);
     }
     /* Skip duplicates so repeated `--lib /same/dir` doesn't waste
      * search slots. O(N) check over a fixed cap-of-8 list — trivial. */
     for (int i = 0; i < global_module_registry->lib_dir_count; i++) {
-        if (strcmp(global_module_registry->lib_dirs[i], norm) == 0) return;
+        if (strcmp(global_module_registry->lib_dirs[i], norm) == 0) { free(norm); return; }
     }
     if (global_module_registry->lib_dir_count >= AETHER_LIB_DIRS_MAX) {
         fprintf(stderr,
             "warning: --lib search path is full (max %d entries); "
             "ignoring '%s'\n", AETHER_LIB_DIRS_MAX, norm);
+        free(norm);
         return;
     }
-    int idx = global_module_registry->lib_dir_count;
-    /* +1 includes the NUL — `nlen` is post-normalisation length,
-     * always < sizeof(lib_dirs[idx]). memcpy here too: same warning
-     * + perf rationale. */
-    memcpy(global_module_registry->lib_dirs[idx], norm, nlen + 1);
-    global_module_registry->lib_dir_count++;
+    global_module_registry->lib_dirs[global_module_registry->lib_dir_count++] = norm;
 }
 
 void module_add_lib_dirs(const char* spec) {
@@ -216,19 +237,29 @@ void module_add_lib_dirs(const char* spec) {
      * parsing — both `module_set_lib_dir` and aetherc's repeated
      * `--lib` handler route through here. */
     const char* cur = spec;
-    char buf[256];
     while (*cur) {
         const char* next = strchr(cur, AETHER_LIB_PATH_SEP_CHAR);
         size_t len = next ? (size_t)(next - cur) : strlen(cur);
         if (len > 0) {
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, cur, len);
-            buf[len] = '\0';
-            module_add_lib_dir(buf);
+            char* seg = (char*)malloc(len + 1);
+            if (!seg) {
+                fprintf(stderr, "aetherc: out of memory reading the --lib path\n");
+                exit(1);
+            }
+            memcpy(seg, cur, len);
+            seg[len] = '\0';
+            module_add_lib_dir(seg);
+            free(seg);
         }
         if (!next) break;
         cur = next + 1;
     }
+}
+
+static void module_clear_lib_dirs(void) {
+    for (int i = 0; i < global_module_registry->lib_dir_count; i++)
+        free(global_module_registry->lib_dirs[i]);
+    global_module_registry->lib_dir_count = 0;
 }
 
 void module_set_lib_dir(const char* lib_dir) {
@@ -237,7 +268,7 @@ void module_set_lib_dir(const char* lib_dir) {
     /* RESET — a fresh `--lib <path>` (or `AETHER_LIB_DIR=<path>`)
      * replaces, doesn't append. The append-form is
      * `module_add_lib_dirs`. */
-    global_module_registry->lib_dir_count = 0;
+    module_clear_lib_dirs();
     module_add_lib_dirs(lib_dir);
     /* Defensive: an entirely-empty path (all separators, no
      * segments) should fall back to the default so the toolchain
@@ -254,7 +285,7 @@ void module_registry_init(void) {
         global_module_registry->modules = NULL;
         global_module_registry->module_count = 0;
         global_module_registry->module_capacity = 0;
-        global_module_registry->source_dir[0] = '\0';
+        global_module_registry->source_dir = NULL;
         global_module_registry->lib_dir_count = 0;
         const char* env_lib = getenv("AETHER_LIB_DIR");
         if (env_lib && env_lib[0]) {
@@ -274,6 +305,8 @@ void module_registry_shutdown(void) {
             module_free(global_module_registry->modules[i]);
         }
         free(global_module_registry->modules);
+        module_clear_lib_dirs();
+        free(global_module_registry->source_dir);
         free(global_module_registry);
         global_module_registry = NULL;
     }
@@ -1022,7 +1055,7 @@ char* module_resolve_local_path(const char* module_path) {
     if (module_probe(path)) return strdup(path);
 
     // Try 6b: Search relative to source file directory
-    if (global_module_registry->source_dir[0]) {
+    if (global_module_registry->source_dir && global_module_registry->source_dir[0]) {
         /* Mirror the CWD-relative loop above, but anchored at the
          * source file's directory. Same left-to-right semantics
          * across the multi-entry lib path. Issue #413. */
@@ -1762,6 +1795,12 @@ static void module_bind_import_identity(ASTNode* imp, const char* resolved,
     }
 }
 
+/* Put back the source directory saved around a module's imports. */
+static void module_restore_source_dir(char* saved) {
+    free(global_module_registry->source_dir);
+    global_module_registry->source_dir = saved;
+}
+
 // Recursive helper: load a single module and its transitive imports
 static int orchestrate_module(const char* module_name, const char* file_path,
                               DependencyGraph* graph) {
@@ -1880,11 +1919,10 @@ static int orchestrate_module(const char* module_name, const char* file_path,
      * "relative to source file directory" branch in module_resolve_local_path
      * only works if source_dir names the importing module. Save and restore
      * around the import loop so sibling modules at the same level still see
-     * the parent's source_dir. */
-    char saved_source_dir[2048];
-    strncpy(saved_source_dir, global_module_registry->source_dir,
-            sizeof(saved_source_dir) - 1);
-    saved_source_dir[sizeof(saved_source_dir) - 1] = '\0';
+     * the parent's source_dir. The parent's is kept as it is, whole, and
+     * put back (#2543). */
+    char* saved_source_dir = global_module_registry->source_dir;
+    global_module_registry->source_dir = NULL;
     module_set_source_dir(file_path);
 
     // Recursively process this module's imports
@@ -1903,12 +1941,12 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (sub_file) {
             if (!orchestrate_module(sub_path, sub_file, graph)) {
                 free(sub_file);
-                module_set_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir);
                 return 0;
             }
             free(sub_file);
             if (!check_selective_import_exports(child, file_path)) {
-                module_set_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir);
                 return 0;
             }
         } else {
@@ -1916,7 +1954,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         }
     }
 
-    module_set_source_dir(saved_source_dir);
+    module_restore_source_dir(saved_source_dir);
     return 1;
 }
 

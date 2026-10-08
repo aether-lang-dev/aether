@@ -24,9 +24,14 @@
  * Map accessors
  * ----------------------------------------------------------------- */
 
+/* A string the script stored is either a plain char* (a literal, a string
+ * from C) or an AetherString (one the script built or kept a copy of: a
+ * function that keeps its `string` parameter stores its own copy), and the
+ * host wants the bytes either way. Returned as stored, the second read as
+ * its header: emit_lib_composite's `env` printed garbage. */
 const char* aether_config_get_string(AetherValue* root, const char* key) {
     if (!root || !key) return NULL;
-    return (const char*)map_get_raw((HashMap*)root, key);
+    return aether_string_data(map_get_raw((HashMap*)root, key));
 }
 
 int32_t aether_config_get_int(AetherValue* root, const char* key, int32_t default_value) {
@@ -96,7 +101,7 @@ AetherValue* aether_config_list_get(AetherValue* list, int32_t index) {
 const char* aether_config_list_get_string(AetherValue* list, int32_t index) {
     if (!list) return NULL;
     if (index < 0 || index >= list_size((ArrayList*)list)) return NULL;
-    return (const char*)list_get_raw((ArrayList*)list, index);
+    return aether_string_data(list_get_raw((ArrayList*)list, index));
 }
 
 int32_t aether_config_list_get_int(AetherValue* list, int32_t index, int32_t default_value) {

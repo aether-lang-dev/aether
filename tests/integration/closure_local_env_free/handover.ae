@@ -1,0 +1,147 @@
+// #2494 probe: closure envs whose owner is not the local that built them.
+//
+//  - A function returns a closure only its caller holds (a literal, a local
+//    whose only escape is the return, or another such function's result):
+//    the caller's local frees it.
+//  - An env that captured another closure holds its own reference to the
+//    captured env, so the captured local frees its reference at scope exit
+//    and the capturer's destructor frees the rest, wherever it went.
+//
+// test_closure_local_env_free.sh builds this with env_count.h force-included
+// and checks every env and cell is freed exactly once; on its own it checks
+// the values (a freed env read back would give a wrong one).
+
+import std.list
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+// Returns a literal.
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+// Returns a local whose only escape is the return.
+make_named(start: int) -> fn {
+    n = start
+    inc = || {
+        n = n + 2
+        return n
+    }
+    int first = call(inc)
+    check("named called before return", first, start + 2)
+    return inc
+}
+
+// Returns a closure that captured another local closure.
+make_twice(start: int) -> fn {
+    n = start
+    inc = || {
+        n = n + 1
+        return n
+    }
+    twice = || {
+        int a = call(inc)
+        int b = call(inc)
+        return a + b
+    }
+    return twice
+}
+
+// Returns another function's owned result.
+make_chain(start: int) -> fn {
+    return make_named(start)
+}
+
+// Returns a closure that captured a parameter.
+wrap(cb: fn) -> fn {
+    return || {
+        int v = call(cb)
+        return v * 10
+    }
+}
+
+// The capturing closure escapes into a list; the captured one does not.
+store_capturer(l: ptr, start: int) {
+    n = start
+    g = || {
+        n = n + 1
+        return n
+    }
+    h = || {
+        int v = call(g)
+        return v
+    }
+    int first = call(h)
+    check("stored capturer called locally", first, start + 1)
+    stash(l, h)
+}
+
+// A captured closure rebound after the capture: the capturer keeps the
+// first one.
+rebound_after_capture(start: int) -> int {
+    n = start
+    g = || {
+        n = n + 1
+        return n
+    }
+    h = || {
+        int v = call(g)
+        return v
+    }
+    g = || {
+        n = n + 100
+        return n
+    }
+    int a = call(h)
+    int b = call(g)
+    return a + b
+}
+
+main() {
+    owners = list.new()
+    r = 0
+    while r < 30 {
+        c = make_counter(r)
+        int c1 = call(c)
+        int c2 = call(c)
+        check("returned literal", c1 + c2, 2 * r + 3)
+
+        m = make_named(r)
+        int m1 = call(m)
+        check("returned local", m1, r + 4)
+
+        t = make_twice(r)
+        int t1 = call(t)
+        check("returned capturer", t1, 2 * r + 3)
+
+        ch = make_chain(r)
+        int ch1 = call(ch)
+        check("returned through a call", ch1, r + 4)
+
+        base = make_counter(r)
+        w = wrap(base)
+        int w1 = call(w)
+        check("captured parameter", w1, (r + 1) * 10)
+
+        store_capturer(owners, r)
+        check("rebound after capture", rebound_after_capture(r), 2 * r + 102)
+        r = r + 1
+    }
+    list.free(owners)
+    println("handover ok")
+}

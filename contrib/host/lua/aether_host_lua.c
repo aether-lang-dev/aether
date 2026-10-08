@@ -231,6 +231,10 @@ static int   lua_perms_depth = 0;
 
 extern int list_size(void*);
 extern void* list_get_raw(void*, int);
+/* A grant list std.sandbox built holds plain C strings; one a program
+ * built can hold Aether strings (a helper that keeps its `string`
+ * parameter stores its own copy). This reads the bytes of either. */
+extern const char* aether_string_data(const void*);
 
 static int pattern_match(const char* pat, const char* resource) {
     if (pat && strncmp(pat, "::ffff:", 7) == 0) pat += 7;
@@ -253,8 +257,8 @@ static int perms_allow(void* ctx, const char* category, const char* resource) {
     int n = list_size(ctx);
     if (n == 0) return 0;
     for (int i = 0; i < n; i += 2) {
-        const char* cat = (const char*)list_get_raw(ctx, i);
-        const char* pat = (const char*)list_get_raw(ctx, i + 1);
+        const char* cat = aether_string_data(list_get_raw(ctx, i));
+        const char* pat = aether_string_data(list_get_raw(ctx, i + 1));
         if (!cat || !pat) continue;
         if (cat[0] == '*' && pat[0] == '*') return 1;
         if (strcmp(cat, category) == 0 && pattern_match(pat, resource)) return 1;
@@ -506,7 +510,7 @@ void lua_vm_set_global_strlist(void* vm, const char* name, void* items) {
     int n = items ? list_size(items) : 0;
     g_lua.lua_createtable(s, n, 0);
     for (int i = 0; i < n; i++) {
-        const char* v = (const char*)list_get_raw(items, i);
+        const char* v = aether_string_data(list_get_raw(items, i));
         g_lua.lua_pushstring(s, v ? v : "");
         g_lua.lua_seti(s, -2, (lua_Integer)(i + 1));   /* 1-based Lua array */
     }

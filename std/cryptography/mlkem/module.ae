@@ -16,14 +16,34 @@
 //
 // Import with:  import std.cryptography.mlkem
 //
-//   mlkem768_keygen(d, z)      -> (ek, dk)   // d,z are 32-byte seed buffers
-//   mlkem768_encaps(ek, m)     -> (ct, K)    // m is the 32-byte message coin
-//   mlkem768_decaps(dk, ct)    -> K          // 32-byte shared secret
+//   mlkem768_keygen()          -> (ek, dk, err)  // seeds from the OS CSPRNG
+//   mlkem768_encaps(ek)        -> (ct, K, err)   // m from the OS CSPRNG
+//   mlkem768_decaps(dk, ct)    -> (K, err)       // 32-byte shared secret
 //   (and the 512_* / 1024_* equivalents)
 //
-// Determinism: keygen/encaps take caller-supplied seeds so KATs reproduce
-// exactly. All inputs/outputs are std.bytes buffers (ptr); read with
-// bytes.get, hand off / free with bytes.free.
+// Every call checks its inputs as FIPS 203 requires and returns an error
+// (and null outputs) instead of a key when a check fails (#2482):
+//   encaps: the §7.2 encapsulation-key check, length 384k + 32 and every
+//           decoded coefficient below q (the modulus check);
+//   decaps: the §7.3 checks, ciphertext length, decapsulation-key length
+//           768k + 96, and the hash check (the H(ek) stored in dk is the
+//           hash of the ek stored in dk).
+// A tampered ciphertext of the right length is not an error: decaps then
+// returns the implicit-rejection secret J(z || c), as FIPS 203 specifies.
+//
+// Testing only (known-answer and Wycheproof vectors):
+//   mlkem768_keygen_derand(d, z)   -> (ek, dk, err)  // d, z: 32 bytes each
+//   mlkem768_encaps_derand(ek, m)  -> (ct, K, err)   // m: 32 bytes
+// These are FIPS 203's ML-KEM.KeyGen_internal / Encaps_internal with the
+// caller supplying the randomness, which §3.3 says should not be made
+// available to applications other than for testing. They run the same input
+// checks as the randomized calls, plus the 32-byte length of d, z and m.
+//
+// All inputs/outputs are std.bytes buffers (ptr); read with bytes.get, hand
+// off / free with bytes.free. Outputs are null whenever err is non-empty.
+//
+// Sizes: mlkem_ek_bytes(k), mlkem_dk_bytes(k), mlkem_ct_bytes(k) for k = 2,
+// 3, 4 (ML-KEM-512, -768, -1024), 0 for any other k; mlkem_ss_bytes() is 32.
 //
 // Aether-specific care:
 //   * BC works in `short` (signed 16-bit) coefficients; the NTT/reduction
@@ -41,15 +61,16 @@
 import std.bits
 import std.bytes
 import std.intarr
+import std.cryptography
 import std.cryptography.sha3
-
-extern malloc(size: int) -> ptr
-@extern("free") libc_free(p: ptr)
 
 exports(
     mlkem512_keygen, mlkem512_encaps, mlkem512_decaps,
     mlkem768_keygen, mlkem768_encaps, mlkem768_decaps,
     mlkem1024_keygen, mlkem1024_encaps, mlkem1024_decaps,
+    mlkem512_keygen_derand, mlkem512_encaps_derand,
+    mlkem768_keygen_derand, mlkem768_encaps_derand,
+    mlkem1024_keygen_derand, mlkem1024_encaps_derand,
     mlkem_ek_bytes, mlkem_dk_bytes, mlkem_ct_bytes, mlkem_ss_bytes
 )
 
@@ -103,24 +124,23 @@ struct MlkemParams {
     ct_bytes: int // polyvec_compressed + poly_compressed
 }
 
-// Allocate + populate a MlkemParams on the heap. Caller frees with free_params.
-mk_params(k: int) -> *MlkemParams {
-    p = malloc(sizeof(MlkemParams)) as *MlkemParams
+// The parameter set k, by value: k is 2, 3 or 4 (ML-KEM-512, -768, -1024).
+// Only the per-variant entry points call this, with one of those; the public
+// size helpers check k themselves first. A value rather than a heap struct:
+// it is ten ints, and the old malloc'd one went unchecked and had to be freed
+// on every path (#2508).
+params(k: int) -> MlkemParams {
+    p = MlkemParams {}
     p.k = k
+    p.eta1 = 2
+    p.poly_compressed = 128 // dv = 4
+    p.polyvec_compressed = k * 320 // du = 10
     if k == 2 {
         p.eta1 = 3
-        p.poly_compressed = 128
-        p.polyvec_compressed = k * 320
-    }
-    if k == 3 {
-        p.eta1 = 2
-        p.poly_compressed = 128
-        p.polyvec_compressed = k * 320
     }
     if k == 4 {
-        p.eta1 = 2
-        p.poly_compressed = 160
-        p.polyvec_compressed = k * 352
+        p.poly_compressed = 160 // dv = 5
+        p.polyvec_compressed = k * 352 // du = 11
     }
     p.polyvec_bytes = k * POLY_BYTES
     p.indcpa_pk = p.polyvec_bytes + SYM
@@ -131,29 +151,44 @@ mk_params(k: int) -> *MlkemParams {
     return p
 }
 
-free_params(p: *MlkemParams) {
-    libc_free(p)
-}
-
 // ---- Size helpers (public) ----
+//
+// Sizes in bytes for the parameter set k = 2, 3 or 4 (ML-KEM-512, -768,
+// -1024). Any other k is not an ML-KEM parameter set and gets 0, which no
+// ML-KEM key or ciphertext has (#2508). They used to build the parameter
+// bundle for any k and read fields only k = 2..4 set, so another k returned
+// whatever the allocator left there.
 
+supported(k: int) -> int {
+    if k >= 2 && k <= 4 {
+        return 1
+    }
+    return 0
+}
+
+// Encapsulation key: 384k + 32 (800, 1184, 1568).
 mlkem_ek_bytes(k: int) -> int {
-    p = mk_params(k)
-    v = p.ek_bytes
-    free_params(p)
-    return v
+    if supported(k) == 0 {
+        return 0
+    }
+    p = params(k)
+    return p.ek_bytes
 }
+// Decapsulation key: 768k + 96 (1632, 2400, 3168).
 mlkem_dk_bytes(k: int) -> int {
-    p = mk_params(k)
-    v = p.dk_bytes
-    free_params(p)
-    return v
+    if supported(k) == 0 {
+        return 0
+    }
+    p = params(k)
+    return p.dk_bytes
 }
+// Ciphertext: 32(du*k + dv) (768, 1088, 1568).
 mlkem_ct_bytes(k: int) -> int {
-    p = mk_params(k)
-    v = p.ct_bytes
-    free_params(p)
-    return v
+    if supported(k) == 0 {
+        return 0
+    }
+    p = params(k)
+    return p.ct_bytes
 }
 mlkem_ss_bytes() -> int {
     return SYM
@@ -162,12 +197,12 @@ mlkem_ss_bytes() -> int {
 // ---- Signed 16-bit truncation (BC works in `short`) ----
 
 // Reproduce a C# `(short)x` cast: keep the low 16 bits, sign-extend bit 15.
+// Branch-free: it runs on secret coefficients inside the reductions, and a
+// branch on bit 15 survives at -O0 (`ae run`) whatever an optimizer would do
+// with it (#2482). Subtracting 0x10000 exactly when bit 15 is set is the
+// sign extension.
 s16(x: int) -> int {
-    v = x & 0xFFFF
-    if v >= 0x8000 {
-        v = v - 0x10000
-    }
-    return v
+    return (x & 0xFFFF) - ((x & 0x8000) << 1)
 }
 
 // ---- Modular reduction ----
@@ -1138,10 +1173,13 @@ indcpa_decrypt(p: *MlkemParams, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
     polyvec_free(mp_pv)
 }
 
-// ---- ML-KEM wrappers ----
+// ---- ML-KEM internals (FIPS 203 §6, unchecked) ----
+//
+// These trust their inputs: lengths and ranges are the callers' to check (see
+// the input checks below).
 
-// keygen: returns (ek, dk). d, z are 32-byte seed buffers.
-mlkem_keygen(p: *MlkemParams, d: ptr, z: ptr) -> {
+// KeyGen_internal (Algorithm 16): returns (ek, dk). d, z are 32-byte seeds.
+keygen_internal(p: *MlkemParams, d: ptr, z: ptr) -> (ptr, ptr) {
     dk = bytes.new(p.dk_bytes)
     // Build indcpa keypair into dk: [sk | pk] occupy first indcpa_sk+indcpa_pk.
     indcpa_keygen(p, d, dk)
@@ -1172,12 +1210,12 @@ mlkem_keygen(p: *MlkemParams, d: ptr, z: ptr) -> {
         i = i + 1
     }
 
-    free_params(p)
     return ek, dk
 }
 
-// encaps: returns (ct, K). m is the 32-byte message coin.
-mlkem_encaps(p: *MlkemParams, ek: ptr, m: ptr) -> {
+// Encaps_internal (Algorithm 17): returns (ct, K). m is the 32-byte message
+// coin.
+encaps_internal(p: *MlkemParams, ek: ptr, m: ptr) -> (ptr, ptr) {
     // buf = m || H(ek)   (64 bytes)
     buf = bytes.new(2 * SYM)
     i = 0
@@ -1217,12 +1255,12 @@ mlkem_encaps(p: *MlkemParams, ek: ptr, m: ptr) -> {
     bytes.free(buf)
     bytes.free(kr)
     bytes.free(coins)
-    free_params(p)
     return ct, key
 }
 
-// decaps: returns K (32 bytes). dk is the ML-KEM private key, ct the ciphertext.
-mlkem_decaps(p: *MlkemParams, dk: ptr, ct: ptr) -> ptr {
+// Decaps_internal (Algorithm 18): returns K (32 bytes). dk is the ML-KEM
+// private key, ct the ciphertext.
+decaps_internal(p: *MlkemParams, dk: ptr, ct: ptr) -> ptr {
     // Decrypt to recover m'
     mprime = bytes.new(SYM)
     indcpa_decrypt(p, ct, 0, dk, mprime)
@@ -1297,44 +1335,217 @@ mlkem_decaps(p: *MlkemParams, dk: ptr, ct: ptr) -> ptr {
     bytes.free(cmp)
     bytes.free(j_in)
     bytes.free(reject)
-    free_params(p)
     return key
+}
+
+// ---- Input checks (FIPS 203 §7.2, §7.3) ----
+//
+// Every entry point below checks its inputs before the internals touch them
+// and returns an error instead of a key when a check fails (#2482). Without
+// them a short buffer was read past its end (bytes.get gives -1, which
+// `& 0xFF` turned into 0xFF padding), a long one was silently truncated, and
+// an encapsulation key shorter than 384k + 32 bytes panicked on the slice
+// that hashes it. Everything checked here is public (ek, ct, and the ek and
+// H(ek) halves of dk), so returning at the first failure leaks nothing.
+
+// §7.2: the type check (384k + 32 bytes), then the modulus check. Every
+// 12-bit coefficient of the encoded vector must be below q, which is what
+// ByteEncode12(ByteDecode12(ek[0:384k])) == ek[0:384k] amounts to.
+ek_check(p: *MlkemParams, ek: ptr) -> string {
+    if bytes.length(ek) != p.ek_bytes {
+        return "mlkem: encapsulation key has the wrong length"
+    }
+    i = 0
+    while i < p.polyvec_bytes {
+        a1 = bytes.get(ek, i + 1)
+        c0 = bytes.get(ek, i) | ((a1 & 0x0F) << 8)
+        c1 = (a1 >> 4) | (bytes.get(ek, i + 2) << 4)
+        if c0 >= Q || c1 >= Q {
+            return "mlkem: encapsulation key fails the modulus check"
+        }
+        i = i + 3
+    }
+    return ""
+}
+
+// §7.3: the ciphertext type check (32(du*k + dv) bytes), which FIPS requires
+// on every execution of Decaps, then the decapsulation-key type check
+// (768k + 96 bytes) and hash check: the H(ek) stored in dk must be the hash
+// of the ek stored in dk. Our dk arrives as raw bytes on every call, so the
+// key check runs every time too; one SHA3-256 over ek is small next to the
+// re-encryption Decaps already does.
+decaps_check(p: *MlkemParams, dk: ptr, ct: ptr) -> string {
+    if bytes.length(ct) != p.ct_bytes {
+        return "mlkem: ciphertext has the wrong length"
+    }
+    if bytes.length(dk) != p.dk_bytes {
+        return "mlkem: decapsulation key has the wrong length"
+    }
+    hoff = p.indcpa_sk + p.indcpa_pk
+    h = sha3.sha3_256_bytes(bytes.view(dk)[p.indcpa_sk..hoff])
+    diff = 0
+    i = 0
+    while i < SYM {
+        diff = diff | (bytes.get(h, i) ^ bytes.get(dk, hoff + i))
+        i = i + 1
+    }
+    bytes.free(h)
+    if diff != 0 {
+        return "mlkem: decapsulation key fails the hash check"
+    }
+    return ""
+}
+
+// 32 fresh bytes from the OS CSPRNG, or null and the error. KeyGen and Encaps
+// return an error when the CSPRNG fails (FIPS 203 Algorithms 19 and 20); a
+// zero-filled seed would make the key or the shared secret predictable.
+rand32() -> (ptr, string) {
+    s, n, err = cryptography.random_bytes(SYM)
+    if err != "" {
+        return null, err
+    }
+    b = bytes.new(SYM)
+    bytes.copy_from_string(b, 0, s, n)
+    return b, ""
+}
+
+// ---- Checked ML-KEM (shared by the per-variant API) ----
+
+// ML-KEM.KeyGen (Algorithm 19): seeds d, z from the CSPRNG.
+keygen_k(k: int) -> (ptr, ptr, string) {
+    d, derr = rand32()
+    if derr != "" {
+        return null, null, derr
+    }
+    z, zerr = rand32()
+    if zerr != "" {
+        bytes.free(d)
+        return null, null, zerr
+    }
+    p = params(k)
+    ek, dk = keygen_internal(&p, d, z)
+    bytes.free(d)
+    bytes.free(z)
+    return ek, dk, ""
+}
+
+// KeyGen_internal with caller-supplied seeds, for known-answer tests only
+// (FIPS 203 §3.3). The seeds must be exactly 32 bytes each.
+keygen_derand_k(k: int, d: ptr, z: ptr) -> (ptr, ptr, string) {
+    if bytes.length(d) != SYM || bytes.length(z) != SYM {
+        return null, null, "mlkem: d and z must be 32 bytes each"
+    }
+    p = params(k)
+    ek, dk = keygen_internal(&p, d, z)
+    return ek, dk, ""
+}
+
+// ML-KEM.Encaps (Algorithm 20): the §7.2 check on ek, then m from the
+// CSPRNG.
+encaps_k(k: int, ek: ptr) -> (ptr, ptr, string) {
+    p = params(k)
+    err = ek_check(&p, ek)
+    if err != "" {
+        return null, null, err
+    }
+    m, merr = rand32()
+    if merr != "" {
+        return null, null, merr
+    }
+    ct, key = encaps_internal(&p, ek, m)
+    bytes.free(m)
+    return ct, key, ""
+}
+
+// Encaps_internal with a caller-supplied m, for known-answer tests only
+// (FIPS 203 §3.3). Runs the same §7.2 check on ek; m must be 32 bytes.
+encaps_derand_k(k: int, ek: ptr, m: ptr) -> (ptr, ptr, string) {
+    p = params(k)
+    err = ek_check(&p, ek)
+    if err == "" && bytes.length(m) != SYM {
+        err = "mlkem: m must be 32 bytes"
+    }
+    if err != "" {
+        return null, null, err
+    }
+    ct, key = encaps_internal(&p, ek, m)
+    return ct, key, ""
+}
+
+// ML-KEM.Decaps (Algorithm 21) after the §7.3 checks. A ciphertext of the
+// right length that does not re-encrypt is not an error: it gets the
+// implicit-rejection secret, as FIPS 203 specifies.
+decaps_k(k: int, dk: ptr, ct: ptr) -> (ptr, string) {
+    p = params(k)
+    err = decaps_check(&p, dk, ct)
+    if err != "" {
+        return null, err
+    }
+    key = decaps_internal(&p, dk, ct)
+    return key, ""
 }
 
 // ---- Public per-variant API ----
 
-mlkem512_keygen(d: ptr, z: ptr) -> {
-    ek, dk = mlkem_keygen(mk_params(2), d, z)
-    return ek, dk
+mlkem512_keygen() -> (ptr, ptr, string) {
+    ek, dk, err = keygen_k(2)
+    return ek, dk, err
 }
-mlkem512_encaps(ek: ptr, m: ptr) -> {
-    ct, key = mlkem_encaps(mk_params(2), ek, m)
-    return ct, key
+mlkem512_encaps(ek: ptr) -> (ptr, ptr, string) {
+    ct, key, err = encaps_k(2, ek)
+    return ct, key, err
 }
-mlkem512_decaps(dk: ptr, ct: ptr) -> ptr {
-    return mlkem_decaps(mk_params(2), dk, ct)
+mlkem512_decaps(dk: ptr, ct: ptr) -> (ptr, string) {
+    key, err = decaps_k(2, dk, ct)
+    return key, err
 }
-
-mlkem768_keygen(d: ptr, z: ptr) -> {
-    ek, dk = mlkem_keygen(mk_params(3), d, z)
-    return ek, dk
+mlkem512_keygen_derand(d: ptr, z: ptr) -> (ptr, ptr, string) {
+    ek, dk, err = keygen_derand_k(2, d, z)
+    return ek, dk, err
 }
-mlkem768_encaps(ek: ptr, m: ptr) -> {
-    ct, key = mlkem_encaps(mk_params(3), ek, m)
-    return ct, key
-}
-mlkem768_decaps(dk: ptr, ct: ptr) -> ptr {
-    return mlkem_decaps(mk_params(3), dk, ct)
+mlkem512_encaps_derand(ek: ptr, m: ptr) -> (ptr, ptr, string) {
+    ct, key, err = encaps_derand_k(2, ek, m)
+    return ct, key, err
 }
 
-mlkem1024_keygen(d: ptr, z: ptr) -> {
-    ek, dk = mlkem_keygen(mk_params(4), d, z)
-    return ek, dk
+mlkem768_keygen() -> (ptr, ptr, string) {
+    ek, dk, err = keygen_k(3)
+    return ek, dk, err
 }
-mlkem1024_encaps(ek: ptr, m: ptr) -> {
-    ct, key = mlkem_encaps(mk_params(4), ek, m)
-    return ct, key
+mlkem768_encaps(ek: ptr) -> (ptr, ptr, string) {
+    ct, key, err = encaps_k(3, ek)
+    return ct, key, err
 }
-mlkem1024_decaps(dk: ptr, ct: ptr) -> ptr {
-    return mlkem_decaps(mk_params(4), dk, ct)
+mlkem768_decaps(dk: ptr, ct: ptr) -> (ptr, string) {
+    key, err = decaps_k(3, dk, ct)
+    return key, err
+}
+mlkem768_keygen_derand(d: ptr, z: ptr) -> (ptr, ptr, string) {
+    ek, dk, err = keygen_derand_k(3, d, z)
+    return ek, dk, err
+}
+mlkem768_encaps_derand(ek: ptr, m: ptr) -> (ptr, ptr, string) {
+    ct, key, err = encaps_derand_k(3, ek, m)
+    return ct, key, err
+}
+
+mlkem1024_keygen() -> (ptr, ptr, string) {
+    ek, dk, err = keygen_k(4)
+    return ek, dk, err
+}
+mlkem1024_encaps(ek: ptr) -> (ptr, ptr, string) {
+    ct, key, err = encaps_k(4, ek)
+    return ct, key, err
+}
+mlkem1024_decaps(dk: ptr, ct: ptr) -> (ptr, string) {
+    key, err = decaps_k(4, dk, ct)
+    return key, err
+}
+mlkem1024_keygen_derand(d: ptr, z: ptr) -> (ptr, ptr, string) {
+    ek, dk, err = keygen_derand_k(4, d, z)
+    return ek, dk, err
+}
+mlkem1024_encaps_derand(ek: ptr, m: ptr) -> (ptr, ptr, string) {
+    ct, key, err = encaps_derand_k(4, ek, m)
+    return ct, key, err
 }

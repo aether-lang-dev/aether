@@ -167,6 +167,44 @@ fn test_strict_and_flat() -> int {
     return fails
 }
 
+// INT is 64-bit, as std.json reads integers: past int32 a value is kept and
+// still meets its bounds, past int64 it is an error, never a silent drop.
+fn test_int_range() -> int {
+    fails = 0
+    s = schema.record() {
+        schema.field("age", schema.INT) { schema.optional(); schema.max(120) }
+        schema.field("big", schema.INT) { schema.optional() }
+        schema.field("xs", schema.array(schema.INT)) {
+            schema.optional()
+            schema.items() { schema.nonneg() }
+        }
+    }
+    v1, e1 = run(s, "{\"age\": 5000000000, \"xs\": [1, -5000000000]}")
+    fails = fails + ck(has_error(e1, "age", "too_big"), "age 5000000000 is above max(120)")
+    fails = fails + ck(has_error(e1, "xs[1]", "too_small"), "xs[1] -5000000000 is negative")
+    fails = fails + ck(schema.error_count(e1) == 2, "two errors (got ${schema.error_count(e1)})")
+    if fails > 0 { dump(e1) }
+    json.json_free(v1)
+    schema.errors_free(e1)
+
+    v2, e2 = run(s, "{\"big\": 5000000000, \"xs\": [9223372036854775807, \"-4\"]}")
+    fails = fails + ck(has_error(e2, "xs[1]", "too_small"), "lax \"-4\" is an int and negative")
+    out2, _ = json.stringify(v2)
+    fails = fails + ck(string_equals(out2, "{\"big\":5000000000}") == 1, "a 64-bit int is kept (${out2})")
+    json.json_free(v2)
+    schema.errors_free(e2)
+
+    v3, e3 = run(s, "{\"big\": 99999999999999999999, \"xs\": [1, 18446744073709551616]}")
+    fails = fails + ck(has_error(e3, "big", "invalid_type"), "big is past int64")
+    fails = fails + ck(has_error(e3, "xs[1]", "invalid_type"), "xs[1] is past int64")
+    out3, _ = json.stringify(v3)
+    fails = fails + ck(string_equals(out3, "{}") == 1, "nothing past int64 is kept (${out3})")
+    json.json_free(v3)
+    schema.errors_free(e3)
+    schema.schema_free(s)
+    return fails
+}
+
 fn test_json_schema(s: ptr) -> int {
     js = schema.to_json_schema(s)
     fails = 0
@@ -192,6 +230,7 @@ main() {
     fails = fails + test_json_schema(s)
     schema.schema_free(s)
     fails = fails + test_strict_and_flat()
+    fails = fails + test_int_range()
     if fails > 0 { println("${fails} failure(s)"); exit(1) }
     println("OK: nested records and arrays")
 }

@@ -216,12 +216,13 @@ const WS_OPCODE_PONG   = 10
 // The WebSocket upgrade requires SHA-1 + Base64. These are provided as
 // extern C functions that must be linked (see ws_handshake.c).
 // ---------------------------------------------------------------------------
-extern ws_generate_accept_key(client_key: string) -> string
-extern ws_base64_encode(data: ptr, len: int) -> string
-// Unmask a client->server frame payload in place (RFC 6455 §5.3): returns a
-// fresh copy of payload with payload[i] ^= mask_key[i % 4]. `len` is the frame's
+// Each returns a fresh string the caller owns.
+extern ws_generate_accept_key(client_key: string) -> string @heap
+extern ws_base64_encode(data: ptr, len: int) -> string @heap
+// Unmask a client->server frame payload (RFC 6455 §5.3): returns a fresh
+// copy of payload with payload[i] ^= mask_key[i % 4]. `len` is the frame's
 // declared payload length (payloads may contain NUL bytes).
-extern ws_unmask(payload: string, mask_key: string, len: int) -> string
+extern ws_unmask(payload: string, mask_key: string, len: int) -> string @heap
 
 // ---------------------------------------------------------------------------
 // Route / Filter registration data structures

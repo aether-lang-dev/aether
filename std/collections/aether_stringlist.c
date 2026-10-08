@@ -6,28 +6,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Own an independent NUL-terminated copy of `s`'s bytes, allocated
- * through the caps accounting so the list's allocations balance.
- * `aether_string_data` is magic-aware: it unwraps an AetherString to
- * its .data or passes a plain `char*` straight through, NULL-safe.
- * The list stores these copies and frees them with sl_free_item; the
- * caller keeps ownership of its argument. Returns NULL on OOM. */
-static char* sl_dup_item(const void* s) {
-    const char* data = s ? aether_string_data(s) : NULL;
-    if (!data) data = "";
-    size_t n = strlen(data) + 1;
-    char* copy = (char*)aether_caps_malloc(n);
-    if (!copy) return NULL;
-    memcpy(copy, data, n);
-    return copy;
+/* Own an independent copy of `s`, as a refcounted AetherString of all
+ * its bytes. `s` is an AetherString (the externs' `string_` prefix passes
+ * an Aether string with its header) or a plain `char*`; the aether_string_*
+ * helpers read either, NULL-safe. Copying up to the length, not to the
+ * first NUL, keeps a value such as url.decode("x%00y") whole (#2469); the
+ * copy used to be a strlen-bounded `char*`, which kept "x". The list frees
+ * these copies with sl_free_item; the caller keeps ownership of its
+ * argument. Returns NULL on OOM. */
+static AetherString* sl_dup_item(const void* s) {
+    if (!s) return string_new_with_length("", 0);
+    return string_new_with_length(aether_string_data(s), aether_string_length(s));
 }
 
-/* Free a copy produced by sl_dup_item. The copy is always a caps-
- * allocated, NUL-terminated `char*`, so its allocation size is
- * strlen+1 (it is never mutated after creation). NULL-safe. */
+/* Free a copy produced by sl_dup_item. NULL-safe. */
 static void sl_free_item(const void* item) {
-    if (!item) return;
-    aether_caps_free((void*)item, strlen((const char*)item) + 1);
+    if (item) string_release(item);
 }
 
 /* StringList is a thin layer over the existing ArrayList. We could
@@ -64,7 +58,7 @@ int string_list_add(StringList* list, const void* s) {
      * free/clear/remove. Storing the caller's raw pointer instead
      * leaked every such element, because string_release is a no-op on
      * a non-magic `char*`. */
-    char* copy = sl_dup_item(s);
+    AetherString* copy = sl_dup_item(s);
     if (!copy) return 0;
     if (!list_add_raw(list->items, copy)) {
         sl_free_item(copy);
@@ -86,7 +80,7 @@ void string_list_set(StringList* list, int index, const void* s) {
      * (`string_list_set(L, i, string_list_get(L, i))`) safe: the
      * source bytes are duplicated before the old element is freed, so
      * there is no read-after-free even when `s` aliases the slot. */
-    char* copy = sl_dup_item(s);
+    AetherString* copy = sl_dup_item(s);
     if (!copy) return;
     const void* old = list_get_raw(list->items, index);
     list_set(list->items, index, copy);
@@ -147,14 +141,9 @@ void string_list_free(StringList* list) {
  * `env` is the implicit first argument to `fn`. */
 typedef struct { void (*fn)(void); void* env; } AeStrListClosure;
 
-/* Free a boxed comparator closure — the callee owns it, matching the
- * seq-combinator convention. NULL-safe. */
-static void sl_closure_free(void* box) {
-    if (!box) return;
-    AeStrListClosure* clo = (AeStrListClosure*)box;
-    if (clo->env) free(clo->env);
-    free(box);
-}
+/* The comparator is declared `@noescape` (#2523): its box is the caller's
+ * stack and its env the caller's to release after the sort, as for the seq
+ * combinators. Nothing here frees either. */
 
 /* Stable top-down merge sort of borrowed pointers, invoking the Aether
  * comparator. Taking the left run on a tie (`cmp <= 0`) preserves the
@@ -178,12 +167,9 @@ static void sl_msort(const char** a, const char** tmp, int lo, int hi,
 }
 
 void string_list_sort(StringList* list, void* cmp_box) {
-    if (!list || !list->items || !cmp_box) {
-        sl_closure_free(cmp_box);   /* still own the box on the error path */
-        return;
-    }
+    if (!list || !list->items || !cmp_box) return;
     int n = list_size(list->items);
-    if (n <= 1) { sl_closure_free(cmp_box); return; }
+    if (n <= 1) return;
 
     AeStrListClosure clo = *(AeStrListClosure*)cmp_box;
     int (*cmp)(void*, const char*, const char*) =
@@ -195,7 +181,6 @@ void string_list_sort(StringList* list, void* cmp_box) {
     if (!snap || !tmp) {
         if (snap) aether_caps_free(snap, bytes);
         if (tmp)  aether_caps_free(tmp, bytes);
-        sl_closure_free(cmp_box);
         return;
     }
 
@@ -207,15 +192,13 @@ void string_list_sort(StringList* list, void* cmp_box) {
 
     aether_caps_free(snap, bytes);
     aether_caps_free(tmp, bytes);
-    sl_closure_free(cmp_box);
 }
 
-/* strcmp over borrowed element pointers, for qsort. Equal elements are
+/* Byte order over borrowed elements, for qsort: string_compare reads
+ * each element's whole length, embedded NULs included. Equal elements are
  * byte-identical strings, so qsort's instability is unobservable here. */
 static int sl_cmp_lex(const void* pa, const void* pb) {
-    const char* a = *(const char* const*)pa;
-    const char* b = *(const char* const*)pb;
-    return strcmp(a ? a : "", b ? b : "");
+    return string_compare(*(const void* const*)pa, *(const void* const*)pb);
 }
 
 void string_list_sort_lex(StringList* list) {

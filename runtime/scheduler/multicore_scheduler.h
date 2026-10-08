@@ -142,25 +142,63 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     uint64_t timeout_ns; \
     /* Timestamp when idle started; 0 = not idle */ \
     uint64_t last_activity_ns; \
-    /* Panic state: set to 1 when the actor's step() unwound via aether_panic() \
-     * or a caught signal. Dead actors are skipped by the scheduler and \
-     * incoming messages are dropped. One-way transition; never un-set. */ \
+    /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
+     * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
+     * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
+     * auto_process actor's) has left its loop. Non-zero actors are skipped \
+     * by the scheduler and incoming messages are dropped. Bits are only \
+     * ever set. */ \
     atomic_int dead; \
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
      * sizeof(ActorBase) would leak the derived-struct tail under libnuma. */ \
-    size_t alloc_size;
+    size_t alloc_size; \
+    /* Releases what the actor's state fields own (heap strings, closure \
+     * environments, owning structs), set by the generated spawn; NULL for \
+     * an actor registered by a caller. Called exactly once, by the free \
+     * path a release or the scheduler's teardown ends the actor through, \
+     * after the actor can no longer be stepped (#2528). */ \
+    void (*destroy_state)(void*); \
+    /* 1 when scheduler_spawn_actor allocated the actor, which the scheduler \
+     * then frees; 0 for one a caller passed to scheduler_register_actor, \
+     * whose memory stays the caller's. Written before the actor is \
+     * published, never after. */ \
+    int scheduler_owned;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
 
+/* The bits of ActorBase.dead; a send checks only that it is non-zero. */
+#define AETHER_ACTOR_PANICKED 1
+#define AETHER_ACTOR_RELEASED 2
+#define AETHER_ACTOR_THREAD_GONE 4
+
+/* Generated actor structs are declared aligned(64) (codegen_actor.c), one
+ * cache line, so the runtime allocates every actor on this boundary (#2485). */
+#define AETHER_ACTOR_ALIGN 64
+
+/* A core's actor table (#2486). Scheduler threads and the main thread read it
+ * without the core's actor_lock, so the slots are atomic and a table that is
+ * grown out of is kept, chained on `retired`, until scheduler_cleanup(). The
+ * protocol is described above the helpers in multicore_scheduler.c. */
+typedef struct AetherActorTable {
+    struct AetherActorTable* retired;  // the smaller table this one replaced
+    size_t alloc_size;                 // bytes, for aether_numa_free
+    int capacity;
+    _Atomic(ActorBase*) slots[];
+} AetherActorTable;
+
 typedef struct {
     int core_id;
     pthread_t thread;
-    ActorBase** actors;
-    int actor_count;
-    int capacity;
+    _Atomic(AetherActorTable*) actor_table;
+    _Atomic int actor_count;
+    // The reclamation epoch this core's thread last observed at the top of
+    // its loop, or 0 while the thread is not running (#2509). A released
+    // actor is freed only once every core is past the epoch it was released
+    // in; see the reclamation notes in multicore_scheduler.c.
+    _Atomic uint64_t reclaim_epoch;
     // Per-sender SPSC channels: from_queues[src] is written ONLY by core src.
     // Each channel is a true SPSC queue, so no CAS or locks are needed on the
     // producer side. from_queues[MAX_CORES] is the channel for every thread
@@ -175,7 +213,7 @@ typedef struct {
     atomic_int work_count;  // Approximate in-flight message count (used for load reporting)
     atomic_int steal_attempts;  // Cumulative count of successful work-steal operations
     atomic_int idle_cycles;     // Track how long core has been idle
-    OptimizedSpinlock actor_lock;  // Protects actors array during migration and registration
+    OptimizedSpinlock actor_lock;  // Serializes every writer of actor_table / actor_count
 
     // Per-core message counters — only written by owning core, but read
     // cross-thread by count_pending_messages(), so must be _Atomic to avoid
@@ -259,7 +297,49 @@ void scheduler_send_batch_flush(void);
 
 // NUMA-aware actor lifetime (TIER 1 - always on)
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size);
+/* Ends an actor (#2509): marks it released, takes it out of its core's table
+ * and reclaims it once no scheduler thread or table reader can still be
+ * looking at it, which is later, not during the call. Safe to call from the
+ * actor's own step, and it never blocks: an actor with its own thread
+ * (auto_process) is only marked here, and that thread, which leaves its
+ * loop at the mark, ends the actor itself once it has let go of it.
+ * Nothing may send to the actor after this. A
+ * message that still arrives is dropped: the actor's memory stays allocated,
+ * marked released, until a later spawn of the same size reuses it (#2517),
+ * so a late send is defined, and one that comes after the reuse reaches the
+ * new actor. */
 void scheduler_release_actor(ActorBase* actor);
+/* Ends every released actor that can be ended now (its state destroyed, its
+ * block kept for reuse), waiting a bounded time for the core threads to move
+ * past the retired ones. Returns the number still retired: 0 means every
+ * release so far has been ended; non-zero means a reader (a core blocked in
+ * a long step, a walk on this thread) still holds some back, and a caller
+ * that needs them ended calls again. The cooperative scheduler ends them on
+ * the spot unless a walk or an inline send is on the stack (#2528). */
+int scheduler_reclaim_released(void);
+/* Released actors not reclaimed yet, for tests and diagnostics (#2509). */
+int scheduler_released_actors_pending(void);
+/* Messages dropped because their target had been released (#2517): each is
+ * a send made against the release contract. */
+uint64_t scheduler_released_sends(void);
+/* A thread that steps actors without being a core's scheduler thread
+ * (aether_actor_thread, which inlines sends to actors of its core) takes
+ * part in reclamation like a core (#2517): it registers before its first
+ * step, publishes the epoch it reads in at every quiescent point (the top of
+ * its loop, holding no actor it found through a table), and deregisters
+ * when it is done. A released actor is not reclaimed while such a thread
+ * may still hold it. `actor` is the one the thread serves, or NULL. */
+void scheduler_reader_online(void);
+void scheduler_reader_quiescent(void);
+void scheduler_reader_offline(void);
+/* The last thing an auto_process actor's thread does (#2517): the actor is
+ * ended, as a release ends any other, if it has been released; a release
+ * that comes later ends it then. */
+void scheduler_actor_thread_exit(ActorBase* actor);
+/* Called by the inline (main-thread-mode) send once the step it ran has
+ * returned and it no longer touches the actor: an actor that released itself
+ * in that step is released now (#2509). */
+void scheduler_inline_step_done(void);
 
 // Ask/reply: send a message and block until a reply arrives or timeout.
 // Returns malloc'd reply payload on success (caller must free), NULL on timeout.
@@ -268,6 +348,12 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 // Reply to the pending ask (called from inside an actor's receive handler).
 // data/data_size describe the reply payload; it is copied internally.
 void scheduler_reply(ActorBase* self, void* data, size_t data_size);
+/* As scheduler_reply, for a reply whose bytes own something (strings copied,
+ * closures taken for the asker): when the reply is not delivered (the asker
+ * timed out, nobody asked, the copy failed) `release(data)` gives those
+ * back; delivered, they are the asker's with the bytes (#2528). */
+void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
+                           void (*release)(void*));
 
 // Drain pending messages for main-thread-only actors.
 // Call this from C-hosted event loops (e.g. inside a render/event callback)

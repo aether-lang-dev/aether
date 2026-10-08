@@ -4,6 +4,8 @@
 import std.cbor
 import std.encoding
 import std.string
+import std.bytes
+import std.mem
 
 extern exit(code: int)
 
@@ -47,21 +49,95 @@ fn run_test(hex_data: string, expected_diag: string) -> int {
     encoded_len = string.length(encoded)
     encoded_hex = encoding.hex_encode(string.bytes(encoded)[0..encoded_len])
 
-    // We only assert exact hex match for non-floats and non-indefinite values
-    is_float = string.starts_with(hex_data, "f9") == 1 || string.starts_with(hex_data, "fa") == 1 || string.starts_with(hex_data, "fb") == 1
-    is_indefinite = string.starts_with(hex_data, "9f") == 1 || string.starts_with(hex_data, "bf") == 1 || string.starts_with(hex_data, "5f") == 1 || string.starts_with(hex_data, "7f") == 1
-    if !is_float && !is_indefinite {
-        if encoded_hex != string.to_lower(hex_data) {
-            println("  FAIL: encode hex mismatch for ${hex_data}")
-            println("    got:      '${encoded_hex}'")
-            println("    expected: '${string.to_lower(hex_data)}'")
-            cbor.free(cv_ptr)
-            return 1
-        }
+    // A parsed item keeps how it was encoded, floats and indefinite
+    // lengths included (#2470), so it encodes back byte for byte.
+    if encoded_hex != string.to_lower(hex_data) {
+        println("  FAIL: encode hex mismatch for ${hex_data}")
+        println("    got:      '${encoded_hex}'")
+        println("    expected: '${string.to_lower(hex_data)}'")
+        cbor.free(cv_ptr)
+        return 1
     }
 
     cbor.free(cv_ptr)
     return 0
+}
+
+// Hostile or truncated input must be refused with `expected_err`, never
+// decoded into a value.
+fn expect_error(hex_data: string, expected_err: string) -> int {
+    binary_data, err = encoding.hex_decode(hex_data)
+    if err != "" {
+        println("  FAIL: hex decode failed for ${hex_data}: ${err}")
+        return 1
+    }
+    cv_ptr, err2 = cbor.parse(binary_data)
+    if err2 != expected_err {
+        diag, _ = cbor.diagnose(cv_ptr)
+        println("  FAIL: ${hex_data} should be refused")
+        println("    got:      err='${err2}' value=${diag}")
+        println("    expected: err='${expected_err}'")
+        cbor.free(cv_ptr)
+        return 1
+    }
+    return 0
+}
+
+// `levels` one-element arrays (0x81) around the integer 1.
+fn nested_arrays(levels: int) -> string {
+    b = bytes.new(levels + 1)
+    i = 0
+    while i < levels {
+        bytes.set(b, i, 129)
+        i = i + 1
+    }
+    bytes.set(b, levels, 1)
+    return bytes.finish(b, levels + 1)
+}
+
+fn test_nesting() -> int {
+    fails = 0
+    // 256 arrays put the integer 256 levels down: the deepest accepted.
+    ok_data = nested_arrays(256)
+    v, err = cbor.parse(ok_data)
+    if err != "" {
+        println("  FAIL nesting: 256 levels refused: ${err}")
+        fails = fails + 1
+    }
+    cbor.free(v)
+    // One more, and 200000 more, are refused instead of recursing until the
+    // stack overflows.
+    deep = nested_arrays(257)
+    v2, err2 = cbor.parse(deep)
+    if err2 != "cbor: nesting deeper than 256" {
+        println("  FAIL nesting: 257 levels gave err='${err2}'")
+        fails = fails + 1
+        cbor.free(v2)
+    }
+    hostile = nested_arrays(200000)
+    v3, err3 = cbor.parse(hostile)
+    if err3 != "cbor: nesting deeper than 256" {
+        println("  FAIL nesting: 200000 levels gave err='${err3}'")
+        fails = fails + 1
+        cbor.free(v3)
+    }
+    return fails
+}
+
+fn test_set_replaces() -> int {
+    m = cbor.obj()
+    _ = cbor.set(m, "k", cbor.from_int(1))
+    _ = cbor.set(m, "j", cbor.from_int(7))
+    _ = cbor.set(m, "k", cbor.from_int(2))
+    v, _ = cbor.object_get(m, "k")
+    diag, _ = cbor.diagnose(m)
+    fails = 0
+    if cbor.object_size(m) != 2 || cbor.get_int(v) != 2 || diag != "{\"k\": 2, \"j\": 7}" {
+        println("  FAIL set: an existing key was not replaced: size=${cbor.object_size(m)} ${diag}")
+        fails = 1
+    }
+    cbor.free(m)
+    return fails
 }
 
 fn test_builders() -> int {
@@ -111,6 +187,386 @@ fn test_builders() -> int {
     return 0
 }
 
+// Diagnostic text without the `_0`.._3 encoding indicators, which RFC 8949
+// Appendix A leaves out (section 8.1).
+fn strip_indicators(d: string) -> string {
+    n = string.length(d)
+    b = bytes.new(n)
+    out = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(d, n, i)
+        if c == 95 && i + 1 < n {
+            nx = string.char_at_n(d, n, i + 1)
+            if nx >= 48 && nx <= 51 {
+                i = i + 2
+                continue
+            }
+        }
+        bytes.set(b, out, c)
+        out = out + 1
+        i = i + 1
+    }
+    return bytes.finish(b, out)
+}
+
+// One RFC 8949 Appendix A example: it parses, diagnoses as the table shows
+// it (encoding indicators aside), and encodes back to the same bytes.
+fn appendix(hex_data: string, want: string) -> int {
+    data, _ = encoding.hex_decode(hex_data)
+    v, err = cbor.parse(data)
+    if err != "" {
+        println("  FAIL appendix A ${hex_data}: ${err}")
+        return 1
+    }
+    d, _ = cbor.diagnose(v)
+    enc, _ = cbor.encode(v)
+    eh = encoding.hex_encode(string.bytes(enc)[0..string.length(enc)])
+    cbor.free(v)
+    if strip_indicators(d) != want {
+        println("  FAIL appendix A ${hex_data}: diag '${d}', want '${want}'")
+        return 1
+    }
+    if eh != hex_data {
+        println("  FAIL appendix A ${hex_data}: re-encoded as ${eh}")
+        return 1
+    }
+    return 0
+}
+
+// RFC 8949 Appendix A, every row, the integers past the signed 64-bit range
+// included (#2510). The bignum tags 2 and 3 are shown as the tag they are.
+fn test_appendix_a() -> int {
+    f = 0
+    f = f + appendix("00", "0")
+    f = f + appendix("01", "1")
+    f = f + appendix("0a", "10")
+    f = f + appendix("17", "23")
+    f = f + appendix("1818", "24")
+    f = f + appendix("1819", "25")
+    f = f + appendix("1864", "100")
+    f = f + appendix("1903e8", "1000")
+    f = f + appendix("1a000f4240", "1000000")
+    f = f + appendix("1b000000e8d4a51000", "1000000000000")
+    f = f + appendix("1bffffffffffffffff", "18446744073709551615")
+    f = f + appendix("c249010000000000000000", "2(h'010000000000000000')")
+    f = f + appendix("3bffffffffffffffff", "-18446744073709551616")
+    f = f + appendix("c349010000000000000000", "3(h'010000000000000000')")
+    f = f + appendix("20", "-1")
+    f = f + appendix("29", "-10")
+    f = f + appendix("3863", "-100")
+    f = f + appendix("3903e7", "-1000")
+    f = f + appendix("f90000", "0.0")
+    f = f + appendix("f98000", "-0.0")
+    f = f + appendix("f93c00", "1.0")
+    f = f + appendix("fb3ff199999999999a", "1.1")
+    f = f + appendix("f93e00", "1.5")
+    f = f + appendix("f97bff", "65504.0")
+    f = f + appendix("fa47c35000", "100000.0")
+    f = f + appendix("fa7f7fffff", "3.4028234663852886e+38")
+    f = f + appendix("fb7e37e43c8800759c", "1.0e+300")
+    f = f + appendix("f90001", "5.960464477539063e-8")
+    f = f + appendix("f90400", "0.00006103515625")
+    f = f + appendix("f9c400", "-4.0")
+    f = f + appendix("fbc010666666666666", "-4.1")
+    f = f + appendix("f97c00", "Infinity")
+    f = f + appendix("f97e00", "NaN")
+    f = f + appendix("f9fc00", "-Infinity")
+    f = f + appendix("fa7f800000", "Infinity")
+    f = f + appendix("fa7fc00000", "NaN")
+    f = f + appendix("faff800000", "-Infinity")
+    f = f + appendix("fb7ff0000000000000", "Infinity")
+    f = f + appendix("fb7ff8000000000000", "NaN")
+    f = f + appendix("fbfff0000000000000", "-Infinity")
+    f = f + appendix("f4", "false")
+    f = f + appendix("f5", "true")
+    f = f + appendix("f6", "null")
+    f = f + appendix("f7", "undefined")
+    f = f + appendix("f0", "simple(16)")
+    f = f + appendix("f8ff", "simple(255)")
+    f = f + appendix("c074323031332d30332d32315432303a30343a30305a", "0(\"2013-03-21T20:04:00Z\")")
+    f = f + appendix("c11a514b67b0", "1(1363896240)")
+    f = f + appendix("c1fb41d452d9ec200000", "1(1363896240.5)")
+    f = f + appendix("d74401020304", "23(h'01020304')")
+    f = f + appendix("d818456449455446", "24(h'6449455446')")
+    f = f + appendix("d82076687474703a2f2f7777772e6578616d706c652e636f6d", "32(\"http://www.example.com\")")
+    f = f + appendix("40", "h''")
+    f = f + appendix("4401020304", "h'01020304'")
+    f = f + appendix("60", "\"\"")
+    f = f + appendix("6161", "\"a\"")
+    f = f + appendix("6449455446", "\"IETF\"")
+    f = f + appendix("62225c", "\"\\\"\\\\\"")
+    f = f + appendix("62c3bc", "\"ü\"")
+    f = f + appendix("63e6b0b4", "\"水\"")
+    f = f + appendix("64f0908591", "\"𐅑\"")
+    f = f + appendix("80", "[]")
+    f = f + appendix("83010203", "[1, 2, 3]")
+    f = f + appendix("8301820203820405", "[1, [2, 3], [4, 5]]")
+    f = f + appendix("98190102030405060708090a0b0c0d0e0f101112131415161718181819", "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]")
+    f = f + appendix("a0", "{}")
+    f = f + appendix("a201020304", "{1: 2, 3: 4}")
+    f = f + appendix("a26161016162820203", "{\"a\": 1, \"b\": [2, 3]}")
+    f = f + appendix("826161a161626163", "[\"a\", {\"b\": \"c\"}]")
+    f = f + appendix("a56161614161626142616361436164614461656145", "{\"a\": \"A\", \"b\": \"B\", \"c\": \"C\", \"d\": \"D\", \"e\": \"E\"}")
+    f = f + appendix("5f42010243030405ff", "(_ h'0102', h'030405')")
+    f = f + appendix("7f657374726561646d696e67ff", "(_ \"strea\", \"ming\")")
+    f = f + appendix("9fff", "[_ ]")
+    f = f + appendix("9f018202039f0405ffff", "[_ 1, [2, 3], [_ 4, 5]]")
+    f = f + appendix("9f01820203820405ff", "[_ 1, [2, 3], [4, 5]]")
+    f = f + appendix("83018202039f0405ff", "[1, [2, 3], [_ 4, 5]]")
+    f = f + appendix("83019f0203ff820405", "[1, [_ 2, 3], [4, 5]]")
+    f = f + appendix("9f0102030405060708090a0b0c0d0e0f101112131415161718181819ff", "[_ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]")
+    f = f + appendix("bf61610161629f0203ffff", "{_ \"a\": 1, \"b\": [_ 2, 3]}")
+    f = f + appendix("826161bf61626163ff", "[\"a\", {_ \"b\": \"c\"}]")
+    f = f + appendix("bf6346756ef563416d7421ff", "{_ \"Fun\": true, \"Amt\": -2}")
+    if f == 0 { println("  PASS: RFC 8949 Appendix A") }
+    return f
+}
+
+// Section 8.1 encoding indicators, exactly where the head is not the
+// preferred one, so the text records the encoding; run_test also checks
+// each re-encodes to its own bytes.
+fn test_indicators() -> int {
+    f = 0
+    f = f + run_test("1800", "0_0")
+    f = f + run_test("190001", "1_1")
+    f = f + run_test("1a00000001", "1_2")
+    f = f + run_test("1b0000000000000001", "1_3")
+    f = f + run_test("3800", "-1_0")
+    f = f + run_test("fb3ff8000000000000", "1.5_3")
+    f = f + run_test("fa3fc00000", "1.5_2")
+    f = f + run_test("fa7f800000", "Infinity_2")
+    f = f + run_test("fb7ff8000000000000", "NaN_3")
+    // A NaN payload that does not fit a narrower width needs no indicator,
+    // and survives the round trip.
+    f = f + run_test("fa7fc00001", "NaN")
+    f = f + run_test("5801ff", "h'ff'_0")
+    f = f + run_test("780161", "\"a\"_0")
+    f = f + run_test("980101", "[_0 1]")
+    f = f + run_test("b8010102", "{_0 1: 2}")
+    f = f + run_test("d8010f", "1_0(15)")
+    f = f + run_test("5fff", "''_")
+    f = f + run_test("7fff", "\"\"_")
+    f = f + run_test("5f40ff", "(_ h'')")
+    f = f + run_test("bfff", "{_ }")
+    f = f + run_test("7f62c3a96161ff", "(_ \"é\", \"a\")")
+    // Text escapes are JSON's; the C0 controls used to be written raw.
+    f = f + run_test("690a0d09080c011f225c", "\"\\n\\r\\t\\b\\f\\u0001\\u001f\\\"\\\\\"")
+    if f == 0 { println("  PASS: encoding indicators") }
+    return f
+}
+
+// RFC 8949 Appendix F: data that is not well-formed. Every one is refused.
+fn test_not_well_formed() -> int {
+    cases = "18 19 1a 1b 1901 1a0102 1b01020304050607 38 58 78 98 9a01ff00 b8 d8 f8 f900 fa0000 fb000000 41 61 5affffffff00 5bffffffffffffffff010203 7affffffff00 7b7fffffffffffffff010203 81 818181818181818181 8200 a1 a20102 a100 a2000000 c0 5f4100 7f6100 9f 9f0102 bf bf01020102 819f 9f8000 9f9f9f9f9fffffffff 9f819f819f9fffffff 1c 1d 1e 3c 3d 3e 5c 5d 5e 7c 7d 7e 9c 9d 9e bc bd be dc dd de fc fd fe f800 f801 f818 f81f 5f00ff 5f21ff 5f6100ff 5f80ff 5fa0ff 5fc000ff 5fe0ff 7f4100ff 5f5f4100ffff 7f7f6100ffff ff 81ff 8200ff a1ff a1ff00 a100ff a20000ff 9f81ff 9f829f819f9fffffffff bf00ff bf000000ff 1f 3f df"
+    f = 0
+    n = string.length(cases)
+    start = 0
+    count = 0
+    i = 0
+    while i <= n {
+        if i == n || string.char_at_n(cases, n, i) == 32 {
+            hex = string.substring(cases, start, i)
+            data, _ = encoding.hex_decode(hex)
+            v, err = cbor.parse(data)
+            if err == "" || v != null {
+                d, _ = cbor.diagnose(v)
+                println("  FAIL not well-formed ${hex} accepted as ${d}")
+                cbor.free(v)
+                f = f + 1
+            }
+            count = count + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    // The three the issue reported, with their own errors.
+    f = f + expect_error("5f5f4101ffff", "cbor: indefinite-length string chunk is not a definite-length string of its type")
+    f = f + expect_error("f814", "cbor: simple value below 32 in two bytes")
+    f = f + expect_error("ff", "cbor: unexpected break")
+    if f == 0 { println("  PASS: RFC 8949 Appendix F (${count} not well-formed items refused)") }
+    return f
+}
+
+fn test_utf8_and_trailing() -> int {
+    f = 0
+    // The input is one data item: a second item, or any byte after it, is
+    // an error rather than ignored.
+    f = f + expect_error("0102", "cbor: trailing bytes after the data item")
+    f = f + expect_error("8001", "cbor: trailing bytes after the data item")
+    f = f + expect_error("a0a0", "cbor: trailing bytes after the data item")
+    // Text strings must be UTF-8 (section 3.1), each chunk on its own.
+    f = f + expect_error("62c328", "cbor: invalid UTF-8 in text string")
+    f = f + expect_error("62c0af", "cbor: invalid UTF-8 in text string")
+    f = f + expect_error("63eda080", "cbor: invalid UTF-8 in text string")
+    f = f + expect_error("64f4908080", "cbor: invalid UTF-8 in text string")
+    f = f + expect_error("6180", "cbor: invalid UTF-8 in text string")
+    f = f + expect_error("61ff", "cbor: invalid UTF-8 in text string")
+    f = f + expect_error("7f61c361a9ff", "cbor: invalid UTF-8 in text string")
+    // A byte string is not text: any byte goes.
+    f = f + run_test("42c328", "h'c328'")
+    if f == 0 { println("  PASS: trailing bytes and UTF-8") }
+    return f
+}
+
+fn enc_hex(v: ptr) -> string {
+    e, _ = cbor.encode(v)
+    return encoding.hex_encode(string.bytes(e)[0..string.length(e)])
+}
+
+fn want_float(bits: long, want_hex: string) -> int {
+    v = cbor.num(mem.float_from_bits(bits))
+    got = enc_hex(v)
+    cbor.free(v)
+    if got != want_hex {
+        println("  FAIL num with bits ${string.from_int_radix(bits, 16)}: encoded ${got}, want ${want_hex}")
+        return 1
+    }
+    return 0
+}
+
+// A float built with num() encodes in preferred serialization, the
+// narrowest exact width (section 4.2.2); it was always a double.
+fn test_preferred_floats() -> int {
+    f = 0
+    f = f + want_float(0x3ff8000000000000, "f93e00") // 1.5
+    f = f + want_float(0x40f86a0000000000, "fa47c35000") // 100000.0
+    f = f + want_float(0x3ff199999999999a, "fb3ff199999999999a") // 1.1
+    f = f + want_float(0x0000000000000000, "f90000")
+    f = f + want_float(0x8000000000000000, "f98000")
+    f = f + want_float(0x40effc0000000000, "f97bff") // 65504.0, the largest half
+    f = f + want_float(0x40effc2000000000, "fa477fe100") // 65505.0
+    f = f + want_float(0x3e70000000000000, "f90001") // 2^-24, the least half subnormal
+    f = f + want_float(0x36a0000000000000, "fa00000001") // 2^-149, the least single subnormal
+    f = f + want_float(0x47efffffe0000000, "fa7f7fffff") // the largest single
+    f = f + want_float(0x7ff0000000000000, "f97c00")
+    f = f + want_float(0xfff0000000000000, "f9fc00")
+    f = f + want_float(0x7ff8000000000000, "f97e00")
+    f = f + want_float(0x0000000000000001, "fb0000000000000001") // a double subnormal
+    f = f + want_float(0x7e37e43c8800759c, "fb7e37e43c8800759c") // 1.0e+300
+    v = cbor.num(mem.float_from_bits(0x3ff8000000000000))
+    d, _ = cbor.diagnose(v)
+    cbor.free(v)
+    if d != "1.5" {
+        println("  FAIL num(1.5) diagnoses as ${d}")
+        f = f + 1
+    }
+    if f == 0 { println("  PASS: constructed floats in preferred serialization") }
+    return f
+}
+
+// map_get matches an array or map key by content; a map's pairs in any
+// order. It never matched either (#2470).
+fn test_container_keys() -> int {
+    m = cbor.obj()
+    ka = cbor.arr()
+    _ = cbor.push(ka, cbor.from_int(1))
+    _ = cbor.push(ka, cbor.from_int(2))
+    _ = cbor.map_set(m, ka, cbor.str("array"))
+    km = cbor.obj()
+    _ = cbor.map_set(km, cbor.from_int(1), cbor.from_int(2))
+    _ = cbor.map_set(km, cbor.from_int(3), cbor.from_int(4))
+    _ = cbor.map_set(m, km, cbor.str("map"))
+
+    f = 0
+    pa = cbor.arr()
+    _ = cbor.push(pa, cbor.from_int(1))
+    _ = cbor.push(pa, cbor.from_int(2))
+    va, _ = cbor.map_get(m, pa)
+    sa, _ = cbor.get_string(va)
+    if sa != "array" { println("  FAIL map_get by array key: '${sa}'") f = f + 1 }
+
+    pm = cbor.obj()
+    _ = cbor.map_set(pm, cbor.from_int(3), cbor.from_int(4))
+    _ = cbor.map_set(pm, cbor.from_int(1), cbor.from_int(2))
+    vm, _ = cbor.map_get(m, pm)
+    sm, _ = cbor.get_string(vm)
+    if sm != "map" { println("  FAIL map_get by map key in another order: '${sm}'") f = f + 1 }
+
+    po = cbor.arr()
+    _ = cbor.push(po, cbor.from_int(2))
+    _ = cbor.push(po, cbor.from_int(1))
+    vo, _ = cbor.map_get(m, po)
+    if vo != null { println("  FAIL map_get matched [2, 1] to [1, 2]") f = f + 1 }
+
+    ps = cbor.obj()
+    _ = cbor.map_set(ps, cbor.from_int(1), cbor.from_int(2))
+    vs, _ = cbor.map_get(m, ps)
+    if vs != null { println("  FAIL map_get matched {1: 2} to {1: 2, 3: 4}") f = f + 1 }
+
+    cbor.free(pa)
+    cbor.free(pm)
+    cbor.free(po)
+    cbor.free(ps)
+    cbor.free(m)
+    if f == 0 { println("  PASS: array and map keys") }
+    return f
+}
+
+// Integers outside the signed long: the accessors (#2510).
+fn test_big_integers() -> int {
+    f = 0
+    data, _ = encoding.hex_decode("1bffffffffffffffff") // 2^64 - 1
+    u, err = cbor.parse(data)
+    if err != "" { println("  FAIL parse 2^64-1: ${err}") return 1 }
+    ub, uerr = cbor.get_uint(u)
+    if uerr != "" || ub != -1 { println("  FAIL get_uint(2^64-1) = ${ub} '${uerr}'") f = f + 1 }
+    _l, lerr = cbor.get_int64(u)
+    if lerr != "cbor: integer outside the signed 64-bit range" { println("  FAIL get_int64(2^64-1) err '${lerr}'") f = f + 1 }
+    if cbor.get_long(u) != 0 { println("  FAIL get_long(2^64-1) = ${cbor.get_long(u)}, want 0") f = f + 1 }
+    _n, nerr = cbor.get_nint(u)
+    if nerr == "" { println("  FAIL get_nint of an unsigned integer") f = f + 1 }
+    if cbor.get_float(u) != 18446744073709551615.0 { println("  FAIL get_float(2^64-1) = ${cbor.get_float(u)}") f = f + 1 }
+    cbor.free(u)
+
+    data2, _ = encoding.hex_decode("3bffffffffffffffff") // -2^64
+    n, err2 = cbor.parse(data2)
+    if err2 != "" { println("  FAIL parse -2^64: ${err2}") return f + 1 }
+    nb, nerr2 = cbor.get_nint(n)
+    if nerr2 != "" || nb != -1 { println("  FAIL get_nint(-2^64) = ${nb} '${nerr2}'") f = f + 1 }
+    _u2, uerr2 = cbor.get_uint(n)
+    if uerr2 == "" { println("  FAIL get_uint of a negative integer") f = f + 1 }
+    _l2, lerr2 = cbor.get_int64(n)
+    if lerr2 != "cbor: integer outside the signed 64-bit range" { println("  FAIL get_int64(-2^64) err '${lerr2}'") f = f + 1 }
+    cbor.free(n)
+
+    // In range, the accessors agree with get_long.
+    small = cbor.from_int(-5)
+    sv, serr = cbor.get_int64(small)
+    sn, snerr = cbor.get_nint(small)
+    if serr != "" || sv != -5 || snerr != "" || sn != 4 { println("  FAIL from_int(-5): int64 ${sv} nint ${sn}") f = f + 1 }
+    cbor.free(small)
+
+    // The constructors build the same values, which encode as RFC 8949
+    // Appendix A has them and compare equal to the parsed ones.
+    bu = cbor.from_uint(-1)
+    if enc_hex(bu) != "1bffffffffffffffff" { println("  FAIL from_uint(2^64-1) encodes ${enc_hex(bu)}") f = f + 1 }
+    bn = cbor.from_nint(-1)
+    if enc_hex(bn) != "3bffffffffffffffff" { println("  FAIL from_nint(2^64-1) encodes ${enc_hex(bn)}") f = f + 1 }
+    bnd, _ = cbor.diagnose(bn)
+    if bnd != "-18446744073709551616" { println("  FAIL from_nint(2^64-1) diagnoses ${bnd}") f = f + 1 }
+    small_u = cbor.from_uint(7)
+    if enc_hex(small_u) != "07" { println("  FAIL from_uint(7) encodes ${enc_hex(small_u)}") f = f + 1 }
+    small_n = cbor.from_nint(0)
+    if enc_hex(small_n) != "20" || cbor.get_long(small_n) != -1 { println("  FAIL from_nint(0) encodes ${enc_hex(small_n)}") f = f + 1 }
+
+    // As map keys, a big integer matches only itself.
+    m = cbor.obj()
+    _ = cbor.map_set(m, bu, cbor.str("max"))
+    _ = cbor.map_set(m, cbor.from_int(-1), cbor.str("minus one"))
+    probe = cbor.from_uint(-1)
+    pv, _ = cbor.map_get(m, probe)
+    ps, _ = cbor.get_string(pv)
+    if ps != "max" { println("  FAIL map_get by 2^64-1: '${ps}'") f = f + 1 }
+    cbor.free(probe)
+    cbor.free(m)
+    cbor.free(bn)
+    cbor.free(small_u)
+    cbor.free(small_n)
+    if f == 0 { println("  PASS: integers past the signed 64-bit range") }
+    return f
+}
+
 main() {
     println("=== test_cbor ===")
     fails = 0
@@ -146,6 +602,10 @@ main() {
     fails = fails + run_test("f97c00", "Infinity")
     fails = fails + run_test("f9fc00", "-Infinity")
     fails = fails + run_test("f97e00", "NaN")
+    // The shortest decimal that reads back, not %g's six digits (#2470).
+    fails = fails + run_test("fb419d6f3454000000", "123456789.0")
+    fails = fails + run_test("fb3fb999999999999a", "0.1")
+    fails = fails + run_test("fb0000000000000001", "5.0e-324")
 
     // ---- Strings & Bytes ----
     fails = fails + run_test("40", "h''")
@@ -162,10 +622,12 @@ main() {
     fails = fails + run_test("a26161016162820203", "{\"a\": 1, \"b\": [2, 3]}")
 
     // ---- Indefinite Collections ----
-    fails = fails + run_test("9f0102ff", "[1, 2]")
-    fails = fails + run_test("bf616101ff", "{\"a\": 1}")
-    fails = fails + run_test("5f41014102ff", "h'0102'")
-    fails = fails + run_test("7f61616162ff", "\"ab\"")
+    // Shown with RFC 8949 section 8.1's `_` indicator and their chunks; they
+    // used to come out as the definite [1, 2] and h'0102' (#2470).
+    fails = fails + run_test("9f0102ff", "[_ 1, 2]")
+    fails = fails + run_test("bf616101ff", "{_ \"a\": 1}")
+    fails = fails + run_test("5f41014102ff", "(_ h'01', h'02')")
+    fails = fails + run_test("7f61616162ff", "(_ \"a\", \"b\")")
 
     // ---- Tags ----
     fails = fails + run_test("c074323031332d30332d32315432303a30343a30355a", "0(\"2013-03-21T20:04:05Z\")")
@@ -174,6 +636,46 @@ main() {
 
     // ---- Builders ----
     fails = fails + test_builders()
+    fails = fails + test_set_replaces()
+
+    // ---- 64-bit integer limits ----
+    // The extremes of the signed long round-trip, and so does the rest of
+    // CBOR's range past them (#2510): a value is never read with its sign
+    // flipped, and get_long reports what does not fit instead.
+    fails = fails + run_test("1b7fffffffffffffff", "9223372036854775807")
+    fails = fails + run_test("3b7fffffffffffffff", "-9223372036854775808")
+    fails = fails + run_test("1b8000000000000000", "9223372036854775808")
+    fails = fails + run_test("3b8000000000000000", "-9223372036854775809")
+    fails = fails + run_test("1bfffffffffffffffe", "18446744073709551614")
+    fails = fails + run_test("3bfffffffffffffffe", "-18446744073709551615")
+    fails = fails + run_test("db8000000000000000f6", "9223372036854775808(null)")
+    fails = fails + test_big_integers()
+
+    // ---- Hostile lengths ----
+    // Lengths and counts of 2^31 and up, larger than the input, were
+    // narrowed to int and decoded as empty (or as the bytes that were there).
+    fails = fails + expect_error("5a80000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("7a80000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("5b000000010000000141", "cbor: unexpected EOF")
+    fails = fails + expect_error("9a80000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("9b0000000100000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("bb00000001000000010102", "cbor: unexpected EOF")
+    fails = fails + expect_error("5bffffffffffffffff", "cbor: unexpected EOF")
+    fails = fails + expect_error("9b8000000000000000", "cbor: unexpected EOF")
+    fails = fails + expect_error("bbffffffffffffffff", "cbor: unexpected EOF")
+    // A map whose count needs more bytes than are left is truncated.
+    fails = fails + expect_error("a201", "cbor: unexpected EOF")
+
+    // ---- Nesting ----
+    fails = fails + test_nesting()
+
+    // ---- RFC 8949 conformance (#2470) ----
+    fails = fails + test_appendix_a()
+    fails = fails + test_indicators()
+    fails = fails + test_not_well_formed()
+    fails = fails + test_utf8_and_trailing()
+    fails = fails + test_preferred_floats()
+    fails = fails + test_container_keys()
 
     if fails != 0 {
         println("CBOR: ${fails} failure(s)")

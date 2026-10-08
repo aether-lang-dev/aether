@@ -8,7 +8,7 @@
 # `Compilation failed.` and nothing else, and there was no way to know
 # whether the code was wrong or the machine was under memory pressure.
 #
-# `posix_run` already distinguishes the two (it returns -signal for a child
+# `ae_spawn` already distinguishes the two (it returns -signal for a child
 # that died of one); this asserts the driver surfaces it, and — just as
 # importantly — that an ORDINARY compile error is not decorated with an exit
 # status it does not need.

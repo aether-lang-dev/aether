@@ -63,13 +63,18 @@ main() {
 | Constant       | Accepts (lax coercion)                       |
 |----------------|----------------------------------------------|
 | `schema.STR`   | any string                                   |
-| `schema.INT`   | a string parseable as an integer             |
+| `schema.INT`   | a string parseable as a 64-bit integer       |
 | `schema.FLOAT` | a string parseable as a number               |
 | `schema.BOOL`  | `true`/`false`/`1`/`0` (case-insensitive)    |
 
 Coercion is **lax by default** (Pydantic-style): `"25"` is accepted for an
 `INT` field. A value that cannot be coerced to the declared type produces an
 `invalid_type` error and the field's other rules are skipped.
+
+`INT` is 64-bit, the range `std.json` reads an integer in and the type of the
+`min`/`max` bounds: `5000000000` is an `INT`, and `max(120)` refuses it as
+`too_big`. An integer outside the 64-bit range is an `invalid_type` error on
+its field, never dropped.
 
 ## Nested records and arrays
 
@@ -146,16 +151,20 @@ Rules are composable builder calls inside a `field(…) { … }` block:
 | `max(n)`                    | INT/FLOAT / STR   | value `<= n` — or string length `<= n`              |
 | `len(lo, hi)`               | STR               | string length within `[lo, hi]`                     |
 | `present()`                 | any               | value must be non-empty                             |
-| `one_of("a,b,c")`           | any               | value must be one of the comma-separated set        |
-| `email()`                   | STR               | value must look like an email address               |
+| `one_of("a,b,c")`           | any               | value must equal one of the comma-separated options |
+| `email()`                   | STR               | value must look like an email address (see below)   |
 | `positive()`                | INT/FLOAT         | value `> 0`                                         |
 | `nonneg()`                  | INT/FLOAT         | value `>= 0`                                        |
 | `pattern("kind:needle")`    | STR               | `contains` / `prefix` / `suffix` match (no regex)   |
-| `one_of("a,b,c")`           | any               | value must be one of the comma-separated set        |
-| `email()`                   | STR               | value must look like an email address               |
 | `optional()`                | any               | absence is not an error (rules skipped when absent) |
-| `default_to("v")`           | any               | when absent, fill `"v"` instead of erroring (implies optional) |
+| `default_to("v")`           | any               | when absent, fill `"v"` instead of erroring (implies optional); a `"v"` the field's type cannot read is refused when the schema is built |
 | `refine(\|v: string\| { … })` | any             | custom predicate: return `1` to pass, `0` to fail   |
+
+`one_of` compares the whole value with each option: with
+`one_of("admin,user")`, `"admin,user"` and `"adm"` are both refused. `email()`
+is a shape check, not RFC 5322: something before the `@`, and a domain after
+it holding a dot that neither starts nor ends it. The local part may hold dots
+(`first.last@example.com`).
 
 **Transforms** rewrite the canonical value in declaration order (before the
 checks that follow them) and never fail — the "parse, don't validate" payoff of
@@ -208,7 +217,7 @@ Errors carry a stable, machine-readable `code` (mirroring Zod's vocabulary):
 | Code             | Raised by                                    |
 |------------------|----------------------------------------------|
 | `missing`        | a required field absent from the input       |
-| `invalid_type`   | value not coercible to the declared type     |
+| `invalid_type`   | value not coercible to the declared type (an `INT` past 64 bits too) |
 | `too_small`      | `min` / `len` lower bound                     |
 | `too_big`        | `max` / `len` upper bound                     |
 | `invalid_value`  | `present` empty / `one_of` not in set        |
@@ -283,6 +292,11 @@ JSON Schema; it does not consume external JSON Schema documents.
 - `error_field(errors, i) -> string`
 - `error_code(errors, i) -> string`
 - `error_message(errors, i) -> string`
+
+The three getters read error `i`, for `i` in `[0, error_count(errors))`. They
+have no error channel, so an index outside that range reads as `""` rather
+than crashing; `error_code` is never `""` for a real error, so it tells the two
+apart (`error_field` is `""` for an error on the JSON root itself).
 
 ### Cleanup
 - `schema_free(schema)` — free a schema built with `record()`

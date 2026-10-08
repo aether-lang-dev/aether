@@ -33,9 +33,9 @@ main() {
 }
 ```
 
-`read` and `write` handle text. For binary payloads use `read_binary` and
-`write_binary`, which carry an explicit length so a buffer with embedded NUL
-bytes survives intact — the text forms would stop at the first zero.
+`read` and `write` carry every byte of a string, embedded NULs included.
+`read_binary` and `write_binary` take or return an explicit length, for
+callers that hold a raw buffer rather than a string.
 
 Every entry point carries bytes verbatim on every platform, `open` included:
 a handle from `fs.open(path, "w")` is binary on Windows too, so a `\n` is one

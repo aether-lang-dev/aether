@@ -12,7 +12,7 @@ import std.string
 extern exit(code: int)
 extern tcp_listen_raw(port: int) -> ptr
 extern tcp_accept_raw(server: ptr) -> ptr
-extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string
+extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
 extern tcp_send_raw(sock: ptr, data: string) -> int
 extern tcp_close(sock: ptr) -> int
 

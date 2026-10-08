@@ -149,16 +149,20 @@ extern fs_mkdir_p_raw(path: string) -> int
 // Symbolic-link operations (raw externs). POSIX symlink(2) / readlink(2) /
 // lstat(2); on Windows CreateSymbolicLinkW, the link's own reparse data
 // and the directory entry's reparse tag.
-//   fs_symlink_raw   — create a symlink at `link_path` pointing to `target`.
+//   fs_symlink_raw:    create a symlink at `link_path` pointing to `target`.
 //                      `target` is recorded verbatim (relative stays relative);
 //                      Windows stores its separators as backslashes.
-//   fs_readlink_raw  — read a symlink's target. Returns null if not a symlink.
+//   fs_readlink_raw:   read a symlink's target (on Windows, a junction's too).
+//                      Returns null if not a link.
 //                      `@heap`: a fresh strdup'd string the tracker frees.
-//   fs_is_symlink    — does NOT follow; returns 1 only for the link itself.
-//                      Pure boolean query, no wrapper (matches file_exists).
-//   fs_unlink_raw    — remove a file or symlink (NOT a directory).
+//   fs_is_symlink:     does NOT follow; returns 1 only for the link itself.
+//                      On Windows a junction counts: it redirects resolution
+//                      exactly as a symlink does (any name-surrogate reparse
+//                      point). Pure boolean query, no wrapper (matches
+//                      file_exists).
+//   fs_unlink_raw:     remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
-//   fs_hard_link_raw — a second name (`link_path`) for the file at `target`;
+//   fs_hard_link_raw:  a second name (`link_path`) for the file at `target`;
 //                      same filesystem, files only. 1 on success.
 extern fs_hard_link_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string @heap
@@ -168,7 +172,7 @@ extern fs_readlink_raw(path: string) -> string @heap
 extern fs_make_temp_dir_raw(dir: string, prefix: string) -> string @heap
 extern fs_make_temp_file_raw(dir: string, prefix: string) -> string @heap
 extern fs_is_symlink(path: string) -> int
-//   fs_is_socket     — 1 if the path is a UNIX-domain socket (follows
+//   fs_is_socket:      1 if the path is a UNIX-domain socket (follows
 //                      symlinks). POSIX only; returns 0 on Windows. Pure
 //                      boolean query, no wrapper (matches fs_is_symlink). #1368
 extern fs_is_socket(path: string) -> int
@@ -380,8 +384,10 @@ extern fs_glob_raw(pattern: string) -> ptr
 extern fs_glob_multi_raw(patterns: ptr) -> ptr
 
 // #977: recursive walk + change notification. Raw externs; the Aether-native
-// wrappers (walk / watch_open below) add the (value, err) surface.
-extern fs_walk_raw(path: string, cb: ptr) -> int
+// wrappers (walk / watch_open below) add the (value, err) surface. The walk
+// callback is used only during the call (#2523): the caller keeps its
+// environment and releases it once the walk returns.
+extern fs_walk_raw(path: string, cb: @noescape ptr) -> int
 extern fs_watch_open_raw(path: string) -> ptr
 // Block up to timeout_ms (negative = forever): 1 = something changed,
 // 0 = timeout, -1 = error / closed handle. Pending events are drained so
@@ -714,7 +720,7 @@ glob_multi(patterns: ptr) -> {
 // Traversal order within a directory is the platform's readdir order
 // (unspecified).
 // Returns (entries visited, "") or (0, error) when `path` can't be read.
-walk(path: string, cb: ptr) -> {
+walk(path: string, cb: fn) -> {
     n = fs_walk_raw(path, cb)
     if n < 0 {
         return 0, "cannot walk path"
@@ -1278,9 +1284,10 @@ find_ext(root: string, ext: string) -> string {
 //
 // `cnt` is a capture the callback assigns to, so it lives in a heap cell the
 // walk closure and this scope share. That cell used to leak once per call
-// (#2019): fs_walk_raw owns and frees the closure before returning, and the
+// (#2019): fs_walk_raw owned and freed the closure before returning, and the
 // scope-exit free was withheld because the compiler could not see that.
-// The cell is reference-counted now and needs no care here.
+// The cell is reference-counted now, and the closure is released here once
+// the walk returns (fs_walk_raw's callback is `@noescape`, #2523).
 _find_ext_collect(root: string, ext: string, exclude: string) -> ptr {
     sb = strbuilder.new(256)
     cnt = 0
@@ -1326,6 +1333,18 @@ _is_dot_entry(name: string) -> int {
 // is unlinked; a directory has its contents removed bottom-up, then itself. A
 // missing path is success (idempotent, like `rm -rf`). Returns "" or an error.
 remove_tree(path: string) -> string {
+    // A link (a symlink, or on Windows a junction) is removed itself, never
+    // descended into: what it points at is not part of this tree. On Windows
+    // file_stat follows links, so a junction looked like a directory and
+    // remove_tree deleted the files of the directory it pointed at. Checked
+    // before existence, which follows the link and misses a dangling one.
+    // `return unlink(path)`, as the file branch returns delete(path): an
+    // interpolated error built here would make every return of this
+    // function a fresh heap string, which its recursive caller does not
+    // free (each link in a tree leaked one).
+    if fs_is_symlink(path) == 1 {
+        return unlink(path)
+    }
     // Not present → nothing to do.
     if fs_path_exists(path) == 0 { return "" }
     // A plain file (or symlink): unlink it.

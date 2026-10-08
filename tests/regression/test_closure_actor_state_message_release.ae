@@ -1,0 +1,89 @@
+// Regression (#2525): a capturing closure sent in a message field and kept
+// in an actor's state is held by a reference of its own at each step. The
+// sender's take gives the message its reference (a fresh closure's, or a
+// retain of a local's, which the local still releases); the handler that
+// stores it in state retains one of its own and gives back the state's
+// previous one; the message's reference is released with the message once
+// the handler is done. Before, the field kept the environment for the rest
+// of the program.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact): one
+// of two equal windows of rounds grows by exactly 0 (a leak grows both, a
+// one-time allocation at most one). An ask at the end
+// of each round waits for every earlier message, so the count is read with
+// the mailbox drained. Elsewhere the macOS leaks gate covers this program.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal that owns nothing.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message SetCb { cb: fn }
+message Run { n: int }
+message Get {}
+message Total { v: int }
+
+actor Keeper {
+    state cb = || { return 0 }
+    state sum = 0
+    receive {
+        SetCb(cb: new_cb) -> { cb = new_cb }
+        Run(n) -> { sum = sum + call(cb) + n }
+        Get() -> { reply Total { v: sum } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+build(tag: string) -> fn {
+    label = string.concat(tag, "!")
+    n = 0
+    return || {
+        n = n + 1
+        return string.length(label) + n
+    }
+}
+
+// Each message carries a fresh capturing closure, or a local's; state keeps
+// the last one and runs it.
+round(k: ptr, p: string) -> int {
+    i = 0
+    while i < 20 {
+        k ! SetCb { cb: build(p) }
+        k ! Run { n: 1 }
+        f = build(string.concat(p, "zz"))
+        k ! SetCb { cb: f }
+        k ! Run { n: 1 }
+        i = i + 1
+    }
+    int total = k ? Get {}
+    return total
+}
+
+main() {
+    k = spawn(Keeper())
+    first = round(k, "a")
+    check(first > 0, "the actor ran the closures it was sent")
+    second = round(k, "a")
+    // Each round adds 20 * ((len + 2) + 1) + 20 * ((len + 4) + 1) = 20 * 4 + 20 * 6 for p = "a".
+    check(second - first == 200, "each round's closures ran once each with their own state")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    before = mem.heap_in_use()
+    round(k, "a")
+    mid = mem.heap_in_use()
+    round(k, "a")
+    after = mem.heap_in_use()
+    check(mid - before == 0 || after - mid == 0,
+        "a round grew the heap by ${mid - before}, then ${after - mid} bytes")
+    println("OK")
+}

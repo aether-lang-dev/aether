@@ -1,0 +1,85 @@
+// Regression (#2504, #2506): values whose owner changes hands.
+//
+//  - A closure capturing a struct that owns strings holds a copy with
+//    strings of its own (`<Name>_dup`), destroyed with the closure. A plain
+//    copy shared the declaring scope's strings, which its destroy freed
+//    while a returned closure still read them.
+//  - A returned closure passed straight to a call is freed after the call
+//    when the callee does not keep it.
+//  - A local whose value was handed on still frees the closures it is
+//    bound to afterwards.
+//
+// The macOS leaks gate runs this program, so each shape must free all it
+// allocates; tests/integration/closure_local_env_free counts envs and cells
+// exactly. Strings are built from parameters, because string.concat of two
+// literals folds to a literal that owns nothing.
+
+import std.string
+import std.list
+
+extern exit(code: int)
+
+struct Rec { name: string, count: int }
+
+var got = 0
+
+check(label: string, have: int, want: int) {
+    if have != want {
+        println("  FAIL: ${label} got=${have} want=${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+mk_reader(p: string) -> fn {
+    w = Rec { name: string.concat(p, "+"), count: 3 }
+    return || {
+        return string.length(w.name) + w.count
+    }
+}
+
+make_counter(p: string) -> fn {
+    s = string.concat(p, "-counter")
+    n = 0
+    return || {
+        n = n + string.length(s)
+        return n
+    }
+}
+
+run_twice(f: fn) {
+    int a = call(f)
+    int b = call(f)
+    got = a + b
+}
+
+rebind_after_escape(l: ptr, p: string) -> int {
+    s = string.concat(p, "-rebound")
+    total = 0
+    g = || { total = total + 1 }
+    stash(l, g)
+    g = || { total = total + string.length(s) }
+    g()
+    return total
+}
+
+main() {
+    owners = list.new()
+    i = 0
+    while i < 20 {
+        rd = mk_reader("ab")
+        junk = string.concat("zzzz", "zzzzzzzzzzzzzzzzzzzz")
+        int v = call(rd)
+        check("captured struct", v, 6)
+        check("junk", string.length(junk), 24)
+        run_twice(make_counter("ab"))
+        check("owned closure passed to a call", got, 30)
+        check("rebind after escape", rebind_after_escape(owners, "ab"), 10)
+        i = i + 1
+    }
+    list.free(owners)
+    println("=== closure owner change: all passed ===")
+}

@@ -366,7 +366,7 @@ When `AETHER_HAS_ATOMICS == 0`, `<stdatomic.h>` is replaced with fallback typede
 - `aether_free_message` returns buffers to the pool or calls `free`
 
 **Actor Allocation:**
-- `scheduler_spawn_actor` allocates via `aether_numa_alloc` with the full derived-struct size
+- `scheduler_spawn_actor` allocates via `aether_numa_alloc_aligned` with the full derived-struct size, on a 64-byte boundary (generated actor structs are declared `aligned(64)`)
 - NUMA-aware placement on the local node of the assigned core
 - Falls back to standard allocation on non-NUMA systems
 

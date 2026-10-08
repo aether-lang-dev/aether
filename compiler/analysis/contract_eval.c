@@ -338,8 +338,10 @@ void contract_sprint_expr(ContractStr* s, ASTNode* e) {
             break;
         case AST_UNARY_EXPRESSION:
             if (e->child_count == 1) {
-                if (e->value) cstr_puts(s, e->value);
+                int postfix = annotation_has_marker(e->annotation, "postfix");  /* #2457 */
+                if (e->value && !postfix) cstr_puts(s, e->value);
                 contract_sprint_expr(s, e->children[0]);
+                if (e->value && postfix) cstr_puts(s, e->value);
                 return;
             }
             break;

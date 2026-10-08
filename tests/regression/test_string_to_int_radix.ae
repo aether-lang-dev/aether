@@ -10,8 +10,12 @@
 //   - full int64 range survives (LLP64-safe, per the same lesson
 //     PR #562 baked in for to_long)
 //   - trailing whitespace OK; trailing garbage errors
+//   - nothing else is accepted (#2472): exactly an optional '-', digits
+//     of the radix, optional trailing whitespace. No '+', no leading
+//     whitespace, no embedded NUL, and the int64 bounds are exact
 
 import std.string
+import std.bytes
 
 extern exit(code: int)
 
@@ -22,6 +26,11 @@ eq(a: string, b: string) -> int {
 fail(msg: string) {
     println("FAIL: ${msg}")
     exit(1)
+}
+
+reject(s: string, radix: int, label: string) {
+    v, err = string.to_int_radix(s, radix)
+    if eq(err, "") == 1 { fail("${label} should error, got ${v}") }
 }
 
 main() {
@@ -159,7 +168,59 @@ main() {
     v, err = string.to_int_radix("ff  ", 16)
     if eq(err, "") != 1 { fail("trailing space: err=${err}") }
     if v != 255 { fail("trailing space: got ${v}") }
+
+    v, err = string.to_int_radix("10\n", 16)
+    if eq(err, "") != 1 { fail("trailing newline: err=${err}") }
+    if v != 16 { fail("trailing newline: got ${v}") }
     println("  PASS: trailing whitespace tolerated")
+
+    // ---- Strict syntax (#2472) --------------------------------
+    //
+    // Exactly an optional '-', digits of the radix, optional trailing
+    // whitespace. strtoll accepted a "0x" prefix in radix 16, leading
+    // whitespace and '+', so "0x10" read as 16.
+
+    reject("0x10", 16, "0x prefix")
+    reject("0X10", 16, "0X prefix")
+    reject("0b101", 2, "0b prefix")
+    reject(" 10", 16, "leading space")
+    reject("\t10", 16, "leading tab")
+    reject("+10", 16, "plus sign")
+    reject("-", 16, "lone minus")
+    reject("--1", 16, "double minus")
+    reject("-+1", 16, "minus plus")
+    reject("- 1", 16, "space after minus")
+    reject("1 0", 16, "embedded space")
+
+    // An embedded NUL is garbage, not the end of the string.
+    nb = bytes.new(5)
+    bytes.set(nb, 0, 102) // 'f'
+    bytes.set(nb, 1, 102)
+    bytes.set(nb, 2, 0)
+    bytes.set(nb, 3, 122) // 'z'
+    bytes.set(nb, 4, 122)
+    with_nul = bytes.finish(nb, 5)
+    reject(with_nul, 16, "embedded NUL")
+    println("  PASS: prefixes, signs, leading whitespace and embedded NUL rejected")
+
+    // ---- int64 bounds -----------------------------------------
+
+    v, err = string.to_int_radix("7fffffffffffffff", 16)
+    if eq(err, "") != 1 { fail("int64 max: err=${err}") }
+    if eq(string.from_int_radix(v, 16), "7fffffffffffffff") != 1 { fail("int64 max: got ${v}") }
+
+    v, err = string.to_int_radix("-8000000000000000", 16)
+    if eq(err, "") != 1 { fail("int64 min: err=${err}") }
+    if eq(string.from_int_radix(v, 16), "-8000000000000000") != 1 { fail("int64 min: got ${v}") }
+
+    v, err = string.to_int_radix("-0", 10)
+    if eq(err, "") != 1 { fail("-0: err=${err}") }
+    if v != 0 { fail("-0: got ${v}") }
+
+    reject("8000000000000000", 16, "int64 max + 1")
+    reject("-8000000000000001", 16, "int64 min - 1")
+    reject("zzzzzzzzzzzzzzz", 36, "radix-36 overflow")
+    println("  PASS: int64 bounds exact, one past either end rejected")
 
     println("\n=== All to_int_radix tests passed ===")
 }

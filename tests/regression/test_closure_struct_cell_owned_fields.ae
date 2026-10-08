@@ -1,0 +1,167 @@
+// Regression (#2458): a struct a closure writes through a field lives in a
+// shared cell, and the cell releases the strings the struct owns, never
+// the ones it borrows.
+//
+// A field write in a closure (`r.count += 1`) promotes the captured struct
+// to a reference-counted cell, as a bare `r = ...` does, so the write
+// reaches the caller. For a struct with a `string` field:
+//
+//  - a heap-string store into the field (`r.name = ...`) goes through the
+//    cell, `(*r).name`; on the bare name, the cell pointer, it did not
+//    compile;
+//  - the cell's last release runs `Rec_destroy` on what it holds (the
+//    plain release freed the cell and leaked the strings);
+//  - a struct PARAMETER borrows the caller's strings, so its cell, or the
+//    parameter itself, frees only what the callee stored. Its trackers
+//    were the caller's, so the callee freed the caller's string;
+//  - a promoted struct returned by name hands its strings to the caller
+//    and its cell no longer frees them under the caller;
+//  - replacing a struct whose new value holds one of its strings
+//    (`r = Rec { name: r.name }`, `r = pass_through(r)`) keeps the string.
+//    Destroying the old value first, as a cell and a plain local (#465)
+//    did, left the field pointing at freed memory.
+//
+// The macOS leaks gate runs this program, so each case must also free
+// everything it allocates. Closures are passed straight to `apply`, which
+// releases each closure's env after the call; the cell's last holder is
+// then the scope, and its release is checked. Every string is built from
+// a parameter, since `string.concat` of two literals folds to a literal,
+// which owns nothing and would hide a leak.
+
+import std.string
+
+extern exit(code: int)
+
+struct Rec { name: string, count: int }
+struct Named { name: string }
+struct Two { a: string, b: string }
+
+apply(f: fn) { f() }
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+// Field writes and an owned-string store through the cell, from closures
+// and from the scope itself.
+fields_through_cell(a: string) {
+    r = Rec { name: string.concat(a, "b"), count: 0 }
+    apply(|| { r.count += 1 })
+    apply(|| { r.count += 1 })
+    apply(|| { r.name = string.concat(r.name, "!") })
+    r.name = string.concat(r.name, "+")
+    check("cell name", r.name, "ab!+")
+    check_int("cell count", r.count, 2)
+}
+
+// The whole struct reassigned in a closure: the old one's strings go.
+reassign_in_closure(x: string, z: string) {
+    r = Rec { name: string.concat(x, "y"), count: 1 }
+    apply(|| { r = Rec { name: string.concat(z, "w"), count: 5 } })
+    check("reassigned name", r.name, "zw")
+    check_int("reassigned count", r.count, 5)
+}
+
+// A promoted parameter borrows the caller's string; the string the callee
+// stores is its own, and freed at its exit.
+param_cell(r: Rec, s: string) -> int {
+    apply(|| { r.count += 1 })
+    apply(|| { r.name = string.concat(s, "-callee") })
+    check("param cell name", r.name, "p-callee")
+    return r.count
+}
+
+// A plain parameter, field store and whole replacement: the caller's
+// string is not freed under it.
+param_plain(r: Rec, s: string) -> int {
+    r.name = string.concat(s, "-1")
+    r = Rec { name: string.concat(s, "-2"), count: r.count + 10 }
+    check("param plain name", r.name, "p-2")
+    return r.count
+}
+
+params(p: string) {
+    mine = Rec { name: string.concat(p, "-mine"), count: 0 }
+    check_int("param cell count", param_cell(mine, p), 1)
+    check_int("param plain count", param_plain(mine, p), 10)
+    check("caller name kept", mine.name, "p-mine")
+    check_int("caller count kept", mine.count, 0)
+}
+
+// A promoted struct returned: the caller owns its strings.
+build(a: string) -> Rec {
+    r = Rec { name: string.concat(a, "-made"), count: 0 }
+    apply(|| { r.count += 1 })
+    return r
+}
+
+build_pair(a: string) -> (Rec, string) {
+    r = Rec { name: string.concat(a, "-pair"), count: 0 }
+    apply(|| { r.count += 2 })
+    return r, ""
+}
+
+returns(a: string) {
+    x = build(a)
+    check("returned name", x.name, "m-made")
+    check_int("returned count", x.count, 1)
+    y, _ = build_pair(a)
+    check("tuple name", y.name, "m-pair")
+    check_int("tuple count", y.count, 2)
+}
+
+pass_through(r: Rec) -> Rec { return r }
+
+// The new value takes over strings the old one owned: kept once, never
+// freed under it, and the rest of the old value is still reclaimed.
+replace_takes_over(a: string) {
+    r = Rec { name: string.concat(a, "b"), count: 0 }
+    apply(|| { r = Rec { name: r.name, count: r.count + 1 } })
+    check("cell self", r.name, "ab")
+    check_int("cell self count", r.count, 1)
+
+    q = Rec { name: string.concat(a, "q"), count: 0 }
+    q = Rec { name: q.name, count: 1 }
+    check("local self", q.name, "aq")
+    q = pass_through(q)
+    check("through a call", q.name, "aq")
+    q = Rec { name: string.concat(a, "z"), count: 2 }
+    check("local replaced", q.name, "az")
+
+    t = Two { a: string.concat(a, "1"), b: string.concat(a, "2") }
+    t = Two { a: t.b, b: t.a }
+    check("swap a", t.a, "a2")
+    check("swap b", t.b, "a1")
+    t = Two { a: t.a, b: t.a }
+    check("dup a", t.a, "a2")
+    check("dup b", t.b, "a2")
+}
+
+// A heap.new box: written through its pointer, never promoted.
+box_through_pointer(n: string) {
+    nb = heap.new(Named)
+    nb.name = string.concat(n, "1")
+    apply(|| { nb.name = string.concat(n, "2") })
+    check("box name", nb.name, "n2")
+    heap.free(nb)
+}
+
+main() {
+    fields_through_cell("a")
+    reassign_in_closure("x", "z")
+    params("p")
+    returns("m")
+    replace_takes_over("a")
+    box_through_pointer("n")
+    println("=== closure struct cell owned fields: all passed ===")
+}

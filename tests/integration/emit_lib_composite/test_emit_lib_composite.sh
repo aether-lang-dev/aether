@@ -2,19 +2,18 @@
 # Composite-return test for --emit=lib: the Aether script builds a nested
 # config map (strings, ints, sub-map, list of strings) and the C host
 # walks it via aether_config_* accessors.
+#
+# Windows too: consume.c loads the DLL with LoadLibrary. It used to skip
+# there, so the accessors reading a string the script had copied went
+# unseen until the POSIX jobs ran.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_composite on Windows (POSIX dlopen)"
-        exit 0
-        ;;
-esac
-
+LINK_FLAGS=""
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     *)      LIB_EXT=".so" ;;
 esac
 
@@ -48,13 +47,18 @@ if [ -z "$LIB_PATH" ]; then
 fi
 
 # Compile the consumer, linking against the aether_config.c accessors
-# compiled into libconfig.so and the runtime/aether_config.h header.
+# compiled into the library and the runtime/aether_config.h header. On
+# Windows the DLL is found beside the consumer; elsewhere through the rpath.
+case "$LIB_EXT" in
+    .dll) ;;
+    *)    LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl" ;;
+esac
+# shellcheck disable=SC2086
 if ! gcc \
     -I"$ROOT/runtime" \
     "$SCRIPT_DIR/consume.c" \
     "$LIB_PATH" \
-    -Wl,-rpath,"$TMPDIR" \
-    -ldl \
+    $LINK_FLAGS \
     -o "$TMPDIR/consume" \
     2>"$TMPDIR/gcc.log"; then
     echo "  [FAIL] gcc could not compile consume.c"

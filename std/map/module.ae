@@ -13,8 +13,11 @@ exports(
     put, get, keys, keys_size, keys_get
 )
 
+// Keys cross as `@aether string`: the C map reads the AetherString's length,
+// so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C
+// string, "a\0x" and "a\0y" were one key, "a".
 extern map_new() -> ptr
-extern map_put_raw(map: ptr, key: string, value: ptr) -> int
+extern map_put_raw(map: ptr, key: @aether string, value: ptr) -> int
 // Heap-string-aware put. The map acquires its OWN reference: a
 // refcounted string is retained, a plain pointer (a literal, a
 // borrowed char*) is copied. The caller keeps and independently frees
@@ -22,10 +25,10 @@ extern map_put_raw(map: ptr, key: string, value: ptr) -> int
 // releases each owned value. Codegen auto-routes
 // `map.put(m, k, heap_string_expr)` to the adopting sibling instead,
 // where the value is escaping into the map.
-extern map_put_string_owned(map: ptr, key: string, value: ptr) -> int
-extern map_get_raw(map: ptr, key: string) -> ptr
-extern map_has(map: ptr, key: string) -> int
-extern map_remove(map: ptr, key: string)
+extern map_put_string_owned(map: ptr, key: @aether string, value: ptr) -> int
+extern map_get_raw(map: ptr, key: @aether string) -> ptr
+extern map_has(map: ptr, key: @aether string) -> int
+extern map_remove(map: ptr, key: @aether string)
 extern map_size(map: ptr) -> int
 extern map_clear(map: ptr)
 extern map_free(map: ptr)

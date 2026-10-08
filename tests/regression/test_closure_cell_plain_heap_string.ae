@@ -1,0 +1,56 @@
+// Regression: a string a closure writes lives in a shared cell that frees
+// the refcounted strings it holds. A plain malloc'd buffer (an `@heap`
+// extern's strdup, os.getenv here) stored into it was passed through as it
+// was and never freed, since the cell cannot tell such a buffer from a
+// literal: one leak per store. The store now turns it into a refcounted
+// copy on the way in. The macOS leaks gate runs this file.
+
+import std.mem
+import std.os
+import std.string
+
+extern exit(code: int)
+
+grab(k: int) -> int {
+    v = ""
+    set = || {
+        v = os.getenv("PATH")
+        v = os.getenv("PATH")
+    }
+    call(set)
+    call(set)
+    return string.length(v)
+}
+
+grabs(n: int) {
+    i = 0
+    while i < n {
+        grab(i)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_closure_cell_plain_heap_string ===")
+    if grab(1) <= 0 {
+        println("  FAIL no PATH in the environment")
+        exit(1)
+    }
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation lands in one. So, warm, one of two
+    // equal windows holds exactly steady.
+    if mem.heap_in_use_exact() {
+        grabs(20)
+        a = mem.heap_in_use()
+        grabs(200)
+        b = mem.heap_in_use()
+        grabs(200)
+        c = mem.heap_in_use()
+        if b - a != 0 && c - b != 0 {
+            println("  FAIL both windows of 200 calls grew the heap: ${b - a} then ${c - b} bytes")
+            exit(1)
+        }
+    }
+    println("  PASS: a plain heap string stored in a cell is freed with it")
+    println("=== test_closure_cell_plain_heap_string passed ===")
+}

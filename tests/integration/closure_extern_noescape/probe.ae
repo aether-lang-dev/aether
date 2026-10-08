@@ -1,0 +1,71 @@
+// Regression (#2523): a capturing closure passed to an extern whose
+// parameter is `@noescape` is released once the call returns, by value
+// (`fn`) and through a `ptr` slot, as a literal and as a local passed many
+// times; a closure passed to an unannotated extern that stores it stays
+// alive for the later call from C.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, one of two equal windows of the same work grows by
+// exactly 0 (a leak grows both, a one-time allocation at most one).
+// Strings are built from parameters so nothing folds to a literal.
+
+import std.mem
+import std.string
+
+extern run_cb(boxed: @noescape fn) -> int
+extern run_box(box: @noescape ptr) -> int
+extern register_cb(boxed: fn)
+extern fire_cb() -> int
+extern exit(code: int)
+
+const PER_ROUND = 200
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+round(p: string) -> int {
+    total = 0
+    i = 0
+    while i < PER_ROUND {
+        s = string.concat(p, "-x")
+        n = 0
+        total = total + run_cb(|| { n = n + string.length(s); return n })
+        total = total + run_box(|| { n = n + string.length(s); return n })
+        f = || { n = n + 1; return n }
+        total = total + run_cb(f)
+        total = total + run_box(f)
+        total = total + run_box(f)
+        check(n == 2 * string.length(s) + 3, "every call ran against the live environment")
+        i = i + 1
+    }
+    return total
+}
+
+tag(p: string) -> string {
+    return string.concat(p, "tured")
+}
+
+main() {
+    // "seed-x" is 6 long: the five calls return 6, 12, 13, 14 and 15.
+    want = PER_ROUND * 60
+    check(round("seed") == want, "a round's calls add up")
+    if mem.heap_in_use_exact() {
+        round("seed")
+        base = mem.heap_in_use()
+        round("seed")
+        mid = mem.heap_in_use()
+        round("seed")
+        after = mem.heap_in_use()
+        check(mid - base == 0 || after - mid == 0,
+            "a round grew the heap by ${mid - base}, then ${after - mid} bytes")
+    }
+    msg = tag("cap")
+    register_cb(|| { println(msg); return 7 })
+    check(fire_cb() == 7, "the stored closure still runs")
+    println("OK")
+    return 0
+}

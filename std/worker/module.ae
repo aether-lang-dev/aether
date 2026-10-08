@@ -185,8 +185,13 @@ map(items: ptr, f: fn) -> ptr {
     while i < n {
         item, _ierr = list.get(items, i)
         slot = i
+        // #2484: `f` is an erased `fn`, so its result is typed by the
+        // binding; returned bare it would be an int and cut the pointer.
         worker.run(
-            || { return call(f, item) },
+            || {
+                let r: ptr = call(f, item)
+                return r
+            },
             | r: ptr | { list.set(out, slot, r) }
         )
         i = i + 1

@@ -142,6 +142,11 @@ typedef struct {
     char* value;
     int line;
     int column;
+    /* TOKEN_STRING_LITERAL: the decoded byte count when the literal holds
+     * a NUL (#2520); `value` then carries value_len bytes and a terminator,
+     * and strlen(value) would stop short. 0 for every other token: `value`
+     * is a C string. */
+    int value_len;
 } Token;
 
 // Lexer functions
@@ -155,6 +160,8 @@ Token** lexer_tokenize(const char* src, int* out_count);
 
 // Token functions
 Token* create_token(AeTokenType type, const char* value, int line, int column);
+/* A token whose value is `len` bytes that may include a NUL (#2520). */
+Token* create_token_bytes(AeTokenType type, const char* bytes, int len, int line, int column);
 void free_token(Token* token);
 void free_tokens(Token** tokens, int count);
 const char* token_type_to_string(AeTokenType type);

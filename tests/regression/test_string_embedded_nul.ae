@@ -1,0 +1,191 @@
+// Regression (#2469): a string with an embedded NUL keeps all its bytes
+// where it crosses into C. Each of these measured it with strlen and lost
+// everything after the NUL, with no error: map and set keys ("a<NUL>x" and
+// "a<NUL>y" were one key), string_list elements (url.parse_query stored
+// "x%00y" as "x"), fs.read (a 5-byte file read back as 2 bytes),
+// string.to_int and friends ("12<NUL>" + "99" read as 12), and json (a
+// "\u0000" string read back as its first byte, and "[1]<NUL>x{" parsed).
+//
+// Every string with a NUL is built at run time from its parts, so nothing
+// is folded at compile time, and every container is freed, for the leak
+// gate. Strings are compared with string.equals, which reads their
+// lengths: `==` on two strings compares them as C strings.
+
+import std.set
+import std.map
+import std.collections
+import std.url
+import std.fs
+import std.os
+import std.json
+import std.string
+import std.bytes
+
+extern exit(code: int)
+
+// `a`, a NUL byte, then `b`.
+with_nul(a: string, b: string) -> string {
+    la = string.length(a)
+    lb = string.length(b)
+    buf = bytes.new(la + 1 + lb)
+    if la > 0 { bytes.copy_from_string(buf, 0, a, la) }
+    bytes.set(buf, la, 0)
+    if lb > 0 { bytes.copy_from_string(buf, la + 1, b, lb) }
+    return bytes.finish(buf, la + 1 + lb)
+}
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+test_set() -> int {
+    f = 0
+    ax = with_nul("a", "x")
+    ay = with_nul("a", "y")
+    s = set.new()
+    set.add(s, ax)
+    f = f + check(!set.contains(s, ay), "set: a<NUL>y found after adding a<NUL>x")
+    f = f + check(!set.contains(s, "a"), "set: a found after adding a<NUL>x")
+    set.add(s, ay)
+    f = f + check(set.size(s) == 2, "set: a<NUL>x and a<NUL>y are two items, size ${set.size(s)}")
+    set.remove(s, ax)
+    f = f + check(set.contains(s, ay) && !set.contains(s, ax), "set: remove a<NUL>x took the right item")
+    items, _ = set.items(s)
+    f = f + check(string.length(set.items_get(items, 0)) == 3, "set: the item comes back 3 bytes long")
+    set.items_free(items)
+    // A plain literal still hashes to its own text.
+    set.add(s, "plain")
+    f = f + check(set.contains(s, "plain"), "set: plain literal")
+    set.free(s)
+    return f
+}
+
+test_map() -> int {
+    f = 0
+    kx = with_nul("k", "x")
+    ky = with_nul("k", "y")
+    m = map.new()
+    map.put(m, kx, "x-value")
+    gy, _ = map.get(m, ky)
+    f = f + check(gy == null, "map: k<NUL>y found after putting k<NUL>x")
+    map.put(m, ky, "y-value")
+    f = f + check(map.map_size(m) == 2, "map: two keys, size ${map.map_size(m)}")
+    // A heap value takes the adopting route the compiler emits for
+    // map.put; its key is passed whole too.
+    kz = with_nul("k", "z")
+    map.put(m, kz, string.concat("z-", "value"))
+    gz, _ = map.get(m, kz)
+    gk, _ = map.get(m, "k")
+    f = f + check(gz != null && gk == null, "map: heap value under k<NUL>z, nothing under k")
+    keys, _ = map.keys(m)
+    n = map.keys_size(keys)
+    i = 0
+    while i < n {
+        f = f + check(string.length(map.keys_get(keys, i)) == 3, "map: key ${i} comes back 3 bytes long")
+        i = i + 1
+    }
+    map.keys_free(keys)
+    map.put(m, "plain", "p")
+    gp, _ = map.get(m, "plain")
+    f = f + check(gp != null, "map: plain literal key")
+    map.free(m)
+    return f
+}
+
+test_string_list() -> int {
+    f = 0
+    list, err = url.parse_query("a=x%00y&b=2")
+    f = f + check(err == "", "parse_query: ${err}")
+    v = url.query_get(list, "a")
+    f = f + check(string.equals(v, with_nul("x", "y")) == 1, "url: a is x<NUL>y, got ${string.length(v)} bytes")
+    f = f + check(url.query_get(list, "b") == "2", "url: b")
+    string_list_free(list)
+
+    sl = string_list_new()
+    string_list_add(sl, with_nul("p", "q"))
+    string_list_add(sl, with_nul("p", "p"))
+    string_list_sort_lex(sl)
+    f = f + check(string.equals(string_list_get(sl, 0), with_nul("p", "p")) == 1 && string.equals(string_list_get(sl, 1), with_nul("p", "q")) == 1, "string_list: kept and sorted by all bytes")
+    string_list_set(sl, 0, with_nul("r", "s"))
+    f = f + check(string.length(string_list_get(sl, 0)) == 3, "string_list: set keeps all bytes")
+    string_list_free(sl)
+    return f
+}
+
+test_fs_read() -> int {
+    f = 0
+    path = "${os.temp_dir()}/aether_embedded_nul_${os.getpid()}.bin"
+    data = with_nul("ab", "cd")
+    werr = fs.write(path, data)
+    f = f + check(werr == "", "fs.write: ${werr}")
+    got, rerr = fs.read(path)
+    f = f + check(rerr == "" && string.equals(got, data) == 1, "fs.read: ${string.length(got)} bytes back, want 5 '${rerr}'")
+    fs.delete(path)
+    return f
+}
+
+test_numbers() -> int {
+    f = 0
+    bad = with_nul("12", "99")
+    _i, ie = string.to_int(bad)
+    f = f + check(ie != "", "to_int read 12<NUL>99")
+    _l, le = string.to_long(bad)
+    f = f + check(le != "", "to_long read 12<NUL>99")
+    _fl, fe = string.to_float(with_nul("1.5", "7"))
+    f = f + check(fe != "", "to_float read 1.5<NUL>7")
+    _d, de = string.to_double(with_nul("1.5", "7"))
+    f = f + check(de != "", "to_double read 1.5<NUL>7")
+    _t, te = string.to_int(with_nul("12", ""))
+    f = f + check(te != "", "to_int read 12<NUL>")
+    // Plain text, and trailing whitespace, still parse.
+    ok_i, oe = string.to_int(string.concat("1", "2 "))
+    f = f + check(oe == "" && ok_i == 12, "to_int(\"12 \")")
+    ok_d, ode = string.to_double(string.concat("2", ".5"))
+    f = f + check(ode == "" && ok_d == 2.5, "to_double(\"2.5\")")
+    return f
+}
+
+test_json() -> int {
+    f = 0
+    v, err = json.parse(string.concat("\"a\\u0000", "b\""))
+    s, _ = json.get_string(v)
+    f = f + check(err == "" && string.equals(s, with_nul("a", "b")) == 1, "json string with U+0000 is ${string.length(s)} bytes")
+    json.free(v)
+
+    o, oerr = json.parse(string.concat("{\"k\\u0000z\": ", "1}"))
+    k, _ov, _ke = json.object_entry(o, 0)
+    f = f + check(oerr == "" && string.equals(k, with_nul("k", "z")) == 1, "json key with U+0000 is ${string.length(k)} bytes")
+    hit, _ = json.object_get(o, with_nul("k", "z"))
+    miss, _ = json.object_get(o, "k")
+    f = f + check(hit != null && miss == null, "json object_get by a key with a NUL")
+    json.free(o)
+
+    // Bytes after a NUL are part of the document: trailing garbage.
+    bad, berr = json.parse(with_nul("[1]", "x{"))
+    f = f + check(berr != "" && bad == null, "json parsed [1]<NUL>x{")
+
+    // A NUL in a value written out is escaped, and reads back whole.
+    sv = json.str(with_nul("a", "b"))
+    out, _ = json.stringify(sv)
+    f = f + check(out == "\"a\\u0000b\"", "json stringify: ${out}")
+    json.free(sv)
+    return f
+}
+
+main() {
+    println("=== embedded NUL across the C boundary ===")
+    fails = 0
+    fails = fails + test_set()
+    fails = fails + test_map()
+    fails = fails + test_string_list()
+    fails = fails + test_fs_read()
+    fails = fails + test_numbers()
+    fails = fails + test_json()
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

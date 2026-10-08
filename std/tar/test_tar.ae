@@ -6,6 +6,7 @@ import std.bytes
 import std.list
 import std.tar
 import std.strbuilder
+import std.os
 
 extern exit(code: int)
 
@@ -480,6 +481,131 @@ test_parent_symlink(base_dir: string, can_create_symlinks: int) {
     }
 }
 
+// A symlink's directory depth comes from its cleaned name: "./l", "a/../l"
+// and "a//l" are one level shallower than their '/' count, so a target one
+// ".." too many escapes. Refused before anything is created, so this runs
+// whether or not the host can make symlinks.
+expect_symlink_escape(base_dir: string, tag: string, entry: string, target: string) {
+    var tar_path = "${base_dir}/sym_depth_${tag}.tar"
+    var w_err = ""
+    var err = ""
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(w_err)
+        string_release(err)
+        string_release(ext_err)
+    }
+
+    var w_ptr: ptr = null
+    w_ptr, w_err = tar.writer_create(tar_path)
+    assert(w_err == "", "create sym_depth_${tag}.tar")
+    err = tar.writer_add_symlink(w_ptr, entry, target, 511, 123456789)
+    assert(err == "", "add symlink ${entry}")
+    err = tar.writer_finish(w_ptr)
+    assert(err == "", "finish sym_depth_${tag}.tar")
+
+    var opts = tar.default_extract_options()
+    opts.allow_symlinks = 1
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_sym_depth_${tag}", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "escapes extraction root") >= 0, "expected '${entry}' -> '${target}' to be refused as escaping: ${ext_err}")
+}
+
+test_sym_escape_depth(base_dir: string) {
+    expect_symlink_escape(base_dir, "dot", "./l", "../escape")
+    expect_symlink_escape(base_dir, "up", "a/../l", "../../escape")
+    expect_symlink_escape(base_dir, "dbl", "a//l", "../../escape")
+    expect_symlink_escape(base_dir, "dotdir", "a/./l", "../../escape")
+    // ".." after a name climbs out of what may be another link from the
+    // archive (r -> "." makes "r/.." the extraction root's parent).
+    expect_symlink_escape(base_dir, "chain", "l", "r/..")
+    expect_symlink_escape(base_dir, "chain2", "d/l", "x/../../y")
+    println("PASS: symlink depth taken from the cleaned entry name")
+}
+
+// Make `link` a link to the directory `target_abs` (an absolute path): a
+// symlink where the host allows one, else on Windows a directory junction,
+// which needs no privilege. Returns 1 for a symlink, 2 for a junction, 0
+// when neither could be made.
+make_dir_link(target_abs: string, link: string, link_win: string) -> int {
+    if fs.symlink(target_abs, link) == "" {
+        return 1
+    }
+    if os.platform() == "windows" {
+        rc = os.os_system("mklink /J \"${link_win}\" \"${target_abs}\" >NUL")
+        if rc == 0 && fs.exists(link) == 1 {
+            return 2
+        }
+    }
+    return 0
+}
+
+expect_parent_link_refused(base_dir: string, dest: string, src: string, tag: string, entry: string) {
+    var tar_path = "${base_dir}/parent_link_${tag}.tar"
+    var w_err = ""
+    var err = ""
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(w_err)
+        string_release(err)
+        string_release(ext_err)
+    }
+
+    var w_ptr: ptr = null
+    w_ptr, w_err = tar.writer_create(tar_path)
+    assert(w_err == "", "create parent_link_${tag}.tar")
+    err = tar.writer_add_file(w_ptr, entry, src)
+    assert(err == "", "add ${entry}")
+    err = tar.writer_finish(w_ptr)
+    assert(err == "", "finish parent_link_${tag}.tar")
+
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, dest, opts)
+    assert(ext_err != "" && string_index_of(ext_err, "resolves through a symlink") >= 0, "expected '${entry}' to be refused through the link: ${ext_err}")
+}
+
+// An entry under a directory that already exists in the destination as a
+// symlink or junction to somewhere else must not be written through it:
+// neither by its plain name nor by a ".." route through a directory that
+// does not exist yet (mkdir_p creates it, then the OS walks on through the
+// link).
+test_parent_link_on_disk(base_dir: string) {
+    var outside = "${base_dir}/outside"
+    var dest = "${base_dir}/ext_linkdest"
+    var link = "${dest}/link"
+    var src = "${base_dir}/pwn_src.txt"
+    defer {
+        string_release(outside)
+        string_release(dest)
+        string_release(link)
+        string_release(src)
+    }
+    fs.mkdir_p(outside)
+    fs.mkdir_p(dest)
+    outside_abs, _k, _m = fs.realpath(outside)
+    kind = make_dir_link(outside_abs, link, "${base_dir}\\ext_linkdest\\link")
+    if kind == 0 {
+        println("SKIP: parent link on disk (this host can make neither a symlink nor a junction)")
+        return
+    }
+    fs.write(src, "pwn")
+
+    expect_parent_link_refused(base_dir, dest, src, "plain", "link/pwned.txt")
+    expect_parent_link_refused(base_dir, dest, src, "dotdot", "missing/../link/pwned2.txt")
+    assert(fs.exists("${outside}/pwned.txt") == 0, "a file was written through the link")
+    assert(fs.exists("${outside}/pwned2.txt") == 0, "a file was written through the link via ..")
+
+    // Remove the link itself, never what it points at.
+    if kind == 1 {
+        fs.unlink(link)
+    } else {
+        fs.delete_dir(link)
+    }
+    assert(fs.exists(link) == 0, "link removed")
+    println("PASS: parent symlink or junction on disk rejected")
+}
+
 test_max_entries(base_dir: string) {
     var ext_err = ""
     defer {
@@ -833,6 +959,8 @@ main() {
     test_unc_path(base_dir)
     test_sym_escape(base_dir, can_create_symlinks)
     test_parent_symlink(base_dir, can_create_symlinks)
+    test_sym_escape_depth(base_dir)
+    test_parent_link_on_disk(base_dir)
     test_max_entries(base_dir)
     test_max_entry_bytes(base_dir)
     test_max_total_bytes(base_dir)

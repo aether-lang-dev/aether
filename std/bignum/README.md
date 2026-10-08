@@ -40,6 +40,12 @@ big-endian two's-complement, the encoding a key or a signature arrives in.
 The `_unsigned` variants skip the sign bit for values known to be positive,
 which is what most cryptographic material is.
 
+`shift_left(n, k)` is `n * 2^k` and `shift_right(n, k)` is `floor(n / 2^k)`,
+so a negative value shifted right rounds toward negative infinity
+(`-5 >> 1` is `-3`). A negative `k` shifts the other way, `INT_MIN`
+(`-2^31`) included: `shift_left(5, INT_MIN)` is `0` and
+`shift_left(-5, INT_MIN)` is `-1`.
+
 ## Decimal
 
 `to_decimal` renders base 10 with a leading `-` for negatives and `"0"` for

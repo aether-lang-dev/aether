@@ -103,15 +103,22 @@ scheduler_shutdown();
 ## Actor Allocation
 
 ```c
-// NUMA-aware allocation with correct derived-struct size
+// NUMA-aware, 64-byte-aligned allocation with the derived-struct size.
+// NULL means the allocation failed.
 ActorBase* actor = scheduler_spawn_actor(preferred_core, step_fn, sizeof(MyActor));
-if (!actor) {
-    // Fallback to manual allocation
-    actor = aligned_alloc(64, sizeof(MyActor));
-    memset(actor, 0, sizeof(MyActor));
-    mailbox_init(&actor->mailbox);
-    spsc_queue_init(&actor->spsc_queue);
-}
+if (!actor) return NULL;
+
+// Release it with scheduler_release_actor, never free(). It takes the actor
+// out of its core's table at once and reclaims it once no scheduler thread,
+// table reader or per-actor thread can still hold it, so it is safe from the
+// actor's own step, and never blocks: an actor with its own thread
+// (auto_process) is only marked, and that thread ends it when it leaves its
+// loop. Nothing may send to the
+// actor after this: the memory stays allocated and marked released until a
+// spawn of the same size reuses it, so a late send is dropped and counted
+// (scheduler_released_sends), and a send after the reuse reaches the new
+// actor.
+scheduler_release_actor(actor);
 ```
 
 ## Message Flow

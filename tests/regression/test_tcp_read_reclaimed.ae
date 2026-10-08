@@ -1,0 +1,77 @@
+// Regression: tcp.read hands its caller a string the caller owns.
+// tcp_receive_raw returns a fresh buffer, but std.tcp declared it a plain
+// `-> string` (std.net already said `@heap`), so the compiler took the
+// result for a borrowed one and never freed it: every read leaked one
+// receive buffer. It is declared `-> string @heap` in std.tcp now.
+import std.mem
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+// One message over loopback: write on `conn`, read it back on `peer`.
+// Returns 1 when the text arrives whole.
+round_trip(conn: ptr, peer: ptr, text: string) -> int {
+    n, werr = tcp.write(conn, text)
+    if werr != "" { return 0 }
+    if n != string.length(text) { return 0 }
+    ready, perr = tcp.poll(peer, 2000)
+    if perr != "" { return 0 }
+    if !ready { return 0 }
+    got, rerr = tcp.read(peer, 64)
+    if rerr != "" { return 0 }
+    if string.equals(got, text) != 1 { return 0 }
+    return 1
+}
+
+// `n` round trips; the number that failed.
+reads(conn: ptr, peer: ptr, text: string, n: int) -> int {
+    bad = 0
+    i = 0
+    while i < n {
+        if round_trip(conn, peer, text) != 1 { bad = bad + 1 }
+        i = i + 1
+    }
+    if bad > 0 { println("  FAIL ${bad} of ${n} round trips") }
+    return bad
+}
+
+main() {
+    fails = 0
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" { println("  FAIL listen: ${lerr}"); exit(1) }
+    port = tcp.server_port(srv)
+    conn, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" { println("  FAIL connect: ${cerr}"); exit(1) }
+    peer, aerr = tcp.accept(srv)
+    if aerr != "" { println("  FAIL accept: ${aerr}"); exit(1) }
+
+    text = string.concat("ping-", string.from_int(port))
+    if round_trip(conn, peer, text) != 1 { println("  FAIL the text does not round-trip"); fails = fails + 1 }
+
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation (a buffer a system library creates
+    // lazily) lands in one. So, warm, one of two equal windows holds exactly
+    // steady.
+    if mem.heap_in_use_exact() {
+        fails = fails + reads(conn, peer, text, 200)
+        a = mem.heap_in_use()
+        fails = fails + reads(conn, peer, text, 500)
+        b = mem.heap_in_use()
+        fails = fails + reads(conn, peer, text, 500)
+        c = mem.heap_in_use()
+        if b - a != 0 && c - b != 0 {
+            println("  FAIL both windows of 500 reads grew the heap: ${b - a} then ${c - b} bytes")
+            fails = fails + 1
+        }
+    }
+
+    tcp.close(conn)
+    tcp.close(peer)
+    tcp.server_close(srv)
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

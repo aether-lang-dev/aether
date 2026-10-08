@@ -1,4 +1,5 @@
 #include "toml_parser.h"
+#include "../ae_line.h"
 #include <ctype.h>
 
 static char* trim(char* str) {
@@ -21,6 +22,47 @@ static char* remove_quotes(char* str) {
     return str;
 }
 
+/* The value of a `key = value` line, without the `# comment` TOML allows
+ * after any value: a quoted string's contents (a basic string's escapes
+ * left as written, as this reader always has), or the bare text cut at its
+ * first `#` outside quotes. A `#` inside quotes is part of the value.
+ * Before, `cflags = "-O2"  # tuned` read as `"-O2"  # tuned`, and the C
+ * compiler was handed `#` and `tuned` as files. */
+static char* parse_value(char* v) {
+    v = trim(v);
+    if (*v == '"' || *v == '\'') {
+        char q = *v;
+        char* p = v + 1;
+        while (*p && *p != q) {
+            if (q == '"' && *p == '\\' && p[1]) p++;
+            p++;
+        }
+        if (*p == q) {
+            char* rest = trim(p + 1);
+            if (*rest == '\0' || *rest == '#') {
+                *p = '\0';
+                return v + 1;
+            }
+        }
+        return remove_quotes(v);
+    }
+    char q = 0;
+    for (char* p = v; *p; p++) {
+        if (q) {
+            if (q == '"' && *p == '\\' && p[1]) p++;
+            else if (*p == q) q = 0;
+        } else if (*p == '"' || *p == '\'') {
+            q = *p;
+        } else if (*p == '#') {
+            *p = '\0';
+            break;
+        }
+    }
+    return trim(v);
+}
+
+/* NULL when the file cannot be opened, and when memory runs out partway:
+ * a document missing its later lines would read as one without them. */
 TomlDocument* toml_parse_file(const char* path) {
     FILE* f = fopen(path, "r");
     if (!f) return NULL;
@@ -32,11 +74,16 @@ TomlDocument* toml_parse_file(const char* path) {
     if (!doc->sections) { fclose(f); free(doc); return NULL; }
     doc->section_count = 0;
 
-    char line[512];
+    char* line = NULL;
+    size_t line_cap = 0;
     TomlSection* current_section = NULL;
     int entry_capacity = 0;  // per-section capacity
+    int oom = 0;
 
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    /* Lines of any length: a fixed 512-byte buffer split a longer one, its
+     * value cut and the rest read as a line of its own (#2535). */
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         char* trimmed = trim(line);
 
         // Skip empty lines and comments
@@ -53,7 +100,7 @@ TomlDocument* toml_parse_file(const char* path) {
                 if (doc->section_count >= section_capacity) {
                     int new_cap = section_capacity * 2;
                     TomlSection* new_secs = realloc(doc->sections, (size_t)new_cap * sizeof(TomlSection));
-                    if (!new_secs) { fclose(f); return doc; }
+                    if (!new_secs) { oom = 1; break; }
                     doc->sections = new_secs;
                     section_capacity = new_cap;
                 }
@@ -62,9 +109,9 @@ TomlDocument* toml_parse_file(const char* path) {
                 current_section = &doc->sections[doc->section_count++];
                 entry_capacity = 32;
                 current_section->name = strdup(section_name);
-                if (!current_section->name) { current_section->name = NULL; continue; }
                 current_section->entries = calloc(entry_capacity, sizeof(TomlKeyValue));
                 current_section->entry_count = 0;
+                if (!current_section->name || !current_section->entries) { oom = 1; break; }
             }
             continue;
         }
@@ -74,14 +121,13 @@ TomlDocument* toml_parse_file(const char* path) {
         if (eq && current_section) {
             *eq = '\0';
             char* key = trim(trimmed);
-            char* value = trim(eq + 1);
-            value = remove_quotes(value);
+            char* value = parse_value(eq + 1);
 
             // Grow entries array if needed
             if (current_section->entry_count >= entry_capacity) {
                 int new_cap = entry_capacity * 2;
                 TomlKeyValue* new_entries = realloc(current_section->entries, (size_t)new_cap * sizeof(TomlKeyValue));
-                if (!new_entries) { fclose(f); return doc; }
+                if (!new_entries) { oom = 1; break; }
                 current_section->entries = new_entries;
                 entry_capacity = new_cap;
             }
@@ -89,16 +135,16 @@ TomlDocument* toml_parse_file(const char* path) {
             TomlKeyValue* entry = &current_section->entries[current_section->entry_count++];
             entry->key = strdup(key);
             entry->value = strdup(value);
-            if (!entry->key || !entry->value) {
-                // Roll back partial entry
-                free(entry->key);
-                free(entry->value);
-                current_section->entry_count--;
-            }
+            if (!entry->key || !entry->value) { oom = 1; break; }
         }
     }
 
+    free(line);
     fclose(f);
+    if (oom || got < 0) {
+        toml_free_document(doc);
+        return NULL;
+    }
     return doc;
 }
 

@@ -59,6 +59,7 @@ extern aether_host_run(binary_path: string) -> int
 extern aether_host_run_script(script_path: string) -> int
 
 // Capture stdout from a sandboxed run as a string.
-// Returns: child's stdout output, or "" on error.
-extern aether_host_capture_sandboxed(perms: ptr, binary_path: string) -> string
-extern aether_host_capture_script_sandboxed(perms: ptr, script_path: string) -> string
+// Returns: child's stdout output, or "" on error. Either way a fresh
+// string the caller owns.
+extern aether_host_capture_sandboxed(perms: ptr, binary_path: string) -> string @heap
+extern aether_host_capture_script_sandboxed(perms: ptr, script_path: string) -> string @heap

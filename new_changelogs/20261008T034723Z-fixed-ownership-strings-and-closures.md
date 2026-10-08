@@ -1,0 +1,265 @@
+- **A string taken from a struct field, an `if` or a `match` is owned by
+  what it is stored into (#2461).** `t = r.name` stored the field's pointer
+  without owning it, so reassigning `r.name`, replacing `r` or leaving `r`'s
+  scope freed what `t` still pointed at; the same held for a struct literal
+  field, a field store, a returned value, a module global, actor state and a
+  closure's string cell. An `if` or `match` whose arm was a local string did
+  the same once the local was reassigned or its function returned, and a
+  `match` binding never updated its local's ownership at all, so the value it
+  replaced leaked and a later free could hit a literal. Each of these now
+  takes the value the way `b = a` already did: a field read is copied, a
+  local is moved on its last use and copied otherwise, a freshly built string
+  is adopted and a literal is borrowed, so every buffer is freed once. A
+  function that returns a field read returns a copy its caller owns.
+- **A string bound through a call that hands its argument back takes the
+  argument's ownership (#2548).** `t = pass(s)`, where `pass` returns its
+  parameter as it is, now takes `s` the way `t = s` does: moved on its last
+  use, copied while `s` is still read, and borrowed when the call returned
+  something else on another path (`fs`'s `temp_prefix` returns `"ae"` for
+  an empty prefix). A container store, a struct literal's field and an `if`
+  or `match` arm take such a call the same way. Before, `s` was marked
+  escaped and never freed, and `t` held its buffer untracked: a leak per
+  call, whatever `t` did next.
+- **A string stored into a struct field through a pointer from a call, a
+  pointer field or a cast frees the field's previous string (#2369).** Only
+  a local bound to `heap.new` in the same function released the old value,
+  because the release reads the box's ownership tracker, and a box made with
+  `malloc(n) as *T` has garbage there (#1873). A box returned by a
+  constructor, held in another struct's pointer field, or passed as a `ptr`
+  and cast back leaked every string it replaced. The compiler now follows
+  the pointer back to where it was made: a function every return of which is
+  a `heap.new` box, a struct field every store into which is one, a local
+  every binding of which is one, or a cast of one. A pointer whose origin it
+  cannot see (a parameter, a list element, a C function's result) still only
+  sets the tracker, as before. Code that freed the old value by hand before
+  storing through one of the pointers now covered frees it twice; drop that.
+- **Containers and structs keep their own copy of a value something else
+  owns (#2497).** `list.add(l, r.name)` and `map.put(m, k, r.name)` stored
+  the field's pointer, which reassigning `r.name` or leaving `r`'s scope
+  freed; they now take their own reference, as does an `if` whose arm is a
+  field or a local. A struct held by value inside another (`o.inner`) is
+  released with its holder: replacing `o` or leaving its scope used to leak
+  `o.inner`'s strings. `b = a` for a struct with string fields freed each
+  string twice, and `x = o.inner`, `return o.inner` and `Wrap { o: o }`
+  borrowed a struct that was then freed; the struct is now moved out of a
+  local on its last use and copied otherwise. A tuple position or `T!`
+  value returned from an `if` with freshly built arms is handed over
+  instead of copied and leaked. Replacing a struct with a value that reuses
+  one of its strings (`q = Rec { name: q.name, count: 1 }`) freed that
+  string first, so `q.name` printed `(null)`; the old value's strings are
+  freed only when the new value does not hold them. A list add or map put
+  of a string local takes it as every other owning slot does: on the
+  local's last use its reference moves into the container, and read again
+  afterwards the container gets a copy of what the local owns (or its own
+  reference to what it borrows) and the local keeps its own frees. The
+  store used to adopt the local's single reference and mark the local
+  escaped, so a local stored twice, or stored in a loop, was freed once per
+  store (an access violation), and a `string` parameter a closure keeps by
+  storing it took a reference on entry that the store then left to nobody.
+- **A named function that keeps its `string` parameter owns it, and
+  `list.set` owns a string element.** A function that stores its parameter
+  in a list, a map, a struct field or a cell takes a reference of
+  its own on entry, as a closure does (copy-on-keep): the store then moves
+  or copies that reference, a return hands it to the caller owned, and the
+  function's exit frees what is left. The caller borrows whatever it
+  passed, so it frees a temporary after the call and rebinds a local as
+  usual; the container owns its element in every shape and nothing frees it
+  twice. A parameter also handed to a sink the compiler cannot release
+  behind (an extern's `ptr` parameter, a `@retain` parameter, a callee with
+  no body, a module-level `var`, which never frees what it holds) is not
+  captured, and its caller keeps the earlier rule; nor is one the function
+  frees (`string.free(s)`, directly or through a helper that frees it),
+  which is the caller's reference handed over. A string a program stores
+  this way is an Aether string, so the C readers of a stored string take
+  either shape: the `aether_config_*` accessors of an `--emit=lib` library
+  and the contrib host bridges reading a grant list. std.jsonpath releases
+  its parser context with `heap.free`, which frees a diagnostic `_fail`
+  copied into it. A call that only hands a parameter back passes it on to
+  wherever its value goes, so a parameter returned through one, or handed
+  through one to a call that keeps nothing, takes no copy:
+  `fs.make_temp_file` copied its prefix and leaked the copy, and
+  `greet(n) { return shout(n) }` freed the copy it returned. A kept
+  parameter's copy is released when a panic unwinds through the function. A
+  store into a field of a struct reached through a pointer not proven to be
+  a `heap.new` box (`malloc(n) as *T`, freed with `free`) takes no copy,
+  since nothing destroys that struct with its fields (`hmac.new` lost its
+  algorithm name). And a struct a call returns owning strings, thrown away
+  or handed to another call in the same statement (`expect_str(s).to_equal(t)`),
+  is destroyed when the statement is done. Before,
+  such a store left the container borrowing the caller's string and the
+  caller keeping it alive for the rest of the function (a leak per call,
+  through wrappers of wrappers too), and a closure's own reference handed
+  to such a wrapper was given back by nobody. `list.set(l, i, s)` of a
+  string now releases the element the slot held and owns the new one (a
+  fresh value adopted, a local moved or copied, any other string copied);
+  it leaked the old element and left the new one to the caller. A raw
+  pointer stored with `list.set` is still the caller's.
+- **A closure environment is reference counted and released by its last
+  holder (#2480, #2494, #2498, #2506, #2507, #2519).** `g = || { println(n)
+  }` allocated `g`'s environment and never freed it, nor the shared cells
+  and strings it holds; a closure a function returned was not freed by the
+  caller's local; an environment that captured another closure copied it
+  without taking a reference; and a receive arm was emitted without a
+  scope, so a `defer` in an arm never ran and nothing an arm built was
+  released. Now every environment carries a reference count: capturing a
+  closure takes a reference, and the environment's destructor gives back
+  its cells, strings and captured closures. A local bound only to closure
+  literals, or to the result of a function whose every `return` hands back
+  a closure nothing else holds (a call through a closure local included),
+  releases its reference at scope exit and on `return`, `break` and
+  `continue`, through the closure's destructor; one rebound in a loop
+  releases the one it replaces. The release is kept back when a copy that
+  holds no reference can outlive the scope: the value is returned (that
+  hands the reference to the caller), aliased, used as an operand, passed
+  to a parameter that keeps it or to a callee whose body cannot be seen, or
+  captured by a closure that does any of these. A local that hands its value
+  on in a whole statement, an `if` or loop condition, a statement with a
+  trailing block or a `defer` stops owning it at that point and still
+  releases the closures it is bound to afterwards; a hand-off inside a
+  nested closure's body (`g = || { keep(f) }`) retains the environment for
+  the new holder right before it, so the local and the capturing closure
+  still release theirs. A closure a function hands over is released after
+  the call that consumes it, anywhere in an expression
+  (`x = take(make_counter(r))`, `run(make_counter())`, a callee with no
+  declared result type), at once when thrown away, and once when used as
+  the callee (`call(make_counter())` used to run the call twice and keep
+  both environments). Each handler and timeout arm is a scope, so its
+  defers, cell releases, environment frees and struct destroys run when the
+  handler ends, on every exit.
+- **Every holder of a closure value keeps a reference of its own (#2518,
+  #2525, #2528).** `list.add(l, f)` handed the list the caller's single
+  reference, so adding one closure twice, to two lists, or keeping it in a
+  local past `list.free` released the environment twice: an access
+  violation. A closure kept in a struct field, a message field, a global or
+  an actor's state was never released: `h = Holder { cb: build("a") };
+  h.cb = build("b")` kept both environments, with the cells and strings they
+  captured, for the rest of the program. Each list slot, map entry, struct
+  field, message field, global and state field now takes a reference when a
+  closure is stored (a fresh closure's is adopted, a view of one held
+  elsewhere is retained), releases it when the element goes (`free`,
+  `remove`, `clear`, an overwrite, the holder's destruction), and copies
+  retain (`b = a`, a struct passed or returned by value, `<Name>_dup`). A
+  list also releases the strings it owns on `remove` and `clear`, as the
+  string list does. A `string[N]` or `fn[N]` field of a struct or an actor
+  owns its elements, released on destroy and on an element store, copied or
+  retained by a copy; a local array of structs that own strings or closures
+  destroys its elements at scope exit, replaces one on `arr[i] = v` and
+  copies each on `other = arr`. A local bound to a field read (`x = h.cb`),
+  a closure a function returns from a field, and a closure an ask brings
+  back hold references of their own; a message's closure field is released
+  with the message once the handler is done. A closure literal, or a
+  parameter, stored into any of these holders is not kept by the store: the
+  caller releases its own reference after the call. `list.add(l,
+  box_closure(f))` is the store `list.add(l, f)` is: the explicit box used
+  to hand the container a raw pointer it did not know it owned, so neither
+  box nor environment was reclaimed; the container now takes its own
+  reference and owns the box, and the local keeps its own. A callback
+  passed to a function that only passes it on (`it(cb) { it_impl(cb) }`) is
+  released after the call: the callee-body walk decided a forwarded `fn`
+  parameter was kept by its kind before reading the callee's body, so the
+  environment of every callback handed to such a wrapper lived for the rest
+  of the program; a visible body now decides, as it does for every other
+  argument. A module-level `var name: fn = null` starts as the zero closure
+  instead of failing to compile.
+- **An actor's state is destroyed with the actor, and a reply is released
+  by its taker or its replier (#2528).** An actor now has a `destroy_state`
+  hook (`ActorBase`, set by the generated spawn) that the scheduler runs
+  once when it ends a scheduler-owned actor, on a release or at teardown:
+  each `string` state field is freed per its tracker, which is a field of
+  the actor rather than a handler local (so a value stored by an earlier
+  message is freed when a later one overwrites it; before, neither it nor
+  the last value was ever freed), each closure field's environment is
+  released and each owning struct or array field destroyed. A reply
+  message's string and closure fields are the asker's: the field the ask
+  reads out is taken, the rest released with the reply, and a closure reply
+  (a field or an expression) now compiles and is owned by the asker's
+  binding. A reply nobody takes (the asker timed out, or the message was
+  sent rather than asked) is released by the replier
+  (`scheduler_reply_owned`), on every host including the MSVC ask path,
+  whose helper now delivers a reply field of any size whole (a closure
+  reply used to be cut to a pointer's width there); on that path a
+  capturing closure built inside a function also compiles now (its
+  constructor was used before it was declared).
+  `scheduler_reclaim_released()` ends the released actors a host wants
+  settled and returns how many are still held back by a reader (0 when all
+  are ended).
+- **A closure borrows its arguments, so an owned string passed to a closure
+  call is freed after the call (#2493, #2499).** `call(f, mk("x"))`, and
+  `f(mk("x"))` on a closure local or an `fn` parameter, passed the argument
+  straight to the closure, so every such call leaked the string, while a
+  named call `g(mk("x"))` hoists it into a temporary and frees it after the
+  call. A closure call whose literal is known is decided by that body, as a
+  function's is: an argument the closure only reads is freed, one it keeps
+  is left to its new owner, and one returned as the string result is freed
+  unless the result is that same pointer. A call with no body to read (an
+  `fn` parameter, a variable bound to several closures) follows the closure
+  calling convention: the caller frees its owned argument after the call.
+  That holds because a closure that keeps a `string` parameter (in a list, a
+  map, a struct field, a captured variable, a local that keeps it) takes its
+  own reference, or copies a plain buffer, when it is entered, and a
+  named function that keeps one does the same in its own prologue, called
+  by name or as a closure value; the parameter is a tracked string, so an
+  alias into a local moves the reference, a return hands it to the caller
+  and whatever it still holds at exit is freed. A `ptr` parameter cannot be copied, so one closure anywhere
+  that keeps one (a store, a capture, a return) turns the convention off,
+  and so does any way a closure the compiler did not see can be called: a
+  library build, an extern that returns a closure or takes or returns a
+  struct with a closure field, a C-laid-out struct with a closure field, a
+  `@c_callback` with a closure parameter, a `ptr` turned into a closure
+  (`unbox_closure`, or a `ptr` passed to an `fn` parameter) or a raw pointer
+  viewed as such a struct. With the convention off, closure-call arguments
+  are left alone: a leak, never a free under a closure that kept the
+  pointer. `docs/memory-management.md` describes the convention. A struct
+  literal returned with a parameter in a field counts as keeping it; the
+  caller freed that argument and the returned field pointed at freed
+  memory. Assigning a `string` parameter to a local is a keep only when
+  that local keeps the value, so neither a closure nor a function's closure
+  adapter takes a reference that nothing gives back.
+- **A closure that captures a struct reads its own copy of the strings
+  (#2504).** A closure capturing a struct that owns strings copied the
+  struct's bytes only, and the declaring scope's destroy freed the strings
+  while a returned or stored closure still read them; it now captures a
+  copy with strings of its own (`<Name>_dup`), destroyed with the closure.
+- **A store into a closure's string cell takes the value (#2514).** `s = p`
+  inside a closure, where `p` is the caller's string the closure captured,
+  stored the pointer as it stood: the env held its own reference and the
+  cell adopted the same one without taking it, so both released it at
+  scope exit and the caller's string was freed under the caller. The cell
+  now takes what it holds the way every owning slot does: a borrowed value
+  is copied or retained, a fresh one adopted, and a plain malloc'd buffer
+  (an `@heap` extern's strdup, `os.getenv` among them) is turned into a
+  refcounted copy on the way in; the cell cannot tell such a buffer from a
+  literal, so it was stored as it was and never freed. A match arm or a
+  tuple destructure that binds such a variable stores the same way, and a
+  function that returns such a variable hands the caller a copy, since
+  the cell is released at the function's exit. The cell's reference count
+  is atomic, as the environment's already was: an environment holding the
+  cell can be released on a worker thread while the declaring scope
+  releases its own reference.
+- **A closure passed to an extern is released when the extern says it keeps
+  nothing (#2523).** A closure handed to an extern parameter declared
+  `@noescape` is released as it would be after an Aether callee that keeps
+  nothing: a literal's environment right after the call, a local's at scope
+  end. An unannotated extern keeps the environment alive, since the callee
+  may have stored it. The std functions that only call their callback
+  during the call carry the attribute and no longer free the box or the
+  environment on the C side, which leaked a capturing closure's cells and
+  strings on every call and, for a closure local passed to `seq_each`
+  twice, used freed memory.
+- **A statement that throws away a string it owns frees it, and a message
+  string field built from a temporary is freed once copied.** A bare call
+  that returns a heap string, a `string.concat` or an interpolation on a
+  line of its own, an ask answered with a string, and a pass-through call
+  handed a fresh temporary (`ident(mk(i))`) each leaked one buffer per
+  statement; `_ = e` already freed its value, and the bare form now does
+  the same. `w ! Keep { s: string.concat(p, "pt") }`, and the same in an
+  ask or a reply, copied the temporary for the receiver and never freed it.
+- **A string passed to a function that returns it as a copy is freed by its
+  scope, and a closure handed back by its callee is the caller's.** A
+  function whose string result is uniform-heap copies a parameter it
+  returns, so passing a heap local to it is no escape: `url.parse_query`
+  no longer keeps every decoded key for the rest of the program. A
+  function that returns its closure parameter (`keep(cb) -> fn { return
+  cb }`) hands the caller's argument back, so a binding to `keep(|| { ... })`
+  owns the closure as a binding to a literal does, and releases it on
+  rebinding and at scope end instead of leaking its environment and cells.

@@ -917,10 +917,12 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
     char* lit_buf = malloc(lit_cap);
     int lit_len = 0;
 
-    // Helper lambda (C-style): flush current literal buffer as a child node
+    // Helper lambda (C-style): flush current literal buffer as a child node.
+    // By length: a decoded `\0` is a byte of the text (#2520).
     #define FLUSH_LIT() do { \
         lit_buf[lit_len] = '\0'; \
-        ASTNode* _lit = create_ast_node(AST_LITERAL, lit_buf, 0, 0); \
+        ASTNode* _lit = create_ast_node(AST_LITERAL, NULL, 0, 0); \
+        ast_set_literal_bytes(_lit, lit_buf, lit_len); \
         _lit->node_type = create_type(TYPE_STRING); \
         add_child(interp, _lit); \
         lit_len = 0; \
@@ -989,45 +991,18 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
 
             if (expr_node) add_child(interp, expr_node);
         } else if (*p == '\\' && p[1]) {
-            // Escape sequence in literal segment
+            // Escape sequence in literal segment: the lexer kept every escape
+            // of an interpolated string as written, so this is its one
+            // decoding, with the same decoder as a plain literal (#2512).
             if (lit_len >= lit_cap - 2) {
                 lit_cap *= 2;
                 char* nb = realloc(lit_buf, lit_cap);
                 if (!nb) { free(lit_buf); return interp; }
                 lit_buf = nb;
             }
-            char code = p[1];
-            if (code == 'x') {
-                // \xNN hex escape (1-2 hex digits)
-                p += 2; // skip \x
-                int val = 0, digits = 0;
-                while (digits < 2 && *p && isxdigit((unsigned char)*p)) {
-                    char h = *p++;
-                    val = val * 16 + (h >= 'a' ? h - 'a' + 10 :
-                                      h >= 'A' ? h - 'A' + 10 : h - '0');
-                    digits++;
-                }
-                lit_buf[lit_len++] = digits > 0 ? (char)val : 'x';
-            } else if (code >= '0' && code <= '7') {
-                // \NNN octal escape (1-3 digits)
-                p++; // skip backslash
-                int val = (*p++) - '0', digits = 1;
-                while (digits < 3 && *p >= '0' && *p <= '7') {
-                    val = val * 8 + (*p++ - '0');
-                    digits++;
-                }
-                lit_buf[lit_len++] = (char)(val & 0xFF);
-            } else {
-                switch (code) {
-                    case 'n':  lit_buf[lit_len++] = '\n'; break;
-                    case 't':  lit_buf[lit_len++] = '\t'; break;
-                    case 'r':  lit_buf[lit_len++] = '\r'; break;
-                    case '\\': lit_buf[lit_len++] = '\\'; break;
-                    case '"':  lit_buf[lit_len++] = '"';  break;
-                    default:   lit_buf[lit_len++] = code; break;
-                }
-                p += 2;
-            }
+            char ch;
+            p += lexer_decode_escape(p, &ch);
+            lit_buf[lit_len++] = ch;
         } else {
             if (lit_len >= lit_cap - 2) {
                 lit_cap *= 2;
@@ -1176,21 +1151,30 @@ static int token_is_compound_assign(Token* t) {
     }
 }
 
-/* Can this lvalue be evaluated twice without observable effect? Names,
- * fields, elements, literals and arithmetic over them — anything with a
- * call in it cannot. */
-static int lvalue_is_repeatable(ASTNode* n) {
-    if (!n) return 1;
+/* Why this lvalue cannot be evaluated twice without observable effect, or
+ * 0 when it can: names, fields, elements, literals and arithmetic over
+ * them. LVALUE_CALL: anything with a call in it. LVALUE_WRITE: a write
+ * inside it (`a[i++] += 1` desugared to `a[i++] = a[i++] + 1` stepped `i`
+ * twice, #2516). */
+enum { LVALUE_CALL = 1, LVALUE_WRITE = 2 };
+static int lvalue_unrepeatable(ASTNode* n) {
+    if (!n) return 0;
     switch (n->type) {
         case AST_IDENTIFIER: case AST_LITERAL: case AST_MEMBER_ACCESS:
         case AST_ARRAY_ACCESS: case AST_BINARY_EXPRESSION: case AST_UNARY_EXPRESSION:
             break;
         default:
-            return 0;
+            return LVALUE_CALL;
     }
-    for (int i = 0; i < n->child_count; i++)
-        if (!lvalue_is_repeatable(n->children[i])) return 0;
-    return 1;
+    if (n->value && ((n->type == AST_UNARY_EXPRESSION &&
+                      (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0)) ||
+                     (n->type == AST_BINARY_EXPRESSION && strcmp(n->value, "=") == 0)))
+        return LVALUE_WRITE;
+    for (int i = 0; i < n->child_count; i++) {
+        int why = lvalue_unrepeatable(n->children[i]);
+        if (why) return why;
+    }
+    return 0;
 }
 static ASTNode* parse_primary_expression_inner(Parser* parser);
 
@@ -1990,8 +1974,16 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
         if (!op) break;
         
         if (op->type == TOKEN_INCREMENT || op->type == TOKEN_DECREMENT) {
+            /* A `++` on the next line is a prefix `++x` starting the next
+             * statement (`z--` then `++z`), not a second postfix on this
+             * operand. */
+            Token* prev = peek_ahead(parser, -1);
+            if (prev && prev->line != op->line) break;
             advance_token(parser);
             expr = create_unary_expression(expr, op);
+            /* #2457: `i++` is the same node as `++i` but marked postfix, so
+             * codegen emits C's `i++` and a used value is the old one. */
+            expr->annotation = annotation_add_marker(expr->annotation, "postfix");
             continue;
         }
 
@@ -2754,6 +2746,23 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             return parse_variable_declaration(parser);
         }
 
+        case TOKEN_PTR: {
+            /* #2465: `ptr p = null` is a typed declaration, like `int x`. The
+             * keyword is also usable as a value name (token_is_value_ident),
+             * so only the `ptr NAME` shape on one line declares; anything
+             * else (`ptr = q`, `ptr.f`) stays an expression statement. */
+            Token* next = peek_ahead(parser, 1);
+            if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
+                return parse_variable_declaration(parser);
+            }
+            ASTNode* expr = parse_expression(parser);
+            if (!expr) return NULL;
+            match_token(parser, TOKEN_SEMICOLON);
+            ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, token->line, token->column);
+            add_child(stmt, expr);
+            return stmt;
+        }
+
         case TOKEN_MULTIPLY: {
             /* `*StructName name = expr` — a typed pointer-to-struct
              * local declaration.  Disambiguated from a deref-store
@@ -2971,15 +2980,25 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 // target is a field or an element. It is `p.n = p.n + rhs`
                 // and is built as that (the plain `=` form the typechecker
                 // and codegen already handle for these targets). Only a
-                // target the language can evaluate twice qualifies — a
-                // chain of names, fields, indexes and arithmetic, no call —
-                // since the desugaring repeats it. Before, the statement
-                // stopped at the operator: "Expected statement in block".
+                // target the language can evaluate twice qualifies, a
+                // chain of names, fields, indexes and arithmetic, with no
+                // call and no write in it, since the desugaring repeats
+                // it. Before, the statement stopped at the operator:
+                // "Expected statement in block".
                 Token* cop = peek_token(parser);
                 if (cop && token_is_compound_assign(cop) &&
-                    (expr->type == AST_MEMBER_ACCESS || expr->type == AST_ARRAY_ACCESS)) {
-                    if (!lvalue_is_repeatable(expr)) {
-                        parser_error(parser, "the target of a compound assignment must be a variable, a field or an element with no call in it; write `target = target op value` with a temporary instead");
+                    (expr->type == AST_MEMBER_ACCESS || expr->type == AST_ARRAY_ACCESS ||
+                     expr->type == AST_FUNCTION_CALL)) {
+                    int why = lvalue_unrepeatable(expr);
+                    if (why) {
+                        /* #2481: `f(x) += v` stopped at the operator with
+                         * "Expected statement in block". #2516: `a[i++] += v`
+                         * stepped `i` twice. */
+                        parser_error(parser, expr->type == AST_FUNCTION_CALL
+                            ? "cannot assign to the result of a call: it is a temporary, so the write would be lost; bind it to a variable first"
+                            : why == LVALUE_WRITE
+                            ? "the target of a compound assignment is read and written, so a write inside it (`i++`, `i = v`) would run twice; step the variable in a statement of its own first"
+                            : "the target of a compound assignment must be a variable, a field or an element with no call in it; write `target = target op value` with a temporary instead");
                         /* Skip the rest of the statement's line so the
                          * operator and its operand are not reported again. */
                         int eline = cop->line;
@@ -4652,13 +4671,34 @@ ASTNode* parse_actor_definition(Parser* parser) {
             // Check if there's an explicit type or Python-style
             Token* next_tok = peek_token(parser);
             ASTNode* state_decl = NULL;
-            
-            if (next_tok && (next_tok->type == TOKEN_INT || next_tok->type == TOKEN_INT64 ||
+            /* #2465: a type spelled by an identifier (`uint8`, `uint16`,
+             * `uint32`, `int64`, `f32`, `longdouble`, a C ABI alias, a struct
+             * name) is recognised by the same shape as a typed local
+             * declaration (parse_statement): `IDENT IDENT`, or the array form
+             * `IDENT [N] IDENT`, on one line. Without it `state uint8 b8 = 1`
+             * became a field named `uint8` and `b8 = 1` a stray statement. */
+            int ident_typed = 0;
+            if (next_tok && next_tok->type == TOKEN_IDENTIFIER) {
+                Token* t1 = peek_ahead(parser, 1);
+                if (t1 && t1->type == TOKEN_IDENTIFIER && t1->line == next_tok->line) {
+                    ident_typed = 1;
+                } else if (t1 && t1->type == TOKEN_LEFT_BRACKET) {
+                    Token* t2 = peek_ahead(parser, 2);
+                    int off = (t2 && t2->type == TOKEN_NUMBER) ? 3 : 2;
+                    Token* rb = peek_ahead(parser, off);
+                    Token* nm = peek_ahead(parser, off + 1);
+                    ident_typed = rb && rb->type == TOKEN_RIGHT_BRACKET &&
+                                  nm && nm->type == TOKEN_IDENTIFIER && nm->line == rb->line;
+                }
+            }
+
+            if (ident_typed ||
+                (next_tok && (next_tok->type == TOKEN_INT || next_tok->type == TOKEN_INT64 ||
                             next_tok->type == TOKEN_UINT64 ||
                             next_tok->type == TOKEN_DURATION ||
                             next_tok->type == TOKEN_FLOAT ||
                             next_tok->type == TOKEN_STRING || next_tok->type == TOKEN_BOOL ||
-                            next_tok->type == TOKEN_BYTE)) {
+                            next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR))) {
                 // Explicit type: state int count = 0  or  state long total = 0
                 state_decl = parse_variable_declaration_with_semicolon(parser, false);
             } else if (next_tok && next_tok->type == TOKEN_IDENTIFIER) {
@@ -4909,6 +4949,85 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
         field->bit_width = w;
     }
     return field;
+}
+
+/* The `@<attr>` markers between an extern parameter's `:` and its type,
+ * then the type. Shared by the bare `extern name(...)` form and the
+ * `@extern("c_sym") name(...)` form, so both accept the same set:
+ *
+ *   @aether   the param receives an AetherString header rather than the
+ *             unwrapped const char*. Codegen suppresses the call-site
+ *             aether_string_data() unwrap so binary content with embedded
+ *             NULs survives the boundary intact. See #351.
+ *
+ *   @retain   the function stores / retains the pointer beyond the call
+ *             (think `string_list_add`, `map_put_raw`'s key, any
+ *             add/put/insert that captures the bytes). Tells the escape
+ *             walker to mark a heap-string arg as escaped at this slot, so
+ *             the heap-string-tracker wrapper and function-exit defer-free
+ *             both skip freeing. Without it, default `string`-param
+ *             treatment is "read-only", correct for string.length /
+ *             equals / println but a UAF for retainers. See #420 follow-up.
+ *
+ *   @noescape the function uses the argument only during the call: it
+ *             neither stores it, hands it to another thread, nor frees
+ *             it. For a closure passed to a `ptr` or `fn` parameter the
+ *             caller then keeps the environment and releases it after the
+ *             call, as it does for an Aether callee that keeps nothing,
+ *             and a `ptr` slot gets a box on the caller's stack instead of
+ *             a heap one (#2523). Only meaningful on `ptr` and `fn`.
+ *
+ * Multiple annotations stack: `name: @aether @retain string` is legal.
+ * Order is irrelevant; storage is a comma-separated set on
+ * `param->annotation`, tested by substring. */
+static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
+        advance_token(parser);  // consume '@'
+        Token* attr = peek_token(parser);
+        const char* tag = NULL;
+        if (attr && attr->type == TOKEN_IDENTIFIER && attr->value) {
+            if (strcmp(attr->value, "aether") == 0) {
+                tag = "aether_param";
+            } else if (strcmp(attr->value, "retain") == 0) {
+                tag = "retain_param";
+            } else if (strcmp(attr->value, "noescape") == 0) {
+                tag = "noescape_param";
+            }
+            if (tag) advance_token(parser);
+        }
+        if (!tag) {
+            parser_error(parser, "unknown extern-param attribute (expected @aether, @retain or @noescape)");
+            break;
+        }
+        /* Append to the comma-separated set, deduping. */
+        if (!param->annotation) {
+            param->annotation = strdup(tag);
+        } else if (!strstr(param->annotation, tag)) {
+            size_t old_len = strlen(param->annotation);
+            size_t tag_len = strlen(tag);
+            char* combined = (char*)malloc(old_len + 1 + tag_len + 1);
+            memcpy(combined, param->annotation, old_len);
+            combined[old_len] = ',';
+            memcpy(combined + old_len + 1, tag, tag_len);
+            combined[old_len + 1 + tag_len] = '\0';
+            free(param->annotation);
+            param->annotation = combined;
+        }
+    }
+    Type* param_type = parse_type(parser);
+    if (param_type) {
+        param->node_type = param_type;
+    } else {
+        parser_error(parser, "Expected type after ':' in extern parameter");
+        param->node_type = create_type(TYPE_INT);  // Fallback for error recovery
+    }
+    /* #2523: a string parameter is borrowed unless `@retain` says
+     * otherwise, and an integer has no lifetime, so `@noescape` on either
+     * would say nothing: refuse it rather than let it look meaningful. */
+    if (param->annotation && strstr(param->annotation, "noescape_param") &&
+        param->node_type->kind != TYPE_PTR && param->node_type->kind != TYPE_FUNCTION) {
+        parser_error(parser, "@noescape on an extern parameter is only valid on `ptr` or `fn`");
+    }
 }
 
 /* Trailing `@`-attributes on an extern signature, shared by the bare
@@ -5181,72 +5300,9 @@ ASTNode* parse_extern_declaration(Parser* parser) {
 
             // Require type annotation for extern: param: type
             if (match_token(parser, TOKEN_COLON)) {
-                /* Zero or more `@<attr>` markers between `:` and the
-                 * type. Currently recognised:
-                 *
-                 *   @aether — param receives an AetherString header
-                 *             rather than the unwrapped const char*.
-                 *             Codegen suppresses the call-site
-                 *             aether_string_data() unwrap so binary
-                 *             content with embedded NULs survives
-                 *             the boundary intact. See #351.
-                 *
-                 *   @retain — the function stores / retains the
-                 *             pointer beyond the call (think
-                 *             `string_list_add`, `map_put_raw`'s
-                 *             key, any add/put/insert that captures
-                 *             the bytes). Tells the escape walker
-                 *             to mark a heap-string arg as escaped
-                 *             at this slot, so the heap-string-
-                 *             tracker wrapper and function-exit
-                 *             defer-free both skip freeing. Without
-                 *             it, default `string`-param treatment
-                 *             is "read-only" — correct for
-                 *             string.length / equals / println but
-                 *             a UAF for retainers. See #420 follow-up.
-                 *
-                 * Multiple annotations stack: `name: @aether @retain string`
-                 * is legal. Order is irrelevant; storage is a
-                 * comma-separated set on `param->annotation`. */
-                while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
-                    advance_token(parser);  // consume '@'
-                    Token* attr = peek_token(parser);
-                    const char* tag = NULL;
-                    if (attr && attr->type == TOKEN_IDENTIFIER && attr->value) {
-                        if (strcmp(attr->value, "aether") == 0) {
-                            tag = "aether_param";
-                            advance_token(parser);
-                        } else if (strcmp(attr->value, "retain") == 0) {
-                            tag = "retain_param";
-                            advance_token(parser);
-                        }
-                    }
-                    if (!tag) {
-                        parser_error(parser, "unknown extern-param attribute (expected @aether or @retain)");
-                        break;
-                    }
-                    /* Append to the comma-separated set, deduping. */
-                    if (!param->annotation) {
-                        param->annotation = strdup(tag);
-                    } else if (!strstr(param->annotation, tag)) {
-                        size_t old_len = strlen(param->annotation);
-                        size_t tag_len = strlen(tag);
-                        char* combined = (char*)malloc(old_len + 1 + tag_len + 1);
-                        memcpy(combined, param->annotation, old_len);
-                        combined[old_len] = ',';
-                        memcpy(combined + old_len + 1, tag, tag_len);
-                        combined[old_len + 1 + tag_len] = '\0';
-                        free(param->annotation);
-                        param->annotation = combined;
-                    }
-                }
-                Type* param_type = parse_type(parser);
-                if (param_type) {
-                    param->node_type = param_type;
-                } else {
-                    parser_error(parser, "Expected type after ':' in extern parameter");
-                    param->node_type = create_type(TYPE_INT);  // Fallback for error recovery
-                }
+                /* `@<attr>` markers between `:` and the type, then the
+                 * type: see parse_extern_param_attrs_and_type. */
+                parse_extern_param_attrs_and_type(parser, param);
             } else {
                 // Type annotation required for extern functions
                 parser_error(parser, "Type annotation required for extern parameter (use param: type)");
@@ -5703,6 +5759,8 @@ ASTNode* parse_pattern(Parser* parser) {
             ASTNode* pattern = create_ast_node(AST_PATTERN_LITERAL, token->value,
                                               token->line, token->column);
             pattern->node_type = create_type(TYPE_STRING);
+            /* A pattern holding a NUL matches by all its bytes (#2520). */
+            if (token->value_len > 0) ast_set_literal_bytes(pattern, token->value, token->value_len);
             return pattern;
         }
         
@@ -6971,44 +7029,10 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         ASTNode* p = create_ast_node(AST_IDENTIFIER, pname->value,
                                                      pname->line, pname->column);
                         if (match_token(parser, TOKEN_COLON)) {
-                            /* Same `@aether` / `@retain` per-param annotations as
-                             * the bare `extern foo(...)` form. See
-                             * parse_extern_declaration for the full table of
-                             * supported attributes. Multiple stack via repeated
-                             * `@<attr>`. */
-                            while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
-                                advance_token(parser);
-                                Token* pattr = peek_token(parser);
-                                const char* tag = NULL;
-                                if (pattr && pattr->type == TOKEN_IDENTIFIER && pattr->value) {
-                                    if (strcmp(pattr->value, "aether") == 0) {
-                                        tag = "aether_param";
-                                        advance_token(parser);
-                                    } else if (strcmp(pattr->value, "retain") == 0) {
-                                        tag = "retain_param";
-                                        advance_token(parser);
-                                    }
-                                }
-                                if (!tag) {
-                                    parser_error(parser, "unknown extern-param attribute (expected @aether or @retain)");
-                                    break;
-                                }
-                                if (!p->annotation) {
-                                    p->annotation = strdup(tag);
-                                } else if (!strstr(p->annotation, tag)) {
-                                    size_t old_len = strlen(p->annotation);
-                                    size_t tag_len = strlen(tag);
-                                    char* combined = (char*)malloc(old_len + 1 + tag_len + 1);
-                                    memcpy(combined, p->annotation, old_len);
-                                    combined[old_len] = ',';
-                                    memcpy(combined + old_len + 1, tag, tag_len);
-                                    combined[old_len + 1 + tag_len] = '\0';
-                                    free(p->annotation);
-                                    p->annotation = combined;
-                                }
-                            }
-                            Type* pt = parse_type(parser);
-                            p->node_type = pt ? pt : create_type(TYPE_INT);
+                            /* The same per-param annotations as the bare
+                             * `extern foo(...)` form, then the type: see
+                             * parse_extern_param_attrs_and_type. */
+                            parse_extern_param_attrs_and_type(parser, p);
                         } else {
                             parser_error(parser, "Type annotation required for @extern parameter (use param: type)");
                             p->node_type = create_type(TYPE_INT);

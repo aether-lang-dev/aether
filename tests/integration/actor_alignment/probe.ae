@@ -1,0 +1,72 @@
+// #2485: a generated actor struct is declared aligned(64), and every spawn
+// must hand back an actor on that boundary. The runtime allocated actors
+// with plain malloc, which promises 16 bytes, so most of them were not.
+// Three actor shapes give three struct sizes; each one is spawned many
+// times so the allocator's placement varies.
+
+extern actor_misaligned(a: ptr) -> int
+
+message Bump { by: int }
+
+actor Small {
+    state n = 0
+    receive {
+        Bump(by) -> { n = n + by }
+    }
+}
+
+actor Mid {
+    state a = 0
+    state b = 0
+    state c = 0
+    state label = "mid"
+    receive {
+        Bump(by) -> {
+            a = a + by
+            b = b + a
+            c = c + b
+        }
+    }
+}
+
+actor Big {
+    state a = 0
+    state b = 0
+    state c = 0
+    state d = 0
+    state e = 0
+    state f = 0
+    state g = 0
+    state h = 0
+    state i = 0
+    state j = 0
+    state k = 0
+    state l = 0
+    receive {
+        Bump(by) -> {
+            a = a + by
+            l = l + a
+        }
+    }
+}
+
+main() {
+    misaligned = 0
+    spawned = 0
+    for (n = 0; n < 40; n = n + 1) {
+        s = spawn(Small())
+        misaligned = misaligned + actor_misaligned(s)
+        s ! Bump { by: n }
+        m = spawn(Mid())
+        misaligned = misaligned + actor_misaligned(m)
+        m ! Bump { by: n }
+        b = spawn(Big())
+        misaligned = misaligned + actor_misaligned(b)
+        b ! Bump { by: n }
+        spawned = spawned + 3
+    }
+    println("spawned=${spawned} misaligned=${misaligned}")
+    if misaligned == 0 {
+        println("actor_alignment passed")
+    }
+}

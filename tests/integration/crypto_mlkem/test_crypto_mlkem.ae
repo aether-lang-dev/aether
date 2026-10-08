@@ -1,8 +1,13 @@
 // Validate std.cryptography.mlkem (ML-KEM / Kyber, FIPS 203):
-//  1. A byte-exact NIST ACVP keyGen known-answer (ML-KEM-512 tcId 1) —
-//     pins FIPS 203 conformance, not just internal self-consistency.
+//  1. A byte-exact NIST ACVP keyGen known-answer (ML-KEM-512 tcId 1),
+//     which pins FIPS 203 conformance, not just internal self-consistency.
 //  2. The KEM correctness property (encaps secret == decaps secret) on
-//     all three parameter sets, plus implicit rejection.
+//     all three parameter sets, through the randomized API and the
+//     derandomized test entries, plus implicit rejection.
+//  3. The FIPS 203 input checks (#2482): every malformed ek, dk, ct, m, d
+//     or z gets an error and null outputs, never a key and never a panic.
+//  4. The size helpers (#2508): FIPS 203's sizes for k = 2, 3, 4, and 0 for
+//     any other k.
 import std.cryptography.mlkem
 import std.bytes
 import std.string
@@ -13,13 +18,223 @@ hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while 
 bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
 seed(byte_val: int) -> ptr { b = bytes.new(32); i = 0; while i < 32 { bytes.set(b, i, (byte_val + i) & 0xFF); i = i + 1 } return b }
 
+// A copy of `b` resized to `n` bytes: truncated, or zero-extended.
+resized(b: ptr, n: int) -> ptr {
+    have = bytes.length(b)
+    keep = n
+    if keep > have { keep = have }
+    out = bytes.new(n)
+    if keep > 0 { bytes.copy_from_slice(out, 0, bytes.view(b)[0..keep]) }
+    i = keep
+    while i < n { bytes.set(out, i, 0) i = i + 1 }
+    return out
+}
+
+// A copy of `b` with byte `at` XORed by `x`.
+flipped(b: ptr, at: int, x: int) -> ptr {
+    out = resized(b, bytes.length(b))
+    bytes.set(out, at, bytes.get(out, at) ^ x)
+    return out
+}
+
+keygen_derand(k: int, d: ptr, z: ptr) -> (ptr, ptr, string) {
+    if k == 2 { ek, dk, err = mlkem.mlkem512_keygen_derand(d, z) return ek, dk, err }
+    if k == 4 { ek, dk, err = mlkem.mlkem1024_keygen_derand(d, z) return ek, dk, err }
+    ek, dk, err = mlkem.mlkem768_keygen_derand(d, z)
+    return ek, dk, err
+}
+
+keygen(k: int) -> (ptr, ptr, string) {
+    if k == 2 { ek, dk, err = mlkem.mlkem512_keygen() return ek, dk, err }
+    if k == 4 { ek, dk, err = mlkem.mlkem1024_keygen() return ek, dk, err }
+    ek, dk, err = mlkem.mlkem768_keygen()
+    return ek, dk, err
+}
+
+encaps(k: int, ek: ptr) -> (ptr, ptr, string) {
+    if k == 2 { ct, key, err = mlkem.mlkem512_encaps(ek) return ct, key, err }
+    if k == 4 { ct, key, err = mlkem.mlkem1024_encaps(ek) return ct, key, err }
+    ct, key, err = mlkem.mlkem768_encaps(ek)
+    return ct, key, err
+}
+
+encaps_derand(k: int, ek: ptr, m: ptr) -> (ptr, ptr, string) {
+    if k == 2 { ct, key, err = mlkem.mlkem512_encaps_derand(ek, m) return ct, key, err }
+    if k == 4 { ct, key, err = mlkem.mlkem1024_encaps_derand(ek, m) return ct, key, err }
+    ct, key, err = mlkem.mlkem768_encaps_derand(ek, m)
+    return ct, key, err
+}
+
+decaps(k: int, dk: ptr, ct: ptr) -> (ptr, string) {
+    if k == 2 { key, err = mlkem.mlkem512_decaps(dk, ct) return key, err }
+    if k == 4 { key, err = mlkem.mlkem1024_decaps(dk, ct) return key, err }
+    key, err = mlkem.mlkem768_decaps(dk, ct)
+    return key, err
+}
+
+// Each reject_* call expects an error and no output. Returns the failure
+// count (0 or 1) so main can sum them.
+reject_encaps(k: int, ek: ptr, m: ptr, label: string) -> int {
+    ct, key, err = encaps_derand(k, ek, m)
+    if err == "" || ct != null || key != null {
+        println("FAIL mlkem k=${k} encaps accepted ${label}")
+        return 1
+    }
+    // The randomized entry runs the same ek check.
+    if bytes.length(m) == 32 {
+        rct, rkey, rerr = encaps(k, ek)
+        if rerr == "" || rct != null || rkey != null {
+            println("FAIL mlkem k=${k} randomized encaps accepted ${label}")
+            return 1
+        }
+    }
+    return 0
+}
+
+reject_decaps(k: int, dk: ptr, ct: ptr, label: string) -> int {
+    key, err = decaps(k, dk, ct)
+    if err == "" || key != null {
+        println("FAIL mlkem k=${k} decaps accepted ${label}")
+        return 1
+    }
+    return 0
+}
+
+// The FIPS 203 §7.2 / §7.3 checks on one parameter set. ek_len, dk_len and
+// ct_len are the set's sizes; the cases are relative to them so every set gets
+// the same coverage.
+check_inputs(k: int) -> int {
+    fails = 0
+    ek, dk, kerr = keygen_derand(k, seed(10 + k), seed(110 + k))
+    if kerr != "" { println("FAIL mlkem k=${k} keygen_derand: ${kerr}") return 1 }
+    m = seed(210 + k)
+    ct, key, eerr = encaps_derand(k, ek, m)
+    if eerr != "" { println("FAIL mlkem k=${k} encaps_derand: ${eerr}") return 1 }
+    ek_len = bytes.length(ek)
+    dk_len = bytes.length(dk)
+    ct_len = bytes.length(ct)
+
+    // §7.2 type check: too short (one byte, and far short: this used to
+    // panic on the slice that hashes ek), too long, empty, null.
+    fails = fails + reject_encaps(k, resized(ek, ek_len - 1), m, "ek one byte short")
+    fails = fails + reject_encaps(k, resized(ek, ek_len - 184), m, "short ek (1000 bytes on 768)")
+    fails = fails + reject_encaps(k, resized(ek, ek_len + 6), m, "ek six bytes long")
+    fails = fails + reject_encaps(k, resized(ek, 0), m, "empty ek")
+    fails = fails + reject_encaps(k, null, m, "null ek")
+
+    // §7.2 modulus check. Coefficient 0 is the low 12 bits of bytes 0..1,
+    // coefficient 1 the high 12 bits of bytes 1..2. q - 1 = 3328 (0xD00) is
+    // in range, q = 3329 (0xD01) and 4095 (0xFFF) are not. The last
+    // coefficient (the top of the final 3-byte group before rho) is checked
+    // too, so the loop covers the whole vector.
+    in_range = resized(ek, ek_len)
+    bytes.set(in_range, 0, 0x00) bytes.set(in_range, 1, (bytes.get(in_range, 1) & 0xF0) | 0x0D)
+    ict, ikey, ierr = encaps_derand(k, in_range, m)
+    if ierr != "" || ict == null || ikey == null { println("FAIL mlkem k=${k} encaps rejected coefficient q-1: ${ierr}") fails = fails + 1 }
+    c0q = resized(ek, ek_len)
+    bytes.set(c0q, 0, 0x01) bytes.set(c0q, 1, (bytes.get(c0q, 1) & 0xF0) | 0x0D)
+    fails = fails + reject_encaps(k, c0q, m, "coefficient 0 == q")
+    c0max = resized(ek, ek_len)
+    bytes.set(c0max, 0, 0xFF) bytes.set(c0max, 1, bytes.get(c0max, 1) | 0x0F)
+    fails = fails + reject_encaps(k, c0max, m, "coefficient 0 == 4095")
+    c1q = resized(ek, ek_len)
+    bytes.set(c1q, 1, (bytes.get(c1q, 1) & 0x0F) | 0x10) bytes.set(c1q, 2, 0xD0)
+    fails = fails + reject_encaps(k, c1q, m, "coefficient 1 == q")
+    last = resized(ek, ek_len)
+    top = ek_len - 32 - 1
+    bytes.set(last, top, 0xFF) bytes.set(last, top - 1, bytes.get(last, top - 1) | 0xF0)
+    fails = fails + reject_encaps(k, last, m, "last coefficient == 4095")
+
+    // m must be 32 bytes (a 3-byte m used to be padded with 0xFF).
+    fails = fails + reject_encaps(k, ek, resized(m, 3), "3-byte m")
+    fails = fails + reject_encaps(k, ek, resized(m, 33), "33-byte m")
+
+    // keygen_derand: d and z must be 32 bytes each.
+    bek, bdk, berr = keygen_derand(k, resized(m, 31), seed(1))
+    if berr == "" || bek != null || bdk != null { println("FAIL mlkem k=${k} keygen accepted a 31-byte d") fails = fails + 1 }
+    bek, bdk, berr = keygen_derand(k, seed(1), resized(m, 33))
+    if berr == "" || bek != null || bdk != null { println("FAIL mlkem k=${k} keygen accepted a 33-byte z") fails = fails + 1 }
+
+    // §7.3 ciphertext type check, on every Decaps: a valid ciphertext with
+    // extra bytes used to decapsulate to the real secret.
+    fails = fails + reject_decaps(k, dk, resized(ct, ct_len + 7), "ct seven bytes long")
+    fails = fails + reject_decaps(k, dk, resized(ct, ct_len - 1), "ct one byte short")
+    fails = fails + reject_decaps(k, dk, resized(ct, 100), "100-byte ct")
+    fails = fails + reject_decaps(k, dk, resized(ct, 0), "empty ct")
+    fails = fails + reject_decaps(k, dk, null, "null ct")
+
+    // §7.3 decapsulation-key type check and hash check.
+    fails = fails + reject_decaps(k, resized(dk, 1000), ct, "1000-byte dk")
+    fails = fails + reject_decaps(k, resized(dk, dk_len + 1), ct, "dk one byte long")
+    fails = fails + reject_decaps(k, null, ct, "null dk")
+    hoff = dk_len - 64
+    fails = fails + reject_decaps(k, flipped(dk, hoff, 0x01), ct, "dk with a corrupted H(ek)")
+    fails = fails + reject_decaps(k, flipped(dk, hoff - 1, 0x80), ct, "dk with a corrupted embedded ek")
+
+    // The unmodified inputs still work, and a tampered ciphertext of the
+    // right length is implicit rejection, not an error.
+    good, gerr = decaps(k, dk, ct)
+    if gerr != "" || bh(good) != bh(key) { println("FAIL mlkem k=${k} valid decaps after the checks: ${gerr}") fails = fails + 1 }
+    rej, rerr = decaps(k, dk, flipped(ct, 0, 0xFF))
+    if rerr != "" || rej == null || bh(rej) == bh(key) { println("FAIL mlkem k=${k} tampered ct: want the rejection secret, got err '${rerr}'") fails = fails + 1 }
+
+    if fails == 0 { println("ok   mlkem k=${k} FIPS 203 input checks (ek, m, d, z, ct, dk)") }
+    return fails
+}
+
+// The size helpers against FIPS 203 Table 3, and 0 for a k that is not a
+// parameter set (they used to read uninitialised fields for one).
+check_sizes() -> int {
+    fails = 0
+    k = 2
+    while k <= 4 {
+        ct = 768
+        if k == 3 { ct = 1088 }
+        if k == 4 { ct = 1568 }
+        if mlkem.mlkem_ek_bytes(k) != 384 * k + 32 { println("FAIL mlkem_ek_bytes(${k}) = ${mlkem.mlkem_ek_bytes(k)}") fails = fails + 1 }
+        if mlkem.mlkem_dk_bytes(k) != 768 * k + 96 { println("FAIL mlkem_dk_bytes(${k}) = ${mlkem.mlkem_dk_bytes(k)}") fails = fails + 1 }
+        if mlkem.mlkem_ct_bytes(k) != ct { println("FAIL mlkem_ct_bytes(${k}) = ${mlkem.mlkem_ct_bytes(k)}") fails = fails + 1 }
+        k = k + 1
+    }
+    bad = 0 - 1
+    while bad <= 6 {
+        if bad < 2 || bad > 4 {
+            if mlkem.mlkem_ek_bytes(bad) != 0 || mlkem.mlkem_dk_bytes(bad) != 0 || mlkem.mlkem_ct_bytes(bad) != 0 {
+                println("FAIL mlkem sizes for unsupported k=${bad}: ${mlkem.mlkem_ek_bytes(bad)} ${mlkem.mlkem_dk_bytes(bad)} ${mlkem.mlkem_ct_bytes(bad)}, want 0")
+                fails = fails + 1
+            }
+        }
+        bad = bad + 1
+    }
+    if mlkem.mlkem_ek_bytes(1000000) != 0 { println("FAIL mlkem_ek_bytes(1000000)") fails = fails + 1 }
+    if mlkem.mlkem_ss_bytes() != 32 { println("FAIL mlkem_ss_bytes") fails = fails + 1 }
+    if fails == 0 { println("ok   mlkem size helpers (k = 2, 3, 4; 0 otherwise)") }
+    return fails
+}
+
+// Randomized keygen + encaps + decaps agree on the shared secret, and two
+// keygens differ (the seeds really come from the CSPRNG).
+round_trip_random(k: int) -> int {
+    ek, dk, kerr = keygen(k)
+    ek2, _dk2, kerr2 = keygen(k)
+    if kerr != "" || kerr2 != "" { println("FAIL mlkem k=${k} keygen: ${kerr}${kerr2}") return 1 }
+    if bh(ek) == bh(ek2) { println("FAIL mlkem k=${k} two keygens gave the same ek") return 1 }
+    ct, k1, eerr = encaps(k, ek)
+    if eerr != "" { println("FAIL mlkem k=${k} encaps: ${eerr}") return 1 }
+    k2, derr = decaps(k, dk, ct)
+    if derr != "" || bh(k1) != bh(k2) { println("FAIL mlkem k=${k} randomized round-trip: ${derr}") return 1 }
+    println("ok   mlkem k=${k} randomized round-trip")
+    return 0
+}
+
 main() {
     fails = 0
 
     // --- NIST ACVP ML-KEM-512 keyGen, tcId 1 (byte-exact KAT) ---
     kd = hb("47b893474672ba92e4b12ee44fb32953af8e8503b5fb471d1614fb8a021a660a")
     kz = hb("1f8cb39e9e30bc458a0dc5408884b1187fb217018df760fa57317703b844a0a9")
-    kek, kdk = mlkem.mlkem512_keygen(kd, kz)
+    kek, kdk, kerr = mlkem.mlkem512_keygen_derand(kd, kz)
+    if kerr != "" { println("FAIL mlkem512 keygen_derand: ${kerr}"); fails = fails + 1 }
     want_ek = "28266a088b3482439bca01afb7ca5c6136a979b5159985a9484b36b679a5f7b9819eb63577891f7bb9cb98413ccc434adc79a16d6ab3076569ce6291c59b5d64612a7fb0c15013200bc8bebb03a570174b5e4363aed86eb02a220d281fb5457f0a549fc5051d49a6b2015259a2c3084f405e1769952260675586a584904059275a265234ef3abf88c171a80898fc783358bbc9803c8789027d917c9ebacbc568cc18de84c85454b94249586c0c6e2b8a16fa789c51212dd1728ee9b8c6c40528bf93826fa82368419623032af27b5694305816811d3ca85805100e9c1a9621e5089e54cb47f5a8fea0b49ef81c6b5187f48924c7947d6b61697a4a8a18452ef803336ad4be503275bcacc03c181405f7b1dc9b47fb169eb37bbe27e29c763a4e52b9a42520388cf09b8edbcdf41ccf6537190e6156c37cc1aac63c0f90ce78d0b9b190c548d71b6f26cc8f585ea14004b5b30aaa100b2adc1263828833b24e46163b41446f98c882092a39941867b80632e2097674a793935227db0b8577e03a69c50a514c7473c892e3fba7c4316bdabc952a70644176687d4191323bad93d85a3ca250868c0747e6c44f6126c874afbec0bdd4503cb2c59a69816e7d4109941467579a1ffe6a4f50fa379051729dab6e2f61432f15be67d667c7cc1054742b2b953078a5cf88d9133087309d88c61da240d99c59137329907b47865321ecd5564e987333b4cb607b0afca86769dc95b2f921357213fcb80c3b152918e9bab2228c0a1b77897ac68ce55088165f87f397da9790873b62c5383c0ccc370f0267cbe195651ccf336182c22ac3924b76c9e779b7a271d166b6d24b84242b7e73cc723f764039f6c851744034c3304db0c091a5764fdc9d593556ff734b82a87ccbc38ca99564d988bbd2d1bf071bb160722d365104fb27610651a8ed817f2742a6b5a1273a61acaf4460b0ab1456a9922351400a1c7d95d856d6e3370622c9c4164bc6b401435624a98b95caeb274f34ce92038d785068cdd8cf44c38d84acb2c466a2756c870ee78c26e738cc451002304eb8c90ab24b6463eb124d779f937a2e3692611d2e34d57b36cc4b2cd3b31ff485c6684d408b972e0d5ca7d2224aae4e"
     if bh(kek) == want_ek { println("ok   mlkem512 keygen KAT (ACVP tcId 1, byte-exact)") } else { println("FAIL mlkem512 keygen KAT"); fails = fails + 1 }
     // dk must end with ek || H(ek) || z; spot-check the z tail.
@@ -30,32 +245,40 @@ main() {
 
     // ML-KEM-768 round-trip with fixed seeds.
     d = seed(1); z = seed(100); m = seed(200)
-    ek, dk = mlkem.mlkem768_keygen(d, z)
+    ek, dk, _kerr = mlkem.mlkem768_keygen_derand(d, z)
     if bytes.length(ek) != mlkem.mlkem_ek_bytes(3) { println("FAIL 768 ek size ${bytes.length(ek)}"); fails = fails + 1 }
-    ct, k1 = mlkem.mlkem768_encaps(ek, m)
+    ct, k1, _eerr = mlkem.mlkem768_encaps_derand(ek, m)
     if bytes.length(ct) != mlkem.mlkem_ct_bytes(3) { println("FAIL 768 ct size"); fails = fails + 1 }
-    k2 = mlkem.mlkem768_decaps(dk, ct)
+    k2, _derr = mlkem.mlkem768_decaps(dk, ct)
     if bh(k1) == bh(k2) { println("ok   mlkem768 round-trip (K=${bytes.length(k1)} bytes)") } else { println("FAIL mlkem768 K mismatch"); println("  enc ${bh(k1)}"); println("  dec ${bh(k2)}"); fails = fails + 1 }
 
     // Implicit rejection: corrupt the ciphertext -> decaps must NOT equal k1,
     // must be stable, and must not crash.
     bytes.set(ct, 0, bytes.get(ct, 0) ^ 0xFF)
-    kr1 = mlkem.mlkem768_decaps(dk, ct)
-    kr2 = mlkem.mlkem768_decaps(dk, ct)
+    kr1, _rerr1 = mlkem.mlkem768_decaps(dk, ct)
+    kr2, _rerr2 = mlkem.mlkem768_decaps(dk, ct)
     if bh(kr1) == bh(k1) { println("FAIL mlkem768 rejection leaked encaps key"); fails = fails + 1 }
     else { if bh(kr1) == bh(kr2) { println("ok   mlkem768 implicit rejection (stable)") } else { println("FAIL mlkem768 rejection unstable"); fails = fails + 1 } }
 
     // ML-KEM-512 round-trip.
-    d5, z5 = mlkem.mlkem512_keygen(seed(2), seed(101))
-    ct5, ka = mlkem.mlkem512_encaps(d5, seed(201))
-    kb = mlkem.mlkem512_decaps(z5, ct5)
+    e5, d5, _ke5 = mlkem.mlkem512_keygen_derand(seed(2), seed(101))
+    ct5, ka, _ee5 = mlkem.mlkem512_encaps_derand(e5, seed(201))
+    kb, _de5 = mlkem.mlkem512_decaps(d5, ct5)
     if bh(ka) == bh(kb) { println("ok   mlkem512 round-trip") } else { println("FAIL mlkem512 K mismatch"); fails = fails + 1 }
 
     // ML-KEM-1024 round-trip.
-    ek10, dk10 = mlkem.mlkem1024_keygen(seed(3), seed(102))
-    ct10, kc = mlkem.mlkem1024_encaps(ek10, seed(202))
-    kd = mlkem.mlkem1024_decaps(dk10, ct10)
-    if bh(kc) == bh(kd) { println("ok   mlkem1024 round-trip") } else { println("FAIL mlkem1024 K mismatch"); fails = fails + 1 }
+    ek10, dk10, _ke10 = mlkem.mlkem1024_keygen_derand(seed(3), seed(102))
+    ct10, kc, _ee10 = mlkem.mlkem1024_encaps_derand(ek10, seed(202))
+    kd10, _de10 = mlkem.mlkem1024_decaps(dk10, ct10)
+    if bh(kc) == bh(kd10) { println("ok   mlkem1024 round-trip") } else { println("FAIL mlkem1024 K mismatch"); fails = fails + 1 }
+
+    fails = fails + check_sizes()
+    k = 2
+    while k <= 4 {
+        fails = fails + round_trip_random(k)
+        fails = fails + check_inputs(k)
+        k = k + 1
+    }
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

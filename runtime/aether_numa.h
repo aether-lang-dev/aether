@@ -50,6 +50,26 @@ void* aether_numa_alloc(size_t size, int node);
 void aether_numa_free(void* ptr, size_t size);
 
 /**
+ * Allocate memory on a NUMA node, aligned to `align` bytes (#2485).
+ * aether_numa_alloc only promises malloc's alignment when it falls back to
+ * the heap, which is 16 bytes, too little for a type declared aligned(64).
+ *
+ * @param size  Size in bytes to allocate
+ * @param align Alignment: a power of two, a multiple of sizeof(void*), and
+ *              at most 4096 (a NUMA mapping is only page-aligned)
+ * @param node  NUMA node to allocate on (-1 for any node)
+ * @return Pointer to allocated memory, or NULL on failure
+ */
+void* aether_numa_alloc_aligned(size_t size, size_t align, int node);
+
+/**
+ * Free memory allocated with aether_numa_alloc_aligned, and only that: the
+ * heap fallback comes from an aligned allocator (_aligned_malloc on Windows)
+ * whose blocks free() must not see.
+ */
+void aether_numa_free_aligned(void* ptr, size_t size);
+
+/**
  * Cleanup NUMA subsystem.
  */
 void aether_numa_cleanup(void);

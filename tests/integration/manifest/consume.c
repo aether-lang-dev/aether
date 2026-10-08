@@ -1,14 +1,35 @@
 /*
  * consume.c — Verifies the manifest builder DSL.
  *
- * dlopens the lib, calls aether_abi() (which runs the namespace()
+ * loads the lib, calls aether_abi() (which runs the namespace()
  * block), then walks the captured manifest via manifest_get() and
  * asserts each input/event/binding is present.
  */
 
 #include <stdio.h>
 #include <string.h>
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows (#2541). */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
 #include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 #include "aether_host.h"
 
@@ -25,11 +46,11 @@ int main(int argc, char** argv) {
     /* Belt-and-braces: clear any state the host shares with the lib. */
     manifest_clear();
 
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen: %s", dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading the library: %s", lib_error());
 
-    setup_fn abi = (setup_fn)dlsym(h, "aether_abi");
-    if (!abi) FAIL("aether_abi not found: %s", dlerror());
+    setup_fn abi = (setup_fn)lib_sym(h, "aether_abi");
+    if (!abi) FAIL("aether_abi not found: %s", lib_error());
 
     /* Run the manifest builder. */
     abi();
@@ -79,7 +100,7 @@ int main(int argc, char** argv) {
     if (manifest_get() != NULL)
         FAIL("manifest_get() should return NULL after clear");
 
-    dlclose(h);
+    lib_close(h);
     printf("OK: manifest builders captured all fields\n");
     return 0;
 }

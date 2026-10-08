@@ -422,8 +422,10 @@ static inline int aether_win32_sched_yield(void) {
 // ---- Thread identity -----------------------------------------------------
 // For "is this the thread that ..." checks (the main-thread-mode thread in
 // the scheduler). The Win32 shim has no pthread_self/pthread_equal, and a
-// threadless build has one thread.
-#if defined(_WIN32)
+// threadless build has one thread. A threadless Windows build
+// (-DAETHER_NO_THREADING) takes the stub path above, which does not include
+// <windows.h>, so it takes the single-thread identity too.
+#if AETHER_HAS_THREADS && defined(_WIN32)
 typedef DWORD aether_tid_t;
 static inline aether_tid_t aether_tid_self(void) { return GetCurrentThreadId(); }
 static inline int aether_tid_equal(aether_tid_t a, aether_tid_t b) { return a == b; }

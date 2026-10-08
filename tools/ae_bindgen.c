@@ -25,13 +25,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ae_line.h"
+
+#include <stdarg.h>
+
 #ifdef _WIN32
+#  include <process.h>
+#  ifndef getpid
+#    define getpid _getpid
+#  endif
 #  ifndef popen
 #    define popen  _popen
 #    define pclose _pclose
 #  endif
 #  define BG_ERR_SINK "2>NUL"
 #else
+#  include <unistd.h>
 #  define BG_ERR_SINK "2>/dev/null"
 #endif
 
@@ -62,22 +71,31 @@ static FILE* bg_popen(const char* cmd) {
 #endif
 }
 
-#define BG_MAX_MACROS   4096
 #define BG_NAME_MAX     128
-#define BG_EXPANSION_MAX 1024
 
 typedef struct {
     char name[BG_NAME_MAX];
-    char expansion[BG_EXPANSION_MAX];
+    /* Heap, held whole (NULL until the preprocessor reports it): a 1 KB
+     * copy cut a longer one, and `1+1+...+1` imported as a smaller number
+     * (#2536). */
+    char* expansion;
     /* 0 = pending, 1 = integer, 2 = string, 3 = float, -1 = skipped */
     int  kind;
     long long ival;
 } BgMacro;
 
+/* Grown as needed: a fixed 4096 dropped the candidates past it, unlisted
+ * even among the skipped ones (#2537). */
 typedef struct {
     BgMacro* macros;
     int count;
+    int cap;
 } BgSet;
+
+static void bg_set_free(BgSet* set) {
+    for (int i = 0; i < set->count; i++) free(set->macros[i].expansion);
+    free(set->macros);
+}
 
 /* ---- integer constant-expression evaluator ------------------------------
  * Grammar (C precedence, the subset macros use):
@@ -312,19 +330,48 @@ static int bg_is_ident(const char* s) {
 }
 
 /* Collect object-like, user-named macro names from one `cc -E -dM` run
- * into a NUL-separated buffer. Names with a leading underscore (reserved
- * namespace) and function-like macros are not importable constants. */
+ * into a NUL-separated list (a double NUL ends it) the caller frees. Names
+ * with a leading underscore (reserved namespace) and function-like macros
+ * are not importable constants. 1 when done, 0 when the preprocessor could
+ * not be run, -1 when out of memory.
+ *
+ * Whole lines, and as many names as there are (#2537): a line read in
+ * 4 KB pieces gave a later piece of a long definition that began with
+ * `#define ` (text in a string) as a macro of its own, and a 256 KB list
+ * dropped the names past it, which a large header (windows.h) reaches. */
+/* A command in a string sized to fit, for free(); NULL when out of memory.
+ * A 4 KB buffer cut a long compiler, header or temp path (#2546). */
+static char* bg_command(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return NULL;
+    char* cmd = (char*)malloc((size_t)n + 1);
+    if (!cmd) return NULL;
+    va_start(ap, fmt);
+    vsnprintf(cmd, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return cmd;
+}
+
 static int bg_dump_names(const char* cc, const char* file,
-                         const char* include_flags,
-                         char* names, size_t names_sz) {
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "\"%s\" -E -dM %s \"%s\" " BG_ERR_SINK,
-             cc, include_flags, file);
+                         const char* include_flags, char** names) {
+    *names = NULL;
+    char* cmd = bg_command("%s -E -dM %s \"%s\" " BG_ERR_SINK, cc, include_flags, file);
+    if (!cmd) {
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
     FILE* p = bg_popen(cmd);
+    free(cmd);
     if (!p) return 0;
-    size_t pos = 0;
-    char line[4096];
-    while (fgets(line, sizeof(line), p)) {
+    size_t pos = 0, cap = 4096;
+    char* out = (char*)malloc(cap);
+    char* line = NULL;
+    size_t line_cap = 0;
+    int got = out ? 0 : -1;
+    while (out && (got = ae_read_line(p, &line, &line_cap)) > 0) {
         if (strncmp(line, "#define ", 8) != 0) continue;
         char* name = line + 8;
         char* sp = strpbrk(name, " (\t\n");
@@ -334,12 +381,24 @@ static int bg_dump_names(const char* cc, const char* file,
         if (!bg_is_ident(name)) continue;
         size_t n = strlen(name);
         if (n == 0 || n >= BG_NAME_MAX) continue;
-        if (pos + n + 2 >= names_sz) break;
-        memcpy(names + pos, name, n + 1);
+        if (pos + n + 2 > cap) {
+            char* grown = (char*)realloc(out, cap * 2);
+            if (!grown) { got = -1; break; }
+            out = grown;
+            cap *= 2;
+        }
+        memcpy(out + pos, name, n + 1);
         pos += n + 1;
     }
-    names[pos] = '\0';                            /* double-NUL terminator */
+    free(line);
     pclose(p);
+    if (got < 0) {
+        free(out);
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
+    out[pos] = '\0';                              /* double-NUL terminator */
+    *names = out;
     return 1;
 }
 
@@ -353,44 +412,60 @@ static int bg_name_in(const char* names, const char* name) {
  * difference against a baseline dump of an empty file. `-dM` includes the
  * compiler's predefined macros, and those are not all underscore-reserved:
  * Linux gcc predefines `linux` and `unix`, which imported as consts and
- * made the output environment-dependent. */
+ * made the output environment-dependent. 1 when there are candidates, 0
+ * when there are none, -1 when out of memory (said). */
 static int bg_discover(const char* cc, const char* header,
                        const char* include_flags, const char* match,
                        BgSet* set, const char* tmp_dir) {
+    /* Named for the process: with one fixed name, two bindgen runs at once
+     * (parallel tests) wrote each other's probe and read the wrong macros. */
     char empty_path[1200];
-    snprintf(empty_path, sizeof(empty_path), "%s/ae_bindgen_empty.c", tmp_dir);
+    snprintf(empty_path, sizeof(empty_path), "%s/ae_bindgen_empty_%d.c", tmp_dir, (int)getpid());
     FILE* f = fopen(empty_path, "w");
     if (!f) return 0;
     if (fclose(f) != 0) { remove(empty_path); return 0; }
 
-    static char base_names[262144];
-    static char hdr_names[262144];
-    int ok = bg_dump_names(cc, empty_path, "", base_names, sizeof(base_names));
+    char* base_names = NULL;
+    char* hdr_names = NULL;
+    int ok = bg_dump_names(cc, empty_path, "", &base_names);
     remove(empty_path);
-    if (!ok) return 0;
-    if (!bg_dump_names(cc, header, include_flags, hdr_names, sizeof(hdr_names)))
-        return 0;
+    if (ok > 0) ok = bg_dump_names(cc, header, include_flags, &hdr_names);
 
-    for (const char* q = hdr_names; *q && set->count < BG_MAX_MACROS;
-         q += strlen(q) + 1) {
+    for (const char* q = hdr_names; ok > 0 && *q; q += strlen(q) + 1) {
         if (bg_name_in(base_names, q)) continue;   /* compiler-predefined */
         if (match && *match && strncmp(q, match, strlen(match)) != 0) continue;
         size_t qn = strlen(q);
         if (qn >= BG_NAME_MAX) continue;   /* already enforced by the dump */
-        memcpy(set->macros[set->count].name, q, qn + 1);
-        set->count++;
+        if (set->count == set->cap) {
+            int ncap = set->cap ? set->cap * 2 : 256;
+            BgMacro* grown = (BgMacro*)realloc(set->macros, (size_t)ncap * sizeof(BgMacro));
+            if (!grown) {
+                fprintf(stderr, "ae bindgen: out of memory\n");
+                ok = -1;
+                break;
+            }
+            set->macros = grown;
+            set->cap = ncap;
+        }
+        BgMacro* m = &set->macros[set->count++];
+        memset(m, 0, sizeof(*m));
+        memcpy(m->name, q, qn + 1);
     }
-    return set->count > 0;
+    free(base_names);
+    free(hdr_names);
+    if (ok < 0) return -1;
+    return ok > 0 && set->count > 0;
 }
 
 /* Stage 2: full expansion of every candidate through `cc -E` on a probe
  * that includes the header. The @AE@ marker keys each output line back to
- * its macro; the preprocessor fully resolves nested macros for us. */
+ * its macro; the preprocessor fully resolves nested macros for us. 1 when
+ * done, 0 when the preprocessor could not be run, -1 when out of memory. */
 static int bg_expand(const char* cc, const char* header,
                      const char* include_flags, BgSet* set,
                      const char* tmp_dir) {
     char probe_path[1200];
-    snprintf(probe_path, sizeof(probe_path), "%s/ae_bindgen_probe.c", tmp_dir);
+    snprintf(probe_path, sizeof(probe_path), "%s/ae_bindgen_probe_%d.c", tmp_dir, (int)getpid());
     FILE* f = fopen(probe_path, "w");
     if (!f) return 0;
     fprintf(f, "#include \"%s\"\n", header);
@@ -400,12 +475,21 @@ static int bg_expand(const char* cc, const char* header,
         fprintf(f, "@AE@ \"%s\" %s\n", set->macros[i].name, set->macros[i].name);
     if (fclose(f) != 0) { remove(probe_path); return 0; }
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "\"%s\" -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
+    char* cmd = bg_command("%s -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
+    if (!cmd) {
+        remove(probe_path);
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
     FILE* p = bg_popen(cmd);
+    free(cmd);
     if (!p) { remove(probe_path); return 0; }
-    char line[BG_EXPANSION_MAX + BG_NAME_MAX + 32];
-    while (fgets(line, sizeof(line), p)) {
+    /* Whole lines (#2536): one expansion is one line, of any length. */
+    char* line = NULL;
+    size_t line_cap = 0;
+    int got;
+    int next = 0;
+    while ((got = ae_read_line(p, &line, &line_cap)) > 0) {
         if (strncmp(line, "@AE@ \"", 6) != 0) continue;
         char* name = line + 6;
         char* endq = strchr(name, '"');
@@ -415,15 +499,30 @@ static int bg_expand(const char* cc, const char* header,
         size_t n = strlen(exp);
         while (n && (exp[n-1] == '\n' || exp[n-1] == '\r' || exp[n-1] == ' '))
             exp[--n] = '\0';
-        for (int i = 0; i < set->count; i++) {
+        /* The lines come back in probe order, so the search starts after the
+         * last match: linear over the set, not quadratic, now that a large
+         * header's thousands of macros are all candidates. */
+        for (int k = 0; k < set->count; k++) {
+            int i = (next + k) % set->count;
             if (strcmp(set->macros[i].name, name) == 0) {
-                snprintf(set->macros[i].expansion, BG_EXPANSION_MAX, "%s", exp);
+                char* copy = (char*)malloc(n + 1);
+                if (!copy) { got = -1; break; }
+                memcpy(copy, exp, n + 1);
+                free(set->macros[i].expansion);
+                set->macros[i].expansion = copy;
+                next = i + 1;
                 break;
             }
         }
+        if (got < 0) break;
     }
+    free(line);
     pclose(p);
     remove(probe_path);
+    if (got < 0) {
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
     return 1;
 }
 
@@ -470,10 +569,7 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
         return 1;
     }
 
-    BgSet set;
-    set.macros = (BgMacro*)calloc(BG_MAX_MACROS, sizeof(BgMacro));
-    if (!set.macros) { fprintf(stderr, "ae bindgen: out of memory\n"); return 1; }
-    set.count = 0;
+    BgSet set = { NULL, 0, 0 };
 
     const char* tmp_dir = getenv("TMPDIR");
 #ifdef _WIN32
@@ -483,48 +579,64 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
     if (!tmp_dir || !*tmp_dir) tmp_dir = "/tmp";
 #endif
 
-    if (!bg_discover(cc, header, include_flags, match, &set, tmp_dir)) {
-        fprintf(stderr, "ae bindgen: no importable macros found in %s "
-                        "(is the path right? does it preprocess standalone?)\n", header);
-        free(set.macros);
+    int discovered = bg_discover(cc, header, include_flags, match, &set, tmp_dir);
+    if (discovered <= 0) {
+        if (discovered == 0)
+            fprintf(stderr, "ae bindgen: no importable macros found in %s "
+                            "(is the path right? does it preprocess standalone?)\n", header);
+        bg_set_free(&set);
         return 1;
     }
 
-    if (!bg_expand(cc, header, include_flags, &set, tmp_dir)) {
-        fprintf(stderr, "ae bindgen: preprocessor expansion failed\n");
-        free(set.macros);
+    int expanded = bg_expand(cc, header, include_flags, &set, tmp_dir);
+    if (expanded <= 0) {
+        if (expanded == 0) fprintf(stderr, "ae bindgen: preprocessor expansion failed\n");
+        bg_set_free(&set);
         return 1;
     }
 
-    /* Classify every expansion. */
+    /* Classify every expansion. A string or float literal is rewritten into
+     * a buffer as long as the expansion, which always holds it. */
     int imported = 0;
     for (int i = 0; i < set.count; i++) {
         BgMacro* m = &set.macros[i];
-        if (m->kind == -1 || m->expansion[0] == '\0') { m->kind = -1; continue; }
-        char buf[BG_EXPANSION_MAX];
+        if (m->kind == -1 || !m->expansion || m->expansion[0] == '\0') { m->kind = -1; continue; }
         if (bg_eval_int(m->expansion, &m->ival)) {
             m->kind = 1; imported++;
-        } else if (bg_eval_string(m->expansion, buf, sizeof(buf))) {
-            snprintf(m->expansion, BG_EXPANSION_MAX, "%s", buf);
+            continue;
+        }
+        size_t buf_sz = strlen(m->expansion) + 3;
+        char* buf = (char*)malloc(buf_sz);
+        if (!buf) {
+            fprintf(stderr, "ae bindgen: out of memory\n");
+            bg_set_free(&set);
+            return 1;
+        }
+        if (bg_eval_string(m->expansion, buf, buf_sz)) {
             m->kind = 2; imported++;
-        } else if (bg_eval_float(m->expansion, buf, sizeof(buf))) {
-            snprintf(m->expansion, BG_EXPANSION_MAX, "%s", buf);
+        } else if (bg_eval_float(m->expansion, buf, buf_sz)) {
             m->kind = 3; imported++;
         } else {
             m->kind = -1;
+        }
+        if (m->kind > 0) {
+            free(m->expansion);
+            m->expansion = buf;
+        } else {
+            free(buf);
         }
     }
     if (imported == 0) {
         fprintf(stderr, "ae bindgen: %d macros found but none expand to an "
                         "importable constant\n", set.count);
-        free(set.macros);
+        bg_set_free(&set);
         return 1;
     }
 
     FILE* out = out_path ? fopen(out_path, "w") : stdout;
     if (!out) {
         fprintf(stderr, "ae bindgen: cannot open '%s' for writing\n", out_path);
-        free(set.macros);
+        bg_set_free(&set);
         return 1;
     }
 
@@ -557,9 +669,8 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
         fprintf(out, "\n// Skipped (not a scalar constant expression):\n");
         for (int i = 0; i < set.count; i++) {
             if (set.macros[i].kind > 0) continue;
-            fprintf(out, "//   %s%s%.60s\n", set.macros[i].name,
-                    set.macros[i].expansion[0] ? " = " : "",
-                    set.macros[i].expansion);
+            const char* e = set.macros[i].expansion ? set.macros[i].expansion : "";
+            fprintf(out, "//   %s%s%.60s\n", set.macros[i].name, e[0] ? " = " : "", e);
         }
     }
 
@@ -567,7 +678,7 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
     if (out_path) {
         if (fclose(out) != 0) write_failed = 1;
     }
-    free(set.macros);
+    bg_set_free(&set);
     if (write_failed) {
         fprintf(stderr, "ae bindgen: failed writing '%s'\n",
                 out_path ? out_path : "stdout");

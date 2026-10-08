@@ -100,7 +100,7 @@ exports(
     read_u16_le, write_u16_le, read_u16_be, write_u16_be, read_u32_le, write_u32_le,
     read_u32_be, write_u32_be, read_u64_le, write_u64_le, read_u64_be, write_u64_be, copy_slice, fill_slice,
     compare_slice,
-    aether_heap_in_use, heap_in_use
+    aether_heap_in_use, heap_in_use, aether_heap_in_use_exact, heap_in_use_exact
 )
 
 // Read unsigned byte at offset `i` from raw pointer `p`. Returns
@@ -250,16 +250,17 @@ extern aether_mem_udiv64_32(dividend: long, divisor: int, premainder: ptr) -> in
 // and calls through this extern, which casts and invokes.
 //
 // Driver: porting C functions like rqsort_idx that take a
-// comparator + swap callback from C.
-extern aether_mem_call_fn3_int(fn: ptr, a: long, b: long, opaque: ptr) -> int
+// comparator + swap callback from C. Each shim only calls through `fn`
+// during the call (`@noescape`, #2523).
+extern aether_mem_call_fn3_int(fn: @noescape ptr, a: long, b: long, opaque: ptr) -> int
 
 // Same shape, void return (e.g. swap callbacks).
-extern aether_mem_call_fn3_void(fn: ptr, a: long, b: long, opaque: ptr)
+extern aether_mem_call_fn3_void(fn: @noescape ptr, a: long, b: long, opaque: ptr)
 
 // Two-arg fnptr shim, void return. Driver case: GC user-finalizer
 // tables (`void (*)(JSContext*, void*)`) — both args cross the FFI
 // as ptr.
-extern aether_mem_call_fn2_void(fn: ptr, a: ptr, b: ptr)
+extern aether_mem_call_fn2_void(fn: @noescape ptr, a: ptr, b: ptr)
 
 // Reinterpret a raw pointer as a 64-bit integer address. Returns the
 // machine address of `p`. Driver case: porting C tagged-pointer code
@@ -414,11 +415,25 @@ extern aether_heap_in_use() -> long
 // glibc's): its statistics would stand still while the program allocates.
 //
 // For a same-process leak check, run the workload a few rounds and compare
-// two later rounds: the growth is what each round leaks. Allocators keep a
-// bounded cache of freed blocks that some count as in use, so a single
-// before/after is not zero even when nothing leaks.
+// two later rounds: the growth is what each round leaks. glibc, macOS and
+// jemalloc count freed blocks parked in per-thread caches as in use, and on
+// a churning workload those settle over many rounds, so there a single
+// before/after, or even two rounds, can grow without a leak.
+// heap_in_use_exact() says where the count is exact.
 heap_in_use() -> long {
     return aether_heap_in_use()
+}
+
+extern aether_heap_in_use_exact() -> int
+
+// True where heap_in_use() counts exactly the blocks the program holds:
+// Windows (a walk of the process's heaps) and a sanitizer's allocator. Any
+// growth between steady rounds is then a leak. False where it reads an
+// allocator's statistics (glibc, macOS, FreeBSD), under Wine (whose heap
+// walk counts a low-fragmentation group whole) or has no answer: a leak
+// check there belongs to a leak tool (leaks, valgrind, LeakSanitizer).
+heap_in_use_exact() -> bool {
+    return aether_heap_in_use_exact() != 0
 }
 
 // ---- slices (#2301) ----

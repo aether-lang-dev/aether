@@ -343,14 +343,14 @@ During operation, cross-core message senders set a `migrate_to` hint on the targ
 
 ## Memory Management
 
-Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc`) at spawn time. The `scheduler_spawn_actor` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
+Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc_aligned`, on a 64-byte boundary) at spawn time. The `scheduler_spawn_actor` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
 
 Message payloads are managed by thread-local pools. Payloads are returned to the pool on free via `aether_free_message`, which checks whether the pointer falls within the pool range before falling back to `free`.
 
 ## Memory Model
 
 The actor runtime uses several allocation strategies for automatic cleanup:
-- **Actor memory**: one NUMA-aware allocation per actor at spawn time (`aether_numa_alloc`), freed with `aether_numa_free` when the actor is destroyed. The mailbox is an inline struct member, not a separate allocation.
+- **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`), or the kept block of a released actor of the same size. `scheduler_release_actor` takes the actor out of its core's table and retires it; it is reclaimed once every core's scheduler thread and every per-actor thread has passed the top of its loop since, and no other thread is walking the tables. The scheduler threads, per-actor threads and `aether_scheduler_poll` read the tables without a lock, so the reclaim has to wait for them; a core blocked in a long step delays it. A reclaimed block is not returned to the allocator while the scheduler runs: it stays marked released, so a send to it is dropped rather than reading freed memory, and the next spawn of that size takes it. The blocks go back with the scheduler's tables. The mailbox is an inline struct member, not a separate allocation.
 - **Message payloads**: thread-local pools with automatic return
 - **Arenas**: a general-purpose arena allocator provides bulk deallocation without per-object tracking for opt-in uses (`std.arena`, JSON parsing). The actor path does not use arenas.
 

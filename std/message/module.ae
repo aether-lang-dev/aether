@@ -418,6 +418,138 @@ fn parse(msg: string) -> (ptr, string) {
     return pat, ""
 }
 
+fn is_digit_char(c: int) -> int {
+    if c >= 48 && c <= 57 { // '0'..'9'
+        return 1
+    }
+    return 0
+}
+
+// A plural argument is a decimal numeral: an optional sign, digits, and an
+// optional '.' followed by digits. Returns it in canonical form -- no '+',
+// no leading integer zeros, no trailing fraction zeros, no "-0" -- so an
+// explicit `=N` branch compares numbers rather than spellings ("1.50"
+// matches `=1.5`, "007" matches `=7`). Returns "" when `s` is not a numeral.
+fn decimal_canonical(s: string) -> string {
+    len = string_length(s)
+    pos = 0
+    neg = 0
+    if len > 0 && (string_char_at(s, 0) == 45 || string_char_at(s, 0) == 43) { // '-' or '+'
+        if string_char_at(s, 0) == 45 {
+            neg = 1
+        }
+        pos = 1
+    }
+    int_start = pos
+    while pos < len && is_digit_char(string_char_at(s, pos)) == 1 {
+        pos = pos + 1
+    }
+    int_end = pos
+    if int_end == int_start {
+        return ""
+    }
+    frac_start = pos
+    frac_end = pos
+    if pos < len && string_char_at(s, pos) == 46 { // '.'
+        pos = pos + 1
+        frac_start = pos
+        while pos < len && is_digit_char(string_char_at(s, pos)) == 1 {
+            pos = pos + 1
+        }
+        frac_end = pos
+        if frac_end == frac_start {
+            return ""
+        }
+    }
+    if pos != len {
+        return ""
+    }
+
+    while int_end - int_start > 1 && string_char_at(s, int_start) == 48 { // '0'
+        int_start = int_start + 1
+    }
+    while frac_end > frac_start && string_char_at(s, frac_end - 1) == 48 {
+        frac_end = frac_end - 1
+    }
+    is_zero = int_end - int_start == 1 && string_char_at(s, int_start) == 48 && frac_end == frac_start
+
+    b = strbuilder.new(len + 1)
+    if neg == 1 && !is_zero {
+        strbuilder.append_byte(b, 45)
+    }
+    k = int_start
+    while k < int_end {
+        strbuilder.append_byte(b, string_char_at(s, k))
+        k = k + 1
+    }
+    if frac_end > frac_start {
+        strbuilder.append_byte(b, 46)
+        k = frac_start
+        while k < frac_end {
+            strbuilder.append_byte(b, string_char_at(s, k))
+            k = k + 1
+        }
+    }
+    return strbuilder.finish(b)
+}
+
+// Appends decimal digit `d` to a CLDR plural operand. Exact up to 18
+// digits; past that the low 17 digits stay exact and the value stays at or
+// above 10^17, which keeps every `% 10^k` a plural rule tests correct and
+// the value above every constant a rule compares it with.
+fn operand_push(acc: long, d: int) -> long {
+    long a = acc
+    if a >= 100000000000000000 {
+        a = a % 10000000000000000 + 10000000000000000
+    }
+    return a * 10 + d
+}
+
+// The CLDR plural category (UTS #35, "Plural Operand Meanings") of `s`, a
+// numeral `decimal_canonical` accepted. The operands come from the digits
+// as written, so "1.0" is `other` in English (one visible fraction digit)
+// while "1" is `one`.
+fn decimal_category(locale: string, s: string) -> string {
+    len = string_length(s)
+    long i = 0
+    long f = 0
+    long t = 0
+    v = 0
+    w = 0
+    // i from the integer digits (a sign is skipped), then f, v and w from
+    // the fraction, then t from its first w digits (f without trailing 0s).
+    k = 0
+    frac_start = len
+    while k < len {
+        c = string_char_at(s, k)
+        if c == 46 { // '.'
+            frac_start = k + 1
+            break
+        }
+        if is_digit_char(c) == 1 {
+            i = operand_push(i, c - 48)
+        }
+        k = k + 1
+    }
+    k = frac_start
+    while k < len {
+        c = string_char_at(s, k)
+        f = operand_push(f, c - 48)
+        v = v + 1
+        if c != 48 {
+            w = v
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < w {
+        t = operand_push(t, string_char_at(s, frac_start + k) - 48)
+        k = k + 1
+    }
+    n = to_float(s) or 0.0
+    return plural.plural_category_decimal(locale, n, i, v, w, f, t)
+}
+
 fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> string {
     // Consumed by strbuilder.finish on the one exit, as in parse_literal;
     // the `defer catch` that was here could never run.
@@ -441,33 +573,36 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
                 if map_has(args, n.text) == 1 {
                     count_str = map_get_raw(args, n.text)
                 }
-                count, count_err = to_int(count_str)
-                string_release(count_err)
+                // The value selects by its number, as ICU does: any decimal
+                // numeral (not only a 32-bit integer), whitespace-trimmed as
+                // to_int would. A value that is not a numeral matches no
+                // `=N` and has no category, so it takes `other`.
+                count_trimmed = string_trim(count_str)
+                count_num = decimal_canonical(count_trimmed)
+                is_numeral = string_length(count_num) > 0
 
                 chosen_branch = null as *Branch
                 bz = list_size(n.branches)
 
-                // 1. Check explicit branches `=N`
+                // 1. Check explicit branches `=N`: an exactly equal number
                 bi = 0
-                while bi < bz {
+                while is_numeral && bi < bz {
                     b = list_get_raw(n.branches, bi) as *Branch
                     if b != null && string_starts_with(b.selector, "=") == 1 {
                         sel_val_str = string_substring(b.selector, 1, string_length(b.selector))
-                        sel_int_val, err_sel = to_int(sel_val_str)
+                        sel_num = decimal_canonical(sel_val_str)
                         string_release(sel_val_str)
-                        if string_length(err_sel) == 0 && sel_int_val == count {
-                            string_release(err_sel)
+                        if string_length(sel_num) > 0 && string_equals(sel_num, count_num) == 1 {
                             chosen_branch = b
                             break
                         }
-                        string_release(err_sel)
                     }
                     bi = bi + 1
                 }
 
                 // 2. Check plural category
-                if chosen_branch == null {
-                    category = plural.plural_category(locale, count)
+                if chosen_branch == null && is_numeral {
+                    category = decimal_category(locale, count_trimmed)
                     bi = 0
                     while bi < bz {
                         b = list_get_raw(n.branches, bi) as *Branch

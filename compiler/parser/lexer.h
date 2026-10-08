@@ -24,6 +24,8 @@ char advance(void);
 void skip_whitespace(void);
 int skip_comment(void);
 Token* read_string(void);
+// Decode the escape at p (p[0] is the backslash); returns the bytes it spans (#2512).
+int lexer_decode_escape(const char* p, char* out);
 Token* read_number(void);
 Token* read_identifier(void);
 Token* read_raw_identifier(void);

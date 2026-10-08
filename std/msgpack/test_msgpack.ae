@@ -14,12 +14,15 @@
 //     - extensions (fixext1..16, ext8, ext16, ext32)
 //   - exact hex representation checks for the MsgPack wire format
 //   - roundtrip correctness checks
+//   - hostile input: lengths and counts past the end, u64 above the
+//     signed range, and nesting past the depth limit are refused
 //   - memory leak safety is ensured because we free all allocated nodes
 
 import std.msgpack
 import std.encoding
 import std.string
 import std.list
+import std.bytes
 
 extern exit(code: int)
 
@@ -39,6 +42,39 @@ fn assert_hex(val: ptr, expected_hex: string, msg: string) -> int {
         return 1
     }
     return 0
+}
+
+// Hostile or truncated input must be refused with `expected_err`, never
+// unpacked into a value.
+fn expect_error_bytes(data: string, label: string, expected_err: string) -> int {
+    let v, err = msgpack.unpack(data)
+    if err != expected_err {
+        println("FAIL: ${label} should be refused (expected err '${expected_err}', got '${err}' type ${msgpack.get_type(v)})")
+        msgpack.free(v)
+        return 1
+    }
+    return 0
+}
+
+fn expect_error(hex: string, expected_err: string) -> int {
+    let data, herr = encoding.hex_decode(hex)
+    if herr != "" {
+        println("FAIL: hex decode failed for ${hex}: ${herr}")
+        return 1
+    }
+    return expect_error_bytes(data, hex, expected_err)
+}
+
+// `levels` one-element fixarrays (0x91) around the integer 1.
+fn nested_arrays(levels: int) -> string {
+    let b = bytes.new(levels + 1)
+    let i = 0
+    while i < levels {
+        bytes.set(b, i, 0x91)
+        i = i + 1
+    }
+    bytes.set(b, levels, 1)
+    return bytes.finish(b, levels + 1)
 }
 
 main() {
@@ -286,6 +322,73 @@ main() {
     fails = fails + check(msgpack.get_bin(es_unpacked) == "AB", "unpack signed ext data")
     msgpack.free(e_signed)
     msgpack.free(es_unpacked)
+
+    // 12. 64-bit integer limits
+    // u64 values that fit the signed long get_int returns come back. Above
+    // that they used to be refused; they unpack now (#2510), get_uint reads
+    // them as the bit pattern of a long, get_int64 reports that they do not
+    // fit, and they pack back as a uint 64.
+    let u63_data, _ = encoding.hex_decode("cf7fffffffffffffff")
+    let u63, err_u63 = msgpack.unpack(u63_data)
+    fails = fails + check(err_u63 == "" && msgpack.get_int(u63) == 9223372036854775807, "unpack u64 2^63-1")
+    msgpack.free(u63)
+    let umax_data, _ = encoding.hex_decode("cfffffffffffffffff")
+    let umax, err_umax = msgpack.unpack(umax_data)
+    fails = fails + check(err_umax == "" && msgpack.get_type(umax) == msgpack.TYPE_INT, "unpack u64 2^64-1")
+    let umax_u, umax_uerr = msgpack.get_uint(umax)
+    fails = fails + check(umax_uerr == "" && umax_u == -1, "get_uint 2^64-1")
+    let _umax_l, umax_lerr = msgpack.get_int64(umax)
+    fails = fails + check(umax_lerr == "integer outside the signed 64-bit range", "get_int64 2^64-1 does not fit")
+    fails = fails + check(msgpack.get_int(umax) == 0, "get_int 2^64-1 is 0")
+    fails = fails + assert_hex(umax, "cfffffffffffffffff", "2^64-1 packs back")
+    msgpack.free(umax)
+    let u2p63 = msgpack.from_uint(-9223372036854775807 - 1)
+    fails = fails + assert_hex(u2p63, "cf8000000000000000", "from_uint(2^63) packs as uint 64")
+    msgpack.free(u2p63)
+    let neg = msgpack.from_int(-3)
+    let _neg_u, neg_uerr = msgpack.get_uint(neg)
+    fails = fails + check(neg_uerr == "not a non-negative integer", "get_uint of a negative integer")
+    let neg_l, neg_lerr = msgpack.get_int64(neg)
+    fails = fails + check(neg_lerr == "" && neg_l == -3, "get_int64 in range")
+    msgpack.free(neg)
+
+    // 13. Hostile lengths
+    // 32-bit lengths and counts of 2^31 and up came back from the cursor
+    // negative and were decoded as empty instead of as truncated.
+    fails = fails + expect_error("db80000000", "EOF reading str 32 data")
+    fails = fails + expect_error("c680000000", "EOF reading bin 32 data")
+    fails = fails + expect_error("c98000000001", "EOF reading ext 32 data")
+    fails = fails + expect_error("dd80000000", "EOF reading array 32 items")
+    fails = fails + expect_error("ddffffffff", "EOF reading array 32 items")
+    fails = fails + expect_error("df80000000", "EOF reading map 32 entries")
+    fails = fails + expect_error("dc000201", "EOF reading array 16 items")
+    fails = fails + expect_error("de00010a", "EOF reading map 16 entries")
+
+    // 14. Nesting
+    // 256 arrays put the integer 256 levels down: the deepest accepted. One
+    // more, or 200000 more, are refused instead of overflowing the stack.
+    let nest_ok, err_nest = msgpack.unpack(nested_arrays(256))
+    fails = fails + check(err_nest == "", "unpack 256 levels")
+    msgpack.free(nest_ok)
+    fails = fails + expect_error_bytes(nested_arrays(257), "257 levels", "nesting deeper than 256")
+    fails = fails + expect_error_bytes(nested_arrays(200000), "200000 levels", "nesting deeper than 256")
+
+    // 15. One value (#2470): bytes after it are an error, not ignored;
+    // `0102` used to unpack as 1.
+    fails = fails + expect_error("0102", "trailing bytes after value")
+    fails = fails + expect_error("9001", "trailing bytes after value")
+    fails = fails + expect_error("c0c0", "trailing bytes after value")
+
+    // 16. Setting the value a key already holds keeps it alive: map_set
+    // freed the old value even when it was the new one.
+    let same_map = msgpack.map()
+    let same_val = msgpack.str("kept")
+    msgpack.map_set(same_map, "k", same_val)
+    msgpack.map_set(same_map, "k", same_val)
+    fails = fails + check(msgpack.map_size(same_map) == 1, "map_set same value: one entry")
+    fails = fails + check(msgpack.get_string(msgpack.map_get(same_map, "k")) == "kept", "map_set same value: value intact")
+    fails = fails + assert_hex(same_map, "81a16ba46b657074", "map_set same value: packs")
+    msgpack.free(same_map)
 
     if fails != 0 {
         println("msgpack: ${fails} failure(s)")

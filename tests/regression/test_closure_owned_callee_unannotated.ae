@@ -1,0 +1,93 @@
+// Regression (#2519): closure envs #2507 left leaking.
+//
+//  - A closure handed over by a call (`make_counter(r)`) and passed to a
+//    callee with no declared result type was never drained: the checker
+//    stamps no type on such a call, so the drain wrap could not name its
+//    result and gave up. The callee's definition says whether the call
+//    yields a value, and the wrap takes whatever type that is.
+//  - A closure handed over by a call and used directly as the callee
+//    (`call(make_counter(r))`) was evaluated twice (once for `.fn`, once
+//    for `.env`) and neither env was freed. It is evaluated once, into a
+//    temporary released after the call.
+//  - A hand-off inside a nested closure's body (`g = || { keep(l, f) }`)
+//    kept every env the local was bound to. A keeper that stores into a
+//    list takes a reference of its own (#2518), so the local frees its own.
+//
+// The macOS leaks gate runs this file; tests/integration/closure_local_env_free
+// counts the envs exactly.
+
+import std.list
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+keep(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+// Result type not declared: unknown to the checker at the call, not void.
+take_untyped(cb: fn) {
+    return call(cb)
+}
+
+// No result at all: the drain must not pretend there is one.
+run_untyped(cb: fn) {
+    int a = call(cb)
+    if a == 0 {
+        println("  FAIL run_untyped: counter did not run")
+        exit(1)
+    }
+}
+
+unknown_result(r: int) -> int {
+    x = take_untyped(make_counter(r))
+    int y = x + take_untyped(make_counter(r)) * 2
+    run_untyped(make_counter(r))
+    return y
+}
+
+direct_callee(r: int) -> int {
+    int v = call(make_counter(r))
+    int w = call(|| { return v + r })
+    return w
+}
+
+nested_handoff(l: ptr, r: int) -> int {
+    acc = 0
+    f = || { acc = acc + 1 }
+    g = || { keep(l, f) }
+    g()
+    g()
+    f()
+    return acc + r
+}
+
+main() {
+    println("=== test_closure_owned_callee_unannotated ===")
+    owners = list.new()
+    r = 1
+    while r < 30 {
+        check("unknown result", unknown_result(r), 3 * r + 3)
+        check("direct callee", direct_callee(r), 2 * r + 1)
+        check("nested handoff", nested_handoff(owners, r), 1 + r)
+        r = r + 1
+    }
+    check("kept by the list", list.size(owners), 58)
+    list.free(owners)
+    println("  PASS: owned closures freed in every position")
+    println("=== test_closure_owned_callee_unannotated passed ===")
+}

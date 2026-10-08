@@ -265,6 +265,34 @@ main() {
     check_bytes(number.bytes_si(12300000), "12.3 MB", "1 fraction digit in [10,100)")
     check_bytes(number.bytes_si(123000000), "123 MB", "0 fraction digits at/above 100")
 
+    // Rounding to 3 significant figures comes before the unit and precision
+    // are chosen, so a carry takes the next step's precision or unit.
+    check_bytes(number.bytes_si(999999), "1.00 MB", "carry into the next unit (SI)")
+    check_bytes(number.bytes_iec(1048575), "1.00 MiB", "carry into the next unit (IEC)")
+    check_bytes(number.bytes_si(9999), "10.0 KB", "carry to 10 keeps 3 significant figures")
+    check_bytes(number.bytes_si(99999), "100 KB", "carry to 100 keeps 3 significant figures")
+    check_bytes(number.bytes_si(9995), "10.0 KB", "an exact tie rounds half up")
+    check_bytes(number.bytes_si(9994), "9.99 KB", "just under the tie stays")
+    check_bytes(number.bytes_si(1005), "1.01 KB", "tie in the last place rounds half up")
+    check_bytes(number.bytes_iec(1047552), "1023 KiB", "below the IEC carry stays in the unit")
+    check_bytes(number.bytes(999999, number.BYTES_SI, "de-DE"), "1,00 MB", "carry keeps the locale separator")
+
+    // INT64_MIN has no positive magnitude in a long; it must not be negated.
+    check_bytes(number.bytes_si(-9223372036854775807 - 1), "-9.22 EB", "INT64_MIN (SI)")
+    check_bytes(number.bytes_iec(-9223372036854775807 - 1), "-8.00 EiB", "INT64_MIN (IEC)")
+    check_bytes(number.bytes_si(9223372036854775807), "9.22 EB", "INT64_MAX (SI)")
+    check_bytes(number.bytes_si(0 - 999), "-999 B", "negative sub-unit count")
+
+    // An exponent past an int is rejected, never wrapped into a small one.
+    check_invalid("en-US", "1e2147483648", "exponent 2^31 rejected")
+    check_invalid("en-US", "1e4294967297", "exponent 2^32+1 rejected")
+    check_invalid("en-US", "1e-2147483648", "exponent -2^31 rejected")
+    check_invalid("en-US", "1e1000001", "exponent past the limit rejected")
+    check_decimal("en-US", "1e-1000000", 0, 3, 1, "0", "exponent at the limit accepted")
+    check_decimal("en-US", "1e0000000000003", 0, 0, 1, "1,000", "leading zeros in an exponent")
+    check_decimal("en-US", "12.5e-4", 0, 6, 1, "0.00125", "negative exponent past the integer digits")
+    check_decimal("en-US", "1.25e1", 0, 3, 1, "12.5", "positive exponent inside the fraction")
+
     // Repeated formatting to ensure no leaks
     i = 0
     while i < 100 {

@@ -39,6 +39,9 @@
 // tests, regression tests, and callers continue to work unchanged.
 
 #include "aether_json.h"
+/* Only for is_aether_string and the AetherString layout, both in the
+ * header: this file still links on its own (bench, conformance runner). */
+#include "../string/aether_string.h"
 #include "../mem/aether_grow.h"
 #include "../../runtime/aether_resource_caps.h"
 // RFC 8259 fixes '.' as the decimal separator — number text must not follow
@@ -1339,8 +1342,25 @@ JsonValue* json_parse_raw_n(const char* data, size_t n) {
     return root;
 }
 
+/* The bytes of a string argument. An Aether `string` reaches the entry
+ * points below with its header (their externs declare it `@aether`), so it
+ * is read to its length: a document, key or value with an embedded NUL is
+ * not cut there (#2469). `[1]\0x{` used to parse as `[1]`. A plain C string
+ * from a C caller is read to its NUL, as before. */
+static const char* jv_bytes(const char* s, size_t* len) {
+    if (is_aether_string(s)) {
+        const AetherString* as = (const AetherString*)s;
+        *len = as->length;
+        return as->data;
+    }
+    *len = s ? strlen(s) : 0;
+    return s;
+}
+
 JsonValue* json_parse_raw(const char* s) {
-    return json_parse_raw_n(s, s ? strlen(s) : 0);
+    size_t n = 0;
+    const char* d = jv_bytes(s, &n);
+    return json_parse_raw_n(d, n);
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,10 +1391,18 @@ double json_get_number(JsonValue* v) {
     return v->data.number;
 }
 
+/* A double outside the int64 range clamps to INT64_MIN / INT64_MAX, as
+ * json_get_int clamps to int32 (NaN reads as 0). Converting it directly is
+ * undefined in C, and in practice gave INT64_MIN for 1e300 and for
+ * 18446744073709551615. */
 long long json_get_long(JsonValue* v) {
     if (!v || v->type != JSON_NUMBER) return 0;
     if (v->flags & JV_FLAG_INTEGER) return v->data.integer;
-    return (long long)v->data.number;
+    double d = v->data.number;
+    if (d != d) return 0;
+    if (d >= 9223372036854775808.0) return INT64_MAX;    /* 2^63 */
+    if (d < -9223372036854775808.0) return INT64_MIN;
+    return (long long)d;
 }
 
 int json_get_int(JsonValue* v) {
@@ -1394,11 +1422,24 @@ const char* json_get_string_raw(JsonValue* v) {
     return v->data.str.data;
 }
 
+/* The payload and its length, for copying a string value whole: one may
+ * hold U+0000 (`"a\u0000b"`), where the C string above ends (#2469). */
+const void* json_get_string_data(JsonValue* v) {
+    if (!v || v->type != JSON_STRING) return NULL;
+    return v->data.str.data;
+}
+
+int json_get_string_length(JsonValue* v) {
+    if (!v || v->type != JSON_STRING) return -1;
+    return (int)v->data.str.length;
+}
+
 JsonValue* json_object_get_raw(JsonValue* obj, const char* key) {
     if (!obj || obj->type != JSON_OBJECT || !key) return NULL;
     uint32_t n = obj->data.obj.count;
     if (!n) return NULL;
-    size_t klen = strlen(key);
+    size_t klen = 0;
+    key = jv_bytes(key, &klen);
     if (klen > UINT32_MAX) return NULL;
     uint32_t k32 = (uint32_t)klen;
     const JsonObjBlock* blk = obj->data.obj.blk;
@@ -1430,6 +1471,12 @@ const char* json_object_key_at(JsonValue* obj, int i) {
     const JsonObjBlock* blk = obj->data.obj.blk;
     if (!blk) return NULL;
     return blk->keys[i];
+}
+
+/* json_object_key_at typed as a plain pointer, to copy the key whole with
+ * json_object_key_len_at: a key may hold U+0000 too (#2469). */
+const void* json_object_key_data_at(JsonValue* obj, int i) {
+    return json_object_key_at(obj, i);
 }
 
 int json_object_key_len_at(JsonValue* obj, int i) {
@@ -1643,14 +1690,19 @@ static void heap_free_tree(JsonValue* v) {
  *    heap") and must be freed too, or it leaks (#1447). Snapshot the flag
  *    before arena_destroy since for a parsed root the struct can live inside
  *    the arena; a builder value never does, but be defensive.
- *  - no arena: a plain heap tree — heap_free_tree reclaims struct + children. */
+ *  - no arena: a plain heap tree; heap_free_tree reclaims struct + children.
+ *  - neither an arena nor JV_FLAG_HEAP_STRUCT: a node inside a parsed
+ *    document (object_get / array_get hand those out borrowed). Its document
+ *    owns it, so the deep copy is all set/push take, and nothing is freed.
+ *    heap_free_tree on it freed arena memory as if it were malloc'd, which
+ *    corrupted the heap. */
 static void free_donated_value(JsonValue* value) {
     if (!value) return;
     if (value->arena) {
         int heap_struct = (value->flags & JV_FLAG_HEAP_STRUCT) != 0;
         arena_destroy(value->arena);
         if (heap_struct) aether_caps_free(value, sizeof(JsonValue));
-    } else {
+    } else if (value->flags & JV_FLAG_HEAP_STRUCT) {
         heap_free_tree(value);
     }
 }
@@ -1675,7 +1727,8 @@ int json_object_set_raw(JsonValue* obj, const char* key, JsonValue* value) {
     if (!obj || obj->type != JSON_OBJECT || !key || !value) return 0;
     if (!ensure_container_arena(obj)) return 0;
 
-    size_t klen = strlen(key);
+    size_t klen = 0;
+    key = jv_bytes(key, &klen);
     if (klen > UINT32_MAX) return 0;
     uint32_t k32 = (uint32_t)klen;
 
@@ -1767,7 +1820,8 @@ JsonValue* json_create_string(const char* s) {
     /* Cap-aware (#343): input string is caller-controlled, plugin-
      * host-reachable. heap_free_tree's JSON_STRING branch passes
      * v->data.str.length + 1 back to the caps allocator. */
-    size_t len = s ? strlen(s) : 0;
+    size_t len = 0;
+    s = jv_bytes(s, &len);
     char* copy = (char*)aether_caps_malloc(len + 1);
     if (!copy) { aether_caps_free(v, sizeof(JsonValue)); return NULL; }
     if (len && s) memcpy(copy, s, len);
@@ -1804,8 +1858,11 @@ void json_free(JsonValue* v) {
         if (heap_struct) aether_caps_free(v, sizeof(JsonValue));
         return;
     }
-    // Heap path — no arena ever attached.
-    heap_free_tree(v);
+    // Heap path: no arena ever attached. A node with neither an arena nor
+    // JV_FLAG_HEAP_STRUCT lives inside a parsed document's arena (handed out
+    // borrowed by object_get / array_get); the document frees it, so this is
+    // a no-op rather than a free of arena memory.
+    if (v->flags & JV_FLAG_HEAP_STRUCT) heap_free_tree(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -1821,6 +1878,7 @@ typedef struct {
     size_t len;
     size_t cap;
     int    oom;
+    int    too_deep;   /* a value nested past JSON_MAX_DEPTH was reached */
 } StrBuf;
 
 static int sb_reserve(StrBuf* b, size_t extra) {
@@ -2018,7 +2076,13 @@ static int json_format_double(char* nb, size_t cap, double x) {
 }
 
 static void sb_emit_value(StrBuf* b, JsonValue* v, int depth) {
-    if (!v || depth > JSON_MAX_DEPTH) {
+    if (depth > JSON_MAX_DEPTH) {
+        /* The parser refuses this depth, so output nested this far could
+         * not be read back. It was written as `null` with no error. */
+        b->too_deep = 1;
+        return;
+    }
+    if (!v) {
         sb_append(b, "null", 4);
         return;
     }
@@ -2055,9 +2119,16 @@ static void sb_emit_value(StrBuf* b, JsonValue* v, int depth) {
     }
 }
 
+/* NULL when the value nests deeper than JSON_MAX_DEPTH (the limit parse
+ * enforces), so the caller reports it instead of shipping output that
+ * silently replaced the deep part with null. */
 char* json_stringify_raw(JsonValue* v) {
     StrBuf b = {0};
     sb_emit_value(&b, v, 0);
+    if (b.too_deep) {
+        free(b.data);
+        return NULL;
+    }
     if (b.oom) {
         free(b.data);
         // Return an empty string rather than NULL so existing callers

@@ -13,9 +13,31 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <dlfcn.h>
 
 #include "aether_config.h"
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows, where the test used to be skipped and so never
+ * saw the accessors read a string the script had copied. */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
+#include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 typedef AetherValue* (*build_config_fn)(const char*, int32_t);
 
@@ -30,11 +52,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen(%s): %s", argv[1], dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading %s: %s", argv[1], lib_error());
 
-    build_config_fn build = (build_config_fn)dlsym(h, "aether_build_config");
-    if (!build) FAIL("aether_build_config not found: %s", dlerror());
+    build_config_fn build = (build_config_fn)lib_sym(h, "aether_build_config");
+    if (!build) FAIL("aether_build_config not found: %s", lib_error());
 
     AetherValue* root = build("prod", 8080);
     if (!root) FAIL("aether_build_config returned NULL");
@@ -88,7 +110,7 @@ int main(int argc, char** argv) {
     if (aether_config_list_size(NULL) != 0)          FAIL("list_size(NULL) didn't return 0");
 
     aether_config_free(root);
-    dlclose(h);
+    lib_close(h);
     printf("OK: composite config tree round-tripped\n");
     return 0;
 }

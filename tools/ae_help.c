@@ -180,29 +180,43 @@ static void safe_strncpy(char* dst, const char* src, size_t dst_size);
  * subprocess builder, the export-catalog loader, and the
  * `*.help.md` resolver. A file-static avoids threading the list
  * through four signatures for what is genuinely invocation-wide
- * state. */
-static char g_lib_dirs[AE_HELP_MAX_LIBS][AE_HELP_PATH_LEN];
+ * state. Each entry is a heap copy of the whole directory (#2543):
+ * 1 KB slots cut a longer one, and the compile, the catalog and the
+ * hint probes then searched a directory nobody named. */
+static char* g_lib_dirs[AE_HELP_MAX_LIBS];
 static int  g_lib_count = 0;
+
+/* A heap copy of `len` bytes of `s`; exits on out of memory. */
+static char* help_strndup(const char* s, size_t len) {
+    char* out = malloc(len + 1);
+    if (!out) {
+        fprintf(stderr, "ae help: out of memory reading the --lib path\n");
+        exit(1);
+    }
+    memcpy(out, s, len);
+    out[len] = '\0';
+    return out;
+}
 
 /* Append one directory to the `--lib` list (dedup, cap-checked). */
 static void help_lib_append_one(const char* dir) {
     if (!dir || !dir[0]) return;
     /* Drop a single trailing slash so `lib` and `lib/` dedup. */
-    char norm[AE_HELP_PATH_LEN];
-    safe_strncpy(norm, dir, sizeof(norm));
+    char* norm = help_strndup(dir, strlen(dir));
     size_t n = strlen(norm);
     while (n > 1 && (norm[n - 1] == '/' || norm[n - 1] == '\\')) {
         norm[--n] = '\0';
     }
     for (int i = 0; i < g_lib_count; i++) {
-        if (strcmp(g_lib_dirs[i], norm) == 0) return;
+        if (strcmp(g_lib_dirs[i], norm) == 0) { free(norm); return; }
     }
     if (g_lib_count >= AE_HELP_MAX_LIBS) {
         fprintf(stderr, "ae help: --lib search path is full (max %d); "
                         "ignoring '%s'\n", AE_HELP_MAX_LIBS, norm);
+        free(norm);
         return;
     }
-    safe_strncpy(g_lib_dirs[g_lib_count++], norm, AE_HELP_PATH_LEN);
+    g_lib_dirs[g_lib_count++] = norm;
 }
 
 /* Append a `--lib` spec, splitting PATH-style `a:b` (POSIX) /
@@ -210,15 +224,13 @@ static void help_lib_append_one(const char* dir) {
 static void help_lib_append(const char* spec) {
     if (!spec || !spec[0]) return;
     const char* cur = spec;
-    char buf[AE_HELP_PATH_LEN];
     while (*cur) {
         const char* next = strchr(cur, AE_HELP_LIB_SEP);
         size_t len = next ? (size_t)(next - cur) : strlen(cur);
         if (len > 0) {
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, cur, len);
-            buf[len] = '\0';
-            help_lib_append_one(buf);
+            char* seg = help_strndup(cur, len);
+            help_lib_append_one(seg);
+            free(seg);
         }
         if (!next) break;
         cur = next + 1;
@@ -291,6 +303,23 @@ static int path_format(char* dst, size_t dst_size, const char* fmt, ...) {
         return -1;
     }
     return 0;
+}
+
+/* `path_alloc`: the same composition into a heap string the caller
+ * frees, for paths under a `--lib` directory, which have no length
+ * bound (#2543). NULL only when out of memory. */
+static char* path_alloc(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return NULL;
+    char* out = malloc((size_t)n + 1);
+    if (!out) return NULL;
+    va_start(ap, fmt);
+    vsnprintf(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
 }
 
 /* === Public dispatcher entry points ================================ */
@@ -749,13 +778,13 @@ static void load_lib_export_catalog(ExportCatalog* cat) {
         struct dirent* entry;
         while ((entry = readdir(d)) != NULL) {
             if (entry->d_name[0] == '.') continue;
-            char mod_path[AE_HELP_PATH_LEN];
-            if (path_format(mod_path, sizeof(mod_path), "%s%c%s%cmodule.ae",
-                            g_lib_dirs[li], PATH_SEP, entry->d_name,
-                            PATH_SEP) != 0) continue;
+            char* mod_path = path_alloc("%s%c%s%cmodule.ae", g_lib_dirs[li],
+                                        PATH_SEP, entry->d_name, PATH_SEP);
+            if (!mod_path) continue;
             struct stat st;
-            if (stat(mod_path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-            parse_module_exports(mod_path, entry->d_name, cat);
+            if (stat(mod_path, &st) == 0 && S_ISREG(st.st_mode))
+                parse_module_exports(mod_path, entry->d_name, cat);
+            free(mod_path);
         }
         closedir(d);
     }
@@ -966,7 +995,7 @@ static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t
      *   POSIX: posix_spawn with file actions opening err_file as
      *          stderr. No fork/exec by hand, no shell, no quoting.
      *   Windows: _spawnv (the MSVCRT helper that `tools/ae.c`'s
-     *            `win_run` already uses) with stderr redirected via
+     *            `ae_spawn` already uses) with stderr redirected via
      *            _dup2 around the spawn. cmd.exe never enters the
      *            picture, so MSYS2's POSIX-flavoured paths and our
      *            mixed-slash aetherc path can't break the redirect.
@@ -1698,9 +1727,11 @@ static void apply_top_level_dsl(SourceFile* sf, Finding* findings, int* count, i
  * are deliberately deferred (issue text: "resist growing it into a
  * rule engine").
  */
-static int find_help_md_path(const char* import_name, char* out, size_t out_size) {
+static char* find_help_md_path(const char* import_name) {
+    /* No stdlib found only skips its probe: a `--lib` library's hint
+     * does not depend on it (#2544). */
     char root[AE_HELP_PATH_LEN];
-    if (resolve_std_root(root, sizeof(root)) != 0) return -1;
+    int have_root = resolve_std_root(root, sizeof(root)) == 0;
     /* `std.os` → `<root>/std/os/os.help.md` (basename = last segment). */
     const char* basename = strrchr(import_name, '.');
     basename = basename ? basename + 1 : import_name;
@@ -1710,41 +1741,34 @@ static int find_help_md_path(const char* import_name, char* out, size_t out_size
     for (char* p = dir; *p; p++) {
         if (*p == '.') *p = PATH_SEP;
     }
-    char probe[AE_HELP_PATH_LEN];
-    if (path_format(probe, sizeof(probe), "%s%c%s%c%s.help.md",
-                    root, PATH_SEP, dir, PATH_SEP, basename) != 0) {
-        return -1;
-    }
+    /* The path is returned whole, in a string the caller frees, NULL
+     * when there is no hint file (#2543). */
+    char* probe = have_root ? path_alloc("%s%c%s%c%s.help.md", root, PATH_SEP,
+                                         dir, PATH_SEP, basename) : NULL;
     struct stat st;
-    if (stat(probe, &st) == 0 && S_ISREG(st.st_mode)) {
-        safe_strncpy(out, probe, out_size);
-        return 0;
-    }
+    if (probe && stat(probe, &st) == 0 && S_ISREG(st.st_mode)) return probe;
+    free(probe);
     /* Not in stdlib — probe each `--lib` directory. A project library
      * resolved via `--lib` ships its hint file the same way stdlib
      * does: `<libdir>/<import-as-dir>/<basename>.help.md`. This is
      * what lets a library author (not just the Aether core team)
      * absorb authoring-mistake knowledge into a shipped hint file. */
     for (int li = 0; li < g_lib_count; li++) {
-        if (path_format(probe, sizeof(probe), "%s%c%s%c%s.help.md",
-                        g_lib_dirs[li], PATH_SEP, dir, PATH_SEP,
-                        basename) != 0) {
-            continue;
-        }
-        if (stat(probe, &st) == 0 && S_ISREG(st.st_mode)) {
-            safe_strncpy(out, probe, out_size);
-            return 0;
-        }
+        probe = path_alloc("%s%c%s%c%s.help.md", g_lib_dirs[li], PATH_SEP,
+                           dir, PATH_SEP, basename);
+        if (probe && stat(probe, &st) == 0 && S_ISREG(st.st_mode)) return probe;
+        free(probe);
     }
-    return -1;
+    return NULL;
 }
 
 static int load_help_md_for_import(const char* import_name, SourceFile* sf,
                                     Finding* findings, int* count, int max) {
-    char path[AE_HELP_PATH_LEN];
-    if (find_help_md_path(import_name, path, sizeof(path)) != 0) return 0;
+    char* path = find_help_md_path(import_name);
+    if (!path) return 0;
 
     FILE* f = fopen(path, "rb");
+    free(path);
     if (!f) return 0;
 
     char line[AE_HELP_MAX_LINE_LEN];

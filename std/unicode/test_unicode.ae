@@ -61,6 +61,22 @@ main() {
     check("grapheme_substring to end (count<0)", unicode.grapheme_substring(decomposed, 3, 0 - 1), "é")
     check("grapheme_substring past end -> empty", unicode.grapheme_substring("ab", 5, 1), "")
 
+    // Invalid UTF-8. A malformed byte ends a grapheme scan, as grapheme_len
+    // documents: the substring used to run on past it to the end.
+    bad = string.concat(string.concat("a", string.from_char(255)), "bc")
+    check_int("grapheme_substring stops at a malformed byte", string.length(unicode.grapheme_substring(bad, 0, 1)), 1)
+    check_int("grapheme_substring to end stops at a malformed byte", string.length(unicode.grapheme_substring(bad, 0, 0 - 1)), 1)
+    // The folds map each valid run and keep an invalid byte as it is. They
+    // returned "" for the whole string, so any two invalid strings compared
+    // equal and casefold("ABC\xff") lost the ABC.
+    ff = string.from_char(255)
+    fe = string.from_char(254)
+    check_int("equals_ignore_case of two different invalid bytes", unicode.equals_ignore_case(ff, fe), 0)
+    check_int("equals_ignore_case of the same invalid byte", unicode.equals_ignore_case(ff, ff), 1)
+    check_int("equals_fold_accents of an invalid byte and empty", unicode.equals_fold_accents(ff, ""), 0)
+    check_int("casefold keeps the valid run before a bad byte", string.length(unicode.casefold(string.concat("ABC", ff))), 4)
+    check_int("equals_ignore_case folds around a bad byte", unicode.equals_ignore_case(string.concat("ABC", ff), string.concat("abc", ff)), 1)
+
     if fails == 0 { println("ALL PASS") }
     else { println("${fails} FAILED"); exit(1) }
 }

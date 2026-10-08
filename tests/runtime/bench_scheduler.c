@@ -38,11 +38,9 @@ static long long get_time_ms(void) {
 // ============================================================================
 
 typedef struct {
-    int id;
-    atomic_int active;
-    atomic_int assigned_core;
-    Mailbox mailbox;
-    void (*step)(void*);
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // OPTIMIZATION: Use plain int in hot path, atomic for cross-thread reads
     int count_local;           // Fast increment in hot path (worker thread only)
     atomic_int count_visible;  // Published count (main thread reads this)
@@ -115,13 +113,13 @@ void bench_single_core_throughput(void) {
     double elapsed = (end - start) / 1000.0;
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Messages: %d / %d (%.1f%%)\n", processed, MSGS, 100.0 * processed / MSGS);
     printf("Time: %.3f seconds\n", elapsed);
     printf("Throughput: %.0f msg/sec\n", processed / elapsed);
     
     free(actor);
-    free(schedulers[0].actors);
 }
 
 void bench_multi_core_throughput(int cores) {
@@ -178,6 +176,7 @@ void bench_multi_core_throughput(int cores) {
     double elapsed = (end - start) / 1000.0;
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Messages: %d / %d (%.1f%%)\n", total_processed, total_target, 
            100.0 * total_processed / total_target);
@@ -187,7 +186,6 @@ void bench_multi_core_throughput(int cores) {
     
     for (int i = 0; i < cores; i++) {
         free(actors[i]);
-        free(schedulers[i].actors);
     }
     free(actors);
 }
@@ -239,6 +237,7 @@ actor1->count_local = 0;
     double elapsed = (end - start) / 1000.0;
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Cross-core messages: %d / %d (%.1f%%)\n", processed, MSGS, 
            100.0 * processed / MSGS);
@@ -247,9 +246,6 @@ actor1->count_local = 0;
     
     free(actor0);
     free(actor1);
-    for (int i = 0; i < 4; i++) {
-        free(schedulers[i].actors);
-    }
 }
 
 void bench_scalability(void) {
@@ -319,10 +315,10 @@ void bench_scalability(void) {
         printf("  %d   | %15.0f        | %6.1f%%\n", cores, throughput, efficiency);
         
         scheduler_shutdown();
+        scheduler_cleanup();
         
         for (int i = 0; i < cores; i++) {
             free(actors[i]);
-            free(schedulers[i].actors);
         }
         free(actors);
     }
@@ -373,14 +369,13 @@ void bench_latency(void) {
     }
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Samples: %d / %d (%.1f%%)\n", successful, SAMPLES, 100.0 * successful / SAMPLES);
     printf("Avg latency: %.2f ms\n", successful > 0 ? (double)total_latency / successful : 0.0);
     printf("Min latency: ~%.2f ms (theoretical)\n", 0.001);
     
     free(actor);
-    free(schedulers[0].actors);
-    free(schedulers[1].actors);
 }
 
 void bench_contention(void) {
@@ -426,6 +421,7 @@ void bench_contention(void) {
     double elapsed = (end - start) / 1000.0;
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Senders: %d cores → 1 target\n", SENDERS);
     printf("Messages: %d / %d (%.1f%%)\n", processed, TOTAL, 100.0 * processed / TOTAL);
@@ -434,9 +430,6 @@ void bench_contention(void) {
     printf("Dropped: %d (%.1f%%)\n", TOTAL - processed, 100.0 * (TOTAL - processed) / TOTAL);
     
     free(target);
-    for (int i = 0; i < 4; i++) {
-        free(schedulers[i].actors);
-    }
 }
 
 void bench_burst_patterns(void) {
@@ -485,6 +478,7 @@ void bench_burst_patterns(void) {
     double elapsed = (end - start) / 1000.0;
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Bursts: %d × %d messages\n", BURSTS, MSGS_PER_BURST);
     printf("Messages: %d / %d (%.1f%%)\n", processed, total_sent, 100.0 * processed / total_sent);
@@ -493,8 +487,6 @@ void bench_burst_patterns(void) {
     printf("Recovery: %s\n", processed == total_sent ? "Perfect" : "Partial");
     
     free(actor);
-    free(schedulers[0].actors);
-    free(schedulers[1].actors);
 }
 void bench_mailbox_saturation(void) {
     printf("\n=== Mailbox Saturation Test ===\n");
@@ -535,6 +527,7 @@ void bench_mailbox_saturation(void) {
     int dropped = MSGS - processed;
     
     scheduler_shutdown();
+    scheduler_cleanup();
     
     printf("Messages sent: %d\n", MSGS);
     printf("Messages processed: %d (%.1f%%)\n", processed, 100.0 * processed / MSGS);
@@ -543,8 +536,6 @@ void bench_mailbox_saturation(void) {
     printf("Throughput: %.0f msg/sec\n", processed / elapsed);
     
     free(actor);
-    free(schedulers[0].actors);
-    free(schedulers[1].actors);
 }
 
 // ============================================================================

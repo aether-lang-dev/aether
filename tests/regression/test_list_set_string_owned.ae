@@ -1,0 +1,66 @@
+// Regression: `list.set(l, i, s)` of a string owns it as `list.add` does:
+// the element the slot held is released, and the new one is adopted (a
+// fresh value) or taken (a local moved on its last use, copied otherwise).
+// `list_set` left the old element to nobody and the new one to the
+// caller: one leak per set. A raw pointer still goes through list_set and
+// stays the caller's. The macOS leaks gate runs this file.
+
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+sets(k: int) -> int {
+    l = list.new()
+    list.add(l, string.concat("a", string.from_int(k)))
+    list.add(l, string.concat("b", string.from_int(k)))
+    list.set(l, 0, string.concat("ccc", string.from_int(k)))
+    s = string.concat("d", string.from_int(k))
+    list.set(l, 1, s)
+    t = string.concat(s, "!")
+    list.set(l, 1, s)
+    list.set(l, 0, "lit")
+    v0, _ = list.get(l, 0)
+    v1, _ = list.get(l, 1)
+    n = string.length(v0) + string.length(v1) + string.length(t)
+    list.free(l)
+    return n
+}
+
+rounds(n: int) {
+    i = 0
+    while i < n {
+        sets(i)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_list_set_string_owned ===")
+    check("sets", sets(3), 3 + 2 + 3)
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation lands in one. So, warm, one of two
+    // equal windows holds exactly steady.
+    if mem.heap_in_use_exact() {
+        rounds(20)
+        a = mem.heap_in_use()
+        rounds(200)
+        b = mem.heap_in_use()
+        rounds(200)
+        c = mem.heap_in_use()
+        if b - a != 0 && c - b != 0 {
+            println("  FAIL both windows of 200 rounds grew the heap: ${b - a} then ${c - b} bytes")
+            exit(1)
+        }
+    }
+    println("  PASS: list.set owns a string element")
+    println("=== test_list_set_string_owned passed ===")
+}
