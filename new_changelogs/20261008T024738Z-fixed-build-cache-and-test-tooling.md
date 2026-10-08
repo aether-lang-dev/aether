@@ -190,3 +190,12 @@
   and `emit_lib_dual_build`, and the `toml_extra_sources` multiline,
   long-line and assembly-buffer tests, skipped Windows for no reason and
   pass there.
+- **Cache salts, the -D list and the binary-import scan have no length
+  limit (#2546).** The -D symbols with `[build] cflags` and `link_flags`
+  went into a 4 KB salt and the linked binary libraries into 2900 bytes,
+  so two builds differing only past the cut shared one cache entry. Past
+  1 KB of -D symbols ae warned, dropped the next one and built a program
+  without it. The binary-import scan stopped at 512 files and cut module
+  names at 255 bytes, and `ae bindgen consts` cut its preprocessor command
+  at 4 KB. Each now holds what it is given; a salt that cannot be built
+  means the build is not cached.

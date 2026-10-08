@@ -27,6 +27,8 @@
 
 #include "ae_line.h"
 
+#include <stdarg.h>
+
 #ifdef _WIN32
 #  include <process.h>
 #  ifndef getpid
@@ -337,13 +339,32 @@ static int bg_is_ident(const char* s) {
  * 4 KB pieces gave a later piece of a long definition that began with
  * `#define ` (text in a string) as a macro of its own, and a 256 KB list
  * dropped the names past it, which a large header (windows.h) reaches. */
+/* A command in a string sized to fit, for free(); NULL when out of memory.
+ * A 4 KB buffer cut a long compiler, header or temp path (#2546). */
+static char* bg_command(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return NULL;
+    char* cmd = (char*)malloc((size_t)n + 1);
+    if (!cmd) return NULL;
+    va_start(ap, fmt);
+    vsnprintf(cmd, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return cmd;
+}
+
 static int bg_dump_names(const char* cc, const char* file,
                          const char* include_flags, char** names) {
     *names = NULL;
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "%s -E -dM %s \"%s\" " BG_ERR_SINK,
-             cc, include_flags, file);
+    char* cmd = bg_command("%s -E -dM %s \"%s\" " BG_ERR_SINK, cc, include_flags, file);
+    if (!cmd) {
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
     FILE* p = bg_popen(cmd);
+    free(cmd);
     if (!p) return 0;
     size_t pos = 0, cap = 4096;
     char* out = (char*)malloc(cap);
@@ -454,9 +475,14 @@ static int bg_expand(const char* cc, const char* header,
         fprintf(f, "@AE@ \"%s\" %s\n", set->macros[i].name, set->macros[i].name);
     if (fclose(f) != 0) { remove(probe_path); return 0; }
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "%s -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
+    char* cmd = bg_command("%s -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
+    if (!cmd) {
+        remove(probe_path);
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
     FILE* p = bg_popen(cmd);
+    free(cmd);
     if (!p) { remove(probe_path); return 0; }
     /* Whole lines (#2536): one expansion is one line, of any length. */
     char* line = NULL;

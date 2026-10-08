@@ -1083,6 +1083,9 @@ unsigned long long compute_cache_key(const char* ae_file,
                                             const char* opt_level,
                                             const char* extra_salt) {
     s_key_walk_incomplete = 0;
+    /* A salt that could not be built (out of memory) would leave part of
+     * the build's identity out of the key: no key, as for an unread file. */
+    if (!extra_salt) return 0;
     unsigned long long src_hash = fnv64_file(ae_file);
     if (src_hash == 0) return 0;
     tc_seed_lib_dirs_from_env();

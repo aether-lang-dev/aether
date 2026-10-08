@@ -106,4 +106,28 @@ else
     fail=1
 fi
 
+# --- 3. more than 1 KB of -D symbols (#2546) ---
+# The list was a fixed 1 KB: past it ae warned, dropped the symbol, and
+# built a program without it. The last of 120 symbols turns a branch on.
+cat > "$TMP/defs.ae" <<'AEOF'
+main() {
+    when defined(AE_LONG_DEFINE_LAST) {
+        println("last defined")
+    } else {
+        println("last missing")
+    }
+}
+AEOF
+set --
+i=0
+while [ $i -lt 120 ]; do set -- "$@" -D "AE_LONG_DEFINE_$i"; i=$((i + 1)); done
+got=$("$AE" run "$@" -D AE_LONG_DEFINE_LAST "$TMP/defs.ae" 2>"$TMP/defs.err" | tr -d '\r')
+if [ "$got" = "last defined" ]; then
+    echo "  [PASS] ae_long_command: 121 -D symbols all reach the compiler"
+else
+    echo "  [FAIL] ae_long_command: with 121 -D symbols the program printed '$got'"
+    sed 's/^/        /' "$TMP/defs.err" | head -5
+    fail=1
+fi
+
 exit $fail

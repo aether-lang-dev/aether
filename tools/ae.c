@@ -222,7 +222,15 @@ static char g_with_caps[128] = "";
  * dropped from the AST, so this is what decides whether a subsystem is in the
  * binary at all (#1527). Names come from the command line and from
  * aether.toml's `[build] defines`. */
-static char g_defines[1024] = "";
+/* The -D symbols, as the compile commands pass them (` -D "NAME"` each),
+ * grown as symbols are added: a fixed 1 KB warned and dropped the ones past
+ * it, and the build went on to make a different program (#2546). */
+static char* g_defines = NULL;
+static size_t g_defines_len = 0, g_defines_cap = 0;
+
+static const char* defines_flags(void) { return g_defines ? g_defines : ""; }
+
+static char* ae_strdup_printf(const char* fmt, ...);
 
 static const char* get_link_flags(void);
 
@@ -235,22 +243,37 @@ static const char* get_link_flags(void);
  * over an already-built tree printed "Built (cache hit)" and handed back the
  * uninstrumented binary, so a sanitizer run measured nothing at all. Same
  * silent-staleness shape as the --trace miss below. */
-static const char* ae_define_salt(const char* base, char* buf, size_t n) {
+/* `base` with the -D symbols and the manifest's flags, whole: a salt cut at
+ * a fixed buffer's end left what was cut out of the key, and two builds that
+ * differed only there shared one cache entry (#2546). The result lives for
+ * the process (it is `base` itself, or a string never freed), since a build
+ * computes its key again from the same salt; NULL when `base` is NULL or
+ * memory runs out, which compute_cache_key takes as "no key". */
+static const char* ae_define_salt(const char* base) {
+    if (!base) return NULL;
     const char* cf = get_cflags();
     const char* lf = get_link_flags();
-    if (!g_defines[0] && !cf[0] && !lf[0]) return base;
-    snprintf(buf, n, "%s%s|cf=%s|lf=%s", base, g_defines, cf, lf);
-    return buf;
+    if (!g_defines_len && !cf[0] && !lf[0]) return base;
+    return ae_strdup_printf("%s%s|cf=%s|lf=%s", base, defines_flags(), cf, lf);
 }
 
 static void ae_define_append(const char* name) {
     if (!name || !*name) return;
-    size_t used = strlen(g_defines);
-    int w = snprintf(g_defines + used, sizeof(g_defines) - used, " -D \"%s\"", name);
-    if (w < 0 || (size_t)w >= sizeof(g_defines) - used) {
-        fprintf(stderr, "warning: too many -D symbols; '%s' was dropped\n", name);
-        g_defines[used] = '\0';
+    size_t need = g_defines_len + strlen(name) + 7;   /* ` -D "` + `"` + NUL */
+    if (need > g_defines_cap) {
+        size_t cap = g_defines_cap ? g_defines_cap : 256;
+        while (cap < need) cap *= 2;
+        char* grown = (char*)realloc(g_defines, cap);
+        if (!grown) {
+            /* A build without the symbol is another program: stop. */
+            fprintf(stderr, "Error: out of memory adding -D %s\n", name);
+            exit(1);
+        }
+        g_defines = grown;
+        g_defines_cap = cap;
     }
+    g_defines_len += (size_t)snprintf(g_defines + g_defines_len, g_defines_cap - g_defines_len,
+                                      " -D \"%s\"", name);
 }
 
 /* `-D NAME` / `-DNAME` at argv[*i]: append the symbol and advance past it.
@@ -619,7 +642,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
     const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
     int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
                      tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-                     g_lib_package_flag, shared_rt_flag, lib_actors_flag, g_defines, lib_flags,
+                     g_lib_package_flag, shared_rt_flag, lib_actors_flag, defines_flags(), lib_flags,
                      deps_flag, input, output);
     free(lib_flags);
     if (w >= (int)cmd_size) cmd_too_long(cmd, cmd_size, w);
@@ -5112,25 +5135,57 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
 // import graph, not just the entry file. `visited` holds the resolved file
 // paths already scanned (dedupe + cycle-break). `stubdir` is the shared stub
 // dir, created lazily by ae_emit_binimport_stub.
-#define AE_BINIMPORT_MAX_FILES 512
+/* The files the scan has read, grown as needed: a cap of 512 stopped the
+ * scan there without a word, and a binary import in a module past it was
+ * never linked (#2546). The set itself breaks cycles. */
+typedef struct { char** paths; int count; int cap; } BinimportVisited;
+
 static void ae_scan_binary_imports(const char* file, char* stubdir,
                                    size_t stubdir_cap,
-                                   char** visited, int* nvisited) {
+                                   BinimportVisited* visited) {
     // Mark this file visited (by its path as given; the entry uses the passed
     // spelling, recursions use the resolved path — both are stable enough to
     // break cycles and avoid rescanning the same module twice).
-    for (int i = 0; i < *nvisited; i++) {
-        if (strcmp(visited[i], file) == 0) return;
+    for (int i = 0; i < visited->count; i++) {
+        if (strcmp(visited->paths[i], file) == 0) return;
     }
-    if (*nvisited >= AE_BINIMPORT_MAX_FILES) return;   /* graph too large; stop */
+    if (visited->count == visited->cap) {
+        int cap = visited->cap ? visited->cap * 2 : 64;
+        char** grown = (char**)realloc(visited->paths, (size_t)cap * sizeof(char*));
+        if (!grown) {
+            fprintf(stderr, "Error: out of memory scanning the imports of %s\n", file);
+            exit(1);
+        }
+        visited->paths = grown;
+        visited->cap = cap;
+    }
     /* The whole path (#2543): two cut to one spelling were one file. */
-    visited[*nvisited] = ae_path_printf("%s", file);
-    (*nvisited)++;
+    visited->paths[visited->count++] = ae_path_printf("%s", file);
 
     FILE* f = fopen(file, "r");
     if (!f) return;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
+    /* Whole lines, and four names of up to a line's length: the module, its
+     * slashed path, a package prefix and that package's library name. Fixed
+     * 256-byte copies cut a longer name to another module (#2546). */
+    char* line = NULL;
+    size_t line_cap = 0;
+    char* names = NULL;
+    size_t names_cap = 0;
+    while (ae_read_line(f, &line, &line_cap) > 0) {
+        size_t span = strlen(line) + 1;
+        if (4 * span > names_cap) {
+            char* grown = (char*)realloc(names, 4 * span);
+            if (!grown) {
+                fprintf(stderr, "Error: out of memory scanning the imports of %s\n", file);
+                exit(1);
+            }
+            names = grown;
+            names_cap = 4 * span;
+        }
+        char* mod = names;
+        char* slashed = names + span;
+        char* pkgname = names + 2 * span;
+        char* libname = names + 3 * span;
         const char* p = line;
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "import", 6) != 0 || (p[6] != ' ' && p[6] != '\t')) continue;
@@ -5143,11 +5198,9 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
         // `import foo.validate`). The dotted NAME is still never a binary-import
         // candidate itself — a binary import is always a bare name — so only the
         // recursion into its file changes.
-        char mod[256];
         size_t mi = 0;
         int dotted = 0;
-        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.')
-               && mi < sizeof(mod) - 1) {
+        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.')) {
             if (*p == '.') dotted = 1;
             mod[mi++] = *p++;
         }
@@ -5160,14 +5213,10 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
             // into that source file (a/b/c.ae or a/b/c/module.ae) so a binary
             // import inside it is seen. A dotted name is never a binary import,
             // so if it does not resolve to a source file there is nothing to do.
-            char slashed[256];
-            size_t si = 0;
-            for (size_t k = 0; k < mi && si < sizeof(slashed) - 1; k++) {
-                slashed[si++] = (mod[k] == '.') ? '/' : mod[k];
-            }
-            slashed[si] = '\0';
+            for (size_t k = 0; k < mi; k++) slashed[k] = (mod[k] == '.') ? '/' : mod[k];
+            slashed[mi] = '\0';
             if ((src_path = ae_source_module_path(slashed)) != NULL) {
-                ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+                ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited);
                 free(src_path);
                 continue;
             }
@@ -5175,20 +5224,20 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
              * library of package `a.b` is lib<a_b>; try each proper prefix
              * of the import, longest first, and take the one whose catalog
              * lists this module. */
-            char pkgname[256];
-            snprintf(pkgname, sizeof(pkgname), "%s", mod);
+            memcpy(pkgname, mod, mi + 1);
             for (;;) {
                 char* last = strrchr(pkgname, '.');
                 if (!last) break;
                 *last = '\0';
-                char libname[256];
-                snprintf(libname, sizeof(libname), "%s", pkgname);
+                memcpy(libname, pkgname, (size_t)(last - pkgname) + 1);
                 for (char* q = libname; *q; q++) if (*q == '.') *q = '_';
                 char* so_path = ae_find_binimport_so(libname);
                 if (so_path && ae_lib_provides_module(so_path, mod)) {
                     int failed = ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0;
                     free(so_path);
                     if (failed) {
+                        free(line);
+                        free(names);
                         fclose(f);
                         return;
                     }
@@ -5202,7 +5251,7 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
         // A flat source module: recurse into its file so a binary import nested
         // inside it (a wrapper importing the binary package) is discovered.
         if ((src_path = ae_source_module_path(mod)) != NULL) {
-            ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+            ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited);
             free(src_path);
             continue;
         }
@@ -5214,18 +5263,17 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
         free(so_path);
         if (failed) break;
     }
+    free(line);
+    free(names);
     fclose(f);
 }
 
 static void prepare_binary_imports(const char* main_file) {
     char stubdir[256] = "";
-    // Visited-set of file paths, each a heap copy of any length.
-    char** visited = calloc((size_t)AE_BINIMPORT_MAX_FILES, sizeof(char*));
-    if (!visited) { return; }
-    int nvisited = 0;
-    ae_scan_binary_imports(main_file, stubdir, sizeof(stubdir), visited, &nvisited);
-    for (int i = 0; i < nvisited; i++) free(visited[i]);
-    free(visited);
+    BinimportVisited visited = { NULL, 0, 0 };
+    ae_scan_binary_imports(main_file, stubdir, sizeof(stubdir), &visited);
+    for (int i = 0; i < visited.count; i++) free(visited.paths[i]);
+    free(visited.paths);
     /* One runtime or none: a library that carries its own (static) runtime
      * next to one built on the shared runtime would split panics and
      * scheduler state between them. */
@@ -5295,23 +5343,25 @@ static void ae_stage_windows_dlls(const char* out_file) {
  * not be served from the cache after the library was rebuilt (its catalog,
  * and so the interface the program was compiled against, may differ), nor a
  * static build for a shared-runtime one. */
-static const char* ae_binimport_salt(char* out, size_t cap) {
-    snprintf(out, cap, "%s", g_shared_runtime ? "+shared-runtime" : "");
+static char* ae_binimport_salt(void) {
+    /* Whole, however many libraries (#2546): a 2900-byte buffer cut the
+     * list, and two builds linking libraries past the cut shared a key. A
+     * string the caller frees; NULL when out of memory. */
+    char* out = ae_strdup_printf("%s", g_shared_runtime ? "+shared-runtime" : "");
     const char* p = binimport_link();
-    while ((p = strchr(p, '"')) != NULL) {
+    while (out && (p = strchr(p, '"')) != NULL) {
         const char* e = strchr(p + 1, '"');
         if (!e) break;
         char* path = ae_path_printf("%.*s", (int)(e - p - 1), p + 1);
         p = e + 1;
         struct stat st;
-        size_t ol = strlen(out);
-        if (stat(path, &st) == 0) {
-            snprintf(out + ol, cap - ol, "+lib:%s:%lld:%lld", path,
-                     (long long)st.st_size, (long long)st.st_mtime);
-        } else {
-            snprintf(out + ol, cap - ol, "+lib:%s", path);
-        }
+        char* next = stat(path, &st) == 0
+            ? ae_strdup_printf("%s+lib:%s:%lld:%lld", out, path,
+                               (long long)st.st_size, (long long)st.st_mtime)
+            : ae_strdup_printf("%s+lib:%s", out, path);
         free(path);
+        free(out);
+        out = next;
     }
     return out;
 }
@@ -5713,12 +5763,13 @@ static char** build_run_argv(const char* exe, int argc, char** argv, int prog_ar
     return out;
 }
 
-static const char* ae_binimport_salt(char* out, size_t cap);
-/* `ae run`'s cache salt: "run", plus the binary libraries it links. */
-static const char* run_mode_salt(void) {
-    static char salt[3000];
-    char libs[2900];
-    snprintf(salt, sizeof(salt), "run%s", ae_binimport_salt(libs, sizeof(libs)));
+static char* ae_binimport_salt(void);
+/* `ae run`'s cache salt: "run", plus the binary libraries it links. A string
+ * the caller frees; NULL when out of memory. */
+static char* run_mode_salt(void) {
+    char* libs = ae_binimport_salt();
+    char* salt = libs ? ae_strdup_printf("run%s", libs) : NULL;
+    free(libs);
     return salt;
 }
 
@@ -5837,10 +5888,11 @@ static int cmd_run(int argc, char** argv) {
     // this exact source + compiler + extras combination.
     bool using_cache = false;
     char cached_exe[1024] = "";
-    char run_salt[4096];
+    /* One salt for the lookup and the publish key below (#2500); it lives
+     * for the process. */
+    const char* run_key_salt = ae_define_salt(run_mode_salt());
     unsigned long long cache_key =
-        compute_cache_key(file, extra_files, "O0",
-                          ae_define_salt(run_mode_salt(), run_salt, sizeof(run_salt)));
+        compute_cache_key(file, extra_files, "O0", run_key_salt);
     if (cache_key != 0) {
         init_cache_dir();
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -5936,8 +5988,7 @@ static int cmd_run(int argc, char** argv) {
         /* The same salt as the lookup (#2500): a bare "run" here dropped the
          * binary-import part, so a program with one published under a key
          * its next run never computes. */
-        unsigned long long dk = compute_cache_key(file, extra_files, "O0",
-                                    ae_define_salt(run_mode_salt(), run_salt, sizeof(run_salt)));
+        unsigned long long dk = compute_cache_key(file, extra_files, "O0", run_key_salt);
         if (dk != 0) {
             if (!using_cache) init_cache_dir();
             using_cache = true;
@@ -6059,7 +6110,7 @@ static int cmd_check(int argc, char** argv) {
      * shell quoting on cmd.exe + MSYS2. Issue #413. */
     char* lib_flags = tc_lib_flags();
     char* cmd = ae_strdup_printf("\"%s\"%s%s --check \"%s\"",
-                                 tc.compiler, g_defines, lib_flags, file);
+                                 tc.compiler, defines_flags(), lib_flags, file);
     free(lib_flags);
     if (!cmd) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
@@ -7810,7 +7861,8 @@ static int cmd_build(int argc, char** argv) {
      * `[build] defines` join them after the walk-up to aether.toml (see
      * load_defines_from_toml), so the manifest is found from a
      * subdirectory too. */
-    g_defines[0] = '\0';
+    g_defines_len = 0;
+    if (g_defines) g_defines[0] = '\0';
 
     // Reset emit mode to the default (exe-only) for this build.
     g_emit_exe = true;
@@ -8580,11 +8632,8 @@ static int cmd_build(int argc, char** argv) {
                           !g_coverage;
     char cached_exe[1024] = "";
     unsigned long long cache_key = 0;
-    /* Outlive the cache check: the key is computed again once aetherc has
-     * written the depfile (#2500), from the same salt, and ae_define_salt
-     * hands back build_mode_full itself when there is nothing to add. */
-    char build_salt[4096];
-    char build_mode_full[3000];
+    /* Outlives the cache check: the key is computed again once aetherc has
+     * written the depfile (#2500), from the same salt. */
     const char* build_key_salt = NULL;
     if (cache_eligible) {
         /* #1333: the salt distinguishes a traced build from a normal one.
@@ -8603,10 +8652,10 @@ static int cmd_build(int argc, char** argv) {
         if (g_coverage) strncat(build_mode, "+coverage", sizeof(build_mode) - strlen(build_mode) - 1);
         if (g_profile)  strncat(build_mode, "+profile",  sizeof(build_mode) - strlen(build_mode) - 1);
         if (g_size)     strncat(build_mode, "+size",     sizeof(build_mode) - strlen(build_mode) - 1);
-        char libs_salt[2900];
-        ae_binimport_salt(libs_salt, sizeof(libs_salt));
-        snprintf(build_mode_full, sizeof(build_mode_full), "%s%s", build_mode, libs_salt);
-        build_key_salt = ae_define_salt(build_mode_full, build_salt, sizeof(build_salt));
+        char* libs_salt = ae_binimport_salt();
+        char* build_mode_full = libs_salt ? ae_strdup_printf("%s%s", build_mode, libs_salt) : NULL;
+        free(libs_salt);
+        build_key_salt = ae_define_salt(build_mode_full);
         cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
                                       build_key_salt);
         if (cache_key != 0) {

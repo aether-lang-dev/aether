@@ -170,7 +170,8 @@ void gc_stale_cache_tmp(const char* dir);
 void init_cache_dir(void);
 void tc_lib_dir_append(const char* spec);
 /* 0 means do not cache this build: the source cannot be read, memory ran
- * out, or a source tree walk could not see every file (#2538). */
+ * out (a NULL `extra_salt` included, #2546), or a source tree walk could not
+ * see every file (#2538). */
 unsigned long long compute_cache_key(const char* ae_file, const char* extra_files,
                                      const char* opt_level, const char* extra_salt);
 /* Whether the last compute_cache_key made no key only because a tree walk
