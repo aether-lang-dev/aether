@@ -1112,6 +1112,32 @@ void test_scheduler_teardown_frees_live_actors(void) {
     }
 }
 
+// An actor with its own thread (#2517) that is alive when the scheduler
+// stops: teardown marks it released instead of freeing it under the thread,
+// and the second of teardown and the thread's exit ends it; the next
+// scheduler's teardown reclaims what was retired.
+void test_scheduler_teardown_with_live_actor_thread(void) {
+    scheduler_init(1);
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    atomic_store(&a->count, 0);   // spawn sets the ActorBase prefix only
+    a->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&a->thread, NULL, aether_actor_thread, a));
+    Message msg = message_create_simple(1, 0, 7);
+    scheduler_send_remote((ActorBase*)a, msg, -1);
+    for (int w = 0; w < 5000 && atomic_load(&a->count) < 1; w++) sleep_ms(1);
+    ASSERT_EQ(1, atomic_load(&a->count));
+
+    pthread_t t = a->thread;
+    scheduler_shutdown();
+    scheduler_cleanup();     // must not free the actor while its thread runs
+    pthread_join(t, NULL);   // the thread leaves (released or stopped) and ends it
+
+    scheduler_init(1);       // the next teardown reclaims what the thread retired
+    scheduler_cleanup();
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1123,6 +1149,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler frees released actors once no reader holds them", test_scheduler_release_churn, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown frees the live actors it spawned", test_scheduler_teardown_frees_live_actors, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);

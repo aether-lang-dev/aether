@@ -2187,15 +2187,25 @@ void scheduler_shutdown(void) {
 static void scheduler_free_core_tables(void) {
     // Actors never released (a program or host that stops the scheduler
     // with actors alive, a panicked actor) are reachable only through the
-    // tables freed below. They end the way a release ends them; no reader is
-    // left, the threads are joined. An actor with its own thread is held by
-    // that thread, not by a table, and is not here.
+    // tables freed below. Those the scheduler spawned end the way a release
+    // ends them; the core threads are joined and no reader is left. One a
+    // caller registered stays the caller's.
     for (int i = 0; i < num_cores; i++) {
         int count = 0;
         AetherActorTable* table = actor_table_snapshot(&schedulers[i], &count);
         for (int k = 0; table && k < count; k++) {
             ActorBase* actor = actor_table_read(table, k);
-            if (actor && actor->scheduler_owned) actor_free_now(actor);
+            if (!actor || !actor->scheduler_owned) continue;
+            if (actor->auto_process) {
+                // Its own thread may still be running it (#2517): this is a
+                // release, and the second of it and the thread's exit ends
+                // the actor. Its block is freed here only when the thread
+                // has already left.
+                int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED,
+                                                   memory_order_acq_rel);
+                if (!(was & AETHER_ACTOR_THREAD_GONE)) continue;
+            }
+            actor_free_now(actor);
         }
     }
     // Released actors not reclaimed yet: no reader is left either (#2509).
