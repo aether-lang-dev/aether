@@ -2129,6 +2129,39 @@ void codegen_maybe_emit_line(CodeGenerator* gen, const ASTNode* node) {
 //   - libc time + env
 // Each category is delimited by a comment so future additions land
 // in the right block.
+static int cmp_c_name(const void* a, const void* b) {
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
+/* A C11 <math.h> function: `name` itself, or its `float` (`f`) or
+   `long double` (`l`) form, as `roundf` or `sqrtl` (#2526). The macros
+   (isnan, signbit...) are listed too: a TU that includes <math.h> cannot
+   define them either. */
+static int c_math_function(const char* name) {
+    static const char* math[] = {
+        "acos", "asin", "atan", "atan2", "cos", "sin", "tan",
+        "acosh", "asinh", "atanh", "cosh", "sinh", "tanh",
+        "exp", "exp2", "expm1", "frexp", "ilogb", "ldexp",
+        "log", "log10", "log1p", "log2", "logb", "modf", "scalbn", "scalbln",
+        "cbrt", "fabs", "hypot", "pow", "sqrt",
+        "erf", "erfc", "lgamma", "tgamma",
+        "ceil", "floor", "nearbyint", "rint", "lrint", "llrint",
+        "round", "lround", "llround", "trunc",
+        "fmod", "remainder", "remquo", "copysign", "nan", "nextafter",
+        "nexttoward", "fdim", "fmax", "fmin", "fma",
+        "isnan", "isinf", "isfinite", "isnormal", "signbit", "fpclassify",
+        NULL
+    };
+    size_t len = strlen(name);
+    for (int i = 0; math[i]; i++) {
+        size_t ml = strlen(math[i]);
+        if (strncmp(name, math[i], ml) != 0) continue;
+        if (len == ml) return 1;
+        if (len == ml + 1 && (name[ml] == 'f' || name[ml] == 'l')) return 1;
+    }
+    return 0;
+}
+
 int is_c_reserved_word(const char* name) {
     static const char* reserved[] = {
         // ── C keywords ─────────────────────────────────────────
@@ -2216,12 +2249,41 @@ int is_c_reserved_word(const char* name) {
         "qsort", "bsearch",
         "atoi", "atol", "atoll", "atof",
         "index", "rindex",
+        /* #2526: the rest of the C11 library the program links. A user
+           `floor(x: int) -> int` was emitted as a global `floor`, the link
+           resolved libm's `floor` to it, and `math.floor(2.5)` called the
+           user's function with a double. `log`, `round`, `pow` and the
+           ctype predicates are as ordinary as the verbs above. The libm
+           functions are listed once here; their `f` and `l` forms are
+           matched by c_math_function below. */
+        "scanf", "vscanf", "vprintf", "strtold", "strtoimax", "strtoumax",
+        "strcoll", "strxfrm", "strspn", "strcspn", "strpbrk",
+        "mblen", "mbtowc", "wctomb", "mbstowcs", "wcstombs",
+        "quick_exit", "at_quick_exit", "timespec_get",
+        "setjmp", "longjmp", "setlocale", "localeconv",
+        "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph",
+        "islower", "isprint", "ispunct", "isspace", "isupper", "isxdigit",
+        "tolower", "toupper",
         NULL
     };
-    for (int i = 0; reserved[i]; i++) {
-        if (strcmp(name, reserved[i]) == 0) return 1;
+    static const char** sorted = NULL;
+    static size_t count = 0;
+    if (!sorted) {
+        size_t n = 0;
+        while (reserved[n]) n++;
+        const char** s = (const char**)malloc(n * sizeof(*s));
+        if (!s) {
+            for (size_t i = 0; i < n; i++)
+                if (strcmp(name, reserved[i]) == 0) return 1;
+            return c_math_function(name);
+        }
+        memcpy(s, reserved, n * sizeof(*s));
+        qsort(s, n, sizeof(*s), cmp_c_name);
+        count = n;
+        sorted = s;
     }
-    return 0;
+    if (bsearch(&name, sorted, count, sizeof(*sorted), cmp_c_name)) return 1;
+    return c_math_function(name);
 }
 
 // Mangle an Aether name to avoid C reserved word collision.
