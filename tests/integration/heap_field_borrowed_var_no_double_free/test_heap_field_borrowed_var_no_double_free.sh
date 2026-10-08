@@ -47,7 +47,10 @@ fi
 #     leave `_heap_<var>` at its stale 0, so the move carried a 0 and the leak
 #     was silent on every platform without a leak checker. Asserted on the
 #     generated C so it fails on those platforms too.
-if ! grep -q "runtime_owned = build_owned(7); _heap_runtime_owned = 1" "$TMP/out.c"; then
+# The assignment is the plain one (`_heap_runtime_owned = 1` right after it)
+# or, once the field store takes the local (#2564), the reassignment that
+# frees the old value first; either way the tracker ends at 1.
+if ! grep -qE "runtime_owned = build_owned\(7\);( if \(_heap_runtime_owned\) aether_heap_str_free\(_tmp_old\);)? _heap_runtime_owned = 1" "$TMP/out.c"; then
     echo "  [FAIL] heap_field_borrowed_var_no_double_free: an owned value that escapes"
     echo "         into a field left its tracker stale, so the field tracker takes 0"
     echo "         and the destructor never frees it"

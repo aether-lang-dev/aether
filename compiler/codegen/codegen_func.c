@@ -102,7 +102,7 @@ const char* lookup_c_callback_symbol(CodeGenerator* gen, const char* name) {
 // when the `@extern` declaration also carries a trailing `...`; the
 // `;` delimiter never occurs inside a C identifier, so only NAME is
 // taken regardless.
-static const char* extern_c_symbol(const ASTNode* ext) {
+const char* extern_c_symbol(const ASTNode* ext) {
     if (!ext || !ext->annotation) return NULL;
     if (strncmp(ext->annotation, "c_symbol:", 9) != 0) return NULL;
     const char* s = ext->annotation + 9;

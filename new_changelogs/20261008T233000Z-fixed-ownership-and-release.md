@@ -32,6 +32,10 @@
   strings on every message, and `kept = r`, `r` a handler local, shared
   `r`'s strings, which the handler's exit freed. And `kept.name = s`
   compiled to C naming an undeclared `kept` (#2581); it is `self->kept`.
+- **The runtime free under another name is a free (#2587).**
+  `@extern("string_free") drop_raw(s: string)`, as `std.jsonpath` declares
+  it, was not recognised as one, so a local handed to it was freed again at
+  scope exit: jsonpath did that on every malformed member name.
 - **A field store trusts a pointer's trackers only when every binding of
   it is a `heap.new` box (#2580).** A local bound to `heap.new` on one
   branch and to `malloc(n) as *T` on another had its garbage tracker read

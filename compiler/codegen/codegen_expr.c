@@ -4889,6 +4889,12 @@ static const char** g_stmt_temp_names = NULL;
 static int g_stmt_temp_count = 0;
 static const ASTNode* g_stmt_temp_wrapping = NULL;
 
+/* Is a call to `fn` the runtime free `sym`, by name or `@extern` alias? */
+static int cfree_sym_is(CodeGenerator* gen, const char* fn, const char* sym) {
+    const char* got = consuming_free_symbol(gen, fn);
+    return got && strcmp(got, sym) == 0;
+}
+
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count) {
     g_stmt_temp_nodes = nodes;
     g_stmt_temp_names = names;
@@ -6878,7 +6884,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // Non-heap-var arguments (literals, borrowed params) fall
                 // through to the plain, literal-safe string_release call.
                 else if ((strcmp(func_name, "string_release") == 0 ||
-                          strcmp(func_name, "string.release") == 0) &&
+                          strcmp(func_name, "string.release") == 0 ||
+                          cfree_sym_is(gen, func_name_norm, "string_release")) &&
                          expr->child_count == 1 &&
                          expr->children[0]->type == AST_IDENTIFIER &&
                          expr->children[0]->value &&
@@ -6909,7 +6916,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // not cover, which is what a magic AetherString arriving
                 // unflagged needs (string.from_double returns one).
                 else if ((strcmp(func_name, "string_free") == 0 ||
-                          strcmp(func_name, "string.free") == 0) &&
+                          strcmp(func_name, "string.free") == 0 ||
+                          cfree_sym_is(gen, func_name_norm, "string_free")) &&
                          expr->child_count == 1 &&
                          expr->children[0]->type == AST_IDENTIFIER &&
                          expr->children[0]->value &&
@@ -6924,13 +6932,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // as a tracked local does: freed here, it must not be freed
                 // again by the next store into the field or by the struct's
                 // destructor (emit_string_field_free).
-                else if ((strcmp(func_name_norm, "string_free") == 0 ||
-                          strcmp(func_name_norm, "string_release") == 0) &&
+                else if ((cfree_sym_is(gen, func_name_norm, "string_free") ||
+                          cfree_sym_is(gen, func_name_norm, "string_release")) &&
                          expr->child_count == 1 &&
                          field_read_can_hand_off(expr->children[0])) {
                     emit_string_field_free(gen, expr->children[0],
-                                           strcmp(func_name_norm, "string_free") == 0
-                                               ? "string_free" : "string_release");
+                                           consuming_free_symbol(gen, func_name_norm));
                 }
                 // string.seq_free(seq) — explicit refcount-decrement on a
                 // *StringSeq. For a tracked seq local, clear the ownership

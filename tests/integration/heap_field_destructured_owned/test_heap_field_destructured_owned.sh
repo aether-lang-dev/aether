@@ -31,7 +31,10 @@ fail() {
 #    the field store moves that ownership into the field's tracker.
 "$AETHERC" "$SCRIPT_DIR/prog.ae" "$TMP/out.c" > "$TMP/gen.log" 2>&1 \
     || { sed 's/^/        /' "$TMP/gen.log" | head -8; fail "codegen failed"; }
-if ! grep -q "content = _tup[0-9]*\._0; _heap_content = 1;" "$TMP/out.c"; then
+# Plain, or the reassignment that frees the old value first (the local is
+# no longer escaped once the field store takes it, #2564): the tracker ends
+# at 1 either way.
+if ! grep -qE "content = _tup[0-9]*\._0;( if \(_heap_content\) aether_heap_str_free\(_tmp_old\);)? _heap_content = 1;" "$TMP/out.c"; then
     grep -n "content = _tup" "$TMP/out.c" | sed 's/^/        /' | head -4
     fail "the destructure left the escaped local's tracker unset, so nothing owns the string"
 fi

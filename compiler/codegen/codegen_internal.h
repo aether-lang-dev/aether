@@ -145,6 +145,11 @@ enum {
     STR_TAKE_RUNTIME = 2    /* depends on the arm taken at run time */
 };
 int is_owned_string_field_read(ASTNode* e);
+/* The C symbol `@extern("sym")` binds an extern to, or NULL. */
+const char* extern_c_symbol(const ASTNode* ext);
+/* The runtime free a call to `fn` is ("string_free", "string_release",
+ * "release"), under its own name or an `@extern` alias, or NULL. */
+const char* consuming_free_symbol(CodeGenerator* gen, const char* fn);
 int struct_is_observable(CodeGenerator* gen, const char* struct_name);
 /* A call that takes the caller's reference to the string at argument `idx`
  * (a free, or a function whose body frees that parameter), and the two

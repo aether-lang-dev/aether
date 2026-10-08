@@ -4526,7 +4526,7 @@ static ASTNode* g_keep_fn = NULL;
 static int value_directly_carries_param(ASTNode* node, const char* pname);
 static int handback_leaf_is(CodeGenerator* gen, ASTNode* expr, const char* name, int depth);
 static int is_nonstoring_builtin(const char* fn);
-static int is_consuming_free(const char* fn);
+static int is_consuming_free(CodeGenerator* gen, const char* fn);
 
 /* In a copy-on-keep query, is `name` a local of the walked body, so that
  * assigning the parameter to it keeps the reference only if `name` keeps
@@ -4908,7 +4908,7 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
                 if (!gen->closure_args_borrowed) return 1;
                 continue;
             }
-            if (is_nonstoring_builtin(fn) || is_consuming_free(fn)) continue;
+            if (is_nonstoring_builtin(fn) || is_consuming_free(gen, fn)) continue;
             if (is_noescape_extern_param(gen, fn, i)) continue;
             /* A list add, list set or map put of the parameter: the slot
              * the owning rewrite takes, a tracked keep. */
@@ -4953,7 +4953,7 @@ static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, 
         for (int i = 0; i < node->child_count; i++) {
             ASTNode* a = node->children[i];
             if (!a || a->type != AST_IDENTIFIER || !a->value || strcmp(a->value, pname) != 0) continue;
-            if (is_consuming_free(fn)) return 1;
+            if (is_consuming_free(gen, fn)) return 1;
             if (callee_has_visible_body(gen, node->value) &&
                 callee_param_is_string(gen, node->value, i)) {
                 const char* cp; ASTNode* cb;
@@ -5495,7 +5495,7 @@ static int call_position_keeps_param(CodeGenerator* gen, ASTNode* node, int i, i
      * assignment / aggregate / return sinks catch that mention separately,
      * so this is sound. */
     if (is_nonstoring_builtin(fn)) return 0;
-    if (is_consuming_free(fn)) return 1;  /* this function frees it; the caller must not */
+    if (is_consuming_free(gen, fn)) return 1;  /* this function frees it; the caller must not */
     /* #2523: the extern's declaration says the argument is used only during
      * the call, neither stored nor freed, so a wrapper that forwards its
      * parameter there (`fs.walk` into `fs_walk_raw`) keeps nothing either. */
@@ -5710,11 +5710,25 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
  * must not also free it. `name_free(s: string) { string.free(s) }` is the
  * shape, and answering "does not escape" there makes every caller of such a
  * helper double-free. */
-static int is_consuming_free(const char* fn) {
-    if (!fn) return 0;
-    return strcmp(fn, "release") == 0 ||
-           strcmp(fn, "string_release") == 0 ||
-           strcmp(fn, "string_free") == 0;
+const char* consuming_free_symbol(CodeGenerator* gen, const char* fn) {
+    if (!fn) return NULL;
+    if (strcmp(fn, "release") == 0) return "release";
+    if (strcmp(fn, "string_release") == 0) return "string_release";
+    if (strcmp(fn, "string_free") == 0) return "string_free";
+    /* `@extern("string_free") _release_x(s: string)` (std.jsonpath) is the
+     * same free under another name; seen by its name only, the free went
+     * unrecognised, and the local it freed was freed again at exit. */
+    if (!gen || !gen->program) return NULL;
+    ProgramIndex* ix = program_index(gen->program);
+    ASTNode* ext = ix ? (ASTNode*)strmap_get(&ix->externs, fn) : NULL;
+    const char* sym = ext ? extern_c_symbol(ext) : NULL;
+    if (sym && strcmp(sym, "string_free") == 0) return "string_free";
+    if (sym && strcmp(sym, "string_release") == 0) return "string_release";
+    return NULL;
+}
+
+static int is_consuming_free(CodeGenerator* gen, const char* fn) {
+    return consuming_free_symbol(gen, fn) != NULL;
 }
 
 static int is_nonstoring_builtin(const char* fn) {
@@ -5790,7 +5804,7 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
     const char* fn = call->value
         ? codegen_normalise_callee(call->value)
         : NULL;
-    if (fn && (is_nonstoring_builtin(fn) || is_consuming_free(fn))) return 0;
+    if (fn && (is_nonstoring_builtin(fn) || is_consuming_free(gen, fn))) return 0;
     /* #2499: under the closure-argument convention a closure call borrows
      * its arguments (the callee slot, 0, is invoked, not stored). */
     if (fn && strcmp(fn, "call") == 0 && gen->closure_args_borrowed) return 0;
@@ -13634,7 +13648,7 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
  * reference up as the call takes it. */
 int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int idx) {
     if (!gen || !func_name || idx < 0) return 0;
-    if (is_consuming_free(codegen_normalise_callee(func_name))) return 1;
+    if (is_consuming_free(gen, codegen_normalise_callee(func_name))) return 1;
     if (!callee_has_visible_body(gen, func_name) || !callee_param_is_string(gen, func_name, idx))
         return 0;
     const char* cp;

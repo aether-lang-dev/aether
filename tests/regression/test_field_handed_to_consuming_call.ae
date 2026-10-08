@@ -28,6 +28,9 @@ import std.os
 import std.string
 
 extern exit(code: int)
+// The runtime free under another name, as std.jsonpath binds it: a free all
+// the same, so a local or field handed to it gives its reference up.
+@extern("string_free") drop_raw(s: string)
 
 struct Item {
     name: string
@@ -98,6 +101,11 @@ round(w: string) -> int {
     it.tag = os.getenv("PATH")
     release(it.tag)
     it.tag = os.getenv("PATH")
+    // The free under an alias, of a local and of a field.
+    loose = string.concat(w, "~")
+    drop_raw(loose)
+    it.tag = string.concat(w, "^")
+    drop_raw(it.tag)
     // A field of a statement's temporary struct.
     drop(make_box(w).item.name)
     drop(make_box(w).item.tag)
