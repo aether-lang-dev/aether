@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <limits.h>
 
 TEST_CATEGORY(string_concat_basic, TEST_CATEGORY_STDLIB) {
     AetherString* s1 = string_from_cstr("Hello");
@@ -271,5 +272,38 @@ TEST_CATEGORY(interp_format_by_length, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(9, (int)n);
     ASSERT_STREQ("1234", out);
 
+    /* Integers are written without snprintf; the extremes are exact. */
+    interp(out, sizeof(out), "%d|%d|%lld|%llu|%u", INT_MIN, 0, LLONG_MIN, ULLONG_MAX, UINT_MAX);
+    ASSERT_STREQ("-2147483648|0|-9223372036854775808|18446744073709551615|4294967295", out);
+
+    string_release(nul);
+}
+
+static void* interp_new(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    void* s = aether_interp_string(fmt, ap);
+    va_end(ap);
+    return s;
+}
+
+/* aether_interp_string formats a short result once, on the stack, and one
+ * past its stack buffer a second time, sized; both carry every byte. */
+TEST_CATEGORY(interp_string_short_and_long, TEST_CATEGORY_STDLIB) {
+    void* s = interp_new("n=%d s=%s", 42, "ok");
+    ASSERT_EQ(9, (int)aether_string_length(s));
+    ASSERT_STREQ("n=42 s=ok", aether_string_data(s));
+    string_release(s);
+
+    char part[201];
+    memset(part, 'x', 200);
+    part[200] = '\0';
+    AetherString* nul = string_new_with_length("a\0b", 3);
+    void* l = interp_new("%s|%s|%d", part, nul, 7);
+    ASSERT_EQ(200 + 1 + 3 + 1 + 1, (int)aether_string_length(l));
+    const char* d = aether_string_data(l);
+    ASSERT_TRUE(memcmp(d, part, 200) == 0);
+    ASSERT_TRUE(memcmp(d + 200, "|a\0b|7", 7) == 0);
+    string_release(l);
     string_release(nul);
 }

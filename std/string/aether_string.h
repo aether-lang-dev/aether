@@ -202,6 +202,11 @@ size_t      aether_string_length(const void* s);
  * whole call. */
 size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap);
 
+/* An interpolated string: `fmt` and `ap` formatted as aether_interp_format
+ * does, into a fresh inline AetherString the caller owns (NULL when the
+ * allocation fails). The generated _aether_interp is a thin wrapper. */
+void* aether_interp_string(const char* fmt, va_list ap);
+
 /* #2521: write `n` bytes (and a newline when `newline`) to `f` under the
  * stream's lock, as one print, so a NUL is written like any other byte and
  * another thread's print cannot land inside it. Returns the bytes written.

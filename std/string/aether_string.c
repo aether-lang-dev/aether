@@ -837,6 +837,28 @@ typedef struct {
     FILE* f;
 } InterpSink;
 
+static void interp_put(InterpSink* k, const char* p, size_t n);
+
+/* A plain %d / %u conversion (codegen writes no flags, width or precision)
+ * in decimal, as printf would, without a call into snprintf: interpolation
+ * is a hot path and most of its segments are integers. */
+static void interp_put_decimal(InterpSink* k, unsigned long long magnitude, int negative) {
+    char buf[24];
+    char* p = buf + sizeof(buf);
+    do {
+        *--p = (char)('0' + (int)(magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude);
+    if (negative) *--p = '-';
+    interp_put(k, p, (size_t)(buf + sizeof(buf) - p));
+}
+
+static void interp_put_signed(InterpSink* k, long long v) {
+    /* The magnitude in unsigned arithmetic, so LLONG_MIN is exact. */
+    if (v < 0) interp_put_decimal(k, 0ULL - (unsigned long long)v, 1);
+    else interp_put_decimal(k, (unsigned long long)v, 0);
+}
+
 static void interp_put(InterpSink* k, const char* p, size_t n) {
     if (n == 0) return;
     if (k->f) {
@@ -917,12 +939,18 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
         p++;
         switch (conv) {
             case 'd': case 'i':
-                if (longs >= 2) INTERP_NUM(long long);
-                else if (longs == 1) INTERP_NUM(long);
-                else if (size_mod) INTERP_NUM(size_t);
-                else INTERP_NUM(int);
+                if (longs >= 2) interp_put_signed(&k, va_arg(ap, long long));
+                else if (longs == 1) interp_put_signed(&k, va_arg(ap, long));
+                else if (size_mod) interp_put_signed(&k, (long long)(ptrdiff_t)va_arg(ap, size_t));
+                else interp_put_signed(&k, va_arg(ap, int));
                 break;
-            case 'u': case 'x': case 'X': case 'o':
+            case 'u':
+                if (longs >= 2) interp_put_decimal(&k, va_arg(ap, unsigned long long), 0);
+                else if (longs == 1) interp_put_decimal(&k, va_arg(ap, unsigned long), 0);
+                else if (size_mod) interp_put_decimal(&k, va_arg(ap, size_t), 0);
+                else interp_put_decimal(&k, va_arg(ap, unsigned int), 0);
+                break;
+            case 'x': case 'X': case 'o':
                 if (longs >= 2) INTERP_NUM(unsigned long long);
                 else if (longs == 1) INTERP_NUM(unsigned long);
                 else if (size_mod) INTERP_NUM(size_t);
@@ -943,6 +971,23 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
 }
 
 #undef INTERP_NUM
+
+void* aether_interp_string(const char* fmt, va_list ap) {
+    /* Most interpolations are short: format once into the stack and copy,
+     * and only a result that outgrows it is formatted again, sized. */
+    char small[256];
+    va_list again;
+    va_copy(again, ap);
+    size_t len = aether_interp_format(small, sizeof(small), NULL, fmt, ap);
+    AetherString* owned = string_alloc_inline(len);
+    if (owned) {
+        char* dst = aether_string_mutable_data(owned);
+        if (len < sizeof(small)) memcpy(dst, small, len + 1);
+        else aether_interp_format(dst, len + 1, NULL, fmt, again);
+    }
+    va_end(again);
+    return owned;
+}
 
 size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline) {
     aether_stream_lock(f);

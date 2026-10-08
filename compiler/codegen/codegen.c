@@ -7042,27 +7042,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * the value leaks. Every interpolated string a caller freed by hand, or
      * handed to a helper that frees, leaked exactly that way (#1543).
      *
-     * The buffer is adopted rather than copied, so the cost is one header
-     * allocation on top of the payload the format already needed. */
-    print_line(gen, "extern void* string_alloc_inline(size_t length);");
-    print_line(gen, "extern char* aether_string_mutable_data(void* s);");
+     * The runtime builds it as one inline allocation, header and payload
+     * together (aether_interp_string). */
     /* #2521: the runtime's formatter, not vsnprintf: a `%s` segment is
      * written by its length, so a string value holding a NUL keeps the
      * bytes after it ("[${s}]" with s = "x\0y" is 5 bytes). The same
      * formatter prints an interpolation (print/println), where printf
      * stopped at the NUL too. */
+    print_line(gen, "extern void* aether_interp_string(const char* fmt, va_list ap);");
     print_line(gen, "extern size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap);");
     print_line(gen, "extern size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline);");
     print_line(gen, "static void* _aether_interp(const char* fmt, ...) {");
-    print_line(gen, "    va_list args, args2;");
+    print_line(gen, "    va_list args;");
     print_line(gen, "    va_start(args, fmt);");
-    print_line(gen, "    va_copy(args2, args);");
-    print_line(gen, "    size_t len = aether_interp_format((char*)0, 0, (FILE*)0, fmt, args);");
+    print_line(gen, "    void* owned = aether_interp_string(fmt, args);");
     print_line(gen, "    va_end(args);");
-    print_line(gen, "    void* owned = string_alloc_inline(len);");
-    print_line(gen, "    if (!owned) { va_end(args2); return (void*)0; }");
-    print_line(gen, "    aether_interp_format(aether_string_mutable_data(owned), len + 1, (FILE*)0, fmt, args2);");
-    print_line(gen, "    va_end(args2);");
     print_line(gen, "    return owned;");
     print_line(gen, "}");
     print_line(gen, "static int _aether_interp_print(const char* fmt, ...) {");
