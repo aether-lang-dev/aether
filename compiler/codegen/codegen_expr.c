@@ -562,6 +562,86 @@ int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
     return is_heap_string_expr(gen, ch);
 }
 
+/* --- Variables bound to a closure literal (#2513) -----------------------
+ *
+ * closure_var_map records which closure literal a variable holds, so
+ * `call(f)` can call that closure's C function directly. A variable is
+ * named by the scope that declares it as well as by its name. Keyed by the
+ * name alone, `f()` on an `fn` parameter of one function dispatched to the
+ * closure bound to a local `f` of an unrelated function, with the
+ * parameter's env. A scope is named as discover_closures_scoped names it:
+ * a function's name, "main", or a receive arm's or a hoisted closure's
+ * synthetic name. In a closure's scope, a name the closure captures is the
+ * enclosing scope's variable; any other name (a parameter, a local) is the
+ * closure's own. */
+
+static void closure_scope_name(ASTNode* closure, char* buf, size_t n);
+
+/* The gen->closures entry of the hoisted closure whose scope is `scope`. */
+static int closure_info_for_scope(CodeGenerator* gen, const char* scope) {
+    if (!scope || strncmp(scope, "__closure_", 10) != 0) return -1;
+    for (int k = 0; k < gen->closure_count; k++) {
+        char nm[64];
+        closure_scope_name(gen->closures[k].closure_node, nm, sizeof(nm));
+        if (strcmp(nm, scope) == 0) return k;
+    }
+    return -1;
+}
+
+/* The scope whose variable `name` is, seen from `scope`. */
+static const char* closure_var_owner(CodeGenerator* gen, const char* scope,
+                                     const char* name) {
+    for (int depth = 0; depth < 256; depth++) {
+        int k = closure_info_for_scope(gen, scope);
+        if (k < 0) return scope;
+        int captured = 0;
+        for (int j = 0; j < gen->closures[k].capture_count && !captured; j++)
+            captured = strcmp(gen->closures[k].captures[j], name) == 0;
+        if (!captured) return scope;
+        scope = gen->closures[k].parent_func;
+    }
+    return scope;
+}
+
+static int closure_var_index(CodeGenerator* gen, const char* scope, const char* name) {
+    if (!name) return -1;
+    const char* owner = closure_var_owner(gen, scope, name);
+    for (int i = 0; i < gen->closure_var_count; i++) {
+        const struct ClosureVarMap* e = &gen->closure_var_map[i];
+        if (!e->var_name || strcmp(e->var_name, name) != 0) continue;
+        if (e->scope ? (owner && strcmp(e->scope, owner) == 0) : !owner) return i;
+    }
+    return -1;
+}
+
+/* The closure literal `name` holds in `scope`, or -1 when it holds none
+ * this program can name (a parameter, a call's result, or a variable bound
+ * to more than one literal). */
+int closure_var_id(CodeGenerator* gen, const char* scope, const char* name) {
+    int i = closure_var_index(gen, scope, name);
+    return i >= 0 ? gen->closure_var_map[i].closure_id : -1;
+}
+
+/* Record that `name` in `scope` is bound to closure `cid`. A variable
+ * bound to two different literals has no single one: -1. */
+void closure_var_bind(CodeGenerator* gen, const char* scope, const char* name, int cid) {
+    int i = closure_var_index(gen, scope, name);
+    if (i >= 0) {
+        if (gen->closure_var_map[i].closure_id != cid) gen->closure_var_map[i].closure_id = -1;
+        return;
+    }
+    if (gen->closure_var_count >= gen->closure_var_capacity) {
+        gen->closure_var_capacity = gen->closure_var_capacity ? gen->closure_var_capacity * 2 : 16;
+        gen->closure_var_map = aether_xrealloc(gen->closure_var_map,
+            gen->closure_var_capacity * sizeof(gen->closure_var_map[0]));
+    }
+    const char* owner = closure_var_owner(gen, scope, name);
+    gen->closure_var_map[gen->closure_var_count].scope = owner ? strdup(owner) : NULL;
+    gen->closure_var_map[gen->closure_var_count].var_name = strdup(name);
+    gen->closure_var_map[gen->closure_var_count].closure_id = cid;
+    gen->closure_var_count++;
+}
+
 /* --- Left-to-right operand order (#2478) ------------------------------
  *
  * C leaves unspecified the order in which a call's arguments, the two
@@ -611,11 +691,14 @@ static const char* order_write_target(ASTNode* node) {
     return NULL;
 }
 
-/* A closure literal is opaque to these walks: its body runs when it is
- * called, not where the literal stands. */
+/* A closure literal's body runs when it is called, not where the literal
+ * stands, so it writes nothing and calls nothing there. It does read the
+ * variables it captures as it is made (a copy of each, unless a closure
+ * writes it), so a mention inside it is a read at the literal (#2516):
+ * `f(i++, || { return i })` makes the closure after the step. */
 
 static int order_mentions(ASTNode* node, const char* name) {
-    if (!node || !name || node->type == AST_CLOSURE) return 0;
+    if (!node || !name) return 0;
     if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0) return 1;
     for (int i = 0; i < node->child_count; i++)
         if (order_mentions(node->children[i], name)) return 1;
@@ -647,8 +730,12 @@ static int order_has_call(ASTNode* node) {
  * (a promoted capture), and memory it is handed by reference (a pointer, an
  * array, a slice). What a function of this program writes is read off its
  * body, through the functions it calls; a closure it runs may write
- * anything it reaches. What a C extern or a C function pointer does is not
- * visible, so a call of one is taken to write nothing an operand reads. */
+ * anything it reaches. What a C extern does is not visible: its
+ * declaration says it, a parameter marked `@mutates` is memory the call
+ * writes through (#2516), and an unmarked extern is taken to write nothing
+ * an operand reads (so byte assembly such as `bytes_get(b, i) |
+ * bytes_get(b, j)` stays inline). A C function pointer is not visible
+ * either, and is taken the same way. */
 
 typedef struct OrderFnEffects {
     ASTNode* fn;
@@ -656,50 +743,39 @@ typedef struct OrderFnEffects {
     unsigned writes_through;   /* bit k: memory its parameter k reaches */
 } OrderFnEffects;
 
-/* The definition a call runs, when it is a function of this program. */
+/* The definition a call runs, when it is a function of this program, or
+ * the declaration of the extern it is. */
 static ASTNode* order_callee_def(CodeGenerator* gen, ASTNode* call) {
     if (!call->value || !gen->program) return NULL;
     char norm[256];
     const char* fn = codegen_normalise_callee(call->value, norm, sizeof(norm));
-    return fn ? find_function_definition_by_name(gen->program, fn) : NULL;
+    if (!fn) return NULL;
+    ASTNode* def = find_function_definition_by_name(gen->program, fn);
+    if (def) return def;
+    ProgramIndex* ix = program_index(gen->program);
+    return ix ? (ASTNode*)strmap_get(&ix->externs, fn) : NULL;
 }
 
 static int order_is_closure_type(Type* t) {
     return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
 }
 
-/* Is `name`, in the body of `fn`, a closure: a parameter or a local of
- * `fn` typed `fn`, or a variable a closure literal is bound to? */
-static int order_names_closure(CodeGenerator* gen, ASTNode* fn, const char* name) {
-    for (int i = 0; fn && i < fn->child_count; i++) {
-        ASTNode* p = fn->children[i];
-        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_CLOSURE_PARAM) &&
-            p->value && strcmp(p->value, name) == 0)
-            return order_is_closure_type(p->node_type);
-    }
-    if (fn == gen->current_function &&
-        order_is_closure_type(declared_var_type(gen, name))) return 1;
-    for (int i = 0; i < gen->closure_var_count; i++)
-        if (gen->closure_var_map[i].var_name &&
-            strcmp(gen->closure_var_map[i].var_name, name) == 0) return 1;
-    return 0;
-}
-
-/* Does `call`, in the body of `fn`, run a closure: `call(f, ...)`, a
- * closure called by its name, or a callee handed a closure it may run? */
-static int order_call_runs_closure(CodeGenerator* gen, ASTNode* fn, ASTNode* call) {
+/* Does `call` run a closure: `call(f, ...)`, or a callee handed a closure
+ * it may run? A closure called by its name (`f(x)`) is `call(f, x)` here:
+ * the typechecker rewrites every call of a closure-typed name to it. */
+static int order_call_runs_closure(ASTNode* call) {
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* a = call->children[i];
         if (a && (a->type == AST_CLOSURE || order_is_closure_type(a->node_type))) return 1;
     }
-    if (!call->value || strcmp(call->value, "call") == 0) return 1;
-    return !strchr(call->value, '.') && order_names_closure(gen, fn, call->value);
+    return !call->value || strcmp(call->value, "call") == 0;
 }
 
 /* The variable an argument hands a call by reference (a pointer, an array
  * or a slice, or a field or element reached from one), or NULL. */
 static const char* order_ref_arg_root(ASTNode* arg) {
-    while (arg && (arg->type == AST_SLICE_FROM_ARRAY || arg->type == AST_SLICE_TO_PTR) &&
+    while (arg && (arg->type == AST_SLICE_FROM_ARRAY || arg->type == AST_SLICE_TO_PTR ||
+                   arg->type == AST_NAMED_ARG) &&
            arg->child_count > 0)
         arg = arg->children[0];
     if (!arg || !arg->node_type ||
@@ -744,7 +820,7 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
     if (node->type == AST_FUNCTION_CALL) {
         int c_shared = 1;
         unsigned c_through = ~0u;
-        if (!order_call_runs_closure(gen, fn, node)) {
+        if (!order_call_runs_closure(node)) {
             ASTNode* def = order_callee_def(gen, node);
             int idx = def ? order_fn_effects(gen, def) : -1;
             c_shared = idx >= 0 && gen->order_fn_effects[idx].writes_shared;
@@ -768,7 +844,8 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
 
 /* The memoised effects of calling `fn`: an index into gen->order_fn_effects.
  * A function reached again while its own body is read (recursion) answers
- * with what is known so far. */
+ * with what is known so far. An extern's effects are its declaration's
+ * `@mutates` parameters (#2516). */
 static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
     for (int i = 0; i < gen->order_fn_effect_count; i++)
         if (gen->order_fn_effects[i].fn == fn) return i;
@@ -782,6 +859,14 @@ static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
     gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0 };
     int shared = 0;
     unsigned through = 0;
+    if (fn->type == AST_EXTERN_FUNCTION) {
+        for (int i = 0, k = 0; i < fn->child_count && k < 32; i++) {
+            ASTNode* p = fn->children[i];
+            if (!p || p->type != AST_IDENTIFIER) continue;
+            if (p->annotation && strstr(p->annotation, "mutates_param")) through |= 1u << k;
+            k++;
+        }
+    }
     for (int i = 0; i < fn->child_count; i++)
         if (fn->children[i] && fn->children[i]->type == AST_BLOCK)
             order_scan_body(gen, fn, fn->children[i], &shared, &through);
@@ -837,7 +922,7 @@ static int order_call_affects(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
     if (x->type == AST_FUNCTION_CALL) {
         /* Any call may read a shared variable `y` writes. */
         if (order_writes_shared_var(gen, y)) return 1;
-        int runs_closure = order_call_runs_closure(gen, gen->current_function, x);
+        int runs_closure = order_call_runs_closure(x);
         int shared = runs_closure;
         unsigned through = runs_closure ? ~0u : 0;
         if (!runs_closure) {
@@ -876,11 +961,11 @@ static int order_conflict(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
 }
 
 /* An operand that can be held in a temporary. A literal has no order to
- * keep, a closure literal is left to its env handling, and a fixed-size
- * array's value is where it lives, which no operand changes. */
+ * keep, and a fixed-size array's value is where it lives, which no operand
+ * changes. A closure literal is a value like any other: the temp holds the
+ * same env (#2516). */
 static int order_hoistable(ASTNode* op) {
-    if (!op || op->type == AST_LITERAL || op->type == AST_NULL_LITERAL ||
-        op->type == AST_CLOSURE) return 0;
+    if (!op || op->type == AST_LITERAL || op->type == AST_NULL_LITERAL) return 0;
     return !(op->node_type && type_is_sized_array(op->node_type));
 }
 
@@ -909,29 +994,50 @@ static int order_hoist_set(CodeGenerator* gen, ASTNode** ops, int n, int* hoist)
 
 #define ORDER_MAX_OPERANDS 32
 
+/* The indexes an assignment's target evaluates before the store, in source
+ * order (`a[i][j] = v` reads `i` then `j`), appended to `ops` (#2516). */
+static int order_target_operands(ASTNode* lhs, ASTNode** ops, int n, int cap) {
+    if (!lhs) return n;
+    if (lhs->type == AST_ARRAY_ACCESS && lhs->child_count >= 2) {
+        n = order_target_operands(lhs->children[0], ops, n, cap);
+        if (n < cap) ops[n++] = lhs->children[1];
+    } else if (lhs->type == AST_MEMBER_ACCESS && lhs->child_count > 0) {
+        n = order_target_operands(lhs->children[0], ops, n, cap);
+    }
+    return n;
+}
+
 /* The operands of a construct whose C spelling leaves their order open: a
- * call's arguments (its receiver among them), the two sides of a binary
- * operator other than `&&` / `||` (sequenced in C) and an assignment, the
- * field values of a struct literal or a message, and a send's target with
- * its message's fields. 0 for anything else, and for a call with named
- * arguments: a builtin such as a platform select emits only the one it
- * picks. */
+ * call's arguments (its receiver among them, a named argument's value in
+ * its place), the two sides of a binary operator other than `&&` / `||`
+ * (sequenced in C), the indexes of an assignment's target and then its
+ * value (`arr[i++] = i` stores at the old `i`, #2516), the field values of
+ * a struct literal or a message, and a send's target with its message's
+ * fields. 0 for anything else, and for a platform `select`, which emits
+ * only the value it picks. */
 static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
     int n = 0;
     switch (expr->type) {
         case AST_FUNCTION_CALL:
+            if (expr->value && strcmp(expr->value, "select") == 0) return 0;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* a = expr->children[i];
                 if (a && a->type == AST_CLOSURE && a->value &&
                     strcmp(a->value, "trailing") == 0) continue;
-                if ((a && a->type == AST_NAMED_ARG) || n == cap) return 0;
+                if (a && a->type == AST_NAMED_ARG) a = a->child_count > 0 ? a->children[0] : NULL;
+                if (n == cap) return 0;
                 ops[n++] = a;
             }
             return n;
         case AST_BINARY_EXPRESSION:
             if (expr->child_count != 2 || !expr->value ||
-                strcmp(expr->value, "&&") == 0 || strcmp(expr->value, "||") == 0 ||
-                is_assignment_op(expr->value)) return 0;
+                strcmp(expr->value, "&&") == 0 || strcmp(expr->value, "||") == 0) return 0;
+            if (is_assignment_op(expr->value)) {
+                n = order_target_operands(expr->children[0], ops, 0, cap);
+                if (n == 0 || n == cap) return 0;
+                ops[n++] = expr->children[1];
+                return n;
+            }
             ops[0] = expr->children[0];
             ops[1] = expr->children[1];
             return 2;
@@ -2538,65 +2644,28 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                     ASTNode* body = target_fn->children[i];
                     if (!body || body->type != AST_BLOCK) continue;
                     ASTNode* ret_expr = find_first_return_expr(body);
-                    if (ret_expr && ret_expr->type == AST_IDENTIFIER && ret_expr->value) {
-                        for (int ci = 0; ci < gen->closure_var_count; ci++) {
-                            if (gen->closure_var_map[ci].var_name &&
-                                strcmp(gen->closure_var_map[ci].var_name, ret_expr->value) == 0) {
-                                cid_to_bind = gen->closure_var_map[ci].closure_id;
-                                break;
-                            }
-                        }
-                    }
+                    if (ret_expr && ret_expr->type == AST_IDENTIFIER && ret_expr->value)
+                        cid_to_bind = closure_var_id(gen, target_fn->value, ret_expr->value);
                     break;
                 }
             }
         }
-        if (cid_to_bind >= 0) {
-            int existing_idx = -1;
-            for (int ci = 0; ci < gen->closure_var_count; ci++) {
-                if (gen->closure_var_map[ci].var_name &&
-                    strcmp(gen->closure_var_map[ci].var_name, node->value) == 0) {
-                    existing_idx = ci;
-                    break;
-                }
-            }
-            if (existing_idx < 0) {
-                if (gen->closure_var_count >= gen->closure_var_capacity) {
-                    gen->closure_var_capacity = gen->closure_var_capacity ? gen->closure_var_capacity * 2 : 16;
-                    gen->closure_var_map = aether_xrealloc(gen->closure_var_map,
-                        gen->closure_var_capacity * sizeof(gen->closure_var_map[0]));
-                }
-                gen->closure_var_map[gen->closure_var_count].var_name = strdup(node->value);
-                gen->closure_var_map[gen->closure_var_count].closure_id = cid_to_bind;
-                gen->closure_var_count++;
-            } else if (gen->closure_var_map[existing_idx].closure_id != cid_to_bind) {
-                // Variable was previously bound to a different closure
-                // (either via declaration or via an earlier reassignment).
-                // The variable's dynamic identity is no longer a single
-                // closure — mark ambiguous so call() falls back to generic
-                // function-pointer dispatch through .fn.
-                gen->closure_var_map[existing_idx].closure_id = -1;
-            }
-        }
+        // A variable previously bound to a different closure (either via
+        // declaration or via an earlier reassignment) has no single
+        // identity: the bind marks it ambiguous so call() falls back to
+        // generic function-pointer dispatch through .fn.
+        if (cid_to_bind >= 0) closure_var_bind(gen, enclosing_func, node->value, cid_to_bind);
     }
 }
 
-// Resolve call(<closure_var>) to the concrete return type, or NULL.
-static Type* resolve_call_type(CodeGenerator* gen, ASTNode* call_expr) {
+// Resolve call(<closure_var>) in `scope` to the concrete return type, or NULL.
+static Type* resolve_call_type(CodeGenerator* gen, ASTNode* call_expr, const char* scope) {
     if (!call_expr || call_expr->type != AST_FUNCTION_CALL ||
         !call_expr->value || strcmp(call_expr->value, "call") != 0 ||
         call_expr->child_count < 1 || !call_expr->children[0] ||
         call_expr->children[0]->type != AST_IDENTIFIER ||
         !call_expr->children[0]->value) return NULL;
-    const char* callee = call_expr->children[0]->value;
-    int callee_id = -1;
-    for (int ci = 0; ci < gen->closure_var_count; ci++) {
-        if (gen->closure_var_map[ci].var_name &&
-            strcmp(gen->closure_var_map[ci].var_name, callee) == 0) {
-            callee_id = gen->closure_var_map[ci].closure_id;
-            break;
-        }
-    }
+    int callee_id = closure_var_id(gen, scope, call_expr->children[0]->value);
     if (callee_id < 0) return NULL;
     for (int cj = 0; cj < gen->closure_count; cj++) {
         if (gen->closures[cj].id != callee_id) continue;
@@ -2632,10 +2701,10 @@ static Type* resolve_call_type(CodeGenerator* gen, ASTNode* call_expr) {
 // typed TYPE_INT, which is wrong for any closure that returns a string or
 // pointer.
 static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
-                                           Type* fn_ret);
+                                           Type* fn_ret, const char* scope);
 
 static void propagate_call_return_types(CodeGenerator* gen, ASTNode* node) {
-    propagate_call_return_types_in(gen, node, NULL);
+    propagate_call_return_types_in(gen, node, NULL, NULL);
 }
 
 /* `fn_ret` is the declared return type of the function/closure whose body we
@@ -2644,15 +2713,28 @@ static void propagate_call_return_types(CodeGenerator* gen, ASTNode* node) {
  * there is no closure body to read a type from. In `-> ptr f(...) { return
  * call(f, v) }` the context supplies it. Without this the global `call`
  * symbol's TYPE_INT default reaches codegen, which casts the closure to an
- * int-returning function pointer and truncates a returned pointer. */
+ * int-returning function pointer and truncates a returned pointer.
+ *
+ * `scope` names the scope the walk is in, as discover_closures_scoped
+ * names it, which is where a `call(f)` resolves `f` (#2513). */
 static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
-                                           Type* fn_ret) {
+                                           Type* fn_ret, const char* scope) {
     if (!node) return;
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION) {
         Type* inner = node->node_type;
         for (int i = 0; i < node->child_count; i++) {
-            propagate_call_return_types_in(gen, node->children[i], inner);
+            propagate_call_return_types_in(gen, node->children[i], inner,
+                                           node->value ? node->value : scope);
+        }
+        return;
+    }
+    if (node->type == AST_MAIN_FUNCTION || is_receive_arm_scope(node)) {
+        char arm_name[64];
+        snprintf(arm_name, sizeof(arm_name), "__recv_arm_%p", (void*)node);
+        const char* inner = node->type == AST_MAIN_FUNCTION ? "main" : arm_name;
+        for (int i = 0; i < node->child_count; i++) {
+            propagate_call_return_types_in(gen, node->children[i], fn_ret, inner);
         }
         return;
     }
@@ -2663,8 +2745,14 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
      * `bump = || { return call(digit, 1) }` inside a closure-returning
      * builder got typed as the closure struct instead of int. */
     if (node->type == AST_CLOSURE) {
+        char own[64];
+        const char* inner = scope;
+        if (is_hoisted_closure(node)) {
+            closure_scope_name(node, own, sizeof(own));
+            inner = own;
+        }
         for (int i = 0; i < node->child_count; i++) {
-            propagate_call_return_types_in(gen, node->children[i], NULL);
+            propagate_call_return_types_in(gen, node->children[i], NULL, inner);
         }
         return;
     }
@@ -2675,11 +2763,11 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
             strcmp(r->value, "call") == 0 &&
             (!r->node_type || r->node_type->kind == TYPE_INT ||
              r->node_type->kind == TYPE_UNKNOWN) &&
-            !resolve_call_type(gen, r)) {
+            !resolve_call_type(gen, r, scope)) {
             r->node_type = clone_type(fn_ret);
         }
     }
-    Type* resolved = resolve_call_type(gen, node);
+    Type* resolved = resolve_call_type(gen, node, scope);
     if (resolved && (!node->node_type || node->node_type->kind != resolved->kind)) {
         node->node_type = clone_type(resolved);
     }
@@ -2688,13 +2776,13 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
     // the typechecker's stale default and later casts or format-string
     // selection go wrong.
     if (node->type == AST_VARIABLE_DECLARATION && node->child_count > 0) {
-        Type* init_resolved = resolve_call_type(gen, node->children[0]);
+        Type* init_resolved = resolve_call_type(gen, node->children[0], scope);
         if (init_resolved && (!node->node_type || node->node_type->kind == TYPE_INT)) {
             node->node_type = clone_type(init_resolved);
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        propagate_call_return_types_in(gen, node->children[i], fn_ret);
+        propagate_call_return_types_in(gen, node->children[i], fn_ret, scope);
     }
 }
 
@@ -3123,7 +3211,7 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
 }
 
 // The C type of a variable, through lookup_var_type; "int" when it has none.
-static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func) {
+const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func) {
     Type* t = lookup_var_type(gen, var_name, parent_func);
     return t ? get_c_type(t) : "int"; // fallback
 }
@@ -3174,42 +3262,38 @@ static const char* resolve_closure_return_type(CodeGenerator* gen, int ci) {
         ret_expr->children[0] &&
         ret_expr->children[0]->type == AST_IDENTIFIER &&
         ret_expr->children[0]->value) {
-        const char* callee = ret_expr->children[0]->value;
-        for (int cvi = 0; cvi < gen->closure_var_count; cvi++) {
-            if (gen->closure_var_map[cvi].var_name &&
-                strcmp(gen->closure_var_map[cvi].var_name, callee) == 0) {
-                int callee_id = gen->closure_var_map[cvi].closure_id;
-                for (int cj = 0; cj < gen->closure_count; cj++) {
-                    if (gen->closures[cj].id != callee_id) continue;
-                    ASTNode* callee_node = gen->closures[cj].closure_node;
-                    ASTNode* callee_body = NULL;
-                    for (int k = callee_node->child_count - 1; k >= 0; k--) {
-                        if (callee_node->children[k] &&
-                            callee_node->children[k]->type == AST_BLOCK) {
-                            callee_body = callee_node->children[k];
-                            break;
-                        }
-                    }
-                    ASTNode* callee_ret = callee_body ? find_first_return_expr(callee_body) : NULL;
-                    Type* callee_tuple = closure_tuple_return_type(callee_node);   /* #2501 */
-                    if (callee_tuple) {
-                        ret_type = closure_tuple_c_name(callee_tuple);
-                        free_type(callee_tuple);
-                        resolved = 1;
-                    } else if (callee_ret) {
-                        if (callee_ret->node_type && callee_ret->node_type->kind != TYPE_UNKNOWN) {
-                            ret_type = get_c_type(callee_ret->node_type);
-                            resolved = 1;
-                        } else if (callee_ret->type == AST_IDENTIFIER && callee_ret->value) {
-                            ret_type = lookup_var_c_type(gen, callee_ret->value,
-                                                         gen->closures[cj].parent_func);
-                            resolved = 1;
-                        }
-                    }
+        char own_scope[64];
+        closure_scope_name(closure, own_scope, sizeof(own_scope));
+        /* #2513: the callee as this closure's body sees the name. */
+        int callee_id = closure_var_id(gen, own_scope, ret_expr->children[0]->value);
+        for (int cj = 0; callee_id >= 0 && cj < gen->closure_count; cj++) {
+            if (gen->closures[cj].id != callee_id) continue;
+            ASTNode* callee_node = gen->closures[cj].closure_node;
+            ASTNode* callee_body = NULL;
+            for (int k = callee_node->child_count - 1; k >= 0; k--) {
+                if (callee_node->children[k] &&
+                    callee_node->children[k]->type == AST_BLOCK) {
+                    callee_body = callee_node->children[k];
                     break;
                 }
-                break;
             }
+            ASTNode* callee_ret = callee_body ? find_first_return_expr(callee_body) : NULL;
+            Type* callee_tuple = closure_tuple_return_type(callee_node);   /* #2501 */
+            if (callee_tuple) {
+                ret_type = closure_tuple_c_name(callee_tuple);
+                free_type(callee_tuple);
+                resolved = 1;
+            } else if (callee_ret) {
+                if (callee_ret->node_type && callee_ret->node_type->kind != TYPE_UNKNOWN) {
+                    ret_type = get_c_type(callee_ret->node_type);
+                    resolved = 1;
+                } else if (callee_ret->type == AST_IDENTIFIER && callee_ret->value) {
+                    ret_type = lookup_var_c_type(gen, callee_ret->value,
+                                                 gen->closures[cj].parent_func);
+                    resolved = 1;
+                }
+            }
+            break;
         }
     }
     if (!resolved && ret_expr) {
@@ -3342,7 +3426,11 @@ static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_t
             if (p->node_type) {
                 ptype = get_c_type(p->node_type);
             }
-            if (closure_param_is_promoted(gen, closure, p->value)) {
+            if (is_sized_array_param(p->node_type)) {
+                /* #2516: copied into the body's own array (or a cell). */
+                fprintf(gen->output, ", ");
+                emit_sized_array_param_declarator(gen, p->node_type, p->value);
+            } else if (closure_param_is_promoted(gen, closure, p->value)) {
                 fprintf(gen->output, ", %s _param_%s", ptype, p->value);
             } else {
                 fprintf(gen->output, ", %s %s", ptype, safe_value_name(p->value));
@@ -3650,6 +3738,12 @@ void emit_closure_definitions(CodeGenerator* gen) {
              * function's. */
             ASTNode* prev_current_function = gen->current_function;
             gen->current_function = closure;
+            /* #2513: the closure's own variables, and through its captures
+             * the enclosing scope's. */
+            char own_var_scope[64];
+            closure_scope_name(closure, own_var_scope, sizeof(own_var_scope));
+            const char* prev_closure_var_scope = gen->closure_var_scope;
+            gen->closure_var_scope = own_var_scope;
             // Publish env-backed captures so generate_statement routes writes
             // through _env-> instead of a local alias.
             char** prev_env = gen->current_env_captures;
@@ -3743,7 +3837,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
              * redeclaration, and the heap-string hoist skips them. */
             for (int i = 0; i < closure->child_count; i++) {
                 ASTNode* p = closure->children[i];
-                if (p && p->type == AST_CLOSURE_PARAM && p->value)
+                if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
+                /* #2516: an array parameter records its type. */
+                if (is_sized_array_param(p->node_type))
+                    mark_var_declared_typed(gen, p->value, p->node_type);
+                else
                     mark_var_declared(gen, p->value);
             }
             /* A closure body is its own C function — it needs the same
@@ -3760,8 +3858,15 @@ void emit_closure_definitions(CodeGenerator* gen) {
              * enter_scope, so its release lands in this closure's scope. */
             for (int i = 0; i < closure->child_count; i++) {
                 ASTNode* p = closure->children[i];
-                if (!p || p->type != AST_CLOSURE_PARAM || !p->value ||
-                    !closure_param_is_promoted(gen, closure, p->value)) continue;
+                if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
+                if (!closure_param_is_promoted(gen, closure, p->value)) {
+                    /* #2516: an array parameter's own copy. */
+                    if (is_sized_array_param(p->node_type)) {
+                        print_indent(gen);
+                        emit_sized_array_param_copy(gen, p->node_type, p->value);
+                    }
+                    continue;
+                }
                 char param_cname[300];
                 snprintf(param_cname, sizeof(param_cname), "_param_%s", p->value);
                 print_indent(gen);
@@ -3832,6 +3937,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->return_escaped_struct_vars = prev_ret_escaped_struct;
             gen->return_escaped_struct_var_count = prev_ret_escaped_struct_count;
             gen->current_function = prev_current_function;
+            gen->closure_var_scope = prev_closure_var_scope;
             gen->in_trailing_block--;
             gen->indent_level = 0;
         }
@@ -6923,16 +7029,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     // is reassignable by construction (some closure writes it)
                     // and must go through the generic path too.
                     int found_id = -1;
-                    if (closure_arg && closure_arg->type == AST_IDENTIFIER && closure_arg->value) {
-                        if (!is_promoted_capture(gen, closure_arg->value)) {
-                            for (int ci = 0; ci < gen->closure_var_count; ci++) {
-                                if (strcmp(gen->closure_var_map[ci].var_name, closure_arg->value) == 0) {
-                                    int cid = gen->closure_var_map[ci].closure_id;
-                                    if (cid >= 0) found_id = cid;
-                                    break;
-                                }
-                            }
-                        }
+                    if (closure_arg && closure_arg->type == AST_IDENTIFIER && closure_arg->value &&
+                        !is_promoted_capture(gen, closure_arg->value)) {
+                        /* #2513: the variable of this scope, not any of the name. */
+                        found_id = closure_var_id(gen, gen->closure_var_scope, closure_arg->value);
                     }
 
                     if (found_id >= 0) {

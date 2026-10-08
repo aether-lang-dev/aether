@@ -1,0 +1,97 @@
+// Regression (#2514): a store into a closure's string cell takes the value.
+//
+// A string a closure writes lives in a shared cell that owns what it
+// holds. `s = p` in the closure, where `p` is the caller's string the
+// closure captured, stored the pointer as it stood: the env held its own
+// reference to `p` and the cell adopted the same pointer without one, so
+// at scope exit both released it and the caller's string was freed while
+// the caller still held it (a double free under a checking allocator).
+// The store now takes the value as every owning slot does: a borrowed
+// value is copied or retained, a fresh one adopted. A match arm and a
+// tuple destructure that bind such a variable store the same way. The
+// macOS leaks gate runs this program: every string the cells end up
+// holding is freed by its last holder, and no string twice.
+//
+// Every string is built from a parameter, so each is a runtime heap
+// string: `string.concat` of two literals folds to a literal, which owns
+// nothing and would hide both the double free and a leak.
+
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+// The captured parameter stored as it is.
+adopt(p: string) -> string {
+    s = "init"
+    f = || { s = p }
+    call(f)
+    call(f)
+    return string.concat(s, "")
+}
+
+// The variable returned as it stands: the cell is released at the exit,
+// so the caller gets a copy of what it held (the function is
+// heap-returning), not the cell's pointer.
+direct(p: string) -> string {
+    s = "init"
+    f = || { s = p }
+    call(f)
+    return s
+}
+
+// A fresh string, then the parameter, then a local heap string.
+sequence(p: string) -> string {
+    s = "init"
+    local = string.concat(p, "-local")
+    f = || {
+        s = string.concat(p, "!")
+        s = p
+        s = local
+    }
+    call(f)
+    return string.concat(s, "")
+}
+
+// A match arm binds the variable.
+choose(p: string, n: int) -> string {
+    s = "none"
+    f = || {
+        s = match n {
+            1 -> p
+            _ -> string.concat(p, "?")
+        }
+    }
+    call(f)
+    return string.concat(s, "")
+}
+
+two(p: string) -> (string, int) { return p, string.length(p) }
+
+// A tuple destructure binds the variable.
+split(p: string) -> string {
+    s = "x"
+    k = 0
+    f = || { s, k = two(p) }
+    call(f)
+    return "${s}/${k}"
+}
+
+main() {
+    base = string.concat("ab", string.from_int(7))
+    check("adopt", adopt(base), "ab7")
+    check("adopt again", adopt(base), "ab7")
+    check("direct", direct(base), "ab7")
+    check("sequence", sequence(base), "ab7-local")
+    check("choose 1", choose(base, 1), "ab7")
+    check("choose 2", choose(base, 2), "ab7?")
+    check("split", split(base), "ab7/3")
+    check("base", base, "ab7")
+    println("ok")
+}

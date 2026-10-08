@@ -1193,6 +1193,10 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // can find any `ensures` clauses attached to it (issue #348).
     ASTNode* prev_current_function = gen->current_function;
     gen->current_function = func;
+    /* #2513: the function's variables, as discover_closures_scoped named
+     * its scope. */
+    const char* prev_closure_var_scope = gen->closure_var_scope;
+    gen->closure_var_scope = func->value;
 
     // Functions cloned from imported modules are emitted with the C
     // `static` storage class so each translation unit gets a private copy.
@@ -1292,6 +1296,13 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 param_count++;
                 continue;
             }
+            /* #2516: `E _param_xs[N]`; the body copies it (or seeds a cell). */
+            if (is_sized_array_param(child->node_type) && child->value) {
+                emit_sized_array_param_declarator(gen, child->node_type, child->value);
+                snprintf(last_param_cname, sizeof(last_param_cname), "_param_%s", child->value);
+                param_count++;
+                continue;
+            }
             generate_type(gen, child->node_type);
             // If this parameter is a Route 1 promoted name in this function,
             // emit it as `_param_<name>` so the body's heap cell can use
@@ -1386,6 +1397,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
      * the int8/uint8/int16/uint16/uint32 widths (see MEM_ACCESSOR_BODIES). */
     if (emit_mem_accessor_body(gen, func)) {
         fprintf(gen->output, "}\n\n");
+        gen->closure_var_scope = prev_closure_var_scope;
         return;
     }
 
@@ -1412,7 +1424,12 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
         if (!child) continue;
         if ((child->type == AST_PATTERN_VARIABLE || child->type == AST_VARIABLE_DECLARATION)
             && child->value) {
-            mark_var_declared(gen, child->value);
+            /* #2516: an array parameter records its type, which a whole-
+             * array store reads its length and element type from. */
+            if (is_sized_array_param(child->node_type))
+                mark_var_declared_typed(gen, child->value, child->node_type);
+            else
+                mark_var_declared(gen, child->value);
             /* #750: register a `fn(...)->R` parameter in the fn-ptr
              * registry so a call through it (`cb(a,b)`) lowers via the
              * same typed indirect-call path as fn-ptr locals
@@ -1460,6 +1477,9 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 print_indent(gen);
                 emit_promoted_param_cell(gen, child->value, c_type, param_cname,
                                          child->line, child->column);
+            } else if (is_sized_array_param(child->node_type)) {
+                print_indent(gen);
+                emit_sized_array_param_copy(gen, child->node_type, child->value);   /* #2516 */
             }
             /* A struct parameter is a copy of the caller's value, strings
              * included, and the caller still owns those strings: the copy
@@ -1668,6 +1688,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     gen->current_promoted_captures = prev_promoted;
     gen->current_promoted_capture_count = prev_promoted_count;
     gen->current_function = prev_current_function;
+    gen->closure_var_scope = prev_closure_var_scope;
 
     unindent(gen);
     print_line(gen, "}");

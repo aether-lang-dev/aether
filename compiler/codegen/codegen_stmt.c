@@ -1675,20 +1675,40 @@ static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
     return 0;
 }
 
+/* #2514: is `expr` a string variable of `fn_name` that a closure writes?
+ * Such a variable lives in a cell that owns what it holds (a store takes
+ * the value) and is released at the function's exit, so `return s` hands
+ * the caller a copy: the function is heap-returning. Resolved by the
+ * function's name, context-free as the INVARIANT above asks. */
+static int returns_promoted_string(CodeGenerator* gen, ASTNode* expr, const char* fn_name) {
+    if (!expr || expr->type != AST_IDENTIFIER || !expr->value || !fn_name) return 0;
+    char** promoted = NULL;
+    int count = 0;
+    get_promoted_names_for_func(gen, fn_name, &promoted, &count);
+    for (int i = 0; i < count; i++) {
+        if (!promoted[i] || strcmp(promoted[i], expr->value) != 0) continue;
+        const char* ct = lookup_var_c_type(gen, expr->value, fn_name);
+        return ct && strcmp(ct, "const char*") == 0;
+    }
+    return 0;
+}
+
 /* Heap evidence for a return-site expression inside the classifiers.
  * Bare identifiers MUST resolve structurally against the analysed
  * function's own body (see the INVARIANT above): is_heap_string_expr
  * consults the currently-emitting function's tracker table for
  * identifiers, which is the wrong function whenever classification is
- * triggered from a caller's destructure site. */
+ * triggered from a caller's destructure site. `fn_name` is the analysed
+ * function's. */
 static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
-                               ASTNode* fn_body_root) {
+                               ASTNode* fn_body_root, const char* fn_name) {
     if (!expr) return 0;
     if (expr->type == AST_IDENTIFIER) {
         return expr->value && fn_body_root &&
                (body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
                 body_tuple_destructure_binds_heap(gen, fn_body_root,
-                                                  expr->value));
+                                                  expr->value) ||
+                returns_promoted_string(gen, expr, fn_name));
     }
     /* #2461: a field read is taken as a copy at the return site (the
      * struct, often this function's own local, frees its buffer at scope
@@ -1696,8 +1716,8 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
      * does whenever one of its value arms does. */
     if (is_owned_string_field_read(expr)) return 1;
     if (expr->type == AST_IF_EXPRESSION && expr->child_count >= 3) {
-        return return_expr_is_heap(gen, expr->children[1], fn_body_root) ||
-               return_expr_is_heap(gen, expr->children[2], fn_body_root);
+        return return_expr_is_heap(gen, expr->children[1], fn_body_root, fn_name) ||
+               return_expr_is_heap(gen, expr->children[2], fn_body_root, fn_name);
     }
     if (expr->type == AST_MATCH_STATEMENT) {
         for (int i = 1; i < expr->child_count; i++) {
@@ -1705,7 +1725,7 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
             if (arm && arm->type == AST_MATCH_ARM && arm->child_count >= 2 &&
                 match_arm_value(arm->children[1]) &&
                 return_expr_is_heap(gen, match_arm_value(arm->children[1]),
-                                    fn_body_root)) return 1;
+                                    fn_body_root, fn_name)) return 1;
         }
         return 0;
     }
@@ -1774,7 +1794,7 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
                 /* `return e` inside `catch e`: the binding may own a
                  * heap-built reason (#2333). */
                 is_heap = 1;
-            } else if (return_expr_is_heap(gen, ret, fn_body_root)) {
+            } else if (return_expr_is_heap(gen, ret, fn_body_root, fn_being_analyzed)) {
                 /* Heap evidence for the return expression. Bare
                  * identifiers resolve STRUCTURALLY against the
                  * analysed function's own body (declaration-from-heap
@@ -2913,20 +2933,20 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
 // destructure site, and by `emit_tuple_return_position` to decide
 // whether to wrap the return value.
 static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
-                                        int position, ASTNode* fn_body_root,
+                                        int position, ASTNode* fn_body_root, const char* fn_name,
                                         int* found, int* any_heap, int* vetoed,
                                         CatchScope* cs);
 
 static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
-                                     int position, ASTNode* fn_body_root,
+                                     int position, ASTNode* fn_body_root, const char* fn_name,
                                      int* found, int* any_heap, int* vetoed) {
     CatchScope cs = { {0}, 0 };
-    walk_returns_for_heap_at_in(gen, node, position, fn_body_root,
+    walk_returns_for_heap_at_in(gen, node, position, fn_body_root, fn_name,
                                 found, any_heap, vetoed, &cs);
 }
 
 static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
-                                        int position, ASTNode* fn_body_root,
+                                        int position, ASTNode* fn_body_root, const char* fn_name,
                                         int* found, int* any_heap, int* vetoed,
                                         CatchScope* cs) {
     if (!node || *vetoed) return;
@@ -2993,7 +3013,7 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
                 child->node_type->kind == TYPE_TUPLE;
             if (position == 0 && !child_is_tuple &&
                 (catch_scope_has(cs, child) ||
-                 return_expr_is_heap(gen, child, fn_body_root))) {
+                 return_expr_is_heap(gen, child, fn_body_root, fn_name))) {
                 *any_heap = 1;
                 return;
             }
@@ -3036,7 +3056,7 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
         /* `return x, e` inside `catch e`: the binding may own a
          * heap-built reason (#2333). */
         if (catch_scope_has(cs, pos_expr) ||
-            return_expr_is_heap(gen, pos_expr, fn_body_root)) {
+            return_expr_is_heap(gen, pos_expr, fn_body_root, fn_name)) {
             *any_heap = 1;
         }
         return;
@@ -3053,7 +3073,7 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
     }
     for (int i = 0; i < node->child_count && !*vetoed; i++) {
         walk_returns_for_heap_at_in(gen, classifier_child(gen, node, i), position,
-                                    fn_body_root, found, any_heap, vetoed, cs);
+                                    fn_body_root, fn_name, found, any_heap, vetoed, cs);
     }
     if (pushed) cs->count--;
 }
@@ -3123,7 +3143,7 @@ static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
     if (body) {
         for (int p = 0; p < tuple_count; p++) {
             int found = 0, any_heap = 0, vetoed = 0;
-            walk_returns_for_heap_at(gen, body, p, body,
+            walk_returns_for_heap_at(gen, body, p, body, fn_def->value,
                                      &found, &any_heap, &vetoed);
             /* Heap at `p` iff some return makes it heap (OR-fold) AND
              * no whole-tuple-passthrough return yields an unwrappable
@@ -3227,13 +3247,7 @@ static int call_targets_closure_literal(CodeGenerator* gen, ASTNode* call) {
     if (!f) return 0;
     if (f->type == AST_CLOSURE) return 1;
     if (f->type != AST_IDENTIFIER || !f->value) return 0;
-    for (int i = 0; i < gen->closure_var_count; i++) {
-        if (gen->closure_var_map[i].var_name &&
-            strcmp(gen->closure_var_map[i].var_name, f->value) == 0) {
-            return gen->closure_var_map[i].closure_id >= 0;
-        }
-    }
-    return 0;
+    return closure_var_id(gen, gen->closure_var_scope, f->value) >= 0;
 }
 
 static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
@@ -4563,18 +4577,14 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         node->child_count > 0) {
         const char* lhs = node->value;
-        /* When `lhs` is a CAPTURED variable (env capture or promoted
-         * capture in the current closure), `V = <expr>` writes THROUGH the
-         * captured cell (emitted as `*V = ...`), which outlives this
-         * closure's activation. So a heap-string assigned to it escapes,
-         * exactly like the non-local `s.field = expr` case below — mark it,
-         * or the closure-exit defer-free reclaims the buffer while the cell
-         * still points at it (closure-local-alloc -> captured-outer ->
-         * read-after-walk UAF; #2019 handled the param-reassign face only).
-         * A bare `V = other_heap_var` (identifier RHS) is caught here; a
-         * `V = string.concat(...)` RHS is caught because the call's result
-         * is bound to a heap-tracked temp whose reassign-wrapper honours the
-         * same escaped mark on `V`. */
+        /* When `lhs` is an env-backed capture of the current closure,
+         * `V = <expr>` writes `_env->V`, which outlives this closure's
+         * activation. So a heap-string assigned to it escapes, exactly
+         * like the non-local `s.field = expr` case below: mark it, or the
+         * closure-exit defer-free reclaims the buffer while the env still
+         * points at it. A promoted capture's cell is not such a slot: it
+         * takes a value of its own (the store moves the local's buffer or
+         * copies it, #2514), so the local keeps its own exit free. */
         int lhs_is_capture = 0;
         for (int e = 0; e < gen->current_env_capture_count; e++) {
             if (gen->current_env_captures[e] &&
@@ -4582,7 +4592,6 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
                 lhs_is_capture = 1; break;
             }
         }
-        if (!lhs_is_capture && is_promoted_capture(gen, lhs)) lhs_is_capture = 1;
         if (lhs_is_capture) {
             ASTNode* rhs = node->children[node->child_count - 1];
             if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
@@ -5548,18 +5557,46 @@ void promoted_cell_pointer(const char* c_type, const char* name,
     }
 }
 
-/* #2474: the value an element of a promoted array's cell takes. A string
- * array cell owns its elements (its last release frees each, and a store
- * frees the one it replaces), so a string element takes a buffer of its
- * own (emit_string_take_owned: a fresh value adopted, a heap-tracked local
- * moved or copied, a view or a borrow copied). A literal is stored as it
- * is: the cell frees only refcounted strings. */
+/* The value a string cell, or a string element of an array cell (#2474),
+ * takes. The cell owns what it holds (its last release frees it, and a
+ * store frees the value it replaces), so it takes a buffer of its own
+ * (emit_string_take_owned: a fresh value adopted, a heap-tracked local
+ * moved or copied, a view or a borrow copied). A borrowed string stored as
+ * it stood was released by the cell as well as by its owner: a parameter
+ * a closure captured was released by the closure's env and by the cell
+ * (#2514). A literal is stored as it is: the cell frees only refcounted
+ * strings. */
 static void emit_cell_element_value(CodeGenerator* gen, int str_elem, ASTNode* v) {
     if (str_elem && !(v->type == AST_LITERAL && v->node_type &&
                       v->node_type->kind == TYPE_STRING)) {
         emit_string_take_owned(gen, v);
     } else {
         generate_expression(gen, v);
+    }
+}
+
+/* `name = value` into the cell of the promoted capture `name`, of type `t`:
+ * the one shape every store into a cell takes (a reassignment, a match
+ * arm). A string cell owns its string and a struct cell its struct's
+ * strings (#2458), so each takes a value of its own and gives up the one
+ * it held (#2514). A whole fixed-size array is stored by
+ * emit_cell_array_store. */
+static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNode* value) {
+    const char* ct = t ? get_c_type(t) : NULL;
+    const char* sname = struct_owning_strings(gen, t);
+    if (ct && strcmp(ct, "const char*") == 0) {
+        fprintf(gen->output, "_aether_str_cell_set(%s, ", name);
+        emit_cell_element_value(gen, 1, value);
+        fprintf(gen->output, ");\n");
+    } else if (sname) {
+        /* #2497: a struct owned elsewhere is copied in. */
+        fprintf(gen->output, "%s_replace(%s, ", sname, name);
+        emit_struct_take(gen, value, sname, NULL);
+        fprintf(gen->output, ");\n");
+    } else {
+        fprintf(gen->output, "*%s = ", name);
+        generate_expression(gen, value);
+        fprintf(gen->output, ";\n");
     }
 }
 
@@ -5604,6 +5641,24 @@ static int emit_cell_array_store(CodeGenerator* gen, ASTNode* stmt) {
     ASTNode* lit = stmt->children[0];
     if (lit && lit->type == AST_SLICE_FROM_ARRAY && lit->child_count > 0)
         lit = lit->children[0];
+    if (lit && lit->type != AST_ARRAY_LITERAL && is_sized_array_param(lit->node_type)) {
+        /* #2516: another array's elements, copied in. A string array's
+         * cell takes a copy of each, as it does a stored element. */
+        char elem[256];
+        snprintf(elem, sizeof(elem), "%s", get_c_type(at->element_type));
+        if (strcmp(elem, "const char*") == 0) {
+            fprintf(gen->output, "{ const char* const* _ae_src = (const char* const*)(");
+            generate_expression(gen, lit);
+            fprintf(gen->output,
+                    "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_str_cell_set(&(*%s)[_ae_k], aether_uniform_heap_str(_ae_src[_ae_k], 0)); }\n",
+                    at->array_size, stmt->value);
+        } else {
+            fprintf(gen->output, "memmove(*%s, ", stmt->value);
+            generate_expression(gen, lit);
+            fprintf(gen->output, ", sizeof(*%s));\n", stmt->value);
+        }
+        return 1;
+    }
     if (!lit || lit->type != AST_ARRAY_LITERAL) return 0;
     if (lit->child_count > at->array_size) {
         char msg[300];
@@ -5633,6 +5688,26 @@ static int emit_cell_array_store(CodeGenerator* gen, ASTNode* stmt) {
                 stmt->value);
     }
     return 1;
+}
+
+/* #2516: a fixed-size array parameter (`xs: int[3]`). A fixed-size array
+ * is a value, as a struct is: binding one (`a = b`, or passing it) copies
+ * its elements. C passes an array as a pointer to its first element, so the
+ * signature takes `E _param_xs[N]` and the body starts by copying the
+ * caller's elements into an array of its own, `E xs[N]`. A parameter a
+ * closure writes is seeded into its cell instead (emit_promoted_param_cell).
+ * The signature used to spell `int[3] xs`, which is not a C declarator. */
+int is_sized_array_param(Type* t) {
+    return type_is_sized_array(t) && t->array_size > 0;
+}
+
+void emit_sized_array_param_declarator(CodeGenerator* gen, Type* t, const char* name) {
+    fprintf(gen->output, "%s _param_%s[%d]", get_c_type(t->element_type), name, t->array_size);
+}
+
+void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name) {
+    fprintf(gen->output, "%s %s[%d]; memcpy(%s, _param_%s, sizeof(%s));\n",
+            get_c_type(t->element_type), name, t->array_size, name, name, name);
 }
 
 /* The function that gives back one reference to a promoted cell of C type
@@ -5692,7 +5767,16 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
         ASTNode* lit = init_expr;
         if (lit && lit->type == AST_SLICE_FROM_ARRAY && lit->child_count > 0)
             lit = lit->children[0];
-        if (lit && lit->type == AST_ARRAY_LITERAL && lit->child_count > arr_len) {
+        if (!init_expr && init_text) {
+            /* #2516: seeded from an array (a parameter's elements). A
+             * string cell owns its elements, so it takes a reference to
+             * each, as a string parameter's cell does. */
+            if (strcmp(elem, "const char*") == 0)
+                fprintf(gen->output, " for (int _ae_k = 0; _ae_k < %d; _ae_k++) (*%s)[_ae_k] = aether_str_capture((%s)[_ae_k]);",
+                        arr_len, name, init_text);
+            else
+                fprintf(gen->output, " memcpy(*%s, %s, sizeof(*%s));", name, init_text, name);
+        } else if (lit && lit->type == AST_ARRAY_LITERAL && lit->child_count > arr_len) {
             char msg[300];
             snprintf(msg, sizeof(msg),
                      "array literal of %d elements initialises '%s', which holds %d",
@@ -5710,11 +5794,9 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
         }
     } else if (init_expr || init_text) {
         fprintf(gen->output, " *%s = ", name);
-        if (init_expr && strcmp(c_type, "const char*") == 0 &&
-            string_take_is_view(gen, init_expr)) {
-            /* #2461: a string cell frees what it holds, so it takes its
-             * own copy of a view rather than a buffer owned elsewhere. */
-            emit_string_take_owned(gen, init_expr);
+        if (init_expr && strcmp(c_type, "const char*") == 0) {
+            /* #2461, #2514: a string cell frees what it holds. */
+            emit_cell_element_value(gen, 1, init_expr);
         } else if (init_expr) {
             generate_expression(gen, init_expr);
         } else {
@@ -7100,6 +7182,11 @@ static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
 // match's flag whether it owns it.
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
     print_indent(gen);
+    if (gen->match_result_var && gen->match_result_cell) {
+        /* #2514: a closure's variable takes the arm's value in its cell. */
+        emit_cell_store(gen, gen->match_result_var, gen->match_result_cell, result);
+        return;
+    }
     if (gen->match_result_var && gen->match_result_struct) {
         /* #2497: an owning struct result takes the arm's struct. */
         if (gen->match_result_replace) {
@@ -7615,13 +7702,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 // codegen_expr.c teaches the promotion analysis to see
                 // tuple-destructure targets as writes.
                 if (is_promoted_capture(gen, var->value)) {
+                    /* #2514: a string cell owns what it holds, so a slot the
+                     * call did not hand over is copied in. */
+                    char slot[96];
+                    if (pos_is_string)
+                        snprintf(slot, sizeof(slot), "aether_uniform_heap_str(_tup%d._%d, %d)",
+                                 tmp_id, j, pos_is_heap);
+                    else
+                        snprintf(slot, sizeof(slot), "_tup%d._%d", tmp_id, j);
                     if (!is_var_declared(gen, var->value)) {
-                        char init[64];
-                        snprintf(init, sizeof(init), "_tup%d._%d", tmp_id, j);
-                        emit_promoted_cell_declaration(gen, var->value, var_type, NULL, NULL, init,
+                        emit_promoted_cell_declaration(gen, var->value, var_type, NULL, NULL, slot,
                                                        stmt->line, stmt->column);
+                    } else if (pos_is_string) {
+                        fprintf(gen->output, "_aether_str_cell_set(%s, %s);\n", var->value, slot);
                     } else {
-                        fprintf(gen->output, "*%s = _tup%d._%d;\n", var->value, tmp_id, j);
+                        fprintf(gen->output, "*%s = %s;\n", var->value, slot);
                     }
                     continue;
                 }
@@ -7979,6 +8074,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 // Match-as-expression: x = match val { ... }
                 if (stmt->child_count > 0 && stmt->children[0] &&
                     stmt->children[0]->type == AST_MATCH_STATEMENT) {
+                    /* #2514: a variable a closure writes lives in its cell,
+                     * declared here, empty, when the match is its first
+                     * binding; each arm stores into the cell. */
+                    Type* cell_type = NULL;
+                    if (is_promoted_capture(gen, stmt->value)) {
+                        cell_type = (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN)
+                                    ? stmt->node_type : match_value_type(stmt->children[0]);
+                        if (!is_var_declared(gen, stmt->value)) {
+                            print_indent(gen);
+                            emit_promoted_cell_declaration(gen, stmt->value,
+                                get_c_type(cell_type), cell_type, NULL, NULL,
+                                stmt->line, stmt->column);
+                        }
+                    }
                     if (!is_var_declared(gen, stmt->value)) {
                         mark_var_declared(gen, stmt->value);
                         // Infer type from first match arm result
@@ -8027,6 +8136,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     const char* saved_mown = gen->match_result_own;
                     const char* saved_mstruct = gen->match_result_struct;
                     int saved_mreplace = gen->match_result_replace;
+                    Type* saved_mcell = gen->match_result_cell;
                     /* #2497: a local that owns a string-owning struct takes
                      * each arm's struct and releases the one it held. */
                     Type* bound = declared_var_type(gen, stmt->value);
@@ -8052,11 +8162,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     gen->match_result_own = owning ? own : NULL;
                     gen->match_result_struct = bound_struct;
                     gen->match_result_replace = 1;
+                    gen->match_result_cell = cell_type;
                     generate_statement(gen, stmt->children[0]);
                     gen->match_result_var = saved_mvar;
                     gen->match_result_own = saved_mown;
                     gen->match_result_struct = saved_mstruct;
                     gen->match_result_replace = saved_mreplace;
+                    gen->match_result_cell = saved_mcell;
                     if (owning) {
                         print_indent(gen);
                         fprintf(gen->output, "if (%s >= 0) {", own);
@@ -8089,44 +8201,15 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->line, stmt->column);
                     } else if (emit_cell_array_store(gen, stmt)) {
                         /* #2474: a whole fixed-size array, stored into its cell. */
-                    } else {
+                    } else if (stmt->child_count > 0) {
                         // Reassignment: write through the pointer. A string
-                        // cell OWNS its value, so free the superseded string
-                        // before storing the new one (else a per-iteration
-                        // running-max / accumulator leaks every prior value).
-                        const char* ct = get_c_type(stmt->node_type);
-                        int str_cell = (ct && strcmp(ct, "const char*") == 0
-                                        && stmt->child_count > 0);
-                        Type* st = stmt->node_type;
-                        ASTNode* sdef = (st && st->kind == TYPE_STRUCT && st->struct_name &&
-                                         gen->program && stmt->child_count > 0)
-                            ? find_struct_definition_by_name(gen->program, st->struct_name)
-                            : NULL;
-                        if (str_cell) {
-                            fprintf(gen->output, "_aether_str_cell_set(%s, ", stmt->value);
-                            /* #2461: the cell frees what it holds, so it must
-                             * not hold a view of a buffer owned elsewhere. */
-                            if (string_take_is_view(gen, stmt->children[0]))
-                                emit_string_take_owned(gen, stmt->children[0]);
-                            else
-                                generate_expression(gen, stmt->children[0]);
-                            fprintf(gen->output, ");\n");
-                        } else if (sdef && struct_owns_heap_strings(gen, sdef)) {
-                            /* A struct cell owns its string fields (#2458):
-                             * the struct it held gives them up when a new
-                             * one replaces it, as a local's does (#465). */
-                            fprintf(gen->output, "%s_replace(%s, ", st->struct_name, stmt->value);
-                            /* #2497: a struct owned elsewhere is copied in. */
-                            emit_struct_take(gen, stmt->children[0], st->struct_name, NULL);
-                            fprintf(gen->output, ");\n");
-                        } else {
-                            fprintf(gen->output, "*%s", stmt->value);
-                            if (stmt->child_count > 0) {
-                                fprintf(gen->output, " = ");
-                                generate_expression(gen, stmt->children[0]);
-                            }
-                            fprintf(gen->output, ";\n");
-                        }
+                        // cell OWNS its value, so it frees the superseded
+                        // string as it stores the new one (else a per-
+                        // iteration running-max / accumulator leaks every
+                        // prior value).
+                        emit_cell_store(gen, stmt->value, stmt->node_type, stmt->children[0]);
+                    } else {
+                        fprintf(gen->output, "*%s;\n", stmt->value);
                     }
                     break;
                 }
@@ -8298,6 +8381,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     stmt->value, lit->child_count, stmt->value,
                                     hoisted->array_size - lit->child_count);
                         }
+                        break;
+                    }
+                    /* #2516: another fixed-size array bound to this one
+                     * copies its elements (the typechecker holds both to
+                     * one length); C does not assign arrays. memmove: the
+                     * source may be the array itself. */
+                    if (stmt->child_count > 0 && stmt->children[0] &&
+                        hoisted && is_sized_array_param(hoisted) &&
+                        is_sized_array_param(stmt->children[0]->node_type)) {
+                        fprintf(gen->output, "memmove(%s, ", stmt->value);
+                        generate_expression(gen, stmt->children[0]);
+                        fprintf(gen->output, ", sizeof(%s));\n", stmt->value);
                         break;
                     }
                     // Already declared - generate assignment only.
@@ -9095,29 +9190,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (stmt->child_count > 0 && stmt->children[0] &&
                         stmt->children[0]->type == AST_CLOSURE &&
                         stmt->children[0]->value && stmt->value) {
-                        int cid = atoi(stmt->children[0]->value);
-                        int existing_idx = -1;
-                        for (int ci = 0; ci < gen->closure_var_count; ci++) {
-                            if (gen->closure_var_map[ci].var_name &&
-                                strcmp(gen->closure_var_map[ci].var_name, stmt->value) == 0) {
-                                existing_idx = ci;
-                                break;
-                            }
-                        }
-                        if (existing_idx >= 0) {
-                            if (gen->closure_var_map[existing_idx].closure_id != cid) {
-                                gen->closure_var_map[existing_idx].closure_id = -1;
-                            }
-                        } else {
-                            if (gen->closure_var_count >= gen->closure_var_capacity) {
-                                gen->closure_var_capacity = gen->closure_var_capacity ? gen->closure_var_capacity * 2 : 16;
-                                gen->closure_var_map = aether_xrealloc(gen->closure_var_map,
-                                    gen->closure_var_capacity * sizeof(gen->closure_var_map[0]));
-                            }
-                            gen->closure_var_map[gen->closure_var_count].var_name = strdup(stmt->value);
-                            gen->closure_var_map[gen->closure_var_count].closure_id = cid;
-                            gen->closure_var_count++;
-                        }
+                        closure_var_bind(gen, gen->closure_var_scope, stmt->value,
+                                         atoi(stmt->children[0]->value));
 
                         /* Free the env at scope exit when the value stays
                          * here (#2480). The free used to be pushed only when
@@ -10231,6 +10305,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 const char* saved_own = gen->match_result_own;
                 const char* saved_struct = gen->match_result_struct;
                 int saved_replace = gen->match_result_replace;
+                Type* saved_cell = gen->match_result_cell;
+                gen->match_result_cell = NULL;
                 gen->match_result_var = tmp;
                 gen->match_result_own = own[0] ? own : NULL;
                 /* #2497: the caller adopts a returned struct, so each arm hands
@@ -10242,6 +10318,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_own = saved_own;
                 gen->match_result_struct = saved_struct;
                 gen->match_result_replace = saved_replace;
+                gen->match_result_cell = saved_cell;
                 // Re-dispatch as `return <tmp>` to reuse all return machinery.
                 ASTNode* rid = create_ast_node(AST_IDENTIFIER, tmp, stmt->line, stmt->column);
                 rid->node_type = rt ? clone_type(rt)

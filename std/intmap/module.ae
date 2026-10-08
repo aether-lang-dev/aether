@@ -31,15 +31,15 @@ exports(
 
 // ---- raw externs (std/intmap/aether_intmap.c) ----
 extern aether_intmap_new(capacity_hint: int) -> ptr
-extern aether_intmap_free(m: ptr)
-extern aether_intmap_put(m: ptr, key: long, value: long) -> int
+extern aether_intmap_free(m: @mutates ptr)
+extern aether_intmap_put(m: @mutates ptr, key: long, value: long) -> int
 extern aether_intmap_get(m: ptr, key: long, missing: long) -> long
 extern aether_intmap_has(m: ptr, key: long) -> int
-extern aether_intmap_add(m: ptr, key: long, delta: long) -> long
+extern aether_intmap_add(m: @mutates ptr, key: long, delta: long) -> long
 extern aether_intmap_add_failed(m: ptr) -> int
-extern aether_intmap_remove(m: ptr, key: long) -> int
+extern aether_intmap_remove(m: @mutates ptr, key: long) -> int
 extern aether_intmap_size(m: ptr) -> int
-extern aether_intmap_clear(m: ptr)
+extern aether_intmap_clear(m: @mutates ptr)
 extern aether_intmap_next(m: ptr, slot: int) -> int
 extern aether_intmap_key_at(m: ptr, slot: int) -> long
 extern aether_intmap_value_at(m: ptr, slot: int) -> long

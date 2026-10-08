@@ -286,6 +286,28 @@ if id_count > 8 {
 
 This is the stack-buffer-with-heap-fallback idiom (`T buf[N]; T* p = buf; if (n > N) p = malloc(...)`). Only a *named array* decays; an array *literal* initializer (`x = [1, 2, 3]`) still binds a real array. To keep the array type, annotate the binding explicitly (`x: byte[128] = ...`).
 
+**A fixed-size array is a value.** A parameter typed `int[3]` is the callee's own copy of the caller's elements, so a write to it, by the callee or by a closure in it, stays in the callee, and `xs.len` is the declared length; the argument must be an array of exactly that length (a slice parameter, `int[]`, takes any length). Binding an array to a variable that already holds one of the same length copies its elements (`a = b`); an array keeps the length of its first binding, so binding one of another length is a type error. An element of a `const` array cannot be written: copy the table into an array of your own first.
+
+```aether,run
+sum3(xs: int[3]) -> int {
+    xs[0] = 100            // the callee's copy
+    return xs[0] + xs[1] + xs[2]
+}
+
+main() {
+    a = [1, 2, 3]
+    b = [7, 8, 9]
+    println("${sum3(a)} ${a[0]}")
+    a = b                  // copies b's elements
+    b[0] = 0
+    println("${a[0]} ${b[0]}")
+}
+```
+```output
+105 1
+7 0
+```
+
 **An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
 
 ```aether,run
@@ -2681,6 +2703,18 @@ pqsort(a: ptr, n: size_t, es: size_t, cmp: const ptr, lr: size_t, rr: size_t) { 
 
 Passing a plain `ptr` where the C conversion is safe stays allowed at call sites; only the *emitted prototype* carries the exact spelling. C ABI scalar aliases (`size_t`, `uint64_t`, …) emit their exact C name the same way. `const`-qualification survives into the generated C so the C compiler diagnoses writes; Aether-side write rejection is not (yet) enforced.
 
+### `@mutates` the extern writes through this parameter
+
+A C function's body is not visible to the compiler. Operands are evaluated left to right (see **Evaluation order** under [Built-in Functions](#built-in-functions)) by evaluating an operand ahead, into a temporary, when a later operand can observe its effect, and for an extern the effects are what its declaration says: a parameter marked `@mutates` is memory the call writes through. Two calls in one operand list that read or write the same handle through such an extern are then evaluated in source order; an unmarked extern is taken to write nothing, so plain reads such as `bytes.get(b, i) | bytes.get(b, j)` stay inline.
+
+```aether,fragment
+extern list_add_raw(list: @mutates ptr, item: ptr) -> int
+extern aether_pqueue_pop(pq: @mutates ptr) -> ptr
+extern aether_bytes_get(b: ptr, index: int) -> int        // a read: no mark
+```
+
+The std collections (`list`, `collections`, `pqueue`, `intarr`, `floatarr`, `intmap`, `set`, `bytes`) carry it on every extern that appends, stores, removes, clears, sorts or frees. It stacks with the other parameter attributes (`@aether`, `@retain`); order does not matter.
+
 ### `@extern("c_name")` bind to a renamed C symbol
 
 When the Aether-side name should differ from the C symbol (for example, to expose a clean module surface without trailing `_raw` suffixes), prefix the declaration with `@extern("c_symbol")`:
@@ -3028,16 +3062,22 @@ A segment that writes a variable (`${i++}`, `${n = n + 1}`) another segment
 uses is evaluated ahead the same way.
 
 The same holds for every other list of operands: a call's arguments (a
-module call's too), the two sides of a binary operator, the fields of a
-struct literal or a message, the elements of an array literal, and the
-values of a multi-value `return` are evaluated left to right. An operand
-is evaluated first, into a temporary, when a later one depends on it: one
-writes a variable the other uses (`f(i++, i)`, `i++ + i++`), or one makes a
-call that can change what the other reads. A call can change a module
-global, a variable it shares with a closure it runs, and memory it is
-handed by reference; what a function of the program writes is read off its
-body. A list with no such pair compiles as written. An array literal stored
-into an array that already exists is evaluated whole before it is stored:
+module call's too, and named arguments in the order written), the two
+sides of a binary operator, the indexes of an assignment's target and
+then its value, the fields of a struct literal or a message, the elements
+of an array literal, and the values of a multi-value `return` are
+evaluated left to right. An operand is evaluated first, into a temporary,
+when a later one depends on it: one writes a variable the other uses
+(`f(i++, i)`, `i++ + i++`, `arr[i++] = i`), or one makes a call that can
+change what the other reads. A closure literal reads the variables it
+captures where it stands, so `f(i++, || { return i })` makes the closure
+after the step. A call can change a module global, a variable it shares
+with a closure it runs, and memory it is handed by reference; what a
+function of the program writes is read off its body, and what a C extern
+writes is what its declaration says (an `@mutates` parameter, see
+[Extern Functions](#extern-functions)). A list with no such pair compiles
+as written. An array literal stored into an array that already exists is
+evaluated whole before it is stored:
 
 ```aether,run
 pair(a: int, b: int) -> int { return a * 10 + b }
@@ -3048,17 +3088,24 @@ main() {
     a = [1, 2, 3]
     a = [a[2], a[1], a[0]]
     println("${a[0]} ${a[1]} ${a[2]}")
+    arr = [0, 0]
+    k = 0
+    arr[k++] = k
+    println("${arr[0]} ${arr[1]}")
 }
 ```
 ```output
 1
 3 2 1
+1 0
 ```
 
-What a C extern or a C function pointer does is not visible to the
-compiler, so two calls that reach one only through such a function keep
-the order C gives them (`pair(list.pop(l), list.pop(l))`). Bind the results
-to locals first where that order matters.
+A C function pointer's body is not visible to the compiler, and neither
+is an extern's beyond its `@mutates` parameters, so two calls that reach
+memory only through an unmarked extern keep the order C gives them. Bind
+the results to locals first where that order matters. The target of a
+compound assignment (`a[i] += v`) is read and then written, so a write
+inside it (`a[i++] += v`) is refused rather than run twice.
 
 ### Heredoc strings
 

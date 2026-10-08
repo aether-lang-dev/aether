@@ -512,6 +512,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->match_result_own = NULL;
     gen->match_result_struct = NULL;
     gen->match_result_replace = 0;
+    gen->match_result_cell = NULL;
     gen->preempt_loops = 0;
     gen->series_collapse_off = 0;
     gen->in_string_closure = 0;
@@ -560,6 +561,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->closure_capacity = 0;
     gen->closure_var_map = NULL;
     gen->closure_var_count = 0;
+    gen->closure_var_scope = NULL;
     gen->closure_var_capacity = 0;
     // Heap string ownership tracking
     gen->heap_string_vars = NULL;
@@ -5039,6 +5041,8 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
      * for them. */
     ASTNode* prev_current_function = gen->current_function;
     gen->current_function = main;
+    const char* prev_closure_var_scope = gen->closure_var_scope;
+    gen->closure_var_scope = "main";   /* #2513 */
 
     int runs_scheduler = main_runs_scheduler(gen);
     int needs_main_exit = runs_scheduler || has_return_statement(main);
@@ -5100,6 +5104,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "}");
     }
     gen->current_function = prev_current_function;
+    gen->closure_var_scope = prev_closure_var_scope;
 }
 
 /* Recursively find the first `reply <Msg> { ... }` message-constructor name

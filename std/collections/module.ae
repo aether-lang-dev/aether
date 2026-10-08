@@ -29,20 +29,20 @@ exports(
 // ---- ArrayList raw externs ----
 extern list_new() -> ptr
 extern list_new_in(alloc: ptr) -> ptr
-extern list_add_raw(list: ptr, item: ptr) -> int
+extern list_add_raw(list: @mutates ptr, item: ptr) -> int
 // Heap-string-aware add (#467). Retains the value, tags the list,
 // stores the pointer. list_free releases owned-string elements
 // before freeing the backing array. Codegen auto-routes
 // `list.add(l, heap_string_expr)` here when the value is heap-
 // classified — direct callers pick this when they want explicit
 // ownership transfer.
-extern list_add_string_owned(list: ptr, item: ptr) -> int
+extern list_add_string_owned(list: @mutates ptr, item: ptr) -> int
 extern list_get_raw(list: ptr, index: int) -> ptr
-extern list_set(list: ptr, index: int, item: ptr)
+extern list_set(list: @mutates ptr, index: int, item: ptr)
 extern list_size(list: ptr) -> int
-extern list_remove(list: ptr, index: int)
-extern list_clear(list: ptr)
-extern list_free(list: ptr)
+extern list_remove(list: @mutates ptr, index: int)
+extern list_clear(list: @mutates ptr)
+extern list_free(list: @mutates ptr)
 
 // ---- HashMap raw externs ----
 extern map_new() -> ptr
@@ -56,20 +56,20 @@ extern map_new() -> ptr
 // Keys cross as `@aether string`: the C map reads the AetherString's length,
 // so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C
 // string, "a\0x" and "a\0y" were one key, "a".
-extern map_put_raw(map: ptr, key: @aether string, value: ptr) -> int
+extern map_put_raw(map: @mutates ptr, key: @aether string, value: ptr) -> int
 // Heap-string-aware put (#467). Retains the value and tags the
 // map so map_free releases each string value before freeing.
-extern map_put_string_owned(map: ptr, key: @aether @retain string, value: ptr) -> int
+extern map_put_string_owned(map: @mutates ptr, key: @aether @retain string, value: ptr) -> int
 extern map_get_raw(map: ptr, key: @aether string) -> ptr
 extern map_has(map: ptr, key: @aether string) -> int
-extern map_remove(map: ptr, key: @aether string)
+extern map_remove(map: @mutates ptr, key: @aether string)
 extern map_size(map: ptr) -> int
-extern map_clear(map: ptr)
-extern map_free(map: ptr)
+extern map_clear(map: @mutates ptr)
+extern map_free(map: @mutates ptr)
 
 // ---- Key iteration ----
 extern map_keys_raw(map: ptr) -> ptr
-extern map_keys_free(keys: ptr)
+extern map_keys_free(keys: @mutates ptr)
 
 // ---- IntArray raw externs ----
 // Fixed-size packed int buffer with O(1) random access. For DP
@@ -80,7 +80,7 @@ extern intarr_new_raw(size: int) -> ptr
 extern intarr_new_filled_raw(size: int, init: int) -> ptr
 extern intarr_size(arr: ptr) -> int
 extern intarr_get_raw(arr: ptr, i: int) -> int
-extern intarr_set_raw(arr: ptr, i: int, value: int)
+extern intarr_set_raw(arr: @mutates ptr, i: int, value: int)
 @c_include("aether_arr_inline.h")
 // #1986: the unchecked accessors are `static inline` in that header,
 // so an element access is the load it names rather than a call the C
@@ -88,9 +88,9 @@ extern intarr_set_raw(arr: ptr, i: int, value: int)
 // the header in and mark them @c_import, or its own prototype
 // collides with the header's definition.
 extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
-extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
-extern intarr_fill(arr: ptr, value: int)
-extern intarr_free(arr: ptr)
+extern intarr_set_unchecked(arr: @mutates ptr, i: int, value: int) @c_import
+extern intarr_fill(arr: @mutates ptr, value: int)
+extern intarr_free(arr: @mutates ptr)
 
 // A bounded int[] view of a native intarr handle, through this
 // compatibility facade (#2301) — the same bounded view std.intarr.array()
@@ -128,20 +128,20 @@ extern string_list_new() -> ptr
 // on non-magic `char*`, so the list could never reclaim a
 // `string.concat`/`split` result. Copy-on-add owns the bytes outright,
 // fixing the leak with no UAF. (#420 / leak-tail follow-up.)
-extern string_list_add(list: ptr, s: string) -> int
+extern string_list_add(list: @mutates ptr, s: string) -> int
 extern string_list_get(list: ptr, index: int) -> string
 // `s` is copied, same as string_list_add; the overwritten element is freed.
-extern string_list_set(list: ptr, index: int, s: string)
+extern string_list_set(list: @mutates ptr, index: int, s: string)
 extern string_list_size(list: ptr) -> int
-extern string_list_remove(list: ptr, index: int)
-extern string_list_clear(list: ptr)
-extern string_list_free(list: ptr)
+extern string_list_remove(list: @mutates ptr, index: int)
+extern string_list_clear(list: @mutates ptr)
+extern string_list_free(list: @mutates ptr)
 // #967: stable sort. `cmp` is a comparator closure `fn(string, string) -> int`
 // (negative / 0 / positive, like strcmp), passed as a boxed closure (ptr).
 // Reorders slots only — safe against the get/set aliasing trap. sort_lex is
 // the closure-free ascending-lexicographic common case.
-extern string_list_sort(list: ptr, cmp: ptr)
-extern string_list_sort_lex(list: ptr)
+extern string_list_sort(list: @mutates ptr, cmp: ptr)
+extern string_list_sort_lex(list: @mutates ptr)
 
 // ---- Go-style wrappers ----
 

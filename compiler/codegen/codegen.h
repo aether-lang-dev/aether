@@ -302,6 +302,9 @@ typedef struct {
     // match_result_replace is set it replaces the value the result held.
     const char* match_result_struct;
     int match_result_replace;
+    // #2514: when non-NULL, the result variable is a promoted capture of
+    // this type: each value arm stores into its cell (emit_cell_store).
+    Type* match_result_cell;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so
@@ -434,11 +437,17 @@ typedef struct {
     int closure_counter;    // unique ID for closure env structs and functions
     // Map variable names to closure IDs (set during variable declaration codegen)
     struct ClosureVarMap {
+        char* scope;        // #2513: the scope declaring the variable
         char* var_name;
         int closure_id;
     }* closure_var_map;
     int closure_var_count;
     int closure_var_capacity;
+    /* #2513: the scope whose variables closure_var_map lookups resolve
+     * against while a body is emitted: a function's name, "main", or a
+     * receive arm's or a hoisted closure's synthetic name, as
+     * discover_closures_scoped names them. */
+    const char* closure_var_scope;
     // Pending closures: discovered during expression codegen, emitted at file scope
     struct ClosureInfo {
         int id;                  // unique closure ID

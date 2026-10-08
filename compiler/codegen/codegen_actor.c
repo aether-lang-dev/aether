@@ -630,6 +630,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         int prev_promoted_count = gen->current_promoted_capture_count;
                         gen->current_promoted_captures = arm_promoted;
                         gen->current_promoted_capture_count = arm_promoted_count;
+                        const char* prev_closure_var_scope = gen->closure_var_scope;
+                        gen->closure_var_scope = arm_name;   /* #2513 */
 
                         // Pre-hoist `_heap_<name>` companions for string
                         // locals in the handler body, exactly as
@@ -675,6 +677,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
                         gen->current_promoted_captures = prev_promoted;
                         gen->current_promoted_capture_count = prev_promoted_count;
+                        gen->closure_var_scope = prev_closure_var_scope;
 
                         unindent(gen);
                         print_line(gen, "}");

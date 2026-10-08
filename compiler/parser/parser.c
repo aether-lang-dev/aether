@@ -1151,21 +1151,30 @@ static int token_is_compound_assign(Token* t) {
     }
 }
 
-/* Can this lvalue be evaluated twice without observable effect? Names,
- * fields, elements, literals and arithmetic over them — anything with a
- * call in it cannot. */
-static int lvalue_is_repeatable(ASTNode* n) {
-    if (!n) return 1;
+/* Why this lvalue cannot be evaluated twice without observable effect, or
+ * 0 when it can: names, fields, elements, literals and arithmetic over
+ * them. LVALUE_CALL: anything with a call in it. LVALUE_WRITE: a write
+ * inside it (`a[i++] += 1` desugared to `a[i++] = a[i++] + 1` stepped `i`
+ * twice, #2516). */
+enum { LVALUE_CALL = 1, LVALUE_WRITE = 2 };
+static int lvalue_unrepeatable(ASTNode* n) {
+    if (!n) return 0;
     switch (n->type) {
         case AST_IDENTIFIER: case AST_LITERAL: case AST_MEMBER_ACCESS:
         case AST_ARRAY_ACCESS: case AST_BINARY_EXPRESSION: case AST_UNARY_EXPRESSION:
             break;
         default:
-            return 0;
+            return LVALUE_CALL;
     }
-    for (int i = 0; i < n->child_count; i++)
-        if (!lvalue_is_repeatable(n->children[i])) return 0;
-    return 1;
+    if (n->value && ((n->type == AST_UNARY_EXPRESSION &&
+                      (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0)) ||
+                     (n->type == AST_BINARY_EXPRESSION && strcmp(n->value, "=") == 0)))
+        return LVALUE_WRITE;
+    for (int i = 0; i < n->child_count; i++) {
+        int why = lvalue_unrepeatable(n->children[i]);
+        if (why) return why;
+    }
+    return 0;
 }
 static ASTNode* parse_primary_expression_inner(Parser* parser);
 
@@ -2971,19 +2980,24 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 // target is a field or an element. It is `p.n = p.n + rhs`
                 // and is built as that (the plain `=` form the typechecker
                 // and codegen already handle for these targets). Only a
-                // target the language can evaluate twice qualifies — a
-                // chain of names, fields, indexes and arithmetic, no call —
-                // since the desugaring repeats it. Before, the statement
-                // stopped at the operator: "Expected statement in block".
+                // target the language can evaluate twice qualifies, a
+                // chain of names, fields, indexes and arithmetic, with no
+                // call and no write in it, since the desugaring repeats
+                // it. Before, the statement stopped at the operator:
+                // "Expected statement in block".
                 Token* cop = peek_token(parser);
                 if (cop && token_is_compound_assign(cop) &&
                     (expr->type == AST_MEMBER_ACCESS || expr->type == AST_ARRAY_ACCESS ||
                      expr->type == AST_FUNCTION_CALL)) {
-                    if (!lvalue_is_repeatable(expr)) {
+                    int why = lvalue_unrepeatable(expr);
+                    if (why) {
                         /* #2481: `f(x) += v` stopped at the operator with
-                         * "Expected statement in block". */
+                         * "Expected statement in block". #2516: `a[i++] += v`
+                         * stepped `i` twice. */
                         parser_error(parser, expr->type == AST_FUNCTION_CALL
                             ? "cannot assign to the result of a call: it is a temporary, so the write would be lost; bind it to a variable first"
+                            : why == LVALUE_WRITE
+                            ? "the target of a compound assignment is read and written, so a write inside it (`i++`, `i = v`) would run twice; step the variable in a statement of its own first"
                             : "the target of a compound assignment must be a variable, a field or an element with no call in it; write `target = target op value` with a temporary instead");
                         /* Skip the rest of the statement's line so the
                          * operator and its operand are not reported again. */
@@ -5231,6 +5245,16 @@ ASTNode* parse_extern_declaration(Parser* parser) {
                  *             string.length / equals / println but
                  *             a UAF for retainers. See #420 follow-up.
                  *
+                 *   @mutates: the function writes through the pointer
+                 *             (a list it appends to, a buffer it
+                 *             fills). Operands are evaluated left to
+                 *             right only where one can change what
+                 *             another reads, and a C function's body is
+                 *             not visible, so this is what tells codegen
+                 *             that `pair(list.pop(l), list.pop(l))`
+                 *             needs its first call evaluated first.
+                 *             See #2516.
+                 *
                  * Multiple annotations stack: `name: @aether @retain string`
                  * is legal. Order is irrelevant; storage is a
                  * comma-separated set on `param->annotation`. */
@@ -5245,10 +5269,13 @@ ASTNode* parse_extern_declaration(Parser* parser) {
                         } else if (strcmp(attr->value, "retain") == 0) {
                             tag = "retain_param";
                             advance_token(parser);
+                        } else if (strcmp(attr->value, "mutates") == 0) {
+                            tag = "mutates_param";
+                            advance_token(parser);
                         }
                     }
                     if (!tag) {
-                        parser_error(parser, "unknown extern-param attribute (expected @aether or @retain)");
+                        parser_error(parser, "unknown extern-param attribute (expected @aether, @retain or @mutates)");
                         break;
                     }
                     /* Append to the comma-separated set, deduping. */

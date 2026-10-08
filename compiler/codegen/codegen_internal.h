@@ -97,6 +97,9 @@ const char* interp_temp_c_type(Type* t);
  * list feeds; generate_statement releases the bindings when the statement
  * ends (order_prelude_end of the depth it saw). See codegen_expr.c. */
 void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char* target);
+/* #2513: closure_var_map, by scope and name (see codegen_expr.c). */
+int closure_var_id(CodeGenerator* gen, const char* scope, const char* name);
+void closure_var_bind(CodeGenerator* gen, const char* scope, const char* name, int cid);
 int order_prelude_depth(void);
 void order_prelude_end(int depth);
 /* Whether the discarded error slot of an `or`-expression's fallible is a
@@ -294,6 +297,11 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
 /* #2474: a cell holding a fixed-size array (`E[N]`) is a pointer to the
  * whole array, `E (*name)[N]`; see the definitions in codegen_stmt.c. */
 int promoted_cell_array_len(const char* c_type, char* elem, size_t n);
+/* #2516: a fixed-size array parameter is passed as `E _param_x[N]` and
+ * copied into the body's own array (see codegen_stmt.c). */
+int is_sized_array_param(Type* t);
+void emit_sized_array_param_declarator(CodeGenerator* gen, Type* t, const char* name);
+void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name);
 void promoted_cell_pointer(const char* c_type, const char* name,
                            char* out, size_t n);
 /* The cell for a promoted PARAMETER (a function's or a closure's), seeded
@@ -507,6 +515,9 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program);
 void get_promoted_names_for_func(CodeGenerator* gen, const char* func_name,
                                  char*** out_names, int* out_count);
 int is_promoted_capture(CodeGenerator* gen, const char* name);
+/* The C type of `var_name` as `parent_func` declares it (a function name,
+ * "main", a receive arm or a hoisted closure scope); "int" when unknown. */
+const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
 void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
                               char* out, size_t out_size);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);

@@ -299,6 +299,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->is_const = 0;
     symtab_link(table, symbol);
 }
 
@@ -403,6 +404,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->is_const = 0;
     symtab_link(table, symbol);
 }
 
@@ -1129,6 +1131,49 @@ static const char* type_name(Type* t) {
         case TYPE_UNKNOWN:  return "unknown";
         default:            return "unknown";
     }
+}
+
+/* #2516: a fixed-size array or slice spelled as written (`int[3]`,
+ * `string[]`); type_name says only "array". */
+static const char* array_type_spell(Type* t, char* buf, size_t n) {
+    if (!t || t->kind != TYPE_ARRAY) return type_name(t);
+    if (t->array_size > 0)
+        snprintf(buf, n, "%s[%d]", type_name(t->element_type), t->array_size);
+    else
+        snprintf(buf, n, "%s[]", type_name(t->element_type));
+    return buf;
+}
+
+/* #2516: the binding `decl` just registered in `table` is a `const` (a
+ * module `var` shares the node kind but is writable). */
+static void mark_const_symbol(SymbolTable* table, ASTNode* decl) {
+    if (!decl || decl->type != AST_CONST_DECLARATION || !decl->value ||
+        (decl->annotation && strcmp(decl->annotation, "global_var") == 0)) return;
+    Symbol* s = lookup_symbol_local(table, decl->value);
+    if (s) s->is_const = 1;
+}
+
+/* #2516: a write to an element (or a field) of a `const`: `TABLE[i] = v`,
+ * `TABLE[i] op= v`, `TABLE[i]++`. A const array is a read-only table (a
+ * C `static const`), so the write is refused here rather than by the C
+ * compiler against generated code. A bare `NAME = v` is not such a write:
+ * it binds a local of that name, which shadows the constant. Returns 1
+ * when it reported. */
+static int reject_const_element_write(ASTNode* target, SymbolTable* table, ASTNode* at) {
+    ASTNode* root = target;
+    while (root && (root->type == AST_ARRAY_ACCESS || root->type == AST_MEMBER_ACCESS) &&
+           root->child_count > 0)
+        root = root->children[0];
+    if (!root || root == target || root->type != AST_IDENTIFIER || !root->value) return 0;
+    Symbol* s = lookup_symbol(table, root->value);
+    if (!s || !s->is_const) return 0;
+    char msg[300];
+    snprintf(msg, sizeof(msg),
+             "cannot write to an element of '%s': it is a constant, a read-only table",
+             root->value);
+    type_error_hint(msg, "copy it into an array of your own (`t = [...]`) and change that",
+                    at->line, at->column);
+    return 1;
 }
 
 static int is_integer_scalar(TypeKind kind) {
@@ -1978,6 +2023,30 @@ static void reject_struct_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
              "Argument %d '%s' of '%s': expected %s, got %s",
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_type->struct_name, arg_type->struct_name);
+    type_error(emsg, arg->line, arg->column);
+}
+
+/* #2516: a fixed-size array parameter (`xs: int[3]`) takes an array of
+ * that element type and length: the callee copies that many elements and
+ * its `xs.len` is the declared length. A longer or shorter array, a slice
+ * or a pointer has no such guarantee; a slice parameter (`int[]`) takes
+ * those. */
+static void reject_sized_array_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                        Type* param_type, int index, const char* param_name) {
+    if (!param_type || param_type->kind != TYPE_ARRAY || param_type->array_size <= 0 ||
+        param_type->index_enum_name || !arg_type || arg_type->kind == TYPE_UNKNOWN) return;
+    if (arg_type->kind == TYPE_ARRAY && arg_type->array_size == param_type->array_size &&
+        is_type_compatible(arg_type->element_type, param_type->element_type) &&
+        is_type_compatible(param_type->element_type, arg_type->element_type)) return;
+    char want[96], got[96], emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got %s; a fixed-size array "
+             "parameter takes an array of exactly that length (take a slice, `%s[]`, "
+             "for any length)",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             array_type_spell(param_type, want, sizeof(want)),
+             array_type_spell(arg_type, got, sizeof(got)),
+             type_name(param_type->element_type));
     type_error(emsg, arg->line, arg->column);
 }
 
@@ -4755,6 +4824,7 @@ int typecheck_program(ASTNode* program) {
                     }
                 }
                 add_symbol(global_table, child->value, ctype, 0, 0, 0);
+                mark_const_symbol(global_table, child);   /* #2516 */
                 /* #929: a module-scope `var x = 0` is a global_var whose type
                  * was inferred 32-bit int from a bare initializer. Carry the
                  * parser's `type_inferred` marker onto the symbol (mirroring
@@ -7164,6 +7234,24 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     free_type(init_type);
                     return 0;
                 }
+                /* #2516: binding a fixed-size array to an array that already
+                 * exists copies its elements, and an array keeps the length
+                 * of its first binding, so the two lengths must agree. (An
+                 * array literal may be shorter: the rest is zeroed.) */
+                if (bound && bound->type && bound->type->kind == TYPE_ARRAY &&
+                    bound->type->array_size > 0 && init->type != AST_ARRAY_LITERAL &&
+                    init_type && init_type->kind == TYPE_ARRAY && init_type->array_size > 0 &&
+                    init_type->array_size != bound->type->array_size) {
+                    char want[96], got[96], rmsg[400];
+                    snprintf(rmsg, sizeof(rmsg),
+                        "'%s' is %s and cannot take %s: an array keeps the length of its "
+                        "first binding, and binding another array to it copies the elements",
+                        stmt->value, array_type_spell(bound->type, want, sizeof(want)),
+                        array_type_spell(init_type, got, sizeof(got)));
+                    type_error(rmsg, stmt->line, stmt->column);
+                    free_type(init_type);
+                    return 0;
+                }
                 if (existing && existing->type && existing->type->kind == TYPE_BYTE &&
                     byte_assignment_literal_out_of_range(init)) {
                     char msg[256];
@@ -7510,6 +7598,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // destructure path above.
             if (stmt->value && strcmp(stmt->value, "_") != 0) {
                 add_symbol(table, stmt->value, clone_type(stmt->node_type), 0, 0, 0);
+                mark_const_symbol(table, stmt);   /* #2516 */
                 /* #698: carry the parser's inferred-type marker onto the
                  * binding, but only for a 32-bit int (the sole narrowing
                  * target). A later 64-bit re-bind then triggers the guard
@@ -7542,7 +7631,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->child_count >= 2) {
                 ASTNode* left = stmt->children[0];
                 ASTNode* right = stmt->children[1];
-                
+                if (reject_const_element_write(left, table, stmt)) return 0;   /* #2516 */
+
                 Symbol* symbol = lookup_symbol(table, left->value);
                 if (!symbol) {
                     char error_msg[256];
@@ -8516,6 +8606,10 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
         case AST_UNARY_EXPRESSION: {
             if (expr->child_count > 0) {
                 typecheck_expression(expr->children[0], table);
+                if (expr->value && (strcmp(expr->value, "++") == 0 ||
+                                    strcmp(expr->value, "--") == 0) &&
+                    reject_const_element_write(expr->children[0], table, expr))   /* #2516 */
+                    return 0;
                 /* `~` flips bits, which a float lane does not have in any
                  * sense C accepts: it reached the C compiler as an invalid
                  * operand. Integer lanes (masks) keep it. */
@@ -9854,6 +9948,11 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     }
 
     if (operator == TOKEN_ASSIGN) {
+        if (reject_const_element_write(left, table, expr)) {   /* #2516 */
+            free_type(left_type);
+            free_type(right_type);
+            return 0;
+        }
         ASTNode* temp = assign_target_temporary(left, table, 1);
         if (temp) {
             char msg[512];
@@ -11048,6 +11147,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_closure_for_fnptr(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||
                                   (da && da->kind == TYPE_BITSTRUCT);
