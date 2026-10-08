@@ -481,6 +481,17 @@ Tells the heap-string-tracker escape walker "this slot stores the pointer; mark 
 
 Audited stdlib retainers carrying `@retain` today: the refcount ops `string_retain` / `string_release` / `string_free` (`std.string`, each taking a strong reference on the same buffer), and the `key` parameter of `map_put_string_owned` (`std.collections`). Other functions are added as their callers are audited.
 
+### `@noescape` per-parameter annotation on extern declarations
+
+The opposite declaration, for closures (#2523). A closure passed to an extern `ptr` or `fn` parameter is a callback the C side may store and invoke later, so the compiler never releases its environment after the call unless the declaration says the function uses it only during the call:
+
+```aether,fragment
+extern string_seq_each(s: *StringSeq, f: @noescape ptr)
+extern fs_walk_raw(path: string, cb: @noescape ptr) -> int
+```
+
+With the mark, the closure argument is treated as it is for an Aether callee whose parameter provably keeps nothing: a closure literal's environment is released right after the call (through its destructor, so the cells and strings it captured go too), a closure local keeps its reference and releases it at scope end, and a `ptr` slot gets a box on the caller's stack (`_aether_box_closure_in`) rather than a malloc'd one. The C function must neither store, free nor hand the box or the environment to another thread. Without the mark the environment is kept for the rest of the program (the safe direction: a leak, never a use after free), which is what an extern that stores the callback (`aether_observe`, `aether_worker_run`, the HTTP server handlers) relies on. Only valid on `ptr` and `fn` parameters.
+
 ### Return-ownership contract (uniform-heap return-escape)
 
 Every function whose return type is `string` honours one rule:

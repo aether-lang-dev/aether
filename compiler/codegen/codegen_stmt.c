@@ -4358,6 +4358,11 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                     /* not an escape via this call */
                 } else if (is_consuming_free(fn)) {
                     return 1;  /* this function frees it; the caller must not */
+                } else if (is_noescape_extern_param(gen, fn, i)) {
+                    /* #2523: the extern's declaration says the argument is
+                     * used only during the call, neither stored nor freed,
+                     * so a wrapper that forwards its parameter there
+                     * (`fs.walk` into `fs_walk_raw`) keeps nothing either. */
                 } else if (is_retain_extern_param(gen, fn, i)) {
                     return 1;
                 } else if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) {
@@ -4761,9 +4766,9 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
  * authoritative; for an extern callee the walk silently defaults to "does not
  * escape", which is exactly wrong for the common extern-callback-registry
  * pattern (the C side keeps the boxed closure and invokes it later). Treat
- * unknown-body callees as escaping, the fail-safe direction (leak >> UAF).
- * When the future `@retains` annotation lands, opt-in non-escaping externs
- * can re-enable the drain. */
+ * unknown-body callees as escaping, the fail-safe direction (leak >> UAF),
+ * unless the extern's declaration marks the parameter `@noescape`: used only
+ * during the call, so the argument is dead after it (#2523). */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
     if (!gen || !call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
 
@@ -4783,6 +4788,10 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
     /* #2518: a container that stores the closure retains it; the argument's own
      * reference is dead after the call. */
     if (closure_container_store_value(gen, call) == cclos) return cclos;
+    /* #2523: an extern's `@noescape` parameter is its declaration's word
+     * that nothing is kept. An extern injects no `_ctx`, so the argument's
+     * index is the parameter's. */
+    if (is_noescape_extern_param(gen, call->value, cclos_idx)) return cclos;
 
     /* Map AST arg index -> function-def param index. When the callee is a
      * `_ctx: ptr` builder and the user omitted `_ctx`, codegen auto-injects
@@ -5004,6 +5013,10 @@ static int env_scan_param_keeps(CodeGenerator* gen, EnvScan* s, ASTNode* call, A
     }
     if (pos < 0) return 1;
     if (env_scan_callee_is_variable(gen, s, call->value)) return 1;
+    /* #2523: an extern's `@noescape` parameter is used only during the
+     * call, so the local keeps its reference and releases it at scope end,
+     * as after an Aether callee that keeps nothing. */
+    if (is_noescape_extern_param(gen, call->value, pos)) return 0;
     char fn_norm[256];
     const char* fn = codegen_normalise_callee(call->value, fn_norm, sizeof(fn_norm));
     const DefClauses* dc = program_index_clauses(gen->program, fn);
@@ -11120,9 +11133,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * exactly wrong for the common extern-callback-registry
                      * pattern (the C side keeps the boxed closure and
                      * invokes it later). Treat unknown-body callees as
-                     * escaping — fail-safe direction (leak ≫ UAF). When
-                     * the future `@retains` annotation lands, opt-in
-                     * non-escaping externs can re-enable the drain. */
+                     * escaping, the fail-safe direction (leak over UAF),
+                     * unless the extern declares the parameter `@noescape`
+                     * (#2523). */
                     ASTNode* cclos = transient_closure_arg(gen, inner);
                     if (inner && call_returns_owned_closure(gen, inner)) {
                         /* #2507: a closure a call hands over, discarded:

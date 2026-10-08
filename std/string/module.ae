@@ -320,10 +320,11 @@ extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 
 // Closure-bearing combinators (#421 — multi-sequence iteration). Each
 // takes an Aether closure as the per-element callback. The callback
-// params are declared `ptr` so the codegen heap-BOXES the closure
-// (`_aether_box_closure`) into the slot; the C runtime unboxes, invokes
-// the body with the captured env as the implicit first argument, and
-// frees the box (+ its env) when the walk completes — so a one-shot
+// params are declared `@noescape ptr` (#2523): the codegen boxes the
+// closure on the caller's stack, the C runtime invokes the body with the
+// captured env as the implicit first argument during the call only, and
+// the caller releases the environment once the call returns, as after a
+// call to an Aether function that keeps nothing, so a one-shot
 // `string.seq_map(s, |x| ...)` does not leak the closure. All five are
 // a single iterative spine walk: O(n) time, O(1) auxiliary stack (no
 // recursion — that's the O(N^2)->O(N) point of the issue).
@@ -337,11 +338,11 @@ extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 // `map`/`filter` return a fresh, caller-owned *StringSeq (reclaimed
 // automatically at scope exit like any seq local). `reduce` returns the
 // caller's accumulator (`ptr`). `each`/`zip_each` return nothing.
-extern string_seq_each(s: *StringSeq, f: ptr)
-extern string_seq_map(s: *StringSeq, f: ptr) -> *StringSeq
-extern string_seq_filter(s: *StringSeq, pred: ptr) -> *StringSeq
-extern string_seq_reduce(s: *StringSeq, init: ptr, f: ptr) -> ptr
-extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: ptr)
+extern string_seq_each(s: *StringSeq, f: @noescape ptr)
+extern string_seq_map(s: *StringSeq, f: @noescape ptr) -> *StringSeq
+extern string_seq_filter(s: *StringSeq, pred: @noescape ptr) -> *StringSeq
+extern string_seq_reduce(s: *StringSeq, init: ptr, f: @noescape ptr) -> ptr
+extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: @noescape ptr)
 
 // Conversion
 extern string_to_cstr(str: string) -> string

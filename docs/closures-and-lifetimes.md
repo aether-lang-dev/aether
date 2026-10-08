@@ -181,7 +181,11 @@ lifetime"):
   right after the call. This is gated on a proven non-escape, invoking a
   closure parameter (`cb()`, an indirect-`call` node whose first child is
   the callee) is not an escape, whereas a stored or returned closure
-  suppresses the drain so its env follows the owner.
+  suppresses the drain so its env follows the owner. An extern has no
+  body to read, so a closure passed to one is kept unless the extern
+  declares the parameter `@noescape` (used only during the call, #2523):
+  the std seq combinators, `fs.walk` and `string_list_sort` do, so their
+  callbacks are released after the call like any transient callback.
 
 - **Stored in a list.** A closure value stored into a list is heap-boxed
   (the `fn → ptr` coercion) and the list owns the box; `list.free` now
@@ -192,9 +196,9 @@ lifetime"):
   leaves no copy behind: calling it, passing it to a user function whose
   parameter is only called or passed on the same way, or capturing it in
   a closure (#2480). Rebinding the local to a new closure frees the env
-  it replaces. A return, an alias, a store, an extern argument or a
-  binding to anything but a fresh closure leaves the env to the value's
-  holder.
+  it replaces. A return, an alias, a store, an argument to an extern
+  parameter not marked `@noescape`, or a binding to anything but a fresh
+  closure leaves the env to the value's holder.
 
 - **Captured by another closure.** An env is reference-counted (#2494):
   the value's owner holds one reference and every env that captured the

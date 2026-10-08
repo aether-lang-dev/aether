@@ -137,10 +137,12 @@ extern string_list_remove(list: ptr, index: int)
 extern string_list_clear(list: ptr)
 extern string_list_free(list: ptr)
 // #967: stable sort. `cmp` is a comparator closure `fn(string, string) -> int`
-// (negative / 0 / positive, like strcmp), passed as a boxed closure (ptr).
-// Reorders slots only — safe against the get/set aliasing trap. sort_lex is
-// the closure-free ascending-lexicographic common case.
-extern string_list_sort(list: ptr, cmp: ptr)
+// (negative / 0 / positive, like strcmp), passed as a boxed closure (ptr)
+// that the sort uses only during the call (`@noescape`, #2523: the caller
+// releases its environment afterwards). Reorders slots only, safe against
+// the get/set aliasing trap. sort_lex is the closure-free ascending-
+// lexicographic common case.
+extern string_list_sort(list: ptr, cmp: @noescape ptr)
 extern string_list_sort_lex(list: ptr)
 
 // ---- Go-style wrappers ----

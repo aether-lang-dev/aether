@@ -141,14 +141,9 @@ void string_list_free(StringList* list) {
  * `env` is the implicit first argument to `fn`. */
 typedef struct { void (*fn)(void); void* env; } AeStrListClosure;
 
-/* Free a boxed comparator closure — the callee owns it, matching the
- * seq-combinator convention. NULL-safe. */
-static void sl_closure_free(void* box) {
-    if (!box) return;
-    AeStrListClosure* clo = (AeStrListClosure*)box;
-    if (clo->env) free(clo->env);
-    free(box);
-}
+/* The comparator is declared `@noescape` (#2523): its box is the caller's
+ * stack and its env the caller's to release after the sort, as for the seq
+ * combinators. Nothing here frees either. */
 
 /* Stable top-down merge sort of borrowed pointers, invoking the Aether
  * comparator. Taking the left run on a tie (`cmp <= 0`) preserves the
@@ -172,12 +167,9 @@ static void sl_msort(const char** a, const char** tmp, int lo, int hi,
 }
 
 void string_list_sort(StringList* list, void* cmp_box) {
-    if (!list || !list->items || !cmp_box) {
-        sl_closure_free(cmp_box);   /* still own the box on the error path */
-        return;
-    }
+    if (!list || !list->items || !cmp_box) return;
     int n = list_size(list->items);
-    if (n <= 1) { sl_closure_free(cmp_box); return; }
+    if (n <= 1) return;
 
     AeStrListClosure clo = *(AeStrListClosure*)cmp_box;
     int (*cmp)(void*, const char*, const char*) =
@@ -189,7 +181,6 @@ void string_list_sort(StringList* list, void* cmp_box) {
     if (!snap || !tmp) {
         if (snap) aether_caps_free(snap, bytes);
         if (tmp)  aether_caps_free(tmp, bytes);
-        sl_closure_free(cmp_box);
         return;
     }
 
@@ -201,7 +192,6 @@ void string_list_sort(StringList* list, void* cmp_box) {
 
     aether_caps_free(snap, bytes);
     aether_caps_free(tmp, bytes);
-    sl_closure_free(cmp_box);
 }
 
 /* Byte order over borrowed elements, for qsort: string_compare reads

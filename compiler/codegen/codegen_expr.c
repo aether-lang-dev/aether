@@ -353,13 +353,15 @@ static int callee_result_shape(CodeGenerator* gen, const char* func_name) {
 }
 
 /* #2507: may the owned closure at child `ai` of call `expr` be released once
- * the call returns? Only with proof its parameter keeps nothing: a named
- * callee with a visible body whose parameter neither escapes nor is
- * returned (a builder's injected `_ctx` shifts its parameters, so builders
- * are left alone), or a known closure literal's parameter, likewise. */
+ * the call returns? Only with proof its parameter keeps nothing: an extern
+ * parameter declared `@noescape` (#2523), a named callee with a visible
+ * body whose parameter neither escapes nor is returned (a builder's
+ * injected `_ctx` shifts its parameters, so builders are left alone), or a
+ * known closure literal's parameter, likewise. */
 static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
                                        ASTNode* closure, int ai, int first_arg) {
     if (func_name) {
+        if (is_noescape_extern_param(gen, func_name, ai)) return 1;
         if (!callee_has_visible_body(gen, func_name)) return 0;
         char fn_norm[256];
         const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
@@ -7756,8 +7758,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * Pre-fix: `fn`-typed local arg into a
                              * `ptr` slot caused gcc "expected void* but
                              * argument is of type _AeClosure" — silent
-                             * type-check accept, hard fail at C compile. */
-                            fprintf(gen->output, "_aether_box_closure(");
+                             * type-check accept, hard fail at C compile.
+                             *
+                             * #2523: a `@noescape` extern parameter reads
+                             * the box only during the call, so it gets one
+                             * on this stack frame (a compound literal of
+                             * the enclosing block) and the closure's env
+                             * stays its owner's: a literal's is released
+                             * after the call by the drain, a local's at its
+                             * scope end. */
+                            if (is_noescape_extern_param(gen, c_func_name, arg_printed)) {
+                                fprintf(gen->output, "_aether_box_closure_in(&(_AeClosureBox){ .tag = 0 }, ");
+                            } else {
+                                fprintf(gen->output, "_aether_box_closure(");
+                            }
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (expected == TYPE_FUNCTION &&

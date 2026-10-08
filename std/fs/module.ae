@@ -384,8 +384,10 @@ extern fs_glob_raw(pattern: string) -> ptr
 extern fs_glob_multi_raw(patterns: ptr) -> ptr
 
 // #977: recursive walk + change notification. Raw externs; the Aether-native
-// wrappers (walk / watch_open below) add the (value, err) surface.
-extern fs_walk_raw(path: string, cb: ptr) -> int
+// wrappers (walk / watch_open below) add the (value, err) surface. The walk
+// callback is used only during the call (#2523): the caller keeps its
+// environment and releases it once the walk returns.
+extern fs_walk_raw(path: string, cb: @noescape ptr) -> int
 extern fs_watch_open_raw(path: string) -> ptr
 // Block up to timeout_ms (negative = forever): 1 = something changed,
 // 0 = timeout, -1 = error / closed handle. Pending events are drained so
@@ -718,7 +720,7 @@ glob_multi(patterns: ptr) -> {
 // Traversal order within a directory is the platform's readdir order
 // (unspecified).
 // Returns (entries visited, "") or (0, error) when `path` can't be read.
-walk(path: string, cb: ptr) -> {
+walk(path: string, cb: fn) -> {
     n = fs_walk_raw(path, cb)
     if n < 0 {
         return 0, "cannot walk path"
@@ -1282,9 +1284,10 @@ find_ext(root: string, ext: string) -> string {
 //
 // `cnt` is a capture the callback assigns to, so it lives in a heap cell the
 // walk closure and this scope share. That cell used to leak once per call
-// (#2019): fs_walk_raw owns and frees the closure before returning, and the
+// (#2019): fs_walk_raw owned and freed the closure before returning, and the
 // scope-exit free was withheld because the compiler could not see that.
-// The cell is reference-counted now and needs no care here.
+// The cell is reference-counted now, and the closure is released here once
+// the walk returns (fs_walk_raw's callback is `@noescape`, #2523).
 _find_ext_collect(root: string, ext: string, exclude: string) -> ptr {
     sb = strbuilder.new(256)
     cnt = 0

@@ -3630,16 +3630,10 @@ char* path_rel(const char* base, const char* target) {
  * is malloc'd by _aether_box_closure and OWNED by the callee. */
 typedef struct { void (*fn)(void); void* env; } AeFsClosure;
 
-extern void aether_closure_env_free(void* env);
-
-static void fs_closure_free(void* box) {
-    if (!box) return;
-    AeFsClosure* clo = (AeFsClosure*)box;
-    /* #1398: through the env's own destructor, so the references its string
-     * captures own are released, not just the struct. */
-    if (clo->env) aether_closure_env_free(clo->env);
-    free(box);
-}
+/* The callback is read only during the walk: `fs_walk_raw`'s `cb` is
+ * declared `@noescape` (#2523), so the box is the caller's stack and the
+ * env the caller's to release once the walk returns. Nothing here frees
+ * either. */
 
 /* Walk paths are built into one shared heap buffer (append the entry name,
  * recurse, truncate back) so recursion costs no per-level path storage. */
@@ -3737,18 +3731,12 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
 }
 
 int fs_walk_raw(const char* root, void* cb_box) {
-    if (!root || !cb_box) { fs_closure_free(cb_box); return -1; }
-    if (!aether_sandbox_check("fs_read", root)) {
-        fs_closure_free(cb_box);
-        return -1;
-    }
+    if (!root || !cb_box) return -1;
+    if (!aether_sandbox_check("fs_read", root)) return -1;
     size_t rlen = strlen(root);
-    if (rlen == 0 || rlen >= FS_WALK_PATH_CAP) {
-        fs_closure_free(cb_box);
-        return -1;
-    }
+    if (rlen == 0 || rlen >= FS_WALK_PATH_CAP) return -1;
     int root_kind = fs_walk_stat_kind(root);
-    if (root_kind == 0) { fs_closure_free(cb_box); return -1; }
+    if (root_kind == 0) return -1;
 
     AeFsClosure clo = *(AeFsClosure*)cb_box;
     int (*cb)(void*, const char*, int, int) =
@@ -3757,7 +3745,7 @@ int fs_walk_raw(const char* root, void* cb_box) {
     /* #462: the path buffer goes through the capability allocator like the
      * rest of the module's traversal storage. */
     char* buf = (char*)aether_caps_malloc(FS_WALK_PATH_CAP);
-    if (!buf) { fs_closure_free(cb_box); return -1; }
+    if (!buf) return -1;
     memcpy(buf, root, rlen + 1);
     /* Trim trailing separators so joined paths don't double the slash. */
     while (rlen > 1 && buf[rlen - 1] == '/') buf[--rlen] = '\0';
@@ -3769,7 +3757,6 @@ int fs_walk_raw(const char* root, void* cb_box) {
     }
 
     aether_caps_free(buf, FS_WALK_PATH_CAP);
-    fs_closure_free(cb_box);
     return count;
 }
 

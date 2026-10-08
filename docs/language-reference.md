@@ -2707,6 +2707,18 @@ Passing a plain `ptr` where the C conversion is safe stays allowed at call sites
 
 A C function's body is not visible to the compiler, and its declaration does not narrow what it does: it may write through any pointer it is given and any state of its own (a reader of stdin, a random generator with no handle parameter). So a call of an extern is evaluated ahead of any later operand that calls anything or reads memory through a pointer, see **Evaluation order** under [Built-in Functions](#built-in-functions); `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order, and `pair(strbuilder.append(b, "xy"), strbuilder.length(b))` reads the length after the append.
 
+### `@noescape` the extern uses this parameter only during the call
+
+A closure passed to an extern is a callback the C side may keep (an event handler, a server route, a timer), so by default the compiler never releases its environment after the call: freeing it would be a use after free if the callee stored the closure. A parameter marked `@noescape` says the function uses the argument only during the call, neither storing it, handing it to another thread, nor freeing it. The caller then keeps the closure's environment and releases it once the call returns, exactly as after a call to an Aether function that keeps nothing: a literal's right after the call, a local's at the end of its scope. A `ptr` slot receives a box built on the caller's stack instead of a heap one, and a wrapper that forwards its own `fn` parameter to such a slot (`fs.walk` into `fs_walk_raw`) keeps nothing either.
+
+```aether,fragment
+extern string_seq_each(s: *StringSeq, f: @noescape ptr)     // calls f per element, keeps nothing
+extern run_now(cb: @noescape fn) -> int                      // by value, same contract
+extern register_handler(cb: fn)                              // stored: no mark, the env lives on
+```
+
+It is only valid on `ptr` and `fn` parameters (a `string` parameter is borrowed unless `@retain` says otherwise). The C function must not free the box or the environment. The std callbacks that carry it: the string seq combinators (`seq_each`, `seq_map`, `seq_filter`, `seq_reduce`, `seq_zip_each`), `fs.walk`'s callback, `string_list_sort`'s comparator and the `std.mem` function-pointer shims. Externs that store the callback (`observe`, `worker.run`, the HTTP server handlers) stay unmarked.
+
 ### `@extern("c_name")` bind to a renamed C symbol
 
 When the Aether-side name should differ from the C symbol (for example, to expose a clean module surface without trailing `_raw` suffixes), prefix the declaration with `@extern("c_symbol")`:

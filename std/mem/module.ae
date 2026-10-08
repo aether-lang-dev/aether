@@ -250,16 +250,17 @@ extern aether_mem_udiv64_32(dividend: long, divisor: int, premainder: ptr) -> in
 // and calls through this extern, which casts and invokes.
 //
 // Driver: porting C functions like rqsort_idx that take a
-// comparator + swap callback from C.
-extern aether_mem_call_fn3_int(fn: ptr, a: long, b: long, opaque: ptr) -> int
+// comparator + swap callback from C. Each shim only calls through `fn`
+// during the call (`@noescape`, #2523).
+extern aether_mem_call_fn3_int(fn: @noescape ptr, a: long, b: long, opaque: ptr) -> int
 
 // Same shape, void return (e.g. swap callbacks).
-extern aether_mem_call_fn3_void(fn: ptr, a: long, b: long, opaque: ptr)
+extern aether_mem_call_fn3_void(fn: @noescape ptr, a: long, b: long, opaque: ptr)
 
 // Two-arg fnptr shim, void return. Driver case: GC user-finalizer
 // tables (`void (*)(JSContext*, void*)`) — both args cross the FFI
 // as ptr.
-extern aether_mem_call_fn2_void(fn: ptr, a: ptr, b: ptr)
+extern aether_mem_call_fn2_void(fn: @noescape ptr, a: ptr, b: ptr)
 
 // Reinterpret a raw pointer as a 64-bit integer address. Returns the
 // machine address of `p`. Driver case: porting C tagged-pointer code

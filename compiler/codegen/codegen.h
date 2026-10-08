@@ -273,6 +273,13 @@ typedef struct {
                              //   for retainers like string_list_add or
                              //   map_put_raw's key. See #420 follow-up. NULL
                              //   when no param carries the annotation.
+        int* params_noescape; // 1 per index when the param was declared
+                             //   `name: @noescape ptr` (or `fn`): the function
+                             //   uses the argument only during the call, so a
+                             //   closure passed there is released by the caller
+                             //   once the call returns, as after an Aether
+                             //   callee that keeps nothing (#2523). NULL when
+                             //   no param carries the annotation.
         int param_count;
         Type* ret_type;      // #1286: the declared return type (borrowed from
                              // the extern's AST), so a call returning `T[]`

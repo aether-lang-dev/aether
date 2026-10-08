@@ -4951,6 +4951,85 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
     return field;
 }
 
+/* The `@<attr>` markers between an extern parameter's `:` and its type,
+ * then the type. Shared by the bare `extern name(...)` form and the
+ * `@extern("c_sym") name(...)` form, so both accept the same set:
+ *
+ *   @aether   the param receives an AetherString header rather than the
+ *             unwrapped const char*. Codegen suppresses the call-site
+ *             aether_string_data() unwrap so binary content with embedded
+ *             NULs survives the boundary intact. See #351.
+ *
+ *   @retain   the function stores / retains the pointer beyond the call
+ *             (think `string_list_add`, `map_put_raw`'s key, any
+ *             add/put/insert that captures the bytes). Tells the escape
+ *             walker to mark a heap-string arg as escaped at this slot, so
+ *             the heap-string-tracker wrapper and function-exit defer-free
+ *             both skip freeing. Without it, default `string`-param
+ *             treatment is "read-only", correct for string.length /
+ *             equals / println but a UAF for retainers. See #420 follow-up.
+ *
+ *   @noescape the function uses the argument only during the call: it
+ *             neither stores it, hands it to another thread, nor frees
+ *             it. For a closure passed to a `ptr` or `fn` parameter the
+ *             caller then keeps the environment and releases it after the
+ *             call, as it does for an Aether callee that keeps nothing,
+ *             and a `ptr` slot gets a box on the caller's stack instead of
+ *             a heap one (#2523). Only meaningful on `ptr` and `fn`.
+ *
+ * Multiple annotations stack: `name: @aether @retain string` is legal.
+ * Order is irrelevant; storage is a comma-separated set on
+ * `param->annotation`, tested by substring. */
+static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
+        advance_token(parser);  // consume '@'
+        Token* attr = peek_token(parser);
+        const char* tag = NULL;
+        if (attr && attr->type == TOKEN_IDENTIFIER && attr->value) {
+            if (strcmp(attr->value, "aether") == 0) {
+                tag = "aether_param";
+            } else if (strcmp(attr->value, "retain") == 0) {
+                tag = "retain_param";
+            } else if (strcmp(attr->value, "noescape") == 0) {
+                tag = "noescape_param";
+            }
+            if (tag) advance_token(parser);
+        }
+        if (!tag) {
+            parser_error(parser, "unknown extern-param attribute (expected @aether, @retain or @noescape)");
+            break;
+        }
+        /* Append to the comma-separated set, deduping. */
+        if (!param->annotation) {
+            param->annotation = strdup(tag);
+        } else if (!strstr(param->annotation, tag)) {
+            size_t old_len = strlen(param->annotation);
+            size_t tag_len = strlen(tag);
+            char* combined = (char*)malloc(old_len + 1 + tag_len + 1);
+            memcpy(combined, param->annotation, old_len);
+            combined[old_len] = ',';
+            memcpy(combined + old_len + 1, tag, tag_len);
+            combined[old_len + 1 + tag_len] = '\0';
+            free(param->annotation);
+            param->annotation = combined;
+        }
+    }
+    Type* param_type = parse_type(parser);
+    if (param_type) {
+        param->node_type = param_type;
+    } else {
+        parser_error(parser, "Expected type after ':' in extern parameter");
+        param->node_type = create_type(TYPE_INT);  // Fallback for error recovery
+    }
+    /* #2523: a string parameter is borrowed unless `@retain` says
+     * otherwise, and an integer has no lifetime, so `@noescape` on either
+     * would say nothing: refuse it rather than let it look meaningful. */
+    if (param->annotation && strstr(param->annotation, "noescape_param") &&
+        param->node_type->kind != TYPE_PTR && param->node_type->kind != TYPE_FUNCTION) {
+        parser_error(parser, "@noescape on an extern parameter is only valid on `ptr` or `fn`");
+    }
+}
+
 /* Trailing `@`-attributes on an extern signature, shared by the bare
  * `extern name(...)` form and the `@extern("c_sym") name(...)` form:
  *
@@ -5221,72 +5300,9 @@ ASTNode* parse_extern_declaration(Parser* parser) {
 
             // Require type annotation for extern: param: type
             if (match_token(parser, TOKEN_COLON)) {
-                /* Zero or more `@<attr>` markers between `:` and the
-                 * type. Currently recognised:
-                 *
-                 *   @aether — param receives an AetherString header
-                 *             rather than the unwrapped const char*.
-                 *             Codegen suppresses the call-site
-                 *             aether_string_data() unwrap so binary
-                 *             content with embedded NULs survives
-                 *             the boundary intact. See #351.
-                 *
-                 *   @retain — the function stores / retains the
-                 *             pointer beyond the call (think
-                 *             `string_list_add`, `map_put_raw`'s
-                 *             key, any add/put/insert that captures
-                 *             the bytes). Tells the escape walker
-                 *             to mark a heap-string arg as escaped
-                 *             at this slot, so the heap-string-
-                 *             tracker wrapper and function-exit
-                 *             defer-free both skip freeing. Without
-                 *             it, default `string`-param treatment
-                 *             is "read-only" — correct for
-                 *             string.length / equals / println but
-                 *             a UAF for retainers. See #420 follow-up.
-                 *
-                 * Multiple annotations stack: `name: @aether @retain string`
-                 * is legal. Order is irrelevant; storage is a
-                 * comma-separated set on `param->annotation`. */
-                while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
-                    advance_token(parser);  // consume '@'
-                    Token* attr = peek_token(parser);
-                    const char* tag = NULL;
-                    if (attr && attr->type == TOKEN_IDENTIFIER && attr->value) {
-                        if (strcmp(attr->value, "aether") == 0) {
-                            tag = "aether_param";
-                            advance_token(parser);
-                        } else if (strcmp(attr->value, "retain") == 0) {
-                            tag = "retain_param";
-                            advance_token(parser);
-                        }
-                    }
-                    if (!tag) {
-                        parser_error(parser, "unknown extern-param attribute (expected @aether or @retain)");
-                        break;
-                    }
-                    /* Append to the comma-separated set, deduping. */
-                    if (!param->annotation) {
-                        param->annotation = strdup(tag);
-                    } else if (!strstr(param->annotation, tag)) {
-                        size_t old_len = strlen(param->annotation);
-                        size_t tag_len = strlen(tag);
-                        char* combined = (char*)malloc(old_len + 1 + tag_len + 1);
-                        memcpy(combined, param->annotation, old_len);
-                        combined[old_len] = ',';
-                        memcpy(combined + old_len + 1, tag, tag_len);
-                        combined[old_len + 1 + tag_len] = '\0';
-                        free(param->annotation);
-                        param->annotation = combined;
-                    }
-                }
-                Type* param_type = parse_type(parser);
-                if (param_type) {
-                    param->node_type = param_type;
-                } else {
-                    parser_error(parser, "Expected type after ':' in extern parameter");
-                    param->node_type = create_type(TYPE_INT);  // Fallback for error recovery
-                }
+                /* `@<attr>` markers between `:` and the type, then the
+                 * type: see parse_extern_param_attrs_and_type. */
+                parse_extern_param_attrs_and_type(parser, param);
             } else {
                 // Type annotation required for extern functions
                 parser_error(parser, "Type annotation required for extern parameter (use param: type)");
@@ -7013,44 +7029,10 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         ASTNode* p = create_ast_node(AST_IDENTIFIER, pname->value,
                                                      pname->line, pname->column);
                         if (match_token(parser, TOKEN_COLON)) {
-                            /* Same `@aether` / `@retain` per-param annotations as
-                             * the bare `extern foo(...)` form. See
-                             * parse_extern_declaration for the full table of
-                             * supported attributes. Multiple stack via repeated
-                             * `@<attr>`. */
-                            while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
-                                advance_token(parser);
-                                Token* pattr = peek_token(parser);
-                                const char* tag = NULL;
-                                if (pattr && pattr->type == TOKEN_IDENTIFIER && pattr->value) {
-                                    if (strcmp(pattr->value, "aether") == 0) {
-                                        tag = "aether_param";
-                                        advance_token(parser);
-                                    } else if (strcmp(pattr->value, "retain") == 0) {
-                                        tag = "retain_param";
-                                        advance_token(parser);
-                                    }
-                                }
-                                if (!tag) {
-                                    parser_error(parser, "unknown extern-param attribute (expected @aether or @retain)");
-                                    break;
-                                }
-                                if (!p->annotation) {
-                                    p->annotation = strdup(tag);
-                                } else if (!strstr(p->annotation, tag)) {
-                                    size_t old_len = strlen(p->annotation);
-                                    size_t tag_len = strlen(tag);
-                                    char* combined = (char*)malloc(old_len + 1 + tag_len + 1);
-                                    memcpy(combined, p->annotation, old_len);
-                                    combined[old_len] = ',';
-                                    memcpy(combined + old_len + 1, tag, tag_len);
-                                    combined[old_len + 1 + tag_len] = '\0';
-                                    free(p->annotation);
-                                    p->annotation = combined;
-                                }
-                            }
-                            Type* pt = parse_type(parser);
-                            p->node_type = pt ? pt : create_type(TYPE_INT);
+                            /* The same per-param annotations as the bare
+                             * `extern foo(...)` form, then the type: see
+                             * parse_extern_param_attrs_and_type. */
+                            parse_extern_param_attrs_and_type(parser, p);
                         } else {
                             parser_error(parser, "Type annotation required for @extern parameter (use param: type)");
                             p->node_type = create_type(TYPE_INT);

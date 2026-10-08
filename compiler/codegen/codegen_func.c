@@ -162,6 +162,7 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
     gen->extern_registry[idx].param_full = NULL;
     gen->extern_registry[idx].params_aether = NULL;
     gen->extern_registry[idx].params_retain = NULL;
+    gen->extern_registry[idx].params_noescape = NULL;
 
     if (ext->child_count > 0) {
         gen->extern_registry[idx].params = malloc(ext->child_count * sizeof(TypeKind));
@@ -171,12 +172,13 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
          * via substring match. The lazy-allocation pattern below
          * keeps the per-extern parallel arrays NULL in the common
          * (no-annotation) case. */
-        int any_aether = 0, any_retain = 0;
+        int any_aether = 0, any_retain = 0, any_noescape = 0;
         for (int i = 0; i < ext->child_count; i++) {
             ASTNode* param = ext->children[i];
             if (!param || !param->annotation) continue;
             if (strstr(param->annotation, "aether_param")) any_aether = 1;
             if (strstr(param->annotation, "retain_param")) any_retain = 1;
+            if (strstr(param->annotation, "noescape_param")) any_noescape = 1;
         }
         if (any_aether) {
             gen->extern_registry[idx].params_aether =
@@ -184,6 +186,10 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
         }
         if (any_retain) {
             gen->extern_registry[idx].params_retain =
+                calloc(ext->child_count, sizeof(int));
+        }
+        if (any_noescape) {
+            gen->extern_registry[idx].params_noescape =
                 calloc(ext->child_count, sizeof(int));
         }
         gen->extern_registry[idx].param_full =
@@ -206,6 +212,10 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
                 if (gen->extern_registry[idx].params_retain &&
                     strstr(param->annotation, "retain_param")) {
                     gen->extern_registry[idx].params_retain[i] = 1;
+                }
+                if (gen->extern_registry[idx].params_noescape &&
+                    strstr(param->annotation, "noescape_param")) {
+                    gen->extern_registry[idx].params_noescape[i] = 1;
                 }
             }
         }
@@ -644,6 +654,20 @@ int is_retain_extern_param(CodeGenerator* gen, const char* func_name, int param_
     if (!gen->extern_registry[idx].params_retain) return 0;
     if (param_idx < 0 || param_idx >= gen->extern_registry[idx].param_count) return 0;
     return gen->extern_registry[idx].params_retain[param_idx];
+}
+
+/* #2523: was extern `func_name`'s parameter at `param_idx` declared
+ * `@noescape`, so the function uses the argument only during the call and
+ * neither stores nor frees it? A closure passed there is the caller's to
+ * release once the call returns, and a `ptr` slot takes a box on the
+ * caller's stack. 0 for an unregistered extern, no annotation or an index
+ * out of range: the conservative answer, under which the callee keeps it. */
+int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int param_idx) {
+    int idx = find_extern_registry_index(gen, func_name);
+    if (idx < 0) return 0;
+    if (!gen->extern_registry[idx].params_noescape) return 0;
+    if (param_idx < 0 || param_idx >= gen->extern_registry[idx].param_count) return 0;
+    return gen->extern_registry[idx].params_noescape[param_idx];
 }
 
 // Check if an AST subtree contains a return statement with a value.

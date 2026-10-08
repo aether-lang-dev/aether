@@ -812,6 +812,7 @@ void free_code_generator(CodeGenerator* gen) {
                 free(gen->extern_registry[i].params);
                 free(gen->extern_registry[i].params_aether);
                 free(gen->extern_registry[i].params_retain);
+                free(gen->extern_registry[i].params_noescape);
                 /* param_full's entries alias AST-owned Types; only the
                  * array is ours to free. */
                 free(gen->extern_registry[i].param_full);
@@ -7242,6 +7243,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline void* _aether_box_closure(_AeClosure c) {");
     print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)malloc(sizeof(_AeClosureBox));");
     print_line(gen, "    if (!p) return (void*)0;");
+    print_line(gen, "    p->fn = c.fn; p->env = c.env; p->tag = _AE_CLOSURE_TAG;");
+    print_line(gen, "    return (void*)p;");
+    print_line(gen, "}");
+    /* #2523: the box for a `@noescape ptr` extern parameter. The callee
+     * reads it only during the call, so it lives in a compound literal on
+     * the caller's stack (`&(_AeClosureBox){ .tag = 0 }`, the enclosing
+     * block's lifetime) and nothing is malloc'd or freed for it; the env
+     * stays the caller's to release. */
+    print_line(gen, "static inline void* _aether_box_closure_in(_AeClosureBox* p, _AeClosure c) {");
     print_line(gen, "    p->fn = c.fn; p->env = c.env; p->tag = _AE_CLOSURE_TAG;");
     print_line(gen, "    return (void*)p;");
     print_line(gen, "}");
