@@ -17,7 +17,7 @@
  *
  * Layout: a text header of `key value` lines, then the AST payload.
  *
- *   AEA 1
+ *   AEA 2
  *   aether_version 0.741.0
  *   frontend <fingerprint of the lexer/parser/AST sources>
  *   module std.cryptography.md2
@@ -36,7 +36,7 @@
 
 #include "ast.h"
 
-#define AEA_FORMAT_VERSION 1
+#define AEA_FORMAT_VERSION 2
 
 /* One `defined(NAME)` answer the module's parse depended on. */
 typedef struct {

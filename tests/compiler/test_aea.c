@@ -284,7 +284,10 @@ TEST_CATEGORY(aea_decode_rejects_another_toolchain, TEST_CATEGORY_COMPILER) {
     ASSERT_STREQ("built by another compiler front end", decode_reason(data, len, &c));
 
     size_t n = 0;
-    char* other = edit_header(data, len, "AEA 1\n", "AEA 2\n", &n);
+    char ours[32], theirs[32];
+    snprintf(ours, sizeof(ours), "AEA %d\n", AEA_FORMAT_VERSION);
+    snprintf(theirs, sizeof(theirs), "AEA %d\n", AEA_FORMAT_VERSION + 1);
+    char* other = edit_header(data, len, ours, theirs, &n);
     c = consumer_for(RICH_SOURCE);
     ASSERT_STREQ("artifact format version differs", decode_reason(other, n, &c));
     free(other);
@@ -356,13 +359,13 @@ TEST_CATEGORY(aea_decode_rejects_damage, TEST_CATEGORY_COMPILER) {
 TEST_CATEGORY(aea_decode_rejects_a_well_hashed_but_malformed_payload, TEST_CATEGORY_COMPILER) {
     /* A payload whose hash matches but whose grammar does not: the decoder
      * must fail cleanly rather than trust the hash. */
-    static const char body[] = "N 1 1 1 0 0 0 0 ~ ~ ~ 5\n";
+    static const char body[] = "N 1 1 1 0 0 0 0 ~ 0 ~ ~ 5\n";
     char header[512];
     AeaConsumer c = consumer_for(RICH_SOURCE);
     int hn = snprintf(header, sizeof(header),
-        "AEA 1\naether_version 1.2.3\nfrontend fe-1\nsource %s\n"
+        "AEA %d\naether_version 1.2.3\nfrontend fe-1\nsource %s\n"
         "source_hash %016llx\npayload_hash %016llx\npayload %zu\n",
-        REL, (unsigned long long)aea_hash(RICH_SOURCE, strlen(RICH_SOURCE)),
+        AEA_FORMAT_VERSION, REL, (unsigned long long)aea_hash(RICH_SOURCE, strlen(RICH_SOURCE)),
         (unsigned long long)aea_hash(body, strlen(body)), strlen(body));
     char buf[1024];
     memcpy(buf, header, (size_t)hn);
@@ -381,15 +384,76 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * ASTNode grew to 104 with `source_name` (#2292). That field is set only
      * at codegen (NULL after a parse), and an artifact holds a fresh parse,
      * so the codec correctly does not carry it and the wire format — and
-     * AEA_FORMAT_VERSION — is unchanged. */
+     * AEA_FORMAT_VERSION — is unchanged.
+     *
+     * ASTNode grew to 112 with `value_len` (#2520): the byte count of a
+     * string literal that holds a NUL. That is parse state, so the codec
+     * writes such a value by its byte count and carries value_len, and
+     * AEA_FORMAT_VERSION went to 2. */
     /* Type grew to 136 with `closure_literal` (#2460), a type-checker
      * back-pointer like compound_node: NULL after a parse and refused by
      * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
      * as well. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
-        ASSERT_EQ(104, (int)sizeof(ASTNode));
+        ASSERT_EQ(112, (int)sizeof(ASTNode));
         ASSERT_EQ(136, (int)sizeof(Type));
     }
+}
+
+TEST_CATEGORY(aea_round_trip_keeps_a_literal_nul, TEST_CATEGORY_COMPILER) {
+    /* #2520: a literal holding a NUL is value_len bytes; an artifact that
+     * stopped at the NUL would hand the importer a shorter string. */
+    static const char src[] = "const K = \"k\\x00v\"\nmain() {\n    println(K)\n}\n";
+    ASTNode* ast = parse_text(src);
+    ASSERT_NOT_NULL(ast);
+    AeaProducer p = producer_for(src);
+    size_t len = 0;
+    const char* err = NULL;
+    char* data = aea_encode(ast, &p, &len, &err);
+    ASSERT_NOT_NULL(data);
+    AeaConsumer c = consumer_for(src);
+    ASTNode* back = aea_decode(data, len, &c, NULL);
+    ASSERT_NOT_NULL(back);
+    ASTNode* k = find_top(back, AST_CONST_DECLARATION, "K");
+    ASSERT_NOT_NULL(k);
+    ASSERT_TRUE(k->child_count > 0);
+    ASTNode* lit = k->children[k->child_count - 1];
+    ASSERT_EQ(3, lit->value_len);
+    ASSERT_TRUE(memcmp(lit->value, "k\0v", 4) == 0);
+    free(data);
+    free_ast_node(back);
+    free_ast_node(ast);
+}
+
+/* Decodes a one-node payload behind a well-formed, well-hashed header. */
+static const char* decode_payload(const char* body, size_t n) {
+    char header[512];
+    int hn = snprintf(header, sizeof(header),
+        "AEA %d\naether_version 1.2.3\nfrontend fe-1\nsource %s\n"
+        "source_hash %016llx\npayload_hash %016llx\npayload %zu\n",
+        AEA_FORMAT_VERSION, REL,
+        (unsigned long long)aea_hash(RICH_SOURCE, strlen(RICH_SOURCE)),
+        (unsigned long long)aea_hash(body, n), n);
+    char buf[1024];
+    memcpy(buf, header, (size_t)hn);
+    memcpy(buf + hn, body, n);
+    AeaConsumer c = consumer_for(RICH_SOURCE);
+    return decode_reason(buf, (size_t)hn + n, &c);
+}
+
+TEST_CATEGORY(aea_decode_rejects_a_value_len_that_disagrees, TEST_CATEGORY_COMPILER) {
+    /* value_len is 0 or the byte count of a value holding a NUL. */
+    static const char good[] = "N 1 1 1 0 0 0 0 3:a\0b 3 ~ ~ 0\n";
+    static const char count_without_nul[] = "N 1 1 1 0 0 0 0 2:ab 2 ~ ~ 0\n";
+    static const char nul_without_count[] = "N 1 1 1 0 0 0 0 3:a\0b 0 ~ ~ 0\n";
+    static const char wrong_count[] = "N 1 1 1 0 0 0 0 3:a\0b 2 ~ ~ 0\n";
+    ASSERT_STREQ("decoded", decode_payload(good, sizeof(good) - 1));
+    ASSERT_STREQ("artifact payload is malformed",
+                 decode_payload(count_without_nul, sizeof(count_without_nul) - 1));
+    ASSERT_STREQ("artifact payload is malformed",
+                 decode_payload(nul_without_count, sizeof(nul_without_count) - 1));
+    ASSERT_STREQ("artifact payload is malformed",
+                 decode_payload(wrong_count, sizeof(wrong_count) - 1));
 }
 
 /* ---- `when defined` answers recorded during a parse ---- */
