@@ -3906,6 +3906,28 @@ void build_gcc_cmd(char* cmd, size_t size,
     // shims relied on silently broke `ae run`.
     const char* user_cflags = get_cflags();
 
+    // Append aether_config.c to the compile when building a lib so the
+    // aether_config_* accessors are bundled into the .so or DLL (a Windows
+    // DLL had none of them: this sat in the POSIX branch only). The .c file
+    // lives in runtime/ under dev mode and in include/aether/runtime/
+    // (or similar) on installed toolchains.
+    // config_c wraps `candidate` in ` "..."` — sized one tier up so
+    // gcc's -Wformat-truncation heuristic doesn't fire on the
+    // wrapper bytes (snprintf would truncate safely either way).
+    char config_c[2056] = "";
+    if (g_emit_lib) {
+        char candidate[2048];
+        /* src_root: this is a SOURCE path, and it is not inside a dev_mode
+         * branch, so a bare tc.root silently found nothing on an installed
+         * tree — the same defect as the wasm list, reached from --emit=lib.
+         * It failed quietly here (path_exists simply returns false and the
+         * config TU is omitted) rather than loudly as emcc did. */
+        snprintf(candidate, sizeof(candidate), "%s/runtime/aether_config.c", tc.src_root);
+        if (path_exists(candidate)) {
+            snprintf(config_c, sizeof(config_c), " \"%s\"", candidate);
+        }
+    }
+
 #ifdef _WIN32
     // Ensure GCC is available (auto-downloads WinLibs on first run if needed).
     if (!ensure_gcc_windows()) {
@@ -4071,8 +4093,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         const char* rt_arg = ae_runtime_link_arg();
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s %s \"%s\" %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, g_binimport_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s %s \"%s\"%s %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, g_binimport_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -4081,8 +4103,8 @@ void build_gcc_cmd(char* cmd, size_t size,
          * references runtime symbols defined in tc.runtime_srcs, so it must
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s %s \"%s\" %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s %s \"%s\"%s %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -4209,27 +4231,6 @@ void build_gcc_cmd(char* cmd, size_t size,
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
         return;
-    }
-
-    // Append aether_config.c to the compile when building a lib so the
-    // aether_config_* accessors are bundled into the .so. The .c file
-    // lives in runtime/ under dev mode and in include/aether/runtime/
-    // (or similar) on installed toolchains.
-    // config_c wraps `candidate` in ` "..."` — sized one tier up so
-    // gcc's -Wformat-truncation heuristic doesn't fire on the
-    // wrapper bytes (snprintf would truncate safely either way).
-    char config_c[2056] = "";
-    if (g_emit_lib) {
-        char candidate[2048];
-        /* src_root: this is a SOURCE path, and it is not inside a dev_mode
-         * branch, so a bare tc.root silently found nothing on an installed
-         * tree — the same defect as the wasm list, reached from --emit=lib.
-         * It failed quietly here (path_exists simply returns false and the
-         * config TU is omitted) rather than loudly as emcc did. */
-        snprintf(candidate, sizeof(candidate), "%s/runtime/aether_config.c", tc.src_root);
-        if (path_exists(candidate)) {
-            snprintf(config_c, sizeof(config_c), " \"%s\"", candidate);
-        }
     }
 
     // Optional OpenSSL linker flags — baked in at `ae` build time from

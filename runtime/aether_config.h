@@ -54,7 +54,8 @@ typedef struct AetherValue AetherValue;
  * ------------------------------------------------------------------ */
 
 /* Borrowed: the returned string lives in the parent map until it's freed.
- * Returns NULL if the key is missing. */
+ * The bytes of whichever string shape the script stored (a literal or an
+ * AetherString). Returns NULL if the key is missing. */
 const char* aether_config_get_string(AetherValue* root, const char* key);
 
 /* Returns default_value if the key is missing. */

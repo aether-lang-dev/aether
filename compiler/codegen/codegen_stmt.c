@@ -4161,6 +4161,7 @@ int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_
  * is "does not capture", which only ever keeps a caller's argument alive
  * longer. */
 static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
+static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 
 static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_name,
                                            int param_idx, int depth) {
@@ -4197,8 +4198,11 @@ static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_
      * struct field, a cell, a global, a callee that captures in turn): a
      * reference handed to an extern's `ptr` parameter, a `@retain`
      * parameter or a callee without a body has no releaser, so the
-     * function keeps borrowing and its caller keeps the old rule. */
-    return kept && !param_opaque_sink(gen, body, pname, depth);
+     * function keeps borrowing and its caller keeps the old rule. A
+     * function that frees its parameter takes the caller's reference
+     * (param_consumed), so it takes none of its own either. */
+    return kept && !param_opaque_sink(gen, body, pname, depth) &&
+           !param_consumed(gen, body, pname, depth);
 }
 
 int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx) {
@@ -4261,6 +4265,41 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
     }
     for (int i = 0; i < node->child_count; i++) {
         if (param_opaque_sink(gen, node->children[i], pname, depth)) return 1;
+    }
+    return 0;
+}
+
+/* Is `pname` handed, as a bare argument anywhere under `node`, to a free
+ * (is_consuming_free), directly or through a callee that frees its own
+ * parameter in turn? Such a function consumes the reference its caller
+ * passed: `_free_cstr(s: string) { string_free(s) }` is how a caller that
+ * holds a string it does not track (a struct field, a string from C) gives
+ * it back. Copy-on-keep taking a reference of its own there freed the copy
+ * and left the caller's string to nobody: std.jsonpath lost 96 bytes per
+ * parse. A nested closure's frees are its own. */
+static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, int depth) {
+    if (!node || depth > 8) return 0;
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) return 0;
+    if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, "call") != 0) {
+        char fn_norm[256];
+        const char* fn = codegen_normalise_callee(node->value, fn_norm, sizeof(fn_norm));
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            if (!a || a->type != AST_IDENTIFIER || !a->value || strcmp(a->value, pname) != 0) continue;
+            if (is_consuming_free(fn)) return 1;
+            if (callee_has_visible_body(gen, node->value) &&
+                callee_param_is_string(gen, node->value, i)) {
+                const char* cp; ASTNode* cb;
+                int saved_cl = g_escape_param_is_closure;
+                int r = resolve_callee_param_body(gen, node->value, i, &cp, &cb) &&
+                        param_consumed(gen, cb, cp, depth + 1);
+                g_escape_param_is_closure = saved_cl;
+                if (r) return 1;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (param_consumed(gen, node->children[i], pname, depth)) return 1;
     }
     return 0;
 }

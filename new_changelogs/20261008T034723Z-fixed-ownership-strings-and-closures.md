@@ -58,7 +58,14 @@
   twice. A parameter also handed to a sink the compiler cannot release
   behind (an extern's `ptr` parameter, a `@retain` parameter, a callee with
   no body, a module-level `var`, which never frees what it holds) is not
-  captured, and its caller keeps the earlier rule. Before,
+  captured, and its caller keeps the earlier rule; nor is one the function
+  frees (`string.free(s)`, directly or through a helper that frees it),
+  which is the caller's reference handed over. A string a program stores
+  this way is an Aether string, so the C readers of a stored string take
+  either shape: the `aether_config_*` accessors of an `--emit=lib` library
+  and the contrib host bridges reading a grant list. std.jsonpath releases
+  its parser context with `heap.free`, which frees a diagnostic `_fail`
+  copied into it. Before,
   such a store left the container borrowing the caller's string and the
   caller keeping it alive for the rest of the function (a leak per call,
   through wrappers of wrappers too), and a closure's own reference handed

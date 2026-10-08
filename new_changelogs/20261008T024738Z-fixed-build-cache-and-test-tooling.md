@@ -132,3 +132,9 @@
   the working directory in front. A function in the reserved `_` namespace
   or one colliding with an extern is renamed whole, where two names
   sharing their first 277 bytes became one C name.
+- **A Windows `--emit=lib` DLL carries the `aether_config_*` accessors
+  (#2540).** `ae` added `runtime/aether_config.c` to a library build only
+  on POSIX, so a C host linking a Windows DLL to walk the map or list a
+  script returned failed with undefined references. `emit_lib_composite`,
+  the test that walks one, skipped on Windows; its host now loads the
+  library with `LoadLibrary` there and runs.
