@@ -147,13 +147,11 @@ main() {
     check(round(tag) == 20, "a round runs twenty times")
     if mem.heap_in_use_exact() {
         round(tag)
-        before = mem.heap_in_use()
-        round(tag)
-        mid = mem.heap_in_use()
-        round(tag)
-        after = mem.heap_in_use()
-        check(mid - before == 0 || after - mid == 0,
-            "a round grew the heap by ${mid - before}, then ${after - mid} bytes")
+        grown = mem.steady_growth(|| {
+                round(tag)
+            }, 5)
+        check(grown == 0,
+            "a round grew the heap by ${grown} bytes in every run")
     }
     println("OK")
 }

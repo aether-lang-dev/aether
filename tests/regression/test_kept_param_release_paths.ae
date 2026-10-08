@@ -24,8 +24,8 @@
 // 5. A panic unwinding through a function that keeps its parameter
 //    releases the copy, as it releases a local's string.
 //
-// Checked where the heap count is exact (mem.heap_in_use_exact): one of two
-// equal windows grows by exactly 0. The macOS leaks gate runs this program
+// Checked where the heap count is exact (mem.heap_in_use_exact): some window
+// grows by exactly 0 (mem.steady_growth). The macOS leaks gate runs this program
 // too.
 
 import std.list
@@ -157,13 +157,11 @@ main() {
     check(round(tag) == 20 * 5, "each round measures twenty tags")
     if mem.heap_in_use_exact() {
         round(tag)
-        before = mem.heap_in_use()
-        round(tag)
-        mid = mem.heap_in_use()
-        round(tag)
-        after = mem.heap_in_use()
-        check(mid - before == 0 || after - mid == 0,
-            "a round grew the heap by ${mid - before}, then ${after - mid} bytes")
+        grown = mem.steady_growth(|| {
+                round(tag)
+            }, 5)
+        check(grown == 0,
+            "a round grew the heap by ${grown} bytes in every run")
     }
     println("OK")
 }
