@@ -13,6 +13,7 @@
 // strtof, which obey LC_NUMERIC and therefore break machine text (JSON, wire
 // formats, round-trips) when Aether is embedded in a host that set a locale.
 #include "../../runtime/aether_locale_num.h"
+#include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -813,8 +814,13 @@ const char* aether_string_data(const void* s) {
 
 /* One print holds the stream's lock across all of its writes, as a single
  * printf call does, so lines printed by two threads never interleave
- * (#2521). The lock is recursive, so fwrite inside it is fine. */
-#ifdef _WIN32
+ * (#2521). The lock is recursive, so fwrite inside it is fine. A build
+ * without threads (WASM, bare metal) has nothing to interleave with, and
+ * its libc need not have the lock at all. */
+#if !AETHER_HAS_THREADS
+#define aether_stream_lock(f)   ((void)(f))
+#define aether_stream_unlock(f) ((void)(f))
+#elif defined(_WIN32)
 #define aether_stream_lock(f)   _lock_file(f)
 #define aether_stream_unlock(f) _unlock_file(f)
 #else
