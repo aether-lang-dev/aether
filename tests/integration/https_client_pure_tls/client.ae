@@ -1,0 +1,47 @@
+// An https GET through std.http.client, carried by the pure-Aether TLS 1.3
+// client rather than OpenSSL.
+//
+// The import below is what links the pure client in (std.http.client does not
+// pull it in itself: std.cryptography reaches std.fs, and an implicit import
+// would make `--emit=lib --with=net` reject every std.http.client user). In a
+// build without OpenSSL -- every `ae build --target=` cross-build -- it is then
+// the https backend automatically; in a build with OpenSSL the runner sets
+// AETHER_PURE_TLS=1 to select it, which is what makes this test meaningful on
+// every CI leg rather than only on a cross-built one.
+//
+// Driven by test_https_client_pure_tls.sh through the environment:
+//   URL       the https URL to GET
+//   CAFILE    optional: set_cafile pin (a PEM bundle or a directory)
+//   INSECURE  optional: "1" for set_insecure
+// Prints "STATUS <code> BODY <body>" on success, "ERR: <error>" on a
+// transport failure.
+
+import std.http.client
+import std.cryptography.tls13_client
+import std.os
+
+main() {
+    url = os.getenv("URL")
+    req = client.request("GET", url)
+    client.set_timeout(req, 10s)
+    // os.getenv returns null for an unset variable, which compares unequal
+    // to "" -- test for null first.
+    ca = os.getenv("CAFILE")
+    if ca != null {
+        if ca != "" { client.set_cafile(req, ca) }
+    }
+    insecure = os.getenv("INSECURE")
+    if insecure != null {
+        if insecure == "1" { client.set_insecure(req, 1) }
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("ERR: ${err}")
+        return
+    }
+    status = client.response_status(resp)
+    body = client.response_body(resp)
+    println("STATUS ${status} BODY ${body}")
+    client.response_free(resp)
+}

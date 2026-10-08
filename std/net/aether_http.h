@@ -131,6 +131,11 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
                                            int64_t idle_ns);
 void http_client_pool_clear_raw(void);
 int  http_client_pool_idle_count_raw(void);
+
+/* std.cryptography.tls13_client records why a pure-TLS handshake failed, so
+ * the https request's error names the real cause (untrusted chain, wrong host,
+ * a server that does not speak TLS 1.3) rather than a guess. Thread-local. */
+void aether_pure_tls_client_set_error(const char* msg);
 long long http_client_rx_buffer_allocs_raw(void);
 
 int http_response_status(HttpResponse* response);

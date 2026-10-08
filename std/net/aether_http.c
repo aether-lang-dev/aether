@@ -166,6 +166,44 @@ static int pt_client_available(void) {
     return f ? f() : aether_pure_tls_client_available();
 }
 
+/* Why the last pure handshake on this thread failed.
+ *
+ * The connect callback hands back only a pointer, so before this every pure
+ * failure -- an untrusted chain, a wrong hostname, a TLS 1.2-only server, no
+ * trust store at all -- reached the caller as one generic sentence that
+ * guessed at the cause. tls13_client knows the real reason; it stores it here
+ * just before returning NULL, and http_dial copies it into the request's
+ * error. Thread-local because the handshake runs synchronously on the
+ * dialling thread, so two requests on two threads cannot see each other's
+ * reason, and no lock is needed. Cleared before each connect so a stale
+ * reason is never reported for a later failure that did not set one. */
+static _Thread_local char pt_client_last_err[512];
+
+void aether_pure_tls_client_set_error(const char* msg) {
+    if (!msg) { pt_client_last_err[0] = '\0'; return; }
+    size_t n = strlen(msg);
+    if (n >= sizeof(pt_client_last_err)) n = sizeof(pt_client_last_err) - 1;
+    memcpy(pt_client_last_err, msg, n);
+    pt_client_last_err[n] = '\0';
+}
+
+/* Which TLS client backend an https request uses.
+ *
+ * A build without OpenSSL has only the pure-Aether client. A build WITH it
+ * keeps OpenSSL as the default and switches to the pure client when
+ * AETHER_PURE_TLS is 1 or true -- the same variable that already selects the
+ * pure TLS server (aether_http_server.c), so one setting moves a process onto
+ * the pure stack in both directions. Read per request rather than cached, so
+ * the pool key and the dial always agree on the answer for a given request. */
+static int http_client_use_pure_tls(void) {
+#ifndef AETHER_HAS_OPENSSL
+    return 1;
+#else
+    const char* v = getenv("AETHER_PURE_TLS");
+    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0);
+#endif
+}
+
 #ifdef AETHER_HAS_OPENSSL
     #include <openssl/ssl.h>
     #include <openssl/err.h>
@@ -577,7 +615,8 @@ uint64_t http_clock_ms(void) {
 static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 
 /* Everything that makes two connections non-interchangeable: the origin, the
- * endpoint actually dialled (proxy or origin), TLS, and the verification the
+ * endpoint actually dialled (proxy or origin), TLS and which backend carries
+ * it (`use_tls` is 0 plain, 1 OpenSSL, 2 pure-Aether), and the verification the
  * caller asked for. A connection opened with a pinned CA or with verification
  * off must never be handed to a request that did not ask for that. */
 static void http_pool_key(char* out, size_t n, const char* host, int port,
@@ -595,7 +634,7 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
     if (port < 0 || dial_port < 0 || hl + dhl + cal + 48 > n) {
         snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
                  h, port, dh, dial_port,
-                 use_tls ? 1 : 0, insecure ? 1 : 0, ca);
+                 use_tls, insecure ? 1 : 0, ca);
         return;
     }
 
@@ -608,7 +647,7 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
     *p++ = ':';
     p += http_write_dec(p, (unsigned long long)dial_port);
     *p++ = '|';
-    *p++ = use_tls  ? '1' : '0';
+    *p++ = (char)('0' + (use_tls >= 0 && use_tls <= 9 ? use_tls : 1));
     *p++ = '|';
     *p++ = insecure ? '1' : '0';
     *p++ = '|';
@@ -1981,43 +2020,59 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
 
     out->pure_tls = NULL;
 
-#ifndef AETHER_HAS_OPENSSL
-    /* No OpenSSL in this build -- every `ae build --target=` cross-compile,
-     * because zig bundles no TLS. Drive the pure-Aether TLS 1.3 client
-     * instead (#1849). The socket is already connected, and already tunnelled
-     * when a forward proxy applies, so the handshake runs end-to-end against
-     * `host` either way and proxying needs no separate path.
+    /* The pure-Aether TLS 1.3 client (#1849). Always the backend in a build
+     * without OpenSSL -- every `ae build --target=` cross-compile, because zig
+     * bundles no TLS -- and selectable with AETHER_PURE_TLS=1 in a build that
+     * has it (see http_client_use_pure_tls). The socket is already connected,
+     * and already tunnelled when a forward proxy applies, so the handshake
+     * runs end-to-end against `host` either way and proxying needs no
+     * separate path.
      *
      * Verification is the pure client's own: certificate chain to a trusted
      * anchor, validity window, and hostname/SAN pinned to `host`. set_insecure
      * skips it; set_cafile pins a couriered bundle. */
-    if (use_tls) {
+    if (use_tls && http_client_use_pure_tls()) {
         if (!pt_client_available()) {
             close(sockfd);
+#ifdef AETHER_HAS_OPENSSL
+            ae_set_err(out_err,
+                "AETHER_PURE_TLS selects the pure-Aether TLS client, but it is "
+                "not linked into this program. Add "
+                "`import std.cryptography.tls13_client` to the program, or "
+                "unset AETHER_PURE_TLS to use OpenSSL.");
+#else
             ae_set_err(out_err,
                 "HTTPS requested but this build has no TLS backend: it was "
                 "built without OpenSSL (every --target= cross-build is), and "
                 "the pure-Aether client is not linked. Add "
                 "`import std.cryptography.tls13_client` to the program.");
+#endif
             return -1;
         }
+        aether_pure_tls_client_set_error(NULL);
         void* pc = pt_client_connect(sockfd, host,
-                                                  req && req->insecure ? 1 : 0,
-                                                  req ? req->cafile : NULL);
+                                     req && req->insecure ? 1 : 0,
+                                     req ? req->cafile : NULL);
         if (!pc) {
-            close(sockfd);
-            /* The pure client has the real reason (connect_full returns an
-             * `err` string) but the callback ABI only hands back a pointer,
-             * so it is lost here. Until that grows a last-error channel, name
-             * the cause that actually bites: no trust store. Windows ships no
-             * system PEM bundle, so a build there finds one only via the
-             * fallbacks in trust_store_path() or SSL_CERT_FILE. */
-            ae_set_err(out_err,
-                "pure TLS handshake failed: the peer was unreachable, spoke a "
-                "protocol we do not, or presented a certificate that did not "
-                "verify. A verification failure is the usual cause and most "
-                "often means no CA bundle was found -- point SSL_CERT_FILE at "
-                "a PEM bundle to rule that out.");
+            /* Not close(sockfd): the descriptor was handed over, and the pure
+             * client closes it on every failure path (connect_full's error
+             * returns, the adopt itself). Closing it again here closed a
+             * NUMBER, which another thread may already have been given for a
+             * fresh socket of its own.
+             *
+             * tls13_client leaves the reason in pt_client_last_err. Only a
+             * failure before it got that far (out of memory, an unusable
+             * socket) arrives without one. */
+            char emsg[640];
+            if (pt_client_last_err[0]) {
+                snprintf(emsg, sizeof(emsg), "TLS handshake failed (pure-Aether TLS 1.3): %s",
+                         pt_client_last_err);
+            } else {
+                snprintf(emsg, sizeof(emsg),
+                         "TLS handshake failed (pure-Aether TLS 1.3): the connection "
+                         "could not be set up");
+            }
+            ae_set_err(out_err, emsg);
             return -1;
         }
         /* The pure connection owns the socket from here; transport_close
@@ -2028,7 +2083,6 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
         out->applied_timeout_ns = -1;
         return 0;
     }
-#endif
 
 #ifdef AETHER_HAS_OPENSSL
     out->ssl = NULL;
@@ -2924,7 +2978,11 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     Transport t = {0};
     t.applied_timeout_ns = -1;
     char pool_key[HTTP_POOL_KEY_MAX];
-    http_pool_key(pool_key, sizeof(pool_key), host, port, use_tls,
+    /* The TLS backend is part of a connection's identity: 1 = OpenSSL,
+     * 2 = pure-Aether. A pooled OpenSSL connection must never serve a request
+     * that asked for the pure client, or the reverse. */
+    int tls_kind = use_tls ? (http_client_use_pure_tls() ? 2 : 1) : 0;
+    http_pool_key(pool_key, sizeof(pool_key), host, port, tls_kind,
                   dial_host, dial_port, req->insecure, req->cafile);
     /* A streaming response hands the transport to the caller, who may abandon
      * it mid-body, so those connections are never pooled in either direction.

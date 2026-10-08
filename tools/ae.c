@@ -3524,6 +3524,49 @@ static void cmd_too_long(char* cmd, size_t size, int needed) {
     set_failing_cmd(cmd, size);
 }
 
+/* Homebrew's include and library directories, for a native macOS build.
+ *
+ * Apple's clang searches /usr/local but not /opt/homebrew, which is where
+ * Homebrew lives on Apple Silicon, so a module whose C needs a Homebrew
+ * header (contrib.vulkan: <vulkan/vulkan.h> from vulkan-headers or MoltenVK)
+ * failed with "file not found" unless every program added -I/opt/homebrew/
+ * include itself. HOMEBREW_PREFIX (what `brew shellenv` exports) wins, else
+ * /opt/homebrew when it exists; /usr/local needs nothing, since the toolchain
+ * already searches it.
+ *
+ * -idirafter, not -I: the directory is searched AFTER the SDK's and aether's
+ * own, so a formula's header can fill a gap but never shadow a system or
+ * runtime header of the same name. The -L goes last on the link line for the
+ * same reason, and only when there is a link: on `cc -c` clang reports an
+ * unused -L, and that warning breaks exact-output tests. Native builds only;
+ * a cross build never comes through build_gcc_cmd. */
+static const char* macos_homebrew_flags(int linking) {
+#if defined(__APPLE__)
+    static char flags[2][1200];
+    static int computed = 0;
+    if (!computed) {
+        computed = 1;
+        flags[0][0] = flags[1][0] = '\0';
+        const char* prefix = getenv("HOMEBREW_PREFIX");
+        char inc[1100], lib[1100];
+        if (!prefix || !*prefix) prefix = "/opt/homebrew";
+        snprintf(inc, sizeof(inc), "%s/include", prefix);
+        snprintf(lib, sizeof(lib), "%s/lib", prefix);
+        if (strchr(prefix, '"') == NULL && dir_exists(inc)) {
+            snprintf(flags[0], sizeof(flags[0]), " -idirafter \"%s\"", inc);
+            if (dir_exists(lib))
+                snprintf(flags[1], sizeof(flags[1]), " -idirafter \"%s\" -L\"%s\"", inc, lib);
+            else
+                snprintf(flags[1], sizeof(flags[1]), "%s", flags[0]);
+        }
+    }
+    return flags[linking ? 1 : 0];
+#else
+    (void)linking;
+    return "";
+#endif
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -3654,7 +3697,7 @@ void build_gcc_cmd(char* cmd, size_t size,
          * (--export-all-symbols skips it; an explicit dllexport is "symbol
          * wrong type"), so no Windows DLL ever exported its catalog. A DLL
          * `ae` links is one TU: make the definition strong. */
-        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= " : "";
+        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
         snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s", emit_lib_flags, opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
@@ -3782,7 +3825,11 @@ void build_gcc_cmd(char* cmd, size_t size,
     // moment any symbol (e.g. an --extra C shim) carries an explicit
     // __declspec(dllexport). On ELF/Mach-O the catalog symbols are exported by
     // default visibility, so the flag is Windows-only.
-    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared " : "";
+    /* -DAETHER_NO_LIB_MAIN: a library-family build of a program carries a
+     * weak C main() for whoever links the OBJECT into an executable (see
+     * emit_lib_weak_main in codegen.c); a shared library ae links itself has
+     * no use for one, and should not export an entry point. */
+    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared -DAETHER_NO_LIB_MAIN " : "";
     // Coverage builds skip -pipe — gcov works fine with it, but it
     // adds nothing when -O0 -g is already forced. Keeping the flag
     // string short helps the cmd-buffer size budget.
@@ -3978,8 +4025,9 @@ void build_gcc_cmd(char* cmd, size_t size,
         const char* rt_arg = ae_runtime_link_arg();
         if (!rt_arg) { set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
+            macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3988,8 +4036,9 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
+            macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -8044,11 +8093,13 @@ static int cmd_build(int argc, char** argv) {
                  * cross_uses_unsupported_module). */
                 fprintf(stderr,
                     "Note: '%s' uses %s. Without a CROSSBUILD_SYSROOT, cross binaries link\n"
-                    "no OpenSSL / zlib / nghttp2, so features needing them (HTTPS/TLS,\n"
+                    "no OpenSSL / zlib / nghttp2, so features needing them (OpenSSL TLS,\n"
                     "SHA/MD hashing, base64, compression, HTTP/2) report errors at\n"
                     "runtime on %s. HMAC (pure-Aether), regex (vendored engine) and plain\n"
-                    "sockets still work. Stage a sysroot (aether-crossbuild) and set\n"
-                    "CROSSBUILD_SYSROOT to link the rest for real. Building anyway.\n",
+                    "sockets still work, and std.http.client does HTTPS through the\n"
+                    "pure-Aether TLS 1.3 client when the program imports\n"
+                    "std.cryptography.tls13_client. Stage a sysroot (aether-crossbuild) and\n"
+                    "set CROSSBUILD_SYSROOT to link the rest for real. Building anyway.\n",
                     file, mod, target);
             }
         }

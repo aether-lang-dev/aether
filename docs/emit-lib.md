@@ -227,6 +227,28 @@ JNIEXPORT void JNICALL Java_..._onDestroy(JNIEnv* env, jobject self) {
 A desktop host does the same around its own loop, or calls both back to back
 to behave like the executable.
 
+**Linking it into an executable needs no C `main()`.** The generated C (what
+`aetherc --emit=lib` writes, and `--emit=csrc`), and the `--emit=obj` and
+`--emit=staticlib` output, also define that back-to-back pair as a **weak**
+`main()`:
+
+```c
+__attribute__((weak)) int main(int argc, char** argv) {
+    int rc = aether_main(argc, argv);
+    aether_main_exit();
+    return rc;
+}
+```
+
+So any build tool that links the object into a program — aeb's `c.program`, a
+Makefile, `cc app.o $(ae cflags --libs)` — gets the program's entry point, and
+its exit code, without a hand-written C file. A host that has its own `main()`
+keeps it: a strong definition beats a weak one. A shared library that `ae`
+links itself (`--emit=lib`, native or `--target=`) leaves it out — it exports
+no entry point — as does wasm (emscripten runs a module's `main` on load,
+which would turn a library into a program) and a compiler without weak
+definitions. `-DAETHER_NO_LIB_MAIN` leaves it out anywhere else.
+
 **Calling them more than once.**
 
 - `aether_main` while the program is already running (no `aether_main_exit`

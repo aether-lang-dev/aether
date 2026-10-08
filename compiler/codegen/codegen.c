@@ -4977,6 +4977,37 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
     return collided;
 }
 
+/* A library build of a program with main() also carries the executable's
+ * C entry point, WEAK:
+ *
+ *   int main(int argc, char** argv) {
+ *       int rc = aether_main(argc, argv); aether_main_exit(); return rc;
+ *   }
+ *
+ * so ANY tool that links the object into an executable -- aeb's c.program,
+ * a Makefile, a bare `cc app.o host.c` -- gets the program's entry without a
+ * hand-written C main() (aeb asks/c-program-aether-source-main-entry.md: a
+ * c.program whose aether_source defined main() linked with "_main"
+ * undefined). A host that brings its own main() is unaffected: a strong
+ * definition beats a weak one, and a shared library's main is never what a
+ * process starts in. Not emitted for wasm, where emscripten runs a module's
+ * main() on load and would turn a library into a program, nor for a compiler
+ * without weak definitions (the host then supplies main, as before). */
+static void emit_lib_weak_main(CodeGenerator* gen) {
+    print_line(gen, "");
+    print_line(gen, "/* The executable's entry, for whoever links this into a program; a host's");
+    print_line(gen, " * own main() wins (weak). See docs/emit-lib.md. */");
+    print_line(gen, "#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__) && !defined(__wasm__) && !defined(AETHER_NO_LIB_MAIN)");
+    print_line(gen, "__attribute__((weak)) int main(int argc, char** argv) {");
+    indent(gen);
+    print_line(gen, "int rc = aether_main(argc, argv);");
+    print_line(gen, "aether_main_exit();");
+    print_line(gen, "return rc;");
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "#endif");
+}
+
 void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     if (!main || main->type != AST_MAIN_FUNCTION) return;
 
@@ -5053,6 +5084,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "_aether_main_state = 0;");
         unindent(gen);
         print_line(gen, "}");
+        emit_lib_weak_main(gen);
     }
     gen->current_function = prev_current_function;
 }

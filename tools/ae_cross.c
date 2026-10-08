@@ -1487,7 +1487,9 @@ int run_cross_build(const char* c_file, const char* out_file,
          * plain ELF `-shared -fPIC` is right for every fbsd_link case. (#1648 got
          * --emit=lib working for the Tier-A targets but never exercised FreeBSD,
          * which shipped no library until selaenium's cross build.) */
-        const char* fbsd_lib_flags = emit_lib ? "-shared -fPIC" : "";
+        /* -DAETHER_NO_LIB_MAIN: no entry point in a shared library (see the
+         * Tier-A link below). */
+        const char* fbsd_lib_flags = emit_lib ? "-shared -fPIC -DAETHER_NO_LIB_MAIN" : "";
         /* --size strips at link time as well: same GNU/LLD spellings the Tier-A
          * ELF/PE path uses (FreeBSD's ld.lld takes them). */
         const char* fbsd_size_link = !ae_build_size_mode() ? ""
@@ -1594,9 +1596,14 @@ int run_cross_build(const char* c_file, const char* out_file,
                 : (is_apple ? "-Wl,-x -Wl,-dead_strip"
                             : "-Wl,--strip-all -Wl,--gc-sections");
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s%s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                "%s %s %s %s%s %s%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
                 cc_cmd, sysroot_flag, apple_lib_flags, wasi_model,
-                wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags, size_link,
+                wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags,
+                /* A shared library ae links carries no entry point; the weak
+                 * main() a library build of a program defines is for an
+                 * object someone links into an executable (codegen.c,
+                 * emit_lib_weak_main). A static library keeps it. */
+                (emit_lib && !emit_staticlib) ? " -DAETHER_NO_LIB_MAIN" : "", size_link,
                 opt, feature_defs, tc.include_flags, ae_includes, c_file, ex, objdir,
                 crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
             free(wasm_lib_flags);

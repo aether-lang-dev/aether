@@ -62,7 +62,7 @@ exports(
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
-    trust_store_load, free_anchors,
+    trust_store_load, trust_store_add, free_anchors,
     parse_ocsp_status, verify_ocsp_signature, verify_ocsp_signature_at, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
 
@@ -637,7 +637,7 @@ fn read_tlv_full(r: ptr) -> (ptr, string) {
 
 // Slice [start,end) of the reader's underlying buffer into fresh bytes.
 fn reader_slice(r: ptr, start: int, end: int) -> ptr {
-    rr = r as *ReaderView
+    rr = r as *CertReaderView
     n = end - start
     out = bytes.new(n)
     if n > 0 { bytes.set(out, n - 1, 0) }
@@ -647,7 +647,7 @@ fn reader_slice(r: ptr, start: int, end: int) -> ptr {
 
 // Minimal view of asn1's Reader to reach its buffer for slicing (buf is the
 // first field; this mirrors asn1.Reader's layout).
-struct ReaderView {
+struct CertReaderView {
     buf: ptr
     pos: int
     len: int
@@ -1796,18 +1796,85 @@ fn is_in_list(intermediates: ptr, idx: int, used: ptr) -> int {
 import std.fs
 import std.cryptography.pem
 
-// Load a PEM bundle file (e.g. /etc/ssl/certs/ca-certificates.crt) into a
-// std.list of *LeafCert trust anchors. Each PEM CERTIFICATE block is base64-
-// decoded and structurally parsed; blocks that fail to parse are skipped.
-// Returns (list, "") on success or (null, err) if the file can't be read.
+// Load a trust store into a std.list of *LeafCert trust anchors. `path` is
+// either a PEM bundle file (e.g. /etc/ssl/certs/ca-certificates.crt) or a
+// DIRECTORY of PEM files, one or more certificates each -- the layout OpenSSL's
+// SSL_CERT_DIR names and the only one Android has (/system/etc/security/cacerts,
+// /apex/com.android.conscrypt/cacerts; there is no bundle file there at all).
+// Each PEM CERTIFICATE block is base64-decoded and structurally parsed; blocks
+// that fail to parse are skipped, as is any text around them (Android's files
+// carry an `openssl x509 -text` dump after the PEM).
+//
+// Returns (list, "") when at least one certificate loaded, or (null, err) when
+// the path cannot be read or yields no certificate at all -- an empty store
+// would only fail later, at chain building, with a message about the server's
+// certificate rather than about the missing store.
 // Caller frees with free_anchors (frees each LeafCert + the list).
 trust_store_load(path: string) -> (ptr, string) {
+    anchors = list_new()
+    n, err = trust_store_add(anchors, path)
+    if n <= 0 {
+        free_anchors(anchors)
+        if string.equals(err, "") == 1 { err = "no certificates found in ${path}" }
+        return null, err
+    }
+    return anchors, ""
+}
+
+// Append the certificates at `path` (a PEM bundle file or a directory of PEM
+// files, as trust_store_load) to `anchors`, a list from trust_store_load or
+// list_new. Returns (count added, "") or (0, err) when `path` cannot be read.
+// A directory loads every regular file (or symlink) directly inside it; files
+// holding no certificate are skipped silently, since a CA directory routinely
+// carries other things (OpenSSL's hash symlinks beside the .pem they point at,
+// a README). Subdirectories are not descended into. This is what lets a caller
+// assemble one store from several sources (SSL_CERT_FILE plus SSL_CERT_DIR).
+trust_store_add(anchors: ptr, path: string) -> (int, string) {
+    if anchors == null { return 0, "trust_store_add: anchors list is null" }
+    if path == null { return 0, "cannot open trust store (no path)" }
+    if string.length(path) == 0 { return 0, "cannot open trust store (empty path)" }
+    if fs.dir_exists(path) == 1 {
+        return add_pem_dir(anchors, path)
+    }
     fh = fs.file_open_raw(path, "r")
-    if fh == null { return null, "cannot open trust store" }
+    if fh == null { return 0, "cannot open trust store ${path}" }
     text = fs.file_read_all_raw(fh)
     fs.file_close(fh)
+    return add_pem_text(anchors, text), ""
+}
 
-    anchors = list_new()
+// Every file directly inside `dir`, through add_pem_text.
+fn add_pem_dir(anchors: ptr, dir: string) -> (int, string) {
+    entries = fs.dir_list_raw(dir)
+    if entries == null { return 0, "cannot list trust store directory ${dir}" }
+    total = 0
+    count = fs.dir_list_count(entries)
+    i = 0
+    while i < count {
+        name = fs.dir_list_get(entries, i)
+        kind = fs.dir_list_kind(entries, i)
+        // Directories (and ".", "..") are skipped; a symlink is followed by
+        // the open below, which is what makes OpenSSL's hash links load. Kind
+        // 0 is "the filesystem did not say", so it is tried too.
+        if kind != fs.STAT_KIND_DIR && string.starts_with(name, ".") != 1 {
+            full = fs.path_join(dir, name)
+            fh = fs.file_open_raw(full, "r")
+            if fh != null {
+                text = fs.file_read_all_raw(fh)
+                fs.file_close(fh)
+                if text != null { total = total + add_pem_text(anchors, text) }
+            }
+        }
+        i = i + 1
+    }
+    fs.dir_list_free(entries)
+    return total, ""
+}
+
+// Parse every PEM CERTIFICATE block in `text` onto `anchors`; returns how many.
+fn add_pem_text(anchors: ptr, text: string) -> int {
+    if text == null { return 0 }
+    added = 0
     end_marker = "-----END CERTIFICATE-----"
     tlen = string.length(text)
     mlen = string.length(end_marker)
@@ -1820,14 +1887,13 @@ trust_store_load(path: string) -> (ptr, string) {
         der, _label, perr = pem.parse(block)
         if string.equals(perr, "") == 1 {
             if der != null {
-                // sizeof(LeafCert) = 136 on LP64 (9 ptr @8 + 8 int @4, C-packed;
-                // measured via element-stride of a *LeafCert array).
                 leaf = malloc(LEAFCERT_SIZE) as *LeafCert
                 init_leaf(leaf)
                 dlen = bytes.length(der)
                 cerr = parse_certificate(bytes.view(der)[0..dlen], leaf)
                 if string.equals(cerr, "") == 1 {
                     list_add_raw(anchors, leaf)
+                    added = added + 1
                 } else {
                     free_leaf(leaf)
                     free(leaf)
@@ -1837,7 +1903,7 @@ trust_store_load(path: string) -> (ptr, string) {
         }
         pos = block_end
     }
-    return anchors, ""
+    return added
 }
 
 // Zero every field of a heap-allocated LeafCert.

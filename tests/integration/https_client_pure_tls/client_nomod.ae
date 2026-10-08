@@ -1,0 +1,19 @@
+// The same https GET as client.ae, WITHOUT importing the pure TLS client.
+// With AETHER_PURE_TLS=1 (or in a build without OpenSSL) the request must fail
+// with an error that names the missing import, not crash or fall back quietly.
+
+import std.http.client
+import std.os
+
+main() {
+    req = client.request("GET", os.getenv("URL"))
+    client.set_timeout(req, 10s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("ERR: ${err}")
+        return
+    }
+    println("STATUS ${client.response_status(resp)}")
+    client.response_free(resp)
+}
