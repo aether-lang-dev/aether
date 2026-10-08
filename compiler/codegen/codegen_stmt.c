@@ -4217,6 +4217,13 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
     if (!node) return 0;
     if (depth > 8) return 1;
     if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) return 0;
+    /* A module-level `var` never frees what it holds (process lifetime,
+     * readable from any thread), so a store of the parameter into one has
+     * no releaser either: the global borrows, as before. */
+    if (node->type == AST_VARIABLE_DECLARATION && node->value && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type == AST_IDENTIFIER &&
+        node->children[0]->value && strcmp(node->children[0]->value, pname) == 0 &&
+        is_module_global_var(gen, node->value)) return 1;
     if (node->type == AST_FUNCTION_CALL && node->value) {
         char fn_norm[256];
         const char* fn = codegen_normalise_callee(node->value, fn_norm, sizeof(fn_norm));
@@ -9016,12 +9023,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     !is_var_declared(gen, stmt->value) &&
                     is_module_global_var(gen, stmt->value)) {
                     print_indent(gen);
-                    if (stmt->child_count > 0 &&
-                        string_take_is_view(gen, stmt->children[0])) {
+                    ASTNode* grhs = stmt->child_count > 0 ? stmt->children[0] : NULL;
+                    if (grhs && (string_take_is_view(gen, grhs) ||
+                                 (grhs->type == AST_IDENTIFIER && grhs->value &&
+                                  is_heap_string_var(gen, grhs->value)))) {
                         /* #2461: a global outlives the function, so it takes
                          * a view (a field of a local struct, an `if` over
-                         * locals) as a value of its own; like every heap
-                         * value a global holds, it is never freed. */
+                         * locals) as a value of its own, and a heap-tracked
+                         * local is moved on its last use or copied, so the
+                         * local's exit free cannot take the global's value
+                         * away; like every heap value a global holds, it is
+                         * never freed. */
                         char own[32];
                         string_take_new_flag(own, sizeof(own));
                         fprintf(gen->output, "{ int %s = 0; %s = ", own, stmt->value);

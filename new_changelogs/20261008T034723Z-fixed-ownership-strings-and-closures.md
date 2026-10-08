@@ -49,7 +49,7 @@
   storing it took a reference on entry that the store then left to nobody.
 - **A named function that keeps its `string` parameter owns it, and
   `list.set` owns a string element.** A function that stores its parameter
-  in a list, a map, a struct field, a cell or a global takes a reference of
+  in a list, a map, a struct field or a cell takes a reference of
   its own on entry, as a closure does (copy-on-keep): the store then moves
   or copies that reference, a return hands it to the caller owned, and the
   function's exit frees what is left. The caller borrows whatever it
@@ -57,7 +57,8 @@
   usual; the container owns its element in every shape and nothing frees it
   twice. A parameter also handed to a sink the compiler cannot release
   behind (an extern's `ptr` parameter, a `@retain` parameter, a callee with
-  no body) is not captured, and its caller keeps the earlier rule. Before,
+  no body, a module-level `var`, which never frees what it holds) is not
+  captured, and its caller keeps the earlier rule. Before,
   such a store left the container borrowing the caller's string and the
   caller keeping it alive for the rest of the function (a leak per call,
   through wrappers of wrappers too), and a closure's own reference handed

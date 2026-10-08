@@ -7503,9 +7503,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "    int n = list_size(ctx);");
         print_line(gen, "    if (n == 0) return 0;");
         print_line(gen, "    for (int i = 0; i < n; i += 2) {");
-        print_line(gen, "        const char* cat = (const char*)list_get_raw(ctx, i);");
-        print_line(gen, "        const char* pat = (const char*)list_get_raw(ctx, i + 1);");
-        print_line(gen, "        if (!cat || !pat) continue;");
+        /* An element is either string shape (a plain char* or an
+         * AetherString, as a grant copied by a wrapper that keeps its
+         * parameter is): read it through aether_string_data. */
+        print_line(gen, "        const void* cat_v = list_get_raw(ctx, i);");
+        print_line(gen, "        const void* pat_v = list_get_raw(ctx, i + 1);");
+        print_line(gen, "        if (!cat_v || !pat_v) continue;");
+        print_line(gen, "        const char* cat = aether_string_data(cat_v);");
+        print_line(gen, "        const char* pat = aether_string_data(pat_v);");
         print_line(gen, "        if (cat[0] == '*' && pat[0] == '*') return 1;");
         print_line(gen, "        if (strcmp(cat, category) == 0) {");
         print_line(gen, "            int plen = strlen(pat);");

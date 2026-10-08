@@ -18,6 +18,15 @@ extern exit(code: int)
 
 struct Rec { name: string }
 
+// A module global never frees what it holds, so a setter storing its
+// parameter there borrows it (no reference of its own): a literal set in a
+// loop allocates nothing, and the global reads the latest value.
+var g_token: string = "none"
+
+set_global(s: string) {
+    g_token = s
+}
+
 check(label: string, got: int, want: int) {
     if got != want {
         println("  FAIL ${label}: got ${got} want ${want}")
@@ -113,7 +122,7 @@ struct_field(k: int) -> int {
 // A closure keeping its parameter through the wrapper.
 through_closure(k: int) -> int {
     l = list.new()
-    f = |x: string| { add_name(l, x) }
+    f = | x: string | { add_name(l, x) }
     call(f, string.concat("c", string.from_int(k)))
     v, _ = list.get(l, 0)
     n = string.length(v)
@@ -121,12 +130,19 @@ through_closure(k: int) -> int {
     return n
 }
 
+globals(k: int) -> int {
+    set_global("secret")
+    n = string.length(g_token)
+    set_global("third")
+    return n + string.length(g_token)
+}
+
 round(k: int) -> int {
     l = escaped(k)
     v, _ = list.get(l, 0)
     n = string.length(v)
     list.free(l)
-    return rebind(k) + temp(k) + via_map(k) + kept_and_returned(k) + struct_field(k) + through_closure(k) + n
+    return rebind(k) + temp(k) + via_map(k) + kept_and_returned(k) + struct_field(k) + through_closure(k) + globals(k) + n
 }
 
 rounds(n: int) {
@@ -145,6 +161,7 @@ main() {
     check("kept and returned", kept_and_returned(3), 2 + 2 + 2)
     check("struct field", struct_field(3), 2 + 2)
     check("through closure", through_closure(3), 2)
+    check("globals", globals(3), 6 + 5)
     l = escaped(3)
     v, _ = list.get(l, 0)
     check("escaped", string.length(v), 2)
