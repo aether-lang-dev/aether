@@ -252,6 +252,11 @@ static const char* KEYWORDS[] = {
     "requires","ensures","true","false","and","or","not","isolate","consume", NULL
 };
 static const char* VALUE_KEYWORDS[] = { "true","false","null","self", NULL };
+/* Keywords the parser also takes as ordinary names (token_is_value_ident in
+ * compiler/parser/parser.c, #880): `after - mid` and `return func + 1` are
+ * arithmetic on a name, and treating the name as a keyword wrote the
+ * operator after it as a prefix one (`after -mid`, #2542). */
+static const char* NAME_KEYWORDS[] = { "state","after","func", NULL };
 static const char* STMT_KW_BEFORE_PAREN[] = { "if","while","for","switch","match","when","return","catch","in", NULL };
 static const char* CALL_KW_BEFORE_PAREN[] = { "spawn","make","isolate","consume", NULL };
 
@@ -259,6 +264,7 @@ static int is_keyword(const char* t){ return in_set(t, KEYWORDS); }
 static int is_value_end(const char* t){
     if (is_close(t)) return 1;
     if (in_set(t, VALUE_KEYWORDS)) return 1;
+    if (in_set(t, NAME_KEYWORDS)) return 1;
     if (is_word_tok(t) && !is_keyword(t)) return 1;   // identifiers, numbers, strings
     return 0;
 }

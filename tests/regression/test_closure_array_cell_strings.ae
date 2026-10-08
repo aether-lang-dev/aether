@@ -113,19 +113,27 @@ main() {
     p = string.concat("p", "")
     q = string.concat("q", "")
     run_all(p, q)
-    // Checked where the heap count is exact (mem.heap_in_use_exact); the
-    // macOS leaks gate covers the other platforms.
+    // Checked where the heap count is exact (mem.heap_in_use_exact): one of
+    // two equal windows grows by exactly 0 (a leak grows both, a one-time
+    // allocation at most one). The macOS leaks gate covers the other
+    // platforms.
     if mem.heap_in_use_exact() {
         run_all(p, q)
         start_bytes = mem.heap_in_use()
         k = 0
-        while k < 60 {
+        while k < 30 {
+            run_all(p, q)
+            k = k + 1
+        }
+        mid_bytes = mem.heap_in_use()
+        k = 0
+        while k < 30 {
             run_all(p, q)
             k = k + 1
         }
         end_bytes = mem.heap_in_use()
-        if end_bytes - start_bytes > 16384 {
-            println("FAIL: 60 rounds grew the heap by ${end_bytes - start_bytes} bytes")
+        if mid_bytes - start_bytes != 0 && end_bytes - mid_bytes != 0 {
+            println("FAIL: 30 rounds grew the heap by ${mid_bytes - start_bytes}, then ${end_bytes - mid_bytes} bytes")
             exit(1)
         }
     }

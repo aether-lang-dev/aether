@@ -158,25 +158,38 @@ main() {
     if mem.heap_in_use_exact() {
         round(1)
         names = ["use", "inline_lit", "alias_outlives", "get_cb", "copies", "field_store", "by_param", "boxed", "nested", "in_list"]
+        // Two equal windows of 50 calls per workload, one of which must grow
+        // by exactly 0: a leak per call grows both, a one-time allocation
+        // (seen on Windows UCRT64: 136 bytes once in alias_outlives) at most
+        // one.
         w = 0
         while w < 10 {
             before = mem.heap_in_use()
-            i = 0
-            while i < 50 {
-                if w == 0 { use(i) }
-                if w == 1 { inline_lit(i) }
-                if w == 2 { alias_outlives(i) }
-                if w == 3 { via_get_cb(i) }
-                if w == 4 { copies(i) }
-                if w == 5 { field_store(i) }
-                if w == 6 { via_param(i) }
-                if w == 7 { boxed(i) }
-                if w == 8 { nested(i) }
-                if w == 9 { in_list(i) }
-                i = i + 1
+            mid = before
+            k = 0
+            while k < 2 {
+                i = 0
+                while i < 50 {
+                    if w == 0 { use(i) }
+                    if w == 1 { inline_lit(i) }
+                    if w == 2 { alias_outlives(i) }
+                    if w == 3 { via_get_cb(i) }
+                    if w == 4 { copies(i) }
+                    if w == 5 { field_store(i) }
+                    if w == 6 { via_param(i) }
+                    if w == 7 { boxed(i) }
+                    if w == 8 { nested(i) }
+                    if w == 9 { in_list(i) }
+                    i = i + 1
+                }
+                if k == 0 { mid = mem.heap_in_use() }
+                k = k + 1
             }
-            grew = mem.heap_in_use() - before
-            if grew != 0 { println("  FAIL ${names[w]}: 50 calls grew the heap by ${grew} bytes"); exit(1) }
+            after = mem.heap_in_use()
+            if mid - before != 0 && after - mid != 0 {
+                println("  FAIL ${names[w]}: 50 calls grew the heap by ${mid - before}, then ${after - mid} bytes")
+                exit(1)
+            }
             w = w + 1
         }
     }

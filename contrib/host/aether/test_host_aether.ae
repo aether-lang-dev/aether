@@ -106,19 +106,26 @@ main() {
         // capture_sandboxed hands back a fresh string the caller owns, the
         // child's stdout or "" when it could not run. Its extern was a
         // plain `-> string`, so the compiler took it for borrowed and every
-        // capture leaked. Where the allocator's count is exact, two hundred
-        // captures of a binary that is not there leave the heap where it
-        // was. Gated like the spawn itself: elsewhere the bridge is a stub.
+        // capture leaked. Where the allocator's count is exact, one of two
+        // windows of a hundred captures of a binary that is not there
+        // leaves the heap where it was (a leak grows both; a one-time
+        // allocation at most one). Gated like the spawn itself: elsewhere
+        // the bridge is a stub.
         spec.it_when(is_posix, "reclaims captured output", "the bridge spawns on Linux and macOS only") callback {
             missing = string.concat(dir, "/no-such-binary")
             spec.assert_eq(capture_missing(missing), 0, "nothing is captured from a missing binary")
             if mem.heap_in_use_exact() {
                 before = mem.heap_in_use()
-                for (i = 0; i < 200; i++) {
+                for (i = 0; i < 100; i++) {
                     _n = capture_missing(missing)
                 }
-                grew = mem.heap_in_use() - before
-                spec.assert_eq(grew, 0, "200 captures grew the heap by ${grew} bytes")
+                mid = mem.heap_in_use()
+                for (i = 0; i < 100; i++) {
+                    _n = capture_missing(missing)
+                }
+                after = mem.heap_in_use()
+                spec.assert_true(mid - before == 0 || after -mid == 0,
+                    "100 captures grew the heap by ${mid - before}, then ${after - mid} bytes")
             }
         }
     }

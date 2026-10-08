@@ -42,7 +42,7 @@ fn reply_for(msg: string) -> string {
     if string.contains(msg, "big") == 1 {
         // 200 'x' chars — safely over the 126 extended-length threshold.
         s = ""
-        for (i = 0; i < 200; i ++) { s = string.concat(s, "x") }
+        for (i = 0; i < 200; i++) { s = string.concat(s, "x") }
         return s
     }
     return "echo:${msg}"
@@ -100,7 +100,7 @@ fn send_client_frame(sock: ptr, payload: string) {
     bytes.set(buf, 3, 2)
     bytes.set(buf, 4, 3)
     bytes.set(buf, 5, 4)
-    for (i = 0; i < len; i ++) {
+    for (i = 0; i < len; i++) {
         b = string.char_at(payload, i)
         bytes.set(buf, 6 + i, b ^ mask_byte(i))
     }
@@ -116,7 +116,7 @@ fn read_exact(sock: ptr, n: int) -> string {
     for (got < n; got < n; got = got) {
         chunk, m, err = tcp.read_n(sock, n - got)
         if err != "" { return "" }
-        for (j = 0; j < m; j ++) {
+        for (j = 0; j < m; j++) {
             bytes.set(acc, got + j, string.char_at(chunk, j))
         }
         got = got + m
@@ -202,8 +202,9 @@ main() {
             spec.assert_eq(string.char_at(plain, 3), 30, "'d' ^ 'z'")
         }
 
-        // Where the allocator's count is exact, a thousand keys and a
-        // thousand unmasked payloads leave the heap where it was.
+        // Where the allocator's count is exact, one of two windows of five
+        // hundred keys and payloads leaves the heap where it was (a leak
+        // grows both, a one-time allocation at most one).
         spec.it("reclaims accept keys and unmasked payloads") callback {
             key = string.concat("dGhlIHNhbXBsZSB", "ub25jZQ==")
             masked = string.concat("ab", "cd")
@@ -211,11 +212,16 @@ main() {
             spec.assert_eq(handshake_strings(key, masked, mask), 32, "28 key bytes and 4 payload bytes")
             if mem.heap_in_use_exact() {
                 before = mem.heap_in_use()
-                for (i = 0; i < 1000; i++) {
+                for (i = 0; i < 500; i++) {
                     _n = handshake_strings(key, masked, mask)
                 }
-                grew = mem.heap_in_use() - before
-                spec.assert_eq(grew, 0, "2000 calls grew the heap by ${grew} bytes")
+                mid = mem.heap_in_use()
+                for (i = 0; i < 500; i++) {
+                    _n = handshake_strings(key, masked, mask)
+                }
+                after = mem.heap_in_use()
+                spec.assert_true(mid - before == 0 || after -mid == 0,
+                    "500 rounds grew the heap by ${mid - before}, then ${after - mid} bytes")
             }
         }
     }

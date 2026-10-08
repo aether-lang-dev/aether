@@ -7,8 +7,9 @@
 // the handler is done. Before, the field kept the environment for the rest
 // of the program.
 //
-// The check runs where the heap count is exact (mem.heap_in_use_exact): a
-// later window of the same rounds must not grow the heap. An ask at the end
+// The check runs where the heap count is exact (mem.heap_in_use_exact): one
+// of two equal windows of rounds grows by exactly 0 (a leak grows both, a
+// one-time allocation at most one). An ask at the end
 // of each round waits for every earlier message, so the count is read with
 // the mailbox drained. Elsewhere the macOS leaks gate covers this program.
 // Strings are built from parameters, because string.concat of two literals
@@ -79,8 +80,10 @@ main() {
     }
     before = mem.heap_in_use()
     round(k, "a")
+    mid = mem.heap_in_use()
     round(k, "a")
-    grown = mem.heap_in_use() - before
-    check(grown == 0, "two rounds grew the heap by ${grown} bytes")
+    after = mem.heap_in_use()
+    check(mid - before == 0 || after - mid == 0,
+        "a round grew the heap by ${mid - before}, then ${after - mid} bytes")
     println("OK")
 }

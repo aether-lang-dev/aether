@@ -5,7 +5,8 @@
 // alive for the later call from C.
 //
 // The heap check runs where the count is exact (mem.heap_in_use_exact):
-// after a warm-up, a later window of the same work must not grow the heap.
+// after a warm-up, one of two equal windows of the same work grows by
+// exactly 0 (a leak grows both, a one-time allocation at most one).
 // Strings are built from parameters so nothing folds to a literal.
 
 import std.mem
@@ -56,9 +57,11 @@ main() {
         round("seed")
         base = mem.heap_in_use()
         round("seed")
+        mid = mem.heap_in_use()
         round("seed")
-        grown = mem.heap_in_use() - base
-        check(grown == 0, "two rounds grew the heap by ${grown} bytes")
+        after = mem.heap_in_use()
+        check(mid - base == 0 || after - mid == 0,
+            "a round grew the heap by ${mid - base}, then ${after - mid} bytes")
     }
     msg = tag("cap")
     register_cb(|| { println(msg); return 7 })

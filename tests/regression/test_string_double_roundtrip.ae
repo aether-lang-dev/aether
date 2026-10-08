@@ -93,8 +93,8 @@ main() {
     var count = 0
     var loop_fails = 0
     while count < 5000 {
-        state = (state *6364136223846793005) + 1442695040888963407
-        if (state &0x7ff0000000000000) != 0x7ff0000000000000 {
+        state = (state * 6364136223846793005) + 1442695040888963407
+        if (state & 0x7ff0000000000000) != 0x7ff0000000000000 {
             loop_fails = loop_fails + check_roundtrip(state)
             count = count + 1
         }

@@ -160,11 +160,23 @@ main() {
     }
     round(0) // warm up: first-use allocations are not per panic
     round(LITERAL)
+    if mem.heap_in_use_exact() {
+        // One of two equal windows grows by exactly 0: a leak per panic
+        // grows both, a one-time allocation at most one.
+        first = two_rounds(0)
+        second = two_rounds(0)
+        if first != 0 && second != 0 {
+            println("FAIL: two rounds of built messages kept ${first}, then ${second} bytes")
+            exit(1)
+        }
+        println("OK")
+        return
+    }
+    // Where the count is not exact, built messages against literal ones:
+    // allocators may keep a few KB of cached blocks (std.mem's README), and
+    // one leaking shape alone keeps 400 messages here, 6400 bytes or more.
     literal = two_rounds(LITERAL)
     built = two_rounds(0)
-    // std.mem's leak-free tolerance (its README): allocators may keep a
-    // few KB of cached blocks, which Wine's heap reports as in use. One
-    // leaking shape alone keeps 400 messages here, 6400 bytes or more.
     if built - literal > 4096 {
         println("FAIL: two rounds of built messages kept ${built} bytes, literals ${literal}")
         exit(1)

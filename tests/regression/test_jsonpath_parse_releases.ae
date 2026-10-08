@@ -54,7 +54,7 @@ fn steady(doc: ptr, kind: int, what: string) {
         i = i + 1
     }
     after = mem.heap_in_use()
-    check(mid - before == 0 || after -mid == 0,
+    check(mid - before == 0 || after - mid == 0,
         "${what} grew the heap: ${mid - before} then ${after - mid} bytes")
 }
 

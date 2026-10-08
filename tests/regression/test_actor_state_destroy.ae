@@ -129,7 +129,7 @@ main() {
     mid = mem.heap_in_use()
     overwrite_round(k, "a")
     after = mem.heap_in_use()
-    check(mid - before == 0 || after -mid == 0,
+    check(mid - before == 0 || after - mid == 0,
         "overwriting state grew the heap: ${mid - before} then ${after - mid} bytes")
     release_window("a", 250)
     check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
@@ -140,7 +140,7 @@ main() {
     release_window("a", 100)
     check(scheduler_reclaim_released() == 0, "released actors still retired after the second window")
     after = mem.heap_in_use()
-    check(mid - before == 0 || after -mid == 0,
+    check(mid - before == 0 || after - mid == 0,
         "spawn, fill and release grew the heap: ${mid - before} then ${after - mid} bytes")
     println("OK")
 }

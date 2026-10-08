@@ -138,3 +138,9 @@
   script returned failed with undefined references. `emit_lib_composite`,
   the test that walks one, skipped on Windows; its host now loads the
   library with `LoadLibrary` there and runs.
+- **`ae fmt` keeps arithmetic on `state`, `after` and `func` binary
+  (#2542).** The parser takes those keywords as ordinary names (#880), but
+  the formatter took the operator after one for a prefix operator, so
+  `after - mid` came out as `after -mid`, and `state * 6364136223846793005`
+  as `state *6364136223846793005`, which reads as a dereference. The ten
+  test files written that way are reformatted.

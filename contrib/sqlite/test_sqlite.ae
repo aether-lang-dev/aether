@@ -98,19 +98,26 @@ main() {
         // exec's error text is a fresh string the caller owns. Its extern
         // was a plain `-> string`, so the compiler took it for borrowed and
         // every failing exec leaked its message. Where the allocator's count
-        // is exact, a thousand failing and a thousand succeeding execs leave
-        // the heap where it was (the first of each warms SQLite's caches).
+        // is exact, one of two windows of five hundred failing and five
+        // hundred succeeding execs leaves the heap where it was (a leak grows
+        // both; a one-time allocation, such as SQLite warming its caches, at
+        // most one).
         spec.it_when(have_sqlite, "reclaims the error text of exec", reason) callback {
             bad = "INSERT INTO nosuchtable VALUES (1)"
             good = "UPDATE t SET name = name WHERE id = 0"
             spec.assert_not_eq(exec_pair(db, bad, good), 0, "the failing exec reports")
             if mem.heap_in_use_exact() {
                 before = mem.heap_in_use()
-                for (i = 0; i < 1000; i++) {
+                for (i = 0; i < 500; i++) {
                     _n = exec_pair(db, bad, good)
                 }
-                grew = mem.heap_in_use() - before
-                spec.assert_eq(grew, 0, "2000 execs grew the heap by ${grew} bytes")
+                mid = mem.heap_in_use()
+                for (i = 0; i < 500; i++) {
+                    _n = exec_pair(db, bad, good)
+                }
+                after = mem.heap_in_use()
+                spec.assert_true(mid - before == 0 || after -mid == 0,
+                    "500 exec pairs grew the heap by ${mid - before}, then ${after - mid} bytes")
             }
         }
 
