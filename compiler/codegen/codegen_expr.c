@@ -4500,10 +4500,10 @@ void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
     }
 }
 
-void emit_string_literal_fwrite(CodeGenerator* gen, const ASTNode* lit) {
-    fprintf(gen->output, "fwrite(\"");
+void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newline) {
+    fprintf(gen->output, "aether_write_bytes(stdout, \"");
     emit_c_string_bytes(gen, lit->value, (size_t)lit->value_len, 0);
-    fprintf(gen->output, "\", 1, %d, stdout)", lit->value_len);
+    fprintf(gen->output, "\", %d, %d)", lit->value_len, newline ? 1 : 0);
 }
 
 /* #2520: the `0` argument for each `%c` that emit_c_string_bytes wrote for
@@ -6318,16 +6318,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
                             } else {
-                                // Runtime string — could be NULL
-                                fprintf(gen->output, "printf(\"%%s\", _aether_safe_str(");
+                                // Runtime string, could be NULL; by length (#2521)
+                                fprintf(gen->output, "_aether_print_str(");
                                 generate_expression(gen, arg);
-                                fprintf(gen->output, "))");
+                                fprintf(gen->output, ")");
                             }
                         } else if (arg_type->kind == TYPE_PTR) {
-                            // Runtime pointer — could be NULL
-                            fprintf(gen->output, "printf(\"%%s\", _aether_safe_str(");
+                            // Runtime pointer, could be NULL; by length (#2521)
+                            fprintf(gen->output, "_aether_print_str(");
                             generate_expression(gen, arg);
-                            fprintf(gen->output, "))");
+                            fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_BOOL) {
                             fprintf(gen->output, "printf(\"%%s\", ");
                             generate_expression(gen, arg);
@@ -6342,7 +6342,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (a->type == AST_LITERAL && a->node_type && a->node_type->kind == TYPE_STRING) {
                             if (a->value_len > 0) {
                                 /* Every byte, NULs included (#2520). */
-                                emit_string_literal_fwrite(gen, a);
+                                emit_string_literal_write(gen, a, 0);
                             } else {
                                 fprintf(gen->output, "printf(");
                                 generate_expression(gen, a);
@@ -6413,13 +6413,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                 }
                 else if (strcmp(func_name, "println") == 0) {
-                    // println(x) = print(x) then putchar('\n')
-                    // Special case: println("...${expr}...") — generate interp then add \n
+                    // println("...${expr}..."): the interpolation is printed
+                    // with its newline in the same format, so the line is
+                    // one write under the stream's lock (#2521).
                     if (expr->child_count == 1 && expr->children[0]->type == AST_STRING_INTERP) {
-                        gen->interp_as_printf = 1;
+                        gen->interp_as_printf = 2;
                         generate_expression(gen, expr->children[0]);
                         gen->interp_as_printf = 0;
-                        fprintf(gen->output, "; putchar('\\n')");
                     } else
                     if (expr->child_count == 1 && expr->children[0]->node_type) {
                         ASTNode* arg = expr->children[0];
@@ -6450,10 +6450,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_STRING) {
                             if (arg->type == AST_LITERAL && arg->value_len > 0) {
-                                /* Every byte, NULs included (#2520). */
-                                fprintf(gen->output, "(");
-                                emit_string_literal_fwrite(gen, arg);
-                                fprintf(gen->output, ", putchar('\\n'))");
+                                /* Every byte, NULs included (#2520), and
+                                 * the newline in the same write (#2521). */
+                                emit_string_literal_write(gen, arg, 1);
                             } else if (arg->type == AST_LITERAL) {
                                 // String literal — never NULL, use puts() directly
                                 fprintf(gen->output, "puts(");
@@ -6471,16 +6470,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
                             } else {
-                                // Runtime string — could be NULL
-                                fprintf(gen->output, "printf(\"%%s\\n\", _aether_safe_str(");
+                                // Runtime string, could be NULL; by length (#2521)
+                                fprintf(gen->output, "_aether_println_str(");
                                 generate_expression(gen, arg);
-                                fprintf(gen->output, "))");
+                                fprintf(gen->output, ")");
                             }
                         } else if (arg_type->kind == TYPE_PTR) {
-                            // Runtime pointer — could be NULL
-                            fprintf(gen->output, "printf(\"%%s\\n\", _aether_safe_str(");
+                            // Runtime pointer, could be NULL; by length (#2521)
+                            fprintf(gen->output, "_aether_println_str(");
                             generate_expression(gen, arg);
-                            fprintf(gen->output, "))");
+                            fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_BOOL) {
                             fprintf(gen->output, "printf(\"%%s\\n\", ");
                             generate_expression(gen, arg);
@@ -7922,7 +7921,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, " ? \"true\" : \"false\""); \
                     } else if (tk == TYPE_STRING || tk == TYPE_PTR) { \
-                        fprintf(gen->output, "_aether_safe_str("); \
+                        /* As held, an AetherString or a char*: the \
+                         * formatter writes it by its length (#2521). */ \
+                        fprintf(gen->output, "(const void*)("); \
                         interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, ")"); \
                     } else if (tk == TYPE_INT64) { \
@@ -8000,9 +8001,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 it_heap[di] = heap;
             }
             if (as_printf) {
-                // Mode 1: direct printf (for print/println)
-                fprintf(gen->output, "printf(\"");
+                // Mode 1: written to stdout (for print/println), by the
+                // runtime formatter so a string segment keeps its NULs; 2
+                // is println, whose newline ends the format (#2521)
+                fprintf(gen->output, "_aether_interp_print(\"");
                 EMIT_INTERP_FMT();
+                if (as_printf == 2) fprintf(gen->output, "\\n");
                 fprintf(gen->output, "\"");
                 EMIT_INTERP_ARGS();
                 fprintf(gen->output, ")");

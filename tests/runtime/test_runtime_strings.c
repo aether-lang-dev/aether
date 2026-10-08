@@ -2,6 +2,7 @@
 #include "../../std/string/aether_string.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 TEST_CATEGORY(string_concat_basic, TEST_CATEGORY_STDLIB) {
     AetherString* s1 = string_from_cstr("Hello");
@@ -230,4 +231,45 @@ TEST_CATEGORY(string_compare_embedded_nul, TEST_CATEGORY_STDLIB) {
     string_release(ab);
     string_release(ac);
     string_release(a);
+}
+
+/* The interpolation formatter takes its arguments as varargs, as the
+ * generated _aether_interp does. */
+static size_t interp(char* out, size_t cap, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    size_t n = aether_interp_format(out, cap, NULL, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* #2521: a %s argument is written by its length, so a NUL in an
+ * AetherString is a byte of the result; numbers go through snprintf as
+ * written, whatever their length. */
+TEST_CATEGORY(interp_format_by_length, TEST_CATEGORY_STDLIB) {
+    AetherString* nul = string_new_with_length("x\0y", 3);
+    char out[512];
+
+    size_t n = interp(out, sizeof(out), "[%s]", nul);
+    ASSERT_EQ(5, (int)n);
+    ASSERT_TRUE(memcmp(out, "[x\0y]", 6) == 0);
+
+    /* A plain char* to its NUL; NULL as (null); %%; a %c of 0. */
+    n = interp(out, sizeof(out), "%s|%s|100%%|%c.", "plain", (const char*)NULL, 0);
+    ASSERT_EQ(20, (int)n);
+    ASSERT_TRUE(memcmp(out, "plain|(null)|100%|\0.", 21) == 0);
+
+    /* A conversion longer than the formatter's stack buffer is whole. */
+    n = interp(out, sizeof(out), "%f", 1e300);
+    ASSERT_EQ(308, (int)n);
+    ASSERT_EQ(308, (int)strlen(out));
+
+    /* Sizing pass, then a buffer too small: the full length either way,
+     * the buffer filled as far as it goes and terminated. */
+    ASSERT_EQ(9, (int)interp(NULL, 0, "%d-%lld", 1234, 5678LL));
+    n = interp(out, 5, "%d-%lld", 1234, 5678LL);
+    ASSERT_EQ(9, (int)n);
+    ASSERT_STREQ("1234", out);
+
+    string_release(nul);
 }

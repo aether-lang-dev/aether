@@ -811,6 +811,146 @@ const char* aether_string_data(const void* s) {
     return str_data(s);
 }
 
+/* One print holds the stream's lock across all of its writes, as a single
+ * printf call does, so lines printed by two threads never interleave
+ * (#2521). The lock is recursive, so fwrite inside it is fine. */
+#ifdef _WIN32
+#define aether_stream_lock(f)   _lock_file(f)
+#define aether_stream_unlock(f) _unlock_file(f)
+#else
+#define aether_stream_lock(f)   flockfile(f)
+#define aether_stream_unlock(f) funlockfile(f)
+#endif
+
+/* Where aether_interp_format writes: a buffer, a stream, or nowhere (a
+ * sizing pass); `len` counts every byte offered. */
+typedef struct {
+    char* out;
+    size_t cap;
+    size_t len;
+    FILE* f;
+} InterpSink;
+
+static void interp_put(InterpSink* k, const char* p, size_t n) {
+    if (n == 0) return;
+    if (k->f) {
+        fwrite(p, 1, n, k->f);
+    } else if (k->out && k->len + 1 < k->cap) {
+        size_t room = k->cap - 1 - k->len;
+        memcpy(k->out + k->len, p, n < room ? n : room);
+    }
+    k->len += n;
+}
+
+/* Formats one numeric argument of type T with the conversion `sub` and
+ * offers it to the sink: on the stack when it fits, else on the heap, so
+ * no conversion is ever cut short. */
+#define INTERP_NUM(T) do {                                                  \
+        T v_ = va_arg(ap, T);                                               \
+        char small_[64];                                                    \
+        int n_ = snprintf(small_, sizeof(small_), sub, v_);                 \
+        if (n_ < 0) break;                                                  \
+        if ((size_t)n_ < sizeof(small_)) {                                  \
+            interp_put(&k, small_, (size_t)n_);                             \
+        } else {                                                            \
+            char* big_ = (char*)malloc((size_t)n_ + 1);                     \
+            if (big_) {                                                     \
+                snprintf(big_, (size_t)n_ + 1, sub, v_);                    \
+                interp_put(&k, big_, (size_t)n_);                           \
+                free(big_);                                                 \
+            }                                                               \
+        }                                                                   \
+    } while (0)
+
+size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
+    InterpSink k = { out, cap, 0, f };
+    if (f) aether_stream_lock(f);
+    const char* p = fmt;
+    while (*p) {
+        if (*p != '%') {
+            const char* run = p;
+            while (*p && *p != '%') p++;
+            interp_put(&k, run, (size_t)(p - run));
+            continue;
+        }
+        const char* spec = p++;
+        if (*p == '%') { interp_put(&k, "%", 1); p++; continue; }
+        if (*p == 's') {
+            /* By length: an AetherString's bytes, a plain char* to its NUL. */
+            const void* s = va_arg(ap, const void*);
+            if (s) interp_put(&k, str_data(s), str_len(s));
+            else interp_put(&k, "(null)", 6);
+            p++;
+            continue;
+        }
+        if (*p == 'c') {
+            char c = (char)va_arg(ap, int);
+            interp_put(&k, &c, 1);
+            p++;
+            continue;
+        }
+        /* A numeric conversion, with its length modifier, as snprintf
+         * writes it. The spec is at most `%` + 2 modifiers + the letter. */
+        int longs = 0, long_double = 0, size_mod = 0;
+        while (*p == 'l' || *p == 'L' || *p == 'z') {
+            if (*p == 'l') longs++;
+            else if (*p == 'L') long_double = 1;
+            else size_mod = 1;
+            p++;
+        }
+        char conv = *p;
+        char sub[8];
+        size_t sl = (size_t)(p - spec) + 1;
+        if (!conv || sl >= sizeof(sub)) {
+            /* Not a conversion codegen writes: keep the text. */
+            interp_put(&k, spec, (size_t)(p - spec));
+            continue;
+        }
+        memcpy(sub, spec, sl);
+        sub[sl] = '\0';
+        p++;
+        switch (conv) {
+            case 'd': case 'i':
+                if (longs >= 2) INTERP_NUM(long long);
+                else if (longs == 1) INTERP_NUM(long);
+                else if (size_mod) INTERP_NUM(size_t);
+                else INTERP_NUM(int);
+                break;
+            case 'u': case 'x': case 'X': case 'o':
+                if (longs >= 2) INTERP_NUM(unsigned long long);
+                else if (longs == 1) INTERP_NUM(unsigned long);
+                else if (size_mod) INTERP_NUM(size_t);
+                else INTERP_NUM(unsigned int);
+                break;
+            case 'g': case 'G': case 'f': case 'F': case 'e': case 'E':
+                if (long_double) INTERP_NUM(long double);
+                else INTERP_NUM(double);
+                break;
+            default:
+                interp_put(&k, spec, sl);
+                break;
+        }
+    }
+    if (f) aether_stream_unlock(f);
+    if (out && cap > 0) out[k.len < cap ? k.len : cap - 1] = '\0';
+    return k.len;
+}
+
+#undef INTERP_NUM
+
+size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline) {
+    aether_stream_lock(f);
+    if (n) fwrite(p, 1, n, f);
+    if (newline) fputc('\n', f);
+    aether_stream_unlock(f);
+    return n + (newline ? 1 : 0);
+}
+
+size_t aether_print_string(FILE* f, const void* s, int newline) {
+    if (!s) return aether_write_bytes(f, "(null)", 6, newline);
+    return aether_write_bytes(f, str_data(s), str_len(s), newline);
+}
+
 void* aether_string_raw_ptr(const void* s) {
     return (void*)str_data(s);
 }

@@ -2,6 +2,8 @@
 #define AETHER_STRING_H
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 // AETHER_STRING_MAGIC, AETHER_STRING_PINNED_REFS and the header's fields,
 // shared with the compiler (#2520).
@@ -186,6 +188,27 @@ const char* string_to_cstr(const void* str);
 // the full ABI contract.
 const char* aether_string_data(const void* s);
 size_t      aether_string_length(const void* s);
+
+/* #2521: the formatter behind string interpolation and print/println.
+ * `fmt` is a printf format the compiler wrote: text and the conversions
+ * codegen emits (%d %i %u %x %o %ld %lld %llu %g %f %e %Lg %c %s %%). A %s
+ * argument is the string as the program holds it, an AetherString* or a
+ * plain char*, and is written by its length, so a NUL in it is kept;
+ * vsnprintf stopped at the first NUL. Every other conversion is given to
+ * snprintf as written. Writes to `out` (at most `cap` bytes, NUL
+ * terminated when cap > 0), or to `f` when `out` is NULL and `f` is set,
+ * and returns the full length either way, so a caller sizes with
+ * (NULL, 0, NULL, ...) first. Writing to a stream holds its lock for the
+ * whole call. */
+size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap);
+
+/* #2521: write `n` bytes (and a newline when `newline`) to `f` under the
+ * stream's lock, as one print, so a NUL is written like any other byte and
+ * another thread's print cannot land inside it. Returns the bytes written.
+ * aether_print_string does the same for a string value (an AetherString or
+ * a plain char*, by its length), printing NULL as `(null)`. */
+size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline);
+size_t aether_print_string(FILE* f, const void* s, int newline);
 
 // Same unwrap as aether_string_data, typed as a bare `void*` in both
 // directions (#2301) so it matches Aether's own `ptr` exactly — declaring

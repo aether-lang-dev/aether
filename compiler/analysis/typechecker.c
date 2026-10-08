@@ -6840,31 +6840,39 @@ static int match_arm_is_wildcard(ASTNode* p) {
     return p->value && strcmp(p->value, "_") == 0;
 }
 
-/* Writes a comparable key for the pattern shapes whose identity is
- * unambiguous. Returns 0 for everything else, which is then left alone. */
-static int match_arm_key(ASTNode* p, char* out, size_t cap) {
-    if (!p || match_arm_is_wildcard(p)) return 0;
+/* A comparable key, malloc'd, for the pattern shapes whose identity is
+ * unambiguous; NULL for everything else, which is then left alone. The key
+ * covers the whole pattern: a fixed 160-byte key made two long literals
+ * sharing a prefix duplicates (#2521). */
+static char* match_arm_key(ASTNode* p) {
+    if (!p || match_arm_is_wildcard(p)) return NULL;
     if (p->type == AST_LITERAL && p->value) {
         /* By length: a string literal may hold a NUL (#2520). A NUL is
          * written as `\0` and a backslash as `\\`, so no two literals share
          * a key. */
-        size_t o = (size_t)snprintf(out, cap, "lit:");
         int n = ast_literal_length(p);
-        for (int i = 0; i < n && o + 2 < cap; i++) {
+        char* key = malloc(4 + (size_t)n * 2 + 1);
+        if (!key) return NULL;
+        memcpy(key, "lit:", 4);
+        size_t o = 4;
+        for (int i = 0; i < n; i++) {
             char c = p->value[i];
-            if (c == '\0') { out[o++] = '\\'; out[o++] = '0'; }
-            else if (c == '\\') { out[o++] = '\\'; out[o++] = '\\'; }
-            else out[o++] = c;
+            if (c == '\0') { key[o++] = '\\'; key[o++] = '0'; }
+            else if (c == '\\') { key[o++] = '\\'; key[o++] = '\\'; }
+            else key[o++] = c;
         }
-        out[o] = '\0';
-        return 1;
+        key[o] = '\0';
+        return key;
     }
     if (p->type == AST_MEMBER_ACCESS && p->value &&
         p->child_count > 0 && p->children[0] && p->children[0]->value) {
-        snprintf(out, cap, "mem:%s.%s", p->children[0]->value, p->value);
-        return 1;
+        size_t n = 4 + strlen(p->children[0]->value) + 1 + strlen(p->value) + 1;
+        char* key = malloc(n);
+        if (!key) return NULL;
+        snprintf(key, n, "mem:%s.%s", p->children[0]->value, p->value);
+        return key;
     }
-    return 0;
+    return NULL;
 }
 
 static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
@@ -6882,7 +6890,7 @@ static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
 static void check_match_arm_reachability(ASTNode* stmt) {
     if (!stmt) return;
     enum { MATCH_KEYS_MAX = 64 };
-    char keys[MATCH_KEYS_MAX][160];
+    char* keys[MATCH_KEYS_MAX];
     int  key_line[MATCH_KEYS_MAX];
     int  nkeys = 0;
     int  wildcard_line = -1;
@@ -6907,8 +6915,8 @@ static void check_match_arm_reachability(ASTNode* stmt) {
             continue;
         }
 
-        char key[160];
-        if (!match_arm_key(pattern, key, sizeof(key))) continue;
+        char* key = match_arm_key(pattern);
+        if (!key) continue;
         int dup_line = -1;
         for (int k = 0; k < nkeys; k++) {
             if (strcmp(keys[k], key) == 0) { dup_line = key_line[k]; break; }
@@ -6920,12 +6928,16 @@ static void check_match_arm_reachability(ASTNode* stmt) {
                      "line %d", dup_line);
             warn_unreachable_arm(pattern, msg,
                                  "remove the duplicate, or change it to the case you meant");
+            free(key);
         } else if (nkeys < MATCH_KEYS_MAX) {
-            snprintf(keys[nkeys], sizeof(keys[nkeys]), "%s", key);
+            keys[nkeys] = key;
             key_line[nkeys] = pattern->line;
             nkeys++;
+        } else {
+            free(key);
         }
     }
+    for (int k = 0; k < nkeys; k++) free(keys[k]);
 }
 
 /* #1778 diagnostic helper: is `rhs` a call to a function that has a BARE `fn`

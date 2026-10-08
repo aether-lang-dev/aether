@@ -315,8 +315,8 @@ TEST(codegen_interp_impure_segments_hoist_in_source_order) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "{ int _ad_", " = (int)(bump()); int _ad_", " = (int)(bump()); int _ad_",
-        " = (int)(bump()); printf(\"%d %d %d\", (int)_ad_", ", (int)_ad_", ", (int)_ad_",
-        "); }; putchar('\\n');",
+        " = (int)(bump()); _aether_interp_print(\"%d %d %d\\n\", (int)_ad_", ", (int)_ad_", ", (int)_ad_",
+        "); }",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
     ASSERT_TRUE(strstr(buf, "(int)bump()") == NULL);
@@ -345,7 +345,7 @@ TEST(codegen_interp_pure_segment_beside_impure_is_hoisted_too) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "{ int _ad_", " = (int)(n); int _ad_", " = (int)(bump()); int _ad_", " = (int)(n); ",
-        "printf(\"%d %d %d\", (int)_ad_",
+        "_aether_interp_print(\"%d %d %d\\n\", (int)_ad_",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
     ASSERT_TRUE(strstr(buf, "(int)n)") == NULL);
@@ -357,7 +357,9 @@ TEST(codegen_interp_all_pure_segments_stay_inline) {
         "main() { name = \"x\"\n age = 3\n println(\"${name} is ${age}\") }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "_ad_") == NULL);
-    ASSERT_NOT_NULL(strstr(buf, "printf(\"%s is %d\", _aether_safe_str(name), (int)age)"));
+    /* A string segment goes as held, for the formatter to write by its
+     * length, and println's newline ends the format (#2521). */
+    ASSERT_NOT_NULL(strstr(buf, "_aether_interp_print(\"%s is %d\\n\", (const void*)(name), (int)age)"));
     free(buf);
 }
 
@@ -367,7 +369,7 @@ TEST(codegen_interp_single_impure_segment_stays_inline) {
         "main() { println(\"got ${bump()}\") }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "_ad_") == NULL);
-    ASSERT_NOT_NULL(strstr(buf, "printf(\"got %d\", (int)bump())"));
+    ASSERT_NOT_NULL(strstr(buf, "_aether_interp_print(\"got %d\\n\", (int)bump())"));
     free(buf);
 }
 
@@ -382,7 +384,7 @@ TEST(codegen_interp_hoisted_heap_segment_is_freed_after_call) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "{ const char* _ad_", " = (const char*)(string_concat(name, name)); int _ad_", " = (int)(bump()); ",
-        "printf(\"%s %d\", _aether_safe_str(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
+        "_aether_interp_print(\"%s %d\\n\", (const void*)(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
     free(buf);
@@ -394,7 +396,7 @@ TEST(codegen_interp_nested_interp_segment_is_freed_after_call) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "({ const char* _ad_", " = (const char*)(_aether_interp(\"%d-%d\", (int)x, (int)x)); ",
-        "const char* _it_r = _aether_interp(\"a %s b\", _aether_safe_str(_ad_", ")); aether_heap_str_free(_ad_", "); _it_r; })",
+        "const char* _it_r = _aether_interp(\"a %s b\", (const void*)(_ad_", ")); aether_heap_str_free(_ad_", "); _it_r; })",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
     free(buf);

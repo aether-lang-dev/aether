@@ -11259,10 +11259,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             generate_expression(gen, first_arg);
                             fprintf(gen->output, ");\n");
                         } else {
-                            // NULL-safe via helper (no double-evaluation)
-                            fprintf(gen->output, "printf(\"%%s\", _aether_safe_str(");
+                            // NULL-safe, and by length (#2521)
+                            fprintf(gen->output, "_aether_print_str(");
                             generate_expression(gen, first_arg);
-                            fprintf(gen->output, "));\n");
+                            fprintf(gen->output, ");\n");
                         }
                     } else if (arg_type->kind == TYPE_BOOL) {
                         fprintf(gen->output, "printf(\"%%s\", ");
@@ -11284,10 +11284,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, "));\n");
                     } else if (arg_type->kind == TYPE_PTR) {
-                        // NULL-safe via helper (no double-evaluation)
-                        fprintf(gen->output, "printf(\"%%s\", _aether_safe_str(");
+                        // NULL-safe, and by length (#2521)
+                        fprintf(gen->output, "_aether_print_str(");
                         generate_expression(gen, first_arg);
-                        fprintf(gen->output, "));\n");
+                        fprintf(gen->output, ");\n");
                     } else {
                         // Unknown type - default to %d
                         fprintf(gen->output, "printf(\"%%d\", ");
@@ -11300,7 +11300,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING &&
                         arg->value_len > 0) {
                         /* Every byte, NULs included (#2520). */
-                        emit_string_literal_fwrite(gen, arg);
+                        emit_string_literal_write(gen, arg, 0);
                         fprintf(gen->output, ";\n");
                     } else if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
                         fprintf(gen->output, "printf(");

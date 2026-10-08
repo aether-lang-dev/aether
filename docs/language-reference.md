@@ -3028,7 +3028,7 @@ age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
 
-The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation.
+The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation. A `${s}` segment writes the string `s` by its length, so a value holding a NUL goes in whole; `print` and `println` write a string value the same way.
 
 Interpolated strings produce a `ptr` (heap-allocated C string) when used as values:
 

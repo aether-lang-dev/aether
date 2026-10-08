@@ -51,6 +51,7 @@ expect_warning warn_arm_after_wildcard 'W1004.*`_` arm on line 9'
 expect_no_warning ok_distinct_arms
 expect_no_warning ok_binding_arm
 expect_no_warning ok_partial_catchall
+expect_no_warning ok_long_arms
 
 if [ "$fail" -eq 0 ]; then
     echo "  [PASS] match_arm_unreachable: duplicate + post-wildcard arms warn; valid shapes silent"

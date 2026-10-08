@@ -6983,18 +6983,31 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * allocation on top of the payload the format already needed. */
     print_line(gen, "extern void* string_alloc_inline(size_t length);");
     print_line(gen, "extern char* aether_string_mutable_data(void* s);");
+    /* #2521: the runtime's formatter, not vsnprintf: a `%s` segment is
+     * written by its length, so a string value holding a NUL keeps the
+     * bytes after it ("[${s}]" with s = "x\0y" is 5 bytes). The same
+     * formatter prints an interpolation (print/println), where printf
+     * stopped at the NUL too. */
+    print_line(gen, "extern size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap);");
+    print_line(gen, "extern size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline);");
     print_line(gen, "static void* _aether_interp(const char* fmt, ...) {");
     print_line(gen, "    va_list args, args2;");
     print_line(gen, "    va_start(args, fmt);");
     print_line(gen, "    va_copy(args2, args);");
-    print_line(gen, "    int len = vsnprintf(NULL, 0, fmt, args);");
+    print_line(gen, "    size_t len = aether_interp_format((char*)0, 0, (FILE*)0, fmt, args);");
     print_line(gen, "    va_end(args);");
-    print_line(gen, "    if (len < 0) { va_end(args2); return (void*)0; }");
-    print_line(gen, "    void* owned = string_alloc_inline((size_t)len);");
+    print_line(gen, "    void* owned = string_alloc_inline(len);");
     print_line(gen, "    if (!owned) { va_end(args2); return (void*)0; }");
-    print_line(gen, "    vsnprintf(aether_string_mutable_data(owned), (size_t)len + 1, fmt, args2);");
+    print_line(gen, "    aether_interp_format(aether_string_mutable_data(owned), len + 1, (FILE*)0, fmt, args2);");
     print_line(gen, "    va_end(args2);");
     print_line(gen, "    return owned;");
+    print_line(gen, "}");
+    print_line(gen, "static int _aether_interp_print(const char* fmt, ...) {");
+    print_line(gen, "    va_list args;");
+    print_line(gen, "    va_start(args, fmt);");
+    print_line(gen, "    size_t n = aether_interp_format((char*)0, 0, stdout, fmt, args);");
+    print_line(gen, "    va_end(args);");
+    print_line(gen, "    return (int)n;");
     print_line(gen, "}");
     /* NULL-safe string helper for print/println — avoids double-evaluating
      * the expression. Goes through aether_string_data() which dispatches
@@ -7075,13 +7088,23 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * nothing else owns; these print it and free it in one composable
      * expression. Bare identifiers never route here, their scope-exit
      * defer owns the free. */
+    /* #2521: a string value is written by its length, so one holding a NUL
+     * prints whole; printf's %s stopped at the NUL. NULL prints as
+     * `(null)`, as _aether_safe_str reads it. */
+    print_line(gen, "extern size_t aether_print_string(FILE* f, const void* s, int newline);");
+    print_line(gen, "static inline int _aether_print_str(const void* s) {");
+    print_line(gen, "    return (int)aether_print_string(stdout, s, 0);");
+    print_line(gen, "}");
+    print_line(gen, "static inline int _aether_println_str(const void* s) {");
+    print_line(gen, "    return (int)aether_print_string(stdout, s, 1);");
+    print_line(gen, "}");
     print_line(gen, "static inline int _aether_println_owned(const char* s) {");
-    print_line(gen, "    int _n = printf(\"%%s\\n\", _aether_safe_str(s));");
+    print_line(gen, "    int _n = _aether_println_str(s);");
     print_line(gen, "    aether_heap_str_free((void*)s);");
     print_line(gen, "    return _n;");
     print_line(gen, "}");
     print_line(gen, "static inline int _aether_print_owned(const char* s) {");
-    print_line(gen, "    int _n = printf(\"%%s\", _aether_safe_str(s));");
+    print_line(gen, "    int _n = _aether_print_str(s);");
     print_line(gen, "    aether_heap_str_free((void*)s);");
     print_line(gen, "    return _n;");
     print_line(gen, "}");
