@@ -383,8 +383,8 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      *
      * ASTNode grew to 104 with `source_name` (#2292). That field is set only
      * at codegen (NULL after a parse), and an artifact holds a fresh parse,
-     * so the codec correctly does not carry it and the wire format — and
-     * AEA_FORMAT_VERSION — is unchanged.
+     * so the codec correctly does not carry it, and neither the wire format
+     * nor AEA_FORMAT_VERSION changed.
      *
      * ASTNode grew to 112 with `value_len` (#2520): the byte count of a
      * string literal that holds a NUL. That is parse state, so the codec

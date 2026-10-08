@@ -149,20 +149,20 @@ extern fs_mkdir_p_raw(path: string) -> int
 // Symbolic-link operations (raw externs). POSIX symlink(2) / readlink(2) /
 // lstat(2); on Windows CreateSymbolicLinkW, the link's own reparse data
 // and the directory entry's reparse tag.
-//   fs_symlink_raw   — create a symlink at `link_path` pointing to `target`.
+//   fs_symlink_raw:    create a symlink at `link_path` pointing to `target`.
 //                      `target` is recorded verbatim (relative stays relative);
 //                      Windows stores its separators as backslashes.
-//   fs_readlink_raw  — read a symlink's target (on Windows, a junction's too).
+//   fs_readlink_raw:   read a symlink's target (on Windows, a junction's too).
 //                      Returns null if not a link.
 //                      `@heap`: a fresh strdup'd string the tracker frees.
-//   fs_is_symlink    — does NOT follow; returns 1 only for the link itself.
+//   fs_is_symlink:     does NOT follow; returns 1 only for the link itself.
 //                      On Windows a junction counts: it redirects resolution
 //                      exactly as a symlink does (any name-surrogate reparse
 //                      point). Pure boolean query, no wrapper (matches
 //                      file_exists).
-//   fs_unlink_raw    — remove a file or symlink (NOT a directory).
+//   fs_unlink_raw:     remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
-//   fs_hard_link_raw — a second name (`link_path`) for the file at `target`;
+//   fs_hard_link_raw:  a second name (`link_path`) for the file at `target`;
 //                      same filesystem, files only. 1 on success.
 extern fs_hard_link_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string @heap
@@ -172,7 +172,7 @@ extern fs_readlink_raw(path: string) -> string @heap
 extern fs_make_temp_dir_raw(dir: string, prefix: string) -> string @heap
 extern fs_make_temp_file_raw(dir: string, prefix: string) -> string @heap
 extern fs_is_symlink(path: string) -> int
-//   fs_is_socket     — 1 if the path is a UNIX-domain socket (follows
+//   fs_is_socket:      1 if the path is a UNIX-domain socket (follows
 //                      symlinks). POSIX only; returns 0 on Windows. Pure
 //                      boolean query, no wrapper (matches fs_is_symlink). #1368
 extern fs_is_socket(path: string) -> int
