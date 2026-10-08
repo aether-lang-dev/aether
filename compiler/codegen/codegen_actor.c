@@ -198,10 +198,10 @@ static const char* referenced_actor(ASTNode* obj) {
     return at && at->kind == TYPE_STRUCT ? at->struct_name : NULL;
 }
 
+// Keyed `Actor.field`, whole: a cut key made two long field names of one
+// actor the same entry (#2539).
 static void mark_ptr_field(CodeGenerator* gen, const char* actor, const char* field) {
-    char key[512];
-    snprintf(key, sizeof(key), "%s.%s", actor, field);
-    strmap_put(&gen->actor_ptr_fields, key, NULL);
+    strmap_put(&gen->actor_ptr_fields, cg_internf("%s.%s", actor, field), NULL);
 }
 
 // The uses of `r.field`, from outside the actor or from another one, that
@@ -294,9 +294,8 @@ static int state_field_is_ptr(CodeGenerator* gen, ASTNode* actor, const char* fi
         }
         mark_ptr_field_member_uses(gen, gen->program);
     }
-    char key[512];
-    snprintf(key, sizeof(key), "%s.%s", actor->value ? actor->value : "", field_name);
-    return strmap_has(&gen->actor_ptr_fields, key);
+    return strmap_has(&gen->actor_ptr_fields,
+                      cg_internf("%s.%s", actor->value ? actor->value : "", field_name));
 }
 
 // The state fields generate_actor_definition emits with an atomic C type:
@@ -660,8 +659,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                      * field's own type, which is what the
                                      * closures' envs point at; intptr_t is
                                      * only the payload width. */
-                                    char from[300];
-                                    snprintf(from, sizeof(from), "_pattern->%s", field->value);
+                                    const char* from = cg_internf("_pattern->%s", field->value);
                                     print_indent(gen);
                                     emit_promoted_param_cell(gen, var_name,
                                         strcmp(c_type, "intptr_t") == 0 ? "int" : c_type,

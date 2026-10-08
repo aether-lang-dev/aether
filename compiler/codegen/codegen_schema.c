@@ -90,60 +90,46 @@ static int schema_kind(const Type* t) {
     }
 }
 
-/* Append `t`'s source spelling to buf[*len..cap). */
-static void schema_spell(const Type* t, char* buf, size_t cap, size_t* len) {
-#define SPELL(...) do { \
-        if (*len < cap) { \
-            int _n = snprintf(buf + *len, cap - *len, __VA_ARGS__); \
-            if (_n > 0) *len += (size_t)_n < cap - *len ? (size_t)_n : cap - *len - 1; \
-        } \
-    } while (0)
-    if (!t) { SPELL("?"); return; }
-    if (t->distinct_name) { SPELL("%s", t->distinct_name); return; }
-    if (t->c_alias) { SPELL("%s", t->c_alias); return; }
+/* `t`'s source spelling, interned: whole however long its names are, where
+ * a fixed buffer cut the text the table hands a reader (#2539). */
+static const char* schema_spell(const Type* t) {
+    if (!t) return "?";
+    if (t->distinct_name) return t->distinct_name;
+    if (t->c_alias) return t->c_alias;
     switch (t->kind) {
-        case TYPE_INT:        SPELL("int"); break;
-        case TYPE_INT64:      SPELL("long"); break;
-        case TYPE_UINT64:     SPELL("uint64"); break;
-        case TYPE_UINT32:     SPELL("uint32"); break;
-        case TYPE_UINT16:     SPELL("uint16"); break;
-        case TYPE_UINT8:      SPELL("uint8"); break;
-        case TYPE_DURATION:   SPELL("Duration"); break;
-        case TYPE_FLOAT:      SPELL("float"); break;
-        case TYPE_FLOAT32:    SPELL("f32"); break;
-        case TYPE_LONGDOUBLE: SPELL("longdouble"); break;
-        case TYPE_BOOL:       SPELL("bool"); break;
-        case TYPE_BYTE:       SPELL("byte"); break;
-        case TYPE_STRING:     SPELL("string"); break;
-        case TYPE_FUNCTION:   SPELL("fn"); break;
+        case TYPE_INT:        return "int";
+        case TYPE_INT64:      return "long";
+        case TYPE_UINT64:     return "uint64";
+        case TYPE_UINT32:     return "uint32";
+        case TYPE_UINT16:     return "uint16";
+        case TYPE_UINT8:      return "uint8";
+        case TYPE_DURATION:   return "Duration";
+        case TYPE_FLOAT:      return "float";
+        case TYPE_FLOAT32:    return "f32";
+        case TYPE_LONGDOUBLE: return "longdouble";
+        case TYPE_BOOL:       return "bool";
+        case TYPE_BYTE:       return "byte";
+        case TYPE_STRING:     return "string";
+        case TYPE_FUNCTION:   return "fn";
         case TYPE_PTR:
-            if (t->element_type) { SPELL("*"); schema_spell(t->element_type, buf, cap, len); }
-            else SPELL("ptr");
-            break;
+            if (t->element_type) return cg_internf("*%s", schema_spell(t->element_type));
+            return "ptr";
         case TYPE_ARRAY:
-            if (t->index_enum_name) {
-                SPELL("[%s]", t->index_enum_name);
-                schema_spell(t->element_type, buf, cap, len);
-            } else {
-                schema_spell(t->element_type, buf, cap, len);
-                if (t->array_size > 0) SPELL("[%d]", t->array_size);
-                else SPELL("[]");
-            }
-            break;
+            if (t->index_enum_name)
+                return cg_internf("[%s]%s", t->index_enum_name, schema_spell(t->element_type));
+            if (t->array_size > 0)
+                return cg_internf("%s[%d]", schema_spell(t->element_type), t->array_size);
+            return cg_internf("%s[]", schema_spell(t->element_type));
         case TYPE_OPTIONAL:
-            schema_spell(t->element_type, buf, cap, len);
-            SPELL("?");
-            break;
+            return cg_internf("%s?", schema_spell(t->element_type));
         case TYPE_STRUCT:
         case TYPE_ENUM:
         case TYPE_SUM:
-            SPELL("%s", t->struct_name ? t->struct_name : "?");
-            break;
+            return t->struct_name ? t->struct_name : "?";
         default:
-            SPELL("%s", type_to_string((Type*)t));
-            break;
+            /* type_to_string's text lives in a buffer its next call reuses. */
+            return cg_intern(type_to_string((Type*)t));
     }
-#undef SPELL
 }
 
 /* A C string literal of the identifier-or-type text `s` (no characters in
@@ -247,10 +233,7 @@ static void schema_emit_table(CodeGenerator* gen, ASTNode* sd) {
             ASTNode* f = sd->children[i];
             if (!f || f->type != AST_STRUCT_FIELD) continue;
             Type* t = f->node_type;
-            char spelled[256];
-            size_t len = 0;
-            spelled[0] = '\0';
-            schema_spell(t, spelled, sizeof(spelled), &len);
+            const char* spelled = schema_spell(t);
             int kind = schema_kind(t);
             int elem_kind = (t && t->kind == TYPE_ARRAY) ? schema_kind(t->element_type) : 0;
             int alen = (t && t->kind == TYPE_ARRAY && t->array_size > 0) ? t->array_size : 0;

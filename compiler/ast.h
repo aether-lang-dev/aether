@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <stdarg.h>  /* va_list, for aether_internv */
 
 #include "parser/tokens.h"
 
@@ -509,6 +510,18 @@ typedef struct Type {
  * cannot meaningfully continue past OOM, so this reports and exits
  * rather than corrupting the caller. */
 void* aether_xrealloc(void* ptr, size_t size);
+
+/* The compiler's intern table (#2539): a name or spelling of any length,
+ * one copy per distinct text, valid for the rest of the process. Out of
+ * memory ends the compile, as aether_xrealloc does. */
+const char* aether_intern(const char* s);
+const char* aether_intern_n(const char* s, size_t n);
+const char* aether_internv(const char* fmt, va_list ap);
+const char* aether_internf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
 
 typedef struct ASTNode {
     ASTNodeType type;

@@ -10,6 +10,19 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+/* Names codegen builds as it goes (C types, mangled and normalised names,
+ * cell declarations, field paths): each spelling kept once, for the life of
+ * the process, so a name is never cut to a buffer's size and a pointer
+ * handed out stays valid however many more are built (#2539). Out of memory
+ * ends the compile, as aether_xrealloc does. */
+const char* cg_intern(const char* s);
+const char* cg_intern_n(const char* s, size_t n);
+const char* cg_internf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+
 /* Utilities (codegen.c) */
 void indent(CodeGenerator* gen);
 void unindent(CodeGenerator* gen);
@@ -24,7 +37,7 @@ const char* safe_c_name(const char* name);
 // (`short`, `int`, `char`, …) so it emits as a valid C identifier. Unlike
 // safe_c_name (which also renames libc symbols for functions), this touches
 // keywords ONLY — a local named `open` is a valid C identifier and must keep
-// its spelling. Returns a static buffer; use before the next call.
+// its spelling. Both return an interned name (cg_intern), valid for good.
 int is_c_keyword(const char* name);
 const char* safe_value_name(const char* name);
 const char* get_c_operator(const char* aether_op);
@@ -190,14 +203,14 @@ int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int para
  * call_arg_escapes heuristic. Defined in codegen_stmt.c. */
 int callee_has_visible_body(CodeGenerator* gen, const char* func_name);
 
-/* Normalise a callee name's dots to underscores, writing into `out`
-   and returning `out`. The AST stores source-level callees in dotted
-   form (`"string.concat"`) but stdlib externs, the generated C call
-   sites, and the various callee registries (heap-string allowlist,
-   builder-funcs registry, extern param-type table) all use the
-   underscored form. Use this whenever you're about to look up by
-   callee name. `out` must hold at least 256 bytes. */
-const char* codegen_normalise_callee(const char* raw, char* out, size_t out_size);
+/* Normalise a callee name's dots to underscores. The AST stores
+   source-level callees in dotted form (`"string.concat"`) but stdlib
+   externs, the generated C call sites, and the various callee registries
+   (heap-string allowlist, builder-funcs registry, extern param-type
+   table) all use the underscored form. Use this whenever you're about to
+   look up by callee name. Returns `raw` itself when it has no dot, else
+   an interned copy (cg_intern); "" for NULL. */
+const char* codegen_normalise_callee(const char* raw);
 
 /* Defer management (codegen.c) */
 void push_defer(CodeGenerator* gen, ASTNode* stmt);
@@ -278,7 +291,7 @@ void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
 int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
-void call_c_name(CodeGenerator* gen, const char* func_name, char* out, size_t n);
+const char* call_c_name(CodeGenerator* gen, const char* func_name);
 ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* #2518 */
 /* The heap-tracked string local a list add, list set or map put takes
  * (moved or copied, never adopted and left escaped), or NULL. */
@@ -307,14 +320,13 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
                                     int line, int column);
 /* #2474: a cell holding a fixed-size array (`E[N]`) is a pointer to the
  * whole array, `E (*name)[N]`; see the definitions in codegen_stmt.c. */
-int promoted_cell_array_len(const char* c_type, char* elem, size_t n);
+int promoted_cell_array_len(const char* c_type, const char** elem);
 /* #2516: a fixed-size array parameter is passed as `E _param_x[N]` and
  * copied into the body's own array (see codegen_stmt.c). */
 int is_sized_array_param(Type* t);
 void emit_sized_array_param_declarator(CodeGenerator* gen, Type* t, const char* name);
 void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name);
-void promoted_cell_pointer(const char* c_type, const char* name,
-                           char* out, size_t n);
+const char* promoted_cell_pointer(const char* c_type, const char* name);
 /* The cell for a promoted PARAMETER (a function's or a closure's), seeded
  * from the C parameter `param_cname`; see the definition for why a string
  * cell takes its own reference. */
@@ -473,7 +485,8 @@ int is_c_callback(ASTNode* func);
 const char* c_callback_symbol(ASTNode* func);
 /* sandbox.enforce trusted calls (codegen.c, see analysis/sandbox_trust.h). */
 ASTNode* sandbox_trust_target(CodeGenerator* gen, const ASTNode* call);
-void sandbox_trust_wrapper_name(ASTNode* def, int site, char* out, size_t n);
+/* The wrapper's C name, interned. */
+const char* sandbox_trust_wrapper_name(ASTNode* def, int site);
 /* Whether a top-level function is emitted `static`. All three emit sites
    (definition, combined multi-clause definition, forward declaration) must
    agree or C rejects the file with "static declaration follows non-static
@@ -510,7 +523,7 @@ int  aether_c_struct_resolve(const char* sname, const char* field,
                              long* out_offset, const char** out_width);
 /* Flatten a member-access chain to its overlay-pointer root receiver +
  * dotted field path; NULL if root isn't a @c_struct overlay. */
-ASTNode* aether_c_struct_chain(ASTNode* macc, char* out, size_t outsz);
+ASTNode* aether_c_struct_chain(ASTNode* macc, const char** path);
 /* Predicate form of the above: is this member-access an overlay access? */
 int aether_c_struct_overlay_lhs(ASTNode* macc);
 
@@ -554,8 +567,7 @@ int is_promoted_capture(CodeGenerator* gen, const char* name);
 /* The C type of `var_name` as `parent_func` declares it (a function name,
  * "main", a receive arm or a hoisted closure scope); "int" when unknown. */
 const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
-void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
-                              char* out, size_t out_size);
+const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 /* `retain_closures`: 1 where the value at `lvalue` stays a holder of its
  * closure fields (a parameter, a cell a copy is returned from), 0 where it

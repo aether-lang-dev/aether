@@ -35,9 +35,9 @@ typedef struct {
     // Lib-search path: an ordered list of directories (PATH-style),
     // searched left-to-right; first hit wins. Issue #413. Default is
     // a single entry, `"lib"`, populated at registry init. Each entry
-    // is a fixed 256-byte buffer; the count tracks how many slots
-    // are live.
-    char lib_dirs[AETHER_LIB_DIRS_MAX][256];
+    // is a heap copy of any length (#2539); the count tracks how many
+    // slots are live.
+    char* lib_dirs[AETHER_LIB_DIRS_MAX];
     int  lib_dir_count;
 } ModuleRegistry;
 

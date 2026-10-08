@@ -144,3 +144,12 @@
   `after - mid` came out as `after -mid`, and `state * 6364136223846793005`
   as `state *6364136223846793005`, which reads as a dereference. The ten
   test files written that way are reformatted.
+- **An `AETHER_CACHE_DIR` too long for the cache is refused, and the
+  lib-dir cache test runs on Windows (#2539).** The cache directory was
+  copied into 512 bytes, so a longer one was cut to another directory,
+  which the cache was then made in. ae now stops with an error naming the
+  limit (511 bytes) and asking for a shorter path. `cache_lib_invalidation`
+  skipped Windows as if the lib-dir walk were POSIX-only, which it has not
+  been since #1235; it runs there now, with its cache isolated through
+  `AETHER_CACHE_DIR`, since Windows finds the home directory through
+  `USERPROFILE` rather than `HOME`.

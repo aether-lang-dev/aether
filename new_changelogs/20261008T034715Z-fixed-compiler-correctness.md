@@ -228,3 +228,17 @@
   does the same for every `<math.h>` function (with its `f` and `l`
   forms), `<ctype.h>`, `<setjmp.h>`, `<locale.h>` and the rest of the C11
   library. The Aether name is unchanged.
+- **Names and `--lib` paths of any length reach the generated C whole
+  (#2539).** Codegen built names in fixed buffers: 256 bytes for a call's
+  C name, a normalised callee, a C type, a struct field path or a closure
+  cell, 280 for a mangled name. A longer name was cut, so two functions
+  sharing their first 256 bytes were called as one identifier nothing
+  defined, and a long struct, tuple or optional type was cut in some
+  places and whole in others. `get_c_type` also handed out four rotating
+  buffers, so a fifth call overwrote a type a caller still held (a tuple of
+  four struct elements could get the wrong typedef name). An `--emit=lib`
+  catalog signature dropped the parameters past 1 KB. Names are now
+  interned for the compile, with no length limit. A `--lib` directory past
+  255 bytes was cut by both `ae` and the compiler, which then searched a
+  directory nobody named; it is kept whole, and so is the `--lib` list ae
+  hands the compiler, which dropped directories past 2304 bytes.

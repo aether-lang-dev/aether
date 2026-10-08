@@ -141,35 +141,25 @@ static void tc_lib_dir_append_one(const char* dir) {
      * paths (`/d/foo`) to native Windows form (`D:/foo`) so a
      * `;`-joined path-list and a sequence of flags end up
      * byte-identical regardless of how MSYS2 handled the argv.
-     * `aether_lib_path_normalize` is a no-op on POSIX.
-     *
-     * memcpy with an explicit length (not `strncpy(dst, src,
-     * sizeof(dst)-1)`) keeps GCC's `-Wstringop-truncation` happy
-     * AND is the faster shape — single bulk copy of a known-good
-     * byte count, no per-byte NUL scan inside libc. */
-    char norm[256];
-    aether_lib_path_normalize(dir, norm, sizeof(norm));
-    size_t nlen = strlen(norm);
-    while (nlen > 1 &&
-           (norm[nlen - 1] == '/' || norm[nlen - 1] == '\\') &&
-           norm[nlen - 2] != ':') {
-        norm[--nlen] = '\0';
+     * `aether_lib_path_normalize` only copies on POSIX. The whole
+     * path (#2539): a 256-byte copy cut a longer one, so the key and
+     * the compiler searched a directory the user never named. */
+    char* norm = aether_lib_path_normalize(dir);
+    if (!norm) {
+        fprintf(stderr, "Error: out of memory adding the --lib directory '%s'\n", dir);
+        exit(1);
     }
     for (int i = 0; i < tc.lib_dir_count; i++) {
-        if (strcmp(tc.lib_dirs[i], norm) == 0) return;
+        if (strcmp(tc.lib_dirs[i], norm) == 0) { free(norm); return; }
     }
     if (tc.lib_dir_count >= AETHER_LIB_DIRS_MAX) {
         fprintf(stderr,
             "warning: --lib search path is full (max %d entries); "
             "ignoring '%s'\n", AETHER_LIB_DIRS_MAX, norm);
+        free(norm);
         return;
     }
-    int idx = tc.lib_dir_count;
-    /* +1 carries the NUL. nlen is post-normalisation length,
-     * always < sizeof(lib_dirs[idx]). Same warning + perf
-     * rationale as above. */
-    memcpy(tc.lib_dirs[idx], norm, nlen + 1);
-    tc.lib_dir_count++;
+    tc.lib_dirs[tc.lib_dir_count++] = norm;
 }
 void tc_lib_dir_append(const char* spec) {
     if (!spec || !spec[0]) return;
@@ -177,38 +167,49 @@ void tc_lib_dir_append(const char* spec) {
      * segments (trailing/leading/double separators) are silently
      * skipped — matches Java -cp and PATH semantics. */
     const char* cur = spec;
-    char buf[256];
     while (*cur) {
         const char* next = strchr(cur, AETHER_LIB_PATH_SEP_CHAR);
         size_t len = next ? (size_t)(next - cur) : strlen(cur);
         if (len > 0) {
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, cur, len);
-            buf[len] = '\0';
-            tc_lib_dir_append_one(buf);
+            char* seg = (char*)malloc(len + 1);
+            if (!seg) {
+                fprintf(stderr, "Error: out of memory reading the --lib path\n");
+                exit(1);
+            }
+            memcpy(seg, cur, len);
+            seg[len] = '\0';
+            tc_lib_dir_append_one(seg);
+            free(seg);
         }
         if (!next) break;
         cur = next + 1;
     }
 }
 
-/* Write the ` --lib "<dir>"` search-path flags (one per `tc.lib_dirs` entry)
- * into `out`. Same one-flag-per-entry shape build_aetherc_cmd emits — see the
- * #413 rationale there. A diagnostic/inspect aetherc run must resolve imports
- * against the SAME search path as the real compile, or a bare-name module that
- * only `--lib` makes resolvable is reported "unresolved" by the prepass even
- * though the build itself resolves it fine (the FreeBSD cross-build red herring:
- * cross_uses_unsupported_module's inspect ran without --lib and printed a
- * spurious `unresolved import` that looked like `--lib` being target-dropped).
- * Truncation just yields a shorter (still valid) flag list. */
-static void tc_lib_flags(char* out, size_t out_size) {
-    size_t off = 0;
-    if (out_size) out[0] = '\0';
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(out + off, out_size - off, " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= out_size - off) break;
-        off += (size_t)w;
+/* The ` --lib "<dir>"` search-path flags (one per `tc.lib_dirs` entry), in a
+ * string the caller frees. Same one-flag-per-entry shape build_aetherc_cmd
+ * emits; see the #413 rationale there. A diagnostic/inspect aetherc run must
+ * resolve imports against the SAME search path as the real compile, or a
+ * bare-name module that only `--lib` makes resolvable is reported
+ * "unresolved" by the prepass even though the build itself resolves it fine
+ * (the FreeBSD cross-build red herring: cross_uses_unsupported_module's
+ * inspect ran without --lib and printed a spurious `unresolved import` that
+ * looked like `--lib` being target-dropped). Every flag, whatever the paths'
+ * length (#2539): a 2304-byte list dropped the directories past it, and the
+ * compile searched fewer than it was given. */
+static char* tc_lib_flags(void) {
+    size_t cap = 1;
+    for (int i = 0; i < tc.lib_dir_count; i++) cap += strlen(tc.lib_dirs[i]) + 10;
+    char* out = (char*)malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory building the --lib flags\n");
+        exit(1);
     }
+    size_t off = 0;
+    out[0] = '\0';
+    for (int i = 0; i < tc.lib_dir_count; i++)
+        off += (size_t)snprintf(out + off, cap - off, " --lib \"%s\"", tc.lib_dirs[i]);
+    return out;
 }
 
 // --with=<caps> forwarded verbatim to aetherc. Empty by default; set
@@ -550,6 +551,8 @@ static const char* ae_runtime_link_arg(void) {
     return arg;
 }
 
+static void cmd_too_long(char* cmd, size_t size, int needed);
+
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
     if (g_emit_csrc)                   emit_flag = " --emit=csrc";
@@ -602,14 +605,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * plain directory path — survives cmd.exe, MSYS2, and any
      * other shell quoting without depending on `;` or `:`
      * preservation inside double quotes. Issue #413. */
-    char lib_flags[2304] = "";
-    size_t lf_off = 0;
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(lib_flags + lf_off, sizeof(lib_flags) - lf_off,
-                         " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
-        lf_off += (size_t)w;
-    }
+    char* lib_flags = tc_lib_flags();
     char deps_flag[1240] = "";
     if (g_emit_deps_path[0]) {
         snprintf(deps_flag, sizeof(deps_flag), " --emit-deps=%s", g_emit_deps_path);
@@ -619,10 +615,12 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * and a program importing it follows (#2297). */
     const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
     const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
-             tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-             g_lib_package_flag, shared_rt_flag, lib_actors_flag, g_defines, lib_flags,
-             deps_flag, input, output);
+    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+                     tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
+                     g_lib_package_flag, shared_rt_flag, lib_actors_flag, g_defines, lib_flags,
+                     deps_flag, input, output);
+    free(lib_flags);
+    if (w >= (int)cmd_size) cmd_too_long(cmd, cmd_size, w);
 }
 
 // --------------------------------------------------------------------------
@@ -5989,18 +5987,17 @@ static int cmd_check(int argc, char** argv) {
     /* Build the same `--lib X --lib Y …` flag sequence the compile
      * path uses (cc_command_build); one flag per entry sidesteps
      * shell quoting on cmd.exe + MSYS2. Issue #413. */
-    char lib_flags[2304] = "";
-    size_t lf_off = 0;
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(lib_flags + lf_off, sizeof(lib_flags) - lf_off,
-                         " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
-        lf_off += (size_t)w;
+    char* lib_flags = tc_lib_flags();
+    char* cmd = ae_strdup_printf("\"%s\"%s%s --check \"%s\"",
+                                 tc.compiler, g_defines, lib_flags, file);
+    free(lib_flags);
+    if (!cmd) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        return 1;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "\"%s\"%s%s --check \"%s\"",
-             tc.compiler, g_defines, lib_flags, file);
-    return run_cmd(cmd);
+    int rc = run_cmd(cmd);
+    free(cmd);
+    return rc;
 }
 
 // `ae inspect <file.ae>` — operator-facing summary of what a script
@@ -6035,18 +6032,17 @@ static int cmd_inspect(int argc, char** argv) {
     /* One `--lib X` per entry, same as cmd_check — keeps import
      * resolution consistent so the reported imports resolve the way a
      * build would. Issue #413. */
-    char lib_flags[2304] = "";
-    size_t lf_off = 0;
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(lib_flags + lf_off, sizeof(lib_flags) - lf_off,
-                         " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
-        lf_off += (size_t)w;
+    char* lib_flags = tc_lib_flags();
+    char* cmd = ae_strdup_printf("\"%s\" --emit=inspect%s \"%s\"",
+                                 tc.compiler, lib_flags, file);
+    free(lib_flags);
+    if (!cmd) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        return 1;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "\"%s\" --emit=inspect%s \"%s\"",
-             tc.compiler, lib_flags, file);
-    return run_cmd(cmd);
+    int rc = run_cmd(cmd);
+    free(cmd);
+    return rc;
 }
 
 // Forward declaration — cmd_build_namespace delegates to cmd_build for the
@@ -6095,15 +6091,14 @@ typedef struct {
 int aetherc_capture_stdout(const char* arg1, const char* in_path,
                                   const char* arg2_or_null,
                                   char* out_buf, size_t out_size) {
-    char cmd[4096];
+    char* cmd;
     /* Forward the same `--lib` search path the real compile uses, so an
      * inspect/manifest prepass resolves bare-name `--lib`-backed imports
      * instead of falsely reporting them unresolved. See tc_lib_flags. */
-    char lib_flags[2304];
-    tc_lib_flags(lib_flags, sizeof(lib_flags));
+    char* lib_flags = tc_lib_flags();
     if (arg2_or_null) {
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" \"%s\"",
-                 tc.compiler, arg1, lib_flags, in_path, arg2_or_null);
+        cmd = ae_strdup_printf("\"%s\" %s%s \"%s\" \"%s\"",
+                               tc.compiler, arg1, lib_flags, in_path, arg2_or_null);
     } else {
         /* The output path aetherc must be given but will not write: the
          * platform's null device. A literal /dev/null on Windows is a file
@@ -6114,8 +6109,14 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
 #else
         const char* devnull = "/dev/null";
 #endif
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" %s",
-                 tc.compiler, arg1, lib_flags, in_path, devnull);
+        cmd = ae_strdup_printf("\"%s\" %s%s \"%s\" %s",
+                               tc.compiler, arg1, lib_flags, in_path, devnull);
+    }
+    free(lib_flags);
+    if (!cmd) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        out_buf[0] = '\0';
+        return 1;
     }
     /* Through the same runner every other aetherc invocation uses, with the
      * output captured to a file. popen() on Windows hands the line to
@@ -6129,6 +6130,7 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
     char capture[1024];
     compile_log_path(capture, sizeof(capture));
     int rc = run_cmd_capture_stdout(cmd, capture);
+    free(cmd);
     out_buf[0] = '\0';
     /* Text mode, as popen("r") was: aetherc's stdout carries "\r\n" on
      * Windows, and a '\r' left on the last token of a line ("string\r")

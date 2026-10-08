@@ -81,7 +81,7 @@ typedef struct {
      * `--lib X` from the user is parsed: if `X` is itself a separator-
      * string, each piece is appended; if it's a single directory, it's
      * appended verbatim. Issue #413. */
-    char lib_dirs[AETHER_LIB_DIRS_MAX][256];
+    char* lib_dirs[AETHER_LIB_DIRS_MAX];   /* heap, any length (#2539) */
     int  lib_dir_count;
 } Toolchain;
 

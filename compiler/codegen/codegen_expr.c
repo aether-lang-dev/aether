@@ -348,8 +348,7 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
  * `int` when the body returns a value, else void. */
 static int callee_result_shape(CodeGenerator* gen, const char* func_name) {
     if (!callee_has_visible_body(gen, func_name)) return -1;
-    char fn_norm[256];
-    const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+    const char* fn = codegen_normalise_callee(func_name);
     const DefClauses* dc = program_index_clauses(gen->program, fn);
     if (!dc || dc->count != 1 || !dc->nodes[0]) return -1;
     ASTNode* fdef = dc->nodes[0];
@@ -369,8 +368,7 @@ static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const 
     if (func_name) {
         if (is_noescape_extern_param(gen, func_name, ai)) return 1;
         if (!callee_has_visible_body(gen, func_name)) return 0;
-        char fn_norm[256];
-        const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+        const char* fn = codegen_normalise_callee(func_name);
         ASTNode* fdef = find_function_definition_by_name(gen->program, fn);
         if (!fdef || fdef->child_count == 0 || !fdef->children[0] ||
             (fdef->children[0]->value && strcmp(fdef->children[0]->value, "_ctx") == 0)) return 0;
@@ -760,8 +758,7 @@ typedef struct OrderFnEffects {
  * the declaration of the extern it is. */
 static ASTNode* order_callee_def(CodeGenerator* gen, ASTNode* call) {
     if (!call->value || !gen->program) return NULL;
-    char norm[256];
-    const char* fn = codegen_normalise_callee(call->value, norm, sizeof(norm));
+    const char* fn = codegen_normalise_callee(call->value);
     if (!fn) return NULL;
     ASTNode* def = find_function_definition_by_name(gen->program, fn);
     if (def) return def;
@@ -1426,23 +1423,24 @@ static Type* fnptr_field_signature(CodeGenerator* gen, const char* recv, const c
  *                           builds of the generated C turn into an
  *                           error)
  *
- * Writes the translated form into `out` (size `out_size`). Returns
- * `out` on translation, or the original `value` if no translation
- * is needed. The previous lexer eagerly decimalised these forms,
+ * Returns the translated form (interned), or the original `value` if no
+ * translation is needed. An octal literal's digits have no length bound
+ * (leading zeros), so the form is never built in a fixed buffer: one that
+ * did not fit fell back to the untranslated `0o...`, which is not C (#2539).
+ * The previous lexer eagerly decimalised these forms,
  * so this path is new — pre-cherry-pick code never had to worry
  * about it because the literal had been collapsed by the time it
  * reached codegen.
  */
-static const char* translate_integer_literal(const char* value, char* out, size_t out_size) {
+static const char* translate_integer_literal(const char* value) {
     if (!value || !value[0]) return value;
     if (value[0] != '0' || !value[1]) {
         if (value[0] < '1' || value[0] > '9') return value;
         errno = 0;
         char* end = NULL;
         unsigned long long magnitude = strtoull(value, &end, 10);
-        if (errno == 0 && end && *end == '\0' && magnitude > (unsigned long long)LLONG_MAX &&
-            snprintf(out, out_size, "%sULL", value) < (int)out_size) {
-            return out;
+        if (errno == 0 && end && *end == '\0' && magnitude > (unsigned long long)LLONG_MAX) {
+            return cg_internf("%sULL", value);
         }
         return value;
     }
@@ -1450,8 +1448,7 @@ static const char* translate_integer_literal(const char* value, char* out, size_
     if (p == 'x' || p == 'X') return value;
     if (p == 'o' || p == 'O') {
         /* 0o777 → 0777. A bare '0' is also valid C octal for zero. */
-        if (snprintf(out, out_size, "0%s", value + 2) >= (int)out_size) return value;
-        return out;
+        return cg_internf("0%s", value + 2);
     }
     if (p == 'b' || p == 'B') {
         /* Walk the binary digits and accumulate into uint64_t, then
@@ -1467,8 +1464,7 @@ static const char* translate_integer_literal(const char* value, char* out, size_
             }
         }
         const char* suffix = (acc > 0xFFFFFFFFULL) ? "ULL" : "";
-        if (snprintf(out, out_size, "0x%llx%s", acc, suffix) >= (int)out_size) return value;
-        return out;
+        return cg_internf("0x%llx%s", acc, suffix);
     }
     return value;
 }
@@ -1914,10 +1910,11 @@ static int is_hoisted_closure(ASTNode* node) {
 }
 
 // Walk down from `node` (carrying the scope name in force there) to find
-// `target`, and write target's ENCLOSING scope name into `out`. Returns 1 on
-// success. The scope name uses the same vocabulary as `parent_func`
+// `target`, and return target's ENCLOSING scope name, interned, or NULL when
+// there is none. The scope name uses the same vocabulary as `parent_func`
 // everywhere else: a function name, "main", `__recv_arm_<ptr>`, or
-// `__closure_<ptr>`.
+// `__closure_<ptr>`. A function name has no length bound, so it is never
+// copied into a fixed buffer (#2539).
 /* #2130: the fn-pointer registry is per C function, and a closure body
  * is emitted in its own pass, after every function. Rebuild the registry
  * a closure's body sees from the scopes it sits in: every fn-typed
@@ -1927,8 +1924,8 @@ static int is_hoisted_closure(ASTNode* node) {
  * type. Walks the whole body of each level (a name is one variable per
  * function; a nested closure's own parameters would only shadow, and
  * are registered again when that closure's body is emitted). */
-static int find_enclosing_scope_name(ASTNode* node, const char* scope,
-                                     ASTNode* target, char* out, size_t n);
+static const char* find_enclosing_scope_name(ASTNode* node, const char* scope,
+                                             ASTNode* target);
 
 static void register_fnptr_decls_in(CodeGenerator* gen, ASTNode* n) {
     if (!n) return;
@@ -1963,24 +1960,20 @@ static ASTNode* find_scope_node_by_name(ASTNode* program, const char* scope) {
 
 static void restore_fnptr_scope_for_closure(CodeGenerator* gen, const char* parent_func) {
     clear_fnptr_locals(gen);
-    char scope[64];
     const char* cur = parent_func;
     for (int depth = 0; cur && depth < 16; depth++) {
         ASTNode* owner = find_scope_node_by_name(gen->program, cur);
         if (!owner) break;
         register_fnptr_decls_in(gen, owner);
         if (strncmp(cur, "__closure_", 10) != 0) break;   /* reached the function */
-        char outer[64];
-        if (!find_enclosing_scope_name(gen->program, NULL, owner, outer, sizeof(outer))) break;
-        snprintf(scope, sizeof(scope), "%s", outer);
-        cur = scope;
+        cur = find_enclosing_scope_name(gen->program, NULL, owner);
     }
 }
 
-static int find_enclosing_scope_name(ASTNode* node, const char* scope,
-                                     ASTNode* target, char* out, size_t n) {
-    if (!node) return 0;
-    char here[64];
+static const char* find_enclosing_scope_name(ASTNode* node, const char* scope,
+                                             ASTNode* target) {
+    if (!node) return NULL;
+    char here[64];   /* `__recv_arm_<ptr>` / `__closure_<ptr>`: bounded */
     const char* child_scope = scope;
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
         child_scope = node->value ? node->value : scope;
@@ -1996,13 +1989,13 @@ static int find_enclosing_scope_name(ASTNode* node, const char* scope,
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* c = node->children[i];
         if (c == target) {
-            if (!child_scope) return 0;
-            snprintf(out, n, "%s", child_scope);
-            return 1;
+            /* Interned: `here` dies with this frame. */
+            return child_scope ? cg_intern(child_scope) : NULL;
         }
-        if (find_enclosing_scope_name(c, child_scope, target, out, n)) return 1;
+        const char* found = find_enclosing_scope_name(c, child_scope, target);
+        if (found) return found;
     }
-    return 0;
+    return NULL;
 }
 
 // Forward declaration — subtree_declares is defined below but used here
@@ -2092,10 +2085,8 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
         if (is_closure_param(c, var_name)) return 0;
         int here = visible_decl_line(last_block_child(c), var_name, viewer);
         if (here != INT_MAX) return here;
-        char outer[64];
-        if (find_enclosing_scope_name(program, NULL, c, outer, sizeof(outer))) {
-            return enclosing_decl_line(program, outer, var_name, c);
-        }
+        const char* outer = find_enclosing_scope_name(program, NULL, c);
+        if (outer) return enclosing_decl_line(program, outer, var_name, c);
         return INT_MAX;
     }
     // Actor receive arms use synthetic function names `__recv_arm_<ptr>`.
@@ -2178,10 +2169,8 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
         // name;`), so an inner closure can and must re-capture it. Chain up
         // to the outer closure's own scope: this is what makes a capture
         // transit an arbitrarily deep closure nest, one env hop per level.
-        char outer[64];
-        if (find_enclosing_scope_name(program, NULL, c, outer, sizeof(outer))) {
-            return is_declared_in_function(program, outer, var_name);
-        }
+        const char* outer = find_enclosing_scope_name(program, NULL, c);
+        if (outer) return is_declared_in_function(program, outer, var_name);
         return 0;
     }
     if (strncmp(func_name, "__recv_arm_", 11) == 0) {
@@ -2852,8 +2841,7 @@ static void add_promoted_name(CodeGenerator* gen, const char* func_name, const c
 // give the intermediate closure a `T*` slot fed from a plain `T` local — a
 // pointer-from-integer miscompile.
 static void promote_up_from(CodeGenerator* gen, const char* start_scope, const char* cap) {
-    char scope[64];
-    snprintf(scope, sizeof(scope), "%s", start_scope);
+    const char* scope = start_scope;
     for (;;) {
         add_promoted_name(gen, scope, cap);
         if (strncmp(scope, "__closure_", 10) != 0) return;  // reached a real function
@@ -2863,7 +2851,8 @@ static void promote_up_from(CodeGenerator* gen, const char* start_scope, const c
         if (is_closure_param(c, cap)) return;
         if (subtree_declares(last_block_child(c), cap)) return;
         // Otherwise the name is this closure's own capture: keep climbing.
-        if (!find_enclosing_scope_name(gen->program, NULL, c, scope, sizeof(scope))) return;
+        scope = find_enclosing_scope_name(gen->program, NULL, c);
+        if (!scope) return;
     }
 }
 
@@ -3184,10 +3173,8 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
             }
             Type* t = decl_type_in_scope(last_block_child(c), var_name);
             if (t) return t;
-            char outer[64];
-            if (find_enclosing_scope_name(gen->program, NULL, c, outer, sizeof(outer))) {
-                return lookup_var_type(gen, var_name, outer);
-            }
+            const char* outer = find_enclosing_scope_name(gen->program, NULL, c);
+            if (outer) return lookup_var_type(gen, var_name, outer);
         }
         return NULL;
     }
@@ -3499,8 +3486,7 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
             Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
             if (capture_is_promoted(gen, captures[i], parent_func)) {
-                char cell[600];
-                promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+                const char* cell = promoted_cell_pointer(ctype, captures[i]);
                 fprintf(gen->output, "    %s;\n", cell);
             } else if (arr) {
                 fprintf(gen->output, "    %s %s[%d];\n",
@@ -3540,9 +3526,8 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             if (promoted) {
                 /* A string cell owns its heap string and a struct cell the
                  * struct's owned fields: the last releaser frees them. */
-                char release_fn[300];
-                promoted_cell_release_fn(gen, lookup_var_c_type(gen, captures[i], parent_func),
-                                         release_fn, sizeof(release_fn));
+                const char* release_fn =
+                    promoted_cell_release_fn(gen, lookup_var_c_type(gen, captures[i], parent_func));
                 fprintf(gen->output, "    %s(_e->%s);\n", release_fn, captures[i]);
             } else {
                 fprintf(gen->output, "    aether_string_release_captured(_e->%s);\n", captures[i]);
@@ -3589,8 +3574,7 @@ static void emit_make_closure_params(CodeGenerator* gen, int ci) {
             continue;
         }
         if (capture_is_promoted(gen, captures[i], parent_func)) {
-            char cell[600];
-            promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+            const char* cell = promoted_cell_pointer(ctype, captures[i]);
             fprintf(gen->output, "%s", cell);
             continue;
         }
@@ -3725,8 +3709,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 // Pointer alias: body reads/writes dereference through the
                 // AST_IDENTIFIER emit path when the name is in
                 // current_promoted_captures.
-                char cell[600];
-                promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+                const char* cell = promoted_cell_pointer(ctype, captures[i]);
                 fprintf(gen->output, "    %s = _env->%s;\n", cell, captures[i]);
             } else if (arr) {
                 // #2464: the env holds the array; the body indexes it in
@@ -3928,8 +3911,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     }
                     continue;
                 }
-                char param_cname[300];
-                snprintf(param_cname, sizeof(param_cname), "_param_%s", p->value);
+                const char* param_cname = cg_internf("_param_%s", p->value);
                 print_indent(gen);
                 emit_promoted_param_cell(gen, p->value,
                                          p->node_type ? get_c_type(p->node_type) : "int",
@@ -4030,9 +4012,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
                             capture_owning_struct(gen, captures[i], parent_func), captures[i]);
                 } else if (capture_is_promoted(gen, captures[i], parent_func)) {
                     /* env owns a reference to the shared cell (#2019) */
-                    char cell[600];
-                    promoted_cell_pointer(lookup_var_c_type(gen, captures[i], parent_func),
-                                          NULL, cell, sizeof(cell));
+                    const char* cell = promoted_cell_pointer(lookup_var_c_type(gen, captures[i], parent_func),
+                                                             NULL);
                     fprintf(gen->output, "    _e->%s = (%s)_aether_cell_retain(%s);\n",
                             captures[i], cell, captures[i]);
                 } else if (capture_is_retained_string(gen, captures[i], parent_func)) {
@@ -4175,19 +4156,17 @@ ASTNode* message_field_init_expr(ASTNode* message, const char* name) {
     return NULL;
 }
 
-/* The C symbol a call to `func_name` is emitted as. */
-void call_c_name(CodeGenerator* gen, const char* func_name, char* out, size_t n) {
+/* The C symbol a call to `func_name` is emitted as: the whole name, from
+ * the extern table, the source or the intern table (#2539: a 256-byte copy
+ * cut a longer one, so the call named a function nothing defined). */
+const char* call_c_name(CodeGenerator* gen, const char* func_name) {
     // Don't mangle extern functions: they refer to real C symbols.
     // For @extern("c_symbol") aether_name(...), translate the
     // Aether-side name to its bound C symbol. See #234.
     const char* mangled = is_extern_func(gen, func_name)
         ? lookup_extern_c_name(gen, func_name)
         : safe_c_name(func_name);
-    strncpy(out, mangled, n - 1);
-    out[n - 1] = '\0';
-    for (char* p = out; *p; p++) {
-        if (*p == '.') *p = '_';
-    }
+    const char* out = codegen_normalise_callee(mangled);
     /* #1383: substituting '_' for the dot assumes the C symbol is
        `<module>_<name>`. It is not when the export already carries
        the module (`intarr.intarr_new_raw`) or carries none
@@ -4205,12 +4184,10 @@ void call_c_name(CodeGenerator* gen, const char* func_name, char* out, size_t n)
         const char* after = qdot + 1;
         if (is_extern_func(gen, after)) {
             const char* real = lookup_extern_c_name(gen, after);
-            if (real) {
-                strncpy(out, real, n - 1);
-                out[n - 1] = '\0';
-            }
+            if (real) out = real;
         }
     }
+    return out;
 }
 
 /* #2518: the container entry a call that stores a closure VALUE is lowered
@@ -4236,8 +4213,7 @@ static const ClosureStoreEntry g_closure_store_entries[] = {
 
 static const ClosureStoreEntry* closure_store_entry(CodeGenerator* gen, ASTNode* call) {
     if (!gen || !call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
-    char c_name[256];
-    call_c_name(gen, call->value, c_name, sizeof(c_name));
+    const char* c_name = call_c_name(gen, call->value);
     for (size_t i = 0; i < sizeof(g_closure_store_entries) / sizeof(g_closure_store_entries[0]); i++) {
         const ClosureStoreEntry* e = &g_closure_store_entries[i];
         if (strcmp(c_name, e->c_name) == 0 && call->child_count == e->val_idx + 1) return e;
@@ -4771,9 +4747,7 @@ static int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
         if (!rt) {
             const char* dot = strrchr(name, '.');
             if (dot && dot[1]) {
-                char norm[256];
-                snprintf(norm, sizeof norm, "%s", name);
-                for (char* q = norm; *q; q++) if (*q == '.') *q = '_';
+                const char* norm = codegen_normalise_callee(name);
                 if (gen->program && find_function_definition_by_name(gen->program, norm)) return 0;
                 rt = lookup_extern_return_type(gen, norm);
                 if (!rt) rt = lookup_extern_return_type(gen, dot + 1);
@@ -4843,11 +4817,7 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
         fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
                 n, get_builder_factory(gen, call->value), n);
         emit_trailing_block_body(gen, block);
-        char c_fn[256];
-        strncpy(c_fn, safe_c_name(call->value), sizeof(c_fn) - 1);
-        c_fn[sizeof(c_fn) - 1] = '\0';
-        for (char* q = c_fn; *q; q++) { if (*q == '.') *q = '_'; }
-        fprintf(gen->output, "%s(", c_fn);
+        fprintf(gen->output, "%s(", codegen_normalise_callee(safe_c_name(call->value)));
         int argc = 0;
         for (int i = 0; i < call->child_count; i++) {
             ASTNode* arg = call->children[i];
@@ -4933,9 +4903,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* Numeric literals: translate 0o / 0b prefixes that C
                  * doesn't accept and suffix a decimal past LLONG_MAX;
                  * everything else passes through unchanged. */
-                char buf[64];
-                fprintf(gen->output, "%s",
-                        translate_integer_literal(expr->value, buf, sizeof(buf)));
+                fprintf(gen->output, "%s", translate_integer_literal(expr->value));
             }
             break;
 
@@ -5268,8 +5236,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             Type* inner = ot->element_type;
             const char* acc = (inner && inner->kind == TYPE_PTR) ? "->" : ".";
-            char rc[256];
-            snprintf(rc, sizeof(rc), "%s", get_c_type(rt));
+            const char* rc = get_c_type(rt);   /* interned, kept across the calls below */
             static int oc_counter = 0;
             int id = oc_counter++;
             fprintf(gen->output, "({ %s _oc%d = ", get_c_type(ot), id);
@@ -5557,8 +5524,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * field path, then emit aether_mem_get_<width> at the
                  * cumulative offset. Width is DERIVED from the field type. */
                 if (expr->value) {
-                    char cpath[256];
-                    ASTNode* root = aether_c_struct_chain(expr, cpath, sizeof(cpath));
+                    const char* cpath = NULL;
+                    ASTNode* root = aether_c_struct_chain(expr, &cpath);
                     if (root) {
                         long off = 0; const char* width = NULL;
                         const char* sname = root->node_type->element_type->struct_name;
@@ -6028,8 +5995,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * flatten to overlay-pointer root + dotted path, emit
                      * aether_mem_set_<width> at the cumulative offset. The
                      * parser lands a member-access store as a binary-`=`. */
-                    char cpath[256];
-                    ASTNode* root = aether_c_struct_chain(expr->children[0], cpath, sizeof(cpath));
+                    const char* cpath = NULL;
+                    ASTNode* root = aether_c_struct_chain(expr->children[0], &cpath);
                     const char* sname = root->node_type->element_type->struct_name;
                     long off = 0; const char* width = NULL;
                     if (!skip_parens) fprintf(gen->output, "(");
@@ -6297,12 +6264,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 int is_ptr = strcmp(expr->annotation, "fnfield_ptr") == 0;
                 const char* dot = strrchr(expr->value, '.');
                 if (dot) {
-                    char recv[200];
-                    size_t rlen = (size_t)(dot - expr->value);
-                    if (rlen >= sizeof(recv)) rlen = sizeof(recv) - 1;
-                    memcpy(recv, expr->value, rlen);
-                    recv[rlen] = '\0';
-                    char recv_c[200], field_c[200];
+                    /* Whole receiver path, however long (#2539). */
+                    const char* recv = cg_intern_n(expr->value, (size_t)(dot - expr->value));
                     /* Keyword mangling only (safe_value_name): the receiver
                      * is a local and the field is a struct member, neither is
                      * a linker symbol, so the libc-collision rename in
@@ -6310,8 +6273,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * `read` to `ae_read` here while the struct definition
                      * kept `read`, so the emitted C referenced a member that
                      * does not exist (#1251). */
-                    snprintf(recv_c, sizeof(recv_c), "%s", safe_value_name(recv));
-                    snprintf(field_c, sizeof(field_c), "%s", safe_value_name(dot + 1));
+                    const char* recv_c = safe_value_name(recv);
+                    const char* field_c = safe_value_name(dot + 1);
                     Type* field_sig = fnptr_field_signature(gen, recv, dot + 1);
                     int narrow = !gen->discard_call_value && fnptr_returns_bool(field_sig);
                     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
@@ -6328,10 +6291,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* Dotted source callees (`string.seq_free`) normalised to
                  * the underscored C/registry form for handlers that match
                  * stdlib functions by name. */
-                char func_name_norm_buf[256];
                 const char* func_name_norm =
-                    codegen_normalise_callee(func_name, func_name_norm_buf,
-                                             sizeof(func_name_norm_buf));
+                    codegen_normalise_callee(func_name);
                 /* Capture + clear the discarded-value flag at the top of
                  * the call codegen so it governs THIS call only and never
                  * leaks into nested argument calls (whose values ARE
@@ -7318,8 +7279,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                 }
                 else {
-                    char c_func_name[256];
-                    call_c_name(gen, func_name, c_func_name, sizeof(c_func_name));
+                    const char* c_func_name = call_c_name(gen, func_name);
 
                     // spawn_ActorName(preferred_core) — pass core hint or -1.
                     // Only the generated actor spawner: a user function or
@@ -7655,7 +7615,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int tsite = sandbox_trust_site_of_call(expr);
                         ASTNode* tdef = tsite ? sandbox_trust_target(gen, expr) : NULL;
                         if (tdef) {
-                            sandbox_trust_wrapper_name(tdef, tsite, c_func_name, sizeof(c_func_name));
+                            c_func_name = sandbox_trust_wrapper_name(tdef, tsite);
                         }
                     }
                     fprintf(gen->output, "%s(", c_func_name);
@@ -7677,8 +7637,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     // }` work.
                     {
                         // builder_funcs registry is keyed on the underscored form.
-                        char bf_normalized[256];
-                        codegen_normalise_callee(func_name, bf_normalized, sizeof(bf_normalized));
+                        const char* bf_normalized = codegen_normalise_callee(func_name);
                         int is_builder = 0;
                         for (int bi = 0; bi < gen->builder_func_count; bi++) {
                             if (strcmp(gen->builder_funcs[bi], bf_normalized) == 0) {
@@ -8596,9 +8555,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                  * per-call-site re-declaration. */
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
                                     if (f->type_kind == TYPE_STRING) {
-                                        char lv[300];
-                                        snprintf(lv, sizeof(lv), "_msg.%s", f->name);
-                                        emit_message_string_copy(gen, lv,
+                                        emit_message_string_copy(gen,
+                                            cg_internf("_msg.%s", f->name),
                                             message_field_init_expr(message, f->name));
                                     }
                                 }
@@ -8678,16 +8636,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * paths: a reply message that owns strings or
                          * closures releases what the asker does not take. */
                         const char* reply_release = "NULL";
-                        char reply_release_buf[300];
                         if (reply_msg_name) {
                             MessageDef* rdef = lookup_message(gen->message_registry, reply_msg_name);
                             for (MessageFieldDef* f = rdef ? rdef->fields : NULL; f; f = f->next) {
                                 if (f->type_kind == TYPE_STRING ||
                                     (f->type_kind == TYPE_FUNCTION && f->c_type &&
                                      strcmp(f->c_type, "_AeClosure") == 0)) {
-                                    snprintf(reply_release_buf, sizeof(reply_release_buf),
-                                             "(void (*)(void*))%s_release_fields", reply_msg_name);
-                                    reply_release = reply_release_buf;
+                                    reply_release = cg_internf(
+                                        "(void (*)(void*))%s_release_fields", reply_msg_name);
                                     break;
                                 }
                             }
@@ -8721,9 +8677,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * receiver's references. */
                         for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
                             if (f->type_kind == TYPE_STRING) {
-                                char lv[300];
-                                snprintf(lv, sizeof(lv), "_msg.%s", f->name);
-                                emit_message_string_copy(gen, lv,
+                                emit_message_string_copy(gen,
+                                    cg_internf("_msg.%s", f->name),
                                     message_field_init_expr(message, f->name));
                             }
                         }
@@ -8832,9 +8787,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 capture_owning_struct(gen, captures[i], cl_parent_func), captures[i]);
                     } else if (capture_is_promoted(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference to the shared cell (#2019) */
-                        char cell[600];
-                        promoted_cell_pointer(lookup_var_c_type(gen, captures[i], cl_parent_func),
-                                              NULL, cell, sizeof(cell));
+                        const char* cell = promoted_cell_pointer(lookup_var_c_type(gen, captures[i], cl_parent_func),
+                                                                 NULL);
                         fprintf(gen->output, "_e->%s = (%s)_aether_cell_retain(%s); ",
                                 captures[i], cell, captures[i]);
                     } else if (capture_is_retained_string(gen, captures[i], cl_parent_func)) {

@@ -95,23 +95,20 @@ const char* lookup_c_callback_symbol(CodeGenerator* gen, const char* name) {
     return ix ? strmap_get(&ix->c_callbacks, name) : NULL;
 }
 
-// Extract the C symbol bound by `@extern("c_symbol")` into `buf`.
-// Returns 1 if `ext` was declared via `@extern` (annotation begins
-// with "c_symbol:"), 0 otherwise. The stored annotation is
+// The C symbol bound by `@extern("c_symbol")`, interned (whole however
+// long, #2539), or NULL when `ext` was not declared via `@extern`
+// (annotation begins with "c_symbol:"). The stored annotation is
 // `c_symbol:NAME` for a plain `@extern` and `c_symbol:NAME;varargs`
 // when the `@extern` declaration also carries a trailing `...`; the
 // `;` delimiter never occurs inside a C identifier, so only NAME is
-// copied out regardless.
-static int extern_c_symbol(const ASTNode* ext, char* buf, size_t bufsz) {
-    if (!ext || !ext->annotation || bufsz == 0) return 0;
-    if (strncmp(ext->annotation, "c_symbol:", 9) != 0) return 0;
+// taken regardless.
+static const char* extern_c_symbol(const ASTNode* ext) {
+    if (!ext || !ext->annotation) return NULL;
+    if (strncmp(ext->annotation, "c_symbol:", 9) != 0) return NULL;
     const char* s = ext->annotation + 9;
     const char* semi = strchr(s, ';');
     size_t n = semi ? (size_t)(semi - s) : strlen(s);
-    if (n >= bufsz) n = bufsz - 1;
-    memcpy(buf, s, n);
-    buf[n] = '\0';
-    return 1;
+    return cg_intern_n(s, n);
 }
 
 // Is `ext` a variadic extern? True for the bare
@@ -151,8 +148,8 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
     // @extern("c_symbol") rebinds the call-site emission to a chosen
     // C symbol while keeping the Aether-side name in the namespace.
     {
-        char c_sym[256];
-        if (extern_c_symbol(ext, c_sym, sizeof(c_sym))) {
+        const char* c_sym = extern_c_symbol(ext);
+        if (c_sym) {
             gen->extern_registry[idx].c_name = strdup(c_sym);
         }
     }
@@ -222,21 +219,11 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
     }
 }
 
-// Normalize a function name by replacing dots with underscores (for module-qualified calls).
-// Writes into a caller-provided buffer.
-static void normalize_func_name(const char* name, char* buf, int buf_size) {
-    strncpy(buf, name, buf_size - 1);
-    buf[buf_size - 1] = '\0';
-    for (char* p = buf; *p; p++) {
-        if (*p == '.') *p = '_';
-    }
-}
-
-// Check if a function name is registered as a builder function.
+// Check if a function name is registered as a builder function. The
+// registry holds module-qualified names with dots as underscores.
 int is_builder_func_reg(CodeGenerator* gen, const char* func_name) {
     if (!gen || !func_name) return 0;
-    char normalized[256];
-    normalize_func_name(func_name, normalized, sizeof(normalized));
+    const char* normalized = codegen_normalise_callee(func_name);
     for (int i = 0; i < gen->builder_func_reg_count; i++) {
         if (gen->builder_funcs_reg[i].name && strcmp(gen->builder_funcs_reg[i].name, normalized) == 0) {
             return 1;
@@ -268,12 +255,9 @@ static ASTNode* find_user_function_by_name(CodeGenerator* gen, const char* name)
         for (const char* p = name; p < last_dot; p++) {
             if (*p == '.') ns_start = p + 1;
         }
-        char merged[512];
         size_t ns_len = (size_t)(last_dot - ns_start);
-        if (ns_len > 0 && ns_len + 1 + strlen(fn) + 1 <= sizeof(merged)) {
-            memcpy(merged, ns_start, ns_len);
-            merged[ns_len] = '_';
-            strcpy(merged + ns_len + 1, fn);
+        if (ns_len > 0) {
+            const char* merged = cg_internf("%.*s_%s", (int)ns_len, ns_start, fn);
             for (int i = 0; i < gen->program->child_count; i++) {
                 ASTNode* c = gen->program->children[i];
                 if (c && (c->type == AST_FUNCTION_DEFINITION ||
@@ -515,8 +499,7 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
 // Get the factory function for a builder function (default: "map_new").
 const char* get_builder_factory(CodeGenerator* gen, const char* func_name) {
     if (!gen || !func_name) return "map_new";
-    char normalized[256];
-    normalize_func_name(func_name, normalized, sizeof(normalized));
+    const char* normalized = codegen_normalise_callee(func_name);
     for (int i = 0; i < gen->builder_func_reg_count; i++) {
         if (gen->builder_funcs_reg[i].name && strcmp(gen->builder_funcs_reg[i].name, normalized) == 0) {
             return gen->builder_funcs_reg[i].factory ? gen->builder_funcs_reg[i].factory : "map_new";
@@ -543,23 +526,14 @@ static int find_extern_registry_index(CodeGenerator* gen, const char* func_name)
             return i;
         }
     }
-    /* Try the dot-normalised form: "ns.fn" → "ns_fn". Bounded
-     * to a small stack buffer; truncation just means the
-     * lookup misses, which preserves current behaviour. */
+    /* Try the dot-normalised form: "ns.fn" → "ns_fn", whole however
+     * long the name (#2539). */
     if (strchr(func_name, '.')) {
-        char buf[256];
-        size_t n = strlen(func_name);
-        if (n < sizeof(buf)) {
-            memcpy(buf, func_name, n);
-            buf[n] = '\0';
-            for (char* p = buf; *p; p++) {
-                if (*p == '.') *p = '_';
-            }
-            for (int i = 0; i < gen->extern_registry_count; i++) {
-                if (gen->extern_registry[i].name &&
-                    strcmp(gen->extern_registry[i].name, buf) == 0) {
-                    return i;
-                }
+        const char* norm = codegen_normalise_callee(func_name);
+        for (int i = 0; i < gen->extern_registry_count; i++) {
+            if (gen->extern_registry[i].name &&
+                strcmp(gen->extern_registry[i].name, norm) == 0) {
+                return i;
             }
         }
     }
@@ -763,9 +737,9 @@ void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
     // declaration and every call site use the annotated C symbol.
     // Closes #234.
     const char* c_name = ext->value;
-    char c_sym_buf[256];
-    if (extern_c_symbol(ext, c_sym_buf, sizeof(c_sym_buf))) {
-        c_name = c_sym_buf;
+    const char* c_sym = extern_c_symbol(ext);
+    if (c_sym) {
+        c_name = c_sym;
     }
 
     if (extern_name_is_libc_conflict(c_name)) {
@@ -1279,8 +1253,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     ASTNode* body = NULL;
     // Track the C name of the last emitted named parameter — needed as
     // the second argument to va_start() if this function is variadic.
-    char last_param_cname[256];
-    last_param_cname[0] = '\0';
+    const char* last_param_cname = "";
 
     for (int i = 0; i < func->child_count; i++) {
         ASTNode* child = func->children[i];
@@ -1305,14 +1278,14 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
              * can't express it. */
             if (is_fnptr_type(child->node_type)) {
                 emit_fnptr_decl(gen, child->node_type, child->value);
-                snprintf(last_param_cname, sizeof(last_param_cname), "%s", child->value);
+                last_param_cname = child->value ? child->value : "";
                 param_count++;
                 continue;
             }
             /* #2516: `E _param_xs[N]`; the body copies it (or seeds a cell). */
             if (is_sized_array_param(child->node_type) && child->value) {
                 emit_sized_array_param_declarator(gen, child->node_type, child->value);
-                snprintf(last_param_cname, sizeof(last_param_cname), "_param_%s", child->value);
+                last_param_cname = cg_internf("_param_%s", child->value);
                 param_count++;
                 continue;
             }
@@ -1334,10 +1307,10 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             }
             if (is_promoted) {
                 fprintf(gen->output, " _param_%s", child->value);
-                snprintf(last_param_cname, sizeof(last_param_cname), "_param_%s", child->value);
+                last_param_cname = cg_internf("_param_%s", child->value);
             } else {
                 fprintf(gen->output, " %s", child->value);
-                snprintf(last_param_cname, sizeof(last_param_cname), "%s", child->value);
+                last_param_cname = child->value ? child->value : "";
             }
             param_count++;
         } else if (child->type == AST_PATTERN_LITERAL) {
@@ -1345,12 +1318,12 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             if (param_count > 0) fprintf(gen->output, ", ");
             generate_type(gen, child->node_type);
             fprintf(gen->output, " _pattern_%d", param_count);
-            snprintf(last_param_cname, sizeof(last_param_cname), "_pattern_%d", param_count);
+            last_param_cname = cg_internf("_pattern_%d", param_count);
             param_count++;
         } else if (child->type == AST_PATTERN_STRUCT) {
             if (param_count > 0) fprintf(gen->output, ", ");
             fprintf(gen->output, "%s _pattern_%d", child->value, param_count);
-            snprintf(last_param_cname, sizeof(last_param_cname), "_pattern_%d", param_count);
+            last_param_cname = cg_internf("_pattern_%d", param_count);
             param_count++;
         } else if (child->type == AST_PATTERN_LIST || child->type == AST_PATTERN_CONS) {
             // List pattern becomes array pointer
@@ -1485,8 +1458,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 if (child->node_type && child->node_type->kind != TYPE_UNKNOWN) {
                     c_type = get_c_type(child->node_type);
                 }
-                char param_cname[300];
-                snprintf(param_cname, sizeof(param_cname), "_param_%s", child->value);
+                const char* param_cname = cg_internf("_param_%s", child->value);
                 print_indent(gen);
                 emit_promoted_param_cell(gen, child->value, c_type, param_cname,
                                          child->line, child->column);
@@ -1516,9 +1488,8 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
              * and holds a reference of its own. */
             const char* owning = struct_owning_strings(gen, child->node_type);
             if (owning && child->type == AST_PATTERN_VARIABLE) {
-                char lv[300];
-                if (is_promoted) snprintf(lv, sizeof(lv), "(*%s)", child->value);
-                else snprintf(lv, sizeof(lv), "%s", child->value);
+                const char* lv = is_promoted ? cg_internf("(*%s)", child->value)
+                                             : child->value;
                 emit_struct_disown(gen, owning, lv, 1);
                 if (!is_promoted) {
                     push_struct_destroy_defer(gen, child->value, child->node_type,

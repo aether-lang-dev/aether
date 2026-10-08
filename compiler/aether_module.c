@@ -198,37 +198,26 @@ void module_add_lib_dir(const char* dir) {
      * would change semantics. ALSO translate MSYS2 POSIX-form
      * (`/d/foo`) to native Windows (`D:/foo`) so a `;`-joined
      * path-list reaches us in the same shape as a sequence of
-     * separate `--lib` flags. `aether_lib_path_normalize` is a
-     * no-op on POSIX.
-     *
-     * memcpy with an explicit length (rather than strncpy with
-     * `sizeof(dst)-1`) keeps GCC's `-Wstringop-truncation` happy
-     * AND is the faster shape. */
-    char norm[256];
-    aether_lib_path_normalize(dir, norm, sizeof(norm));
-    size_t nlen = strlen(norm);
-    while (nlen > 1 &&
-           (norm[nlen - 1] == '/' || norm[nlen - 1] == '\\') &&
-           norm[nlen - 2] != ':') {
-        norm[--nlen] = '\0';
+     * separate `--lib` flags. Both are aether_lib_path_normalize's,
+     * which keeps the whole path (#2539). */
+    char* norm = aether_lib_path_normalize(dir);
+    if (!norm) {
+        fprintf(stderr, "aetherc: out of memory adding the --lib directory '%s'\n", dir);
+        exit(1);
     }
     /* Skip duplicates so repeated `--lib /same/dir` doesn't waste
      * search slots. O(N) check over a fixed cap-of-8 list — trivial. */
     for (int i = 0; i < global_module_registry->lib_dir_count; i++) {
-        if (strcmp(global_module_registry->lib_dirs[i], norm) == 0) return;
+        if (strcmp(global_module_registry->lib_dirs[i], norm) == 0) { free(norm); return; }
     }
     if (global_module_registry->lib_dir_count >= AETHER_LIB_DIRS_MAX) {
         fprintf(stderr,
             "warning: --lib search path is full (max %d entries); "
             "ignoring '%s'\n", AETHER_LIB_DIRS_MAX, norm);
+        free(norm);
         return;
     }
-    int idx = global_module_registry->lib_dir_count;
-    /* +1 includes the NUL — `nlen` is post-normalisation length,
-     * always < sizeof(lib_dirs[idx]). memcpy here too: same warning
-     * + perf rationale. */
-    memcpy(global_module_registry->lib_dirs[idx], norm, nlen + 1);
-    global_module_registry->lib_dir_count++;
+    global_module_registry->lib_dirs[global_module_registry->lib_dir_count++] = norm;
 }
 
 void module_add_lib_dirs(const char* spec) {
@@ -242,19 +231,29 @@ void module_add_lib_dirs(const char* spec) {
      * parsing — both `module_set_lib_dir` and aetherc's repeated
      * `--lib` handler route through here. */
     const char* cur = spec;
-    char buf[256];
     while (*cur) {
         const char* next = strchr(cur, AETHER_LIB_PATH_SEP_CHAR);
         size_t len = next ? (size_t)(next - cur) : strlen(cur);
         if (len > 0) {
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, cur, len);
-            buf[len] = '\0';
-            module_add_lib_dir(buf);
+            char* seg = (char*)malloc(len + 1);
+            if (!seg) {
+                fprintf(stderr, "aetherc: out of memory reading the --lib path\n");
+                exit(1);
+            }
+            memcpy(seg, cur, len);
+            seg[len] = '\0';
+            module_add_lib_dir(seg);
+            free(seg);
         }
         if (!next) break;
         cur = next + 1;
     }
+}
+
+static void module_clear_lib_dirs(void) {
+    for (int i = 0; i < global_module_registry->lib_dir_count; i++)
+        free(global_module_registry->lib_dirs[i]);
+    global_module_registry->lib_dir_count = 0;
 }
 
 void module_set_lib_dir(const char* lib_dir) {
@@ -263,7 +262,7 @@ void module_set_lib_dir(const char* lib_dir) {
     /* RESET — a fresh `--lib <path>` (or `AETHER_LIB_DIR=<path>`)
      * replaces, doesn't append. The append-form is
      * `module_add_lib_dirs`. */
-    global_module_registry->lib_dir_count = 0;
+    module_clear_lib_dirs();
     module_add_lib_dirs(lib_dir);
     /* Defensive: an entirely-empty path (all separators, no
      * segments) should fall back to the default so the toolchain
@@ -300,6 +299,7 @@ void module_registry_shutdown(void) {
             module_free(global_module_registry->modules[i]);
         }
         free(global_module_registry->modules);
+        module_clear_lib_dirs();
         free(global_module_registry);
         global_module_registry = NULL;
     }

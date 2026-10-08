@@ -24,6 +24,19 @@
 /* #2292: defined with the constant rename, used by the symbol catalog. */
 static const char* const_public_name(const ASTNode* cd);
 
+/* Codegen's names live in the compiler's intern table (aether_intern in
+ * ast.c, #2539): whole, and valid for the rest of the process. */
+const char* cg_intern_n(const char* s, size_t n) { return aether_intern_n(s, n); }
+const char* cg_intern(const char* s) { return aether_intern_n(s, strlen(s)); }
+
+const char* cg_internf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    const char* r = aether_internv(fmt, ap);
+    va_end(ap);
+    return r;
+}
+
 /* Set of struct names declared `extern struct Name @c_import`.
  * aetherc does not emit typedefs for these because the C header owns the
  * layout. Some headers, such as <time.h> for `struct tm`, also do not ship
@@ -121,17 +134,21 @@ void aether_c_struct_add_field(const char* sname, const char* fname,
 }
 
 /* Given a member-access chain `root.f1.f2...fN` whose ultimate receiver is a
- * @c_struct overlay pointer, return that root receiver node and write the
- * dotted field path ("f1.f2...fN") into `out`. Returns NULL if the chain's
- * root receiver is not a @c_struct overlay pointer (caller falls back to
- * ordinary member access). `macc` must be an AST_MEMBER_ACCESS node. */
-ASTNode* aether_c_struct_chain(ASTNode* macc, char* out, size_t outsz) {
+ * @c_struct overlay pointer, return that root receiver node and set `*path`
+ * to the dotted field path ("f1.f2...fN"), interned. Returns NULL if the
+ * chain's root receiver is not a @c_struct overlay pointer (caller falls
+ * back to ordinary member access). `macc` must be an AST_MEMBER_ACCESS node.
+ * The whole path, however deep (#2539): 32 links and 256 bytes were kept,
+ * and a cut path resolved to another field's offset or to none. */
+ASTNode* aether_c_struct_chain(ASTNode* macc, const char** path) {
+    *path = "";
     if (!macc || macc->type != AST_MEMBER_ACCESS) return NULL;
-    const char* parts[32];
+    size_t len = 0;
     int n = 0;
     ASTNode* cur = macc;
     while (cur && cur->type == AST_MEMBER_ACCESS && cur->value && cur->child_count > 0) {
-        if (n < 32) parts[n++] = cur->value;
+        len += strlen(cur->value) + 1;
+        n++;
         cur = cur->children[0];
     }
     if (!cur || !cur->node_type || cur->node_type->kind != TYPE_PTR ||
@@ -140,24 +157,27 @@ ASTNode* aether_c_struct_chain(ASTNode* macc, char* out, size_t outsz) {
         !cur->node_type->element_type->struct_name ||
         !aether_is_c_struct_overlay(cur->node_type->element_type->struct_name))
         return NULL;
-    out[0] = '\0';
-    size_t used = 0;
-    for (int i = n - 1; i >= 0; i--) {
-        size_t pl = strlen(parts[i]);
-        if (used + pl + 2 >= outsz) break;
-        if (used) out[used++] = '.';
-        memcpy(out + used, parts[i], pl);
-        used += pl;
-        out[used] = '\0';
+    /* The links run from the last field to the first: fill from the end. */
+    char* out = (char*)aether_xrealloc(NULL, len + 1);
+    size_t end = len ? len - 1 : 0;
+    out[end] = '\0';
+    ASTNode* link = macc;
+    for (int i = 0; i < n; i++, link = link->children[0]) {
+        size_t pl = strlen(link->value);
+        end -= pl;
+        memcpy(out + end, link->value, pl);
+        if (i + 1 < n) out[--end] = '.';
     }
+    *path = cg_intern(out);
+    free(out);
     return cur;
 }
 
 /* Predicate: is this member-access node a write/read against a @c_struct
  * overlay (its chain root is an overlay pointer)? */
 int aether_c_struct_overlay_lhs(ASTNode* macc) {
-    char tmp[256];
-    return aether_c_struct_chain(macc, tmp, sizeof(tmp)) != NULL;
+    const char* path;
+    return aether_c_struct_chain(macc, &path) != NULL;
 }
 
 /* Resolve `struct.field` (field may be a dotted chain for nested overlays)
@@ -167,15 +187,18 @@ int aether_c_struct_resolve(const char* sname, const char* field,
     CStructDef* d = cstruct_find(sname);
     if (!d || !field) return 0;
     long acc = 0;
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%s", field);
-    char* seg = buf;
-    while (seg && *seg) {
-        char* dot = strchr(seg, '.');
-        if (dot) *dot = '\0';
+    /* Segment by segment in place, each one a span of `field` (a 256-byte
+     * copy cut a long path, #2539). */
+    const char* seg = field;
+    while (*seg) {
+        const char* dot = strchr(seg, '.');
+        size_t sl = dot ? (size_t)(dot - seg) : strlen(seg);
         CStructField* found = NULL;
         for (int i = 0; i < d->nfields; i++)
-            if (strcmp(d->fields[i].name, seg) == 0) { found = &d->fields[i]; break; }
+            if (strlen(d->fields[i].name) == sl && strncmp(d->fields[i].name, seg, sl) == 0) {
+                found = &d->fields[i];
+                break;
+            }
         if (!found) return 0;
         acc += found->offset;
         if (dot) {
@@ -1308,18 +1331,18 @@ void mark_return_escaped_struct_var(CodeGenerator* gen, const char* var_name) {
 // (codegen_expr.c), extern param-type lookup
 // (codegen_stmt.c:lookup_callee_param_kind). Source-level
 // `"string.concat"` becomes `"string_concat"` so it matches the
-// underscored form the registries are keyed on.
-const char* codegen_normalise_callee(const char* raw, char* out, size_t out_size) {
-    if (!out || out_size == 0) return out;
-    if (!raw) { out[0] = '\0'; return out; }
+// underscored form the registries are keyed on. The whole name, interned
+// (#2539): a 256-byte copy cut a longer one, which then matched no
+// definition, or the wrong one.
+const char* codegen_normalise_callee(const char* raw) {
+    if (!raw) return "";
+    if (!strchr(raw, '.')) return raw;
     size_t n = strlen(raw);
-    if (n >= out_size) n = out_size - 1;
-    memcpy(out, raw, n);
-    out[n] = '\0';
-    for (char* p = out; *p; p++) {
-        if (*p == '.') *p = '_';
-    }
-    return out;
+    char* tmp = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i <= n; i++) tmp[i] = raw[i] == '.' ? '_' : raw[i];
+    const char* r = cg_intern_n(tmp, n);
+    free(tmp);
+    return r;
 }
 
 // Helper: check if a function was already generated
@@ -1572,10 +1595,8 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     const char* sep = strchr(rest, ':');
     if (!sep || !sep[1]) return 0;
     size_t var_len = (size_t)(sep - rest);
-    if (var_len == 0 || var_len > 200) return 0;
-    char var_buf[256];
-    memcpy(var_buf, rest, var_len);
-    var_buf[var_len] = '\0';
+    if (var_len == 0) return 0;
+    const char* var_buf = cg_intern_n(rest, var_len);
     const char* struct_name = sep + 1;
     /* #752: suppress the destroy when this struct escaped via a return —
      * its heap-string fields now belong to the caller. Consume the defer
@@ -1602,17 +1623,13 @@ static int try_emit_struct_array_destroy(CodeGenerator* gen, ASTNode* deferred) 
     const char* sep = strchr(rest, ':');
     if (!sep || !sep[1]) return 0;
     size_t var_len = (size_t)(sep - rest);
-    if (var_len == 0 || var_len > 200) return 0;
-    char var_buf[256];
-    memcpy(var_buf, rest, var_len);
-    var_buf[var_len] = '\0';
+    if (var_len == 0) return 0;
+    const char* var_buf = cg_intern_n(rest, var_len);
     const char* sep2 = strchr(sep + 1, ':');
     if (!sep2 || !sep2[1]) return 0;
-    char struct_buf[256];
     size_t slen = (size_t)(sep2 - (sep + 1));
-    if (slen == 0 || slen > 200) return 0;
-    memcpy(struct_buf, sep + 1, slen);
-    struct_buf[slen] = '\0';
+    if (slen == 0) return 0;
+    const char* struct_buf = cg_intern_n(sep + 1, slen);
     int n = atoi(sep2 + 1);
     if (is_return_escaped_struct_var(gen, var_buf)) return 1;
     print_indent(gen);
@@ -2010,36 +2027,40 @@ const char* try_volatile_qual_for(CodeGenerator* gen, const char* name) {
 // Header Generation Functions (for --emit-header)
 // ============================================================================
 
-// Convert filename to uppercase guard name (e.g., "counter.h" -> "COUNTER_H")
-static void make_guard_name(const char* path, char* guard, size_t guard_size) {
+// Convert filename to uppercase guard name (e.g., "counter.h" -> "COUNTER_H").
+// Interned, whole: a guard cut at a fixed length made two long header names
+// that share a prefix collide (#2539).
+static const char* make_guard_name(const char* path) {
     const char* filename = path;
     // Find last path separator
     for (const char* p = path; *p; p++) {
         if (*p == '/' || *p == '\\') filename = p + 1;
     }
 
-    size_t i = 0;
-    for (; filename[i] && i < guard_size - 1; i++) {
+    size_t n = strlen(filename);
+    char* guard = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++) {
         char c = filename[i];
         if (c == '.') guard[i] = '_';
         else if (c >= 'a' && c <= 'z') guard[i] = c - 32;  // toupper
         else if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') guard[i] = c;
         else guard[i] = '_';
     }
-    guard[i] = '\0';
+    const char* r = cg_intern_n(guard, n);
+    free(guard);
+    return r;
 }
 
 void emit_header_prologue(CodeGenerator* gen, const char* guard_name) {
     if (!gen->header_file) return;
 
-    char guard[256];
+    const char* guard;
     if (guard_name) {
-        strncpy(guard, guard_name, sizeof(guard) - 1);
-        guard[sizeof(guard) - 1] = '\0';
+        guard = guard_name;
     } else if (gen->header_path) {
-        make_guard_name(gen->header_path, guard, sizeof(guard));
+        guard = make_guard_name(gen->header_path);
     } else {
-        snprintf(guard, sizeof(guard), "AETHER_GENERATED_H");
+        guard = "AETHER_GENERATED_H";
     }
 
     fprintf(gen->header_file, "// Auto-generated by aetherc - DO NOT EDIT\n");
@@ -2382,13 +2403,12 @@ int is_c_reserved_word(const char* name) {
 }
 
 // Mangle an Aether name to avoid C reserved word collision.
-// Returns a static buffer — caller must use before next call.
+// Interned (#2539): one static buffer gave the second of two names in a
+// single printf the first one's spelling.
 const char* safe_c_name(const char* name) {
     if (!name) return name;
     if (!is_c_reserved_word(name)) return name;
-    static char buf[280];
-    snprintf(buf, sizeof(buf), "ae_%s", name);
-    return buf;
+    return cg_internf("ae_%s", name);
 }
 
 // #976: is `name` a C reserved keyword (as opposed to a libc symbol)?
@@ -2497,9 +2517,7 @@ static int is_c_header_macro_name(const char* name) {
 const char* safe_value_name(const char* name) {
     if (!name) return name;
     if (!is_c_keyword(name)) return name;
-    static char buf[280];
-    snprintf(buf, sizeof(buf), "ae_%s", name);
-    return buf;
+    return cg_internf("ae_%s", name);
 }
 
 /* Source position of the construct codegen is lowering right now.
@@ -2603,17 +2621,13 @@ const char* get_c_type(Type* type) {
         case TYPE_STRING: return "const char*";
         case TYPE_VOID: return "void";
         case TYPE_ACTOR_REF: {
-            // Rotating buffers prevent clobber when get_c_type() is called
-            // multiple times in the same printf/expression
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
+            /* Interned (#2539): the four rotating 256-byte buffers these
+             * cases used cut a long name, and a fifth call overwrote a
+             * result a caller still held. */
             if (type->element_type && type->element_type->kind == TYPE_STRUCT && type->element_type->struct_name) {
-                snprintf(buffer, 256, "%s*", type->element_type->struct_name);
-            } else {
-                snprintf(buffer, 256, "void*");
+                return cg_internf("%s*", type->element_type->struct_name);
             }
-            return buffer;
+            return "void*";
         }
         case TYPE_MESSAGE: return "Message";
         case TYPE_PTR: {
@@ -2631,9 +2645,6 @@ const char* get_c_type(Type* type) {
              * portable. */
             if (type->element_type && type->element_type->kind == TYPE_STRUCT &&
                 type->element_type->struct_name) {
-                static char buffers[4][256];
-                static int buf_idx = 0;
-                char* buffer = buffers[buf_idx++ & 3];
                 const char* sname = type->element_type->struct_name;
                 if (aether_is_c_struct_overlay(sname)) {
                     /* #891: a @c_struct overlay pointer is just a raw `void*`
@@ -2641,45 +2652,28 @@ const char* get_c_type(Type* type) {
                      * access lowers to mem accessors at offsets. */
                     return "void*";
                 } else if (aether_is_c_import_struct(sname)) {
-                    snprintf(buffer, 256, "struct %s*", sname);
-                } else {
-                    snprintf(buffer, 256, "%s*", sname);
+                    return cg_internf("struct %s*", sname);
                 }
-                return buffer;
+                return cg_internf("%s*", sname);
             }
             return "void*";
         }
         case TYPE_STRUCT: {
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
             const char* sname = type->struct_name ? type->struct_name : "unnamed";
             if (type->struct_name && aether_is_c_import_struct(type->struct_name)) {
-                snprintf(buffer, 256, "struct %s", sname);
-            } else {
-                snprintf(buffer, 256, "%s", sname);
+                return cg_internf("struct %s", sname);
             }
-            return buffer;
+            return cg_intern(sname);
         }
-        case TYPE_SUM: {
+        case TYPE_SUM:
             // #914: a sum type lowers to `typedef struct Name { Name_tag tag;
             // union {...} data; } Name;` (emitted by emit_sum_typedefs), so the
             // C type is just the sum's name.
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
-            snprintf(buffer, 256, "%s", type->struct_name ? type->struct_name : "_sum");
-            return buffer;
-        }
-        case TYPE_ENUM: {
+            return cg_intern(type->struct_name ? type->struct_name : "_sum");
+        case TYPE_ENUM:
             // #1044: an enum lowers to `typedef enum { Name_Member = v, ... }
             // Name;` (emitted by emit_enum_typedef), so the C type is the name.
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
-            snprintf(buffer, 256, "%s", type->struct_name ? type->struct_name : "_enum");
-            return buffer;
-        }
+            return cg_intern(type->struct_name ? type->struct_name : "_enum");
         case TYPE_ISOLATED:
             /* #479: Isolated[T] is a compile-time-only, move-only wrapper. It
              * lowers to the C type of the wrapped T with zero runtime cost
@@ -2697,25 +2691,20 @@ const char* get_c_type(Type* type) {
              * this word, so the layout is exact and portable. */
             return type->element_type ? get_c_type(type->element_type)
                                       : "unsigned char";
-        case TYPE_ARRAY: {
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
-            const char* element_type = get_c_type(type->element_type);
+        case TYPE_ARRAY:
             if (type->array_size > 0) {
-                snprintf(buffer, 256, "%s[%d]", element_type, type->array_size);
-            } else {
-                /* #1286: an unsized `T[]` is a slice, `{ ptr, len }`. */
-                snprintf(buffer, 256, "AetherSlice");
+                return cg_internf("%s[%d]", get_c_type(type->element_type), type->array_size);
             }
-            return buffer;
-        }
+            /* #1286: an unsized `T[]` is a slice, `{ ptr, len }`. */
+            return "AetherSlice";
         case TYPE_TUPLE: {
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
-            int pos = snprintf(buffer, 256, "_tuple");
-            for (int i = 0; i < type->tuple_count && pos < 240; i++) {
+            /* `_tuple` and each element's C type, identifier-sanitised. The
+             * whole name (#2539): cut at 240 bytes, two tuples that differed
+             * past it shared one typedef. */
+            size_t cap = 64, pos = 0;
+            char* buffer = (char*)aether_xrealloc(NULL, cap);
+            pos = (size_t)snprintf(buffer, cap, "_tuple");
+            for (int i = 0; i < type->tuple_count; i++) {
                 const char* elem = get_c_type(type->tuple_types[i]);
                 // Sanitize: "const char*" -> "string", "void*" -> "ptr",
                 // and the space-containing spellings that would otherwise
@@ -2724,12 +2713,17 @@ const char* get_c_type(Type* type) {
                 else if (strcmp(elem, "void*") == 0) elem = "ptr";
                 else if (strcmp(elem, "unsigned char") == 0) elem = "byte";
                 else if (strcmp(elem, "long double") == 0) elem = "longdouble";
+                size_t need = pos + 1 + strlen(elem) + 1;
+                if (need > cap) {
+                    while (cap < need) cap *= 2;
+                    buffer = (char*)aether_xrealloc(buffer, cap);
+                }
                 // Any remaining non-identifier character (the `*` in a
                 // struct-pointer element like `Node*`, or an embedded space)
                 // would make an invalid C typedef name; map it to '_', the
                 // same sanitization the optional-type namer below applies.
-                if (pos < 255) buffer[pos++] = '_';
-                for (const char* e = elem; *e && pos < 255; e++) {
+                buffer[pos++] = '_';
+                for (const char* e = elem; *e; e++) {
                     char c = *e;
                     int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                              (c >= '0' && c <= '9') || c == '_';
@@ -2737,30 +2731,30 @@ const char* get_c_type(Type* type) {
                 }
                 buffer[pos] = '\0';
             }
-            return buffer;
+            const char* name = cg_intern_n(buffer, pos);
+            free(buffer);
+            return name;
         }
         case TYPE_OPTIONAL: {
             // #340: `T?` lowers to a per-T tagged struct `ae_opt_<T>`
             // (`{ bool has; T val; }`), emitted on first use by
             // ensure_optional_typedef. The mangled name uses the inner C
             // type, identifier-sanitised (string/ptr aliases, non-alnum -> _).
-            static char buffers[4][256];
-            static int buf_idx = 0;
-            char* buffer = buffers[buf_idx++ & 3];
             const char* inner = type->element_type ? get_c_type(type->element_type) : "int";
             if (strcmp(inner, "const char*") == 0) inner = "string";
             else if (strcmp(inner, "void*") == 0) inner = "ptr";
-            char safe[200];
-            int si = 0;
-            for (const char* p = inner; *p && si < 199; p++) {
-                char c = *p;
+            size_t n = strlen(inner);
+            char* safe = (char*)aether_xrealloc(NULL, 7 + n + 1);
+            memcpy(safe, "ae_opt_", 7);
+            for (size_t i = 0; i < n; i++) {
+                char c = inner[i];
                 int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                          (c >= '0' && c <= '9') || c == '_';
-                safe[si++] = ok ? c : '_';
+                safe[7 + i] = ok ? c : '_';
             }
-            safe[si] = '\0';
-            snprintf(buffer, 256, "ae_opt_%s", safe);
-            return buffer;
+            const char* name = cg_intern_n(safe, 7 + n);
+            free(safe);
+            return name;
         }
         case TYPE_FUNCTION:
             /* Typed C function pointer (storage = void*).  The call
@@ -2882,12 +2876,22 @@ static const char* lib_pkg_base_name(AetherModule* m, const char* value) {
     return value;
 }
 
-static void lib_pkg_symbol(AetherModule* m, const char* base, char* out, size_t cap) {
-    int n = snprintf(out, cap, "aether_%s__%s", m->name, base);
-    if (n < 0) { out[0] = '\0'; return; }
-    size_t mod_end = strlen("aether_") + strlen(m->name);
-    for (size_t i = strlen("aether_"); i < mod_end && i < cap; i++)
-        if (out[i] == '.') out[i] = '_';
+/* Interned and whole (#2539): a cut symbol named a wrapper that does not
+ * exist, or made two exports with a long shared prefix one symbol. */
+static const char* lib_pkg_symbol(AetherModule* m, const char* base) {
+    size_t pre = strlen("aether_");
+    size_t mlen = strlen(m->name);
+    size_t blen = strlen(base);
+    size_t n = pre + mlen + 2 + blen;
+    char* out = (char*)aether_xrealloc(NULL, n + 1);
+    memcpy(out, "aether_", pre);
+    for (size_t i = 0; i < mlen; i++) out[pre + i] = m->name[i] == '.' ? '_' : m->name[i];
+    out[pre + mlen] = '_';
+    out[pre + mlen + 1] = '_';
+    memcpy(out + pre + mlen + 2, base, blen);
+    const char* r = cg_intern_n(out, n);
+    free(out);
+    return r;
 }
 
 /* Does the module make `base` public: its `exports (...)` list names it, or
@@ -2899,24 +2903,25 @@ static int lib_pkg_exports(AetherModule* m, const char* base) {
 }
 
 /* The public identity of a top-level function in a --emit=lib build, or 0
- * when it is not part of the library's surface. `alias` receives the
- * wrapper symbol, `*name` the name the catalog gives it, `*module` the
- * package module it belongs to ("" for the entry's own functions). */
-static int lib_fn_identity(ASTNode* fn, char* alias, size_t acap,
+ * when it is not part of the library's surface. `*alias` receives the
+ * wrapper symbol (interned), `*name` the name the catalog gives it,
+ * `*module` the package module it belongs to ("" for the entry's own
+ * functions). */
+static int lib_fn_identity(ASTNode* fn, const char** alias,
                            const char** name, const char** module) {
     if (fn->is_imported) {
         AetherModule* m = module_lib_package_module_of(fn);
         if (!m) return 0;
         const char* base = lib_pkg_base_name(m, fn->value);
         if (!lib_pkg_exports(m, base)) return 0;
-        lib_pkg_symbol(m, base, alias, acap);
+        *alias = lib_pkg_symbol(m, base);
         *name = base;
         *module = m->name;
         return 1;
     }
     size_t name_len = strlen(fn->value);
     if (name_len > 0 && fn->value[name_len - 1] == '_') return 0;
-    snprintf(alias, acap, "aether_%s", fn->value);
+    *alias = cg_internf("aether_%s", fn->value);
     *name = fn->value;
     *module = "";
     return 1;
@@ -3029,10 +3034,10 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         // into the public ABI, and (b) causes a duplicate-symbol link error
         // when two .ae files in the same --namespace bundle pick the same
         // helper name (they each generate their own alias). Closes #279.
-        char alias[512];
+        const char* alias = NULL;
         const char* pub_name = NULL;
         const char* pub_module = NULL;
-        if (!lib_fn_identity(fn, alias, sizeof(alias), &pub_name, &pub_module)) continue;
+        if (!lib_fn_identity(fn, &alias, &pub_name, &pub_module)) continue;
 
         // Check that every param type is ABI-representable.
         // The last non-guard, non-block child is the body; everything before
@@ -3217,8 +3222,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             aether_warning_report(&w);
             continue;
         }
-        char sym[512];
-        lib_pkg_symbol(m, base, sym, sizeof(sym));
+        const char* sym = lib_pkg_symbol(m, base);
         /* The return type, chosen exactly as the builder's own definition
          * chooses it (codegen_func.c), so the two prototypes agree. */
         Type* rt = b->node_type;
@@ -3285,26 +3289,82 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
 // `closures` slots are reserved at zero/NULL so v2 can extend
 // (closure-context records — captures + capture types per closure
 // reachable from an export) without an ABI break.
+/* A malloc'd string that grows as text is appended: the catalog signatures
+ * below are as long as their parameter lists and type names (#2539). */
+typedef struct { char* s; size_t len; size_t cap; } CgText;
+
+static void cg_text_put(CgText* b, const char* s) {
+    size_t n = strlen(s);
+    if (b->len + n + 1 > b->cap) {
+        size_t ncap = b->cap ? b->cap : 128;
+        while (ncap < b->len + n + 1) ncap *= 2;
+        b->s = (char*)aether_xrealloc(b->s, ncap);
+        b->cap = ncap;
+    }
+    memcpy(b->s + b->len, s, n + 1);
+    b->len += n;
+}
+
+/* An upper bound on the length of `t` spelled by type_to_aether_source:
+ * each type it visits writes its names plus a few fixed characters
+ * (`Isolated[...]`, `fn(...) -> `, `[N]`, a separator). */
+static size_t cg_type_source_bound(const Type* t) {
+    if (!t) return 0;
+    size_t n = 48;
+    if (t->c_alias) n += strlen(t->c_alias);
+    if (t->struct_name) n += strlen(t->struct_name);
+    switch (t->kind) {
+        case TYPE_PTR:
+            if (t->element_type && t->element_type->struct_name)
+                n += strlen(t->element_type->struct_name);
+            break;
+        case TYPE_ARRAY: case TYPE_OPTIONAL: case TYPE_ISOLATED:
+            n += cg_type_source_bound(t->element_type);
+            break;
+        case TYPE_FUNCTION:
+            for (int i = 0; i < t->param_count && t->param_types; i++)
+                n += cg_type_source_bound(t->param_types[i]);
+            n += cg_type_source_bound(t->return_type);
+            break;
+        case TYPE_TUPLE:
+            for (int i = 0; i < t->tuple_count && t->tuple_types; i++)
+                n += cg_type_source_bound(t->tuple_types[i]);
+            break;
+        default:
+            break;
+    }
+    return n;
+}
+
+/* `t` as Aether source (type_to_aether_source), interned, or NULL when it
+ * has no spelling. The buffer is sized to the type, so a failure means no
+ * spelling, never a long name that did not fit. */
+static const char* cg_type_source(const Type* t) {
+    size_t cap = cg_type_source_bound(t) + 1;
+    char* buf = (char*)aether_xrealloc(NULL, cap);
+    const char* r = type_to_aether_source(t, buf, cap) ? cg_intern(buf) : NULL;
+    free(buf);
+    return r;
+}
+
 /* Build a function's descriptive signature `(type1, type2, ...) -> retType`
  * as a malloc'd string the caller frees. Single source of truth for both the
  * C-literal catalog and the JSON catalog. Each type_to_string result (a
- * pointer into a shared static buffer) is copied into `buf` immediately, so a
- * later type_to_string call can't clobber an earlier field. */
+ * pointer into a shared static buffer) is copied into the text immediately,
+ * so a later type_to_string call can't clobber an earlier field. */
 static char* fn_signature_string(ASTNode* fn) {
-    char buf[1024];
-    int pos = 0;
-    buf[pos++] = '(';
+    CgText b = {NULL, 0, 0};
+    cg_text_put(&b, "(");
     int first = 1;
-    for (int i = 0; i < fn->child_count && pos < (int)sizeof(buf) - 64; i++) {
+    for (int i = 0; i < fn->child_count; i++) {
         ASTNode* c = fn->children[i];
         if (!c) continue;
         if (c->type != AST_PATTERN_VARIABLE && c->type != AST_VARIABLE_DECLARATION) continue;
-        if (!first) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
+        if (!first) cg_text_put(&b, ", ");
         first = 0;
-        const char* tname = c->node_type ? type_to_string(c->node_type) : "unknown";
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", tname);
+        cg_text_put(&b, c->node_type ? type_to_string(c->node_type) : "unknown");
     }
-    pos += snprintf(buf + pos, sizeof(buf) - pos, ") -> ");
+    cg_text_put(&b, ") -> ");
     /* No-return-type and TYPE_UNKNOWN both mean "void" at the
      * source-level surface (Aether's `foo() { ... }` with no
      * `-> T` is a void function). Render as "void" rather than
@@ -3313,8 +3373,8 @@ static char* fn_signature_string(ASTNode* fn) {
                       fn->node_type->kind == TYPE_UNKNOWN ||
                       fn->node_type->kind == TYPE_VOID)
                          ? "void" : type_to_string(fn->node_type);
-    snprintf(buf + pos, sizeof(buf) - pos, "%s", rt);
-    return strdup(buf);
+    cg_text_put(&b, rt);
+    return b.s;
 }
 
 static void emit_lib_metadata_signature_for(FILE* out, ASTNode* fn) {
@@ -3416,16 +3476,15 @@ static ASTNode* meta_find_return_expr(ASTNode* node) {
  * we read the AST_CLOSURE_PARAM children directly and best-effort the
  * return type. Returns a malloc'd string the caller frees. */
 static char* render_closure_sig_ast(ASTNode* cnode) {
-    char buf[512];
-    int pos = snprintf(buf, sizeof(buf), "|");
+    CgText b = {NULL, 0, 0};
+    cg_text_put(&b, "|");
     int first = 1;
-    for (int i = 0; i < cnode->child_count && pos < (int)sizeof(buf) - 32; i++) {
+    for (int i = 0; i < cnode->child_count; i++) {
         ASTNode* p = cnode->children[i];
         if (!p || p->type != AST_CLOSURE_PARAM) continue;
-        if (!first) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
+        if (!first) cg_text_put(&b, ", ");
         first = 0;
-        const char* t = p->node_type ? type_to_string(p->node_type) : "?";
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", t);
+        cg_text_put(&b, p->node_type ? type_to_string(p->node_type) : "?");
     }
     /* Return type: prefer the closure type's return slot; otherwise the
      * type of the body's return/arrow expression; default void. */
@@ -3462,14 +3521,11 @@ static char* render_closure_sig_ast(ASTNode* cnode) {
                      ? type_to_string(rexpr->node_type) : "?";
         }
     }
-    char tail[64];
-    snprintf(tail, sizeof(tail), "| -> %s", rt);
-    /* rt may point at type_to_string's static buffer; copy via snprintf
-     * into tail before it can be clobbered, then append. */
-    if (pos < (int)sizeof(buf) - (int)strlen(tail) - 1) {
-        snprintf(buf + pos, sizeof(buf) - pos, "%s", tail);
-    }
-    return strdup(buf);
+    /* rt may point at type_to_string's static buffer; append it before
+     * anything else can clobber it. */
+    cg_text_put(&b, "| -> ");
+    cg_text_put(&b, rt);
+    return b.s;
 }
 
 /* Does this function's first parameter look like an injected builder
@@ -3584,7 +3640,6 @@ static int lib_struct_recordable(ASTNode* sd, const char** why) {
         *why = "it is an opaque or header-defined type, with no layout to carry";
         return 0;
     }
-    char tbuf[512];
     for (int f = 0; f < sd->child_count; f++) {
         ASTNode* fld = sd->children[f];
         if (!fld) continue;
@@ -3596,7 +3651,7 @@ static int lib_struct_recordable(ASTNode* sd, const char** why) {
             *why = "it has a bit-width field";
             return 0;
         }
-        if (!type_to_aether_source(fld->node_type, tbuf, sizeof(tbuf))) {
+        if (!cg_type_source(fld->node_type)) {
             *why = "a field's type has no source spelling (an enum, sum or distinct type)";
             return 0;
         }
@@ -3649,32 +3704,31 @@ static void lib_struct_collect(ASTNode* program, const char* name,
 /* `(name: T, ...) -> R` in Aether source, or NULL when a type has no
  * spelling. Malloc'd; the caller frees. */
 static char* fn_source_signature_string(ASTNode* fn) {
-    char buf[2048];
-    char tbuf[512];
-    size_t pos = 0;
-    buf[pos++] = '(';
+    CgText b = {NULL, 0, 0};
+    cg_text_put(&b, "(");
     int first = 1;
     for (int i = 0; i < fn->child_count; i++) {
         ASTNode* c = fn->children[i];
         if (!c) continue;
         if (c->type == AST_BLOCK) break;
         if (c->type != AST_PATTERN_VARIABLE && c->type != AST_VARIABLE_DECLARATION) continue;
-        if (!type_to_aether_source(c->node_type, tbuf, sizeof(tbuf))) return NULL;
-        int n = snprintf(buf + pos, sizeof(buf) - pos, "%s%s: %s",
-                         first ? "" : ", ", c->value ? c->value : "_", tbuf);
-        if (n < 0 || (size_t)n >= sizeof(buf) - pos) return NULL;
-        pos += (size_t)n;
+        const char* ts = cg_type_source(c->node_type);
+        if (!ts) { free(b.s); return NULL; }
+        if (!first) cg_text_put(&b, ", ");
+        cg_text_put(&b, c->value ? c->value : "_");
+        cg_text_put(&b, ": ");
+        cg_text_put(&b, ts);
         first = 0;
     }
     const char* rt = "void";
     if (fn->node_type && fn->node_type->kind != TYPE_UNKNOWN &&
         fn->node_type->kind != TYPE_VOID) {
-        if (!type_to_aether_source(fn->node_type, tbuf, sizeof(tbuf))) return NULL;
-        rt = tbuf;
+        rt = cg_type_source(fn->node_type);
+        if (!rt) { free(b.s); return NULL; }
     }
-    int n = snprintf(buf + pos, sizeof(buf) - pos, ") -> %s", rt);
-    if (n < 0 || (size_t)n >= sizeof(buf) - pos) return NULL;
-    return strdup(buf);
+    cg_text_put(&b, ") -> ");
+    cg_text_put(&b, rt);
+    return b.s;
 }
 
 static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
@@ -3699,10 +3753,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
          * functions minus `_`-suffixed privates, plus a package module's
          * exported functions (#2297). */
         {
-            char alias_probe[512];
+            const char* alias_probe = NULL;
             const char* nm = NULL;
             const char* md = NULL;
-            if (!lib_fn_identity(fn, alias_probe, sizeof(alias_probe), &nm, &md)) continue;
+            if (!lib_fn_identity(fn, &alias_probe, &nm, &md)) continue;
         }
         /* @c_callback functions are always eligible — the user opted
          * the bare Aether name into the C ABI directly. Plain
@@ -3917,10 +3971,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
     for (int i = 0; i < fn_count; i++) {
         ASTNode* fn = fns[i];
-        char pkg_alias[512];
+        const char* pkg_alias = "";
         const char* pub_name = fn->value;
         const char* pub_module = "";
-        lib_fn_identity(fn, pkg_alias, sizeof(pkg_alias), &pub_name, &pub_module);
+        lib_fn_identity(fn, &pkg_alias, &pub_name, &pub_module);
         fprintf(gen->output, "    { ");
         emit_lib_metadata_c_string_literal(gen->output, pub_name);
         fprintf(gen->output, ", ");
@@ -3935,12 +3989,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
          * a callable pointer regardless of which path the function
          * took. */
         const char* cb_sym = c_callback_symbol(fn);
-        char c_sym[512];
-        if (cb_sym) {
-            snprintf(c_sym, sizeof(c_sym), "%s", cb_sym);
-        } else {
-            snprintf(c_sym, sizeof(c_sym), "%s", pkg_alias);
-        }
+        const char* c_sym = cb_sym ? cb_sym : pkg_alias;
         emit_lib_metadata_c_string_literal(gen->output, c_sym);
         fprintf(gen->output, ", \"");
         /* Signature directly into the C-string literal — characters
@@ -4189,14 +4238,14 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     /* --- v4 struct records and source signatures (schema 1.3) --- */
     for (int i = 0; i < struct_count; i++) {
         ASTNode* sd = structs[i];
-        char tbuf[512];
         fprintf(gen->output,
             "static const struct _AetherLibField _aether_lib_fields_%d[] = {\n", i);
         int nf = 0;
         for (int f = 0; f < sd->child_count; f++) {
             ASTNode* fld = sd->children[f];
             if (!fld || fld->type != AST_STRUCT_FIELD) continue;
-            type_to_aether_source(fld->node_type, tbuf, sizeof(tbuf));
+            const char* tbuf = cg_type_source(fld->node_type);
+            if (!tbuf) tbuf = "";
             fprintf(gen->output, "    { ");
             emit_lib_metadata_c_string_literal(gen->output, fld->value);
             fprintf(gen->output, ", ");
@@ -4249,10 +4298,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     if (pkg_lib && fn_count > 0) {
         fprintf(gen->output, "static const char* const _aether_lib_fn_modules[] = {\n");
         for (int i = 0; i < fn_count; i++) {
-            char a[512];
+            const char* a = NULL;
             const char* nm = NULL;
             const char* md = "";
-            lib_fn_identity(fns[i], a, sizeof(a), &nm, &md);
+            lib_fn_identity(fns[i], &a, &nm, &md);
             fprintf(gen->output, "    ");
             emit_lib_metadata_c_string_literal(gen->output, md ? md : "");
             fprintf(gen->output, ",\n");
@@ -4369,13 +4418,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             for (const char* p = caps; ; p++) {
                 if (*p == ',' || *p == '\0') {
                     if (p > start) {
-                        char tmp[64];
-                        int n = (int)(p - start);
-                        if (n > (int)sizeof(tmp) - 1) n = (int)sizeof(tmp) - 1;
-                        memcpy(tmp, start, (size_t)n); tmp[n] = '\0';
                         if (!cap_first) fputs(", ", j);
                         cap_first = 0;
-                        emit_json_string(j, tmp);
+                        emit_json_string(j, cg_intern_n(start, (size_t)(p - start)));
                     }
                     if (*p == '\0') break;
                     start = p + 1;
@@ -4389,13 +4434,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         for (int i = 0; i < fn_count; i++) {
             ASTNode* fn = fns[i];
             const char* cb_sym = c_callback_symbol(fn);
-            char pkg_alias[512];
+            const char* pkg_alias = "";
             const char* pub_name = fn->value;
             const char* pub_module = "";
-            lib_fn_identity(fn, pkg_alias, sizeof(pkg_alias), &pub_name, &pub_module);
-            char c_sym[512];
-            if (cb_sym) snprintf(c_sym, sizeof(c_sym), "%s", cb_sym);
-            else        snprintf(c_sym, sizeof(c_sym), "%s", pkg_alias);
+            lib_fn_identity(fn, &pkg_alias, &pub_name, &pub_module);
+            const char* c_sym = cb_sym ? cb_sym : pkg_alias;
             char* sig = fn_signature_string(fn);
             fputs(i == 0 ? "\n" : ",\n", j);
             fputs("    { \"aether_name\": ", j);  emit_json_string(j, pub_name);
@@ -4484,7 +4527,6 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             fputs(",\n  \"structs\": [", j);
             for (int i = 0; i < struct_count; i++) {
                 ASTNode* sd = structs[i];
-                char tbuf[512];
                 fputs(i == 0 ? "\n" : ",\n", j);
                 fputs("    { \"name\": ", j);  emit_json_string(j, sd->value);
                 fputs(", \"kind\": ", j);      emit_json_string(j, sd->annotation ? sd->annotation : "");
@@ -4493,7 +4535,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                 for (int f = 0; f < sd->child_count; f++) {
                     ASTNode* fld = sd->children[f];
                     if (!fld || fld->type != AST_STRUCT_FIELD) continue;
-                    type_to_aether_source(fld->node_type, tbuf, sizeof(tbuf));
+                    const char* tbuf = cg_type_source(fld->node_type);
+                    if (!tbuf) tbuf = "";
                     if (nf++) fputs(", ", j);
                     fputs("{ \"name\": ", j);  emit_json_string(j, fld->value);
                     fputs(", \"type\": ", j);  emit_json_string(j, tbuf);
@@ -4753,12 +4796,8 @@ void ensure_optional_typedef(CodeGenerator* gen, Type* type) {
     for (int i = 0; i < gen->opt_type_count; i++) {
         if (strcmp(gen->opt_type_names[i], name) == 0) return;
     }
-    // get_c_type uses rotating static buffers, so snapshot the inner C type
-    // name before `name` (also a rotating buffer) could be reused.
-    char inner_c[256];
-    snprintf(inner_c, sizeof(inner_c), "%s", get_c_type(type->element_type));
-    char opt_name[256];
-    snprintf(opt_name, sizeof(opt_name), "%s", name);
+    const char* inner_c = get_c_type(type->element_type);
+    const char* opt_name = name;
     fprintf(gen->output, "typedef struct { int has; %s val; } %s;\n", inner_c, opt_name);
     if (gen->opt_type_count >= gen->opt_type_capacity) {
         gen->opt_type_capacity = gen->opt_type_capacity ? gen->opt_type_capacity * 2 : 8;
@@ -5155,13 +5194,11 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
         ASTNode* fn = program->children[i];
         if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
         if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value) continue;
-        char alias[512];
         const char* pub_name = NULL;
         const char* pub_module = NULL;
         const char* sym = c_callback_symbol(fn);
         if (!sym) {
-            if (!lib_fn_identity(fn, alias, sizeof(alias), &pub_name, &pub_module)) continue;
-            sym = alias;
+            if (!lib_fn_identity(fn, &sym, &pub_name, &pub_module)) continue;
         }
         if (strcmp(sym, "aether_main") != 0 && strcmp(sym, "aether_main_exit") != 0) continue;
         /* sym is "aether_main" or "aether_main_exit" here; the precision
@@ -5431,12 +5468,9 @@ static ASTNode* entry_const_decl(ASTNode* child) {
 }
 
 static void prefix_value(ASTNode* node) {
-    char buf[300];
-    snprintf(buf, sizeof(buf), AE_CONST_PREFIX "%s", node->value);
-    char* dup = strdup(buf);
-    if (!dup) return;
+    char* renamed = prefixed_name(AE_CONST_PREFIX, node->value);
     free(node->value);
-    node->value = dup;
+    node->value = renamed;
 }
 
 /* The entry constants renamed, by their source names. */
@@ -6071,22 +6105,16 @@ static void emit_entry_point(CodeGenerator* gen, ASTNode* program) {
 /* The function a trusted call resolves to, or NULL (an extern, a closure). */
 ASTNode* sandbox_trust_target(CodeGenerator* gen, const ASTNode* call) {
     if (!gen || !gen->program || !call || !call->value) return NULL;
-    char name[512];
-    snprintf(name, sizeof name, "%s", call->value);
-    ASTNode* def = find_function_definition_by_name(gen->program, name);
+    ASTNode* def = find_function_definition_by_name(gen->program, call->value);
     if (def) return def;
-    for (char* p = name; *p; p++) {
-        if (*p == '.') *p = '_';
-    }
-    return find_function_definition_by_name(gen->program, name);
+    return find_function_definition_by_name(gen->program,
+                                            codegen_normalise_callee(call->value));
 }
 
 /* The C name of the wrapper for `def` at enforce site `site`. */
-void sandbox_trust_wrapper_name(ASTNode* def, int site, char* out, size_t n) {
+const char* sandbox_trust_wrapper_name(ASTNode* def, int site) {
     const char* cb = c_callback_symbol(def);
-    char base[300];
-    snprintf(base, sizeof base, "%s", cb ? cb : safe_c_name(def->value));
-    snprintf(out, n, "_aether_sbx%d_%s", site, base);
+    return cg_internf("_aether_sbx%d_%s", site, cb ? cb : safe_c_name(def->value));
 }
 
 /* The return type exactly as the forward declaration spells it. */
@@ -6157,11 +6185,9 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
                     def->value);
             continue;
         }
-        char wname[400];
-        sandbox_trust_wrapper_name(def, site, wname, sizeof wname);
+        const char* wname = sandbox_trust_wrapper_name(def, site);
         const char* cb = c_callback_symbol(def);
-        char target[300];
-        snprintf(target, sizeof target, "%s", cb ? cb : safe_c_name(def->value));
+        const char* target = cb ? cb : safe_c_name(def->value);
 
         fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
         int returns = emit_trust_return_type(gen, def);

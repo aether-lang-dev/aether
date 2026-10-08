@@ -394,11 +394,23 @@ void init_cache_dir(void) {
     // while this is a writable artifact directory — two variables, two
     // meanings.
     const char* override = getenv("AETHER_CACHE_DIR");
+    int n;
     if (override && override[0]) {
-        snprintf(s_cache_dir, sizeof(s_cache_dir), "%s", override);
+        n = snprintf(s_cache_dir, sizeof(s_cache_dir), "%s", override);
     } else {
         const char* home = get_home_dir();
-        snprintf(s_cache_dir, sizeof(s_cache_dir), "%s/.aether/cache", home);
+        n = snprintf(s_cache_dir, sizeof(s_cache_dir), "%s/.aether/cache", home);
+    }
+    /* Refused rather than cut (#2539): a cut path is another directory,
+     * which the cache would have been made in, and every path built from
+     * it (entries, depfiles, temporaries) is sized for this bound. */
+    if (n < 0 || (size_t)n >= sizeof(s_cache_dir)) {
+        fprintf(stderr,
+                "Error: the build cache directory (%s) is %d bytes long; at most %d\n"
+                "       are supported. Set AETHER_CACHE_DIR to a shorter path.\n",
+                override && override[0] ? "AETHER_CACHE_DIR" : "$HOME/.aether/cache",
+                n, (int)sizeof(s_cache_dir) - 1);
+        exit(1);
     }
     mkdirs(s_cache_dir);
     gc_stale_cache_tmp(s_cache_dir);

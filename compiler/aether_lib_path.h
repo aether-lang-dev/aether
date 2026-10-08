@@ -12,7 +12,8 @@
 #ifndef AETHER_LIB_PATH_H
 #define AETHER_LIB_PATH_H
 
-#include <stddef.h>  /* size_t for the path-normalisation helper */
+#include <stdlib.h>  /* malloc for the path-normalisation helper */
+#include <string.h>
 
 /* Soft cap on the number of entries in the lib-search path.
  * PATH-style chains rarely exceed 4 in practice; 8 covers any
@@ -55,46 +56,39 @@
  * sides of the toolchain (`module_add_lib_dir` on the compiler side,
  * `tc_lib_dir_append_one` on the CLI side), so a path-list and a
  * sequence of flags end up byte-identical regardless of how MSYS2
- * handled the argv. On POSIX this function is a pure copy.
+ * handled the argv. On POSIX the path is only copied.
  *
- * Output buffer must hold up to `strlen(in)` bytes plus a NUL (no
- * expansion possible since `/x/` → `x:/` is the same width). The
- * function is small enough to inline. Issue #413 Windows follow-up. */
-static inline void aether_lib_path_normalize(const char* in, char* out, size_t out_size) {
-    if (out_size == 0) return;
-    if (!in) { out[0] = '\0'; return; }
+ * The copy is the caller's to free, NULL when out of memory, and of any
+ * length (#2539): both sides copied into 256 bytes, so a longer `--lib`
+ * path was cut and the directory searched was not the one named. Trailing
+ * separators are dropped here, the same on both sides, so `lib` and
+ * `lib/` dedup (a root, `/` or `C:/`, keeps its own). Issue #413 Windows
+ * follow-up. */
+static inline char* aether_lib_path_normalize(const char* in) {
+    if (!in) in = "";
+    size_t n = strlen(in);
+    char* out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, in, n + 1);
 #ifdef _WIN32
     /* Match the MSYS2 POSIX-drive form: `/<single-letter>/` at the
      * very start. Examples that match: `/d/foo`, `/c/`. Examples
      * that don't (and shouldn't be touched): `D:\foo`, `D:/foo`,
      * `./relative`, `lib`, `/usr/local/share` (no drive-letter
-     * convention). */
+     * convention). The rest is kept verbatim, forward slashes and
+     * all (Windows fopen accepts both `/` and `\`; staying with `/`
+     * avoids any escape-character confusion). */
     if (in[0] == '/' && in[1] && in[2] == '/' &&
         ((in[1] >= 'a' && in[1] <= 'z') || (in[1] >= 'A' && in[1] <= 'Z'))) {
-        char drive_upper = (char)(in[1] >= 'a' ? in[1] - ('a' - 'A') : in[1]);
-        if (out_size >= 3) {
-            out[0] = drive_upper;
-            out[1] = ':';
-            out[2] = '/';
-            /* Copy the rest verbatim, with forward slashes preserved
-             * (Windows fopen accepts both `/` and `\`; staying with
-             * `/` avoids any escape-character confusion). */
-            size_t i = 3, j = 3;
-            while (in[j] && i + 1 < out_size) {
-                out[i++] = in[j++];
-            }
-            out[i] = '\0';
-            return;
-        }
+        out[0] = (char)(in[1] >= 'a' ? in[1] - ('a' - 'A') : in[1]);
+        out[1] = ':';
+        out[2] = '/';
     }
 #endif
-    /* Default: byte-copy, bounded. */
-    size_t n = 0;
-    while (in[n] && n + 1 < out_size) {
-        out[n] = in[n];
-        n++;
+    while (n > 1 && (out[n - 1] == '/' || out[n - 1] == '\\') && out[n - 2] != ':') {
+        out[--n] = '\0';
     }
-    out[n] = '\0';
+    return out;
 }
 
 #endif /* AETHER_LIB_PATH_H */
