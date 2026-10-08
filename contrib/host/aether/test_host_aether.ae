@@ -26,9 +26,16 @@
 
 import contrib.host.aether
 import std.fs
+import std.mem
 import std.os
 import std.spec
 import std.string
+
+// Capture from a binary that is not there; the "" result dies with this call.
+fn capture_missing(path: string) -> int {
+    out = aether.aether_host_capture_sandboxed(null, path)
+    return string.length(out)
+}
 
 main() {
     fw = spec.init()
@@ -46,6 +53,10 @@ main() {
     have_ae = 0
     if string.length(ae_path) != 0 { have_ae = 1 }
     reason = "no ae driver (set AETHER_AE_PATH, or build build/ae)"
+    plat = os.platform()
+    is_posix = 0
+    if string.equals(plat, "linux") == 1 { is_posix = 1 }
+    if string.equals(plat, "darwin") == 1 { is_posix = 1 }
 
     // Stage the child script the bridge will compile and run. PID-scoped
     // so concurrent runs cannot collide. The child is deliberately
@@ -90,6 +101,25 @@ main() {
             spec.assert_not_eq(
                 aether.aether_host_run_script("/nonexistent-aether-child-zzz.ae"), 0,
                 "a missing script must NOT report success")
+        }
+
+        // capture_sandboxed hands back a fresh string the caller owns, the
+        // child's stdout or "" when it could not run. Its extern was a
+        // plain `-> string`, so the compiler took it for borrowed and every
+        // capture leaked. Where the allocator's count is exact, two hundred
+        // captures of a binary that is not there leave the heap where it
+        // was. Gated like the spawn itself: elsewhere the bridge is a stub.
+        spec.it_when(is_posix, "reclaims captured output", "the bridge spawns on Linux and macOS only") callback {
+            missing = string.concat(dir, "/no-such-binary")
+            spec.assert_eq(capture_missing(missing), 0, "nothing is captured from a missing binary")
+            if mem.heap_in_use_exact() {
+                before = mem.heap_in_use()
+                for (i = 0; i < 200; i++) {
+                    _n = capture_missing(missing)
+                }
+                grew = mem.heap_in_use() - before
+                spec.assert_eq(grew, 0, "200 captures grew the heap by ${grew} bytes")
+            }
         }
     }
 

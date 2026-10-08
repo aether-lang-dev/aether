@@ -93,7 +93,7 @@ exports (
 extern sqlite_open_raw(path: string) -> ptr
 extern sqlite_close_raw(db: ptr) -> int
 // Returns NULL on success, an owned error string on failure.
-extern sqlite_exec_raw(db: ptr, sql: string) -> string
+extern sqlite_exec_raw(db: ptr, sql: string) -> string @heap
 // Returns a ResultSet ptr on success, NULL on failure.
 extern sqlite_query_raw(db: ptr, sql: string) -> ptr
 extern sqlite_rs_row_count(rs: ptr) -> int

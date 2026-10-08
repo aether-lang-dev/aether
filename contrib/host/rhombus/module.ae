@@ -49,11 +49,12 @@ extern rhombus_run_sandboxed(perms: ptr, code: string) -> int
 extern rhombus_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
 extern rhombus_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured stdout as a
-// string ("" on failure). State persists across calls.
-extern rhombus_evaluate(code: string) -> string
+// string ("" on failure). State persists across calls. The string is a
+// fresh one the caller owns.
+extern rhombus_evaluate(code: string) -> string @heap
 // Live string-only k-v map over the persistent VM (shared with Racket — the
 // same underlying hash, so a key set here is visible to racket.get).
 extern rhombus_set(key: string, value: string) -> int
-extern rhombus_get(key: string) -> string
+extern rhombus_get(key: string) -> string @heap
 extern rhombus_init() -> int
 extern rhombus_finalize()

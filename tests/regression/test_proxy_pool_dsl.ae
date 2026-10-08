@@ -6,12 +6,8 @@
 // block's builder_context(); the child calls configure that live pool. This
 // test asserts the child setters actually reach the live pool — by re-adding an
 // upstream the DSL block already added and observing the duplicate-URL error,
-// and by confirming a fresh URL still adds cleanly.
-//
-// (It deliberately avoids proxy.pool_metrics_text for the assertion: that
-// function returns a raw, non-@heap char* that leaks on free — a pre-existing
-// ownership quirk unrelated to this DSL — and this test must stay leak-clean
-// for the CI gate.)
+// and by confirming a fresh URL still adds cleanly. (proxy.pool_metrics_text
+// has its own ownership test, test_proxy_metrics_text_reclaimed.)
 
 import std.http.proxy
 import std.string
