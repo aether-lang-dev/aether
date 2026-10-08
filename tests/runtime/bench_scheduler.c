@@ -38,11 +38,9 @@ static long long get_time_ms(void) {
 // ============================================================================
 
 typedef struct {
-    int id;
-    atomic_int active;
-    atomic_int assigned_core;
-    Mailbox mailbox;
-    void (*step)(void*);
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // OPTIMIZATION: Use plain int in hot path, atomic for cross-thread reads
     int count_local;           // Fast increment in hot path (worker thread only)
     atomic_int count_visible;  // Published count (main thread reads this)

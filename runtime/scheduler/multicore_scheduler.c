@@ -1130,7 +1130,8 @@ static void actor_free_now(ActorBase* actor) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
     }
-    tombstone_keep(actor);
+    // A caller's actor (scheduler_register_actor) is the caller's to free.
+    if (actor->scheduler_owned) tombstone_keep(actor);
 }
 
 // Frees every retired actor that no reader can still hold. `wait` takes the
@@ -2184,6 +2185,19 @@ void scheduler_shutdown(void) {
 // I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
 // follows a scheduler_shutdown() both release them this way.
 static void scheduler_free_core_tables(void) {
+    // Actors never released (a program or host that stops the scheduler
+    // with actors alive, a panicked actor) are reachable only through the
+    // tables freed below. They end the way a release ends them; no reader is
+    // left, the threads are joined. An actor with its own thread is held by
+    // that thread, not by a table, and is not here.
+    for (int i = 0; i < num_cores; i++) {
+        int count = 0;
+        AetherActorTable* table = actor_table_snapshot(&schedulers[i], &count);
+        for (int k = 0; table && k < count; k++) {
+            ActorBase* actor = actor_table_read(table, k);
+            if (actor && actor->scheduler_owned) actor_free_now(actor);
+        }
+    }
     // Released actors not reclaimed yet: no reader is left either (#2509).
     // Then the kept blocks go back to the allocator (#2517).
     actor_reclaim_all();
@@ -2215,7 +2229,15 @@ void scheduler_cleanup(void) {
     atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }
 
+static int register_actor(ActorBase* actor, int preferred_core);
+
+// An actor the caller allocated: the scheduler runs it and never frees it.
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
+    actor->scheduler_owned = 0;
+    return register_actor(actor, preferred_core);
+}
+
+static int register_actor(ActorBase* actor, int preferred_core) {
     // Default placement: pick the worker with the lowest combined
     // load right now. The previous shape — `actor_id % num_cores` —
     // gave perfect distribution only on long actor sequences; on
@@ -2889,7 +2911,8 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
         scheduler_ensure_threads_running();
     }
 
-    scheduler_register_actor(actor, preferred_core);
+    actor->scheduler_owned = 1;
+    register_actor(actor, preferred_core);
 
     return actor;
 }

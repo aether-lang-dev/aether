@@ -8,6 +8,7 @@
 #include "../../runtime/scheduler/multicore_scheduler.h"
 #include "../../runtime/actors/aether_actor_thread.h"
 #include "../../runtime/actors/aether_send_message.h"
+#include "../../runtime/aether_process_mem.h"
 #include <stdatomic.h>
 
 #ifdef _WIN32
@@ -1068,6 +1069,49 @@ void test_scheduler_bidirectional(void) {
     free(b);
 }
 
+// A scheduler stopped with actors still alive (a host's aether_main_exit, a
+// program that never releases its workers) frees the actors it spawned along
+// with its tables, which were their last reference: run again, the first
+// run's actors leaked (macOS leaks, emit_lib_keeps_main). An actor a caller
+// registered is the caller's and is left alone.
+static CounterActor g_caller_actor;
+
+static void teardown_cycle(void) {
+    scheduler_init(2);
+    const size_t sizes[] = { sizeof(CounterActor), sizeof(ActorBase) + 1000, sizeof(OrderActor) };
+    for (int s = 0; s < 3; s++) {
+        for (int k = 0; k < 4; k++) {
+            ActorBase* a = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizes[s]);
+            ASSERT_NOT_NULL(a);
+            Message msg = message_create_simple(1, 0, k);
+            scheduler_send_remote(a, msg, -1);
+        }
+    }
+    scheduler_register_actor((ActorBase*)&g_caller_actor, -1);
+    scheduler_wait();
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
+void test_scheduler_teardown_frees_live_actors(void) {
+    memset(&g_caller_actor, 0, sizeof(g_caller_actor));
+    mailbox_init(&g_caller_actor.mailbox);
+    g_caller_actor.step = (void (*)(void*))counter_step;
+    atomic_store(&g_caller_actor.last_value, 4242);
+
+    teardown_cycle();   // warm: first-use allocations of the runtime
+    int64_t before = aether_heap_in_use();
+    for (int round = 0; round < 5; round++) teardown_cycle();
+    int64_t after = aether_heap_in_use();
+
+    // The caller's actor was run and never freed.
+    ASSERT_EQ(0, g_caller_actor.scheduler_owned);
+    ASSERT_EQ(4242, atomic_load(&g_caller_actor.last_value));
+    if (aether_heap_in_use_exact()) {
+        ASSERT_EQ(0, (int)(after - before));
+    }
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1078,6 +1122,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler spawns 64-byte-aligned actors", test_scheduler_spawn_aligned, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler frees released actors once no reader holds them", test_scheduler_release_churn, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler teardown frees the live actors it spawned", test_scheduler_teardown_frees_live_actors, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);

@@ -71,6 +71,8 @@ static void coop_free_actor(ActorBase* actor) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
     }
+    // A caller's actor (scheduler_register_actor) is the caller's to free.
+    if (!actor->scheduler_owned) return;
     if (g_coop_kept_count == g_coop_kept_capacity) {
         int cap = g_coop_kept_capacity ? g_coop_kept_capacity * 2 : 16;
         ActorBase** grown = realloc(g_coop_kept, (size_t)cap * sizeof(ActorBase*));
@@ -246,6 +248,16 @@ void scheduler_cleanup(void) {
     free(g_coop_released);
     g_coop_released = NULL;
     g_coop_released_capacity = 0;
+    // Actors never released are reachable only through the table freed
+    // below: they end the way a release ends them.
+    {
+        AetherActorTable* table = atomic_load_explicit(&schedulers[0].actor_table, memory_order_relaxed);
+        int count = atomic_load_explicit(&schedulers[0].actor_count, memory_order_relaxed);
+        for (int k = 0; table && k < count; k++) {
+            ActorBase* actor = atomic_load_explicit(&table->slots[k], memory_order_relaxed);
+            if (actor && actor->scheduler_owned) coop_free_actor(actor);
+        }
+    }
     coop_free_kept();
     free(atomic_load_explicit(&schedulers[0].actor_table, memory_order_relaxed));
     atomic_store_explicit(&schedulers[0].actor_table, NULL, memory_order_relaxed);
@@ -268,7 +280,15 @@ void scheduler_shutdown(void) {
 // Actor registration and spawning
 // ============================================================================
 
+static int register_actor(ActorBase* actor, int preferred_core);
+
+// An actor the caller allocated: the scheduler runs it and never frees it.
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
+    actor->scheduler_owned = 0;
+    return register_actor(actor, preferred_core);
+}
+
+static int register_actor(ActorBase* actor, int preferred_core) {
     (void)preferred_core;
     Scheduler* sched = &schedulers[0];
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
@@ -326,7 +346,8 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     // We force it back on because aether_on_actor_spawn() disables it for count > 1.
     atomic_store_explicit(&g_aether_config.main_thread_mode, true, memory_order_relaxed);
 
-    scheduler_register_actor(actor, 0);
+    actor->scheduler_owned = 1;
+    register_actor(actor, 0);
     return actor;
 }
 

@@ -141,7 +141,12 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
      * sizeof(ActorBase) would leak the derived-struct tail under libnuma. */ \
-    size_t alloc_size;
+    size_t alloc_size; \
+    /* 1 when scheduler_spawn_actor allocated the actor, which the scheduler \
+     * then frees; 0 for one a caller passed to scheduler_register_actor, \
+     * whose memory stays the caller's. Written before the actor is \
+     * published, never after. */ \
+    int scheduler_owned;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS

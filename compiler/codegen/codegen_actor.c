@@ -406,31 +406,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "%s {", actor->value);
     indent(gen);
     
-    // Hot fields (accessed every message) - first cache line
-    print_line(gen, "atomic_int active;       // Hot: checked every loop iteration");
-    print_line(gen, "int id;                  // Hot: used for identification");
-    print_line(gen, "Mailbox mailbox;         // Hot: message queue");
-    print_line(gen, "void (*step)(void*);     // Hot: message handler");
-    
-    // Warm fields (accessed occasionally)
-    print_line(gen, "pthread_t thread;        // Warm: thread handle");
-    print_line(gen, "int auto_process;        // Warm: auto-processing flag");
-    print_line(gen, "atomic_int assigned_core; // Cold: core assignment (atomic for work-stealing)");
-    print_line(gen, "atomic_int migrate_to;    // Cold: affinity hint (-1 = none)");
-    print_line(gen, "atomic_int main_thread_only; // Cold: scheduler skip flag");
-    print_line(gen, "SPSCQueue* spsc_queue;   // Lock-free same-core messaging (lazy alloc)");
-    print_line(gen, "_Atomic(ActorReplySlot*) reply_slot; // Non-NULL only during ask/reply");
-    print_line(gen, "atomic_flag step_lock;   // Prevents concurrent step() during work-steal handoff");
-    print_line(gen, "uint64_t timeout_ns;     // Receive timeout (0 = none)");
-    print_line(gen, "uint64_t last_activity_ns; // Idle start timestamp (0 = not idle)");
-    print_line(gen, "atomic_int dead;         // Set when step() unwound via panic/signal");
     /* The prefix of a generated actor IS an ActorBase: the scheduler is handed
-     * a pointer to it and casts. alloc_size is the last ActorBase field, and
-     * leaving it out put the first user state field at its offset, so
-     * scheduler_spawn_actor wrote the allocation size into that field and
-     * scheduler_destroy_actor later passed the field's value to
-     * aether_numa_free as a length (munmap under libnuma). */
-    print_line(gen, "size_t alloc_size;       // Allocation size, read by scheduler_destroy_actor");
+     * a pointer to it and casts. The fields come from the runtime's one
+     * definition (AETHER_ACTOR_BASE_FIELDS), so a field added there is here
+     * too; a hand-written copy that missed one put the first state field at
+     * its offset, and the scheduler wrote through it. */
+    print_line(gen, "AETHER_ACTOR_BASE_FIELDS");
     print_line(gen, "");
 
     // State fields (user-defined)
@@ -471,10 +452,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "} %s;", actor->value);
     /* The scheduler casts this to ActorBase*, so every field it touches has to
      * sit at the ActorBase offset. Checking the last one pins the whole
-     * prefix: a field added to ActorBase without being added here stops the
-     * build instead of writing through the first state field at run time. */
+     * prefix. */
     print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
-    print_line(gen, "_Static_assert(offsetof(%s, alloc_size) == offsetof(ActorBase, alloc_size),",
+    print_line(gen, "_Static_assert(offsetof(%s, scheduler_owned) == offsetof(ActorBase, scheduler_owned),",
                actor->value);
     print_line(gen, "               \"%s prefix must match ActorBase\");", actor->value);
     print_line(gen, "#endif");
