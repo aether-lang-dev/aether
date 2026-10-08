@@ -521,6 +521,16 @@ typedef struct {
     char** captured_string_params;
     int captured_string_param_count;
 
+    // The ownership answers about a callee's parameter (does it keep it,
+    // capture it, only hand it back), computed once per program from the
+    // callee's body and remembered (an open-addressed table of CalleeMemo,
+    // private to codegen_stmt.c). Every walk asks them at every call site,
+    // and answering walks the callee's body, whose calls ask them in turn:
+    // unremembered, std.message took minutes to compile.
+    void* callee_memo;
+    int callee_memo_cap;
+    int callee_memo_count;
+
     // #752: struct locals that escape via a return (directly or as a
     // tuple element). Such a struct's heap-string fields belong to the
     // caller once returned, so the function-exit <Struct>_destroy defer

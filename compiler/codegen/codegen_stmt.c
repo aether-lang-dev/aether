@@ -4145,13 +4145,112 @@ int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name,
 static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name, int param_idx,
                                        int return_is_keep, int depth);
 
+/* The ownership answers about a callee's `string` parameter are properties
+ * of the callee's body alone, so each is computed once per program and
+ * remembered (gen->callee_memo). Computed afresh (the depth bound restarts
+ * at each callee), and asked again while it is being computed (a function
+ * reaching itself), a query gets the answer the depth bound used to give:
+ * the one that only ever keeps a caller's argument alive longer.
+ * Unremembered, every walk re-walked every callee at every call site, a
+ * cost that multiplied with nesting. */
+enum { CALLEE_Q_HANDBACK, CALLEE_Q_KEEPS, CALLEE_Q_CAPTURES, CALLEE_Q_KEPT, CALLEE_Q_KEPT_RET };
+
+typedef struct {
+    ASTNode* fn;
+    int key;     /* param_idx * 8 + query */
+    int state;   /* 0 empty, 1 being computed, 2 no, 3 yes */
+} CalleeMemo;
+
+static size_t callee_memo_hash(const ASTNode* fn, int key, int cap) {
+    uint64_t h = (uint64_t)(uintptr_t)fn >> 4;
+    h = h * 0x9E3779B97F4A7C15ull + (uint64_t)(unsigned)key;
+    return (size_t)(h ^ (h >> 29)) & (size_t)(cap - 1);
+}
+
+/* The entry for (fn, key), inserted empty if absent; NULL on OOM. */
+static CalleeMemo* callee_memo_entry(CodeGenerator* gen, ASTNode* fn, int key) {
+    if (gen->callee_memo_count * 2 >= gen->callee_memo_cap) {
+        int cap = gen->callee_memo_cap ? gen->callee_memo_cap * 2 : 256;
+        CalleeMemo* grown = (CalleeMemo*)calloc((size_t)cap, sizeof(CalleeMemo));
+        if (!grown) return NULL;
+        CalleeMemo* old = (CalleeMemo*)gen->callee_memo;
+        for (int i = 0; i < gen->callee_memo_cap; i++) {
+            if (!old[i].fn) continue;
+            size_t j = callee_memo_hash(old[i].fn, old[i].key, cap);
+            while (grown[j].fn) j = (j + 1) & (size_t)(cap - 1);
+            grown[j] = old[i];
+        }
+        free(old);
+        gen->callee_memo = grown;
+        gen->callee_memo_cap = cap;
+    }
+    CalleeMemo* t = (CalleeMemo*)gen->callee_memo;
+    size_t j = callee_memo_hash(fn, key, gen->callee_memo_cap);
+    while (t[j].fn && !(t[j].fn == fn && t[j].key == key))
+        j = (j + 1) & (size_t)(gen->callee_memo_cap - 1);
+    if (!t[j].fn) {
+        t[j].fn = fn;
+        t[j].key = key;
+        t[j].state = 0;
+        gen->callee_memo_count++;
+    }
+    return &t[j];
+}
+
+static ASTNode* callee_memo_fn(CodeGenerator* gen, const char* func_name) {
+    if (!gen || !gen->program || !func_name) return NULL;
+    return find_function_definition_by_name(gen->program, codegen_normalise_callee(func_name));
+}
+
+/* 1 with the answer in *out when it is known, or `pending` while it is
+ * being computed; 0 when the caller is to compute it (now marked) and
+ * hand it to callee_memo_end; -1 when the table cannot grow, and the
+ * caller computes it unremembered within its own depth bound. */
+static int callee_memo_begin(CodeGenerator* gen, ASTNode* fn, int idx, int query,
+                             int pending, int* out) {
+    CalleeMemo* m = callee_memo_entry(gen, fn, idx * 8 + query);
+    if (!m) return -1;
+    if (m->state == 1) { *out = pending; return 1; }
+    if (m->state) { *out = m->state == 3; return 1; }
+    m->state = 1;
+    return 0;
+}
+
+static void callee_memo_end(CodeGenerator* gen, ASTNode* fn, int idx, int query, int r) {
+    CalleeMemo* m = callee_memo_entry(gen, fn, idx * 8 + query);
+    if (m) m->state = r ? 3 : 2;
+}
+
+/* compute_closure_args_borrowed asks under a hypothesis it may drop. */
+static void callee_memo_reset(CodeGenerator* gen) {
+    if (gen->callee_memo)
+        memset(gen->callee_memo, 0, sizeof(CalleeMemo) * (size_t)gen->callee_memo_cap);
+    gen->callee_memo_count = 0;
+}
+
 int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
                              int return_is_keep) {
     return callee_string_param_kept_at(gen, func_name, param_idx, return_is_keep, 0);
 }
 
+static int callee_string_param_kept_at_walk(CodeGenerator* gen, const char* func_name,
+                                            int param_idx, int return_is_keep, int depth);
+
 static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name, int param_idx,
                                        int return_is_keep, int depth) {
+    int query = return_is_keep ? CALLEE_Q_KEPT_RET : CALLEE_Q_KEPT;
+    ASTNode* fn = callee_memo_fn(gen, func_name);
+    int r;
+    int known = fn ? callee_memo_begin(gen, fn, param_idx, query, 1, &r) : -1;
+    if (known == 1) return r;
+    r = callee_string_param_kept_at_walk(gen, func_name, param_idx, return_is_keep,
+                                         known == 0 ? 0 : depth);
+    if (known == 0) callee_memo_end(gen, fn, param_idx, query, r);
+    return r;
+}
+
+static int callee_string_param_kept_at_walk(CodeGenerator* gen, const char* func_name,
+                                            int param_idx, int return_is_keep, int depth) {
     /* Mutual recursion between callees: past the bound the parameter
      * counts as kept, which only ever keeps a caller's argument alive
      * longer (the walk through callee_keeps_string_arg restarts here). */
@@ -4210,8 +4309,22 @@ int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_
 static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 
+static int callee_string_param_captures_at_walk(CodeGenerator* gen, const char* func_name,
+                                                int param_idx, int depth);
+
 static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_name,
                                            int param_idx, int depth) {
+    ASTNode* fn = callee_memo_fn(gen, func_name);
+    int r;
+    int known = fn ? callee_memo_begin(gen, fn, param_idx, CALLEE_Q_CAPTURES, 0, &r) : -1;
+    if (known == 1) return r;
+    r = callee_string_param_captures_at_walk(gen, func_name, param_idx, known == 0 ? 0 : depth);
+    if (known == 0) callee_memo_end(gen, fn, param_idx, CALLEE_Q_CAPTURES, r);
+    return r;
+}
+
+static int callee_string_param_captures_at_walk(CodeGenerator* gen, const char* func_name,
+                                                int param_idx, int depth) {
     if (depth > 8) return 0;
     ASTNode* param = callee_string_param_node(gen, func_name, param_idx);
     if (!param) return 0;
@@ -4399,7 +4512,21 @@ static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, 
  * keeps it unless the callee's string result is uniform-heap, which hands
  * back a copy. Shared by the escape walk, the argument drain and the keep
  * walk of an enclosing body, so the three never disagree. */
+static int callee_keeps_string_arg_walk(CodeGenerator* gen, const char* func_name,
+                                        int param_idx, int depth);
+
 int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth) {
+    ASTNode* fn = callee_memo_fn(gen, func_name);
+    int r;
+    int known = fn ? callee_memo_begin(gen, fn, param_idx, CALLEE_Q_KEEPS, 1, &r) : -1;
+    if (known == 1) return r;
+    r = callee_keeps_string_arg_walk(gen, func_name, param_idx, known == 0 ? 0 : depth);
+    if (known == 0) callee_memo_end(gen, fn, param_idx, CALLEE_Q_KEEPS, r);
+    return r;
+}
+
+static int callee_keeps_string_arg_walk(CodeGenerator* gen, const char* func_name,
+                                        int param_idx, int depth) {
     if (callee_string_param_captures_at(gen, func_name, param_idx, depth)) return 0;
     const char* fn = codegen_normalise_callee(func_name);
     ASTNode* fn_def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
@@ -4687,6 +4814,7 @@ void compute_closure_args_borrowed(CodeGenerator* gen) {
         }
     }
     gen->closure_args_borrowed = ok;
+    callee_memo_reset(gen);
 }
 
 /* #2499 copy-on-keep: does the closure literal `closure` keep its `string`
@@ -4825,12 +4953,22 @@ static int closure_param_store_retains(CodeGenerator* gen, ASTNode* node, const 
  * result is not uniform-heap) and stores it nowhere, so the call's value is
  * the argument itself, and the argument goes wherever that value goes. */
 static int handback_param(CodeGenerator* gen, ASTNode* call, int i, int depth) {
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value || depth > 8 ||
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
         strcmp(call->value, "call") == 0) return 0;
     if (!callee_has_visible_body(gen, call->value) ||
         !callee_param_is_string(gen, call->value, i)) return 0;
-    return callee_keeps_string_arg(gen, call->value, i, depth) &&
-           !callee_string_param_kept_at(gen, call->value, i, 0, depth);
+    /* Asked again while it is being computed (a callee reaching itself), the
+     * answer is no: the call is then judged as a keep of its own, as it was
+     * before hand-backs were told apart. */
+    ASTNode* fn = callee_memo_fn(gen, call->value);
+    int r;
+    int known = fn ? callee_memo_begin(gen, fn, i, CALLEE_Q_HANDBACK, 0, &r) : -1;
+    if (known == 1) return r;
+    int d = known == 0 ? 0 : depth;
+    r = callee_keeps_string_arg(gen, call->value, i, d) &&
+        !callee_string_param_kept_at(gen, call->value, i, 0, d);
+    if (known == 0) callee_memo_end(gen, fn, i, CALLEE_Q_HANDBACK, r);
+    return r;
 }
 
 /* The variable whose pointer `expr` evaluates to through calls that only

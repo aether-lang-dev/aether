@@ -657,6 +657,9 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->return_escaped_string_var_count = 0;
     gen->captured_string_params = NULL;
     gen->captured_string_param_count = 0;
+    gen->callee_memo = NULL;
+    gen->callee_memo_cap = 0;
+    gen->callee_memo_count = 0;
     gen->return_escaped_struct_vars = NULL;
     gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
@@ -772,6 +775,8 @@ void free_code_generator(CodeGenerator* gen) {
         free(gen->order_fn_effects);   /* #2478 */
         gen->order_fn_effects = NULL;
         clear_captured_string_params(gen);
+        free(gen->callee_memo);
+        gen->callee_memo = NULL;
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
