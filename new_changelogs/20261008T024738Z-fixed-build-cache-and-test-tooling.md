@@ -116,3 +116,19 @@
   keys on the source tree. The depfile slot is named for the whole
   absolute path, where a 1 KB buffer cut it and a longer working directory
   gave every project's `main.ae` the same slot.
+- **A build cache key covers everything it is built from, or there is no
+  key (#2538).** With no depfile to go on, the key walks the source trees,
+  and the walk stopped without a word at 8 directory levels and 4096
+  files, and skipped any path past 1 KB, so an edit to a module out of its
+  reach was served from the cache. Reaching a limit now means the build is
+  not cached (`--verbose` says why); it still asks aetherc for the depfile,
+  and is cached under the key made from that, which needs no walk. The key
+  text itself was cut at 2 KB, so with eight long `--lib` directories or a
+  hundred `--extra` files the `-D` defines and the optimisation level at
+  its end did not count, and a build with other defines was served the
+  first one's binary. The compiler lookup no longer cuts a `PATH` entry
+  past 1 KB or a long `$CC`, the working directory has no length limit,
+  and on Windows a drive or backslash path names its depfile slot without
+  the working directory in front. A function in the reserved `_` namespace
+  or one colliding with an extern is renamed whole, where two names
+  sharing their first 277 bytes became one C name.

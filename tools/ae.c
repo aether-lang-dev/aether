@@ -5798,6 +5798,11 @@ static int cmd_run(int argc, char** argv) {
          * manifest to the source's stable depfile slot, so the next run keys
          * on exact deps rather than the conservative tree walk. */
         cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+    } else if (cache_key_walk_incomplete()) {
+        /* #2538: no key, because a tree walk could not see every file. The
+         * manifest needs no walk, so ask for it anyway; the key recomputed
+         * from it below is one this build can publish under. */
+        cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
     }
 
     // Determine temp .c file path and exe path
@@ -5855,14 +5860,18 @@ static int cmd_run(int argc, char** argv) {
      * the next run will compute. Publish the artifact under THAT key, not the
      * cold tree-walk key, or every warm run would miss (the artifact would sit
      * under a key nobody computes again). Only when we were already caching and
-     * the recompute succeeds; otherwise keep the original slot. */
-    if (using_cache && g_emit_deps_path[0]) {
+     * the recompute succeeds; otherwise keep the original slot. A build that
+     * had no key (an incomplete walk, #2538) starts caching here when the
+     * depfile gives it one. */
+    if (g_emit_deps_path[0]) {
         /* The same salt as the lookup (#2500): a bare "run" here dropped the
          * binary-import part, so a program with one published under a key
          * its next run never computes. */
         unsigned long long dk = compute_cache_key(file, extra_files, "O0",
                                     ae_define_salt(run_mode_salt(), run_salt, sizeof(run_salt)));
         if (dk != 0) {
+            if (!using_cache) init_cache_dir();
+            using_cache = true;
             cache_key = dk;
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
             snprintf(exe_file, sizeof(exe_file), "%s.tmp.%d", cached_exe, (int)getpid());
@@ -8547,6 +8556,11 @@ static int cmd_build(int argc, char** argv) {
              * source's stable slot for the next run's exact key. Set whether
              * or not the copy above failed; a rebuild still wants the deps. */
             cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+        } else if (cache_key_walk_incomplete()) {
+            /* #2538: no key, because a tree walk could not see every file.
+             * The manifest needs no walk, so ask for it anyway; the key
+             * recomputed from it below is one this build can publish under. */
+            cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
         }
     }
 
@@ -8589,11 +8603,14 @@ static int cmd_build(int argc, char** argv) {
      * key left the entry where no build looks it up: the second identical
      * build missed, compiled again and published a second copy, and only
      * the third hit. `ae run` recomputes here too (#1882). */
-    if (cache_eligible && cache_key != 0 && g_emit_deps_path[0]) {
+    if (cache_eligible && g_emit_deps_path[0]) {
+        /* A build that had no key (an incomplete walk, #2538) starts caching
+         * here when the depfile gives it one. */
         unsigned long long dk = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
                                                   build_key_salt);
         if (dk != 0 && dk != cache_key) {
             if (tc.verbose) fprintf(stderr, "[cache] publish key: %016llx\n", dk);
+            if (cache_key == 0) init_cache_dir();
             cache_key = dk;
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
                      s_cache_dir, cache_key);

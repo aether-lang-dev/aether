@@ -5364,6 +5364,19 @@ static int declares_c_import_const(ASTNode* node, const char* name) {
     return 0;
 }
 
+/* `prefix` then `name`, the new spelling of a renamed identifier, in memory
+ * the caller owns. Of any length (#2538): a 280-byte buffer cut a long name,
+ * so two functions that shared their first 277 bytes became one C name, and
+ * renamed references no longer matched the definition. Out of memory ends
+ * the compile, as aether_xrealloc does. */
+static char* prefixed_name(const char* prefix, const char* name) {
+    size_t pl = strlen(prefix), nl = strlen(name);
+    char* s = (char*)aether_xrealloc(NULL, pl + nl + 1);
+    memcpy(s, prefix, pl);
+    memcpy(s + pl, name, nl + 1);
+    return s;
+}
+
 static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
     if (!node) return;
     switch (node->type) {
@@ -5381,13 +5394,9 @@ static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
                                 is_winapi_reserved_name(node->value) ||
                                 is_c_header_macro_name(node->value)) &&
                 !declares_c_import_const(program, node->value)) {
-                char safe[280];
-                snprintf(safe, sizeof(safe), "ae_%s", node->value);
-                char* dup = strdup(safe);
-                if (dup) {
-                    free(node->value);
-                    node->value = dup;
-                }
+                char* renamed = prefixed_name("ae_", node->value);
+                free(node->value);
+                node->value = renamed;
             }
             break;
         default:
@@ -5631,11 +5640,8 @@ static void rename_refs_in(ASTNode* node, const char* from, const char* to) {
     if (!node) return;
     if (node->type == AST_IDENTIFIER && node->value &&
         strcmp(node->value, from) == 0) {
-        char* dup = strdup(to);
-        if (dup) {
-            free(node->value);
-            node->value = dup;
-        }
+        free(node->value);
+        node->value = prefixed_name("", to);
         return;
     }
     for (int i = 0; i < node->child_count; i++) {
@@ -5647,11 +5653,8 @@ static void rename_calls_to(ASTNode* node, const char* from, const char* to) {
     if (!node) return;
     if (node->type == AST_FUNCTION_CALL && node->value &&
         strcmp(node->value, from) == 0) {
-        char* dup = strdup(to);
-        if (dup) {
-            free(node->value);
-            node->value = dup;
-        }
+        free(node->value);
+        node->value = prefixed_name("", to);
     }
     for (int i = 0; i < node->child_count; i++) {
         rename_calls_to(node->children[i], from, to);
@@ -5724,14 +5727,10 @@ static void rename_leading_underscore_functions(ASTNode* program) {
         /* `ae` + the name keeps the underscore, so `_write` becomes
            `ae_write` — readable in a backtrace and out of the reserved
            namespace, since the leading character is no longer `_`. */
-        char safe[280];
-        snprintf(safe, sizeof(safe), "ae%s", fn->value);
-        rename_all_refs_to(program, fn->value, safe);
-        char* dup = strdup(safe);
-        if (dup) {
-            free(fn->value);
-            fn->value = dup;
-        }
+        char* renamed = prefixed_name("ae", fn->value);
+        rename_all_refs_to(program, fn->value, renamed);
+        free(fn->value);
+        fn->value = renamed;
     }
 }
 
@@ -5744,14 +5743,10 @@ static void rename_extern_colliding_functions(ASTNode* program) {
         if (fn->is_imported || is_c_callback(fn) || !fn->value) continue;
         if (!tu_declares_extern(program, fn->value)) continue;
 
-        char safe[280];
-        snprintf(safe, sizeof(safe), "ae_%s", fn->value);
-        rename_all_refs_to(program, fn->value, safe);
-        char* dup = strdup(safe);
-        if (dup) {
-            free(fn->value);
-            fn->value = dup;
-        }
+        char* renamed = prefixed_name("ae_", fn->value);
+        rename_all_refs_to(program, fn->value, renamed);
+        free(fn->value);
+        fn->value = renamed;
     }
 }
 
