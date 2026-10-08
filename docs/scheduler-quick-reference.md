@@ -109,10 +109,15 @@ ActorBase* actor = scheduler_spawn_actor(preferred_core, step_fn, sizeof(MyActor
 if (!actor) return NULL;
 
 // Release it with scheduler_release_actor, never free(). It takes the actor
-// out of its core's table at once and frees it once no scheduler thread or
-// table reader can still hold it, so it is safe from the actor's own step.
-// Nothing may send to the actor after this, and no message to it may still
-// be on its way.
+// out of its core's table at once and reclaims it once no scheduler thread,
+// table reader or per-actor thread can still hold it, so it is safe from the
+// actor's own step, and never blocks: an actor with its own thread
+// (auto_process) is only marked, and that thread ends it when it leaves its
+// loop. Nothing may send to the
+// actor after this: the memory stays allocated and marked released until a
+// spawn of the same size reuses it, so a late send is dropped and counted
+// (scheduler_released_sends), and a send after the reuse reaches the new
+// actor.
 scheduler_release_actor(actor);
 ```
 

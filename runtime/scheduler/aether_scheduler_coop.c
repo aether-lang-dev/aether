@@ -51,6 +51,15 @@ static ActorBase** g_coop_released = NULL;
 static int g_coop_released_count = 0;
 static int g_coop_released_capacity = 0;
 
+// A released actor's block is kept, marked released, for the next spawn of
+// its size (#2517): a send takes a raw pointer and reads `dead` first, so a
+// late send is dropped rather than reading freed memory. See the threaded
+// scheduler's notes. The blocks go back to the allocator in
+// scheduler_cleanup.
+static ActorBase** g_coop_kept = NULL;
+static int g_coop_kept_count = 0;
+static int g_coop_kept_capacity = 0;
+
 static void coop_free_actor(ActorBase* actor) {
     // Anything still in the mailbox was sent against the release contract.
     Message discard;
@@ -62,8 +71,75 @@ static void coop_free_actor(ActorBase* actor) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
     }
+    if (g_coop_kept_count == g_coop_kept_capacity) {
+        int cap = g_coop_kept_capacity ? g_coop_kept_capacity * 2 : 16;
+        ActorBase** grown = realloc(g_coop_kept, (size_t)cap * sizeof(ActorBase*));
+        if (grown) {
+            g_coop_kept = grown;
+            g_coop_kept_capacity = cap;
+        }
+    }
+    if (g_coop_kept_count < g_coop_kept_capacity) {
+        g_coop_kept[g_coop_kept_count++] = actor;
+        return;
+    }
+    // Out of memory to keep it: the block goes back.
     aether_numa_free_aligned(actor, actor->alloc_size);
 }
+
+// The most recently kept block of this size, or NULL.
+static ActorBase* coop_take_kept(size_t size) {
+    for (int i = g_coop_kept_count - 1; i >= 0; i--) {
+        if (g_coop_kept[i]->alloc_size == size) {
+            ActorBase* actor = g_coop_kept[i];
+            g_coop_kept[i] = g_coop_kept[--g_coop_kept_count];
+            return actor;
+        }
+    }
+    return NULL;
+}
+
+static void coop_free_kept(void) {
+    for (int i = 0; i < g_coop_kept_count; i++) {
+        aether_numa_free_aligned(g_coop_kept[i], g_coop_kept[i]->alloc_size);
+    }
+    free(g_coop_kept);
+    g_coop_kept = NULL;
+    g_coop_kept_count = 0;
+    g_coop_kept_capacity = 0;
+}
+
+// Sends dropped because their target was dead; a released target is a
+// send against the release contract, counted and reported once (#2517).
+static uint64_t g_coop_released_sends = 0;
+static int g_coop_released_send_reported = 0;
+
+uint64_t scheduler_released_sends(void) {
+    return g_coop_released_sends;
+}
+
+static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
+    int dead = actor ? atomic_load_explicit(&actor->dead, memory_order_relaxed) : 1;
+    if (!dead) return 0;
+    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
+    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+    if (dead & AETHER_ACTOR_RELEASED) {
+        g_coop_released_sends++;
+        if (!g_coop_released_send_reported) {
+            g_coop_released_send_reported = 1;
+            fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
+                            "dropped (reported once)\n", msg->type, actor->id);
+        }
+    }
+    return 1;
+}
+
+// One thread: nothing but aether_scheduler_poll and scheduler_wait steps an
+// actor, and their walk depth covers them.
+void scheduler_reader_online(void) {}
+void scheduler_reader_quiescent(void) {}
+void scheduler_reader_offline(void) {}
+void scheduler_actor_thread_exit(ActorBase* actor) { (void)actor; }
 
 // Frees the released actors once no walk and no inline send is running.
 static void coop_free_released(void) {
@@ -170,6 +246,7 @@ void scheduler_cleanup(void) {
     free(g_coop_released);
     g_coop_released = NULL;
     g_coop_released_capacity = 0;
+    coop_free_kept();
     free(atomic_load_explicit(&schedulers[0].actor_table, memory_order_relaxed));
     atomic_store_explicit(&schedulers[0].actor_table, NULL, memory_order_relaxed);
     atomic_store_explicit(&schedulers[0].actor_count, 0, memory_order_relaxed);
@@ -213,9 +290,11 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     scheduler_init(1);  // no-op once initialized; see g_coop_initialized
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
-    // Generated actor structs are aligned(64), which calloc does not honour
-    // (#2485); scheduler_release_actor frees with the matching function.
-    ActorBase* actor = aether_numa_alloc_aligned(actor_size, AETHER_ACTOR_ALIGN, -1);
+    // A released actor's block of this size first (#2517). Generated actor
+    // structs are aligned(64), which calloc does not honour (#2485); the
+    // block goes back through the matching function in scheduler_cleanup.
+    ActorBase* actor = coop_take_kept(actor_size);
+    if (!actor) actor = aether_numa_alloc_aligned(actor_size, AETHER_ACTOR_ALIGN, -1);
     if (!actor) return NULL;
     memset(actor, 0, actor_size);
 
@@ -254,7 +333,7 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
-    atomic_store_explicit(&actor->dead, 1, memory_order_relaxed);
+    atomic_store_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_relaxed);
 
     // Remove from scheduler's actor list, clearing the vacated slot as the
     // threaded scheduler does.
@@ -295,12 +374,14 @@ void scheduler_release_actor(ActorBase* actor) {
 // ============================================================================
 
 void scheduler_send_local(ActorBase* actor, Message msg) {
+    if (coop_send_to_dead_actor(actor, &msg)) return;
     mailbox_send(&actor->mailbox, msg);
 }
 
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     (void)from_core;
     // In cooperative mode there's only one core — all sends are local
+    if (coop_send_to_dead_actor(actor, &msg)) return;
     mailbox_send(&actor->mailbox, msg);
 }
 
@@ -310,6 +391,7 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
+    if (coop_send_to_dead_actor(actor, &msg)) return;
     mailbox_send(&actor->mailbox, msg);
 }
 

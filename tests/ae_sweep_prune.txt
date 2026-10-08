@@ -239,3 +239,4 @@ tests/integration/sandbox_trusted_names/
 tests/integration/spec_describe_indent/
 tests/integration/print_format_args/
 tests/integration/extern_hidden_state_eval_order/
+tests/integration/emit_header_layout/

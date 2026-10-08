@@ -131,9 +131,12 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     uint64_t timeout_ns; \
     /* Timestamp when idle started; 0 = not idle */ \
     uint64_t last_activity_ns; \
-    /* Panic state: set to 1 when the actor's step() unwound via aether_panic() \
-     * or a caught signal. Dead actors are skipped by the scheduler and \
-     * incoming messages are dropped. One-way transition; never un-set. */ \
+    /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
+     * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
+     * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
+     * auto_process actor's) has left its loop. Non-zero actors are skipped \
+     * by the scheduler and incoming messages are dropped. Bits are only \
+     * ever set. */ \
     atomic_int dead; \
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
@@ -143,6 +146,11 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
+
+/* The bits of ActorBase.dead; a send checks only that it is non-zero. */
+#define AETHER_ACTOR_PANICKED 1
+#define AETHER_ACTOR_RELEASED 2
+#define AETHER_ACTOR_THREAD_GONE 4
 
 /* Generated actor structs are declared aligned(64) (codegen_actor.c), one
  * cache line, so the runtime allocates every actor on this boundary (#2485). */
@@ -267,15 +275,37 @@ void scheduler_send_batch_flush(void);
 
 // NUMA-aware actor lifetime (TIER 1 - always on)
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size);
-/* Ends an actor (#2509): marks it dead, takes it out of its core's table and
- * frees it once no scheduler thread or table reader can still be looking at
- * it, which is later, not during the call. Safe to call from the actor's own
- * step. The caller guarantees nothing sends to the actor any more and no
- * message to it is still on its way: a message that reaches it before it is
- * freed is dropped, one that arrives after is a use after free. */
+/* Ends an actor (#2509): marks it released, takes it out of its core's table
+ * and reclaims it once no scheduler thread or table reader can still be
+ * looking at it, which is later, not during the call. Safe to call from the
+ * actor's own step, and it never blocks: an actor with its own thread
+ * (auto_process) is only marked here, and that thread, which leaves its
+ * loop at the mark, ends the actor itself once it has let go of it.
+ * Nothing may send to the actor after this. A
+ * message that still arrives is dropped: the actor's memory stays allocated,
+ * marked released, until a later spawn of the same size reuses it (#2517),
+ * so a late send is defined, and one that comes after the reuse reaches the
+ * new actor. */
 void scheduler_release_actor(ActorBase* actor);
-/* Released actors not freed yet, for tests and diagnostics (#2509). */
+/* Released actors not reclaimed yet, for tests and diagnostics (#2509). */
 int scheduler_released_actors_pending(void);
+/* Messages dropped because their target had been released (#2517): each is
+ * a send made against the release contract. */
+uint64_t scheduler_released_sends(void);
+/* A thread that steps actors without being a core's scheduler thread
+ * (aether_actor_thread, which inlines sends to actors of its core) takes
+ * part in reclamation like a core (#2517): it registers before its first
+ * step, publishes the epoch it reads in at every quiescent point (the top of
+ * its loop, holding no actor it found through a table), and deregisters
+ * when it is done. A released actor is not reclaimed while such a thread
+ * may still hold it. `actor` is the one the thread serves, or NULL. */
+void scheduler_reader_online(void);
+void scheduler_reader_quiescent(void);
+void scheduler_reader_offline(void);
+/* The last thing an auto_process actor's thread does (#2517): the actor is
+ * ended, as a release ends any other, if it has been released; a release
+ * that comes later ends it then. */
+void scheduler_actor_thread_exit(ActorBase* actor);
 /* Called by the inline (main-thread-mode) send once the step it ran has
  * returned and it no longer touches the actor: an actor that released itself
  * in that step is released now (#2509). */

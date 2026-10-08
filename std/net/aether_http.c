@@ -2,6 +2,97 @@
 #include "aether_http_internal.h"
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_compiler.h"
+
+/* The helpers below do no networking and other modules link against
+ * them (the proxy times its upstreams with the clock and validates the
+ * header names it forwards), so they are built whether networking is or
+ * not (#2517). */
+
+/* A millisecond clock pinned for one pass of an event loop.
+ *
+ * A driver reads the clock several times per request: arming a deadline,
+ * computing the next timeout, expiring idle pooled connections, recording when
+ * an upstream was picked. Each read is a counter the kernel serialises, and on
+ * a single core arch_counter_get_cntvct is 4.9% of this path's profile -- the
+ * largest entry that is not TCP receive processing.
+ *
+ * Within one pass those readers do not need different answers: the pass takes
+ * microseconds and every deadline they compare against is milliseconds or
+ * seconds away. So the driver pins one value for the pass and they share it.
+ *
+ * Defined here rather than in a header because a static thread-local in a
+ * header is a separate variable per translation unit, and the thread that pins
+ * it is not in the file that reads it. A thread that never pins reads the real
+ * clock, which is every thread but a driver. */
+AETHER_TLS_SHARED uint64_t aether_http_pinned_ms = 0;
+
+void http_clock_pin(void) {
+    uint64_t ms = aether_now_ns() / 1000000ULL;
+    /* Zero means "not pinned", so a clock reading exactly zero pins a
+     * millisecond later rather than not at all. */
+    aether_http_pinned_ms = ms ? ms : 1;
+}
+
+void http_clock_unpin(void) { aether_http_pinned_ms = 0; }
+
+uint64_t http_clock_ms(void) {
+    return aether_http_pinned_ms ? aether_http_pinned_ms
+                                 : (aether_now_ns() / 1000000ULL);
+}
+
+/* A header name has to be a token, and a value has to be free of the bytes
+ * that end a line.
+ *
+ * Without this, a value carrying CR LF is written into the request head
+ * verbatim and becomes additional headers: a caller that builds a value out
+ * of anything a user supplied hands that user the rest of the request, and a
+ * doubled CR LF ends the head entirely and starts a second request the peer
+ * will answer (CWE-93). The header is rejected rather than repaired, because
+ * silently sending something other than what was asked for is its own bug.
+ */
+/* RFC 9110 token characters: letters, digits, and "!#$%&'*+-.^_`|~".
+ *
+ * A table, because the proxy validates every character of every header name it
+ * forwards, and the readable spelling of this test costs an isalnum call plus
+ * a strchr across sixteen punctuation marks per character. Fixing the set here
+ * also pins it to the grammar: isalnum answers for the active locale, and a
+ * header name is a token in every locale. */
+static const unsigned char http_tchar[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+int http_header_name_ok(const char* name) {
+    if (!name || !*name) return 0;
+    for (const unsigned char* c = (const unsigned char*)name; *c; c++) {
+        if (!http_tchar[*c]) return 0;
+    }
+    return 1;
+}
+
+int http_header_value_ok(const char* value) {
+    if (!value) return 0;
+    for (const unsigned char* c = (const unsigned char*)value; *c; c++) {
+        if (*c == '\r' || *c == '\n') return 0;
+    }
+    return 1;
+}
 
 #if !AETHER_HAS_NETWORKING
 HttpResponse* http_get_raw(const char* u) { (void)u; return NULL; }
@@ -39,6 +130,9 @@ const char* http_response_redirect_error_raw(HttpResponse* r) { (void)r; return 
 int http_request_set_stream_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_response_is_stream_raw(HttpResponse* r) { (void)r; return 0; }
 const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (void)max; return ""; }
+/* Linked by the proxy, which is built without networking too (#2517). */
+const char* http_response_body_str(HttpResponse* r) { (void)r; return ""; }
+void http_client_pool_size_for_proxy(void) {}
 #else
 
 #include <stdio.h>
@@ -47,8 +141,6 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <string.h>
 #include <stdatomic.h>
 #include <time.h>
-#include "../../runtime/utils/aether_thread.h"
-#include "../../runtime/utils/aether_compiler.h"
 #include <limits.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -541,38 +633,6 @@ static int64_t         http_pool_idle_ms = 15000;
  * were doing anyway is free. A stale-early value costs one redundant sweep,
  * never a missed expiry. */
 static int64_t         http_pool_next_expiry_ms = INT64_MAX;
-
-/* A millisecond clock pinned for one pass of an event loop.
- *
- * A driver reads the clock several times per request: arming a deadline,
- * computing the next timeout, expiring idle pooled connections, recording when
- * an upstream was picked. Each read is a counter the kernel serialises, and on
- * a single core arch_counter_get_cntvct is 4.9% of this path's profile -- the
- * largest entry that is not TCP receive processing.
- *
- * Within one pass those readers do not need different answers: the pass takes
- * microseconds and every deadline they compare against is milliseconds or
- * seconds away. So the driver pins one value for the pass and they share it.
- *
- * Defined here rather than in a header because a static thread-local in a
- * header is a separate variable per translation unit, and the thread that pins
- * it is not in the file that reads it. A thread that never pins reads the real
- * clock, which is every thread but a driver. */
-AETHER_TLS_SHARED uint64_t aether_http_pinned_ms = 0;
-
-void http_clock_pin(void) {
-    uint64_t ms = aether_now_ns() / 1000000ULL;
-    /* Zero means "not pinned", so a clock reading exactly zero pins a
-     * millisecond later rather than not at all. */
-    aether_http_pinned_ms = ms ? ms : 1;
-}
-
-void http_clock_unpin(void) { aether_http_pinned_ms = 0; }
-
-uint64_t http_clock_ms(void) {
-    return aether_http_pinned_ms ? aether_http_pinned_ms
-                                 : (aether_now_ns() / 1000000ULL);
-}
 
 static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 
@@ -1101,58 +1161,6 @@ struct HttpClientRequest {
 #define PROXY_MODE_ENV      1
 #define PROXY_MODE_EXPLICIT 2
 #define PROXY_MODE_IGNORE   3
-
-/* A header name has to be a token, and a value has to be free of the bytes
- * that end a line.
- *
- * Without this, a value carrying CR LF is written into the request head
- * verbatim and becomes additional headers: a caller that builds a value out
- * of anything a user supplied hands that user the rest of the request, and a
- * doubled CR LF ends the head entirely and starts a second request the peer
- * will answer (CWE-93). The header is rejected rather than repaired, because
- * silently sending something other than what was asked for is its own bug.
- */
-/* RFC 9110 token characters: letters, digits, and "!#$%&'*+-.^_`|~".
- *
- * A table, because the proxy validates every character of every header name it
- * forwards, and the readable spelling of this test costs an isalnum call plus
- * a strchr across sixteen punctuation marks per character. Fixing the set here
- * also pins it to the grammar: isalnum answers for the active locale, and a
- * header name is a token in every locale. */
-static const unsigned char http_tchar[256] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
-    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-};
-
-int http_header_name_ok(const char* name) {
-    if (!name || !*name) return 0;
-    for (const unsigned char* c = (const unsigned char*)name; *c; c++) {
-        if (!http_tchar[*c]) return 0;
-    }
-    return 1;
-}
-
-int http_header_value_ok(const char* value) {
-    if (!value) return 0;
-    for (const unsigned char* c = (const unsigned char*)value; *c; c++) {
-        if (*c == '\r' || *c == '\n') return 0;
-    }
-    return 1;
-}
 
 HttpClientRequest* http_request_raw(const char* method, const char* url) {
     if (!url || !*url) return NULL;

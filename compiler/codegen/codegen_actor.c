@@ -1096,7 +1096,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "#if AETHER_HAS_THREADS");
     print_line(gen, "if (actor->auto_process) {");
     indent(gen);
-    print_line(gen, "pthread_create(&actor->thread, NULL, (void*(*)(void*))aether_actor_thread, actor);");
+    // Without its thread the actor is an ordinary one, stepped by its core
+    // and ended by its release (#2517).
+    print_line(gen, "if (pthread_create(&actor->thread, NULL, (void*(*)(void*))aether_actor_thread, actor) != 0) {");
+    indent(gen);
+    print_line(gen, "actor->thread = 0;");
+    print_line(gen, "actor->auto_process = 0;");
+    unindent(gen);
+    print_line(gen, "}");
     unindent(gen);
     print_line(gen, "}");
     print_line(gen, "#endif");

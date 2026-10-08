@@ -408,6 +408,68 @@ const char* get_single_int_field(MessageDef* msg_def) {
     return is_inlineable_scalar(field->type_kind) ? field->name : NULL;
 }
 
+/* The C struct of a message (#2517). The .c and the embedding header
+ * (--emit-header) both write it from here and nowhere else, so a C host
+ * reads the offsets the generated code wrote. The order packs the fields:
+ * ints and bools first, then pointer-sized fields, then everything else,
+ * after the `_message_id` that is always first. Returns the number of
+ * fields written to `out`, which holds at least msg_def->child_count. */
+static int message_field_rank(ASTNode* field) {
+    if (!field->node_type) return 2;
+    switch (field->node_type->kind) {
+        case TYPE_INT: case TYPE_BOOL: return 0;
+        case TYPE_ACTOR_REF: case TYPE_STRING: case TYPE_PTR: return 1;
+        default: return 2;
+    }
+}
+
+int message_struct_fields(ASTNode* msg_def, ASTNode** out) {
+    int n = 0;
+    for (int rank = 0; rank < 3; rank++) {
+        for (int i = 0; i < msg_def->child_count; i++) {
+            ASTNode* field = msg_def->children[i];
+            if (field && field->type == AST_MESSAGE_FIELD && field->value &&
+                message_field_rank(field) == rank) {
+                out[n++] = field;
+            }
+        }
+    }
+    return n;
+}
+
+/* The C type of a message field in that struct. The lone int of an
+ * inline-payload message travels in Message.payload_int, so it is declared
+ * intptr_t, that field's width. */
+const char* message_field_c_type(ASTNode* msg_def, ASTNode* field) {
+    if (!field->node_type) return "int";
+    if (field->node_type->kind == TYPE_INT) {
+        int ints = 0, others = 0;
+        for (int i = 0; i < msg_def->child_count; i++) {
+            ASTNode* f = msg_def->children[i];
+            if (f && f->type == AST_MESSAGE_FIELD && f->node_type) {
+                if (f->node_type->kind == TYPE_INT) ints++;
+                else others++;
+            }
+        }
+        if (ints == 1 && others == 0) return "intptr_t";
+    }
+    return get_c_type(field->node_type);
+}
+
+/* The lines between the braces of a message struct, one per field, at
+ * `indent` levels of four spaces. */
+static void emit_message_struct_body(ASTNode* msg_def, FILE* out, int indent) {
+    ASTNode** fields = (ASTNode**)malloc((size_t)(msg_def->child_count + 1) * sizeof(ASTNode*));
+    int n = fields ? message_struct_fields(msg_def, fields) : 0;
+    for (int level = 0; level < indent; level++) fprintf(out, "    ");
+    fprintf(out, "int _message_id;\n");
+    for (int i = 0; i < n; i++) {
+        for (int level = 0; level < indent; level++) fprintf(out, "    ");
+        fprintf(out, "%s %s;\n", message_field_c_type(msg_def, fields[i]), fields[i]->value);
+    }
+    free(fields);
+}
+
 /* Take ownership of a node codegen built itself. Such nodes hang off the
  * defer stack or a rewritten statement, never off the program AST, so
  * free_ast_node(program) does not reach them (#1667). */
@@ -1953,6 +2015,7 @@ void emit_header_prologue(CodeGenerator* gen, const char* guard_name) {
     fprintf(gen->header_file, "#define %s\n\n", guard);
     fprintf(gen->header_file, "#include <stdint.h>\n");
     fprintf(gen->header_file, "#include \"runtime/scheduler/multicore_scheduler.h\"\n");
+    fprintf(gen->header_file, "#include \"runtime/actors/aether_send_message.h\"\n");
     fprintf(gen->header_file, "\n");
     fprintf(gen->header_file, "// Forward declarations\n");
 }
@@ -1973,32 +2036,26 @@ void emit_message_to_header(CodeGenerator* gen, ASTNode* msg_def) {
     fprintf(gen->header_file, "\n// Message: %s\n", msg_name);
     fprintf(gen->header_file, "#define MSG_%s %d\n", msg_name, msg_id);
 
-    // Generate struct typedef
+    // The struct the generated .c declares, field for field (#2517).
     fprintf(gen->header_file, "typedef struct {\n");
-    fprintf(gen->header_file, "    int _message_id;\n");
+    emit_message_struct_body(msg_def, gen->header_file, 1);
+    fprintf(gen->header_file, "} %s;\n", msg_name);
+}
 
-    // Check if this message uses the inline payload_int path (single int field).
-    // If so, the field must be intptr_t to match Message.payload_int's width,
-    // which is pointer-sized to allow actor refs stored in int message fields.
-    MessageDef* reg_def = lookup_message(gen->message_registry, msg_name);
-    int uses_inline = reg_def && get_single_int_field(reg_def) != NULL;
-
-    for (int i = 0; i < msg_def->child_count; i++) {
-        ASTNode* field = msg_def->children[i];
-        if (field && field->type == AST_MESSAGE_FIELD && field->value) {
-            const char* c_type = "int";  // Default
-            if (field->node_type) {
-                c_type = get_c_type(field->node_type);
-            }
-            // Inline-path int fields use intptr_t to match payload_int width
-            if (uses_inline && field->node_type && field->node_type->kind == TYPE_INT) {
-                c_type = "intptr_t";
-            }
-            fprintf(gen->header_file, "    %s %s;\n", c_type, field->value);
+/* The AST of the message named `name` (exported or not), or NULL. */
+static ASTNode* find_message_definition(ASTNode* program, const char* name) {
+    if (!program || !name) return NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* def = program->children[i];
+        if (def && def->type == AST_EXPORT_STATEMENT && def->child_count > 0) {
+            def = def->children[0];
+        }
+        if (def && def->type == AST_MESSAGE_DEFINITION && def->value &&
+            strcmp(def->value, name) == 0) {
+            return def;
         }
     }
-
-    fprintf(gen->header_file, "} %s;\n", msg_name);
+    return NULL;
 }
 
 void emit_actor_to_header(CodeGenerator* gen, ASTNode* actor) {
@@ -2015,49 +2072,53 @@ void emit_actor_to_header(CodeGenerator* gen, ASTNode* actor) {
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (child && child->type == AST_RECEIVE_STATEMENT) {
-            // Each handler arm in the receive statement
+            // Each handler arm in the receive statement: the message name
+            // is on the arm's pattern (codegen_actor.c reads it the same
+            // way); the arm itself carries none (#2517).
             for (int j = 0; j < child->child_count; j++) {
                 ASTNode* handler = child->children[j];
-                if (handler && handler->type == AST_RECEIVE_ARM && handler->value) {
-                    const char* msg_name = handler->value;
+                if (handler && handler->type == AST_RECEIVE_ARM && handler->child_count >= 1 &&
+                    handler->children[0] && handler->children[0]->type == AST_MESSAGE_PATTERN &&
+                    handler->children[0]->value) {
+                    const char* msg_name = handler->children[0]->value;
                     MessageDef* msg_def = lookup_message(gen->message_registry, msg_name);
                     int msg_id = msg_def ? msg_def->message_id : 0;
+                    ASTNode* msg_node = find_message_definition(gen->program, msg_name);
+                    if (!msg_node) continue;
 
-                    // Generate inline send helper
+                    // A typed send helper. Its parameters are the fields in
+                    // declaration order, with the C types of the struct
+                    // (#2517); it sends the way the generated code does: a
+                    // message of one inlineable scalar travels in
+                    // Message.payload_int, any other in a copy of the struct.
                     fprintf(gen->header_file, "\nstatic inline void %s_%s(%s* actor",
                             actor_name, msg_name, actor_name);
-
-                    // Add parameters for each field
-                    if (msg_def && msg_def->fields) {
-                        MessageFieldDef* field = msg_def->fields;
-                        while (field) {
-                            const char* c_type = "int";
-                            switch (field->type_kind) {
-                                case TYPE_INT: c_type = "int"; break;
-                                /* See get_c_type() — Aether `float` is always C `double`. */
-                                case TYPE_FLOAT: c_type = "double"; break;
-                                case TYPE_LONGDOUBLE: c_type = "long double"; break;
-                                case TYPE_STRING: c_type = "const char*"; break;
-                                case TYPE_BOOL: c_type = "int"; break;
-                                case TYPE_BYTE: c_type = "unsigned char"; break;
-                                default: c_type = "int"; break;
-                            }
-                            fprintf(gen->header_file, ", %s %s", c_type, field->name);
-                            field = field->next;
+                    for (int k = 0; k < msg_node->child_count; k++) {
+                        ASTNode* field = msg_node->children[k];
+                        if (field && field->type == AST_MESSAGE_FIELD && field->value) {
+                            fprintf(gen->header_file, ", %s %s",
+                                    message_field_c_type(msg_node, field), field->value);
                         }
                     }
-
                     fprintf(gen->header_file, ") {\n");
-                    fprintf(gen->header_file, "    Message msg = {0};\n");
-                    fprintf(gen->header_file, "    msg.type = %d;\n", msg_id);
 
-                    // For single-int messages, use payload_int
-                    if (msg_def && msg_def->fields && !msg_def->fields->next &&
-                        msg_def->fields->type_kind == TYPE_INT) {
-                        fprintf(gen->header_file, "    msg.payload_int = %s;\n", msg_def->fields->name);
+                    const char* single_int = msg_def ? get_single_int_field(msg_def) : NULL;
+                    if (single_int) {
+                        fprintf(gen->header_file, "    Message msg = {0};\n");
+                        fprintf(gen->header_file, "    msg.type = %d;\n", msg_id);
+                        fprintf(gen->header_file, "    msg.payload_int = (intptr_t)%s;\n", single_int);
+                        fprintf(gen->header_file, "    scheduler_send_remote((ActorBase*)actor, msg, -1);\n");
+                    } else {
+                        fprintf(gen->header_file, "    %s msg = { ._message_id = %d", msg_name, msg_id);
+                        for (int k = 0; k < msg_node->child_count; k++) {
+                            ASTNode* field = msg_node->children[k];
+                            if (field && field->type == AST_MESSAGE_FIELD && field->value) {
+                                fprintf(gen->header_file, ", .%s = %s", field->value, field->value);
+                            }
+                        }
+                        fprintf(gen->header_file, " };\n");
+                        fprintf(gen->header_file, "    aether_send_message(actor, &msg, sizeof(msg));\n");
                     }
-
-                    fprintf(gen->header_file, "    scheduler_send_remote((ActorBase*)actor, msg, -1);\n");
                     fprintf(gen->header_file, "}\n");
                 }
             }
@@ -8276,8 +8337,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 break;
             case AST_ACTOR_DEFINITION:
                 generate_actor_definition(gen, child);
-                // Emit to header if enabled
-                if (gen->csrc_header_file) {
+                // The --emit-header file (#2517, see the message case below).
+                if (gen->header_file) {
                     emit_actor_to_header(gen, child);
                 }
                 break;
@@ -8303,65 +8364,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                     // nothing, and it padded every such message to 64 bytes.
                     print_line(gen, "typedef struct %s {", child->value);
                     indent(gen);
-                    print_line(gen, "int _message_id;");
-                    
+                    // The field order and types are the ones the embedding
+                    // header gets (#2517).
+                    emit_message_struct_body(child, gen->output, gen->indent_level);
+
                     MessageFieldDef* first_field = NULL;
                     MessageFieldDef* last_field = NULL;
-                    
-                    // Detect single-int-field messages (inline payload_int path).
-                    // Their int field must be intptr_t to match Message.payload_int width.
-                    int int_field_count = 0, other_field_count = 0;
-                    for (int i = 0; i < child->child_count; i++) {
-                        ASTNode* f = child->children[i];
-                        if (f && f->type == AST_MESSAGE_FIELD && f->node_type) {
-                            if (f->node_type->kind == TYPE_INT) int_field_count++;
-                            else other_field_count++;
-                        }
-                    }
-                    int is_inline_msg = (int_field_count == 1 && other_field_count == 0);
 
-                    // Pack int fields together first for better alignment
-                    for (int i = 0; i < child->child_count; i++) {
-                        ASTNode* field = child->children[i];
-                        if (field && field->type == AST_MESSAGE_FIELD) {
-                            if (field->node_type && (field->node_type->kind == TYPE_INT || field->node_type->kind == TYPE_BOOL)) {
-                                print_indent(gen);
-                                if (is_inline_msg && field->node_type->kind == TYPE_INT) {
-                                    // intptr_t for inline-path field (matches payload_int width)
-                                    fprintf(gen->output, "intptr_t");
-                                } else {
-                                    generate_type(gen, field->node_type);
-                                }
-                                fprintf(gen->output, " %s;\n", field->value);
-                            }
-                        }
-                    }
-                    
-                    // Then pointer types
-                    for (int i = 0; i < child->child_count; i++) {
-                        ASTNode* field = child->children[i];
-                        if (field && field->type == AST_MESSAGE_FIELD) {
-                            if (field->node_type && (field->node_type->kind == TYPE_ACTOR_REF || field->node_type->kind == TYPE_STRING || field->node_type->kind == TYPE_PTR)) {
-                                print_indent(gen);
-                                generate_type(gen, field->node_type);
-                                fprintf(gen->output, " %s;\n", field->value);
-                            }
-                        }
-                    }
-                    
-                    // Finally other types
-                    for (int i = 0; i < child->child_count; i++) {
-                        ASTNode* field = child->children[i];
-                        if (field && field->type == AST_MESSAGE_FIELD) {
-                            if (field->node_type && field->node_type->kind != TYPE_INT && field->node_type->kind != TYPE_BOOL &&
-                                field->node_type->kind != TYPE_ACTOR_REF && field->node_type->kind != TYPE_STRING && field->node_type->kind != TYPE_PTR) {
-                                print_indent(gen);
-                                generate_type(gen, field->node_type);
-                                fprintf(gen->output, " %s;\n", field->value);
-                            }
-                        }
-                    }
-                    
                     // Build field list for registry. We store the resolved
                     // C type for each field so downstream codegen (receive
                     // destructuring, struct-literal send-side) can emit the
@@ -8459,8 +8468,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
 
                     register_message_type(gen->message_registry, child->value, first_field);
 
-                    // Emit to header if enabled
-                    if (gen->csrc_header_file) {
+                    // The --emit-header file; #996 had gated this on the
+                    // --emit=csrc catalog header, which left it empty (#2517).
+                    if (gen->header_file) {
                         emit_message_to_header(gen, child);
                     }
                 }

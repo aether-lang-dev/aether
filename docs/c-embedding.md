@@ -371,12 +371,12 @@ The C host and the Aether runtime share a process but have distinct ownership ru
 
 1. **State is message-only.** Actor state is owned by the actor; the host reads and writes it exclusively through messages. Reach-in access bypasses message-ordering guarantees and races with the scheduler.
 2. **Sends are fire-and-forget.** There's no synchronous reply from `aether_send_message()`. When you need a value back, either (a) have the actor send a response message to a host-registered event handler, or (b) have the actor write into shared atomic state the host polls.
-3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done, after the last message you send it has been handled: the actor is freed later, once the scheduler threads are past it, but a message that arrives after that is a use after free.
+3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done, after the last message you send it has been handled: the actor is reclaimed later, once the scheduler threads are past it. Nothing may send to it after the release. A send that does so anyway is defined, not a use after free: a released actor's memory is kept, marked released, until a later spawn of the same size reuses it, so the message is dropped (counted by `scheduler_released_sends()`, reported once on stderr), but a send made after the memory has become another actor reaches that actor, which a raw pointer cannot detect.
 4. **One runtime per process.** `aether_runtime_init()` initializes process-global scheduler state. Calling it twice from the same process is not supported; use separate processes if you need isolated runtimes.
 
 ## Header Generation
 
-Pass `--emit-header` to `aetherc` to generate a C header alongside the C output. The header contains message struct definitions, `MSG_*` constants, and actor spawn prototypes, everything needed to send messages to Aether actors from C without copying struct definitions by hand.
+Pass `--emit-header` to `aetherc` to generate a C header alongside the C output. The header contains message struct definitions, `MSG_*` constants, actor spawn prototypes and a typed send helper per message an actor receives, everything needed to send messages to Aether actors from C without copying struct definitions by hand. The message structs are the ones the generated C declares, field for field: the fields are packed (ints and bools first, then pointer-sized fields, then the rest), not in declaration order, so build a message by field name, or through its helper, whose parameters are in declaration order.
 
 ```bash
 aetherc --emit-header counter.ae counter.c
@@ -395,23 +395,28 @@ Example generated header:
 
 #include <stdint.h>
 #include "runtime/scheduler/multicore_scheduler.h"
+#include "runtime/actors/aether_send_message.h"
 
 // Message IDs (numbered from 0 in declaration order)
 #define MSG_Increment 0
-#define MSG_GetValue  1
-#define MSG_Reset     2
+#define MSG_Label     1
 
 // Message structs, first field is the message ID; single-int payloads
 // widen to intptr_t to match Message.payload_int.
 typedef struct { int _message_id; intptr_t amount; } Increment;
+// `message Label { tag: int, text: string, weight: float }`: packed, so
+// the string lands before the float.
+typedef struct { int _message_id; int tag; const char* text; double weight; } Label;
 
-// Spawn prototype
+// Spawn prototype and typed send helpers (parameters in declaration order)
 Counter* spawn_Counter(void);
+static inline void Counter_Increment(Counter* actor, intptr_t amount) { ... }
+static inline void Counter_Label(Counter* actor, int tag, const char* text, double weight) { ... }
 
 #endif
 ```
 
-Include the header in your C host application and use the constants with `scheduler_send_remote`.
+Include the header in your C host application and send through the helpers, or build a struct by field name and pass it to `aether_send_message(actor, &msg, sizeof msg)`. A `string` field takes a `const char*` the host keeps alive until the message has been handled; the actor does not free it.
 
 ---
 

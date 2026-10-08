@@ -163,6 +163,16 @@ static inline int AETHER_HOT aether_send_message_sync(ActorBase* actor, void* me
     // step() call below may consume a different message (FIFO order).
     // The just-sent message will be processed later by scheduler_wait(),
     // by which time the caller's stack frame may be gone.
+    //
+    // A dead actor takes no message: a released one's block is kept
+    // (#2517), so this read is defined, and the scheduler's send drops and
+    // counts the message before anything is allocated for it.
+    if (atomic_load_explicit(&actor->dead, memory_order_relaxed)) {
+        msg.payload_ptr = NULL;
+        scheduler_send_local(actor, msg);
+        g_inline_step_depth--;
+        return 1;
+    }
     void* heap_copy = malloc(message_size);
     if (!heap_copy) {
         // Delivering a NULL payload would crash the handler (or, for a

@@ -6,6 +6,8 @@
 #include "test_harness.h"
 #include "../../runtime/actors/actor_state_machine.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"
+#include "../../runtime/actors/aether_actor_thread.h"
+#include "../../runtime/actors/aether_send_message.h"
 #include <stdatomic.h>
 
 #ifdef _WIN32
@@ -512,6 +514,240 @@ void test_scheduler_release_churn(void) {
     ASSERT_TRUE(max_registered <= registered_before + PER_ROUND);
 }
 
+// #2517: an actor with its own thread (auto_process, run by
+// aether_actor_thread) sends to another actor of its core from its step.
+// scheduler_send_local steps that actor inline, on the actor thread, and
+// touches it after its step; the stepped actor releases itself in that step.
+// The actor thread used to publish no reclamation epoch, so the core freed
+// the released actor while the actor thread was still in the send that
+// stepped it. It now reads under an epoch like a core: nothing released is
+// reclaimed until it passes the top of its loop again, which it cannot while
+// its step is still running. The relay's step waits at a gate after the
+// send, so the hold is observed with the thread deterministically inside
+// the step; the core's published epoch says when it has tried to reclaim.
+//
+// Then the relay itself is released by an actor the core steps, while the
+// relay's step is waiting on that very core: a release never blocks, the
+// relay's own thread ends the actor once it leaves its loop. Last, an actor
+// thread's actor releases itself from its own step.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* target;
+    ActorBase* echo;
+    atomic_int* gate;
+    atomic_int stepped;
+    atomic_int echoed;     // the core answered while this step waited on it
+} RelayActor;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* victim;     // released from this step, which a core runs
+    atomic_int count;
+} EchoActor;
+
+static void echo_step(void* self) {
+    EchoActor* a = (EchoActor*)self;
+    Message msg;
+    while (mailbox_receive(&a->mailbox, &msg)) {
+        if (a->victim) scheduler_release_actor(a->victim);
+        atomic_fetch_add(&a->count, 1);
+    }
+    atomic_store_explicit(&a->active, (a->mailbox.count > 0), memory_order_relaxed);
+}
+
+static void relay_step(void* self) {
+    RelayActor* a = (RelayActor*)self;
+    Message msg;
+    if (mailbox_receive(&a->mailbox, &msg)) {
+        // Credited here as the core loop credits a step it runs itself:
+        // scheduler_wait() balances sent against processed.
+        atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
+                                  memory_order_relaxed);
+        Message fwd = {1, 0, 0, NULL, {NULL, 0, 0}, NULL};
+        scheduler_send_local(a->target, fwd);   // steps the target right here
+        atomic_store(&a->stepped, 1);
+        while (!atomic_load(a->gate)) sleep_ms(1);
+        // Through the core's queue, not inline: the core steps echo, which
+        // releases this actor while this step is still waiting on it.
+        EchoActor* echo = (EchoActor*)a->echo;
+        scheduler_send_remote(a->echo, fwd, -1);
+        for (int w = 0; w < 5000 && atomic_load(&echo->count) < 1; w++) sleep_ms(1);
+        if (atomic_load(&echo->count) == 1) atomic_store(&a->echoed, 1);
+    }
+}
+
+static void quitter_step(void* self) {
+    ChurnActor* a = (ChurnActor*)self;
+    Message msg;
+    if (mailbox_receive(&a->mailbox, &msg)) {
+        atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
+                                  memory_order_relaxed);
+        atomic_fetch_add(&g_churn_handled, 1);
+        scheduler_release_actor((ActorBase*)a);   // from its own thread's step
+    }
+}
+
+// Waits until core 0 has published an epoch past `seen`, so it has tried to
+// reclaim since; 0 when it does not within 5 s.
+static int core0_moved_past(uint64_t seen) {
+    for (int w = 0; w < 5000; w++) {
+        if (atomic_load(&schedulers[0].reclaim_epoch) > seen) return 1;
+        sleep_ms(1);
+    }
+    return 0;
+}
+
+static int wait_no_pending(void) {
+    int pending = scheduler_released_actors_pending();
+    for (int w = 0; w < 5000 && pending > 0; w++) {
+        sleep_ms(1);
+        pending = scheduler_released_actors_pending();
+    }
+    return pending;
+}
+
+void test_scheduler_actor_thread_holds_released_actor(void) {
+    scheduler_init(1);   // one core: every actor is the actor thread's core-mate
+
+    ActorBase* keep[2];
+    for (int i = 0; i < 2; i++) {
+        keep[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
+        ASSERT_NOT_NULL(keep[i]);
+    }
+
+    ChurnActor* target = (ChurnActor*)scheduler_spawn_actor(-1, churn_step, sizeof(ChurnActor));
+    ASSERT_NOT_NULL(target);
+    target->self_release = 1;
+
+    EchoActor* echo = (EchoActor*)scheduler_spawn_actor(-1, echo_step, sizeof(EchoActor));
+    ASSERT_NOT_NULL(echo);
+    atomic_init(&echo->count, 0);
+
+    atomic_int gate;
+    atomic_init(&gate, 0);
+    RelayActor* relay = (RelayActor*)scheduler_spawn_actor(-1, relay_step, sizeof(RelayActor));
+    ASSERT_NOT_NULL(relay);
+    relay->target = (ActorBase*)target;
+    relay->echo = (ActorBase*)echo;
+    relay->gate = &gate;
+    atomic_init(&relay->stepped, 0);
+    atomic_init(&relay->echoed, 0);
+    echo->victim = (ActorBase*)relay;
+    relay->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&relay->thread, NULL, aether_actor_thread, relay));
+
+    atomic_store(&g_churn_handled, 0);
+    Message msg = {1, 0, 0, NULL, {NULL, 0, 0}, NULL};
+    scheduler_send_remote((ActorBase*)relay, msg, -1);
+    for (int w = 0; w < 5000 && !atomic_load(&relay->stepped); w++) sleep_ms(1);
+    ASSERT_EQ(1, atomic_load(&relay->stepped));
+    ASSERT_EQ(1, atomic_load(&g_churn_handled));   // the target ran, on the relay's thread
+    ASSERT_EQ(1, scheduler_released_actors_pending());
+
+    // Further releases move the epoch on; the core publishes each move and
+    // tries to reclaim. The target stays because the relay thread's epoch
+    // is older than its release.
+    int held = 1;
+    for (int round = 1; round <= 3; round++) {
+        uint64_t seen = atomic_load(&schedulers[0].reclaim_epoch);
+        ActorBase* extra = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
+        ASSERT_NOT_NULL(extra);
+        scheduler_release_actor(extra);
+        ASSERT_TRUE(core0_moved_past(seen));
+        if (scheduler_released_actors_pending() != round + 1) held = 0;
+    }
+    ASSERT_TRUE(held);
+
+    // The relay's step goes on to wait on the core, which releases it
+    // meanwhile; the release returns at once, the step finishes, the relay's
+    // thread leaves its loop and ends the actor, and everything is reclaimed.
+    atomic_store(&gate, 1);
+    for (int w = 0; w < 6000 && !atomic_load(&relay->echoed); w++) sleep_ms(1);
+    ASSERT_EQ(1, atomic_load(&relay->echoed));
+    ASSERT_EQ(0, wait_no_pending());
+    pthread_join(relay->thread, NULL);
+
+    // An actor thread's actor releasing itself from its own step.
+    ChurnActor* quitter = (ChurnActor*)scheduler_spawn_actor(-1, quitter_step, sizeof(ChurnActor));
+    ASSERT_NOT_NULL(quitter);
+    quitter->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&quitter->thread, NULL, aether_actor_thread, quitter));
+    scheduler_send_remote((ActorBase*)quitter, msg, -1);
+    for (int w = 0; w < 5000 && atomic_load(&g_churn_handled) < 2; w++) sleep_ms(1);
+    ASSERT_EQ(2, atomic_load(&g_churn_handled));
+    ASSERT_EQ(0, wait_no_pending());
+    pthread_join(quitter->thread, NULL);
+
+    scheduler_shutdown();
+    scheduler_release_actor((ActorBase*)echo);
+    for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
+    scheduler_cleanup();
+}
+
+// #2517: a send to a released actor is defined. The release contract forbids
+// it, but a raw ActorBase* cannot be revoked, so a released actor's block is
+// kept, marked released, until a spawn of the same size takes it back: the
+// late send reads the mark, drops the message and counts it. Every send
+// entry is tried after the actor has been reclaimed, under the plain build.
+void test_scheduler_late_send_after_release(void) {
+    scheduler_init(2);
+
+    ActorBase* keep[2];
+    for (int i = 0; i < 2; i++) {
+        keep[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
+        ASSERT_NOT_NULL(keep[i]);
+    }
+
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    atomic_init(&a->count, 0);
+    atomic_init(&a->last_value, 0);
+    Message msg = {1, 0, 7, NULL, {NULL, 0, 0}, NULL};
+    scheduler_send_remote((ActorBase*)a, msg, -1);
+    for (int w = 0; w < 5000 && atomic_load(&a->count) < 1; w++) sleep_ms(1);
+    ASSERT_EQ(1, atomic_load(&a->count));
+
+    uint64_t dropped_before = scheduler_released_sends();
+    scheduler_release_actor((ActorBase*)a);
+    int pending = scheduler_released_actors_pending();
+    for (int w = 0; w < 5000 && pending > 0; w++) {
+        sleep_ms(1);
+        pending = scheduler_released_actors_pending();
+    }
+    ASSERT_EQ(0, pending);   // reclaimed: the block is now a kept one
+
+    // Late sends through each entry point. The block is kept, so reading it
+    // is defined, and each is dropped.
+    ASSERT_EQ(AETHER_ACTOR_RELEASED, atomic_load(&a->dead));
+    scheduler_send_remote((ActorBase*)a, msg, -1);
+    scheduler_send_batch_start();
+    scheduler_send_batch_add((ActorBase*)a, msg);
+    scheduler_send_batch_flush();
+    struct { int id; intptr_t value; } typed = {1, 7};
+    aether_send_message(a, &typed, sizeof typed);
+    ASSERT_EQ(dropped_before + 3, scheduler_released_sends());
+    ASSERT_EQ(1, atomic_load(&a->count));
+    ASSERT_EQ(0, atomic_load(&a->mailbox.count));
+
+    // The next spawn of the size takes the block back as a live actor.
+    CounterActor* b = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(b);
+    ASSERT_TRUE(b == a);
+    ASSERT_EQ(0, atomic_load(&b->dead));
+    atomic_store(&b->count, 0);
+    scheduler_send_remote((ActorBase*)b, msg, -1);
+    for (int w = 0; w < 5000 && atomic_load(&b->count) < 1; w++) sleep_ms(1);
+    ASSERT_EQ(1, atomic_load(&b->count));
+    ASSERT_EQ(dropped_before + 3, scheduler_released_sends());
+
+    scheduler_shutdown();
+    scheduler_release_actor((ActorBase*)b);
+    for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
+    scheduler_cleanup();
+}
+
 void test_scheduler_basic_messaging(void) {
     scheduler_init(2);
     
@@ -842,6 +1078,8 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler spawns 64-byte-aligned actors", test_scheduler_spawn_aligned, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler frees released actors once no reader holds them", test_scheduler_release_churn, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler cross-core messaging", test_scheduler_cross_core, TEST_CATEGORY_RUNTIME);

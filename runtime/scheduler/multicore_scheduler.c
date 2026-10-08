@@ -204,7 +204,8 @@ static inline void aether_step_safe(ActorBase* actor) {
     g_aether_current_actor_id = -1;
     aether_try_pop();
 
-    atomic_store_explicit(&actor->dead, 1, memory_order_release);
+    // A bit, not a store: a release may be setting its own bit meanwhile.
+    atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_PANICKED, memory_order_release);
     atomic_store_explicit(&actor->active, 0, memory_order_release);
 
     // Drain any pending messages so scheduler_wait() sees counters converge.
@@ -816,6 +817,78 @@ static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
 // any walk it makes (aether_scheduler_poll() called from a step, say).
 static AETHER_TLS int t_reclaim_core_thread = 0;
 
+// Readers that are neither a core thread nor a bracketed walk (#2517): a
+// per-actor thread (aether_actor_thread) sets current_core_id, so a send it
+// makes to an actor of its core steps that actor on itself (work inlining in
+// scheduler_send_local) and touches it after the step. Such a thread holds a
+// record for as long as it runs and treats it as a core treats its
+// `reclaim_epoch`: the epoch in it is refreshed at the top of its loop, the
+// one point where it holds no actor it found through a table. The records
+// live for the process (a thread exits without a join to wait for, so none
+// is freed) and are reused; the list only grows.
+typedef struct ReclaimReader {
+    _Atomic uint64_t epoch;      // 0 while nothing reads through this record
+    _Atomic int in_use;
+    struct ReclaimReader* next;
+} ReclaimReader;
+
+static _Atomic(ReclaimReader*) g_readers = NULL;
+static AETHER_TLS ReclaimReader* t_reader = NULL;
+
+void scheduler_reader_online(void) {
+    if (t_reader) return;
+    ReclaimReader* r = atomic_load_explicit(&g_readers, memory_order_acquire);
+    for (; r; r = r->next) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&r->in_use, &expected, 1,
+                                                    memory_order_acquire,
+                                                    memory_order_relaxed)) {
+            break;
+        }
+    }
+    if (!r) {
+        r = (ReclaimReader*)calloc(1, sizeof(ReclaimReader));
+        if (!r) {
+            // Without a record the thread cannot hold a free back: it
+            // must not step at all, which the caller cannot do either.
+            // Reading on is the use after free of #2517; say so.
+            fprintf(stderr, "aether: out of memory registering a reader thread\n");
+            return;
+        }
+        atomic_store_explicit(&r->in_use, 1, memory_order_relaxed);
+        ReclaimReader* head = atomic_load_explicit(&g_readers, memory_order_relaxed);
+        do {
+            r->next = head;
+        } while (!atomic_compare_exchange_weak_explicit(&g_readers, &head, r,
+                                                        memory_order_release,
+                                                        memory_order_relaxed));
+    }
+    t_reader = r;
+    // As reclaim_core_online: publish first, then the fence that pairs with
+    // a releaser's.
+    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    atomic_store_explicit(&r->epoch, epoch, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+}
+
+void scheduler_reader_quiescent(void) {
+    ReclaimReader* r = t_reader;
+    if (!r) return;
+    // The same store a core makes at the top of its loop.
+    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    if (epoch != atomic_load_explicit(&r->epoch, memory_order_relaxed)) {
+        atomic_store_explicit(&r->epoch, epoch, memory_order_release);
+    }
+}
+
+void scheduler_reader_offline(void) {
+    ReclaimReader* r = t_reader;
+    if (!r) return;
+    t_reader = NULL;
+    atomic_store_explicit(&r->epoch, 0, memory_order_release);
+    atomic_store_explicit(&r->in_use, 0, memory_order_release);
+}
+
 // Actors released while an inline send was stepping on this thread, released
 // for real when the outermost one is done (scheduler_inline_step_done).
 static AETHER_TLS ActorBase** t_inline_released = NULL;
@@ -877,9 +950,10 @@ static void reclaim_core_offline(Scheduler* sched) {
 }
 
 // Claims an external reader slot; returns its index, or -1 when the caller is
-// a core thread, which its own slot already covers.
+// a core thread or a registered reader thread, whose own slot or record
+// already covers it.
 static int reclaim_reader_enter(void) {
-    if (t_reclaim_core_thread) return -1;
+    if (t_reclaim_core_thread || t_reader) return -1;
     for (;;) {
         uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
         for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
@@ -901,6 +975,138 @@ static void reclaim_reader_exit(int slot) {
     if (slot >= 0) atomic_store_explicit(&g_external_reader[slot], 0, memory_order_release);
 }
 
+// ---------------------------------------------------------------------------
+// Released actors keep their memory (#2517)
+//
+// A send takes a raw ActorBase* and reads `dead` first. Nothing may send to a
+// released actor, but a send that breaks the contract must not read freed
+// memory, so a reclaimed actor's block does not go back to the allocator: it
+// stays marked released, in the bucket for its size, and the next spawn of
+// that size takes it back. A late send to it is dropped, counted and reported
+// once. One made after the block has become another actor reaches that
+// actor: a raw pointer cannot tell the two apart. The buckets never hold
+// more than was once live at the same time, and are freed with the tables.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    size_t size;
+    ActorBase** blocks;
+    int count;
+    int capacity;
+} TombstoneBucket;
+
+static atomic_flag g_tombstone_lock = ATOMIC_FLAG_INIT;
+static TombstoneBucket* g_tombstones = NULL;
+static int g_tombstone_buckets = 0;
+static int g_tombstone_bucket_cap = 0;
+
+static inline void tombstone_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_tombstone_lock, memory_order_acquire)) {
+        AETHER_PAUSE();
+    }
+}
+
+static inline void tombstone_unlock(void) {
+    atomic_flag_clear_explicit(&g_tombstone_lock, memory_order_release);
+}
+
+static TombstoneBucket* tombstone_bucket_locked(size_t size, int create) {
+    for (int i = 0; i < g_tombstone_buckets; i++) {
+        if (g_tombstones[i].size == size) return &g_tombstones[i];
+    }
+    if (!create) return NULL;
+    if (g_tombstone_buckets == g_tombstone_bucket_cap) {
+        int cap = g_tombstone_bucket_cap ? g_tombstone_bucket_cap * 2 : 8;
+        TombstoneBucket* grown = realloc(g_tombstones, (size_t)cap * sizeof(TombstoneBucket));
+        if (!grown) return NULL;
+        g_tombstones = grown;
+        g_tombstone_bucket_cap = cap;
+    }
+    TombstoneBucket* b = &g_tombstones[g_tombstone_buckets++];
+    b->size = size;
+    b->blocks = NULL;
+    b->count = 0;
+    b->capacity = 0;
+    return b;
+}
+
+// Keeps a reclaimed actor's block for the next spawn of its size.
+static void tombstone_keep(ActorBase* actor) {
+    tombstone_lock();
+    TombstoneBucket* b = tombstone_bucket_locked(actor->alloc_size, 1);
+    if (b && b->count == b->capacity) {
+        int cap = b->capacity ? b->capacity * 2 : 16;
+        ActorBase** grown = realloc(b->blocks, (size_t)cap * sizeof(ActorBase*));
+        if (grown) {
+            b->blocks = grown;
+            b->capacity = cap;
+        }
+    }
+    if (b && b->count < b->capacity) {
+        b->blocks[b->count++] = actor;
+        tombstone_unlock();
+        return;
+    }
+    tombstone_unlock();
+    // Out of memory to keep it: a late send would then read freed memory,
+    // which is the contract violation's own risk; the block goes back.
+    aether_numa_free_aligned(actor, actor->alloc_size);
+}
+
+// The most recently kept block of this size, or NULL.
+static ActorBase* tombstone_take(size_t size) {
+    ActorBase* actor = NULL;
+    tombstone_lock();
+    TombstoneBucket* b = tombstone_bucket_locked(size, 0);
+    if (b && b->count > 0) actor = b->blocks[--b->count];
+    tombstone_unlock();
+    return actor;
+}
+
+// Returns every kept block to the allocator: the scheduler's tables are
+// going, and with them any pointer a late send could still use.
+static void tombstone_free_all(void) {
+    tombstone_lock();
+    for (int i = 0; i < g_tombstone_buckets; i++) {
+        TombstoneBucket* b = &g_tombstones[i];
+        for (int k = 0; k < b->count; k++) {
+            aether_numa_free_aligned(b->blocks[k], b->blocks[k]->alloc_size);
+        }
+        free(b->blocks);
+    }
+    free(g_tombstones);
+    g_tombstones = NULL;
+    g_tombstone_buckets = 0;
+    g_tombstone_bucket_cap = 0;
+    tombstone_unlock();
+}
+
+// Sends dropped because their target had been released, and the one
+// diagnostic they get.
+static _Atomic uint64_t g_released_sends = 0;
+static atomic_flag g_released_send_reported = ATOMIC_FLAG_INIT;
+
+uint64_t scheduler_released_sends(void) {
+    return atomic_load_explicit(&g_released_sends, memory_order_relaxed);
+}
+
+// A message to a dead actor cannot be delivered: release what travels with
+// it (no processed credit: the send is not counted yet on this path). A
+// released target means a send against the release contract.
+static void send_to_dead_actor(ActorBase* actor, Message* msg) {
+    AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0, msg->type, msg->sender_id);
+    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
+    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+    if (msg->_reply_slot) reply_slot_decref((ActorReplySlot*)msg->_reply_slot);
+    if (actor && (atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
+        atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
+        if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
+            fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
+                            "dropped (reported once)\n", msg->type, actor->id);
+        }
+    }
+}
+
 static void actor_free_now(ActorBase* actor) {
     // Whatever is still in the mailbox was sent against the release contract.
     // Release it and credit it as processed, as a panicked actor's drain does,
@@ -918,13 +1124,13 @@ static void actor_free_now(ActorBase* actor) {
                                   (uint64_t)drained, memory_order_relaxed);
     }
     // The same-core SPSC queue is the actor's alone (calloc'd by
-    // ensure_spsc_queue / send_buffer_flush); the struct free below does not
+    // ensure_spsc_queue / send_buffer_flush); the block kept below does not
     // cover it.
     if (actor->spsc_queue) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
     }
-    aether_numa_free_aligned(actor, actor->alloc_size);
+    tombstone_keep(actor);
 }
 
 // Frees every retired actor that no reader can still hold. `wait` takes the
@@ -942,6 +1148,11 @@ static void actor_reclaim(int wait) {
     }
     for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
         uint64_t e = atomic_load_explicit(&g_external_reader[i], memory_order_acquire);
+        if (e != 0 && e < oldest) oldest = e;
+    }
+    for (ReclaimReader* r = atomic_load_explicit(&g_readers, memory_order_acquire);
+         r; r = r->next) {
+        uint64_t e = atomic_load_explicit(&r->epoch, memory_order_acquire);
         if (e != 0 && e < oldest) oldest = e;
     }
 
@@ -1973,8 +2184,10 @@ void scheduler_shutdown(void) {
 // I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
 // follows a scheduler_shutdown() both release them this way.
 static void scheduler_free_core_tables(void) {
-    // Released actors not freed yet: no reader is left either (#2509).
+    // Released actors not reclaimed yet: no reader is left either (#2509).
+    // Then the kept blocks go back to the allocator (#2517).
     actor_reclaim_all();
+    tombstone_free_all();
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources
         schedulers[i].thread = 0;
@@ -2215,16 +2428,11 @@ static AETHER_TLS int inline_depth = 0;
 void scheduler_send_local(ActorBase* actor, Message msg) {
     AETHER_TRACE_EVENT(AE_TRACE_SEND_LOCAL, actor ? actor->id : 0,
                        msg.type, msg.sender_id);
-    // Drop messages to dead actors — they can't process them and we don't
-    // want to grow their mailbox or fire their step(). The payload and any
-    // reply-slot reference still belong to this message; release them
-    // (no processed credit: the send is not counted yet on this path).
+    // Drop messages to dead actors: they can't process them and we don't
+    // want to grow their mailbox or fire their step(). A released actor's
+    // block is kept, so this read is defined after its release (#2517).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
-        AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0,
-                           msg.type, msg.sender_id);
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
-        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
-        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
+        send_to_dead_actor(actor, &msg);
         return;
     }
 
@@ -2307,11 +2515,7 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
                        msg.type, msg.sender_id);
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
-        AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0,
-                           msg.type, msg.sender_id);
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
-        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
-        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
+        send_to_dead_actor(actor, &msg);
         return;
     }
     // INLINE MODE: For single-actor programs, process synchronously on the main thread.
@@ -2468,6 +2672,11 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
+    // Drop messages to dead actors (see scheduler_send_local).
+    if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+        send_to_dead_actor(actor, &msg);
+        return;
+    }
     // FAST PATH: Single-actor programs bypass batching entirely
     // Main Thread Mode = synchronous processing, zero queue overhead
     if (aether_main_thread_mode_active()) {
@@ -2601,18 +2810,18 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     }
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
-    ActorBase* actor = NULL;
-
-    {
+    // A released actor's block of this size first (#2517), then the allocator.
+    ActorBase* actor = tombstone_take(actor_size);
+    if (!actor) {
         int numa_node = aether_numa_node_of_cpu(preferred_core >= 0 ? preferred_core : 0);
         // Generated actor structs are aligned(64), which plain malloc does not
-        // honour (#2485). scheduler_release_actor frees with the matching
-        // aether_numa_free_aligned.
+        // honour (#2485). The block goes back through the matching
+        // aether_numa_free_aligned once the tables are freed.
         actor = aether_numa_alloc_aligned(actor_size, AETHER_ACTOR_ALIGN, numa_node);
         if (!actor) return NULL;
-        mailbox_init(&actor->mailbox);
         AETHER_STAT_INC(actors_malloced);
     }
+    mailbox_init(&actor->mailbox);
 
     actor->alloc_size = actor_size;
     actor->id = atomic_fetch_add(&next_actor_id, 1);
@@ -2685,6 +2894,19 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     return actor;
 }
 
+// The rest of a release, once the actor is marked and nothing of its own
+// runs it any more: out of its table, off the count, retired.
+static void actor_end(ActorBase* actor) {
+    scheduler_deregister_actor(actor);
+
+    // Track actor count for inline mode auto-detection
+    aether_on_actor_terminate();
+
+    // Freed once no reader can hold it (see the reclamation notes), which is
+    // never before this call returns: a step can release its own actor.
+    actor_retire(actor);
+}
+
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
@@ -2709,15 +2931,23 @@ void scheduler_release_actor(ActorBase* actor) {
     }
 
     // A message that still reaches the actor is dropped, not delivered.
-    atomic_store_explicit(&actor->dead, 1, memory_order_release);
-    scheduler_deregister_actor(actor);
+    int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_acq_rel);
+    if (was & AETHER_ACTOR_RELEASED) return;   // released twice: ended once
 
-    // Track actor count for inline mode auto-detection
-    aether_on_actor_terminate();
+    // An actor with its own thread (#2517): that thread holds the actor for
+    // as long as it runs, outside the epochs, which only cover pointers found
+    // through a table, and this never waits for it (its step may be waiting
+    // on the releasing core). The thread leaves its loop at the mark just
+    // set and ends the actor itself (scheduler_actor_thread_exit), unless it
+    // has left already, in which case that is done here. The two bits make
+    // the second of the two the one that ends it.
+    if (actor->auto_process && !(was & AETHER_ACTOR_THREAD_GONE)) return;
+    actor_end(actor);
+}
 
-    // Freed once no reader can hold it (see the reclamation notes), which is
-    // never before this call returns: a step can release its own actor.
-    actor_retire(actor);
+void scheduler_actor_thread_exit(ActorBase* actor) {
+    int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_THREAD_GONE, memory_order_acq_rel);
+    if (was & AETHER_ACTOR_RELEASED) actor_end(actor);
 }
 
 void scheduler_inline_step_done(void) {

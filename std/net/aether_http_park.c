@@ -20,7 +20,9 @@
 #include <string.h>
 #include <time.h>
 
-#if AETHER_HAS_THREADS
+/* As the pool: the lot works on the server's connections, which a build
+ * without networking does not have (#2517). */
+#if AETHER_HAS_THREADS && AETHER_HAS_NETWORKING
 
 /* How long the poller sleeps between sweeps. Wakeups are event-driven, so
  * this only bounds how late a deadline is noticed, and a keep-alive timeout
@@ -298,13 +300,13 @@ void http_park_destroy(HttpParkLot* lot) {
     free(lot);
 }
 
-#else /* !AETHER_HAS_THREADS */
+#else /* !AETHER_HAS_THREADS || !AETHER_HAS_NETWORKING */
 
 HttpParkLot* http_park_create(HttpServer* server,
                               void (*resume)(HttpServer*, HttpConn*),
                               int capacity) {
     (void)server; (void)resume; (void)capacity;
-    return NULL;   /* no threads: connections stay on their caller, as before */
+    return NULL;   /* no threads or no networking: connections stay on their caller */
 }
 int  http_park_add(HttpParkLot* lot, HttpConn* conn, int idle_ms) {
     (void)lot; (void)conn; (void)idle_ms; return -1;
@@ -312,4 +314,4 @@ int  http_park_add(HttpParkLot* lot, HttpConn* conn, int idle_ms) {
 int  http_park_count(HttpParkLot* lot) { (void)lot; return 0; }
 void http_park_destroy(HttpParkLot* lot) { (void)lot; }
 
-#endif /* AETHER_HAS_THREADS */
+#endif /* AETHER_HAS_THREADS && AETHER_HAS_NETWORKING */

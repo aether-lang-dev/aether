@@ -857,3 +857,111 @@ TEST(codegen_wide_message_has_natural_alignment) {
     ASSERT_EQ(1, aligned);  /* the actor struct only */
     free(buf);
 }
+
+/* Like generate_typechecked, with the --emit-header file as well. */
+static char* generate_with_header(const char* source, char** header_out) {
+    int count;
+    Token** tokens = tokenize_source(source, &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    if (!ast) return NULL;
+    if (!typecheck_program(ast)) return NULL;
+
+    FILE* out = tmpfile();
+    FILE* hdr = tmpfile();
+    if (!out || !hdr) return NULL;
+    CodeGenerator* gen = create_code_generator_with_header(out, hdr, NULL);
+    generate_program(gen, ast);
+    char* buf = read_all(out);
+    *header_out = read_all(hdr);
+
+    fclose(out);
+    fclose(hdr);
+    free_code_generator(gen);
+    free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+    return buf;
+}
+
+/* The text between the first "{" after `marker` and the "}" that follows it,
+ * with every line stripped of leading spaces: a struct body. */
+static char* struct_body_after(const char* text, const char* marker) {
+    const char* at = strstr(text, marker);
+    if (!at) return NULL;
+    const char* open = strchr(at, '{');
+    const char* close = open ? strchr(open, '}') : NULL;
+    if (!open || !close) return NULL;
+    char* body = (char*)malloc((size_t)(close - open) + 1);
+    char* w = body;
+    int at_line_start = 1;
+    for (const char* p = open + 1; p < close; p++) {
+        if (at_line_start && *p == ' ') continue;
+        at_line_start = (*p == '\n');
+        *w++ = *p;
+    }
+    *w = '\0';
+    return body;
+}
+
+/* #2517: the embedding header declared a message's fields in declaration
+ * order while the .c packs ints first, then pointers, then the rest, so a C
+ * host built against the header read the wrong offsets of any message whose
+ * field types interleave. Both now come from one field order. The header
+ * was also empty: #996 had gated its contents on the --emit=csrc catalog
+ * header. The typed send helper carries the fields; it used to send a
+ * multi-field message with no payload at all. */
+TEST(codegen_emit_header_message_matches_generated_struct) {
+    char* header = NULL;
+    char* buf = generate_with_header(
+        "message Mixed { a: int, s: string, b: int, f: float, c: bool, p: ptr }\n"
+        "message Bump { by: int }\n"
+        "actor Sink {\n"
+        "    state n = 0\n"
+        "    receive {\n"
+        "        Mixed(a, s, b, f, c, p) -> { n = n + a + b }\n"
+        "        Bump(by) -> { n = n + by }\n"
+        "    }\n"
+        "}\n"
+        "main() {\n"
+        "    k = spawn(Sink())\n"
+        "    k ! Mixed { a: 1, s: \"x\", b: 2, f: 0.5, c: true, p: 0 }\n"
+        "    k ! Bump { by: 1 }\n"
+        "}\n", &header);
+    ASSERT_NOT_NULL(buf);
+    ASSERT_NOT_NULL(header);
+
+    char* in_c = struct_body_after(buf, "typedef struct Mixed {");
+    char* in_h = struct_body_after(header, "// Message: Mixed\n");
+    ASSERT_NOT_NULL(in_c);
+    ASSERT_NOT_NULL(in_h);
+    ASSERT_STREQ(in_c, in_h);
+    /* Packed, as the runtime has always laid messages out. */
+    ASSERT_STREQ("\nint _message_id;\nint a;\nint b;\nint c;\nconst char* s;\nvoid* p;\ndouble f;\n", in_c);
+
+    /* The lone int of an inline-payload message is intptr_t on both sides. */
+    char* bump_c = struct_body_after(buf, "typedef struct Bump {");
+    char* bump_h = struct_body_after(header, "// Message: Bump\n");
+    ASSERT_NOT_NULL(bump_c);
+    ASSERT_NOT_NULL(bump_h);
+    ASSERT_STREQ(bump_c, bump_h);
+    ASSERT_STREQ("\nint _message_id;\nintptr_t by;\n", bump_c);
+
+    /* The helpers: a struct copy for the multi-field message, payload_int
+     * for the inline one. */
+    ASSERT_TRUE(strstr(header, "static inline void Sink_Mixed(Sink* actor, int a, const char* s, "
+                               "int b, double f, int c, void* p)") != NULL);
+    ASSERT_TRUE(strstr(header, "Mixed msg = { ._message_id = 0, .a = a, .s = s, .b = b, "
+                               ".f = f, .c = c, .p = p };") != NULL);
+    ASSERT_TRUE(strstr(header, "aether_send_message(actor, &msg, sizeof(msg));") != NULL);
+    ASSERT_TRUE(strstr(header, "static inline void Sink_Bump(Sink* actor, intptr_t by)") != NULL);
+    ASSERT_TRUE(strstr(header, "msg.payload_int = (intptr_t)by;") != NULL);
+
+    free(in_c);
+    free(in_h);
+    free(bump_c);
+    free(bump_h);
+    free(header);
+    free(buf);
+}
