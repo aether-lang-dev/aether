@@ -31,13 +31,15 @@ typedef struct {
     AetherModule** modules;
     int module_count;
     int module_capacity;
-    char source_dir[2048];  // Source file directory for relative resolution
+    // Source file directory for relative resolution, with its trailing
+    // slash: a heap copy of any length (#2543), NULL or "" when none.
+    char* source_dir;
     // Lib-search path: an ordered list of directories (PATH-style),
     // searched left-to-right; first hit wins. Issue #413. Default is
     // a single entry, `"lib"`, populated at registry init. Each entry
-    // is a fixed 256-byte buffer; the count tracks how many slots
-    // are live.
-    char lib_dirs[AETHER_LIB_DIRS_MAX][256];
+    // is a heap copy of any length (#2539); the count tracks how many
+    // slots are live.
+    char* lib_dirs[AETHER_LIB_DIRS_MAX];
     int  lib_dir_count;
 } ModuleRegistry;
 
@@ -182,7 +184,9 @@ void module_dep_recording_enable(void);
 int  module_probe(const char* path);            // access(F_OK)==0, and record
 void module_dep_record_read(const char* path);  // a file whose CONTENTS matter
 // Write the manifest: two sections, "read <path>" (content-hashed on reuse) and
-// "absent <path>" (a newly-present file busts the cache). Returns 0 on success.
+// "absent <path>" (a newly-present file busts the cache). Returns 0 on success;
+// otherwise no manifest is left at out_path, so the next build keys on the
+// source tree rather than on a list that misses files.
 int  module_dep_write(const char* out_path);
 
 // #2125 `@source("lanes.c")`: the path of one directive, resolved against the

@@ -1,0 +1,126 @@
+// #2518 probe: a closure value kept by a container.
+//
+// A list slot or a map entry that keeps a closure holds a reference of its
+// own to the env and releases it when the element goes (free, remove,
+// clear, overwrite), so one closure can be stored twice, in two
+// containers, or kept by a local past the container's free, and a literal
+// or a handed-over closure stored directly is released by the store.
+//
+// test_closure_local_env_free.sh builds this with env_count.h force-included
+// and checks every env and cell is freed exactly once; on its own it checks
+// the values (a freed env read back would give a wrong one).
+
+import std.list
+import std.map
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+stash_ok(l: ptr, cb: fn) -> bool {
+    _ = list.add(l, cb)
+    return true
+}
+
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+// The same closure in one list twice and in another list.
+shared(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 1
+        return n
+    }
+    a = list.new()
+    b = list.new()
+    list.add(a, f)
+    list.add(a, f)
+    stash(b, f)
+    list.free(a)
+    int first = call(f)
+    list.free(b)
+    int second = call(f)
+    return first + second
+}
+
+// Removed, overwritten and cleared elements are released by the slot.
+slots(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 2
+        return n
+    }
+    l = list.new()
+    stash(l, f)
+    stash(l, make_counter(r))
+    list.add(l, || { return r })
+    list.remove(l, 1)
+    list.list_set(l, 0, make_counter(r))
+    list.list_set(l, 1, f)
+    list.clear(l)
+    stash(l, f)
+    list.free(l)
+    int v = call(f)
+    return v
+}
+
+// A literal, a handed-over closure and a parameter stored directly, in
+// statement and expression position.
+direct(r: int) -> int {
+    l = list.new()
+    list.add(l, make_counter(r))
+    _ = list.add(l, || { return r + 1 })
+    ok = stash_ok(l, || { return r + 2 })
+    ok2 = stash_ok(l, make_counter(r))
+    int size = list.size(l)
+    list.free(l)
+    if ok && ok2 {
+        return size
+    }
+    return 0
+}
+
+// Map entries: put, overwrite, remove, free.
+in_map(r: int) -> int {
+    n = r
+    f = || {
+        n = n + 3
+        return n
+    }
+    m = map.new()
+    map.put(m, "a", f)
+    map.put(m, "b", f)
+    map.put(m, "a", make_counter(r))
+    map.put(m, "a", f)
+    map.remove(m, "b")
+    map.free(m)
+    int v = call(f)
+    return v
+}
+
+main() {
+    r = 0
+    while r < 25 {
+        check("shared", shared(r), 2 * r + 3)
+        check("slots", slots(r), r + 2)
+        check("direct", direct(r), 4)
+        check("in map", in_map(r), r + 3)
+        r = r + 1
+    }
+    println("shared ok")
+}

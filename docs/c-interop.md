@@ -1190,9 +1190,11 @@ Mitigation: the codegen keeps a curated list of
 libc / POSIX symbol names (see `compiler/codegen/codegen.c`'s
 `is_c_reserved_word` for the full set, it covers C keywords, the
 entire BSD/POSIX network sockets API, POSIX I/O, process control,
-memory + dynamic linking, string + stdio, and time + env). Any
-Aether function whose name appears in the list gets transparently
-emitted with an `ae_` prefix in the C output:
+memory + dynamic linking, string + stdio, time + env, and the rest of
+the C11 library: every `<math.h>` function with its `f` and `l` forms,
+`<ctype.h>`, `<setjmp.h>` and `<locale.h>`). Any Aether function whose
+name appears in the list gets transparently emitted with an `ae_`
+prefix in the C output:
 
 | Aether-side spelling | Emitted C symbol |
 |----------------------|------------------|
@@ -1204,6 +1206,8 @@ emitted with an `ae_` prefix in the C output:
 | `socket`             | `ae_socket`      |
 | `fork`               | `ae_fork`        |
 | `malloc`             | `ae_malloc`      |
+| `floor`              | `ae_floor`       |
+| `isdigit`            | `ae_isdigit`     |
 
 The renaming is **invisible to Aether source**, you call your
 function `bind(...)` and the compiler does the right thing. The only

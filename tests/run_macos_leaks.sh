@@ -172,7 +172,12 @@ check_one() {
     else
         {
             echo "  [FAIL] $t: $count leaks (allowed ≤ $allow)"
-            grep -E "ROOT LEAK|leaks for" "$lk_out" | head -12 | sed 's/^/      /'
+            grep -E "leaks for" "$lk_out" | head -1 | sed 's/^/      /'
+            # Each leak's allocation stack, as MallocStackLogging recorded
+            # it, so the report names the code that allocated the block,
+            # not only the allocator it went through.
+            awk '/^STACK OF /{show=1} show{print} /^$/{show=0}' "$lk_out" |
+                head -80 | sed 's/^/      /'
         } >"$report"
         cat "$report"
         : >"$tmpdir/fail_$t"

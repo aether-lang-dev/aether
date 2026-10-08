@@ -6,6 +6,15 @@
 #include "../../runtime/aether_process_mem.h"
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <sched.h>
+#ifdef _WIN32
+#include <windows.h>
+#define sleep_ms(ms) Sleep(ms)
+#else
+#include <unistd.h>
+#define sleep_ms(ms) usleep((ms) * 1000)
+#endif
 
 /* Where each block escapes to: a compiler may drop a malloc/free pair whose
  * pointer goes nowhere, and then there is nothing to measure. */
@@ -55,4 +64,47 @@ TEST_CATEGORY(process_memory_is_reported_or_unsupported, TEST_CATEGORY_RUNTIME) 
     ASSERT_TRUE(resident > 0);
     ASSERT_TRUE(priv > 0);
 #endif
+}
+
+/* aether_thread_epoch changes when a thread starts and again when it ends
+ * (#2551): a thread holds heap blocks of its own while it lives, so a heap
+ * count is compared only between reads with the same epoch. */
+static volatile int g_release_waiter = 0;
+static volatile int g_waiter_running = 0;
+
+/* A thread's start is reported on the thread itself, before its start
+ * routine runs (on Windows, the loader's DLL_THREAD_ATTACH), so the
+ * routine says it runs and the reader waits for that. */
+static void* epoch_waiter(void* arg) {
+    (void)arg;
+    g_waiter_running = 1;
+    while (!g_release_waiter) sched_yield();
+    return NULL;
+}
+
+TEST_CATEGORY(thread_epoch_moves_when_a_thread_starts_and_ends, TEST_CATEGORY_RUNTIME) {
+    int64_t before = aether_thread_epoch();
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
+    ASSERT_TRUE(before >= 0);
+#endif
+    if (before < 0) return;
+    ASSERT_TRUE(aether_thread_epoch() == before);
+    g_release_waiter = 0;
+    g_waiter_running = 0;
+    pthread_t t;
+    ASSERT_TRUE(pthread_create(&t, NULL, epoch_waiter, NULL) == 0);
+    while (!g_waiter_running) sched_yield();
+    int64_t running = aether_thread_epoch();
+    ASSERT_TRUE(running != before);
+    g_release_waiter = 1;
+    pthread_join(t, NULL);
+    /* The end can be reported after the join returns: on macOS the Mach
+     * thread finishes terminating on its own, and task_threads lists it
+     * until then. Wait for it, a bounded while. */
+    int64_t ended = aether_thread_epoch();
+    for (int i = 0; ended == running && i < 2000; i++) {
+        sleep_ms(1);
+        ended = aether_thread_epoch();
+    }
+    ASSERT_TRUE(ended != running);
 }

@@ -13,6 +13,8 @@
 //   JSON_NULL = 0, JSON_BOOL = 1, JSON_NUMBER = 2,
 //   JSON_STRING = 3, JSON_ARRAY = 4, JSON_OBJECT = 5
 
+import std.bytes
+
 exports(
     json_parse_raw, json_last_error, json_stringify_raw, json_free,
     json_type, json_is_null, json_is_integer,
@@ -45,7 +47,10 @@ const KIND_OUT_OF_MEMORY = 2 // arena allocation failed during parse
 const KIND_INVALID_INPUT = 3 // NULL / empty input handed to json_parse_raw
 
 // ---- parsing and serialization (raw externs) ----
-extern json_parse_raw(json_str: string) -> ptr
+// The string arguments below cross as `@aether string`, so the C side reads
+// them to their length: a document, key or value with an embedded NUL is
+// not cut there (#2469).
+extern json_parse_raw(json_str: @aether string) -> ptr
 extern json_last_error() -> string
 extern json_last_error_kind() -> int
 extern json_last_error_line() -> int
@@ -70,13 +75,19 @@ extern json_get_number(value: ptr) -> float
 extern json_get_int(value: ptr) -> int
 extern json_get_long(value: ptr) -> long
 extern json_get_string_raw(value: ptr) -> string
+// The payload and its length, to copy a string value whole: one may hold
+// U+0000, where json_get_string_raw's C string ends (#2469).
+extern json_get_string_data(value: ptr) -> ptr
+extern json_get_string_length(value: ptr) -> int
 
 // ---- object operations (raw externs) ----
-extern json_object_get_raw(obj: ptr, key: string) -> ptr
-extern json_object_set_raw(obj: ptr, key: string, value: ptr) -> int
-extern json_object_has(obj: ptr, key: string) -> int
+extern json_object_get_raw(obj: ptr, key: @aether string) -> ptr
+extern json_object_set_raw(obj: ptr, key: @aether string, value: ptr) -> int
+extern json_object_has(obj: ptr, key: @aether string) -> int
 extern json_object_size_raw(obj: ptr) -> int
 extern json_object_key_at(obj: ptr, i: int) -> string
+extern json_object_key_data_at(obj: ptr, i: int) -> ptr
+extern json_object_key_len_at(obj: ptr, i: int) -> int
 extern json_object_value_at(obj: ptr, i: int) -> ptr
 
 // ---- array operations (raw externs) ----
@@ -89,7 +100,7 @@ extern json_create_null() -> ptr
 extern json_create_bool(value: int) -> ptr
 extern json_create_number(value: float) -> ptr
 extern json_create_int(value: long long) -> ptr
-extern json_create_string(value: string) -> ptr
+extern json_create_string(value: @aether string) -> ptr
 extern json_create_array() -> ptr
 extern json_create_object() -> ptr
 
@@ -153,14 +164,16 @@ last_error_line() -> int { return json_last_error_line() }
 last_error_col() -> int { return json_last_error_col() }
 
 // Serialize a JSON value to a compact string. Returns (string, "") on
-// success, ("", error) on failure. The returned string is a refcounted
+// success, ("", error) on failure: a value nested deeper than 256 levels,
+// the most `parse` reads back, is an error rather than output with the
+// deep part replaced by null. The returned string is a refcounted
 // Aether string — no manual free required.
 //
 // Uniform-heap shape on both positions: see `parse` for the rationale.
 stringify(value: ptr) -> string! {
     raw = json_stringify_raw(value)
     if raw == null {
-        return string_concat("", ""), string_concat("stringify failed", "")
+        return string_concat("", ""), string_concat("json: stringify: nesting deeper than 256 levels", "")
     }
     return string_concat(raw, ""), string_concat("", "")
 }
@@ -178,11 +191,12 @@ stringify(value: ptr) -> string! {
 // `_heap_b64 = 1` and the function-exit defer-free never ran. avn's
 // 5000-commit bench retained ~666 MB just from this site.
 get_string(value: ptr) -> string! {
-    raw = json_get_string_raw(value)
+    raw = json_get_string_data(value)
     if raw == null {
         return string_concat("", ""), string_concat("not a string", "")
     }
-    return string_concat(raw, ""), string_concat("", "")
+    // Copied by its length, not to a NUL: "a\u0000b" is 3 bytes (#2469).
+    return bytes.string_from_ptr(raw, json_get_string_length(value)), string_concat("", "")
 }
 
 // Look up `key` in a JSON object.
@@ -250,7 +264,8 @@ object_entry(obj: ptr, i: int) -> (string, ptr, string) {
     if i >= n {
         return string_concat("", ""), null, string_concat("index out of range", "")
     }
-    return string_concat(json_object_key_at(obj, i), ""),
+    // Copied by its length, not to a NUL: a key may hold U+0000 (#2469).
+    return bytes.string_from_ptr(json_object_key_data_at(obj, i), json_object_key_len_at(obj, i)),
     json_object_value_at(obj, i),
     string_concat("", "")
 }

@@ -75,6 +75,7 @@ extern char** environ;
 #include "ae_fmt.h"
 #include "ae_sha256.h"
 #include "ae_bindgen.h"
+#include "ae_line.h"
 
 // Version is set by Makefile from VERSION file
 #ifndef AETHER_VERSION
@@ -88,7 +89,7 @@ extern char** environ;
  * lives under a long temp path (/var/folders/.../T/tmp.XXXX/inst/current/...),
  * so every -I carries that prefix; the old 16 KiB buffer truncated the link
  * command there (dropping -L lib) once enough std dirs existed. 64 KiB leaves
- * generous headroom. The command runners (posix_run/win_run) use the same
+ * generous headroom. The command runners (run_command) use the same
  * size so a large command isn't re-truncated when handed off. */
 /* AE_CMD_BUF lives in ae_internal.h so every caller agrees on it. */
 
@@ -140,35 +141,25 @@ static void tc_lib_dir_append_one(const char* dir) {
      * paths (`/d/foo`) to native Windows form (`D:/foo`) so a
      * `;`-joined path-list and a sequence of flags end up
      * byte-identical regardless of how MSYS2 handled the argv.
-     * `aether_lib_path_normalize` is a no-op on POSIX.
-     *
-     * memcpy with an explicit length (not `strncpy(dst, src,
-     * sizeof(dst)-1)`) keeps GCC's `-Wstringop-truncation` happy
-     * AND is the faster shape — single bulk copy of a known-good
-     * byte count, no per-byte NUL scan inside libc. */
-    char norm[256];
-    aether_lib_path_normalize(dir, norm, sizeof(norm));
-    size_t nlen = strlen(norm);
-    while (nlen > 1 &&
-           (norm[nlen - 1] == '/' || norm[nlen - 1] == '\\') &&
-           norm[nlen - 2] != ':') {
-        norm[--nlen] = '\0';
+     * `aether_lib_path_normalize` only copies on POSIX. The whole
+     * path (#2539): a 256-byte copy cut a longer one, so the key and
+     * the compiler searched a directory the user never named. */
+    char* norm = aether_lib_path_normalize(dir);
+    if (!norm) {
+        fprintf(stderr, "Error: out of memory adding the --lib directory '%s'\n", dir);
+        exit(1);
     }
     for (int i = 0; i < tc.lib_dir_count; i++) {
-        if (strcmp(tc.lib_dirs[i], norm) == 0) return;
+        if (strcmp(tc.lib_dirs[i], norm) == 0) { free(norm); return; }
     }
     if (tc.lib_dir_count >= AETHER_LIB_DIRS_MAX) {
         fprintf(stderr,
             "warning: --lib search path is full (max %d entries); "
             "ignoring '%s'\n", AETHER_LIB_DIRS_MAX, norm);
+        free(norm);
         return;
     }
-    int idx = tc.lib_dir_count;
-    /* +1 carries the NUL. nlen is post-normalisation length,
-     * always < sizeof(lib_dirs[idx]). Same warning + perf
-     * rationale as above. */
-    memcpy(tc.lib_dirs[idx], norm, nlen + 1);
-    tc.lib_dir_count++;
+    tc.lib_dirs[tc.lib_dir_count++] = norm;
 }
 void tc_lib_dir_append(const char* spec) {
     if (!spec || !spec[0]) return;
@@ -176,38 +167,49 @@ void tc_lib_dir_append(const char* spec) {
      * segments (trailing/leading/double separators) are silently
      * skipped — matches Java -cp and PATH semantics. */
     const char* cur = spec;
-    char buf[256];
     while (*cur) {
         const char* next = strchr(cur, AETHER_LIB_PATH_SEP_CHAR);
         size_t len = next ? (size_t)(next - cur) : strlen(cur);
         if (len > 0) {
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, cur, len);
-            buf[len] = '\0';
-            tc_lib_dir_append_one(buf);
+            char* seg = (char*)malloc(len + 1);
+            if (!seg) {
+                fprintf(stderr, "Error: out of memory reading the --lib path\n");
+                exit(1);
+            }
+            memcpy(seg, cur, len);
+            seg[len] = '\0';
+            tc_lib_dir_append_one(seg);
+            free(seg);
         }
         if (!next) break;
         cur = next + 1;
     }
 }
 
-/* Write the ` --lib "<dir>"` search-path flags (one per `tc.lib_dirs` entry)
- * into `out`. Same one-flag-per-entry shape build_aetherc_cmd emits — see the
- * #413 rationale there. A diagnostic/inspect aetherc run must resolve imports
- * against the SAME search path as the real compile, or a bare-name module that
- * only `--lib` makes resolvable is reported "unresolved" by the prepass even
- * though the build itself resolves it fine (the FreeBSD cross-build red herring:
- * cross_uses_unsupported_module's inspect ran without --lib and printed a
- * spurious `unresolved import` that looked like `--lib` being target-dropped).
- * Truncation just yields a shorter (still valid) flag list. */
-static void tc_lib_flags(char* out, size_t out_size) {
-    size_t off = 0;
-    if (out_size) out[0] = '\0';
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(out + off, out_size - off, " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= out_size - off) break;
-        off += (size_t)w;
+/* The ` --lib "<dir>"` search-path flags (one per `tc.lib_dirs` entry), in a
+ * string the caller frees. Same one-flag-per-entry shape build_aetherc_cmd
+ * emits; see the #413 rationale there. A diagnostic/inspect aetherc run must
+ * resolve imports against the SAME search path as the real compile, or a
+ * bare-name module that only `--lib` makes resolvable is reported
+ * "unresolved" by the prepass even though the build itself resolves it fine
+ * (the FreeBSD cross-build red herring: cross_uses_unsupported_module's
+ * inspect ran without --lib and printed a spurious `unresolved import` that
+ * looked like `--lib` being target-dropped). Every flag, whatever the paths'
+ * length (#2539): a 2304-byte list dropped the directories past it, and the
+ * compile searched fewer than it was given. */
+static char* tc_lib_flags(void) {
+    size_t cap = 1;
+    for (int i = 0; i < tc.lib_dir_count; i++) cap += strlen(tc.lib_dirs[i]) + 10;
+    char* out = (char*)malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory building the --lib flags\n");
+        exit(1);
     }
+    size_t off = 0;
+    out[0] = '\0';
+    for (int i = 0; i < tc.lib_dir_count; i++)
+        off += (size_t)snprintf(out + off, cap - off, " --lib \"%s\"", tc.lib_dirs[i]);
+    return out;
 }
 
 // --with=<caps> forwarded verbatim to aetherc. Empty by default; set
@@ -220,7 +222,15 @@ static char g_with_caps[128] = "";
  * dropped from the AST, so this is what decides whether a subsystem is in the
  * binary at all (#1527). Names come from the command line and from
  * aether.toml's `[build] defines`. */
-static char g_defines[1024] = "";
+/* The -D symbols, as the compile commands pass them (` -D "NAME"` each),
+ * grown as symbols are added: a fixed 1 KB warned and dropped the ones past
+ * it, and the build went on to make a different program (#2546). */
+static char* g_defines = NULL;
+static size_t g_defines_len = 0, g_defines_cap = 0;
+
+static const char* defines_flags(void) { return g_defines ? g_defines : ""; }
+
+static char* ae_strdup_printf(const char* fmt, ...);
 
 static const char* get_link_flags(void);
 
@@ -233,22 +243,37 @@ static const char* get_link_flags(void);
  * over an already-built tree printed "Built (cache hit)" and handed back the
  * uninstrumented binary, so a sanitizer run measured nothing at all. Same
  * silent-staleness shape as the --trace miss below. */
-static const char* ae_define_salt(const char* base, char* buf, size_t n) {
+/* `base` with the -D symbols and the manifest's flags, whole: a salt cut at
+ * a fixed buffer's end left what was cut out of the key, and two builds that
+ * differed only there shared one cache entry (#2546). The result lives for
+ * the process (it is `base` itself, or a string never freed), since a build
+ * computes its key again from the same salt; NULL when `base` is NULL or
+ * memory runs out, which compute_cache_key takes as "no key". */
+static const char* ae_define_salt(const char* base) {
+    if (!base) return NULL;
     const char* cf = get_cflags();
     const char* lf = get_link_flags();
-    if (!g_defines[0] && !cf[0] && !lf[0]) return base;
-    snprintf(buf, n, "%s%s|cf=%s|lf=%s", base, g_defines, cf, lf);
-    return buf;
+    if (!g_defines_len && !cf[0] && !lf[0]) return base;
+    return ae_strdup_printf("%s%s|cf=%s|lf=%s", base, defines_flags(), cf, lf);
 }
 
 static void ae_define_append(const char* name) {
     if (!name || !*name) return;
-    size_t used = strlen(g_defines);
-    int w = snprintf(g_defines + used, sizeof(g_defines) - used, " -D \"%s\"", name);
-    if (w < 0 || (size_t)w >= sizeof(g_defines) - used) {
-        fprintf(stderr, "warning: too many -D symbols; '%s' was dropped\n", name);
-        g_defines[used] = '\0';
+    size_t need = g_defines_len + strlen(name) + 7;   /* ` -D "` + `"` + NUL */
+    if (need > g_defines_cap) {
+        size_t cap = g_defines_cap ? g_defines_cap : 256;
+        while (cap < need) cap *= 2;
+        char* grown = (char*)realloc(g_defines, cap);
+        if (!grown) {
+            /* A build without the symbol is another program: stop. */
+            fprintf(stderr, "Error: out of memory adding -D %s\n", name);
+            exit(1);
+        }
+        g_defines = grown;
+        g_defines_cap = cap;
     }
+    g_defines_len += (size_t)snprintf(g_defines + g_defines_len, g_defines_cap - g_defines_len,
+                                      " -D \"%s\"", name);
 }
 
 /* `-D NAME` / `-DNAME` at argv[*i]: append the symbol and advance past it.
@@ -345,7 +370,9 @@ static bool g_trace = false;
 // and records the .so path + rpath here so build_gcc_cmd links it.
 // Empty for the common all-source build. On Windows it carries the DLL
 // paths alone (PE has no rpath; the DLLs are staged next to the output).
-static char g_binimport_link[4096] = "";
+// Grown as needed (#2543): a 4 KB buffer dropped the libraries past it.
+static char* g_binimport_link = NULL;
+static const char* binimport_link(void) { return g_binimport_link ? g_binimport_link : ""; }
 
 // Extra link flags accumulated by the host-bridge import prepass: when
 // a program `import`s `contrib.host.<lang>`, the bridge's static lib
@@ -549,6 +576,8 @@ static const char* ae_runtime_link_arg(void) {
     return arg;
 }
 
+static void cmd_too_long(char* cmd, size_t size, int needed);
+
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
     if (g_emit_csrc)                   emit_flag = " --emit=csrc";
@@ -601,14 +630,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * plain directory path — survives cmd.exe, MSYS2, and any
      * other shell quoting without depending on `;` or `:`
      * preservation inside double quotes. Issue #413. */
-    char lib_flags[2304] = "";
-    size_t lf_off = 0;
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(lib_flags + lf_off, sizeof(lib_flags) - lf_off,
-                         " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
-        lf_off += (size_t)w;
-    }
+    char* lib_flags = tc_lib_flags();
     char deps_flag[1240] = "";
     if (g_emit_deps_path[0]) {
         snprintf(deps_flag, sizeof(deps_flag), " --emit-deps=%s", g_emit_deps_path);
@@ -618,65 +640,124 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * and a program importing it follows (#2297). */
     const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
     const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
-             tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-             g_lib_package_flag, shared_rt_flag, lib_actors_flag, g_defines, lib_flags,
-             deps_flag, input, output);
+    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+                     tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
+                     g_lib_package_flag, shared_rt_flag, lib_actors_flag, defines_flags(), lib_flags,
+                     deps_flag, input, output);
+    free(lib_flags);
+    if (w >= (int)cmd_size) cmd_too_long(cmd, cmd_size, w);
 }
 
 // --------------------------------------------------------------------------
 // Utility functions
 // --------------------------------------------------------------------------
 
-#ifndef _WIN32
-// Run a command via posix_spawnp (faster than system() — no /bin/sh overhead)
-// Space-splits the command string into argv (no shell quoting supported,
-// but our controlled commands never need it).
-// quiet=0: show all output, quiet=1: hide stdout+stderr, quiet=2: hide stdout only (keep stderr for warnings)
-static int posix_run(const char* cmd_str, int quiet, const char* capture) {
-    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
-    char buf[AE_CMD_BUF];
-    strncpy(buf, cmd_str, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    /* Split into argv. There is no shell here — posix_spawnp hands the
-     * tokens to the program verbatim — so this tokenizer IS the quoting
-     * rule, and a quote it does not remove reaches the program as a
-     * character of the argument.
-     *
-     * A quote is therefore honoured ANYWHERE in a token, not only at its
-     * start: the flags this builds include `-I"/path/with space"` and
-     * `-L"..."`, where the quote opens after the flag letters. Treating
-     * only a leading quote as syntax passed `-I"/path"` to the C compiler
-     * with the quotes in it, and it looked for a directory of that literal
-     * name (#1986 — the Linux/Clang lane found it; Windows hid it, because
-     * there the child CRT re-parses the command line and strips them).
-     *
-     * Compacted in place: removing quotes only ever shortens a token, so
-     * the write cursor never passes the read cursor. */
-    char* toks[512];
+/* Splits a command string into an argument vector for a spawn. There is no
+ * shell, so this tokenizer IS the quoting rule: a space separates
+ * arguments, and a double quote anywhere in a token opens or closes a
+ * quoted run, in which spaces are kept, and is itself removed. Anywhere,
+ * not only at a token's start: the flags built here include
+ * `-I"/path/with space"` and `-L"..."`, and passing `-I"/path"` with its
+ * quotes made the C compiler look for a directory of that literal name
+ * (#1986).
+ *
+ * The vector and its strings are one allocation, released with free(), and
+ * neither the number nor the length of the arguments is bounded: the fixed
+ * table of 511 this replaced dropped the rest of a longer command without
+ * a word (#2534). NULL when out of memory. */
+static char** ae_split_command(const char* cmd, int* count) {
     int n = 0;
-    {
-        char* p = buf;
-        char* w = buf;
-        while (*p && n < 511) {
-            while (*p == ' ') p++;
-            if (!*p) break;
-            toks[n++] = w;
-            int in_quotes = 0;
-            while (*p && (in_quotes || *p != ' ')) {
-                if (*p == '"') { in_quotes = !in_quotes; p++; continue; }
-                *w++ = *p++;
-            }
-            /* Step past the separator before terminating: w is at most p
-             * here, so the NUL lands on the space or on the existing one. */
-            if (*p == ' ') p++;
-            *w++ = '\0';
+    for (const char* p = cmd; *p; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        n++;
+        int in_quotes = 0;
+        while (*p && (in_quotes || *p != ' ')) {
+            if (*p == '"') in_quotes = !in_quotes;
+            p++;
         }
     }
-    toks[n] = NULL;
-    if (n == 0) return 0;
+    /* An argument's characters are its source characters less its quotes,
+     * and its terminator takes the place of the space after it, or of the
+     * end of the string: the strings fit in strlen(cmd) + 1. */
+    size_t vec = ((size_t)n + 1) * sizeof(char*);
+    char** argv = malloc(vec + strlen(cmd) + 1);
+    if (!argv) return NULL;
+    char* w = (char*)argv + vec;
+    int i = 0;
+    for (const char* p = cmd; *p; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        argv[i++] = w;
+        int in_quotes = 0;
+        while (*p && (in_quotes || *p != ' ')) {
+            if (*p == '"') { in_quotes = !in_quotes; p++; continue; }
+            *w++ = *p++;
+        }
+        *w++ = '\0';
+    }
+    argv[i] = NULL;
+    if (count) *count = i;
+    return argv;
+}
 
+static void print_argv(char* const* argv) {
+    fputs("[cmd]", stderr);
+    for (int i = 0; argv[i]; i++) fprintf(stderr, " %s", argv[i]);
+    fputc('\n', stderr);
+}
+
+static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward);
+
+/* Runs a command string: split by ae_split_command, then spawned.
+ * quiet=0: show all output, 1: hide stdout and stderr, 2: hide stdout only
+ * (keep stderr for warnings), 3: stdout to the file `capture`. */
+static int run_command(const char* cmd_str, int quiet, const char* capture) {
+    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
+    char** argv = ae_split_command(cmd_str, NULL);
+    if (!argv) {
+        fprintf(stderr, "error: out of memory splitting a command\n");
+        return AE_SPAWN_FAILED;
+    }
+    int rc = argv[0] ? ae_spawn(argv, quiet, capture, 0) : 0;
+    free(argv);
+    return rc;
+}
+
+#ifndef _WIN32
+/* The pid of the program `ae run` launched, for the signal forwarder.
+ * volatile sig_atomic_t because the handler reads it. 0 = nothing running. */
+static volatile sig_atomic_t g_child_pid = 0;
+
+/* Forward a terminating signal to the child, then re-raise it so `ae`
+ * dies of the same signal it was sent (correct $? for the shell).
+ *
+ * WHY THIS EXISTS: `ae run` builds, then SPAWNS the built binary and
+ * waits — it does not exec it, because it still has work to do afterwards
+ * (evict a crashed binary from the cache, delete a non-cached temp exe).
+ * That means `ae run server.ae & ; kill $!` killed only the wrapper and
+ * ORPHANED the server, which kept its listening socket. On an ephemeral
+ * CI runner nobody notices; on a persistent box the orphan squats the
+ * port and the NEXT run of the same test fails to bind — a green run
+ * poisoning the one after it, with no code change in between.
+ *
+ * Forwarding rather than exec'ing keeps the post-run cleanup intact. */
+static void forward_signal_to_child(int sig) {
+    if (g_child_pid > 0) kill((pid_t)g_child_pid, sig);
+    /* Restore the default and re-raise so we report death-by-signal
+     * rather than exiting 0 out of a handler. */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* Spawns argv[0], looked up on PATH, with `argv` through posix_spawnp
+ * (no /bin/sh in between) and waits for it. `quiet` and `capture` as for
+ * run_command. `forward` relays SIGTERM, SIGINT and SIGHUP to the child
+ * while it runs: only for the program `ae run` launches, never for a build
+ * step. Returns the exit status, the negated signal for a child killed by
+ * one, or AE_SPAWN_FAILED, with the reason printed, when it never
+ * started. */
+static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward) {
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     if (quiet == 1) {
@@ -691,19 +772,43 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     }
 
     pid_t pid;
-    int ret = posix_spawnp(&pid, toks[0], &fa, NULL, toks, environ);
+    int ret = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     if (ret != 0) {
         /* posix_spawnp reports the reason as its return value. Printed here
          * because this is the only place that has it, and a build that ends
          * with "could not be started: Resource temporarily unavailable" is
          * diagnosable where a bare failure is not. */
-        fprintf(stderr, "error: could not start '%s': %s\n", toks[0], strerror(ret));
+        fprintf(stderr, "error: could not start '%s': %s\n", argv[0], strerror(ret));
         return AE_SPAWN_FAILED;
     }
 
+    /* Install forwarders only while the child is alive, and keep the
+     * previous dispositions so `ae` is unchanged for every other path. */
+    struct sigaction old_term, old_int, old_hup;
+    if (forward) {
+        g_child_pid = (sig_atomic_t)pid;
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = forward_signal_to_child;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGTERM, &sa, &old_term);
+        sigaction(SIGINT,  &sa, &old_int);
+        sigaction(SIGHUP,  &sa, &old_hup);
+    }
+
     int status = 0;
-    waitpid(pid, &status, 0);
+    /* EINTR: a forwarded signal interrupts waitpid; resume rather than
+     * abandoning the child (which would orphan it — the very bug). */
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+
+    if (forward) {
+        sigaction(SIGTERM, &old_term, NULL);
+        sigaction(SIGINT,  &old_int,  NULL);
+        sigaction(SIGHUP,  &old_hup,  NULL);
+        g_child_pid = 0;
+    }
+
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     if (WIFSIGNALED(status))
@@ -747,78 +852,199 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
 #ifndef _S_IWRITE
 #define _S_IWRITE 0x0080
 #endif
-static int win_run(const char* cmd_str, int quiet, const char* capture) {
-    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
-    char buf[AE_CMD_BUF];
-    strncpy(buf, cmd_str, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+/* #2533: does `prog`, spawned as _spawnvp will spawn it, run as a batch
+ * file? Windows runs a .cmd/.bat through cmd.exe, whose command line is
+ * capped at 8191 characters, where an .exe takes 32 KB. The resolution
+ * mirrors the CRT's: a name with a directory part is tried as is; a bare
+ * name is looked for in the current directory and then in each PATH entry;
+ * a name without an extension is tried with .com, .exe, .bat and .cmd in
+ * that order. 1 when the file that will run has a .cmd or .bat extension. */
+#define AE_WIN_PATH_MAX 4096
 
-    // Tokenize the command string into argv tokens for _spawnvp. Quoted
-    // segments map to ONE token even when they contain spaces.
-    //
-    // toks[0] (the program name) is unquoted: _spawnvp wants a bare path.
-    // toks[1..] are passed to the child verbatim — but MSVCRT's _spawnvp
-    // joins them with single spaces to build the child's command line
-    // WITHOUT any quoting of its own (documented MS behaviour). So a
-    // token containing a space, if left bare in toks[], reaches the
-    // child as multiple argv entries.  Wrap each non-program token that
-    // contains a space in literal `"..."` so the child's CRT
-    // command-line parser re-fuses it into one arg.  (Args that
-    // themselves contain a `"` are not handled — the caller's quoting
-    // convention at the cmd_str layer already doesn't support those.)
-    char* toks[512];
-    int n = 0;
-    // Backing store for re-quoted tokens. Sized 2× the input buffer so a
-    // worst-case input where every byte is part of a quoted token still
-    // fits (each token grows by 2 bytes of `"..."` wrapper).
-    char qbuf[32768];
-    int qoff = 0;
-    char* w = buf;
-    for (char* p = buf; *p && n < 511; ) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        /* A quote is syntax wherever it appears in the token, not only at
-         * its start — `-I"C:/path with space"` opens one after the flag
-         * letters. Compacted in place; dropping quotes only shortens. */
-        char* tok_start = w;
-        int had_quotes = 0;
-        {
-            int in_quotes = 0;
-            while (*p && (in_quotes || *p != ' ')) {
-                if (*p == '"') { in_quotes = !in_quotes; had_quotes = 1; p++; continue; }
-                *w++ = *p++;
-            }
-            if (*p == ' ') p++;
-            *w++ = '\0';
-        }
-        // For the program name (toks[0]) and tokens with no spaces,
-        // pass-through. For other tokens, store a re-quoted copy so
-        // _spawnvp's space-join produces a cmdline the child can re-
-        // tokenize correctly.
-        int needs_quoting = 0;
-        if (n > 0 && (had_quotes || strchr(tok_start, ' ') != NULL)) {
-            needs_quoting = 1;
-        }
-        if (needs_quoting) {
-            int len = (int)strlen(tok_start);
-            if (qoff + len + 3 > (int)sizeof(qbuf)) {
-                // Out of re-quote space — pass through and hope for the best.
-                toks[n++] = tok_start;
-            } else {
-                char* dst = qbuf + qoff;
-                dst[0] = '"';
-                memcpy(dst + 1, tok_start, len);
-                dst[len + 1] = '"';
-                dst[len + 2] = '\0';
-                toks[n++] = dst;
-                qoff += len + 3;
-            }
-        } else {
-            toks[n++] = tok_start;
-        }
+static int win_name_has_batch_ext(const char* name) {
+    size_t n = strlen(name);
+    if (n < 4) return 0;
+    const char* ext = name + n - 4;
+    return _stricmp(ext, ".cmd") == 0 || _stricmp(ext, ".bat") == 0;
+}
+
+static int win_file_exists(const char* path) {
+    DWORD a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* The file `dir\name[ext]` that the CRT would run, with `ext` tried in its
+ * order when `name` has no extension of its own; its batch-ness, or -1 when
+ * nothing is found there. */
+static int win_resolve_in_dir(const char* dir, const char* name) {
+    char path[AE_WIN_PATH_MAX];
+    const char* base = strrchr(name, '\\');
+    const char* base2 = strrchr(name, '/');
+    if (base2 > base) base = base2;
+    base = base ? base + 1 : name;
+    int has_ext = strchr(base, '.') != NULL;
+    if (dir && *dir) snprintf(path, sizeof(path), "%s\\%s", dir, name);
+    else snprintf(path, sizeof(path), "%s", name);
+    if (has_ext) return win_file_exists(path) ? win_name_has_batch_ext(path) : -1;
+    static const char* const exts[] = { ".com", ".exe", ".bat", ".cmd" };
+    size_t len = strlen(path);
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+        snprintf(path + len, sizeof(path) - len, "%s", exts[i]);
+        if (win_file_exists(path)) return win_name_has_batch_ext(path);
     }
-    toks[n] = NULL;
+    return -1;
+}
+
+static int win_prog_is_batch(const char* prog) {
+    if (!prog || !*prog) return 0;
+    if (strchr(prog, '\\') || strchr(prog, '/') || (prog[1] == ':')) {
+        int r = win_resolve_in_dir(NULL, prog);
+        return r > 0;
+    }
+    int r = win_resolve_in_dir(NULL, prog);
+    if (r >= 0) return r;
+    const char* path = getenv("PATH");
+    if (!path) return 0;
+    const char* p = path;
+    while (*p) {
+        const char* end = strchr(p, ';');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len > 0 && len < AE_WIN_PATH_MAX) {
+            char dir[AE_WIN_PATH_MAX];
+            memcpy(dir, p, len);
+            dir[len] = '\0';
+            if (dir[0] == '"' && len >= 2 && dir[len - 1] == '"') {
+                memmove(dir, dir + 1, len - 2);
+                dir[len - 2] = '\0';
+            }
+            r = win_resolve_in_dir(dir, prog);
+            if (r >= 0) return r;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+
+/* #2533: writes argv[1..] to a response file the way gcc's and clang's
+ * `@file` reader takes it: one argument per line, in double quotes (so
+ * spaces survive), with each backslash and quote escaped (a backslash is
+ * the escape character there). The file's path goes to `out`; 0 when it
+ * could not be written. */
+static int win_write_response_file(char* const* argv, char* out, size_t out_size) {
+    static int seq = 0;
+    snprintf(out, out_size, "%s\\ae_args_%d_%d.rsp", get_temp_dir(), (int)_getpid(), seq++);
+    FILE* f = fopen(out, "wb");
+    if (!f) return 0;
+    for (int i = 1; argv[i]; i++) {
+        fputc('"', f);
+        for (const char* p = argv[i]; *p; p++) {
+            if (*p == '\\' || *p == '"') fputc('\\', f);
+            fputc(*p, f);
+        }
+        fputs("\"\n", f);
+    }
+    int ok = !ferror(f);
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) remove(out);
+    return ok;
+}
+
+/* Whether an argument needs quotes on a Windows command line: the child's
+ * C runtime splits at spaces and tabs and reads quotes as syntax, and a
+ * batch file runs through cmd.exe, which takes & | < > ^ ( ) outside quotes
+ * as its own. An empty argument needs them to exist at all. */
+static int win_arg_needs_quotes(const char* arg) {
+    return *arg == '\0' || strpbrk(arg, " \t\"&|<>^()") != NULL;
+}
+
+/* Writes `arg` at `w` as the child's C runtime reads it back out of the
+ * command line (the rule the CRT and CommandLineToArgvW share) and returns
+ * the end, at most 2 * strlen(arg) + 2 characters on. Bare when nothing in
+ * it needs quotes; otherwise quoted, with a backslash before each quote of
+ * its own and every run of backslashes doubled where a quote follows it,
+ * its own or the closing one: 2n backslashes and a quote read back as n
+ * backslashes and the quote's syntax, 2n + 1 as n and a literal quote. */
+static char* win_quote_arg(const char* arg, char* w) {
+    if (!win_arg_needs_quotes(arg)) {
+        size_t len = strlen(arg);
+        memcpy(w, arg, len);
+        return w + len;
+    }
+    *w++ = '"';
+    for (const char* p = arg; ; p++) {
+        size_t bs = 0;
+        while (*p == '\\') { bs++; p++; }
+        if (*p == '\0') {
+            for (size_t i = 0; i < 2 * bs; i++) *w++ = '\\';
+            break;
+        }
+        size_t run = *p == '"' ? 2 * bs + 1 : bs;
+        for (size_t i = 0; i < run; i++) *w++ = '\\';
+        *w++ = *p;
+    }
+    *w++ = '"';
+    return w;
+}
+
+/* cmd.exe refuses a longer line; kept under its 8191 with room for the
+ * batch file's own expansion of %* and its path. */
+#define WIN_CMD_LINE_MAX 8000
+
+/* Spawns argv[0] with `argv` through _spawnvp and waits for it. `quiet`
+ * and `capture` as for run_command; `forward` has nothing to do here, as
+ * Windows has no terminating signal to relay. Returns the exit status (for
+ * a crash, the NTSTATUS the OS ended it with, negative as an int), or
+ * AE_SPAWN_FAILED, with the reason printed, when it never started.
+ *
+ * _spawnvp joins its arguments with single spaces and quotes none of them,
+ * so each goes in already quoted for the child's C runtime, the program's
+ * own path included: a batch file runs through cmd.exe, which splits an
+ * unquoted path at its spaces. The bare path is what _spawnvp looks up. */
+static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward) {
+    (void)forward;
+    int n = 0;
+    size_t room = 0;
+    for (; argv[n]; n++) room += 2 * strlen(argv[n]) + 3;
     if (n == 0) return 0;
+    size_t vec = ((size_t)n + 1) * sizeof(char*);
+    char** list = malloc(vec + room);
+    if (!list) {
+        fprintf(stderr, "error: could not start '%s': out of memory\n", argv[0]);
+        return AE_SPAWN_FAILED;
+    }
+    char* w = (char*)list + vec;
+    size_t line = 0;
+    for (int i = 0; i < n; i++) {
+        list[i] = w;
+        w = win_quote_arg(argv[i], w);
+        line += (size_t)(w - list[i]) + 1;
+        *w++ = '\0';
+    }
+    list[n] = NULL;
+
+    /* #2533: a batch file (a gcc.cmd wrapper or shim found on PATH) runs
+     * through cmd.exe, whose command line is capped at 8191 characters: a
+     * build from a deep directory failed with "The command line is too
+     * long". Past the cap the arguments go through a response file,
+     * `prog @file`, which gcc and clang read; an executable keeps the
+     * direct spawn, whose own limit is 32 KB. */
+    char rsp_path[AE_WIN_PATH_MAX];
+    rsp_path[0] = '\0';
+    char rsp_arg[AE_WIN_PATH_MAX + 1];
+    char rsp_quoted[2 * (AE_WIN_PATH_MAX + 1) + 3];
+    char* rsp_list[3];
+    char* const* spawn_list = list;
+    if (line > WIN_CMD_LINE_MAX && n > 1 && win_prog_is_batch(argv[0]) &&
+        win_write_response_file(argv, rsp_path, sizeof(rsp_path))) {
+        snprintf(rsp_arg, sizeof(rsp_arg), "@%s", rsp_path);
+        *win_quote_arg(rsp_arg, rsp_quoted) = '\0';
+        rsp_list[0] = list[0];
+        rsp_list[1] = rsp_quoted;
+        rsp_list[2] = NULL;
+        spawn_list = rsp_list;
+        if (tc.verbose) fprintf(stderr, "[cmd] arguments in %s\n", rsp_path);
+    }
 
     // Redirect stdout/stderr for quiet modes
     int saved_stdout = -1, saved_stderr = -1;
@@ -845,8 +1071,10 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
      * the child never started. A child CAN exit 0xFFFFFFFF, so -1 alone does
      * not separate the two; errno, cleared first, does. */
     errno = 0;
-    int ret = (int)_spawnvp(_P_WAIT, toks[0], (const char* const*)toks);
+    int ret = (int)_spawnvp(_P_WAIT, argv[0], (const char* const*)spawn_list);
     int spawn_errno = (ret == -1) ? errno : 0;
+    if (rsp_path[0]) remove(rsp_path);
+    free(list);
 
     // Restore
     if (saved_stdout >= 0) { _dup2(saved_stdout, 1); _close(saved_stdout); }
@@ -855,7 +1083,7 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
     /* After the handles are back, or the message would go to nul. */
     if (spawn_errno != 0) {
         fprintf(stderr, "error: could not start '%s': %s\n",
-                toks[0], strerror(spawn_errno));
+                argv[0], strerror(spawn_errno));
         return AE_SPAWN_FAILED;
     }
     return ret;
@@ -863,20 +1091,12 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
 #endif
 
 int run_cmd(const char* cmd) {
-#ifndef _WIN32
-    return posix_run(cmd, 0, NULL);
-#else
-    return win_run(cmd, 0, NULL);
-#endif
+    return run_command(cmd, 0, NULL);
 }
 
 // Run a command, suppressing all output (quiet mode)
 int run_cmd_quiet(const char* cmd) {
-#ifndef _WIN32
-    return posix_run(cmd, 1, NULL);
-#else
-    return win_run(cmd, 1, NULL);
-#endif
+    return run_command(cmd, 1, NULL);
 }
 
 /* The shared-library extension for a build TARGET -- not the host. (#1648)
@@ -924,7 +1144,7 @@ static const char* exe_ext_for(const char* target) {
  * code and a machine under memory pressure. A sweep run hit exactly that
  * and left nothing to diagnose.
  *
- * `posix_run` returns -signal for a child that died of one, and on Windows
+ * `ae_spawn` returns -signal for a child that died of one, and on Windows
  * an abnormal termination carries an NTSTATUS whose high bit is set, so
  * both land as a negative rc. That, and only that, is worth a note here.
  *
@@ -965,11 +1185,7 @@ static const char* compile_log_path(char* buf, size_t size) {
  * C compiler that reports through it (emcc does) would fail with no
  * explanation at all. */
 int run_cmd_capture_stdout(const char* cmd, const char* path) {
-#ifndef _WIN32
-    return posix_run(cmd, 3, path);
-#else
-    return win_run(cmd, 3, path);
-#endif
+    return run_command(cmd, 3, path);
 }
 
 /* Print a captured stdout log to stderr, so it interleaves with the
@@ -986,44 +1202,10 @@ void dump_captured_stdout(const char* path) {
 
 // Run a command, showing stderr (warnings) but hiding stdout
 int run_cmd_show_warnings(const char* cmd) {
-#ifndef _WIN32
-    return posix_run(cmd, 2, NULL);
-#else
-    return win_run(cmd, 2, NULL);
-#endif
+    return run_command(cmd, 2, NULL);
 }
 
-#ifndef _WIN32
-/* The pid of the program `ae run` launched, for the signal forwarder.
- * volatile sig_atomic_t because the handler reads it. 0 = nothing running. */
-static volatile sig_atomic_t g_child_pid = 0;
-
-/* Forward a terminating signal to the child, then re-raise it so `ae`
- * dies of the same signal it was sent (correct $? for the shell).
- *
- * WHY THIS EXISTS: `ae run` builds, then SPAWNS the built binary and
- * waits — it does not exec it, because it still has work to do afterwards
- * (evict a crashed binary from the cache, delete a non-cached temp exe).
- * That means `ae run server.ae & ; kill $!` killed only the wrapper and
- * ORPHANED the server, which kept its listening socket. On an ephemeral
- * CI runner nobody notices; on a persistent box the orphan squats the
- * port and the NEXT run of the same test fails to bind — a green run
- * poisoning the one after it, with no code change in between.
- *
- * Forwarding rather than exec'ing keeps the post-run cleanup intact. */
-static void forward_signal_to_child(int sig) {
-    if (g_child_pid > 0) kill((pid_t)g_child_pid, sig);
-    /* Restore the default and re-raise so we report death-by-signal
-     * rather than exiting 0 out of a handler. */
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-#endif
-
-/* Run the just-built program, forwarding termination signals to it.
- * Used ONLY for the program `ae run` launches — build steps (aetherc,
- * gcc) keep the plain run_cmd path, where forwarding would be wrong. */
-/* Say what a crashed child died of. run_cmd_forwarding returns the negated
+/* Say what a crashed child died of. run_argv_forwarding returns the negated
  * signal on POSIX; on Windows _spawnvp hands back the process exit code,
  * which for a crash is the NTSTATUS the OS terminated it with (0xC0000094
  * for an integer divide by zero, 0xC0000005 for an access violation) --
@@ -1059,65 +1241,12 @@ static void report_crash(int rc) {
 #endif
 }
 
-int run_cmd_forwarding(const char* cmd) {
-#ifdef _WIN32
-    /* Windows has no SIGTERM-to-child model that matches this; the
-     * orphaning report is POSIX-specific (kill $! in a shell test). */
-    return win_run(cmd, 0, NULL);
-#else
-    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
-    char buf[AE_CMD_BUF];
-    strncpy(buf, cmd, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    char* toks[512];
-    int n = 0;
-    for (char* p = buf; *p && n < 511; ) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        if (*p == '"') {
-            p++;
-            toks[n++] = p;
-            while (*p && *p != '"') p++;
-            if (*p) *p++ = '\0';
-        } else {
-            toks[n++] = p;
-            while (*p && *p != ' ') p++;
-            if (*p) *p++ = '\0';
-        }
-    }
-    toks[n] = NULL;
-    if (n == 0) return 0;
-
-    pid_t pid;
-    if (posix_spawnp(&pid, toks[0], NULL, NULL, toks, environ) != 0) return -1;
-    g_child_pid = (sig_atomic_t)pid;
-
-    /* Install forwarders only while the child is alive, and keep the
-     * previous dispositions so `ae` is unchanged for every other path. */
-    struct sigaction sa;
-    struct sigaction old_term, old_int, old_hup;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = forward_signal_to_child;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGTERM, &sa, &old_term);
-    sigaction(SIGINT,  &sa, &old_int);
-    sigaction(SIGHUP,  &sa, &old_hup);
-
-    int status = 0;
-    /* EINTR: a forwarded signal interrupts waitpid; resume rather than
-     * abandoning the child (which would orphan it — the very bug). */
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
-
-    sigaction(SIGTERM, &old_term, NULL);
-    sigaction(SIGINT,  &old_int,  NULL);
-    sigaction(SIGHUP,  &old_hup,  NULL);
-    g_child_pid = 0;
-
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
-    return -1;
-#endif
+/* Runs the program `ae run` launches, forwarding termination signals to
+ * it. Build steps (aetherc, gcc) keep the plain run_cmd path, where
+ * forwarding would be wrong. */
+static int run_argv_forwarding(char* const* argv) {
+    if (tc.verbose) print_argv(argv);
+    return ae_spawn(argv, 0, NULL, 1);
 }
 
 /* AE_TEST_RUNNER — prefix the just-built binary with a runner program
@@ -1168,6 +1297,61 @@ static bool is_safe_path(const char* path) {
 /* #1378 follow-up: both the include list and the MANIFEST source list were
  * fixed buffers that a long install prefix silently overflowed, dropping -I
  * entries and .c files from an otherwise correct build. They grow instead. */
+/* printf into a new heap string sized to fit, for free(); NULL when out of
+ * memory. For a piece of a command that holds user input of any length,
+ * where a fixed buffer would cut it without a word (#2534). */
+static char* ae_strdup_printf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return NULL;
+    char* out = malloc((size_t)n + 1);
+    if (!out) return NULL;
+    va_start(ap, fmt);
+    vsnprintf(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
+/* A path (or a list of them) built with printf, of any length, in a string
+ * the caller frees. Out of memory ends the run, as the --lib helpers do:
+ * a path that could not be built would be taken for one that is absent
+ * (#2543). */
+static char* ae_path_printf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char* out = n < 0 ? NULL : (char*)malloc((size_t)n + 1);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory building a path\n");
+        exit(1);
+    }
+    va_start(ap, fmt);
+    vsnprintf(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
+/* Append printf output to a string grown as needed (`*s` NULL to start). */
+static void ae_path_appendf(char** s, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    size_t used = *s ? strlen(*s) : 0;
+    char* grown = n < 0 ? NULL : (char*)realloc(*s, used + (size_t)n + 1);
+    if (!grown) {
+        fprintf(stderr, "Error: out of memory building a path\n");
+        exit(1);
+    }
+    va_start(ap, fmt);
+    vsnprintf(grown + used, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    *s = grown;
+}
+
 static int str_buf_grow(char** out, size_t* cap, size_t need_total) {
     if (need_total < *cap) return 1;
     size_t next = *cap ? *cap : 16384;
@@ -1918,12 +2102,29 @@ static bool env_var_name_allowed(const char* name, size_t n) {
     return true;
 }
 
-static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
-    if (dst_size == 0) return;
-    size_t di = 0;
-    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_size; ) {
+/* Appends `n` bytes of `src` to the growing string *dst. 0 when out of
+ * memory. */
+static int expand_put(char** dst, size_t* len, size_t* cap, const char* src, size_t n) {
+    if (!str_buf_grow(dst, cap, *len + n)) return 0;
+    memcpy(*dst + *len, src, n);
+    *len += n;
+    (*dst)[*len] = '\0';
+    return 1;
+}
+
+/* The expansion of `src` as a new string, sized to fit, for free(); NULL
+ * when out of memory. It used to be written into each caller's fixed
+ * buffer and cut at its end without a word, so a long `cflags`, or a
+ * `${AETHER_*}` holding a whole `python3-config --ldflags`, lost flags
+ * (#2534). */
+static char* expand_env_vars(const char* src) {
+    char* dst = NULL;
+    size_t len = 0, cap = 0;
+    if (!str_buf_grow(&dst, &cap, 0)) return NULL;
+    dst[0] = '\0';
+    for (size_t si = 0; src[si] != '\0'; ) {
         if (src[si] == '\\' && src[si + 1] == '$') {
-            dst[di++] = '$';
+            if (!expand_put(&dst, &len, &cap, "$", 1)) goto oom;
             si += 2;
             continue;
         }
@@ -1943,11 +2144,7 @@ static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
                     } else {
                         const char* v = getenv(name);
                         if (v) {
-                            size_t vl = strlen(v);
-                            size_t room = dst_size - 1 - di;
-                            size_t cp = vl < room ? vl : room;
-                            memcpy(dst + di, v, cp);
-                            di += cp;
+                            if (!expand_put(&dst, &len, &cap, v, strlen(v))) goto oom;
                         } else {
                             fprintf(stderr,
                                 "ae: warning: aether.toml references "
@@ -1962,9 +2159,13 @@ static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
             }
             // Unterminated ${: fall through and copy the literal '$'.
         }
-        dst[di++] = src[si++];
+        if (!expand_put(&dst, &len, &cap, src + si, 1)) goto oom;
+        si++;
     }
-    dst[di] = '\0';
+    return dst;
+oom:
+    free(dst);
+    return NULL;
 }
 
 /* `[build] defines = "A B"` in aether.toml, the project-level equivalent of
@@ -2115,7 +2316,7 @@ static int dep_append_module_roots(const char* root, const char* name) {
     for (char* tok = strtok(buf, " \t,"); tok; tok = strtok(NULL, " \t,")) {
         /* `modules = "."` is the explicit opt-in root export: it joins the
          * package ROOT itself onto the search path, so a package whose
-         * modules live in `core/*.ae` and import each other with a dotted
+         * modules live in `core/<name>.ae` and import each other with a dotted
          * package prefix (`import core.phonenumber`) is `ae add`-consumable
          * without giving up that namespacing. A normal entry names a module
          * and what joins is its PARENT (below); `.` has no leaf to strip and
@@ -2496,10 +2697,14 @@ static void load_defines_from_toml(void) {
     if (!doc) return;
     const char* val = toml_get_value(doc, "build", "defines");
     if (val) {
-        char expanded[1024];
-        expand_env_vars(val, expanded, sizeof(expanded));
-        for (char* tok = strtok(expanded, " \t,"); tok; tok = strtok(NULL, " \t,")) {
-            ae_define_append(tok);
+        char* expanded = expand_env_vars(val);
+        if (!expanded) {
+            fprintf(stderr, "ae: out of memory reading aether.toml [build] defines\n");
+        } else {
+            for (char* tok = strtok(expanded, " \t,"); tok; tok = strtok(NULL, " \t,")) {
+                ae_define_append(tok);
+            }
+            free(expanded);
         }
     }
     toml_free_document(doc);
@@ -2539,24 +2744,25 @@ static void load_defines_from_toml(void) {
 #endif
 
 static const char* get_link_flags(void) {
-    static char flags[1024] = "";
+    /* Read once and kept for the process: every compile asks. */
+    static char* flags = NULL;
     static bool checked = false;
 
-    if (checked) return flags;
+    if (checked) return flags ? flags : "";
     checked = true;
 
-    if (!path_exists(ae_manifest_path())) return flags;
+    if (!path_exists(ae_manifest_path())) return "";
 
     TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return flags;
+    if (!doc) return "";
 
     const char* val = toml_get_value(doc, "build", "link_flags");
-    if (val) {
-        expand_env_vars(val, flags, sizeof(flags));
+    if (val && !(flags = expand_env_vars(val))) {
+        fprintf(stderr, "ae: out of memory reading aether.toml [build] link_flags\n");
     }
 
     toml_free_document(doc);
-    return flags;
+    return flags ? flags : "";
 }
 
 // Read the `// aether-link: <tokens>` header codegen emits on the first line
@@ -2627,20 +2833,26 @@ static bool token_is_toolchain_managed(const char* tok, size_t len) {
     return token_is_platform_runtime(tok, len);
 }
 
+/* NULL when out of memory, after saying so. The string is kept for the
+ * process and valid until the next call: it holds the whole line, where a
+ * 1 KB line buffer and a 1 KB result dropped the flags past them (#2536). */
 static const char* get_aether_link_flags(const char* c_file, unsigned* required) {
-    static char flags[1024] = "";
-    flags[0] = '\0';
+    static char* flags = NULL;
+    static size_t flags_cap = 0;
     *required = 0;
-    if (!c_file) return flags;
+    if (!c_file) return "";
 
     FILE* f = fopen(c_file, "r");
-    if (!f) return flags;
+    if (!f) return "";
 
     // The header is emitted as the first line of the TU, but tolerate a few
     // leading lines rather than depending on exact placement.
-    char line[1024];
+    char* line = NULL;
+    size_t line_cap = 0;
+    const char* result = "";
     int lines_read = 0;
-    while (lines_read < 8 && fgets(line, sizeof(line), f)) {
+    int got = 0;
+    while (lines_read < 8 && (got = ae_read_line(f, &line, &line_cap)) > 0) {
         lines_read++;
         const char* p = strstr(line, "// aether-link:");
         if (!p) continue;
@@ -2649,6 +2861,12 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
         size_t n = strlen(p);
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
             n--;
+        /* Every token kept comes from these n bytes once, one space apart,
+         * so n + 1 bytes hold the result. */
+        if (!str_buf_grow(&flags, &flags_cap, n + 1)) {
+            got = -1;
+            break;
+        }
         // Record optional groups, then keep only non-managed tokens here.
         size_t out = 0;
         size_t i = 0;
@@ -2674,7 +2892,6 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
                 continue;
             }
             if (token_is_toolchain_managed(p + start, tlen)) continue;
-            if (out + tlen + 2 >= sizeof(flags)) break;
             if (out) flags[out++] = ' ';
             memcpy(flags + out, p + start, tlen);
             out += tlen;
@@ -2693,18 +2910,23 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
 #ifndef __APPLE__
         for (int k = 0; out > 0 && k < nplatform; k++) {
             size_t tl = strlen(platform[k]);
-            if (out + tl + 2 >= sizeof(flags)) break;
             flags[out++] = ' ';
             memcpy(flags + out, platform[k], tl);
             out += tl;
         }
 #endif
         flags[out] = '\0';
+        result = flags;
         break;
     }
 
+    free(line);
     fclose(f);
-    return flags;
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @link flags in %s\n", c_file);
+        return NULL;
+    }
+    return result;
 }
 
 // Read the `// aether-source: <path>` header lines codegen emits after the
@@ -2716,18 +2938,24 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
 // a `-D`-dropped import drops its sources with its libraries — a static
 // extra_sources entry cannot do that and, for a module used by twenty bins,
 // had to be restated in every one of them. Returns the space-separated,
-// quoted list (empty when nothing in the closure declares a source).
+// quoted list (empty when nothing in the closure declares a source), kept
+// for the process and valid until the next call; NULL when out of memory,
+// after saying so.
 const char* get_aether_source_files(const char* c_file) {
-    static char files[8192];
-    files[0] = '\0';
-    if (!c_file) return files;
+    static char* files = NULL;
+    static size_t files_cap = 0;
+    if (!c_file) return "";
     FILE* f = fopen(c_file, "r");
-    if (!f) return files;
+    if (!f) return "";
     /* The lines sit at the top of the TU, the link line first; stop at the
-     * first line that is not a `//` comment. */
-    char line[2048];
+     * first line that is not a `//` comment. Read whole (#2536): a link
+     * line past a 2 KB buffer left a chunk that is not one, and every
+     * source listed after it was dropped. */
+    char* line = NULL;
+    size_t line_cap = 0;
     size_t out = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         if (strncmp(line, "//", 2) != 0) break;
         const char* p = strstr(line, "// aether-source:");
         if (!p) continue;
@@ -2737,9 +2965,8 @@ const char* get_aether_source_files(const char* c_file) {
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
             n--;
         if (n == 0) continue;
-        if (out + n + 4 >= sizeof(files)) {
-            fprintf(stderr, "Warning: the module @source list exceeded 8 KiB; "
-                            "the remaining files were dropped from the build.\n");
+        if (!str_buf_grow(&files, &files_cap, out + n + 4)) {
+            got = -1;
             break;
         }
         if (out) files[out++] = ' ';
@@ -2749,8 +2976,13 @@ const char* get_aether_source_files(const char* c_file) {
         files[out++] = '"';
         files[out] = '\0';
     }
+    free(line);
     fclose(f);
-    return files;
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @source files in %s\n", c_file);
+        return NULL;
+    }
+    return out ? files : "";
 }
 
 /* Do two spellings name the same file on disk? A relative path from the
@@ -2780,16 +3012,28 @@ static bool same_source_file(const char* a, const char* b) {
  * declare the file) and imports that module would otherwise compile it
  * twice and fail at link on every symbol in it. Written to `out` in the
  * quoted, space-separated form extras_next reads. */
-void merge_source_lists(const char* extra, const char* module_sources, char* out, size_t cap) {
+const char* merge_source_lists(const char* extra, const char* module_sources) {
+    static char* out = NULL;
+    extra = extra ? extra : "";
+    module_sources = module_sources ? module_sources : "";
+    /* Every file is written back as it was read, quoted when it has a space
+     * (as it already was, or it would have read as two) and one space from
+     * the next, so the two lists' lengths, a separator and the terminator
+     * bound the result: no append below can run out of room. A fixed 16 KiB
+     * buffer used to drop the files past it, with a warning the build then
+     * scrolled past to a link error (#2536). */
+    size_t cap = strlen(extra) + strlen(module_sources) + 2;
+    free(out);
+    out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory merging the source list.\n");
+        return NULL;
+    }
     out[0] = '\0';
     char path[4096];
-    const char* cursor = extra ? extra : "";
-    while (extras_next(&cursor, path, sizeof(path))) {
-        if (!extras_append(out, cap, path)) {
-            fprintf(stderr, "Warning: the source list exceeded %zu bytes; '%s' was dropped.\n", cap, path);
-        }
-    }
-    cursor = module_sources ? module_sources : "";
+    const char* cursor = extra;
+    while (extras_next(&cursor, path, sizeof(path))) extras_append(out, cap, path);
+    cursor = module_sources;
     while (extras_next(&cursor, path, sizeof(path))) {
         bool seen = false;
         const char* prior = out;
@@ -2797,18 +3041,11 @@ void merge_source_lists(const char* extra, const char* module_sources, char* out
         while (!seen && extras_next(&prior, have, sizeof(have))) {
             if (same_source_file(have, path)) seen = true;
         }
-        if (seen) continue;
-        if (!extras_append(out, cap, path)) {
-            fprintf(stderr, "Warning: the source list exceeded %zu bytes; '%s' was dropped.\n", cap, path);
-        }
+        if (!seen) extras_append(out, cap, path);
     }
+    return out;
 }
 
-// Read the `// aether-include: <dir>` header lines codegen emits for the
-// modules that declared a `@c_include` (#1986), as `-I"<dir>"` flags. The
-// generated C includes the header by the name the module wrote, so the file
-// stays portable; these say where that name resolves. Empty when no module
-// in the closure asked for one, which is the common case.
 /* Does the generated C define an entry point? codegen says so in the header
  * with `// aether-entry: main`, the way it reports link, source and include
  * requirements (see emit_entry_point).
@@ -2822,13 +3059,19 @@ void merge_source_lists(const char* extra, const char* module_sources, char* out
 static int c_file_has_entry(const char* c_file) {
     FILE* f = fopen(c_file, "r");
     if (!f) return 1;   /* nothing to judge by; let the link speak */
-    char line[512];
+    /* Whole lines (#2536): the tail of a link line past a 512-byte buffer
+     * does not start with `//`, and the scan stopped before the entry. */
+    char* line = NULL;
+    size_t cap = 0;
     int found = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    while ((got = ae_read_line(f, &line, &cap)) > 0) {
         if (strncmp(line, "//", 2) != 0) break;
         if (strncmp(line, "// aether-entry: main", 21) == 0) { found = 1; break; }
     }
+    free(line);
     fclose(f);
+    if (got < 0) return 1;   /* out of memory: no verdict either */
     return found;
 }
 
@@ -2844,15 +3087,25 @@ static int require_entry_point(const char* c_file, const char* source) {
     return 0;
 }
 
+// Read the `// aether-include: <dir>` header lines codegen emits for the
+// modules that declared a `@c_include` (#1986), as `-I"<dir>"` flags. The
+// generated C includes the header by the name the module wrote, so the file
+// stays portable; these say where that name resolves. Empty when no module
+// in the closure asked for one, which is the common case. Kept for the
+// process and valid until the next call; NULL when out of memory, after
+// saying so.
 const char* get_aether_include_flags(const char* c_file) {
-    static char flags[4096];
-    flags[0] = '\0';
-    if (!c_file) return flags;
+    static char* flags = NULL;
+    static size_t flags_cap = 0;
+    if (!c_file) return "";
     FILE* f = fopen(c_file, "r");
-    if (!f) return flags;
-    char line[2048];
+    if (!f) return "";
+    /* Whole lines, as for the @source list (#2536). */
+    char* line = NULL;
+    size_t line_cap = 0;
     size_t out = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         if (strncmp(line, "//", 2) != 0) break;
         const char* p = strstr(line, "// aether-include:");
         if (!p) continue;
@@ -2861,9 +3114,8 @@ const char* get_aether_include_flags(const char* c_file) {
         size_t n = strlen(p);
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' ')) n--;
         if (n == 0) continue;
-        if (out + n + 6 >= sizeof(flags)) {
-            fprintf(stderr, "Warning: the @c_include include path exceeded 4 KiB; "
-                            "the remaining directories were dropped.\n");
+        if (!str_buf_grow(&flags, &flags_cap, out + n + 6)) {
+            got = -1;
             break;
         }
         if (out) flags[out++] = ' ';
@@ -2873,8 +3125,13 @@ const char* get_aether_include_flags(const char* c_file) {
         flags[out++] = '"';
         flags[out] = '\0';
     }
+    free(line);
     fclose(f);
-    return flags;
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @c_include directories in %s\n", c_file);
+        return NULL;
+    }
+    return out ? flags : "";
 }
 
 // --------------------------------------------------------------------------
@@ -2885,7 +3142,7 @@ const char* get_aether_include_flags(const char* c_file) {
 // is set, so each platform keeps its existing default (gcc on POSIX,
 // WinLibs/gcc on Windows).
 // --------------------------------------------------------------------------
-static const char* c_backend_env_override(void) {
+const char* c_backend_env_override(void) {
     const char* cc = getenv("AE_CC");
     if (cc && *cc) return cc;
     cc = getenv("CC");
@@ -2908,6 +3165,23 @@ static const char* c_backend_env_override(void) {
 
 static char s_gcc_bin[1100] = "gcc";  // path to gcc; updated by ensure_gcc_windows()
 static bool s_gcc_ready      = false; // set after first successful check
+/* How a command line names the C compiler (#2545): the program, quoted (its
+ * path may hold spaces), then the flags an $AE_CC / $CC override carries
+ * after it, as the POSIX build line has them. Quoting the whole override
+ * made `cc -Werror=...` one program name nothing could start. Set when
+ * ensure_gcc_windows succeeds. */
+static char* s_gcc_cmd = NULL;
+
+static bool gcc_ready(const char* flags) {
+    free(s_gcc_cmd);
+    s_gcc_cmd = ae_strdup_printf("\"%s\"%s", s_gcc_bin, flags);
+    if (!s_gcc_cmd) {
+        fprintf(stderr, "Error: out of memory naming the C compiler\n");
+        return false;
+    }
+    s_gcc_ready = true;
+    return true;
+}
 
 // Checks PATH, then ~/.aether/tools/, then downloads WinLibs on demand.
 // Returns true when gcc is usable; false means the user must intervene.
@@ -2924,36 +3198,36 @@ static bool ensure_gcc_windows(void) {
          * build's own "Build failed." over the top of it; POSIX said
          * plainly that the compiler was not found. Same message on both
          * now. The value may carry flags ("gcc -m32"), so only its first
-         * token is a program name. */
-        char first[256];
+         * token is a program name, and the rest follows it on every
+         * command (#2545). */
         size_t n = strcspn(ov, " \t");
-        if (n >= sizeof(first)) n = sizeof(first) - 1;
-        snprintf(first, sizeof(first), "%.*s", (int)n, ov);
+        if (n >= sizeof(s_gcc_bin)) {
+            fprintf(stderr, "Error: C compiler '%.*s' (from $%s) not found.\n", (int)n, ov,
+                    (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
+            return false;
+        }
+        snprintf(s_gcc_bin, sizeof(s_gcc_bin), "%.*s", (int)n, ov);
         /* A bare name is looked up on PATH; a path is checked where it
          * points, because `where` searches PATH and would not find it. */
         int ok;
-        if (strchr(first, '/') || strchr(first, '\\')) {
-            ok = _access(first, 0) == 0;
+        if (strchr(s_gcc_bin, '/') || strchr(s_gcc_bin, '\\')) {
+            ok = _access(s_gcc_bin, 0) == 0;
         } else {
-            char probe[600];
-            snprintf(probe, sizeof(probe), "where \"%s\" >nul 2>&1", first);
+            char probe[1200];
+            snprintf(probe, sizeof(probe), "where \"%s\" >nul 2>&1", s_gcc_bin);
             ok = system(probe) == 0;
         }
         if (!ok) {
             fprintf(stderr, "Error: C compiler '%s' (from $%s) not found.\n",
-                    first, (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
+                    s_gcc_bin, (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
+            snprintf(s_gcc_bin, sizeof(s_gcc_bin), "gcc");
             return false;
         }
-        snprintf(s_gcc_bin, sizeof(s_gcc_bin), "%s", ov);
-        s_gcc_ready = true;
-        return true;
+        return gcc_ready(ov + n);
     }
 
     // 1. Already on PATH?
-    if (system("gcc --version >nul 2>&1") == 0) {
-        s_gcc_ready = true;
-        return true;
-    }
+    if (system("gcc --version >nul 2>&1") == 0) return gcc_ready("");
 
     // 2. Already installed to ~/.aether/tools/ from a previous run?
     const char* home  = get_home_dir();
@@ -3013,8 +3287,7 @@ found:
         SetEnvironmentVariableA("PATH", updated);
     }
     snprintf(s_gcc_bin, sizeof(s_gcc_bin), "%s", tools_gcc);
-    s_gcc_ready = true;
-    return true;
+    return gcc_ready("");
 
 fail:
     fprintf(stderr, "[ae] GCC auto-install failed. Install it manually:\n");
@@ -3025,31 +3298,106 @@ fail:
     return false;
 }
 
+/* #2476: the assembler flag that keeps AVX code from faulting on the Win64
+ * stack, or "" when the build does not need it.
+ *
+ * Win64 only guarantees 16-byte stack alignment and GCC does not realign the
+ * stack for 32-byte values (GCC bug 54412), yet it still spills 256-bit
+ * temporaries with the aligned moves vmovaps / vmovdqa. When the slot lands
+ * on an address that is 16 but not 32 aligned, the move faults: an `f32x8`
+ * kernel built with -mavx2 segfaulted under MinGW GCC 15. binutils 2.38 and
+ * later can encode every aligned vector move as its unaligned twin
+ * (-muse-unaligned-vector-move), which runs at the same speed on aligned
+ * data on any AVX processor and does not fault on the rest, so the fix does
+ * not depend on which GCC is installed or on how a given kernel spills.
+ *
+ * Only a build that enables AVX gets it: the compiler is asked whether
+ * __AVX__ is defined under the user's cflags (which settles -march=native,
+ * -mfma, a later -mno-avx and the like), and only when those cflags carry a
+ * -m option at all, so a build without one runs no probe. The assembler is
+ * then asked whether it takes the option. Both answers hold for the process
+ * (one compiler, one set of cflags), so each probe runs at most once. */
+static const char* win_avx_stack_flags(const char* user_cflags) {
+    static int done = 0;
+    static const char* flags = "";
+    if (done) return flags;
+    done = 1;
+    int selects_isa = 0;
+    for (const char* p = user_cflags; p && *p && !selects_isa; p++) {
+        if ((p == user_cflags || p[-1] == ' ' || p[-1] == '\t') &&
+            p[0] == '-' && p[1] == 'm') selects_isa = 1;
+    }
+    if (!selects_isa) return flags;
+
+    char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
+    char* define_cmd;
+    int pid = (int)getpid();
+    snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
+    snprintf(probe_out, sizeof(probe_out), "%s/ae_avx_probe_%d.txt", get_temp_dir(), pid);
+    snprintf(probe_o, sizeof(probe_o), "%s/ae_avx_probe_%d.o", get_temp_dir(), pid);
+    FILE* f = fopen(probe_c, "w");
+    if (!f) return flags;
+    fclose(f);
+    int avx = 0;
+    /* The cflags are the user's, of any length (#2534). */
+    define_cmd = ae_strdup_printf("%s %s -dM -E \"%s\" -o \"%s\"",
+                                  s_gcc_cmd, user_cflags, probe_c, probe_out);
+    if (define_cmd && run_cmd_quiet(define_cmd) == 0) {
+        FILE* m = fopen(probe_out, "r");
+        char line[512];
+        while (m && !avx && fgets(line, sizeof(line), m)) {
+            avx = strncmp(line, "#define __AVX__ ", 16) == 0;
+        }
+        if (m) fclose(m);
+    }
+    free(define_cmd);
+    if (avx) {
+        snprintf(cmd, sizeof(cmd),
+                 "%s -Wa,-muse-unaligned-vector-move -c \"%s\" -o \"%s\"",
+                 s_gcc_cmd, probe_c, probe_o);
+        if (run_cmd_quiet(cmd) == 0) {
+            flags = " -Wa,-muse-unaligned-vector-move";
+        } else {
+            fprintf(stderr,
+                    "warning: AVX is enabled, but this assembler does not take "
+                    "-muse-unaligned-vector-move (binutils 2.38 or later).\n"
+                    "         GCC on Windows can spill 256-bit values with aligned "
+                    "moves to a 16-byte-aligned stack, which faults (GCC bug 54412).\n");
+        }
+    }
+    remove(probe_c);
+    remove(probe_out);
+    remove(probe_o);
+    return flags;
+}
+
 #endif // _WIN32
 
-// Get cflags from aether.toml [build] section (applied only for release/ae-build)
+// Get cflags from aether.toml [build] section, `${AETHER_*}` expanded as for
+// link_flags; every compile applies them (`ae build`, `ae run`, `ae test`).
 // Returns empty string if not found or no aether.toml
 bool ae_build_size_mode(void) { return g_size; }
 
 const char* get_cflags(void) {
-    static char flags[512] = "";
+    /* Read once and kept for the process: every compile asks. */
+    static char* flags = NULL;
     static bool checked = false;
 
-    if (checked) return flags;
+    if (checked) return flags ? flags : "";
     checked = true;
 
-    if (!path_exists(ae_manifest_path())) return flags;
+    if (!path_exists(ae_manifest_path())) return "";
 
     TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return flags;
+    if (!doc) return "";
 
     const char* val = toml_get_value(doc, "build", "cflags");
-    if (val) {
-        expand_env_vars(val, flags, sizeof(flags));
+    if (val && !(flags = expand_env_vars(val))) {
+        fprintf(stderr, "ae: out of memory reading aether.toml [build] cflags\n");
     }
 
     toml_free_document(doc);
-    return flags;
+    return flags ? flags : "";
 }
 
 // Get extra_sources for the [[bin]] entry whose path matches ae_file.
@@ -3071,11 +3419,11 @@ const char* get_cflags(void) {
 // buffer limit (v0.85 / the "tail entries dropped" fix).
 //
 // Returns 0 on clean fill, 1 if the `out` buffer was too small and at
-// least one filename was silently truncated. Callers should warn in
-// that case — the caller's subsequent `build_gcc_cmd` will hand the
-// linker a mangled partial path ("ae/.../handler_copy_generat" was
-// the real-world symptom that prompted this signature change) and
-// the error message won't point at extra_sources as the culprit.
+// least one filename was dropped. The caller refuses the build then
+// (merge_toml_extra_sources): the link would fail on the dropped file's
+// symbols, and that error would not point at extra_sources as the
+// culprit ("ae/.../handler_copy_generat", a path cut short, was the
+// real-world symptom that prompted this signature change).
 // Walk up from the current working directory looking for an
 // `aether.toml`. If found in some ancestor directory `D`, chdir
 // there and adjust the positional `*file_inout` (when relative) to
@@ -3158,12 +3506,17 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
     FILE* f = fopen(ae_manifest_path(), "r");
     if (!f) return 0;
 
-    char line[1024];
+    /* Whole lines (#2536), as get_extra_sources_for_bin reads the same
+     * file: a long line in a [[bin]] read in pieces could start a piece
+     * that looks like a key or a section. */
+    char* line = NULL;
+    size_t line_cap = 0;
     int in_bin = 0;
     int matched_name = 0;
     int found = 0;
+    int got;
 
-    while (fgets(line, sizeof(line), f)) {
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         size_t ln = strlen(s);
@@ -3204,7 +3557,9 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
             break;
         }
     }
+    free(line);
     fclose(f);
+    if (got < 0) fprintf(stderr, "Error: out of memory reading %s\n", ae_manifest_path());
     return found;
 }
 
@@ -3220,19 +3575,18 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
 
     int truncated = 0;
 
-    // 1 KiB was too small for projects with many extra_sources on one
-    // logical line: `extra_sources = ["a.c", "b.c", ..., "zz.c"]`. fgets
-    // silently truncates at the buffer boundary, dropping the tail of
-    // the array and producing link errors for the omitted shims — no
-    // warning, just "undefined reference to ..." at link time. 8 KiB
-    // fits ~250 comma-separated filenames of average length; projects
-    // hitting even that limit should switch to multi-line TOML arrays
-    // (tracked separately — parser still only handles single-line).
-    char line[8192];
+    // Whole lines, however many extra_sources sit on one: `extra_sources =
+    // ["a.c", "b.c", ..., "zz.c"]`. fgets into a fixed buffer (1 KiB, then
+    // 8 KiB) cut such a line at the boundary; when the cut fell inside a
+    // quoted name, that entry was lost and `", "` read as a file (#2536),
+    // with no warning, just "undefined reference to ..." at link time.
+    char* line = NULL;
+    size_t line_cap = 0;
+    int got;
     int in_bin = 0;
     int matched = 0;
 
-    while (fgets(line, sizeof(line), f)) {
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         size_t ln = strlen(s);
@@ -3303,7 +3657,7 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
             // Line-by-line loop. `frag` is the remaining unparsed
             // portion of the current line. We walk entries until we
             // hit the closing `]`; when we reach end-of-fragment
-            // without finding it, we fgets the next line and keep
+            // without finding it, we read the next line and keep
             // going. Continuation lines get the same whitespace +
             // comment strip as the outer loop.
             char* frag = eq;
@@ -3334,8 +3688,9 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
                     closed = 1;
                     break;
                 }
-                // Continuation: pull the next line.
-                if (!fgets(line, sizeof(line), f)) {
+                // Continuation: pull the next line. `s`, `eq` and `frag`
+                // pointed into the old one, which the read may move.
+                if ((got = ae_read_line(f, &line, &line_cap)) <= 0) {
                     // Malformed TOML — unterminated array at EOF.
                     // Treat as end; don't block the build here.
                     closed = 1;
@@ -3348,7 +3703,7 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
                     t[--tln] = '\0';
                 }
                 if (!*t || *t == '#') {
-                    frag = t;   // empty line / comment — frag is "" so we fgets again next iter
+                    frag = t;   // empty line / comment: frag is "" so we read again next iter
                     continue;
                 }
                 frag = t;
@@ -3356,8 +3711,38 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
             break;
         }
     }
+    free(line);
     fclose(f);
+    if (got < 0) return -1;
     return truncated;
+}
+
+/* The [[bin]] extra_sources of `file`, appended to the --extra list in
+ * `extra_files` (cap bytes, the 8 KiB every extras list has). 0, after
+ * saying why, when they cannot all be read or do not all fit: a build
+ * missing a source the manifest lists fails at the link, far from the
+ * cause, and `--extra` past the limit is refused the same way. */
+static int merge_toml_extra_sources(const char* file, char* extra_files, size_t cap) {
+    char toml_extra[8192] = "";
+    int r = get_extra_sources_for_bin(file, toml_extra, sizeof(toml_extra));
+    if (r < 0) {
+        fprintf(stderr, "Error: out of memory reading %s\n", ae_manifest_path());
+        return 0;
+    }
+    size_t used = strlen(extra_files);
+    if (r > 0 || (toml_extra[0] && used + (used ? 1 : 0) + strlen(toml_extra) + 1 > cap)) {
+        fprintf(stderr,
+            "Error: aether.toml [[bin]] extra_sources for '%s' (with any --extra\n"
+            "       files) exceed the %zu-byte source list. Split the array into\n"
+            "       fewer, larger shims or report it as a toolchain bug.\n",
+            file, cap);
+        return 0;
+    }
+    if (toml_extra[0]) {
+        if (used) strcat(extra_files, " ");
+        strcat(extra_files, toml_extra);
+    }
+    return 1;
 }
 
 /* Do two paths name the same file? Resolved first, so `./p.c` and `p.c` are
@@ -3581,9 +3966,15 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* ae_sources = get_aether_source_files(c_file);
     /* -I for each module that declared a `@c_include` (#1986). */
     const char* ae_includes = get_aether_include_flags(c_file);
-    char extra_buf[8192 + 8192 + 2];
-    merge_source_lists(extra_files, ae_sources, extra_buf, sizeof(extra_buf));
-    const char* extra = extra_buf;
+    if (!ae_link || !ae_sources || !ae_includes) {   /* out of memory, said */
+        set_failing_cmd(cmd, size);
+        return;
+    }
+    const char* extra = merge_source_lists(extra_files, ae_sources);
+    if (!extra) {   /* out of memory, said */
+        set_failing_cmd(cmd, size);
+        return;
+    }
 
     // User cflags from aether.toml apply to every build path — `ae build`,
     // `ae run`, and any internal invocation. Previously they were gated
@@ -3591,6 +3982,28 @@ void build_gcc_cmd(char* cmd, size_t size,
     // meant `-D<feature>` flags and warning-suppression that extern C
     // shims relied on silently broke `ae run`.
     const char* user_cflags = get_cflags();
+
+    // Append aether_config.c to the compile when building a lib so the
+    // aether_config_* accessors are bundled into the .so or DLL (a Windows
+    // DLL had none of them: this sat in the POSIX branch only). The .c file
+    // lives in runtime/ under dev mode and in include/aether/runtime/
+    // (or similar) on installed toolchains.
+    // config_c wraps `candidate` in ` "..."` — sized one tier up so
+    // gcc's -Wformat-truncation heuristic doesn't fire on the
+    // wrapper bytes (snprintf would truncate safely either way).
+    char config_c[2056] = "";
+    if (g_emit_lib) {
+        char candidate[2048];
+        /* src_root: this is a SOURCE path, and it is not inside a dev_mode
+         * branch, so a bare tc.root silently found nothing on an installed
+         * tree — the same defect as the wasm list, reached from --emit=lib.
+         * It failed quietly here (path_exists simply returns false and the
+         * config TU is omitted) rather than loudly as emcc did. */
+        snprintf(candidate, sizeof(candidate), "%s/runtime/aether_config.c", tc.src_root);
+        if (path_exists(candidate)) {
+            snprintf(config_c, sizeof(config_c), " \"%s\"", candidate);
+        }
+    }
 
 #ifdef _WIN32
     // Ensure GCC is available (auto-downloads WinLibs on first run if needed).
@@ -3609,7 +4022,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // library wasn't detected, in which case the stdlib wrappers fall into
     // their "unavailable" stubs at runtime.
     // -static links libwinpthread/libgcc into the binary so it runs without MinGW DLLs.
-    // Quote s_gcc_bin in case the path contains spaces.
+    // s_gcc_cmd quotes the compiler in case its path contains spaces.
 #ifdef AETHER_OPENSSL_LIBS
     const char* openssl_libs = (required_libs & LINK_OPENSSL) ? AETHER_OPENSSL_LIBS : "";
 #else
@@ -3681,7 +4094,7 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* yaml_libs = "";
 #endif
-    char opt[768];
+    char* opt;   /* the flags, with user cflags of any length (#2534) */
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
      * GCC's auto-export switches off the moment any symbol carries an
@@ -3699,11 +4112,17 @@ void build_gcc_cmd(char* cmd, size_t size,
          * `ae` links is one TU: make the definition strong. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s", emit_lib_flags, opt_flags(optimize),
-                 harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
+        opt = ae_strdup_printf("-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
+                               harden_cflags(optimize), harden_ldflags(), user_cflags,
+                               win_avx_stack_flags(user_cflags), trace_def);
     else
-        snprintf(opt, sizeof(opt), "-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                 harden_cflags(optimize), harden_ldflags(), trace_def);
+        opt = ae_strdup_printf("-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
+                               harden_cflags(optimize), harden_ldflags(), trace_def);
+    if (!opt) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        set_failing_cmd(cmd, size);
+        return;
+    }
     /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
      * so the two cannot drift apart again. */
     const char* win_link_libs = AETHER_WIN_SYSTEM_LIBS;
@@ -3749,10 +4168,10 @@ void build_gcc_cmd(char* cmd, size_t size,
          * linker, so `import contrib.host.tinygo` failed with undefined
          * tinygo_call_* while the .a sat in build/contrib. */
         const char* rt_arg = ae_runtime_link_arg();
-        if (!rt_arg) { set_failing_cmd(cmd, size); return; }
+        if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s %s \"%s\" %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, g_binimport_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "%s %s %s %s \"%s\"%s %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3761,8 +4180,8 @@ void build_gcc_cmd(char* cmd, size_t size,
          * references runtime symbols defined in tc.runtime_srcs, so it must
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s %s \"%s\" %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "%s %s %s %s \"%s\"%s %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3813,7 +4232,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
-    char opt[768];
+    char* opt;   /* the flags, with user cflags of any length (#2534) */
     // --emit=lib adds -fPIC -shared so the output is loadable via dlopen.
     // --emit=both (exe + lib from one source) is not supported by this
     // helper — the caller should invoke it twice with different modes,
@@ -3878,33 +4297,17 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
                             ? size_link_flags : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
-                 harden_cflags(optimize), harden_link, harden_pie, size_link,
-                 user_cflags, trace_def);
+        opt = ae_strdup_printf("%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
+                               harden_cflags(optimize), harden_link, harden_pie, size_link,
+                               user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
-                 harden_cflags(optimize), harden_link, harden_pie, size_link,
-                 trace_def);
-
-    // Append aether_config.c to the compile when building a lib so the
-    // aether_config_* accessors are bundled into the .so. The .c file
-    // lives in runtime/ under dev mode and in include/aether/runtime/
-    // (or similar) on installed toolchains.
-    // config_c wraps `candidate` in ` "..."` — sized one tier up so
-    // gcc's -Wformat-truncation heuristic doesn't fire on the
-    // wrapper bytes (snprintf would truncate safely either way).
-    char config_c[2056] = "";
-    if (g_emit_lib) {
-        char candidate[2048];
-        /* src_root: this is a SOURCE path, and it is not inside a dev_mode
-         * branch, so a bare tc.root silently found nothing on an installed
-         * tree — the same defect as the wasm list, reached from --emit=lib.
-         * It failed quietly here (path_exists simply returns false and the
-         * config TU is omitted) rather than loudly as emcc did. */
-        snprintf(candidate, sizeof(candidate), "%s/runtime/aether_config.c", tc.src_root);
-        if (path_exists(candidate)) {
-            snprintf(config_c, sizeof(config_c), " \"%s\"", candidate);
-        }
+        opt = ae_strdup_printf("%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
+                               harden_cflags(optimize), harden_link, harden_pie, size_link,
+                               trace_def);
+    if (!opt) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        set_failing_cmd(cmd, size);
+        return;
     }
 
     // Optional OpenSSL linker flags — baked in at `ae` build time from
@@ -4023,10 +4426,10 @@ void build_gcc_cmd(char* cmd, size_t size,
         else
             contrib_L[0] = '\0';
         const char* rt_arg = ae_runtime_link_arg();
-        if (!rt_arg) { set_failing_cmd(cmd, size); return; }
+        if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
@@ -4037,13 +4440,14 @@ void build_gcc_cmd(char* cmd, size_t size,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
     }
 #endif
+    free(opt);
 }
 
 static int build_wasm_cmd(char* cmd, size_t size,
@@ -4074,9 +4478,17 @@ static int build_wasm_cmd(char* cmd, size_t size,
      * target compiles the same generated C, so it needs the same paths. */
     {
         const char* extra_inc = get_aether_include_flags(c_file);
+        if (!extra_inc) return 0;   /* out of memory, said */
         if (extra_inc[0]) {
-            strncat(includes, " ", sizeof(includes) - strlen(includes) - 1);
-            strncat(includes, extra_inc, sizeof(includes) - strlen(includes) - 1);
+            /* Refused rather than cut: a cut -I loses the directories after
+             * it, and the error would be a header the compiler cannot find. */
+            if (strlen(includes) + 1 + strlen(extra_inc) >= sizeof(includes)) {
+                fprintf(stderr, "Error: the @c_include directories do not fit the "
+                                "%zu-byte include path of a wasm build.\n", sizeof(includes));
+                return 0;
+            }
+            strcat(includes, " ");
+            strcat(includes, extra_inc);
         }
     }
 
@@ -4126,13 +4538,22 @@ static int build_wasm_cmd(char* cmd, size_t size,
         NULL
     };
     char runtime[8192];
+    size_t rlen = 0;
     runtime[0] = '\0';
     for (int i = 0; wasm_runtime_files[i]; i++) {
-        char path[2048];
         /* src_root, not root — this bare tc.root was the bug: on an installed
          * tree it composed <prefix>/runtime/... and emcc failed on every file. */
-        snprintf(path, sizeof(path), "%s/%s ", tc.src_root, wasm_runtime_files[i]);
-        strncat(runtime, path, sizeof(runtime) - strlen(runtime) - 1);
+        int w = snprintf(runtime + rlen, sizeof(runtime) - rlen, "%s/%s ",
+                         tc.src_root, wasm_runtime_files[i]);
+        if (w < 0 || (size_t)w >= sizeof(runtime) - rlen) {
+            /* Refused rather than cut (#2537): a cut list compiles a
+             * runtime missing the files past it. */
+            fprintf(stderr, "Error: the wasm runtime sources under %s do not fit "
+                            "%zu bytes; build from a shorter path.\n",
+                    tc.src_root, sizeof(runtime));
+            return 0;
+        }
+        rlen += (size_t)w;
     }
 
     /* --emit=lib: a side-effect-free module with named exports rather than a
@@ -4143,34 +4564,43 @@ static int build_wasm_cmd(char* cmd, size_t size,
      *
      * -sEXPORTED_RUNTIME_METHODS=ccall,cwrap and MODULARIZE give the JS half
      * a callable surface; without them a consumer gets a module whose exports
-     * exist in the wasm but have no wrapper to reach them. */
-    char lib_flags[16384];
-    lib_flags[0] = '\0';
+     * exist in the wasm but have no wrapper to reach them. Sized to fit:
+     * a 16 KB buffer dropped the exports past it (#2537). */
+    char* lib_flags = NULL;
     if (g_emit_lib && !g_emit_exe) {
-        static char names[8192];
-        int n = wasm_collect_export_names(c_file, g_wasm_exports, names, sizeof(names));
-        size_t p = (size_t)snprintf(lib_flags, sizeof(lib_flags),
-            "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
-            "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free");
-        if (n > 0) {
-            for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n")) {
-                int w = snprintf(lib_flags + p, sizeof(lib_flags) - p, ",_%s", line);
-                if (w < 0 || (size_t)w >= sizeof(lib_flags) - p) break;
-                p += (size_t)w;
-            }
+        int n;
+        char* names = wasm_collect_export_names(c_file, g_wasm_exports, &n);
+        if (!names) return 0;   /* out of memory, said */
+        static const char base[] = "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
+                                   "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free";
+        size_t cap = sizeof(base) + strlen(names) + (size_t)n;
+        lib_flags = malloc(cap);
+        if (!lib_flags) {
+            free(names);
+            fprintf(stderr, "Error: out of memory listing the wasm exports.\n");
+            return 0;
         }
+        size_t p = (size_t)snprintf(lib_flags, cap, "%s", base);
+        for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n"))
+            p += (size_t)snprintf(lib_flags + p, cap - p, ",_%s", line);
+        free(names);
     }
 
     /* AETHER_WRAP_CFLAGS: emcc is clang, and the wasm build compiles the same
      * generated C as every other target, so it owes the same `int` semantics
      * (#1957). */
-    snprintf(cmd, size,
+    int w = snprintf(cmd, size,
         "emcc -O2" AETHER_WRAP_CFLAGS
         " -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING "
         "%s %s \"%s\" %s -o \"%s\" -lm "
         "-Wall -Wextra -Wno-unused-parameter -Wno-unused-function "
         "-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label",
-        lib_flags, includes, c_file, runtime, out_file);
+        lib_flags ? lib_flags : "", includes, c_file, runtime, out_file);
+    free(lib_flags);
+    if (w >= (int)size) {
+        cmd_too_long(cmd, size, w);
+        return 0;
+    }
 
     return 1;
 }
@@ -4214,8 +4644,9 @@ static void ae_lib_close(void* h) { dlclose(h); }
 #endif
 
 /* The directories of the binary libraries this build links, for staging
- * the DLLs next to a Windows output and for `ae run`'s PATH. ';'-joined. */
-static char g_binimport_dirs[4096] = "";
+ * the DLLs next to a Windows output and for `ae run`'s PATH. ';'-joined,
+ * grown as needed; NULL when there are none. */
+static char* g_binimport_dirs = NULL;
 /* Imported libraries, by runtime: a program that imports a library linked
  * against the shared runtime has to link it too (#2297). */
 static int g_binimport_shared_rt = 0;
@@ -4493,24 +4924,32 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
 // resolver closely enough to decide "source vs binary" for a bare import.
 // Resolve source module `mod` to its file path (`<base>/<mod>.ae` or
 // `<base>/<mod>/module.ae`), probing `.`, `src`, then every --lib/dependency
-// dir — the same order source-import resolution uses. Writes the path into
-// `out` and returns 1 if found, 0 otherwise.
-static int ae_source_module_path(const char* mod, char* out, size_t outcap) {
-    const char* bases[] = { ".", "src" };
-    for (size_t b = 0; b < sizeof(bases)/sizeof(bases[0]); b++) {
-        snprintf(out, outcap, "%s/%s.ae", bases[b], mod);        if (path_exists(out)) return 1;
-        snprintf(out, outcap, "%s/%s/module.ae", bases[b], mod); if (path_exists(out)) return 1;
+// dir, the same order source-import resolution uses. Returns the path in a
+// string the caller frees, NULL when there is none. Whole however long the
+// --lib directory (#2543): a 1200-byte probe cut a longer one, and a source
+// module there was taken for absent, or for a binary import.
+static char* ae_source_module_path(const char* mod) {
+    const char* bases[2 + AETHER_LIB_DIRS_MAX];
+    int nb = 0;
+    bases[nb++] = ".";
+    bases[nb++] = "src";
+    for (int i = 0; i < tc.lib_dir_count; i++) bases[nb++] = tc.lib_dirs[i];
+    for (int b = 0; b < nb; b++) {
+        char* p = ae_path_printf("%s/%s.ae", bases[b], mod);
+        if (path_exists(p)) return p;
+        free(p);
+        p = ae_path_printf("%s/%s/module.ae", bases[b], mod);
+        if (path_exists(p)) return p;
+        free(p);
     }
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        snprintf(out, outcap, "%s/%s.ae", tc.lib_dirs[i], mod);        if (path_exists(out)) return 1;
-        snprintf(out, outcap, "%s/%s/module.ae", tc.lib_dirs[i], mod); if (path_exists(out)) return 1;
-    }
-    return 0;
+    return NULL;
 }
 
 static int ae_source_module_exists(const char* mod) {
-    char p[1200];
-    return ae_source_module_path(mod, p, sizeof(p));
+    char* p = ae_source_module_path(mod);
+    int found = p != NULL;
+    free(p);
+    return found;
 }
 
 // Locate a binary artifact for module `mod` (libMOD.so / MOD.so /
@@ -4519,8 +4958,9 @@ static int ae_source_module_exists(const char* mod) {
 // contents, not its suffix, and `ae build --emit=lib -o libfoo.so`
 // produces a `.so`-named artifact even on macOS — dlopen and the linker
 // accept it regardless. macOS-native `.dylib` is tried first there.
-// Writes the resolved path into `out` and returns 1 if found.
-static int ae_find_binimport_so(const char* mod, char* out, size_t outcap) {
+// Returns the resolved path in a string the caller frees, NULL when there
+// is none; whole, as ae_source_module_path's (#2543).
+static char* ae_find_binimport_so(const char* mod) {
     const char* exts[] = {
 #if defined(_WIN32)
         ".dll"
@@ -4538,26 +4978,30 @@ static int ae_find_binimport_so(const char* mod, char* out, size_t outcap) {
     }
     for (int d = 0; d < nd; d++) {
         for (size_t e = 0; e < sizeof(exts)/sizeof(exts[0]); e++) {
-            snprintf(out, outcap, "%s/lib%s%s", dirs[d], mod, exts[e]);
-            if (path_exists(out)) return 1;
-            snprintf(out, outcap, "%s/%s%s", dirs[d], mod, exts[e]);
-            if (path_exists(out)) return 1;
+            char* p = ae_path_printf("%s/lib%s%s", dirs[d], mod, exts[e]);
+            if (path_exists(p)) return p;
+            free(p);
+            p = ae_path_printf("%s/%s%s", dirs[d], mod, exts[e]);
+            if (path_exists(p)) return p;
+            free(p);
         }
     }
-    return 0;
+    return NULL;
 }
 
 // Resolve `path` to an absolute path (best-effort) for use in -rpath and
 // on the link line, so the produced binary finds the .so at run time
 // regardless of the cwd it is launched from.
-static void ae_abspath(const char* path, char* out, size_t outcap) {
+// Returned in a string the caller frees, whole (#2543).
+static char* ae_abspath(const char* path) {
 #ifdef _WIN32
-    if (!_fullpath(out, path, outcap)) snprintf(out, outcap, "%s", path);
+    char* out = _fullpath(NULL, path, 0);
+    if (!out) out = ae_path_printf("%s", path);
     for (char* q = out; *q; q++) if (*q == '\\') *q = '/';
+    return out;
 #else
     char* rp = realpath(path, NULL);
-    if (rp) { snprintf(out, outcap, "%s", rp); free(rp); }
-    else    { snprintf(out, outcap, "%s", path); }
+    return rp ? rp : ae_path_printf("%s", path);
 #endif
 }
 
@@ -4624,9 +5068,8 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
     // rpath so the produced binary finds it at run time). The host's
     // -rdynamic + static libaether satisfy the .so's runtime symbols.
     tc_lib_dir_append_one(stubdir);
-    char abs_so[1200], dir[1200];
-    ae_abspath(so_path, abs_so, sizeof(abs_so));
-    snprintf(dir, sizeof(dir), "%s", abs_so);
+    char* abs_so = ae_abspath(so_path);
+    char* dir = ae_path_printf("%s", abs_so);
     char* slash = strrchr(dir, '/');
     if (slash) *slash = '\0';
     // Emit the rpath UNQUOTED — `-Wl,-rpath,<dir>`, parallel to the
@@ -4642,49 +5085,48 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
      * a script built against it) share one, and macOS ld warns about every
      * duplicate ("duplicate -rpath ... ignored"). */
     /* A package library serves several imported modules: link it once. */
-    char so_quoted[1300];
-    snprintf(so_quoted, sizeof(so_quoted), " \"%s\"", abs_so);
-    if (strstr(g_binimport_link, so_quoted)) {
+    char* so_quoted = ae_path_printf(" \"%s\"", abs_so);
+    int linked = strstr(binimport_link(), so_quoted) != NULL;
+    free(so_quoted);
+    if (linked) {
         if (tc.verbose) {
             fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n", mod, abs_so, stub_path);
         }
+        free(abs_so);
+        free(dir);
         return 0;
     }
-    {
-        size_t dl = strlen(g_binimport_dirs);
-        if (!strstr(g_binimport_dirs, dir))
-            snprintf(g_binimport_dirs + dl, sizeof(g_binimport_dirs) - dl, "%s%s",
-                     dl ? ";" : "", dir);
-    }
+    if (!g_binimport_dirs || !strstr(g_binimport_dirs, dir))
+        ae_path_appendf(&g_binimport_dirs, "%s%s", g_binimport_dirs ? ";" : "", dir);
 #ifdef _WIN32
     /* PE has no rpath: GNU ld links the DLL directly, and ae stages it next
      * to the output (ae_stage_windows_dlls) or puts its directory on `ae
      * run`'s PATH. */
-    {
-        size_t off = strlen(g_binimport_link);
-        snprintf(g_binimport_link + off, sizeof(g_binimport_link) - off, " \"%s\"", abs_so);
-        if (tc.verbose)
-            fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n", mod, abs_so, stub_path);
-        return 0;
-    }
-#endif
-    char rpath_flag[1300];
-    snprintf(rpath_flag, sizeof(rpath_flag), " -Wl,-rpath,%s", dir);
-    const char* hit = strstr(g_binimport_link, rpath_flag);
+    ae_path_appendf(&g_binimport_link, " \"%s\"", abs_so);
+    if (tc.verbose)
+        fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n", mod, abs_so, stub_path);
+    free(abs_so);
+    free(dir);
+    return 0;
+#else
+    char* rpath_flag = ae_path_printf(" -Wl,-rpath,%s", dir);
+    const char* hit = strstr(binimport_link(), rpath_flag);
     int rpath_seen = 0;
     while (hit) {
         char after = hit[strlen(rpath_flag)];
         if (after == '\0' || after == ' ') { rpath_seen = 1; break; }
         hit = strstr(hit + 1, rpath_flag);
     }
-    size_t off = strlen(g_binimport_link);
-    snprintf(g_binimport_link + off, sizeof(g_binimport_link) - off,
-             " \"%s\"%s", abs_so, rpath_seen ? "" : rpath_flag);
+    ae_path_appendf(&g_binimport_link, " \"%s\"%s", abs_so, rpath_seen ? "" : rpath_flag);
     if (tc.verbose) {
         fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n",
                 mod, abs_so, stub_path);
     }
+    free(rpath_flag);
+    free(abs_so);
+    free(dir);
     return 0;
+#endif
 }
 
 // Scan one `.ae` file's `import` lines for binary-package imports, recursing
@@ -4693,24 +5135,57 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
 // import graph, not just the entry file. `visited` holds the resolved file
 // paths already scanned (dedupe + cycle-break). `stubdir` is the shared stub
 // dir, created lazily by ae_emit_binimport_stub.
-#define AE_BINIMPORT_MAX_FILES 512
+/* The files the scan has read, grown as needed: a cap of 512 stopped the
+ * scan there without a word, and a binary import in a module past it was
+ * never linked (#2546). The set itself breaks cycles. */
+typedef struct { char** paths; int count; int cap; } BinimportVisited;
+
 static void ae_scan_binary_imports(const char* file, char* stubdir,
                                    size_t stubdir_cap,
-                                   char (*visited)[1200], int* nvisited) {
+                                   BinimportVisited* visited) {
     // Mark this file visited (by its path as given; the entry uses the passed
     // spelling, recursions use the resolved path — both are stable enough to
     // break cycles and avoid rescanning the same module twice).
-    for (int i = 0; i < *nvisited; i++) {
-        if (strcmp(visited[i], file) == 0) return;
+    for (int i = 0; i < visited->count; i++) {
+        if (strcmp(visited->paths[i], file) == 0) return;
     }
-    if (*nvisited >= AE_BINIMPORT_MAX_FILES) return;   /* graph too large; stop */
-    snprintf(visited[*nvisited], 1200, "%s", file);
-    (*nvisited)++;
+    if (visited->count == visited->cap) {
+        int cap = visited->cap ? visited->cap * 2 : 64;
+        char** grown = (char**)realloc(visited->paths, (size_t)cap * sizeof(char*));
+        if (!grown) {
+            fprintf(stderr, "Error: out of memory scanning the imports of %s\n", file);
+            exit(1);
+        }
+        visited->paths = grown;
+        visited->cap = cap;
+    }
+    /* The whole path (#2543): two cut to one spelling were one file. */
+    visited->paths[visited->count++] = ae_path_printf("%s", file);
 
     FILE* f = fopen(file, "r");
     if (!f) return;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
+    /* Whole lines, and four names of up to a line's length: the module, its
+     * slashed path, a package prefix and that package's library name. Fixed
+     * 256-byte copies cut a longer name to another module (#2546). */
+    char* line = NULL;
+    size_t line_cap = 0;
+    char* names = NULL;
+    size_t names_cap = 0;
+    while (ae_read_line(f, &line, &line_cap) > 0) {
+        size_t span = strlen(line) + 1;
+        if (4 * span > names_cap) {
+            char* grown = (char*)realloc(names, 4 * span);
+            if (!grown) {
+                fprintf(stderr, "Error: out of memory scanning the imports of %s\n", file);
+                exit(1);
+            }
+            names = grown;
+            names_cap = 4 * span;
+        }
+        char* mod = names;
+        char* slashed = names + span;
+        char* pkgname = names + 2 * span;
+        char* libname = names + 3 * span;
         const char* p = line;
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "import", 6) != 0 || (p[6] != ' ' && p[6] != '\t')) continue;
@@ -4723,84 +5198,82 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
         // `import foo.validate`). The dotted NAME is still never a binary-import
         // candidate itself — a binary import is always a bare name — so only the
         // recursion into its file changes.
-        char mod[256];
         size_t mi = 0;
         int dotted = 0;
-        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.')
-               && mi < sizeof(mod) - 1) {
+        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.')) {
             if (*p == '.') dotted = 1;
             mod[mi++] = *p++;
         }
         mod[mi] = '\0';
         if (mi == 0) continue;
 
-        char src_path[1200];
+        char* src_path;
         if (dotted) {
             // A dotted package import: resolve `a.b.c` -> `a/b/c` and recurse
             // into that source file (a/b/c.ae or a/b/c/module.ae) so a binary
             // import inside it is seen. A dotted name is never a binary import,
             // so if it does not resolve to a source file there is nothing to do.
-            char slashed[256];
-            size_t si = 0;
-            for (size_t k = 0; k < mi && si < sizeof(slashed) - 1; k++) {
-                slashed[si++] = (mod[k] == '.') ? '/' : mod[k];
-            }
-            slashed[si] = '\0';
-            if (ae_source_module_path(slashed, src_path, sizeof(src_path))) {
-                ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+            for (size_t k = 0; k < mi; k++) slashed[k] = (mod[k] == '.') ? '/' : mod[k];
+            slashed[mi] = '\0';
+            if ((src_path = ae_source_module_path(slashed)) != NULL) {
+                ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited);
+                free(src_path);
                 continue;
             }
             /* #2297: no source -- a module of a package library? The
              * library of package `a.b` is lib<a_b>; try each proper prefix
              * of the import, longest first, and take the one whose catalog
              * lists this module. */
-            char pkgname[256];
-            snprintf(pkgname, sizeof(pkgname), "%s", mod);
+            memcpy(pkgname, mod, mi + 1);
             for (;;) {
                 char* last = strrchr(pkgname, '.');
                 if (!last) break;
                 *last = '\0';
-                char libname[256];
-                snprintf(libname, sizeof(libname), "%s", pkgname);
+                memcpy(libname, pkgname, (size_t)(last - pkgname) + 1);
                 for (char* q = libname; *q; q++) if (*q == '.') *q = '_';
-                char so_path[1200];
-                if (ae_find_binimport_so(libname, so_path, sizeof(so_path)) &&
-                    ae_lib_provides_module(so_path, mod)) {
-                    if (ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0) {
+                char* so_path = ae_find_binimport_so(libname);
+                if (so_path && ae_lib_provides_module(so_path, mod)) {
+                    int failed = ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0;
+                    free(so_path);
+                    if (failed) {
+                        free(line);
+                        free(names);
                         fclose(f);
                         return;
                     }
                     break;
                 }
+                free(so_path);
             }
             continue;
         }
 
         // A flat source module: recurse into its file so a binary import nested
         // inside it (a wrapper importing the binary package) is discovered.
-        if (ae_source_module_path(mod, src_path, sizeof(src_path))) {
-            ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+        if ((src_path = ae_source_module_path(mod)) != NULL) {
+            ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited);
+            free(src_path);
             continue;
         }
 
         // Not a source module — a binary-package import if a .so is on the path.
-        char so_path[1200];
-        if (!ae_find_binimport_so(mod, so_path, sizeof(so_path))) continue;
-        if (ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0) break;
+        char* so_path = ae_find_binimport_so(mod);
+        if (!so_path) continue;
+        int failed = ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0;
+        free(so_path);
+        if (failed) break;
     }
+    free(line);
+    free(names);
     fclose(f);
 }
 
 static void prepare_binary_imports(const char* main_file) {
     char stubdir[256] = "";
-    // Visited-set of file paths, heap-allocated (512 * 1200 B is too large for
-    // the stack). Best-effort: if allocation fails, fall back to scanning only
-    // the entry file, the pre-transitive behaviour.
-    char (*visited)[1200] = malloc((size_t)AE_BINIMPORT_MAX_FILES * 1200);
-    if (!visited) { return; }
-    int nvisited = 0;
-    ae_scan_binary_imports(main_file, stubdir, sizeof(stubdir), visited, &nvisited);
-    free(visited);
+    BinimportVisited visited = { NULL, 0, 0 };
+    ae_scan_binary_imports(main_file, stubdir, sizeof(stubdir), &visited);
+    for (int i = 0; i < visited.count; i++) free(visited.paths[i]);
+    free(visited.paths);
     /* One runtime or none: a library that carries its own (static) runtime
      * next to one built on the shared runtime would split panics and
      * scheduler state between them. */
@@ -4831,34 +5304,35 @@ static void prepare_binary_imports(const char* main_file) {
  * loader looks, unless it is already there. */
 static void ae_stage_windows_dlls(const char* out_file) {
 #ifdef _WIN32
-    char out_dir[1100];
-    ae_abspath(out_file, out_dir, sizeof(out_dir));
+    char* out_dir = ae_abspath(out_file);
     char* slash = strrchr(out_dir, '/');
-    if (slash) *slash = '\0'; else snprintf(out_dir, sizeof(out_dir), ".");
+    if (slash) *slash = '\0'; else { free(out_dir); out_dir = ae_path_printf("."); }
 
-    /* The binary imports: each "<path>" in the link fragment. */
-    const char* p = g_binimport_link;
+    /* The binary imports: each "<path>" in the link fragment, whole (#2543). */
+    const char* p = binimport_link();
     while ((p = strchr(p, '"')) != NULL) {
         const char* e = strchr(p + 1, '"');
         if (!e) break;
-        char src[1200];
-        snprintf(src, sizeof(src), "%.*s", (int)(e - p - 1), p + 1);
+        char* src = ae_path_printf("%.*s", (int)(e - p - 1), p + 1);
         p = e + 1;
         const char* base = strrchr(src, '/');
         base = base ? base + 1 : src;
-        char dst[1300];
-        snprintf(dst, sizeof(dst), "%s/%s", out_dir, base);
+        char* dst = ae_path_printf("%s/%s", out_dir, base);
         if (!paths_same(src, dst)) copy_file(src, dst);
+        free(dst);
+        free(src);
     }
     if (g_shared_runtime) {
         char dir[1100], arg[1400];
         if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
-            char src[1200], dst[1300];
+            char src[1200];
             snprintf(src, sizeof(src), "%s/aether.dll", dir);
-            snprintf(dst, sizeof(dst), "%s/aether.dll", out_dir);
+            char* dst = ae_path_printf("%s/aether.dll", out_dir);
             if (!paths_same(src, dst)) copy_file(src, dst);
+            free(dst);
         }
     }
+    free(out_dir);
 #else
     (void)out_file;
 #endif
@@ -4869,23 +5343,25 @@ static void ae_stage_windows_dlls(const char* out_file) {
  * not be served from the cache after the library was rebuilt (its catalog,
  * and so the interface the program was compiled against, may differ), nor a
  * static build for a shared-runtime one. */
-static const char* ae_binimport_salt(char* out, size_t cap) {
-    snprintf(out, cap, "%s", g_shared_runtime ? "+shared-runtime" : "");
-    const char* p = g_binimport_link;
-    while ((p = strchr(p, '"')) != NULL) {
+static char* ae_binimport_salt(void) {
+    /* Whole, however many libraries (#2546): a 2900-byte buffer cut the
+     * list, and two builds linking libraries past the cut shared a key. A
+     * string the caller frees; NULL when out of memory. */
+    char* out = ae_strdup_printf("%s", g_shared_runtime ? "+shared-runtime" : "");
+    const char* p = binimport_link();
+    while (out && (p = strchr(p, '"')) != NULL) {
         const char* e = strchr(p + 1, '"');
         if (!e) break;
-        char path[1200];
-        snprintf(path, sizeof(path), "%.*s", (int)(e - p - 1), p + 1);
+        char* path = ae_path_printf("%.*s", (int)(e - p - 1), p + 1);
         p = e + 1;
         struct stat st;
-        size_t ol = strlen(out);
-        if (stat(path, &st) == 0) {
-            snprintf(out + ol, cap - ol, "+lib:%s:%lld:%lld", path,
-                     (long long)st.st_size, (long long)st.st_mtime);
-        } else {
-            snprintf(out + ol, cap - ol, "+lib:%s", path);
-        }
+        char* next = stat(path, &st) == 0
+            ? ae_strdup_printf("%s+lib:%s:%lld:%lld", out, path,
+                               (long long)st.st_size, (long long)st.st_mtime)
+            : ae_strdup_printf("%s+lib:%s", out, path);
+        free(path);
+        free(out);
+        out = next;
     }
     return out;
 }
@@ -4895,21 +5371,19 @@ static const char* ae_binimport_salt(char* out, size_t cap) {
  * directories at the front of PATH so the loader finds them there. */
 static void ae_windows_dll_path_for_run(void) {
 #ifdef _WIN32
-    char dirs[6000] = "";
-    snprintf(dirs, sizeof(dirs), "%s", g_binimport_dirs);
+    char* dirs = ae_path_printf("%s", g_binimport_dirs ? g_binimport_dirs : "");
     if (g_shared_runtime) {
         char dir[1100], arg[1400];
-        if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
-            size_t dl = strlen(dirs);
-            snprintf(dirs + dl, sizeof(dirs) - dl, "%s%s", dl ? ";" : "", dir);
-        }
+        if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg)))
+            ae_path_appendf(&dirs, "%s%s", dirs[0] ? ";" : "", dir);
     }
-    if (!dirs[0]) return;
+    if (!dirs[0]) { free(dirs); return; }
     const char* old = getenv("PATH");
     size_t need = strlen(dirs) + (old ? strlen(old) : 0) + 8;
     char* env = malloc(need);
-    if (!env) return;
+    if (!env) { free(dirs); return; }
     snprintf(env, need, "PATH=%s%s%s", dirs, old ? ";" : "", old ? old : "");
+    free(dirs);
     _putenv(env);   /* the CRT keeps the string: it is not freed */
 #endif
 }
@@ -4923,27 +5397,29 @@ static void ae_windows_dll_path_for_run(void) {
 
 static void ae_pkg_collect(const char* dir, const char* modname,
                            char (*mods)[256], int* n) {
-    char probe[1300];
-    snprintf(probe, sizeof(probe), "%s/module.ae", dir);
+    /* Paths below a --lib dir are built whole (#2543). */
+    char* probe = ae_path_printf("%s/module.ae", dir);
     if (path_exists(probe) && *n < AE_PKG_MAX_MODULES) {
         int dup = 0;
         for (int i = 0; i < *n; i++) if (strcmp(mods[i], modname) == 0) { dup = 1; break; }
         if (!dup) snprintf(mods[(*n)++], 256, "%s", modname);
     }
+    free(probe);
 #ifdef _WIN32
-    char pattern[1300];
-    snprintf(pattern, sizeof(pattern), "%s\\*", dir);
+    char* pattern = ae_path_printf("%s\\*", dir);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
+    free(pattern);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         const char* name = fd.cFileName;
         if (name[0] == '.') continue;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        char child[1300], childmod[256];
-        snprintf(child, sizeof(child), "%s/%s", dir, name);
+        char childmod[256];
+        char* child = ae_path_printf("%s/%s", dir, name);
         snprintf(childmod, sizeof(childmod), "%s.%s", modname, name);
         ae_pkg_collect(child, childmod, mods, n);
+        free(child);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 #else
@@ -4953,12 +5429,13 @@ static void ae_pkg_collect(const char* dir, const char* modname,
     while ((ent = readdir(d)) != NULL) {
         const char* name = ent->d_name;
         if (name[0] == '.') continue;
-        char child[1300], childmod[256];
-        snprintf(child, sizeof(child), "%s/%s", dir, name);
+        char childmod[256];
+        char* child = ae_path_printf("%s/%s", dir, name);
         struct stat st;
-        if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) { free(child); continue; }
         snprintf(childmod, sizeof(childmod), "%s.%s", modname, name);
         ae_pkg_collect(child, childmod, mods, n);
+        free(child);
     }
     closedir(d);
 #endif
@@ -4982,11 +5459,12 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
         roots[nr++] = tc.lib_dirs[i];
     const char* found_root = NULL;
     for (int r = 0; r < nr && !found_root; r++) {
-        char dir[1100];
-        snprintf(dir, sizeof(dir), "%s/%s", roots[r], rel);
-        if (!dir_exists(dir)) continue;
-        ae_pkg_collect(dir, pkg, mods, &n);
-        if (n > 0) found_root = roots[r];
+        char* dir = ae_path_printf("%s/%s", roots[r], rel);
+        if (dir_exists(dir)) {
+            ae_pkg_collect(dir, pkg, mods, &n);
+            if (n > 0) found_root = roots[r];
+        }
+        free(dir);
     }
     if (n == 0) {
         fprintf(stderr, "Error: package '%s' has no modules: no %s/ directory holding a "
@@ -4999,16 +5477,9 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     if (strcmp(found_root, ".") != 0 && strcmp(found_root, "src") != 0) {
         tc_lib_dir_append_one(found_root);
     } else {
-        char abs_root[1100];
-#ifdef _WIN32
-        if (!_fullpath(abs_root, found_root, sizeof(abs_root)))
-            snprintf(abs_root, sizeof(abs_root), "%s", found_root);
-#else
-        char* rp = realpath(found_root, NULL);
-        snprintf(abs_root, sizeof(abs_root), "%s", rp ? rp : found_root);
-        free(rp);
-#endif
+        char* abs_root = ae_abspath(found_root);
         tc_lib_dir_append_one(abs_root);
+        free(abs_root);
     }
     qsort(mods, (size_t)n, 256, (int (*)(const void*, const void*))strcmp);
 
@@ -5251,48 +5722,62 @@ static void prepare_host_bridge_imports(const char* main_file) {
 // Commands
 // --------------------------------------------------------------------------
 
-/* Build the command that runs a program `ae run` just produced or found in
- * the cache: the exe, then every post-`--` argument, each double-quoted so an
- * argument containing spaces stays one token through run_cmd's tokenizer
- * (posix_run / win_run). Arguments containing a literal double-quote are not
- * representable through this path, rare for a build command line; build the
- * binary and invoke it directly if you need that.
- *
- * AE_TEST_RUNNER, when set, is spliced in ahead of the exe so the program runs
- * under a wrapper (wine, qemu-user, ...). Empty by default, see
- * test_runner_prefix().
+/* The argument vector that runs a program `ae run` just produced or found in
+ * the cache: AE_TEST_RUNNER's words when it is set (wine, qemu-user, ...;
+ * see test_runner_prefix), the exe, then every post-`--` argument exactly
+ * as `ae` received it. A vector, not a command string, so an argument goes
+ * through no tokenizer: its spaces, quotes and length reach the program as
+ * given, where the string this replaced dropped the arguments past its
+ * buffer and could not carry a double quote (#2534). One allocation,
+ * released with free(); NULL when out of memory.
  *
  * CRITICAL: the cache-hit and cache-miss paths must both go through this. A
  * cache hit that ran the exe bare dropped every forwarded argument, so
  * `ae run supervisor.ae -- make -j8` worked once and then silently ran with an
  * empty argv on every later invocation. */
-static void build_run_cmd(char* cmd, size_t cap, const char* exe,
-                          int argc, char** argv, int prog_args_start) {
-    const char* runner = test_runner_prefix();
-    snprintf(cmd, cap, "%s%s\"%s\"", runner, *runner ? " " : "", exe);
-    if (prog_args_start < 0) return;
-    size_t off = strlen(cmd);
-    for (int i = prog_args_start; i < argc && off < cap - 1; i++) {
-        int w = snprintf(cmd + off, cap - off, " \"%s\"", argv[i]);
-        if (w < 0 || (size_t)w >= cap - off) break;  /* truncated, stop cleanly */
-        off += (size_t)w;
+static char** build_run_argv(const char* exe, int argc, char** argv, int prog_args_start) {
+    int nr = 0;
+    char** runner = NULL;
+    const char* r = test_runner_prefix();
+    if (*r && !(runner = ae_split_command(r, &nr))) return NULL;
+    int first = prog_args_start >= 0 ? prog_args_start : argc;
+    int na = first < argc ? argc - first : 0;
+    size_t bytes = strlen(exe) + 1;
+    for (int i = 0; i < nr; i++) bytes += strlen(runner[i]) + 1;
+    for (int i = 0; i < na; i++) bytes += strlen(argv[first + i]) + 1;
+    size_t vec = (size_t)(nr + 1 + na + 1) * sizeof(char*);
+    char** out = malloc(vec + bytes);
+    if (out) {
+        char* w = (char*)out + vec;
+        int k = 0;
+        for (int i = 0; i < nr + 1 + na; i++) {
+            const char* a = i < nr ? runner[i] : i == nr ? exe : argv[first + i - nr - 1];
+            size_t len = strlen(a) + 1;
+            memcpy(w, a, len);
+            out[k++] = w;
+            w += len;
+        }
+        out[k] = NULL;
     }
+    free(runner);
+    return out;
 }
 
-static const char* ae_binimport_salt(char* out, size_t cap);
-/* `ae run`'s cache salt: "run", plus the binary libraries it links. */
-static const char* run_mode_salt(void) {
-    static char salt[3000];
-    char libs[2900];
-    snprintf(salt, sizeof(salt), "run%s", ae_binimport_salt(libs, sizeof(libs)));
+static char* ae_binimport_salt(void);
+/* `ae run`'s cache salt: "run", plus the binary libraries it links. A string
+ * the caller frees; NULL when out of memory. */
+static char* run_mode_salt(void) {
+    char* libs = ae_binimport_salt();
+    char* salt = libs ? ae_strdup_printf("run%s", libs) : NULL;
+    free(libs);
     return salt;
 }
 
 static int cmd_run(int argc, char** argv) {
     const char* file = NULL;
-    /* 8 KiB matches toml_extra below + the fgets line buffer in
-     * get_extra_sources_for_bin. Needs to fit --extra CLI args plus
-     * the full TOML extra_sources concatenated. */
+    /* 8 KiB, as the extra_sources list merge_toml_extra_sources reads.
+     * Needs to fit --extra CLI args plus the full TOML extra_sources
+     * concatenated; a list that does not fit is refused. */
     char extra_files[8192] = "";
 
     /* Index in argv where the program's own arguments begin — everything
@@ -5389,20 +5874,7 @@ static int cmd_run(int argc, char** argv) {
     // Merge toml [[bin]] extra_sources into extra_files BEFORE the cache
     // check. Otherwise editing an FFI shim listed in aether.toml wouldn't
     // invalidate the cached exe (extras content is part of the cache key).
-    {
-        char toml_extra_pre[8192] = "";
-        if (get_extra_sources_for_bin(file, toml_extra_pre, sizeof(toml_extra_pre))) {
-            fprintf(stderr,
-                "Warning: aether.toml [[bin]] extra_sources for '%s' "
-                "exceeded 8 KiB; tail entries were dropped. Split the "
-                "array into fewer, larger shims or report as a toolchain "
-                "bug.\n", file);
-        }
-        if (toml_extra_pre[0]) {
-            if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
-            strncat(extra_files, toml_extra_pre, sizeof(extra_files) - strlen(extra_files) - 1);
-        }
-    }
+    if (!merge_toml_extra_sources(file, extra_files, sizeof(extra_files))) return 1;
 
     // Binary-import prepass: synthesize interface stubs for any
     // `import foo` that resolves to a precompiled libfoo.so, and record
@@ -5416,10 +5888,11 @@ static int cmd_run(int argc, char** argv) {
     // this exact source + compiler + extras combination.
     bool using_cache = false;
     char cached_exe[1024] = "";
-    char run_salt[4096];
+    /* One salt for the lookup and the publish key below (#2500); it lives
+     * for the process. */
+    const char* run_key_salt = ae_define_salt(run_mode_salt());
     unsigned long long cache_key =
-        compute_cache_key(file, extra_files, "O0",
-                          ae_define_salt(run_mode_salt(), run_salt, sizeof(run_salt)));
+        compute_cache_key(file, extra_files, "O0", run_key_salt);
     if (cache_key != 0) {
         init_cache_dir();
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -5427,12 +5900,17 @@ static int cmd_run(int argc, char** argv) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
             cache_touch(cached_exe);   /* least-recently-USED, for the cap */
             cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
-            build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
-            ae_windows_dll_path_for_run();
-            int rc = run_cmd_forwarding(cmd);
-            if (rc < 0) {
-                report_crash(rc);
+            char** run_argv = build_run_argv(cached_exe, argc, argv, prog_args_start);
+            if (!run_argv) {
+                fprintf(stderr, "Error: out of memory\n");
+                return 1;
             }
+            ae_windows_dll_path_for_run();
+            int rc = run_argv_forwarding(run_argv);
+            free(run_argv);
+            /* A program that never started has said why; it did not crash. */
+            if (rc == AE_SPAWN_FAILED) return 1;
+            if (rc < 0) report_crash(rc);
             return rc;
         }
         if (tc.verbose) fprintf(stderr, "[cache] miss: %016llx\n", cache_key);
@@ -5440,6 +5918,11 @@ static int cmd_run(int argc, char** argv) {
         /* #1882: on this (cold) build, have aetherc write the dependency
          * manifest to the source's stable depfile slot, so the next run keys
          * on exact deps rather than the conservative tree walk. */
+        cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+    } else if (cache_key_walk_incomplete()) {
+        /* #2538: no key, because a tree walk could not see every file. The
+         * manifest needs no walk, so ask for it anyway; the key recomputed
+         * from it below is one this build can publish under. */
         cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
     }
 
@@ -5498,11 +5981,17 @@ static int cmd_run(int argc, char** argv) {
      * the next run will compute. Publish the artifact under THAT key, not the
      * cold tree-walk key, or every warm run would miss (the artifact would sit
      * under a key nobody computes again). Only when we were already caching and
-     * the recompute succeeds; otherwise keep the original slot. */
-    if (using_cache && g_emit_deps_path[0]) {
-        unsigned long long dk = compute_cache_key(file, extra_files, "O0",
-                                    ae_define_salt("run", run_salt, sizeof(run_salt)));
+     * the recompute succeeds; otherwise keep the original slot. A build that
+     * had no key (an incomplete walk, #2538) starts caching here when the
+     * depfile gives it one. */
+    if (g_emit_deps_path[0]) {
+        /* The same salt as the lookup (#2500): a bare "run" here dropped the
+         * binary-import part, so a program with one published under a key
+         * its next run never computes. */
+        unsigned long long dk = compute_cache_key(file, extra_files, "O0", run_key_salt);
         if (dk != 0) {
+            if (!using_cache) init_cache_dir();
+            using_cache = true;
             cache_key = dk;
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
             snprintf(exe_file, sizeof(exe_file), "%s.tmp.%d", cached_exe, (int)getpid());
@@ -5558,21 +6047,29 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
-    // Step 3: run it, forwarding any post-`--` args (see build_run_cmd).
-    build_run_cmd(cmd, sizeof(cmd), exe_file, argc, argv, prog_args_start);
+    // Step 3: run it, forwarding any post-`--` args (see build_run_argv).
+    char** run_argv = build_run_argv(exe_file, argc, argv, prog_args_start);
+    if (!run_argv) {
+        fprintf(stderr, "Error: out of memory\n");
+        remove(exe_file);
+        return 1;
+    }
     ae_windows_dll_path_for_run();
-    int rc = run_cmd_forwarding(cmd);
+    int rc = run_argv_forwarding(run_argv);
+    free(run_argv);
 
     if (rc < 0) {
-        report_crash(rc);
-        // Remove crashed binary from cache so next run recompiles
+        /* A program that never started has said why; it did not crash. */
+        if (rc != AE_SPAWN_FAILED) report_crash(rc);
+        // Remove a crashed or unstartable binary from the cache so the next
+        // run recompiles
         if (using_cache) remove(exe_file);
     }
 
     // If not cached, remove the temp exe
     if (!using_cache) remove(exe_file);
 
-    return rc;
+    return rc == AE_SPAWN_FAILED ? 1 : rc;
 }
 
 static int cmd_check(int argc, char** argv) {
@@ -5611,18 +6108,17 @@ static int cmd_check(int argc, char** argv) {
     /* Build the same `--lib X --lib Y …` flag sequence the compile
      * path uses (cc_command_build); one flag per entry sidesteps
      * shell quoting on cmd.exe + MSYS2. Issue #413. */
-    char lib_flags[2304] = "";
-    size_t lf_off = 0;
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(lib_flags + lf_off, sizeof(lib_flags) - lf_off,
-                         " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
-        lf_off += (size_t)w;
+    char* lib_flags = tc_lib_flags();
+    char* cmd = ae_strdup_printf("\"%s\"%s%s --check \"%s\"",
+                                 tc.compiler, defines_flags(), lib_flags, file);
+    free(lib_flags);
+    if (!cmd) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        return 1;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "\"%s\"%s%s --check \"%s\"",
-             tc.compiler, g_defines, lib_flags, file);
-    return run_cmd(cmd);
+    int rc = run_cmd(cmd);
+    free(cmd);
+    return rc;
 }
 
 // `ae inspect <file.ae>` — operator-facing summary of what a script
@@ -5657,18 +6153,17 @@ static int cmd_inspect(int argc, char** argv) {
     /* One `--lib X` per entry, same as cmd_check — keeps import
      * resolution consistent so the reported imports resolve the way a
      * build would. Issue #413. */
-    char lib_flags[2304] = "";
-    size_t lf_off = 0;
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        int w = snprintf(lib_flags + lf_off, sizeof(lib_flags) - lf_off,
-                         " --lib \"%s\"", tc.lib_dirs[i]);
-        if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
-        lf_off += (size_t)w;
+    char* lib_flags = tc_lib_flags();
+    char* cmd = ae_strdup_printf("\"%s\" --emit=inspect%s \"%s\"",
+                                 tc.compiler, lib_flags, file);
+    free(lib_flags);
+    if (!cmd) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        return 1;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "\"%s\" --emit=inspect%s \"%s\"",
-             tc.compiler, lib_flags, file);
-    return run_cmd(cmd);
+    int rc = run_cmd(cmd);
+    free(cmd);
+    return rc;
 }
 
 // Forward declaration — cmd_build_namespace delegates to cmd_build for the
@@ -5717,15 +6212,14 @@ typedef struct {
 int aetherc_capture_stdout(const char* arg1, const char* in_path,
                                   const char* arg2_or_null,
                                   char* out_buf, size_t out_size) {
-    char cmd[4096];
+    char* cmd;
     /* Forward the same `--lib` search path the real compile uses, so an
      * inspect/manifest prepass resolves bare-name `--lib`-backed imports
      * instead of falsely reporting them unresolved. See tc_lib_flags. */
-    char lib_flags[2304];
-    tc_lib_flags(lib_flags, sizeof(lib_flags));
+    char* lib_flags = tc_lib_flags();
     if (arg2_or_null) {
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" \"%s\"",
-                 tc.compiler, arg1, lib_flags, in_path, arg2_or_null);
+        cmd = ae_strdup_printf("\"%s\" %s%s \"%s\" \"%s\"",
+                               tc.compiler, arg1, lib_flags, in_path, arg2_or_null);
     } else {
         /* The output path aetherc must be given but will not write: the
          * platform's null device. A literal /dev/null on Windows is a file
@@ -5736,8 +6230,14 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
 #else
         const char* devnull = "/dev/null";
 #endif
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" %s",
-                 tc.compiler, arg1, lib_flags, in_path, devnull);
+        cmd = ae_strdup_printf("\"%s\" %s%s \"%s\" %s",
+                               tc.compiler, arg1, lib_flags, in_path, devnull);
+    }
+    free(lib_flags);
+    if (!cmd) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        out_buf[0] = '\0';
+        return 1;
     }
     /* Through the same runner every other aetherc invocation uses, with the
      * output captured to a file. popen() on Windows hands the line to
@@ -5747,10 +6247,11 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
      * became `D:\..\aetherc.exe" --emit-namespace-manifest "./manifest.ae`
      * — "El sistema no puede encontrar la ruta especificada", and every
      * `ae build --namespace` on Windows fell back to a library named after
-     * the directory. win_run tokenises and spawns directly. */
+     * the directory. run_command tokenises and spawns directly. */
     char capture[1024];
     compile_log_path(capture, sizeof(capture));
     int rc = run_cmd_capture_stdout(cmd, capture);
+    free(cmd);
     out_buf[0] = '\0';
     /* Text mode, as popen("r") was: aetherc's stdout carries "\r\n" on
      * Windows, and a '\r' left on the last token of a line ("string\r")
@@ -7348,9 +7849,9 @@ int cmd_build_namespace(int argc, char** argv) {
 static int cmd_build(int argc, char** argv) {
     const char* file = NULL;
     const char* output_name = NULL;
-    /* 8 KiB matches toml_extra below + the fgets line buffer in
-     * get_extra_sources_for_bin. Needs to fit --extra CLI args plus
-     * the full TOML extra_sources concatenated. */
+    /* 8 KiB, as the extra_sources list merge_toml_extra_sources reads.
+     * Needs to fit --extra CLI args plus the full TOML extra_sources
+     * concatenated; a list that does not fit is refused. */
     char extra_files[8192] = "";
 
     const char* target = NULL;
@@ -7360,7 +7861,8 @@ static int cmd_build(int argc, char** argv) {
      * `[build] defines` join them after the walk-up to aether.toml (see
      * load_defines_from_toml), so the manifest is found from a
      * subdirectory too. */
-    g_defines[0] = '\0';
+    g_defines_len = 0;
+    if (g_defines) g_defines[0] = '\0';
 
     // Reset emit mode to the default (exe-only) for this build.
     g_emit_exe = true;
@@ -8110,20 +8612,7 @@ static int cmd_build(int argc, char** argv) {
     // Merge toml [[bin]] extra_sources into extra_files BEFORE the cache
     // check so an FFI shim edit invalidates the cached exe (extras
     // content is part of the cache key).
-    {
-        char toml_extra_pre[8192] = "";
-        if (get_extra_sources_for_bin(file, toml_extra_pre, sizeof(toml_extra_pre))) {
-            fprintf(stderr,
-                "Warning: aether.toml [[bin]] extra_sources for '%s' "
-                "exceeded 8 KiB; tail entries were dropped. Split the "
-                "array into fewer, larger shims or report as a toolchain "
-                "bug.\n", file);
-        }
-        if (toml_extra_pre[0]) {
-            if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
-            strncat(extra_files, toml_extra_pre, sizeof(extra_files) - strlen(extra_files) - 1);
-        }
-    }
+    if (!merge_toml_extra_sources(file, extra_files, sizeof(extra_files))) return 1;
 
     // --- Build cache ---
     // Cache native --emit=exe builds only. wasm uses a different toolchain
@@ -8145,6 +8634,9 @@ static int cmd_build(int argc, char** argv) {
                           !g_coverage;
     char cached_exe[1024] = "";
     unsigned long long cache_key = 0;
+    /* Outlives the cache check: the key is computed again once aetherc has
+     * written the depfile (#2500), from the same salt. */
+    const char* build_key_salt = NULL;
     if (cache_eligible) {
         /* #1333: the salt distinguishes a traced build from a normal one.
          * Without it `ae build --trace` after a plain build is served the
@@ -8152,7 +8644,6 @@ static int cmd_build(int argc, char** argv) {
          * all: the same silent-staleness shape as the imported-module miss
          * (#1421). Any flag that changes the emitted code has to reach the
          * key. */
-        char build_salt[4096];
         /* Every flag that changes the emitted code, not just --trace. A
          * --coverage build after a plain build of the same source was served
          * the cached uninstrumented binary: it ran, produced no .gcno and no
@@ -8163,14 +8654,12 @@ static int cmd_build(int argc, char** argv) {
         if (g_coverage) strncat(build_mode, "+coverage", sizeof(build_mode) - strlen(build_mode) - 1);
         if (g_profile)  strncat(build_mode, "+profile",  sizeof(build_mode) - strlen(build_mode) - 1);
         if (g_size)     strncat(build_mode, "+size",     sizeof(build_mode) - strlen(build_mode) - 1);
-        char libs_salt[2900];
-        ae_binimport_salt(libs_salt, sizeof(libs_salt));
-        char build_mode_full[3000];
-        snprintf(build_mode_full, sizeof(build_mode_full), "%s%s", build_mode, libs_salt);
-        cache_key = compute_cache_key(file, extra_files,
-                                      quick ? "O0" : "O2",
-                                      ae_define_salt(build_mode_full,
-                                                     build_salt, sizeof(build_salt)));
+        char* libs_salt = ae_binimport_salt();
+        char* build_mode_full = libs_salt ? ae_strdup_printf("%s%s", build_mode, libs_salt) : NULL;
+        free(libs_salt);
+        build_key_salt = ae_define_salt(build_mode_full);
+        cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
+                                      build_key_salt);
         if (cache_key != 0) {
             init_cache_dir();
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
@@ -8190,6 +8679,11 @@ static int cmd_build(int argc, char** argv) {
             /* #1882: cold build — aetherc writes the dep manifest to the
              * source's stable slot for the next run's exact key. Set whether
              * or not the copy above failed; a rebuild still wants the deps. */
+            cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+        } else if (cache_key_walk_incomplete()) {
+            /* #2538: no key, because a tree walk could not see every file.
+             * The manifest needs no walk, so ask for it anyway; the key
+             * recomputed from it below is one this build can publish under. */
             cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
         }
     }
@@ -8226,6 +8720,26 @@ static int cmd_build(int argc, char** argv) {
         return 1;
     }
     remove(clog);
+
+    /* #2500: aetherc has now written the depfile, so the key every later
+     * build of this source computes folds in its exact dependencies, not
+     * the tree walk the key above fell back to. Publishing under the cold
+     * key left the entry where no build looks it up: the second identical
+     * build missed, compiled again and published a second copy, and only
+     * the third hit. `ae run` recomputes here too (#1882). */
+    if (cache_eligible && g_emit_deps_path[0]) {
+        /* A build that had no key (an incomplete walk, #2538) starts caching
+         * here when the depfile gives it one. */
+        unsigned long long dk = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
+                                                  build_key_salt);
+        if (dk != 0 && dk != cache_key) {
+            if (tc.verbose) fprintf(stderr, "[cache] publish key: %016llx\n", dk);
+            if (cache_key == 0) init_cache_dir();
+            cache_key = dk;
+            snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
+                     s_cache_dir, cache_key);
+        }
+    }
 
     /* #1243 --emit=obj: aetherc has written the generated C; compile it to a
      * single object and stop. No link, no `main`, so the caller drops the .o
@@ -8265,25 +8779,34 @@ static int cmd_build(int argc, char** argv) {
                    "cross target.\n", target);
             return 0;
         }
-        const char* objcc = getenv("AE_CC");
-        if (!objcc || !*objcc) objcc = getenv("CC");
-        if (!objcc || !*objcc) {
+        /* The compiler as a command line names it. $AE_CC / $CC is a
+         * command prefix, the program and then any flags, so it is not
+         * quoted whole (#2545): `"gcc -m32"` named no program. */
 #ifdef _WIN32
-            /* The compiler every other native Windows build uses ($AE_CC /
-             * $CC, then PATH, then the WinLibs download). `command -v` is a
-             * POSIX shell builtin: through cmd.exe it printed "El sistema no
-             * puede encontrar la ruta especificada" and failed, so this
-             * path fell back to a bare `cc` that only an MSYS2 shell has. */
-            if (!ensure_gcc_windows()) return 1;
-            objcc = s_gcc_bin;
+        /* The compiler every other native Windows build uses ($AE_CC /
+         * $CC, then PATH, then the WinLibs download), checked the same
+         * way. `command -v` is a POSIX shell builtin: through cmd.exe it
+         * printed "El sistema no puede encontrar la ruta especificada" and
+         * failed, so this path fell back to a bare `cc` that only an MSYS2
+         * shell has. */
+        if (!ensure_gcc_windows()) return 1;
+        const char* objcc = s_gcc_cmd;
 #else
+        const char* objcc = c_backend_env_override();
+        if (!objcc)
             objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
 #endif
+        const char* obj_includes = get_aether_include_flags(c_file);   /* #1986 */
+        if (!obj_includes) return 1;   /* out of memory, said */
+        int ow = snprintf(cmd, sizeof(cmd), "%s -c %s %s \"%s\" -o \"%s\"",
+                          objcc, tc.include_flags ? tc.include_flags : "",
+                          obj_includes, c_file, obj_file);
+        if (ow >= (int)sizeof(cmd)) {
+            /* The include list has no length limit now (#2536); a cut
+             * command would compile without the directories past the cut. */
+            cmd_too_long(cmd, sizeof(cmd), ow);
+            return 1;
         }
-        snprintf(cmd, sizeof(cmd), "\"%s\" -c %s %s \"%s\" -o \"%s\"",
-                 objcc, tc.include_flags ? tc.include_flags : "",
-                 get_aether_include_flags(c_file),   /* #1986 */
-                 c_file, obj_file);
         if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
         int orc = run_cmd(cmd);
         if (orc != 0) {
@@ -10517,6 +11040,37 @@ int main(int argc, char** argv) {
          * the next argv is a path ending in `.ae` that actually exists;
          * bare `ae help` falls through to the usage banner. */
         if (sub_argc > 0 && ae_help_is_script_target(sub_argv[0])) {
+            /* Diagnose with the compiler a build of the script would use.
+             * The helper's own search tried $AETHER_HOME/bin before the
+             * aetherc beside this binary, so in a source tree with an
+             * installed toolchain configured, `ae help` ran the installed
+             * compiler while `ae build` ran the tree's. Resolve the
+             * toolchain as every other command does and name it (AETHERC
+             * is the helper's first choice), unless the caller did. */
+            discover_toolchain();
+            if (!getenv("AETHERC") && tc.compiler[0]) {
+#ifdef _WIN32
+                char env_buf[1100];
+                snprintf(env_buf, sizeof(env_buf), "AETHERC=%s", tc.compiler);
+                _putenv(env_buf);
+#else
+                setenv("AETHERC", tc.compiler, 0);
+#endif
+            }
+            /* And its stdlib (#2544): the helper looked only under the
+             * working directory and a few fixed prefixes, so with an
+             * installed toolchain (<prefix>/share/aether) or a build run
+             * from outside its checkout it had no export catalog. Named
+             * the same way (AETHER_ROOT is its first choice). */
+            if (!getenv("AETHER_ROOT") && tc.src_root[0]) {
+#ifdef _WIN32
+                char root_buf[sizeof(tc.src_root) + 16];
+                snprintf(root_buf, sizeof(root_buf), "AETHER_ROOT=%s", tc.src_root);
+                _putenv(root_buf);
+#else
+                setenv("AETHER_ROOT", tc.src_root, 0);
+#endif
+            }
             return ae_help_main(sub_argc, sub_argv);
         }
         print_usage();
@@ -10560,7 +11114,7 @@ int main(int argc, char** argv) {
          * WinLibs gcc ensure_gcc_windows resolves. */
 #ifdef _WIN32
         if (!ensure_gcc_windows()) return 1;
-        return ae_bindgen_consts(s_gcc_bin, sub_argc - 1, sub_argv + 1);
+        return ae_bindgen_consts(s_gcc_cmd, sub_argc - 1, sub_argv + 1);
 #else
         return ae_bindgen_consts("cc", sub_argc - 1, sub_argv + 1);
 #endif

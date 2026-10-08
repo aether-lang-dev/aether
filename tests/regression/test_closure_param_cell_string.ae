@@ -1,0 +1,97 @@
+// Regression (#2463): a string parameter that a nested closure writes lives
+// in a shared cell that holds its own reference to the caller's string.
+//
+// A closure's parameter written by a closure nested in it was left a plain
+// value while the nested closure's environment expected a cell, so the
+// program did not compile. A function's parameter took the cell already,
+// but the cell was seeded with the caller's string as it stood: a string
+// cell owns what it holds, so the first write through it (or the scope
+// exit) freed the caller's string, which the caller then read or freed
+// again (a heap-corruption abort on Windows). The cell now takes a
+// reference of its own for both, and gives it back when it is overwritten
+// or released. The macOS leaks gate runs this program: every string the
+// cells end up holding is freed by the last holder.
+//
+// Every string is built from a parameter, so each is a runtime heap
+// string: `string.concat` of two literals folds to a literal, which owns
+// nothing and would hide both the double free and a leak.
+
+import std.string
+
+extern exit(code: int)
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+// A function parameter written by a closure.
+fn_bang(s: string) -> int {
+    add = || { s = string.concat(s, "!") }
+    add()
+    add()
+    return string.length(s)
+}
+
+// A function parameter the closure never overwrites: the scope exit alone
+// releases the cell.
+fn_read(s: string) -> int {
+    look = || { s = s }
+    look()
+    return string.length(s)
+}
+
+main() {
+    base = string.concat("ab", string.from_int(7))
+
+    i = 0
+    while i < 3 {
+        check_int("fn length", fn_bang(base), 5)
+        check_int("fn read", fn_read(base), 3)
+        check("caller after fn", base, "ab7")
+        i = i + 1
+    }
+
+    // A closure parameter written by a closure nested in it, and by the
+    // owner itself.
+    grow = | s: string, n: int | {
+        s = string.concat(s, "-")
+        add = || { s = string.concat(s, "+") }
+        k = 0
+        while k < n {
+            add()
+            k = k + 1
+        }
+        return string.length(s)
+    }
+    j = 0
+    while j < 3 {
+        check_int("closure length", grow(base, j), 4 + j)
+        check("caller after closure", base, "ab7")
+        j = j + 1
+    }
+
+    // Two levels deep, and a stored nested closure that outlives the call
+    // holds the cell last.
+    keep = | s: string | {
+        leaf = || { s = string.concat(s, "x") }
+        mid = || { leaf() }
+        mid()
+        mid()
+        return leaf
+    }
+    held = keep(base)
+    held()
+    check("caller after deep", base, "ab7")
+
+    println("ok")
+}

@@ -1,0 +1,18 @@
+// #2524: an extern's effects are unknown, so a call of one is evaluated
+// ahead of a later operand that calls anything. `tick` advances a C
+// static that `peek` reads; neither takes a handle.
+extern tick() -> int
+extern peek() -> int
+
+pair(a: int, b: int) -> int { return a * 10 + b }
+
+// Calls an extern, so it is as opaque as one.
+step() -> int { return tick() }
+
+main() {
+    println("hidden ${pair(tick(), peek())} ${pair(peek(), tick())} ${pair(peek(), peek())}")
+    println("wrapped ${pair(step(), peek())} ${pair(peek(), step())}")
+    x = 3
+    y = 4
+    println("plain ${pair(x + y, x * y)} ${pair(tick(), x + y)} ${pair(x - y, tick())}")
+}

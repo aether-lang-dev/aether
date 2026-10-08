@@ -1537,7 +1537,8 @@ is_probable_prime(n: ptr, rounds: int) -> int {
 
 // ---- shifts ----
 
-// BC ShiftLeft of a magnitude by n bits (n > 0). Returns (mag, len).
+// BC ShiftLeft of a magnitude by n bits (n > 0). Returns (mag, len). n is
+// read as an unsigned 32-bit count (lsr32 / & 0x1f), so INT_MIN shifts by 2^31.
 mag_shift_left(mag: ptr, maglen: int, n: int) -> (ptr, int) {
     nints = bits.lsr32(n, 5) // n / 32
     nbits = n & 0x1f
@@ -1582,6 +1583,8 @@ mag_shift_left(mag: ptr, maglen: int, n: int) -> (ptr, int) {
     return nm, newlen
 }
 
+// A negative count shifts the other way. Negating it overflows int at
+// INT_MIN, so each direction handles that count without negating it.
 shift_left(n: ptr, bits_to: int) -> ptr {
     bn = n as *BN
     if bn.sign == 0 {
@@ -1591,6 +1594,14 @@ shift_left(n: ptr, bits_to: int) -> ptr {
         return clone(n)
     }
     if bits_to < 0 {
+        if bits_to == -2147483647 - 1 {
+            // A right shift by 2^31 = INT_MAX + 1 bits, in two steps: floor
+            // division by powers of two composes.
+            part = shift_right(n, 2147483647)
+            res = shift_right(part, 1)
+            free(part)
+            return res
+        }
         return shift_right(n, 0 - bits_to)
     }
     mag, len = mag_shift_left(bn.mag, bn.len, bits_to)
@@ -1603,6 +1614,16 @@ shift_right(n: ptr, bits_to: int) -> ptr {
         return clone(n)
     }
     if bits_to < 0 {
+        if bits_to == -2147483647 - 1 {
+            // A left shift by 2^31 bits. mag_shift_left reads its count as
+            // an unsigned 32-bit value (lsr32 / & 31), so INT_MIN is passed
+            // through as exactly that.
+            if bn.sign == 0 {
+                return bn_zero()
+            }
+            mag, len = mag_shift_left(bn.mag, bn.len, bits_to)
+            return bn_from_mag_checked(bn.sign, mag, len)
+        }
         return shift_left(n, 0 - bits_to)
     }
     bl = bit_length(n)

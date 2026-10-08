@@ -1,0 +1,94 @@
+// Regression: issue #2369. Storing a string into a struct field through a
+// pointer that came from a call, another struct's pointer field or a cast
+// never freed the field's previous string.
+//
+// Releasing the old value reads the box's `_heap_<field>` tracker, which is
+// only sound on a box made by heap.new (a `malloc(n) as *T` box has garbage
+// trackers, #1873). The compiler could only see that for a local bound to
+// heap.new in the same function, so every other spelling stored the new
+// string, set the tracker, and dropped the old one. It now follows the
+// pointer back to where it was made: a function every return of which is a
+// heap.new box, a struct field every store into which is one, a cast of one.
+// Each replaced label below leaked before the fix; the macOS leaks gate
+// fails on them. This test checks the values seen after each store.
+
+import std.heap
+import std.string
+extern exit(code: int)
+
+struct Box {
+    label: string
+    n: int
+}
+
+struct Holder {
+    inner: *Box
+    count: int
+}
+
+// The constructor shape: the box is made here and handed to the caller.
+make_box(seed: string) -> *Box {
+    b = heap.new(Box)
+    b.label = string.concat(seed, "-made")
+    return b
+}
+
+// A box that travels as a raw `ptr` handle and is cast back by the user.
+make_handle(seed: string) -> ptr {
+    b = make_box(seed)
+    return b as ptr
+}
+
+expect(got: string, want: string, what: string) {
+    if got != want {
+        println("FAIL #2369 ${what}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+run(seed: string) {
+    // A pointer returned by a function that made it with heap.new.
+    b = make_box(seed)
+    b.label = string.concat(seed, "-call")
+    expect(b.label, "${seed}-call", "store through a returned box")
+
+    // A pointer field of another struct, by nested path and by alias.
+    h = heap.new(Holder)
+    h.inner = make_box(seed)
+    h.inner.label = string.concat(seed, "-nested")
+    expect(h.inner.label, "${seed}-nested", "store through a pointer field")
+    w = h.inner
+    w.label = string.concat(seed, "-alias")
+    expect(h.inner.label, "${seed}-alias", "store through an alias of a pointer field")
+
+    // A cast of a `ptr` handle back to the struct.
+    c = make_handle(seed) as *Box
+    c.label = string.concat(seed, "-cast")
+    expect(c.label, "${seed}-cast", "store through a cast")
+
+    // Repeated stores: each one must release the one before it.
+    for i in 0..64 {
+        b.label = "${seed}-loop-${i}"
+        h.inner.label = "${seed}-nested-${i}"
+        c.label = "${seed}-cast-${i}"
+    }
+    expect(b.label, "${seed}-loop-63", "repeated store through a returned box")
+    expect(h.inner.label, "${seed}-nested-63", "repeated store through a pointer field")
+    expect(c.label, "${seed}-cast-63", "repeated store through a cast")
+
+    // A borrowed literal replaces an owned string, then is replaced itself:
+    // the literal must not be freed.
+    b.label = "borrowed"
+    b.label = string.concat(seed, "-after-literal")
+    expect(b.label, "${seed}-after-literal", "store after a borrowed literal")
+
+    heap.free(b)
+    heap.free(h.inner)
+    heap.free(h)
+    heap.free(c)
+}
+
+main() {
+    run("box")
+    println("PASS: #2369 field stores release the previous string through any heap.new box pointer")
+}

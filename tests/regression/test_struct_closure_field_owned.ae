@@ -1,0 +1,192 @@
+// Regression: a struct's closure field holds a reference of its own to the
+// closure's env (#2525), and a closure local rebound from such a field is
+// called through its current value. Shapes beyond #2525's own test: the
+// field read into a local that outlives the struct (which also dispatched
+// to the local's first literal before the closure_var_map fix), returned
+// from a function, stored in a list, assigned to itself, a struct nested in
+// another, boxed with heap.new, passed by value, copied and replaced.
+// The macOS leaks gate runs this file.
+import std.heap
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Button { label: string; on_click: fn }
+struct Panel { title: string; body: Button; count: int }
+struct Pair { a: fn; b: fn }
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+mk(k: int) -> Button {
+    n = k
+    f = || { n = n + 1; return n }
+    b = Button { label: string.concat("b", string.from_int(k)), on_click: f }
+    int first = call(f)
+    check("mk first", first, k + 1)
+    return b
+}
+
+inline_lit(k: int) -> int {
+    n = k
+    b = Button { label: "x", on_click: || { n = n + 2; return n } }
+    int v = call(b.on_click)
+    return v
+}
+
+use(k: int) -> int {
+    b = mk(k)
+    int v = call(b.on_click)
+    return v + string.length(b.label)
+}
+
+// The field read into a local, the struct gone before the local's last use.
+alias_outlives(k: int) -> int {
+    g = || { return 0 }
+    if k >= 0 {
+        b = mk(k)
+        g = b.on_click
+    }
+    int v = call(g)
+    return v
+}
+
+get_cb(k: int) -> fn {
+    b = mk(k)
+    return b.on_click
+}
+
+copies(k: int) -> int {
+    b = mk(k)
+    c = b
+    d = Pair { a: b.on_click, b: c.on_click }
+    int v1 = call(c.on_click)
+    int v2 = call(d.a)
+    int v3 = call(d.b)
+    b = mk(k + 10)
+    int v4 = call(b.on_click)
+    return v1 + v2 + v3 + v4
+}
+
+field_store(k: int) -> int {
+    b = mk(k)
+    n = k
+    b.on_click = || { n = n + 100; return n }
+    int v = call(b.on_click)
+    b.on_click = b.on_click
+    int w = call(b.on_click)
+    return v + w
+}
+
+by_param(b: Button) -> int {
+    int v = call(b.on_click)
+    b.on_click = || { return 7 }
+    return v + call(b.on_click)
+}
+
+boxed(k: int) -> int {
+    p = heap.new(Button)
+    n = k
+    p.on_click = || { n = n + 3; return n }
+    p.on_click = || { n = n + 4; return n }
+    int v = call(p.on_click)
+    heap.free(p)
+    return v
+}
+
+nested(k: int) -> int {
+    b = mk(k)
+    pnl = Panel { title: "t", body: b, count: 1 }
+    int v = call(pnl.body.on_click)
+    m = pnl.body
+    int w = call(m.on_click)
+    return v + w
+}
+
+in_list(k: int) -> int {
+    b = mk(k)
+    l = list.new()
+    list.add(l, b.on_click)
+    fn g = unbox_closure(list.get_raw(l, 0))
+    int v = call(g)
+    list.free(l)
+    int w = call(b.on_click)
+    return v + w
+}
+
+via_get_cb(k: int) -> int {
+    fn h = get_cb(k)
+    return call(h)
+}
+
+via_param(k: int) -> int {
+    b = mk(k)
+    return by_param(b) + call(b.on_click)
+}
+
+round(k: int) -> int {
+    t = use(k) + inline_lit(k) + alias_outlives(k)
+    fn h = get_cb(k)
+    t = t + call(h) + copies(k) + field_store(k)
+    b = mk(k)
+    t = t + by_param(b) + call(b.on_click)
+    t = t + boxed(k) + nested(k) + in_list(k)
+    return t
+}
+
+main() {
+    println("=== test_struct_closure_field_owned ===")
+    check("use", use(3), 5 + 2)
+    check("inline", inline_lit(3), 5)
+    check("alias outlives", alias_outlives(3), 5)
+    fn h = get_cb(3)
+    check("get_cb", call(h), 5)
+    check("copies", copies(3), 5 + 6 + 7 + 15)
+    check("field store", field_store(3), 103 + 203)
+    b = mk(3)
+    check("by param", by_param(b), 5 + 7)
+    check("after param", call(b.on_click), 6)
+    check("boxed", boxed(3), 7)
+    check("nested", nested(3), 5 + 6)
+    check("in list", in_list(3), 5 + 6)
+    if mem.heap_in_use_exact() {
+        round(1)
+        names = ["use", "inline_lit", "alias_outlives", "get_cb", "copies", "field_store", "by_param", "boxed", "nested", "in_list"]
+        // 50 calls per workload, which must hold the count exactly steady in
+        // some run: a leak per call grows every run, a one-time allocation
+        // (seen on Windows UCRT64: 136 bytes once in alias_outlives), or a
+        // thread the system starts, settles (mem.steady_growth).
+        w = 0
+        while w < 10 {
+            grown = mem.steady_growth(|| {
+                    i = 0
+                    while i < 50 {
+                        if w == 0 { use(i) }
+                        if w == 1 { inline_lit(i) }
+                        if w == 2 { alias_outlives(i) }
+                        if w == 3 { via_get_cb(i) }
+                        if w == 4 { copies(i) }
+                        if w == 5 { field_store(i) }
+                        if w == 6 { via_param(i) }
+                        if w == 7 { boxed(i) }
+                        if w == 8 { nested(i) }
+                        if w == 9 { in_list(i) }
+                        i = i + 1
+                    }
+                }, 5)
+            if grown != 0 {
+                println("  FAIL ${names[w]}: 50 calls grew the heap by ${grown} bytes in every run")
+                exit(1)
+            }
+            w = w + 1
+        }
+    }
+    println("  PASS: struct closure fields hold and release their own reference")
+    println("=== test_struct_closure_field_owned passed ===")
+}

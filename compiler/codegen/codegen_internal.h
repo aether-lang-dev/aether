@@ -10,6 +10,19 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+/* Names codegen builds as it goes (C types, mangled and normalised names,
+ * cell declarations, field paths): each spelling kept once, for the life of
+ * the process, so a name is never cut to a buffer's size and a pointer
+ * handed out stays valid however many more are built (#2539). Out of memory
+ * ends the compile, as aether_xrealloc does. */
+const char* cg_intern(const char* s);
+const char* cg_intern_n(const char* s, size_t n);
+const char* cg_internf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+
 /* Utilities (codegen.c) */
 void indent(CodeGenerator* gen);
 void unindent(CodeGenerator* gen);
@@ -24,7 +37,7 @@ const char* safe_c_name(const char* name);
 // (`short`, `int`, `char`, …) so it emits as a valid C identifier. Unlike
 // safe_c_name (which also renames libc symbols for functions), this touches
 // keywords ONLY — a local named `open` is a valid C identifier and must keep
-// its spelling. Returns a static buffer; use before the next call.
+// its spelling. Both return an interned name (cg_intern), valid for good.
 int is_c_keyword(const char* name);
 const char* safe_value_name(const char* name);
 const char* get_c_operator(const char* aether_op);
@@ -43,6 +56,7 @@ int is_heap_box_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_box_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_box_var(CodeGenerator* gen, const char* var_name);
 int is_module_global_var(CodeGenerator* gen, const char* name);
+int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
 void register_module_global_var(CodeGenerator* gen, const char* name);
 int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
@@ -91,6 +105,16 @@ int interp_segment_is_text(ASTNode* ch);
 int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch);
 int interp_order_hoist_boundary(ASTNode* interp);
 const char* interp_temp_c_type(Type* t);
+/* #2478: the elements of an initializer list (an array literal, a returned
+ * tuple) evaluated into temps, in source order, ahead of the statement the
+ * list feeds; generate_statement releases the bindings when the statement
+ * ends (order_prelude_end of the depth it saw). See codegen_expr.c. */
+void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char* target);
+/* #2513: closure_var_map, by scope and name (see codegen_expr.c). */
+int closure_var_id(CodeGenerator* gen, const char* scope, const char* name);
+void closure_var_bind(CodeGenerator* gen, const char* scope, const char* name, int cid);
+int order_prelude_depth(void);
+void order_prelude_end(int depth);
 /* Whether the discarded error slot of an `or`-expression's fallible is a
  * heap-owned string the `or` lowering must release (vs a raw literal it
  * must not free). See the definition in codegen_stmt.c. */
@@ -110,6 +134,22 @@ int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible);
  * codegen_expr.c. */
 int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
                                const char* var_name);
+
+/* #2461: how an owning string slot (a local, a struct field, a return value)
+ * takes a value that may view a buffer someone else owns: a struct field
+ * read, or an `if` / `match` whose arm is one or is a heap-tracked local. See
+ * the comment above is_owned_string_field_read in codegen_stmt.c. */
+enum {
+    STR_TAKE_BORROW = 0,    /* every arm is borrowed (literal, parameter) */
+    STR_TAKE_OWNED = 1,     /* every arm hands the slot a buffer to free */
+    STR_TAKE_RUNTIME = 2    /* depends on the arm taken at run time */
+};
+int is_owned_string_field_read(ASTNode* e);
+int string_take_kind(CodeGenerator* gen, ASTNode* e);
+int string_take_is_view(CodeGenerator* gen, ASTNode* e);
+void string_take_new_flag(char* buf, size_t n);
+void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
+                      const char* target);
 
 /* Escape gate for heap-string arguments: returns 1 if a callee's
  * parameter slot of the given type-kind is treated as storage (the
@@ -143,19 +183,34 @@ int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name, int
 int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_name, int param_idx);
 int callee_returns_string(CodeGenerator* gen, const char* func_name);
 
+/* #2493: the same body walk for parameter `param_idx` of the closure
+ * literal `closure` (an AST_CLOSURE). `return_is_escape` picks between the
+ * two questions above. Unresolvable: escapes. Defined in codegen_stmt.c. */
+int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
+                                   int return_is_escape);
+
+/* #2499: sets gen->closure_args_borrowed. Run after discover_closures and
+ * discover_bare_fn_adapters. Defined in codegen_stmt.c. */
+void compute_closure_args_borrowed(CodeGenerator* gen);
+/* #2499: must closure literal `closure` take its own reference to its
+ * `string` parameter `param_idx` on entry? Defined in codegen_stmt.c. */
+int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx);
+int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
+                             int return_is_keep);
+
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
  * call_arg_escapes heuristic. Defined in codegen_stmt.c. */
 int callee_has_visible_body(CodeGenerator* gen, const char* func_name);
 
-/* Normalise a callee name's dots to underscores, writing into `out`
-   and returning `out`. The AST stores source-level callees in dotted
-   form (`"string.concat"`) but stdlib externs, the generated C call
-   sites, and the various callee registries (heap-string allowlist,
-   builder-funcs registry, extern param-type table) all use the
-   underscored form. Use this whenever you're about to look up by
-   callee name. `out` must hold at least 256 bytes. */
-const char* codegen_normalise_callee(const char* raw, char* out, size_t out_size);
+/* Normalise a callee name's dots to underscores. The AST stores
+   source-level callees in dotted form (`"string.concat"`) but stdlib
+   externs, the generated C call sites, and the various callee registries
+   (heap-string allowlist, builder-funcs registry, extern param-type
+   table) all use the underscored form. Use this whenever you're about to
+   look up by callee name. Returns `raw` itself when it has no dot, else
+   an interned copy (cg_intern); "" for NULL. */
+const char* codegen_normalise_callee(const char* raw);
 
 /* Defer management (codegen.c) */
 void push_defer(CodeGenerator* gen, ASTNode* stmt);
@@ -164,7 +219,6 @@ void push_auto_defer(CodeGenerator* gen, const char* free_fn, const char* var_na
 void emit_defers_for_scope(CodeGenerator* gen);
 void emit_defers_through_scope(CodeGenerator* gen, int floor_depth);
 void emit_all_defers(CodeGenerator* gen);
-void emit_all_defers_protected(CodeGenerator* gen, char** protected_names, int protected_count);
 void enter_scope(CodeGenerator* gen);
 void exit_scope(CodeGenerator* gen);
 
@@ -236,6 +290,23 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
 void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
+int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
+const char* call_c_name(CodeGenerator* gen, const char* func_name);
+ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* #2518 */
+/* The heap-tracked string local a list add, list set or map put takes
+ * (moved or copied, never adopted and left escaped), or NULL. */
+ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call);
+int container_store_slot(CodeGenerator* gen, ASTNode* call);
+/* Copy-on-keep for named functions: does `func_name` take its own reference
+ * to `string` parameter `param_idx` on entry (it keeps it past the call)?
+ * The caller then borrows. callee_keeps_string_arg is the one caller-side
+ * rule for a `string` argument (does the caller's pointer live on?). */
+int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx);
+int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
+int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth);
+int body_may_assign_var_from_heap(CodeGenerator* gen, ASTNode* node, const char* var_name);
+void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
+ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on
  * the definition; the callers' ownership decisions and the bare-fn adapter
  * read the same verdict. */
@@ -245,8 +316,24 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
  * C text `init_text`. The cell is reference-counted, so the release is
  * always sound; see the _AeCellHeader helpers in the generated prologue. */
 void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
-                                    const char* c_type, ASTNode* init_expr,
-                                    const char* init_text, int line, int column);
+                                    const char* c_type, Type* var_type,
+                                    ASTNode* init_expr, const char* init_text,
+                                    int line, int column);
+/* #2474: a cell holding a fixed-size array (`E[N]`) is a pointer to the
+ * whole array, `E (*name)[N]`; see the definitions in codegen_stmt.c. */
+int promoted_cell_array_len(const char* c_type, const char** elem);
+/* #2516: a fixed-size array parameter is passed as `E _param_x[N]` and
+ * copied into the body's own array (see codegen_stmt.c). */
+int is_sized_array_param(Type* t);
+void emit_sized_array_param_declarator(CodeGenerator* gen, Type* t, const char* name);
+void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name);
+const char* promoted_cell_pointer(const char* c_type, const char* name);
+/* The cell for a promoted PARAMETER (a function's or a closure's), seeded
+ * from the C parameter `param_cname`; see the definition for why a string
+ * cell takes its own reference. */
+void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
+                              const char* c_type, const char* param_cname,
+                              int line, int column);
 /* The program's own definition of `name`, or NULL. Shared rather than
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */
@@ -261,6 +348,12 @@ ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
  * and before body codegen. See codegen_stmt.c for the
  * implementation rationale (issue #420 follow-up). */
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
+int  is_captured_string_param(CodeGenerator* gen, const char* var_name);
+void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
+void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
+                               ASTNode*** nodes, int* count, int* cap);
+void mark_captured_string_param(CodeGenerator* gen, const char* var_name);
+void clear_captured_string_params(CodeGenerator* gen);
 
 /* *StringSeq local lifecycle (parallel to the heap-string passes). */
 void hoist_seq_trackers(CodeGenerator* gen, ASTNode* body);
@@ -274,6 +367,10 @@ void push_opt_str_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 
 /* Actor generation (codegen_actor.c) */
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor);
+/* #2466: is state field `field` of actor `actor_name` emitted with an atomic
+   C type (so a read from outside the actor goes through atomic_load)? */
+int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
+                                const char* field);
 
 /* Extern function registry — tracks param types for call-site cast emission */
 void register_extern_func(CodeGenerator* gen, ASTNode* ext);
@@ -304,6 +401,7 @@ int is_aether_extern_param(CodeGenerator* gen, const char* func_name, int param_
    pointer beyond the call). 0 for non-extern callees, missing
    annotations, or out-of-range index. See codegen_func.c. */
 int is_retain_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
+int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);   /* #2523 */
 const char* lookup_extern_c_name(CodeGenerator* gen, const char* func_name);
 
 /* Builder function registry — functions where block configures first, then function executes */
@@ -330,6 +428,13 @@ void discover_bare_fn_adapters(CodeGenerator* gen);
 
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);
+/* #2528 (codegen_actor.c): a `string` state field, tracked by `_heap_<name>`
+ * in the actor struct and released by `<Actor>_destroy_state`. */
+int state_field_owns_string(ASTNode* state_decl);
+/* #2528: a `string[N]` (1) / `fn[N]` (2) state field, length in `*len`. */
+int state_array_owned(ASTNode* state_decl, int* len);
+/* #2528 (codegen_stmt.c): `v` as the value an owned string element takes. */
+void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
 /* Struct-field heap-string ownership (#465). The struct typedef
  * emitter (generate_struct_definition) appends a hidden
@@ -339,6 +444,37 @@ int has_return_value(ASTNode* node);
  * scope-exit destroy defer) and at field-write sites (emit the
  * reassign-wrapper free). */
 int struct_has_heap_string_field(ASTNode* struct_def);
+/* #2525: a `fn` field (a closure value, not a raw C function pointer): it
+ * holds a reference of its own to the closure's env, released by
+ * `<Name>_destroy` / `_replace`, retained by `_dup`. */
+int struct_field_is_closure(ASTNode* field);
+/* #2528: a `string[N]` (1) or `fn[N]` (2) field whose elements the struct
+ * owns, length in `*len`; 0 otherwise. */
+int struct_field_owned_array(ASTNode* field, int* len);
+/* #2525: store the closure value `e` into a slot that holds a reference of
+ * its own: a fresh closure (a literal, a call handing one over) is adopted,
+ * anything else (a local, a field, an element, a parameter) is retained. */
+void emit_closure_take(CodeGenerator* gen, ASTNode* e);
+/* #2528: an array literal whose elements the holder owns: `kind` 1 copies
+ * each string (a fresh one is adopted), 2 takes each closure. */
+void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
+/* #2497: does a value of this struct own heap strings, in a `string` field
+ * of its own or in a field that is itself such a struct held by value? It
+ * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,
+ * which release the nested struct's strings too. */
+int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def);
+ASTNode* owning_struct_field_def(CodeGenerator* gen, ASTNode* field);
+/* #2525: as above, but a fixed-size array field of such structs qualifies
+ * too, its length in `*len` (0 for a direct field). */
+ASTNode* owning_struct_field_def_n(CodeGenerator* gen, ASTNode* field, int* len);
+/* #2497: store `e` into a slot that owns a `sname` struct value (see the
+ * definition in codegen_stmt.c). struct_take_shape: is `e` a value that
+ * views a struct owned elsewhere (a variable, a field, an element, an `if`
+ * over such), which a take copies or moves, rather than a fresh one? */
+int struct_take_shape(ASTNode* e);
+void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
+                      const char* target);
+const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters
@@ -356,7 +492,8 @@ int is_c_callback(ASTNode* func);
 const char* c_callback_symbol(ASTNode* func);
 /* sandbox.enforce trusted calls (codegen.c, see analysis/sandbox_trust.h). */
 ASTNode* sandbox_trust_target(CodeGenerator* gen, const ASTNode* call);
-void sandbox_trust_wrapper_name(ASTNode* def, int site, char* out, size_t n);
+/* The wrapper's C name, interned. */
+const char* sandbox_trust_wrapper_name(ASTNode* def, int site);
 /* Whether a top-level function is emitted `static`. All three emit sites
    (definition, combined multi-clause definition, forward declaration) must
    agree or C rejects the file with "static declaration follows non-static
@@ -393,7 +530,7 @@ int  aether_c_struct_resolve(const char* sname, const char* field,
                              long* out_offset, const char** out_width);
 /* Flatten a member-access chain to its overlay-pointer root receiver +
  * dotted field path; NULL if root isn't a @c_struct overlay. */
-ASTNode* aether_c_struct_chain(ASTNode* macc, char* out, size_t outsz);
+ASTNode* aether_c_struct_chain(ASTNode* macc, const char** path);
 /* Predicate form of the above: is this member-access an overlay access? */
 int aether_c_struct_overlay_lhs(ASTNode* macc);
 
@@ -434,10 +571,26 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program);
 void get_promoted_names_for_func(CodeGenerator* gen, const char* func_name,
                                  char*** out_names, int* out_count);
 int is_promoted_capture(CodeGenerator* gen, const char* name);
+/* The C type of `var_name` as `parent_func` declares it (a function name,
+ * "main", a receive arm or a hoisted closure scope); "int" when unknown. */
+const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
+const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type);
+const char* struct_owning_strings(CodeGenerator* gen, Type* t);
+/* `retain_closures`: 1 where the value at `lvalue` stays a holder of its
+ * closure fields (a parameter, a cell a copy is returned from), 0 where it
+ * is moved out (#2525). */
+void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue,
+                        int retain_closures);
+void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
+                               Type* struct_type, int line, int col);
 
 /* Internal helpers shared across files */
 int contains_send_expression(ASTNode* node);
 const char* get_single_int_field(MessageDef* msg_def);
+/* The fields of a message in the order its C struct declares them, and the
+ * C type each has there; the .c and the --emit-header file share them (#2517). */
+int message_struct_fields(ASTNode* msg_def, ASTNode** out);
+const char* message_field_c_type(ASTNode* msg_def, ASTNode* field);
 void generate_default_return_value(CodeGenerator* gen, Type* type);
 int is_function_generated(CodeGenerator* gen, const char* func_name);
 /* ------------------------------------------------------------------

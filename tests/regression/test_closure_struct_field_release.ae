@@ -1,0 +1,218 @@
+// Regression (#2525): a capturing closure kept in a struct's `fn` field is
+// held by a reference of its own to its environment, like a string the
+// struct owns (#2497): a store takes one (a fresh closure's, or a retain of
+// a view), overwriting or destroying the struct releases it, and a copy
+// (`b = a`, a struct passed or returned by value, `<Name>_dup`) retains.
+//
+// Before, the field held the closure's only reference and nothing ever
+// released it: `h = Holder { cb: build("a") }; h.cb = build("b")` leaked
+// two environments, the cells and the strings they held, per round.
+//
+// Shapes: a literal init and a field overwrite; a struct copy whose two
+// copies keep working after one is overwritten; a struct passed and
+// returned by value; a nested struct and a replaced outer; a heap box; a
+// fixed-size array field of structs; one closure kept in two structs, a
+// local and a list at once (every holder releases its own reference, no
+// double free); a closure local stored into a field and still released by
+// its scope; a local bound to a field read, and a closure returned from a
+// field, each holding a reference of their own past the struct's end; a
+// module-level `var` rebound to a new closure.
+//
+// The check measures what the process holds (std.mem's heap_in_use) over
+// two later windows of the same work, after a warm-up: work that leaks
+// nothing holds steady in at least one of them. The check runs where the
+// heap count is exact (mem.heap_in_use_exact); elsewhere the macOS leaks
+// gate covers this program. Strings are built from parameters, because
+// string.concat of two literals folds to a literal that owns nothing.
+
+import std.mem
+import std.string
+import std.list
+import std.heap
+
+extern exit(code: int)
+
+const PER_ROUND = 100
+
+struct Holder {
+    cb: fn
+}
+
+struct Outer {
+    tag: string
+    inner: Holder
+}
+
+struct Pair {
+    slots: Holder[2]
+}
+
+var current: fn = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Captures a heap string and a cell: the length of the label plus how
+// often it has run.
+build(tag: string) -> fn {
+    label = string.concat(tag, "!")
+    n = 0
+    return || {
+        n = n + 1
+        return string.length(label) + n
+    }
+}
+
+literal_and_overwrite(p: string) -> int {
+    h = Holder { cb: build(p) }
+    h.cb = build(string.concat(p, "zz"))
+    int first = call(h.cb)
+    int second = call(h.cb)
+    check(first == string.length(p) + 4 && second == first + 1, "the overwritten field holds the new closure")
+    return second
+}
+
+copy_keeps_both(p: string) -> int {
+    a = Holder { cb: build(p) }
+    b = a
+    a.cb = build(string.concat(p, "zz"))
+    check(call(b.cb) == string.length(p) + 2, "the copy keeps the first closure")
+    check(call(a.cb) == string.length(p) + 4, "the original holds the new one")
+    check(call(b.cb) == string.length(p) + 3, "the copy's closure keeps its own state")
+    return call(a.cb)
+}
+
+make_holder(p: string) -> Holder {
+    return Holder { cb: build(p) }
+}
+
+use(h: Holder) -> int {
+    return call(h.cb)
+}
+
+passed_and_returned(p: string) -> int {
+    h = make_holder(p)
+    x = use(h)
+    y = use(h)
+    check(x == string.length(p) + 2 && y == x + 1, "a struct passed by value shares the closure's state")
+    h = make_holder(string.concat(p, "zz"))
+    check(call(h.cb) == string.length(p) + 4, "a replaced local holds the returned struct")
+    return call(h.cb)
+}
+
+nested_and_replaced(p: string) -> int {
+    o = Outer { tag: string.concat(p, "t"), inner: Holder { cb: build(p) } }
+    o.inner.cb = build(string.concat(p, "z"))
+    check(call(o.inner.cb) == string.length(p) + 3, "a nested field overwrite")
+    o.inner = Holder { cb: build(string.concat(p, "zz")) }
+    check(call(o.inner.cb) == string.length(p) + 4, "a nested struct replaced")
+    o = Outer { tag: string.concat(p, "u"), inner: make_holder(p) }
+    check(call(o.inner.cb) == string.length(p) + 2, "an outer struct replaced")
+    return call(o.inner.cb)
+}
+
+boxed(p: string) -> int {
+    nb = heap.new(Holder)
+    nb.cb = build(p)
+    nb.cb = build(string.concat(p, "zz"))
+    int r = call(nb.cb)
+    check(r == string.length(p) + 4, "a field store through a box")
+    heap.free(nb)
+    return r
+}
+
+array_field(p: string) -> int {
+    pr = Pair { slots: [Holder { cb: build(p) }, Holder { cb: build(string.concat(p, "zz")) }] }
+    r = call(pr.slots[0].cb) + call(pr.slots[1].cb)
+    check(r == 2 * string.length(p) + 6, "closures in an array field")
+    return r
+}
+
+shared_everywhere(p: string) -> int {
+    f = build(p)
+    a = Holder { cb: f }
+    b = Holder { cb: f }
+    l = list.new()
+    list.add(l, f)
+    total = call(a.cb) + call(b.cb) + call(f)
+    check(total == 3 * string.length(p) + 9, "one closure, four holders, one state")
+    a.cb = build(string.concat(p, "zz"))
+    check(call(b.cb) == string.length(p) + 5, "the other holders keep the closure")
+    list.free(l)
+    return total
+}
+
+// A local bound to a field read holds a reference of its own: the struct
+// may be destroyed first.
+view_outlives_holder(p: string) -> int {
+    x = build(p)
+    if string.length(p) > 0 {
+        h = Holder { cb: build(string.concat(p, "zz")) }
+        x = h.cb
+    }
+    int r = call(x)
+    check(r == string.length(p) + 4, "a view bound to a local outlives the struct")
+    return r
+}
+
+pick(h: Holder) -> fn {
+    return h.cb
+}
+
+returned_from_field(p: string) -> int {
+    h = Holder { cb: build(p) }
+    f = pick(h)
+    h = Holder { cb: build(string.concat(p, "zz")) }
+    int r = call(f)
+    check(r == string.length(p) + 2, "a closure returned from a field outlives the struct")
+    return r
+}
+
+global_rebound(p: string) -> int {
+    current = build(p)
+    current = build(string.concat(p, "zz"))
+    int r = call(current)
+    check(r == string.length(p) + 4, "a global holds the closure it was last bound to")
+    return r
+}
+
+fn one_round(p: string) {
+    i = 0
+    while i < PER_ROUND {
+        literal_and_overwrite(p)
+        copy_keeps_both(p)
+        passed_and_returned(p)
+        nested_and_replaced(p)
+        boxed(p)
+        array_field(p)
+        shared_everywhere(p)
+        view_outlives_holder(p)
+        returned_from_field(p)
+        global_rebound(p)
+        i = i + 1
+    }
+}
+
+main() {
+    if !mem.heap_in_use_exact() {
+        one_round("a")
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    // A leak grows the exact count in every window of rounds; work that
+    // leaks nothing holds it steady once warm. So warm up, then require some
+    // later window to hold steady (mem.steady_growth).
+    one_round("a")
+    one_round("a")
+    grown = mem.steady_growth(|| {
+            one_round("a")
+            one_round("a")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

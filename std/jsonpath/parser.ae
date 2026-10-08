@@ -22,7 +22,6 @@ import std.strbuilder
 import std.list
 import model
 
-@extern("free") _free_parser_memory(p: ptr)
 // Parser strings come from strbuilder.finish, a length-carrying string whose
 // header and bytes are one block; string_free releases the block whole. See
 // model.ae for why a raw free of the bytes is wrong.
@@ -48,14 +47,13 @@ struct Parser {
     err: string
 }
 
-// `heap.free` runs generated field destructors. That is normally useful, but
-// `err` is deliberately a borrowed diagnostic (often a literal), while the
-// input is the only string this context owns. Release the input explicitly
-// and then release the allocation without asking the generated destructor to
-// infer ownership of the diagnostic.
+// `heap.free` runs the generated field destructors, which release a string
+// field only when the context owns it: the input, a copy of the query, and
+// a diagnostic `_fail` stored (a field keeps its own copy of a parameter);
+// the literal one `parse` starts with is left alone. A raw free of the
+// struct leaked that copy on every failed parse.
 _dispose_parser(p: *Parser) {
-    string.release(p.input)
-    _free_parser_memory(p as ptr)
+    heap.free(p)
 }
 
 // Re-export so callers need only import the parser for the common path.

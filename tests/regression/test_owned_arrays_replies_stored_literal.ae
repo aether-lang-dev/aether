@@ -1,0 +1,153 @@
+// Regression (#2528): three more holders own what they keep.
+//
+// - A `string[N]` or `fn[N]` struct field owns every element (a copy of
+//   each string, a reference per closure), and a local array of structs
+//   that own strings or closures owns its elements: released on destroy and
+//   on an element store, copied or retained by a copy, consistent with a
+//   fixed-size array field of such structs (#2525).
+// - A reply message's string and closure fields: the asker takes the field
+//   it reads and releases the rest with the reply; a closure an ask brings
+//   back (a field or an expression reply) is the asker's own; a reply with
+//   no taker (sent to, not asked; or the asker timed out) is released by
+//   the replier.
+// - A closure literal passed to a function that stores it in a struct
+//   field: the field retains it (#2525), so the caller releases its own
+//   reference after the call.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work must grow the heap by
+// exactly 0 (mem.steady_growth). Elsewhere the macOS leaks gate covers this program.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal that owns nothing.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    cb: fn
+}
+
+struct Bag {
+    names: string[2]
+    cbs: fn[2]
+}
+
+message GetBoth {}
+message Both { cb: fn, note: string }
+message GetNote {}
+message Note { note: string, cb: fn }
+message GetCb {}
+message Unasked {}
+
+actor Giver {
+    state tag = "t"
+    receive {
+        GetBoth() -> { reply Both { cb: build(tag), note: string.concat(tag, "-note") } }
+        Unasked() -> { reply Both { cb: build(tag), note: string.concat(tag, "-note") } }
+        GetNote() -> { reply Note { note: string.concat(tag, "-note"), cb: build(tag) } }
+        GetCb() -> { reply build(tag) }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+build(tag: string) -> fn {
+    label = string.concat(tag, "!")
+    n = 0
+    return || {
+        n = n + 1
+        return string.length(label) + n
+    }
+}
+
+// string[N] and fn[N] fields: a literal, element overwrites, a copy, a
+// replaced struct.
+array_fields(p: string) -> int {
+    b = Bag { names: [string.concat(p, "1"), "lit"], cbs: [build(p), build(string.concat(p, "zz"))] }
+    b.names[1] = string.concat(p, "2")
+    b.names[0] = "again"
+    b.cbs[0] = build(string.concat(p, "q"))
+    c = b
+    b.cbs[1] = build(p)
+    check(string.equals(c.names[1], "a2") == 1, "a copy keeps the element strings")
+    check(call(c.cbs[1]) == string.length(p) + 4, "a copy keeps the element closures")
+    check(call(b.cbs[1]) == string.length(p) + 2, "the original holds the new element")
+    b = Bag { names: [p, p], cbs: [build(p), build(p)] }
+    check(string.equals(b.names[0], p) == 1, "a replaced struct holds its new elements")
+    return call(b.cbs[0]) + call(c.cbs[0])
+}
+
+// A local array of owning structs: element stores, an array copy, scope exit.
+local_array(p: string) -> int {
+    arr = [Holder { cb: build(p) }, Holder { cb: build(string.concat(p, "zz")) }]
+    arr[0] = Holder { cb: build(string.concat(p, "q")) }
+    h = Holder { cb: build(p) }
+    arr[1] = h
+    check(call(arr[1].cb) == string.length(p) + 2, "an element stored from a local keeps working")
+    check(call(h.cb) == string.length(p) + 3, "the local still holds its closure")
+    other = [Holder { cb: build(p) }, Holder { cb: build(p) }]
+    other = arr
+    check(call(other[0].cb) == string.length(p) + 3, "an array copy keeps the elements")
+    return call(arr[0].cb)
+}
+
+keep(h: Holder, cb: fn) -> Holder {
+    h.cb = cb
+    return h
+}
+
+stored_literal(p: string) -> int {
+    h = Holder { cb: build(p) }
+    h = keep(h, || { return string.length(p) })
+    check(call(h.cb) == string.length(p), "the stored literal runs")
+    return call(h.cb)
+}
+
+replies(g: ptr) -> int {
+    f = g ? GetBoth {}
+    int r = call(f)
+    check(r == 3, "a reply's closure field runs")
+    note = g ? GetNote {}
+    check(string.length(note) == 6, "a reply's string field is taken")
+    cb = g ? GetCb {}
+    check(call(cb) == 3, "an expression reply's closure runs")
+    // A reply nobody asked for (a send, not an ask) has no taker: the
+    // replier releases what it owns, as it does when the asker timed out.
+    g ! Unasked {}
+    return r
+}
+
+fn one_round(g: ptr, p: string) {
+    i = 0
+    while i < 50 {
+        array_fields(p)
+        local_array(p)
+        stored_literal(p)
+        replies(g)
+        i = i + 1
+    }
+}
+
+main() {
+    g = spawn(Giver())
+    if !mem.heap_in_use_exact() {
+        one_round(g, "a")
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    one_round(g, "a")
+    one_round(g, "a")
+    grown = mem.steady_growth(|| {
+            one_round(g, "a")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

@@ -1,0 +1,20 @@
+// #2509: an HTTP server in actor dispatch mode releases the worker actor it
+// spawns for each connection once the connection is finished. The work is
+// in shim.c; actor dispatch mode is reached from C, not from Aether code.
+
+import std.http
+
+extern http_actor_release_probe() -> int
+
+main() {
+    // Touch std.http so the build links the server.
+    s = http.server_create(0)
+    if s == 0 {
+        println("FAIL: server_create")
+        return
+    }
+    rc = http_actor_release_probe()
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+}

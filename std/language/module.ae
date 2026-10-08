@@ -423,7 +423,12 @@ fn match_tags(m: *Matcher, preferred: *StringSeq) -> string {
         curr_pref = string_seq_tail(curr_pref)
     }
 
-    // Second pass: fallback to primary language matching (base language)
+    // Second pass: fallback to primary language matching (base language).
+    // The script is what makes a written form readable, so a base-language
+    // match only stands when the two tags do not name different scripts:
+    // `zh-HK` may be served `zh-Hans-CN`, but `zh-Hant` is not served
+    // `zh-Hans` (RFC 4647 §3.4 lookup only truncates a range, so from
+    // `zh-Hant` it reaches `zh`, never a sibling script).
     curr_pref = preferred
     while string_seq_is_empty(curr_pref) == 0 {
         p_str = string_seq_head(curr_pref)
@@ -431,6 +436,7 @@ fn match_tags(m: *Matcher, preferred: *StringSeq) -> string {
         if p_err == "" {
             p_tag = p_tag_str as Tag
             p_lang = language(p_tag)
+            p_script = script(p_tag)
             curr_supp = m.supported
             while string_seq_is_empty(curr_supp) == 0 {
                 s_str = string_seq_head(curr_supp)
@@ -438,7 +444,9 @@ fn match_tags(m: *Matcher, preferred: *StringSeq) -> string {
                 if s_err == "" {
                     s_tag = s_tag_str as Tag
                     s_lang = language(s_tag)
-                    if string_equals(p_lang, s_lang) == 1 {
+                    s_script = script(s_tag)
+                    scripts_agree = string_length(p_script) == 0 || string_length(s_script) == 0 || string_equals(p_script, s_script) == 1
+                    if string_equals(p_lang, s_lang) == 1 && scripts_agree {
                         return string_copy(s_tag_str)
                     }
                 }
@@ -504,7 +512,9 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
                 }
             }
 
-            if string_length(tag_str) > 0 {
+            // q=0 marks a range as "not acceptable" (RFC 7231 §5.3.1), so
+            // it is dropped rather than tried last.
+            if string_length(tag_str) > 0 && q_val > 0.0 {
                 p = heap.new(Preferred)
                 p.tag = string_copy(tag_str)
                 p.q = q_val
@@ -515,21 +525,23 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
         curr = string_seq_tail(curr)
     }
 
+    // Order by descending q with a STABLE insertion sort: ranges of equal
+    // weight keep the order the client listed them in, which is its
+    // preference among them. A header holds a handful of entries.
     sz = list_size(pref_list)
-    i = 0
+    i = 1
     while i < sz {
-        j = i + 1
-        while j < sz {
-            pi = list_get_raw(pref_list, i)
-            pj = list_get_raw(pref_list, j)
-            pref_i = pi as *Preferred
-            pref_j = pj as *Preferred
-            if pref_j.q > pref_i.q {
-                list_set(pref_list, i, pref_j)
-                list_set(pref_list, j, pref_i)
+        cur = list_get_raw(pref_list, i) as *Preferred
+        j = i - 1
+        while j >= 0 {
+            prev_pref = list_get_raw(pref_list, j) as *Preferred
+            if prev_pref.q >= cur.q {
+                break
             }
-            j = j + 1
+            list_set(pref_list, j + 1, prev_pref)
+            j = j - 1
         }
+        list_set(pref_list, j + 1, cur)
         i = i + 1
     }
 

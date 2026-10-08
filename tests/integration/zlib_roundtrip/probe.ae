@@ -155,19 +155,26 @@ main() {
     print("  PASS: 32 binary bytes round-trip (NULs preserved)\n")
     fs.delete(path)
 
-    // ---- Test 6: level out of range is clamped to default ----
-    print("\nTest 6: out-of-range level is clamped to default\n")
-    c6, nc6, cerr6 = zlib.deflate(string.bytes(msg)[0..n_in], 42)
-    if cerr6 != "" {
-        println("  FAIL: deflate errored on weird level: ${cerr6}")
+    // ---- Test 6: a level outside -1..9 is an error ----
+    // It used to be replaced by the default without a word; the documented
+    // levels are 0..9 and -1, and anything else is now reported.
+    print("\nTest 6: out-of-range level is an error\n")
+    _c6, nc6, cerr6 = zlib.deflate(string.bytes(msg)[0..n_in], 42)
+    if cerr6 == "" || nc6 != 0 {
+        println("  FAIL: deflate accepted level 42")
         exit(1)
     }
-    u6, _, _ = zlib.inflate(string.bytes(c6)[0..nc6])
+    c6d, nc6d, cerr6d = zlib.deflate(string.bytes(msg)[0..n_in], 0 - 1)
+    if cerr6d != "" {
+        println("  FAIL: deflate at the default level (-1) errored: ${cerr6d}")
+        exit(1)
+    }
+    u6, _, _ = zlib.inflate(string.bytes(c6d)[0..nc6d])
     if string.equals(u6, msg) != 1 {
-        print("  FAIL: round-trip content mismatch at clamped level\n")
+        print("  FAIL: round-trip content mismatch at the default level\n")
         exit(1)
     }
-    print("  PASS: level 42 treated as default, round-trip OK\n")
+    print("  PASS: level 42 refused, -1 (default) round-trips\n")
 
     print("\n=== All std.zlib tests passed ===\n")
 }

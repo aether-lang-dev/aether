@@ -136,6 +136,15 @@ main() {
                 "bound leaves headroom over 100 bytes")
         }
 
+        spec.it("computes the bound for inputs past 130 MB without wrapping") callback {
+            // n * 33 / 32 + 1, which the lzf.h macro computed in unsigned
+            // int: 200000000 gave 72032273, and compress allocated that.
+            spec.assert_eq(lzf.max_compressed_size(200000000), 206250001,
+                "200 MB bound")
+            spec.assert_eq(lzf.max_compressed_size(2147483647), 2147483647,
+                "a bound past INT_MAX saturates")
+        }
+
         // The input is a byte[] whose length travels with it (#2301), so a
         // negative input length cannot be expressed; the case that replaces
         // it is a slice with no bound at all, which both calls refuse.

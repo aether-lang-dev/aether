@@ -41,10 +41,11 @@ extern racket_run_sandboxed(perms: ptr, code: string) -> int
 extern racket_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
 extern racket_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured stdout as a
-// string ("" on failure). State persists across calls.
-extern racket_evaluate(code: string) -> string
+// string ("" on failure). State persists across calls. The string is a
+// fresh one the caller owns.
+extern racket_evaluate(code: string) -> string @heap
 // Live string-only k-v map over the persistent VM (shared with Rhombus).
 extern racket_set(key: string, value: string) -> int
-extern racket_get(key: string) -> string
+extern racket_get(key: string) -> string @heap
 extern racket_init() -> int
 extern racket_finalize()

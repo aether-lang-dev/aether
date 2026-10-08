@@ -4,6 +4,7 @@
 #include "../../runtime/aether_resource_caps.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,9 +48,20 @@ static void free_decompress_tls(void) {
     tls_decompress_len = 0;
 }
 
+/* LZF's worst case, n * 33/32 + 1, in 64 bits. The lzf.h macro computes
+ * `n * 33` in unsigned int, which wraps past about 130 MB: 200000000 gave
+ * 72032273 instead of 206250001, and lzf_try_compress allocated that
+ * wrapped bound as its output buffer. */
+static uint64_t lzf_bound64(uint64_t n) {
+    return ((n * 33u) >> 5) + 1u;
+}
+
+/* The bound as an int, saturating at INT_MAX for an input so large that its
+ * worst case does not fit one. */
 int lzf_max_compressed_size(int length) {
     if (length < 0) return 0;
-    return (int)LZF_MAX_COMPRESSED_SIZE((unsigned int)length);
+    uint64_t b = lzf_bound64((uint64_t)length);
+    return b > (uint64_t)INT_MAX ? INT_MAX : (int)b;
 }
 
 int lzf_try_compress(const char* data, int length) {
@@ -69,7 +81,11 @@ int lzf_try_compress(const char* data, int length) {
         return 1;
     }
 
-    unsigned int bound = LZF_MAX_COMPRESSED_SIZE((unsigned int)in_len);
+    /* lzf_compress takes 32-bit lengths; past UINT_MAX the bound is capped
+     * there, and an output that does not fit reports "incompressible" as
+     * it would at any size. */
+    uint64_t bound64 = lzf_bound64((uint64_t)in_len);
+    unsigned int bound = bound64 > (uint64_t)UINT_MAX ? UINT_MAX : (unsigned int)bound64;
     size_t alloc_cap = (size_t)bound;
     unsigned char* out = (unsigned char*)aether_caps_malloc(alloc_cap);
     if (!out) return 0;

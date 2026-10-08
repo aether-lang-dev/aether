@@ -4,9 +4,15 @@
 // function's address was passed where the row pointer belonged, then read
 // as a string. In aether-ui the same defect segfaulted table_demo at
 // startup inside aether_string_data.
+//
+// The cell callback returns a `string`: `uix.invoke_cell` hands its result
+// over owned, as a string closure does (#2054), and the caller frees it. A
+// `ptr`-returning callback here returned the borrowed literal, which the
+// caller then freed; it only survived while closure bodies inherited the
+// string-escape sets of the function emitted before them.
 import uix
 
 main() {
     s = "REAL-ROW"
-    uix.drive(| item: ptr, c: int | { return item }, s)
+    uix.drive(| item: string, c: int | { return item }, s)
 }

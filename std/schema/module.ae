@@ -83,18 +83,22 @@ exports(
 import std.json
 import std.map
 import std.map(map_new, map_has, map_free)
+import std.list
 import std.list(list_new, list_add_raw, list_get_raw, list_size, list_free)
 import std.strbuilder
 import std.string(string_length, string_equals, string_concat, string_char_at,
-    string_contains, string_index_of, string_to_lower, string_to_upper,
+    string_char_at_n, string_contains, string_index_of, string_index_of_from,
+    string_index_of_from_n, string_to_lower, string_to_upper,
     string_trim, string_ends_with, string_free, string_substring,
-    string_starts_with, to_int, to_float)
+    string_starts_with, to_long, to_float)
 
 // box_closure() mallocs a two-word _AeClosure box; free it with libc free.
 @extern("free") libc_free(p: ptr)
 
 // ---- Field type tags ----
 const STR = 0
+// A 64-bit integer: the range std.json reads an integer literal in, and the
+// type of the min/max bounds. Text outside it is not an INT.
 const INT = 1
 const FLOAT = 2
 const BOOL = 3
@@ -338,6 +342,11 @@ default_to(_ctx: ptr, v: string) {
     if f.kind != KIND_FIELD || f.ty == OBJECT || is_array(f.ty) {
         panic("schema.default_to() supplies a scalar field; an object or array field can be optional()")
     }
+    // Refused here rather than dropped from parse_json's values later.
+    _, code = check_type(v, f.ty, 0)
+    if code != "" {
+        panic("schema.default_to(\"${v}\") on ${f.name}: the default is not a valid ${type_name(f.ty)}")
+    }
     f.has_default = 1
     f.default_val = v
     f.is_optional = 1
@@ -406,7 +415,7 @@ fn check_type(raw: string, ty: int, strict: int) -> (string, string) {
         return raw, ""
     }
     if ty == INT {
-        _, err = to_int(raw)
+        _, err = to_long(raw)
         if err != "" {
             return "", "invalid_type"
         }
@@ -435,20 +444,60 @@ fn check_type(raw: string, ty: int, strict: int) -> (string, string) {
     return raw, ""
 }
 
+// Something before the @, and a domain after it with a dot that neither
+// starts nor ends it. The local part may hold dots of its own.
 fn looks_like_email(v: string) -> int {
     at = string_index_of(v, "@")
     if at <= 0 {
         return 0
     }
-    // must have a dot after the @, not immediately after
-    rest_dot = string_index_of(v, ".")
-    if rest_dot < at {
+    // the domain's dot: after the @, not immediately after
+    dot = string_index_of_from(v, ".", at + 1)
+    if dot <= at + 1 {
         return 0
     }
-    if string_length(v) - 1 == rest_dot {
+    n = string_length(v)
+    if string_char_at_n(v, n, n - 1) == 46 { // '.'
         return 0 // trailing dot
     }
     return 1
+}
+
+// An INT field's value for a numeric check: (n, 0), or (0, 1) after pushing
+// invalid_type. check_type has accepted the text by the same parse, so the
+// failure arm only guards a check that would otherwise compare a 0.
+fn int_value(errors: ptr, path: string, v: string) -> (long, int) {
+    n, err = to_long(v)
+    if err != "" {
+        push_error(errors, path, "invalid_type", "${path} is not a valid integer")
+        return 0, 1
+    }
+    return n, 0
+}
+
+// Whether `v` is exactly one of the comma-separated options in `set`,
+// compared in place: no option is copied out.
+fn in_set(set: string, v: string) -> int {
+    n = string_length(set)
+    vn = string_length(v)
+    start = 0
+    while start <= n {
+        end = string_index_of_from_n(set, n, ",", start)
+        if end < 0 {
+            end = n
+        }
+        if end - start == vn {
+            i = 0
+            while i < vn && string_char_at_n(set, n, start + i) == string_char_at_n(v, vn, i) {
+                i = i + 1
+            }
+            if i == vn {
+                return 1
+            }
+        }
+        start = end + 1
+    }
+    return 0
 }
 
 // Apply one rule to a (typed) value at `path`. On failure pushes an error
@@ -479,8 +528,11 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, path: string, v: string) -> int 
                 return 1
             }
         } else {
-            iv, _ = to_int(v)
-            if (iv as long) < r.ival {
+            iv, bad = int_value(errors, path, v)
+            if bad == 1 {
+                return 1
+            }
+            if iv < r.ival {
                 push_error(errors, path, "too_small", "${path} must be >= ${r.ival}")
                 return 1
             }
@@ -500,8 +552,11 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, path: string, v: string) -> int 
                 return 1
             }
         } else {
-            iv, _ = to_int(v)
-            if (iv as long) > r.ival {
+            iv, bad = int_value(errors, path, v)
+            if bad == 1 {
+                return 1
+            }
+            if iv > r.ival {
                 push_error(errors, path, "too_big", "${path} must be <= ${r.ival}")
                 return 1
             }
@@ -521,17 +576,7 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, path: string, v: string) -> int 
         return 0
     }
     if k == RULE_ONE_OF {
-        // set is comma-separated; test membership by wrapping in commas
-        needle = string_concat(",", v)
-        needle2 = string_concat(needle, ",")
-        string_free(needle)
-        hay = string_concat(",", r.sval)
-        hay2 = string_concat(hay, ",")
-        string_free(hay)
-        found = string_contains(hay2, needle2)
-        string_free(needle2)
-        string_free(hay2)
-        if found != 1 {
+        if in_set(r.sval, v) != 1 {
             push_error(errors, path, "invalid_value", "${path} must be one of: ${r.sval}")
             return 1
         }
@@ -561,7 +606,10 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, path: string, v: string) -> int 
                 return 1
             }
         } else {
-            iv, _ = to_int(v)
+            iv, bad = int_value(errors, path, v)
+            if bad == 1 {
+                return 1
+            }
             if iv <= 0 {
                 push_error(errors, path, "too_small", "${path} must be positive")
                 return 1
@@ -577,7 +625,10 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, path: string, v: string) -> int 
                 return 1
             }
         } else {
-            iv, _ = to_int(v)
+            iv, bad = int_value(errors, path, v)
+            if bad == 1 {
+                return 1
+            }
             if iv < 0 {
                 push_error(errors, path, "too_small", "${path} must be non-negative")
                 return 1
@@ -832,6 +883,9 @@ fn check_value(f: *Field, v: ptr, path: string, strict: int, errors: ptr) -> ptr
     }
     out = typed_json(f.ty, cur)
     string_free(cur)
+    if out == null {
+        push_error(errors, path, "invalid_type", "${path} is not a valid ${type_name(f.ty)}")
+    }
     return out
 }
 
@@ -910,14 +964,14 @@ fn scalar_text(ty: int, v: ptr, strict: int) -> (string, string) {
 }
 
 // A field's canonical text as the JSON value of its type; null when the
-// text does not read as one (a default the field's type cannot hold).
+// text does not read as one, which a caller reports.
 fn typed_json(ty: int, text: string) -> ptr {
     if ty == INT {
-        n, err = to_int(text)
+        n, err = to_long(text)
         if err != "" {
             return null
         }
-        return json.json_create_int(n as long)
+        return json.json_create_int(n)
     }
     if ty == FLOAT {
         x, ferr = to_float(text)
@@ -973,18 +1027,38 @@ error_count(errors: ptr) -> int {
     return list_size(errors)
 }
 
+// The getters below read error `idx` of an errors list. They have no error
+// channel, so an index outside [0, error_count) reads as "", which no error
+// carries as its code, rather than a crash.
+fn error_at(errors: ptr, idx: int) -> *SchemaError {
+    e, err = list.get(errors, idx)
+    if err != "" {
+        return null
+    }
+    return e as *SchemaError
+}
+
 error_field(errors: ptr, idx: int) -> string {
-    e = list_get_raw(errors, idx) as *SchemaError
+    e = error_at(errors, idx)
+    if e == null {
+        return ""
+    }
     return e.field
 }
 
 error_code(errors: ptr, idx: int) -> string {
-    e = list_get_raw(errors, idx) as *SchemaError
+    e = error_at(errors, idx)
+    if e == null {
+        return ""
+    }
     return e.code
 }
 
 error_message(errors: ptr, idx: int) -> string {
-    e = list_get_raw(errors, idx) as *SchemaError
+    e = error_at(errors, idx)
+    if e == null {
+        return ""
+    }
     return e.msg
 }
 

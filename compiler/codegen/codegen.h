@@ -139,6 +139,18 @@ typedef struct {
     // that quadratic in the number of functions.
     StrMap generated_functions;
 
+    // #2466: "Actor.field" for every actor state field the program uses as a
+    // pointer (codegen_actor.c, state_field_is_ptr). Built by one walk of
+    // the program on the first ask.
+    StrMap actor_ptr_fields;
+    int actor_ptr_fields_ready;
+
+    // #2369: answers to "does this function / struct field / local always
+    // hold a heap.new box?" (codegen_stmt.c, zb_*), keyed by the question.
+    // The field and local questions walk the program or a function body, so
+    // each is answered once.
+    StrMap zeroed_box_memo;
+
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
     ASTNode* defer_stack[MAX_DEFER_STACK];
     // #1140: parallel to defer_stack — which exits this defer fires on.
@@ -261,6 +273,13 @@ typedef struct {
                              //   for retainers like string_list_add or
                              //   map_put_raw's key. See #420 follow-up. NULL
                              //   when no param carries the annotation.
+        int* params_noescape; // 1 per index when the param was declared
+                             //   `name: @noescape ptr` (or `fn`): the function
+                             //   uses the argument only during the call, so a
+                             //   closure passed there is released by the caller
+                             //   once the call returns, as after an Aether
+                             //   callee that keeps nothing (#2523). NULL when
+                             //   no param carries the annotation.
         int param_count;
         Type* ret_type;      // #1286: the declared return type (borrowed from
                              // the extern's AST), so a call returning `T[]`
@@ -281,6 +300,18 @@ typedef struct {
 
     // Match-as-expression: when non-NULL, match arms assign to this variable
     const char* match_result_var;
+    // #2461: when non-NULL, the result variable is an owning string local:
+    // each value arm takes its value with emit_string_take, setting this C
+    // int flag to whether the local owns what it got (-1: no arm assigned).
+    const char* match_result_own;
+    // #2497: when non-NULL, the result is a struct of this name that owns
+    // heap strings: each value arm is taken with emit_struct_take, and when
+    // match_result_replace is set it replaces the value the result held.
+    const char* match_result_struct;
+    int match_result_replace;
+    // #2514: when non-NULL, the result variable is a promoted capture of
+    // this type: each value arm stores into its cell (emit_cell_store).
+    Type* match_result_cell;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so
@@ -320,6 +351,15 @@ typedef struct {
     char** opt_type_names;
     int opt_type_count;
     int opt_type_capacity;
+
+    /* #2520: the string literals of the program that hold a NUL, one entry
+     * per distinct byte sequence. Each is emitted once, at file scope, as a
+     * static pinned AetherString `_ae_slit_<i>` (emit_static_string_literals),
+     * and every use of the literal is the address of that object. */
+    char** static_str_bytes;
+    int* static_str_lens;
+    int static_str_count;
+    int static_str_capacity;
 
     // Builder function registry: functions with _ctx: ptr as first param
     // get builder_context() auto-injected at call sites inside trailing blocks
@@ -389,16 +429,32 @@ typedef struct {
     char** bare_fn_adapter_names;
     int    bare_fn_adapter_count;
     int    bare_fn_adapter_capacity;
+    /* #2499: no closure the program can call keeps a parameter that can
+     * hold a caller's string, so an owned string argument to any closure
+     * call is freed after it (compute_closure_args_borrowed). */
+    int    closure_args_borrowed;
+    /* #2478: what calling each function of the program can change (a module
+     * global, memory a parameter reaches), memoised per definition by
+     * order_fn_effects in codegen_expr.c. */
+    struct OrderFnEffects* order_fn_effects;
+    int    order_fn_effect_count;
+    int    order_fn_effect_capacity;
 
     // Closure support: track closures for hoisted C function generation
     int closure_counter;    // unique ID for closure env structs and functions
     // Map variable names to closure IDs (set during variable declaration codegen)
     struct ClosureVarMap {
+        char* scope;        // #2513: the scope declaring the variable
         char* var_name;
         int closure_id;
     }* closure_var_map;
     int closure_var_count;
     int closure_var_capacity;
+    /* #2513: the scope whose variables closure_var_map lookups resolve
+     * against while a body is emitted: a function's name, "main", or a
+     * receive arm's or a hoisted closure's synthetic name, as
+     * discover_closures_scoped names them. */
+    const char* closure_var_scope;
     // Pending closures: discovered during expression codegen, emitted at file scope
     struct ClosureInfo {
         int id;                  // unique closure ID
@@ -456,6 +512,24 @@ typedef struct {
     // exit defer pre-pass consults both for the defer-suppression.
     char** return_escaped_string_vars;
     int return_escaped_string_var_count;
+
+    // #2499 copy-on-keep: the `string` parameters of the body being
+    // generated that hold a reference of their own (captured on entry),
+    // heap-tracked locals from there on. Their exit free, when one is
+    // armed, is journaled for panic unwinding as soon as it is
+    // (push_heap_string_exit_free_defers), before any statement runs.
+    char** captured_string_params;
+    int captured_string_param_count;
+
+    // The ownership answers about a callee's parameter (does it keep it,
+    // capture it, only hand it back), computed once per program from the
+    // callee's body and remembered (an open-addressed table of CalleeMemo,
+    // private to codegen_stmt.c). Every walk asks them at every call site,
+    // and answering walks the callee's body, whose calls ask them in turn:
+    // unremembered, std.message took minutes to compile.
+    void* callee_memo;
+    int callee_memo_cap;
+    int callee_memo_count;
 
     // #752: struct locals that escape via a return (directly or as a
     // tuple element). Such a struct's heap-string fields belong to the
@@ -575,6 +649,21 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def);
 void generate_main_function(CodeGenerator* gen, ASTNode* main);
 void generate_statement(CodeGenerator* gen, ASTNode* stmt);
 void generate_expression(CodeGenerator* gen, ASTNode* expr);
+void emit_c_string_literal(CodeGenerator* gen, const char* str);
+void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format);  // #2512
+/* #2520: `len` bytes, NULs included, as the inside of a C string literal. */
+void emit_c_string_bytes(CodeGenerator* gen, const char* str, size_t len, int printf_format);
+/* #2520: a string literal node as a C expression: a C string literal, or,
+ * when the literal holds a NUL, the static AetherString that carries it. */
+void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit);
+/* #2520: `lit` as an fwrite of all its bytes to stdout (print of a literal). */
+void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newline);
+void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit);
+int  static_string_literal_index(CodeGenerator* gen, const char* bytes, int len);
+void emit_static_string_literals(CodeGenerator* gen, ASTNode* program);
+int  binary_is_string_compare(const ASTNode* expr);                      // #2515
+void emit_string_compare_open(CodeGenerator* gen, const char* op);       // #2515
+void emit_string_compare_close(CodeGenerator* gen, const char* op);      // #2515   // #2467
 void generate_type(CodeGenerator* gen, Type* type);
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type);
 void ensure_optional_typedef(CodeGenerator* gen, Type* type);   // #340

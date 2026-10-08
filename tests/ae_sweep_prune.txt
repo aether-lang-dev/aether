@@ -9,6 +9,7 @@
 # duplicate or break the script's own run.
 /custom_lib_dir/
 /lib/
+tests/integration/actor_alignment/
 tests/integration/ae_inspect/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
@@ -44,6 +45,7 @@ tests/integration/closure_actor_state_reject/
 tests/integration/closure_param_shadows_module_fn/
 tests/integration/closure_builder_ctx_inject_no_uaf/
 tests/integration/closure_extern_retains_no_uaf/
+tests/integration/closure_extern_noescape/
 tests/integration/closure_qualified_ctx_inject_no_uaf/
 tests/integration/contract_fold_reject/
 tests/integration/cross_emit_lib/
@@ -95,6 +97,7 @@ tests/integration/heap_tracker_return_escape_no_leak/
 tests/integration/host_racket/
 tests/integration/host_rhombus/
 tests/integration/host_tinygo/
+tests/integration/http_actor_mode_release/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
@@ -235,3 +238,6 @@ tests/integration/slice_bounds/
 tests/integration/slice_diag_path_escape/
 tests/integration/sandbox_trusted_names/
 tests/integration/spec_describe_indent/
+tests/integration/print_format_args/
+tests/integration/extern_hidden_state_eval_order/
+tests/integration/emit_header_layout/

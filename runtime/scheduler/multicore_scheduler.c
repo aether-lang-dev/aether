@@ -41,6 +41,9 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
 // defer main_thread_only=0 in scheduler_spawn_actor and prevent a scheduler
 // thread from entering the same step() concurrently.
 extern AETHER_TLS ActorBase* g_sync_step_actor;
+// Inline-send depth and pending releases, defined in aether_send_message.c.
+extern AETHER_TLS int g_inline_step_depth;
+extern AETHER_TLS int g_inline_release_pending;
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -201,7 +204,8 @@ static inline void aether_step_safe(ActorBase* actor) {
     g_aether_current_actor_id = -1;
     aether_try_pop();
 
-    atomic_store_explicit(&actor->dead, 1, memory_order_release);
+    // A bit, not a store: a release may be setting its own bit meanwhile.
+    atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_PANICKED, memory_order_release);
     atomic_store_explicit(&actor->active, 0, memory_order_release);
 
     // Drain any pending messages so scheduler_wait() sees counters converge.
@@ -258,9 +262,15 @@ static inline void aether_step_safe(ActorBase* actor) {
 }
 
 static inline void aether_step_inline(ActorBase* actor) {
+    // As in aether_send_message_sync: a release made in the step waits until
+    // this is done touching the actor (#2509).
+    g_inline_step_depth++;
     int locked = aether_inline_lock_acquire(actor);
     aether_step_safe(actor);
     if (locked) aether_inline_lock_release(actor);
+    if (--g_inline_step_depth == 0 && unlikely(g_inline_release_pending)) {
+        scheduler_inline_step_done();
+    }
 }
 
 /* Layout assertions to catch struct padding/size mismatches between
@@ -621,6 +631,620 @@ static void pin_to_core(int core_id) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Per-core actor table (#2486)
+//
+// Every writer (registration, deregistration, migration, work stealing) holds
+// the core's actor_lock. Readers do not: the owning scheduler thread scans its
+// table whenever it is idle, and the main thread walks every table in
+// aether_scheduler_poll() and scheduler_wait(). So each word a reader looks at
+// is atomic, and the orderings carry this protocol:
+//
+//  - A slot is stored with release and loaded with acquire. A reader that
+//    finds an actor pointer also sees that actor's initialization, including
+//    when the pointer reached the slot through a later swap-remove rather than
+//    the append that published it.
+//
+//  - A table is published (release) before any count that needs it, and a
+//    reader loads the count (acquire) BEFORE the table (acquire). The count it
+//    reads was stored after a table large enough to hold it was published, so
+//    the table it loads next is that one or a newer one, and tables only grow:
+//    the count never exceeds the capacity of the table it is paired with. The
+//    other order can pair a new count with the old table and index past its
+//    end.
+//
+//  - A table that is grown out of is not freed: a reader may still be walking
+//    it. It is chained on `retired` and freed by scheduler_cleanup(), after the
+//    threads are joined. Each table doubles the one before, so the chain costs
+//    less than the live table.
+//
+//  - Every slot at or past actor_count is NULL. A new table is zeroed past the
+//    prefix copied into it, and a removal clears the slot it vacates, so a
+//    reader holding an older, larger count finds NULL there and skips it.
+// ---------------------------------------------------------------------------
+
+// A table of `capacity` empty slots. aether_numa_alloc() is plain malloc()
+// without libnuma, so the slots start as garbage until set here.
+static AetherActorTable* actor_table_alloc(int capacity, int numa_node) {
+    size_t size = sizeof(AetherActorTable) + (size_t)capacity * sizeof(_Atomic(ActorBase*));
+    AetherActorTable* table = aether_numa_alloc(size, numa_node);
+    if (!table) return NULL;
+    table->retired = NULL;
+    table->alloc_size = size;
+    table->capacity = capacity;
+    for (int i = 0; i < capacity; i++) atomic_init(&table->slots[i], NULL);
+    return table;
+}
+
+// Frees a table and every table it replaced. Only once no reader is left.
+static void actor_table_free_chain(AetherActorTable* table) {
+    while (table) {
+        AetherActorTable* older = table->retired;
+        aether_numa_free(table, table->alloc_size);
+        table = older;
+    }
+}
+
+// The view of a core's actors for a reader that does not hold actor_lock:
+// returns the table, with the number of slots to visit in *count. The count is
+// loaded first; see the notes above.
+static inline AetherActorTable* actor_table_snapshot(Scheduler* sched, int* count) {
+    *count = atomic_load_explicit(&sched->actor_count, memory_order_acquire);
+    return atomic_load_explicit(&sched->actor_table, memory_order_acquire);
+}
+
+static inline ActorBase* actor_table_read(AetherActorTable* table, int i) {
+    return atomic_load_explicit(&table->slots[i], memory_order_acquire);
+}
+
+// The *_locked helpers below are for a caller holding sched->actor_lock, which
+// orders them against each other; their loads are relaxed for that reason.
+// Their stores are release, for the readers that do not take the lock.
+
+static inline int actor_table_has_room_locked(Scheduler* sched) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    return atomic_load_explicit(&sched->actor_count, memory_order_relaxed) < table->capacity;
+}
+
+// Index of `actor` in the table, or -1 when it is not there. `hint` is the
+// slot the caller last saw it in (-1 for none), checked before the scan.
+static int actor_table_find_locked(Scheduler* sched, ActorBase* actor, int hint) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    if (!table) return -1;   // freed by teardown: nothing is registered
+    if (hint >= 0 && hint < count &&
+        atomic_load_explicit(&table->slots[hint], memory_order_relaxed) == actor) {
+        return hint;
+    }
+    for (int i = 0; i < count; i++) {
+        if (atomic_load_explicit(&table->slots[i], memory_order_relaxed) == actor) return i;
+    }
+    return -1;
+}
+
+// Appends `actor`. The caller has checked there is room.
+static inline void actor_table_push_locked(Scheduler* sched, ActorBase* actor) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    atomic_store_explicit(&table->slots[count], actor, memory_order_release);
+    atomic_store_explicit(&sched->actor_count, count + 1, memory_order_release);
+}
+
+// Removes slot `i` by moving the last actor into it.
+static inline void actor_table_remove_locked(Scheduler* sched, int i) {
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int last = atomic_load_explicit(&sched->actor_count, memory_order_relaxed) - 1;
+    ActorBase* moved = atomic_load_explicit(&table->slots[last], memory_order_relaxed);
+    atomic_store_explicit(&table->slots[i], moved, memory_order_release);
+    atomic_store_explicit(&table->slots[last], NULL, memory_order_release);
+    atomic_store_explicit(&sched->actor_count, last, memory_order_release);
+}
+
+// Replaces a full table with one twice its size. The new table is published
+// before the caller stores the count that needs it, and the old one is kept
+// for readers still walking it. Returns 0, or -1 when the allocation fails.
+static int actor_table_grow_locked(Scheduler* sched, int numa_node) {
+    AetherActorTable* old = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    AetherActorTable* table = actor_table_alloc(old->capacity * 2, numa_node);
+    if (!table) return -1;
+    for (int i = 0; i < count; i++) {
+        atomic_store_explicit(&table->slots[i],
+                              atomic_load_explicit(&old->slots[i], memory_order_relaxed),
+                              memory_order_relaxed);
+    }
+    table->retired = old;
+    atomic_store_explicit(&sched->actor_table, table, memory_order_release);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Actor reclamation (#2509)
+//
+// The table readers above take no lock, so taking a released actor out of its
+// table is not enough to free it: a reader may have loaded its pointer before
+// the removal, or still walk a table that was grown out of and keeps a stale
+// copy of it. A released actor is therefore retired and freed later, once no
+// reader can still hold it. The readers are of two kinds.
+//
+//  - Each core's scheduler thread is always reading: it walks its table and
+//    steps actors for the whole of a loop iteration. The top of the loop is
+//    its quiescent point, where it holds no actor pointer from a table. There
+//    it publishes the global epoch it has just loaded (acquire) in its
+//    `reclaim_epoch`. The thread starts reading only after publishing an
+//    epoch (with a seq_cst fence, below) and stores 0 when it exits.
+//
+//  - Any other thread that walks a table (aether_scheduler_poll(),
+//    scheduler_wait()) brackets the walk: it claims one of the external
+//    slots with the global epoch, issues a seq_cst fence, walks, and stores 0.
+//
+// Releasing removes the actor from its table under the core's lock, issues a
+// seq_cst fence, and takes E = the global epoch while incrementing it. The
+// actor is freed once every published epoch is 0 or greater than E. Why that
+// is safe, for a reader R that could have found the actor:
+//
+//  - R's slot store and fence, against the releaser's removal and fence, is
+//    the store-buffering pattern: one of the two fences comes first in the
+//    single order of seq_cst fences. If the releaser's comes first, R's table
+//    loads after its own fence see the removal (and the newest table, whose
+//    grow happened before the removal under the lock), so R never finds the
+//    actor. If R's comes first, the reclaimer, which reads the slots after the
+//    releaser's fence (through the retired list's lock), sees R's slot store
+//    or a later one, and the epoch R stored was loaded before R's fence, so it
+//    is at most E. Either R does not hold the actor, or its slot keeps it.
+//
+//  - A core thread's per-iteration store has no fence. If the reclaimer reads
+//    a value greater than E there, the thread loaded that value from the
+//    global epoch, which was written by the increment that produced E + 1 or a
+//    later one; its acquire load synchronizes with that release, so
+//    everything the thread reads afterwards sees the removal. A stale (older)
+//    value only delays the free.
+//
+// Hence no reader dereferences a freed actor, and no reader takes a lock. A
+// core blocked in a long step holds the epoch back and delays every free
+// until the step returns; an idle core still wakes every PARK_MS_MAX at most.
+// ---------------------------------------------------------------------------
+
+#define AETHER_EXTERNAL_READER_SLOTS 32
+
+// Set once main-thread mode has been entered or a second actor has existed:
+// the mode is not entered again in this scheduler lifecycle.
+static atomic_int g_main_mode_ended = 0;
+
+static _Atomic uint64_t g_reclaim_epoch = 1;  // never 0: 0 means "not reading"
+static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
+
+// Set on a core's scheduler thread, whose own `reclaim_epoch` already covers
+// any walk it makes (aether_scheduler_poll() called from a step, say).
+static AETHER_TLS int t_reclaim_core_thread = 0;
+
+// Readers that are neither a core thread nor a bracketed walk (#2517): a
+// per-actor thread (aether_actor_thread) sets current_core_id, so a send it
+// makes to an actor of its core steps that actor on itself (work inlining in
+// scheduler_send_local) and touches it after the step. Such a thread holds a
+// record for as long as it runs and treats it as a core treats its
+// `reclaim_epoch`: the epoch in it is refreshed at the top of its loop, the
+// one point where it holds no actor it found through a table. The records
+// live for the process (a thread exits without a join to wait for, so none
+// is freed) and are reused; the list only grows.
+typedef struct ReclaimReader {
+    _Atomic uint64_t epoch;      // 0 while nothing reads through this record
+    _Atomic int in_use;
+    struct ReclaimReader* next;
+} ReclaimReader;
+
+static _Atomic(ReclaimReader*) g_readers = NULL;
+static AETHER_TLS ReclaimReader* t_reader = NULL;
+
+void scheduler_reader_online(void) {
+    if (t_reader) return;
+    ReclaimReader* r = atomic_load_explicit(&g_readers, memory_order_acquire);
+    for (; r; r = r->next) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&r->in_use, &expected, 1,
+                                                    memory_order_acquire,
+                                                    memory_order_relaxed)) {
+            break;
+        }
+    }
+    if (!r) {
+        r = (ReclaimReader*)calloc(1, sizeof(ReclaimReader));
+        if (!r) {
+            // Without a record the thread cannot hold a free back: it
+            // must not step at all, which the caller cannot do either.
+            // Reading on is the use after free of #2517; say so.
+            fprintf(stderr, "aether: out of memory registering a reader thread\n");
+            return;
+        }
+        atomic_store_explicit(&r->in_use, 1, memory_order_relaxed);
+        ReclaimReader* head = atomic_load_explicit(&g_readers, memory_order_relaxed);
+        do {
+            r->next = head;
+        } while (!atomic_compare_exchange_weak_explicit(&g_readers, &head, r,
+                                                        memory_order_release,
+                                                        memory_order_relaxed));
+    }
+    t_reader = r;
+    // As reclaim_core_online: publish first, then the fence that pairs with
+    // a releaser's.
+    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    atomic_store_explicit(&r->epoch, epoch, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+}
+
+void scheduler_reader_quiescent(void) {
+    ReclaimReader* r = t_reader;
+    if (!r) return;
+    // The same store a core makes at the top of its loop.
+    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    if (epoch != atomic_load_explicit(&r->epoch, memory_order_relaxed)) {
+        atomic_store_explicit(&r->epoch, epoch, memory_order_release);
+    }
+}
+
+void scheduler_reader_offline(void) {
+    ReclaimReader* r = t_reader;
+    if (!r) return;
+    t_reader = NULL;
+    atomic_store_explicit(&r->epoch, 0, memory_order_release);
+    atomic_store_explicit(&r->in_use, 0, memory_order_release);
+}
+
+// Actors released while an inline send was stepping on this thread, released
+// for real when the outermost one is done (scheduler_inline_step_done).
+static AETHER_TLS ActorBase** t_inline_released = NULL;
+static AETHER_TLS int t_inline_released_count = 0;
+static AETHER_TLS int t_inline_released_capacity = 0;
+
+static int inline_release_defer(ActorBase* actor) {
+    if (t_inline_released_count == t_inline_released_capacity) {
+        int cap = t_inline_released_capacity ? t_inline_released_capacity * 2 : 4;
+        ActorBase** grown = realloc(t_inline_released, (size_t)cap * sizeof(ActorBase*));
+        if (!grown) return 0;
+        t_inline_released = grown;
+        t_inline_released_capacity = cap;
+    }
+    t_inline_released[t_inline_released_count++] = actor;
+    g_inline_release_pending = 1;
+    return 1;
+}
+
+typedef struct {
+    ActorBase* actor;
+    uint64_t epoch;
+} RetiredActor;
+
+// Released actors in the order of their epochs, oldest first. Guarded by
+// g_retired_lock, which only releasing and reclaiming take.
+static atomic_flag g_retired_lock = ATOMIC_FLAG_INIT;
+static RetiredActor* g_retired = NULL;
+static int g_retired_count = 0;
+static int g_retired_capacity = 0;
+static _Atomic int g_retired_pending = 0;  // g_retired_count, read without the lock
+
+static inline void retired_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_retired_lock, memory_order_acquire)) {
+        AETHER_PAUSE();
+    }
+}
+
+static inline int retired_trylock(void) {
+    return !atomic_flag_test_and_set_explicit(&g_retired_lock, memory_order_acquire);
+}
+
+static inline void retired_unlock(void) {
+    atomic_flag_clear_explicit(&g_retired_lock, memory_order_release);
+}
+
+// A core thread starts reading: publish an epoch, then the fence that pairs
+// with a releaser's (the first bullet above).
+static void reclaim_core_online(Scheduler* sched) {
+    t_reclaim_core_thread = 1;
+    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    atomic_store_explicit(&sched->reclaim_epoch, epoch, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+}
+
+static void reclaim_core_offline(Scheduler* sched) {
+    atomic_store_explicit(&sched->reclaim_epoch, 0, memory_order_release);
+    t_reclaim_core_thread = 0;
+}
+
+// Claims an external reader slot; returns its index, or -1 when the caller is
+// a core thread or a registered reader thread, whose own slot or record
+// already covers it.
+static int reclaim_reader_enter(void) {
+    if (t_reclaim_core_thread || t_reader) return -1;
+    for (;;) {
+        uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+        for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
+            uint64_t expected = 0;
+            if (atomic_load_explicit(&g_external_reader[i], memory_order_relaxed) == 0 &&
+                atomic_compare_exchange_strong_explicit(&g_external_reader[i], &expected, epoch,
+                                                        memory_order_relaxed,
+                                                        memory_order_relaxed)) {
+                atomic_thread_fence(memory_order_seq_cst);
+                return i;
+            }
+        }
+        // More concurrent walkers than slots: wait for one to finish.
+        aether_sched_yield();
+    }
+}
+
+static void reclaim_reader_exit(int slot) {
+    if (slot >= 0) atomic_store_explicit(&g_external_reader[slot], 0, memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
+// Released actors keep their memory (#2517)
+//
+// A send takes a raw ActorBase* and reads `dead` first. Nothing may send to a
+// released actor, but a send that breaks the contract must not read freed
+// memory, so a reclaimed actor's block does not go back to the allocator: it
+// stays marked released, in the bucket for its size, and the next spawn of
+// that size takes it back. A late send to it is dropped, counted and reported
+// once. One made after the block has become another actor reaches that
+// actor: a raw pointer cannot tell the two apart. The buckets never hold
+// more than was once live at the same time, and are freed with the tables.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    size_t size;
+    ActorBase** blocks;
+    int count;
+    int capacity;
+} TombstoneBucket;
+
+static atomic_flag g_tombstone_lock = ATOMIC_FLAG_INIT;
+static TombstoneBucket* g_tombstones = NULL;
+static int g_tombstone_buckets = 0;
+static int g_tombstone_bucket_cap = 0;
+
+static inline void tombstone_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_tombstone_lock, memory_order_acquire)) {
+        AETHER_PAUSE();
+    }
+}
+
+static inline void tombstone_unlock(void) {
+    atomic_flag_clear_explicit(&g_tombstone_lock, memory_order_release);
+}
+
+static TombstoneBucket* tombstone_bucket_locked(size_t size, int create) {
+    for (int i = 0; i < g_tombstone_buckets; i++) {
+        if (g_tombstones[i].size == size) return &g_tombstones[i];
+    }
+    if (!create) return NULL;
+    if (g_tombstone_buckets == g_tombstone_bucket_cap) {
+        int cap = g_tombstone_bucket_cap ? g_tombstone_bucket_cap * 2 : 8;
+        TombstoneBucket* grown = realloc(g_tombstones, (size_t)cap * sizeof(TombstoneBucket));
+        if (!grown) return NULL;
+        g_tombstones = grown;
+        g_tombstone_bucket_cap = cap;
+    }
+    TombstoneBucket* b = &g_tombstones[g_tombstone_buckets++];
+    b->size = size;
+    b->blocks = NULL;
+    b->count = 0;
+    b->capacity = 0;
+    return b;
+}
+
+// Keeps a reclaimed actor's block for the next spawn of its size.
+static void tombstone_keep(ActorBase* actor) {
+    tombstone_lock();
+    TombstoneBucket* b = tombstone_bucket_locked(actor->alloc_size, 1);
+    if (b && b->count == b->capacity) {
+        int cap = b->capacity ? b->capacity * 2 : 16;
+        ActorBase** grown = realloc(b->blocks, (size_t)cap * sizeof(ActorBase*));
+        if (grown) {
+            b->blocks = grown;
+            b->capacity = cap;
+        }
+    }
+    if (b && b->count < b->capacity) {
+        b->blocks[b->count++] = actor;
+        tombstone_unlock();
+        return;
+    }
+    tombstone_unlock();
+    // Out of memory to keep it: a late send would then read freed memory,
+    // which is the contract violation's own risk; the block goes back.
+    aether_numa_free_aligned(actor, actor->alloc_size);
+}
+
+// The most recently kept block of this size, or NULL.
+static ActorBase* tombstone_take(size_t size) {
+    ActorBase* actor = NULL;
+    tombstone_lock();
+    TombstoneBucket* b = tombstone_bucket_locked(size, 0);
+    if (b && b->count > 0) actor = b->blocks[--b->count];
+    tombstone_unlock();
+    return actor;
+}
+
+// Returns every kept block to the allocator: the scheduler's tables are
+// going, and with them any pointer a late send could still use.
+static void tombstone_free_all(void) {
+    tombstone_lock();
+    for (int i = 0; i < g_tombstone_buckets; i++) {
+        TombstoneBucket* b = &g_tombstones[i];
+        for (int k = 0; k < b->count; k++) {
+            aether_numa_free_aligned(b->blocks[k], b->blocks[k]->alloc_size);
+        }
+        free(b->blocks);
+    }
+    free(g_tombstones);
+    g_tombstones = NULL;
+    g_tombstone_buckets = 0;
+    g_tombstone_bucket_cap = 0;
+    tombstone_unlock();
+}
+
+// Sends dropped because their target had been released, and the one
+// diagnostic they get.
+static _Atomic uint64_t g_released_sends = 0;
+static atomic_flag g_released_send_reported = ATOMIC_FLAG_INIT;
+
+uint64_t scheduler_released_sends(void) {
+    return atomic_load_explicit(&g_released_sends, memory_order_relaxed);
+}
+
+// A message to a dead actor cannot be delivered: release what travels with
+// it (no processed credit: the send is not counted yet on this path). A
+// released target means a send against the release contract.
+static void send_to_dead_actor(ActorBase* actor, Message* msg) {
+    AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0, msg->type, msg->sender_id);
+    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
+    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+    if (msg->_reply_slot) reply_slot_decref((ActorReplySlot*)msg->_reply_slot);
+    if (actor && (atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
+        atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
+        if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
+            fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
+                            "dropped (reported once)\n", msg->type, actor->id);
+        }
+    }
+}
+
+static void actor_free_now(ActorBase* actor) {
+    // Whatever is still in the mailbox was sent against the release contract.
+    // Release it and credit it as processed, as a panicked actor's drain does,
+    // or scheduler_wait() would wait for it forever.
+    int drained = 0;
+    Message discard;
+    while (mailbox_receive(&actor->mailbox, &discard)) {
+        if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
+        if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
+        if (discard._reply_slot) reply_slot_decref((ActorReplySlot*)discard._reply_slot);
+        drained++;
+    }
+    if (drained > 0) {
+        atomic_fetch_add_explicit(&schedulers[0].messages_processed,
+                                  (uint64_t)drained, memory_order_relaxed);
+    }
+    // The same-core SPSC queue is the actor's alone (calloc'd by
+    // ensure_spsc_queue / send_buffer_flush); the block kept below does not
+    // cover it.
+    if (actor->spsc_queue) {
+        free(actor->spsc_queue);
+        actor->spsc_queue = NULL;
+    }
+    // A caller's actor (scheduler_register_actor) is the caller's to free.
+    if (!actor->scheduler_owned) return;
+    // What the state owns goes before the block is kept (#2528). Nothing
+    // steps the actor any more: a retired one is freed only past every
+    // reader's epoch, a teardown's once the threads are joined.
+    if (actor->destroy_state) {
+        actor->destroy_state(actor);
+        actor->destroy_state = NULL;
+    }
+    tombstone_keep(actor);
+}
+
+// Frees every retired actor that no reader can still hold. `wait` takes the
+// lock even when contended; a core thread passes 0 and tries again next time.
+static void actor_reclaim(int wait) {
+    if (atomic_load_explicit(&g_retired_pending, memory_order_relaxed) == 0) return;
+    if (wait) retired_lock();
+    else if (!retired_trylock()) return;
+
+    // The oldest epoch any reader still holds.
+    uint64_t oldest = UINT64_MAX;
+    for (int c = 0; c < MAX_CORES; c++) {
+        uint64_t e = atomic_load_explicit(&schedulers[c].reclaim_epoch, memory_order_acquire);
+        if (e != 0 && e < oldest) oldest = e;
+    }
+    for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
+        uint64_t e = atomic_load_explicit(&g_external_reader[i], memory_order_acquire);
+        if (e != 0 && e < oldest) oldest = e;
+    }
+    for (ReclaimReader* r = atomic_load_explicit(&g_readers, memory_order_acquire);
+         r; r = r->next) {
+        uint64_t e = atomic_load_explicit(&r->epoch, memory_order_acquire);
+        if (e != 0 && e < oldest) oldest = e;
+    }
+
+    int freed = 0;
+    while (freed < g_retired_count && g_retired[freed].epoch < oldest) {
+        actor_free_now(g_retired[freed].actor);
+        freed++;
+    }
+    if (freed > 0) {
+        memmove(g_retired, g_retired + freed,
+                (size_t)(g_retired_count - freed) * sizeof(RetiredActor));
+        g_retired_count -= freed;
+        atomic_store_explicit(&g_retired_pending, g_retired_count, memory_order_relaxed);
+    }
+    retired_unlock();
+}
+
+// Waits until every released actor has been ended (its state destroyed, its
+// block kept for reuse), which otherwise happens on the core threads' own
+// schedule once every reader has moved past it (#2528). For a host or a test
+// that wants the memory of released actors settled before it measures or
+// goes on; bounded, so a core blocked in a long step cannot hang it.
+int scheduler_reclaim_released(void) {
+    // A parked core keeps the epoch it last published until it wakes (up to
+    // PARK_MS_MAX), so the cores are woken to republish, and the wait is by
+    // time, well past one park, not by spins.
+    for (int rounds = 0; rounds < 2500; rounds++) {
+        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return 0;
+        actor_reclaim(1);
+        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return 0;
+        for (int c = 0; c < num_cores; c++) sched_wake(&schedulers[c]);
+        aether_usleep(200);
+    }
+    return atomic_load_explicit(&g_retired_pending, memory_order_acquire);
+}
+
+// Frees every retired actor without asking. Only once no reader is left:
+// the threads are joined and nothing else walks the tables.
+static void actor_reclaim_all(void) {
+    retired_lock();
+    for (int i = 0; i < g_retired_count; i++) actor_free_now(g_retired[i].actor);
+    free(g_retired);
+    g_retired = NULL;
+    g_retired_count = 0;
+    g_retired_capacity = 0;
+    atomic_store_explicit(&g_retired_pending, 0, memory_order_relaxed);
+    retired_unlock();
+}
+
+// Queues an actor that is no longer in any table to be freed.
+static void actor_retire(ActorBase* actor) {
+    // The releaser's fence of the store-buffering pair: it orders the removal
+    // the caller made before the epoch is taken.
+    atomic_thread_fence(memory_order_seq_cst);
+    retired_lock();
+    if (g_retired_count == g_retired_capacity) {
+        int cap = g_retired_capacity ? g_retired_capacity * 2 : 64;
+        RetiredActor* grown = realloc(g_retired, (size_t)cap * sizeof(RetiredActor));
+        if (!grown) {
+            // Freeing now could hand a reader freed memory; keeping the actor
+            // costs only its memory.
+            retired_unlock();
+            fprintf(stderr, "aether: out of memory retiring actor %d; it is not freed\n",
+                    actor->id);
+            return;
+        }
+        g_retired = grown;
+        g_retired_capacity = cap;
+    }
+    // Taken under the lock, so the list stays in epoch order.
+    uint64_t epoch = atomic_fetch_add_explicit(&g_reclaim_epoch, 1, memory_order_seq_cst);
+    g_retired[g_retired_count].actor = actor;
+    g_retired[g_retired_count].epoch = epoch;
+    g_retired_count++;
+    atomic_store_explicit(&g_retired_pending, g_retired_count, memory_order_relaxed);
+    retired_unlock();
+}
+
+int scheduler_released_actors_pending(void) {
+    return atomic_load_explicit(&g_retired_pending, memory_order_relaxed);
+}
+
 // Check if any from_queue on this scheduler has pending cross-core messages.
 // Used to yield early from inner mailbox-drain loops so that external sends
 // (e.g. StopAnimation from main) are not starved by a self-scheduling actor.
@@ -667,8 +1291,28 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     int idle_count = 0;
     int park_ms = PARK_MS_MIN;
 
+    // From here on this thread reads its table: publish an epoch first (#2509).
+    reclaim_core_online(sched);
+    unsigned reclaim_tick = 0;
+
     while (atomic_load_explicit(&sched->running, memory_order_acquire)) {
         int work_done = 0;
+
+        // Quiescent point (#2509): no actor pointer from a table is held here.
+        // Publish the epoch now in effect. Each core tries to free right
+        // after it moves its own epoch on, so the last core to move frees
+        // what all of them have passed. While a free is held back (a core
+        // in a long step, another thread walking the tables) the attempt is
+        // repeated only every 1024 iterations, not on every spin.
+        {
+            uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+            if (epoch != atomic_load_explicit(&sched->reclaim_epoch, memory_order_relaxed)) {
+                atomic_store_explicit(&sched->reclaim_epoch, epoch, memory_order_release);
+                actor_reclaim(0);
+            } else if (unlikely(++reclaim_tick % 1024 == 0)) {
+                actor_reclaim(0);
+            }
+        }
 
         // Flush any deferred sends from the previous iteration before draining
         // from_queues.  This ensures deferred messages land on every loop and
@@ -883,16 +1527,14 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 OptimizedSpinlock* second_lock = (sched->core_id < mig_to) ? &dst->actor_lock : &sched->actor_lock;
                 if (!atomic_flag_test_and_set_explicit(&first_lock->lock, memory_order_acquire)) {
                     if (!atomic_flag_test_and_set_explicit(&second_lock->lock, memory_order_acquire)) {
-                        if (dst->actor_count < dst->capacity) {
+                        if (actor_table_has_room_locked(dst)) {
                             // Find and remove actor from our list
-                            for (int ai = 0; ai < sched->actor_count; ai++) {
-                                if (sched->actors[ai] == mig_actor) {
-                                    sched->actors[ai] = sched->actors[--sched->actor_count];
-                                    atomic_store_explicit(&mig_actor->assigned_core, mig_to, memory_order_relaxed);
-                                    atomic_store_explicit(&mig_actor->migrate_to, -1, memory_order_relaxed);
-                                    dst->actors[dst->actor_count++] = mig_actor;
-                                    break;
-                                }
+                            int ai = actor_table_find_locked(sched, mig_actor, -1);
+                            if (ai >= 0) {
+                                actor_table_remove_locked(sched, ai);
+                                atomic_store_explicit(&mig_actor->assigned_core, mig_to, memory_order_relaxed);
+                                atomic_store_explicit(&mig_actor->migrate_to, -1, memory_order_relaxed);
+                                actor_table_push_locked(dst, mig_actor);
                             }
                         }
                         atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
@@ -905,12 +1547,14 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         // Scan actor list for SPSC messages and migration when idle.
         // With heavy from_queue traffic, migration is already handled above.
         if (sched->coalesce_buffer.count == 0) {
-        atomic_thread_fence(memory_order_acquire);
-        ActorBase** local_actors     = sched->actors;
-        int         local_actor_count = sched->actor_count;
+        // Without the lock: other threads register into, migrate into and
+        // steal from this table meanwhile (#2486, see the actor table notes).
+        int local_actor_count;
+        AetherActorTable* local_table = actor_table_snapshot(sched, &local_actor_count);
         for (int i = 0; i < local_actor_count; i++) {
-            ActorBase* actor = local_actors[i];
+            ActorBase* actor = actor_table_read(local_table, i);
 
+            // A slot vacated since the snapshot reads NULL.
             if (unlikely(!actor)) continue;
 
             // Skip actors processed on main thread
@@ -999,18 +1643,26 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                         &first_lock->lock, memory_order_acquire)) {
                     if (!atomic_flag_test_and_set_explicit(
                             &second_lock->lock, memory_order_acquire)) {
-                        if (dst->actor_count < dst->capacity) {
-                            ActorBase* replacement = sched->actors[--sched->actor_count];
-                            sched->actors[i] = replacement;
-                            local_actors[i]  = replacement;  // keep snapshot in sync
+                        // `i` indexes the snapshot. Since it was taken a steal or
+                        // a deregistration may have moved another actor into
+                        // slot i or taken this one, so the live table is asked
+                        // where the actor is, slot i first (#2486).
+                        int at = actor_table_has_room_locked(dst)
+                                     ? actor_table_find_locked(sched, actor, i) : -1;
+                        if (at >= 0) {
+                            actor_table_remove_locked(sched, at);
                             atomic_store_explicit(&actor->assigned_core, dst_core, memory_order_relaxed);
                             atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
-                            dst->actors[dst->actor_count++] = actor;
+                            actor_table_push_locked(dst, actor);
 
                             atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
                             atomic_flag_clear_explicit(&first_lock->lock, memory_order_release);
 
-                            i--;  // Re-examine this slot (now holds a different actor)
+                            // Re-examine this slot: it now holds the actor
+                            // moved in from the end, or NULL. In a snapshot of
+                            // a table that has since grown it is unchanged,
+                            // and the second look at it finds nothing to do.
+                            i--;
                             continue;
                         }
                         atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
@@ -1054,7 +1706,11 @@ void* AETHER_HOT scheduler_thread(void* arg) {
 
                     if (!atomic_flag_test_and_set_explicit(&first_lock->lock, memory_order_acquire)) {
                         if (!atomic_flag_test_and_set_explicit(&second_lock->lock, memory_order_acquire)) {
-                            if (victim->actor_count > 4 && sched->actor_count < sched->capacity) {
+                            AetherActorTable* victim_table =
+                                atomic_load_explicit(&victim->actor_table, memory_order_relaxed);
+                            int victim_count =
+                                atomic_load_explicit(&victim->actor_count, memory_order_relaxed);
+                            if (victim_count > 4 && actor_table_has_room_locked(sched)) {
                                 // Search backward for a stealable actor.  Only steal actors
                                 // that have been activated (active flag set, or messages in
                                 // mailbox).  A freshly spawned actor whose first messages
@@ -1064,23 +1720,23 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                                 // (e.g. Setup) are still queued on the old core, breaking
                                 // the FIFO ordering that actors depend on for initialization.
                                 ActorBase* stolen = NULL;
-                                for (int s = victim->actor_count - 1; s >= 4; s--) {
-                                    ActorBase* candidate = victim->actors[s];
+                                for (int s = victim_count - 1; s >= 4; s--) {
+                                    ActorBase* candidate = atomic_load_explicit(&victim_table->slots[s],
+                                                                                memory_order_relaxed);
                                     if (!atomic_load_explicit(&candidate->active, memory_order_relaxed) &&
                                         atomic_load_explicit(&candidate->mailbox.count,
                                                              memory_order_relaxed) == 0) {
-                                        continue;  // freshly spawned or fully idle — skip
+                                        continue;  // freshly spawned or fully idle, skip
                                     }
-                                    // Swap candidate to the end and steal it
-                                    victim->actors[s] = victim->actors[victim->actor_count - 1];
-                                    victim->actor_count--;
+                                    // Move the last actor into its slot and steal it
+                                    actor_table_remove_locked(victim, s);
                                     stolen = candidate;
                                     break;
                                 }
                                 if (stolen) {
                                     atomic_store_explicit(&stolen->assigned_core, sched->core_id, memory_order_relaxed);
                                     atomic_store_explicit(&stolen->migrate_to, -1, memory_order_relaxed);
-                                    sched->actors[sched->actor_count++] = stolen;
+                                    actor_table_push_locked(sched, stolen);
                                     work_done = 1;
                                     atomic_fetch_add(&sched->steal_attempts, 1);
                                 }
@@ -1097,6 +1753,13 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 // Tight spin with architecture-specific pause
                 AETHER_PAUSE();
             } else {
+                // A free held back by a reader (another thread walking the
+                // tables, a core in a long step) is retried here, once per
+                // park, so an idle core frees it within PARK_MS_MAX of the
+                // reader leaving, not after the 1024 loop iterations a busy
+                // core waits (#2509). It returns at once when nothing waits.
+                actor_reclaim(0);
+
                 // Extended idle. With descriptors registered the poller blocks
                 // for its timeout and that is the sleep. With none registered
                 // it returns immediately, which is what used to turn this
@@ -1147,6 +1810,10 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     // slip in — flush it so no messages are lost.
     overflow_flush(sched->core_id);
 
+    // Done reading: this core no longer holds back any free (#2509).
+    reclaim_core_offline(sched);
+    actor_reclaim(0);
+
     aether_unwind_thread_cleanup();
 
     return NULL;
@@ -1187,6 +1854,8 @@ void scheduler_init(int cores) {
     atomic_store_explicit(&g_threads_ready, 0, memory_order_relaxed);
     // Reset global overflow counter between scheduler lifecycles.
     atomic_store_explicit(&g_overflow_total, 0, memory_order_relaxed);
+    // A new lifecycle's first actor may use main-thread mode again (#2509).
+    atomic_store_explicit(&g_main_mode_ended, 0, memory_order_relaxed);
     // Reset main-thread send counter between scheduler lifecycles.
     // Without this, count_pending_messages() sees a stale sent > processed
     // delta from the prior run and scheduler_wait() spins forever.
@@ -1225,18 +1894,17 @@ void scheduler_init(int cores) {
         
         // NUMA-aware allocation: allocate scheduler data on same NUMA node as core
         int numa_node = aether_numa_node_of_cpu(i);
-        schedulers[i].actors = aether_numa_alloc(MAX_ACTORS_PER_CORE * sizeof(ActorBase*), numa_node);
-        if (!schedulers[i].actors) {
+        // Not reading until its thread starts (#2509).
+        atomic_store_explicit(&schedulers[i].reclaim_epoch, 0, memory_order_relaxed);
+        // Every slot starts NULL (actor_table_alloc); the threads that read the
+        // table are created after this, which publishes it to them.
+        AetherActorTable* table = actor_table_alloc(MAX_ACTORS_PER_CORE, numa_node);
+        if (!table) {
             fprintf(stderr, "ERROR: Failed to allocate memory for scheduler %d actors\n", i);
             exit(1);
         }
-        // Zero the slot array so uninitialized entries read as NULL.
-        // aether_numa_alloc() falls back to malloc() (not calloc) without libnuma,
-        // leaving slots with garbage.  The scheduler loop's null-check relies on
-        // this to guard against stale actor_count reads on ARM64.
-        memset(schedulers[i].actors, 0, MAX_ACTORS_PER_CORE * sizeof(ActorBase*));
-        schedulers[i].actor_count = 0;
-        schedulers[i].capacity = MAX_ACTORS_PER_CORE;
+        atomic_store_explicit(&schedulers[i].actor_table, table, memory_order_relaxed);
+        atomic_store_explicit(&schedulers[i].actor_count, 0, memory_order_relaxed);
         for (int q = 0; q <= MAX_CORES; q++) {
             queue_init(&schedulers[i].from_queues[q]);
         }
@@ -1397,13 +2065,18 @@ static inline int count_pending_messages(void) {
 // Safe to call multiple times in a program (e.g. between test phases).
 // Check if any actor has a pending timeout
 static int has_pending_actor_timeout(void) {
-    for (int c = 0; c < num_cores; c++) {
-        for (int i = 0; i < schedulers[c].actor_count; i++) {
-            ActorBase* a = schedulers[c].actors[i];
-            if (a && a->timeout_ns > 0) return 1;
+    int found = 0;
+    int slot = reclaim_reader_enter();  // #2509
+    for (int c = 0; c < num_cores && !found; c++) {
+        int count;
+        AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
+        for (int i = 0; i < count; i++) {
+            ActorBase* a = actor_table_read(table, i);
+            if (a && a->timeout_ns > 0) { found = 1; break; }
         }
     }
-    return 0;
+    reclaim_reader_exit(slot);
+    return found;
 }
 
 void scheduler_wait(void) {
@@ -1414,14 +2087,18 @@ void scheduler_wait(void) {
         if (has_pending_actor_timeout()) {
             int rounds = 0;
             while (has_pending_actor_timeout() && rounds < 100000) {
+                int slot = reclaim_reader_enter();  // #2509
                 for (int c = 0; c < num_cores; c++) {
-                    for (int i = 0; i < schedulers[c].actor_count; i++) {
-                        ActorBase* a = schedulers[c].actors[i];
+                    int count;
+                    AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
+                    for (int i = 0; i < count; i++) {
+                        ActorBase* a = actor_table_read(table, i);
                         if (a && a->timeout_ns > 0 && a->step) {
                             a->step(a);
                         }
                     }
                 }
+                reclaim_reader_exit(slot);
                 #ifdef _WIN32
                 Sleep(1);
                 #else
@@ -1525,6 +2202,9 @@ void scheduler_shutdown(void) {
         aether_numa_cleanup();
     }
 
+    // The core threads are gone; free what no other walker holds (#2509).
+    actor_reclaim(1);
+
     /* Write the trace here, not from atexit: every scheduler thread has been
      * joined by this point, so the per-core buffers are quiescent and the join
      * supplies the happens-before the merge relies on. It also keeps the exit
@@ -1539,28 +2219,54 @@ void scheduler_shutdown(void) {
 // Free the per-core tables scheduler_init allocated: the actor slots, the
 // I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
 // follows a scheduler_shutdown() both release them this way.
-static void scheduler_free_spawned_actors(void);
-
 static void scheduler_free_core_tables(void) {
-    scheduler_free_spawned_actors();
+    // Actors never released (a program or host that stops the scheduler
+    // with actors alive, a panicked actor) are reachable only through the
+    // tables freed here. Those the scheduler spawned end the way a release
+    // ends them; the core threads are joined and no reader is left. One a
+    // caller registered stays the caller's. Each table is scanned and taken
+    // away under its core's lock: an actor's own thread can be ending its
+    // actor meanwhile (scheduler_actor_thread_exit), and its deregister,
+    // which takes the same lock, then finds the table whole or gone.
+    for (int i = 0; i < num_cores; i++) {
+        Scheduler* sched = &schedulers[i];
+        spinlock_lock(&sched->actor_lock);
+        AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+        int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+        for (int k = 0; table && k < count; k++) {
+            ActorBase* actor = atomic_load_explicit(&table->slots[k], memory_order_relaxed);
+            if (!actor || !actor->scheduler_owned) continue;
+            if (actor->auto_process) {
+                // Its own thread may still be running it (#2517): this is a
+                // release, and the second of it and the thread's exit ends
+                // the actor. Its block is freed here only when the thread
+                // has already left.
+                int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED,
+                                                   memory_order_acq_rel);
+                if (!(was & AETHER_ACTOR_THREAD_GONE)) continue;
+            }
+            actor_free_now(actor);
+        }
+        atomic_store_explicit(&sched->actor_table, NULL, memory_order_release);
+        atomic_store_explicit(&sched->actor_count, 0, memory_order_relaxed);
+        spinlock_unlock(&sched->actor_lock);
+        // The live table and every table it replaced, each with its own size:
+        // a grown table is bigger than MAX_ACTORS_PER_CORE slots (#2486).
+        actor_table_free_chain(table);
+    }
+    // Released actors not reclaimed yet: no reader is left either (#2509).
+    // Then the kept blocks go back to the allocator (#2517).
+    actor_reclaim_all();
+    tombstone_free_all();
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources
         schedulers[i].thread = 0;
 
-        if (schedulers[i].actors != NULL) {
-            // Free with the size we allocated, not current capacity
-            aether_numa_free(schedulers[i].actors, MAX_ACTORS_PER_CORE * sizeof(ActorBase*));
-            schedulers[i].actors = NULL;
-        }
         // Clean up I/O event loop
         aether_io_poller_destroy(&schedulers[i].io_poller);
         free(schedulers[i].io_map);
         schedulers[i].io_map = NULL;
         schedulers[i].io_registered_count = 0;
-
-        // Reset counters
-        schedulers[i].actor_count = 0;
-        schedulers[i].capacity = 0;
     }
 }
 
@@ -1571,7 +2277,15 @@ void scheduler_cleanup(void) {
     atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }
 
+static int register_actor(ActorBase* actor, int preferred_core);
+
+// An actor the caller allocated: the scheduler runs it and never frees it.
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
+    actor->scheduler_owned = 0;
+    return register_actor(actor, preferred_core);
+}
+
+static int register_actor(ActorBase* actor, int preferred_core) {
     // Default placement: pick the worker with the lowest combined
     // load right now. The previous shape — `actor_id % num_cores` —
     // gave perfect distribution only on long actor sequences; on
@@ -1598,7 +2312,9 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
                 long load = (long)atomic_load_explicit(
                                 &schedulers[c].work_count,
                                 memory_order_relaxed)
-                          + (long)schedulers[c].actor_count;
+                          + (long)atomic_load_explicit(
+                                &schedulers[c].actor_count,
+                                memory_order_relaxed);
                 if (load < best) {
                     best = load;
                     target = c;
@@ -1612,30 +2328,13 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
 
     spinlock_lock(&sched->actor_lock);
 
-    if (sched->actor_count >= sched->capacity) {
-        // Dynamically grow actor array with NUMA-aware reallocation
-        int numa_node = aether_numa_node_of_cpu(preferred_core);
-        size_t old_size = sched->capacity * sizeof(ActorBase*);
-        size_t new_size = sched->capacity * 2 * sizeof(ActorBase*);
-
-        ActorBase** new_actors = aether_numa_alloc(new_size, numa_node);
-        if (!new_actors) {
-            spinlock_unlock(&sched->actor_lock);
-            fprintf(stderr, "Fatal: Failed to grow actor array for core %d\n", preferred_core);
-            return -1;
-        }
-
-        // Copy old data.  Do NOT free the old array here: the scheduler thread
-        // that owns this core may be concurrently iterating sched->actors with
-        // a snapshotted pointer (taken under acquire fence).  Freeing would
-        // create a use-after-free race.  The old array is leaked until
-        // scheduler_cleanup(), which frees only the current (final) pointer.
-        // Waste is bounded: O(log2(final_capacity) * initial_capacity * 8 bytes)
-        // per core — acceptable for typical actor counts.
-        memcpy(new_actors, sched->actors, old_size);
-
-        sched->actors = new_actors;
-        sched->capacity *= 2;
+    // A full table is replaced by one twice its size, published before the
+    // count that needs it; the old one stays for readers still walking it.
+    if (!actor_table_has_room_locked(sched) &&
+        actor_table_grow_locked(sched, aether_numa_node_of_cpu(preferred_core)) != 0) {
+        spinlock_unlock(&sched->actor_lock);
+        fprintf(stderr, "Fatal: Failed to grow actor array for core %d\n", preferred_core);
+        return -1;
     }
 
     atomic_store_explicit(&actor->assigned_core, preferred_core, memory_order_relaxed);
@@ -1643,7 +2342,7 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     // SPSC queue is lazy-allocated: only when auto_process is set.
     // actor->spsc_queue stays NULL for regular actors (saves 3 KB/actor).
 
-    sched->actors[sched->actor_count++] = actor;
+    actor_table_push_locked(sched, actor);
 
     spinlock_unlock(&sched->actor_lock);
 
@@ -1652,20 +2351,27 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
 
 // Remove an actor from its scheduler's actor array.
 // Must be called before freeing actor memory to avoid dangling pointers.
+// assigned_core is read again under the core's lock (#2509). Every move to
+// another core (migration, work stealing) stores it with the source core's
+// lock held, so while it names the locked core the actor is in that core's
+// table and stays there. Read before the lock, it could name a core the actor
+// had just left, and the removal missed it.
 void scheduler_deregister_actor(ActorBase* actor) {
     if (!actor) return;
-    int core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-    if (core < 0 || core >= num_cores) return;
+    for (;;) {
+        int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        if (core < 0 || core >= num_cores) return;
 
-    Scheduler* sched = &schedulers[core];
-    spinlock_lock(&sched->actor_lock);
-    for (int i = 0; i < sched->actor_count; i++) {
-        if (sched->actors[i] == actor) {
-            sched->actors[i] = sched->actors[--sched->actor_count];
-            break;
+        Scheduler* sched = &schedulers[core];
+        spinlock_lock(&sched->actor_lock);
+        if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == core) {
+            int at = actor_table_find_locked(sched, actor, -1);
+            if (at >= 0) actor_table_remove_locked(sched, at);
+            spinlock_unlock(&sched->actor_lock);
+            return;
         }
+        spinlock_unlock(&sched->actor_lock);
     }
-    spinlock_unlock(&sched->actor_lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -1792,16 +2498,11 @@ static AETHER_TLS int inline_depth = 0;
 void scheduler_send_local(ActorBase* actor, Message msg) {
     AETHER_TRACE_EVENT(AE_TRACE_SEND_LOCAL, actor ? actor->id : 0,
                        msg.type, msg.sender_id);
-    // Drop messages to dead actors — they can't process them and we don't
-    // want to grow their mailbox or fire their step(). The payload and any
-    // reply-slot reference still belong to this message; release them
-    // (no processed credit: the send is not counted yet on this path).
+    // Drop messages to dead actors: they can't process them and we don't
+    // want to grow their mailbox or fire their step(). A released actor's
+    // block is kept, so this read is defined after its release (#2517).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
-        AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0,
-                           msg.type, msg.sender_id);
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
-        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
-        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
+        send_to_dead_actor(actor, &msg);
         return;
     }
 
@@ -1884,11 +2585,7 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
                        msg.type, msg.sender_id);
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
-        AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0,
-                           msg.type, msg.sender_id);
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
-        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
-        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
+        send_to_dead_actor(actor, &msg);
         return;
     }
     // INLINE MODE: For single-actor programs, process synchronously on the main thread.
@@ -2045,6 +2742,11 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
+    // Drop messages to dead actors (see scheduler_send_local).
+    if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+        send_to_dead_actor(actor, &msg);
+        return;
+    }
     // FAST PATH: Single-actor programs bypass batching entirely
     // Main Thread Mode = synchronous processing, zero queue overhead
     if (aether_main_thread_mode_active()) {
@@ -2168,56 +2870,6 @@ void scheduler_send_batch_flush(void) {
 
 // Spawn actor with NUMA-aware allocation.  actor_size must be >= sizeof(ActorBase)
 // and cover the full derived-actor struct (e.g. sizeof(PingActor)).
-// The actors scheduler_spawn_actor allocated and nobody has released: the
-// scheduler owns these, unlike the caller-owned actors a test or embedder
-// hands to scheduler_register_actor. Nothing else frees them (an executable
-// just exits), so when a lifecycle's tables are discarded -- a host running
-// an --emit=lib program's aether_main() again, or scheduler_cleanup() -- they
-// are freed with them instead of leaking every actor of the previous run.
-static OptimizedSpinlock g_spawned_lock = { ATOMIC_FLAG_INIT, {0} };
-static ActorBase** g_spawned = NULL;
-static int g_spawned_count = 0;
-static int g_spawned_cap = 0;
-
-static void spawned_track(ActorBase* actor) {
-    spinlock_lock(&g_spawned_lock);
-    if (g_spawned_count == g_spawned_cap) {
-        int cap = g_spawned_cap ? g_spawned_cap * 2 : 64;
-        ActorBase** grown = realloc(g_spawned, (size_t)cap * sizeof(ActorBase*));
-        if (!grown) { spinlock_unlock(&g_spawned_lock); return; }  // untracked: leaks, as before
-        g_spawned = grown;
-        g_spawned_cap = cap;
-    }
-    g_spawned[g_spawned_count++] = actor;
-    spinlock_unlock(&g_spawned_lock);
-}
-
-static void spawned_untrack(ActorBase* actor) {
-    spinlock_lock(&g_spawned_lock);
-    for (int i = g_spawned_count - 1; i >= 0; i--) {
-        if (g_spawned[i] == actor) {
-            g_spawned[i] = g_spawned[--g_spawned_count];
-            break;
-        }
-    }
-    spinlock_unlock(&g_spawned_lock);
-}
-
-// Only from scheduler_free_core_tables: the scheduler threads are joined by
-// then (scheduler_shutdown), so nothing steps these actors.
-static void scheduler_free_spawned_actors(void) {
-    spinlock_lock(&g_spawned_lock);
-    for (int i = 0; i < g_spawned_count; i++) {
-        ActorBase* a = g_spawned[i];
-        free(a->spsc_queue);
-        aether_numa_free(a, a->alloc_size);
-    }
-    free(g_spawned);
-    g_spawned = NULL;
-    g_spawned_count = g_spawned_cap = 0;
-    spinlock_unlock(&g_spawned_lock);
-}
-
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     scheduler_init_on_demand();
     if (preferred_core < 0 || preferred_core >= num_cores) {
@@ -2228,17 +2880,21 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     }
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
-    ActorBase* actor = NULL;
-
-    {
+    // A released actor's block of this size first (#2517), then the allocator.
+    ActorBase* actor = tombstone_take(actor_size);
+    if (!actor) {
         int numa_node = aether_numa_node_of_cpu(preferred_core >= 0 ? preferred_core : 0);
-        actor = aether_numa_alloc(actor_size, numa_node);
+        // Generated actor structs are aligned(64), which plain malloc does not
+        // honour (#2485). The block goes back through the matching
+        // aether_numa_free_aligned once the tables are freed.
+        actor = aether_numa_alloc_aligned(actor_size, AETHER_ACTOR_ALIGN, numa_node);
         if (!actor) return NULL;
-        mailbox_init(&actor->mailbox);
         AETHER_STAT_INC(actors_malloced);
     }
+    mailbox_init(&actor->mailbox);
 
     actor->alloc_size = actor_size;
+    actor->destroy_state = NULL;   // the generated spawn sets it (#2528)
     actor->id = atomic_fetch_add(&next_actor_id, 1);
     actor->step = step;
     atomic_init(&actor->active, 0);  // inactive until first message send
@@ -2264,8 +2920,18 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     aether_on_actor_spawn();
     main_mode_unlock();
 
+    // Main-thread mode is for the first actor of a scheduler lifecycle and is
+    // entered at most once (#2509). Released actors bring the count back to
+    // 0, and a later spawn at 0 (the next per-request worker of an HTTP
+    // server, say) would otherwise be stepped inline on whichever thread
+    // spawned it, with the scheduler threads already running.
+    if (prev_count >= 1) {
+        atomic_store_explicit(&g_main_mode_ended, 1, memory_order_relaxed);
+    }
+
     // MAIN THREAD MODE handling
-    if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled)) {
+    if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled) &&
+        !atomic_exchange_explicit(&g_main_mode_ended, 1, memory_order_relaxed)) {
         // First actor: enable main thread mode for synchronous processing
         aether_enable_main_thread_mode(actor);
         g_main_mode_thread = aether_tid_self();
@@ -2294,29 +2960,80 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
         scheduler_ensure_threads_running();
     }
 
-    scheduler_register_actor(actor, preferred_core);
-    spawned_track(actor);
+    actor->scheduler_owned = 1;
+    register_actor(actor, preferred_core);
 
     return actor;
 }
 
-void scheduler_release_actor(ActorBase* actor) {
-    if (!actor) return;
-    spawned_untrack(actor);
+// The rest of a release, once the actor is marked and nothing of its own
+// runs it any more: out of its table, off the count, retired.
+static void actor_end(ActorBase* actor) {
+    scheduler_deregister_actor(actor);
 
     // Track actor count for inline mode auto-detection
     aether_on_actor_terminate();
 
-    // Reclaim the lazily-allocated same-core SPSC queue (owned solely by this
-    // actor, calloc'd by ensure_spsc_queue / send_buffer_flush). numa_free
-    // below only releases the actor struct itself, so without this every actor
-    // that ever flushed a same-core batch leaks its multi-KB queue.
-    if (actor->spsc_queue) {
-        free(actor->spsc_queue);
-        actor->spsc_queue = NULL;
+    // Freed once no reader can hold it (see the reclamation notes), which is
+    // never before this call returns: a step can release its own actor.
+    actor_retire(actor);
+}
+
+void scheduler_release_actor(ActorBase* actor) {
+    if (!actor) return;
+
+    // Released while an inline send is stepping an actor on this thread (its
+    // own, typically): that send still touches the actor once the step
+    // returns, so the release waits for scheduler_inline_step_done().
+    if (g_inline_step_depth > 0) {
+        if (inline_release_defer(actor)) return;
+        // Out of memory to remember it: keeping the actor is safe, freeing
+        // it is not.
+        fprintf(stderr, "aether: out of memory deferring the release of actor %d; "
+                        "it is not freed\n", actor->id);
+        return;
     }
 
-    aether_numa_free(actor, actor->alloc_size);
+    // The lone actor of main-thread mode is going: leave the mode (which
+    // starts the scheduler threads), or the next spawn would be stepped
+    // inline against a main actor that no longer exists.
+    if (aether_main_thread_mode_active() &&
+        (ActorBase*)g_aether_config.main_actor == actor) {
+        aether_leave_main_thread_mode();
+    }
+
+    // A message that still reaches the actor is dropped, not delivered.
+    int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_acq_rel);
+    if (was & AETHER_ACTOR_RELEASED) return;   // released twice: ended once
+
+    // An actor with its own thread (#2517): that thread holds the actor for
+    // as long as it runs, outside the epochs, which only cover pointers found
+    // through a table, and this never waits for it (its step may be waiting
+    // on the releasing core). The thread leaves its loop at the mark just
+    // set and ends the actor itself (scheduler_actor_thread_exit), unless it
+    // has left already, in which case that is done here. The two bits make
+    // the second of the two the one that ends it.
+    if (actor->auto_process && !(was & AETHER_ACTOR_THREAD_GONE)) return;
+    actor_end(actor);
+}
+
+void scheduler_actor_thread_exit(ActorBase* actor) {
+    int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_THREAD_GONE, memory_order_acq_rel);
+    if (was & AETHER_ACTOR_RELEASED) actor_end(actor);
+}
+
+void scheduler_inline_step_done(void) {
+    // Releases are taken one at a time from the end: releasing runs no step,
+    // so nothing is added meanwhile, but the list is not walked while it
+    // changes.
+    while (t_inline_released_count > 0) {
+        ActorBase* actor = t_inline_released[--t_inline_released_count];
+        scheduler_release_actor(actor);
+    }
+    free(t_inline_released);
+    t_inline_released = NULL;
+    t_inline_released_capacity = 0;
+    g_inline_release_pending = 0;
 }
 
 
@@ -2380,27 +3097,41 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     return result;
 }
 
-void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
+void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
+                           void (*release)(void*)) {
     (void)self;
     ActorReplySlot* slot = (ActorReplySlot*)g_current_reply_slot;
     g_current_reply_slot = NULL;
-    if (!slot) return;
+    if (!slot) {
+        if (release && data) release(data);   // nobody asked: nothing takes the fields
+        return;
+    }
 
     pthread_mutex_lock(&slot->mutex);
+    int delivered = 0;
     if (!slot->timed_out) {
         if (data && data_size > 0) {
             slot->reply_data = malloc(data_size);
             if (slot->reply_data) {
                 memcpy(slot->reply_data, data, data_size);
                 slot->reply_size = data_size;
+                delivered = 1;
             }
         }
         slot->reply_ready = 1;
         pthread_cond_signal(&slot->cond);
     }
     pthread_mutex_unlock(&slot->mutex);
+    // The asker gave up (or the copy failed): what the reply owns, the
+    // strings copied and closures taken for the asker, has no taker but the
+    // replier (#2528). Delivered, the bytes are the asker's to release.
+    if (!delivered && release && data) release(data);
 
     reply_slot_decref(slot);
+}
+
+void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
+    scheduler_reply_owned(self, data, data_size, NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -2422,15 +3153,19 @@ int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
 
+    // A step run here may release its own actor, which the loop touches after
+    // the step: the reader slot keeps it allocated until the walk is over
+    // (#2509).
+    int slot = reclaim_reader_enter();
     for (int c = 0; c < num_cores; c++) {
         Scheduler* sched = &schedulers[c];
 
-        // Acquire fence: ensure actor pointer writes (from registration) are visible.
-        atomic_thread_fence(memory_order_acquire);
-        int actor_count = sched->actor_count;
+        // No lock: scheduler threads change the table meanwhile (#2486).
+        int actor_count;
+        AetherActorTable* table = actor_table_snapshot(sched, &actor_count);
 
         for (int i = 0; i < actor_count; i++) {
-            ActorBase* actor = sched->actors[i];
+            ActorBase* actor = actor_table_read(table, i);
             if (!actor || !actor->step) continue;
 
             // Only process actors the scheduler threads are skipping.
@@ -2452,6 +3187,7 @@ int aether_scheduler_poll(int max_per_actor) {
                 atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
         }
     }
+    reclaim_reader_exit(slot);
 
     return total;
 }

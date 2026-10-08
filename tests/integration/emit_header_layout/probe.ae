@@ -1,0 +1,31 @@
+// #2517: a C host built against the --emit-header file sends messages whose
+// field types interleave. The header used to declare the fields in
+// declaration order while the generated struct packs ints first, so the host
+// wrote every field but the first at the wrong offset; and the typed send
+// helper sent a multi-field message with no payload at all. The actor prints
+// what it reads; the script checks it is what shim.c sent.
+
+extern host_send(a: ptr) -> int
+
+message Mixed { a: int, s: string, b: int, f: float, c: int, p: ptr }
+message Bump { by: int }
+
+actor Sink {
+    state n = 0
+    receive {
+        Mixed(a, s, b, f, c, p) -> {
+            n = n + a + b + c
+            println("mixed a=${a} s=${s} b=${b} f=${f} c=${c}")
+        }
+        Bump(by) -> {
+            n = n + by
+            println("bump by=${by}")
+        }
+    }
+}
+
+main() {
+    k = spawn(Sink())
+    size = host_send(k)
+    println("host sent size=${size}")
+}

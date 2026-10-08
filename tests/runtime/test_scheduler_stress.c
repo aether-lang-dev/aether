@@ -512,7 +512,6 @@ void test_message_ordering_under_load(void) {
     ASSERT_TRUE(oo < 50);  // Allow some reordering under high load (< 10%)
     
     free(actor);
-    schedulers[0].actors = NULL;
 }
 
 void test_cascading_messages(void) {
@@ -565,11 +564,6 @@ void test_cascading_messages(void) {
     for (int i = 0; i < 3; i++) {
         free(actors[i]);
     }
-    for (int i = 0; i < 2; i++) {
-        if (schedulers[i].actors) {
-            schedulers[i].actors = NULL;
-        }
-    }
 }
 
 void test_memory_pressure(void) {
@@ -621,11 +615,6 @@ void test_memory_pressure(void) {
         free(actors[i]);
     }
     free(actors);
-    for (int i = 0; i < 2; i++) {
-        if (schedulers[i].actors) {
-            schedulers[i].actors = NULL;
-        }
-    }
 }
 
 // ============================================================================

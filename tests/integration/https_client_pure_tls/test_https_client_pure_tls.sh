@@ -180,6 +180,11 @@ expect "set_insecure" "STATUS 200 BODY pure-client-ok"
 #    both name the import.)
 run env $PURE URL="https://localhost:$GOOD/" "$TMP/cli_nomod"
 expect "pure client not linked" "import std.cryptography.tls13_client"
+# ...and says so before it dials: with nothing listening (port 1), the
+# answer is the same. It was found only after the TCP connect, so a connect
+# that failed first (a loaded machine) read "connection failed".
+run env $PURE URL="https://localhost:1/" "$TMP/cli_nomod"
+expect "pure client not linked, nothing listening" "import std.cryptography.tls13_client"
 
 # 10. A TLS 1.2-only server: a clear error, promptly -- not a hang, not a
 #     crash, and not a "truncated ServerHello". This is also the case that

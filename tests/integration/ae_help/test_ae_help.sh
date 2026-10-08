@@ -338,6 +338,20 @@ else
     fail=$((fail + 1))
 fi
 
+# Case 17: run from outside the checkout with no AETHER_ROOT, `ae help`
+# still finds the stdlib where the toolchain is, and a --lib library's
+# hint. It looked only under the working directory and a few fixed
+# prefixes, so an installed toolchain (<prefix>/share/aether) or a build
+# run from elsewhere had no stdlib, and the --lib hints were skipped with
+# it (#2544).
+outside_help() { ( cd "$TMPDIR" && unset AETHER_ROOT && "$AE" help "$@" ); }
+expect_match "stdlib found from outside the checkout" \
+    "is exported by std\.string|import std\.string" \
+    outside_help "$TMPDIR/missing.ae"
+expect_match "--lib hint found from outside the checkout" \
+    "Label must be non-empty" \
+    outside_help "$TMPDIR/usewidgets.ae" --lib "$TMPDIR/lib"
+
 echo
 echo "ae_help: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

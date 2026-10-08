@@ -1,7 +1,10 @@
 #include "test_harness.h"
 #include "../../std/string/aether_string.h"
+#include "../../runtime/aether_process_mem.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <limits.h>
 
 TEST_CATEGORY(string_concat_basic, TEST_CATEGORY_STDLIB) {
     AetherString* s1 = string_from_cstr("Hello");
@@ -230,4 +233,104 @@ TEST_CATEGORY(string_compare_embedded_nul, TEST_CATEGORY_STDLIB) {
     string_release(ab);
     string_release(ac);
     string_release(a);
+}
+
+/* The interpolation formatter takes its arguments as varargs, as the
+ * generated _aether_interp does. */
+static size_t interp(char* out, size_t cap, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    size_t n = aether_interp_format(out, cap, NULL, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* #2521: a %s argument is written by its length, so a NUL in an
+ * AetherString is a byte of the result; numbers go through snprintf as
+ * written, whatever their length. */
+TEST_CATEGORY(interp_format_by_length, TEST_CATEGORY_STDLIB) {
+    AetherString* nul = string_new_with_length("x\0y", 3);
+    char out[512];
+
+    size_t n = interp(out, sizeof(out), "[%s]", nul);
+    ASSERT_EQ(5, (int)n);
+    ASSERT_TRUE(memcmp(out, "[x\0y]", 6) == 0);
+
+    /* A plain char* to its NUL; NULL as (null); %%; a %c of 0. */
+    n = interp(out, sizeof(out), "%s|%s|100%%|%c.", "plain", (const char*)NULL, 0);
+    ASSERT_EQ(20, (int)n);
+    ASSERT_TRUE(memcmp(out, "plain|(null)|100%|\0.", 21) == 0);
+
+    /* A conversion longer than the formatter's stack buffer is whole. */
+    n = interp(out, sizeof(out), "%f", 1e300);
+    ASSERT_EQ(308, (int)n);
+    ASSERT_EQ(308, (int)strlen(out));
+
+    /* Sizing pass, then a buffer too small: the full length either way,
+     * the buffer filled as far as it goes and terminated. */
+    ASSERT_EQ(9, (int)interp(NULL, 0, "%d-%lld", 1234, 5678LL));
+    n = interp(out, 5, "%d-%lld", 1234, 5678LL);
+    ASSERT_EQ(9, (int)n);
+    ASSERT_STREQ("1234", out);
+
+    /* Integers are written without snprintf; the extremes are exact. */
+    interp(out, sizeof(out), "%d|%d|%lld|%llu|%u", INT_MIN, 0, LLONG_MIN, ULLONG_MAX, UINT_MAX);
+    ASSERT_STREQ("-2147483648|0|-9223372036854775808|18446744073709551615|4294967295", out);
+
+    string_release(nul);
+}
+
+/* string_release tells a one-block string (header, then payload) from a
+ * two-block one by `data == s + 1`. string_new_with_length builds the one
+ * block itself, and a payload adopted on its own never sits right after its
+ * header, even where an allocator packs blocks of one size class side by
+ * side (LeakSanitizer's, macOS malloc): there a 32-byte header and a 23-byte
+ * payload were neighbours, the pair was freed as one block, and the payload
+ * leaked on every release (#2549: std.spec's suite names under contrib's LSan). */
+TEST_CATEGORY(string_layout_is_unambiguous, TEST_CATEGORY_STDLIB) {
+    int64_t before = aether_heap_in_use();
+    for (int i = 0; i < 256; i++) {
+        AetherString* s = string_new_with_length("vulkan.vk: ray queries", 22);
+        ASSERT_NOT_NULL(s);
+        ASSERT_TRUE(s->data == (char*)(s + 1));
+        ASSERT_EQ(22, (int)aether_string_length(s));
+        AetherString* a = string_new_with_length("eleven char", 11);
+        AetherString* c = string_concat(a, a);   /* a 23-byte adopted payload */
+        ASSERT_NOT_NULL(c);
+        ASSERT_TRUE(c->data != (char*)(c + 1));
+        ASSERT_STREQ("eleven chareleven char", aether_string_data(c));
+        string_release(c);
+        string_release(a);
+        string_release(s);
+    }
+    if (aether_heap_in_use_exact()) ASSERT_TRUE(aether_heap_in_use() == before);
+}
+
+static void* interp_new(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    void* s = aether_interp_string(fmt, ap);
+    va_end(ap);
+    return s;
+}
+
+/* aether_interp_string formats a short result once, on the stack, and one
+ * past its stack buffer a second time, sized; both carry every byte. */
+TEST_CATEGORY(interp_string_short_and_long, TEST_CATEGORY_STDLIB) {
+    void* s = interp_new("n=%d s=%s", 42, "ok");
+    ASSERT_EQ(9, (int)aether_string_length(s));
+    ASSERT_STREQ("n=42 s=ok", aether_string_data(s));
+    string_release(s);
+
+    char part[201];
+    memset(part, 'x', 200);
+    part[200] = '\0';
+    AetherString* nul = string_new_with_length("a\0b", 3);
+    void* l = interp_new("%s|%s|%d", part, nul, 7);
+    ASSERT_EQ(200 + 1 + 3 + 1 + 1, (int)aether_string_length(l));
+    const char* d = aether_string_data(l);
+    ASSERT_TRUE(memcmp(d, part, 200) == 0);
+    ASSERT_TRUE(memcmp(d + 200, "|a\0b|7", 7) == 0);
+    string_release(l);
+    string_release(nul);
 }

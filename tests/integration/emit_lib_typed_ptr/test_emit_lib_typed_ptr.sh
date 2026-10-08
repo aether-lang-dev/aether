@@ -9,13 +9,13 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# The host loads the library by path: dlopen (-ldl on Linux), or
+# LoadLibrary on Windows.
+LDL=""
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_typed_ptr on Windows (uses POSIX dlopen)"; exit 0 ;;
-esac
-case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     Darwin) LIB_EXT=".dylib" ;;
-    *)      LIB_EXT=".so" ;;
+    *)      LIB_EXT=".so"; LDL="-ldl" ;;
 esac
 
 TMPDIR="$(mktemp -d)"
@@ -36,15 +36,26 @@ if ! AETHER_HOME="" AE_CC="$BASE_CC -Werror=incompatible-pointer-types" \
     exit 1
 fi
 
+# 1b. The same compiler through --emit=obj, which also takes AE_CC as a
+#     command prefix: it quoted the whole value, so a compiler with a flag
+#     named no program (#2545).
+if ! AETHER_HOME="" AE_CC="$BASE_CC -Werror=incompatible-pointer-types" \
+        "$ROOT/build/ae" build --emit=obj lib.ae -o "$TMPDIR/thing.o" >"$TMPDIR/obj.log" 2>&1 \
+   || [ ! -f "$TMPDIR/thing.o" ]; then
+    echo "  [FAIL] --emit=obj with a compiler that carries a flag"
+    sed 's/^/        /' "$TMPDIR/obj.log" | head -12
+    exit 1
+fi
+
 LIB_PATH=""
 for c in "$TMPDIR/libthing" "$TMPDIR/libthing${LIB_EXT}"; do
     [ -f "$c" ] && { LIB_PATH="$c"; break; }
 done
 [ -z "$LIB_PATH" ] && { echo "  [FAIL] no library produced"; exit 1; }
 
-# 2. Compile + run the C host that dlopens it and calls aether_bump.
+# 2. Compile + run the C host that loads it and calls aether_bump.
 CC="${CC:-cc}"
-if ! "$CC" -o "$TMPDIR/consume" consume.c -ldl >"$TMPDIR/cc.log" 2>&1; then
+if ! "$CC" -o "$TMPDIR/consume" consume.c $LDL >"$TMPDIR/cc.log" 2>&1; then
     echo "  [FAIL] could not compile consume.c"; sed 's/^/        /' "$TMPDIR/cc.log"; exit 1
 fi
 

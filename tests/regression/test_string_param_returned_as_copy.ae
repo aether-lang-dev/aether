@@ -1,0 +1,82 @@
+// Regression: a heap string local passed to a function that returns its
+// parameter on one path and a fresh string on another is still freed by
+// its scope. Such a function's string result is uniform-heap (every return
+// goes through aether_uniform_heap_str, which copies a borrowed parameter),
+// so the result never aliases the argument and the call is not an escape.
+//
+// Before, the caller-side escape walk counted the callee's `return p` as
+// an escape of the argument, so `key` in url.parse_query was never freed:
+// one decoded key leaked per entry (the macOS leaks gate, push 5;
+// url.parse_query grew 6800 bytes per 100 calls on Windows).
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work must grow the heap by
+// exactly 0 (mem.steady_growth). Elsewhere the macOS leaks gate covers this program.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal that owns nothing.
+
+import std.mem
+import std.string
+import std.url
+import std.collections
+
+extern exit(code: int)
+
+const PER_ROUND = 100
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Returns its parameter as it is, or a fresh string: a uniform-heap result.
+escape_eq(key: string) -> string {
+    if string.contains(key, "=") == 0 {
+        return key
+    }
+    return string.replace_all(key, "=", "%3D")
+}
+
+through_copy(p: string) -> int {
+    plain = string.concat(p, "-plain")
+    marked = string.concat(p, "=x")
+    entry = string.concat(escape_eq(plain), "|")
+    entry = string.concat(entry, escape_eq(marked))
+    check(string.equals(entry, "a-plain|a%3Dx") == 1, "the returned copies read correctly")
+    return string.length(entry)
+}
+
+parsed_query(p: string) -> int {
+    list, err = url.parse_query(string.concat(p, "=x%00y&b=2"))
+    check(string.equals(err, "") == 1, "the query parses")
+    n = string_list_size(list)
+    string_list_free(list)
+    return n
+}
+
+fn one_round(p: string) {
+    i = 0
+    while i < PER_ROUND {
+        through_copy(p)
+        parsed_query(p)
+        i = i + 1
+    }
+}
+
+main() {
+    if !mem.heap_in_use_exact() {
+        one_round("a")
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    one_round("a")
+    one_round("a")
+    grown = mem.steady_growth(|| {
+            one_round("a")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

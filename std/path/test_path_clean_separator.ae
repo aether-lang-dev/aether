@@ -43,6 +43,14 @@ main() {
     // The helpers that were previously fs-only are reachable via std.path.
     total_ok = ck(path.join("a", "b"), "a/b", "path.join", total_ok)
     total_ok = ck(path.rel("/x", "/x/y/z"), "y/z", "path.rel", total_ok)
+    // A base that climbs above what target can be reached from has no
+    // relative path (Go's filepath.Rel errors). It used to give
+    // rel("../a", "b") = "../../b", which joined onto ../a is ../../b, not b.
+    total_ok = ck("${string.length(path.rel("../a", "b"))}", "0", "path.rel: base above target's root has no answer", total_ok)
+    total_ok = ck("${string.length(path.rel("/a", "b"))}", "0", "path.rel: absolute vs relative has no answer", total_ok)
+    // A leading '..' both sides share is just a common prefix.
+    total_ok = ck(path.rel("../a", "../a/b"), "b", "path.rel under a shared '..'", total_ok)
+    total_ok = ck(path.rel("../a", "../b"), "../b", "path.rel across a shared '..'", total_ok)
 
     if path.is_within_base("/base", "/base/sub/f") == 1 {
         println("ok   path.is_within_base true for a contained path")

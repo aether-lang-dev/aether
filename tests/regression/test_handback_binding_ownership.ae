@@ -1,0 +1,157 @@
+// Regression (#2548): a string bound through a call that only hands its
+// argument back (`t = pass(s)`) takes the argument's ownership as the bare
+// alias `t = s` does: moved on the source's last use, copied while the
+// source is still read, and borrowed when the call returned something else
+// (`prefix_or_default` returns a literal for an empty prefix). Before, the
+// source was marked escaped and never freed, and the alias held its buffer
+// untracked, so every shape below leaked the source once per call. The
+// macOS leaks gate runs this program.
+
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+pass(s: string) -> string {
+    return s
+}
+
+prefix_or_default(p: string) -> string {
+    if p == "" {
+        return "ae"
+    }
+    return p
+}
+
+// A kept parameter handed back into a local that is returned.
+keep_relay(l: ptr, s: string) -> string {
+    list.add(l, s)
+    t = pass(s)
+    return t
+}
+
+// Handed back into a local a container keeps.
+relay_store(l: ptr, s: string) {
+    t = pass(s)
+    list.add(l, t)
+}
+
+// A heap local handed back into a local that is returned.
+local_relay(k: int) -> string {
+    x = string.concat("loc", string.from_int(k))
+    t = pass(x)
+    return t
+}
+
+// The source is read after the binding: the binding takes a copy.
+relay_and_read(k: int) -> int {
+    x = string.concat("read", string.from_int(k))
+    t = pass(x)
+    return string.length(t) + string.length(x)
+}
+
+// The call returns a literal on one path: the binding borrows it, and the
+// source keeps (and frees) its own buffer.
+defaulted(k: int) -> int {
+    x = string.concat("", "")
+    if k > 0 {
+        x = string.concat("p", string.from_int(k))
+    }
+    t = prefix_or_default(x)
+    return string.length(t)
+}
+
+// Rebinding a local to a hand-back of itself keeps its buffer.
+self_relay(k: int) -> int {
+    x = string.concat("self", string.from_int(k))
+    x = pass(x)
+    return string.length(x)
+}
+
+// An `if` arm that hands a local back; the other arm leaves it to the local.
+arm_relay(k: int) -> string {
+    x = string.concat("arm", string.from_int(k))
+    t = if k > 1 { pass(x) } else { "none" }
+    return t
+}
+
+// A `match` arm.
+match_relay(k: int) -> string {
+    x = string.concat("match", string.from_int(k))
+    t = match k {
+        0 -> "zero"
+        _ -> pass(x)
+    }
+    return t
+}
+
+struct Named {
+    name: string
+}
+
+// A struct literal's field.
+named(k: int) -> Named {
+    x = string.concat("named", string.from_int(k))
+    return Named { name: pass(x) }
+}
+
+// A container store's value.
+store_relay(l: ptr, k: int) {
+    x = string.concat("stored", string.from_int(k))
+    list.add(l, pass(x))
+}
+
+fn round(tag: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        l = list.new()
+        a = keep_relay(l, tag)
+        check(string.equals(a, tag) == 1, "keep_relay hands back its parameter")
+        relay_store(l, tag)
+        b, _ = list.get(l, 1)
+        check(list.size(l) == 2 && string.equals(b, tag) == 1, "relay_store keeps its parameter")
+        list.free(l)
+        c = local_relay(i)
+        check(string.starts_with(c, "loc") == 1, "local_relay hands back its local")
+        check(relay_and_read(i) > 8, "relay_and_read reads both")
+        check(defaulted(0) == 2 && defaulted(i + 1) > 1, "defaulted borrows the literal")
+        check(self_relay(i) > 4, "self_relay keeps its buffer")
+        d = arm_relay(i)
+        check(string.length(d) > 3, "arm_relay hands back an arm")
+        m = match_relay(i)
+        check(string.length(m) > 3, "match_relay hands back an arm")
+        nm = named(i)
+        check(string.starts_with(nm.name, "named") == 1, "named holds its field")
+        l2 = list.new()
+        store_relay(l2, i)
+        sv, _ = list.get(l2, 0)
+        check(string.starts_with(sv, "stored") == 1, "store_relay keeps its value")
+        list.free(l2)
+        total = total + 1
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    tag = string.concat("hand", "-back")
+    check(round(tag) == 20, "a round runs twenty times")
+    if mem.heap_in_use_exact() {
+        round(tag)
+        grown = mem.steady_growth(|| {
+                round(tag)
+            }, 5)
+        check(grown == 0,
+            "a round grew the heap by ${grown} bytes in every run")
+    }
+    println("OK")
+}

@@ -17,6 +17,7 @@ exports(
     get_bool, get_int, get_long, get_float, get_string, get_bytes, get_tag_val, get_tag_child,
     object_get, map_get, object_set, array_add, map_set, object_size, array_size, object_entry,
     obj, arr, str, bytes, num, from_int, boolean, null_value, undefined_value, tag,
+    get_int64, get_uint, get_nint, from_uint, from_nint,
     set, push, map_push, free, diagnose
 )
 
@@ -29,6 +30,11 @@ const CBOR_TAG = 5
 const CBOR_SIMPLE = 6
 const CBOR_FLOAT = 7
 
+// Deepest nesting parse accepts, the same bound as std.json. The decoder
+// recurses once per level, so without a bound a few hundred kilobytes of
+// one-element arrays overflow the stack.
+const CBOR_MAX_DEPTH = 256
+
 // Memory model: a CborValue tree owns its text/byte-string payloads as an
 // AetherBytes buffer (str_bytes + str_len), NOT a refcounted `string` field.
 // A `string` stored in a heap.new struct field leaks — heap.free reclaims
@@ -38,17 +44,37 @@ const CBOR_FLOAT = 7
 // the buffer alongside the struct. get_string/get_bytes mint a fresh
 // caller-owned string on demand via the non-consuming bytes.to_string. This
 // is the same treatment std.msgpack uses for the identical problem.
+//
+// How a parsed item was encoded is kept with it (#2470), so `encode` writes
+// it back byte for byte and `diagnose` can show it: `ind` is the size of the
+// head's argument, 0 when it sat in the initial byte (or for a value built
+// with the constructors, which encode in preferred serialization) and 1..4
+// when it followed in 1, 2, 4 or 8 bytes (additional information 24..27, so
+// for a float 2, 3, 4 is half, single, double); `indefinite` marks an
+// indefinite-length string, array or map. An indefinite-length string keeps
+// its chunks (definite strings) in list_val beside the joined payload, and a
+// parsed float keeps its raw bits, in its own width, in int_val.
+//
+// An integer is int_val when it fits a signed long. CBOR's range is wider,
+// 0..2^64-1 for major type 0 and -2^64..-1 for major type 1, and `big`
+// carries the rest (#2510): 1 for a major type 0 value of 2^63 or more,
+// whose 64 bits are int_val; 2 for a major type 1 value below -2^63, whose
+// argument n (the value is -1 - n, n >= 2^63) is int_val. As elsewhere in
+// std, an unsigned 64-bit value travels as the bit pattern of a long.
 struct CborValue {
     type: int
-    int_val: long
+    int_val: long // integer or simple value; a parsed float's raw bits
     float_val: float
     str_bytes: ptr // owned AetherBytes for text/byte-string payload (null if empty); freed in free_value
     str_len: int // payload byte length
     tag_val: long
     tag_child: ptr // *CborValue
-    list_val: ptr // list pointer (std.list)
+    list_val: ptr // list pointer (std.list): array items, or an indefinite string's chunks
     map_keys: ptr // list pointer (std.list)
     map_values: ptr // list pointer (std.list)
+    ind: int // argument size of the head as parsed, see above
+    indefinite: int // 1 for an indefinite-length item
+    big: int // an integer outside the signed long range, see above
 }
 
 // ---- str payload helpers (see Memory model above) ----
@@ -270,6 +296,10 @@ read_value(r: ptr, ai: int) -> (long, string) {
     if ai == 27 {
         if reader.offset + 8 > reader.len { return 0, "cbor: unexpected EOF" }
         b0 = rd(reader, reader.offset)
+        // The argument is a full unsigned 64 bits, and in the signed long
+        // every caller holds it, 2^63 and up read as negative: an integer
+        // or tag number keeps it as the bit pattern it is (#2510), and a
+        // length or count refuses it as longer than the input.
         b1 = rd(reader, reader.offset + 1)
         b2 = rd(reader, reader.offset + 2)
         b3 = rd(reader, reader.offset + 3)
@@ -285,8 +315,156 @@ read_value(r: ptr, ai: int) -> (long, string) {
     return 0, "cbor: invalid additional information"
 }
 
-parse_item(r: ptr) -> (ptr, string) {
+// The argument size `ind` records for additional information `ai`: 0 for an
+// argument held in the initial byte, 1..4 for one in 1, 2, 4 or 8 bytes.
+fn ind_of(ai: int) -> int {
+    if ai >= 24 && ai <= 27 {
+        return ai - 23
+    }
+    return 0
+}
+
+// Whether the `len` bytes of `b` from `off` are UTF-8 (RFC 3629): no
+// overlong form, no surrogate, nothing past U+10FFFF. RFC 8949 §3.1 requires
+// it of a text string, and §3.2.3 of each chunk of an indefinite-length one,
+// so a character cannot be split across chunks.
+fn valid_utf8(b: ptr, off: int, len: int) -> bool {
+    i = off
+    end = off + len
+    while i < end {
+        c = rd_byte(b, i)
+        if c < 128 {
+            i = i + 1
+            continue
+        }
+        need = 0
+        lo = 128
+        hi = 191
+        if c >= 194 && c <= 223 {
+            need = 1
+        } else if c >= 224 && c <= 239 {
+            need = 2
+            if c == 224 { lo = 160 } // overlong
+            if c == 237 { hi = 159 } // surrogates
+        } else if c >= 240 && c <= 244 {
+            need = 3
+            if c == 240 { lo = 144 } // overlong
+            if c == 244 { hi = 143 } // past U+10FFFF
+        } else {
+            return false
+        }
+        if i + need >= end {
+            return false
+        }
+        c2 = rd_byte(b, i + 1)
+        if c2 < lo || c2 > hi {
+            return false
+        }
+        k = 2
+        while k <= need {
+            ck = rd_byte(b, i + k)
+            if ck < 128 || ck > 191 {
+                return false
+            }
+            k = k + 1
+        }
+        i = i + need + 1
+    }
+    return true
+}
+
+fn rd_byte(b: ptr, off: int) -> int {
+    return bytes.get(b, off) & 255
+}
+
+// An indefinite-length string (RFC 8949 §3.2.3): definite-length strings of
+// the same major type up to a break. A chunk of another type, or a nested
+// indefinite-length string (`5f5f4101ffff`), is not well-formed; it used to
+// be joined in (#2470). The chunks are kept so the item encodes and
+// diagnoses as it came.
+fn parse_indefinite_string(r: ptr, mt: int, depth: int) -> (ptr, string) {
     reader = r as *Reader
+    cv = heap.new(CborValue)
+    cv.type = CBOR_BYTES
+    if mt == 3 {
+        cv.type = CBOR_TEXT
+    }
+    cv.indefinite = 1
+    cv.list_val = list.new()
+    sb = bytes.new(32)
+    sb_len = 0
+    while true {
+        if reader.offset >= reader.len {
+            bytes.free(sb)
+            free_value(cv)
+            return null, "cbor: unexpected EOF in indefinite-length string"
+        }
+        next_byte = rd(reader, reader.offset)
+        if next_byte == 255 { // break code
+            reader.offset = reader.offset + 1
+            break
+        }
+        if (next_byte >> 5) != mt || (next_byte & 31) == 31 {
+            bytes.free(sb)
+            free_value(cv)
+            return null, "cbor: indefinite-length string chunk is not a definite-length string of its type"
+        }
+        child, err = parse_item(r, depth + 1)
+        if err != "" {
+            bytes.free(sb)
+            free_value(cv)
+            return null, err
+        }
+        string.release(err)
+        child_cv = child as *CborValue
+        chunk_len = child_cv.str_len
+        if chunk_len > 0 {
+            _ = bytes.copy_from_bytes(sb, sb_len, child_cv.str_bytes, 0, chunk_len)
+        }
+        sb_len = sb_len + chunk_len
+        _ = list.add(cv.list_val, child)
+    }
+    adopt_str_payload(cv as *CborValue, sb, sb_len)
+    return cv as ptr, ""
+}
+
+// A float of `width` bytes (2, 4 or 8) whose big-endian bits start at the
+// reader's offset; `ind` is 2, 3 or 4 to match.
+fn parse_float(reader: *Reader, width: int) -> (ptr, string) {
+    if reader.offset + width > reader.len {
+        return null, "cbor: unexpected EOF"
+    }
+    bits = 0 as long
+    i = 0
+    while i < width {
+        bits = (bits << 8) | (rd(reader, reader.offset + i) as long)
+        i = i + 1
+    }
+    reader.offset = reader.offset + width
+    cv = heap.new(CborValue)
+    cv.type = CBOR_FLOAT
+    cv.int_val = bits
+    if width == 2 {
+        cv.float_val = float16_to_float32(bits as int)
+        cv.ind = 2
+    } else if width == 4 {
+        cv.float_val = float32_from_bits(bits)
+        cv.ind = 3
+    } else {
+        cv.float_val = mem.float_from_bits(bits)
+        cv.ind = 4
+    }
+    return cv as ptr, ""
+}
+
+// `depth` counts the items enclosing this one (0 at the root). Each way an
+// item can fail to be well-formed (RFC 8949 §3; the cases of Appendix F) is
+// an error, as is invalid UTF-8 in a text string (§3.1).
+parse_item(r: ptr, depth: int) -> (ptr, string) {
+    reader = r as *Reader
+    if depth > CBOR_MAX_DEPTH {
+        return null, "cbor: nesting deeper than 256"
+    }
     if reader.offset >= reader.len {
         return null, "cbor: unexpected EOF"
     }
@@ -303,6 +481,10 @@ parse_item(r: ptr) -> (ptr, string) {
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
         cv.int_val = val
+        if val < 0 {
+            cv.big = 1 // 2^63 or more
+        }
+        cv.ind = ind_of(ai)
         return cv as ptr, ""
     }
     if mt == 1 {
@@ -311,103 +493,35 @@ parse_item(r: ptr) -> (ptr, string) {
         string.release(err)
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
-        cv.int_val = -1 - val
+        if val < 0 {
+            // n >= 2^63, so -1 - n is below -2^63: keep n.
+            cv.big = 2
+            cv.int_val = val
+        } else {
+            cv.int_val = -1 - val
+        }
+        cv.ind = ind_of(ai)
         return cv as ptr, ""
     }
-    if mt == 2 {
+    if mt == 2 || mt == 3 {
         if ai == 31 {
-            // Indefinite length byte string. Parse indefinite chunks.
-            // We concatenate all chunk strings.
-            sb = bytes.new(32)
-            sb_len = 0
-            while true {
-                if reader.offset >= reader.len {
-                    bytes.free(sb)
-                    return null, "cbor: unexpected EOF in indefinite byte string"
-                }
-                next_byte = rd(reader, reader.offset)
-                if next_byte == 255 { // break code
-                    reader.offset = reader.offset + 1
-                    break
-                }
-                child, err = parse_item(r)
-                if err != "" {
-                    bytes.free(sb)
-                    return null, err
-                }
-                string.release(err)
-                child_cv = child as *CborValue
-                if child_cv.type != CBOR_BYTES {
-                    bytes.free(sb)
-                    free_value(child)
-                    return null, "cbor: indefinite byte string contains non-byte-string"
-                }
-                chunk_len = child_cv.str_len
-                if chunk_len > 0 {
-                    _ = bytes.copy_from_bytes(sb, sb_len, child_cv.str_bytes, 0, chunk_len)
-                }
-                sb_len = sb_len + chunk_len
-                free_value(child)
-            }
-            cv = heap.new(CborValue)
-            cv.type = CBOR_BYTES
-            adopt_str_payload(cv as *CborValue, sb, sb_len)
-            return cv as ptr, ""
+            return parse_indefinite_string(r, mt, depth)
         }
         len_val, err = read_value(r, ai)
         if err != "" { return null, err }
         string.release(err)
-        if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
+        // Compared in long against what is left: narrowing a length of 2^31
+        // or more to int first made it negative and passed it as empty.
+        if len_val < 0 || len_val > ((reader.len - reader.offset) as long) { return null, "cbor: unexpected EOF" }
+        if mt == 3 && !valid_utf8(reader.buf, reader.offset, len_val as int) {
+            return null, "cbor: invalid UTF-8 in text string"
+        }
         cv = heap.new(CborValue)
         cv.type = CBOR_BYTES
-        read_str_payload(cv as *CborValue, reader, len_val as int)
-        return cv as ptr, ""
-    }
-    if mt == 3 {
-        if ai == 31 {
-            // Indefinite length text string
-            sb = bytes.new(32)
-            sb_len = 0
-            while true {
-                if reader.offset >= reader.len {
-                    bytes.free(sb)
-                    return null, "cbor: unexpected EOF in indefinite text string"
-                }
-                next_byte = rd(reader, reader.offset)
-                if next_byte == 255 {
-                    reader.offset = reader.offset + 1
-                    break
-                }
-                child, err = parse_item(r)
-                if err != "" {
-                    bytes.free(sb)
-                    return null, err
-                }
-                string.release(err)
-                child_cv = child as *CborValue
-                if child_cv.type != CBOR_TEXT {
-                    bytes.free(sb)
-                    free_value(child)
-                    return null, "cbor: indefinite text string contains non-text-string"
-                }
-                chunk_len = child_cv.str_len
-                if chunk_len > 0 {
-                    _ = bytes.copy_from_bytes(sb, sb_len, child_cv.str_bytes, 0, chunk_len)
-                }
-                sb_len = sb_len + chunk_len
-                free_value(child)
-            }
-            cv = heap.new(CborValue)
+        if mt == 3 {
             cv.type = CBOR_TEXT
-            adopt_str_payload(cv as *CborValue, sb, sb_len)
-            return cv as ptr, ""
         }
-        len_val, err = read_value(r, ai)
-        if err != "" { return null, err }
-        string.release(err)
-        if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
-        cv = heap.new(CborValue)
-        cv.type = CBOR_TEXT
+        cv.ind = ind_of(ai)
         read_str_payload(cv as *CborValue, reader, len_val as int)
         return cv as ptr, ""
     }
@@ -418,6 +532,7 @@ parse_item(r: ptr) -> (ptr, string) {
         cv.type = CBOR_ARRAY
         cv.list_val = list.new()
         if ai == 31 {
+            cv.indefinite = 1
             while true {
                 if reader.offset >= reader.len {
                     free_value(cv)
@@ -428,7 +543,7 @@ parse_item(r: ptr) -> (ptr, string) {
                     reader.offset = reader.offset + 1
                     break
                 }
-                child, err = parse_item(r)
+                child, err = parse_item(r, depth + 1)
                 if err != "" {
                     free_value(cv)
                     return null, err
@@ -444,9 +559,17 @@ parse_item(r: ptr) -> (ptr, string) {
             return null, err
         }
         string.release(err)
+        cv.ind = ind_of(ai)
+        // Every element takes at least one byte, so a count beyond what is
+        // left is truncated input, refused before the loop rather than
+        // narrowed to int (2^32 became 0 elements).
+        if len_val < 0 || len_val > ((reader.len - reader.offset) as long) {
+            free_value(cv)
+            return null, "cbor: unexpected EOF"
+        }
         i = 0
         while i < (len_val as int) {
-            child, err = parse_item(r)
+            child, err = parse_item(r, depth + 1)
             if err != "" {
                 free_value(cv)
                 return null, err
@@ -465,6 +588,7 @@ parse_item(r: ptr) -> (ptr, string) {
         cv.map_keys = list.new()
         cv.map_values = list.new()
         if ai == 31 {
+            cv.indefinite = 1
             while true {
                 if reader.offset >= reader.len {
                     free_value(cv)
@@ -475,13 +599,15 @@ parse_item(r: ptr) -> (ptr, string) {
                     reader.offset = reader.offset + 1
                     break
                 }
-                key_cv, err = parse_item(r)
+                key_cv, err = parse_item(r, depth + 1)
                 if err != "" {
                     free_value(cv)
                     return null, err
                 }
                 string.release(err)
-                val_cv, err2 = parse_item(r)
+                // A break here, where the value belongs, is not the end of
+                // the map: parse_item refuses it as an unexpected break.
+                val_cv, err2 = parse_item(r, depth + 1)
                 if err2 != "" {
                     free_value(key_cv)
                     free_value(cv)
@@ -499,15 +625,21 @@ parse_item(r: ptr) -> (ptr, string) {
             return null, err
         }
         string.release(err)
+        cv.ind = ind_of(ai)
+        // Every entry is a key and a value, at least two bytes.
+        if len_val < 0 || len_val > ((reader.len - reader.offset) as long) / 2 {
+            free_value(cv)
+            return null, "cbor: unexpected EOF"
+        }
         i = 0
         while i < (len_val as int) {
-            key_cv, err = parse_item(r)
+            key_cv, err = parse_item(r, depth + 1)
             if err != "" {
                 free_value(cv)
                 return null, err
             }
             string.release(err)
-            val_cv, err2 = parse_item(r)
+            val_cv, err2 = parse_item(r, depth + 1)
             if err2 != "" {
                 free_value(key_cv)
                 free_value(cv)
@@ -524,100 +656,59 @@ parse_item(r: ptr) -> (ptr, string) {
         tag_val, err = read_value(r, ai)
         if err != "" { return null, err }
         string.release(err)
-        child_cv, err2 = parse_item(r)
+        child_cv, err2 = parse_item(r, depth + 1)
         if err2 != "" { return null, err2 }
         string.release(err2)
         cv = heap.new(CborValue)
         cv.type = CBOR_TAG
         cv.tag_val = tag_val
         cv.tag_child = child_cv
+        cv.ind = ind_of(ai)
         return cv as ptr, ""
     }
-    if mt == 7 {
-        if ai == 20 {
-            cv = heap.new(CborValue)
-            cv.type = CBOR_SIMPLE
-            cv.int_val = 20
-            return cv as ptr, ""
-        }
-        if ai == 21 {
-            cv = heap.new(CborValue)
-            cv.type = CBOR_SIMPLE
-            cv.int_val = 21
-            return cv as ptr, ""
-        }
-        if ai == 22 {
-            cv = heap.new(CborValue)
-            cv.type = CBOR_SIMPLE
-            cv.int_val = 22
-            return cv as ptr, ""
-        }
-        if ai == 23 {
-            cv = heap.new(CborValue)
-            cv.type = CBOR_SIMPLE
-            cv.int_val = 23
-            return cv as ptr, ""
-        }
-        if ai == 24 {
-            if reader.offset >= reader.len { return null, "cbor: unexpected EOF" }
-            v = rd(reader, reader.offset)
-            reader.offset = reader.offset + 1
-            cv = heap.new(CborValue)
-            cv.type = CBOR_SIMPLE
-            cv.int_val = v as long
-            return cv as ptr, ""
-        }
-        if ai == 25 {
-            if reader.offset + 2 > reader.len { return null, "cbor: unexpected EOF" }
-            b0 = rd(reader, reader.offset)
-            b1 = rd(reader, reader.offset + 1)
-            reader.offset = reader.offset + 2
-            bits = (b0 << 8) | b1
-            f = float16_to_float32(bits)
-            cv = heap.new(CborValue)
-            cv.type = CBOR_FLOAT
-            cv.float_val = f
-            return cv as ptr, ""
-        }
-        if ai == 26 {
-            if reader.offset + 4 > reader.len { return null, "cbor: unexpected EOF" }
-            b0 = rd(reader, reader.offset)
-            b1 = rd(reader, reader.offset + 1)
-            b2 = rd(reader, reader.offset + 2)
-            b3 = rd(reader, reader.offset + 3)
-            reader.offset = reader.offset + 4
-            bits = ((b0 as long) << 24) | ((b1 as long) << 16) | ((b2 as long) << 8) | (b3 as long)
-            f = float32_from_bits(bits)
-            cv = heap.new(CborValue)
-            cv.type = CBOR_FLOAT
-            cv.float_val = f
-            return cv as ptr, ""
-        }
-        if ai == 27 {
-            if reader.offset + 8 > reader.len { return null, "cbor: unexpected EOF" }
-            b0 = rd(reader, reader.offset)
-            b1 = rd(reader, reader.offset + 1)
-            b2 = rd(reader, reader.offset + 2)
-            b3 = rd(reader, reader.offset + 3)
-            b4 = rd(reader, reader.offset + 4)
-            b5 = rd(reader, reader.offset + 5)
-            b6 = rd(reader, reader.offset + 6)
-            b7 = rd(reader, reader.offset + 7)
-            reader.offset = reader.offset + 8
-            bits = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
-            ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
-            f = mem.float_from_bits(bits)
-            cv = heap.new(CborValue)
-            cv.type = CBOR_FLOAT
-            cv.float_val = f
-            return cv as ptr, ""
-        }
+    // Major type 7: simple values and floats.
+    if ai < 24 {
+        // simple(0) .. simple(23); 20..23 are false, true, null, undefined.
+        cv = heap.new(CborValue)
+        cv.type = CBOR_SIMPLE
+        cv.int_val = ai as long
+        return cv as ptr, ""
     }
-    return null, "cbor: unsupported major type"
+    if ai == 24 {
+        if reader.offset >= reader.len { return null, "cbor: unexpected EOF" }
+        v = rd(reader, reader.offset)
+        reader.offset = reader.offset + 1
+        // simple(0..31) take one byte; a second byte for them is not
+        // well-formed (RFC 8949 §3.3: `f814` is not false).
+        if v < 32 {
+            return null, "cbor: simple value below 32 in two bytes"
+        }
+        cv = heap.new(CborValue)
+        cv.type = CBOR_SIMPLE
+        cv.int_val = v as long
+        return cv as ptr, ""
+    }
+    if ai == 25 {
+        return parse_float(reader, 2)
+    }
+    if ai == 26 {
+        return parse_float(reader, 4)
+    }
+    if ai == 27 {
+        return parse_float(reader, 8)
+    }
+    if ai == 31 {
+        // A break only ends an indefinite-length item, and those consume
+        // their own before calling here.
+        return null, "cbor: unexpected break"
+    }
+    return null, "cbor: invalid additional information"
 }
 
-// Parse a CBOR binary string. Returns (value_ptr, "") on success, (null, error) on failure.
-// Caller owns the returned value and must free with cbor.free.
+// Parse one CBOR data item that is the whole of `cbor_data`. Returns
+// (value_ptr, "") on success, (null, error) on failure. Caller owns the
+// returned value and must free with cbor.free. Bytes left after the item are
+// an error (#2470): `0102` used to parse as 1.
 parse(cbor_data: string) -> ptr! {
     ok = ""
     dlen = string.length(cbor_data)
@@ -632,7 +723,8 @@ parse(cbor_data: string) -> ptr! {
     r.buf = buf
     r.len = dlen
     r.offset = 0
-    res, err = parse_item(r as ptr)
+    res, err = parse_item(r as ptr, 0)
+    trailing = r.offset < r.len
     bytes.free(r.buf)
     heap.free(r)
     if err != "" {
@@ -641,6 +733,10 @@ parse(cbor_data: string) -> ptr! {
     // parse_item's success path returns a fresh heap "" in the error slot;
     // discard it here (we return our own ok) or it leaks one byte per parse.
     string.release(err)
+    if trailing {
+        free_value(res)
+        return null, "cbor: trailing bytes after the data item"
+    }
     return res, ok
 }
 
@@ -676,24 +772,138 @@ write_string(w: ptr, s: string, len: int) {
     writer.offset = writer.offset + len
 }
 
-encode_header(w: ptr, major: int, val: long) {
-    _writer = w as *Writer
+// The preferred `ind` for an argument: the fewest bytes that hold it
+// (RFC 8949 §4.2.1).
+fn preferred_ind(val: long) -> int {
+    if val < 0 { return 4 } // an unsigned argument of 2^63 or more
+    if val < 24 { return 0 }
+    if val <= 255 { return 1 }
+    if val <= 65535 { return 2 }
+    if val <= 4294967295 { return 3 }
+    return 4
+}
+
+// Write a head: the major type and the argument, in `ind`'s size when the
+// argument fits there (a parsed item writes back as it came) and in the
+// preferred size otherwise (every constructed value, ind 0).
+encode_head(w: ptr, major: int, val: long, ind: int) {
+    use = preferred_ind(val)
+    if ind > use {
+        use = ind
+    }
     base = major << 5
-    if val < 24 {
+    if use == 0 {
         write_byte(w, base | (val as int))
-    } else if val <= 255 {
+    } else if use == 1 {
         write_byte(w, base | 24)
         write_byte(w, val as int)
-    } else if val <= 65535 {
+    } else if use == 2 {
         write_byte(w, base | 25)
         write_be16(w, val as int)
-    } else if val <= 4294967295 {
+    } else if use == 3 {
         write_byte(w, base | 26)
         write_be32(w, val as int)
     } else {
         write_byte(w, base | 27)
         write_be64(w, val)
     }
+}
+
+// ---- Float widths: ind 2 is half, 3 single, 4 double ----
+
+// Whether a nonzero finite value whose leading bit is 2^e and lowest set bit
+// 2^low is exact in a format of `prec` significand bits and normal exponents
+// emin..emax, subnormals included.
+fn float_fits(e: int, low: int, prec: int, emin: int, emax: int) -> bool {
+    if e > emax { return false }
+    floor = e - (prec - 1)
+    if floor < emin - (prec - 1) {
+        floor = emin - (prec - 1)
+    }
+    return low >= floor
+}
+
+// The narrowest float width that holds the double `x` exactly: preferred
+// serialization (RFC 8949 §4.2.2). A NaN narrows as far as its payload does.
+fn float_width_for(x: float) -> int {
+    bits = mem.bits_of_float(x)
+    exp = ((bits >> 52) & 2047) as int
+    mant = bits & 4503599627370495
+    if exp == 2047 {
+        if (mant & 4398046511103) == 0 { return 2 } // infinity, or low 42 bits clear
+        if (mant & 536870911) == 0 { return 3 } // low 29 bits clear
+        return 4
+    }
+    if exp == 0 {
+        if mant == 0 { return 2 } // zero
+        return 4 // a double subnormal is below every narrower format
+    }
+    e = exp - 1023
+    sig = mant | 4503599627370496 // with the implicit leading bit, 2^52
+    tz = 0
+    while (sig & 1) == 0 {
+        sig = sig >> 1
+        tz = tz + 1
+    }
+    low = e - 52 + tz
+    if float_fits(e, low, 11, -14, 15) { return 2 }
+    if float_fits(e, low, 24, -126, 127) { return 3 }
+    return 4
+}
+
+// The preferred width of a float value as it stands: a parsed NaN keeps its
+// payload only in its raw bits (float_val holds the default NaN), so a NaN
+// narrows by those.
+fn float_preferred(cv: *CborValue) -> int {
+    if !is_nan(cv.float_val) || cv.ind == 0 {
+        return float_width_for(cv.float_val)
+    }
+    if cv.ind == 2 { return 2 }
+    if cv.ind == 3 {
+        if (cv.int_val & 8191) == 0 { return 2 } // low 13 of 23 mantissa bits
+        return 3
+    }
+    return float_width_for(mem.float_from_bits(cv.int_val))
+}
+
+// IEEE 754 half bits of `x`, which float_width_for found exact in half.
+fn half_bits(x: float) -> int {
+    bits = mem.bits_of_float(x)
+    sign = ((bits >> 63) & 1) as int
+    exp = ((bits >> 52) & 2047) as int
+    mant = bits & 4503599627370495
+    if exp == 2047 {
+        return (sign << 15) | 31744 | ((mant >> 42) as int)
+    }
+    if exp == 0 {
+        return sign << 15
+    }
+    e = exp - 1023
+    if e >= -14 {
+        return (sign << 15) | ((e + 15) << 10) | ((mant >> 42) as int)
+    }
+    sig = mant | 4503599627370496
+    return (sign << 15) | ((sig >> (28 - e)) as int) // subnormal: units of 2^-24
+}
+
+// IEEE 754 single bits of `x`, which float_width_for found exact in single.
+fn single_bits(x: float) -> long {
+    bits = mem.bits_of_float(x)
+    sign = (bits >> 63) & 1
+    exp = ((bits >> 52) & 2047) as int
+    mant = bits & 4503599627370495
+    if exp == 2047 {
+        return (sign << 31) | 2139095040 | (mant >> 29)
+    }
+    if exp == 0 {
+        return sign << 31
+    }
+    e = exp - 1023
+    if e >= -126 {
+        return (sign << 31) | (((e + 127) as long) << 23) | (mant >> 29)
+    }
+    sig = mant | 4503599627370496
+    return (sign << 31) | (sig >> (-97 - e)) // subnormal: units of 2^-149
 }
 
 encode_item(w: ptr, cv: ptr) -> string {
@@ -706,26 +916,37 @@ encode_item(w: ptr, cv: ptr) -> string {
     cv_val = cv as *CborValue
     if cv_val.type == CBOR_INT {
         v = cv_val.int_val
-        if v >= 0 {
-            encode_header(w, 0, v)
+        if cv_val.big == 1 {
+            encode_head(w, 0, v, cv_val.ind)
+        } else if cv_val.big == 2 {
+            encode_head(w, 1, v, cv_val.ind)
+        } else if v >= 0 {
+            encode_head(w, 0, v, cv_val.ind)
         } else {
-            encode_header(w, 1, -1 - v)
+            encode_head(w, 1, -1 - v, cv_val.ind)
         }
         return ""
     }
-    if cv_val.type == CBOR_BYTES {
-        len = cv_val.str_len
-        encode_header(w, 2, len as long)
-        if len > 0 {
-            s = str_payload_string(cv_val)
-            write_string(w, s, len)
-            string.release(s)
+    if cv_val.type == CBOR_BYTES || cv_val.type == CBOR_TEXT {
+        major = 2
+        if cv_val.type == CBOR_TEXT {
+            major = 3
         }
-        return ""
-    }
-    if cv_val.type == CBOR_TEXT {
+        if cv_val.indefinite == 1 && cv_val.list_val != null {
+            write_byte(w, (major << 5) | 31)
+            nc = list.size(cv_val.list_val)
+            ci = 0
+            while ci < nc {
+                chunk, _ = list.get(cv_val.list_val, ci)
+                err = encode_item(w, chunk)
+                if err != "" { return err }
+                ci = ci + 1
+            }
+            write_byte(w, 255)
+            return ""
+        }
         len = cv_val.str_len
-        encode_header(w, 3, len as long)
+        encode_head(w, major, len as long, cv_val.ind)
         if len > 0 {
             s = str_payload_string(cv_val)
             write_string(w, s, len)
@@ -735,7 +956,11 @@ encode_item(w: ptr, cv: ptr) -> string {
     }
     if cv_val.type == CBOR_ARRAY {
         n = list.size(cv_val.list_val)
-        encode_header(w, 4, n as long)
+        if cv_val.indefinite == 1 {
+            write_byte(w, 159)
+        } else {
+            encode_head(w, 4, n as long, cv_val.ind)
+        }
         i = 0
         while i < n {
             item, _ = list.get(cv_val.list_val, i)
@@ -743,11 +968,18 @@ encode_item(w: ptr, cv: ptr) -> string {
             if err != "" { return err }
             i = i + 1
         }
+        if cv_val.indefinite == 1 {
+            write_byte(w, 255)
+        }
         return ""
     }
     if cv_val.type == CBOR_MAP {
         n = list.size(cv_val.map_keys)
-        encode_header(w, 5, n as long)
+        if cv_val.indefinite == 1 {
+            write_byte(w, 191)
+        } else {
+            encode_head(w, 5, n as long, cv_val.ind)
+        }
         i = 0
         while i < n {
             k, _ = list.get(cv_val.map_keys, i)
@@ -758,10 +990,13 @@ encode_item(w: ptr, cv: ptr) -> string {
             if err2 != "" { return err2 }
             i = i + 1
         }
+        if cv_val.indefinite == 1 {
+            write_byte(w, 255)
+        }
         return ""
     }
     if cv_val.type == CBOR_TAG {
-        encode_header(w, 6, cv_val.tag_val)
+        encode_head(w, 6, cv_val.tag_val, cv_val.ind)
         err = encode_item(w, cv_val.tag_child)
         return err
     }
@@ -776,9 +1011,33 @@ encode_item(w: ptr, cv: ptr) -> string {
         return ""
     }
     if cv_val.type == CBOR_FLOAT {
-        write_byte(w, 224 | 27) // double-precision float
-        bits = mem.bits_of_float(cv_val.float_val)
-        write_be64(w, bits)
+        if cv_val.ind != 0 {
+            // A parsed float: its own width and raw bits, NaN payload too.
+            if cv_val.ind == 2 {
+                write_byte(w, 249)
+                write_be16(w, cv_val.int_val as int)
+            } else if cv_val.ind == 3 {
+                write_byte(w, 250)
+                write_be32(w, cv_val.int_val as int)
+            } else {
+                write_byte(w, 251)
+                write_be64(w, cv_val.int_val)
+            }
+            return ""
+        }
+        // A constructed float: the narrowest exact width (preferred
+        // serialization); it used to be a double always.
+        width = float_width_for(cv_val.float_val)
+        if width == 2 {
+            write_byte(w, 249)
+            write_be16(w, half_bits(cv_val.float_val))
+        } else if width == 3 {
+            write_byte(w, 250)
+            write_be32(w, single_bits(cv_val.float_val) as int)
+        } else {
+            write_byte(w, 251)
+            write_be64(w, mem.bits_of_float(cv_val.float_val))
+        }
         return ""
     }
     return "cbor: unsupported CBOR value type for encoding"
@@ -840,19 +1099,55 @@ get_bool(value: ptr) -> int {
 get_int(value: ptr) -> int {
     if value == null { return 0 }
     cv = value as *CborValue
-    if cv.type == CBOR_INT {
+    if cv.type == CBOR_INT && cv.big == 0 {
         return cv.int_val as int
     }
     return 0
 }
 
+// The integer, or 0 when `value` is not an integer or is one outside the
+// signed long range (get_int64 says which; get_uint / get_nint read those).
 get_long(value: ptr) -> long {
     if value == null { return 0 }
     cv = value as *CborValue
-    if cv.type == CBOR_INT {
+    if cv.type == CBOR_INT && cv.big == 0 {
         return cv.int_val
     }
     return 0
+}
+
+// The integer as a signed long, or an error when `value` is not an integer
+// or is one outside -2^63..2^63-1 (#2510).
+get_int64(value: ptr) -> long! {
+    if value == null { return 0, "not an integer" }
+    cv = value as *CborValue
+    if cv.type != CBOR_INT { return 0, "not an integer" }
+    if cv.big != 0 { return 0, "cbor: integer outside the signed 64-bit range" }
+    return cv.int_val, ""
+}
+
+// A non-negative integer (major type 0), 0..2^64-1, as the bit pattern of a
+// long: 2^63 and up read negative as a long, and std.bits' udiv64, urem64
+// and ucmp64 treat them as the unsigned values they are. An error for a
+// negative integer or anything else.
+get_uint(value: ptr) -> long! {
+    if value == null { return 0, "not an integer" }
+    cv = value as *CborValue
+    if cv.type != CBOR_INT { return 0, "not an integer" }
+    if cv.big == 1 || (cv.big == 0 && cv.int_val >= 0) { return cv.int_val, "" }
+    return 0, "not a non-negative integer"
+}
+
+// A negative integer (major type 1) as its CBOR argument n, the value being
+// -1 - n: n is 0..2^64-1, the bit pattern of a long as for get_uint, so the
+// whole range down to -2^64 is reachable. An error for anything else.
+get_nint(value: ptr) -> long! {
+    if value == null { return 0, "not an integer" }
+    cv = value as *CborValue
+    if cv.type != CBOR_INT { return 0, "not an integer" }
+    if cv.big == 2 { return cv.int_val, "" }
+    if cv.big == 0 && cv.int_val < 0 { return -1 - cv.int_val, "" }
+    return 0, "not a negative integer"
 }
 
 get_float(value: ptr) -> float {
@@ -862,9 +1157,31 @@ get_float(value: ptr) -> float {
         return cv.float_val
     }
     if cv.type == CBOR_INT {
+        if cv.big == 1 { return u64_to_float(cv.int_val) }
+        if cv.big == 2 { return 0.0 - u64_to_float(cv.int_val) - 1.0 }
         return cv.int_val as float
     }
     return 0.0
+}
+
+// The unsigned 64-bit value whose bits are `u`, as the nearest double.
+// Halving with the low bit kept as a sticky bit, then doubling, rounds once.
+fn u64_to_float(u: long) -> float {
+    if u >= 0 { return u as float }
+    half = ((u >> 1) & (9223372036854775807 as long)) | (u & 1)
+    return (half as float) * 2.0
+}
+
+// The unsigned 64-bit value whose bits are `u`, in decimal.
+fn u64_decimal(u: long) -> string {
+    if u >= 0 { return string.from_long(u) }
+    // u = 2h + b with h = u / 2 (a logical shift) and b its low bit; then
+    // h = 5q + r2 gives u = 10q + (2 r2 + b): quotient and last digit
+    // without leaving the signed range.
+    h = (u >> 1) & (9223372036854775807 as long)
+    q = h / 5
+    r = 2 * (h - q * 5) + (u & 1)
+    return string.concat(string.from_long(q), string.from_long(r))
 }
 
 get_string(value: ptr) -> string! {
@@ -885,6 +1202,8 @@ get_bytes(value: ptr) -> string! {
     return str_payload_string(cv), ""
 }
 
+// The tag number; one of 2^63 or more as the bit pattern of a long, as for
+// get_uint.
 get_tag_val(value: ptr) -> long {
     if value == null { return 0 }
     cv = value as *CborValue
@@ -927,12 +1246,45 @@ fn equal_val(a: ptr, b: ptr) -> bool {
     acv = a as *CborValue
     bcv = b as *CborValue
     if acv.type != bcv.type { return false }
-    if acv.type == CBOR_INT { return acv.int_val == bcv.int_val }
+    if acv.type == CBOR_INT { return acv.int_val == bcv.int_val && acv.big == bcv.big }
     if acv.type == CBOR_FLOAT { return acv.float_val == bcv.float_val }
     if acv.type == CBOR_TEXT || acv.type == CBOR_BYTES { return str_payload_equal(acv, bcv) }
     if acv.type == CBOR_SIMPLE { return acv.int_val == bcv.int_val }
     if acv.type == CBOR_TAG {
         return acv.tag_val == bcv.tag_val && equal_val(acv.tag_child, bcv.tag_child)
+    }
+    // Arrays and maps compare by content (#2470: map_get never matched an
+    // array or map key). Arrays are ordered; a map's pairs are not, so each
+    // pair of `a` must have an equal key in `b` holding an equal value.
+    if acv.type == CBOR_ARRAY {
+        n = list.size(acv.list_val)
+        if n != list.size(bcv.list_val) { return false }
+        i = 0
+        while i < n {
+            if !equal_val(list.list_get_raw(acv.list_val, i), list.list_get_raw(bcv.list_val, i)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if acv.type == CBOR_MAP {
+        n = list.size(acv.map_keys)
+        if n != list.size(bcv.map_keys) { return false }
+        i = 0
+        while i < n {
+            ak = list.list_get_raw(acv.map_keys, i)
+            matched = false
+            j = 0
+            while j < n && !matched {
+                if equal_val(ak, list.list_get_raw(bcv.map_keys, j)) {
+                    if !equal_val(list.list_get_raw(acv.map_values, i), list.list_get_raw(bcv.map_values, j)) { return false }
+                    matched = true
+                }
+                j = j + 1
+            }
+            if !matched { return false }
+            i = i + 1
+        }
+        return true
     }
     return false
 }
@@ -954,12 +1306,29 @@ map_get(obj_ptr: ptr, key_ptr: ptr) -> ptr! {
     return null, ""
 }
 
+// Insert or update the text key `key` on a map. The map takes ownership of
+// `value`; a value it replaces is freed.
 object_set(obj_ptr: ptr, key: string, value: ptr) -> string {
     if obj_ptr == null { return "null map" }
     cv = obj_ptr as *CborValue
     if cv.type != CBOR_MAP {
         free_value(value as *CborValue)
         return "not a map"
+    }
+    // An existing text key keeps its place and takes the new value, as
+    // json.set and msgpack.map_set do; appending would leave object_get
+    // returning the first, stale, entry.
+    n = list.size(cv.map_keys)
+    i = 0
+    while i < n {
+        k = list.list_get_raw(cv.map_keys, i) as *CborValue
+        if k.type == CBOR_TEXT && str_payload_equals_key(k, key) {
+            old = list.list_get_raw(cv.map_values, i)
+            if old != value { free_value(old) }
+            list.list_set(cv.map_values, i, value)
+            return ""
+        }
+        i = i + 1
     }
     key_cv = str(key)
     _ = list.add(cv.map_keys, key_cv)
@@ -1076,6 +1445,32 @@ from_int(value: long) -> ptr {
     return cv as ptr
 }
 
+// The non-negative integer whose unsigned 64 bits are `bits` (0..2^64-1),
+// the inverse of get_uint.
+from_uint(bits: long) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_INT
+    cv.int_val = bits
+    if bits < 0 {
+        cv.big = 1
+    }
+    return cv as ptr
+}
+
+// The negative integer -1 - n for the unsigned 64-bit argument n in `bits`
+// (-2^64..-1), the inverse of get_nint.
+from_nint(bits: long) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_INT
+    if bits < 0 {
+        cv.big = 2
+        cv.int_val = bits
+    } else {
+        cv.int_val = -1 - bits
+    }
+    return cv as ptr
+}
+
 boolean(value: int) -> ptr {
     cv = heap.new(CborValue)
     cv.type = CBOR_SIMPLE
@@ -1114,7 +1509,8 @@ tag(tag_num: long, child: ptr) -> ptr {
 free_value(cv: ptr) {
     if cv == null { return }
     cv_val = cv as *CborValue
-    if cv_val.type == CBOR_ARRAY {
+    if cv_val.type == CBOR_ARRAY || ((cv_val.type == CBOR_TEXT || cv_val.type == CBOR_BYTES) && cv_val.list_val != null) {
+        // Array items, or an indefinite-length string's chunks.
         n = list.size(cv_val.list_val)
         i = 0
         while i < n {
@@ -1150,32 +1546,61 @@ free(value: ptr) {
 }
 
 // ---- DIAGNOSTIC NOTATION (EDN) ----
+//
+// RFC 8949 §8, written so the text gives the value back exactly (#2470):
+// floats in the shortest decimal that reads back as the same double, text
+// with JSON escapes, and the encoding indicators of §8.1 wherever a parsed
+// item did not use preferred serialization: `_` for an indefinite length
+// (`[_ 1, 2]`, `(_ h'01', h'02')`, `''_` for one with no chunks) and `_n`
+// for an argument in 2^n bytes that would fit in fewer (`0_0` for 1800,
+// `1.5_3` for a double-width 1.5, `[_0 1]`, `24_1(...)`). Appendix A of the
+// RFC leaves the `_n` indicators out, as §8.1 says.
 
+// `_n` for a parsed argument size that is not the preferred one, else "".
+fn ind_suffix(ind: int, preferred: int) -> string {
+    if ind == 0 || ind == preferred {
+        return ""
+    }
+    if ind == 1 { return "_0" }
+    if ind == 2 { return "_1" }
+    if ind == 3 { return "_2" }
+    return "_3"
+}
+
+// A text string in double quotes with JSON's escapes (§8): `"` and `\`, and
+// the C0 controls, which were written raw.
 escape_string(s: string) -> string {
     len = string.length(s)
-    buf = bytes.new(len * 2 + 2)
-    bytes.set(buf, 0, 34)
-    out = 1
+    sb = strbuilder.new(len + 2)
+    strbuilder.append_byte(sb, 34)
+    hex = "0123456789abcdef"
     i = 0
     while i < len {
         c = string.char_at_n(s, len, i) & 255
-        if c == 34 {
-            bytes.set(buf, out, 92)
-            bytes.set(buf, out + 1, 34)
-            out = out + 2
-        } else if c == 92 {
-            bytes.set(buf, out, 92)
-            bytes.set(buf, out + 1, 92)
-            out = out + 2
+        if c == 34 || c == 92 {
+            strbuilder.append_byte(sb, 92)
+            strbuilder.append_byte(sb, c)
+        } else if c == 10 {
+            strbuilder.append(sb, "\\n")
+        } else if c == 13 {
+            strbuilder.append(sb, "\\r")
+        } else if c == 9 {
+            strbuilder.append(sb, "\\t")
+        } else if c == 8 {
+            strbuilder.append(sb, "\\b")
+        } else if c == 12 {
+            strbuilder.append(sb, "\\f")
+        } else if c < 32 {
+            strbuilder.append(sb, "\\u00")
+            strbuilder.append_byte(sb, string.char_at_n(hex, 16, c >> 4))
+            strbuilder.append_byte(sb, string.char_at_n(hex, 16, c & 15))
         } else {
-            bytes.set(buf, out, c)
-            out = out + 1
+            strbuilder.append_byte(sb, c)
         }
         i = i + 1
     }
-    bytes.set(buf, out, 34)
-    out = out + 1
-    return bytes.finish(buf, out)
+    strbuilder.append_byte(sb, 34)
+    return strbuilder.finish(sb)
 }
 
 format_bytes_diag(s: string) -> string {
@@ -1184,37 +1609,263 @@ format_bytes_diag(s: string) -> string {
     return string.concat("h'", string.concat(hex_str, "'"))
 }
 
+// Digit string `digits` (no sign) rounded up by one unit in its last place:
+// "129" -> "130", "999" -> "1000".
+fn digits_plus_one(digits: string) -> string {
+    n = string.length(digits)
+    b = bytes.new(n)
+    carry = 1
+    i = n - 1
+    while i >= 0 {
+        d = string.char_at_n(digits, n, i) - 48 + carry
+        carry = 0
+        if d == 10 {
+            d = 0
+            carry = 1
+        }
+        bytes.set(b, i, 48 + d)
+        i = i - 1
+    }
+    if carry == 1 {
+        return string.concat("1", bytes.finish(b, n))
+    }
+    return bytes.finish(b, n)
+}
+
+// Whether "0.<digits>e<point>" reads back as exactly the double whose bits
+// are `bits`.
+fn reads_back(digits: string, point: int, bits: long) -> bool {
+    text = string.concat("0.", string.concat(digits, string.concat("e", string.from_int(point))))
+    v, err = string.to_double(text)
+    return err == "" && mem.bits_of_float(v) == bits
+}
+
+// The finite, nonzero magnitude `x` in the shortest decimal that reads back
+// as `x` (the digits of JavaScript's Number::toString and Python's repr),
+// laid out the same way, positional for 1e-7 <= x < 1e21, with ".0" added
+// so a whole number still reads as a float. string.from_double's 17
+// significant digits always read back; each shorter length is tried with the
+// two decimals that bracket the value, nearer first.
+fn shortest_decimal(x: float) -> string {
+    s17 = string.from_double(x) // "%.17g": trailing zeros dropped
+    n = string.length(s17)
+    // Split into significant digits and a decimal point position `point`,
+    // value = 0.<digits> * 10^point.
+    digs = strbuilder.new(20)
+    point = 0
+    seen_dot = 0
+    started = 0
+    exp10 = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(s17, n, i)
+        if c == 46 {
+            seen_dot = 1
+        } else if c == 101 || c == 69 {
+            ev, _ = string.to_int(string.substring(s17, i + 1, n))
+            exp10 = ev
+            i = n
+        } else if c >= 48 && c <= 57 {
+            if c != 48 || started == 1 {
+                started = 1
+                strbuilder.append_byte(digs, c)
+                if seen_dot == 0 { point = point + 1 }
+            } else if seen_dot == 1 {
+                point = point - 1 // a leading zero after the point
+            }
+        }
+        i = i + 1
+    }
+    all = strbuilder.finish(digs)
+    point = point + exp10
+    // Drop trailing zeros.
+    k = string.length(all)
+    while k > 1 && string.char_at_n(all, string.length(all), k - 1) == 48 {
+        k = k - 1
+    }
+    all = string.substring(all, 0, k)
+    total = k
+    bits = mem.bits_of_float(x)
+
+    best = all
+    best_point = point
+    len = 1
+    while len < total {
+        lo = string.substring(all, 0, len)
+        next_digit = string.char_at_n(all, total, len)
+        // The rest is at or above a half unit when its first digit is 5 or
+        // more; on an exact half (Python's and the RFC's choice) round up.
+        up_first = next_digit >= 53
+        hi = digits_plus_one(lo)
+        hi_point = point
+        if string.length(hi) > len {
+            hi_point = point + 1
+        }
+        found = 0
+        if up_first {
+            if reads_back(hi, hi_point, bits) {
+                best = hi
+                best_point = hi_point
+                found = 1
+            } else if reads_back(lo, point, bits) {
+                best = lo
+                best_point = point
+                found = 1
+            }
+        } else {
+            if reads_back(lo, point, bits) {
+                best = lo
+                best_point = point
+                found = 1
+            } else if reads_back(hi, hi_point, bits) {
+                best = hi
+                best_point = hi_point
+                found = 1
+            }
+        }
+        if found == 1 {
+            len = total
+        }
+        len = len + 1
+    }
+    // A carry ("999" -> "1000") leaves trailing zeros to drop.
+    bl = string.length(best)
+    while bl > 1 && string.char_at_n(best, string.length(best), bl - 1) == 48 {
+        bl = bl - 1
+    }
+    best = string.substring(best, 0, bl)
+    return layout_decimal(best, best_point)
+}
+
+// Lay out 0.<digits> * 10^point as JavaScript does, with ".0" for a whole
+// number and before the exponent of a one-digit mantissa ("1.0e+300").
+fn layout_decimal(digits: string, point: int) -> string {
+    k = string.length(digits)
+    sb = strbuilder.new(k + 24)
+    if point >= k && point <= 21 {
+        strbuilder.append(sb, digits)
+        z = point - k
+        while z > 0 {
+            strbuilder.append_byte(sb, 48)
+            z = z - 1
+        }
+        strbuilder.append(sb, ".0")
+    } else if point > 0 && point <= 21 {
+        strbuilder.append(sb, string.substring(digits, 0, point))
+        strbuilder.append_byte(sb, 46)
+        strbuilder.append(sb, string.substring(digits, point, k))
+    } else if point > -6 && point <= 0 {
+        strbuilder.append(sb, "0.")
+        z = 0 - point
+        while z > 0 {
+            strbuilder.append_byte(sb, 48)
+            z = z - 1
+        }
+        strbuilder.append(sb, digits)
+    } else {
+        strbuilder.append(sb, string.substring(digits, 0, 1))
+        strbuilder.append_byte(sb, 46)
+        if k > 1 {
+            strbuilder.append(sb, string.substring(digits, 1, k))
+        } else {
+            strbuilder.append_byte(sb, 48)
+        }
+        e = point - 1
+        strbuilder.append_byte(sb, 101)
+        if e >= 0 {
+            strbuilder.append_byte(sb, 43)
+        } else {
+            strbuilder.append_byte(sb, 45)
+            e = 0 - e
+        }
+        strbuilder.append(sb, string.from_int(e))
+    }
+    return strbuilder.finish(sb)
+}
+
 format_float_diag(val: float) -> string {
     if is_nan(val) { return "NaN" }
     if is_pos_inf(val) { return "Infinity" }
     if is_neg_inf(val) { return "-Infinity" }
-    s = string.from_float(val)
-    if string.contains(s, ".") == 0 && string.contains(s, "e") == 0 && string.contains(s, "E") == 0 {
-        return string.concat(s, ".0")
+    bits = mem.bits_of_float(val)
+    if (bits << 1) == 0 {
+        // Zero keeps its sign: -0.0 is a distinct float.
+        if bits < 0 { return "-0.0" }
+        return "0.0"
     }
-    return s
+    if bits < 0 {
+        return string.concat("-", shortest_decimal(0.0 - val))
+    }
+    return shortest_decimal(val)
+}
+
+// A definite or indefinite-length string: "..."/h'..' with its indicator,
+// or (_ chunk, chunk) for an indefinite one.
+fn diagnose_string(cv_val: *CborValue) -> string {
+    if cv_val.indefinite == 1 && cv_val.list_val != null {
+        nc = list.size(cv_val.list_val)
+        if nc == 0 {
+            if cv_val.type == CBOR_TEXT { return "\"\"_" }
+            return "''_"
+        }
+        b = strbuilder.new(16 * nc)
+        strbuilder.append(b, "(_ ")
+        ci = 0
+        while ci < nc {
+            chunk, _ = list.get(cv_val.list_val, ci)
+            if ci > 0 { strbuilder.append(b, ", ") }
+            strbuilder.append(b, to_diagnose_string(chunk))
+            ci = ci + 1
+        }
+        strbuilder.append(b, ")")
+        return strbuilder.finish(b)
+    }
+    s = str_payload_string(cv_val)
+    out = ""
+    if cv_val.type == CBOR_TEXT {
+        out = escape_string(s)
+    } else {
+        out = format_bytes_diag(s)
+    }
+    string.release(s)
+    return string.concat(out, ind_suffix(cv_val.ind, preferred_ind(cv_val.str_len as long)))
+}
+
+// "[" or "{" with the indicator a parsed array or map carries.
+fn open_bracket(cv_val: *CborValue, bracket: string, count: int) -> string {
+    if cv_val.indefinite == 1 {
+        return string.concat(bracket, "_ ")
+    }
+    suffix = ind_suffix(cv_val.ind, preferred_ind(count as long))
+    if suffix == "" {
+        return bracket
+    }
+    return string.concat(bracket, string.concat(suffix, " "))
 }
 
 to_diagnose_string(cv: ptr) -> string {
     if cv == null { return "null" }
     cv_val = cv as *CborValue
     if cv_val.type == CBOR_INT {
-        return string.from_long(cv_val.int_val)
+        if cv_val.big == 1 {
+            return string.concat(u64_decimal(cv_val.int_val), ind_suffix(cv_val.ind, 4))
+        }
+        if cv_val.big == 2 {
+            // -1 - n = -(n + 1), and n + 1 may be 2^64: add the 1 in decimal.
+            magnitude = digits_plus_one(u64_decimal(cv_val.int_val))
+            return string.concat(string.concat("-", magnitude), ind_suffix(cv_val.ind, 4))
+        }
+        arg = cv_val.int_val
+        if arg < 0 {
+            arg = -1 - arg
+        }
+        return string.concat(string.from_long(cv_val.int_val), ind_suffix(cv_val.ind, preferred_ind(arg)))
     }
     if cv_val.type == CBOR_FLOAT {
-        return format_float_diag(cv_val.float_val)
+        return string.concat(format_float_diag(cv_val.float_val), ind_suffix(cv_val.ind, float_preferred(cv_val)))
     }
-    if cv_val.type == CBOR_TEXT {
-        s = str_payload_string(cv_val)
-        out = escape_string(s)
-        string.release(s)
-        return out
-    }
-    if cv_val.type == CBOR_BYTES {
-        s = str_payload_string(cv_val)
-        out = format_bytes_diag(s)
-        string.release(s)
-        return out
+    if cv_val.type == CBOR_TEXT || cv_val.type == CBOR_BYTES {
+        return diagnose_string(cv_val)
     }
     if cv_val.type == CBOR_SIMPLE {
         if cv_val.int_val == 20 { return "false" }
@@ -1225,16 +1876,16 @@ to_diagnose_string(cv: ptr) -> string {
     }
     if cv_val.type == CBOR_TAG {
         child_str = to_diagnose_string(cv_val.tag_child)
-        return string.concat(string.from_long(cv_val.tag_val), string.concat("(", string.concat(child_str, ")")))
+        head = string.concat(u64_decimal(cv_val.tag_val), ind_suffix(cv_val.ind, preferred_ind(cv_val.tag_val)))
+        return string.concat(head, string.concat("(", string.concat(child_str, ")")))
     }
     // Arrays and maps build into one builder: concatenating each item onto
     // the text so far re-copied that text every time, quadratic in the
     // length of the output.
     if cv_val.type == CBOR_ARRAY {
         n = list.size(cv_val.list_val)
-        if n == 0 { return "[]" }
-        b = strbuilder.new(16 * n)
-        strbuilder.append(b, "[")
+        b = strbuilder.new(16 * n + 4)
+        strbuilder.append(b, open_bracket(cv_val, "[", n))
         i = 0
         while i < n {
             item, _ = list.get(cv_val.list_val, i)
@@ -1248,9 +1899,8 @@ to_diagnose_string(cv: ptr) -> string {
     }
     if cv_val.type == CBOR_MAP {
         n = list.size(cv_val.map_keys)
-        if n == 0 { return "{}" }
-        b = strbuilder.new(32 * n)
-        strbuilder.append(b, "{")
+        b = strbuilder.new(32 * n + 4)
+        strbuilder.append(b, open_bracket(cv_val, "{", n))
         i = 0
         while i < n {
             k_ptr, _ = list.get(cv_val.map_keys, i)

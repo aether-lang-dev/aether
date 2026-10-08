@@ -185,7 +185,10 @@ decode(s: string) -> {
 // on it. This decoupling lets callers iterate manually too.
 
 // Parse a query string. Returns (list, ""), where list is a
-// std.collections.string_list of decoded "key=value" entries.
+// std.collections.string_list of decoded "key=value" entries. Within the key
+// part, a `%` or `=` the key decoded to stays encoded (`%25`, `%3D`), so the
+// first `=` always ends the key: an `a%3Db=1` entry for key "a=b" is
+// "a%3Db=1", and cannot be read as key "a" with value "b=1".
 // Returns ("", error) on a malformed percent-encoding inside any
 // key or value.
 //
@@ -239,7 +242,7 @@ parse_query(s: string) -> {
             if v_err != "" {
                 return list, v_err
             }
-            entry = string.concat(key, "=")
+            entry = string.concat(_query_key_escape(key), "=")
             entry = string.concat(entry, val)
             string_list_add(list, entry)
         }
@@ -248,30 +251,28 @@ parse_query(s: string) -> {
     return list, ""
 }
 
+// The key part of a stored entry: the decoded key with its own `%` and `=`
+// re-encoded, so the entry's first `=` is always the separator. Keys
+// without either are stored as they are.
+_query_key_escape(key: string) -> string {
+    if string_contains(key, "%") == 0 && string_contains(key, "=") == 0 {
+        return key
+    }
+    return string_replace_all(string_replace_all(key, "%", "%25"), "=", "%3D")
+}
+
 // Get the first value for `name` from a parsed query list. Returns
-// "" if the key is absent.
+// "" if the key is absent. The key matches exactly: a key that decoded to
+// contain `=` (`a%3Db`) no longer passes for a prefix of another (`a`).
 query_get(list: ptr, name: string) -> string {
     n = string_list_size(list)
-    name_eq = string.concat(name, "=")
+    name_eq = string.concat(_query_key_escape(name), "=")
     name_eq_len = string_length(name_eq)
     i = 0
     while i < n {
         entry = string_list_get(list, i)
-        entry_len = string_length(entry)
-        if entry_len >= name_eq_len {
-            // Does entry start with name_eq?
-            ok = 1
-            j = 0
-            while j < name_eq_len {
-                if string.char_at_n(entry, entry_len, j) != string.char_at_n(name_eq, name_eq_len, j) {
-                    ok = 0
-                    break
-                }
-                j = j + 1
-            }
-            if ok == 1 {
-                return string.substring_n(entry, entry_len, name_eq_len, entry_len)
-            }
+        if string_starts_with(entry, name_eq) == 1 {
+            return string.substring_n(entry, string_length(entry), name_eq_len, string_length(entry))
         }
         i = i + 1
     }
@@ -283,25 +284,14 @@ query_get(list: ptr, name: string) -> string {
 query_get_all(list: ptr, name: string) -> ptr {
     out = string_list_new()
     n = string_list_size(list)
-    name_eq = string.concat(name, "=")
+    name_eq = string.concat(_query_key_escape(name), "=")
     name_eq_len = string_length(name_eq)
     i = 0
     while i < n {
         entry = string_list_get(list, i)
-        entry_len = string_length(entry)
-        if entry_len >= name_eq_len {
-            ok = 1
-            j = 0
-            while j < name_eq_len {
-                if string.char_at_n(entry, entry_len, j) != string.char_at_n(name_eq, name_eq_len, j) {
-                    ok = 0
-                    break
-                }
-                j = j + 1
-            }
-            if ok == 1 {
-                string_list_add(out, string.substring_n(entry, entry_len, name_eq_len, entry_len))
-            }
+        if string_starts_with(entry, name_eq) == 1 {
+            entry_len = string_length(entry)
+            string_list_add(out, string.substring_n(entry, entry_len, name_eq_len, entry_len))
         }
         i = i + 1
     }

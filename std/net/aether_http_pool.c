@@ -47,7 +47,10 @@ int http_pool_has_spare_worker(void) {
         && atomic_load(&http_pool_pending_conns) == 0;
 }
 
-#if AETHER_HAS_THREADS
+/* The pool hands connections to the server, which a build without
+ * networking stubs out: nothing then defines the connection functions it
+ * calls, and a shared library does not link (#2517). */
+#if AETHER_HAS_THREADS && AETHER_HAS_NETWORKING
 
 #define HTTP_POOL_QUEUE_CAP  256
 #define HTTP_POOL_MIN_WORKERS 8
@@ -272,5 +275,5 @@ void http_pool_destroy(HttpConnectionPool* pool) {
     free(pool);
 }
 
-#endif // AETHER_HAS_THREADS
+#endif // AETHER_HAS_THREADS && AETHER_HAS_NETWORKING
 

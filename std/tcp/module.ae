@@ -27,7 +27,9 @@ extern tcp_send_raw(sock: ptr, data: string) -> int
 // heap string passed to a `ptr` parameter would send its header. std.net
 // no longer declares this symbol, so the two prototypes cannot disagree.
 extern tcp_send_n_raw(sock: ptr, data: ptr, length: int) -> int
-extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string
+// A fresh buffer the caller owns, as std.net declares it; a plain `-> string`
+// here took it for borrowed and leaked one buffer per read.
+extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
 extern tcp_send_bytes_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_receive_into_raw(sock: ptr, buf: ptr, cap: int) -> int
@@ -43,10 +45,6 @@ extern tcp_fd_raw(sock: ptr) -> int
 extern tcp_server_fd_raw(server: ptr) -> int
 extern tcp_poll_raw(sock: ptr, timeout_ms: int) -> int
 extern tcp_poll2_raw(a: ptr, b: ptr, timeout_ms: int) -> int
-
-// string_concat used to duplicate the borrowed receive buffer so the
-// caller's copy outlives the underlying malloc.
-extern string_concat(a: string, b: string) -> string
 
 // Connect to host:port. Returns (socket, "") on success, (null, error)
 // on failure. Caller must tcp.close the returned socket.
@@ -96,16 +94,15 @@ write_n(sock: ptr, data: byte[]) -> {
 }
 
 // Read up to max_bytes from a socket. Returns (data, "") on success,
-// ("", error) on transport failure or connection close. This text
-// wrapper copies with string_concat and is strlen-shaped; use read_n
-// when the payload may contain embedded NUL bytes.
+// ("", error) on transport failure or connection close. The caller owns
+// the data. This text wrapper is strlen-shaped; use read_n when the
+// payload may contain embedded NUL bytes.
 read(sock: ptr, max_bytes: int) -> {
     data = tcp_receive_raw(sock, max_bytes)
     if data == null {
         return "", "connection closed or receive failed"
     }
-    data_copy = string_concat(data, "")
-    return data_copy, ""
+    return data, ""
 }
 
 // Binary-safe read. Returns (bytes, length, "") on success, with the

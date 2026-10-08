@@ -24,11 +24,13 @@ esac
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP" || true' EXIT
 "$ROOT/build/aetherc" "$SCRIPT_DIR/prog.ae" "$TMP/out.c" >/dev/null 2>&1 || {
     echo "  [FAIL] struct_literal_ptr_field: aetherc could not emit C"; exit 1; }
-if grep -qE '\.code = c\.auth_code' "$TMP/out.c"; then
+# The field's value may be wrapped (a taken string is copied into the
+# literal, #2461), so match the access anywhere in the initializer.
+if grep -qE '\.code = [^;]*[^a-z_>]c\.auth_code' "$TMP/out.c"; then
     echo "  [FAIL] struct_literal_ptr_field: emitted 'c.auth_code' in a struct literal"
     exit 1
 fi
-grep -qE '\.code = c->auth_code' "$TMP/out.c" || {
+grep -qE '\.code = [^;]*c->auth_code' "$TMP/out.c" || {
     echo "  [FAIL] struct_literal_ptr_field: expected 'c->auth_code' in the literal"
     grep -n "auth_code" "$TMP/out.c" | sed 's/^/    /' | head -6
     exit 1; }

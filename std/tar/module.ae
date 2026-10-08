@@ -55,6 +55,10 @@ struct DirMetadata {
     mtime: long
 }
 
+// Shared with std.zip: the definition is identical, field for field, to
+// std.zip's ExtractOptions. Struct names are one namespace across modules
+// and identical definitions share one type, so a program can import both
+// modules. Keep the two definitions in lockstep.
 struct ExtractOptions {
     max_entries: int
     max_entry_bytes: long
@@ -215,16 +219,23 @@ is_unsafe_path(name: string) -> {
     return false
 }
 
-// Resolve a symlink target only as component depth. Returning true means the
-// target is absolute, platform-qualified, or climbs above the extraction root.
+// Resolve a symlink target segment by segment from the directory the link
+// is created in. `entry` is the link's path CLEANED (fs.clean: no ".", ".."
+// or empty segments left), so each '/' in it is one directory level: the
+// raw name would count "./l", "a/../l" and "a//l" one level too deep each.
+// Returning true means the target is absolute, platform-qualified, or
+// climbs above the extraction root.
 symlink_target_escapes(entry: string, target: string) -> {
     target_len = string_length(target)
     if target_len == 0 { return true }
     first = string_char_at_n(target, target_len, 0)
     if first == 47 || first == 92 { return true }
 
-    var depth = 0
+    // A name that cleans to "." ("./", "a/..") is the root itself, not a
+    // link name.
     entry_len = string_length(entry)
+    if entry_len == 1 && string_char_at_n(entry, entry_len, 0) == 46 { return true }
+    var depth = 0
     var e = 0
     while e < entry_len {
         if string_char_at_n(entry, entry_len, e) == 47 {
@@ -233,6 +244,12 @@ symlink_target_escapes(entry: string, target: string) -> {
         e = e + 1
     }
 
+    // ".." is accepted only before the target's first name segment. After a
+    // name it would climb out of a component that may itself be a symlink
+    // (one from this same archive, extracted before or after this link),
+    // and the OS climbs from where that link points, not lexically: with
+    // r -> ".", the target "r/.." is the extraction root's parent.
+    var seen_name = false
     var segment_start = 0
     var i = 0
     while i <= target_len {
@@ -244,9 +261,11 @@ symlink_target_escapes(entry: string, target: string) -> {
         if c == 47 {
             segment_len = i - segment_start
             if segment_len == 2 && string_char_at_n(target, target_len, segment_start) == 46 && string_char_at_n(target, target_len, segment_start + 1) == 46 {
+                if seen_name { return true }
                 if depth == 0 { return true }
                 depth = depth - 1
             } else if segment_len > 0 && !(segment_len == 1 && string_char_at_n(target, target_len, segment_start) == 46) {
+                seen_name = true
                 depth = depth + 1
             }
             segment_start = i + 1
@@ -254,6 +273,33 @@ symlink_target_escapes(entry: string, target: string) -> {
         i = i + 1
     }
     return false
+}
+
+// Index of the first '/' in `rel` that ends a component already present
+// under `dest_prefix` as a symbolic link (on Windows also a junction:
+// whatever fs.fs_is_symlink reports), or -1 when no parent is one. `rel` is
+// the entry's name after fs.clean, and the path that is then written: with
+// no ".", ".." or empty segments left, its '/'-terminated prefixes are
+// exactly the directories the OS walks to reach the entry. (On the raw name
+// a prefix such as "missing/../link" would be checked before mkdir_p
+// creates "missing", and then walked through "link".) Writing through such
+// a component would land outside the destination. std.zip has the same
+// helper; keep the two in step.
+fn symlinked_parent(dest_prefix: string, rel: string) -> int {
+    n = string_length(rel)
+    var i: int = 1
+    while i < n {
+        if string.char_at(rel, i) == 47 { // '/'
+            part = string.substring(rel, 0, i)
+            full = string.concat(dest_prefix, part)
+            is_link = fs.fs_is_symlink(full)
+            string.free(full)
+            string.free(part)
+            if is_link == 1 { return i }
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 reader_open(path: string) -> {
@@ -1015,9 +1061,9 @@ writer_abort(writer_ptr: ptr) {
 extract(archive_path: string, destination: string, options: ExtractOptions) -> string {
     // Declare all heap string variables at function scope so they are cleanly freed on early returns
     var parent_dir: string = ""
-    var full_parent_path: string = ""
     var parent_part: string = ""
     var name: string = ""
+    var rel: string = ""
     var linkname: string = ""
     var mkdir_err: string = ""
     var write_open_err: string = ""
@@ -1085,6 +1131,10 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
         if is_unsafe_path(name) {
             return "security violation: unsafe archive path '${name}'"
         }
+        // Every check and write below uses the cleaned name, so the path
+        // checked is the path written. Safe to clean: the name never climbs
+        // above its root (checked just above).
+        rel = fs.clean(name)
 
         // 2. Prevent symlinks if not explicitly allowed
         if kind == KIND_SYMLINK && options.allow_symlinks == 0 {
@@ -1093,29 +1143,19 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
 
         // 3. Prevent symlink escapes if symlinks are explicitly allowed
         if kind == KIND_SYMLINK && options.allow_symlinks == 1 {
-            if symlink_target_escapes(name, linkname) {
+            if symlink_target_escapes(rel, linkname) {
                 return "security violation: symlink target '${linkname}' escapes extraction root for '${name}'"
             }
         }
 
-        // 4. Validate parents of regular files / directories are not symlinks on filesystem
-        var parent_idx = 0
-        n_len = string_length(name)
-        while parent_idx < n_len {
-            if string_char_at_n(name, n_len, parent_idx) == 47 { // '/'
-                parent_part = string_substring(name, 0, parent_idx)
-                if string_length(parent_part) > 0 {
-                    full_parent_path = string_concat_wrapped(destination_prefix, parent_part)
-                    is_sym = fs.fs_is_symlink(full_parent_path)
-                    string_release(full_parent_path)
-                    if is_sym == 1 {
-                        string_release(parent_part)
-                        return "security violation: parent component '${parent_part}' resolves through a symlink"
-                    }
-                }
-                string_release(parent_part)
-            }
-            parent_idx = parent_idx + 1
+        // 4. Validate no parent of the entry is a symlink on the filesystem
+        n_len = string_length(rel)
+        sym_idx = symlinked_parent(destination_prefix, rel)
+        if sym_idx >= 0 {
+            parent_part = string_substring(rel, 0, sym_idx)
+            sym_msg = "security violation: parent component '${parent_part}' resolves through a symlink"
+            string_release(parent_part)
+            return sym_msg
         }
 
         // 5. Check bounds limits
@@ -1139,7 +1179,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
         // -------------------------------------------------------------
 
         target = heap.new(DirMetadata)
-        target.path = string_concat_wrapped(destination_prefix, name)
+        target.path = string_concat_wrapped(destination_prefix, rel)
         target.mode = mode
         target.mtime = mtime
 
@@ -1147,13 +1187,13 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
         var last_slash = 0 - 1
         var slash_idx = 0
         while slash_idx < n_len {
-            if string_char_at_n(name, n_len, slash_idx) == 47 {
+            if string_char_at_n(rel, n_len, slash_idx) == 47 {
                 last_slash = slash_idx
             }
             slash_idx = slash_idx + 1
         }
         if last_slash >= 0 {
-            parent_part = string_substring(name, 0, last_slash)
+            parent_part = string_substring(rel, 0, last_slash)
             parent_dir = string_concat_wrapped(destination_prefix, parent_part)
             string_release(parent_part)
         } else {
@@ -1168,7 +1208,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
 
         if kind == KIND_FILE {
             // Check overwrite policy
-            if fs.fs_path_exists(target.path) == 1 {
+            if fs.fs_path_exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "file '${name}' already exists and overwrite is disabled"
@@ -1248,7 +1288,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
             // Queue directory metadata to be applied last
             list_add_raw(dir_list, target as ptr)
         } else if kind == KIND_SYMLINK {
-            if fs.fs_path_exists(target.path) == 1 {
+            if fs.fs_path_exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "symlink destination '${name}' already exists"

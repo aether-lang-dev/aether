@@ -1,22 +1,29 @@
-// Wycheproof adversarial vectors — ML-KEM (FIPS 203) decapsulation, wave 5.
+// Wycheproof adversarial vectors: ML-KEM (FIPS 203), ML-KEM-512/-768/-1024.
 //
-// Covers ML-KEM-512, -768, -1024. Each case gives a 64-byte seed (d||z),
-// the encapsulation key ek, a ciphertext c, and the expected shared secret
-// K. We derive the decaps key dk via keygen(d,z), run decaps(dk, c), and
-// compare to K.
+// Three vector families, all at the pinned commit (see
+// tests/vectors/wycheproof/README.md):
 //
-// ML-KEM never "fails to decapsulate" — the FO transform's implicit
-// rejection returns a pseudo-random secret on a malformed/modified
-// ciphertext. So the two results mean:
-//   "valid"   -> decaps(c) MUST equal K.
-//   "invalid" -> decaps(c) MUST NOT equal K (implicit rejection fired).
-// A driver that accepts a modified ciphertext (returns K anyway) would be a
-// real forgery/malleability hole — exactly what this catches. On the PQ-TLS
-// path via GROUP_X25519MLKEM768.
+//   mlkem_N_test.json                 decapsulation. Each case gives the
+//       64-byte seed d || z, a ciphertext c and the expected secret K. We
+//       derive dk with keygen_derand(d, z) and run decaps(dk, c).
+//   mlkem_N_encaps_test.json          encapsulation. Each case gives ek, the
+//       32-byte coin m, and the expected c and K from encaps_derand(ek, m).
+//   mlkem_N_semi_expanded_decaps_test.json   decapsulation with the expanded
+//       768k + 96 byte dk given directly.
 //
-// ML-KEM keygen+decaps is symmetric-crypto-fast (all ~600 cases in ~2s), so
-// the default is a FULL sweep (stride 1). WYCHEPROOF_STRIDE=N can still thin
-// it if ever needed.
+// "valid" means the call succeeds and returns exactly K (and c). That covers
+// implicit rejection too: a tampered ciphertext of the right length is a
+// valid case whose K is the rejection secret J(z || c).
+//
+// "invalid" means the inputs fail a FIPS 203 input check (#2482): a seed,
+// ek, dk or ciphertext of the wrong length, an ek coefficient not reduced
+// mod q (the §7.2 modulus check), or a dk whose stored H(ek) does not match
+// its ek (the §7.3 hash check). The call MUST return an error and no output.
+// Comparing an output against the empty K of an invalid case would pass for
+// any output at all, so the driver asserts the error itself.
+//
+// All ~1400 cases take a few seconds, so the default is a FULL sweep
+// (stride 1). WYCHEPROOF_STRIDE=N can still thin it if ever needed.
 
 import std.cryptography.mlkem
 import std.os
@@ -30,6 +37,10 @@ extern exit(code: int)
 extern atoi(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 extern string_length(s: string) -> int
+
+const KIND_DECAPS = 0 // mlkem_N_test.json: seed, c, K
+const KIND_ENCAPS = 1 // mlkem_N_encaps_test.json: ek, m, c, K
+const KIND_DECAPS_DK = 2 // mlkem_N_semi_expanded_decaps_test.json: dk, c, K
 
 fn hexval(h: int) -> int {
     if h >= 48 && h <= 57 { return h - 48 }
@@ -53,38 +64,95 @@ fn from_hex(s: string) -> ptr {
     return b
 }
 
-fn slicen(src: ptr, off: int, width: int) -> ptr {
+// Bytes [off, off + width) of src, clamped to what src holds, so a seed of
+// the wrong length reaches keygen_derand as a d or z of the wrong length
+// instead of being padded here.
+fn slice_clamped(src: ptr, off: int, width: int) -> ptr {
     out = bytes.new(width)
     i = 0
-    while i < width { bytes.set(out, i, bytes.get(src, off + i)) i = i + 1 }
+    while i < width && off + i < bytes.length(src) { bytes.set(out, i, bytes.get(src, off + i)) i = i + 1 }
     return out
 }
 
-fn eq32(a: ptr, b: ptr) -> int {
+fn same_bytes(a: ptr, b: ptr) -> int {
+    if a == null || b == null { return 0 }
+    n = bytes.length(a)
+    if n != bytes.length(b) { return 0 }
     i = 0
-    while i < 32 {
+    while i < n {
         if bytes.get(a, i) != bytes.get(b, i) { return 0 }
         i = i + 1
     }
     return 1
 }
 
-// Derive dk and decapsulate at the parameter set k (2/3/4 = 512/768/1024).
-fn decaps_k(k: int, dk: ptr, c: ptr) -> ptr {
-    if k == 2 { return mlkem.mlkem512_decaps(dk, c) }
-    if k == 4 { return mlkem.mlkem1024_decaps(dk, c) }
-    return mlkem.mlkem768_decaps(dk, c)
+fn keygen_k(k: int, d: ptr, z: ptr) -> (ptr, ptr, string) {
+    if k == 2 { ek, dk, err = mlkem.mlkem512_keygen_derand(d, z) return ek, dk, err }
+    if k == 4 { ek, dk, err = mlkem.mlkem1024_keygen_derand(d, z) return ek, dk, err }
+    ek, dk, err = mlkem.mlkem768_keygen_derand(d, z)
+    return ek, dk, err
 }
 
-fn keygen_k(k: int, d: ptr, z: ptr) -> (ptr, ptr) {
-    if k == 2 { ek, dk = mlkem.mlkem512_keygen(d, z) return ek, dk }
-    if k == 4 { ek, dk = mlkem.mlkem1024_keygen(d, z) return ek, dk }
-    ek, dk = mlkem.mlkem768_keygen(d, z)
-    return ek, dk
+fn encaps_k(k: int, ek: ptr, m: ptr) -> (ptr, ptr, string) {
+    if k == 2 { ct, key, err = mlkem.mlkem512_encaps_derand(ek, m) return ct, key, err }
+    if k == 4 { ct, key, err = mlkem.mlkem1024_encaps_derand(ek, m) return ct, key, err }
+    ct, key, err = mlkem.mlkem768_encaps_derand(ek, m)
+    return ct, key, err
 }
 
-// Run one vector file at the given parameter set k. Returns [ok, rej, fail].
-fn run_file(path: string, k: int, stride: int) -> (int, int, int) {
+fn decaps_k(k: int, dk: ptr, c: ptr) -> (ptr, string) {
+    if k == 2 { key, err = mlkem.mlkem512_decaps(dk, c) return key, err }
+    if k == 4 { key, err = mlkem.mlkem1024_decaps(dk, c) return key, err }
+    key, err = mlkem.mlkem768_decaps(dk, c)
+    return key, err
+}
+
+fn field(t: ptr, name: string) -> ptr {
+    return from_hex(json.json_get_string_raw(json.json_object_get_raw(t, name)))
+}
+
+// Run one case. Returns (ct, key, err); ct is null except for encaps. The
+// caller frees ct and key.
+fn run_case(kind: int, k: int, t: ptr) -> (ptr, ptr, string) {
+    if kind == KIND_ENCAPS {
+        ek = field(t, "ek")
+        m = field(t, "m")
+        ct, key, err = encaps_k(k, ek, m)
+        bytes.free(ek)
+        bytes.free(m)
+        return ct, key, err
+    }
+    c = field(t, "c")
+    if kind == KIND_DECAPS_DK {
+        dk = field(t, "dk")
+        key, err = decaps_k(k, dk, c)
+        bytes.free(dk)
+        bytes.free(c)
+        return null, key, err
+    }
+    seed = field(t, "seed")
+    zlen = bytes.length(seed) - 32
+    if zlen < 0 { zlen = 0 }
+    d = slice_clamped(seed, 0, 32)
+    z = slice_clamped(seed, 32, zlen)
+    ek, dk, kerr = keygen_k(k, d, z)
+    bytes.free(seed)
+    bytes.free(d)
+    bytes.free(z)
+    if kerr != "" {
+        bytes.free(c)
+        return null, null, kerr
+    }
+    key, err = decaps_k(k, dk, c)
+    bytes.free(ek)
+    bytes.free(dk)
+    bytes.free(c)
+    return null, key, err
+}
+
+// Run one vector file of the given kind at parameter set k (2/3/4 =
+// 512/768/1024). Returns [ok, rejected invalid, failed].
+fn run_file(path: string, kind: int, k: int, stride: int) -> (int, int, int) {
     doc, ferr = fs.read(path)
     if ferr != "" {
         println("FAIL: cannot read ${path}: ${ferr}")
@@ -116,51 +184,48 @@ fn run_file(path: string, k: int, stride: int) -> (int, int, int) {
                 continue
             }
             res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
-            seed_hex = json.json_get_string_raw(json.json_object_get_raw(t, "seed"))
-            c_hex = json.json_get_string_raw(json.json_object_get_raw(t, "c"))
-            k_hex = json.json_get_string_raw(json.json_object_get_raw(t, "K"))
-
-            seed = from_hex(seed_hex) // 64 bytes = d || z
-            d = slicen(seed, 0, 32)
-            z = slicen(seed, 32, 32)
-            ek, dk = keygen_k(k, d, z)
-
-            c = from_hex(c_hex)
-            want = from_hex(k_hex) // 32 bytes
-            got = decaps_k(k, dk, c)
-            same = eq32(got, want)
+            ct, key, err = run_case(kind, k, t)
 
             if res == "valid" {
-                if same == 1 { passed = passed + 1 } else {
-                    println("FAIL tcId=${tc_id} (valid): decaps != K")
+                want_k = field(t, "K")
+                ok = 0
+                if err == "" && same_bytes(key, want_k) == 1 { ok = 1 }
+                if ok == 1 && kind == KIND_ENCAPS {
+                    want_c = field(t, "c")
+                    ok = same_bytes(ct, want_c)
+                    bytes.free(want_c)
+                }
+                if ok == 1 { passed = passed + 1 } else {
+                    println("FAIL ${path} tcId=${tc_id} (valid): err='${err}' or output != expected")
                     failed = failed + 1
                 }
+                bytes.free(want_k)
             } else {
-                if res == "invalid" {
-                    // Implicit rejection: a modified ciphertext must yield a
-                    // DIFFERENT secret, never the real K.
-                    if same == 0 { rejected_invalid = rejected_invalid + 1 } else {
-                        println("FAIL tcId=${tc_id} (invalid): decaps ACCEPTED, returned K")
-                        failed = failed + 1
-                    }
-                } else {
-                    passed = passed + 1
+                // FIPS 203 input check: an error and no output, never a key.
+                if err != "" && key == null && ct == null { rejected_invalid = rejected_invalid + 1 } else {
+                    println("FAIL ${path} tcId=${tc_id} (invalid): accepted, returned a key")
+                    failed = failed + 1
                 }
             }
 
-            bytes.free(seed)
-            bytes.free(d)
-            bytes.free(z)
-            bytes.free(ek)
-            bytes.free(dk)
-            bytes.free(c)
-            bytes.free(want)
-            bytes.free(got)
+            bytes.free(ct)
+            bytes.free(key)
             ti = ti + 1
         }
         gi = gi + 1
     }
     return passed, rejected_invalid, failed
+}
+
+fn run_set(dir: string, name: string, kind: int, k: int, stride: int) -> int {
+    p, r, f = run_file("${dir}/${name}.json", kind, k, stride)
+    println("wycheproof ${name}: ${p} ok, ${r} invalid rejected, ${f} failed (stride ${stride})")
+    // A family with no invalid case swept would hide a vacuous branch again.
+    if r == 0 && stride == 1 {
+        println("FAIL ${name}: no invalid case was exercised")
+        return f + 1
+    }
+    return f
 }
 
 main() {
@@ -169,19 +234,17 @@ main() {
     if sv != 0 { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
 
+    dir = "tests/vectors/wycheproof"
     total_fail = 0
-
-    p2, r2, f2 = run_file("tests/vectors/wycheproof/mlkem_512_test.json", 2, stride)
-    println("wycheproof mlkem_512: ${p2} ok, ${r2} invalid rejected, ${f2} failed (stride ${stride})")
-    total_fail = total_fail + f2
-
-    p3, r3, f3 = run_file("tests/vectors/wycheproof/mlkem_768_test.json", 3, stride)
-    println("wycheproof mlkem_768: ${p3} ok, ${r3} invalid rejected, ${f3} failed (stride ${stride})")
-    total_fail = total_fail + f3
-
-    p4, r4, f4 = run_file("tests/vectors/wycheproof/mlkem_1024_test.json", 4, stride)
-    println("wycheproof mlkem_1024: ${p4} ok, ${r4} invalid rejected, ${f4} failed (stride ${stride})")
-    total_fail = total_fail + f4
+    total_fail = total_fail + run_set(dir, "mlkem_512_test", KIND_DECAPS, 2, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_768_test", KIND_DECAPS, 3, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_1024_test", KIND_DECAPS, 4, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_512_encaps_test", KIND_ENCAPS, 2, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_768_encaps_test", KIND_ENCAPS, 3, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_1024_encaps_test", KIND_ENCAPS, 4, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_512_semi_expanded_decaps_test", KIND_DECAPS_DK, 2, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_768_semi_expanded_decaps_test", KIND_DECAPS_DK, 3, stride)
+    total_fail = total_fail + run_set(dir, "mlkem_1024_semi_expanded_decaps_test", KIND_DECAPS_DK, 4, stride)
 
     if total_fail > 0 { exit(1) }
     println("ALL PASS")

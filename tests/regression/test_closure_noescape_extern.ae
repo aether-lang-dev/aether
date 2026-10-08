@@ -1,0 +1,137 @@
+// Regression (#2523): a capturing closure passed to an extern whose callback
+// parameter is declared `@noescape` is released once the call returns, as
+// after a call to an Aether function that keeps nothing. Covers the std
+// externs that carry the annotation: the string seq combinators (each, map,
+// filter, reduce, zip_each) and the string list comparator sort, with a
+// closure literal and with a closure local passed many times.
+//
+// Before, the compiler could not see whether the C callee kept the closure,
+// so it never released the environment; the C side freed the env with a
+// plain free that skipped its destructor, and the cells and strings the
+// closure captured leaked on every call (one env cell and its string per
+// seq_each call in test_closure_local_alloc_capture).
+//
+// The check measures what the process holds (std.mem's heap_in_use) over
+// two later windows of the same work, after a warm-up: work that leaks
+// nothing holds steady in at least one of them. The check runs where the
+// heap count is exact (mem.heap_in_use_exact); elsewhere the macOS leaks
+// gate covers this program. Strings are built from parameters, because
+// string.concat of two literals folds to a literal that owns nothing.
+
+import std.mem
+import std.string
+import std.collections
+
+extern exit(code: int)
+
+const PER_ROUND = 100
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// A literal per combinator, each capturing a heap string and a cell it
+// writes: the shapes a running max or an accumulator over seq_each uses.
+literals(p: string) -> int {
+    items = string.split_to_seq(string.concat(p, ",b,c"), ",")
+    tag = string.concat(p, "!")
+    out = ""
+    hits = 0
+    string.seq_each(items, | it: string | {
+            c = string.concat(it, tag)
+            out = c
+            hits = hits + 1
+        })
+    check(string.equals(out, "c${tag}") == 1, "seq_each published the last element")
+    mapped = string.seq_map(items, | it: string | {
+            return string.concat(it, tag)
+        })
+    check(string.seq_length(mapped) == 3, "seq_map built three elements")
+    kept = string.seq_filter(items, | it: string | {
+            return string.equals(it, p)
+        })
+    check(string.seq_length(kept) == 1, "seq_filter kept the first element")
+    acc = ref(0)
+    total = string.seq_reduce(items, acc, | a: ptr, it: string | {
+            ref_set(acc, ref_get(acc) + string.length(it) + string.length(tag))
+            return acc
+        })
+    check(ref_get(total) == string.length(p) + 2 + 3 * string.length(tag), "seq_reduce summed the lengths")
+    string.seq_zip_each(items, mapped, | a: string, b: string | {
+            hits = hits + string.length(b) - string.length(a)
+        })
+    check(hits == 3 + 3 * string.length(tag), "seq_zip_each saw every pair")
+    string.seq_free(kept)
+    string.seq_free(mapped)
+    string.seq_free(items)
+    ref_free(acc) // a ref cell is freed by hand; `total` is the same cell
+    return hits
+}
+
+// One closure local, passed to the extern three times and called once
+// directly: the local keeps the environment and releases it at scope end.
+local_many(p: string) -> int {
+    items = string.split_to_seq(string.concat(p, ",b,c"), ",")
+    acc = ""
+    f = | it: string | {
+        acc = "${acc}${it}|"
+    }
+    string.seq_each(items, f)
+    string.seq_each(items, f)
+    string.seq_each(items, f)
+    f(p)
+    string.seq_free(items)
+    check(string.length(acc) == 4 * string.length(p) + 16, "the local ran every time")
+    return string.length(acc)
+}
+
+// A comparator that captures a counter and a heap string.
+sort_capturing(p: string) -> int {
+    l = string_list_new()
+    string_list_add(l, string.concat(p, "zz"))
+    string_list_add(l, string.concat(p, "a"))
+    string_list_add(l, string.concat(p, "mmm"))
+    key = string.concat(p, "")
+    calls = 0
+    string_list_sort(l, | a: string, b: string | {
+            calls = calls + string.length(key)
+            return string.length(a) - string.length(b)
+        })
+    check(string.length(string_list_get(l, 0)) == string.length(p) + 1, "shortest first")
+    check(calls > 0, "the comparator ran")
+    string_list_free(l)
+    return calls
+}
+
+fn one_round(p: string) {
+    i = 0
+    while i < PER_ROUND {
+        literals(p)
+        local_many(p)
+        sort_capturing(p)
+        i = i + 1
+    }
+}
+
+main() {
+    if !mem.heap_in_use_exact() {
+        one_round("a")
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    // A leak grows the exact count in every window of rounds; work that
+    // leaks nothing holds it steady once warm. So warm up, then require some
+    // later window to hold steady (mem.steady_growth).
+    one_round("a")
+    one_round("a")
+    grown = mem.steady_growth(|| {
+            one_round("a")
+            one_round("a")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

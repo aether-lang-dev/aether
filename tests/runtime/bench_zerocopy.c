@@ -24,11 +24,9 @@ static long get_time_us(void) {
 #endif
 
 typedef struct {
-    int id;
-    atomic_int active;
-    atomic_int assigned_core;
-    Mailbox mailbox;
-    void (*step)(void*);
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     int received_count;
     long total_bytes;
 } BenchActor;

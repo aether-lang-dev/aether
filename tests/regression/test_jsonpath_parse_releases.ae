@@ -1,0 +1,70 @@
+// Regression (#2499 copy-on-keep): std.jsonpath releases everything a query
+// allocates, on success and on a syntax error.
+//
+// A named function that frees its `string` parameter takes the caller's
+// reference: jsonpath's `_free_cstr(s: string) { string.free(s) }` is how
+// the AST hands its names back. Copy-on-keep took a reference of its own
+// there, freed that copy, and left the AST's string to nobody: 96 bytes per
+// parse, which valgrind found through contrib.jq's jsonpath tests. And a
+// diagnostic `_fail` stored in the parser context is now the context's own
+// copy, which a raw free of the context leaked on every failed parse.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.json
+import std.jsonpath
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn query_round(doc: ptr) {
+    r, err = jsonpath.query(doc, "$.b[*]")
+    check(err == "", "the query parses")
+    check(jsonpath.result_size(r) == 3, "three matches")
+    jsonpath.free_result(r)
+}
+
+fn bad_round() {
+    ast, err = jsonpath.parse("$.b[")
+    check(err != "", "an unclosed selector is a syntax error")
+    if err == "" { jsonpath.free_query(ast) }
+}
+
+// Two equal windows of `kind` rounds; one must grow by exactly 0.
+fn steady(doc: ptr, kind: int, what: string) {
+    grown = mem.steady_growth(|| {
+            i = 0
+            while i < 50 {
+                if kind == 0 { query_round(doc) } else { bad_round() }
+                i = i + 1
+            }
+        }, 5)
+    check(grown == 0,
+        "${what} grew the heap by ${grown} bytes in every run")
+}
+
+main() {
+    doc, jerr = json.parse("{\"b\": [1, 2, 3]}")
+    check(jerr == "", "the document parses")
+    i = 0
+    while i < 10 {
+        query_round(doc)
+        bad_round()
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        steady(doc, 0, "queries")
+        steady(doc, 1, "failed parses")
+    }
+    json.json_free(doc)
+    println("OK")
+}

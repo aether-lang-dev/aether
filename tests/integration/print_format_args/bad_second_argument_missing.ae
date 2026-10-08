@@ -1,0 +1,4 @@
+main() {
+    n = 3
+    print("%d and %s\n", n)
+}

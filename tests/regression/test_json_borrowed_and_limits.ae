@@ -1,0 +1,99 @@
+// std.json: a borrowed node given to set/push, the int64 range of get_long,
+// and stringify past the nesting limit parse enforces.
+//
+// - A node from object_get / array_get lives in its document's arena. Given
+//   to json.set or json.push, it was deep-copied and then freed as if it
+//   were a heap tree: heap corruption (0xC0000374). json.free on one did the
+//   same. The copy is now all they take, and the document keeps its node.
+// - json_get_long converted a double outside int64 directly, which C leaves
+//   undefined; it gave INT64_MIN for 18446744073709551615 and 1e300. It
+//   clamps now, as json_get_int clamps to int32.
+// - stringify wrote `null` in place of anything nested deeper than 256
+//   levels and reported success. It is an error now.
+
+import std.json
+import std.string
+
+extern exit(code: int)
+
+var fails: int = 0
+
+fn check(cond: bool, msg: string) {
+    if cond { println("  PASS: ${msg}") }
+    else { println("  FAIL: ${msg}"); fails = fails + 1 }
+}
+
+main() {
+    // ---- a borrowed node into set / push ----
+    doc, perr = json.parse("{\"a\":{\"x\":1},\"b\":[2,3]}")
+    check(perr == "", "parse")
+    child, _ = json.object_get(doc, "a")
+    dst = json.obj()
+    json.set(dst, "copy", child)
+    arr = json.arr()
+    b, _ = json.object_get(doc, "b")
+    json.push(arr, b)
+    out, serr = json.stringify(dst)
+    check(serr == "" && out == "{\"copy\":{\"x\":1}}", "set copies a borrowed node (${out})")
+    aout, aerr = json.stringify(arr)
+    check(aerr == "" && aout == "[[2,3]]", "push copies a borrowed node (${aout})")
+    // The document still has its node, untouched.
+    dout, derr = json.stringify(doc)
+    check(derr == "" && dout == "{\"a\":{\"x\":1},\"b\":[2,3]}", "the document keeps its nodes (${dout})")
+    // json.free on a borrowed node is a no-op, not a free of arena memory.
+    json.free(child)
+    dout2, _ = json.stringify(doc)
+    check(dout2 == dout, "json.free of a borrowed node leaves the document whole")
+    json.free(dst)
+    json.free(arr)
+    json.free(doc)
+
+    // ---- get_long clamps to the int64 range ----
+    big, _ = json.parse("18446744073709551615")
+    check(json.json_get_long(big) == 9223372036854775807, "a number above int64 reads as INT64_MAX")
+    json.free(big)
+    huge, _ = json.parse("1e300")
+    check(json.json_get_long(huge) == 9223372036854775807, "1e300 reads as INT64_MAX")
+    json.free(huge)
+    neg, _ = json.parse("-1e300")
+    check(json.json_get_long(neg) == 0 - 9223372036854775807 - 1, "-1e300 reads as INT64_MIN")
+    json.free(neg)
+    exact, _ = json.parse("9007199254740993")
+    check(json.json_get_long(exact) == 9007199254740993, "an integer in range reads exactly")
+    json.free(exact)
+
+    // ---- stringify past the nesting limit ----
+    inner = json.arr()
+    json.push(inner, json.from_int(7))
+    i = 0
+    while i < 299 {
+        o = json.arr()
+        json.push(o, inner)
+        inner = o
+        i = i + 1
+    }
+    deep_out, deep_err = json.stringify(inner)
+    check(deep_err != "" && string.length(deep_out) == 0, "stringify past 256 levels is an error (${deep_err})")
+    json.free(inner)
+    // 256 levels is within the limit, and parses back.
+    ok = json.arr()
+    i = 0
+    while i < 255 {
+        o = json.arr()
+        json.push(o, ok)
+        ok = o
+        i = i + 1
+    }
+    ok_out, ok_err = json.stringify(ok)
+    check(ok_err == "", "stringify at the limit succeeds")
+    back, back_err = json.parse(ok_out)
+    check(back_err == "", "and parses back")
+    json.free(ok)
+    json.free(back)
+
+    if fails > 0 {
+        println("${fails} FAILED")
+        exit(1)
+    }
+    println("PASS: json borrowed nodes, get_long range, stringify depth")
+}

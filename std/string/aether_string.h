@@ -2,17 +2,16 @@
 #define AETHER_STRING_H
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdarg.h>
 
-// Magic number to distinguish AetherString* from raw char*
-#define AETHER_STRING_MAGIC 0xAE57C0DE
+// AETHER_STRING_MAGIC, AETHER_STRING_PINNED_REFS and the header's fields,
+// shared with the compiler (#2520).
+#include "aether_string_abi.h"
 
 // String structure - immutable, reference counted
 typedef struct AetherString {
-    unsigned int magic;     // Always AETHER_STRING_MAGIC for valid AetherString
-    int ref_count;
-    size_t length;
-    size_t capacity;
-    char* data;
+    AETHER_STRING_FIELDS
 } AetherString;
 
 // Check if a pointer is an AetherString (vs raw char*).
@@ -53,6 +52,11 @@ AetherString* string_from_cstr(const char* cstr);  // Alias for new
 AetherString* string_from_literal(const char* cstr);  // Alias for new
 AetherString* string_new_with_length(const char* data, size_t length);
 AetherString* string_empty(void);
+
+/* AETHER_STRING_PINNED_REFS (aether_string_abi.h) is the ref_count of a
+ * pinned string. The compiler emits a string literal holding a NUL as a
+ * static AetherString with this count, so the literal keeps every byte
+ * (#2520); string_retain and string_release leave such a string alone. */
 
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str);
@@ -185,6 +189,32 @@ const char* string_to_cstr(const void* str);
 const char* aether_string_data(const void* s);
 size_t      aether_string_length(const void* s);
 
+/* #2521: the formatter behind string interpolation and print/println.
+ * `fmt` is a printf format the compiler wrote: text and the conversions
+ * codegen emits (%d %i %u %x %o %ld %lld %llu %g %f %e %Lg %c %s %%). A %s
+ * argument is the string as the program holds it, an AetherString* or a
+ * plain char*, and is written by its length, so a NUL in it is kept;
+ * vsnprintf stopped at the first NUL. Every other conversion is given to
+ * snprintf as written. Writes to `out` (at most `cap` bytes, NUL
+ * terminated when cap > 0), or to `f` when `out` is NULL and `f` is set,
+ * and returns the full length either way, so a caller sizes with
+ * (NULL, 0, NULL, ...) first. Writing to a stream holds its lock for the
+ * whole call. */
+size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap);
+
+/* An interpolated string: `fmt` and `ap` formatted as aether_interp_format
+ * does, into a fresh inline AetherString the caller owns (NULL when the
+ * allocation fails). The generated _aether_interp is a thin wrapper. */
+void* aether_interp_string(const char* fmt, va_list ap);
+
+/* #2521: write `n` bytes (and a newline when `newline`) to `f` under the
+ * stream's lock, as one print, so a NUL is written like any other byte and
+ * another thread's print cannot land inside it. Returns the bytes written.
+ * aether_print_string does the same for a string value (an AetherString or
+ * a plain char*, by its length), printing NULL as `(null)`. */
+size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline);
+size_t aether_print_string(FILE* f, const void* s, int newline);
+
 // Same unwrap as aether_string_data, typed as a bare `void*` in both
 // directions (#2301) so it matches Aether's own `ptr` exactly — declaring
 // aether_string_data itself as an `extern` taking/returning `ptr` would
@@ -198,6 +228,10 @@ void* aether_string_raw_ptr(const void* s);
  * header, for producers that format their bytes in place. `length` excludes
  * the terminator, which is written for you. NULL on allocation failure. */
 AetherString* string_alloc_inline(size_t length);
+// Adopt an aether_caps_malloc'd payload of `cap` bytes (`length` bytes and
+// a NUL) as a string without copying; on failure the payload is freed and
+// NULL returned.
+AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap);
 
 /* Writable payload of a string the caller owns and has not shared, for
  * producers filling in bytes. NULL when `s` is not a refcounted string. */
@@ -243,11 +277,12 @@ int string_to_long_raw(const void* str, long long* out_value);  // 64-bit slot (
 int string_to_float_raw(const void* str, float* out_value);
 int string_to_double_raw(const void* str, double* out_value);
 
-// Base-N parse, radix in 2..36 (strtoll's range). Out-slot is
-// `long long*` for LLP64 safety, matching string_to_long_raw. No
-// "0x" / "0b" prefix recognition — caller passes the digit-only
-// substring. Returns 1 on success, 0 on null/empty/radix-out-of-range
-// /parse-failure/overflow/trailing-garbage.
+// Base-N parse, radix in 2..36. Out-slot is `long long*` for LLP64
+// safety, matching string_to_long_raw. Accepts exactly an optional '-',
+// one or more digits of the radix and optional trailing whitespace: no
+// "0x" / "0b" prefix, no '+', no leading whitespace (#2472). Returns 1 on
+// success, 0 on null/empty/radix-out-of-range/parse-failure/overflow/
+// trailing-garbage.
 int string_to_int_radix_raw(const void* str, int radix, long long* out_value);
 
 // Split-return helpers used by the Go-style wrappers. `_try` returns

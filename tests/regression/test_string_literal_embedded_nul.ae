@@ -1,0 +1,142 @@
+// Regression (#2520): a string literal keeps every byte, a NUL included.
+// Tokens, AST values and the emitted C were C strings, so "a\x00b" and
+// "a\0b" had length 1, plain and interpolated alike, with no diagnostic. A
+// literal holding a NUL is now emitted as a static string carrying its
+// length, so string.length, `==`, map keys, json, concatenation, match arms
+// and function-clause patterns see all of its bytes. A literal without a
+// NUL is the plain C string it always was.
+//
+// The strings a literal is compared against are built at run time from
+// their parts, so no check folds to the literal under test.
+
+import std.string
+import std.map
+import std.json
+import std.bytes
+
+extern exit(code: int)
+// A C function taking the literal as `const char*` sees the C view, the
+// bytes up to the first NUL, by design.
+extern strlen(s: string) -> int
+
+const NUL_CONST = "k\0v"
+
+// `a`, a NUL byte, then `b`.
+with_nul(a: string, b: string) -> string {
+    la = string.length(a)
+    lb = string.length(b)
+    buf = bytes.new(la + 1 + lb)
+    if la > 0 { bytes.copy_from_string(buf, 0, a, la) }
+    bytes.set(buf, la, 0)
+    if lb > 0 { bytes.copy_from_string(buf, la + 1, b, lb) }
+    return bytes.finish(buf, la + 1 + lb)
+}
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+// A function-clause pattern holding a NUL.
+kind("a\0b") -> int { return 1 }
+kind(s: string) -> int { return 0 }
+
+// A match arm holding a NUL.
+arm(s: string) -> int {
+    match (s) {
+        "x\0y" -> { return 1 }
+        "x" -> { return 2 }
+        _ -> { return 0 }
+    }
+}
+
+give() -> string { return "r\0s" }
+
+main() {
+    f = 0
+    e = string.substring("x", 0, 0) // empty, and not foldable
+    n = 7
+    ab = with_nul("a", "b")
+
+    // Plain literals, both spellings.
+    f = f + check(string.length("a\x00b") == 3, "a\\x00b has ${string.length("a\x00b")} bytes, want 3")
+    f = f + check(string.length("a\0b") == 3, "a\\0b has ${string.length("a\0b")} bytes, want 3")
+    f = f + check(string.char_at("a\0b", 0) == 97 && string.char_at("a\0b", 1) == 0 && string.char_at("a\0b", 2) == 98, "the bytes of a\\0b")
+    f = f + check(string.length("\0") == 1, "a lone NUL has ${string.length("\0")} bytes, want 1")
+    s = "a\0b"
+    f = f + check(string.length(s) == 3, "a local holding a\\0b has ${string.length(s)} bytes")
+    f = f + check(string.length("plain") == 5, "a literal without a NUL")
+
+    // Equality reads every byte (#2515).
+    f = f + check("a\0b" == ab, "a\\0b == a<NUL>b built at run time")
+    f = f + check(!("a\0b" == "a"), "a\\0b == a")
+    f = f + check("a\0b" != "a\0c", "a\\0b != a\\0c")
+    f = f + check("\0" != "", "a lone NUL != the empty string")
+
+    // Interpolated literals keep a NUL of their text.
+    f = f + check(string.length("a\0b${n}") == 4, "a\\0b${n} has ${string.length("a\0b${n}")} bytes, want 4")
+    f = f + check(string.equals("${e}a\x00b", ab) == 1, "${e}a\\x00b is a<NUL>b")
+    f = f + check(string.length("\0${e}\0") == 2, "NUL ${e} NUL has ${string.length("\0${e}\0")} bytes, want 2")
+
+    // Constants, top-level and local.
+    kv = with_nul("k", "v")
+    f = f + check(string.length(NUL_CONST) == 3 && NUL_CONST == kv, "const k\\0v has ${string.length(NUL_CONST)} bytes")
+    const LOCAL = "l\0m"
+    f = f + check(string.length(LOCAL) == 3, "local const l\\0m has ${string.length(LOCAL)} bytes")
+
+    // Returned from a function.
+    f = f + check(string.length(give()) == 3, "a returned literal has ${string.length(give())} bytes")
+
+    // A C extern taking `const char*` sees the C view: up to the NUL.
+    f = f + check(strlen("a\0b") == 1, "strlen of a\\0b is ${strlen("a\0b")}, want 1")
+
+    // Function-clause pattern and match arm.
+    f = f + check(kind(ab) == 1, "kind(a<NUL>b) is ${kind(ab)}, want 1")
+    f = f + check(kind("a") == 0, "kind(a) is ${kind("a")}, want 0")
+    f = f + check(kind("a\0b") == 1, "kind(a\\0b) is ${kind("a\0b")}, want 1")
+    xy = with_nul("x", "y")
+    x = string.concat("x", e)
+    f = f + check(arm(xy) == 1, "arm(x<NUL>y) is ${arm(xy)}, want 1")
+    f = f + check(arm(x) == 2, "arm(x) is ${arm(x)}, want 2")
+    f = f + check(arm("x\0z") == 0, "arm(x\\0z) is ${arm("x\0z")}, want 0")
+
+    // Concatenation with such a literal, on either side, and the
+    // compile-time fold of two literals.
+    c1 = string.concat("a\0b", "c")
+    f = f + check(string.length(c1) == 4, "a\\0b + c has ${string.length(c1)} bytes, want 4")
+    c2 = string.concat(ab, "\0d")
+    f = f + check(string.length(c2) == 5 && string.char_at(c2, 3) == 0, "a<NUL>b + \\0d has ${string.length(c2)} bytes, want 5")
+    c3 = string.concat("a\0", "b\0")
+    f = f + check(string.length(c3) == 4, "a\\0 + b\\0 folded has ${string.length(c3)} bytes, want 4")
+
+    // A whole map key.
+    m = map.new()
+    map.put(m, "k\0x", "v")
+    hit, _ = map.get(m, with_nul("k", "x"))
+    miss, _ = map.get(m, "k")
+    f = f + check(hit != null && miss == null, "map: k\\0x is the key, not k")
+    map.free(m)
+
+    // A whole json value.
+    sv = json.str("a\0b")
+    out, _ = json.stringify(sv)
+    f = f + check(out == "\"a\\u0000b\"", "json stringify of a\\0b: ${out}")
+    json.free(sv)
+
+    // Captured by a closure.
+    cap = "c\0d"
+    g = || { return string.length(cap) }
+    f = f + check(call(g) == 3, "a closure sees ${call(g)} bytes of c\\0d, want 3")
+
+    // The literal is static: freeing it is a no-op and it stays whole.
+    t = "a\0b"
+    string.free(t)
+    f = f + check(string.length("a\0b") == 3, "a\\0b after string.free")
+
+    if f > 0 {
+        println("FAIL: ${f} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -166,23 +166,35 @@ TEST(codegen_fnptr_non_string_param_passes_arg_as_written) {
 /* #2206: `s != "0"` must be a content compare, not a pointer compare. Both
  * the integer literal `0` and the string literal `"0"` carry the text `0`;
  * the null-check shortcut in the string-compare codegen used to match either,
- * so the string one skipped strcmp. The string literal is TYPE_STRING out of
- * the parser, which is what the fix keys on. */
-TEST(codegen_string_ne_zero_literal_uses_strcmp) {
+ * so the string one skipped the content compare. The string literal is
+ * TYPE_STRING out of the parser, which is what the fix keys on. The compare
+ * is by length and bytes, through string_equals (#2515). */
+TEST(codegen_string_ne_zero_literal_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if a != \"0\" { println(\"ne\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a), _aether_safe_str(\"0\")) != 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "!string_equals(a, \"0\")") != NULL);
     ASSERT_TRUE(strstr(buf, "a != \"0\"") == NULL);
     free(buf);
 }
 
-TEST(codegen_zero_literal_eq_string_uses_strcmp) {
+TEST(codegen_zero_literal_eq_string_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if \"0\" == a { println(\"eq\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(\"0\"), _aether_safe_str(a)) == 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "string_equals(\"0\", a)") != NULL);
     ASSERT_TRUE(strstr(buf, "\"0\" == a") == NULL);
+    free(buf);
+}
+
+/* #2515: order on strings is byte order over the whole length, through
+ * string_compare; strcmp stopped at the first NUL. */
+TEST(codegen_string_order_compares_content) {
+    char* buf = generate_typechecked(
+        "main() { a = \"abc\"\n if a < \"b\" { println(\"lt\") } }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "(string_compare(a, \"b\") < 0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a)") == NULL);
     free(buf);
 }
 
@@ -303,8 +315,8 @@ TEST(codegen_interp_impure_segments_hoist_in_source_order) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "{ int _ad_", " = (int)(bump()); int _ad_", " = (int)(bump()); int _ad_",
-        " = (int)(bump()); printf(\"%d %d %d\", (int)_ad_", ", (int)_ad_", ", (int)_ad_",
-        "); }; putchar('\\n');",
+        " = (int)(bump()); _aether_interp_print(\"%d %d %d\\n\", (int)_ad_", ", (int)_ad_", ", (int)_ad_",
+        "); }",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
     ASSERT_TRUE(strstr(buf, "(int)bump()") == NULL);
@@ -333,7 +345,7 @@ TEST(codegen_interp_pure_segment_beside_impure_is_hoisted_too) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "{ int _ad_", " = (int)(n); int _ad_", " = (int)(bump()); int _ad_", " = (int)(n); ",
-        "printf(\"%d %d %d\", (int)_ad_",
+        "_aether_interp_print(\"%d %d %d\\n\", (int)_ad_",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
     ASSERT_TRUE(strstr(buf, "(int)n)") == NULL);
@@ -345,7 +357,9 @@ TEST(codegen_interp_all_pure_segments_stay_inline) {
         "main() { name = \"x\"\n age = 3\n println(\"${name} is ${age}\") }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "_ad_") == NULL);
-    ASSERT_NOT_NULL(strstr(buf, "printf(\"%s is %d\", _aether_safe_str(name), (int)age)"));
+    /* A string segment goes as held, for the formatter to write by its
+     * length, and println's newline ends the format (#2521). */
+    ASSERT_NOT_NULL(strstr(buf, "_aether_interp_print(\"%s is %d\\n\", (const void*)(name), (int)age)"));
     free(buf);
 }
 
@@ -355,7 +369,7 @@ TEST(codegen_interp_single_impure_segment_stays_inline) {
         "main() { println(\"got ${bump()}\") }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "_ad_") == NULL);
-    ASSERT_NOT_NULL(strstr(buf, "printf(\"got %d\", (int)bump())"));
+    ASSERT_NOT_NULL(strstr(buf, "_aether_interp_print(\"got %d\\n\", (int)bump())"));
     free(buf);
 }
 
@@ -370,7 +384,7 @@ TEST(codegen_interp_hoisted_heap_segment_is_freed_after_call) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "{ const char* _ad_", " = (const char*)(string_concat(name, name)); int _ad_", " = (int)(bump()); ",
-        "printf(\"%s %d\", _aether_safe_str(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
+        "_aether_interp_print(\"%s %d\\n\", (const void*)(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
     free(buf);
@@ -382,7 +396,7 @@ TEST(codegen_interp_nested_interp_segment_is_freed_after_call) {
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
         "({ const char* _ad_", " = (const char*)(_aether_interp(\"%d-%d\", (int)x, (int)x)); ",
-        "const char* _it_r = _aether_interp(\"a %s b\", _aether_safe_str(_ad_", ")); aether_heap_str_free(_ad_", "); _it_r; })",
+        "const char* _it_r = _aether_interp(\"a %s b\", (const void*)(_ad_", ")); aether_heap_str_free(_ad_", "); _it_r; })",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
     free(buf);
@@ -815,4 +829,139 @@ TEST(derive_rejects_field_attributes_without_schema) {
 TEST(derive_rejects_an_attribute_named_twice) {
     ASSERT_EQ(-1, derive_result(
         "@derive(schema)\nstruct Bob { rate: float @range(0.0, 1.0) @range(1.0, 2.0) }\nmain() { }"));
+}
+
+/* #2509: a message with more than four fields was declared aligned(64), but
+ * its payload travels in a malloc'd copy (16-byte aligned) that the receiver
+ * reads through a pointer of the message type: undefined behaviour, and an
+ * aligned vector move the compiler may choose for it faults. Messages now
+ * take their natural alignment; the actor struct keeps its cache line,
+ * which the runtime allocates on a 64-byte boundary (#2485). */
+TEST(codegen_wide_message_has_natural_alignment) {
+    char* buf = generate_typechecked(
+        "message Wide { a: int, b: int, c: int, d: int, e: int, f: string }\n"
+        "actor Sink {\n"
+        "    state n = 0\n"
+        "    receive {\n"
+        "        Wide(a, b, c, d, e, f) -> { n = n + a + e }\n"
+        "    }\n"
+        "}\n"
+        "main() {\n"
+        "    s = spawn(Sink())\n"
+        "    s ! Wide { a: 1, b: 2, c: 3, d: 4, e: 5, f: \"x\" }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "typedef struct Wide {") != NULL);
+    int aligned = 0;
+    for (const char* p = buf; (p = strstr(p, "aligned(64)")) != NULL; p++) aligned++;
+    ASSERT_EQ(1, aligned);  /* the actor struct only */
+    free(buf);
+}
+
+/* Like generate_typechecked, with the --emit-header file as well. */
+static char* generate_with_header(const char* source, char** header_out) {
+    int count;
+    Token** tokens = tokenize_source(source, &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    if (!ast) return NULL;
+    if (!typecheck_program(ast)) return NULL;
+
+    FILE* out = tmpfile();
+    FILE* hdr = tmpfile();
+    if (!out || !hdr) return NULL;
+    CodeGenerator* gen = create_code_generator_with_header(out, hdr, NULL);
+    generate_program(gen, ast);
+    char* buf = read_all(out);
+    *header_out = read_all(hdr);
+
+    fclose(out);
+    fclose(hdr);
+    free_code_generator(gen);
+    free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+    return buf;
+}
+
+/* The text between the first "{" after `marker` and the "}" that follows it,
+ * with every line stripped of leading spaces: a struct body. */
+static char* struct_body_after(const char* text, const char* marker) {
+    const char* at = strstr(text, marker);
+    if (!at) return NULL;
+    const char* open = strchr(at, '{');
+    const char* close = open ? strchr(open, '}') : NULL;
+    if (!open || !close) return NULL;
+    char* body = (char*)malloc((size_t)(close - open) + 1);
+    char* w = body;
+    int at_line_start = 1;
+    for (const char* p = open + 1; p < close; p++) {
+        if (at_line_start && *p == ' ') continue;
+        at_line_start = (*p == '\n');
+        *w++ = *p;
+    }
+    *w = '\0';
+    return body;
+}
+
+/* #2517: the embedding header declared a message's fields in declaration
+ * order while the .c packs ints first, then pointers, then the rest, so a C
+ * host built against the header read the wrong offsets of any message whose
+ * field types interleave. Both now come from one field order. The header
+ * was also empty: #996 had gated its contents on the --emit=csrc catalog
+ * header. The typed send helper carries the fields; it used to send a
+ * multi-field message with no payload at all. */
+TEST(codegen_emit_header_message_matches_generated_struct) {
+    char* header = NULL;
+    char* buf = generate_with_header(
+        "message Mixed { a: int, s: string, b: int, f: float, c: bool, p: ptr }\n"
+        "message Bump { by: int }\n"
+        "actor Sink {\n"
+        "    state n = 0\n"
+        "    receive {\n"
+        "        Mixed(a, s, b, f, c, p) -> { n = n + a + b }\n"
+        "        Bump(by) -> { n = n + by }\n"
+        "    }\n"
+        "}\n"
+        "main() {\n"
+        "    k = spawn(Sink())\n"
+        "    k ! Mixed { a: 1, s: \"x\", b: 2, f: 0.5, c: true, p: 0 }\n"
+        "    k ! Bump { by: 1 }\n"
+        "}\n", &header);
+    ASSERT_NOT_NULL(buf);
+    ASSERT_NOT_NULL(header);
+
+    char* in_c = struct_body_after(buf, "typedef struct Mixed {");
+    char* in_h = struct_body_after(header, "// Message: Mixed\n");
+    ASSERT_NOT_NULL(in_c);
+    ASSERT_NOT_NULL(in_h);
+    ASSERT_STREQ(in_c, in_h);
+    /* Packed, as the runtime has always laid messages out. */
+    ASSERT_STREQ("\nint _message_id;\nint a;\nint b;\nint c;\nconst char* s;\nvoid* p;\ndouble f;\n", in_c);
+
+    /* The lone int of an inline-payload message is intptr_t on both sides. */
+    char* bump_c = struct_body_after(buf, "typedef struct Bump {");
+    char* bump_h = struct_body_after(header, "// Message: Bump\n");
+    ASSERT_NOT_NULL(bump_c);
+    ASSERT_NOT_NULL(bump_h);
+    ASSERT_STREQ(bump_c, bump_h);
+    ASSERT_STREQ("\nint _message_id;\nintptr_t by;\n", bump_c);
+
+    /* The helpers: a struct copy for the multi-field message, payload_int
+     * for the inline one. */
+    ASSERT_TRUE(strstr(header, "static inline void Sink_Mixed(Sink* actor, int a, const char* s, "
+                               "int b, double f, int c, void* p)") != NULL);
+    ASSERT_TRUE(strstr(header, "Mixed msg = { ._message_id = 0, .a = a, .s = s, .b = b, "
+                               ".f = f, .c = c, .p = p };") != NULL);
+    ASSERT_TRUE(strstr(header, "aether_send_message(actor, &msg, sizeof(msg));") != NULL);
+    ASSERT_TRUE(strstr(header, "static inline void Sink_Bump(Sink* actor, intptr_t by)") != NULL);
+    ASSERT_TRUE(strstr(header, "msg.payload_int = (intptr_t)by;") != NULL);
+
+    free(in_c);
+    free(in_h);
+    free(bump_c);
+    free(bump_h);
+    free(header);
+    free(buf);
 }

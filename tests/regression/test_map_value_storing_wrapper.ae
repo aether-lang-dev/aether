@@ -1,21 +1,24 @@
 // Regression: a heap string passed to a wrapper whose value parameter is
-// typed `string` and which stores it into a map must NOT be freed at the
-// caller's scope exit — the map slot would dangle and read back garbage.
+// typed `string` and which stores it into a map is owned by the map.
 //
 // (heap-string-map-value-use-after-free-multi-tu.md — surfaced by aeb's
 // build session, where `build.fail(ctx, reason)` stored the reason into a
 // nested status map and a later `reason_of` read it as garbage.)
 //
-// Root cause: `call_arg_escapes` judged a `string`-typed callee parameter
-// read-only, so the caller's heap local was never marked escaped and the
-// function-exit defer-free reclaimed it while `pr`'s `map.put` had already
-// stashed the pointer. Fix: interprocedural escape — look through the
-// callee body and see the param reach `map.put`'s `ptr` value parameter.
-// (Reported as multi-TU-only; in fact it reproduces single-TU with this
-// exact named-local-through-string-param-wrapper shape, which is what this
-// test pins.)
+// First root cause: `call_arg_escapes` judged a `string`-typed callee
+// parameter read-only, so the caller's heap local was freed at scope exit
+// while `pr`'s `map.put` had already stashed the pointer. The first fix
+// kept the caller's local alive for ever and left the map borrowing it,
+// so the program had to read the values back and free them by hand before
+// `map.free`. Now the wrapper keeps its parameter the way a closure does
+// (copy-on-keep): it takes a reference of its own on entry and the store
+// moves it into the map, which owns the value and releases it with the
+// entry; the caller's local is freed at its own scope exit as any other.
+// Nothing is freed twice and nothing is left to the program. The macOS
+// leaks gate runs this file.
 
 import std.map
+import std.mem
 import std.string
 
 extern exit(code: int)
@@ -34,6 +37,13 @@ reason_of(m: ptr, k: string) -> ptr {
 record_fail(m: ptr, label: string, code: int) {
     reason = string.concat("exit ", string.from_int(code))
     pr(m, label, reason)
+}
+
+fill_and_free(n: int) {
+    m = map.new()
+    record_fail(m, "java", n)
+    record_fail(m, "rust", n + 5)
+    map.free(m)
 }
 
 main() {
@@ -61,20 +71,24 @@ main() {
         exit(1)
     }
     println("  PASS: stored heap reasons survived the storing wrapper")
-
-    // The map BORROWS its string values: map.put on a value passed through
-    // a `string` parameter routes to the non-owning map_put_raw, because
-    // the codegen cannot prove a parameter is an owned heap allocation
-    // rather than a borrowed/literal one — and tagging a borrowed value
-    // "owned" would make map.free double-free it (the exact misroute
-    // test_proxy_opts_map_mount guards against). So the PROGRAM owns the
-    // reason strings and frees them here, via the handles read back above,
-    // before tearing the map down. record_fail transferred them in and did
-    // not free them, so r1/r2 are the only live references.
-    string.free(r1)
-    string.free(r2)
-    // Frees the interned keys + the bucket array/struct; the borrowed
-    // (now-freed) values are left untouched (map_put_raw => value_owned=0).
+    // The map owns the reasons: freeing it releases them.
     map.free(m)
+
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation, or a thread the system starts in
+    // the process, settles. So, warm, some window holds exactly steady
+    // (mem.steady_growth).
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 20 { fill_and_free(i); i = i + 1 }
+        grown = mem.steady_growth(|| {
+                i = 0
+                while i < 200 { fill_and_free(i); i = i + 1 }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: a window of 200 maps grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+    }
     println("=== all cases passed ===")
 }

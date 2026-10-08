@@ -47,7 +47,7 @@ main() {
         return
     }
 
-    growth = after -before
+    growth = after - before
     println("rss growth: ${growth} KB")
     if growth > 256 {
         println("FAIL: rss grew ${growth} KB across 50000 caught panics")

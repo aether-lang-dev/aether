@@ -58,6 +58,13 @@ aGVsbG8=
 hello
 ```
 
+## Base32
+
+`base32_encode` emits the standard RFC 4648 alphabet with `=` padding. The
+decoder accepts padded or unpadded input in either case, and rejects what no
+encoder produces: a final group of 1, 3 or 6 characters, padding that does not
+complete the last group to 8, or non-zero bits after the last byte.
+
 ## Exports
 
 `hex_encode`, `hex_decode`, `base64_encode`, `base64_encode_padded`,

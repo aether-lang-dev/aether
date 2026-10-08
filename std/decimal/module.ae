@@ -34,8 +34,9 @@
 // A decimal is an opaque `ptr`. Operations return NEW decimals and never
 // mutate their inputs; every result is the caller's to free with
 // decimal.free. Operations that can fail (division by zero, a malformed
-// string) return (value, err) with err == "" on success and value == null on
-// failure, so a failed call leaves nothing to free.
+// string, a result exponent outside the int range from multiply, shift, pow
+// or a division) return (value, err) with err == "" on success and
+// value == null on failure, so a failed call leaves nothing to free.
 
 import std.bignum
 import std.string
@@ -72,6 +73,18 @@ struct Dec {
 // library's DivisionPrecision default.
 division_precision() -> int {
     return 16
+}
+
+// An exponent is an int. Every operation that computes one does so in a long
+// and checks the result with exp_fits, so a value past the int range is this
+// error rather than an exponent wrapped to the opposite end.
+const EXP_RANGE_ERROR = "decimal exponent out of range"
+
+exp_fits(e: long) -> int {
+    if e > 2147483647 || e < -2147483647 - 1 {
+        return 0
+    }
+    return 1
 }
 
 // ---- construction --------------------------------------------------------
@@ -164,7 +177,9 @@ from_string(s: string) -> (ptr, string) {
         strbuilder.free(sb)
         return null, "decimal string has no digits"
     }
-    exp = 0 - frac_digits
+    // A long, checked below: the fraction digits and the e-part together
+    // can leave the int range an exponent is held in.
+    var exp: long = 0 - frac_digits
     if i < n {
         // exponent part: 'e' then optional sign then digits
         i = i + 1
@@ -188,7 +203,7 @@ from_string(s: string) -> (ptr, string) {
             }
             if edigits >= 9 {
                 strbuilder.free(sb)
-                return null, "decimal exponent out of range"
+                return null, EXP_RANGE_ERROR
             }
             evalue = evalue * 10 + (c - 48)
             edigits = edigits + 1
@@ -203,6 +218,10 @@ from_string(s: string) -> (ptr, string) {
         }
         exp = exp + evalue
     }
+    if exp_fits(exp) == 0 {
+        strbuilder.free(sb)
+        return null, EXP_RANGE_ERROR
+    }
     coef, err = bignum.from_decimal(strbuilder.finish(sb))
     if err != "" {
         return null, err
@@ -212,7 +231,7 @@ from_string(s: string) -> (ptr, string) {
         bignum.free(coef)
         coef = nc
     }
-    return dec_alloc(coef, exp), ""
+    return dec_alloc(coef, exp as int), ""
 }
 
 // ---- inspection ----------------------------------------------------------
@@ -329,10 +348,17 @@ subtract(a: ptr, b: ptr) -> ptr {
     return dec_alloc(v, e)
 }
 
-multiply(a: ptr, b: ptr) -> ptr {
+// Exact: the coefficients multiply and the exponents add. Fails only when
+// that sum leaves the int range.
+multiply(a: ptr, b: ptr) -> (ptr, string) {
     x = dv(a)
     y = dv(b)
-    return dec_alloc(bignum.multiply(x.value, y.value), x.exp + y.exp)
+    var e: long = x.exp
+    e = e + y.exp
+    if exp_fits(e) == 0 {
+        return null, EXP_RANGE_ERROR
+    }
+    return dec_alloc(bignum.multiply(x.value, y.value), e as int), ""
 }
 
 negate(d: ptr) -> ptr {
@@ -345,46 +371,83 @@ abs(d: ptr) -> ptr {
     return dec_alloc(bignum.abs(x.value), x.exp)
 }
 
-// d * 10^n, exactly: only the exponent moves.
-shift(d: ptr, n: int) -> ptr {
+// d * 10^n, exactly: only the exponent moves. Fails only when it moves
+// out of the int range.
+shift(d: ptr, n: int) -> (ptr, string) {
     x = dv(d)
-    return dec_alloc(bignum.clone(x.value), x.exp + n)
+    var e: long = x.exp
+    e = e + n
+    if exp_fits(e) == 0 {
+        return null, EXP_RANGE_ERROR
+    }
+    return dec_alloc(bignum.clone(x.value), e as int), ""
+}
+
+// For pow with n < 0: is 1 / d^|n| already sure to round to 0 at
+// division_precision() places, given `base`, the squared (so positive) base
+// partway through |n|? While bits of |n| remain, d^|n| is at least base
+// times factors that are at least 1 once base is, so base > 2 * 10^precision
+// suffices. The test is base >= 10^(precision + 1), read off the bit length
+// so that it never divides or rescales: a coefficient of `bits` bits is at
+// least 2^(bits - 1) >= 10^((bits - 1) * 3 / 10).
+underflows(base: ptr) -> int {
+    x = dv(base)
+    var log10_low: long = bignum.bit_length(x.value) - 1
+    log10_low = log10_low * 3 / 10 + x.exp
+    if log10_low > division_precision() {
+        return 1
+    }
+    return 0
 }
 
 // d^n by square-and-multiply. A negative n is 1 / d^(-n) rounded to
-// division_precision(), which is the one way this can fail: d == 0.
+// division_precision(). It fails for d == 0 with n < 0, and when an
+// exponent of the result leaves the int range.
 pow(d: ptr, n: int) -> (ptr, string) {
-    if n < 0 {
-        if is_zero(d) == 1 {
-            return null, "decimal zero raised to a negative power"
-        }
-        p, perr = pow(d, 0 - n)
-        if perr != "" {
-            return null, perr
-        }
-        one = from_int(1)
-        q, qerr = divide(one, p)
-        free(one)
-        free(p)
-        return q, qerr
+    if n < 0 && is_zero(d) == 1 {
+        return null, "decimal zero raised to a negative power"
+    }
+    // |n| in a long: the int -n overflows for n == INT_MIN.
+    var e: long = n
+    if e < 0 {
+        e = 0 - e
     }
     result = from_int(1)
     base = clone(d)
-    e = n
     while e > 0 {
         if (e & 1) == 1 {
-            nr = multiply(result, base)
+            nr, rerr = multiply(result, base)
             free(result)
+            if rerr != "" {
+                free(base)
+                return null, rerr
+            }
             result = nr
         }
         e = e >> 1
         if e > 0 {
-            nb = multiply(base, base)
+            nb, berr = multiply(base, base)
             free(base)
+            if berr != "" {
+                free(result)
+                return null, berr
+            }
             base = nb
+            if n < 0 && underflows(base) == 1 {
+                free(base)
+                free(result)
+                return new(0, 0 - division_precision()), ""
+            }
         }
     }
     free(base)
+    if n < 0 {
+        one = from_int(1)
+        q, qerr = divide(one, result)
+        free(one)
+        free(result)
+        return q, qerr
+    }
     return result, ""
 }
 
@@ -396,25 +459,39 @@ quo_rem(d: ptr, d2: ptr, precision: int) -> (ptr, ptr, string) {
     }
     x = dv(d)
     y = dv(d2)
-    scale = 0 - precision
-    e = x.exp - y.exp - scale
+    // The quotient's exponent (scale), the power of ten that aligns the
+    // operands (|e|) and the remainder's exponent are each computed in a
+    // long and checked, so operands too far apart fail rather than wrap.
+    var scale: long = precision
+    scale = 0 - scale
+    var e: long = x.exp
+    e = e - y.exp - scale
+    var align: long = e
+    var r_exp: long = scale + y.exp
+    if e < 0 {
+        align = 0 - e
+        r_exp = x.exp
+    }
+    if exp_fits(scale) == 0 || exp_fits(align) == 0 || exp_fits(r_exp) == 0 {
+        return null, null, EXP_RANGE_ERROR
+    }
     if e < 0 {
         // d = a*10^ea, d2 = b*10^eb: divide a by b*10^(-e)
-        s = pow10(0 - e)
+        s = pow10(align as int)
         bb = bignum.multiply(y.value, s)
         bignum.free(s)
         q = bignum.divide(x.value, bb)
         r = bignum.remainder(x.value, bb)
         bignum.free(bb)
-        return dec_alloc(q, scale), dec_alloc(r, x.exp), ""
+        return dec_alloc(q, scale as int), dec_alloc(r, r_exp as int), ""
     }
-    s = pow10(e)
+    s = pow10(align as int)
     aa = bignum.multiply(x.value, s)
     bignum.free(s)
     q = bignum.divide(aa, y.value)
     r = bignum.remainder(aa, y.value)
     bignum.free(aa)
-    return dec_alloc(q, scale), dec_alloc(r, scale + y.exp), ""
+    return dec_alloc(q, scale as int), dec_alloc(r, r_exp as int), ""
 }
 
 // d / d2 rounded half away from zero to `precision` fractional places.
@@ -425,12 +502,16 @@ divide_round(d: ptr, d2: ptr, precision: int) -> (ptr, string) {
     }
     // Compare 2*|r| against |d2| (both at the remainder's scale): a
     // remainder of at least half a unit in the last place rounds away.
+    // Both sides are shifted by d2's exponent, which leaves r's at
+    // min(0, e) of quo_rem, an exponent quo_rem has already range-checked.
+    var rel: long = dv(r).exp
+    rel = rel + precision - dv(d2).exp
     rv = bignum.abs(dv(r).value)
     rv2 = bignum.shift_left(rv, 1)
     bignum.free(rv)
-    r2 = dec_alloc(rv2, dv(r).exp + precision)
+    r2 = dec_alloc(rv2, rel as int)
     free(r)
-    ad2 = abs(d2)
+    ad2 = dec_alloc(bignum.abs(dv(d2).value), 0)
     c = compare(r2, ad2)
     free(r2)
     free(ad2)

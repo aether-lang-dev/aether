@@ -15,13 +15,9 @@
 #define MESSAGES_PER_ACTOR 5000
 
 typedef struct Node {
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     int next_id;
     int count;
 } Node;

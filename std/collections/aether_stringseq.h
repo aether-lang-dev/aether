@@ -204,12 +204,11 @@ StringSeq* string_seq_drop(StringSeq* s, int n);
  * parameters — exactly what codegen emits for `call(cb, ...)` and for
  * the `_closure_fn_N(env, ...)` definition.
  *
- * Ownership: the box (and the `env` it points at, when non-NULL) is
- * malloc'd by `_aether_box_closure` and OWNED BY THE CALLEE — the same
- * contract `list_add_closure_owned` / `list_free` use in
- * aether_collections.c. Each combinator below frees the env then the
- * box before returning, so a one-shot `string.seq_map(s, |x| ...)` does
- * not leak the closure.
+ * Ownership: the callback parameters are declared `@noescape` (#2523),
+ * so the box lives on the caller's stack (`_aether_box_closure_in`) and
+ * the env stays the caller's: it is read here only during the call and
+ * released by the caller once the combinator returns, as after a call to
+ * an Aether function that keeps nothing. No combinator frees either.
  *
  * Complexity: every combinator is a single iterative spine walk —
  * O(n) time, O(1) auxiliary stack (no recursion). `map`/`filter`

@@ -1,0 +1,52 @@
+// Regression: a closure local bound to a literal and later rebound to a
+// value the compiler cannot name (a struct field, a parameter, a call's
+// result) is called through its current value. The closure_var_map kept
+// the literal's id, since only a rebinding to another literal made the
+// entry ambiguous, so call(g) ran the first closure after `g = h.cb`.
+// A rebinding in a loop body before the call in source order is covered by
+// deciding this at discovery, not at the statement.
+
+extern exit(code: int)
+
+struct Holder { cb: fn }
+
+pick(f: fn) -> fn { return f }
+
+from_param(f: fn) -> int {
+    g = || { return 1 }
+    g = f
+    int v = call(g)
+    return v
+}
+
+in_loop(h: Holder) -> int {
+    total = 0
+    g = || { return 1 }
+    i = 0
+    while i < 3 {
+        int v = call(g)
+        total = total + v
+        g = h.cb
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    println("=== test_closure_rebind_dispatch ===")
+    h = Holder { cb: || { return 5 } }
+    g = || { return 0 }
+    g = h.cb
+    int v = call(g)
+    if v != 5 { println("  FAIL field rebinding dispatched to the first closure: ${v}"); exit(1) }
+    w = from_param(|| { return 9 })
+    if w != 9 { println("  FAIL parameter rebinding dispatched to the first closure: ${w}"); exit(1) }
+    k = || { return 2 }
+    k = pick(|| { return 3 })
+    int u = call(k)
+    if u != 3 { println("  FAIL call rebinding dispatched to the first closure: ${u}"); exit(1) }
+    t = in_loop(h)
+    if t != 1 + 5 + 5 { println("  FAIL loop rebinding: ${t} want 11"); exit(1) }
+    println("  PASS: call() dispatches through the current binding")
+    println("=== test_closure_rebind_dispatch passed ===")
+}

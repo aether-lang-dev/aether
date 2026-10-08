@@ -83,8 +83,23 @@ ZIP's higher deflate ratios):
 
 - absolute paths, `..` traversal, and backslash/colon tricks that become
   absolute or drive-qualified on Windows are refused;
-- `max_entries` / `max_entry_bytes` / `max_total_bytes` cap a zip-bomb;
-- `overwrite` (default off) controls replacing an existing file.
+- an entry is written at its *cleaned* name (`./a//b` is `a/b`), and a parent
+  directory of it that already exists in the destination as a symlink (on
+  Windows also a junction) is refused, so nothing is written through a link to
+  somewhere else;
+- `max_entries` / `max_entry_bytes` / `max_total_bytes` cap a zip-bomb. They
+  are checked against each entry's declared size, and the reader never returns
+  more than that size (see Integrity below);
+- `overwrite` (default off) controls replacing an existing file. With it on,
+  whatever is at the path (a file, or a symlink) is removed first, so the
+  write never follows a link.
+
+`ExtractOptions` is the same struct as `std.tar`'s, field for field, so the
+two modules import together and either module's options work with the other's
+`extract`. Two of its fields do not apply to zip yet: a zip entry is always
+extracted as a file or a directory, never as a symlink, so `allow_symlinks` has
+nothing to allow; and modes / mtimes are not restored, so `extract` refuses
+`preserve_mode` or `preserve_mtime` set to 1 instead of ignoring them.
 
 ## What it covers
 
@@ -92,17 +107,29 @@ ZIP's higher deflate ratios):
   Any other method is refused with a clear error, not silently mis-decoded.
 - **ZIP64**: 64-bit sizes, offsets and entry counts (archives over 4 GiB or
   past 65535 entries) via the ZIP64 EOCD record and locator.
-- **Integrity**: every `entry_read` verifies the entry's CRC-32 (and, for
-  deflate, the decompressed size) against the central directory, and returns an
-  error on mismatch.
+- **Integrity**: every `entry_read` verifies the entry's CRC-32 and its size
+  against the central directory, and returns an error on mismatch: a stored
+  entry's compressed and uncompressed sizes must be equal, and a deflate
+  entry must inflate to exactly its uncompressed size. So `entry_read` never
+  returns more bytes than `entry_size` reports. Inflation runs through
+  `std.zlib`'s `inflate_raw_max`, capped at the stated size, so a deflate
+  entry that lies about its size is stopped as it crosses the claim rather
+  than expanding in memory first.
+- **Locating the central directory**: the end-of-central-directory record is
+  the last one whose comment length reaches exactly the end of the buffer, so
+  an archive comment that happens to contain the record's signature cannot
+  hide the real one.
+- **ZIP64 range checks**: a 64-bit size or offset at or past 2^63 (negative
+  once read) refuses the archive in `open`; one beyond the buffer is an error
+  from `entry_read`, never narrowed into a wrong in-range offset.
 - **Metadata from the central directory**, not the local file headers (a local
   header may zero its sizes and defer them to a trailing data descriptor).
 
 ## What it refuses (clearly, not silently)
 
-Encrypted entries (general-purpose bit 0), multi-disk / spanned archives, and
-compression methods other than stored/deflate each return a descriptive error
-rather than garbage. A buffer with no EOCD record (not a zip, or truncated) is
+Encrypted entries (general-purpose bit 0), multi-disk / spanned archives,
+compression methods other than stored/deflate, and sizes or offsets that are
+out of range each return a descriptive error rather than garbage. A buffer with no EOCD record (not a zip, or truncated) is
 rejected by `open`.
 
 ## Not in scope (yet)

@@ -12,6 +12,16 @@ fn assert_format(locale: string, msg: string, args: ptr, expected: string) {
     }
 }
 
+// Like assert_format, but reports and returns 1 instead of exiting.
+fn check_format(locale: string, msg: string, args: ptr, expected: string) -> int {
+    res = format(locale, msg, args)
+    if string_equals(res, expected) != 1 {
+        print("FAIL: format(\"${locale}\", \"${msg}\") expected \"${expected}\", got \"${res}\"\n")
+        return 1
+    }
+    return 0
+}
+
 main() {
     print("=== std.message regression tests ===\n\n")
 
@@ -47,6 +57,30 @@ main() {
     assert_format("en", "{count, plural, =0 {No items} =1 {One item} one {# item} other {# items}}", args3, "2 items")
     map_free(args3)
     print("PASS: plural with explicit-value branches (=0, =1)\n")
+
+    // 3b. A count that is not a 32-bit integer selects by its number, never
+    // as 0. Each case is counted rather than exiting so one fix cannot hide
+    // another.
+    args3b = map_new()
+    plural_msg = "{n, plural, =0 {no items} =1 {one exactly} one {# item} other {# items}}"
+    bad = 0
+    map_put_raw(args3b, "n", "1.5") // a fraction is `other` in English
+    bad = bad + check_format("en", plural_msg, args3b, "1.5 items")
+    map_put_raw(args3b, "n", "3000000000") // past 32 bits
+    bad = bad + check_format("en", plural_msg, args3b, "3000000000 items")
+    map_put_raw(args3b, "n", "many") // not a number: `other`
+    bad = bad + check_format("en", plural_msg, args3b, "many items")
+    map_put_raw(args3b, "n", "1.0") // = 1 exactly, but "1.0" is `other`
+    bad = bad + check_format("en", plural_msg, args3b, "one exactly")
+    map_put_raw(args3b, "n", "0.5")
+    bad = bad + check_format("en", "{n, plural, =0.5 {half} other {# items}}", args3b, "half")
+    map_put_raw(args3b, "n", "2.5") // Russian fractions are `other`, not `many`
+    bad = bad + check_format("ru", "{n, plural, one {# яблоко} few {# яблока} many {# яблок} other {# яблока}}", args3b, "2.5 яблока")
+    map_free(args3b)
+    if bad != 0 {
+        exit(1)
+    }
+    print("PASS: plural with non-integer, large and non-numeric counts\n")
 
     // 4. Russian plural (few/many)
     args4 = map_new()

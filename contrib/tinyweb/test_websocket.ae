@@ -29,6 +29,7 @@ import std.map
 import std.map(map_new)
 import std.string
 import std.bytes
+import std.mem
 import std.spec
 
 const PORT = 8231
@@ -41,7 +42,7 @@ fn reply_for(msg: string) -> string {
     if string.contains(msg, "big") == 1 {
         // 200 'x' chars — safely over the 126 extended-length threshold.
         s = ""
-        for (i = 0; i < 200; i ++) { s = string.concat(s, "x") }
+        for (i = 0; i < 200; i++) { s = string.concat(s, "x") }
         return s
     }
     return "echo:${msg}"
@@ -64,6 +65,13 @@ actor WsActor {
 actor SchedHelper {
     state x = 0
     receive { Noop() -> { x = 1 } }
+}
+
+// One accept key and one unmasked payload; both die with this call.
+fn handshake_strings(key: string, masked: string, mask: string) -> int {
+    ak = tinyweb.ws_generate_accept_key(key)
+    up = ws_unmask(masked, mask, 4)
+    return string.length(ak) + string.length(up)
 }
 
 // ---- client-side WebSocket helpers (build/parse frames by hand) ----
@@ -92,7 +100,7 @@ fn send_client_frame(sock: ptr, payload: string) {
     bytes.set(buf, 3, 2)
     bytes.set(buf, 4, 3)
     bytes.set(buf, 5, 4)
-    for (i = 0; i < len; i ++) {
+    for (i = 0; i < len; i++) {
         b = string.char_at(payload, i)
         bytes.set(buf, 6 + i, b ^ mask_byte(i))
     }
@@ -108,7 +116,7 @@ fn read_exact(sock: ptr, n: int) -> string {
     for (got < n; got < n; got = got) {
         chunk, m, err = tcp.read_n(sock, n - got)
         if err != "" { return "" }
-        for (j = 0; j < m; j ++) {
+        for (j = 0; j < m; j++) {
             bytes.set(acc, got + j, string.char_at(chunk, j))
         }
         got = got + m
@@ -174,6 +182,49 @@ main() {
         }
     }
     conn_reason = "no websocket connection to the test server"
+
+    // The handshake and unmasking helpers hand back fresh strings the caller
+    // owns. Their externs were plain `-> string`, so the compiler took the
+    // results for borrowed ones and every upgrade and every masked frame
+    // leaked a buffer. Needs no connection: the inputs are built here.
+    spec.describe(fw, "tinyweb websocket strings") {
+        spec.it("derives the RFC 6455 accept key") callback {
+            key = string.concat("dGhlIHNhbXBsZSB", "ub25jZQ==")
+            spec.assert_str_eq(tinyweb.ws_generate_accept_key(key),
+                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "the RFC 6455 worked example")
+        }
+
+        spec.it("unmasks a client payload") callback {
+            masked = string.concat("ab", "cd")
+            mask = string.concat("wx", "yz")
+            plain = ws_unmask(masked, mask, 4)
+            spec.assert_eq(string.char_at(plain, 0), 22, "'a' ^ 'w'")
+            spec.assert_eq(string.char_at(plain, 3), 30, "'d' ^ 'z'")
+        }
+
+        // Where the allocator's count is exact, one of two windows of five
+        // hundred keys and payloads leaves the heap where it was (a leak
+        // grows both, a one-time allocation at most one).
+        spec.it("reclaims accept keys and unmasked payloads") callback {
+            key = string.concat("dGhlIHNhbXBsZSB", "ub25jZQ==")
+            masked = string.concat("ab", "cd")
+            mask = string.concat("wx", "yz")
+            spec.assert_eq(handshake_strings(key, masked, mask), 32, "28 key bytes and 4 payload bytes")
+            if mem.heap_in_use_exact() {
+                before = mem.heap_in_use()
+                for (i = 0; i < 500; i++) {
+                    _n = handshake_strings(key, masked, mask)
+                }
+                mid = mem.heap_in_use()
+                for (i = 0; i < 500; i++) {
+                    _n = handshake_strings(key, masked, mask)
+                }
+                after = mem.heap_in_use()
+                spec.assert_true(mid - before == 0 || after -mid == 0,
+                    "500 rounds grew the heap by ${mid - before}, then ${after - mid} bytes")
+            }
+        }
+    }
 
     // The frames below travel over ONE socket in order, so each `it` runs a
     // complete send/receive exchange rather than splitting one exchange

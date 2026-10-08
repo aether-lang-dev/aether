@@ -1,0 +1,70 @@
+// Regression (#2512): an escape means the same in an interpolated string as
+// in a plain literal, wherever it sits relative to the interpolated parts.
+// The lexer decoded the text before the first interpolation, the parser
+// decoded it again, and codegen read the parser's output as escapes a third
+// time, so an escaped backslash was lost: "a\\0b ${n}" held a NUL (length
+// 2), and "\\u0000 ${n}" came out as "u0000 7". Each case builds the
+// interpolated form around an empty `e`, which adds nothing, so it must
+// equal the plain literal byte for byte: in front of, behind and between
+// interpolations.
+
+import std.string
+
+extern exit(code: int)
+
+// `got` must have the bytes of `want`.
+same(got: string, want: string, what: string) -> int {
+    if string.equals(got, want) == 1 { return 0 }
+    println("  FAIL ${what}: got ${string.length(got)} bytes, want ${string.length(want)}")
+    return 1
+}
+
+main() {
+    e = string.substring("x", 0, 0) // empty, and not foldable
+    n = 7
+    f = 0
+
+    // An escaped backslash before what would otherwise be an escape letter.
+    f = f + same("a\\0b${e}", "a\\0b", "escaped backslash before 0, in front")
+    f = f + same("${e}a\\0b", "a\\0b", "escaped backslash before 0, behind")
+    f = f + same("${e}a\\0b${e}", "a\\0b", "escaped backslash before 0, between")
+    f = f + same("\\u0000${e}", "\\u0000", "escaped backslash before u, in front")
+    f = f + same("${e}\\u0000", "\\u0000", "escaped backslash before u, behind")
+    f = f + same("a\\nb${e}", "a\\nb", "escaped backslash before n, in front")
+    f = f + same("${e}a\\nb", "a\\nb", "escaped backslash before n, behind")
+    f = f + same("a\\x41b${e}", "a\\x41b", "escaped backslash before x, in front")
+    f = f + same("${e}a\\x41b", "a\\x41b", "escaped backslash before x, behind")
+    f = f + same("C:\\\\${e}dir\\\\f", "C:\\\\dir\\\\f", "two escaped backslashes")
+    f = f + same("${e}\\", "\\", "an escaped backslash at the end")
+
+    // Every escape, in front of and behind an interpolation.
+    f = f + same("a\"b${e}", "a\"b", "quote, in front")
+    f = f + same("${e}a\"b", "a\"b", "quote, behind")
+    f = f + same("a\nb${e}", "a\nb", "newline, in front")
+    f = f + same("${e}a\nb", "a\nb", "newline, behind")
+    f = f + same("a\tb${e}", "a\tb", "tab, in front")
+    f = f + same("${e}a\tb", "a\tb", "tab, behind")
+    f = f + same("a\rb${e}", "a\rb", "carriage return")
+    f = f + same("a\x41b${e}", "a\x41b", "hex escape, in front")
+    f = f + same("${e}a\x41b", "a\x41b", "hex escape, behind")
+    f = f + same("a\x4${e}", "a\x4", "one-digit hex escape")
+    f = f + same("a\xg${e}", "a\xg", "x without hex digits")
+    f = f + same("a\101b${e}", "a\101b", "octal escape, in front")
+    f = f + same("${e}a\101b", "a\101b", "octal escape, behind")
+    f = f + same("a\qb${e}", "a\qb", "unknown escape")
+    f = f + same("a%db%%${e}", "a%db%%", "percent signs")
+    f = f + same("a\${e}b${e}", "a\${e}b", "escaped dollar starts no interpolation")
+    // A NUL is a byte of the text in both forms alike (#2520).
+    f = f + same("a\0b${e}", "a\0b", "NUL escape")
+
+    // The interpolated value lands where it should around the escapes.
+    f = f + same("a\\0b ${n}", string.concat("a\\0b ", "7"), "escaped backslash, then a value")
+    f = f + same("\\u0000 ${n}", string.concat("\\u0000 ", "7"), "escaped backslash before u, then a value")
+    f = f + same("${n}\\${n}", string.concat("7\\", "7"), "escaped backslash between values")
+
+    if f > 0 {
+        println("FAIL: ${f} cases differ")
+        exit(1)
+    }
+    println("All PASS")
+}

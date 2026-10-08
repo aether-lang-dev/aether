@@ -43,7 +43,8 @@ sub_str(a: string, b: string) -> string {
 mul_str(a: string, b: string) -> string {
     x = parsed(a)
     y = parsed(b)
-    r = decimal.multiply(x, y)
+    r, err = decimal.multiply(x, y)
+    spec.assert_ok(err, "${a} * ${b}")
     decimal.free(x)
     decimal.free(y)
     return str(r)
@@ -86,6 +87,13 @@ pow_str(a: string, n: int) -> string {
     spec.assert_ok(err, "${a} ^ ${n}")
     decimal.free(x)
     return str(r)
+}
+
+// d * 10^n; an exponent overflow fails the test.
+shifted(d: ptr, n: int) -> ptr {
+    r, err = decimal.shift(d, n)
+    spec.assert_ok(err, "shift by ${n}")
+    return r
 }
 
 cmp(a: string, b: string) -> int {
@@ -139,7 +147,8 @@ main() {
                 "123456789012345678901234567890000000000000000000000", "past 64 bits")
             a = parsed("1.10")
             b = parsed("3")
-            p = decimal.multiply(a, b)
+            p, perr = decimal.multiply(a, b)
+            spec.assert_ok(perr, "1.10 * 3")
             spec.assert_eq(decimal.exponent(p), -2, "product exponent is the sum")
             decimal.free(a)
             decimal.free(b)
@@ -150,8 +159,8 @@ main() {
             a = parsed("-1.5")
             spec.assert_str_eq(str(decimal.negate(a)), "1.5", "negate")
             spec.assert_str_eq(str(decimal.abs(a)), "1.5", "abs of negative")
-            spec.assert_str_eq(str(decimal.shift(a, 2)), "-150", "shift left two")
-            spec.assert_str_eq(str(decimal.shift(a, -3)), "-0.0015", "shift right three")
+            spec.assert_str_eq(str(shifted(a, 2)), "-150", "shift left two")
+            spec.assert_str_eq(str(shifted(a, -3)), "-0.0015", "shift right three")
             decimal.free(a)
             b = parsed("2")
             spec.assert_str_eq(str(decimal.abs(b)), "2", "abs of positive")
@@ -170,6 +179,55 @@ main() {
             spec.assert_err(err, "0^-1 is an error")
             spec.assert_null(r, "0^-1 yields no value")
             decimal.free(z)
+        }
+
+        spec.it("reports an exponent that leaves the int range") callback {
+            imin = -2147483647 - 1
+            big = decimal.new(1, 2147483647)
+            tiny = decimal.new(1, -2147483647)
+            up, uerr = decimal.shift(big, 1)
+            spec.assert_err(uerr, "1e2147483647 shifted up one")
+            spec.assert_null(up, "an overflowed shift yields no value")
+            sq, sqerr = decimal.multiply(tiny, tiny)
+            spec.assert_err(sqerr, "1e-2147483647 squared")
+            spec.assert_null(sq, "an overflowed product yields no value")
+            q, qerr = decimal.divide(big, tiny)
+            spec.assert_err(qerr, "1e2147483647 / 1e-2147483647")
+            spec.assert_null(q, "an overflowed quotient yields no value")
+            // The int range itself is still usable, to both ends.
+            low = shifted(tiny, -1)
+            spec.assert_eq(decimal.exponent(low), imin, "down to INT_MIN still fits")
+            under, underr = decimal.shift(low, -1)
+            spec.assert_err(underr, "below INT_MIN")
+            spec.assert_null(under, "an underflowed shift yields no value")
+            unit, merr = decimal.multiply(big, tiny)
+            spec.assert_ok(merr, "exponents that cancel")
+            spec.assert_str_eq(str(unit), "1", "1e2147483647 * 1e-2147483647")
+            decimal.free(low)
+            decimal.free(big)
+            decimal.free(tiny)
+        }
+
+        spec.it("raises to INT_MIN without recursing on its negation") callback {
+            imin = -2147483647 - 1
+            spec.assert_str_eq(pow_str("1", imin), "1", "1^INT_MIN")
+            spec.assert_str_eq(pow_str("-1", imin), "1", "(-1)^INT_MIN is an even power")
+            spec.assert_str_eq(pow_str("2", imin), "0", "2^INT_MIN rounds to zero")
+            spec.assert_str_eq(pow_str("-10", imin), "0", "(-10)^INT_MIN rounds to zero")
+            // The early zero matches the division on either side of the cutoff.
+            spec.assert_str_eq(pow_str("2", -54), "0.0000000000000001", "2^-54 still rounds up")
+            spec.assert_str_eq(pow_str("2", -64), "0", "2^-64 rounds to zero")
+            // 0.1^INT_MIN is 10^(2^31), whose exponent is past an int.
+            tenth = decimal.new(1, -1)
+            r, err = decimal.pow(tenth, imin)
+            spec.assert_err(err, "0.1^INT_MIN")
+            spec.assert_null(r, "an overflowed power yields no value")
+            decimal.free(tenth)
+            big = decimal.new(1, 2147483647)
+            sq, sqerr = decimal.pow(big, 2)
+            spec.assert_err(sqerr, "(1e2147483647)^2")
+            spec.assert_null(sq, "an overflowed power yields no value")
+            decimal.free(big)
         }
     }
 
@@ -251,7 +309,8 @@ main() {
             d2 = parsed("-0.037")
             q, r, err = decimal.quo_rem(d, d2, 3)
             spec.assert_ok(err, "quo_rem")
-            prod = decimal.multiply(q, d2)
+            prod, merr = decimal.multiply(q, d2)
+            spec.assert_ok(merr, "q * d2")
             back = decimal.add(prod, r)
             spec.assert_true(decimal.equals(back, d), "q * d2 + r == d (got ${decimal.to_string(back)})")
             decimal.free(q)

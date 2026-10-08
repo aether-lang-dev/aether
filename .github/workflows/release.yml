@@ -521,7 +521,7 @@ jobs:
         # websockets 9.1, which the probe rejects for good reason -- it passes
         # asyncio's removed loop= argument and dies mid-handshake on Python
         # 3.10+. pip gets a current one.
-        pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+        pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
     # -- Windows -- MinGW-w64 via MSYS2 ---
     - name: Setup (Windows)

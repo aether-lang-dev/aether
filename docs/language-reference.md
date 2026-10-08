@@ -227,7 +227,9 @@ is one 256-bit register and each operation one instruction; without AVX2 it
 is two four-lane halves, which costs what two `f32x4` operations cost. The
 same source runs either way, and gives the same results, so a kernel written
 eight-wide is never slower than the four-lane one and runs twice as wide
-where AVX2 is on.
+where AVX2 is on. On Windows an AVX build is assembled with
+`-Wa,-muse-unaligned-vector-move`, because GCC there can spill a 256-bit
+value with an aligned move to a stack that is only 16-byte aligned (#2476).
 
 See [`std/lanes/README.md`](../std/lanes/README.md) for the full surface and
 the measured speedup.
@@ -283,6 +285,28 @@ if id_count > 8 {
 ```
 
 This is the stack-buffer-with-heap-fallback idiom (`T buf[N]; T* p = buf; if (n > N) p = malloc(...)`). Only a *named array* decays; an array *literal* initializer (`x = [1, 2, 3]`) still binds a real array. To keep the array type, annotate the binding explicitly (`x: byte[128] = ...`).
+
+**A fixed-size array is a value.** A parameter typed `int[3]` is the callee's own copy of the caller's elements, so a write to it, by the callee or by a closure in it, stays in the callee, and `xs.len` is the declared length; the argument must be an array of exactly that length (a slice parameter, `int[]`, takes any length). Binding an array to a variable that already holds one of the same length copies its elements (`a = b`); an array keeps the length of its first binding, so binding one of another length is a type error. An element of a `const` array cannot be written: copy the table into an array of your own first.
+
+```aether,run
+sum3(xs: int[3]) -> int {
+    xs[0] = 100            // the callee's copy
+    return xs[0] + xs[1] + xs[2]
+}
+
+main() {
+    a = [1, 2, 3]
+    b = [7, 8, 9]
+    println("${sum3(a)} ${a[0]}")
+    a = b                  // copies b's elements
+    b[0] = 0
+    println("${a[0]} ${b[0]}")
+}
+```
+```output
+105 1
+7 0
+```
 
 **An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
 
@@ -416,6 +440,14 @@ big = 1_000_000
 ```
 
 All numeric literal formats work with bitwise operators and in any expression context.
+
+### String Literals
+
+A string literal is double-quoted. Its escapes are decoded once, in a plain literal and in the text of an interpolated one alike: `\n`, `\t`, `\r`, `\\`, `\"`, `\xN` / `\xNN` (one or two hex digits), `\N` to `\NNN` (octal), and any other `\c` is the character `c`.
+
+A literal may hold a NUL byte (`"a\0b"`, `"a\x00b"`, `"a\0b ${n}"`), and it keeps every byte: `string.length("a\0b")` is 3, `==` compares all of its bytes, and it is a whole key in a map or set, a whole value for `std.json` and `std.fs`, and a whole operand of `string.concat`, in a `match` arm and in a function-clause pattern, as a string built at run time is. The compiler emits such a literal as a static string that carries its length; it is never freed, and `string.free` on it is a no-op. A literal without a NUL stays the plain C string it always was, at no cost.
+
+One boundary keeps the C view: a C extern whose parameter is `string` receives the literal's bytes up to the first NUL, since that is all a `const char*` can carry; a parameter declared `@aether string` receives the whole string. `print` and `println` write all of the literal's bytes.
 
 ---
 
@@ -907,7 +939,7 @@ match (value) {
 
 ### String Matching
 
-Strings are compared by content (via `strcmp`), so string literal arms work correctly:
+Strings are compared by content (length and bytes), so string literal arms work correctly:
 
 ```aether,fragment
 match (command) {
@@ -2350,7 +2382,7 @@ receive {
 | `<=` | Less or equal | `a <= b` |
 | `>=` | Greater or equal | `a >= b` |
 
-> **String comparison:** When both operands are strings, `==` and `!=` compare by content (using `strcmp` in the generated C), not by pointer identity. Two strings with the same content are always equal regardless of how they were allocated.
+> **String comparison:** When both operands are strings, `==` and `!=` compare by content, not by pointer identity: two strings are equal when they have the same length and the same bytes, embedded NULs included, however they were allocated. `<`, `<=`, `>` and `>=` order them byte by byte over their whole length, a string after any proper prefix of it. A string comparison in a function-clause guard (`f(s) when s == "bob"`) works the same way.
 
 ### Bitwise Operators
 
@@ -2671,6 +2703,22 @@ pqsort(a: ptr, n: size_t, es: size_t, cmp: const ptr, lr: size_t, rr: size_t) { 
 
 Passing a plain `ptr` where the C conversion is safe stays allowed at call sites; only the *emitted prototype* carries the exact spelling. C ABI scalar aliases (`size_t`, `uint64_t`, …) emit their exact C name the same way. `const`-qualification survives into the generated C so the C compiler diagnoses writes; Aether-side write rejection is not (yet) enforced.
 
+### An extern's effects are unknown
+
+A C function's body is not visible to the compiler, and its declaration does not narrow what it does: it may write through any pointer it is given and any state of its own (a reader of stdin, a random generator with no handle parameter). So a call of an extern is evaluated ahead of any later operand that calls anything or reads memory through a pointer, see **Evaluation order** under [Built-in Functions](#built-in-functions); `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order, and `pair(strbuilder.append(b, "xy"), strbuilder.length(b))` reads the length after the append.
+
+### `@noescape` the extern uses this parameter only during the call
+
+A closure passed to an extern is a callback the C side may keep (an event handler, a server route, a timer), so by default the compiler never releases its environment after the call: freeing it would be a use after free if the callee stored the closure. A parameter marked `@noescape` says the function uses the argument only during the call, neither storing it, handing it to another thread, nor freeing it. The caller then keeps the closure's environment and releases it once the call returns, exactly as after a call to an Aether function that keeps nothing: a literal's right after the call, a local's at the end of its scope. A `ptr` slot receives a box built on the caller's stack instead of a heap one, and a wrapper that forwards its own `fn` parameter to such a slot (`fs.walk` into `fs_walk_raw`) keeps nothing either.
+
+```aether,fragment
+extern string_seq_each(s: *StringSeq, f: @noescape ptr)     // calls f per element, keeps nothing
+extern run_now(cb: @noescape fn) -> int                      // by value, same contract
+extern register_handler(cb: fn)                              // stored: no mark, the env lives on
+```
+
+It is only valid on `ptr` and `fn` parameters (a `string` parameter is borrowed unless `@retain` says otherwise). The C function must not free the box or the environment. The std callbacks that carry it: the string seq combinators (`seq_each`, `seq_map`, `seq_filter`, `seq_reduce`, `seq_zip_each`), `fs.walk`'s callback, `string_list_sort`'s comparator and the `std.mem` function-pointer shims. Externs that store the callback (`observe`, `worker.run`, the HTTP server handlers) stay unmarked.
+
 ### `@extern("c_name")` bind to a renamed C symbol
 
 When the Aether-side name should differ from the C symbol (for example, to expose a clean module surface without trailing `_raw` suffixes), prefix the declaration with `@extern("c_symbol")`:
@@ -2901,7 +2949,7 @@ main() {
 }
 ```
 
-Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, `bool`) and `string`. The codegen lowers `string == string` to `strcmp(...) == 0` automatically, so the synthesizer doesn't need a special path.
+Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, `bool`) and `string`. The codegen lowers `string == string` to a content comparison automatically, so the synthesizer doesn't need a special path.
 
 `@derive(format)` / `clone` / `hash` and nested-struct fields surface a precise compile-time diagnostic, they're explicitly out of v1 scope and tracked for follow-up commits.
 
@@ -2984,6 +3032,8 @@ age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
 
+The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation. A `${s}` segment writes the string `s` by its length, so a value holding a NUL goes in whole; `print` and `println` write a string value the same way.
+
 Interpolated strings produce a `ptr` (heap-allocated C string) when used as values:
 
 ```aether,fragment
@@ -3012,6 +3062,56 @@ interpolations pass their segments straight to the formatting call. Once a
 segment calls a function, sends a message, or reads varargs, the compiler
 evaluates every segment into a temporary in source order first, so the
 order the C compiler chooses for the call's arguments can no longer show.
+A segment that writes a variable (`${i++}`, `${n = n + 1}`) another segment
+uses is evaluated ahead the same way.
+
+The same holds for every other list of operands: a call's arguments (a
+module call's too, and named arguments in the order written), the two
+sides of a binary operator, the indexes of an assignment's target and
+then its value, the fields of a struct literal or a message, the elements
+of an array literal, and the values of a multi-value `return` are
+evaluated left to right. An operand is evaluated first, into a temporary,
+when a later one depends on it: one writes a variable the other uses
+(`f(i++, i)`, `i++ + i++`, `arr[i++] = i`), or one makes a call that can
+change what the other reads. A closure literal reads the variables it
+captures where it stands, so `f(i++, || { return i })` makes the closure
+after the step. A call can change a module global, a variable it shares
+with a closure it runs, and memory it is handed by reference; what a
+function of the program writes is read off its body. A call whose body
+the compiler cannot see is opaque: a C extern, a C function pointer, a
+closure, a message send, and a function of the program that makes such a
+call. An opaque call may write anything, so it is evaluated ahead of every
+later operand that calls anything, reads a module global or a variable
+shared with a closure, or reads memory through a pointer, a field or an
+index. A list with no such pair compiles as written: operands that read
+only plain locals and literals stay inline, beside a call or not. An array
+literal stored into an array that already exists is evaluated whole before
+it is stored:
+
+```aether,run
+pair(a: int, b: int) -> int { return a * 10 + b }
+
+main() {
+    i = 0
+    println("${pair(i++, i)}")
+    a = [1, 2, 3]
+    a = [a[2], a[1], a[0]]
+    println("${a[0]} ${a[1]} ${a[2]}")
+    arr = [0, 0]
+    k = 0
+    arr[k++] = k
+    println("${arr[0]} ${arr[1]}")
+}
+```
+```output
+1
+3 2 1
+1 0
+```
+
+The target of a compound assignment (`a[i] += v`) is read and then
+written, so a write inside it (`a[i++] += v`) is refused rather than run
+twice.
 
 ### Heredoc strings
 

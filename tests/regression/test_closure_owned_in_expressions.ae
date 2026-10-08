@@ -1,0 +1,106 @@
+// Regression (#2507): a closure handed over by a call and used inside a
+// larger expression, or thrown away, is freed; a local that hands its value
+// on inside a condition or a `defer` still frees the closures it is bound
+// to afterwards.
+//
+// `x = take(make_counter(p))` passed a closure that only the call held to
+// a function that keeps nothing, and nothing freed it after the call; nor
+// was a discarded `make_counter(p)`. A local handed on in a condition or a
+// `defer` kept every env it was ever bound to. The env, the cell it holds
+// and the string it captured leaked on every call.
+//
+// The check measures what the process holds (std.mem's heap_in_use) over
+// two later windows of the same work, after a warm-up: work that leaks
+// nothing holds steady in at least one of them. tests/integration/
+// closure_local_env_free counts envs and cells exactly. The check runs
+// where the heap count is exact (mem.heap_in_use_exact); elsewhere the
+// macOS leaks gate covers this program. Strings are built
+// from parameters, because string.concat of two literals folds to a literal
+// that owns nothing.
+
+import std.mem
+import std.string
+import std.list
+
+extern exit(code: int)
+
+const PER_ROUND = 200
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+make_counter(p: string) -> fn {
+    s = string.concat(p, "-counter")
+    n = 0
+    return || {
+        n = n + string.length(s)
+        return n
+    }
+}
+
+take(f: fn) -> int {
+    int a = call(f)
+    return a
+}
+
+stash_ok(l: ptr, f: fn) -> bool {
+    _ = list.add(l, f)
+    return true
+}
+
+in_expressions(p: string) -> int {
+    x = take(make_counter(p))
+    total = x + take(make_counter(p)) * 2
+    make_counter(p)
+    _ = make_counter(p)
+    return total
+}
+
+in_condition_and_defer(l: ptr, p: string) -> int {
+    s = string.concat(p, "-local")
+    acc = 0
+    g = || { acc = acc + 1 }
+    if stash_ok(l, g) {
+        acc = acc + 10
+    }
+    g = || { acc = acc + string.length(s) }
+    defer stash_ok(l, g)
+    g()
+    g = || { acc = acc + 100 }
+    g()
+    return acc
+}
+
+fn one_round(p: string) {
+    l = list.new()
+    i = 0
+    while i < PER_ROUND {
+        check(in_expressions(p) == 30, "owned closures in expressions")
+        check(in_condition_and_defer(l, p) == 118, "hand-offs in a condition and a defer")
+        i = i + 1
+    }
+    list.free(l)
+}
+
+main() {
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    // A leak grows the exact count in every window of rounds; work that
+    // leaks nothing holds it steady once warm. So warm up, then require some
+    // later window to hold steady (mem.steady_growth).
+    one_round("ab")
+    one_round("ab")
+    grown = mem.steady_growth(|| {
+            one_round("ab")
+            one_round("ab")
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

@@ -127,14 +127,42 @@ and is undefined there, exactly as in C.
 `mem.heap_in_use()` is the bytes the C allocator has handed out and not taken
 back, read from the allocator's own statistics: every malloc in the process
 counts, Aether's (`heap.new`, strings, closure environments, collections) and
-the ones C code reached through an extern makes. It is exact to the
-allocation, so a same-process leak check works on every platform, locally and
-in seconds, not only under a leak tool on one CI leg.
+the ones C code reached through an extern makes, so a same-process leak
+check can run locally and in seconds, not only under a leak tool on one CI
+leg.
 
 Run the workload a few rounds and compare two later rounds: the growth is
-what a round leaks. Allocators keep a small cache of freed blocks that some
-count as in use, so a single before/after is not zero even when nothing
-leaks; between steady rounds it is.
+what a round leaks. A single before/after is not zero even when nothing
+leaks. On Windows (a walk of the process's heaps) and under a sanitizer's
+allocator the count is exactly the blocks the program holds, and
+`mem.heap_in_use_exact()` is true: between steady rounds the growth is zero
+unless something leaks. glibc, macOS and FreeBSD report from allocator
+statistics that also count freed blocks parked in per-thread caches; on a
+workload that churns many allocations those settle over many rounds, so two
+rounds there can differ by a few kilobytes without a leak. A Windows program
+running under Wine is in the same position: Wine's heap walk counts a
+low-fragmentation group as one block of its whole size, however few of its
+slots are in use. Where
+`heap_in_use_exact()` is false, a leak check that must not misfire belongs to
+a leak tool (`leaks`, valgrind, LeakSanitizer).
+
+A thread holds heap blocks of its own while it lives, the OS's and the C
+runtime's (about 1 KB on Windows), so the count moves when one starts,
+whoever starts it, and on Windows the system starts thread-pool workers in a
+process. `mem.thread_epoch()` changes whenever a thread starts or ends.
+`mem.steady_growth(round, tries)` runs a round of work up to `tries` times,
+each run between two reads, compares only the runs in which no thread
+started or ended, and returns 0 as soon as one leaves the count exactly as
+it found it. A leak grows every run, so the answer is then what a run
+leaks; a one-time allocation, or a buffer still growing to its high-water
+mark, lands in some runs and settles.
+
+```aether,fragment
+if mem.heap_in_use_exact() {
+    grown = mem.steady_growth(|| { work(200) }, 5)
+    if grown != 0 { println("a round of work leaked ${grown} bytes") }
+}
+```
 
 ```aether,run
 import std.mem
@@ -227,5 +255,5 @@ endian pairs `get_u16_le` through `set_u64_be`; `bits_of_float`,
 `float_from_bits`, `clz32`, `clz64`, `udiv64_32`; `copy`, `move`, `compare`,
 `set`, `copy_at`, `move_at`, `fill_at`, `compare_at`; `get_byte_sz`,
 `set_byte_sz`; `ptr_to_long`, `long_to_ptr`; `call_fn3_int`, `call_fn3_void`,
-`call_fn2_void`; `heap_in_use`; the slice forms `read_u16_le` through
+`call_fn2_void`; `heap_in_use`, `heap_in_use_exact`, `thread_epoch`, `steady_growth`; the slice forms `read_u16_le` through
 `write_u64_be`, `copy_slice`, `fill_slice` and `compare_slice`.

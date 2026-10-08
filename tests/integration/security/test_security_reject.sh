@@ -7,6 +7,12 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# A directory of this run's own: fixed /tmp names let two sweeps on one
+# machine overwrite each other's program and binary, and a case then ran
+# the other sweep's build.
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+
 pass=0
 fail=0
 
@@ -14,7 +20,7 @@ run_reject() {
     case_name="$1"
     src_file="$2"
     if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" \
-        -o /tmp/ae_sec_out 2>/dev/null; then
+        -o $T/ae_sec_out 2>/dev/null; then
         echo "  [FAIL] $case_name should have been rejected"
         fail=$((fail + 1))
     else
@@ -27,7 +33,7 @@ run_accept() {
     case_name="$1"
     src_file="$2"
     if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" \
-        -o /tmp/ae_sec_out 2>/dev/null; then
+        -o $T/ae_sec_out 2>/dev/null; then
         echo "  [PASS] $case_name correctly accepted"
         pass=$((pass + 1))
     else
@@ -41,12 +47,12 @@ run_accept_and_exec() {
     src_file="$2"
     expected="$3"
     if ! AETHER_HOME="" "$ROOT/build/ae" build "$src_file" \
-        -o /tmp/ae_sec_out 2>/dev/null; then
+        -o $T/ae_sec_out 2>/dev/null; then
         echo "  [FAIL] $case_name compile failed"
         fail=$((fail + 1))
         return
     fi
-    out=$(/tmp/ae_sec_out 2>/dev/null)
+    out=$($T/ae_sec_out 2>/dev/null)
     if echo "$out" | grep -qF "$expected"; then
         echo "  [PASS] $case_name"
         pass=$((pass + 1))
@@ -60,15 +66,15 @@ run_accept_and_exec() {
 # ---------------------------------------------------------------
 # Rejection: undefined variables
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_undef.ae << 'EOF'
+cat > $T/ae_sec_undef.ae << 'EOF'
 main() { println(nosuchvar) }
 EOF
-run_reject "undefined variable" /tmp/ae_sec_undef.ae
+run_reject "undefined variable" $T/ae_sec_undef.ae
 
 # ---------------------------------------------------------------
 # Rejection: use hidden var
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_hide_use.ae << 'EOF'
+cat > $T/ae_sec_hide_use.ae << 'EOF'
 extern println(s: string)
 main() {
     secret = "abc"
@@ -78,12 +84,12 @@ main() {
     }
 }
 EOF
-run_reject "use hidden variable" /tmp/ae_sec_hide_use.ae
+run_reject "use hidden variable" $T/ae_sec_hide_use.ae
 
 # ---------------------------------------------------------------
 # Rejection: write to hidden var
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_hide_write.ae << 'EOF'
+cat > $T/ae_sec_hide_write.ae << 'EOF'
 main() {
     secret = "abc"
     {
@@ -92,12 +98,12 @@ main() {
     }
 }
 EOF
-run_reject "write hidden variable" /tmp/ae_sec_hide_write.ae
+run_reject "write hidden variable" $T/ae_sec_hide_write.ae
 
 # ---------------------------------------------------------------
 # Rejection: sealed-out variable
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_seal.ae << 'EOF'
+cat > $T/ae_sec_seal.ae << 'EOF'
 extern println(s: string)
 main() {
     allowed = 1
@@ -108,12 +114,12 @@ main() {
     }
 }
 EOF
-run_reject "sealed-out variable" /tmp/ae_sec_seal.ae
+run_reject "sealed-out variable" $T/ae_sec_seal.ae
 
 # ---------------------------------------------------------------
 # Rejection: redeclare hidden name in same scope
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_hide_redecl.ae << 'EOF'
+cat > $T/ae_sec_hide_redecl.ae << 'EOF'
 main() {
     x = 1
     {
@@ -122,7 +128,7 @@ main() {
     }
 }
 EOF
-run_reject "redeclare hidden name" /tmp/ae_sec_hide_redecl.ae
+run_reject "redeclare hidden name" $T/ae_sec_hide_redecl.ae
 
 # ---------------------------------------------------------------
 # Accept: long identifier (10000 chars)
@@ -132,8 +138,8 @@ run_reject "redeclare hidden name" /tmp/ae_sec_hide_redecl.ae
     python3 -c "print('a' * 10000, end='')" 2>/dev/null \
         || printf '%10000s' | tr ' ' 'a'
     printf ' = 42\nprintln("ok")\n}\nextern println(s: string)\n'
-} > /tmp/ae_sec_longid.ae
-run_accept "10000-char identifier" /tmp/ae_sec_longid.ae
+} > $T/ae_sec_longid.ae
+run_accept "10000-char identifier" $T/ae_sec_longid.ae
 
 # ---------------------------------------------------------------
 # Accept: long string literal (10000 chars)
@@ -143,13 +149,13 @@ run_accept "10000-char identifier" /tmp/ae_sec_longid.ae
     python3 -c "print('x' * 10000, end='')" 2>/dev/null \
         || printf '%10000s' | tr ' ' 'x'
     printf '"\nprintln("ok")\n}\n'
-} > /tmp/ae_sec_longstr.ae
-run_accept "10000-char string literal" /tmp/ae_sec_longstr.ae
+} > $T/ae_sec_longstr.ae
+run_accept "10000-char string literal" $T/ae_sec_longstr.ae
 
 # ---------------------------------------------------------------
 # Accept+run: string with embedded quotes
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_quotes.ae << 'EOF'
+cat > $T/ae_sec_quotes.ae << 'EOF'
 extern println(s: string)
 import std.string
 extern exit(code: int)
@@ -163,12 +169,12 @@ main() {
 }
 EOF
 run_accept_and_exec "string embedded quotes" \
-    /tmp/ae_sec_quotes.ae "ok quotes"
+    $T/ae_sec_quotes.ae "ok quotes"
 
 # ---------------------------------------------------------------
 # Accept+run: string with backslashes
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_backslash.ae << 'EOF'
+cat > $T/ae_sec_backslash.ae << 'EOF'
 extern println(s: string)
 import std.string
 extern exit(code: int)
@@ -182,12 +188,12 @@ main() {
 }
 EOF
 run_accept_and_exec "string backslashes" \
-    /tmp/ae_sec_backslash.ae "ok backslash"
+    $T/ae_sec_backslash.ae "ok backslash"
 
 # ---------------------------------------------------------------
 # Accept+run: string with percent signs (not format specifiers)
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_percent.ae << 'EOF'
+cat > $T/ae_sec_percent.ae << 'EOF'
 extern println(s: string)
 import std.string
 extern exit(code: int)
@@ -201,12 +207,12 @@ main() {
 }
 EOF
 run_accept_and_exec "string percent signs" \
-    /tmp/ae_sec_percent.ae "ok percent"
+    $T/ae_sec_percent.ae "ok percent"
 
 # ---------------------------------------------------------------
 # Accept+run: deep nesting (20 levels)
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_deep.ae << 'EOF'
+cat > $T/ae_sec_deep.ae << 'EOF'
 extern println(s: string)
 extern exit(code: int)
 main() {
@@ -219,12 +225,12 @@ main() {
 }
 EOF
 run_accept_and_exec "20-level nesting" \
-    /tmp/ae_sec_deep.ae "ok deep"
+    $T/ae_sec_deep.ae "ok deep"
 
 # ---------------------------------------------------------------
 # Accept+run: many variables (50)
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_manyvars.ae << 'EOF'
+cat > $T/ae_sec_manyvars.ae << 'EOF'
 extern println(s: string)
 extern exit(code: int)
 main() {
@@ -245,12 +251,12 @@ main() {
 }
 EOF
 run_accept_and_exec "50 variables" \
-    /tmp/ae_sec_manyvars.ae "ok manyvars"
+    $T/ae_sec_manyvars.ae "ok manyvars"
 
 # ---------------------------------------------------------------
 # Accept+run: string interpolation with special chars
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_interp.ae << 'EOF'
+cat > $T/ae_sec_interp.ae << 'EOF'
 extern println(s: string)
 import std.string
 extern exit(code: int)
@@ -269,12 +275,12 @@ main() {
 }
 EOF
 run_accept_and_exec "string interpolation specials" \
-    /tmp/ae_sec_interp.ae "ok interp"
+    $T/ae_sec_interp.ae "ok interp"
 
 # ---------------------------------------------------------------
 # Accept: hide + local in nested scope (not a rejection)
 # ---------------------------------------------------------------
-cat > /tmp/ae_sec_hide_local.ae << 'EOF'
+cat > $T/ae_sec_hide_local.ae << 'EOF'
 extern println(s: string)
 extern exit(code: int)
 main() {
@@ -288,12 +294,11 @@ main() {
 }
 EOF
 run_accept_and_exec "hide with local variable" \
-    /tmp/ae_sec_hide_local.ae "ok hide local"
+    $T/ae_sec_hide_local.ae "ok hide local"
 
 # ---------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------
-rm -f /tmp/ae_sec_*.ae /tmp/ae_sec_out
 
 echo ""
 echo "Security rejection tests: $pass passed, $fail failed"

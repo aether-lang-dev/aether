@@ -1,0 +1,84 @@
+// Regression (#2521).
+//
+// 1. Interpolating a string value that holds a NUL kept only the bytes
+//    before it: a `${s}` segment was formatted with printf's %s, which stops
+//    at the first NUL although the value carries its length (#2469), so
+//    "[${s}]" with s = "x<NUL>y" had length 3. print and println of such a
+//    value lost the same bytes. A string segment is now written by its
+//    length, in a built string and in print/println alike.
+//
+// 2. Two string-literal match arms sharing their first 160 characters were
+//    reported as duplicates (W1004, which fails builds that treat warnings
+//    as errors): the arm key was built in a fixed buffer. The key now covers
+//    the whole literal, so the long arms below compile silently and dispatch
+//    by their full text.
+//
+// Every string a result is compared against is built at run time from its
+// parts, so nothing folds to the value under test.
+
+import std.string
+import std.bytes
+
+extern exit(code: int)
+
+// `a`, a NUL byte, then `b`.
+with_nul(a: string, b: string) -> string {
+    la = string.length(a)
+    lb = string.length(b)
+    buf = bytes.new(la + 1 + lb)
+    if la > 0 { bytes.copy_from_string(buf, 0, a, la) }
+    bytes.set(buf, la, 0)
+    if lb > 0 { bytes.copy_from_string(buf, la + 1, b, lb) }
+    return bytes.finish(buf, la + 1 + lb)
+}
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("  FAIL: ${what}")
+    return 1
+}
+
+// Two arms that agree on their first 190 characters and differ at the end.
+which(s: string) -> int {
+    match (s) {
+        "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789-first" -> { return 1 }
+        "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789-second" -> { return 2 }
+        _ -> { return 0 }
+    }
+}
+
+main() {
+    f = 0
+    e = string.substring("x", 0, 0) // empty, and not foldable
+    n = 7
+    s = with_nul("x", "y")
+
+    // A string value with a NUL, interpolated: every byte of it.
+    t = "[${s}]"
+    f = f + check(string.length(t) == 5, "[x<NUL>y] has ${string.length(t)} bytes, want 5")
+    f = f + check(string.char_at(t, 0) == 91 && string.char_at(t, 1) == 120 && string.char_at(t, 2) == 0 && string.char_at(t, 3) == 121 && string.char_at(t, 4) == 93, "the bytes of [x<NUL>y]")
+    f = f + check(string.length("${s}") == 3, "a lone segment has ${string.length("${s}")} bytes, want 3")
+    f = f + check(string.length("${s}${s}") == 6, "two segments have ${string.length("${s}${s}")} bytes, want 6")
+    f = f + check(string.length("${n}:${s}:${n}") == 7, "between numbers: ${string.length("${n}:${s}:${n}")} bytes, want 7")
+    f = f + check(string.length("\0${s}") == 4, "a NUL of the text before the value: ${string.length("\0${s}")} bytes, want 4")
+    f = f + check(string.equals("<${s}>", string.concat("<", string.concat(s, ">"))) == 1, "[${s}] equals the concatenation")
+
+    // Plain values, numbers and a bool keep their text.
+    p = string.concat("ab", e)
+    f = f + check("[${p}]" == "[ab]", "a plain string segment")
+    f = f + check("${n} ${n > 3} ${1.5}" == "7 true 1.5", "number, bool and float segments: ${n} ${n > 3} ${1.5}")
+    f = f + check("${e}" == "", "an empty segment")
+
+    // The long arms dispatch by their whole text, and compile silently.
+    first = string.concat("0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789", string.concat("-first", e))
+    second = string.concat("0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789", string.concat("-second", e))
+    f = f + check(which(first) == 1, "the first long arm: ${which(first)}, want 1")
+    f = f + check(which(second) == 2, "the second long arm: ${which(second)}, want 2")
+    f = f + check(which(p) == 0, "neither long arm: ${which(p)}, want 0")
+
+    if f > 0 {
+        println("FAIL: ${f} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -1,0 +1,48 @@
+// Regression for #2524: an extern's effects are not known, so a call of one
+// is evaluated ahead of a later operand that calls anything or reads memory
+// through a pointer. `pair(strbuilder.append(b, "xy"), strbuilder.length(b))`
+// emitted both calls inline as C arguments, and gcc evaluated the length
+// first (0, want 2); the map case likewise (0, want 1). The first operand
+// is evaluated into a temporary now, whatever the extern's declaration says.
+import std.map
+import std.strbuilder
+import std.string
+
+extern exit(code: int)
+
+pair(a: int, b: int) -> int {
+    return a * 10 + b
+}
+
+// A function of the program that calls an extern is as opaque as the extern.
+append_twice(b: ptr, s: string) -> int {
+    strbuilder.append(b, s)
+    strbuilder.append(b, s)
+    return 1
+}
+
+main() {
+    fails = 0
+    b = strbuilder.new(16)
+    r = pair(strbuilder.append(b, "xy"), strbuilder.length(b))
+    if r % 10 != 2 { println("  FAIL strbuilder: length read ${r % 10}, want 2"); fails = fails + 1 }
+
+    // The read on the left runs first: it sees the builder before the append.
+    r = pair(strbuilder.length(b), strbuilder.append(b, "z"))
+    if r / 10 != 2 { println("  FAIL strbuilder: length read ${r / 10}, want 2"); fails = fails + 1 }
+
+    r = pair(append_twice(b, "q"), strbuilder.length(b))
+    if r % 10 != 5 { println("  FAIL wrapper: length read ${r % 10}, want 5"); fails = fails + 1 }
+    strbuilder.free(b)
+
+    m = map.map_new()
+    s = pair(map.map_put_raw(m, "k", m), map.map_size(m))
+    if s % 10 != 1 { println("  FAIL map: size read ${s % 10}, want 1"); fails = fails + 1 }
+    map.map_free(m)
+
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

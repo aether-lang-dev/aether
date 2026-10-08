@@ -1,0 +1,185 @@
+// Regression: a named function that keeps its `string` parameter (stores
+// it in a list or a map, in a struct field, hands it to another keeper)
+// takes a reference of its own on entry, as a closure does (copy-on-keep,
+// #2499), and the caller borrows: it frees or rebinds its own argument as
+// usual. The container then owns its element in every shape. Before, the
+// store left the container borrowing the caller's string, and the caller
+// was told to keep that string alive for the rest of the function: a leak
+// per call, through a wrapper of a wrapper too, and a closure's own
+// reference handed to such a wrapper was given back by nobody. The macOS
+// leaks gate runs this file.
+
+import std.list
+import std.map
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Rec { name: string }
+
+// A module global never frees what it holds, so a setter storing its
+// parameter there borrows it (no reference of its own): a literal set in a
+// loop allocates nothing, and the global reads the latest value.
+var g_token: string = "none"
+
+set_global(s: string) {
+    g_token = s
+}
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+add_name(l: ptr, s: string) { list.add(l, s) }
+put_name(m: ptr, k: string, s: string) { map.put(m, k, s) }
+add_twice(l: ptr, s: string) { add_name(l, s); add_name(l, s) }
+add_both(l: ptr, m: ptr, s: string) { list.add(l, s); map.put(m, "k", s) }
+// Keeps it and returns it: the caller's argument lives on in the result.
+add_and_return(l: ptr, s: string) -> string { list.add(l, s); return s }
+// Keeps it and uses it afterwards.
+add_and_measure(l: ptr, s: string) -> int { list.add(l, s); return string.length(s) }
+into_rec(s: string) -> Rec { r = Rec { name: "" }; r.name = s; return r }
+// Keeps it, then rebinds and keeps the new value too.
+add_and_rebind(l: ptr, s: string) {
+    list.add(l, s)
+    s = string.concat(s, "x")
+    list.add(l, s)
+}
+// Keeps it in a closure of its own (the env takes its own reference).
+add_later(l: ptr, s: string) -> int {
+    f = || { add_name(l, s) }
+    call(f)
+    return list.size(l)
+}
+
+// The caller rebinds and frees its own string after the call.
+rebind(k: int) -> int {
+    l = list.new()
+    s = string.concat("a", string.from_int(k))
+    add_name(l, s)
+    s = string.concat("bb", string.from_int(k))
+    v, _ = list.get(l, 0)
+    n = string.length(v) + string.length(s)
+    list.free(l)
+    return n
+}
+
+// A fresh temporary is freed by the caller after the call.
+temp(k: int) -> int {
+    l = list.new()
+    add_name(l, string.concat("t", string.from_int(k)))
+    add_twice(l, string.concat("u", string.from_int(k)))
+    add_and_rebind(l, string.concat("w", string.from_int(k)))
+    add_later(l, string.concat("z", string.from_int(k)))
+    v, _ = list.get(l, 4)
+    n = list.size(l) + string.length(v)
+    list.free(l)
+    return n
+}
+
+// The list outlives the caller's local.
+escaped(k: int) -> ptr {
+    l = list.new()
+    s = string.concat("e", string.from_int(k))
+    add_name(l, s)
+    return l
+}
+
+via_map(k: int) -> int {
+    m = map.new()
+    l = list.new()
+    s = string.concat("m", string.from_int(k))
+    put_name(m, "key", s)
+    add_both(l, m, s)
+    s = string.concat("n", string.from_int(k))
+    v, _ = map.get(m, "k")
+    n = string.length(v) + string.length(s) + list.size(l)
+    map.free(m)
+    list.free(l)
+    return n
+}
+
+kept_and_returned(k: int) -> int {
+    l = list.new()
+    s = string.concat("r", string.from_int(k))
+    t = add_and_return(l, s)
+    n = string.length(t) + add_and_measure(l, string.concat("q", string.from_int(k)))
+    list.free(l)
+    return n + string.length(s)
+}
+
+struct_field(k: int) -> int {
+    s = string.concat("f", string.from_int(k))
+    r = into_rec(s)
+    s = string.concat("g", string.from_int(k))
+    return string.length(r.name) + string.length(s)
+}
+
+// A closure keeping its parameter through the wrapper.
+through_closure(k: int) -> int {
+    l = list.new()
+    f = | x: string | { add_name(l, x) }
+    call(f, string.concat("c", string.from_int(k)))
+    v, _ = list.get(l, 0)
+    n = string.length(v)
+    list.free(l)
+    return n
+}
+
+globals(k: int) -> int {
+    set_global("secret")
+    n = string.length(g_token)
+    set_global("third")
+    return n + string.length(g_token)
+}
+
+round(k: int) -> int {
+    l = escaped(k)
+    v, _ = list.get(l, 0)
+    n = string.length(v)
+    list.free(l)
+    return rebind(k) + temp(k) + via_map(k) + kept_and_returned(k) + struct_field(k) + through_closure(k) + globals(k) + n
+}
+
+rounds(n: int) {
+    i = 0
+    while i < n {
+        round(i)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_named_fn_string_param_kept ===")
+    check("rebind", rebind(3), 2 + 3)
+    check("temp", temp(3), 6 + 3)
+    check("via map", via_map(3), 2 + 2 + 1)
+    check("kept and returned", kept_and_returned(3), 2 + 2 + 2)
+    check("struct field", struct_field(3), 2 + 2)
+    check("through closure", through_closure(3), 2)
+    check("globals", globals(3), 6 + 5)
+    l = escaped(3)
+    v, _ = list.get(l, 0)
+    check("escaped", string.length(v), 2)
+    list.free(l)
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation, or a thread the system starts in
+    // the process, settles. So, warm, some window holds exactly steady
+    // (mem.steady_growth).
+    if mem.heap_in_use_exact() {
+        rounds(20)
+        grown = mem.steady_growth(|| {
+                rounds(200)
+            }, 5)
+        if grown != 0 {
+            println("  FAIL a window of 200 rounds grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+    }
+    println("  PASS: a kept string parameter is the callee's own reference")
+    println("=== test_named_fn_string_param_kept passed ===")
+}

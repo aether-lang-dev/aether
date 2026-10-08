@@ -320,10 +320,11 @@ extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 
 // Closure-bearing combinators (#421 — multi-sequence iteration). Each
 // takes an Aether closure as the per-element callback. The callback
-// params are declared `ptr` so the codegen heap-BOXES the closure
-// (`_aether_box_closure`) into the slot; the C runtime unboxes, invokes
-// the body with the captured env as the implicit first argument, and
-// frees the box (+ its env) when the walk completes — so a one-shot
+// params are declared `@noescape ptr` (#2523): the codegen boxes the
+// closure on the caller's stack, the C runtime invokes the body with the
+// captured env as the implicit first argument during the call only, and
+// the caller releases the environment once the call returns, as after a
+// call to an Aether function that keeps nothing, so a one-shot
 // `string.seq_map(s, |x| ...)` does not leak the closure. All five are
 // a single iterative spine walk: O(n) time, O(1) auxiliary stack (no
 // recursion — that's the O(N^2)->O(N) point of the issue).
@@ -337,18 +338,18 @@ extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 // `map`/`filter` return a fresh, caller-owned *StringSeq (reclaimed
 // automatically at scope exit like any seq local). `reduce` returns the
 // caller's accumulator (`ptr`). `each`/`zip_each` return nothing.
-extern string_seq_each(s: *StringSeq, f: ptr)
-extern string_seq_map(s: *StringSeq, f: ptr) -> *StringSeq
-extern string_seq_filter(s: *StringSeq, pred: ptr) -> *StringSeq
-extern string_seq_reduce(s: *StringSeq, init: ptr, f: ptr) -> ptr
-extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: ptr)
+extern string_seq_each(s: *StringSeq, f: @noescape ptr)
+extern string_seq_map(s: *StringSeq, f: @noescape ptr) -> *StringSeq
+extern string_seq_filter(s: *StringSeq, pred: @noescape ptr) -> *StringSeq
+extern string_seq_reduce(s: *StringSeq, init: ptr, f: @noescape ptr) -> ptr
+extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: @noescape ptr)
 
 // Conversion
 extern string_to_cstr(str: string) -> string
 extern string_from_int(value: int) -> ptr
 extern string_from_long(value: long) -> ptr
 extern string_from_float(value: float) -> ptr
-extern string_from_double(value: float) -> string
+extern string_from_double(value: float) -> string @heap
 
 // Inverse of to_int_radix. Render `value` in base `radix` (2..36).
 // Returns an empty string for radix outside [2, 36]; otherwise the
@@ -414,7 +415,9 @@ to_long(s: string) -> long! {
 }
 
 // Parse a string to a float. Returns (value, "") on success,
-// (0.0, error) on invalid input.
+// (0.0, error) on invalid input. "inf", "infinity", "nan" and
+// hexadecimal constants parse on every platform, as for to_double; a hex
+// constant is rounded straight to float.
 to_float(s: string) -> {
     ok = string_try_float(s)
     if ok == 0 {
@@ -424,7 +427,10 @@ to_float(s: string) -> {
 }
 
 // Parse a string to a double. Returns (value, "") on success,
-// (0.0, error) on invalid input.
+// (0.0, error) on invalid input. "inf", "infinity" and "nan" (any case,
+// optionally signed) parse identically on every platform, so the
+// "Infinity", "-Infinity" and "NaN" that from_double emits read back, and
+// so do C99 hexadecimal constants such as "0x1.8p3" (correctly rounded).
 to_double(s: string) -> {
     ok = string_try_double(s)
     if ok == 0 {
@@ -436,13 +442,16 @@ to_double(s: string) -> {
 // Base-N parse: like `to_long` but accepts a radix in [2, 36].
 // Headline use cases: hex color decode (`parseInt(hex, 16)` patterns),
 // hex byte fields in config files, binary masks, octal mode bits.
-// Returns (value, "") on success; (0, error) on:
+// The accepted text is exactly an optional '-', one or more digits of
+// the radix (0-9, a-z, A-Z), then optional trailing whitespace; this is
+// what from_int_radix emits. Returns (value, "") on success; (0, error) on:
 //   - radix outside [2, 36]
-//   - empty string or unparseable digits
+//   - empty string, or any character that is not a digit of the radix
+//     (a "0x" / "0b" prefix, a '+' sign, leading whitespace)
 //   - overflow (the int64 range)
 //   - trailing non-whitespace garbage
 //
-// No "0x" / "0b" prefix recognition — pass the digit-only substring.
+// No "0x" / "0b" prefix recognition: pass the digit-only substring.
 // The value is `long` (int64) because radix-16/36 can exceed int32
 // quickly and because callers often want the full 64-bit width
 // (32-bit ARGB colors, file offsets, flag masks). Downcast at the

@@ -1,7 +1,28 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <dlfcn.h>
 #include <math.h>
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows (#2541). */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
+#include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 #define FAIL(fmt, ...) do { fprintf(stderr, "FAIL (line %d): " fmt "\n", __LINE__, ##__VA_ARGS__); return 1; } while (0)
 
@@ -11,13 +32,13 @@ typedef double  (*f_fn)(double, double);
 
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen: %s", dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading the library: %s", lib_error());
 
-    i64_fn echo64 = (i64_fn)dlsym(h, "aether_echo_long");
-    i32_fn negb   = (i32_fn)dlsym(h, "aether_negate_bool");
-    f_fn   scale  = (f_fn)dlsym(h, "aether_scale");
-    if (!echo64 || !negb || !scale) FAIL("dlsym: %s", dlerror());
+    i64_fn echo64 = (i64_fn)lib_sym(h, "aether_echo_long");
+    i32_fn negb   = (i32_fn)lib_sym(h, "aether_negate_bool");
+    f_fn   scale  = (f_fn)lib_sym(h, "aether_scale");
+    if (!echo64 || !negb || !scale) FAIL("dlsym: %s", lib_error());
 
     /* int64 — a value that can't fit in int32 */
     int64_t big = 1LL << 40;  /* 1 099 511 627 776 */
@@ -37,7 +58,7 @@ int main(int argc, char** argv) {
     double s = scale(3.0, 2.5);
     if (fabs(s - 7.5) > 1e-9) FAIL("scale(3.0, 2.5) = %f, expected 7.5", s);
 
-    dlclose(h);
+    lib_close(h);
     printf("OK: int64, bool, float round-trip\n");
     return 0;
 }

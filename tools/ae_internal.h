@@ -81,7 +81,7 @@ typedef struct {
      * `--lib X` from the user is parsed: if `X` is itself a separator-
      * string, each piece is appended; if it's a single directory, it's
      * appended verbatim. Issue #413. */
-    char lib_dirs[AETHER_LIB_DIRS_MAX][256];
+    char* lib_dirs[AETHER_LIB_DIRS_MAX];   /* heap, any length (#2539) */
     int  lib_dir_count;
 } Toolchain;
 
@@ -169,8 +169,18 @@ void remove_dsym_bundle(const char* exe_path);
 void gc_stale_cache_tmp(const char* dir);
 void init_cache_dir(void);
 void tc_lib_dir_append(const char* spec);
+/* 0 means do not cache this build: the source cannot be read, memory ran
+ * out (a NULL `extra_salt` included, #2546), or a source tree walk could not
+ * see every file (#2538). */
 unsigned long long compute_cache_key(const char* ae_file, const char* extra_files,
                                      const char* opt_level, const char* extra_salt);
+/* Whether the last compute_cache_key made no key only because a tree walk
+ * could not see every file. The build then still asks aetherc for a depfile,
+ * and the key recomputed from it (no walk) is the one it publishes under. */
+int cache_key_walk_incomplete(void);
+/* $AE_CC, else $CC, else NULL: the C-backend compiler the user picked (ae.c).
+ * The cache key folds in the compiler it names (#2477). */
+const char* c_backend_env_override(void);
 /* The extra C sources of a build (--extra, [[bin]] extra_sources) travel as
  * ONE space-separated string that goes onto the compiler command as-is. A
  * path with a space is stored double-quoted, so the shell sees one argument;
@@ -182,15 +192,20 @@ int extras_append(char* list, size_t cap, const char* path);
 int extras_next(const char** cursor, char* out, size_t out_size);
 /* The `// aether-source:` lines of a generated C file (#2125): the C files the
  * modules of the import closure ship, as a quoted space-separated list ready
- * for a compile command, "" when there are none. Static storage. */
+ * for a compile command, "" when there are none. Kept for the process and
+ * valid until the next call; NULL when out of memory, after saying so. */
 const char* get_aether_source_files(const char* c_file);
 /* The --extra / extra_sources list followed by the module-declared sources,
  * each file once however it is spelled (a file named on the command line and
  * declared by an imported module's @source is compiled a single time). The
- * native and cross build paths both build their source list with this. */
-void merge_source_lists(const char* extra, const char* module_sources, char* out, size_t cap);
+ * native and cross build paths both build their source list with this. Of
+ * any length; kept for the process and valid until the next call; NULL when
+ * out of memory, after saying so. */
+const char* merge_source_lists(const char* extra, const char* module_sources);
 /* The `-I"<dir>"` flags for the modules that declared a `@c_include`, read
- * from the generated C's `// aether-include:` lines (#1986). "" when none. */
+ * from the generated C's `// aether-include:` lines (#1986). "" when none.
+ * Kept for the process and valid until the next call; NULL when out of
+ * memory, after saying so. */
 const char* get_aether_include_flags(const char* c_file);
 /* #1882: the stable depfile slot for an entry source, under the cache dir.
  * ae asks aetherc to write it (--emit-deps) on a cached build; compute_cache_key
@@ -212,9 +227,11 @@ extern char g_wasm_exports[8192];
 
 /* Export NAMES (mangled, newline-separated) for a wasm --emit=lib. Shared by
  * both wasm backends so the zig (-Wl,--export=) and emcc
- * (-sEXPORTED_FUNCTIONS) spellings cannot derive different sets. */
-int wasm_collect_export_names(const char* c_file, const char* explicit_list,
-                              char* out, size_t outsz);
+ * (-sEXPORTED_FUNCTIONS) spellings cannot derive different sets. A string
+ * the caller frees, with the count in *count; NULL when out of memory,
+ * after saying so. */
+char* wasm_collect_export_names(const char* c_file, const char* explicit_list,
+                                int* count);
 
 int  run_cross_compile_obj(const char* c_file, const char* obj_file,
                            bool optimize, const char* ztriple);

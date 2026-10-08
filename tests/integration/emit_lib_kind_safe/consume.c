@@ -27,7 +27,28 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows (#2541). */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
 #include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 #include "aether_config.h"
 
@@ -44,11 +65,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen(%s): %s", argv[1], dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading %s: %s", argv[1], lib_error());
 
-    build_tree_fn build = (build_tree_fn)dlsym(h, "aether_build_tree");
-    if (!build) FAIL("aether_build_tree not found: %s", dlerror());
+    build_tree_fn build = (build_tree_fn)lib_sym(h, "aether_build_tree");
+    if (!build) FAIL("aether_build_tree not found: %s", lib_error());
 
     /* (1) NULL probe — must not crash, must return UNKNOWN. */
     if (aether_value_kind(NULL) != AETHER_KIND_UNKNOWN)
@@ -113,7 +134,7 @@ int main(int argc, char** argv) {
         FAIL("kind(root) post-free != UNKNOWN (magic-clear failed)");
 #endif
 
-    dlclose(h);
+    lib_close(h);
     printf("OK: kind predicates safe; deep-free walks containers; magic cleared on free\n");
     return 0;
 }

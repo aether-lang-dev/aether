@@ -5,6 +5,7 @@
 #include "../alloc/aether_alloc.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 /* std.list backing-allocator dispatch (#1045): NULL keeps the default
  * cap-aware path unchanged; a non-NULL handle routes the list's own
@@ -209,8 +210,11 @@ typedef struct { void (*fn)(void); void* env; } AeClosureBox;
 /* #1398: a closure env's first field is a pointer to its generated destructor,
  * which releases the references its string captures own. Lets an owner with no
  * type for the env reclaim it correctly. Must match the `_dtor` field codegen
- * emits first in every env struct. */
-typedef struct { void (*dtor)(void*); } _AeEnvHeader;
+ * emits first in every env struct. Since #2494 the destructor is a release:
+ * an env another closure captured is only torn down by its last holder, and
+ * the reference count is the second field (`_AeEnvHead` in the generated
+ * prologue). */
+typedef struct { void (*dtor)(void*); atomic_long refs; } _AeEnvHeader;
 
 void aether_closure_env_free(void* env) {
     if (!env) return;
@@ -219,20 +223,70 @@ void aether_closure_env_free(void* env) {
     free(env);
 }
 
+/* The container's own reference to a closure box's env (#2518). */
+static void closure_box_retain_env(const void* box) {
+    void* env = box ? ((const AeClosureBox*)box)->env : NULL;
+    if (env) atomic_fetch_add_explicit(&((_AeEnvHeader*)env)->refs, 1, memory_order_relaxed);
+}
+
+/* Release an element the container owns: a string (owned 1) or a closure
+ * box (owned 2), whose env is released through its own destructor (#1398,
+ * so the references its string captures own go too; NULL for a
+ * non-capturing closure) before the box is freed. */
+static void release_owned_value(void* it, int owned) {
+    if (!it || !owned) return;
+    if (owned == 2) {
+        aether_closure_env_free(((AeClosureBox*)it)->env);
+        free(it);
+    } else if (is_aether_string(it)) {
+        string_release(it);
+    } else {
+        free(it);
+    }
+}
+
+/* Release slot `i` of `list` when the list owns it, and untag it. */
+static void list_release_slot(ArrayList* list, int i) {
+    if (!list->owned_flags || !list->owned_flags[i]) return;
+    release_owned_value(list->items[i], list->owned_flags[i]);
+    list->owned_flags[i] = 0;
+}
+
 /* Add a heap-allocated closure BOX the list owns (owned_flags == 2).
- * Unlike a string value, the box also owns its captured `env`, so
- * list_free frees env first, then the box. Routed from codegen when a
- * `fn`-typed closure value is stored into a list (the fn -> ptr box
- * coercion). */
+ * Unlike a string value, the box also holds a reference to its captured
+ * `env`, so list_free releases env first, then frees the box. Routed from
+ * codegen when a `fn`-typed closure value is stored into a list (the
+ * fn -> ptr box coercion).
+ *
+ * #2518: the list takes a reference of its OWN to the env, as
+ * list_add_string_owned does for a string. It used to take over the
+ * reference of whoever stored the closure, so storing one closure twice
+ * (or in two lists) gave a single reference two owners, and list_free
+ * released it twice. The holder that stored it keeps and releases its own. */
 int list_add_closure_owned(ArrayList* list, void* box) {
     if (!list) return 0;
     list_grow_owned_flags(list);
     int slot = list->size;
     int ok = list_add_raw(list, box);
     if (!ok) return 0;
+    closure_box_retain_env(box);
     /* Retry: capacity may have been 0 until list_add_raw's grow. */
     list_grow_owned_flags(list);
     if (list->owned_flags) list->owned_flags[slot] = 2;
+    return 1;
+}
+
+/* Store a closure box into slot `index`, which the list then owns as
+ * list_add_closure_owned does: the list takes its own reference to the env
+ * and releases what the slot owned before (#2518). The box is the caller's
+ * to free when the index is out of range (returns 0). */
+int list_set_closure_owned(ArrayList* list, int index, void* box) {
+    if (!list || index < 0 || index >= list->size) return 0;
+    if (!list_grow_owned_flags(list)) return 0;
+    closure_box_retain_env(box);
+    list_release_slot(list, index);
+    list->items[index] = box;
+    list->owned_flags[index] = 2;
     return 1;
 }
 
@@ -256,6 +310,47 @@ void* list_get_raw(ArrayList* list, int index) {
 void list_set(ArrayList* list, int index, void* item) {
     if (!list || index < 0 || index >= list->size) return;
     list->items[index] = item;
+    /* #2518: the slot now holds a pointer the caller passed and still owns
+     * (list_set takes no reference). Left tagged, list_free released the
+     * new item as if the list owned it: a string freed under its owner, or
+     * a plain pointer read as a closure box. What the slot owned before is
+     * not released here: a sort or a swap puts it back in another slot
+     * through this same call, so the slot that gives it up cannot know it
+     * is gone. */
+    if (list->owned_flags) list->owned_flags[index] = 0;
+}
+
+/* Store a string the list owns into slot `index`, as list_add_string_owned
+ * stores one at the end: the list takes a reference of its own (a
+ * refcounted string retained, a plain one copied) and releases what the
+ * slot owned before. Routed from codegen for `list.set(l, i, s)` with a
+ * string value; a raw pointer goes through list_set and stays the caller's. */
+int list_set_string_owned(ArrayList* list, int index, const void* item) {
+    if (!list || index < 0 || index >= list->size) return 0;
+    if (!list_grow_owned_flags(list)) return 0;
+    const void* store = item;
+    if (item && is_aether_string(item)) {
+        string_retain(item);
+    } else if (item) {
+        AetherString* copy = string_new_with_length((const char*)item, strlen((const char*)item));
+        if (!copy) return 0;
+        store = copy;
+    }
+    list_release_slot(list, index);
+    list->items[index] = (void*)store;
+    list->owned_flags[index] = store ? 1 : 0;
+    return 1;
+}
+
+/* The adopting form: the caller's single reference to a fresh string moves
+ * into the slot, the old element released. */
+int list_set_string_adopted(ArrayList* list, int index, const void* item) {
+    if (!list || index < 0 || index >= list->size) return 0;
+    if (!list_grow_owned_flags(list)) return 0;
+    list_release_slot(list, index);
+    list->items[index] = (void*)item;
+    list->owned_flags[index] = item ? 1 : 0;
+    return 1;
 }
 
 int list_size(ArrayList* list) {
@@ -265,14 +360,23 @@ int list_size(ArrayList* list) {
 void list_remove(ArrayList* list, int index) {
     if (!list || index < 0 || index >= list->size) return;
 
+    /* #2518: an element the list owns is released when it goes, as
+     * string_list_remove does; it used to be dropped, and the tags were
+     * not shifted with the elements, so list_free released elements the
+     * list never owned (or read a closure box as a string). */
+    list_release_slot(list, index);
     for (int i = index; i < list->size - 1; i++) {
         list->items[i] = list->items[i + 1];
+        if (list->owned_flags) list->owned_flags[i] = list->owned_flags[i + 1];
     }
+    if (list->owned_flags) list->owned_flags[list->size - 1] = 0;
     list->size--;
 }
 
 void list_clear(ArrayList* list) {
     if (!list) return;
+    /* #2518: owned elements go with the clear, as in string_list_clear. */
+    for (int i = 0; i < list->size; i++) list_release_slot(list, i);
     list->size = 0;
 }
 
@@ -288,21 +392,7 @@ void list_free(ArrayList* list) {
     if (list->owned_flags && list->items) {
         for (int i = 0; i < list->size; i++) {
             if (!list->owned_flags[i]) continue;
-            void* it = list->items[i];
-            if (!it) continue;
-            if (list->owned_flags[i] == 2) {
-                /* Owned closure box: reclaim the captured env, then the
-                 * box. env is NULL for a non-capturing closure (no-op). */
-                void* env = ((AeClosureBox*)it)->env;
-                /* #1398: through the env's own destructor, so the references
-                 * its string captures own are released, not just the struct. */
-                if (env) aether_closure_env_free(env);
-                free(it);
-            } else if (is_aether_string(it)) {
-                string_release(it);
-            } else {
-                free(it);
-            }
+            list_release_slot(list, i);
             list->items[i] = NULL;
         }
     }
@@ -348,7 +438,8 @@ typedef struct HashMapEntry {
      * value_owned == 1 have their value released — mixing owned
      * (heap concat results) and unowned (literal strings, int-
      * cast-to-ptr) values on the same map is safe by construction:
-     * each entry knows who owns it. */
+     * each entry knows who owns it. 2 is a closure box the map owns
+     * (map_put_closure_owned, #2518), as in a list's owned_flags. */
     int                   value_owned;
 } HashMapEntry;
 
@@ -370,6 +461,26 @@ static unsigned int hash_cstr_len(const char* key, unsigned int* out_len) {
     }
     if (out_len) *out_len = (unsigned int)(p - key);
     return hash;
+}
+
+// A key arrives as an AetherString (an Aether `string` key crosses with its
+// header: the externs declare it `@aether`) or as a plain C string from C
+// callers and literals. The map hashes, compares and copies the key's
+// bytes up to its length, so `"a\0x"` and `"a\0y"` are two keys rather than
+// one `"a"` (#2469). A plain C string keeps the one-pass hash above; its
+// length is where its NUL is. Sets *data / *len to the key's bytes.
+static unsigned int key_hash(const char* key, const char** data, unsigned int* len) {
+    if (is_aether_string(key)) {
+        const AetherString* as = (const AetherString*)key;
+        unsigned int hash = 5381;
+        for (size_t i = 0; i < as->length; i++)
+            hash = ((hash << 5) + hash) + (unsigned char)as->data[i];
+        *data = as->data;
+        *len = (unsigned int)as->length;
+        return hash;
+    }
+    *data = key;
+    return hash_cstr_len(key, len);
 }
 
 // Fast equality: cheap length compare first, memcmp only on match.
@@ -434,25 +545,20 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
     }
 
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* entry = map->buckets[index];
 
     while (entry) {
         // Hash check is a cheap prefilter before key_equals (which
         // still runs memcmp for false hash collisions).
-        if (entry->hash == hash && key_equals(entry, key, key_len)) {
+        if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             /* #467: if the entry was previously owned-put, release
              * the prior heap-string before overwriting with the
              * (unowned) new value. Subsequent map.free won't see
              * the dropped allocation since value_owned is reset. */
-            if (entry->value_owned && entry->value) {
-                if (is_aether_string(entry->value)) {
-                    string_release(entry->value);
-                } else {
-                    free(entry->value);
-                }
-            }
+            release_owned_value(entry->value, entry->value_owned);
             entry->value = value;
             entry->value_owned = 0;
             return 1;
@@ -462,7 +568,7 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
 
     HashMapEntry* new_entry = (HashMapEntry*)aether_caps_malloc(sizeof(HashMapEntry));
     if (!new_entry) return 0;
-    new_entry->key = string_new(key);
+    new_entry->key = string_new_with_length(kd, key_len);
     if (!new_entry->key) { aether_caps_free(new_entry, sizeof(HashMapEntry)); return 0; }
     new_entry->value       = value;
     new_entry->value_owned = 0;
@@ -505,18 +611,13 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
      * the caller never expected ownership transfer for that path. */
     if (map->size > 0) {
         unsigned int key_len = 0;
-        unsigned int hash = hash_cstr_len(key, &key_len);
+        const char* kd = NULL;
+        unsigned int hash = key_hash(key, &kd, &key_len);
         unsigned int index = hash % (unsigned int)map->capacity;
         HashMapEntry* entry = map->buckets[index];
         while (entry) {
-            if (entry->hash == hash && key_equals(entry, key, key_len)) {
-                if (entry->value_owned && entry->value) {
-                    if (is_aether_string(entry->value)) {
-                        string_release(entry->value);
-                    } else {
-                        free(entry->value);
-                    }
-                }
+            if (entry->hash == hash && key_equals(entry, kd, key_len)) {
+                release_owned_value(entry->value, entry->value_owned);
                 entry->value = (void*)value;
                 entry->value_owned = 1;
                 return 1;
@@ -531,7 +632,8 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     int ok = map_put_raw(map, key, (void*)value);
     if (!ok) return 0;
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* head = map->buckets[index];
     if (head) head->value_owned = 1;
@@ -564,16 +666,38 @@ int map_put_string_owned(HashMap* map, const char* key, const void* value) {
     return 1;
 }
 
+/* Put a closure BOX the map owns (value_owned == 2), as
+ * list_add_closure_owned does for a list (#2518): the map takes its own
+ * reference to the captured env, releases what the key held before when it
+ * owned that, and releases env and box when the entry goes. The box is the
+ * caller's to free on failure (returns 0). */
+int map_put_closure_owned(HashMap* map, const char* key, void* box) {
+    if (!map || !key) return 0;
+    closure_box_retain_env(box);
+    if (!map_put_string_adopted(map, key, box)) {
+        aether_closure_env_free(box ? ((AeClosureBox*)box)->env : NULL);
+        return 0;
+    }
+    unsigned int key_len = 0;
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
+    HashMapEntry* entry = map->buckets[hash % (unsigned int)map->capacity];
+    while (entry && !(entry->hash == hash && key_equals(entry, kd, key_len))) entry = entry->next;
+    if (entry) entry->value_owned = 2;
+    return 1;
+}
+
 void* map_get_raw(HashMap* map, const char* key) {
     if (!map || !key) return NULL;
 
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* entry = map->buckets[index];
 
     while (entry) {
-        if (entry->hash == hash && key_equals(entry, key, key_len)) {
+        if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             return entry->value;
         }
         entry = entry->next;
@@ -590,13 +714,14 @@ void map_remove(HashMap* map, const char* key) {
     if (!map || !key) return;
 
     unsigned int key_len = 0;
-    unsigned int hash = hash_cstr_len(key, &key_len);
+    const char* kd = NULL;
+    unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* entry = map->buckets[index];
     HashMapEntry* prev = NULL;
 
     while (entry) {
-        if (entry->hash == hash && key_equals(entry, key, key_len)) {
+        if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             if (prev) {
                 prev->next = entry->next;
             } else {
@@ -607,13 +732,7 @@ void map_remove(HashMap* map, const char* key) {
             /* #467: release the value too when this entry was
              * owned-put. Otherwise map_remove of an owned-put
              * entry leaks the heap string. */
-            if (entry->value_owned && entry->value) {
-                if (is_aether_string(entry->value)) {
-                    string_release(entry->value);
-                } else {
-                    free(entry->value);
-                }
-            }
+            release_owned_value(entry->value, entry->value_owned);
             aether_caps_free(entry, sizeof(HashMapEntry));
             map->size--;
             return;
@@ -640,13 +759,7 @@ void map_clear(HashMap* map) {
              * single map carry owned heap-strings + unowned
              * literals / int-cast-to-ptr values without
              * crashing on free of the latter. */
-            if (entry->value_owned && entry->value) {
-                if (is_aether_string(entry->value)) {
-                    string_release(entry->value);
-                } else {
-                    free(entry->value);
-                }
-            }
+            release_owned_value(entry->value, entry->value_owned);
             aether_caps_free(entry, sizeof(HashMapEntry));
             entry = next;
         }

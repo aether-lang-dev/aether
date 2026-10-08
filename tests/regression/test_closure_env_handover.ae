@@ -1,0 +1,145 @@
+// Regression (#2494, #2498): a closure env handed to a new owner is freed by
+// that owner, and a receive arm is a scope.
+//
+//  - A function returning a closure only its caller holds (a literal, or a
+//    local whose only escape is the return) hands its reference over, and
+//    the caller's local frees the env at its scope exit.
+//  - An env that captured another closure holds its own reference to the
+//    captured env, so the capturer can go anywhere (returned, stored in a
+//    list) and the captured env is freed with it.
+//  - A receive arm is a defer scope: its defer runs when the handler ends,
+//    and the closures, cells and struct locals of each message are freed
+//    then. A struct stored into actor state keeps its strings.
+//
+// The macOS leaks gate runs this program, so every shape must free all it
+// allocates; tests/integration/closure_local_env_free counts envs and cells
+// exactly. Strings are built from parameters, because string.concat of two
+// literals folds to a literal that owns nothing.
+
+import std.string
+import std.list
+
+extern exit(code: int)
+
+struct Rec { name: string, count: int }
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+// Returns a literal capturing a string and a cell.
+make_counter(p: string) -> fn {
+    s = string.concat(p, "-counter")
+    n = 0
+    return || {
+        n = n + string.length(s)
+        return n
+    }
+}
+
+// Returns a closure that captured another local closure.
+make_twice(p: string) -> fn {
+    s = string.concat(p, "-twice")
+    n = 0
+    inc = || {
+        n = n + string.length(s)
+        return n
+    }
+    twice = || {
+        int a = call(inc)
+        int b = call(inc)
+        return a + b
+    }
+    return twice
+}
+
+// The capturer goes into a list; the captured local's scope ends first.
+store_capturer(l: ptr, p: string) {
+    s = string.concat(p, "-stored")
+    g = || {
+        return string.length(s)
+    }
+    h = || {
+        int v = call(g)
+        return v
+    }
+    stash(l, h)
+}
+
+message Ping { n: int }
+message Keep { s: string }
+message Check { want_done: int, want_name: string }
+
+actor Worker {
+    state done = 0
+    state total = 0
+    state kept = Rec { name: "", count: 0 }
+
+    receive {
+        Ping(n) -> {
+            defer done = done + 1
+            acc = 0
+            g = || { acc = acc + n }
+            g()
+            total = total + acc
+            if n > 5 {
+                return
+            }
+            tmp = Rec { name: string.concat("t", "mp"), count: n }
+            total = total + tmp.count
+        }
+        Keep(s) -> {
+            loc = Rec { name: string.concat(s, "!"), count: 1 }
+            kept = loc
+        }
+        Check(want_done, want_name) -> {
+            if done != want_done {
+                println("  FAIL: arm defers ran ${done} times, want ${want_done}")
+                exit(1)
+            }
+            if kept.name != want_name {
+                println("  FAIL: state struct name ${kept.name}, want ${want_name}")
+                exit(1)
+            }
+        }
+    }
+}
+
+send_keep(w: ptr, p: string) {
+    w ! Keep { s: string.concat(p, "pt") }
+}
+
+main() {
+    owners = list.new()
+    i = 0
+    while i < 20 {
+        c = make_counter("ab")
+        int c1 = call(c)
+        int c2 = call(c)
+        check("returned literal", c1 + c2, 30)
+        t = make_twice("ab")
+        int t1 = call(t)
+        check("returned capturer", t1, 24)
+        store_capturer(owners, "ab")
+        i = i + 1
+    }
+    list.free(owners)
+
+    w = spawn(Worker())
+    k = 0
+    while k < 10 {
+        w ! Ping { n: k }
+        k = k + 1
+    }
+    send_keep(w, "ke")
+    w ! Check { want_done: 10, want_name: "kept!" }
+    wait_for_idle()
+    println("=== closure env handover: all passed ===")
+}

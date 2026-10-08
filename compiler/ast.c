@@ -29,6 +29,7 @@ Type* create_type(TypeKind kind) {
      * must NOT inherit garbage from malloc. */
     type->is_fnptr = 0;
     type->compound_node = NULL;
+    type->closure_literal = NULL;
     type->is_result = 0;   /* #913 `T!` marker — must not inherit malloc garbage */
     return type;
 }
@@ -292,9 +293,34 @@ int type_to_aether_source(const Type* type, char* buf, size_t cap) {
     return 1;
 }
 
+/* A type's spelling, interned (#2539): whole however long its names, and
+ * never in a buffer a later call reuses. The static buffers this had cut a
+ * long struct or tuple name, and a nested array or tuple was spelled into
+ * the buffer its own element's spelling was read from. */
+static const char* spelled_list(const char* open, Type** items, int count,
+                                const char* sep, const char* close) {
+    size_t cap = 64, len = 0;
+    char* buf = (char*)aether_xrealloc(NULL, cap);
+    buf[0] = '\0';
+    for (int i = -1; i <= count; i++) {
+        const char* piece = i < 0 ? open : i == count ? close
+                          : items ? type_to_string(items[i]) : "?";
+        const char* lead = (i > 0 && i < count) ? sep : "";
+        size_t need = len + strlen(lead) + strlen(piece) + 1;
+        if (need > cap) {
+            while (cap < need) cap *= 2;
+            buf = (char*)aether_xrealloc(buf, cap);
+        }
+        len += (size_t)sprintf(buf + len, "%s%s", lead, piece);
+    }
+    const char* r = aether_intern_n(buf, len);
+    free(buf);
+    return r;
+}
+
 const char* type_to_string(Type* type) {
     if (!type) return "UNKNOWN";
-    
+
     switch (type->kind) {
         case TYPE_INT: return "int";
         case TYPE_INT64: return "long";
@@ -309,79 +335,38 @@ const char* type_to_string(Type* type) {
         case TYPE_VOID: return "void";
         case TYPE_PTR: return "ptr";
         case TYPE_MESSAGE: return "Message";
-        case TYPE_STRUCT: {
-            static char buffer[256];
-            snprintf(buffer, sizeof(buffer), "struct %s", 
-                    type->struct_name ? type->struct_name : "unnamed");
-            return buffer;
-        }
-        case TYPE_ARRAY: {
-            static char buffer[256];
+        case TYPE_STRUCT:
+            return aether_internf("struct %s", type->struct_name ? type->struct_name : "unnamed");
+        case TYPE_ARRAY:
             if (type->index_enum_name) {
                 // #1044 enum-indexed array `[E]T`
-                snprintf(buffer, sizeof(buffer), "[%s]%s",
-                        type->index_enum_name,
-                        type->element_type ? type_to_string(type->element_type) : "?");
-            } else {
-                snprintf(buffer, sizeof(buffer), "%s[%d]",
-                        type_to_string(type->element_type),
-                        type->array_size);
+                return aether_internf("[%s]%s", type->index_enum_name,
+                                      type->element_type ? type_to_string(type->element_type) : "?");
             }
-            return buffer;
-        }
-        case TYPE_ACTOR_REF: {
-            static char buffer[256];
-            snprintf(buffer, sizeof(buffer), "ActorRef<%s>", 
-                    type_to_string(type->element_type));
-            return buffer;
-        }
-        case TYPE_TUPLE: {
-            static char buffer[512];
-            int pos = snprintf(buffer, sizeof(buffer), "(");
-            for (int i = 0; i < type->tuple_count && pos < (int)sizeof(buffer) - 10; i++) {
-                if (i > 0) pos += snprintf(buffer + pos, sizeof(buffer) - pos, ", ");
-                pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s",
-                               type_to_string(type->tuple_types[i]));
-            }
-            snprintf(buffer + pos, sizeof(buffer) - pos, ")");
-            return buffer;
-        }
+            return aether_internf("%s[%d]", type_to_string(type->element_type), type->array_size);
+        case TYPE_ACTOR_REF:
+            return aether_internf("ActorRef<%s>", type_to_string(type->element_type));
+        case TYPE_TUPLE:
+            return spelled_list("(", type->tuple_types, type->tuple_count, ", ", ")");
         case TYPE_FUNCTION: {
-            static char buffer[512];
-            int pos = snprintf(buffer, sizeof(buffer), "|");
-            for (int i = 0; i < type->param_count && pos < (int)sizeof(buffer) - 20; i++) {
-                if (i > 0) pos += snprintf(buffer + pos, sizeof(buffer) - pos, ", ");
-                pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s",
-                               type->param_types ? type_to_string(type->param_types[i]) : "?");
-            }
-            pos += snprintf(buffer + pos, sizeof(buffer) - pos, "| -> %s",
-                           type->return_type ? type_to_string(type->return_type) : "void");
-            return buffer;
+            const char* params = spelled_list("|", type->param_types, type->param_count, ", ", "|");
+            return aether_internf("%s -> %s", params,
+                                  type->return_type ? type_to_string(type->return_type) : "void");
         }
-        case TYPE_OPTIONAL: {
-            static char buffer[256];
-            snprintf(buffer, sizeof(buffer), "%s?",
-                     type->element_type ? type_to_string(type->element_type) : "?");
-            return buffer;
-        }
+        case TYPE_OPTIONAL:
+            return aether_internf("%s?", type->element_type ? type_to_string(type->element_type) : "?");
         case TYPE_SUM:
             return type->struct_name ? type->struct_name : "sum";
         case TYPE_ENUM:
             return type->struct_name ? type->struct_name : "enum";
         case TYPE_BITSTRUCT:
             return type->struct_name ? type->struct_name : "bitstruct";
-        case TYPE_ISOLATED: {
-            static char buffer[256];
-            snprintf(buffer, sizeof(buffer), "Isolated[%s]",
-                     type->element_type ? type_to_string(type->element_type) : "?");
-            return buffer;
-        }
-        case TYPE_BITSET: {
-            static char buffer[256];
-            snprintf(buffer, sizeof(buffer), "bit_set[%s]",
-                     type->element_type ? type_to_string(type->element_type) : "?");
-            return buffer;
-        }
+        case TYPE_ISOLATED:
+            return aether_internf("Isolated[%s]",
+                                  type->element_type ? type_to_string(type->element_type) : "?");
+        case TYPE_BITSET:
+            return aether_internf("bit_set[%s]",
+                                  type->element_type ? type_to_string(type->element_type) : "?");
         default: return "UNKNOWN";
     }
 }
@@ -521,6 +506,7 @@ Type* clone_type(Type* type) {
     }
     new_type->is_fnptr = type->is_fnptr;
     new_type->compound_node = type->compound_node;  // borrowed; AST owns it.
+    new_type->closure_literal = type->closure_literal;  // borrowed, as above (#2460)
     new_type->is_result = type->is_result;          // #913 `T!` marker
 
     return new_type;
@@ -538,6 +524,83 @@ Type* make_string_seq_ptr_type(void) {
     t->element_type = create_type(TYPE_STRUCT);
     t->element_type->struct_name = strdup("StringSeq");
     return t;
+}
+
+/* ---- interned names (#2539) ---------------------------------------------
+ *
+ * Names built while compiling (C types, mangled and normalised names, type
+ * spellings) used to go into fixed buffers: 256 bytes for a C type, a
+ * callee or a field path, 280 for a mangled name, and rotating static sets
+ * that a later call overwrote while a caller still held one. A longer name
+ * was cut, so two that shared a prefix became one C identifier. An interned
+ * name has no length limit and is never reused for anything else. Kept for
+ * the life of the process: the distinct names of a program are few, and
+ * nothing has to know when to free one. */
+typedef struct { char** slots; size_t cap; size_t count; } InternTable;
+static InternTable g_intern;
+
+static unsigned long long intern_hash(const char* s, size_t n) {
+    unsigned long long h = 14695981039346656037ULL;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+const char* aether_intern_n(const char* s, size_t n) {
+    if (g_intern.count * 4 >= g_intern.cap * 3) {
+        size_t ncap = g_intern.cap ? g_intern.cap * 2 : 1024;
+        char** slots = (char**)aether_xrealloc(NULL, ncap * sizeof(char*));
+        memset(slots, 0, ncap * sizeof(char*));
+        for (size_t i = 0; i < g_intern.cap; i++) {
+            char* e = g_intern.slots[i];
+            if (!e) continue;
+            size_t j = (size_t)intern_hash(e, strlen(e)) & (ncap - 1);
+            while (slots[j]) j = (j + 1) & (ncap - 1);
+            slots[j] = e;
+        }
+        free(g_intern.slots);
+        g_intern.slots = slots;
+        g_intern.cap = ncap;
+    }
+    size_t j = (size_t)intern_hash(s, n) & (g_intern.cap - 1);
+    for (char* e; (e = g_intern.slots[j]) != NULL; j = (j + 1) & (g_intern.cap - 1)) {
+        if (strncmp(e, s, n) == 0 && e[n] == '\0') return e;
+    }
+    char* copy = (char*)aether_xrealloc(NULL, n + 1);
+    memcpy(copy, s, n);
+    copy[n] = '\0';
+    g_intern.slots[j] = copy;
+    g_intern.count++;
+    return copy;
+}
+
+const char* aether_intern(const char* s) {
+    return aether_intern_n(s, strlen(s));
+}
+
+const char* aether_internv(const char* fmt, va_list ap) {
+    char small[256];
+    va_list again;
+    va_copy(again, ap);
+    int n = vsnprintf(small, sizeof(small), fmt, ap);
+    if (n < 0) n = 0;
+    if ((size_t)n < sizeof(small)) {
+        va_end(again);
+        return aether_intern_n(small, (size_t)n);
+    }
+    char* big = (char*)aether_xrealloc(NULL, (size_t)n + 1);
+    vsnprintf(big, (size_t)n + 1, fmt, again);
+    va_end(again);
+    const char* r = aether_intern_n(big, (size_t)n);
+    free(big);
+    return r;
+}
+
+const char* aether_internf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    const char* r = aether_internv(fmt, ap);
+    va_end(ap);
+    return r;
 }
 
 void* aether_xrealloc(void* ptr, size_t size) {
@@ -570,7 +633,23 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->type_inferred = 0;
     node->warned = 0;
     node->source_name = NULL;
+    node->value_len = 0;
     return node;
+}
+
+void ast_set_literal_bytes(ASTNode* node, const char* bytes, int len) {
+    char* copy = malloc((size_t)len + 1);
+    if (!copy) {
+        fprintf(stderr, "Fatal: out of memory copying a string literal\n");
+        exit(1);
+    }
+    memcpy(copy, bytes, (size_t)len);
+    copy[len] = '\0';
+    free(node->value);
+    node->value = copy;
+    /* Only a literal with a NUL records its length, so a literal without
+     * one is handled exactly as before, as a C string (#2520). */
+    node->value_len = memchr(bytes, '\0', (size_t)len) ? len : 0;
 }
 
 void add_child(ASTNode* parent, ASTNode* child) {
@@ -612,6 +691,7 @@ ASTNode* clone_ast_node(ASTNode* node) {
     clone->source_file = node->source_file ? strdup(node->source_file) : NULL;
     clone->type_inferred = node->type_inferred;
     clone->source_name = node->source_name ? strdup(node->source_name) : NULL;
+    if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     for (int i = 0; i < node->child_count; i++) {
         add_child(clone, clone_ast_node(node->children[i]));
@@ -675,6 +755,32 @@ int annotation_has_marker(const char* annotation, const char* marker) {
         p += n;
     }
     return 0;
+}
+
+ASTNode* match_arm_value(ASTNode* body) {
+    if (!body) return NULL;
+    switch (body->type) {
+        case AST_PRINT_STATEMENT:
+        case AST_RETURN_STATEMENT:
+        case AST_VARIABLE_DECLARATION:
+        case AST_ASSIGNMENT:
+        case AST_EXPRESSION_STATEMENT:
+            return NULL;
+        case AST_BLOCK: {
+            if (body->child_count == 0) return NULL;
+            ASTNode* last = body->children[body->child_count - 1];
+            if (!last) return NULL;
+            if (last->type == AST_MATCH_STATEMENT) return last;
+            if (last->type != AST_EXPRESSION_STATEMENT || last->child_count < 1) return NULL;
+            ASTNode* e = last->children[0];
+            if (!e || !e->node_type || e->node_type->kind == TYPE_VOID) return NULL;
+            if (e->type == AST_BINARY_EXPRESSION && e->value &&
+                strcmp(e->value, "=") == 0) return NULL;
+            return e;
+        }
+        default:
+            return body;
+    }
 }
 
 char* annotation_add_marker(char* annotation, const char* marker) {
@@ -863,6 +969,8 @@ ASTNode* create_literal_node(Token* token) {
     
     ASTNode* node = create_ast_node(AST_LITERAL, token->value, token->line, token->column);
     node->node_type = type;
+    /* A string literal holding a NUL keeps every byte (#2520). */
+    if (token->value_len > 0) ast_set_literal_bytes(node, token->value, token->value_len);
     return node;
 }
 

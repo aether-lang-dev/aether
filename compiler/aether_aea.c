@@ -73,18 +73,19 @@ static void buf_int(Buf* b, long long v) {
 }
 
 /* ` ~` for NULL, else ` <len>:<bytes>`, so any byte can appear in a value. */
-static void buf_text(Buf* b, const char* s) {
+static void buf_bytes(Buf* b, const char* s, size_t n) {
     if (!s) { buf_put(b, " ~", 2); return; }
     char tmp[32];
-    size_t n = strlen(s);
     int k = snprintf(tmp, sizeof(tmp), " %zu:", n);
     buf_put(b, tmp, (size_t)k);
     buf_put(b, s, n);
 }
 
+static void buf_text(Buf* b, const char* s) { buf_bytes(b, s, s ? strlen(s) : 0); }
+
 static int encode_type(Buf* b, const Type* t, const char** err) {
     if (!t) { buf_put(b, " ~", 2); return 1; }
-    if (t->compound_node) {
+    if (t->compound_node || t->closure_literal) {
         /* Set by the type checker only; a parse never produces it. */
         *err = "a type carries a type-checker back-pointer (not a fresh parse)";
         return 0;
@@ -135,7 +136,9 @@ static int encode_node(Buf* b, const ASTNode* n, const char* source_file,
     buf_int(b, n->bit_lo);
     buf_int(b, n->bit_hi);
     buf_int(b, n->type_inferred);
-    buf_text(b, n->value);
+    /* A string literal holding a NUL is value_len bytes (#2520). */
+    buf_bytes(b, n->value, n->value ? (size_t)ast_literal_length(n) : 0);
+    buf_int(b, n->value_len);
     buf_text(b, n->annotation);
     if (!encode_type(b, n->node_type, err)) return 0;
     buf_int(b, n->child_count);
@@ -266,7 +269,9 @@ static int cur_count(Cursor* c) {
     return (int)v;
 }
 
-static char* cur_text(Cursor* c) {
+/* A ` ~` or ` <len>:<bytes>` value; *len gets its byte count. */
+static char* cur_bytes(Cursor* c, size_t* len) {
+    *len = 0;
     if (!cur_char(c, ' ')) return NULL;
     if (c->p < c->end && *c->p == '~') { c->p++; return NULL; }
     size_t n = 0;
@@ -283,7 +288,13 @@ static char* cur_text(Cursor* c) {
     memcpy(s, c->p, n);
     s[n] = '\0';
     c->p += n;
+    *len = n;
     return s;
+}
+
+static char* cur_text(Cursor* c) {
+    size_t len;
+    return cur_bytes(c, &len);
 }
 
 static Type* decode_type(Cursor* c, int depth) {
@@ -338,7 +349,15 @@ static ASTNode* decode_node(Cursor* c, int depth) {
     n->bit_lo = (int)cur_int(c);
     n->bit_hi = (int)cur_int(c);
     n->type_inferred = (int)cur_int(c);
-    n->value = cur_text(c);
+    size_t value_bytes = 0;
+    n->value = cur_bytes(c, &value_bytes);
+    n->value_len = cur_count(c);
+    /* value_len is the byte count of a value holding a NUL and 0 for any
+     * other (ast_set_literal_bytes); the encoder writes nothing else. */
+    if (!c->bad) {
+        int has_nul = n->value && memchr(n->value, '\0', value_bytes) != NULL;
+        if (has_nul ? (size_t)n->value_len != value_bytes : n->value_len != 0) c->bad = 1;
+    }
     n->annotation = cur_text(c);
     n->node_type = decode_type(c, depth + 1);
     int children = cur_count(c);

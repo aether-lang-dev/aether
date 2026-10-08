@@ -28,9 +28,10 @@ StringList* string_list_new(void);
  * success, 0 on null list / OOM. */
 int string_list_add(StringList* list, const void* s);
 
-/* Read at `index`. Returns NULL on null list / OOB. The pointer is
- * borrowed — callers that need to outlive the list should
- * string_retain it themselves or `string.copy` it. */
+/* Read at `index`. Returns NULL on null list / OOB. The element is the
+ * list's own AetherString copy, every byte of what was added, embedded
+ * NULs included (#2469). The pointer is borrowed: callers that need to
+ * outlive the list should string_retain it themselves or `string.copy` it. */
 const void* string_list_get(StringList* list, int index);
 
 /* Replace the slot at `index`. Releases the previous occupant and

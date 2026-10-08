@@ -69,6 +69,24 @@ main() {
     if string.equals(bignum.to_hex(sr), "-4") != 1 { print("FAIL shift_right neg floor\n"); fails = fails + 1 }
     bignum.free(sr); bignum.free(neg8)
 
+    // A count of INT_MIN reverses direction without negating it (-INT_MIN
+    // overflows int, which recursed between the two shifts until the stack
+    // ran out): a right shift by 2^31 drops every bit, flooring a negative.
+    imin = -2147483647 - 1
+    five = bignum.from_int(5)
+    m5 = bignum.from_int(-5)
+    z = bignum.from_int(0)
+    s5 = bignum.shift_left(five, imin)
+    if string.equals(bignum.to_hex(s5), "0") != 1 { print("FAIL shift_left(5, INT_MIN)\n"); fails = fails + 1 }
+    sm5 = bignum.shift_left(m5, imin)
+    if string.equals(bignum.to_hex(sm5), "-1") != 1 { print("FAIL shift_left(-5, INT_MIN) floors\n"); fails = fails + 1 }
+    sz = bignum.shift_right(z, imin)
+    if bignum.is_zero(sz) != 1 { print("FAIL shift_right(0, INT_MIN)\n"); fails = fails + 1 }
+    smax = bignum.shift_left(five, 0 - 2147483647)
+    if string.equals(bignum.to_hex(smax), "0") != 1 { print("FAIL shift_left(5, -INT_MAX)\n"); fails = fails + 1 }
+    bignum.free(s5); bignum.free(sm5); bignum.free(sz); bignum.free(smax)
+    bignum.free(five); bignum.free(m5); bignum.free(z)
+
     // ---- byte round-trips through std.bytes (the RSA-relevant path) ----
     // unsigned: leading zero stripped
     in1 = hb("00ff")

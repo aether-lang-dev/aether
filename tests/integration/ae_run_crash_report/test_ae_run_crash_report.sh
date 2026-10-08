@@ -1,7 +1,7 @@
 #!/bin/sh
 # `ae run` names what a crashed program died of, on every platform.
 #
-# run_cmd_forwarding returns the negated signal on POSIX; on Windows the
+# run_argv_forwarding returns the negated signal on POSIX; on Windows the
 # process exit code, which for a crash is the NTSTATUS the OS terminated it
 # with (0xC0000005 for an access violation). Both are negative as an int,
 # and the report used to print the negation of either as a "signal": on

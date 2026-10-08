@@ -437,13 +437,15 @@ static ASTNode* fold_const_string_call(ASTNode* node) {
         ASTNode* a = node->children[0];
         ASTNode* b = node->children[1];
         if (!is_string_literal(a) || !is_string_literal(b)) return node;
-        size_t la = strlen(a->value), lb = strlen(b->value);
+        /* By length: a literal may hold a NUL (#2520). */
+        size_t la = (size_t)ast_literal_length(a), lb = (size_t)ast_literal_length(b);
         char* joined = (char*)malloc(la + lb + 1);
         if (!joined) return node;
         memcpy(joined, a->value, la);
         memcpy(joined + la, b->value, lb);
         joined[la + lb] = '\0';
-        ASTNode* folded = create_string_literal(joined, node->line, node->column);
+        ASTNode* folded = create_string_literal(NULL, node->line, node->column);
+        if (folded) ast_set_literal_bytes(folded, joined, (int)(la + lb));
         free(joined);
         if (!folded) return node;
         global_opt_stats.constants_folded++;

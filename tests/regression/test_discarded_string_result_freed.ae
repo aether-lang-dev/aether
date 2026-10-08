@@ -1,0 +1,56 @@
+// Regression: a statement that throws away a string it owns frees it: a
+// heap-returning call, a string.concat, an interpolation, or a pass-through
+// call handed a fresh temporary (`ident(mk(i))`), whose temporary the
+// identity drain kept for a result nobody held. `_ = e` already freed its
+// value; the bare statement leaked one buffer per call. The macOS leaks gate
+// runs this file.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+mk(k: int) -> string {
+    return string.concat("a", string.from_int(k))
+}
+
+ident(s: string) -> string {
+    return s
+}
+
+mixed(k: int) -> string {
+    if k % 2 == 0 { return "even" }
+    return string.concat("odd", string.from_int(k))
+}
+
+discards(n: int) {
+    i = 0
+    while i < n {
+        mk(i)
+        string.concat("x", string.from_int(i))
+        "${i}-${i}"
+        ident(mk(i))
+        mixed(i)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_discarded_string_result_freed ===")
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation, or a thread the system starts in
+    // the process, settles. So, warm, some window holds exactly steady
+    // (mem.steady_growth).
+    if mem.heap_in_use_exact() {
+        discards(20)
+        grown = mem.steady_growth(|| {
+                discards(200)
+            }, 5)
+        if grown != 0 {
+            println("  FAIL a window of 200 discarded results grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+    }
+    println("  PASS: discarded owned strings are freed")
+    println("=== test_discarded_string_result_freed passed ===")
+}

@@ -36,6 +36,14 @@ The locale argument drives plural and select forms — pair it with
 `std.plural`, whose categories are what a message catalogue keys its variants
 on.
 
+A `plural` argument is read as a decimal numeral (`3`, `-1`, `1.5`,
+`3000000000`), as ICU does with a number. An `=N` branch matches only an
+exactly equal number (`1.50` takes `=1.5`; `1.5` never takes `=1`); otherwise
+the branch is the locale's category for the digits as written, so in English
+`1` is `one` while `1.5` and `1.0` are `other`. A value that is not a numeral
+(`many`) matches no `=N` branch and has no category: it takes `other`, and `#`
+still prints it as given. A missing argument counts as `0`.
+
 `catalog_new` / `catalog_add` / `catalog_format` hold a set of messages by key,
 which is the shape an application wants: look a message up by identifier,
 format it for the user's locale.

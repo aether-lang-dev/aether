@@ -650,6 +650,19 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                             func_sym->type->return_type) {
                             free_type(node->node_type);
                             node->node_type = clone_type(func_sym->type->return_type);
+                        } else if (func_sym->type->kind == TYPE_FUNCTION &&
+                                   !func_sym->type->is_fnptr && !func_sym->is_function) {
+                            /* #2460: `f(x)` through a closure-typed local
+                             * yields its result, not the closure: the
+                             * signature's return slot when it has one, else
+                             * nothing yet. The checker types it as it types
+                             * `call(f, x)`, from the closure literal the
+                             * local holds; stamping the closure type here
+                             * made `r = f(x)` bind `r` as a closure. */
+                            if (func_sym->type->return_type) {
+                                free_type(node->node_type);
+                                node->node_type = clone_type(func_sym->type->return_type);
+                            }
                         } else {
                             // Function call inherits the function's return type
                             free_type(node->node_type);
@@ -1327,7 +1340,33 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             // A closure's locals belong to the enclosing walk.
             ASTNode* prev_owner = ctx->scope_owner;
             ctx->scope_owner = node;
+            /* #2453: the closure's parameters shadow the enclosing
+             * function's names for the body, as they do in the type checker.
+             * This pass keeps one flat table per function, so `|v: int|`
+             * inside a function with an `f32x4 v` saw the outer `v`, and
+             * `w = v * 2` bound `w` as a lane. Each parameter gets a fresh
+             * entry (an untyped one still shadows, as unknown), and
+             * everything the closure added is unwound after it: its
+             * parameters and its own locals are not names of the enclosing
+             * function. Writes to an outer variable still land, since that
+             * symbol is below the snapshot and is updated in place. */
+            Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
+            if (ctx->symbols) {
+                for (int i = 0; i < node->child_count; i++) {
+                    ASTNode* p = node->children[i];
+                    if (p && p->type == AST_CLOSURE_PARAM && p->value) {
+                        add_walk_symbol(ctx, p->value,
+                                        p->node_type ? clone_type(p->node_type)
+                                                     : create_type(TYPE_UNKNOWN));
+                    }
+                }
+            }
             collect_expression_constraints(node, ctx);
+            if (ctx->symbols) {
+                while (ctx->symbols->symbols && ctx->symbols->symbols != saved_head) {
+                    pop_symbol(ctx->symbols);
+                }
+            }
             ctx->scope_owner = prev_owner;
             break;
         }

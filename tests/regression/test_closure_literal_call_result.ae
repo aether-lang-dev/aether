@@ -1,0 +1,105 @@
+// Regression (#2460): calling a closure literal bound without a type yields
+// the type its body returns.
+//
+// A closure literal's type is the erased `fn`, so `call(f, ...)` on it was
+// assumed to return int whatever the body returned: `r = call(sg, "b")`
+// bound `r` as int while the C function returned a string, `println(r)`
+// printed the pointer as a number and a float result printed 0. The type
+// checker now remembers which literal a closure variable holds (through an
+// alias, and through a closure that returns one) and types the call from
+// that literal's body, by the rule codegen uses for the closure's C
+// signature. A string result is owned by the binding it lands in, as a
+// string closure hands every result over owned, and the macOS leaks gate
+// runs this program to check each one is freed. `f(x)` on the variable is
+// typed the same way. The shapes that need a capturing closure (a closure
+// returning one, a closure called inside another) are covered by
+// tests/integration/closure_literal_call_result.
+//
+// Strings are built from parameters, so each is a runtime heap string:
+// `string.concat` of two literals folds to a literal and would hide a leak.
+
+import std.string
+
+extern exit(code: int)
+
+struct Pt {
+    x: int
+    y: float
+    name: string
+}
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_int(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+check_float(label: string, got: float, want: float) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+run(seed: string) {
+    // The issue's shapes.
+    sg = | t: string | -> t
+    r2 = call(sg, seed)
+    check("string", r2, "s")
+    fl = | a: float | -> a * 2.0
+    r5 = call(fl, 1.25)
+    check_float("float", r5, 2.5)
+    check_float("float in an expression", r5 + 1.0, 3.5)
+
+    // A bool result in a condition.
+    pos = | v: int | -> v > 0
+    ok = call(pos, 3)
+    if !ok {
+        println("  FAIL: bool")
+        exit(1)
+    }
+
+    // A heap string built in the body, rebound in a loop: each result is
+    // the binding's to free.
+    greet = | who: string | {
+        s = string.concat("hi ", who)
+        return s
+    }
+    i = 0
+    while i < 3 {
+        g = call(greet, seed)
+        check("loop", g, "hi s")
+        i = i + 1
+    }
+
+    // A struct result and its fields.
+    mkpt = | a: int, nm: string | -> Pt { x: a, y: 0.5, name: nm }
+    p = call(mkpt, 7, seed)
+    check_int("struct x", p.x, 7)
+    check_float("struct y", p.y, 0.5)
+    check("struct name", p.name, "s")
+
+    // An alias of the variable, and the direct-call spelling.
+    fl2 = fl
+    check_float("alias", call(fl2, 4.0), 8.0)
+    d = fl(3.0)
+    check_float("direct call", d, 6.0)
+    ds = sg(seed)
+    check("direct call string", ds, "s")
+
+    // The result used as an argument.
+    check_int("as an argument", string.length(call(greet, seed)), 4)
+}
+
+main() {
+    run(string.substring("xs", 1, 2))
+    println("ok")
+}

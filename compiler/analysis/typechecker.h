@@ -43,6 +43,8 @@ typedef struct Symbol {
     // which knows the joined type; this only makes the name readable after
     // the block.
     int branch_hoisted;
+    // #2516: a `const` (not a module `var`): its elements cannot be written.
+    int is_const;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the
@@ -146,6 +148,10 @@ Type* infer_unary_type(ASTNode* operand, AeTokenType operator);
 
 // Type compatibility functions
 int is_type_compatible(Type* from, Type* to);
+/* #2499: did the program convert a `ptr` into a closure (`fn`) anywhere?
+ * Such a closure may have been made outside the program, so codegen does
+ * not assume it borrows its arguments. Reset by typecheck_program. */
+int typecheck_ptr_to_closure_seen(void);
 int is_assignable(Type* from, Type* to);
 int is_callable(Type* type);
 

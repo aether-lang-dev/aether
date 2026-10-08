@@ -2,6 +2,8 @@
 #define AST_H
 
 #include <stddef.h>
+#include <string.h>
+#include <stdarg.h>  /* va_list, for aether_internv */
 
 #include "parser/tokens.h"
 
@@ -487,6 +489,13 @@ typedef struct Type {
     // look up. NULL on all other types. Borrowed pointer (the AST owns
     // the storage), so don't free on type teardown.
     struct ASTNode* compound_node;
+    // #2460: on a closure's erased TYPE_FUNCTION, the closure literal the
+    // value is known to be (set by the type checker, carried by clone_type to
+    // the binding, an alias of it and a call that returns it), so `call(f,
+    // ...)` takes its result type from the literal's body. The type stays
+    // erased for compatibility; this only informs the call. Borrowed like
+    // compound_node; NULL everywhere else.
+    struct ASTNode* closure_literal;
     // #913: a fallible result type `T!`. Represented as the existing
     // `(T, string)` (value, err) TUPLE so it is ABI-interchangeable with the
     // stdlib convention; this flag marks it as a result so `expr!` PROPAGATES
@@ -501,6 +510,18 @@ typedef struct Type {
  * cannot meaningfully continue past OOM, so this reports and exits
  * rather than corrupting the caller. */
 void* aether_xrealloc(void* ptr, size_t size);
+
+/* The compiler's intern table (#2539): a name or spelling of any length,
+ * one copy per distinct text, valid for the rest of the process. Out of
+ * memory ends the compile, as aether_xrealloc does. */
+const char* aether_intern(const char* s);
+const char* aether_intern_n(const char* s, size_t n);
+const char* aether_internv(const char* fmt, va_list ap);
+const char* aether_internf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
 
 typedef struct ASTNode {
     ASTNodeType type;
@@ -573,6 +594,13 @@ typedef struct ASTNode {
      * NULL otherwise. The symbol catalog and export lists speak the source
      * language, so they read this rather than the emitted C name. */
     char* source_name;
+
+    /* #2520: a string literal (AST_LITERAL or AST_PATTERN_LITERAL typed
+     * string) that holds a NUL carries its byte count here, and `value` is
+     * value_len bytes plus a terminator; codegen emits such a literal as a
+     * static, length-carrying AetherString. 0 on every other node: `value`
+     * is a C string. ast_literal_length reads either. */
+    int value_len;
 } ASTNode;
 
 // Type functions
@@ -619,6 +647,14 @@ Type* make_string_seq_ptr_type(void);
 
 // AST Node functions
 ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int column);
+/* #2520: give a string literal node `len` bytes as its value, which may
+ * include a NUL; replaces any value it had. */
+void ast_set_literal_bytes(ASTNode* node, const char* bytes, int len);
+/* #2520: the byte count of a string literal's value, NULs included. */
+static inline int ast_literal_length(const ASTNode* node) {
+    if (node->value_len > 0) return node->value_len;
+    return node->value ? (int)strlen(node->value) : 0;
+}
 void add_child(ASTNode* parent, ASTNode* child);
 void free_ast_node(ASTNode* node);
 ASTNode* clone_ast_node(ASTNode* node);
@@ -647,6 +683,16 @@ int lane_accessor_index(TypeKind kind, const char* field);
 // `@heap` extern would stop being variadic).
 int annotation_has_marker(const char* annotation, const char* marker);
 char* annotation_add_marker(char* annotation, const char* marker);
+
+/* #2496: the value a `match` arm body yields when the match is an
+ * expression, or NULL when it yields none and leaves the result as it was.
+ * An expression body yields itself. A `{ ... }` block yields its last
+ * statement when that is a value: an expression that is neither an
+ * assignment nor a call with no value, or a nested `match` (whose arms then
+ * yield for the outer one). A print, a return, a binding, or a block ending
+ * in one yields nothing. One rule, so the typechecker and codegen cannot
+ * disagree about what an arm yields. */
+ASTNode* match_arm_value(ASTNode* body);
 
 // Utility functions
 ASTNode* create_literal_node(Token* token);

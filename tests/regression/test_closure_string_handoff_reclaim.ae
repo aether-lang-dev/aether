@@ -1,0 +1,104 @@
+// Regression: three string and env leaks the macOS leaks gate found, each a
+// reference nobody gave back. The check measures what the process holds
+// (std.mem's heap_in_use, which every malloc moves) over two later windows
+// of the same work, after a warm-up: work that leaks nothing holds steady in
+// at least one of them.
+//
+//  - A closure that keeps a `string` parameter takes its own reference on
+//    entry (#2499 copy-on-keep). When the keep was only an alias into a
+//    local (`nm = item`), nothing released that reference. The parameter is
+//    now a tracked string: an alias moves it, a return hands it over, and
+//    whatever it still holds at exit is freed.
+//  - A closure local's call whose literal returns a closure only it holds
+//    (`held = keep(base)`) is a fresh binding, freed at scope exit like the
+//    result of a named function under the same contract (#2494).
+//  - A message string field built from a temporary
+//    (`w ! Keep { s: string.concat(p, "pt") }`) is copied for the receiver
+//    (#466); the temporary itself was never freed.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact:
+// Windows, a sanitizer's allocator); elsewhere the macOS leaks gate covers
+// this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+const PER_ROUND = 300
+
+var seen = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+outer(render: fn) { call(render, "item") }
+
+note(s: string) { seen = seen + string.length(s) }
+
+message Keep { s: string }
+
+actor Sink {
+    state total = 0
+    receive {
+        Keep(s) -> {
+            total = total + string.length(s)
+        }
+    }
+}
+
+send_keep(w: ptr, p: string) {
+    w ! Keep { s: string.concat(p, "pt") }
+}
+
+fn one_round(w: ptr, base: string) {
+    keep = | s: string | {
+        leaf = || { s = string.concat(s, "x") }
+        leaf()
+        return leaf
+    }
+    i = 0
+    while i < PER_ROUND {
+        // A kept string parameter aliased into a local.
+        outer(| item: string | {
+                nm = item
+                note(nm)
+            })
+        // A closure local's call handing over a closure.
+        held = keep(base)
+        held()
+        // A message field built from a temporary.
+        send_keep(w, "ke")
+        i = i + 1
+    }
+    wait_for_idle()
+}
+
+main() {
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    w = spawn(Sink())
+    base = string.concat("ab", string.from_int(7))
+    // A leak grows the exact count in every window of rounds; work that
+    // leaks nothing holds it steady once warm. So warm up, then require some
+    // later window to hold steady (mem.steady_growth).
+    one_round(w, base)
+    one_round(w, base)
+    runs = 0
+    grown = mem.steady_growth(|| {
+            one_round(w, base)
+            one_round(w, base)
+            runs = runs + 1
+        }, 5)
+    check(grown == 0,
+        "a window grew the heap by ${grown} bytes in every run")
+    // Two warm-up rounds, then two per run steady_growth made.
+    check(seen == (2 + 2 * runs) * PER_ROUND * 4, "every alias saw its string (${seen})")
+    println("OK")
+}

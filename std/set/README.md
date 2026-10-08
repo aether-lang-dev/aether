@@ -4,7 +4,7 @@ A hash set of strings: membership without duplicates.
 
 Adding a value that is already present is a no-op rather than an error, which
 is what makes a set the right shape for de-duplication — feed it everything and
-ask afterwards.
+ask afterwards. Items are compared by all their bytes, embedded NULs included.
 
 ```aether,run
 import std.set

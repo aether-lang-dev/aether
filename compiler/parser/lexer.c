@@ -115,6 +115,43 @@ int skip_comment(void) {
     return 0;
 }
 
+/* Decode the escape at `p` (p[0] is the backslash) into *out and return
+ * how many source bytes it spans: \n \t \r \\ \" , \xN or \xNN (a lone
+ * `\x` is `x`), \N to \NNN octal, and any other `\c` is `c`. The one
+ * decoder for plain literals (read_string) and the text of interpolated
+ * ones (parse_interp_string_expr), so a string means the same with or
+ * without a `${}` in it (#2512). */
+int lexer_decode_escape(const char* p, char* out) {
+    char c = p[1];
+    if (c == '\0') { *out = '\\'; return 1; }
+    switch (c) {
+        case 'n': *out = '\n'; return 2;
+        case 't': *out = '\t'; return 2;
+        case 'r': *out = '\r'; return 2;
+        case 'x': {
+            int val = 0, digits = 0;
+            while (digits < 2 && isxdigit((unsigned char)p[2 + digits])) {
+                char h = p[2 + digits];
+                val = val * 16 + (h >= 'a' ? h - 'a' + 10 : h >= 'A' ? h - 'A' + 10 : h - '0');
+                digits++;
+            }
+            *out = digits ? (char)val : 'x';
+            return 2 + digits;
+        }
+        case '0': case '1': case '2': case '3':
+        case '4': case '5': case '6': case '7': {
+            int val = c - '0', digits = 1;
+            while (digits < 3 && p[1 + digits] >= '0' && p[1 + digits] <= '7') {
+                val = val * 8 + (p[1 + digits] - '0');
+                digits++;
+            }
+            *out = (char)(val & 0xFF);
+            return 1 + digits;
+        }
+        default: *out = c; return 2;   /* \\, \" and any other \c */
+    }
+}
+
 Token* read_string(void) {
     advance(); // skip opening quote
     int capacity = MAX_IDENTIFIER_LENGTH;
@@ -188,66 +225,35 @@ Token* read_string(void) {
             interp_depth--;
             buffer[i++] = advance();
         } else if (peek() == '\\') {
-            if (has_interp) {
-                // In interpolated strings, keep escape sequences raw so parser can handle them
-                buffer[i++] = advance(); // backslash
-                if (current_pos < source_length) {
-                    char esc = peek();
-                    buffer[i++] = advance(); // escaped char (e.g. 'x', '0', 'n')
-                    if (esc == 'x') {
-                        // Copy up to 2 hex digits so parser sees \xNN together
-                        int d = 0;
-                        while (d < 2 && current_pos < source_length &&
-                               isxdigit((unsigned char)peek())) {
-                            if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
-                            buffer[i++] = advance();
-                            d++;
-                        }
-                    } else if (esc >= '0' && esc <= '7') {
-                        // Copy up to 2 more octal digits so parser sees \NNN together
-                        int d = 0;
-                        while (d < 2 && current_pos < source_length &&
-                               peek() >= '0' && peek() <= '7') {
-                            if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
-                            buffer[i++] = advance();
-                            d++;
-                        }
+            /* Escapes are kept as written and decoded once the whole string
+             * is read: whether it is interpolated is only known at its first
+             * `${`, and text before that used to be decoded here and then,
+             * once `${` turned up, decoded again by the parser, so an escaped
+             * backslash in it was lost ("a\\0b ${n}" held a NUL) (#2512). A
+             * plain literal is decoded below; an interpolated one by
+             * parse_interp_string_expr, segment by segment. */
+            buffer[i++] = advance(); // backslash
+            if (current_pos < source_length) {
+                char esc = peek();
+                buffer[i++] = advance(); // escaped char (e.g. 'x', '0', 'n')
+                if (esc == 'x') {
+                    // Copy up to 2 hex digits so parser sees \xNN together
+                    int d = 0;
+                    while (d < 2 && current_pos < source_length &&
+                           isxdigit((unsigned char)peek())) {
+                        if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
+                        buffer[i++] = advance();
+                        d++;
                     }
-                }
-            } else {
-                advance(); // skip backslash
-                char c = advance();
-                switch (c) {
-                    case 'n': buffer[i++] = '\n'; break;
-                    case 't': buffer[i++] = '\t'; break;
-                    case 'r': buffer[i++] = '\r'; break;
-                    case '\\': buffer[i++] = '\\'; break;
-                    case '"': buffer[i++] = '"'; break;
-                    case 'x': {  // \xNN hex escape (1-2 hex digits)
-                        int val = 0, digits = 0;
-                        while (digits < 2 && current_pos < source_length &&
-                               isxdigit((unsigned char)peek())) {
-                            char h = advance();
-                            val = val * 16 + (h >= 'a' ? h - 'a' + 10 :
-                                              h >= 'A' ? h - 'A' + 10 : h - '0');
-                            digits++;
-                        }
-                        if (digits == 0) { buffer[i++] = 'x'; break; }
-                        buffer[i++] = (char)val;
-                        break;
+                } else if (esc >= '0' && esc <= '7') {
+                    // Copy up to 2 more octal digits so parser sees \NNN together
+                    int d = 0;
+                    while (d < 2 && current_pos < source_length &&
+                           peek() >= '0' && peek() <= '7') {
+                        if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
+                        buffer[i++] = advance();
+                        d++;
                     }
-                    case '0': case '1': case '2': case '3':
-                    case '4': case '5': case '6': case '7': {  // \NNN octal (1-3 digits)
-                        int val = c - '0', digits = 1;
-                        while (digits < 3 && current_pos < source_length &&
-                               peek() >= '0' && peek() <= '7') {
-                            val = val * 8 + (advance() - '0');
-                            digits++;
-                        }
-                        buffer[i++] = (char)(val & 0xFF);
-                        break;
-                    }
-                    default: buffer[i++] = c; break;
                 }
             }
         } else {
@@ -264,8 +270,27 @@ Token* read_string(void) {
     }
 
     buffer[i] = '\0';
-    AeTokenType tok_type = has_interp ? TOKEN_INTERP_STRING : TOKEN_STRING_LITERAL;
-    Token* token = create_token(tok_type, buffer, token_start_line, token_start_column);
+    Token* token;
+    if (!has_interp) {
+        /* A plain literal: decode its escapes in place (a decoded escape is
+         * never longer than its spelling). A decoded `\0` or `\x00` is a
+         * byte of the literal, so the token takes the decoded length rather
+         * than reading the bytes as a C string (#2520). */
+        int o = 0;
+        for (int k = 0; k < i; ) {
+            if (buffer[k] == '\\') {
+                char ch;
+                k += lexer_decode_escape(buffer + k, &ch);
+                buffer[o++] = ch;
+            } else {
+                buffer[o++] = buffer[k++];
+            }
+        }
+        buffer[o] = '\0';
+        token = create_token_bytes(TOKEN_STRING_LITERAL, buffer, o, token_start_line, token_start_column);
+    } else {
+        token = create_token(TOKEN_INTERP_STRING, buffer, token_start_line, token_start_column);
+    }
     free(buffer);
     return token;
 }
@@ -981,6 +1006,7 @@ Token* create_token(AeTokenType type, const char* value, int line, int column) {
     token->type = type;
     token->line = line;
     token->column = column;
+    token->value_len = 0;
     if (value) {
         size_t len = strlen(value);
         token->value = malloc(len + 1);
@@ -989,6 +1015,22 @@ Token* create_token(AeTokenType type, const char* value, int line, int column) {
     } else {
         token->value = NULL;
     }
+    return token;
+}
+
+Token* create_token_bytes(AeTokenType type, const char* bytes, int len, int line, int column) {
+    Token* token = malloc(sizeof(Token));
+    if (!token) return NULL;
+    token->type = type;
+    token->line = line;
+    token->column = column;
+    token->value = malloc((size_t)len + 1);
+    if (!token->value) { free(token); return NULL; }
+    memcpy(token->value, bytes, (size_t)len);
+    token->value[len] = '\0';
+    /* Only a literal with a NUL carries its length; every reader of a
+     * token without one keeps treating `value` as a C string (#2520). */
+    token->value_len = memchr(bytes, '\0', (size_t)len) ? len : 0;
     return token;
 }
 

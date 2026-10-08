@@ -76,7 +76,9 @@ extern aether_proxy_upstream_drain(pool: ptr, base_url: string) -> string
 extern aether_proxy_upstream_undrain(pool: ptr, base_url: string) -> string
 extern aether_proxy_rate_limit_set(pool: ptr, max_rps: int, burst: int) -> string
 extern aether_proxy_pool_set_cookie_name(pool: ptr, cookie_name: string) -> string
-extern aether_proxy_pool_metrics_text(pool: ptr) -> string
+// A fresh buffer the caller owns; a plain `-> string` took it for borrowed
+// and leaked the whole text at every scrape.
+extern aether_proxy_pool_metrics_text(pool: ptr) -> string @heap
 
 extern aether_proxy_health_checks_enable(pool: ptr,
     probe_path: string,

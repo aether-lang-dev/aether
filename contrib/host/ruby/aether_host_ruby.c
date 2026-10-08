@@ -165,6 +165,10 @@ static int   ruby_perms_depth = 0;
 
 extern int list_size(void*);
 extern void* list_get_raw(void*, int);
+/* A grant list std.sandbox built holds plain C strings; one a program
+ * built can hold Aether strings (a helper that keeps its `string`
+ * parameter stores its own copy). This reads the bytes of either. */
+extern const char* aether_string_data(const void*);
 
 static int pattern_match(const char* pat, const char* resource) {
     if (pat && strncmp(pat, "::ffff:", 7) == 0) pat += 7;
@@ -187,8 +191,8 @@ static int perms_allow(void* perms, const char* category, const char* resource) 
     int n = list_size(perms);
     if (n == 0) return 0;
     for (int i = 0; i < n; i += 2) {
-        const char* cat = (const char*)list_get_raw(perms, i);
-        const char* pat = (const char*)list_get_raw(perms, i + 1);
+        const char* cat = aether_string_data(list_get_raw(perms, i));
+        const char* pat = aether_string_data(list_get_raw(perms, i + 1));
         if (!cat || !pat) continue;
         if (cat[0] == '*' && pat[0] == '*') return 1;
         if (strcmp(cat, category) == 0 && pattern_match(pat, resource)) return 1;
@@ -292,8 +296,8 @@ int ruby_run_sandboxed(void* perms, const char* code) {
         int pos = snprintf(scrub, sizeof(scrub),
             "_keep = {}; ");
         for (int i = 0; i < n && pos < 3900; i += 2) {
-            const char* cat = (const char*)list_get_raw(perms, i);
-            const char* pat = (const char*)list_get_raw(perms, i + 1);
+            const char* cat = aether_string_data(list_get_raw(perms, i));
+            const char* pat = aether_string_data(list_get_raw(perms, i + 1));
             if (cat && strcmp(cat, "env") == 0 && pat) {
                 if (strcmp(pat, "*") == 0) {
                     pos += snprintf(scrub + pos, sizeof(scrub) - pos,
@@ -352,8 +356,8 @@ int ruby_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_toke
         char scrub[4096];
         int pos = snprintf(scrub, sizeof(scrub), "_keep = {}; ");
         for (int i = 0; i < n && pos < 3900; i += 2) {
-            const char* cat = (const char*)list_get_raw(perms, i);
-            const char* pat = (const char*)list_get_raw(perms, i + 1);
+            const char* cat = aether_string_data(list_get_raw(perms, i));
+            const char* pat = aether_string_data(list_get_raw(perms, i + 1));
             if (cat && strcmp(cat, "env") == 0 && pat) {
                 if (strcmp(pat, "*") == 0) {
                     pos += snprintf(scrub + pos, sizeof(scrub) - pos,

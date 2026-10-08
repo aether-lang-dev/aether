@@ -490,11 +490,17 @@ const char* http_mime_type(const char* path);
 void http_serve_file(HttpServerResponse* res, const char* filepath);
 void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir);
 
-// Actor dispatch mode (fire-and-forget, one actor per request)
-// step_fn: actor step function that handles MSG_HTTP_REQUEST messages
+// Actor dispatch mode (one actor per connection)
+// step_fn: actor step function that handles the MSG_HTTP_CONNECTION message,
+//          normally by calling http_server_drain_connection on its client_fd
 // send_fn: pass aether_send_message
-// spawn_fn: pass scheduler_spawn_actor
-// release_fn: pass scheduler_release_actor
+// spawn_fn: pass scheduler_spawn_actor. The server asks it for an actor of
+//          its own size running its own step, which calls step_fn on the
+//          connection message and then calls release_fn on the actor: the
+//          connection is finished when step_fn returns (#2509). A spawn_fn
+//          that hands out actors from a pool of its own, keeping their step,
+//          keeps them: the server neither writes into nor releases those.
+// release_fn: pass scheduler_release_actor, or NULL to keep every worker
 void http_server_set_actor_handler(HttpServer* server, void (*step_fn)(void*),
                                     void (*send_fn)(void*, void*, size_t),
                                     void* (*spawn_fn)(int, void (*)(void*), size_t),
