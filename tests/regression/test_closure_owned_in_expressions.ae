@@ -103,7 +103,7 @@ main() {
     one_round("ab")
     one_round("ab")
     last_bytes = mem.heap_in_use()
-    check(mid_bytes - first_bytes <= 4096 || last_bytes - mid_bytes <= 4096,
+    check(mid_bytes - first_bytes == 0 || last_bytes - mid_bytes == 0,
         "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
     println("OK")
 }

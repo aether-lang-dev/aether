@@ -97,7 +97,7 @@ main() {
     one_round(w, base)
     one_round(w, base)
     last_bytes = mem.heap_in_use()
-    check(mid_bytes - first_bytes <= 4096 || last_bytes - mid_bytes <= 4096,
+    check(mid_bytes - first_bytes == 0 || last_bytes - mid_bytes == 0,
         "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
     check(seen == 6 * PER_ROUND * 4, "every alias saw its string (${seen})")
     println("OK")

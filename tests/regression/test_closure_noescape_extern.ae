@@ -67,6 +67,7 @@ literals(p: string) -> int {
     string.seq_free(kept)
     string.seq_free(mapped)
     string.seq_free(items)
+    ref_free(acc) // a ref cell is freed by hand; `total` is the same cell
     return hits
 }
 
@@ -133,7 +134,7 @@ main() {
     one_round("a")
     one_round("a")
     last_bytes = mem.heap_in_use()
-    check(mid_bytes - first_bytes <= 4096 || last_bytes - mid_bytes <= 4096,
+    check(mid_bytes - first_bytes == 0 || last_bytes - mid_bytes == 0,
         "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
     println("OK")
 }

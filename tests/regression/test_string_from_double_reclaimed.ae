@@ -16,22 +16,33 @@ round_trips(x: float) -> int {
     return 1
 }
 
+calls(n: int) {
+    i = 0
+    while i < n {
+        round_trips(1.5)
+        i = i + 1
+    }
+}
+
 main() {
     fails = 0
     if round_trips(1.5) != 1 { println("  FAIL 1.5 does not round-trip"); fails = fails + 1 }
     if round_trips(0.0 - 2.25) != 1 { println("  FAIL -2.25 does not round-trip"); fails = fails + 1 }
 
-    // Where the allocator's count is exact, a thousand calls leave the heap
-    // where it was.
+    // Where the allocator's count is exact: a leak grows every window of
+    // calls, while a one-time allocation lands in one. So, warm, one of two
+    // equal windows holds exactly steady.
     if mem.heap_in_use_exact() {
-        before = mem.heap_in_use()
-        i = 0
-        while i < 1000 {
-            round_trips(1.5)
-            i = i + 1
+        calls(200)
+        a = mem.heap_in_use()
+        calls(500)
+        b = mem.heap_in_use()
+        calls(500)
+        c = mem.heap_in_use()
+        if b - a != 0 && c - b != 0 {
+            println("  FAIL both windows of 500 calls grew the heap: ${b - a} then ${c - b} bytes")
+            fails = fails + 1
         }
-        grew = mem.heap_in_use() - before
-        if grew != 0 { println("  FAIL 1000 calls grew the heap by ${grew} bytes"); fails = fails + 1 }
     }
 
     if fails > 0 {
