@@ -10,9 +10,9 @@
 # a const array was caught only by gcc. An assignment's own sides were
 # unsequenced (`arr[i++] = i`), a closure literal was never ordered
 # against the operands beside it, a call with named arguments was
-# skipped, and what a C extern writes was not visible: an extern parameter
-# marked `@mutates` is memory the call writes through, and the std
-# collections carry it. A plain extern read stays inline.
+# skipped, and what a C extern writes was not visible: an extern is opaque
+# (#2524), evaluated ahead of a later operand that calls anything or reads
+# through a pointer. Operands that read only plain locals stay inline.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -135,23 +135,25 @@ closure 1 11 2
 named 12
 extern 0 5 0 1" "an assignment's sides, a closure literal, named arguments and extern effects were not ordered"
 
-# A read through an extern writes nothing: the C stays as it was.
+# Operands that read only plain locals have nothing to order, beside a call
+# or not: the C stays as it was (#2524).
 cat > "$tmp/plain.ae" <<'AE'
 import std.bytes
 
 main() {
     b = bytes.new(4)
     bytes.set(b, 0, 1)
-    bytes.set(b, 1, 2)
-    v = bytes.get(b, 0) | bytes.get(b, 1)
-    println("${v}")
+    k = 2
+    v = bytes.get(b, 0) | k
+    w = (k + 1) | (k * 2)
+    println("${v} ${w}")
 }
 AE
 if ! "$AETHERC" "$tmp/plain.ae" "$tmp/plain.c" >/dev/null 2>&1; then
     echo "  [FAIL] sized_array_params_eval_order: plain.ae did not compile"
     fail=1
 elif grep -q "_eo[0-9]" "$tmp/plain.c"; then
-    echo "  [FAIL] sized_array_params_eval_order: byte reads with nothing to order were hoisted"
+    echo "  [FAIL] sized_array_params_eval_order: operands with nothing to order were hoisted"
     grep -n "_eo[0-9]" "$tmp/plain.c" | head -3 | sed 's/^/        /'
     fail=1
 fi

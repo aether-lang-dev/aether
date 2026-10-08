@@ -729,16 +729,21 @@ static int order_has_call(ASTNode* node) {
  * can write a module global, a variable it shares with a closure it runs
  * (a promoted capture), and memory it is handed by reference (a pointer, an
  * array, a slice). What a function of this program writes is read off its
- * body, through the functions it calls; a closure it runs may write
- * anything it reaches. What a C extern does is not visible: its
- * declaration says it, a parameter marked `@mutates` is memory the call
- * writes through (#2516), and an unmarked extern is taken to write nothing
- * an operand reads (so byte assembly such as `bytes_get(b, i) |
- * bytes_get(b, j)` stays inline). A C function pointer is not visible
- * either, and is taken the same way. */
+ * body, through the functions it calls. A call whose body the compiler
+ * cannot see is opaque: a C extern, a C function pointer, a closure, and a
+ * function of the program that makes such a call. An opaque call may write
+ * anything (a C global, a buffer reached through a stored pointer, the
+ * state behind a handle it is given), so it is ordered against every later
+ * operand that calls anything, reads a shared variable, or reads memory
+ * through a pointer, a field or an index (#2524). Nothing in a declaration
+ * narrows it: a mark on the parameters an extern writes through would still
+ * leave its other effects unknown, and holding the earlier operand in a
+ * temporary costs nothing once the C compiler has optimised. Operands that
+ * read only plain locals and literals stay inline. */
 
 typedef struct OrderFnEffects {
     ASTNode* fn;
+    int opaque;                /* makes a call the compiler cannot see */
     int writes_shared;         /* a module global, or runs a closure */
     unsigned writes_through;   /* bit k: memory its parameter k reaches */
 } OrderFnEffects;
@@ -808,9 +813,20 @@ static int order_param_index(ASTNode* fn, const char* name) {
 
 static int order_fn_effects(CodeGenerator* gen, ASTNode* fn);
 
+/* The effects of the call `call`: its callee's entry in gen->order_fn_effects,
+ * or -1 for a call the compiler cannot see through (an extern, a C function
+ * pointer, a closure, a callee it cannot find). */
+static int order_call_effects(CodeGenerator* gen, ASTNode* call) {
+    if (order_call_runs_closure(call)) return -1;
+    ASTNode* def = order_callee_def(gen, call);
+    if (!def || def->type == AST_EXTERN_FUNCTION) return -1;
+    int idx = order_fn_effects(gen, def);
+    return gen->order_fn_effects[idx].opaque ? -1 : idx;
+}
+
 /* The effects of the calls in `node` as seen from `fn`'s own body. */
 static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
-                            int* shared, unsigned* through) {
+                            int* opaque, int* shared, unsigned* through) {
     if (!node || node->type == AST_CLOSURE) return;
     const char* t = order_write_target(node);
     if (t && is_module_global_var(gen, t)) *shared = 1;
@@ -818,34 +834,36 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
     int k = lv ? order_param_index(fn, order_lvalue_root(lv)) : -1;
     if (k >= 0) *through |= 1u << k;
     if (node->type == AST_FUNCTION_CALL) {
-        int c_shared = 1;
-        unsigned c_through = ~0u;
-        if (!order_call_runs_closure(node)) {
-            ASTNode* def = order_callee_def(gen, node);
-            int idx = def ? order_fn_effects(gen, def) : -1;
-            c_shared = idx >= 0 && gen->order_fn_effects[idx].writes_shared;
-            c_through = idx >= 0 ? gen->order_fn_effects[idx].writes_through : 0;
-        }
-        if (c_shared) *shared = 1;
-        for (int i = 0, a = 0; i < node->child_count && a < 32; i++) {
-            ASTNode* arg = node->children[i];
-            if (arg && arg->type == AST_CLOSURE && arg->value &&
-                strcmp(arg->value, "trailing") == 0) continue;
-            if (c_through & (1u << a)) {
-                int pk = order_param_index(fn, order_ref_arg_root(arg));
-                if (pk >= 0) *through |= 1u << pk;
+        int idx = order_call_effects(gen, node);
+        if (idx < 0) {
+            *opaque = 1;
+        } else {
+            if (gen->order_fn_effects[idx].writes_shared) *shared = 1;
+            unsigned c_through = gen->order_fn_effects[idx].writes_through;
+            for (int i = 0, a = 0; i < node->child_count && a < 32; i++) {
+                ASTNode* arg = node->children[i];
+                if (arg && arg->type == AST_CLOSURE && arg->value &&
+                    strcmp(arg->value, "trailing") == 0) continue;
+                if (c_through & (1u << a)) {
+                    int pk = order_param_index(fn, order_ref_arg_root(arg));
+                    if (pk >= 0) *through |= 1u << pk;
+                }
+                a++;
             }
-            a++;
         }
+    } else if (node->type == AST_SEND_FIRE_FORGET || node->type == AST_SEND_ASK ||
+               node->type == AST_VA_ARG) {
+        /* A handler runs code the body does not show; a varargs read
+         * advances state the caller handed over. */
+        *opaque = 1;
     }
     for (int i = 0; i < node->child_count; i++)
-        order_scan_body(gen, fn, node->children[i], shared, through);
+        order_scan_body(gen, fn, node->children[i], opaque, shared, through);
 }
 
-/* The memoised effects of calling `fn`: an index into gen->order_fn_effects.
- * A function reached again while its own body is read (recursion) answers
- * with what is known so far. An extern's effects are its declaration's
- * `@mutates` parameters (#2516). */
+/* The memoised effects of calling `fn`, a function of this program: an
+ * index into gen->order_fn_effects. A function reached again while its own
+ * body is read (recursion) answers with what is known so far. */
 static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
     for (int i = 0; i < gen->order_fn_effect_count; i++)
         if (gen->order_fn_effects[i].fn == fn) return i;
@@ -856,20 +874,14 @@ static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
         gen->order_fn_effect_capacity = cap;
     }
     int idx = gen->order_fn_effect_count++;
-    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0 };
+    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0, 0 };
+    int opaque = 0;
     int shared = 0;
     unsigned through = 0;
-    if (fn->type == AST_EXTERN_FUNCTION) {
-        for (int i = 0, k = 0; i < fn->child_count && k < 32; i++) {
-            ASTNode* p = fn->children[i];
-            if (!p || p->type != AST_IDENTIFIER) continue;
-            if (p->annotation && strstr(p->annotation, "mutates_param")) through |= 1u << k;
-            k++;
-        }
-    }
     for (int i = 0; i < fn->child_count; i++)
         if (fn->children[i] && fn->children[i]->type == AST_BLOCK)
-            order_scan_body(gen, fn, fn->children[i], &shared, &through);
+            order_scan_body(gen, fn, fn->children[i], &opaque, &shared, &through);
+    gen->order_fn_effects[idx].opaque = opaque;
     gen->order_fn_effects[idx].writes_shared = shared;
     gen->order_fn_effects[idx].writes_through = through;
     return idx;
@@ -919,23 +931,18 @@ static int order_reads_through(ASTNode* node, const char* root) {
 /* Can a call in `x` change what `y` reads, or read what `y` writes? */
 static int order_call_affects(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
     if (!x || x->type == AST_CLOSURE) return 0;
-    if (x->type == AST_FUNCTION_CALL) {
+    if (x->type == AST_FUNCTION_CALL || x->type == AST_SEND_ASK ||
+        x->type == AST_SEND_FIRE_FORGET || x->type == AST_VA_ARG) {
         /* Any call may read a shared variable `y` writes. */
         if (order_writes_shared_var(gen, y)) return 1;
-        int runs_closure = order_call_runs_closure(x);
-        int shared = runs_closure;
-        unsigned through = runs_closure ? ~0u : 0;
-        if (!runs_closure) {
-            ASTNode* def = order_callee_def(gen, x);
-            int idx = def ? order_fn_effects(gen, def) : -1;
-            if (idx >= 0) {
-                shared = gen->order_fn_effects[idx].writes_shared;
-                through = gen->order_fn_effects[idx].writes_through;
-            }
-        }
+        /* A send runs a handler, a varargs read advances the list: opaque. */
+        int idx = x->type == AST_FUNCTION_CALL ? order_call_effects(gen, x) : -1;
+        int shared = idx < 0 || gen->order_fn_effects[idx].writes_shared;
+        unsigned through = idx < 0 ? 0 : gen->order_fn_effects[idx].writes_through;
         /* A shared variable it writes, read by `y` or by a call in `y`. */
         if (shared && (order_reads_shared_var(gen, y) || order_has_call(y))) return 1;
-        if (runs_closure && order_reads_through(y, NULL)) return 1;
+        /* An opaque call may write any memory `y` reads through. */
+        if (idx < 0 && order_reads_through(y, NULL)) return 1;
         for (int i = 0, a = 0; i < x->child_count && a < 32; i++) {
             ASTNode* arg = x->children[i];
             if (arg && arg->type == AST_CLOSURE && arg->value &&

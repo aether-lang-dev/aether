@@ -35,14 +35,14 @@ exports(
 
 // ---- raw externs (std/collections/aether_pqueue.c) ----
 extern aether_pqueue_new() -> ptr
-extern aether_pqueue_push(pq: @mutates ptr, priority: long, item: ptr) -> int
-extern aether_pqueue_pop(pq: @mutates ptr) -> ptr
+extern aether_pqueue_push(pq: ptr, priority: long, item: ptr) -> int
+extern aether_pqueue_pop(pq: ptr) -> ptr
 extern aether_pqueue_peek(pq: ptr) -> ptr
 extern aether_pqueue_peek_priority(pq: ptr) -> long
 extern aether_pqueue_size(pq: ptr) -> int
 extern aether_pqueue_is_empty(pq: ptr) -> int
-extern aether_pqueue_clear(pq: @mutates ptr)
-extern aether_pqueue_free(pq: @mutates ptr)
+extern aether_pqueue_clear(pq: ptr)
+extern aether_pqueue_free(pq: ptr)
 
 // ---- Aether-side wrappers ----
 

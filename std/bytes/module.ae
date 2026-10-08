@@ -46,45 +46,45 @@ extern aether_bytes_from_ptr(src: ptr, length: int) -> ptr
 extern aether_bytes_string_from_ptr(src: ptr, length: int) -> string @heap
 extern aether_bytes_length(b: ptr) -> int
 extern aether_bytes_capacity(b: ptr) -> int
-extern aether_bytes_set_length(b: @mutates ptr, length: int) -> int
+extern aether_bytes_set_length(b: ptr, length: int) -> int
 extern aether_bytes_data(b: ptr) -> ptr
-extern aether_bytes_set(b: @mutates ptr, index: int, value: int) -> int
+extern aether_bytes_set(b: ptr, index: int, value: int) -> int
 extern aether_bytes_get(b: ptr, index: int) -> int
-extern aether_bytes_set_le16(b: @mutates ptr, index: int, value: int) -> int
+extern aether_bytes_set_le16(b: ptr, index: int, value: int) -> int
 extern aether_bytes_get_le16(b: ptr, index: int) -> int
-extern aether_bytes_set_le32(b: @mutates ptr, index: int, value: int) -> int
+extern aether_bytes_set_le32(b: ptr, index: int, value: int) -> int
 extern aether_bytes_get_le32(b: ptr, index: int) -> int
-extern aether_bytes_set_le64(b: @mutates ptr, index: int, value: long) -> int
+extern aether_bytes_set_le64(b: ptr, index: int, value: long) -> int
 extern aether_bytes_get_le64(b: ptr, index: int) -> long
-extern aether_bytes_set_be16(b: @mutates ptr, index: int, value: int) -> int
+extern aether_bytes_set_be16(b: ptr, index: int, value: int) -> int
 extern aether_bytes_get_be16(b: ptr, index: int) -> int
-extern aether_bytes_set_be32(b: @mutates ptr, index: int, value: int) -> int
+extern aether_bytes_set_be32(b: ptr, index: int, value: int) -> int
 extern aether_bytes_get_be32(b: ptr, index: int) -> int
-extern aether_bytes_set_be64(b: @mutates ptr, index: int, value: long) -> int
+extern aether_bytes_set_be64(b: ptr, index: int, value: long) -> int
 extern aether_bytes_get_be64(b: ptr, index: int) -> long
-extern aether_bytes_copy_from_string(b: @mutates ptr, dst: int, src: string, src_len: int) -> int
+extern aether_bytes_copy_from_string(b: ptr, dst: int, src: string, src_len: int) -> int
 // Two-buffer copy. `dst` and `src` are distinct AetherBytes pointers;
 // `length` is the count of bytes to copy from `src` at offset
 // `src_off` into `dst` at offset `dst_off`. Grows `dst` if needed.
 // For an in-place copy (same buffer) use `copy_within` — it has the
 // deliberate RLE forward-overlap semantics that memmove() lacks.
-extern aether_bytes_copy_from_bytes(dst: @mutates ptr, dst_off: int, src: ptr, src_off: int, length: int) -> int
+extern aether_bytes_copy_from_bytes(dst: ptr, dst_off: int, src: ptr, src_off: int, length: int) -> int
 // `length` here is the count of bytes to copy, not a buffer length.
-extern aether_bytes_copy_within(b: @mutates ptr, dst: int, src: int, length: int) -> int
+extern aether_bytes_copy_within(b: ptr, dst: int, src: int, length: int) -> int
 // Copy `length` bytes from raw memory into the buffer at `dst`, growing it.
-extern aether_bytes_copy_from_ptr(b: @mutates ptr, dst: int, src: ptr, length: int) -> int
+extern aether_bytes_copy_from_ptr(b: ptr, dst: int, src: ptr, length: int) -> int
 // `aether_bytes_finish` returns a freshly heap-owned AetherString
 // (`string_new_with_length` — see std/bytes/aether_bytes.c). The
 // `string @heap` return tells the heap-string tracker the caller
 // owns the result, so `x = bytes.finish(...)` gets a `_heap_x = 1`
 // slot and any function returning a `bytes.finish` value is itself
 // classified heap-returning. Mirrors `aether_strbuilder_finish`.
-extern aether_bytes_finish(b: @mutates ptr, length: int) -> string @heap
+extern aether_bytes_finish(b: ptr, length: int) -> string @heap
 // Non-consuming twin of finish: mint a fresh heap AetherString from the
 // first `length` bytes without destroying the buffer, so the buffer's
 // owner can keep it and mint again. See to_string wrapper below.
 extern aether_bytes_to_string(b: ptr, length: int) -> string @heap
-extern aether_bytes_free(b: @mutates ptr)
+extern aether_bytes_free(b: ptr)
 
 // ---- Aether-side wrappers ----
 // Allocate a new mutable byte buffer with at least `initial_capacity`

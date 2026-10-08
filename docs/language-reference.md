@@ -2703,17 +2703,9 @@ pqsort(a: ptr, n: size_t, es: size_t, cmp: const ptr, lr: size_t, rr: size_t) { 
 
 Passing a plain `ptr` where the C conversion is safe stays allowed at call sites; only the *emitted prototype* carries the exact spelling. C ABI scalar aliases (`size_t`, `uint64_t`, …) emit their exact C name the same way. `const`-qualification survives into the generated C so the C compiler diagnoses writes; Aether-side write rejection is not (yet) enforced.
 
-### `@mutates` the extern writes through this parameter
+### An extern's effects are unknown
 
-A C function's body is not visible to the compiler. Operands are evaluated left to right (see **Evaluation order** under [Built-in Functions](#built-in-functions)) by evaluating an operand ahead, into a temporary, when a later operand can observe its effect, and for an extern the effects are what its declaration says: a parameter marked `@mutates` is memory the call writes through. Two calls in one operand list that read or write the same handle through such an extern are then evaluated in source order; an unmarked extern is taken to write nothing, so plain reads such as `bytes.get(b, i) | bytes.get(b, j)` stay inline.
-
-```aether,fragment
-extern list_add_raw(list: @mutates ptr, item: ptr) -> int
-extern aether_pqueue_pop(pq: @mutates ptr) -> ptr
-extern aether_bytes_get(b: ptr, index: int) -> int        // a read: no mark
-```
-
-The std collections (`list`, `collections`, `pqueue`, `intarr`, `floatarr`, `intmap`, `set`, `bytes`) carry it on every extern that appends, stores, removes, clears, sorts or frees. It stacks with the other parameter attributes (`@aether`, `@retain`); order does not matter.
+A C function's body is not visible to the compiler, and its declaration does not narrow what it does: it may write through any pointer it is given and any state of its own (a reader of stdin, a random generator with no handle parameter). So a call of an extern is evaluated ahead of any later operand that calls anything or reads memory through a pointer, see **Evaluation order** under [Built-in Functions](#built-in-functions); `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order, and `pair(strbuilder.append(b, "xy"), strbuilder.length(b))` reads the length after the append.
 
 ### `@extern("c_name")` bind to a renamed C symbol
 
@@ -3073,11 +3065,16 @@ change what the other reads. A closure literal reads the variables it
 captures where it stands, so `f(i++, || { return i })` makes the closure
 after the step. A call can change a module global, a variable it shares
 with a closure it runs, and memory it is handed by reference; what a
-function of the program writes is read off its body, and what a C extern
-writes is what its declaration says (an `@mutates` parameter, see
-[Extern Functions](#extern-functions)). A list with no such pair compiles
-as written. An array literal stored into an array that already exists is
-evaluated whole before it is stored:
+function of the program writes is read off its body. A call whose body
+the compiler cannot see is opaque: a C extern, a C function pointer, a
+closure, a message send, and a function of the program that makes such a
+call. An opaque call may write anything, so it is evaluated ahead of every
+later operand that calls anything, reads a module global or a variable
+shared with a closure, or reads memory through a pointer, a field or an
+index. A list with no such pair compiles as written: operands that read
+only plain locals and literals stay inline, beside a call or not. An array
+literal stored into an array that already exists is evaluated whole before
+it is stored:
 
 ```aether,run
 pair(a: int, b: int) -> int { return a * 10 + b }
@@ -3100,12 +3097,9 @@ main() {
 1 0
 ```
 
-A C function pointer's body is not visible to the compiler, and neither
-is an extern's beyond its `@mutates` parameters, so two calls that reach
-memory only through an unmarked extern keep the order C gives them. Bind
-the results to locals first where that order matters. The target of a
-compound assignment (`a[i] += v`) is read and then written, so a write
-inside it (`a[i++] += v`) is refused rather than run twice.
+The target of a compound assignment (`a[i] += v`) is read and then
+written, so a write inside it (`a[i++] += v`) is refused rather than run
+twice.
 
 ### Heredoc strings
 

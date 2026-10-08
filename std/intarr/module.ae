@@ -50,19 +50,19 @@ extern intarr_get_raw(arr: ptr, i: int) -> int
 
 // Write `value` at `i`. No-op if `arr` is null or `i` is out-of-range.
 // Use `intarr.set` (below) if you need an error on OOB.
-extern intarr_set_raw(arr: @mutates ptr, i: int, value: int)
+extern intarr_set_raw(arr: ptr, i: int, value: int)
 
 // Hot-path variants — caller guarantees index is in [0, size). OOB
 // access is undefined behaviour. Don't use from outside a tight loop.
 extern intarr_data(arr: ptr) -> int[] @c_import
 extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
-extern intarr_set_unchecked(arr: @mutates ptr, i: int, value: int) @c_import
+extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
 
 // Fill every element with `value`. Useful for resetting a DP table.
-extern intarr_fill(arr: @mutates ptr, value: int)
+extern intarr_fill(arr: ptr, value: int)
 
 // Release. Idempotent on null.
-extern intarr_free(arr: @mutates ptr)
+extern intarr_free(arr: ptr)
 
 // ---- Go-style wrappers ----
 

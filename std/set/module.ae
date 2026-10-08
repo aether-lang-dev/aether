@@ -34,14 +34,14 @@ exports(
 extern aether_set_new() -> ptr
 // Items cross as `@aether string`, with their length, so an item with an
 // embedded NUL is all of itself (#2469): the set is a map underneath.
-extern aether_set_add(set: @mutates ptr, item: @aether string) -> int
+extern aether_set_add(set: ptr, item: @aether string) -> int
 extern aether_set_has(set: ptr, item: @aether string) -> int
-extern aether_set_remove(set: @mutates ptr, item: @aether string)
+extern aether_set_remove(set: ptr, item: @aether string)
 extern aether_set_size(set: ptr) -> int
-extern aether_set_clear(set: @mutates ptr)
-extern aether_set_free(set: @mutates ptr)
+extern aether_set_clear(set: ptr)
+extern aether_set_free(set: ptr)
 extern aether_set_items_raw(set: ptr) -> ptr
-extern aether_set_items_free(items: @mutates ptr)
+extern aether_set_items_free(items: ptr)
 // aether_set_items_raw returns the same MapKeys snapshot map.keys does, so
 // the read side is literally the same two functions (#1724).
 extern map_keys_size_raw(items: ptr) -> int

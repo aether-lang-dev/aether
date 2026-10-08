@@ -12,10 +12,7 @@
   indexes of an assignment's target are evaluated before its value
   (`arr[i++] = i` stores at the old `i`), a closure literal reads its
   captures where it stands and is ordered against the operands beside it,
-  a call with named arguments evaluates them in the order written, and an
-  extern parameter marked `@mutates` is memory the call writes through, so
-  `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order; the std
-  collections carry the mark. An unmarked extern is a read, so byte
-  assembly such as `bytes.get(b, i) | bytes.get(b, j)` stays inline. A
-  write inside the target of a compound assignment (`a[i++] += 1`) is
-  refused rather than run twice.
+  a call with named arguments evaluates them in the order written, and
+  `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order. A write
+  inside the target of a compound assignment (`a[i++] += 1`) is refused
+  rather than run twice.

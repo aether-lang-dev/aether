@@ -14,7 +14,7 @@ exports(
 
 extern list_new() -> ptr
 extern list_new_in(alloc: ptr) -> ptr
-extern list_add_raw(list: @mutates ptr, item: ptr) -> int
+extern list_add_raw(list: ptr, item: ptr) -> int
 // Heap-string-aware add. The list acquires its OWN reference: a
 // refcounted string is retained, a plain pointer (a literal, a
 // borrowed char*) is copied. The caller keeps and independently frees
@@ -23,13 +23,13 @@ extern list_add_raw(list: @mutates ptr, item: ptr) -> int
 // Codegen auto-routes `list.add(l, heap_string_expr)` to the adopting
 // sibling instead, where the value is escaping into the list and the
 // caller does not release it.
-extern list_add_string_owned(list: @mutates ptr, item: ptr) -> int
+extern list_add_string_owned(list: ptr, item: ptr) -> int
 extern list_get_raw(list: ptr, index: int) -> ptr
-extern list_set(list: @mutates ptr, index: int, item: ptr)
+extern list_set(list: ptr, index: int, item: ptr)
 extern list_size(list: ptr) -> int
-extern list_remove(list: @mutates ptr, index: int)
-extern list_clear(list: @mutates ptr)
-extern list_free(list: @mutates ptr)
+extern list_remove(list: ptr, index: int)
+extern list_clear(list: ptr)
+extern list_free(list: ptr)
 
 // Append an item to a list. Returns "" on success, error on failure.
 add(list: ptr, item: ptr) -> {

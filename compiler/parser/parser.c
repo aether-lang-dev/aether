@@ -5245,16 +5245,6 @@ ASTNode* parse_extern_declaration(Parser* parser) {
                  *             string.length / equals / println but
                  *             a UAF for retainers. See #420 follow-up.
                  *
-                 *   @mutates: the function writes through the pointer
-                 *             (a list it appends to, a buffer it
-                 *             fills). Operands are evaluated left to
-                 *             right only where one can change what
-                 *             another reads, and a C function's body is
-                 *             not visible, so this is what tells codegen
-                 *             that `pair(list.pop(l), list.pop(l))`
-                 *             needs its first call evaluated first.
-                 *             See #2516.
-                 *
                  * Multiple annotations stack: `name: @aether @retain string`
                  * is legal. Order is irrelevant; storage is a
                  * comma-separated set on `param->annotation`. */
@@ -5269,13 +5259,10 @@ ASTNode* parse_extern_declaration(Parser* parser) {
                         } else if (strcmp(attr->value, "retain") == 0) {
                             tag = "retain_param";
                             advance_token(parser);
-                        } else if (strcmp(attr->value, "mutates") == 0) {
-                            tag = "mutates_param";
-                            advance_token(parser);
                         }
                     }
                     if (!tag) {
-                        parser_error(parser, "unknown extern-param attribute (expected @aether, @retain or @mutates)");
+                        parser_error(parser, "unknown extern-param attribute (expected @aether or @retain)");
                         break;
                     }
                     /* Append to the comma-separated set, deduping. */
