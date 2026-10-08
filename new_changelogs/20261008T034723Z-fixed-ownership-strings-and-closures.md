@@ -207,3 +207,12 @@
   statement; `_ = e` already freed its value, and the bare form now does
   the same. `w ! Keep { s: string.concat(p, "pt") }`, and the same in an
   ask or a reply, copied the temporary for the receiver and never freed it.
+- **A string passed to a function that returns it as a copy is freed by its
+  scope, and a closure handed back by its callee is the caller's.** A
+  function whose string result is uniform-heap copies a parameter it
+  returns, so passing a heap local to it is no escape: `url.parse_query`
+  no longer keeps every decoded key for the rest of the program. A
+  function that returns its closure parameter (`keep(cb) -> fn { return
+  cb }`) hands the caller's argument back, so a binding to `keep(|| { ... })`
+  owns the closure as a binding to a literal does, and releases it on
+  rebinding and at scope end instead of leaking its environment and cells.

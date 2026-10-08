@@ -1,0 +1,90 @@
+// Regression: a function that hands its closure parameter back
+// (`keep(cb) -> fn { return cb }`) hands back the caller's argument, so a
+// local bound to `keep(|| { ... })` owns the closure it was given, as one
+// bound to a closure literal does: rebinding it releases the previous
+// environment and its scope releases the last one.
+//
+// Before, a returned parameter was taken as "the caller's own value", so
+// the binding was never an owner; since a list keeps a reference of its
+// own to a closure it stores (#2518), the binding's reference had no
+// holder left to release it, and `later = keep() callback { ... }` in
+// test_closure_capture_in_builder_block leaked the environment and the two
+// cells it held (the macOS leaks gate, push 5).
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, one of two equal windows of the same work must grow the
+// heap by exactly 0. Elsewhere the macOS leaks gate covers this program.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal that owns nothing.
+
+import std.mem
+import std.string
+import std.list
+
+extern exit(code: int)
+
+const PER_ROUND = 100
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+keep(cb: fn) -> fn { return cb }
+
+// The callback form, rebound, then kept in a list as well.
+kept_callbacks(p: string) -> int {
+    label = string.concat(p, "!")
+    total = 0
+    later = keep() callback { total = total + 1 }
+    later = keep() callback {
+        total = total + string.length(label)
+    }
+    later()
+    later()
+    owners = list.new()
+    _ = list.add(owners, later)
+    list.free(owners)
+    check(total == 2 * string.length(label), "the kept closure ran against its cell")
+    return total
+}
+
+// A closure literal handed back, and a handed-back result handed back again.
+chained(p: string) -> int {
+    label = string.concat(p, "?")
+    n = 0
+    f = keep(keep(|| { n = n + string.length(label); return n }))
+    int a = call(f)
+    int b = call(f)
+    check(b == 2 * a, "the closure keeps its state across calls")
+    return b
+}
+
+fn one_round(p: string) {
+    i = 0
+    while i < PER_ROUND {
+        kept_callbacks(p)
+        chained(p)
+        i = i + 1
+    }
+}
+
+main() {
+    if !mem.heap_in_use_exact() {
+        one_round("a")
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    one_round("a")
+    one_round("a")
+    first_bytes = mem.heap_in_use()
+    one_round("a")
+    mid_bytes = mem.heap_in_use()
+    one_round("a")
+    last_bytes = mem.heap_in_use()
+    check(mid_bytes - first_bytes == 0 || last_bytes - mid_bytes == 0,
+        "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+    println("OK")
+}

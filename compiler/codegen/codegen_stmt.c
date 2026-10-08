@@ -4778,7 +4778,18 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
     if (fn && is_retain_extern_param(gen, fn, arg_idx)) return 1;
     if (callee_has_visible_body(gen, call->value)) {
         /* Visible body → the body-walk is authoritative (sees through
-         * read-only accessors, ignores self-assignment `p = p`). */
+         * read-only accessors, ignores self-assignment `p = p`).
+         *
+         * A callee whose string result is uniform-heap hands back a copy
+         * of a parameter it returns (`return p` goes through
+         * aether_uniform_heap_str with the parameter's tracker 0), so the
+         * argument is never aliased by the result: only a store in the
+         * body escapes it. Counting the return made the caller keep a
+         * local passed to `_query_key_escape(key)` for ever (the leak in
+         * url.parse_query); the result and the walk now follow one rule. */
+        if (is_heap_string_expr(gen, call)) {
+            return callee_param_store_escapes_via_body(gen, call->value, arg_idx);
+        }
         return callee_param_escapes_via_body(gen, call->value, arg_idx, 0);
     }
     /* No visible body (extern / unknown): a `string`-typed param looks
@@ -5184,7 +5195,8 @@ typedef struct {
 
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                           ASTNode* parent, int nested);
-static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* callee);
+static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* callee,
+                                 ASTNode* call);
 static int call_hands_over_closure(CodeGenerator* gen, EnvScan* s, ASTNode* call);
 
 static int env_scan_is_real_closure(ASTNode* n) {
@@ -5375,6 +5387,31 @@ static int env_scan_param_keeps(CodeGenerator* gen, EnvScan* s, ASTNode* call, A
 static ASTNode* g_owned_ret_active[ENV_SCAN_MAX_DEPTH + 2];
 static int g_owned_ret_active_count = 0;
 
+/* The parameter `fdef` returns, when every return hands back the same
+ * parameter (`keep(cb) -> fn { return cb }`): its index, -1 when no return
+ * does, -2 when returns disagree. The callee hands the caller's argument
+ * back, so the call's result is the caller's own exactly when that argument
+ * was a closure nobody else holds (returns_owned_closure checks the call). */
+static int g_returns_param = -1;
+
+/* The index of parameter `name` of `fdef` (a function definition's pattern
+ * variables, a closure's AST_CLOSURE_PARAMs), or -1. */
+static int owned_return_param_index(ASTNode* fdef, const char* name) {
+    int idx = 0;
+    for (int i = 0; fdef && i < fdef->child_count; i++) {
+        ASTNode* p = fdef->children[i];
+        if (!p) continue;
+        if (p->type == AST_BLOCK) break;
+        if (p->type == AST_GUARD_CLAUSE || p->type == AST_REQUIRES_CLAUSE ||
+            p->type == AST_ENSURES_CLAUSE) continue;
+        if (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION &&
+            p->type != AST_CLOSURE_PARAM) continue;
+        if (p->value && strcmp(p->value, name) == 0) return idx;
+        idx++;
+    }
+    return -1;
+}
+
 /* Every `return` of `fdef` (a closure body's returns are its own) must hand
  * back a closure value only the caller will hold. */
 static int returns_owned_in(CodeGenerator* gen, ASTNode* fdef, ASTNode* body,
@@ -5404,9 +5441,25 @@ static int returns_owned_in(CodeGenerator* gen, ASTNode* fdef, ASTNode* body,
             return call_hands_over_closure(gen, &s, e);
         }
         if (e->type != AST_IDENTIFIER || !e->value) return 0;
+        /* A parameter returned is the caller's argument handed back: the
+         * result is the caller's own when that argument was (the call
+         * site decides, through g_returns_param), provided the body keeps
+         * no copy of it (a store into a holder retains its own, #2525). */
+        int pidx = owned_return_param_index(fdef, e->value);
+        if (pidx >= 0) {
+            s.name = e->value;
+            s.param_mode = 1;
+            env_scan_walk(gen, &s, body, NULL, 0);
+            if (s.escapes) return 0;
+            if (g_returns_param == -1 || g_returns_param == pidx) {
+                g_returns_param = pidx;
+                return 1;
+            }
+            g_returns_param = -2;
+            return 0;
+        }
         /* A local bound only to fresh closures whose every other use leaves
-         * no copy: its reference goes to the caller. A parameter is the
-         * caller's own value and has no binding here. */
+         * no copy: its reference goes to the caller. */
         s.name = e->value;
         env_scan_walk(gen, &s, body, NULL, 0);
         return !s.escapes && s.bindings > 0;
@@ -5421,15 +5474,36 @@ static int returns_owned_in(CodeGenerator* gen, ASTNode* fdef, ASTNode* body,
  * holds? Then the caller owns the value's reference, and a local it binds
  * the call to is freed by the caller's scope like a closure literal is.
  * Every clause must return only fresh closures. */
-static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* callee) {
+/* Is the argument the callee hands back (parameter `pidx` of a callee whose
+ * every return is that parameter) a closure nobody else holds at `call`: a
+ * closure literal, or a call that hands one over? `first_arg` is 1 for the
+ * `call(f, ...)` form. A builder's injected `_ctx` shifts the arguments, so
+ * builders are left alone. */
+static int handed_back_arg_is_fresh(CodeGenerator* gen, EnvScan* s, ASTNode* fdef,
+                                    ASTNode* call, int pidx, int first_arg) {
+    if (!call || pidx < 0) return 0;
+    if (fdef && fdef->child_count > 0 && fdef->children[0] && fdef->children[0]->value &&
+        strcmp(fdef->children[0]->value, "_ctx") == 0) return 0;
+    int ai = first_arg + pidx;
+    if (ai >= call->child_count) return 0;
+    ASTNode* arg = call->children[ai];
+    if (env_scan_is_real_closure(arg)) return 1;
+    return arg && arg->type == AST_FUNCTION_CALL && call_hands_over_closure(gen, s, arg);
+}
+
+static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* callee,
+                                 ASTNode* call) {
     if (!gen->program || !callee || s->depth >= ENV_SCAN_MAX_DEPTH) return 0;
     char fn_norm[256];
     const char* fn = codegen_normalise_callee(callee, fn_norm, sizeof(fn_norm));
     const DefClauses* dc = program_index_clauses(gen->program, fn);
     if (!dc || dc->count == 0) return 0;
+    int handed = -1;   /* the parameter every clause hands back, if any */
+    ASTNode* first_def = NULL;
     for (int c = 0; c < dc->count; c++) {
         ASTNode* fdef = dc->nodes[c];
         if (!fdef) return 0;
+        if (!first_def) first_def = fdef;
         /* The result must be a closure value, not a box in a `ptr`. */
         Type* rt = fdef->node_type;
         if (!rt || rt->kind != TYPE_FUNCTION || rt->is_fnptr) return 0;
@@ -5439,11 +5513,20 @@ static int returns_owned_closure(CodeGenerator* gen, EnvScan* s, const char* cal
         ASTNode* body = env_scan_fn_body(fdef);
         if (!body) return 0;
         int returns = 0;
+        int saved_param = g_returns_param;   /* nested walks have their own */
+        g_returns_param = -1;
         g_owned_ret_active[g_owned_ret_active_count++] = fdef;
         int ok = returns_owned_in(gen, fdef, body, body, s->depth + 1, &returns);
         g_owned_ret_active_count--;
-        if (!ok || returns == 0) return 0;
+        int param = g_returns_param;
+        g_returns_param = saved_param;
+        if (!ok || returns == 0 || param == -2) return 0;
+        if (c == 0) handed = param;
+        else if (handed != param) return 0;
     }
+    /* A handed-back parameter is the caller's own only when the argument
+     * was. */
+    if (handed >= 0) return handed_back_arg_is_fresh(gen, s, first_def, call, handed, 0);
     return 1;
 }
 
@@ -5480,7 +5563,7 @@ static int call_hands_over_closure(CodeGenerator* gen, EnvScan* s, ASTNode* call
         callee = f->value;
         if (!env_scan_callee_is_variable(gen, s, callee)) return 0;
     } else if (!env_scan_callee_is_variable(gen, s, callee)) {
-        return returns_owned_closure(gen, s, callee);
+        return returns_owned_closure(gen, s, callee, call);
     }
     if (s->depth >= ENV_SCAN_MAX_DEPTH || !s->root) return 0;
     /* The result must be a closure value, not a box in a `ptr`. */
@@ -5504,9 +5587,17 @@ static int call_hands_over_closure(CodeGenerator* gen, EnvScan* s, ASTNode* call
     if (!body) return 0;
     int returns = 0;
     g_owned_ret_active[g_owned_ret_active_count++] = lit;
+    int saved_param = g_returns_param;   /* nested walks have their own */
+    g_returns_param = -1;
     int ok = returns_owned_in(gen, lit, body, body, s->depth + 1, &returns);
+    int param = g_returns_param;
+    g_returns_param = saved_param;
     g_owned_ret_active_count--;
-    return ok && returns > 0;
+    if (!ok || returns == 0 || param == -2) return 0;
+    /* A handed-back parameter of the closure: the argument follows the
+     * callee slot in `call(f, ...)`. */
+    if (param >= 0) return handed_back_arg_is_fresh(gen, s, NULL, call, param, 1);
+    return 1;
 }
 
 /* Does `n` bind `name` anywhere below it (not counting `n` itself)? */
