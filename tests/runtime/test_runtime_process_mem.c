@@ -8,6 +8,13 @@
 #include <string.h>
 #include <pthread.h>
 #include <sched.h>
+#ifdef _WIN32
+#include <windows.h>
+#define sleep_ms(ms) Sleep(ms)
+#else
+#include <unistd.h>
+#define sleep_ms(ms) usleep((ms) * 1000)
+#endif
 
 /* Where each block escapes to: a compiler may drop a malloc/free pair whose
  * pointer goes nowhere, and then there is nothing to measure. */
@@ -91,6 +98,13 @@ TEST_CATEGORY(thread_epoch_moves_when_a_thread_starts_and_ends, TEST_CATEGORY_RU
     ASSERT_TRUE(running != before);
     g_release_waiter = 1;
     pthread_join(t, NULL);
+    /* The end can be reported after the join returns: on macOS the Mach
+     * thread finishes terminating on its own, and task_threads lists it
+     * until then. Wait for it, a bounded while. */
     int64_t ended = aether_thread_epoch();
+    for (int i = 0; ended == running && i < 2000; i++) {
+        sleep_ms(1);
+        ended = aether_thread_epoch();
+    }
     ASSERT_TRUE(ended != running);
 }
