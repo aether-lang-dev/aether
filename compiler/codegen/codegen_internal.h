@@ -398,6 +398,9 @@ void discover_bare_fn_adapters(CodeGenerator* gen);
 
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);
+/* #2528 (codegen_actor.c): a `string` state field, tracked by `_heap_<name>`
+ * in the actor struct and released by `<Actor>_destroy_state`. */
+int state_field_owns_string(ASTNode* state_decl);
 
 /* Struct-field heap-string ownership (#465). The struct typedef
  * emitter (generate_struct_definition) appends a hidden
@@ -411,10 +414,16 @@ int struct_has_heap_string_field(ASTNode* struct_def);
  * holds a reference of its own to the closure's env, released by
  * `<Name>_destroy` / `_replace`, retained by `_dup`. */
 int struct_field_is_closure(ASTNode* field);
+/* #2528: a `string[N]` (1) or `fn[N]` (2) field whose elements the struct
+ * owns, length in `*len`; 0 otherwise. */
+int struct_field_owned_array(ASTNode* field, int* len);
 /* #2525: store the closure value `e` into a slot that holds a reference of
  * its own: a fresh closure (a literal, a call handing one over) is adopted,
  * anything else (a local, a field, an element, a parameter) is retained. */
 void emit_closure_take(CodeGenerator* gen, ASTNode* e);
+/* #2528: an array literal whose elements the holder owns: `kind` 1 copies
+ * each string (a fresh one is adopted), 2 takes each closure. */
+void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
 /* #2497: does a value of this struct own heap strings, in a `string` field
  * of its own or in a field that is itself such a struct held by value? It
  * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,

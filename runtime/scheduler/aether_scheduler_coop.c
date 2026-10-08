@@ -73,6 +73,11 @@ static void coop_free_actor(ActorBase* actor) {
     }
     // A caller's actor (scheduler_register_actor) is the caller's to free.
     if (!actor->scheduler_owned) return;
+    // What the state owns goes before the block is kept (#2528).
+    if (actor->destroy_state) {
+        actor->destroy_state(actor);
+        actor->destroy_state = NULL;
+    }
     if (g_coop_kept_count == g_coop_kept_capacity) {
         int cap = g_coop_kept_capacity ? g_coop_kept_capacity * 2 : 16;
         ActorBase** grown = realloc(g_coop_kept, (size_t)cap * sizeof(ActorBase*));
@@ -149,6 +154,12 @@ static void coop_free_released(void) {
     while (g_coop_released_count > 0) {
         coop_free_actor(g_coop_released[--g_coop_released_count]);
     }
+}
+
+// One thread: the released actors are ended here and now (#2528), unless a
+// walk or an inline send is on the stack, which ends them when it returns.
+void scheduler_reclaim_released(void) {
+    coop_free_released();
     free(g_coop_released);
     g_coop_released = NULL;
     g_coop_released_capacity = 0;

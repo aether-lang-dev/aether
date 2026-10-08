@@ -376,6 +376,47 @@ static void mark_state_stored_struct_vars(CodeGenerator* gen, ASTNode* node) {
     }
 }
 
+/* #2528: a `string` state field owns what it holds, tracked by
+ * `_heap_<name>` beside it (a `ptr`-widened field is a payload the user
+ * manages). */
+int state_field_owns_string(ASTNode* state_decl) {
+    return state_decl && state_decl->type == AST_STATE_DECLARATION &&
+           state_decl->node_type && state_decl->node_type->kind == TYPE_STRING;
+}
+
+/* #2528: `<Actor>_destroy_state(void*)`, the scheduler's hook for what the
+ * state fields own: a heap string per its tracker, a closure's environment
+ * (#2525), a struct that owns strings or closures through its own
+ * destructor. Run once by the free path that ends a scheduler-owned actor,
+ * after it can no longer be stepped. Idempotent, as a struct destroy is. */
+static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
+    print_line(gen, "static void %s_destroy_state(void* _p) {", actor->value);
+    indent(gen);
+    print_line(gen, "%s* self = (%s*)_p;", actor->value, actor->value);
+    print_line(gen, "(void)self;");
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* child = actor->children[i];
+        if (!child || child->type != AST_STATE_DECLARATION || !child->node_type) continue;
+        Type* t = child->node_type;
+        if (state_field_owns_string(child)) {
+            print_line(gen, "if (self->_heap_%s) { aether_heap_str_free(self->%s); self->%s = (const char*)0; self->_heap_%s = 0; }",
+                       child->value, child->value, child->value, child->value);
+        } else if (t->kind == TYPE_FUNCTION && !t->is_fnptr &&
+                   !state_field_is_ptr(gen, actor, child->value)) {
+            print_line(gen, "if (self->%s.env) { _aether_closure_env_release(self->%s.env); self->%s.env = (void*)0; }",
+                       child->value, child->value, child->value);
+        } else {
+            const char* sname = struct_owning_strings(gen, t);
+            if (sname && !state_field_is_ptr(gen, actor, child->value)) {
+                print_line(gen, "%s_destroy(&self->%s);", sname, child->value);
+            }
+        }
+    }
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "");
+}
+
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return;
     
@@ -445,11 +486,22 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                     generate_type(gen, child->node_type);
                     fprintf(gen->output, " %s;\n", child->value);
                 }
-            }        }
+            }
+            /* #2528: a string state field's ownership tracker lives with
+             * the field, for the handlers (which alias `_heap_<name>` to
+             * it) and for the destructor. It used to be a handler local,
+             * reset to 0 on every message: a value stored by an earlier
+             * message was never freed on overwrite, and the one stored
+             * last never at all. */
+            if (state_field_owns_string(child)) {
+                print_line(gen, "int _heap_%s;", child->value);
+            }
+        }
     }
-    
+
     unindent(gen);
     print_line(gen, "} %s;", actor->value);
+    emit_actor_destroy_state(gen, actor);
     /* The scheduler casts this to ActorBase*, so every field it touches has to
      * sit at the ActorBase offset. Checking the last one pins the whole
      * prefix. */
@@ -648,6 +700,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             }
                         }
                         exit_scope(gen);
+                        /* #2528: the state trackers' aliases
+                         * (hoist_heap_string_trackers) end with the
+                         * handler, or a later function's local of the
+                         * same name would be rewritten. */
+                        for (int si = 0; si < actor->child_count; si++) {
+                            ASTNode* sd = actor->children[si];
+                            if (state_field_owns_string(sd)) {
+                                print_line(gen, "#undef _heap_%s", sd->value);
+                            }
+                        }
                         for (int k = 0; k < gen->return_escaped_struct_var_count; k++) {
                             free(gen->return_escaped_struct_vars[k]);
                         }
@@ -1060,8 +1122,17 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             } else {
                 print_line(gen, "actor->%s = 0;", child->value);
             }
+            /* #2528: the block is not zeroed (a kept one is reused), so the
+             * tracker is set here: the initializer's value is owned when it
+             * is a fresh heap string. */
+            if (state_field_owns_string(child)) {
+                int owned = child->child_count > 0 && child->children[0] &&
+                            is_heap_string_expr(gen, child->children[0]);
+                print_line(gen, "actor->_heap_%s = %d;", child->value, owned ? 1 : 0);
+            }
         }
     }
+    print_line(gen, "actor->destroy_state = %s_destroy_state;   /* #2528 */", actor->value);
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates

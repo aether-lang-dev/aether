@@ -206,7 +206,13 @@ lifetime"):
   rebound. The closure local stored into a field still releases its own
   reference at scope end. A local bound to a field read (`x = h.cb`) and
   a closure a named function returns from a field hold references of
-  their own, so the struct may go first.
+  their own, so the struct may go first. A `fn[N]` field holds a reference
+  per element, a local array of such structs owns its elements, an
+  actor's closure state is released with the actor (its `destroy_state`
+  hook, run once when the scheduler ends it), a reply's closure fields are
+  the asker's (the one it reads out) or released with the reply, and a
+  closure literal handed to a function that stores it in a field is
+  released by the caller after the call (#2528).
 
 - **Bound to a local.** `g = || { ... }` frees its env when the local's
   scope ends, through `_closure_env_N_free`, provided every use of `g`

@@ -8273,9 +8273,25 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int fv_closure = !c_imported && fv && fv->node_type &&
                                          fv->node_type->kind == TYPE_FUNCTION &&
                                          !fv->node_type->is_fnptr;
+                        /* #2528: a `string[N]` / `fn[N]` field owns every
+                         * element: a literal's elements are copied or
+                         * taken. */
+                        int fv_owned_array = 0;
+                        if (!c_imported && fv && fv->type == AST_ARRAY_LITERAL && gen->program) {
+                            ASTNode* sdef = find_struct_definition_by_name(gen->program, expr->value);
+                            for (int fi = 0; sdef && fi < sdef->child_count; fi++) {
+                                ASTNode* f = sdef->children[fi];
+                                if (f && f->type == AST_STRUCT_FIELD && f->value &&
+                                    strcmp(f->value, field_init->value) == 0) {
+                                    fv_owned_array = struct_field_owned_array(f, NULL);
+                                    break;
+                                }
+                            }
+                        }
                         if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
                         else if (fv_struct && struct_take_shape(fv)) emit_struct_take(gen, fv, fv_struct, NULL);
                         else if (fv_closure) emit_closure_take(gen, fv);
+                        else if (fv_owned_array) emit_owned_array_literal(gen, fv, fv_owned_array);
                         else generate_expression(gen, fv);
                         if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }
@@ -8561,10 +8577,27 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 case TYPE_UINT64:  c_type = "uint64_t"; c_zero = "0"; break;
                                 case TYPE_DURATION: c_type = "int64_t"; c_zero = "0"; break;
                                 case TYPE_PTR:     c_type = "void*";  c_zero = "NULL"; break;
+                                case TYPE_FUNCTION: c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;   /* #2528 */
                                 default:           c_type = "int";    c_zero = "0";   break;
                             }
                             fprintf(gen->output, "%s _ask_val = _ask_r ? ((%s*)_ask_r)->%s : %s; ",
                                     c_type, reply_msg_name, reply_field, c_zero);
+                            /* #2528: the reply's strings were copied and its
+                             * closures taken for the asker: the field read
+                             * out is the asker's now (cleared so the release
+                             * skips it), every other owned field goes with
+                             * the buffer. */
+                            MessageDef* reply_def = lookup_message(gen->message_registry, reply_msg_name);
+                            int reply_owns = 0;
+                            for (MessageFieldDef* f = reply_def ? reply_def->fields : NULL; f; f = f->next) {
+                                if (f->type_kind == TYPE_STRING ||
+                                    (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                     strcmp(f->c_type, "_AeClosure") == 0)) { reply_owns = 1; break; }
+                            }
+                            if (reply_owns) {
+                                fprintf(gen->output, "if (_ask_r) { ((%s*)_ask_r)->%s = %s; %s_release_fields((%s*)_ask_r); } ",
+                                        reply_msg_name, reply_field, c_zero, reply_msg_name, reply_msg_name);
+                            }
                             fprintf(gen->output, "free(_ask_r); _ask_val; })");
                         } else if (reply_scalar_kind != TYPE_UNKNOWN) {
                             /* Expression reply (#1324): the handler sent a
@@ -8582,6 +8615,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 case TYPE_DURATION:   c_type = "int64_t"; c_zero = "0"; break;
                                 case TYPE_PTR:        c_type = "void*"; c_zero = "NULL"; break;
                                 case TYPE_STRING:     c_type = "const char*"; c_zero = "NULL"; break;
+                                case TYPE_FUNCTION:   c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;   /* #2528 */
                                 default:              c_type = "int"; c_zero = "0"; break;
                             }
                             fprintf(gen->output, "%s _ask_val = _ask_r ? *(%s*)_ask_r : %s; ",

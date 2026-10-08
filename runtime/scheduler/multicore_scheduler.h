@@ -142,6 +142,12 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
      * exactly [ptr, ptr+size), so freeing a derived actor with \
      * sizeof(ActorBase) would leak the derived-struct tail under libnuma. */ \
     size_t alloc_size; \
+    /* Releases what the actor's state fields own (heap strings, closure \
+     * environments, owning structs), set by the generated spawn; NULL for \
+     * an actor registered by a caller. Called exactly once, by the free \
+     * path a release or the scheduler's teardown ends the actor through, \
+     * after the actor can no longer be stepped (#2528). */ \
+    void (*destroy_state)(void*); \
     /* 1 when scheduler_spawn_actor allocated the actor, which the scheduler \
      * then frees; 0 for one a caller passed to scheduler_register_actor, \
      * whose memory stays the caller's. Written before the actor is \
@@ -292,6 +298,9 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
  * so a late send is defined, and one that comes after the reuse reaches the
  * new actor. */
 void scheduler_release_actor(ActorBase* actor);
+/* Waits (bounded) until every released actor has been ended: its state
+ * destroyed and its block kept for reuse (#2528). */
+void scheduler_reclaim_released(void);
 /* Released actors not reclaimed yet, for tests and diagnostics (#2509). */
 int scheduler_released_actors_pending(void);
 /* Messages dropped because their target had been released (#2517): each is

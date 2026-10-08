@@ -1,0 +1,130 @@
+// Regression (#2528): what an actor's state owns is released: a heap string
+// per its tracker and a closure's environment, when a later message
+// overwrites the field, and when the actor is ended (a release, or the
+// scheduler's teardown for one left alive), through the actor's
+// `destroy_state` hook, run once by the free path.
+//
+// Before, a state string's tracker was a handler local reset on every
+// message, so an overwrite never freed the previous value and the last one
+// was never freed; a closure in state was released on overwrite (#2525) but
+// never with the actor.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, a window of the same work must not grow the heap, with
+// one of two windows growing by exactly 0. The overwrite window keeps one
+// actor alive and drains its mailbox with an ask before each read; the
+// release window spawns, fills and releases an actor per round, warmed up
+// so the scheduler's retire and keep lists have reached their steady size,
+// and waits for the scheduler to end every released actor
+// (scheduler_reclaim_released) before each read, since a released block is
+// ended and kept for reuse on the core threads' own schedule. Elsewhere the
+// macOS leaks gate covers this program, including the actor left alive at
+// exit. Strings are built from parameters, because string.concat of two
+// literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() @c_import
+
+message SetName { name: string }
+message SetCb { cb: fn }
+message Get {}
+message Total { v: int }
+
+actor Keeper {
+    state name = ""
+    state cb = || { return 0 }
+    state sum = 0
+    receive {
+        SetName(name: n) -> {
+            name = string.concat(n, "!")
+            sum = sum + string.length(name)
+        }
+        SetCb(cb: new_cb) -> { cb = new_cb }
+        Get() -> { reply Total { v: sum + call(cb) } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+build(tag: string) -> fn {
+    label = string.concat(tag, "!")
+    n = 0
+    return || {
+        n = n + 1
+        return string.length(label) + n
+    }
+}
+
+// One actor, its string and closure state overwritten per message.
+overwrite_round(k: ptr, p: string) -> int {
+    i = 0
+    while i < 20 {
+        k ! SetName { name: p }
+        k ! SetCb { cb: build(p) }
+        i = i + 1
+    }
+    int t = k ? Get {}
+    return t
+}
+
+// A fresh actor per round, filled, asked and released.
+release_round(p: string) -> int {
+    k = spawn(Keeper())
+    k ! SetName { name: p }
+    k ! SetCb { cb: build(string.concat(p, "zz")) }
+    k ! SetName { name: string.concat(p, "q") }
+    int t = k ? Get {}
+    // "a!" (2) + "aq!" (3) + the closure over "azz!" on its first call (5).
+    check(t == 10, "the state's closure and string are live when asked")
+    let kp: ptr = k
+    scheduler_release_actor(kp)
+    return t
+}
+
+fn release_window(p: string, n: int) {
+    i = 0
+    while i < n {
+        release_round(p)
+        i = i + 1
+    }
+}
+
+main() {
+    k = spawn(Keeper())
+    first = overwrite_round(k, "a")
+    second = overwrite_round(k, "a")
+    check(second - first == 40, "each message's string is stored and counted")
+    release_window("a", 2)
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    before = mem.heap_in_use()
+    overwrite_round(k, "a")
+    mid = mem.heap_in_use()
+    overwrite_round(k, "a")
+    after = mem.heap_in_use()
+    check(mid - before == 0 || after - mid == 0,
+        "overwriting state grew the heap: ${mid - before} then ${after - mid} bytes")
+    release_window("a", 250)
+    scheduler_reclaim_released()
+    before = mem.heap_in_use()
+    release_window("a", 100)
+    scheduler_reclaim_released()
+    mid = mem.heap_in_use()
+    release_window("a", 100)
+    scheduler_reclaim_released()
+    after = mem.heap_in_use()
+    check(mid - before == 0 || after - mid == 0,
+        "spawn, fill and release grew the heap: ${mid - before} then ${after - mid} bytes")
+    println("OK")
+}

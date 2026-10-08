@@ -1590,6 +1590,38 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* #2528: a local array of structs that own strings or closures. Annotation:
+ *   "struct_array_destroy:<varname>:<StructName>:<N>"
+ * Each element is destroyed at scope exit. */
+static int try_emit_struct_array_destroy(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "struct_array_destroy:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strchr(rest, ':');
+    if (!sep || !sep[1]) return 0;
+    size_t var_len = (size_t)(sep - rest);
+    if (var_len == 0 || var_len > 200) return 0;
+    char var_buf[256];
+    memcpy(var_buf, rest, var_len);
+    var_buf[var_len] = '\0';
+    const char* sep2 = strchr(sep + 1, ':');
+    if (!sep2 || !sep2[1]) return 0;
+    char struct_buf[256];
+    size_t slen = (size_t)(sep2 - (sep + 1));
+    if (slen == 0 || slen > 200) return 0;
+    memcpy(struct_buf, sep + 1, slen);
+    struct_buf[slen] = '\0';
+    int n = atoi(sep2 + 1);
+    if (is_return_escaped_struct_var(gen, var_buf)) return 1;
+    print_indent(gen);
+    fprintf(gen->output,
+            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s_destroy(&%s[_ae_k]);\n",
+            n, struct_buf, var_buf);
+    return 1;
+}
+
 /* Closure-local env carrier (#2480). Annotation:
  *   "closure_env_free:<closure id or -1>:<own flag 0|1>:<varname>"
  * Pushed by claim_closure_local_env (codegen_stmt.c) for a local bound only
@@ -1697,6 +1729,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
         !try_emit_struct_destroy(gen, deferred) &&
+        !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
         !try_emit_closure_env_free(gen, deferred)) {
         print_indent(gen);
         fprintf(gen->output, "/* deferred%s */ ",

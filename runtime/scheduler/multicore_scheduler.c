@@ -1132,7 +1132,15 @@ static void actor_free_now(ActorBase* actor) {
         actor->spsc_queue = NULL;
     }
     // A caller's actor (scheduler_register_actor) is the caller's to free.
-    if (actor->scheduler_owned) tombstone_keep(actor);
+    if (!actor->scheduler_owned) return;
+    // What the state owns goes before the block is kept (#2528). Nothing
+    // steps the actor any more: a retired one is freed only past every
+    // reader's epoch, a teardown's once the threads are joined.
+    if (actor->destroy_state) {
+        actor->destroy_state(actor);
+        actor->destroy_state = NULL;
+    }
+    tombstone_keep(actor);
 }
 
 // Frees every retired actor that no reader can still hold. `wait` takes the
@@ -1170,6 +1178,20 @@ static void actor_reclaim(int wait) {
         atomic_store_explicit(&g_retired_pending, g_retired_count, memory_order_relaxed);
     }
     retired_unlock();
+}
+
+// Waits until every released actor has been ended (its state destroyed, its
+// block kept for reuse), which otherwise happens on the core threads' own
+// schedule once every reader has moved past it (#2528). For a host or a test
+// that wants the memory of released actors settled before it measures or
+// goes on; bounded, so a core blocked in a long step cannot hang it.
+void scheduler_reclaim_released(void) {
+    for (int spins = 0; spins < 200000; spins++) {
+        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return;
+        actor_reclaim(1);
+        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return;
+        aether_sched_yield();
+    }
 }
 
 // Frees every retired actor without asking. Only once no reader is left:
@@ -2867,6 +2889,7 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     mailbox_init(&actor->mailbox);
 
     actor->alloc_size = actor_size;
+    actor->destroy_state = NULL;   // the generated spawn sets it (#2528)
     actor->id = atomic_fetch_add(&next_actor_id, 1);
     actor->step = step;
     atomic_init(&actor->active, 0);  // inactive until first message send

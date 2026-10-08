@@ -2397,6 +2397,16 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
                 print_line(gen, "if (s->%s.env) { _aether_closure_env_release(s->%s.env); s->%s.env = (void*)0; }",
                            field->value, field->value, field->value);
             }
+            /* #2528: every element of an owned array goes with the struct. */
+            int oalen = 0;
+            int oak = struct_field_owned_array(field, &oalen);
+            if (oak == 1) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (s->%s[_ai]) { aether_heap_str_free(s->%s[_ai]); s->%s[_ai] = (const char*)0; }",
+                           oalen, field->value, field->value, field->value);
+            } else if (oak == 2) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (s->%s[_ai].env) { _aether_closure_env_release(s->%s[_ai].env); s->%s[_ai].env = (void*)0; }",
+                           oalen, field->value, field->value, field->value);
+            }
             int alen = 0;
             ASTNode* inner = owning_struct_field_def_n(gen, field, &alen);
             if (inner && alen > 0) {
@@ -2494,6 +2504,21 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
             if (!struct_field_is_closure(f)) continue;
             print_line(gen, "_aether_closure_env_release(dst->%s.env);", f->value);
         }
+        /* #2528: an owned array's old elements go, except a string the new
+         * value holds at the same slot (`r = Rec { names: r.names }`), which
+         * stays its own. */
+        for (int i = 0; i < struct_def->child_count; i++) {
+            ASTNode* f = struct_def->children[i];
+            int oalen = 0;
+            int oak = struct_field_owned_array(f, &oalen);
+            if (oak == 1) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (dst->%s[_ai] && dst->%s[_ai] != src.%s[_ai]) aether_heap_str_free(dst->%s[_ai]);",
+                           oalen, f->value, f->value, f->value, f->value);
+            } else if (oak == 2) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) _aether_closure_env_release(dst->%s[_ai].env);",
+                           oalen, f->value);
+            }
+        }
         print_line(gen, "*dst = src;");
         unindent(gen);
         print_line(gen, "}");
@@ -2515,6 +2540,16 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
             /* #2525: the copy holds a reference of its own to the env. */
             if (struct_field_is_closure(f)) {
                 print_line(gen, "_aether_closure_env_retain(src.%s.env);", f->value);
+            }
+            /* #2528: an owned array's elements are copied or retained. */
+            int oalen = 0;
+            int oak = struct_field_owned_array(f, &oalen);
+            if (oak == 1) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (src.%s[_ai]) src.%s[_ai] = aether_uniform_heap_str(src.%s[_ai], 0);",
+                           oalen, f->value, f->value, f->value);
+            } else if (oak == 2) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) _aether_closure_env_retain(src.%s[_ai].env);",
+                           oalen, f->value);
             }
             int alen = 0;
             ASTNode* inner = owning_struct_field_def_n(gen, f, &alen);
@@ -2612,6 +2647,21 @@ int struct_field_is_closure(ASTNode* field) {
            field->node_type->kind == TYPE_FUNCTION && !field->node_type->is_fnptr;
 }
 
+/* #2528: a fixed-size array field whose elements the struct owns: 1 for
+ * `string[N]` (every element a heap copy of its own, as a string array cell
+ * holds them, #2474), 2 for `fn[N]` (a reference per element); 0 otherwise.
+ * The length goes to `*len`. */
+int struct_field_owned_array(ASTNode* field, int* len) {
+    if (!field || field->type != AST_STRUCT_FIELD || !field->node_type) return 0;
+    Type* t = field->node_type;
+    if (t->kind != TYPE_ARRAY || t->array_size <= 0 || !t->element_type) return 0;
+    Type* e = t->element_type;
+    if (len) *len = t->array_size;
+    if (e->kind == TYPE_STRING) return 1;
+    if (e->kind == TYPE_FUNCTION && !e->is_fnptr) return 2;
+    return 0;
+}
+
 /* A string field, or (#2525) a closure field, whose env the struct holds a
  * reference to: either makes the struct an owner with a destructor. */
 int struct_has_heap_string_field(ASTNode* struct_def) {
@@ -2626,6 +2676,7 @@ int struct_has_heap_string_field(ASTNode* struct_def) {
             return 1;
         }
         if (struct_field_is_closure(field)) return 1;
+        if (struct_field_owned_array(field, NULL)) return 1;   /* #2528 */
     }
     return 0;
 }
