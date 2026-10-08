@@ -564,32 +564,34 @@ static bool cross_cmd_fmt(char** buf, size_t* cap, const char* fmt, ...) {
  * across the ABI, and every hand-rolled script this replaces did the same.
  *
  * Returns a malloc'd flag string, or NULL on allocation failure. */
-/* Collect the export NAMES (mangled, no flag syntax) for a wasm --emit=lib,
- * one per line in `out`. Shared by both wasm backends: the zig path spells
- * them `-Wl,--export=<sym>` and the emcc path `-sEXPORTED_FUNCTIONS=_<sym>`,
- * but the SET is identical and deriving it twice would let them drift.
- *
- * Returns the count. See wasm_export_flags for why explicit_list replaces
- * rather than extends the catalog set. */
-int wasm_collect_export_names(const char* c_file, const char* explicit_list,
-                              char* out, size_t outsz) {
-    size_t len = 0; int n = 0;
-    out[0] = '\0';
 
-    if (explicit_list && *explicit_list) {
-        char list[8192];
-        snprintf(list, sizeof(list), "%s", explicit_list);
-        for (char* tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
-            while (*tok == ' ') tok++;
-            if (!*tok) continue;
-            const char* pfx = strncmp(tok, "aether_", 7) == 0 ? "" : "aether_";
-            int w = snprintf(out + len, outsz - len, "%s%s\n", pfx, tok);
-            if (w < 0 || (size_t)w >= outsz - len) break;
-            len += (size_t)w; n++;
-        }
-        return n;
+/* `pfx` and the `n` bytes at `name`, then a newline, appended to a list
+ * grown as needed. 0 when out of memory. */
+static int export_name_append(char** out, size_t* len, size_t* cap,
+                              const char* pfx, const char* name, size_t n) {
+    size_t pl = strlen(pfx);
+    size_t need = *len + pl + n + 2;
+    if (need > *cap) {
+        size_t ncap = *cap ? *cap : 1024;
+        while (ncap < need) ncap *= 2;
+        char* nb = realloc(*out, ncap);
+        if (!nb) return 0;
+        *out = nb;
+        *cap = ncap;
     }
+    memcpy(*out + *len, pfx, pl);
+    *len += pl;
+    memcpy(*out + *len, name, n);
+    *len += n;
+    (*out)[(*len)++] = '\n';
+    (*out)[*len] = '\0';
+    return 1;
+}
 
+/* The c_symbol of every entry in the catalog beside `c_file`, appended to
+ * the list. 0 when out of memory. */
+static int wasm_catalog_symbols(const char* c_file, char** out, size_t* len,
+                                size_t* cap, int* n) {
     char jpath[2048];
     snprintf(jpath, sizeof(jpath), "%s", c_file);
     size_t jl = strlen(jpath);
@@ -597,9 +599,11 @@ int wasm_collect_export_names(const char* c_file, const char* explicit_list,
     strncat(jpath, ".catalog.json", sizeof(jpath) - strlen(jpath) - 1);
 
     FILE* f = fopen(jpath, "r");
-    if (!f) return 0;
-    char line[2048];
-    while (fgets(line, sizeof(line), f)) {
+    if (!f) return 1;
+    char* line = NULL;
+    size_t line_cap = 0;
+    int got = 0, ok = 1;
+    while (ok && (got = ae_read_line(f, &line, &line_cap)) > 0) {
         /* Line shape:  { ... "c_symbol": "aether_greet", ... }
          * Skip past the KEY's closing quote, then take the next quoted run —
          * that is the value. An earlier version advanced a fixed offset past
@@ -610,39 +614,87 @@ int wasm_collect_export_names(const char* c_file, const char* explicit_list,
         const char* q = strchr(k + strlen("\"c_symbol\""), '"');
         if (!q) continue;
         const char* e = strchr(q + 1, '"');
-        if (!e) continue;
-        int sl = (int)(e - q - 1);
-        if (sl <= 0) continue;
-        int w = snprintf(out + len, outsz - len, "%.*s\n", sl, q + 1);
-        if (w < 0 || (size_t)w >= outsz - len) break;
-        len += (size_t)w; n++;
+        if (!e || e - q - 1 <= 0) continue;
+        if (export_name_append(out, len, cap, "", q + 1, (size_t)(e - q - 1))) (*n)++;
+        else ok = 0;
     }
+    free(line);
     fclose(f);
-    return n;
+    return ok && got >= 0;
+}
+
+/* Collect the export NAMES (mangled, no flag syntax) for a wasm --emit=lib,
+ * one per line. Shared by both wasm backends: the zig path spells
+ * them `-Wl,--export=<sym>` and the emcc path `-sEXPORTED_FUNCTIONS=_<sym>`,
+ * but the SET is identical and deriving it twice would let them drift.
+ *
+ * See wasm_export_flags for why explicit_list replaces rather than extends
+ * the catalog set.
+ *
+ * Returns the names in a string the caller frees, with their number in
+ * *count; NULL when out of memory, after saying so. Any number of them, and
+ * catalog lines of any length (#2537): an 8 KB list dropped the exports past
+ * it, and a catalog line read in 2 KB pieces lost its export when the cut
+ * fell in the `"c_symbol": "..."` pair. */
+char* wasm_collect_export_names(const char* c_file, const char* explicit_list,
+                                int* count) {
+    size_t len = 0, cap = 1024;
+    int n = 0;
+    char* out = malloc(cap);
+    int ok = out != NULL;
+    if (ok) out[0] = '\0';
+
+    if (ok && explicit_list && *explicit_list) {
+        for (const char* tok = explicit_list; ok && *tok; ) {
+            const char* end = strchr(tok, ',');
+            if (!end) end = tok + strlen(tok);
+            const char* s = tok;
+            while (s < end && *s == ' ') s++;
+            if (s < end) {
+                size_t tl = (size_t)(end - s);
+                const char* pfx = (tl >= 7 && strncmp(s, "aether_", 7) == 0) ? "" : "aether_";
+                if (export_name_append(&out, &len, &cap, pfx, s, tl)) n++;
+                else ok = 0;
+            }
+            tok = *end ? end + 1 : end;
+        }
+    } else if (ok) {
+        ok = wasm_catalog_symbols(c_file, &out, &len, &cap, &n);
+    }
+    if (!ok) {
+        free(out);
+        fprintf(stderr, "Error: out of memory listing the wasm exports.\n");
+        return NULL;
+    }
+    *count = n;
+    return out;
 }
 
 /* The zig spelling of that set: -Wl,--export=<sym> per name, plus the
- * link flags a library needs. Returns a malloc'd string, NULL on OOM. */
+ * link flags a library needs. Returns a malloc'd string, NULL when out of
+ * memory, after saying so. */
 static char* wasm_export_flags(const char* c_file, const char* explicit_list) {
-    size_t cap = 16384, len = 0;
-    char* out = malloc(cap);
-    if (!out) return NULL;
+    int n;
+    char* names = wasm_collect_export_names(c_file, explicit_list, &n);
+    if (!names) return NULL;
     /* --no-entry: wasm-ld demands a `main` without it, which a library has
      * not got. --gc-sections keeps the module to what the exports reach.
      * malloc/free are always exported — a wasm consumer needs them to pass
      * strings across the ABI, as every hand-rolled script this replaces did. */
-    len += (size_t)snprintf(out, cap, "-Wl,--no-entry -Wl,--gc-sections "
-                                      "-Wl,--export=malloc -Wl,--export=free");
-
-    static char names[8192];
-    int n = wasm_collect_export_names(c_file, explicit_list, names, sizeof(names));
-    if (n > 0) {
-        for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n")) {
-            int w = snprintf(out + len, cap - len, " -Wl,--export=%s", line);
-            if (w < 0 || (size_t)w >= cap - len) break;
-            len += (size_t)w;
-        }
+    static const char base[] = "-Wl,--no-entry -Wl,--gc-sections "
+                               "-Wl,--export=malloc -Wl,--export=free";
+    static const char each[] = " -Wl,--export=";
+    size_t cap = sizeof(base) + strlen(names) + (size_t)n * (sizeof(each) - 1);
+    char* out = malloc(cap);
+    if (!out) {
+        free(names);
+        fprintf(stderr, "Error: out of memory listing the wasm exports.\n");
+        return NULL;
     }
+    size_t len = (size_t)snprintf(out, cap, "%s", base);
+    for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n"))
+        len += (size_t)snprintf(out + len, cap - len, "%s%s", each, line);
+    free(names);
     return out;
 }
 
@@ -821,22 +873,40 @@ static int cross_link_wants(const char* link_hdr, const char* names) {
  * the right object; a miss compiles and publishes. The veneer is small and
  * is compiled per build like the runtime. */
 
-/* SQLITE_CFLAGS from the lock file, quotes stripped; "" when absent. */
-static void cross_sqlite_lock_cflags(const char* lock, char* out, size_t osz) {
-    out[0] = '\0';
+/* SQLITE_CFLAGS from the lock file, quotes stripped; "" when absent. A
+ * string the caller frees, NULL when out of memory (after saying so). The
+ * line is read whole (#2537): one past 1 KB was cut, its closing quote went
+ * with the cut so the opening one stayed in the flags, and the flags past
+ * the cut never reached the compile or the cache key. */
+static char* cross_sqlite_lock_cflags(const char* lock) {
+    char* out = NULL;
     FILE* f = fopen(lock, "r");
-    if (!f) return;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "SQLITE_CFLAGS=", 14) != 0) continue;
-        char* v = line + 14;
-        size_t n = strlen(v);
-        while (n && (v[n-1] == '\n' || v[n-1] == '\r')) v[--n] = '\0';
-        if (n >= 2 && v[0] == '"' && v[n-1] == '"') { v[n-1] = '\0'; v++; }
-        snprintf(out, osz, "%s", v);
-        break;
+    if (f) {
+        char* line = NULL;
+        size_t cap = 0;
+        int got;
+        while ((got = ae_read_line(f, &line, &cap)) > 0) {
+            if (strncmp(line, "SQLITE_CFLAGS=", 14) != 0) continue;
+            char* v = line + 14;
+            size_t n = strlen(v);
+            while (n && (v[n-1] == '\n' || v[n-1] == '\r')) v[--n] = '\0';
+            if (n >= 2 && v[0] == '"' && v[n-1] == '"') { v[n-1] = '\0'; v++; }
+            out = strdup(v);
+            if (!out) got = -1;
+            break;
+        }
+        free(line);
+        fclose(f);
+        if (got < 0) {
+            fprintf(stderr, "Error: out of memory reading %s\n", lock);
+            return NULL;
+        }
     }
-    fclose(f);
+    if (!out && !(out = strdup(""))) {
+        fprintf(stderr, "Error: out of memory reading %s\n", lock);
+        return NULL;
+    }
+    return out;
 }
 
 static void cross_sha256_update_file(AeSha256* ctx, const char* path) {
@@ -914,8 +984,8 @@ static bool cross_vendored_sqlite(const char* base, const char* ztriple,
         return false;
     }
 
-    char sqlite_cflags[1024];
-    cross_sqlite_lock_cflags(lock, sqlite_cflags, sizeof(sqlite_cflags));
+    char* sqlite_cflags = cross_sqlite_lock_cflags(lock);
+    if (!sqlite_cflags) return false;   /* out of memory, said */
     char cc_version[256];
     cross_compiler_version(cc_cmd, cc_version, sizeof(cc_version));
 
@@ -987,6 +1057,7 @@ static bool cross_vendored_sqlite(const char* base, const char* ztriple,
         ok = true;
     } while (0);
     free(cmd);
+    free(sqlite_cflags);
     return ok;
 }
 
@@ -1551,6 +1622,7 @@ int run_cross_build(const char* c_file, const char* out_file,
             char* wasm_lib_flags = NULL;
             if (strstr(ztriple, "wasm") && emit_lib) {
                 wasm_lib_flags = wasm_export_flags(c_file, g_wasm_exports);
+                if (!wasm_lib_flags) break;   /* out of memory, said */
             }
             /* A wasi library is a reactor, not a command. Left in command mode
              * zig links wasi-libc's startup object, which demands a `main` the

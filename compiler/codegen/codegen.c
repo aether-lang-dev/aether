@@ -5829,38 +5829,59 @@ static int program_imports_module(ASTNode* program, const char* mod) {
     return 0;
 }
 
+/* The link tokens, @source paths, and @c_include headers and directories of
+ * an import closure: heap strings, deduplicated, in first-seen order, grown
+ * as needed. Fixed tables (64 tokens, 256 sources, 64 headers and 64
+ * directories of under 400 bytes) dropped or cut what did not fit, and a
+ * missing -l, C file or -I surfaces as a link or compile error far from its
+ * cause (#2537). Out of memory ends the compile, as aether_xrealloc does. */
+typedef struct { char** items; int count; int cap; } CgStrSet;
+
+/* Adds the `len` bytes at `s` unless already present. 1 when added. */
+static int cg_strset_add(CgStrSet* set, const char* s, size_t len) {
+    for (int i = 0; i < set->count; i++) {
+        if (strlen(set->items[i]) == len && memcmp(set->items[i], s, len) == 0) return 0;
+    }
+    if (set->count == set->cap) {
+        set->cap = set->cap ? set->cap * 2 : 16;
+        set->items = (char**)aether_xrealloc(set->items, (size_t)set->cap * sizeof(char*));
+    }
+    char* copy = (char*)aether_xrealloc(NULL, len + 1);
+    memcpy(copy, s, len);
+    copy[len] = '\0';
+    set->items[set->count++] = copy;
+    return 1;
+}
+
+static void cg_strset_free(CgStrSet* set) {
+    for (int i = 0; i < set->count; i++) free(set->items[i]);
+    free(set->items);
+    set->items = NULL;
+    set->count = set->cap = 0;
+}
+
 /* Emit `// aether-link: <tokens>` as the first line of the TU when the import
  * closure introduces any native-library dependency. De-dupes tokens across
  * modules (e.g. std.http and std.cryptography both want -lssl -lcrypto). */
-/* Split `flags` on spaces and append each token to toks[] unless already
- * present. Tokens are heap copies; the caller frees them after printing. */
-static void add_link_tokens(const char* flags, const char** toks, int* ntok, int cap) {
+/* Split `flags` on spaces and add each token to `toks` unless already
+ * present. */
+static void add_link_tokens(const char* flags, CgStrSet* toks) {
     const char* s = flags;
     while (*s) {
         while (*s == ' ') s++;
         if (!*s) break;
         const char* start = s;
         while (*s && *s != ' ') s++;
-        size_t len = (size_t)(s - start);
-        int dup = 0;
-        for (int k = 0; k < *ntok; k++) {
-            if (strlen(toks[k]) == len && strncmp(toks[k], start, len) == 0) { dup = 1; break; }
-        }
-        if (!dup && *ntok < cap) {
-            char* copy = (char*)malloc(len + 1);
-            if (copy) { memcpy(copy, start, len); copy[len] = '\0'; toks[(*ntok)++] = copy; }
-        }
+        cg_strset_add(toks, start, (size_t)(s - start));
     }
 }
 
 static void emit_link_requirements(CodeGenerator* gen, ASTNode* program) {
     /* Accumulate unique tokens in first-seen (table) order. */
-    const char* toks[64];
-    int ntok = 0;
+    CgStrSet toks = { 0 };
     for (int r = 0; r < g_link_req_count; r++) {
         if (!program_imports_module(program, g_link_reqs[r].module)) continue;
-        add_link_tokens(g_link_reqs[r].libs, toks, &ntok,
-                        (int)(sizeof(toks) / sizeof(toks[0])));
+        add_link_tokens(g_link_reqs[r].libs, &toks);
     }
 
     /* #1259: module-declared deps. A module's own `@link("...")` directives
@@ -5870,8 +5891,7 @@ static void emit_link_requirements(CodeGenerator* gen, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_LINK_DIRECTIVE && c->value)
-            add_link_tokens(c->value, toks, &ntok,
-                            (int)(sizeof(toks) / sizeof(toks[0])));
+            add_link_tokens(c->value, &toks);
     }
     if (global_module_registry) {
         for (int m = 0; m < global_module_registry->module_count; m++) {
@@ -5880,32 +5900,30 @@ static void emit_link_requirements(CodeGenerator* gen, ASTNode* program) {
             for (int i = 0; i < mod->ast->child_count; i++) {
                 ASTNode* c = mod->ast->children[i];
                 if (c && c->type == AST_LINK_DIRECTIVE && c->value)
-                    add_link_tokens(c->value, toks, &ntok,
-                                    (int)(sizeof(toks) / sizeof(toks[0])));
+                    add_link_tokens(c->value, &toks);
             }
         }
     }
-    if (ntok == 0) return;
+    if (toks.count == 0) return;
 
     fputs("// aether-link:", gen->output);
-    for (int i = 0; i < ntok; i++) {
-        fprintf(gen->output, " %s", toks[i]);
-        free((void*)toks[i]);
-    }
+    for (int i = 0; i < toks.count; i++)
+        fprintf(gen->output, " %s", toks.items[i]);
     fputc('\n', gen->output);
+    cg_strset_free(&toks);
 }
 
-static void add_source_directive(ASTNode* c, char** paths, int* npaths, int cap) {
+static void add_source_directive(ASTNode* c, CgStrSet* paths) {
     if (!c || c->type != AST_SOURCE_DIRECTIVE || !c->value) return;
     /* Existence was checked, and the file recorded as a dependency, when the
      * module was orchestrated (module_check_source_directives). */
     char* path = module_resolve_source_directive(c);
-    if (!path) return;
-    for (int i = 0; i < *npaths; i++) {
-        if (strcmp(paths[i], path) == 0) { free(path); return; }
+    if (!path) {
+        fprintf(stderr, "aetherc: out of memory listing the @source files\n");
+        exit(1);
     }
-    if (*npaths < cap) paths[(*npaths)++] = path;
-    else free(path);
+    cg_strset_add(paths, path, strlen(path));
+    free(path);
 }
 
 /* #1986: the headers modules ask for, deduplicated, in first-seen order.
@@ -5916,27 +5934,22 @@ static void add_source_directive(ASTNode* c, char** paths, int* npaths, int cap)
 /* The directory a node's file sits in, "." when the path has none (an entry
  * file named without one). "." rather than nothing: the generated C lives in
  * a build directory, so the module's own directory has to reach the include
- * path either way. */
-static void c_include_dir_of(const char* file, char* out, size_t out_size) {
+ * path either way. Returned as the first `*len` bytes of the result, which
+ * is `file` itself or ".", so no length is cut. */
+static const char* c_include_dir_of(const char* file, size_t* len) {
     const char* cut = NULL;
     for (const char* q = file ? file : ""; *q; q++)
         if (*q == '/' || *q == '\\') cut = q;
-    if (!cut) { snprintf(out, out_size, "."); return; }
-    size_t len = (size_t)(cut - file);
-    if (len >= out_size) len = out_size - 1;
-    memcpy(out, file, len);
-    out[len] = '\0';
+    if (!cut) { *len = 1; return "."; }
+    *len = (size_t)(cut - file);
+    return file;
 }
-
-#define AE_C_INCLUDE_MAX 64
 
 static void emit_c_include_directives(CodeGenerator* gen, ASTNode* program) {
     /* Deduplicated by header name AND the directory it came from: two
      * modules may each ship an `api.h`, and a single `#include "api.h"`
      * would reach whichever -I came first. */
-    char seen[AE_C_INCLUDE_MAX][512];
-    int nseen = 0;
-    int overflowed = 0;
+    CgStrSet seen = { 0 };
     ASTNode* sources[2] = { program, NULL };
     for (int pass = 0; pass < 2; pass++) {
         int mods = (pass == 1 && global_module_registry) ? global_module_registry->module_count : 0;
@@ -5950,23 +5963,20 @@ static void emit_c_include_directives(CodeGenerator* gen, ASTNode* program) {
             for (int i = 0; i < ast->child_count; i++) {
                 ASTNode* c = ast->children[i];
                 if (!c || c->type != AST_C_INCLUDE_DIRECTIVE || !c->value) continue;
-                char dir[400];
-                c_include_dir_of(c->source_file, dir, sizeof(dir));
-                char key[512];
-                snprintf(key, sizeof(key), "%s|%s", dir, c->value);
-                int dup = 0;
-                for (int k = 0; k < nseen; k++)
-                    if (strcmp(seen[k], key) == 0) { dup = 1; break; }
-                if (dup) continue;
-                if (nseen >= AE_C_INCLUDE_MAX) { overflowed = 1; continue; }
-                snprintf(seen[nseen++], sizeof(seen[0]), "%s", key);
-                fprintf(gen->output, "#include \"%s\"\n", c->value);
+                size_t dlen;
+                const char* dir = c_include_dir_of(c->source_file, &dlen);
+                size_t vlen = strlen(c->value);
+                char* key = (char*)aether_xrealloc(NULL, dlen + 1 + vlen + 1);
+                memcpy(key, dir, dlen);
+                key[dlen] = '|';
+                memcpy(key + dlen + 1, c->value, vlen + 1);
+                if (cg_strset_add(&seen, key, dlen + 1 + vlen))
+                    fprintf(gen->output, "#include \"%s\"\n", c->value);
+                free(key);
             }
         }
     }
-    if (overflowed)
-        fprintf(stderr, "warning: more than %d distinct @c_include headers in the "
-                        "import closure; the rest were not emitted\n", AE_C_INCLUDE_MAX);
+    cg_strset_free(&seen);
 }
 
 /* #1986: the directories the `@c_include` headers live in, as
@@ -5977,9 +5987,7 @@ static void emit_c_include_directives(CodeGenerator* gen, ASTNode* program) {
  * The stdlib's own directories are on the path already; a module anywhere
  * else would otherwise have its header found only by luck. */
 static void emit_c_include_dirs(CodeGenerator* gen, ASTNode* program) {
-    char dirs[AE_C_INCLUDE_MAX][400];
-    int ndirs = 0;
-    int overflowed = 0;
+    CgStrSet dirs = { 0 };
     for (int pass = 0; pass < 2; pass++) {
         int mods = (pass == 1 && global_module_registry) ? global_module_registry->module_count : 0;
         for (int m = -1; m < mods; m++) {
@@ -5992,23 +6000,15 @@ static void emit_c_include_dirs(CodeGenerator* gen, ASTNode* program) {
             for (int i = 0; i < ast->child_count; i++) {
                 ASTNode* c = ast->children[i];
                 if (!c || c->type != AST_C_INCLUDE_DIRECTIVE) continue;
-                char dir[400];
-                c_include_dir_of(c->source_file, dir, sizeof(dir));
-                int dup = 0;
-                for (int k = 0; k < ndirs; k++)
-                    if (strcmp(dirs[k], dir) == 0) { dup = 1; break; }
-                if (dup) continue;
-                if (ndirs >= AE_C_INCLUDE_MAX) { overflowed = 1; continue; }
-                snprintf(dirs[ndirs++], sizeof(dirs[0]), "%s", dir);
+                size_t dlen;
+                const char* dir = c_include_dir_of(c->source_file, &dlen);
+                cg_strset_add(&dirs, dir, dlen);
             }
         }
     }
-    for (int i = 0; i < ndirs; i++)
-        fprintf(gen->output, "// aether-include: %s\n", dirs[i]);
-    if (overflowed)
-        fprintf(stderr, "warning: more than %d distinct @c_include directories in "
-                        "the import closure; the rest are not on the include path\n",
-                AE_C_INCLUDE_MAX);
+    for (int i = 0; i < dirs.count; i++)
+        fprintf(gen->output, "// aether-include: %s\n", dirs.items[i]);
+    cg_strset_free(&dirs);
 }
 
 /* #2125: module-owned C sources. Every `@source` in the entry program and in
@@ -6017,23 +6017,20 @@ static void emit_c_include_dirs(CodeGenerator* gen, ASTNode* program) {
  * the program. A losing `when defined(...)` import is gone before codegen, so
  * its sources are dropped with its `@link` flags. */
 static void emit_source_requirements(CodeGenerator* gen, ASTNode* program) {
-    char* paths[256];
-    int npaths = 0;
-    const int cap = (int)(sizeof(paths) / sizeof(paths[0]));
+    CgStrSet paths = { 0 };
     for (int i = 0; i < program->child_count; i++)
-        add_source_directive(program->children[i], paths, &npaths, cap);
+        add_source_directive(program->children[i], &paths);
     if (global_module_registry) {
         for (int m = 0; m < global_module_registry->module_count; m++) {
             AetherModule* mod = global_module_registry->modules[m];
             if (!mod || !mod->ast) continue;
             for (int i = 0; i < mod->ast->child_count; i++)
-                add_source_directive(mod->ast->children[i], paths, &npaths, cap);
+                add_source_directive(mod->ast->children[i], &paths);
         }
     }
-    for (int i = 0; i < npaths; i++) {
-        fprintf(gen->output, "// aether-source: %s\n", paths[i]);
-        free(paths[i]);
-    }
+    for (int i = 0; i < paths.count; i++)
+        fprintf(gen->output, "// aether-source: %s\n", paths.items[i]);
+    cg_strset_free(&paths);
 }
 
 /* `// aether-entry: main` when the program defines main(), nothing otherwise.

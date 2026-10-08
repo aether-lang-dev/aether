@@ -220,9 +220,11 @@ extern char g_wasm_exports[8192];
 
 /* Export NAMES (mangled, newline-separated) for a wasm --emit=lib. Shared by
  * both wasm backends so the zig (-Wl,--export=) and emcc
- * (-sEXPORTED_FUNCTIONS) spellings cannot derive different sets. */
-int wasm_collect_export_names(const char* c_file, const char* explicit_list,
-                              char* out, size_t outsz);
+ * (-sEXPORTED_FUNCTIONS) spellings cannot derive different sets. A string
+ * the caller frees, with the count in *count; NULL when out of memory,
+ * after saying so. */
+char* wasm_collect_export_names(const char* c_file, const char* explicit_list,
+                                int* count);
 
 int  run_cross_compile_obj(const char* c_file, const char* obj_file,
                            bool optimize, const char* ztriple);

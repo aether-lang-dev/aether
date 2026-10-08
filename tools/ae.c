@@ -4460,13 +4460,22 @@ static int build_wasm_cmd(char* cmd, size_t size,
         NULL
     };
     char runtime[8192];
+    size_t rlen = 0;
     runtime[0] = '\0';
     for (int i = 0; wasm_runtime_files[i]; i++) {
-        char path[2048];
         /* src_root, not root — this bare tc.root was the bug: on an installed
          * tree it composed <prefix>/runtime/... and emcc failed on every file. */
-        snprintf(path, sizeof(path), "%s/%s ", tc.src_root, wasm_runtime_files[i]);
-        strncat(runtime, path, sizeof(runtime) - strlen(runtime) - 1);
+        int w = snprintf(runtime + rlen, sizeof(runtime) - rlen, "%s/%s ",
+                         tc.src_root, wasm_runtime_files[i]);
+        if (w < 0 || (size_t)w >= sizeof(runtime) - rlen) {
+            /* Refused rather than cut (#2537): a cut list compiles a
+             * runtime missing the files past it. */
+            fprintf(stderr, "Error: the wasm runtime sources under %s do not fit "
+                            "%zu bytes; build from a shorter path.\n",
+                    tc.src_root, sizeof(runtime));
+            return 0;
+        }
+        rlen += (size_t)w;
     }
 
     /* --emit=lib: a side-effect-free module with named exports rather than a
@@ -4477,34 +4486,43 @@ static int build_wasm_cmd(char* cmd, size_t size,
      *
      * -sEXPORTED_RUNTIME_METHODS=ccall,cwrap and MODULARIZE give the JS half
      * a callable surface; without them a consumer gets a module whose exports
-     * exist in the wasm but have no wrapper to reach them. */
-    char lib_flags[16384];
-    lib_flags[0] = '\0';
+     * exist in the wasm but have no wrapper to reach them. Sized to fit:
+     * a 16 KB buffer dropped the exports past it (#2537). */
+    char* lib_flags = NULL;
     if (g_emit_lib && !g_emit_exe) {
-        static char names[8192];
-        int n = wasm_collect_export_names(c_file, g_wasm_exports, names, sizeof(names));
-        size_t p = (size_t)snprintf(lib_flags, sizeof(lib_flags),
-            "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
-            "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free");
-        if (n > 0) {
-            for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n")) {
-                int w = snprintf(lib_flags + p, sizeof(lib_flags) - p, ",_%s", line);
-                if (w < 0 || (size_t)w >= sizeof(lib_flags) - p) break;
-                p += (size_t)w;
-            }
+        int n;
+        char* names = wasm_collect_export_names(c_file, g_wasm_exports, &n);
+        if (!names) return 0;   /* out of memory, said */
+        static const char base[] = "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
+                                   "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free";
+        size_t cap = sizeof(base) + strlen(names) + (size_t)n;
+        lib_flags = malloc(cap);
+        if (!lib_flags) {
+            free(names);
+            fprintf(stderr, "Error: out of memory listing the wasm exports.\n");
+            return 0;
         }
+        size_t p = (size_t)snprintf(lib_flags, cap, "%s", base);
+        for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n"))
+            p += (size_t)snprintf(lib_flags + p, cap - p, ",_%s", line);
+        free(names);
     }
 
     /* AETHER_WRAP_CFLAGS: emcc is clang, and the wasm build compiles the same
      * generated C as every other target, so it owes the same `int` semantics
      * (#1957). */
-    snprintf(cmd, size,
+    int w = snprintf(cmd, size,
         "emcc -O2" AETHER_WRAP_CFLAGS
         " -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING "
         "%s %s \"%s\" %s -o \"%s\" -lm "
         "-Wall -Wextra -Wno-unused-parameter -Wno-unused-function "
         "-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label",
-        lib_flags, includes, c_file, runtime, out_file);
+        lib_flags ? lib_flags : "", includes, c_file, runtime, out_file);
+    free(lib_flags);
+    if (w >= (int)size) {
+        cmd_too_long(cmd, size, w);
+        return 0;
+    }
 
     return 1;
 }

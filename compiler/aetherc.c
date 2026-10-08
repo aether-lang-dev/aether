@@ -1386,8 +1386,13 @@ int compile_source(const char* input_path, const char* output_path) {
      * keeping them paired is cleaner). */
     if (emit_deps_path) {
         module_dep_record_read(input_path);
-        if (module_dep_write(emit_deps_path) != 0 && verbose_mode)
-            fprintf(stderr, "warning: could not write --emit-deps to '%s'\n", emit_deps_path);
+        /* Said whatever the verbosity (#2537): the build is still right, but
+         * every cached build of this file walks the source tree until the
+         * manifest can be written again. */
+        if (module_dep_write(emit_deps_path) != 0)
+            fprintf(stderr, "warning: could not write the dependency manifest '%s'; "
+                            "the build cache keys on the source tree instead\n",
+                    emit_deps_path);
     }
 
     /* #953: surface parse/annotation errors from IMPORTED modules. The

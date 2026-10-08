@@ -40,6 +40,10 @@ typedef struct { char* path; int found; int is_read; } DepEntry;
 static DepEntry* g_deps = NULL;
 static int g_dep_count = 0, g_dep_cap = 0;
 static int g_dep_recording = 0;
+/* Set when a path could not be recorded (out of memory). The manifest is
+ * then incomplete, and a key built from it would not change when the
+ * missing file does, so module_dep_write writes none (#2537). */
+static int g_dep_incomplete = 0;
 
 void module_dep_recording_enable(void) { g_dep_recording = 1; }
 
@@ -60,13 +64,18 @@ static void dep_record(const char* path, int found, int is_read) {
         if (is_read) e->is_read = 1;
         return;
     }
+    /* A dropped entry under-invalidates: an edit to a file the manifest does
+     * not name leaves the key as it was. So a failure here poisons the whole
+     * manifest rather than losing one line of it. */
     if (g_dep_count == g_dep_cap) {
         int ncap = g_dep_cap ? g_dep_cap * 2 : 32;
         DepEntry* nd = realloc(g_deps, (size_t)ncap * sizeof(DepEntry));
-        if (!nd) return;   /* best-effort: a dropped entry over-invalidates, never under */
+        if (!nd) { g_dep_incomplete = 1; return; }
         g_deps = nd; g_dep_cap = ncap;
     }
-    g_deps[g_dep_count].path = strdup(path);
+    char* copy = strdup(path);
+    if (!copy) { g_dep_incomplete = 1; return; }
+    g_deps[g_dep_count].path = copy;
     g_deps[g_dep_count].found = found;
     g_deps[g_dep_count].is_read = is_read;
     g_dep_count++;
@@ -80,9 +89,21 @@ int module_probe(const char* path) {
 
 void module_dep_record_read(const char* path) { dep_record(path, 1, 1); }
 
+/* On any failure (an incomplete recording, a file that cannot be opened or
+ * written in full) there is no manifest at `out_path` afterwards, not even
+ * the previous build's: ae then keys on the source tree. A partial or stale
+ * manifest would name fewer files than the build read, and an edit to one
+ * it leaves out would be served from the cache (#2537). */
 int module_dep_write(const char* out_path) {
+    if (g_dep_incomplete) {
+        remove(out_path);
+        return 1;
+    }
     FILE* f = fopen(out_path, "w");
-    if (!f) return 1;
+    if (!f) {
+        remove(out_path);
+        return 1;
+    }
     /* v1 header lets the reader reject a format it doesn't understand and fall
      * back to the tree hash rather than trust a stale/foreign layout. */
     fprintf(f, "# aether-deps v1\n");
@@ -94,7 +115,12 @@ int module_dep_write(const char* out_path) {
          * captured by the sibling `absent` lines it would flip, so it needs
          * no line of its own. */
     }
-    fclose(f);
+    int failed = ferror(f) != 0;
+    if (fclose(f) != 0) failed = 1;
+    if (failed) {
+        remove(out_path);
+        return 1;
+    }
     return 0;
 }
 

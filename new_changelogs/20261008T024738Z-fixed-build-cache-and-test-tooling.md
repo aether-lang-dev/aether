@@ -98,3 +98,21 @@
   lists now have no length limit, and `extra_sources` that do not fit the
   8 KiB source list are an error, as `--extra` past it already was, where
   the entries past it were dropped with a warning.
+- **No count limit on `@link` tokens, `@source` files, `@c_include`
+  headers or wasm exports, and no stale depfile (#2537).** The compiler
+  kept the first 64 `@link` tokens and 256 `@source` files of an import
+  closure and dropped the rest unsaid; it kept 64 `@c_include` headers and
+  directories and cut a directory past 399 bytes. `ae bindgen consts`
+  stopped at 4096 macros and 256 KB of names (`windows.h` has 23,000 and
+  500 KB), a piece of a long `-dM` line that began with `#define ` was
+  taken for a macro, and two runs at once shared one temporary probe file
+  and could read each other's macros. A wasm `--emit=lib` dropped the
+  exports past 8 KB of names, or one whose catalog line was cut, and a
+  cross build's `SQLITE_CFLAGS` past 1 KB was cut with its opening quote
+  left in. A dependency path aetherc could not record (out of memory) was
+  left out of the manifest, and a write error left a partial one; either
+  way an edit to the missing file was served from the cache. aetherc now
+  writes no manifest then, removes the previous one and says so, and ae
+  keys on the source tree. The depfile slot is named for the whole
+  absolute path, where a 1 KB buffer cut it and a longer working directory
+  gave every project's `main.ae` the same slot.

@@ -404,11 +404,16 @@ void init_cache_dir(void) {
     gc_stale_cache_tmp(s_cache_dir);
 }
 
-// FNV-64 hash of a string
-static unsigned long long fnv64_str(const char* s) {
-    unsigned long long h = 14695981039346656037ULL;
+/* FNV-1a over `s`, continuing from `h`: a string hashed in pieces hashes
+ * as the pieces joined. */
+static unsigned long long fnv64_more(unsigned long long h, const char* s) {
     while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }
     return h;
+}
+
+// FNV-64 hash of a string
+static unsigned long long fnv64_str(const char* s) {
+    return fnv64_more(14695981039346656037ULL, s);
 }
 
 // FNV-64 hash of a file's contents
@@ -505,19 +510,39 @@ static unsigned long long hash_contrib_archives(const char* lib_path) {
  * The depfile lives at a path derived from the ENTRY file's absolute path, so
  * it's stable across content edits (the edit changes a `read` line's hash, not
  * the manifest's location) and found before the content-key is known. */
-static void abspath_of(const char* p, char* out, size_t outsz) {
-    if (p && p[0] == '/') { snprintf(out, outsz, "%s", p); return; }
-    char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd))) snprintf(out, outsz, "%s/%s", cwd, p ? p : "");
-    else snprintf(out, outsz, "%s", p ? p : "");
+/* The current directory however long it is, in a buffer the caller frees;
+ * NULL when it cannot be read. */
+static char* cwd_dup(void) {
+    for (size_t cap = 1024; cap <= ((size_t)1 << 20); cap *= 2) {
+        char* buf = malloc(cap);
+        if (!buf) return NULL;
+        if (getcwd(buf, cap)) return buf;
+        free(buf);
+        if (errno != ERANGE) return NULL;
+    }
+    return NULL;
 }
 
 // The stable depfile path for an entry source, under the cache dir.
+//
+// Named for a hash of the absolute path (`<cwd>/<file>` for a relative one),
+// hashed in pieces rather than built in a buffer: a 1 KB one cut a longer
+// path, and a cwd past it fell back to the bare relative name, so two
+// projects' `main.ae` shared one slot and each keyed on the other's
+// dependencies (#2537). The bytes hashed are the ones the buffer held, so a
+// slot for a shorter path keeps its name.
 void cache_depfile_path(const char* ae_file, char* out, size_t outsz) {
-    char abs[1024];
-    abspath_of(ae_file, abs, sizeof(abs));
+    const char* p = ae_file ? ae_file : "";
+    unsigned long long h;
+    char* cwd = p[0] == '/' ? NULL : cwd_dup();
+    if (cwd) {
+        h = fnv64_more(fnv64_more(fnv64_str(cwd), "/"), p);
+        free(cwd);
+    } else {
+        h = fnv64_str(p);
+    }
     init_cache_dir();
-    snprintf(out, outsz, "%s/%016llx.deps", s_cache_dir, fnv64_str(abs));
+    snprintf(out, outsz, "%s/%016llx.deps", s_cache_dir, h);
 }
 
 /* Fold a depfile's contents into `acc`. Returns 1 if a valid v1 manifest was
