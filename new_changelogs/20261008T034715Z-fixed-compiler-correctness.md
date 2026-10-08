@@ -140,7 +140,12 @@
   the closure variable `f` of an unrelated function and ran that closure's
   code with the parameter's env, an access violation. The closure a
   variable holds is now recorded per scope, so a parameter, or a name bound
-  in another function, dispatches through `f.fn(f.env)`.
+  in another function, dispatches through `f.fn(f.env)`. A closure local
+  rebound to a value the compiler cannot name (`g = h.cb`, `g = f` with `f`
+  a parameter, `g = pick(...)`) also dispatches through its current value:
+  only a rebinding to another literal used to make the binding ambiguous,
+  so `call(g)` ran the first literal. It is decided at discovery now, so a
+  rebinding later in a loop body is covered too.
 - **`call()` on a value that is not a closure is a type error (#2468).**
   `call(x, ...)` invokes a closure, and a callee of any other known type was
   let through to the C compiler, which stopped at `'_tuple_ptr_string' has

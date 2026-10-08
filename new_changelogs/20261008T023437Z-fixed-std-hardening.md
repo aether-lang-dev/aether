@@ -14,7 +14,10 @@
 - **A zip archive cannot misstate its entries.** A stored entry whose two
   recorded sizes differ is an error (a 100-byte entry claiming 1 byte got
   past `max_entry_bytes`), ZIP64 sizes and offsets at or past 2^63 or past
-  the buffer are refused, and a comment holding `PK\5\6` no longer hides the
+  the buffer are refused (`zip.entry_read` compares a size against the room
+  left after the data offset, so one just under 2^63 cannot wrap the sum,
+  slip under the check and come back as an empty body with a negative
+  length), and a comment holding `PK\5\6` no longer hides the
   entries: the end record whose comment ends the file is preferred, then the
   latest one that fits, as Python's zipfile reads appended archives.
   `std.zip` and `std.tar` can be imported together (one `ExtractOptions`),
@@ -47,7 +50,11 @@
   and a character reference to no legal XML Char (`&#0;`, a surrogate, past
   U+10FFFF) all read without an error; each is now `EVENT_ERROR`, and
   `xml.error` gives its line, column and byte offset. A UTF-8 byte order mark
-  before the root is accepted.
+  before the root is accepted, and so is a reference to an entity the
+  DOCTYPE's internal subset declares (`<!DOCTYPE d [<!ENTITY e "x">]><d>&e;
+  </d>` is well-formed): the reader does not read the subset, so when it
+  declares entities a reference to a name the reader does not know is kept
+  as written; a document whose DOCTYPE declares none is still refused.
 - **`std.schema` validates what it promises.** The error getters read `""`
   past the list (an access violation before); `INT` is 64-bit and a value
   outside it is an error (`{"age": 5000000000}` passed `max(120)` and
@@ -104,7 +111,9 @@
   `grapheme_substring` stops at a malformed byte. `path.rel` has no answer
   when the base climbs above the target's root. `math.random_int` covers its
   whole range without bias or a division by zero (splitmix64, one sequence
-  per seed on every platform), `random_float` is in `[0, 1)`,
+  per seed on every platform, its state atomic so two actors drawing at once
+  get two distinct steps rather than the same number, and the first draw
+  seeds from the clock once), `random_float` is in `[0, 1)`,
   `abs_int(INT_MIN)` is defined and `min_float` / `max_float` ignore a NaN.
   `zlib.gzip_inflate` inflates every member, inflate refuses trailing bytes
   other than zero padding, and a compression level outside -1..9 is an

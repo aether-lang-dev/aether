@@ -38,7 +38,15 @@
   instead of copied and leaked. Replacing a struct with a value that reuses
   one of its strings (`q = Rec { name: q.name, count: 1 }`) freed that
   string first, so `q.name` printed `(null)`; the old value's strings are
-  freed only when the new value does not hold them.
+  freed only when the new value does not hold them. A list add or map put
+  of a string local takes it as every other owning slot does: on the
+  local's last use its reference moves into the container, and read again
+  afterwards the container gets a copy of what the local owns (or its own
+  reference to what it borrows) and the local keeps its own frees. The
+  store used to adopt the local's single reference and mark the local
+  escaped, so a local stored twice, or stored in a loop, was freed once per
+  store (an access violation), and a `string` parameter a closure keeps by
+  storing it took a reference on entry that the store then left to nobody.
 - **A closure environment is reference counted and released by its last
   holder (#2480, #2494, #2498, #2506, #2507, #2519).** `g = || { println(n)
   }` allocated `g`'s environment and never freed it, nor the shared cells
@@ -94,8 +102,18 @@
   back hold references of their own; a message's closure field is released
   with the message once the handler is done. A closure literal, or a
   parameter, stored into any of these holders is not kept by the store: the
-  caller releases its own reference after the call. A module-level `var
-  name: fn = null` starts as the zero closure instead of failing to compile.
+  caller releases its own reference after the call. `list.add(l,
+  box_closure(f))` is the store `list.add(l, f)` is: the explicit box used
+  to hand the container a raw pointer it did not know it owned, so neither
+  box nor environment was reclaimed; the container now takes its own
+  reference and owns the box, and the local keeps its own. A callback
+  passed to a function that only passes it on (`it(cb) { it_impl(cb) }`) is
+  released after the call: the callee-body walk decided a forwarded `fn`
+  parameter was kept by its kind before reading the callee's body, so the
+  environment of every callback handed to such a wrapper lived for the rest
+  of the program; a visible body now decides, as it does for every other
+  argument. A module-level `var name: fn = null` starts as the zero closure
+  instead of failing to compile.
 - **An actor's state is destroyed with the actor, and a reply is released
   by its taker or its replier (#2528).** An actor now has a `destroy_state`
   hook (`ActorBase`, set by the generated spawn) that the scheduler runs
@@ -161,10 +179,16 @@
   cell adopted the same one without taking it, so both released it at
   scope exit and the caller's string was freed under the caller. The cell
   now takes what it holds the way every owning slot does: a borrowed value
-  is copied or retained, a fresh one adopted. A match arm or a tuple
-  destructure that binds such a variable stores the same way, and a
+  is copied or retained, a fresh one adopted, and a plain malloc'd buffer
+  (an `@heap` extern's strdup, `os.getenv` among them) is turned into a
+  refcounted copy on the way in; the cell cannot tell such a buffer from a
+  literal, so it was stored as it was and never freed. A match arm or a
+  tuple destructure that binds such a variable stores the same way, and a
   function that returns such a variable hands the caller a copy, since
-  the cell is released at the function's exit.
+  the cell is released at the function's exit. The cell's reference count
+  is atomic, as the environment's already was: an environment holding the
+  cell can be released on a worker thread while the declaring scope
+  releases its own reference.
 - **A closure passed to an extern is released when the extern says it keeps
   nothing (#2523).** A closure handed to an extern parameter declared
   `@noescape` is released as it would be after an Aether callee that keeps
@@ -175,7 +199,11 @@
   environment on the C side, which leaked a capturing closure's cells and
   strings on every call and, for a closure local passed to `seq_each`
   twice, used freed memory.
-- **A message string field built from a call or an interpolation is freed
-  once copied.** `w ! Keep { s: string.concat(p, "pt") }`, and the same in
-  an ask or a reply, copied the temporary for the receiver and never freed
-  it.
+- **A statement that throws away a string it owns frees it, and a message
+  string field built from a temporary is freed once copied.** A bare call
+  that returns a heap string, a `string.concat` or an interpolation on a
+  line of its own, an ask answered with a string, and a pass-through call
+  handed a fresh temporary (`ident(mk(i))`) each leaked one buffer per
+  statement; `_ = e` already freed its value, and the bare form now does
+  the same. `w ! Keep { s: string.concat(p, "pt") }`, and the same in an
+  ask or a reply, copied the temporary for the receiver and never freed it.

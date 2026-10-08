@@ -14,7 +14,13 @@
   PATH, another `$CC` / `$AE_CC`, or a compiler upgraded in place was handed
   the binary the previous compiler made, reported as a cache hit. The key now
   includes the compiler setting and, for each program it names, the resolved
-  path and a hash of the file.
+  path, a hash of the file and the first line of its `--version`, since the
+  file found on PATH can be a trampoline whose bytes never change when the
+  compiler behind it does (macOS's xcrun `/usr/bin/gcc`, a ccache
+  masquerade). The key text is also appended with a bound: it was built with
+  unchecked appends into a 2 KiB stack buffer, which about 110 `--extra`
+  files overran; past the end the key is truncated, which only means a
+  rebuild.
 - **On Windows, an AVX build no longer faults on a 256-bit spill (#2476).**
   The Win64 stack is only 16-byte aligned and GCC does not realign it for
   32-byte values (GCC bug 54412), but it can still spill them with the

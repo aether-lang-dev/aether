@@ -1,1 +1,0 @@
-- **A statement that throws away a string it owns frees it.** A bare call that returns a heap string, a `string.concat` or an interpolation on a line of its own, an ask answered with a string, and a pass-through call handed a fresh temporary (`ident(mk(i))`) each leaked one buffer per statement; `_ = e` already freed its value, and the bare form now does the same.
