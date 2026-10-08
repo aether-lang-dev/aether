@@ -101,7 +101,33 @@ tunnel is established before the handshake either way.
 
 Without that import the pure client is not linked, and an https request in a
 no-OpenSSL build fails with an error naming the missing import rather than
-returning an empty body.
+returning an empty body. (`std.http.client` does not import it for you:
+`std.cryptography` reaches `std.fs`, and an implicit import would make
+`--emit=lib --with=net` reject every `std.http.client` user — the same reason
+the server side is opt-in.)
+
+In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` — the variable that already
+selects the pure server — moves client requests onto the pure client as well,
+provided the program imports it (otherwise the request fails, naming the
+import). That is how the pure path is tested on every platform, not only in
+cross-builds.
+
+**Trust store.** The pure client verifies against, in order: the `set_cafile`
+pin alone, when there is one; else the union of `SSL_CERT_FILE` (a PEM bundle)
+and `SSL_CERT_DIR` (a directory of PEM files, or a `:`-separated list — `;` on
+Windows) when either is set; else the first system bundle that exists
+(`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
+`/etc/ssl/cert.pem`, and the Git-for-Windows / MSYS2 bundles); else the first
+certificate directory that loads — Android's `/apex/com.android.conscrypt/cacerts`
+(Android 14+) and `/system/etc/security/cacerts`, which are one certificate per
+file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the
+handshake fails closed.
+
+**Scope and errors.** The pure client speaks TLS 1.3 only. A server that does
+not is refused with an error that says so (`server does not support TLS 1.3`),
+not a hang. Handshake failures carry the real cause — an untrusted chain, a
+certificate not valid for the requested host, no trust store — prefixed with
+`TLS handshake failed (pure-Aether TLS 1.3):`.
 
 **Performance.** A pure handshake against a real CDN (a P-256 leaf over
 secp384r1 intermediates) completes in about 1.3 seconds, and a full cross-built

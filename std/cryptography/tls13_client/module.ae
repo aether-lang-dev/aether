@@ -476,14 +476,42 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
     while looking == 1 {
         rec, rlen, err = recio_next(r)
         if string.equals(err, "") != 1 { looking = 0 } else {
-            if (bytes.get(rec, 0) & 0xFF) == 0x14 {
+            ct = bytes.get(rec, 0) & 0xFF
+            if ct == 0x14 {
                 bytes.free(rec) // skip CCS
             } else {
+                if ct == 0x15 {
+                    // A plaintext Alert where the ServerHello belongs: the
+                    // server refused the ClientHello outright. Parsing it as a
+                    // ServerHello produced "server hello: truncated header",
+                    // which named the wrong layer. The usual cause is a server
+                    // that does not speak TLS 1.3, which answers this client's
+                    // TLS-1.3-only offer with protocol_version (OpenSSL) or
+                    // handshake_failure (no cipher suite in common).
+                    err = server_hello_alert_error(rec, rlen)
+                    bytes.free(rec)
+                    rec = null
+                    rlen = 0
+                }
                 looking = 0
             }
         }
     }
     return rec, rlen, err
+}
+
+// The error for a plaintext Alert record received instead of a ServerHello.
+fn server_hello_alert_error(rec: ptr, rlen: int) -> string {
+    if rlen < 7 { return "server sent a malformed alert instead of a ServerHello" }
+    desc = bytes.get(rec, 6) & 0xFF
+    name = alert_name(desc)
+    if desc == ALERT_PROTOCOL_VERSION {
+        return "server does not support TLS 1.3 (it answered with alert protocol_version); this client speaks TLS 1.3 only"
+    }
+    if desc == ALERT_HANDSHAKE_FAILURE {
+        return "server refused the handshake (alert handshake_failure): it may not support TLS 1.3, which is all this client speaks, or shares no cipher suite or group with it"
+    }
+    return "server refused the handshake with alert ${name} (${desc})"
 }
 
 // or (null, 0, err). Blocks (via recio_fill) until a full record is available.
@@ -1044,9 +1072,7 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string, shared: byte[]
             // OpenSSL backend's equivalent, and offered for the same reason.
             auth_err = ""
         } else {
-            store = trust_store_path()
-            if string.equals(cafile, "") != 1 { store = cafile }
-            anchors, tsErr = tls13_cert.trust_store_load(store)
+            anchors, tsErr = load_trust_anchors(cafile)
             if anchors == null {
                 // Say WHY. trust_store_load reports the reason (missing file,
                 // unreadable, nothing parsed out of it) and that was dropped,
@@ -2124,45 +2150,131 @@ fn split_ec_point(spki_key: byte[]) -> (ptr, ptr, int, string) {
 
 // Authenticate the server: extract the leaf public key from Certificate and
 // verify the CertificateVerify signature over `th_thru_cert`. Fails closed.
-// Locate the system CA-bundle PEM. Honours SSL_CERT_FILE (the de-facto
-// override that curl/openssl respect), then falls back to the common OS
-// locations. Returns the first path that exists, or the Debian/Ubuntu default
-// (so trust_store_load produces a clear "cannot load" error if nothing is
-// present, rather than us guessing).
-fn trust_store_path() -> string {
-    // os_getenv returns a NULL pointer for an unset variable, and comparing
-    // that against "" does not catch it -- the value interpolates as the
-    // literal text "(null)", which was then returned AS THE PATH. The
-    // fallbacks below were unreachable whenever SSL_CERT_FILE was unset, so
-    // the pure client could not load a trust store on a stock Debian box even
-    // though /etc/ssl/certs/ca-certificates.crt was sitting right there. The
-    // null check has to come first, exactly as std/cas/module.ae does it.
-    env = os.os_getenv("SSL_CERT_FILE")
-    if env != null {
-        if string.length(env) > 0 {
-            return env
+// Load the trust anchors a connection verifies against. Returns (anchors, "")
+// or (null, why) -- and connect() fails closed on null, so a store that cannot
+// be found is a refused connection, never an unauthenticated one.
+//
+// Resolution, first match wins:
+//   1. `cafile`, when the caller pinned one (set_cafile): ONLY that. A pin
+//      that does not load fails; it never quietly widens to the system store.
+//   2. SSL_CERT_FILE and/or SSL_CERT_DIR, the de-facto overrides curl and
+//      OpenSSL honour. When either is set, the union of what they name is the
+//      store and the OS defaults are not consulted. SSL_CERT_DIR may list
+//      several directories, separated by ':' (';' on Windows), as OpenSSL
+//      reads it.
+//   3. The OS defaults: the first bundle file that exists, else the first
+//      certificate directory that loads anything. Android has no bundle at
+//      all, only one-certificate-per-file directories, which is why the
+//      directory probe exists.
+fn load_trust_anchors(cafile: string) -> (ptr, string) {
+    if cafile != null {
+        if string.length(cafile) > 0 {
+            return tls13_cert.trust_store_load(cafile)
         }
     }
-    debian = "/etc/ssl/certs/ca-certificates.crt" // Debian/Ubuntu/Alpine
-    if fs.file_exists(debian) == 1 { return debian }
-    fedora = "/etc/pki/tls/certs/ca-bundle.crt" // Fedora/RHEL/CentOS
-    if fs.file_exists(fedora) == 1 { return fedora }
-    bsd = "/etc/ssl/cert.pem" // *BSD / macOS (LibreSSL)
-    if fs.file_exists(bsd) == 1 { return bsd }
-    // Windows ships no system PEM bundle, and every path above is POSIX-only,
-    // so without these a source build there had NO trust store at all: the
-    // handshake failed with a bare "pure TLS handshake failed" and nothing
-    // pointing at the cause. The two locations below are where the toolchains
-    // the README tells Windows users to install actually put the bundle.
-    //
-    // These must be native Windows paths. A compiled Aether program is a plain
-    // Win32 binary and does not inherit MSYS2's virtual mounts, so the
-    // /mingw64/... form that works in an MSYS2 shell does not resolve here.
-    git_win = "C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt" // Git for Windows
-    if fs.file_exists(git_win) == 1 { return git_win }
-    msys2 = "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt" // MSYS2 ca-certificates
-    if fs.file_exists(msys2) == 1 { return msys2 }
-    return debian
+
+    // os_getenv returns a NULL pointer for an unset variable, and comparing
+    // that against "" does not catch it -- the value interpolates as the
+    // literal text "(null)", which was once returned AS THE PATH and made
+    // every fallback unreachable. The null check has to come first, exactly
+    // as std/cas/module.ae does it.
+    env_file = os.os_getenv("SSL_CERT_FILE")
+    env_dir = os.os_getenv("SSL_CERT_DIR")
+    have_file = 0
+    if env_file != null { if string.length(env_file) > 0 { have_file = 1 } }
+    have_dir = 0
+    if env_dir != null { if string.length(env_dir) > 0 { have_dir = 1 } }
+    if have_file == 1 || have_dir == 1 {
+        anchors = list_new()
+        first_err = ""
+        if have_file == 1 {
+            _n, ferr = tls13_cert.trust_store_add(anchors, env_file)
+            if string.equals(ferr, "") != 1 { first_err = "SSL_CERT_FILE: ${ferr}" }
+        }
+        if have_dir == 1 {
+            derr = add_cert_dir_list(anchors, env_dir)
+            if string.equals(derr, "") != 1 {
+                if string.equals(first_err, "") == 1 { first_err = "SSL_CERT_DIR: ${derr}" }
+            }
+        }
+        if list_size(anchors) == 0 {
+            tls13_cert.free_anchors(anchors)
+            if string.equals(first_err, "") == 1 {
+                first_err = "no certificates found in SSL_CERT_FILE / SSL_CERT_DIR"
+            }
+            return null, first_err
+        }
+        return anchors, ""
+    }
+
+    // Bundle files.
+    b = first_existing_file5(
+        "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Alpine
+        "/etc/pki/tls/certs/ca-bundle.crt", // Fedora/RHEL/CentOS
+        "/etc/ssl/cert.pem", // *BSD / macOS (LibreSSL)
+        // Windows ships no system PEM bundle, and every path above is
+        // POSIX-only, so without these a source build there had NO trust
+        // store at all. These are where the toolchains the README tells
+        // Windows users to install put the bundle. They must be native
+        // Windows paths: a compiled Aether program is a plain Win32 binary and
+        // does not inherit MSYS2's virtual mounts, so /mingw64/... does not
+        // resolve here.
+        "C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt", // Git for Windows
+        "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt") // MSYS2 ca-certificates
+    if string.length(b) > 0 {
+        return tls13_cert.trust_store_load(b)
+    }
+
+    // Certificate directories: Android's two (the updatable Conscrypt APEX
+    // store first, Android 14+, then the system image's), then the hashed
+    // directory most Linux distributions keep beside the bundle.
+    a1, _e1 = load_cert_dir_if_present("/apex/com.android.conscrypt/cacerts")
+    if a1 != null { return a1, "" }
+    a2, _e2 = load_cert_dir_if_present("/system/etc/security/cacerts")
+    if a2 != null { return a2, "" }
+    a3, _e3 = load_cert_dir_if_present("/etc/ssl/certs")
+    if a3 != null { return a3, "" }
+    return null, "no CA trust store found (looked for the system bundle and certificate directories; set SSL_CERT_FILE or SSL_CERT_DIR)"
+}
+
+// The first of five paths that exists as a file, or "".
+fn first_existing_file5(p1: string, p2: string, p3: string, p4: string, p5: string) -> string {
+    if fs.file_exists(p1) == 1 { return p1 }
+    if fs.file_exists(p2) == 1 { return p2 }
+    if fs.file_exists(p3) == 1 { return p3 }
+    if fs.file_exists(p4) == 1 { return p4 }
+    if fs.file_exists(p5) == 1 { return p5 }
+    return ""
+}
+
+// trust_store_load on `dir` when it is a directory; (null, "") when it is not.
+fn load_cert_dir_if_present(dir: string) -> (ptr, string) {
+    if fs.dir_exists(dir) != 1 { return null, "" }
+    return tls13_cert.trust_store_load(dir)
+}
+
+// Add every directory in an SSL_CERT_DIR-style list to `anchors`. The list is
+// separated by ':' (';' on Windows, where ':' follows the drive letter), as
+// OpenSSL reads the variable. Returns the first error, or "".
+fn add_cert_dir_list(anchors: ptr, list: string) -> string {
+    sep = ":"
+    when target.os == "windows" { sep = ";" }
+    first_err = ""
+    n = string.length(list)
+    pos = 0
+    while pos <= n {
+        e = string.index_of_from(list, sep, pos)
+        if e < 0 { e = n }
+        if e > pos {
+            d = string.substring_n(list, n, pos, e)
+            _m, derr = tls13_cert.trust_store_add(anchors, d)
+            if string.equals(derr, "") != 1 {
+                if string.equals(first_err, "") == 1 { first_err = derr }
+            }
+        }
+        pos = e + 1
+    }
+    return first_err
 }
 
 fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host: string, anchors: ptr) -> string {
@@ -2455,23 +2567,47 @@ pure_tls_client_available() -> int {
     return 1
 }
 
+// Why a handshake failed goes back to std/net/aether_http.c through this, so
+// the https request's error names the cause (untrusted chain, wrong host, a
+// server that does not speak TLS 1.3, no trust store) instead of a guess. The
+// callback ABI returns only a pointer; this is the side channel (thread-local
+// on the C side, and the handshake runs on the dialling thread).
+extern aether_pure_tls_client_set_error(msg: string)
+
 @c_callback("aether_pure_tls_client_connect")
 pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string) -> ptr {
     sock = tcp_socket_from_fd_owned(fd)
-    if sock == null { return null }
+    if sock == null {
+        aether_pure_tls_client_set_error("could not adopt the connected socket")
+        return null
+    }
 
     priv = rand_into(32)
-    if priv == null { net.tcp_close(sock); return null }
+    if priv == null {
+        net.tcp_close(sock)
+        aether_pure_tls_client_set_error("no randomness for the key share")
+        return null
+    }
 
     ca = ""
     if cafile != null { ca = cafile }
     conn, err = connect_full(host, 443, priv, null, 0, null, sock, verify_mode, ca)
     bytes.free(priv)
-    if string.equals(err, "") != 1 { return null }
-    if conn == null { return null }
+    if string.equals(err, "") != 1 {
+        aether_pure_tls_client_set_error(err)
+        return null
+    }
+    if conn == null {
+        aether_pure_tls_client_set_error("handshake returned no connection")
+        return null
+    }
 
     pc = malloc(sizeof(PureClientConn)) as *PureClientConn
-    if pc == null { close_conn(conn); return null }
+    if pc == null {
+        close_conn(conn)
+        aether_pure_tls_client_set_error("out of memory")
+        return null
+    }
     pc.conn = conn
     pc.pending = null
     pc.pending_len = 0

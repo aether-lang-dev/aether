@@ -111,7 +111,7 @@ const ZETAS_INV: int[128] = [
 
 // ---- Parameter bundle ----
 
-struct Params {
+struct MlkemParams {
     k: int
     eta1: int
     poly_compressed: int // dv bytes per poly  (128 for dv=4, 160 for dv=5)
@@ -129,8 +129,8 @@ struct Params {
 // size helpers check k themselves first. A value rather than a heap struct:
 // it is ten ints, and the old malloc'd one went unchecked and had to be freed
 // on every path (#2508).
-params(k: int) -> Params {
-    p = Params {}
+params(k: int) -> MlkemParams {
+    p = MlkemParams {}
     p.k = k
     p.eta1 = 2
     p.poly_compressed = 128 // dv = 4
@@ -908,7 +908,7 @@ gen_matrix(mat: ptr, seed: ptr, k: int, transpose: int) {
 // ---- K-PKE keygen ----
 
 // Writes IndCpa keypair into kp: [sk polyvec (indcpa_sk)] then [pk (indcpa_pk)].
-indcpa_keygen(p: *Params, d: ptr, kp: ptr) {
+indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
     k = p.k
 
     // G(d || k) -> 64 bytes = rho(32) || sigma(32)
@@ -1025,7 +1025,7 @@ mat_row(mat: ptr, i: int, k: int) -> ptr {
 
 // pk is the indcpa public key (indcpa_pk bytes) at pk[pk_off..].
 // coins = 32-byte r. Writes ct (ct_bytes) at out[out_off..].
-indcpa_encrypt(p: *Params, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: ptr, out: ptr, out_off: int) {
+indcpa_encrypt(p: *MlkemParams, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: ptr, out: ptr, out_off: int) {
     k = p.k
 
     // Unpack pk -> pkpv, seed(rho)
@@ -1134,7 +1134,7 @@ indcpa_encrypt(p: *Params, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: 
 
 // sk is indcpa secret key bytes at sk[0..]; ct at ct[ct_off..].
 // Writes 32-byte message into msg[0..].
-indcpa_decrypt(p: *Params, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
+indcpa_decrypt(p: *MlkemParams, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
     k = p.k
 
     bp = polyvec_new(k)
@@ -1179,7 +1179,7 @@ indcpa_decrypt(p: *Params, ct: ptr, ct_off: int, sk: ptr, msg: ptr) {
 // the input checks below).
 
 // KeyGen_internal (Algorithm 16): returns (ek, dk). d, z are 32-byte seeds.
-keygen_internal(p: *Params, d: ptr, z: ptr) -> (ptr, ptr) {
+keygen_internal(p: *MlkemParams, d: ptr, z: ptr) -> (ptr, ptr) {
     dk = bytes.new(p.dk_bytes)
     // Build indcpa keypair into dk: [sk | pk] occupy first indcpa_sk+indcpa_pk.
     indcpa_keygen(p, d, dk)
@@ -1215,7 +1215,7 @@ keygen_internal(p: *Params, d: ptr, z: ptr) -> (ptr, ptr) {
 
 // Encaps_internal (Algorithm 17): returns (ct, K). m is the 32-byte message
 // coin.
-encaps_internal(p: *Params, ek: ptr, m: ptr) -> (ptr, ptr) {
+encaps_internal(p: *MlkemParams, ek: ptr, m: ptr) -> (ptr, ptr) {
     // buf = m || H(ek)   (64 bytes)
     buf = bytes.new(2 * SYM)
     i = 0
@@ -1260,7 +1260,7 @@ encaps_internal(p: *Params, ek: ptr, m: ptr) -> (ptr, ptr) {
 
 // Decaps_internal (Algorithm 18): returns K (32 bytes). dk is the ML-KEM
 // private key, ct the ciphertext.
-decaps_internal(p: *Params, dk: ptr, ct: ptr) -> ptr {
+decaps_internal(p: *MlkemParams, dk: ptr, ct: ptr) -> ptr {
     // Decrypt to recover m'
     mprime = bytes.new(SYM)
     indcpa_decrypt(p, ct, 0, dk, mprime)
@@ -1351,7 +1351,7 @@ decaps_internal(p: *Params, dk: ptr, ct: ptr) -> ptr {
 // §7.2: the type check (384k + 32 bytes), then the modulus check. Every
 // 12-bit coefficient of the encoded vector must be below q, which is what
 // ByteEncode12(ByteDecode12(ek[0:384k])) == ek[0:384k] amounts to.
-ek_check(p: *Params, ek: ptr) -> string {
+ek_check(p: *MlkemParams, ek: ptr) -> string {
     if bytes.length(ek) != p.ek_bytes {
         return "mlkem: encapsulation key has the wrong length"
     }
@@ -1374,7 +1374,7 @@ ek_check(p: *Params, ek: ptr) -> string {
 // of the ek stored in dk. Our dk arrives as raw bytes on every call, so the
 // key check runs every time too; one SHA3-256 over ek is small next to the
 // re-encryption Decaps already does.
-decaps_check(p: *Params, dk: ptr, ct: ptr) -> string {
+decaps_check(p: *MlkemParams, dk: ptr, ct: ptr) -> string {
     if bytes.length(ct) != p.ct_bytes {
         return "mlkem: ciphertext has the wrong length"
     }

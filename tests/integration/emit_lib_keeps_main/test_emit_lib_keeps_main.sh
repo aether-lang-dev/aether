@@ -30,6 +30,12 @@
 #      an Android AETHER_SYSROOT, so does --target=aarch64-linux-android
 #   8. --emit=csrc's header declares both for a program with main(), and
 #      neither for one without
+#   9. the --emit=obj object carries the executable's entry as a WEAK main(),
+#      so a plain `cc app.o $(ae cflags --libs)` -- or any build tool (aeb's
+#      c.program; aeb asks/c-program-aether-source-main-entry.md) -- links a
+#      working program with no C main() of its own, exit code and all; and a
+#      host that brings its own main() still gets its own (strong beats weak);
+#      a shared library ae links (native and cross) exports no main at all
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -74,6 +80,15 @@ if exports "$LIB" aether_main && exports "$LIB" aether_main_exit; then
 else
     bad "library does not export aether_main / aether_main_exit"
     syms "$LIB" | grep aether_ | head
+fi
+
+# 1b. ...and no entry point: the weak main() a library build of a program
+#     carries is for an object linked into an executable (check 9); a shared
+#     library ae links leaves it out.
+if syms "$LIB" | grep -E "[[:space:]]_?main\$" >/dev/null; then
+    bad "the shared library exports main"; syms "$LIB" | grep -E "[[:space:]]_?main\$"
+else
+    ok "the shared library exports no main"
 fi
 
 # 2. the C host
@@ -185,11 +200,53 @@ else
     bad "ae build --emit=csrc"; cat "$TMP/csrc.log"
 fi
 
+# 9. the weak main(): a linked object needs no hand-written C entry
+if AETHER_HOME="" "$AE" build --emit=obj app.ae -o "$TMP/app.o" >"$TMP/obj.log" 2>&1; then
+    LIBS="$("$AE" cflags --libs 2>/dev/null)"
+    if $CC "$TMP/app.o" $LIBS -o "$TMP/objprog" >"$TMP/objlink.log" 2>&1; then
+        "$TMP/objprog" one two >"$TMP/objprog.out" 2>&1; orc=$?
+        if [ "$orc" -eq 42 ] && grep -q '^main: start, 3 args' "$TMP/objprog.out" \
+           && grep -q '^worker done 2' "$TMP/objprog.out"; then
+            ok "an --emit=obj object links into a working program with no C main() (exit 42, workers drained)"
+        else
+            bad "object-only program (exit $orc)"; cat "$TMP/objprog.out"
+        fi
+    else
+        bad "cc app.o with no C main(): link failed"; tail -5 "$TMP/objlink.log"
+    fi
+    cat > "$TMP/hostmain.c" <<'HC'
+#include <stdio.h>
+int  aether_main(int argc, char** argv);
+void aether_main_exit(void);
+int main(int argc, char** argv) {
+    printf("hostmain: first\n");
+    int rc = aether_main(argc, argv);
+    aether_main_exit();
+    printf("hostmain: last, rc %d\n", rc);
+    return 0;
+}
+HC
+    if $CC "$TMP/app.o" "$TMP/hostmain.c" $LIBS -o "$TMP/hostprog" >"$TMP/hostlink.log" 2>&1; then
+        "$TMP/hostprog" >"$TMP/hostprog.out" 2>&1; hrc=$?
+        if [ "$hrc" -eq 0 ] && [ "$(head -1 "$TMP/hostprog.out")" = "hostmain: first" ] \
+           && grep -q '^hostmain: last, rc 42' "$TMP/hostprog.out"; then
+            ok "a host's own main() beats the object's weak one"
+        else
+            bad "host main() did not win (exit $hrc)"; cat "$TMP/hostprog.out"
+        fi
+    else
+        bad "cc app.o hostmain.c: link failed (duplicate main?)"; tail -5 "$TMP/hostlink.log"
+    fi
+else
+    bad "ae build --emit=obj app.ae"; cat "$TMP/obj.log"
+fi
+
 # 7. cross
 if command -v zig >/dev/null 2>&1; then
     if AETHER_HOME="" "$AE" build --target=aarch64-linux --emit=lib app.ae -o "$TMP/libapp_arm.so" >"$TMP/x.log" 2>&1 \
-       && exports "$TMP/libapp_arm.so" aether_main && exports "$TMP/libapp_arm.so" aether_main_exit; then
-        ok "cross aarch64-linux: the ELF .so exports both"
+       && exports "$TMP/libapp_arm.so" aether_main && exports "$TMP/libapp_arm.so" aether_main_exit \
+       && ! exports "$TMP/libapp_arm.so" main; then
+        ok "cross aarch64-linux: the ELF .so exports both, and no main"
     else
         bad "cross aarch64-linux"; tail -15 "$TMP/x.log"
     fi

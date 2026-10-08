@@ -13,10 +13,21 @@
 #include "lockfree_queue.h"
 #include "aether_io_poller.h"
 
+/* Sizing. Each is overridable with -D for small-memory targets: a Scheduler
+ * holds MAX_CORES + 1 queues of QUEUE_SIZE slots (lockfree_queue.h) and a
+ * SCHEDULER_DRAIN_BATCH buffer, about 650 KB at the defaults, and the
+ * cooperative scheduler declares MAX_CORES of them while using only [0]. An
+ * ESP32 has about 320 KB of DRAM in all. */
+#ifndef MAX_ACTORS_PER_CORE
 #define MAX_ACTORS_PER_CORE 10000
+#endif
+#ifndef MAX_CORES
 #define MAX_CORES 16
+#endif
 #define BATCH_SIZE 64  // Process up to 64 messages per batch for better throughput
+#ifndef SCHEDULER_DRAIN_BATCH
 #define SCHEDULER_DRAIN_BATCH 512  // Drain this many messages at once for high throughput
+#endif
 #ifndef AETHER_IO_MAX_FDS
 #define AETHER_IO_MAX_FDS 4096  // Initial I/O fd map capacity per core (grows on demand)
 #endif

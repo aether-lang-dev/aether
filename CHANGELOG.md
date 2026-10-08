@@ -14,6 +14,106 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.790.0]
+
+### Added
+
+- **`std.http.client` HTTPS on the pure-Aether TLS client works on Android, and
+  can be selected anywhere.** A build without OpenSSL (every
+  `ae build --target=` cross-build, including aarch64-linux-android) already
+  routed https through `std.cryptography.tls13_client` once the program
+  imported it, but its trust store had to be a PEM bundle file, and Android has
+  none, so every https request there failed. The pure client now also loads
+  directories of PEM files: `SSL_CERT_DIR` (a `:`-separated list, `;` on
+  Windows, as OpenSSL reads it) alongside `SSL_CERT_FILE`, and when neither is
+  set, after the system bundles, Android's `/apex/com.android.conscrypt/cacerts`
+  and `/system/etc/security/cacerts` and then `/etc/ssl/certs`. Nothing loading
+  still fails closed. `tls13_cert.trust_store_load` accepts a directory, and the
+  new `tls13_cert.trust_store_add` appends a file or directory to an existing
+  anchor list. In a build WITH OpenSSL, `AETHER_PURE_TLS=1`, which already
+  selected the pure server, now selects the pure client too (OpenSSL stays the
+  default; a request fails naming the import if the program does not link the
+  pure client). The pool keys connections by backend, so the two never share
+  one. The public `std.http.client` API is unchanged
+  (tests/integration/https_client_pure_tls).
+
+- **A library build of a program links into an executable with no C
+  `main()`.** `--emit=lib` (and obj, staticlib, csrc) kept a program's
+  `main()` as `aether_main` / `aether_main_exit` (#2489) but emitted no C
+  entry, so any tool linking the object into a program — aeb's `c.program`
+  with an `aether_source` that defines `main()`, a Makefile, a bare
+  `cc app.o $(ae cflags --libs)` — failed with `_main` undefined, and each
+  consumer had to hand-write the same three-line C file (sae's
+  `src/sae_entry.c`; aeb `asks/c-program-aether-source-main-entry.md`). The
+  generated C, objects and static libraries now also define the executable's
+  entry as a **weak** `main()` that runs `aether_main` then `aether_main_exit`
+  and returns main()'s result. A host with its own `main()` keeps it (a strong
+  definition wins). A shared library `ae` links itself still exports no
+  `main`; neither does wasm, where emscripten would run it on load; and
+  `-DAETHER_NO_LIB_MAIN` turns it off. See docs/emit-lib.md
+  (tests/integration/emit_lib_keeps_main, checks 1b and 9).
+
+### Changed
+
+- **Three macOS leak-gate caps tightened to what the tests actually leak.**
+  `tests/leaks_known.txt` allowed `test_rsa_pkcs1` 130 leaks and
+  `test_closure_local_shadows_promoted_capture` 1, and both report 0 on every
+  macOS ARM64 CI run and locally, so both entries are gone and the tests are
+  held to 0 like every unlisted test; `test_closure_local_alloc_capture` is
+  capped at its measured 15 instead of 20. A cap far above the real count let a
+  new leak of that size through: three blocks injected into `test_rsa_pkcs1`
+  passed the old 130 and fail now.
+
+### Fixed
+
+- **A failed pure-TLS https request says why, and no longer closes a socket
+  twice.** Every handshake failure on the pure-Aether path reached the caller
+  as one guessed sentence ("...most often means no CA bundle was found"),
+  whether the chain was untrusted, the certificate was for another host, the
+  server did not speak TLS 1.3 or the store was missing. The error is now
+  `TLS handshake failed (pure-Aether TLS 1.3): <cause>`, with the cause
+  `tls13_client` found. A server that answers the TLS-1.3-only ClientHello with
+  a plaintext alert is reported as such (`server does not support TLS 1.3 (it
+  answered with alert protocol_version)`) instead of as "server hello:
+  truncated header", and a TLS 1.2 ServerHello says the client speaks TLS 1.3
+  only. A failed pure handshake also closed the request's socket descriptor a
+  second time after `tls13_client` had already closed it, which in a threaded
+  program could close a descriptor another thread had just been given.
+
+- **`ae` on macOS finds Homebrew's headers and libraries.** Apple's clang
+  searches /usr/local but not /opt/homebrew, where Homebrew lives on Apple
+  Silicon, so `contrib.vulkan` (and `tests/integration/vulkan_vkgen`) failed
+  with `'vulkan/vulkan.h' file not found` on a Mac with Homebrew's
+  vulkan-headers / MoltenVK installed, unless every program added the path
+  itself. A native macOS build now adds `HOMEBREW_PREFIX` (else /opt/homebrew)
+  with `-idirafter <prefix>/include`, searched after the SDK's and aether's own
+  headers so a formula can fill a gap but never shadow them, and
+  `-L<prefix>/lib` last on the link line (tests/integration/macos_homebrew_paths).
+
+- **Importing the pure TLS client no longer takes `Pt`, `Fe`, `Params` or
+  `ReaderView` from the program.** Struct names are one namespace across
+  modules, and the TLS client's import closure declared those common names
+  internally (`std.cryptography.p384` and `.p521`: `Pt`; `.x25519`: `Fe`;
+  `.mlkem`: `Params`; `.tls13_cert`: `ReaderView`), so a program with its own
+  struct of one of those names and another layout failed to compile once it
+  added `import std.cryptography.tls13_client` ("struct 'Pt' is defined
+  differently in two modules") — sae, whose vector graphics have a 2-D `Pt`,
+  could not get HTTPS on Android. They are now `P384Pt`, `P521Pt`, `X25519Fe`,
+  `MlkemParams` and `CertReaderView`; none was exported
+  (tests/regression/test_tls_client_struct_names_stay_private.ae).
+
+- **Running an `--emit=lib` program's `aether_main()` again no longer leaks the
+  previous run's actors.** Nothing frees an actor (an executable just exits),
+  so when a second `aether_main()` re-initialized the scheduler and discarded
+  the previous run's per-core actor tables, every actor still registered in
+  them became unreachable. macOS `leaks` caught it only intermittently -- a
+  stale pointer elsewhere often kept the actor "reachable" -- so
+  tests/integration/emit_lib_keeps_main's "leaks after a rerun" check failed
+  on some CI runs, `main` included. The scheduler now frees the actors
+  registered in a table when it discards that table, after the scheduler
+  threads have been joined; an actor is only ever in one table (migration and
+  stealing move it), so none is freed twice.
+
 ## [0.789.0]
 
 ### Added

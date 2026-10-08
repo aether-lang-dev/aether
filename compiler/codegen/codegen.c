@@ -5181,6 +5181,37 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
     return collided;
 }
 
+/* A library build of a program with main() also carries the executable's
+ * C entry point, WEAK:
+ *
+ *   int main(int argc, char** argv) {
+ *       int rc = aether_main(argc, argv); aether_main_exit(); return rc;
+ *   }
+ *
+ * so ANY tool that links the object into an executable -- aeb's c.program,
+ * a Makefile, a bare `cc app.o host.c` -- gets the program's entry without a
+ * hand-written C main() (aeb asks/c-program-aether-source-main-entry.md: a
+ * c.program whose aether_source defined main() linked with "_main"
+ * undefined). A host that brings its own main() is unaffected: a strong
+ * definition beats a weak one, and a shared library's main is never what a
+ * process starts in. Not emitted for wasm, where emscripten runs a module's
+ * main() on load and would turn a library into a program, nor for a compiler
+ * without weak definitions (the host then supplies main, as before). */
+static void emit_lib_weak_main(CodeGenerator* gen) {
+    print_line(gen, "");
+    print_line(gen, "/* The executable's entry, for whoever links this into a program; a host's");
+    print_line(gen, " * own main() wins (weak). See docs/emit-lib.md. */");
+    print_line(gen, "#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__) && !defined(__wasm__) && !defined(AETHER_NO_LIB_MAIN)");
+    print_line(gen, "__attribute__((weak)) int main(int argc, char** argv) {");
+    indent(gen);
+    print_line(gen, "int rc = aether_main(argc, argv);");
+    print_line(gen, "aether_main_exit();");
+    print_line(gen, "return rc;");
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "#endif");
+}
+
 void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     if (!main || main->type != AST_MAIN_FUNCTION) return;
 
@@ -5222,6 +5253,14 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "_aether_main_state = 1;");
         unindent(gen);
     } else {
+        /* ESP-IDF starts a firmware image by calling app_main() from its main
+         * FreeRTOS task, and never calls main(). Forward to it, so the same
+         * generated C builds as an ESP-IDF component with no C of the user's
+         * own (see tests/esp32/). */
+        print_line(gen, "#ifdef ESP_PLATFORM");
+        print_line(gen, "int main(int argc, char** argv);");
+        print_line(gen, "void app_main(void) { static char* argv[] = { \"aether\", 0 }; (void)main(1, argv); }");
+        print_line(gen, "#endif");
         print_line(gen, "int main(int argc, char** argv) {");
     }
     begin_main_c_function(gen);
@@ -5259,6 +5298,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "_aether_main_state = 0;");
         unindent(gen);
         print_line(gen, "}");
+        emit_lib_weak_main(gen);
     }
     gen->current_function = prev_current_function;
     gen->closure_var_scope = prev_closure_var_scope;
@@ -7390,8 +7430,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // when the closure variable's defer runs.
     print_line(gen, "static inline void _aether_thunk_free(void* p) { if (p) free(p); }");
     // Terminal raw mode helpers for interactive input
-    // Only available on hosted POSIX systems (not embedded/bare-metal or Windows)
-    print_line(gen, "#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && defined(__STDC_HOSTED__) && (__STDC_HOSTED__ == 1) && !defined(__arm__) && !defined(__thumb__)");
+    // Only available on hosted POSIX systems (not embedded/bare-metal, ESP-IDF
+    // (its termios is compiled out unless VFS termios is configured) or Windows)
+    print_line(gen, "#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && defined(__STDC_HOSTED__) && (__STDC_HOSTED__ == 1) && !defined(__arm__) && !defined(__thumb__) && !defined(ESP_PLATFORM)");
     print_line(gen, "#include <termios.h>");
     print_line(gen, "static struct termios _aether_orig_termios;");
     print_line(gen, "static void _aether_raw_mode(void) {");
