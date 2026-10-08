@@ -747,6 +747,111 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
 #ifndef _S_IWRITE
 #define _S_IWRITE 0x0080
 #endif
+/* #2533: does `prog`, spawned as _spawnvp will spawn it, run as a batch
+ * file? Windows runs a .cmd/.bat through cmd.exe, whose command line is
+ * capped at 8191 characters, where an .exe takes 32 KB. The resolution
+ * mirrors the CRT's: a name with a directory part is tried as is; a bare
+ * name is looked for in the current directory and then in each PATH entry;
+ * a name without an extension is tried with .com, .exe, .bat and .cmd in
+ * that order. 1 when the file that will run has a .cmd or .bat extension. */
+#define AE_WIN_PATH_MAX 4096
+
+static int win_name_has_batch_ext(const char* name) {
+    size_t n = strlen(name);
+    if (n < 4) return 0;
+    const char* ext = name + n - 4;
+    return _stricmp(ext, ".cmd") == 0 || _stricmp(ext, ".bat") == 0;
+}
+
+static int win_file_exists(const char* path) {
+    DWORD a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* The file `dir\name[ext]` that the CRT would run, with `ext` tried in its
+ * order when `name` has no extension of its own; its batch-ness, or -1 when
+ * nothing is found there. */
+static int win_resolve_in_dir(const char* dir, const char* name) {
+    char path[AE_WIN_PATH_MAX];
+    const char* base = strrchr(name, '\\');
+    const char* base2 = strrchr(name, '/');
+    if (base2 > base) base = base2;
+    base = base ? base + 1 : name;
+    int has_ext = strchr(base, '.') != NULL;
+    if (dir && *dir) snprintf(path, sizeof(path), "%s\\%s", dir, name);
+    else snprintf(path, sizeof(path), "%s", name);
+    if (has_ext) return win_file_exists(path) ? win_name_has_batch_ext(path) : -1;
+    static const char* const exts[] = { ".com", ".exe", ".bat", ".cmd" };
+    size_t len = strlen(path);
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+        snprintf(path + len, sizeof(path) - len, "%s", exts[i]);
+        if (win_file_exists(path)) return win_name_has_batch_ext(path);
+    }
+    return -1;
+}
+
+static int win_prog_is_batch(const char* prog) {
+    if (!prog || !*prog) return 0;
+    if (strchr(prog, '\\') || strchr(prog, '/') || (prog[1] == ':')) {
+        int r = win_resolve_in_dir(NULL, prog);
+        return r > 0;
+    }
+    int r = win_resolve_in_dir(NULL, prog);
+    if (r >= 0) return r;
+    const char* path = getenv("PATH");
+    if (!path) return 0;
+    const char* p = path;
+    while (*p) {
+        const char* end = strchr(p, ';');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len > 0 && len < AE_WIN_PATH_MAX) {
+            char dir[AE_WIN_PATH_MAX];
+            memcpy(dir, p, len);
+            dir[len] = '\0';
+            if (dir[0] == '"' && len >= 2 && dir[len - 1] == '"') {
+                memmove(dir, dir + 1, len - 2);
+                dir[len - 2] = '\0';
+            }
+            r = win_resolve_in_dir(dir, prog);
+            if (r >= 0) return r;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+
+/* #2533: write toks[1..] to a response file the way gcc's and clang's
+ * `@file` reader expects: one argument per line, each in double quotes (so
+ * spaces survive), with backslashes and quotes escaped (a backslash is the
+ * escape character there). Returns the file's path in `out`, or 0. */
+static int win_write_response_file(char* const* toks, char* out, size_t out_size) {
+    static int seq = 0;
+    snprintf(out, out_size, "%s\\ae_args_%d_%d.rsp", get_temp_dir(), (int)_getpid(), seq++);
+    FILE* f = fopen(out, "wb");
+    if (!f) return 0;
+    for (int i = 1; toks[i]; i++) {
+        const char* t = toks[i];
+        size_t n = strlen(t);
+        /* The tokenizer wrapped a spaced argument in quotes for the
+         * CRT's space-join; here every argument is quoted, so strip them. */
+        if (n >= 2 && t[0] == '"' && t[n - 1] == '"') { t++; n -= 2; }
+        fputc('"', f);
+        for (size_t k = 0; k < n; k++) {
+            if (t[k] == '\\' || t[k] == '"') fputc('\\', f);
+            fputc(t[k], f);
+        }
+        fputs("\"\n", f);
+    }
+    int ok = fclose(f) == 0;
+    if (!ok) remove(out);
+    return ok;
+}
+
+/* cmd.exe refuses a longer line; kept under its 8191 with room for the
+ * batch file's own expansion of %* and its path. */
+#define WIN_CMD_LINE_MAX 8000
+
 static int win_run(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char buf[AE_CMD_BUF];
@@ -841,12 +946,38 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
         if (nul >= 0) { _dup2(nul, 2); _close(nul); }
     }
 
+    /* #2533: a batch file (a gcc.cmd wrapper or shim found on PATH) runs
+     * through cmd.exe, whose command line is capped at 8191 characters: a
+     * build from a deep directory failed with "The command line is too
+     * long". Past the cap the arguments go through a response file,
+     * `prog @file`, which gcc and clang read; an executable keeps the
+     * direct spawn, whose own limit is 32 KB. */
+    char rsp_path[AE_WIN_PATH_MAX];
+    rsp_path[0] = '\0';
+    char rsp_arg[AE_WIN_PATH_MAX + 2];
+    char* rsp_toks[3];
+    char* const* spawn_toks = toks;
+    {
+        size_t joined = 0;
+        for (int i = 0; toks[i]; i++) joined += strlen(toks[i]) + 1;
+        if (joined > WIN_CMD_LINE_MAX && n > 1 && win_prog_is_batch(toks[0]) &&
+            win_write_response_file(toks, rsp_path, sizeof(rsp_path))) {
+            snprintf(rsp_arg, sizeof(rsp_arg), "@%s", rsp_path);
+            rsp_toks[0] = toks[0];
+            rsp_toks[1] = rsp_arg;
+            rsp_toks[2] = NULL;
+            spawn_toks = rsp_toks;
+            if (tc.verbose) fprintf(stderr, "[cmd] arguments in %s\n", rsp_path);
+        }
+    }
+
     /* _spawnvp returns the child's exit status, or -1 with errno set when
      * the child never started. A child CAN exit 0xFFFFFFFF, so -1 alone does
      * not separate the two; errno, cleared first, does. */
     errno = 0;
-    int ret = (int)_spawnvp(_P_WAIT, toks[0], (const char* const*)toks);
+    int ret = (int)_spawnvp(_P_WAIT, spawn_toks[0], (const char* const*)spawn_toks);
     int spawn_errno = (ret == -1) ? errno : 0;
+    if (rsp_path[0]) remove(rsp_path);
 
     // Restore
     if (saved_stdout >= 0) { _dup2(saved_stdout, 1); _close(saved_stdout); }

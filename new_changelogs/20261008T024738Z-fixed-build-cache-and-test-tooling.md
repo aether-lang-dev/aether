@@ -51,3 +51,14 @@
   it reported the installed compiler's errors (an older one rejected the
   current std outright). It now resolves the toolchain as every other
   command does; `AETHERC` still overrides it.
+- **`ae build` on Windows works with a batch-file compiler from a deep
+  directory (#2533).** A C compiler that resolves to a `.cmd` or `.bat`
+  (a gcc wrapper or shim first on PATH, or `$CC` naming one) runs through
+  cmd.exe, whose command line is capped at 8191 characters, so a build
+  with a long command line failed with "The command line is too long".
+  ae now resolves the program the way Windows will (an explicit `.cmd` or
+  `.bat`, or a bare name found through PATH with the .com, .exe, .bat,
+  .cmd order) and, when the arguments would not fit, hands them to such a
+  compiler through a response file (`gcc @file`, quoted the way gcc and
+  clang read it), removed after the run. An executable compiler keeps the
+  direct spawn.
