@@ -49,7 +49,7 @@ which(s: string) -> int {
 
 main() {
     f = 0
-    e = string.substring("x", 0, 0)   // empty, and not foldable
+    e = string.substring("x", 0, 0) // empty, and not foldable
     n = 7
     s = with_nul("x", "y")
 

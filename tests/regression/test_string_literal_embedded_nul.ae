@@ -55,7 +55,7 @@ give() -> string { return "r\0s" }
 
 main() {
     f = 0
-    e = string.substring("x", 0, 0)   // empty, and not foldable
+    e = string.substring("x", 0, 0) // empty, and not foldable
     n = 7
     ab = with_nul("a", "b")
 

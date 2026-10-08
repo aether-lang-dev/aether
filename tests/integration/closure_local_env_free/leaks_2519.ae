@@ -59,7 +59,7 @@ nested_to_list(l: ptr, r: int) -> int {
 // A hand-off, inside a nested closure's body, to a keeper the walk cannot
 // see through; the local is then rebound to a closure nobody keeps.
 nested_to_opaque(l: ptr, r: int) -> int {
-    k = |cb: fn| { _ = list.add(l, cb) }
+    k = | cb: fn | { _ = list.add(l, cb) }
     acc = r
     f = || {
         acc = acc + 10
