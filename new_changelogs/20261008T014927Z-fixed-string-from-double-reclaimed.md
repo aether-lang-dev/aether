@@ -1,1 +1,0 @@
-- **`string.from_double` no longer leaks its result.** Its extern was a plain `-> string`, so the compiler treated the fresh string as borrowed and never freed it: every call leaked. It is declared `-> string @heap`, like the other producers of a fresh string.
