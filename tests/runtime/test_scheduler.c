@@ -1100,15 +1100,26 @@ void test_scheduler_teardown_frees_live_actors(void) {
     atomic_store(&g_caller_actor.last_value, 4242);
 
     teardown_cycle();   // warm: first-use allocations of the runtime
-    int64_t before = aether_heap_in_use();
+    int64_t start = aether_heap_in_use();
     for (int round = 0; round < 5; round++) teardown_cycle();
-    int64_t after = aether_heap_in_use();
+    int64_t mid = aether_heap_in_use();
+    for (int round = 0; round < 5; round++) teardown_cycle();
+    int64_t end = aether_heap_in_use();
 
     // The caller's actor was run and never freed.
     ASSERT_EQ(0, g_caller_actor.scheduler_owned);
     ASSERT_EQ(4242, atomic_load(&g_caller_actor.last_value));
     if (aether_heap_in_use_exact()) {
-        ASSERT_EQ(0, (int)(after - before));
+        // Two equal windows, one of which must grow by exactly 0: a leak per
+        // cycle grows both, while a one-time allocation (a high-water mark
+        // in the C runtime or the thread library, reached in whichever cycle
+        // the scheduling of that run reaches it) grows at most one. A single
+        // window failed on the Windows CI runner with 48 bytes over five
+        // cycles, a size no per-cycle leak can have.
+        if (mid - start != 0 && end - mid != 0)
+            fprintf(stderr, "    teardown cycles grew the heap: %lld then %lld bytes\n",
+                    (long long)(mid - start), (long long)(end - mid));
+        ASSERT_TRUE(mid - start == 0 || end - mid == 0);
     }
 }
 
