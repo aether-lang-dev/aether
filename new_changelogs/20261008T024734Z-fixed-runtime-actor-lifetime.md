@@ -98,9 +98,11 @@
   MinGW (`make ci-coop`, `make stdlib EXTRA_CFLAGS=-DAETHER_NO_THREADING`)
   failed in `aether_thread.h`, which named `DWORD` without `<windows.h>`, and
   in the cooperative scheduler's `Sleep` call.
-- **Stopping the scheduler frees the actors it spawned.** `scheduler_cleanup`,
-  and a `scheduler_init` after `scheduler_shutdown`, freed the actor tables
-  but not the actors still in them, so a host that ran `aether_main` and
-  `aether_main_exit` twice leaked the first run's actors. Every actor the
-  scheduler spawned now ends with its tables as a release would end it; one
-  a caller passed to `scheduler_register_actor` stays the caller's.
+- **An actor still alive when the scheduler's tables are discarded ends as
+  a release ends it.** Since 0.790.0 the scheduler frees the actors it
+  spawned when it discards a lifecycle's tables; now each also has its state
+  destroyed and its queued messages dropped, its block goes back through the
+  allocator that made it, an actor its own thread runs is left to that
+  thread to end, and the tables are taken under each core's lock, so an
+  actor thread exiting meanwhile never reads a freed table. An actor a
+  caller passed to `scheduler_register_actor` stays the caller's.
