@@ -7,7 +7,28 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows (#2541). */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
 #include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 #include "aether_config.h"
 
@@ -20,13 +41,13 @@ typedef AetherValue* (*list_fn)(void);
 
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen: %s", dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading the library: %s", lib_error());
 
-    list_fn primes   = (list_fn)dlsym(h, "aether_primes_up_to_20");
-    list_fn weekdays = (list_fn)dlsym(h, "aether_weekdays");
-    list_fn empty    = (list_fn)dlsym(h, "aether_empty_list");
-    if (!primes || !weekdays || !empty) FAIL("symbol lookup failed: %s", dlerror());
+    list_fn primes   = (list_fn)lib_sym(h, "aether_primes_up_to_20");
+    list_fn weekdays = (list_fn)lib_sym(h, "aether_weekdays");
+    list_fn empty    = (list_fn)lib_sym(h, "aether_empty_list");
+    if (!primes || !weekdays || !empty) FAIL("symbol lookup failed: %s", lib_error());
 
     /* Int list */
     AetherValue* p = primes();
@@ -59,7 +80,7 @@ int main(int argc, char** argv) {
     if (aether_config_list_get_string(w, 99) != NULL)  FAIL("OOR string didn't return NULL");
     if (aether_config_list_get_int(p, -1, 42) != 42)   FAIL("negative index didn't return default");
 
-    dlclose(h);
+    lib_close(h);
     printf("OK: list returns round-tripped\n");
     return 0;
 }

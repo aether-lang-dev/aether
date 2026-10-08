@@ -172,19 +172,25 @@ int module_check_source_directives(ASTNode* ast) {
 
 void module_set_source_dir(const char* source_path) {
     module_registry_init();
-    if (!source_path) { global_module_registry->source_dir[0] = '\0'; return; }
-    strncpy(global_module_registry->source_dir, source_path, sizeof(global_module_registry->source_dir) - 1);
-    global_module_registry->source_dir[sizeof(global_module_registry->source_dir) - 1] = '\0';
-    // Strip filename to get directory
-    char* last_sep = NULL;
-    for (char* p = global_module_registry->source_dir; *p; p++) {
-        if (*p == '/' || *p == '\\') last_sep = p;
+    /* The directory part of the path, whole (#2543): a 2048-byte copy cut
+     * a longer one, and the modules beside the file were not found. Strip
+     * the filename, keeping the trailing slash; "" when there is no
+     * directory component. */
+    size_t len = 0;
+    if (source_path) {
+        for (size_t i = 0; source_path[i]; i++) {
+            if (source_path[i] == '/' || source_path[i] == '\\') len = i + 1;
+        }
     }
-    if (last_sep) {
-        *(last_sep + 1) = '\0';  // keep trailing slash
-    } else {
-        global_module_registry->source_dir[0] = '\0';  // no directory component
+    char* dir = (char*)malloc(len + 1);
+    if (!dir) {
+        fprintf(stderr, "aetherc: out of memory recording the source directory\n");
+        exit(1);
     }
+    if (len) memcpy(dir, source_path, len);
+    dir[len] = '\0';
+    free(global_module_registry->source_dir);
+    global_module_registry->source_dir = dir;
 }
 
 void module_add_lib_dir(const char* dir) {
@@ -279,7 +285,7 @@ void module_registry_init(void) {
         global_module_registry->modules = NULL;
         global_module_registry->module_count = 0;
         global_module_registry->module_capacity = 0;
-        global_module_registry->source_dir[0] = '\0';
+        global_module_registry->source_dir = NULL;
         global_module_registry->lib_dir_count = 0;
         const char* env_lib = getenv("AETHER_LIB_DIR");
         if (env_lib && env_lib[0]) {
@@ -300,6 +306,7 @@ void module_registry_shutdown(void) {
         }
         free(global_module_registry->modules);
         module_clear_lib_dirs();
+        free(global_module_registry->source_dir);
         free(global_module_registry);
         global_module_registry = NULL;
     }
@@ -1048,7 +1055,7 @@ char* module_resolve_local_path(const char* module_path) {
     if (module_probe(path)) return strdup(path);
 
     // Try 6b: Search relative to source file directory
-    if (global_module_registry->source_dir[0]) {
+    if (global_module_registry->source_dir && global_module_registry->source_dir[0]) {
         /* Mirror the CWD-relative loop above, but anchored at the
          * source file's directory. Same left-to-right semantics
          * across the multi-entry lib path. Issue #413. */
@@ -1788,6 +1795,12 @@ static void module_bind_import_identity(ASTNode* imp, const char* resolved,
     }
 }
 
+/* Put back the source directory saved around a module's imports. */
+static void module_restore_source_dir(char* saved) {
+    free(global_module_registry->source_dir);
+    global_module_registry->source_dir = saved;
+}
+
 // Recursive helper: load a single module and its transitive imports
 static int orchestrate_module(const char* module_name, const char* file_path,
                               DependencyGraph* graph) {
@@ -1906,11 +1919,10 @@ static int orchestrate_module(const char* module_name, const char* file_path,
      * "relative to source file directory" branch in module_resolve_local_path
      * only works if source_dir names the importing module. Save and restore
      * around the import loop so sibling modules at the same level still see
-     * the parent's source_dir. */
-    char saved_source_dir[2048];
-    strncpy(saved_source_dir, global_module_registry->source_dir,
-            sizeof(saved_source_dir) - 1);
-    saved_source_dir[sizeof(saved_source_dir) - 1] = '\0';
+     * the parent's source_dir. The parent's is kept as it is, whole, and
+     * put back (#2543). */
+    char* saved_source_dir = global_module_registry->source_dir;
+    global_module_registry->source_dir = NULL;
     module_set_source_dir(file_path);
 
     // Recursively process this module's imports
@@ -1929,12 +1941,12 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (sub_file) {
             if (!orchestrate_module(sub_path, sub_file, graph)) {
                 free(sub_file);
-                module_set_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir);
                 return 0;
             }
             free(sub_file);
             if (!check_selective_import_exports(child, file_path)) {
-                module_set_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir);
                 return 0;
             }
         } else {
@@ -1942,7 +1954,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         }
     }
 
-    module_set_source_dir(saved_source_dir);
+    module_restore_source_dir(saved_source_dir);
     return 1;
 }
 

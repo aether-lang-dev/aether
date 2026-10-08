@@ -8,13 +8,13 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# The driver loads the library by path: dlopen (-ldl on Linux), or
+# LoadLibrary on Windows.
+LDL=""
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_net on Windows (uses POSIX dlopen)"
-        exit 0
-        ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     Darwin) LIB_EXT=".dylib" ;;
-    *)      LIB_EXT=".so" ;;
+    *)      LIB_EXT=".so"; LDL="-ldl" ;;
 esac
 
 TMPDIR="$(mktemp -d)"
@@ -31,12 +31,12 @@ fi
 [ -f "$TMPDIR/libnetmod$LIB_EXT" ] || fail "no shared object produced"
 
 # Compile the C driver and run it against the .so.
-if ! gcc "$SCRIPT_DIR/consume.c" -ldl -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
+if ! gcc "$SCRIPT_DIR/consume.c" $LDL -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
     echo "--- gcc log:"; cat "$TMPDIR/gcc.log"; fail "could not compile consume.c"
 fi
 if ! OUT="$("$TMPDIR/consume" "$TMPDIR/libnetmod$LIB_EXT" 2>&1)"; then
-    echo "$OUT"; fail "C driver could not dlopen/call the .so"
+    echo "$OUT"; fail "C driver could not load/call the library"
 fi
 echo "$OUT" | grep -q "^OK:" || { echo "$OUT"; fail "unexpected driver output"; }
 
-echo "  [PASS] emit_lib_net: --emit=lib --with=net links + dlopens a std.http module"
+echo "  [PASS] emit_lib_net: --emit=lib --with=net links + loads a std.http module"

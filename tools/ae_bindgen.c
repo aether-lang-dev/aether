@@ -341,7 +341,7 @@ static int bg_dump_names(const char* cc, const char* file,
                          const char* include_flags, char** names) {
     *names = NULL;
     char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "\"%s\" -E -dM %s \"%s\" " BG_ERR_SINK,
+    snprintf(cmd, sizeof(cmd), "%s -E -dM %s \"%s\" " BG_ERR_SINK,
              cc, include_flags, file);
     FILE* p = bg_popen(cmd);
     if (!p) return 0;
@@ -455,7 +455,7 @@ static int bg_expand(const char* cc, const char* header,
     if (fclose(f) != 0) { remove(probe_path); return 0; }
 
     char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "\"%s\" -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
+    snprintf(cmd, sizeof(cmd), "%s -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
     FILE* p = bg_popen(cmd);
     if (!p) { remove(probe_path); return 0; }
     /* Whole lines (#2536): one expansion is one line, of any length. */

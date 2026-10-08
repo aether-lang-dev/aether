@@ -21,20 +21,19 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_kind_safe on Windows (POSIX dlopen)"
-        exit 0
-        ;;
-esac
-
+# The host loads the library by path (dlopen, LoadLibrary on Windows) and
+# links it for the aether_value_* accessors. Windows finds the DLL beside
+# the host, so it needs no rpath and no -ldl.
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     *)      LIB_EXT=".so" ;;
 esac
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+LINK_FLAGS=""
+[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl"
 
 pass=0
 fail=0
@@ -66,8 +65,7 @@ if ! gcc \
     -I"$ROOT/runtime" \
     "$SCRIPT_DIR/consume.c" \
     "$LIB_PATH" \
-    -Wl,-rpath,"$TMPDIR" \
-    -ldl \
+    $LINK_FLAGS \
     -o "$TMPDIR/consume" \
     2>"$TMPDIR/gcc.log"; then
     echo "  [FAIL] gcc could not compile consume.c"

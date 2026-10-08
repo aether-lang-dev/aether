@@ -31,7 +31,9 @@ typedef struct {
     AetherModule** modules;
     int module_count;
     int module_capacity;
-    char source_dir[2048];  // Source file directory for relative resolution
+    // Source file directory for relative resolution, with its trailing
+    // slash: a heap copy of any length (#2543), NULL or "" when none.
+    char* source_dir;
     // Lib-search path: an ordered list of directories (PATH-style),
     // searched left-to-right; first hit wins. Issue #413. Default is
     // a single entry, `"lib"`, populated at registry init. Each entry

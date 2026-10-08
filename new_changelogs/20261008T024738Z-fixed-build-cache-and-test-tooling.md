@@ -153,3 +153,40 @@
   been since #1235; it runs there now, with its cache isolated through
   `AETHER_CACHE_DIR`, since Windows finds the home directory through
   `USERPROFILE` rather than `HOME`.
+- **`ae help`, the compiler's import resolution and ae's binary imports
+  take paths of any length (#2543).** `ae help` kept each `--lib`
+  directory in 1 KB, so the compile it runs, the library catalog and the
+  `*.help.md` hints of a longer one were looked for in a directory nobody
+  named. The compiler kept the entry file's directory in 2 KB, and an
+  import beside a file with a longer path resolved from the wrong one. ae
+  probed for a source or binary import under a `--lib` directory in
+  1.2 KB, so a library there was missed and its import left unresolved,
+  and it kept the libraries a program links, and their directories, in
+  4 KB, dropping those past it. All are kept whole now, as are the
+  directories `--package` walks.
+- **`ae help` reads the stdlib of the toolchain it runs (#2544).** It
+  looked for the stdlib only under the working directory and a few fixed
+  prefixes, so with an installed toolchain (`<prefix>/share/aether`) or a
+  build run from outside its checkout it had no export catalog, and a
+  misspelt or unimported std function got no suggestion. ae now names the
+  toolchain's stdlib to it, as it names the compiler. A `--lib` library's
+  `*.help.md` hint no longer depends on the stdlib being found.
+- **An `$AE_CC` / `$CC` that carries flags works on Windows and with
+  `--emit=obj` (#2545).** The value is a command prefix, the program and
+  then its flags, as the POSIX build line already used it, but every
+  native Windows build, `ae bindgen` there and `ae build --emit=obj` on
+  every platform quoted it whole, so `cc -Werror=incompatible-pointer-types`
+  named a program nothing could start. Each now quotes the program alone
+  and passes the flags after it, and `--emit=obj` on Windows checks the
+  compiler the way the other builds do.
+- **Ten `--emit=lib` tests and four `aether.toml` tests run on Windows
+  (#2541).** The C hosts of `emit_lib_keeps_main`, `emit_lib_kind_safe`,
+  `emit_lib_net`, `emit_lib_typed_ptr`, `emit_lib_primitives`,
+  `emit_lib_lists` and `manifest` loaded the library with `dlopen` only,
+  and the tests skipped Windows; they load it with `LoadLibrary` there now,
+  without `-ldl` or an rpath, and `emit_lib_keeps_main` and
+  `emit_lib_dual_build` read a DLL's export table with `objdump -p`.
+  `emit_lib_with_capability`, `emit_lib_unsupported`, `emit_lib_banned`
+  and `emit_lib_dual_build`, and the `toml_extra_sources` multiline,
+  long-line and assembly-buffer tests, skipped Windows for no reason and
+  pass there.
