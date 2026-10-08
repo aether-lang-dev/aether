@@ -106,3 +106,8 @@
   thread to end, and the tables are taken under each core's lock, so an
   actor thread exiting meanwhile never reads a freed table. An actor a
   caller passed to `scheduler_register_actor` stays the caller's.
+- **`scheduler_wait` returns once an actor thread has handled its messages.**
+  A message an actor with its own thread (`auto_process`) handled was
+  counted as sent but never as processed, so `scheduler_wait`, and
+  `scheduler_shutdown` with it, waited forever in a host using actor
+  threads. The thread credits each message it handles, as a core does.
