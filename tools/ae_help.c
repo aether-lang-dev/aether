@@ -966,7 +966,7 @@ static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t
      *   POSIX: posix_spawn with file actions opening err_file as
      *          stderr. No fork/exec by hand, no shell, no quoting.
      *   Windows: _spawnv (the MSVCRT helper that `tools/ae.c`'s
-     *            `win_run` already uses) with stderr redirected via
+     *            `ae_spawn` already uses) with stderr redirected via
      *            _dup2 around the spawn. cmd.exe never enters the
      *            picture, so MSYS2's POSIX-flavoured paths and our
      *            mixed-slash aetherc path can't break the redirect.

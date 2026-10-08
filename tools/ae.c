@@ -88,7 +88,7 @@ extern char** environ;
  * lives under a long temp path (/var/folders/.../T/tmp.XXXX/inst/current/...),
  * so every -I carries that prefix; the old 16 KiB buffer truncated the link
  * command there (dropping -L lib) once enough std dirs existed. 64 KiB leaves
- * generous headroom. The command runners (posix_run/win_run) use the same
+ * generous headroom. The command runners (run_command) use the same
  * size so a large command isn't re-truncated when handed off. */
 /* AE_CMD_BUF lives in ae_internal.h so every caller agrees on it. */
 
@@ -628,55 +628,112 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
 // Utility functions
 // --------------------------------------------------------------------------
 
-#ifndef _WIN32
-// Run a command via posix_spawnp (faster than system() — no /bin/sh overhead)
-// Space-splits the command string into argv (no shell quoting supported,
-// but our controlled commands never need it).
-// quiet=0: show all output, quiet=1: hide stdout+stderr, quiet=2: hide stdout only (keep stderr for warnings)
-static int posix_run(const char* cmd_str, int quiet, const char* capture) {
-    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
-    char buf[AE_CMD_BUF];
-    strncpy(buf, cmd_str, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    /* Split into argv. There is no shell here — posix_spawnp hands the
-     * tokens to the program verbatim — so this tokenizer IS the quoting
-     * rule, and a quote it does not remove reaches the program as a
-     * character of the argument.
-     *
-     * A quote is therefore honoured ANYWHERE in a token, not only at its
-     * start: the flags this builds include `-I"/path/with space"` and
-     * `-L"..."`, where the quote opens after the flag letters. Treating
-     * only a leading quote as syntax passed `-I"/path"` to the C compiler
-     * with the quotes in it, and it looked for a directory of that literal
-     * name (#1986 — the Linux/Clang lane found it; Windows hid it, because
-     * there the child CRT re-parses the command line and strips them).
-     *
-     * Compacted in place: removing quotes only ever shortens a token, so
-     * the write cursor never passes the read cursor. */
-    char* toks[512];
+/* Splits a command string into an argument vector for a spawn. There is no
+ * shell, so this tokenizer IS the quoting rule: a space separates
+ * arguments, and a double quote anywhere in a token opens or closes a
+ * quoted run, in which spaces are kept, and is itself removed. Anywhere,
+ * not only at a token's start: the flags built here include
+ * `-I"/path/with space"` and `-L"..."`, and passing `-I"/path"` with its
+ * quotes made the C compiler look for a directory of that literal name
+ * (#1986).
+ *
+ * The vector and its strings are one allocation, released with free(), and
+ * neither the number nor the length of the arguments is bounded: the fixed
+ * table of 511 this replaced dropped the rest of a longer command without
+ * a word (#2534). NULL when out of memory. */
+static char** ae_split_command(const char* cmd, int* count) {
     int n = 0;
-    {
-        char* p = buf;
-        char* w = buf;
-        while (*p && n < 511) {
-            while (*p == ' ') p++;
-            if (!*p) break;
-            toks[n++] = w;
-            int in_quotes = 0;
-            while (*p && (in_quotes || *p != ' ')) {
-                if (*p == '"') { in_quotes = !in_quotes; p++; continue; }
-                *w++ = *p++;
-            }
-            /* Step past the separator before terminating: w is at most p
-             * here, so the NUL lands on the space or on the existing one. */
-            if (*p == ' ') p++;
-            *w++ = '\0';
+    for (const char* p = cmd; *p; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        n++;
+        int in_quotes = 0;
+        while (*p && (in_quotes || *p != ' ')) {
+            if (*p == '"') in_quotes = !in_quotes;
+            p++;
         }
     }
-    toks[n] = NULL;
-    if (n == 0) return 0;
+    /* An argument's characters are its source characters less its quotes,
+     * and its terminator takes the place of the space after it, or of the
+     * end of the string: the strings fit in strlen(cmd) + 1. */
+    size_t vec = ((size_t)n + 1) * sizeof(char*);
+    char** argv = malloc(vec + strlen(cmd) + 1);
+    if (!argv) return NULL;
+    char* w = (char*)argv + vec;
+    int i = 0;
+    for (const char* p = cmd; *p; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        argv[i++] = w;
+        int in_quotes = 0;
+        while (*p && (in_quotes || *p != ' ')) {
+            if (*p == '"') { in_quotes = !in_quotes; p++; continue; }
+            *w++ = *p++;
+        }
+        *w++ = '\0';
+    }
+    argv[i] = NULL;
+    if (count) *count = i;
+    return argv;
+}
 
+static void print_argv(char* const* argv) {
+    fputs("[cmd]", stderr);
+    for (int i = 0; argv[i]; i++) fprintf(stderr, " %s", argv[i]);
+    fputc('\n', stderr);
+}
+
+static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward);
+
+/* Runs a command string: split by ae_split_command, then spawned.
+ * quiet=0: show all output, 1: hide stdout and stderr, 2: hide stdout only
+ * (keep stderr for warnings), 3: stdout to the file `capture`. */
+static int run_command(const char* cmd_str, int quiet, const char* capture) {
+    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
+    char** argv = ae_split_command(cmd_str, NULL);
+    if (!argv) {
+        fprintf(stderr, "error: out of memory splitting a command\n");
+        return AE_SPAWN_FAILED;
+    }
+    int rc = argv[0] ? ae_spawn(argv, quiet, capture, 0) : 0;
+    free(argv);
+    return rc;
+}
+
+#ifndef _WIN32
+/* The pid of the program `ae run` launched, for the signal forwarder.
+ * volatile sig_atomic_t because the handler reads it. 0 = nothing running. */
+static volatile sig_atomic_t g_child_pid = 0;
+
+/* Forward a terminating signal to the child, then re-raise it so `ae`
+ * dies of the same signal it was sent (correct $? for the shell).
+ *
+ * WHY THIS EXISTS: `ae run` builds, then SPAWNS the built binary and
+ * waits — it does not exec it, because it still has work to do afterwards
+ * (evict a crashed binary from the cache, delete a non-cached temp exe).
+ * That means `ae run server.ae & ; kill $!` killed only the wrapper and
+ * ORPHANED the server, which kept its listening socket. On an ephemeral
+ * CI runner nobody notices; on a persistent box the orphan squats the
+ * port and the NEXT run of the same test fails to bind — a green run
+ * poisoning the one after it, with no code change in between.
+ *
+ * Forwarding rather than exec'ing keeps the post-run cleanup intact. */
+static void forward_signal_to_child(int sig) {
+    if (g_child_pid > 0) kill((pid_t)g_child_pid, sig);
+    /* Restore the default and re-raise so we report death-by-signal
+     * rather than exiting 0 out of a handler. */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* Spawns argv[0], looked up on PATH, with `argv` through posix_spawnp
+ * (no /bin/sh in between) and waits for it. `quiet` and `capture` as for
+ * run_command. `forward` relays SIGTERM, SIGINT and SIGHUP to the child
+ * while it runs: only for the program `ae run` launches, never for a build
+ * step. Returns the exit status, the negated signal for a child killed by
+ * one, or AE_SPAWN_FAILED, with the reason printed, when it never
+ * started. */
+static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward) {
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     if (quiet == 1) {
@@ -691,19 +748,43 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     }
 
     pid_t pid;
-    int ret = posix_spawnp(&pid, toks[0], &fa, NULL, toks, environ);
+    int ret = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     if (ret != 0) {
         /* posix_spawnp reports the reason as its return value. Printed here
          * because this is the only place that has it, and a build that ends
          * with "could not be started: Resource temporarily unavailable" is
          * diagnosable where a bare failure is not. */
-        fprintf(stderr, "error: could not start '%s': %s\n", toks[0], strerror(ret));
+        fprintf(stderr, "error: could not start '%s': %s\n", argv[0], strerror(ret));
         return AE_SPAWN_FAILED;
     }
 
+    /* Install forwarders only while the child is alive, and keep the
+     * previous dispositions so `ae` is unchanged for every other path. */
+    struct sigaction old_term, old_int, old_hup;
+    if (forward) {
+        g_child_pid = (sig_atomic_t)pid;
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = forward_signal_to_child;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGTERM, &sa, &old_term);
+        sigaction(SIGINT,  &sa, &old_int);
+        sigaction(SIGHUP,  &sa, &old_hup);
+    }
+
     int status = 0;
-    waitpid(pid, &status, 0);
+    /* EINTR: a forwarded signal interrupts waitpid; resume rather than
+     * abandoning the child (which would orphan it — the very bug). */
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+
+    if (forward) {
+        sigaction(SIGTERM, &old_term, NULL);
+        sigaction(SIGINT,  &old_int,  NULL);
+        sigaction(SIGHUP,  &old_hup,  NULL);
+        g_child_pid = 0;
+    }
+
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     if (WIFSIGNALED(status))
@@ -821,109 +902,125 @@ static int win_prog_is_batch(const char* prog) {
     return 0;
 }
 
-/* #2533: write toks[1..] to a response file the way gcc's and clang's
- * `@file` reader expects: one argument per line, each in double quotes (so
- * spaces survive), with backslashes and quotes escaped (a backslash is the
- * escape character there). Returns the file's path in `out`, or 0. */
-static int win_write_response_file(char* const* toks, char* out, size_t out_size) {
+/* #2533: writes argv[1..] to a response file the way gcc's and clang's
+ * `@file` reader takes it: one argument per line, in double quotes (so
+ * spaces survive), with each backslash and quote escaped (a backslash is
+ * the escape character there). The file's path goes to `out`; 0 when it
+ * could not be written. */
+static int win_write_response_file(char* const* argv, char* out, size_t out_size) {
     static int seq = 0;
     snprintf(out, out_size, "%s\\ae_args_%d_%d.rsp", get_temp_dir(), (int)_getpid(), seq++);
     FILE* f = fopen(out, "wb");
     if (!f) return 0;
-    for (int i = 1; toks[i]; i++) {
-        const char* t = toks[i];
-        size_t n = strlen(t);
-        /* The tokenizer wrapped a spaced argument in quotes for the
-         * CRT's space-join; here every argument is quoted, so strip them. */
-        if (n >= 2 && t[0] == '"' && t[n - 1] == '"') { t++; n -= 2; }
+    for (int i = 1; argv[i]; i++) {
         fputc('"', f);
-        for (size_t k = 0; k < n; k++) {
-            if (t[k] == '\\' || t[k] == '"') fputc('\\', f);
-            fputc(t[k], f);
+        for (const char* p = argv[i]; *p; p++) {
+            if (*p == '\\' || *p == '"') fputc('\\', f);
+            fputc(*p, f);
         }
         fputs("\"\n", f);
     }
-    int ok = fclose(f) == 0;
+    int ok = !ferror(f);
+    if (fclose(f) != 0) ok = 0;
     if (!ok) remove(out);
     return ok;
+}
+
+/* Whether an argument needs quotes on a Windows command line: the child's
+ * C runtime splits at spaces and tabs and reads quotes as syntax, and a
+ * batch file runs through cmd.exe, which takes & | < > ^ ( ) outside quotes
+ * as its own. An empty argument needs them to exist at all. */
+static int win_arg_needs_quotes(const char* arg) {
+    return *arg == '\0' || strpbrk(arg, " \t\"&|<>^()") != NULL;
+}
+
+/* Writes `arg` at `w` as the child's C runtime reads it back out of the
+ * command line (the rule the CRT and CommandLineToArgvW share) and returns
+ * the end, at most 2 * strlen(arg) + 2 characters on. Bare when nothing in
+ * it needs quotes; otherwise quoted, with a backslash before each quote of
+ * its own and every run of backslashes doubled where a quote follows it,
+ * its own or the closing one: 2n backslashes and a quote read back as n
+ * backslashes and the quote's syntax, 2n + 1 as n and a literal quote. */
+static char* win_quote_arg(const char* arg, char* w) {
+    if (!win_arg_needs_quotes(arg)) {
+        size_t len = strlen(arg);
+        memcpy(w, arg, len);
+        return w + len;
+    }
+    *w++ = '"';
+    for (const char* p = arg; ; p++) {
+        size_t bs = 0;
+        while (*p == '\\') { bs++; p++; }
+        if (*p == '\0') {
+            for (size_t i = 0; i < 2 * bs; i++) *w++ = '\\';
+            break;
+        }
+        size_t run = *p == '"' ? 2 * bs + 1 : bs;
+        for (size_t i = 0; i < run; i++) *w++ = '\\';
+        *w++ = *p;
+    }
+    *w++ = '"';
+    return w;
 }
 
 /* cmd.exe refuses a longer line; kept under its 8191 with room for the
  * batch file's own expansion of %* and its path. */
 #define WIN_CMD_LINE_MAX 8000
 
-static int win_run(const char* cmd_str, int quiet, const char* capture) {
-    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
-    char buf[AE_CMD_BUF];
-    strncpy(buf, cmd_str, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    // Tokenize the command string into argv tokens for _spawnvp. Quoted
-    // segments map to ONE token even when they contain spaces.
-    //
-    // toks[0] (the program name) is unquoted: _spawnvp wants a bare path.
-    // toks[1..] are passed to the child verbatim — but MSVCRT's _spawnvp
-    // joins them with single spaces to build the child's command line
-    // WITHOUT any quoting of its own (documented MS behaviour). So a
-    // token containing a space, if left bare in toks[], reaches the
-    // child as multiple argv entries.  Wrap each non-program token that
-    // contains a space in literal `"..."` so the child's CRT
-    // command-line parser re-fuses it into one arg.  (Args that
-    // themselves contain a `"` are not handled — the caller's quoting
-    // convention at the cmd_str layer already doesn't support those.)
-    char* toks[512];
+/* Spawns argv[0] with `argv` through _spawnvp and waits for it. `quiet`
+ * and `capture` as for run_command; `forward` has nothing to do here, as
+ * Windows has no terminating signal to relay. Returns the exit status (for
+ * a crash, the NTSTATUS the OS ended it with, negative as an int), or
+ * AE_SPAWN_FAILED, with the reason printed, when it never started.
+ *
+ * _spawnvp joins its arguments with single spaces and quotes none of them,
+ * so each goes in already quoted for the child's C runtime, the program's
+ * own path included: a batch file runs through cmd.exe, which splits an
+ * unquoted path at its spaces. The bare path is what _spawnvp looks up. */
+static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward) {
+    (void)forward;
     int n = 0;
-    // Backing store for re-quoted tokens. Sized 2× the input buffer so a
-    // worst-case input where every byte is part of a quoted token still
-    // fits (each token grows by 2 bytes of `"..."` wrapper).
-    char qbuf[32768];
-    int qoff = 0;
-    char* w = buf;
-    for (char* p = buf; *p && n < 511; ) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        /* A quote is syntax wherever it appears in the token, not only at
-         * its start — `-I"C:/path with space"` opens one after the flag
-         * letters. Compacted in place; dropping quotes only shortens. */
-        char* tok_start = w;
-        int had_quotes = 0;
-        {
-            int in_quotes = 0;
-            while (*p && (in_quotes || *p != ' ')) {
-                if (*p == '"') { in_quotes = !in_quotes; had_quotes = 1; p++; continue; }
-                *w++ = *p++;
-            }
-            if (*p == ' ') p++;
-            *w++ = '\0';
-        }
-        // For the program name (toks[0]) and tokens with no spaces,
-        // pass-through. For other tokens, store a re-quoted copy so
-        // _spawnvp's space-join produces a cmdline the child can re-
-        // tokenize correctly.
-        int needs_quoting = 0;
-        if (n > 0 && (had_quotes || strchr(tok_start, ' ') != NULL)) {
-            needs_quoting = 1;
-        }
-        if (needs_quoting) {
-            int len = (int)strlen(tok_start);
-            if (qoff + len + 3 > (int)sizeof(qbuf)) {
-                // Out of re-quote space — pass through and hope for the best.
-                toks[n++] = tok_start;
-            } else {
-                char* dst = qbuf + qoff;
-                dst[0] = '"';
-                memcpy(dst + 1, tok_start, len);
-                dst[len + 1] = '"';
-                dst[len + 2] = '\0';
-                toks[n++] = dst;
-                qoff += len + 3;
-            }
-        } else {
-            toks[n++] = tok_start;
-        }
-    }
-    toks[n] = NULL;
+    size_t room = 0;
+    for (; argv[n]; n++) room += 2 * strlen(argv[n]) + 3;
     if (n == 0) return 0;
+    size_t vec = ((size_t)n + 1) * sizeof(char*);
+    char** list = malloc(vec + room);
+    if (!list) {
+        fprintf(stderr, "error: could not start '%s': out of memory\n", argv[0]);
+        return AE_SPAWN_FAILED;
+    }
+    char* w = (char*)list + vec;
+    size_t line = 0;
+    for (int i = 0; i < n; i++) {
+        list[i] = w;
+        w = win_quote_arg(argv[i], w);
+        line += (size_t)(w - list[i]) + 1;
+        *w++ = '\0';
+    }
+    list[n] = NULL;
+
+    /* #2533: a batch file (a gcc.cmd wrapper or shim found on PATH) runs
+     * through cmd.exe, whose command line is capped at 8191 characters: a
+     * build from a deep directory failed with "The command line is too
+     * long". Past the cap the arguments go through a response file,
+     * `prog @file`, which gcc and clang read; an executable keeps the
+     * direct spawn, whose own limit is 32 KB. */
+    char rsp_path[AE_WIN_PATH_MAX];
+    rsp_path[0] = '\0';
+    char rsp_arg[AE_WIN_PATH_MAX + 1];
+    char rsp_quoted[2 * (AE_WIN_PATH_MAX + 1) + 3];
+    char* rsp_list[3];
+    char* const* spawn_list = list;
+    if (line > WIN_CMD_LINE_MAX && n > 1 && win_prog_is_batch(argv[0]) &&
+        win_write_response_file(argv, rsp_path, sizeof(rsp_path))) {
+        snprintf(rsp_arg, sizeof(rsp_arg), "@%s", rsp_path);
+        *win_quote_arg(rsp_arg, rsp_quoted) = '\0';
+        rsp_list[0] = list[0];
+        rsp_list[1] = rsp_quoted;
+        rsp_list[2] = NULL;
+        spawn_list = rsp_list;
+        if (tc.verbose) fprintf(stderr, "[cmd] arguments in %s\n", rsp_path);
+    }
 
     // Redirect stdout/stderr for quiet modes
     int saved_stdout = -1, saved_stderr = -1;
@@ -946,38 +1043,14 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
         if (nul >= 0) { _dup2(nul, 2); _close(nul); }
     }
 
-    /* #2533: a batch file (a gcc.cmd wrapper or shim found on PATH) runs
-     * through cmd.exe, whose command line is capped at 8191 characters: a
-     * build from a deep directory failed with "The command line is too
-     * long". Past the cap the arguments go through a response file,
-     * `prog @file`, which gcc and clang read; an executable keeps the
-     * direct spawn, whose own limit is 32 KB. */
-    char rsp_path[AE_WIN_PATH_MAX];
-    rsp_path[0] = '\0';
-    char rsp_arg[AE_WIN_PATH_MAX + 2];
-    char* rsp_toks[3];
-    char* const* spawn_toks = toks;
-    {
-        size_t joined = 0;
-        for (int i = 0; toks[i]; i++) joined += strlen(toks[i]) + 1;
-        if (joined > WIN_CMD_LINE_MAX && n > 1 && win_prog_is_batch(toks[0]) &&
-            win_write_response_file(toks, rsp_path, sizeof(rsp_path))) {
-            snprintf(rsp_arg, sizeof(rsp_arg), "@%s", rsp_path);
-            rsp_toks[0] = toks[0];
-            rsp_toks[1] = rsp_arg;
-            rsp_toks[2] = NULL;
-            spawn_toks = rsp_toks;
-            if (tc.verbose) fprintf(stderr, "[cmd] arguments in %s\n", rsp_path);
-        }
-    }
-
     /* _spawnvp returns the child's exit status, or -1 with errno set when
      * the child never started. A child CAN exit 0xFFFFFFFF, so -1 alone does
      * not separate the two; errno, cleared first, does. */
     errno = 0;
-    int ret = (int)_spawnvp(_P_WAIT, spawn_toks[0], (const char* const*)spawn_toks);
+    int ret = (int)_spawnvp(_P_WAIT, argv[0], (const char* const*)spawn_list);
     int spawn_errno = (ret == -1) ? errno : 0;
     if (rsp_path[0]) remove(rsp_path);
+    free(list);
 
     // Restore
     if (saved_stdout >= 0) { _dup2(saved_stdout, 1); _close(saved_stdout); }
@@ -986,7 +1059,7 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
     /* After the handles are back, or the message would go to nul. */
     if (spawn_errno != 0) {
         fprintf(stderr, "error: could not start '%s': %s\n",
-                toks[0], strerror(spawn_errno));
+                argv[0], strerror(spawn_errno));
         return AE_SPAWN_FAILED;
     }
     return ret;
@@ -994,20 +1067,12 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
 #endif
 
 int run_cmd(const char* cmd) {
-#ifndef _WIN32
-    return posix_run(cmd, 0, NULL);
-#else
-    return win_run(cmd, 0, NULL);
-#endif
+    return run_command(cmd, 0, NULL);
 }
 
 // Run a command, suppressing all output (quiet mode)
 int run_cmd_quiet(const char* cmd) {
-#ifndef _WIN32
-    return posix_run(cmd, 1, NULL);
-#else
-    return win_run(cmd, 1, NULL);
-#endif
+    return run_command(cmd, 1, NULL);
 }
 
 /* The shared-library extension for a build TARGET -- not the host. (#1648)
@@ -1055,7 +1120,7 @@ static const char* exe_ext_for(const char* target) {
  * code and a machine under memory pressure. A sweep run hit exactly that
  * and left nothing to diagnose.
  *
- * `posix_run` returns -signal for a child that died of one, and on Windows
+ * `ae_spawn` returns -signal for a child that died of one, and on Windows
  * an abnormal termination carries an NTSTATUS whose high bit is set, so
  * both land as a negative rc. That, and only that, is worth a note here.
  *
@@ -1096,11 +1161,7 @@ static const char* compile_log_path(char* buf, size_t size) {
  * C compiler that reports through it (emcc does) would fail with no
  * explanation at all. */
 int run_cmd_capture_stdout(const char* cmd, const char* path) {
-#ifndef _WIN32
-    return posix_run(cmd, 3, path);
-#else
-    return win_run(cmd, 3, path);
-#endif
+    return run_command(cmd, 3, path);
 }
 
 /* Print a captured stdout log to stderr, so it interleaves with the
@@ -1117,44 +1178,10 @@ void dump_captured_stdout(const char* path) {
 
 // Run a command, showing stderr (warnings) but hiding stdout
 int run_cmd_show_warnings(const char* cmd) {
-#ifndef _WIN32
-    return posix_run(cmd, 2, NULL);
-#else
-    return win_run(cmd, 2, NULL);
-#endif
+    return run_command(cmd, 2, NULL);
 }
 
-#ifndef _WIN32
-/* The pid of the program `ae run` launched, for the signal forwarder.
- * volatile sig_atomic_t because the handler reads it. 0 = nothing running. */
-static volatile sig_atomic_t g_child_pid = 0;
-
-/* Forward a terminating signal to the child, then re-raise it so `ae`
- * dies of the same signal it was sent (correct $? for the shell).
- *
- * WHY THIS EXISTS: `ae run` builds, then SPAWNS the built binary and
- * waits — it does not exec it, because it still has work to do afterwards
- * (evict a crashed binary from the cache, delete a non-cached temp exe).
- * That means `ae run server.ae & ; kill $!` killed only the wrapper and
- * ORPHANED the server, which kept its listening socket. On an ephemeral
- * CI runner nobody notices; on a persistent box the orphan squats the
- * port and the NEXT run of the same test fails to bind — a green run
- * poisoning the one after it, with no code change in between.
- *
- * Forwarding rather than exec'ing keeps the post-run cleanup intact. */
-static void forward_signal_to_child(int sig) {
-    if (g_child_pid > 0) kill((pid_t)g_child_pid, sig);
-    /* Restore the default and re-raise so we report death-by-signal
-     * rather than exiting 0 out of a handler. */
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-#endif
-
-/* Run the just-built program, forwarding termination signals to it.
- * Used ONLY for the program `ae run` launches — build steps (aetherc,
- * gcc) keep the plain run_cmd path, where forwarding would be wrong. */
-/* Say what a crashed child died of. run_cmd_forwarding returns the negated
+/* Say what a crashed child died of. run_argv_forwarding returns the negated
  * signal on POSIX; on Windows _spawnvp hands back the process exit code,
  * which for a crash is the NTSTATUS the OS terminated it with (0xC0000094
  * for an integer divide by zero, 0xC0000005 for an access violation) --
@@ -1190,65 +1217,12 @@ static void report_crash(int rc) {
 #endif
 }
 
-int run_cmd_forwarding(const char* cmd) {
-#ifdef _WIN32
-    /* Windows has no SIGTERM-to-child model that matches this; the
-     * orphaning report is POSIX-specific (kill $! in a shell test). */
-    return win_run(cmd, 0, NULL);
-#else
-    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
-    char buf[AE_CMD_BUF];
-    strncpy(buf, cmd, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    char* toks[512];
-    int n = 0;
-    for (char* p = buf; *p && n < 511; ) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        if (*p == '"') {
-            p++;
-            toks[n++] = p;
-            while (*p && *p != '"') p++;
-            if (*p) *p++ = '\0';
-        } else {
-            toks[n++] = p;
-            while (*p && *p != ' ') p++;
-            if (*p) *p++ = '\0';
-        }
-    }
-    toks[n] = NULL;
-    if (n == 0) return 0;
-
-    pid_t pid;
-    if (posix_spawnp(&pid, toks[0], NULL, NULL, toks, environ) != 0) return -1;
-    g_child_pid = (sig_atomic_t)pid;
-
-    /* Install forwarders only while the child is alive, and keep the
-     * previous dispositions so `ae` is unchanged for every other path. */
-    struct sigaction sa;
-    struct sigaction old_term, old_int, old_hup;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = forward_signal_to_child;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGTERM, &sa, &old_term);
-    sigaction(SIGINT,  &sa, &old_int);
-    sigaction(SIGHUP,  &sa, &old_hup);
-
-    int status = 0;
-    /* EINTR: a forwarded signal interrupts waitpid; resume rather than
-     * abandoning the child (which would orphan it — the very bug). */
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
-
-    sigaction(SIGTERM, &old_term, NULL);
-    sigaction(SIGINT,  &old_int,  NULL);
-    sigaction(SIGHUP,  &old_hup,  NULL);
-    g_child_pid = 0;
-
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
-    return -1;
-#endif
+/* Runs the program `ae run` launches, forwarding termination signals to
+ * it. Build steps (aetherc, gcc) keep the plain run_cmd path, where
+ * forwarding would be wrong. */
+static int run_argv_forwarding(char* const* argv) {
+    if (tc.verbose) print_argv(argv);
+    return ae_spawn(argv, 0, NULL, 1);
 }
 
 /* AE_TEST_RUNNER — prefix the just-built binary with a runner program
@@ -1299,6 +1273,23 @@ static bool is_safe_path(const char* path) {
 /* #1378 follow-up: both the include list and the MANIFEST source list were
  * fixed buffers that a long install prefix silently overflowed, dropping -I
  * entries and .c files from an otherwise correct build. They grow instead. */
+/* printf into a new heap string sized to fit, for free(); NULL when out of
+ * memory. For a piece of a command that holds user input of any length,
+ * where a fixed buffer would cut it without a word (#2534). */
+static char* ae_strdup_printf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return NULL;
+    char* out = malloc((size_t)n + 1);
+    if (!out) return NULL;
+    va_start(ap, fmt);
+    vsnprintf(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
 static int str_buf_grow(char** out, size_t* cap, size_t need_total) {
     if (need_total < *cap) return 1;
     size_t next = *cap ? *cap : 16384;
@@ -2049,12 +2040,29 @@ static bool env_var_name_allowed(const char* name, size_t n) {
     return true;
 }
 
-static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
-    if (dst_size == 0) return;
-    size_t di = 0;
-    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_size; ) {
+/* Appends `n` bytes of `src` to the growing string *dst. 0 when out of
+ * memory. */
+static int expand_put(char** dst, size_t* len, size_t* cap, const char* src, size_t n) {
+    if (!str_buf_grow(dst, cap, *len + n)) return 0;
+    memcpy(*dst + *len, src, n);
+    *len += n;
+    (*dst)[*len] = '\0';
+    return 1;
+}
+
+/* The expansion of `src` as a new string, sized to fit, for free(); NULL
+ * when out of memory. It used to be written into each caller's fixed
+ * buffer and cut at its end without a word, so a long `cflags`, or a
+ * `${AETHER_*}` holding a whole `python3-config --ldflags`, lost flags
+ * (#2534). */
+static char* expand_env_vars(const char* src) {
+    char* dst = NULL;
+    size_t len = 0, cap = 0;
+    if (!str_buf_grow(&dst, &cap, 0)) return NULL;
+    dst[0] = '\0';
+    for (size_t si = 0; src[si] != '\0'; ) {
         if (src[si] == '\\' && src[si + 1] == '$') {
-            dst[di++] = '$';
+            if (!expand_put(&dst, &len, &cap, "$", 1)) goto oom;
             si += 2;
             continue;
         }
@@ -2074,11 +2082,7 @@ static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
                     } else {
                         const char* v = getenv(name);
                         if (v) {
-                            size_t vl = strlen(v);
-                            size_t room = dst_size - 1 - di;
-                            size_t cp = vl < room ? vl : room;
-                            memcpy(dst + di, v, cp);
-                            di += cp;
+                            if (!expand_put(&dst, &len, &cap, v, strlen(v))) goto oom;
                         } else {
                             fprintf(stderr,
                                 "ae: warning: aether.toml references "
@@ -2093,9 +2097,13 @@ static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
             }
             // Unterminated ${: fall through and copy the literal '$'.
         }
-        dst[di++] = src[si++];
+        if (!expand_put(&dst, &len, &cap, src + si, 1)) goto oom;
+        si++;
     }
-    dst[di] = '\0';
+    return dst;
+oom:
+    free(dst);
+    return NULL;
 }
 
 /* `[build] defines = "A B"` in aether.toml, the project-level equivalent of
@@ -2246,7 +2254,7 @@ static int dep_append_module_roots(const char* root, const char* name) {
     for (char* tok = strtok(buf, " \t,"); tok; tok = strtok(NULL, " \t,")) {
         /* `modules = "."` is the explicit opt-in root export: it joins the
          * package ROOT itself onto the search path, so a package whose
-         * modules live in `core/*.ae` and import each other with a dotted
+         * modules live in `core/<name>.ae` and import each other with a dotted
          * package prefix (`import core.phonenumber`) is `ae add`-consumable
          * without giving up that namespacing. A normal entry names a module
          * and what joins is its PARENT (below); `.` has no leaf to strip and
@@ -2627,10 +2635,14 @@ static void load_defines_from_toml(void) {
     if (!doc) return;
     const char* val = toml_get_value(doc, "build", "defines");
     if (val) {
-        char expanded[1024];
-        expand_env_vars(val, expanded, sizeof(expanded));
-        for (char* tok = strtok(expanded, " \t,"); tok; tok = strtok(NULL, " \t,")) {
-            ae_define_append(tok);
+        char* expanded = expand_env_vars(val);
+        if (!expanded) {
+            fprintf(stderr, "ae: out of memory reading aether.toml [build] defines\n");
+        } else {
+            for (char* tok = strtok(expanded, " \t,"); tok; tok = strtok(NULL, " \t,")) {
+                ae_define_append(tok);
+            }
+            free(expanded);
         }
     }
     toml_free_document(doc);
@@ -2670,24 +2682,25 @@ static void load_defines_from_toml(void) {
 #endif
 
 static const char* get_link_flags(void) {
-    static char flags[1024] = "";
+    /* Read once and kept for the process: every compile asks. */
+    static char* flags = NULL;
     static bool checked = false;
 
-    if (checked) return flags;
+    if (checked) return flags ? flags : "";
     checked = true;
 
-    if (!path_exists(ae_manifest_path())) return flags;
+    if (!path_exists(ae_manifest_path())) return "";
 
     TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return flags;
+    if (!doc) return "";
 
     const char* val = toml_get_value(doc, "build", "link_flags");
-    if (val) {
-        expand_env_vars(val, flags, sizeof(flags));
+    if (val && !(flags = expand_env_vars(val))) {
+        fprintf(stderr, "ae: out of memory reading aether.toml [build] link_flags\n");
     }
 
     toml_free_document(doc);
-    return flags;
+    return flags ? flags : "";
 }
 
 // Read the `// aether-link: <tokens>` header codegen emits on the first line
@@ -3188,6 +3201,7 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
     if (!selects_isa) return flags;
 
     char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
+    char* define_cmd;
     int pid = (int)getpid();
     snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
     snprintf(probe_out, sizeof(probe_out), "%s/ae_avx_probe_%d.txt", get_temp_dir(), pid);
@@ -3196,9 +3210,10 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
     if (!f) return flags;
     fclose(f);
     int avx = 0;
-    snprintf(cmd, sizeof(cmd), "\"%s\" %s -dM -E \"%s\" -o \"%s\"",
-             s_gcc_bin, user_cflags, probe_c, probe_out);
-    if (run_cmd_quiet(cmd) == 0) {
+    /* The cflags are the user's, of any length (#2534). */
+    define_cmd = ae_strdup_printf("\"%s\" %s -dM -E \"%s\" -o \"%s\"",
+                                  s_gcc_bin, user_cflags, probe_c, probe_out);
+    if (define_cmd && run_cmd_quiet(define_cmd) == 0) {
         FILE* m = fopen(probe_out, "r");
         char line[512];
         while (m && !avx && fgets(line, sizeof(line), m)) {
@@ -3206,6 +3221,7 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
         }
         if (m) fclose(m);
     }
+    free(define_cmd);
     if (avx) {
         snprintf(cmd, sizeof(cmd),
                  "\"%s\" -Wa,-muse-unaligned-vector-move -c \"%s\" -o \"%s\"",
@@ -3228,29 +3244,31 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
 
 #endif // _WIN32
 
-// Get cflags from aether.toml [build] section (applied only for release/ae-build)
+// Get cflags from aether.toml [build] section, `${AETHER_*}` expanded as for
+// link_flags; every compile applies them (`ae build`, `ae run`, `ae test`).
 // Returns empty string if not found or no aether.toml
 bool ae_build_size_mode(void) { return g_size; }
 
 const char* get_cflags(void) {
-    static char flags[512] = "";
+    /* Read once and kept for the process: every compile asks. */
+    static char* flags = NULL;
     static bool checked = false;
 
-    if (checked) return flags;
+    if (checked) return flags ? flags : "";
     checked = true;
 
-    if (!path_exists(ae_manifest_path())) return flags;
+    if (!path_exists(ae_manifest_path())) return "";
 
     TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return flags;
+    if (!doc) return "";
 
     const char* val = toml_get_value(doc, "build", "cflags");
-    if (val) {
-        expand_env_vars(val, flags, sizeof(flags));
+    if (val && !(flags = expand_env_vars(val))) {
+        fprintf(stderr, "ae: out of memory reading aether.toml [build] cflags\n");
     }
 
     toml_free_document(doc);
-    return flags;
+    return flags ? flags : "";
 }
 
 // Get extra_sources for the [[bin]] entry whose path matches ae_file.
@@ -3882,7 +3900,7 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* yaml_libs = "";
 #endif
-    char opt[1024];   /* user cflags (up to 511) plus the #2476 assembler flag */
+    char* opt;   /* the flags, with user cflags of any length (#2534) */
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
      * GCC's auto-export switches off the moment any symbol carries an
@@ -3900,12 +3918,17 @@ void build_gcc_cmd(char* cmd, size_t size,
          * `ae` links is one TU: make the definition strong. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
-                 harden_cflags(optimize), harden_ldflags(), user_cflags,
-                 win_avx_stack_flags(user_cflags), trace_def);
+        opt = ae_strdup_printf("-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
+                               harden_cflags(optimize), harden_ldflags(), user_cflags,
+                               win_avx_stack_flags(user_cflags), trace_def);
     else
-        snprintf(opt, sizeof(opt), "-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                 harden_cflags(optimize), harden_ldflags(), trace_def);
+        opt = ae_strdup_printf("-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
+                               harden_cflags(optimize), harden_ldflags(), trace_def);
+    if (!opt) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        set_failing_cmd(cmd, size);
+        return;
+    }
     /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
      * so the two cannot drift apart again. */
     const char* win_link_libs = AETHER_WIN_SYSTEM_LIBS;
@@ -3951,7 +3974,7 @@ void build_gcc_cmd(char* cmd, size_t size,
          * linker, so `import contrib.host.tinygo` failed with undefined
          * tinygo_call_* while the .a sat in build/contrib. */
         const char* rt_arg = ae_runtime_link_arg();
-        if (!rt_arg) { set_failing_cmd(cmd, size); return; }
+        if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "\"%s\" %s %s %s \"%s\" %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
             s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, g_binimport_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
@@ -4015,7 +4038,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
-    char opt[768];
+    char* opt;   /* the flags, with user cflags of any length (#2534) */
     // --emit=lib adds -fPIC -shared so the output is loadable via dlopen.
     // --emit=both (exe + lib from one source) is not supported by this
     // helper — the caller should invoke it twice with different modes,
@@ -4080,13 +4103,18 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
                             ? size_link_flags : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
-                 harden_cflags(optimize), harden_link, harden_pie, size_link,
-                 user_cflags, trace_def);
+        opt = ae_strdup_printf("%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
+                               harden_cflags(optimize), harden_link, harden_pie, size_link,
+                               user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
-                 harden_cflags(optimize), harden_link, harden_pie, size_link,
-                 trace_def);
+        opt = ae_strdup_printf("%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
+                               harden_cflags(optimize), harden_link, harden_pie, size_link,
+                               trace_def);
+    if (!opt) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        set_failing_cmd(cmd, size);
+        return;
+    }
 
     // Append aether_config.c to the compile when building a lib so the
     // aether_config_* accessors are bundled into the .so. The .c file
@@ -4225,7 +4253,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         else
             contrib_L[0] = '\0';
         const char* rt_arg = ae_runtime_link_arg();
-        if (!rt_arg) { set_failing_cmd(cmd, size); return; }
+        if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
             cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link,
@@ -4246,6 +4274,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     }
 #endif
+    free(opt);
 }
 
 static int build_wasm_cmd(char* cmd, size_t size,
@@ -5453,32 +5482,45 @@ static void prepare_host_bridge_imports(const char* main_file) {
 // Commands
 // --------------------------------------------------------------------------
 
-/* Build the command that runs a program `ae run` just produced or found in
- * the cache: the exe, then every post-`--` argument, each double-quoted so an
- * argument containing spaces stays one token through run_cmd's tokenizer
- * (posix_run / win_run). Arguments containing a literal double-quote are not
- * representable through this path, rare for a build command line; build the
- * binary and invoke it directly if you need that.
- *
- * AE_TEST_RUNNER, when set, is spliced in ahead of the exe so the program runs
- * under a wrapper (wine, qemu-user, ...). Empty by default, see
- * test_runner_prefix().
+/* The argument vector that runs a program `ae run` just produced or found in
+ * the cache: AE_TEST_RUNNER's words when it is set (wine, qemu-user, ...;
+ * see test_runner_prefix), the exe, then every post-`--` argument exactly
+ * as `ae` received it. A vector, not a command string, so an argument goes
+ * through no tokenizer: its spaces, quotes and length reach the program as
+ * given, where the string this replaced dropped the arguments past its
+ * buffer and could not carry a double quote (#2534). One allocation,
+ * released with free(); NULL when out of memory.
  *
  * CRITICAL: the cache-hit and cache-miss paths must both go through this. A
  * cache hit that ran the exe bare dropped every forwarded argument, so
  * `ae run supervisor.ae -- make -j8` worked once and then silently ran with an
  * empty argv on every later invocation. */
-static void build_run_cmd(char* cmd, size_t cap, const char* exe,
-                          int argc, char** argv, int prog_args_start) {
-    const char* runner = test_runner_prefix();
-    snprintf(cmd, cap, "%s%s\"%s\"", runner, *runner ? " " : "", exe);
-    if (prog_args_start < 0) return;
-    size_t off = strlen(cmd);
-    for (int i = prog_args_start; i < argc && off < cap - 1; i++) {
-        int w = snprintf(cmd + off, cap - off, " \"%s\"", argv[i]);
-        if (w < 0 || (size_t)w >= cap - off) break;  /* truncated, stop cleanly */
-        off += (size_t)w;
+static char** build_run_argv(const char* exe, int argc, char** argv, int prog_args_start) {
+    int nr = 0;
+    char** runner = NULL;
+    const char* r = test_runner_prefix();
+    if (*r && !(runner = ae_split_command(r, &nr))) return NULL;
+    int first = prog_args_start >= 0 ? prog_args_start : argc;
+    int na = first < argc ? argc - first : 0;
+    size_t bytes = strlen(exe) + 1;
+    for (int i = 0; i < nr; i++) bytes += strlen(runner[i]) + 1;
+    for (int i = 0; i < na; i++) bytes += strlen(argv[first + i]) + 1;
+    size_t vec = (size_t)(nr + 1 + na + 1) * sizeof(char*);
+    char** out = malloc(vec + bytes);
+    if (out) {
+        char* w = (char*)out + vec;
+        int k = 0;
+        for (int i = 0; i < nr + 1 + na; i++) {
+            const char* a = i < nr ? runner[i] : i == nr ? exe : argv[first + i - nr - 1];
+            size_t len = strlen(a) + 1;
+            memcpy(w, a, len);
+            out[k++] = w;
+            w += len;
+        }
+        out[k] = NULL;
     }
+    free(runner);
+    return out;
 }
 
 static const char* ae_binimport_salt(char* out, size_t cap);
@@ -5629,12 +5671,17 @@ static int cmd_run(int argc, char** argv) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
             cache_touch(cached_exe);   /* least-recently-USED, for the cap */
             cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
-            build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
-            ae_windows_dll_path_for_run();
-            int rc = run_cmd_forwarding(cmd);
-            if (rc < 0) {
-                report_crash(rc);
+            char** run_argv = build_run_argv(cached_exe, argc, argv, prog_args_start);
+            if (!run_argv) {
+                fprintf(stderr, "Error: out of memory\n");
+                return 1;
             }
+            ae_windows_dll_path_for_run();
+            int rc = run_argv_forwarding(run_argv);
+            free(run_argv);
+            /* A program that never started has said why; it did not crash. */
+            if (rc == AE_SPAWN_FAILED) return 1;
+            if (rc < 0) report_crash(rc);
             return rc;
         }
         if (tc.verbose) fprintf(stderr, "[cache] miss: %016llx\n", cache_key);
@@ -5763,21 +5810,29 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
-    // Step 3: run it, forwarding any post-`--` args (see build_run_cmd).
-    build_run_cmd(cmd, sizeof(cmd), exe_file, argc, argv, prog_args_start);
+    // Step 3: run it, forwarding any post-`--` args (see build_run_argv).
+    char** run_argv = build_run_argv(exe_file, argc, argv, prog_args_start);
+    if (!run_argv) {
+        fprintf(stderr, "Error: out of memory\n");
+        remove(exe_file);
+        return 1;
+    }
     ae_windows_dll_path_for_run();
-    int rc = run_cmd_forwarding(cmd);
+    int rc = run_argv_forwarding(run_argv);
+    free(run_argv);
 
     if (rc < 0) {
-        report_crash(rc);
-        // Remove crashed binary from cache so next run recompiles
+        /* A program that never started has said why; it did not crash. */
+        if (rc != AE_SPAWN_FAILED) report_crash(rc);
+        // Remove a crashed or unstartable binary from the cache so the next
+        // run recompiles
         if (using_cache) remove(exe_file);
     }
 
     // If not cached, remove the temp exe
     if (!using_cache) remove(exe_file);
 
-    return rc;
+    return rc == AE_SPAWN_FAILED ? 1 : rc;
 }
 
 static int cmd_check(int argc, char** argv) {
@@ -5952,7 +6007,7 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
      * became `D:\..\aetherc.exe" --emit-namespace-manifest "./manifest.ae`
      * — "El sistema no puede encontrar la ruta especificada", and every
      * `ae build --namespace` on Windows fell back to a library named after
-     * the directory. win_run tokenises and spawns directly. */
+     * the directory. run_command tokenises and spawns directly. */
     char capture[1024];
     compile_log_path(capture, sizeof(capture));
     int rc = run_cmd_capture_stdout(cmd, capture);

@@ -1347,7 +1347,7 @@ int run_cross_build(const char* c_file, const char* out_file,
     char* cmd = NULL;
     size_t cmd_cap = 0;
     /* Accumulated quoted "<objpath>" list, in compile order, for the ar
-     * step. posix_run tokenizes the command itself (no shell), so the
+     * step. run_command tokenizes the command itself (no shell), so the
      * archive must name each object explicitly rather than glob. Also grows:
      * it holds one quoted path per runtime object. */
     char* objlist = NULL;

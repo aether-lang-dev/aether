@@ -62,3 +62,22 @@
   compiler through a response file (`gcc @file`, quoted the way gcc and
   clang read it), removed after the run. An executable compiler keeps the
   direct spawn.
+- **`ae` passes every argument of a command whole (#2534).** The
+  spawners split a command into at most 511 arguments and dropped the
+  rest without an error; on Windows a 32 KB re-quoting buffer let a long
+  argument with spaces split, and a quoted argument ending in a backslash
+  fused with the next. They now share one splitter with no count or length
+  limit, and each Windows argument is quoted the way the child's C runtime
+  reads it back. `ae run x.ae -- args` forwards the program's arguments as
+  a vector, so spaces, quotes and any number of them arrive exactly (the
+  command string it used to build dropped what did not fit and could not
+  carry a quote). A program `ae run` cannot start is reported as that, no
+  longer as a crash. `[build] cflags`, `link_flags` and `defines` expand
+  `${AETHER_*}` into a string of any length, where they were cut at 512
+  or 1024 bytes, and so are the compile flags built from them.
+- **`aether.toml` lines of any length, and comments after values
+  (#2535).** The reader split a line longer than 511 bytes, cutting the
+  value and reading the rest as a line of its own, and it kept a trailing
+  `# comment` in the value, so `cflags = "-O2"  # tuned` handed the C
+  compiler `#` and `tuned` as files. A `#` inside quotes stays part of the
+  value.

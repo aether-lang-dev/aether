@@ -95,5 +95,25 @@ if [ "$got" != "tag=7 parts=25" ]; then
     echo "  [FAIL] win_batch_compiler_long_cmdline: printed '$got', expected 'tag=7 parts=25'"
     exit 1
 fi
+
+# The same build with the temp directory, where the response file goes,
+# under a name with a space (a profile like C:\Users\John Doe): the `@file`
+# argument must reach the compiler as one argument (#2534). A fresh cache,
+# so the program is compiled again.
+mkdir -p "$TMP/t m p"
+rm -f ./app ./app.exe
+spaced="$(cygpath -w "$TMP/t m p")"
+# shellcheck disable=SC2086
+if ! env PATH="$TMP/cc:$PATH" TEMP="$spaced" TMP="$spaced" AETHER_CACHE_DIR="$TMP/cache2" \
+        "$AE" build main.ae $extras -o ./app >"$TMP/build2.log" 2>&1; then
+    echo "  [FAIL] win_batch_compiler_long_cmdline: the build failed with a temp directory containing a space"
+    sed 's/^/        /' "$TMP/build2.log" | head -10
+    exit 1
+fi
+got=$(./app 2>&1 | tr -d '\r')
+if [ "$got" != "tag=7 parts=25" ]; then
+    echo "  [FAIL] win_batch_compiler_long_cmdline: with a spaced temp directory, printed '$got'"
+    exit 1
+fi
 echo "  [PASS] win_batch_compiler_long_cmdline: a batch compiler gets a long command line through a response file"
 exit 0
