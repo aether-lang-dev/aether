@@ -245,6 +245,7 @@ typedef struct ArgDrainWrap {
     int count;          /* hoisted arguments */
     int idx[16];        /* their child indices in the call node */
     int identity[16];   /* 1 = identity-guarded release (return-escape-only param) */
+    int closure[16];    /* 1 = an owned closure (#2507), released through its env */
     int have_value;     /* the call yields a value: of C type ret_ct, or
                          * when that is NULL, of type ret_type */
     const char* ret_ct;
@@ -334,6 +335,31 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
     return 0;
 }
 
+/* #2507: may the owned closure at child `ai` of call `expr` be released once
+ * the call returns? Only with proof its parameter keeps nothing: a named
+ * callee with a visible body whose parameter neither escapes nor is
+ * returned (a builder's injected `_ctx` shifts its parameters, so builders
+ * are left alone), or a known closure literal's parameter, likewise. */
+static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
+                                       ASTNode* closure, int ai, int first_arg) {
+    if (func_name) {
+        if (!callee_has_visible_body(gen, func_name)) return 0;
+        char fn_norm[256];
+        const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+        ASTNode* fdef = find_function_definition_by_name(gen->program, fn);
+        if (!fdef || fdef->child_count == 0 || !fdef->children[0] ||
+            (fdef->children[0]->value && strcmp(fdef->children[0]->value, "_ctx") == 0)) return 0;
+        for (int i = 0; i < expr->child_count; i++) {
+            ASTNode* a = expr->children[i];
+            if (a && (a->type == AST_NAMED_ARG ||
+                      (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0))) return 0;
+        }
+        return !callee_param_escapes_via_body(gen, func_name, ai, 0);
+    }
+    if (!closure) return 0;
+    return !closure_param_escapes_via_body(gen, closure, ai - first_arg, 1);
+}
+
 /* Pick the arguments of `expr` (from child `first_arg` on) to hoist. The
  * caller has set have_value, ret_ct and discarded. A VOID parent (e.g. an
  * assert-style helper `check(label, string.from_long(n), want)`) yields no
@@ -365,10 +391,22 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             arg->type != AST_STRING_INTERP &&
             arg->type != AST_OR_ELSE) continue;
         if (arg_drain_lookup(arg)) continue;
+        /* #2507: a closure a call hands over (call_returns_owned_closure),
+         * passed on as an argument anywhere in an expression: dead after
+         * the call when the parameter keeps nothing. */
+        if (call_returns_owned_closure(gen, arg)) {
+            if (owned_closure_arg_drainable(gen, expr, func_name, closure, ai, first_arg)) {
+                w->identity[w->count] = 0;
+                w->closure[w->count] = 1;
+                w->idx[w->count++] = ai;
+            }
+            continue;
+        }
         if (!is_heap_string_expr(gen, arg)) continue;
         int verdict = arg_drain_verdict(gen, func_name, closure, ai, first_arg, w);
         if (verdict < 0) continue;
         w->identity[w->count] = verdict;
+        w->closure[w->count] = 0;
         w->idx[w->count++] = ai;
     }
 }
@@ -398,6 +436,12 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
          * -Wincompatible-pointer-types-discards-qualifiers from a `const
          * char*` temp. The value is a fresh heap string this wrap owns and
          * frees, so there is nothing const about it. */
+        if (w->closure[h]) {
+            fprintf(gen->output, "_AeClosure %s = ", names[h]);
+            generate_expression(gen, arg);
+            fprintf(gen->output, "; ");
+            continue;
+        }
         fprintf(gen->output, "char* %s = (char*)(", names[h]);
         generate_expression(gen, arg);
         fprintf(gen->output, "); ");
@@ -425,7 +469,9 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
          * the wrap's scope. */
         const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
         if (!nm) continue;
-        if (w->identity[h]) {
+        if (w->closure[h]) {
+            fprintf(gen->output, "_aether_closure_env_release(%s.env); ", nm);
+        } else if (w->identity[h]) {
             /* Return-escape-only param: free the fresh temp ONLY if the
              * call did not return it (string_release is magic-guarded; the
              * temp is always a magic string-op result here, never a

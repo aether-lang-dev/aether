@@ -33,6 +33,9 @@
 #                returned closure passed straight to a call, and the later
 #                bindings of a local whose value was handed on, are freed
 #                (#2506).
+#   expr_positions.ae an owned closure used inside an expression or thrown
+#                away, and a local handed on in a condition, a loop condition
+#                or a defer (#2507).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -143,5 +146,6 @@ expect_clean actor_arm "hi 3
 bye 3
 kept kept! count 1 total 3730 counted 7" "a receive arm runs its defer and frees what each message built"
 expect_clean owner_change "owner change ok" "captured structs, closures passed on and values handed off are freed once"
+expect_clean expr_positions "expression positions ok" "owned closures inside expressions and hand-offs in conditions and defers are freed once"
 
 exit $fail

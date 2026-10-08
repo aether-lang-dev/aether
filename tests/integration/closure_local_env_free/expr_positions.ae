@@ -1,0 +1,113 @@
+// #2507 probe: closures handed over or handed on inside expressions.
+//
+//  - A closure a function hands over (a fresh literal it alone held) used
+//    inside a larger expression, or thrown away, is freed after the call
+//    that consumes it, or at once.
+//  - A local whose value is handed on inside a condition, a loop condition
+//    or a `defer` still frees the closures it is bound to afterwards.
+//
+// test_closure_local_env_free.sh builds this with env_count.h force-included
+// and checks every env and cell is freed exactly once; on its own it checks
+// the values (a freed env read back would give a wrong one).
+
+import std.list
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got} want ${want}")
+        exit(1)
+    }
+}
+
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+take(f: fn) -> int {
+    int a = call(f)
+    return a
+}
+
+// Stores the closure; says whether it did.
+stash_ok(l: ptr, f: fn) -> bool {
+    _ = list.add(l, f)
+    return true
+}
+
+// Stores the closure into an empty list only: a list frees each closure
+// it holds, so one closure value must not be stored twice.
+stash_first(l: ptr, f: fn) -> bool {
+    if list.size(l) == 0 {
+        _ = list.add(l, f)
+    }
+    return true
+}
+
+// Owned closures inside expressions.
+in_expressions(r: int) -> int {
+    x = take(make_counter(r))
+    total = x + take(make_counter(r)) * 2
+    if take(make_counter(r)) > r {
+        total = total + 1
+    }
+    make_counter(r)
+    _ = make_counter(r)
+    return total
+}
+
+// Handed on in a condition, then rebound.
+in_condition(l: ptr, r: int) -> int {
+    acc = 0
+    g = || { acc = acc + 1 }
+    if stash_ok(l, g) {
+        acc = acc + 10
+    }
+    g = || { acc = acc + r }
+    g()
+    return acc
+}
+
+// Handed on by a defer: the value it reads when it runs is the one stored.
+in_defer(l: ptr, r: int) -> int {
+    acc = 0
+    g = || { acc = acc + 1 }
+    defer stash_ok(l, g)
+    g()
+    g = || { acc = acc + r }
+    g()
+    return acc
+}
+
+// Handed on in a loop condition; the body does not rebind it.
+in_loop(r: int) -> int {
+    mine = list.new()
+    acc = 0
+    g = || { acc = acc + 1 }
+    i = 0
+    while i < 3 && stash_first(mine, g) {
+        g()
+        i = i + 1
+    }
+    list.free(mine)
+    return acc + r
+}
+
+main() {
+    owners = list.new()
+    r = 0
+    while r < 25 {
+        check("in expressions", in_expressions(r), 3 * r + 4)
+        check("in condition", in_condition(owners, r), 10 + r)
+        check("in defer", in_defer(owners, r), 1 + r)
+        check("in loop", in_loop(r), 3 + r)
+        r = r + 1
+    }
+    list.free(owners)
+    println("expression positions ok")
+}

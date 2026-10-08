@@ -3765,11 +3765,37 @@ int call_arg_escapes(TypeKind param_kind) {
 static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                                      const char* pname, int depth,
                                      int return_is_escape);
-/* #2499: set while compute_closure_args_borrowed walks a string parameter,
- * whose capture by a nested closure takes its own reference. */
+/* #2499: set while a copy-on-keep query (closure_string_param_kept,
+ * callee_string_param_kept) asks whether a `string` parameter's REFERENCE
+ * outlives the call. A capture by a nested closure takes its own reference,
+ * and an alias into a local keeps it only if that local does, so neither
+ * is a keep by itself there. */
 static int g_capture_holds_own_ref = 0;
+/* The body the query walks (the function's or closure's own, switched by
+ * each nested callee walk), where an alias's later uses are found, and the
+ * closure whose captures are outer variables rather than locals. */
+static ASTNode* g_keep_body = NULL;
+static ASTNode* g_keep_closure = NULL;
 static int is_nonstoring_builtin(const char* fn);
 static int is_consuming_free(const char* fn);
+
+/* In a copy-on-keep query, is `name` a local of the walked body, so that
+ * assigning the parameter to it keeps the reference only if `name` keeps
+ * it? A module global, or (in a closure) a captured outer variable, holds
+ * it past the call. */
+static int keep_alias_is_local(CodeGenerator* gen, const char* name) {
+    if (!name || !g_keep_body || is_module_global_var(gen, name)) return 0;
+    if (g_keep_closure) {
+        for (int ci = 0; ci < gen->closure_count; ci++) {
+            if (gen->closures[ci].closure_node != g_keep_closure) continue;
+            for (int k = 0; k < gen->closures[ci].capture_count; k++) {
+                if (gen->closures[ci].captures[k] &&
+                    strcmp(gen->closures[ci].captures[k], name) == 0) return 0;
+            }
+        }
+    }
+    return 1;
+}
 
 /* Shared resolver: find user-fn `func_name`'s param-name + body block.
  * Returns 1 and fills out_pname and out_body on success; 0 otherwise. */
@@ -3807,7 +3833,37 @@ int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name,
     if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) return 0;
     /* Used by the arg-drain / escape-pre-pass gates: a `return pname`
      * IS an escape (the value flows out to the caller). */
-    return param_escapes_in_subtree(gen, body, pname, depth, /*return_is_escape=*/1);
+    ASTNode* saved_body = g_keep_body;
+    ASTNode* saved_closure = g_keep_closure;
+    g_keep_body = body;
+    g_keep_closure = NULL;
+    int r = param_escapes_in_subtree(gen, body, pname, depth, /*return_is_escape=*/1);
+    g_keep_body = saved_body;
+    g_keep_closure = saved_closure;
+    return r;
+}
+
+/* #2499 copy-on-keep, for a named function called through its closure
+ * adapter (emit_bare_fn_adapters): does it keep its `string` parameter
+ * `param_idx` past the call, so the adapter must hand it a reference of its
+ * own? The same question closure_string_param_kept asks of a closure
+ * literal: a capture or an alias into a local that keeps nothing is no
+ * keep. A return counts only when `return_is_keep`. */
+int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
+                             int return_is_keep) {
+    const char* pname; ASTNode* body;
+    if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) return 1;
+    int saved_flag = g_capture_holds_own_ref;
+    ASTNode* saved_body = g_keep_body;
+    ASTNode* saved_closure = g_keep_closure;
+    g_capture_holds_own_ref = 1;
+    g_keep_body = body;
+    g_keep_closure = NULL;
+    int kept = param_escapes_in_subtree(gen, body, pname, 0, return_is_keep);
+    g_capture_holds_own_ref = saved_flag;
+    g_keep_body = saved_body;
+    g_keep_closure = saved_closure;
+    return kept;
 }
 
 /* Does the callee's param STORE-escape (anything except being directly
@@ -3836,7 +3892,14 @@ int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int par
         if (c->type == AST_BLOCK) body = c;
     }
     if (!pname || !body) return 1;
-    return param_escapes_in_subtree(gen, body, pname, 0, return_is_escape);
+    ASTNode* saved_body = g_keep_body;
+    ASTNode* saved_closure = g_keep_closure;
+    g_keep_body = body;
+    g_keep_closure = closure;
+    int r = param_escapes_in_subtree(gen, body, pname, 0, return_is_escape);
+    g_keep_body = saved_body;
+    g_keep_closure = saved_closure;
+    return r;
 }
 
 /* #2499: can a value of type `t` be a string the caller owns? A closure
@@ -4064,11 +4127,13 @@ void compute_closure_args_borrowed(CodeGenerator* gen) {
 /* #2499 copy-on-keep: does the closure literal `closure` keep its `string`
  * parameter `param_idx` past the call, so it must take a reference of its
  * own when it is entered? Every way of keeping counts (a list, map or set
- * store, a struct field, a cell or variable it is assigned to, a nested
- * call that keeps it, a multi-value return) except two that already take
- * their own reference: a capture by a nested closure, and the return of a
- * string closure, which is a copy. With the reference taken, the caller's
- * own one is its to free after the call, whatever the closure does. */
+ * store, a struct field, a cell or outer variable it is assigned to, a
+ * local that keeps it, a nested call that keeps it, a multi-value return)
+ * except two that already take their own reference: a capture by a nested
+ * closure, and the return of a string closure, which is a copy. A local it
+ * is assigned to and that keeps nothing is no keep either. With the
+ * reference taken, the caller's own one is its to free after the call,
+ * whatever the closure does. */
 int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx) {
     int saw_string = 0;
     int returns_copy = closure_returns_copy(last_block_child_of(closure), &saw_string) &&
@@ -4212,7 +4277,18 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
         int decl_is_self = node->value && strcmp(node->value, pname) == 0;
         if (!decl_is_self) {
             for (int i = 0; i < node->child_count; i++) {
-                if (value_directly_carries_param(node->children[i], pname)) return 1;
+                if (!value_directly_carries_param(node->children[i], pname)) continue;
+                /* A copy-on-keep query follows an alias into a local: the
+                 * reference outlives the call only if the local keeps it
+                 * (#2499). Every use of the local's name in the body counts,
+                 * whatever value it holds by then, which errs toward a keep. */
+                if (g_capture_holds_own_ref && node->value && keep_alias_is_local(gen, node->value)) {
+                    if (depth >= 8 ||
+                        param_escapes_in_subtree(gen, g_keep_body, node->value, depth + 1,
+                                                 return_is_escape)) return 1;
+                    continue;
+                }
+                return 1;
             }
         }
     }
@@ -4674,8 +4750,6 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
  * unknown-body callees as escaping, the fail-safe direction (leak >> UAF).
  * When the future `@retains` annotation lands, opt-in non-escaping externs
  * can re-enable the drain. */
-static int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);
-
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
     if (!gen || !call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
 
@@ -5093,30 +5167,30 @@ static int call_hands_over_closure(CodeGenerator* gen, EnvScan* s, ASTNode* call
     return ok && returns > 0;
 }
 
-/* Does `n` hold a builder's trailing block anywhere? Such a block can run
- * before the call it belongs to. */
-static int env_scan_has_trailing(ASTNode* n) {
-    if (!n) return 0;
-    if (n->type == AST_CLOSURE && !env_scan_is_real_closure(n)) return 1;
-    for (int i = 0; i < n->child_count; i++) {
-        if (env_scan_has_trailing(n->children[i])) return 1;
+/* Does `n` bind `name` anywhere below it (not counting `n` itself)? */
+static int env_scan_binds_below(ASTNode* n, const char* name) {
+    for (int i = 0; n && i < n->child_count; i++) {
+        if (env_scan_binds(n->children[i], name)) return 1;
     }
     return 0;
 }
 
-/* The value of s->name is handed on (or replaced by one nobody vouches for).
- * The local stops owning it, which is sound to mark right before the
- * statement only when that statement evaluates once, top to bottom: a
- * simple statement in the scanned function's own body, not a condition, a
- * deferred statement, a nested closure body or a trailing block that can
- * run around it. Anything else keeps the env for good. */
+/* The value of s->name is handed on (or replaced by one nobody vouches for)
+ * inside statement s->cur_stmt of the scanned function's own body. The
+ * local stops owning it: `_envown_<name> = 0` is emitted right before that
+ * statement runs, which is sound when the local holds the same value from
+ * there to the hand-off. That is so when nothing inside the statement binds
+ * the name: a simple statement, a condition or match subject, a loop whose
+ * body does not rebind it (#2507), a statement with a trailing block that
+ * does not rebind it. A `defer` hands off when it runs, so its deferred
+ * statement is the point (each emission of it clears). A hand-off inside a
+ * nested closure body happens in another C function, which cannot reach
+ * the flag, and keeps the env for good, as does anything that binds the
+ * name around the hand-off. */
 static void env_scan_escape(EnvScan* s, int nested) {
     ASTNode* st = s->cur_stmt;
-    if (s->track_clears && !nested && st &&
-        (st->type == AST_EXPRESSION_STATEMENT || st->type == AST_VARIABLE_DECLARATION ||
-         st->type == AST_RETURN_STATEMENT || st->type == AST_ASSIGNMENT ||
-         st->type == AST_TUPLE_DESTRUCTURE) &&
-        !env_scan_has_trailing(st)) {
+    if (st && st->type == AST_DEFER_STATEMENT) st = st->child_count > 0 ? st->children[0] : NULL;
+    if (s->track_clears && !nested && st && !env_scan_binds_below(st, s->name)) {
         for (int i = 0; i < s->clear_count; i++) {
             if (s->clears[i] == st) return;
         }
@@ -5224,7 +5298,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
 
 /* #2506: is `call` a call whose result is a closure only the caller holds
  * (returns_owned_closure), in the function being generated? */
-static int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call) {
+int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
         !gen->hoist_scope_body) return 0;
     for (int i = 0; i < call->child_count; i++) {
@@ -7726,6 +7800,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "aether_heap_str_free((void*)(");
                     generate_expression(gen, drhs);
                     fprintf(gen->output, "));\n");
+                } else if (call_returns_owned_closure(gen, drhs)) {
+                    /* #2507: a handed-over closure thrown away. */
+                    fprintf(gen->output, "_aether_closure_env_release((");
+                    generate_expression(gen, drhs);
+                    fprintf(gen->output, ").env);\n");
                 } else {
                     fprintf(gen->output, "(void)(");
                     generate_expression(gen, drhs);
@@ -10909,7 +10988,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * the future `@retains` annotation lands, opt-in
                      * non-escaping externs can re-enable the drain. */
                     ASTNode* cclos = transient_closure_arg(gen, inner);
-                    if (cclos) {
+                    if (inner && call_returns_owned_closure(gen, inner)) {
+                        /* #2507: a closure a call hands over, discarded:
+                         * nothing else holds it. */
+                        gen->discard_call_value = 0;
+                        fprintf(gen->output, "{ _AeClosure _ae_dc = ");
+                        generate_expression(gen, inner);
+                        fprintf(gen->output, "; _aether_closure_env_release(_ae_dc.env); }\n");
+                    } else if (cclos) {
                         emit_closure_env_drained_call(gen, inner, cclos);
                         fprintf(gen->output, "\n");
                     } else {

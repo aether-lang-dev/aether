@@ -1,7 +1,8 @@
 // Regression: three string and env leaks the macOS leaks gate found, each a
 // reference nobody gave back. The check measures what the process holds
-// (std.mem's heap_in_use, which every malloc moves) over two later rounds of
-// the same work: a round that leaks nothing holds steady.
+// (std.mem's heap_in_use, which every malloc moves) over two later windows
+// of the same work, after a warm-up: work that leaks nothing holds steady in
+// at least one of them.
 //
 //  - A closure that keeps a `string` parameter takes its own reference on
 //    entry (#2499 copy-on-keep). When the keep was only an alias into a
@@ -83,13 +84,20 @@ main() {
     }
     w = spawn(Sink())
     base = string.concat("ab", string.from_int(7))
+    // A leak grows the heap in every window of rounds; an allocator's cache
+    // of freed blocks fills once and can grow one window, never both. So
+    // warm up, then require one of two equal later windows to hold steady.
     one_round(w, base)
     one_round(w, base)
-    held_2 = mem.heap_in_use()
+    first_bytes = mem.heap_in_use()
     one_round(w, base)
     one_round(w, base)
-    held_4 = mem.heap_in_use()
-    check(held_4 - held_2 < 16384, "rounds hold steady (grew ${held_4 - held_2})")
-    check(seen == 4 * PER_ROUND * 4, "every alias saw its string (${seen})")
+    mid_bytes = mem.heap_in_use()
+    one_round(w, base)
+    one_round(w, base)
+    last_bytes = mem.heap_in_use()
+    check(mid_bytes - first_bytes <= 4096 || last_bytes - mid_bytes <= 4096,
+          "both windows grew the heap: ${mid_bytes - first_bytes} then ${last_bytes - mid_bytes} bytes")
+    check(seen == 6 * PER_ROUND * 4, "every alias saw its string (${seen})")
     println("OK")
 }

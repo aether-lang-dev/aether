@@ -179,6 +179,8 @@ void compute_closure_args_borrowed(CodeGenerator* gen);
 /* #2499: must closure literal `closure` take its own reference to its
  * `string` parameter `param_idx` on entry? Defined in codegen_stmt.c. */
 int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx);
+int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
+                             int return_is_keep);
 
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
@@ -272,6 +274,7 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
 void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
+int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on

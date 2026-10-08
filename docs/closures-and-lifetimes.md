@@ -206,14 +206,17 @@ lifetime"):
   closure nothing else holds (a closure literal, a local whose only
   escape is the return, or another such function's result) gives its
   reference to the caller, and a local bound to its result is freed like
-  a local bound to a literal (#2494). Passed straight to a call whose
-  parameter keeps nothing (`run(make_counter())`), it is freed after the
-  call (#2506).
+  a local bound to a literal (#2494). Passed to a call whose parameter
+  keeps nothing, anywhere in an expression (`x = take(make_counter())`),
+  it is freed after that call (#2506, #2507); thrown away, it is freed at
+  once.
 
-- **Handed on, then rebound.** A local whose value is handed on at a
-  simple statement (stored, returned, aliased) stops owning it right
-  before that statement; `_envown_<name>` records it, and the closures the
-  local is bound to afterwards are still freed (#2506).
+- **Handed on, then rebound.** A local whose value is handed on (stored,
+  returned, aliased) stops owning it right before the statement that does
+  it; `_envown_<name>` records it, and the closures the local is bound to
+  afterwards are still freed (#2506). The statement may be a condition, a
+  loop whose body does not rebind the local, a statement with a trailing
+  block, or a `defer`, whose deferred statement is the point (#2507).
 
 - **Capturing a struct.** A struct that owns strings is captured as a copy
   with strings of its own (`<Name>_dup`), destroyed with the env (#2504),
@@ -416,8 +419,9 @@ the env it replaces and scope exit frees the last one.
 The old env may still be reachable via a `box_closure()` copy; the
 variable stops owning it right before that statement (#2506), so the
 replaced env is left to the copy while later bindings are freed. A
-hand-off in a condition, a `defer` or a nested closure body still keeps
-every env of the variable. A closure that captured the old value holds
+hand-off inside a nested closure body (another C function, which cannot
+reach the flag) or around a rebinding of the variable in the same
+statement still keeps every env of the variable. A closure that captured the old value holds
 its own reference to it (#2494), so it is no reason to keep the env.
 
 Paired tests pin this:

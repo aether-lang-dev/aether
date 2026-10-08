@@ -490,10 +490,14 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
             }
             int keeps = 0;
             if (params[k] && params[k]->node_type &&
-                params[k]->node_type->kind == TYPE_STRING && pidx >= 0 &&
-                callee_param_escapes_via_body(gen, fname, pidx, 0)) {
+                params[k]->node_type->kind == TYPE_STRING && pidx >= 0) {
+                /* The function's body treats the parameter as borrowed, so
+                 * a reference taken here is released by nothing unless the
+                 * function hands it on. Take one only for a real keep: an
+                 * alias into a local that keeps nothing, or a capture
+                 * (which takes its own), would leak it. */
                 int copies = owned_string && !function_def_returns_heap_string(gen, fdef);
-                keeps = !copies || callee_param_store_escapes_via_body(gen, fname, pidx);
+                keeps = callee_string_param_kept(gen, fname, pidx, !copies);
             }
             if (keeps) {
                 fprintf(gen->output, "aether_str_capture(_a%d)", k);
