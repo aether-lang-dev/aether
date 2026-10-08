@@ -1835,6 +1835,25 @@ static void ae_set_err(char** out_err, const char* msg) {
  *
  * Split out of http_request_internal so a pooled connection that turns out to
  * be dead can be redialled without duplicating any of this (#1653). */
+/* Why HTTPS cannot run in this program, or NULL when it can: the
+ * pure-Aether client is selected (AETHER_PURE_TLS=1, or a build without
+ * OpenSSL) but not linked. The program's to fix, and known before any
+ * network is touched. */
+static const char* http_tls_backend_missing(void) {
+    if (!http_client_use_pure_tls() || pt_client_available()) return NULL;
+#ifdef AETHER_HAS_OPENSSL
+    return "AETHER_PURE_TLS selects the pure-Aether TLS client, but it is "
+           "not linked into this program. Add "
+           "`import std.cryptography.tls13_client` to the program, or "
+           "unset AETHER_PURE_TLS to use OpenSSL.";
+#else
+    return "HTTPS requested but this build has no TLS backend: it was "
+           "built without OpenSSL (every --target= cross-build is), and "
+           "the pure-Aether client is not linked. Add "
+           "`import std.cryptography.tls13_client` to the program.";
+#endif
+}
+
 static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                      const char* host, int port, int use_tls, int via_proxy,
                      Transport* out, char** out_err) {
@@ -2040,21 +2059,12 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
      * anchor, validity window, and hostname/SAN pinned to `host`. set_insecure
      * skips it; set_cafile pins a couriered bundle. */
     if (use_tls && http_client_use_pure_tls()) {
-        if (!pt_client_available()) {
+        /* http_request_internal has said so before dialling; a dial from
+         * anywhere else must not reach the handshake without a client. */
+        const char* missing = http_tls_backend_missing();
+        if (missing) {
             close(sockfd);
-#ifdef AETHER_HAS_OPENSSL
-            ae_set_err(out_err,
-                "AETHER_PURE_TLS selects the pure-Aether TLS client, but it is "
-                "not linked into this program. Add "
-                "`import std.cryptography.tls13_client` to the program, or "
-                "unset AETHER_PURE_TLS to use OpenSSL.");
-#else
-            ae_set_err(out_err,
-                "HTTPS requested but this build has no TLS backend: it was "
-                "built without OpenSSL (every --target= cross-build is), and "
-                "the pure-Aether client is not linked. Add "
-                "`import std.cryptography.tls13_client` to the program.");
-#endif
+            ae_set_err(out_err, missing);
             return -1;
         }
         aether_pure_tls_client_set_error(NULL);
@@ -2919,11 +2929,19 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         return response;
     }
 
-    /* No early rejection of https in a no-OpenSSL build any more (#1849).
-     * http_dial now drives the pure-Aether TLS 1.3 client there, and reports
-     * a named error itself when that client is not linked -- so the decision
-     * lives in one place, next to the handshake it describes, rather than
-     * being pre-empted here. */
+    /* An https request the program cannot make (the pure-Aether client
+     * selected but not linked, #1849) is the program's to fix: say so
+     * before resolving or dialling, so the answer does not depend on the
+     * network. It was found only after the TCP connect, and when the
+     * connect failed first (a server not up yet, a loaded machine) the
+     * request reported "connection failed" instead. */
+    if (use_tls) {
+        const char* missing = http_tls_backend_missing();
+        if (missing) {
+            response->error = string_new(missing);
+            return response;
+        }
+    }
 
     /* Forward-proxy resolution (aether#1012). Default is direct. When a proxy
      * applies, we CONNECT to the proxy's host/port instead of the target's;
