@@ -1,0 +1,1 @@
+- **`zip.entry_read` refuses a ZIP64 entry whose size is close to 2^63.** Added to the data offset the size overflowed, slipped under the bounds check and was narrowed to a garbage count; with a CRC of 0 a stored entry came back as an empty body with a negative length. The check compares the size against the room left instead.

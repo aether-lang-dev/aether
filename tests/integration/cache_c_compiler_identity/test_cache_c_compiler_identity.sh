@@ -132,4 +132,65 @@ expect_hit "\$CC"
 write_wrapper "$TMP/ccC" 4
 build_expect "stale binary after the \$CC compiler changed in place" 4 CC="$CC_C"
 
+# 3. A compiler whose driver file never changes when the compiler behind it
+# does (macOS's xcrun shims, a ccache masquerade): the key also folds in the
+# first line of `--version`. This wrapper answers --version from a file next
+# to it, so its own bytes stay the same while its version changes.
+write_version_wrapper() {
+    mkdir -p "$1"
+    if [ "$WIN" = 1 ]; then
+        printf '@if "%%~1"=="--version" (type "%%~dp0version.txt") else ("%s" -DAE_CC_TAG=%s %%*)\r\n' \
+            "$(cygpath -w "$REAL_CC")" "$2" > "$1/gcc.cmd"
+    else
+        printf '#!/bin/sh\nif [ "$1" = "--version" ]; then cat "$(dirname "$0")/version.txt"; exit 0; fi\nexec "%s" -DAE_CC_TAG=%s "$@"\n' \
+            "$REAL_CC" "$2" > "$1/gcc"
+        chmod +x "$1/gcc"
+    fi
+}
+expect_miss() {
+    if grep -q "cache hit" "$TMP/build.log"; then
+        echo "  [FAIL] cache_c_compiler_identity: $1"
+        sed 's/^/        /' "$TMP/build.log" | head -5
+        exit 1
+    fi
+}
+write_version_wrapper "$TMP/ccD" 5
+echo "shim gcc 15.1.0" > "$TMP/ccD/version.txt"
+CC_D="$(wrapper_file "$TMP/ccD")"
+build_expect "first build with a version-reporting \$CC" 5 CC="$CC_D"
+build_expect "unchanged rebuild with the version-reporting \$CC" 5 CC="$CC_D"
+expect_hit "version shim"
+echo "shim gcc 16.0.0" > "$TMP/ccD/version.txt"
+build_expect "rebuild after the compiler behind an unchanged shim changed" 5 CC="$CC_D"
+expect_miss "a compiler upgrade behind an unchanged driver file was served from the cache"
+
+# 4. Many --extra files: the key text used to be built with unchecked
+# snprintf appends into a 2 KiB stack buffer, and about 110 extra files
+# overran it.
+mkdir -p "$TMP/many"
+MANY=""
+i=0
+while [ $i -lt 130 ]; do
+    printf 'int many_%d(void) { return %d; }\n' "$i" "$i" > "$TMP/many/s$i.c"
+    MANY="$MANY --extra $(native_path "$TMP/many/s$i.c")"
+    i=$((i + 1))
+done
+cat > many.ae <<'AEOF'
+extern many_129() -> int
+
+main() {
+    println("many=${many_129()}")
+}
+AEOF
+if ! "$AE" build many.ae $MANY -o ./many_app >"$TMP/build.log" 2>&1; then
+    echo "  [FAIL] cache_c_compiler_identity: a build with 130 --extra files failed"
+    sed 's/^/        /' "$TMP/build.log" | head -10
+    exit 1
+fi
+got=$(./many_app 2>&1 | tr -d '\r')
+if [ "$got" != "many=129" ]; then
+    echo "  [FAIL] cache_c_compiler_identity: 130 --extra files: printed '$got', expected 'many=129'"
+    exit 1
+fi
+
 echo "  [PASS] cache_c_compiler_identity: a different C compiler rebuilds, the same one hits"

@@ -7041,25 +7041,32 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * it is built and releases in its generated destructor, and the last
      * holder frees. The previous scheme freed the cell at scope exit only
      * when an escape walk could prove no env outlived the scope, and every
-     * shape the walk could not see through — a callback passed inside a
+     * shape the walk could not see through (a callback passed inside a
      * tuple destructure, a closure handed to an extern that owns and frees
-     * it — leaked one cell per call. The count is not atomic, like the
-     * string count it mirrors: a closure env is not shared across threads. */
-    print_line(gen, "typedef union { long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
+     * it) leaked one cell per call. The count is atomic, as the env count
+     * is (#2494): an env that holds the cell can be released on a worker
+     * thread while the declaring scope releases on its own. The union
+     * keeps the cell's value aligned for any type. _aether_cell_last is the
+     * one decrement every release shares, the generated struct cell
+     * releases included. */
+    print_line(gen, "typedef union { atomic_long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
     print_line(gen, "static inline void* _aether_cell_new(size_t size) {");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)calloc(1, sizeof(_AeCellHeader) + size);");
     print_line(gen, "    if (!h) aether_panic(\"out of memory allocating a captured variable\");");
-    print_line(gen, "    h->_refs = 1;");
+    print_line(gen, "    atomic_init(&h->_refs, 1);");
     print_line(gen, "    return (void*)(h + 1);");
     print_line(gen, "}");
     print_line(gen, "static inline void* _aether_cell_retain(void* cell) {");
-    print_line(gen, "    if (cell) ((_AeCellHeader*)cell - 1)->_refs++;");
+    print_line(gen, "    if (cell) atomic_fetch_add_explicit(&((_AeCellHeader*)cell - 1)->_refs, 1, memory_order_relaxed);");
     print_line(gen, "    return cell;");
+    print_line(gen, "}");
+    print_line(gen, "static inline int _aether_cell_last(_AeCellHeader* h) {");
+    print_line(gen, "    return atomic_fetch_sub_explicit(&h->_refs, 1, memory_order_acq_rel) == 1;");
     print_line(gen, "}");
     print_line(gen, "static inline void _aether_cell_release(void* cell) {");
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
-    print_line(gen, "    if (--h->_refs == 0) free(h);");
+    print_line(gen, "    if (_aether_cell_last(h)) free(h);");
     print_line(gen, "}");
     /* String-valued capture cell: the cell OWNS the heap string it holds, so
      * the last releaser frees that string before freeing the cell. Used for a
@@ -7089,11 +7096,24 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline void _aether_cell_release_str(void* cell) {");
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
-    print_line(gen, "    if (--h->_refs == 0) { _aether_str_cell_free_val(*(const char**)cell); free(h); }");
+    print_line(gen, "    if (_aether_cell_last(h)) { _aether_str_cell_free_val(*(const char**)cell); free(h); }");
     print_line(gen, "}");
     print_line(gen, "static inline void _aether_str_cell_set(const char** cell, const char* v) {");
     print_line(gen, "    if (*cell != v) _aether_str_cell_free_val(*cell);");
     print_line(gen, "    *cell = v;");
+    print_line(gen, "}");
+    /* The value a string cell takes (emit_string_take_owned): what the take
+     * left borrowed is copied, as for a return, and an owned PLAIN buffer
+     * (an `@heap` extern's strdup, which the cell's release above would not
+     * free) becomes a refcounted copy, the buffer freed. */
+    print_line(gen, "static inline const char* _aether_str_cell_own(const char* s, int own) {");
+    print_line(gen, "    if (!s || !own) return aether_uniform_heap_str(s, own);");
+    print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
+    print_line(gen, "    if (_hp[0]==0x%02X && _hp[1]==0x%02X && _hp[2]==0x%02X && _hp[3]==0x%02X) return s;",
+               AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
+    print_line(gen, "    const char* _c = aether_uniform_heap_str(s, 0);");
+    print_line(gen, "    aether_heap_str_free(s);");
+    print_line(gen, "    return _c;");
     print_line(gen, "}");
     /* #2474: a string array a closure writes lives in a cell, `const char*
      * (*arr)[N]`, that owns each element as a string cell owns its one. The
@@ -7103,7 +7123,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline void _aether_cell_release_strs_n(void* cell, size_t n) {");
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
-    print_line(gen, "    if (--h->_refs != 0) return;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
     print_line(gen, "    for (size_t i = 0; i < n; i++) _aether_str_cell_free_val(((const char**)cell)[i]);");
     print_line(gen, "    free(h);");
     print_line(gen, "}");

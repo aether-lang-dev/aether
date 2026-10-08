@@ -140,9 +140,12 @@ fn check_lying_stored_size(base: string) {
 // `comp` and `lfh`. 141 bytes: local header + data (0..40), central
 // directory (40..119), EOCD (119..141).
 fn zip64_archive(uncomp: long, comp: long, lfh: long) -> ptr {
+    return zip64_archive_crc(uncomp, comp, lfh, 0x3610A686) // CRC-32 of "hello"
+}
+
+fn zip64_archive_crc(uncomp: long, comp: long, lfh: long, crc: int) -> ptr {
     b = bytes.new(141)
     bytes.set(b, 140, 0)
-    crc = 0x3610A686 // CRC-32 of "hello"
     // local file header
     bytes.set_le32(b, 0, 0x04034b50)
     bytes.set_le16(b, 4, 45)
@@ -224,6 +227,22 @@ fn check_zip64_fields() {
         zip.close(car)
     }
     bytes.free(cb)
+
+    // A size just under 2^63: added to the data offset it wrapped negative,
+    // slipped under the bounds check and was narrowed to a garbage count.
+    // With CRC 0, a count narrowed to a negative int matched the CRC of
+    // no bytes and came back as the entry's length.
+    var huge: long = 9223372036854775800
+    hb = zip64_archive_crc(huge, huge, zero, 0)
+    har, herr = zip.open(bytes.view(hb))
+    check("zip64 size near 2^63: open err", herr, "")
+    if string.equals(herr, "") == 1 {
+        _hbody, hl, hrerr = zip.entry_read(har, 0)
+        check_int("zip64 size near 2^63: entry_read refused", string.equals(hrerr, "") == 0, 1)
+        check_int("zip64 size near 2^63: entry_read returns nothing", hl, 0)
+        zip.close(har)
+    }
+    bytes.free(hb)
 
     lb = zip64_archive(five, five, past32)
     lar, lerr = zip.open(bytes.view(lb))

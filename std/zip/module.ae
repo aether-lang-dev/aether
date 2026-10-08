@@ -490,7 +490,9 @@ entry_read(arp: ptr, i: int) -> (string, int, string) {
     lname = u16(b, lfh + 26)
     lextra = u16(b, lfh + 28)
     data_at_l = (lfh as long) + 30 + lname + lextra
-    if e.comp_size < 0 || data_at_l + e.comp_size > blen_l {
+    // data_at_l <= blen_l here, so the subtraction cannot wrap; the sum
+    // could, for a ZIP64 size near 2^63.
+    if e.comp_size < 0 || e.comp_size > blen_l - data_at_l {
         return "", 0, "zip: entry data out of range"
     }
     data_at = data_at_l as int

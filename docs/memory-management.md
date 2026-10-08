@@ -222,7 +222,7 @@ Aether takes the same shape, strings are the "standard container" for character 
 
 ### What gets freed automatically
 
-For every string variable in a function, the compiler emits a companion `int _heap_<name>` tracker that's set to `1` after every heap-string assignment and `0` after every literal assignment. On reassignment, the wrapper `if (_heap_<name>) free(<old>)` decides whether to release the previous buffer.
+For every string variable in a function, the compiler emits a companion `int _heap_<name>` tracker that's set to `1` after every heap-string assignment and `0` after every literal assignment. On reassignment, the wrapper `if (_heap_<name>) aether_heap_str_free(<old>)` decides whether to release the previous buffer.
 
 ```aether,fragment
 s = ""                          // _heap_s = 0 (literal)
@@ -541,15 +541,17 @@ A function that calls itself recursively (e.g. a `walk_join`-style accumulator-p
 `f(g(), h())` where `g()` and `h()` are themselves heap-returning was a pre-fix anonymous-temp leak: the two heap allocations flowed into `f` and had nowhere to be reclaimed. The codegen now wraps every call site that has heap-returning function-call subexpressions in argument position with a GCC statement-expression that:
 
 ```c
-({ const char* _ad_0 = g();
-   const char* _ad_1 = h();
+({ char* _ad_0 = (char*)(g());
+   char* _ad_1 = (char*)(h());
    <ret_type> _ad_r = f(_ad_0, _ad_1);
-   free((void*)_ad_0);
-   free((void*)_ad_1);
+   aether_heap_str_free(_ad_0);
+   aether_heap_str_free(_ad_1);
    _ad_r; })
 ```
 
-The wrap is suppressed when the corresponding callee parameter is storage-shaped (`ptr`, `@retain` string, or unknown-typed), the same `call_arg_escapes` gate the escape walker uses. In those cases the recipient takes ownership and freeing here would dangle the stored copy.
+The wrap is suppressed when the corresponding callee parameter is storage-shaped (`ptr`, `@retain` string, or unknown-typed), the same `call_arg_escapes` gate the escape walker uses. In those cases the recipient takes ownership and freeing here would dangle the stored copy. A parameter the callee only returns (`ident(s) { return s }`) keeps the temporary alive for the result, which the caller then owns; in statement position the result is thrown away, so the temporary is freed with it.
+
+A statement that throws away a string it owns frees it at once: a bare call that returns a heap string, a `string.concat` or an interpolation on a line of its own, an ask answered with a string, and `_ = e`.
 
 ### Closure arguments are borrowed
 
@@ -561,16 +563,17 @@ A call through an `fn` value (`call(f, mk(a))`, or `f(mk(a))` on an `fn` paramet
 
 ### Container value ownership (`map.put` / `list.add`)
 
-A heap string stored as a container *value* is owned by the container and released when the container is freed (`map.free` / `list.free`) **only when the codegen can prove, at the put site, that the value is a fresh owned heap allocation**:
+A heap string stored as a container *value* is owned by the container and released when the element leaves it (`list.remove`, `list.clear`, a `map.put` over the key, `map.remove`, `map.free` / `list.free`) **only when the codegen can prove, at the put site, that the value is owned**:
 
-- **Statically heap** (`string.concat(...)`, interpolation, a heap-returning call, or a local proven heap-assigned in the enclosing body): routed to the owning variant (`map_put_string_owned` / `list_add_string_owned`, which adopt the caller's single reference, no retain, so the refcount balances at free time). The escape walker marks the same value escaped, so the caller doesn't also free it; the value is freed exactly once, by the container.
-- **A literal**, or a value whose ownership can't be proven at the put site, stays on the non-owning `*_raw` path; the container never frees it.
+- **A fresh heap value** (`string.concat(...)`, interpolation, a heap-returning call): the container adopts the single reference (`list_add_string_adopted` / `map_put_string_adopted`, no retain), so it is freed exactly once, by the container.
+- **A heap-tracked local** (one some binding of the enclosing body gives a heap value), or a `string` parameter of a closure that keeps it by storing it (copy-on-keep, below): taken as every owning slot takes a local (`emit_string_take`): on the local's last use its reference moves into the container (`_heap_<name>` is cleared, so the local's scope exit frees nothing); read again afterwards, the container gets a copy of what the local owns, or holds its own reference to what it borrows (`list_add_string_owned` / `map_put_string_owned`), and the local keeps its own frees. Stored twice, or in a loop, the reference moves once and later stores copy; the same holds for a field read or an `if` over such values.
+- **A literal**, a local that only ever holds a literal, or a value whose ownership can't be proven at the put site, stays on the non-owning `*_raw` path; the container never frees it.
 
 **Ownership through a `string` parameter, the container borrows.** A value reaching a container *through a `string` parameter* of a storing wrapper (`pr(m, k, v) { map.put(m, k, v) }`) is left on the **non-owning** path: the put site sees only a `string` param, which can hold either an owned heap string the caller minted *or* a borrowed/literal one, and the two are indistinguishable there. The container therefore **borrows** such a value (it does not free it at teardown), and the **program** owns and frees it. (Dispatching at runtime on the AetherString magic header is *not* a sound shortcut: the magic header proves heap *representation*, not caller-transferred *ownership*, so a borrowed magic string still owned by another scope would be double-freed. Representation is not ownership, and a double-free is worse than a leak.) This matches the proxy/opts-map idiom (`std.map` holding both owned and borrowed values): retrieve the heap values via their owning handles and `string.free` them before `map.free`.
 
 The key is always interned by the container (copied via `string_new`), so a heap key is the caller's to reclaim, see the `@retain` note above.
 
-**Boxed closures.** A closure value (`fn`-typed, not a raw fn-pointer) stored into a list is heap-boxed by the `fn -> ptr` coercion (`_aether_box_closure`). The list takes ownership of the box (it is stored owned, and `list_free` reclaims the non-magic box via `free`); a bare function pointer (`is_fnptr`, a code address) is not heap and stays on the raw path.
+**Boxed closures.** A closure value (`fn`-typed, not a raw fn-pointer) stored into a list or a map is heap-boxed by the `fn -> ptr` coercion (`_aether_box_closure`), and `list.add(l, box_closure(f))` is that same store spelled with the box the coercion would make. The container owns the box and takes a reference of its own to the closure's env (`list_add_closure_owned` / `list_set_closure_owned` / `map_put_closure_owned`, #2518), released with the box when the element leaves; a closure literal or a handed-over call result stored this way is released right after the store, since the container's reference is the only one needed, and a local stored this way still releases its own. A bare function pointer (`is_fnptr`, a code address) is not heap and stays on the raw path.
 
 The box is `{fn, env}` followed by a tag word. The `{fn, env}` prefix is the layout C code reads, so it stays first and unchanged: `std/collections` and `std/worker` mirror it, and the box pointer is still the `malloc` base that plain `free` reclaims. The tag is how `unbox_closure` tells a real box from a raw code address, which is what a bare function coerced into a `ptr` slot leaves behind. Unboxing one of those panics naming the cause instead of reading `env` out of the function's machine code and jumping through it. To make a bare function safe to unbox, pass it through an `fn`-typed parameter or call `box_closure` on it.
 
@@ -581,12 +584,12 @@ A closure that captures variables carries them in a heap-allocated environment s
 A **transient** capturing closure, created inline and passed to a function that only calls it and neither stores nor returns it (the callback shape `run(cb) { cb() }`), is dead once that call returns, so its environment is freed right after the call. The codegen emits the call in an env-draining form:
 
 ```c
-{ _AeClosure _ad_0 = <closure>; run(_ad_0); if (_ad_0.env) free((void*)_ad_0.env); }
+{ _AeClosure _ad_0 = <closure>; run(_ad_0); if (_ad_0.env) _closure_env_N_free((void*)_ad_0.env); }
 ```
 
-This fires only when the receiving parameter is proven not to escape the closure (`callee_param_escapes_via_body`): invoking a closure parameter (`cb()`, which lowers to an indirect-`call` node whose first child is the *callee*, not an argument) reads `cb.fn`/`cb.env` and runs it, it neither stores nor returns `cb` so the callee slot is not an escape. If the callee *does* store or return the closure, the drain is suppressed and the environment's lifetime follows the owner. The `if (_ad_0.env)` guard makes a zero-capture closure (NULL env) a no-op.
+This fires only when the receiving parameter is proven not to escape the closure (`callee_param_escapes_via_body`): invoking a closure parameter (`cb()`, which lowers to an indirect-`call` node whose first child is the *callee*, not an argument) reads `cb.fn`/`cb.env` and runs it, it neither stores nor returns `cb` so the callee slot is not an escape, and passing it on to a function whose body only calls it (`it(cb) { it_impl(cb) }`) is none either: a visible body decides, as it does for every argument. If the callee *does* store or return the closure, or passes it to an extern parameter not declared `@noescape`, the drain is suppressed and the environment's lifetime follows the owner. The `if (_ad_0.env)` guard makes a zero-capture closure (NULL env) a no-op.
 
-A capturing closure **bound to a local** (`g = || { ... }`) has its environment freed when the local's scope ends, on every exit (`return`, `break`, `continue` included), through the closure's generated destructor, which also releases the shared cells and strings the environment holds (#2480). A local rebound to a new closure literal, typically one per loop iteration, frees the environment it replaces. This happens only when every use of the local leaves no copy behind: calling it, passing it to a user function whose parameter is itself only called or passed on the same way, or capturing it in a closure. Any other use (returning it, aliasing it, storing it into a list, map, struct, message, global or actor state, passing it to an extern or a function that keeps it, or binding the local to anything but a fresh closure) leaves the environment to whoever holds the value.
+A capturing closure **bound to a local** (`g = || { ... }`) has its environment freed when the local's scope ends, on every exit (`return`, `break`, `continue` included), through the closure's generated destructor, which also releases the shared cells and strings the environment holds (#2480). A local rebound to a new closure literal, typically one per loop iteration, frees the environment it replaces. This happens only when every use of the local leaves no copy without a reference behind: calling it, passing it to a user function whose parameter is itself only called or passed on the same way, capturing it in a closure, or storing it into a list, map, struct field, message field, global or actor state, each of which takes a reference of its own. Any other use (returning it, aliasing it, passing it to an extern parameter not marked `@noescape` or to a function that keeps it, or binding the local to anything but a fresh closure) leaves the environment to whoever holds the value.
 
 Environments are reference-counted (#2494). The closure value's owner holds one reference, and an environment that captures a closure takes one of its own and gives it back in its destructor, so a captured closure lives as long as either holder. A function whose every `return` hands back a closure nothing else holds (a literal, a local whose only escape is the return, or another such function's result) gives its reference to the caller, and a local bound to the call's result is freed by the caller's scope; passed to a call that keeps nothing, anywhere in an expression, it is freed after that call, and a discarded one at once (#2506, #2507). A local that hands its value on stops owning it right before the statement that does it (a condition, a loop condition or a `defer` included, #2507), and still frees the closures it is bound to afterwards (#2506). A struct that owns strings is captured as a copy with strings of its own, destroyed with the closure (#2504). A receive arm is a scope like a function body (#2498): its defers run and the closures, cells and struct locals it built are released when the handler ends, except a struct stored into actor state, whose strings stay with the state.
 

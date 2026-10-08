@@ -1,5 +1,6 @@
 #include "aether_math.h"
 #include <math.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
@@ -153,35 +154,56 @@ double math_exp(double x) {
 }
 
 // Random numbers
-static int random_initialized = 0;
 
 /* splitmix64 (Steele, Lea, Flood 2014): a 64-bit state, one add and three
  * mixing steps per draw, full period, and well distributed in every bit. It
  * replaces rand(), whose RAND_MAX is 32767 on Windows: random_int(0, 1000000)
  * never went above 32767 there, `rand() % range` was biased, and
  * `max - min + 1` over the whole int range overflowed to 0 and divided by
- * zero. Same seed, same sequence, on every platform. */
-static uint64_t random_state = 0;
+ * zero. Same seed, same sequence, on every platform.
+ *
+ * The state is one process-wide word that actors draw from on their worker
+ * threads (rand() took a lock), so the step is an atomic add: two threads
+ * drawing at once get two distinct steps of the sequence instead of one
+ * lost update and the same number twice. For one thread the sequence after
+ * random_seed is the same as before. The first draw seeds from the clock
+ * once, whichever thread gets there first. */
+static _Atomic uint64_t random_state = 0;
+static atomic_int random_initialized = 0;
+
+#define RANDOM_GOLDEN 0x9E3779B97F4A7C15ULL
 
 static uint64_t random_next(void) {
-    uint64_t z = (random_state += 0x9E3779B97F4A7C15ULL);
+    uint64_t z = atomic_fetch_add_explicit(&random_state, RANDOM_GOLDEN,
+                                           memory_order_relaxed) + RANDOM_GOLDEN;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
 }
 
 void math_random_seed(unsigned int seed) {
-    random_state = (uint64_t)seed;
-    random_initialized = 1;
+    atomic_store_explicit(&random_state, (uint64_t)seed, memory_order_relaxed);
+    atomic_store_explicit(&random_initialized, 1, memory_order_release);
+}
+
+static void random_seed_once(void) {
+    int expected = 0;
+    if (atomic_load_explicit(&random_initialized, memory_order_acquire)) return;
+    /* The first caller seeds; a second one arriving meanwhile draws from
+     * the seeded state rather than resetting it. */
+    if (atomic_compare_exchange_strong(&random_initialized, &expected, 2)) {
+        atomic_store_explicit(&random_state, (uint64_t)time(NULL), memory_order_relaxed);
+        atomic_store_explicit(&random_initialized, 1, memory_order_release);
+    } else {
+        while (atomic_load_explicit(&random_initialized, memory_order_acquire) != 1) { }
+    }
 }
 
 /* A uniform int in [min, max], both ends included. The span is computed in
  * 64 bits (at most 2^32, so it cannot overflow), and draws below
  * 2^64 mod span are rejected so every value is equally likely. */
 int math_random_int(int min, int max) {
-    if (!random_initialized) {
-        math_random_seed((unsigned int)time(NULL));
-    }
+    random_seed_once();
     if (min >= max) return min;
     uint64_t span = (uint64_t)((int64_t)max - (int64_t)min) + 1u;
     uint64_t floor_ = (0u - span) % span;
@@ -194,9 +216,7 @@ int math_random_int(int min, int max) {
  * so every representable step is equally likely and 1.0 is never returned
  * (`floor(random_float() * n)` stays below n). */
 double math_random_float(void) {
-    if (!random_initialized) {
-        math_random_seed((unsigned int)time(NULL));
-    }
+    random_seed_once();
     return (double)(random_next() >> 11) * (1.0 / 9007199254740992.0);
 }
 

@@ -158,7 +158,13 @@ enum {
     XML_BAD_CONTROL = -6    /* raw control character */
 };
 
-static int xml_decode(const char* p, size_t n, char** out_text, size_t* bad) {
+/* With `keep_undeclared`, a reference to an entity other than the five
+ * predefined ones is kept as written: the document's DOCTYPE declared
+ * entities this reader does not read, so the reference may well be
+ * declared (XML 1.0 WFC: Entity Declared binds only a document with no DTD,
+ * or a standalone one). */
+static int xml_decode(const char* p, size_t n, char** out_text, size_t* bad,
+                      int keep_undeclared) {
     Sb out;
     sb_init(&out);
     size_t i = 0;
@@ -205,7 +211,9 @@ static int xml_decode(const char* p, size_t n, char** out_text, size_t* bad) {
         else if (elen == 2 && memcmp(e, "gt", 2) == 0)   sb_putc(&out, '>');
         else if (elen == 4 && memcmp(e, "quot", 4) == 0) sb_putc(&out, '"');
         else if (elen == 4 && memcmp(e, "apos", 4) == 0) sb_putc(&out, '\'');
-        else {
+        else if (keep_undeclared) {
+            for (size_t q = i; q <= semi; q++) sb_putc(&out, p[q]);
+        } else {
             free(out.data);
             *bad = i;
             return XML_BAD_ENTITY;
@@ -236,6 +244,7 @@ struct XmlParser {
     int      depth;
     int      open_cap;
     int      roots;           /* top-level elements started so far */
+    int      dtd_entities;    /* the DOCTYPE's internal subset declares entities */
     int      errored;
     char     err[256];
 };
@@ -315,7 +324,7 @@ static int xml_fail(XmlParser* p, const char* msg) {
 static char* decode_or_fail(XmlParser* p, size_t start, size_t end) {
     char* text = NULL;
     size_t bad = 0;
-    int rc = xml_decode(p->buf + start, end - start, &text, &bad);
+    int rc = xml_decode(p->buf + start, end - start, &text, &bad, p->dtd_entities);
     if (rc == XML_BAD_CHAR) {
         xml_fail_at(p, start + bad, "character reference to a character XML does not allow");
         return NULL;
@@ -499,6 +508,13 @@ int xml_next(XmlParser* p) {
                 if (c == '[') depth++;
                 else if (c == ']') { if (depth > 0) depth--; }
                 else if (c == '>' && depth == 0) break;
+                /* An entity declared in the internal subset: references
+                 * to names this reader does not know are then kept as
+                 * written rather than refused (xml_decode). */
+                else if (depth > 0 && c == '<' && p->len - i >= 8 &&
+                         memcmp(p->buf + i, "<!ENTITY", 8) == 0) {
+                    p->dtd_entities = 1;
+                }
                 i++;
             }
             if (i >= p->len) return xml_fail(p, "unterminated declaration");

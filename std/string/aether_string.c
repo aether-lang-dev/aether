@@ -886,6 +886,14 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
                 snprintf(big_, (size_t)n_ + 1, sub, v_);                    \
                 interp_put(&k, big_, (size_t)n_);                           \
                 free(big_);                                                 \
+            } else {                                                        \
+                /* Out of memory: the sizing pass counted n_ bytes, so   \
+                 * the writing pass must produce n_ bytes too, or the    \
+                 * string's length covers bytes never written. The text  \
+                 * that fits, then spaces. */                             \
+                interp_put(&k, small_, sizeof(small_) - 1);                 \
+                for (size_t p_ = sizeof(small_) - 1; p_ < (size_t)n_; p_++) \
+                    interp_put(&k, " ", 1);                                 \
             }                                                               \
         }                                                                   \
     } while (0)

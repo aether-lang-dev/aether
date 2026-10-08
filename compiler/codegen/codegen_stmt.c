@@ -423,14 +423,18 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
 
 /* Emit `e` taken as a value the receiver always owns: the take, then a copy
  * of whatever it left borrowed. For a slot with no ownership flag of its
- * own: a return value (the uniform-heap contract), or a closure's string
- * cell (which frees every refcounted string it holds). */
-static void emit_string_take_owned(CodeGenerator* gen, ASTNode* e) {
+ * own: a return value (the uniform-heap contract), or, with `cell`, a
+ * closure's string cell, which frees only the refcounted strings it holds
+ * (a literal is stored as it is), so a plain owned buffer (an `@heap`
+ * extern's strdup) is turned into one on the way in (_aether_str_cell_own);
+ * passed through, nothing freed it. */
+static void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell) {
     char own[32];
     string_take_new_flag(own, sizeof(own));
     fprintf(gen->output, "({ int %s = 0; const char* _ae_tv = ", own);
     emit_string_take(gen, e, own, NULL);
-    fprintf(gen->output, "; aether_uniform_heap_str(_ae_tv, %s); })", own);
+    fprintf(gen->output, "; %s(_ae_tv, %s); })",
+            cell ? "_aether_str_cell_own" : "aether_uniform_heap_str", own);
 }
 
 /* `name = <view>` for a heap-tracked string local: the reassignment wrapper
@@ -3040,7 +3044,7 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
         /* #2461: the arm that runs is taken as a binding would take it (a
          * local moved out of this scope, a field read copied, a fresh
          * value adopted); the shim copies only what is still borrowed. */
-        emit_string_take_owned(gen, expr);
+        emit_string_take_owned(gen, expr, 0);
         return 1;
     }
     fprintf(gen->output, "aether_uniform_heap_str(");
@@ -4630,6 +4634,15 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                      * (`fs.walk` into `fs_walk_raw`) keeps nothing either. */
                 } else if (is_retain_extern_param(gen, fn, i)) {
                     return 1;
+                } else if (callee_has_visible_body(gen, node->value)) {
+                    /* As call_arg_position_escapes decides it: a visible
+                     * body is authoritative, so a parameter passed on to a
+                     * function that only calls it (`it(cb) { it_impl(cb) }`)
+                     * is not kept. Deciding by the parameter's kind first
+                     * made every `fn` or `ptr` parameter passed on a keep,
+                     * and the env of a callback handed to such a wrapper
+                     * was never drained. */
+                    if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) return 1;
                 } else if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) {
                     return 1;
                 } else if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) {
@@ -4782,9 +4795,12 @@ static void escape_inspect_call_args(CodeGenerator* gen, ASTNode* call,
     if (!call) return;
     /* Children of an AST_FUNCTION_CALL are the arg expressions. Each
      * is itself walked recursively in case it nests further calls. */
+    /* A list add or map put takes a heap-tracked local (moved on its
+     * last use, copied otherwise), so the local keeps its own frees. */
+    ASTNode* taken = string_container_store_value(gen, call);
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* arg = call->children[i];
-        if (!arg) continue;
+        if (!arg || arg == taken) continue;
         if (arg->type == AST_IDENTIFIER && arg->value) {
             /* Bare identifier in argument position. See
              * call_arg_position_escapes for the escape rationale
@@ -5647,9 +5663,25 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 env_scan_escape(s, nested, node);
             }
             return;
-        case AST_FUNCTION_CALL:
-            /* `g(...)` invokes it; only the arguments are walked. */
+        case AST_FUNCTION_CALL: {
+            /* `g(...)` invokes it; only the arguments are walked. A
+             * container store of the name, bare or through
+             * `box_closure(name)`, retains it (#2518): the other arguments
+             * are walked, the stored value is no hand-off. */
+            ASTNode* cv = closure_container_store_value(gen, node);
+            if (cv && cv->type == AST_IDENTIFIER && cv->value && strcmp(cv->value, name) == 0) {
+                for (int i = 0; i < node->child_count && !s->escapes; i++) {
+                    ASTNode* c = node->children[i];
+                    if (!c || c == cv) continue;
+                    if (c->type == AST_FUNCTION_CALL && c->value &&
+                        strcmp(c->value, "box_closure") == 0 &&
+                        c->child_count == 1 && c->children[0] == cv) continue;
+                    env_scan_walk(gen, s, c, node, nested);
+                }
+                return;
+            }
             break;
+        }
         case AST_CLOSURE:
             if (!env_scan_is_real_closure(node)) break;   /* a trailing block runs inline */
             /* A closure capturing the name takes its own reference to the
@@ -5903,7 +5935,7 @@ void promoted_cell_pointer(const char* c_type, const char* name,
 static void emit_cell_element_value(CodeGenerator* gen, int str_elem, ASTNode* v) {
     if (str_elem && !(v->type == AST_LITERAL && v->node_type &&
                       v->node_type->kind == TYPE_STRING)) {
-        emit_string_take_owned(gen, v);
+        emit_string_take_owned(gen, v, 1);
     } else {
         generate_expression(gen, v);
     }
@@ -7702,7 +7734,7 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
             if (wrap_v0 && string_take_is_view(gen, v)) {
                 /* #2497: an `if` or field read is taken as a return takes
                  * it: a fresh arm adopted, not copied and leaked. */
-                emit_string_take_owned(gen, v);
+                emit_string_take_owned(gen, v, 0);
             } else if (wrap_v0) {
                 fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
                 generate_expression(gen, v);
@@ -11682,6 +11714,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 }
                             }
                             gen->discard_call_value = 0;
+                            break;
+                        }
+                        /* A thrown-away string the statement owns (a
+                         * heap-returning call, an interpolation, an ask
+                         * answered with a string): freed here, as `_ = e`
+                         * frees it. Discarded bare, it leaked one buffer
+                         * per statement. */
+                        if (inner && (inner->type == AST_FUNCTION_CALL ||
+                                      inner->type == AST_STRING_INTERP ||
+                                      inner->type == AST_SEND_ASK) &&
+                            is_heap_string_expr(gen, inner)) {
+                            /* The value is used (freed), not discarded: an
+                             * argument drain keeps the result. */
+                            gen->discard_call_value = 0;
+                            fprintf(gen->output, "aether_heap_str_free((void*)(");
+                            generate_expression(gen, inner);
+                            fprintf(gen->output, "));\n");
                             break;
                         }
                         int discards_value = inner && (

@@ -2573,7 +2573,7 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
         indent(gen);
         print_line(gen, "if (!cell) return;");
         print_line(gen, "_AeCellHeader* h = (_AeCellHeader*)cell - 1;");
-        print_line(gen, "if (--h->_refs == 0) { %s_destroy((%s*)cell); free(h); }",
+        print_line(gen, "if (_aether_cell_last(h)) { %s_destroy((%s*)cell); free(h); }",
                    struct_def->value, struct_def->value);
         unindent(gen);
         print_line(gen, "}");

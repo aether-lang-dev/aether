@@ -141,6 +141,14 @@ main() {
     fails = fails + refuse("<a>&;</a>", "'&' that does not start a reference")
     fails = fails + refuse("<a>&amp</a>", "'&' that does not start a reference")
     fails = fails + accept("<a>&amp;&lt;&gt;&quot;&apos;</a>", "&<>\"'")
+    // A DOCTYPE whose internal subset declares entities may declare the
+    // one referenced (WFC: Entity Declared does not bind such a document),
+    // so the reference is kept as written; a DOCTYPE without one declares
+    // nothing, and the reference is still refused.
+    fails = fails + accept("<!DOCTYPE d [<!ENTITY e \"x\">]><d>&e;</d>", "&e;")
+    fails = fails + accept("<!DOCTYPE d [ <!ELEMENT d ANY> <!ENTITY e \"x\"> ]><d>a&e;b&amp;</d>", "a&e;b&")
+    fails = fails + refuse("<!DOCTYPE d><d>&e;</d>", "reference to undeclared entity &e;")
+    fails = fails + refuse("<!DOCTYPE d [<!ELEMENT d ANY>]><d>&e;</d>", "reference to undeclared entity &e;")
 
     if fails > 0 {
         println("FAIL: ${fails} checks failed")

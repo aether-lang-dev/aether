@@ -7,7 +7,14 @@
 #include "ae_internal.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
+#ifdef _WIN32
+#ifndef popen
+#  define popen  _popen
+#  define pclose _pclose
+#endif
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -837,9 +844,41 @@ static unsigned long long c_compiler_fingerprint(void) {
         if (!resolve_program(word, resolved, sizeof(resolved))) continue;
         h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
         h = (h * 1099511628211ULL) ^ fnv64_file(resolved);
+        /* The file found on PATH may be a trampoline whose bytes never
+         * change when the compiler behind it does: macOS's /usr/bin/gcc
+         * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
+         * Xcode update), a ccache masquerade directory. What the program
+         * says it is comes from the compiler that will actually run, so
+         * its first line of `--version` is folded in too; a program with
+         * no such line folds in nothing. */
+        char cmd[1300];
+        snprintf(cmd, sizeof(cmd), "\"%s\" --version", resolved);
+        FILE* pipe = popen(cmd, "r");
+        if (!pipe) continue;
+        char line[512];
+        if (fgets(line, sizeof(line), pipe)) {
+            h = (h * 1099511628211ULL) ^ fnv64_str(line);
+        }
+        pclose(pipe);
     }
     fp = h ? h : 1ULL;
     return fp;
+}
+
+/* Append to the key text, clamped at the buffer's end: snprintf returns the
+ * length it wanted, so `pos` kept growing past the buffer and the next
+ * append got a wrapped (huge) size and wrote past the stack buffer; about
+ * 110 extra files were enough. Past the end the key is truncated, which only
+ * ever means a rebuild. */
+static int key_append(char* buf, size_t cap, int pos, const char* fmt, ...) {
+    if (pos < 0 || (size_t)pos >= cap - 1) return (int)cap - 1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + pos, cap - (size_t)pos, fmt, ap);
+    va_end(ap);
+    if (n < 0) return pos;
+    if ((size_t)n >= cap - (size_t)pos) return (int)cap - 1;
+    return pos + n;
 }
 
 unsigned long long compute_cache_key(const char* ae_file,
@@ -852,7 +891,7 @@ unsigned long long compute_cache_key(const char* ae_file,
 
     char key_buf[2048];
     int pos = 0;
-    pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, "%016llx", src_hash);
+    pos = key_append(key_buf, sizeof(key_buf), pos, "%016llx", src_hash);
 
     /* The three toolchain binaries — aetherc (the compiler, which owns
      * codegen), the ae driver (owns the flags passed to the C compiler),
@@ -869,21 +908,21 @@ unsigned long long compute_cache_key(const char* ae_file,
      * A hash of 0 (unreadable) folds in nothing rather than colliding. */
     struct stat st; (void)st;
     unsigned long long cc_hash = fnv64_file(tc.compiler);
-    if (cc_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":cc=%016llx", cc_hash);
+    if (cc_hash) pos = key_append(key_buf, sizeof(key_buf), pos, ":cc=%016llx", cc_hash);
     char self_path[1200];
     if (get_exe_path(self_path, sizeof(self_path))) {
         unsigned long long ae_hash = fnv64_file(self_path);
-        if (ae_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ae=%016llx", ae_hash);
+        if (ae_hash) pos = key_append(key_buf, sizeof(key_buf), pos, ":ae=%016llx", ae_hash);
     }
     /* #2477: and the C compiler that turns aetherc's output into the binary. */
-    pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":ccid=%016llx",
+    pos = key_append(key_buf, sizeof(key_buf), pos, ":ccid=%016llx",
                     c_compiler_fingerprint());
     if (tc.has_lib) {
         unsigned long long lib_hash = fnv64_file(tc.lib);
-        if (lib_hash) pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=%016llx", lib_hash);
+        if (lib_hash) pos = key_append(key_buf, sizeof(key_buf), pos, ":lib=%016llx", lib_hash);
         unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
         if (contrib_hash)
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":contrib=%016llx", contrib_hash);
+            pos = key_append(key_buf, sizeof(key_buf), pos, ":contrib=%016llx", contrib_hash);
     }
 
     if (extra_files && extra_files[0]) {
@@ -891,7 +930,7 @@ unsigned long long compute_cache_key(const char* ae_file,
         char tok[2048];
         while (extras_next(&cursor, tok, sizeof(tok))) {
             unsigned long long fh = fnv64_file(tok);
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%016llx", fh);
+            pos = key_append(key_buf, sizeof(key_buf), pos, ":%016llx", fh);
         }
     }
 
@@ -908,7 +947,7 @@ unsigned long long compute_cache_key(const char* ae_file,
         cache_depfile_path(ae_file, depfile, sizeof(depfile));
         unsigned long long dep_acc = 1469598103934665603ULL;
         if (fold_depfile(depfile, &dep_acc)) {
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":deps=%016llx", dep_acc);
+            pos = key_append(key_buf, sizeof(key_buf), pos, ":deps=%016llx", dep_acc);
             used_depfile = 1;
         }
     }
@@ -947,7 +986,7 @@ unsigned long long compute_cache_key(const char* ae_file,
         int src_count = 0;
         hash_lib_dir_entries(entry_dir, "", &src_tree, &src_count, 0);
         if (src_count > 0) {
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+            pos = key_append(key_buf, sizeof(key_buf), pos,
                             ":src=%016llx", src_tree);
         }
 
@@ -990,7 +1029,7 @@ unsigned long long compute_cache_key(const char* ae_file,
                     int cwd_count = 0;
                     hash_lib_dir_entries(cwd, "", &cwd_tree, &cwd_count, 0);
                     if (cwd_count > 0) {
-                        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+                        pos = key_append(key_buf, sizeof(key_buf), pos,
                                         ":cwd=%016llx", cwd_tree);
                     }
                 }
@@ -1020,7 +1059,7 @@ unsigned long long compute_cache_key(const char* ae_file,
      * blow the cache-key buffer; the cap is well above any realistic
      * stdlib/vendored-modules count. */
     if (tc.lib_dir_count == 0) {
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":lib=(default)");
+        pos = key_append(key_buf, sizeof(key_buf), pos, ":lib=(default)");
         /* #1025 Bug A: with no --lib flag and no $AETHER_LIB_DIR, the compiler
          * still searches the default lib dir (module_add_lib_dir(
          * AETHER_DEFAULT_LIB_DIR) in aether_module.c) — the canonical
@@ -1035,7 +1074,7 @@ unsigned long long compute_cache_key(const char* ae_file,
             int n = 0;
             hash_lib_dir_entries(AETHER_DEFAULT_LIB_DIR, "", &entry_hash, &n, 0);
             if (n > 0) {
-                pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+                pos = key_append(key_buf, sizeof(key_buf), pos,
                                 ":dlent=%d:dlh=%016llx", n, entry_hash);
             }
         }
@@ -1048,11 +1087,11 @@ unsigned long long compute_cache_key(const char* ae_file,
          * on the entry source, so it cannot carry this distinction. Dropping it
          * on the depfile path let an `--override` build reuse the
          * non-overridden slot (#1882 depfile regression). */
-        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+        pos = key_append(key_buf, sizeof(key_buf), pos,
                         ":lib[%d]=%s", i, tc.lib_dirs[i]);
         struct stat lst;
         if (stat(tc.lib_dirs[i], &lst) == 0) {
-            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+            pos = key_append(key_buf, sizeof(key_buf), pos,
                             ":lmt=%lld", (long long)lst.st_mtime);
         }
         /* The CONTENT walk is what the depfile replaces (it records the lib
@@ -1064,7 +1103,7 @@ unsigned long long compute_cache_key(const char* ae_file,
             int n = 0;
             hash_lib_dir_entries(tc.lib_dirs[i], "", &entry_hash, &n, 0);
             if (n > 0) {
-                pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+                pos = key_append(key_buf, sizeof(key_buf), pos,
                                 ":lent=%d:lh=%016llx", n, entry_hash);
             }
         }

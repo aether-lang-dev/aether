@@ -495,7 +495,7 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         if (!nm) continue;
         if (w->closure[h]) {
             fprintf(gen->output, "_aether_closure_env_release(%s.env); ", nm);
-        } else if (w->identity[h]) {
+        } else if (w->identity[h] && !w->discarded) {
             /* Return-escape-only param: free the fresh temp ONLY if the
              * call did not return it (string_release is magic-guarded; the
              * temp is always a magic string-op result here, never a
@@ -2662,8 +2662,16 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         // A variable previously bound to a different closure (either via
         // declaration or via an earlier reassignment) has no single
         // identity: the bind marks it ambiguous so call() falls back to
-        // generic function-pointer dispatch through .fn.
-        if (cid_to_bind >= 0) closure_var_bind(gen, enclosing_func, node->value, cid_to_bind);
+        // generic function-pointer dispatch through .fn. A binding to a
+        // closure value this walk cannot name (a struct field, a parameter,
+        // a call whose result it does not know) is bound as -1 for the same
+        // reason: left out, the variable kept the literal it was bound to
+        // before (or after, in a loop), and call() ran that one.
+        Type* vt = node->node_type ? node->node_type : (rhs ? rhs->node_type : NULL);
+        int closure_typed = vt && vt->kind == TYPE_FUNCTION && !vt->is_fnptr;
+        if (cid_to_bind >= 0 || closure_typed) {
+            closure_var_bind(gen, enclosing_func, node->value, cid_to_bind);
+        }
     }
 }
 
@@ -4242,9 +4250,42 @@ ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call) {
     const ClosureStoreEntry* e = closure_store_entry(gen, call);
     if (!e) return NULL;
     ASTNode* val = call->children[e->val_idx];
+    /* `list.add(l, box_closure(f))` stores f as `list.add(l, f)` does: the
+     * explicit box is the one the coercion would make. Stored as a raw
+     * pointer, neither the box nor the env was ever reclaimed. */
+    if (val && val->type == AST_FUNCTION_CALL && val->value &&
+        strcmp(val->value, "box_closure") == 0 && val->child_count == 1) {
+        val = val->children[0];
+    }
     if (!val || !val->node_type || val->node_type->kind != TYPE_FUNCTION ||
         val->node_type->is_fnptr) return NULL;
     return val;
+}
+
+/* The string local a list add or a map put stores, when the store takes it
+ * as every other owning slot does (emit_string_take): moved on its last
+ * use, copied otherwise, so the local keeps whatever it did not hand over
+ * and the container holds a reference of its own. Only a local some
+ * binding of the body gives a heap value (one that only ever holds a
+ * literal stays on the raw path, as before), or a `string` parameter of
+ * the closure being emitted that took a reference of its own on entry
+ * (copy-on-keep, #2499), which is a heap-tracked local from there on.
+ * Returns the value node, else NULL. The escape walk asks this same
+ * question, so the local's own frees stay in place. Adopting the single
+ * reference and marking the local escaped freed it twice when it was
+ * stored twice, or stored in a loop, and left a kept parameter's
+ * reference to nobody. */
+static ASTNode* current_fn_body_block(CodeGenerator* gen);
+ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call) {
+    const ClosureStoreEntry* e = closure_store_entry(gen, call);
+    if (!e || strcmp(e->c_name, "list_set") == 0) return NULL;
+    ASTNode* val = call->children[e->val_idx];
+    if (!val || val->type != AST_IDENTIFIER || !val->value ||
+        !is_heap_string_var(gen, val->value)) return NULL;
+    if (body_assigns_var_from_heap(gen, current_fn_body_block(gen), val->value)) return val;
+    ASTNode* fn = gen->current_function;
+    if (fn && fn->type == AST_CLOSURE && is_closure_param(fn, val->value)) return val;
+    return NULL;
 }
 
 /* Emit the store of closure value `val` (closure_container_store_value) by
@@ -7382,8 +7423,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * assigned is left un-rewritten (the
                              * container does not own it). */
                             int val_is_heap;
+                            /* A heap-tracked local is taken below, as a
+                             * struct field or an `if` is: moved on its last
+                             * use, copied otherwise (string_container_store_value). */
+                            ASTNode* taken = string_container_store_value(gen, expr);
                             if (val && val->type == AST_IDENTIFIER && val->value) {
-                                val_is_heap = body_assigns_var_from_heap(
+                                val_is_heap = !taken && body_assigns_var_from_heap(
                                     gen, current_fn_body_block(gen), val->value);
                             } else {
                                 val_is_heap = val && is_heap_string_expr(gen, val);
@@ -7455,7 +7500,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, ")");
                                 break;
                             }
-                            if (val && string_take_is_view(gen, val)) {
+                            if (val && (taken == val || string_take_is_view(gen, val))) {
                                 char own[32];
                                 string_take_new_flag(own, sizeof(own));
                                 fprintf(gen->output, "({ void* _ae_cc = (void*)(");

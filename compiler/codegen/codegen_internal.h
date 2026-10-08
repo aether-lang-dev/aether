@@ -280,6 +280,9 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
 int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
 void call_c_name(CodeGenerator* gen, const char* func_name, char* out, size_t n);
 ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* #2518 */
+/* The heap-tracked string local a list add or map put takes (moved or
+ * copied, never adopted and left escaped), or NULL. */
+ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on

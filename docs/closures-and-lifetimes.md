@@ -1,24 +1,19 @@
 # Closures and Environment Lifetimes
 
 This document covers how closure environments are allocated, captured,
-and freed, and the patterns that currently need workarounds. Earlier
-rounds of the closure/DSL feature shipped with four capture-handling and
-env-lifetime issues plus a chained typechecker hole that surfaced once
-those four were resolved. All five landed together in a single PR
-because testing any one in isolation was blocked by the others; they
-are fixed on main and documented below as the underlying mechanism.
-
-Three more closure-related bugs surfaced during the aether_ui toolkit
-work: emission-ordering for cross-referenced closures, nested-lambda
-return-type bubble-up, and captures across trailing blocks. All three
-are fixed on main.
+and freed: the eight capture and lifetime bugs that shaped the mechanism
+(fixed, and documented below as the mechanism itself), the reclamation
+rules shape by shape, and the patterns that still need a workaround.
+The ownership rules themselves are stated once in
+[`docs/memory-management.md`](memory-management.md) (string tracker,
+container values, closure arguments, closure environment lifetime); this
+document lists how each closure shape meets them.
 
 Five patterns are tracked, three around dynamic `call()` dispatch
 (L1, L2, L3), one correctness hazard in closures inside actor handlers
 (L4), and one memory-handling contract on closure-var reassignment
-(L5). L4 is now rejected at compile time with a clear error; the rest
-are documented with workarounds in the "Closure patterns and
-workarounds" section below.
+(L5). L4 is rejected at compile time with a clear error; the rest
+are documented in the "Closure patterns and workarounds" section below.
 
 Regression tests live at `tests/syntax/test_closure_*.ae` and
 `tests/integration/closure_*/`.
@@ -164,32 +159,43 @@ Nearly all changes are in the codegen layer. The typechecker is unchanged.
 |---------|------|
 | Capture discovery, type resolution, return-type inference, `call()` node_type propagation | `compiler/codegen/codegen_expr.c` |
 | Mutated-capture write path (routes through `_env->`) | `compiler/codegen/codegen_stmt.c` |
-| Bug-3 return-defer protection | `compiler/codegen/codegen.c`, `codegen_stmt.c` |
+| Env claim and release of closure locals (`claim_closure_local_env`, the env scan) | `codegen_stmt.c` |
 | Small additions to `CodeGenerator` state | `compiler/codegen/codegen.h` |
 | New helpers on the public header | `compiler/codegen/codegen_internal.h` |
 
 ## Environment reclamation
 
-A capturing closure's environment is a heap allocation; two common
-lifetimes now reclaim it automatically (the canonical reference is
+A capturing closure's environment is a heap allocation, reference counted
+(#2494): every holder (the local it is bound to, each container slot,
+struct field, message field, global or state slot that keeps it, each env
+that captured it) holds one reference and gives it back when it lets go,
+and the last one tears the env down. The rules are stated in
 [`docs/memory-management.md`](memory-management.md) → "Closure environment
-lifetime"):
+lifetime"; shape by shape:
 
 - **Transient callback.** A capturing closure created inline and passed to
   a parameter that only *calls* it and neither stores nor returns it
   (`run(cb) { cb() }`) is dead once the call returns, so its env is freed
   right after the call. This is gated on a proven non-escape, invoking a
   closure parameter (`cb()`, an indirect-`call` node whose first child is
-  the callee) is not an escape, whereas a stored or returned closure
-  suppresses the drain so its env follows the owner. An extern has no
-  body to read, so a closure passed to one is kept unless the extern
-  declares the parameter `@noescape` (used only during the call, #2523):
-  the std seq combinators, `fs.walk` and `string_list_sort` do, so their
-  callbacks are released after the call like any transient callback.
+  the callee) is not an escape, nor is passing it on to a function whose
+  body only calls it (`it(cb) { it_impl(cb) }`), whereas a stored or
+  returned closure suppresses the drain so its env follows the owner. An
+  extern has no body to read, so a closure passed to one is kept unless
+  the extern declares the parameter `@noescape` (used only during the
+  call, #2523): the std seq combinators, `fs.walk` and `string_list_sort`
+  do, so their callbacks are released after the call like any transient
+  callback.
 
-- **Stored in a list.** A closure value stored into a list is heap-boxed
-  (the `fn → ptr` coercion) and the list owns the box; `list.free` now
-  reclaims the captured env as well as the box (`owned_flags == 2`).
+- **Stored in a list or a map.** A closure value stored into a list or a
+  map is heap-boxed (the `fn -> ptr` coercion, or an explicit
+  `box_closure(f)` at the store, which is the same store) and the
+  container owns the box and a reference of its own to the env (#2518),
+  both released when the element leaves (`list.remove`, `list.clear`, a
+  closure set over the slot, `map.remove`, a put over the key, `free`).
+  A literal or a handed-over call result stored this way is released
+  right after the store; a local stored this way keeps its own reference
+  and releases it at scope end.
 
 - **Kept in a struct field, a message field, a global or an actor's
   state (#2525).** Each such holder has a reference of its own to the env,
@@ -218,10 +224,12 @@ lifetime"):
   scope ends, through `_closure_env_N_free`, provided every use of `g`
   leaves no copy behind: calling it, passing it to a user function whose
   parameter is only called or passed on the same way, or capturing it in
-  a closure (#2480). Rebinding the local to a new closure frees the env
-  it replaces. A return, an alias, a store, an argument to an extern
-  parameter not marked `@noescape`, or a binding to anything but a fresh
-  closure leaves the env to the value's holder.
+  a closure, or storing it where the holder takes a reference of its own
+  (a list, a map, a struct field, a message field, a global, actor state,
+  #2480). Rebinding the local to a new closure frees the env it replaces.
+  A return, an alias, an argument to an extern parameter not marked
+  `@noescape` or to a function that keeps it, or a binding to anything
+  but a fresh closure leaves the env to the value's holder.
 
 - **Captured by another closure.** An env is reference-counted (#2494):
   the value's owner holds one reference and every env that captured the
@@ -277,8 +285,14 @@ an escape walk could prove no env outlived the scope, and every shape the
 walk could not see through — a callback passed inside a tuple destructure,
 a closure owned and freed by an extern — leaked one cell per call.)
 
-The count is a plain integer, like the string reference count it mirrors:
-a closure env is not shared between threads.
+The count is atomic, as the env count is: an env that holds the cell can
+be released on a worker thread while the declaring scope releases its own
+reference on another. A string cell owns a refcounted string: a store
+takes the value as an owning slot does (a fresh value adopted, a local
+moved or copied, a view copied), and a plain owned buffer (an `@heap`
+extern's strdup) becomes a refcounted copy on the way in, so the cell's
+last release frees every value it was ever given; a literal is stored as
+it is and never freed.
 
 A fixed-size array the closure writes (`arr[i] = v`, `arr[i]++`, a whole
 `arr = [...]`) is a cell too (#2474): a pointer to the whole array,
@@ -302,28 +316,13 @@ matching defer scope, so a cell, or a heap string, declared in the block
 is reclaimed at the end of the block rather than at the end of the
 enclosing function.
 
-Two shapes defeat these paths and leak the env — both bit `std.spec`
-(#1577):
-
-- **Forwarding a `fn` parameter.** The transient-callback drain fires
-  only when the callee *calls* its `fn` parameter. Passing it on to
-  another function (`it(cb) { it_impl(cb) }`) is an escape from the
-  callee's point of view, so the caller keeps the env alive forever.
-  Restructure so the exported function invokes the parameter itself —
-  split the shared logic into begin/end halves around the `call()` if
-  needed (that is exactly how `std.spec`'s `it`/`it_within` are built).
-
-- **Explicit `box_closure()` into a list.** The list-owns-the-env path
-  is keyed off the `fn → ptr` coercion at the `list.add` call site.
-  `list.add(l, box_closure(f))` hands the list a raw pointer it cannot
-  know it owns; nothing reclaims box or env. Add the `fn` value
-  directly (`list.add(l, f)`) and the owned coercion does the boxing
-  and the reclamation.
-
-Still a leak (the safe side of the leak-vs-UAF trade): **L5 below**,
-reassigning a closure *variable* drops the previous env, because without
-whole-program escape analysis the codegen can't prove the old env is
-unreachable (it may be aliased through a `box_closure` copy).
+Two shapes used to defeat these paths and leak the env (both bit
+`std.spec`, #1577): a `fn` parameter passed on to another function
+(`it(cb) { it_impl(cb) }`), which the callee walk counted as kept by its
+kind before reading the callee's body, and `list.add(l, box_closure(f))`,
+which stored a raw pointer the list did not know it owned. Both are the
+ordinary shapes now: the callee's body decides, and the explicit box is
+the store `list.add(l, f)` is.
 
 ## Closure patterns and workarounds
 
