@@ -1,0 +1,106 @@
+// Regression: a struct in an actor's state that owns strings is replaced
+// as a local one is (#465, #2497): the old value's strings are released,
+// and a struct another owner keeps (a handler local) is taken as a copy.
+//
+// The store was a plain C assignment (#2579). Every replacement leaked the
+// old value's strings, and `kept = r`, `r` a handler local, shared r's
+// strings, which the handler's exit freed: the next message read freed
+// memory. The same store written as a match arm (`1 -> kept = ...`, #2575)
+// goes the same way. A store into the state struct's string field
+// (`kept.name = ...`) named an undeclared local (#2581).
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). One actor stays alive and every window ends with an
+// ask, which drains its mailbox. Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Rec {
+    name: string
+    count: int
+}
+
+message Fresh { w: string }
+message Local { w: string }
+message Arm { k: int, w: string }
+message Rename { w: string }
+message Get {}
+message Total { v: int }
+
+make_rec(w: string, n: int) -> Rec {
+    return Rec { name: string.concat(w, "!"), count: n }
+}
+
+actor Holder {
+    state kept = Rec { name: "", count: 0 }
+    receive {
+        Fresh(w: w) -> { kept = make_rec(w, 1) }
+        Local(w: w) -> {
+            r = make_rec(w, 2)
+            kept = r
+        }
+        Arm(k: k, w: w) -> {
+            match k {
+                1 -> kept = make_rec(w, 3)
+                _ -> {}
+            }
+        }
+        Rename(w: w) -> { kept.name = string.concat(w, "?") }
+        Get() -> { reply Total { v: string.length(kept.name) * 10 + kept.count } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    println("=== test_actor_state_struct_replace ===")
+    a = spawn(Holder())
+    a ! Fresh { w: "a" }
+    int t1 = a ? Get {}
+    check(t1 == 21, "a fresh struct replaces the state")
+    a ! Local { w: "ab" }
+    a ! Fresh { w: "z" }
+    a ! Local { w: "ab" }
+    int t2 = a ? Get {}
+    check(t2 == 32, "a handler local's struct is copied into the state")
+    a ! Arm { k: 1, w: "abc" }
+    int t3 = a ? Get {}
+    check(t3 == 43, "a match arm replaces the state")
+    a ! Rename { w: "abcd" }
+    int t4 = a ? Get {}
+    check(t4 == 53, "a store into the state struct's field")
+    i = 0
+    while i < 20 {
+        a ! Fresh { w: "a" }
+        a ! Local { w: "ab" }
+        a ! Arm { k: 1, w: "abc" }
+        a ! Rename { w: "abcd" }
+        int _w = a ? Get {}
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 50 {
+                    a ! Fresh { w: "a" }
+                    a ! Local { w: "ab" }
+                    a ! Arm { k: 1, w: "abc" }
+                    a ! Rename { w: "abcd" }
+                    int _t = a ? Get {}
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 50 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_actor_state_struct_replace passed ===")
+}

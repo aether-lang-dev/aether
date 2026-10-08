@@ -452,11 +452,15 @@ jobs:
         startsWith(github.ref, 'refs/tags/')
       )
     runs-on: ${{ matrix.os }}
-    # A healthy build+test is ~10 min (macOS ARM64 up to ~22). Cap well under
-    # GitHub's multi-hour default so a hung test (see the per-test `timeout`
-    # in Makefile test-ae) can't idle the release job for ~3h before it's
-    # cancelled — the failure mode that left 0.442.0 tagged but unpublished.
-    timeout-minutes: 45
+    # Capped well under GitHub's multi-hour default so a hung test (see the
+    # per-test `timeout` in Makefile test-ae) can't idle the release job for
+    # ~3h before it's cancelled, the failure mode that left 0.442.0 tagged but
+    # unpublished. The cap is per platform, from what a healthy run takes: up
+    # to ~22 min on macOS ARM64, while the Windows leg's test step alone took
+    # 34.5 min for 0.791.0 and 36.5 min for 0.792.0, and windows.yml's
+    # Build + Test of the same suite took up to 52 min. A cap of 45 for every
+    # leg cancelled 0.793.0's Windows test step and left it unpublished (#2557).
+    timeout-minutes: ${{ matrix.timeout }}
 
     strategy:
       fail-fast: false
@@ -475,15 +479,19 @@ jobs:
           - os: ubuntu-22.04
             target: linux-x86_64
             ext: ""
+            timeout: 45
           - os: macos-15-intel
             target: macos-x86_64
             ext: ""
+            timeout: 45
           - os: macos-latest
             target: macos-arm64
             ext: ""
+            timeout: 45
           - os: windows-latest
             target: windows-x86_64
             ext: ".exe"
+            timeout: 80
 
     steps:
     - uses: actions/checkout@v4

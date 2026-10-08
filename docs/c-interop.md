@@ -1246,23 +1246,21 @@ grows with every release. A top-level function in your entry file called
 symbol, breaking a build that had worked for months with no change to your code
 (#1366).
 
-Two things prevent that now, and neither is a name list that has to be kept up
-to date:
+What prevents that now is not a name list that has to be kept up to date:
+**a function whose name matches an extern the same file declares is renamed**
+to the `ae_` spelling above. Importing `std.string` puts a
+`string_replace_all` prototype in your translation unit, so your own function
+of that name is emitted as `ae_string_replace_all`. Calls follow the rename;
+`string.replace_all(...)` still reaches the standard library. It is invisible
+to Aether source.
 
-- **Top-level functions in an executable build get internal linkage.** The
-  generated C for an executable is a single translation unit, so nothing
-  outside it can legitimately reference those functions by name, and `static`
-  means the linker never compares them against `libaether.a` at all.
-- **A function whose name matches an extern the same file declares is renamed**
-  to the `ae_` spelling above. Importing `std.string` puts a
-  `string_replace_all` prototype in your translation unit, so your own function
-  of that name is emitted as `ae_string_replace_all`. Calls follow the rename;
-  `string.replace_all(...)` still reaches the standard library.
-
-Both are invisible to Aether source. `--emit=lib`, `--emit=both` and
-`--emit=csrc` are excluded from the linkage change, because there the bare
-symbols of functions the flattened ABI cannot express (builders, `fn`-typed
-parameters) are a documented part of what consumers link against.
+A top-level function of the entry file keeps external linkage, under its own
+name when nothing collides with it: a C file built into the program can call
+it, against a header it shares with the Aether definition (#703). Making those
+functions `static` would also have kept them away from `libaether.a`, but it
+would break that. The functions of imported modules have internal linkage
+(each translation unit gets its own copy), and so does a file-local function
+whose name ends in `_` (#279).
 
 ### When to use `@c_callback` instead
 
@@ -1270,10 +1268,10 @@ If your Aether function specifically needs a **stable, unprefixed C
 symbol**, e.g. it's going to be looked up via `dlsym()` from a host
 program, or passed as a function pointer to a C library, annotate
 it with `@c_callback("desired_c_name")`. That bypasses the prefix
-logic and emits exactly the symbol you ask for. It is also the opt-out
-from the internal-linkage rule above: a `@c_callback` function keeps
-external linkage in every emit mode, so a C file you pass with
-`--extra` (or `extra_sources` in `aether.toml`) can call it by name.
+logic and emits exactly the symbol you ask for, and it keeps external
+linkage in every emit mode, even in an imported module or for a name
+ending in `_`, so a C file you pass with `--extra` (or `extra_sources`
+in `aether.toml`) can call it by name.
 
 ### Aether-keyword collisions
 

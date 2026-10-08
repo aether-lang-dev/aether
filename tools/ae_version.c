@@ -120,8 +120,13 @@ int ae_download_ex(const char* url, const char* dest, int max_seconds) {
     char ps_timeout[48] = "";
     if (max_seconds > 0)
         snprintf(ps_timeout, sizeof(ps_timeout), " -TimeoutSec %d", max_seconds);
+    /* #2530: Stop makes a failed request (a 404 included) end the script
+     * with exit code 1. Under the default preference powershell exited 0
+     * having written nothing, and the caller reported a download that was
+     * never made as "Downloaded file not found". */
     fprintf(ps,
         "$ProgressPreference='SilentlyContinue'\n"
+        "$ErrorActionPreference='Stop'\n"
         "Invoke-WebRequest -Uri '%s' -OutFile '%s' "
         "-Headers @{'User-Agent'='ae-cli'}%s\n",
         url, dest, ps_timeout);
@@ -378,6 +383,59 @@ static int cmd_version_list(void) {
 }
 
 // Download and install a specific version into ~/.aether/versions/<tag>/
+static int fetch_latest_release_tag(char* out, size_t outlen);
+
+/* #2530: the archive for `vtag` could not be had. Ask GitHub why, so the
+ * reader knows whether to wait, pick another version or look at the
+ * network: the tag may have no release published yet (a release follows its
+ * tag once that tag's build has finished), or the release may carry no
+ * archive for this platform. Asked only after a download failed, so an
+ * install that works makes no API call. */
+static void explain_missing_release(const char* vtag, const char* filename) {
+    char json_path[512];
+    snprintf(json_path, sizeof(json_path), "%s/ae_release_%d.json",
+             get_temp_dir(), (int)getpid());
+    char url[256];
+    snprintf(url, sizeof(url),
+        "https://api.github.com/repos/" AE_GITHUB_REPO "/releases/tags/%s", vtag);
+    int has_release = ae_download_ex(url, json_path, 15) == 0;
+    int has_asset = 0;
+    if (has_release) {
+        FILE* f = fopen(json_path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char* buf = n > 0 ? (char*)malloc((size_t)n + 1) : NULL;
+            if (buf) {
+                size_t got = fread(buf, 1, (size_t)n, f);
+                buf[got] = '\0';
+                has_asset = strstr(buf, filename) != NULL;
+                free(buf);
+            }
+            fclose(f);
+        } else {
+            has_release = 0;
+        }
+    }
+    remove(json_path);
+    char latest[64];
+    int known = fetch_latest_release_tag(latest, sizeof(latest)) == 0;
+    if (!known) {
+        fprintf(stderr, "GitHub's release list could not be read (no network, or its "
+                        "API rate limit), so why the download failed is unknown.\n");
+        return;
+    }
+    if (!has_release)
+        fprintf(stderr, "%s has no published release, so there is no archive to "
+                        "download yet; a release follows its tag once that tag's "
+                        "build has finished.\n", vtag);
+    else if (!has_asset)
+        fprintf(stderr, "The %s release has no archive for " AE_PLATFORM " (%s).\n",
+                vtag, filename);
+    fprintf(stderr, "The latest release is %s. Available versions: ae version list\n", latest);
+}
+
 static int cmd_version_install(const char* version) {
     char vtag[64];
     if (version[0] != 'v') snprintf(vtag, sizeof(vtag), "v%s", version);
@@ -449,8 +507,9 @@ static int cmd_version_install(const char* version) {
     printf("Downloading Aether %s for " AE_PLATFORM "...\n", vtag);
     fflush(stdout);
     if (ae_download(url, archive) != 0) {
-        fprintf(stderr, "Error: Version %s not found for " AE_PLATFORM ".\n", vtag);
-        fprintf(stderr, "Run 'ae version list' to see available versions.\n");
+        remove(archive);
+        fprintf(stderr, "Error: could not download %s for " AE_PLATFORM ".\n", vtag);
+        explain_missing_release(vtag, filename);
         return 1;
     }
 
@@ -460,7 +519,8 @@ static int cmd_version_install(const char* version) {
     {
         FILE* af = fopen(archive, "rb");
         if (!af) {
-            fprintf(stderr, "Error: Downloaded file not found.\n");
+            fprintf(stderr, "Error: could not download %s for " AE_PLATFORM ".\n", vtag);
+            explain_missing_release(vtag, filename);
             return 1;
         }
         fseek(af, 0, SEEK_END);
@@ -477,9 +537,9 @@ static int cmd_version_install(const char* version) {
 
         if (!is_gzip && !is_zip && !is_xz) {
             remove(archive);
-            fprintf(stderr, "Error: Version %s not found for platform " AE_PLATFORM ".\n", vtag);
-            fprintf(stderr, "The download returned an error page, not a release archive.\n");
-            fprintf(stderr, "Available versions: ae version list\n");
+            fprintf(stderr, "Error: the download of %s for " AE_PLATFORM " returned an error "
+                            "page, not a release archive.\n", vtag);
+            explain_missing_release(vtag, filename);
             return 1;
         }
         if (asize < 1024) {
@@ -657,6 +717,66 @@ static void resolve_version_bin_dir(const char* ver_dir, char* out, size_t outsz
 #endif
 }
 
+#ifdef _WIN32
+/* #2529: see cmd_version_use. For each file in `src_bin`, moves
+ * <dest_root>\bin\<name> to <name>.old (replacing an older .old). Returns
+ * how many were moved. */
+static int win_move_bin_aside(const char* src_bin, const char* dest_root) {
+    char pattern[1024];
+    snprintf(pattern, sizeof(pattern), "%s\\*", src_bin);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int moved = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        char cur[1024], old[1100];
+        snprintf(cur, sizeof(cur), "%s\\bin\\%s", dest_root, fd.cFileName);
+        snprintf(old, sizeof(old), "%s.old", cur);
+        if (GetFileAttributesA(cur) == INVALID_FILE_ATTRIBUTES) continue;
+        DeleteFileA(old);
+        if (MoveFileExA(cur, old, MOVEFILE_REPLACE_EXISTING)) moved++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return moved;
+}
+
+/* The copy failed: put back each moved file the copy did not replace. */
+static void win_restore_bin(const char* src_bin, const char* dest_root) {
+    char pattern[1024];
+    snprintf(pattern, sizeof(pattern), "%s\\*", src_bin);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        char cur[1024], old[1100];
+        snprintf(cur, sizeof(cur), "%s\\bin\\%s", dest_root, fd.cFileName);
+        snprintf(old, sizeof(old), "%s.old", cur);
+        if (GetFileAttributesA(cur) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesA(old) != INVALID_FILE_ATTRIBUTES)
+            MoveFileExA(old, cur, 0);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+/* Deletes the bin\*.old files no process holds any more; the one this
+ * process runs from stays until a later switch. */
+static void win_delete_bin_leftovers(const char* dest_root) {
+    char pattern[1024];
+    snprintf(pattern, sizeof(pattern), "%s\\bin\\*.old", dest_root);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char path[1100];
+        snprintf(path, sizeof(path), "%s\\bin\\%s", dest_root, fd.cFileName);
+        DeleteFileA(path);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+#endif
+
 int cmd_version_use(const char* version) {
     char vtag[64];
     if (version[0] != 'v') snprintf(vtag, sizeof(vtag), "v%s", version);
@@ -703,7 +823,7 @@ int cmd_version_use(const char* version) {
                     snprintf(dest_root_bak, sizeof(dest_root_bak), "%s\\.aether", home);
                     mkdirs(cur_ver_dir);
                     snprintf(bak_cmd, sizeof(bak_cmd),
-                        "robocopy \"%s\" \"%s\" /E /NFL /NDL /NJH /NJS /IS /IT /XD versions cache >nul 2>&1",
+                        "robocopy \"%s\" \"%s\" /E /R:0 /W:0 /NFL /NDL /NJH /NJS /IS /IT /XD versions cache >nul 2>&1",
                         dest_root_bak, cur_ver_dir);
                     if (system(bak_cmd) != 0) { /* backup failed — non-fatal */ }
                 }
@@ -715,10 +835,22 @@ int cmd_version_use(const char* version) {
     // share/ are available alongside bin/.
     char dest_root[512];
     snprintf(dest_root, sizeof(dest_root), "%s\\.aether", home);
+    /* #2529: Windows refuses to overwrite a running executable, or a DLL it
+     * has loaded, but lets either be renamed. bin/ae.exe is usually the
+     * process running this command, so every file of the new version's bin/
+     * that bin/ already has is moved aside to <name>.old first; the copy then
+     * writes a fresh file, and the next switch deletes the .old ones that are
+     * no longer in use. Without this, robocopy retried the locked ae.exe its
+     * default 1,000,000 times, 30 s apart, with its output sent to nul. */
+    /* A version laid out flat (no bin\, resolve_version_bin_dir) is copied
+     * to the root, not into bin\: nothing there is overwritten, so nothing
+     * is moved, and moving would leave bin\ without the files it had. */
+    int moved = strcmp(src_bin, ver_dir) != 0 ? win_move_bin_aside(src_bin, dest_root) : 0;
     char cmd[2048];
-    // robocopy /E copies all subdirectories; /NFL /NDL /NJH /NJS suppress output
+    // robocopy /E copies all subdirectories; /R:0 /W:0 never waits on a file
+    // it cannot copy; /NFL /NDL /NJH /NJS suppress output.
     snprintf(cmd, sizeof(cmd),
-        "robocopy \"%s\" \"%s\" /E /NFL /NDL /NJH /NJS /IS /IT >nul 2>&1",
+        "robocopy \"%s\" \"%s\" /E /R:0 /W:0 /NFL /NDL /NJH /NJS /IS /IT >nul 2>&1",
         ver_dir, dest_root);
     int rc = system(cmd);
     // robocopy returns 0-7 for success, >=8 for failure
@@ -727,10 +859,13 @@ int cmd_version_use(const char* version) {
         snprintf(cmd, sizeof(cmd),
             "xcopy /E /Y /Q \"%s\\*\" \"%s\\\"", ver_dir, dest_root);
         if (system(cmd) != 0) {
-            fprintf(stderr, "Failed to copy version files from %s to %s\n", ver_dir, dest_root);
+            if (moved) win_restore_bin(src_bin, dest_root);
+            fprintf(stderr, "Failed to copy version files from %s to %s (robocopy exit %d): "
+                            "a file there is in use or not writable.\n", ver_dir, dest_root, rc);
             return 1;
         }
     }
+    win_delete_bin_leftovers(dest_root);
 #else
     // Backup current version to versions/ before switching (preserves initial install)
     {

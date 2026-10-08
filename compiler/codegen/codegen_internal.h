@@ -145,6 +145,14 @@ enum {
     STR_TAKE_RUNTIME = 2    /* depends on the arm taken at run time */
 };
 int is_owned_string_field_read(ASTNode* e);
+int struct_is_observable(CodeGenerator* gen, const char* struct_name);
+/* A call that takes the caller's reference to the string at argument `idx`
+ * (a free, or a function whose body frees that parameter), and the two
+ * shapes an owned field read takes there: handed over, or freed. */
+int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int idx);
+int field_read_can_hand_off(ASTNode* e);
+void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
+void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
 void string_take_new_flag(char* buf, size_t n);
@@ -303,6 +311,13 @@ int container_store_slot(CodeGenerator* gen, ASTNode* call);
  * rule for a `string` argument (does the caller's pointer live on?). */
 int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx);
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
+/* Release the parameter table box_trackers_are_initialised builds. */
+void zb_params_free(CodeGenerator* gen);
+void code_generator_release(CodeGenerator* gen);
+/* The statement temporary holding a call's struct result, or NULL. */
+const char* stmt_struct_temp_of(const ASTNode* expr);
+/* Drop `e as T` between string types before ownership is decided. */
+void erase_string_retype_casts(ASTNode* node);
 int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth);
 int body_may_assign_var_from_heap(CodeGenerator* gen, ASTNode* node, const char* var_name);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);

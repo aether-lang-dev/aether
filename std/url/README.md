@@ -38,7 +38,9 @@ a b err=''
 ## Query strings
 
 `parse_query` returns `(list, err)`; `query_get` reads a single value from it,
-and `query_get_all` returns every value bound to a repeated key.
+and `query_get_all` returns every value bound to a repeated key. Both lists
+are the caller's, released with `query_free`. A malformed query returns a null
+list with the error, which the readers and `query_free` take as empty.
 
 ```aether,run
 import std.url
@@ -51,6 +53,7 @@ main() {
 
     // An absent key reads as the empty string rather than an error.
     println("missing='${url.query_get(q, "nope")}'")
+    url.query_free(q)
 }
 ```
 ```output
@@ -63,4 +66,4 @@ missing=''
 ## Exports
 
 `encode`, `encode_path`, `encode_strict`, `decode`, `parse_query`,
-`query_get`, `query_get_all`.
+`query_get`, `query_get_all`, `query_free`.

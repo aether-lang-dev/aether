@@ -1,0 +1,109 @@
+// Regression: `e as T` between string types (a `distinct string` and its
+// base) is the operand's own pointer, owned exactly as the operand is.
+// Codegen used to keep the cast, which hid the operand's shape from the
+// ownership rules, with two failures:
+//   - `t = x as Tag` borrowed the local x where `t = x` copies it, so a
+//     function returning t returned the buffer its exit had just freed
+//     (keep_alias below read back another string's bytes);
+//   - `return made(s) as Tag` was not seen to hand over the call's result,
+//     so no caller freed it: std.language's base() leaked on every call.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+type Tag = distinct string
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+made(s: string) -> string {
+    return string.concat(s, "-x")
+}
+
+via_call(s: string) -> Tag {
+    return made(s) as Tag
+}
+
+via_local(s: string) -> Tag {
+    x = string.concat(s, "!")
+    return x as Tag
+}
+
+via_param(s: string) -> Tag {
+    return s as Tag
+}
+
+mixed(c: int, s: string) -> Tag {
+    if c > 0 {
+        return string.concat(s, "b") as Tag
+    }
+    return "z" as Tag
+}
+
+// x is read after the cast, so t must hold a copy of its own.
+keep_alias(s: string) -> Tag {
+    x = string.concat(s, "?")
+    t = x as Tag
+    if string.length(x) > 100 {
+        return "big" as Tag
+    }
+    return t
+}
+
+round(s: string) -> int {
+    a = via_call(s)
+    b = via_local(s)
+    c = via_param(s)
+    d = mixed(1, s)
+    e = mixed(0, s)
+    g = keep_alias(s)
+    // Same size as g's buffer: under the use after free, g read this back.
+    h = made(s)
+    t = string.concat(s, "k") as Tag
+    t = made(s) as Tag
+    raw = string.concat(s, "l")
+    i = raw as Tag
+    j = i
+    check(a as string == "w-x", "a call's result through a cast")
+    check(b as string == "w!", "a local returned through a cast")
+    check(c as string == "w", "a parameter through a cast")
+    check(d as string == "wb", "a built string on one return path")
+    check(e as string == "z", "a literal on the other")
+    check(g as string == "w?", "an alias of a local that is read again")
+    check(h == "w-x", "the string allocated after it")
+    check(t as string == "w-x", "a rebinding through a cast")
+    check(i as string == "wl" && j as string == "wl" && raw == "wl", "aliases of a local")
+    return string.length(g as string) + string.length(h)
+}
+
+main() {
+    println("=== test_distinct_string_cast_ownership ===")
+    check(round("w") == 5, "keep_alias and made")
+    k = 0
+    while k < 20 {
+        round("w")
+        k = k + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                n = 0
+                while n < 200 {
+                    round("w")
+                    n = n + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_distinct_string_cast_ownership passed ===")
+}

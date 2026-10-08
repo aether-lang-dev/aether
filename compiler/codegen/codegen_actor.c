@@ -363,7 +363,13 @@ static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node) {
 static void mark_state_stored_struct_vars(CodeGenerator* gen, ASTNode* node) {
     if (!node) return;
     if (node->type == AST_VARIABLE_DECLARATION && is_actor_state_var(gen, node->value)) {
-        for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i]);
+        /* A struct that owns strings is taken by the store (`<Name>_replace`
+         * with emit_struct_take): a local is moved in on its last use and
+         * copied otherwise, so it keeps its scope-exit destroy, which then
+         * releases what it still owns. */
+        ASTNode* v = node->child_count > 0 ? node->children[0] : NULL;
+        if (!(v && struct_owning_strings(gen, v->node_type)))
+            for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i]);
     } else if (node->type == AST_ASSIGNMENT && node->child_count >= 2) {
         const char* root = store_target_root(node->children[0]);
         if (root && (strcmp(root, "self") == 0 || is_actor_state_var(gen, root))) {

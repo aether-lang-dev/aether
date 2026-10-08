@@ -1566,39 +1566,88 @@ static bool get_exe_dir(char* buf, size_t size) {
 // --------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Recursive directory walker — emits `-I<path>` for `root` and every
-// subdirectory it contains, space-separated, into `out`. Used to build
+// Recursive directory walker: emits `-idirafter <path>` for `root` and every
+// subdirectory it contains that holds a header, space-separated, into `out`.
+// Used to build
 // `tc.include_flags` dynamically rather than maintaining a hardcoded
 // list (issue #329 follow-on item 2). The hardcoded list silently
 // missed `std/bytes`, `std/cryptography`, `std/zlib`, `std/dl`,
 // `std/config`, `std/actors`, and the entire `std/http*` tree as
 // those modules landed; the walker doesn't.
 //
-// Returns 1 on success, 0 if the buffer would overflow (caller can
-// surface that as a fatal error — 4 KiB is enough for any reasonable
-// install layout, and overflow means the layout grew beyond what
-// `tc.include_flags` can hold).
+// Returns 1 on success, 0 when the flag buffer cannot grow (out of
+// memory); the callers warn that some directories were dropped.
 // ---------------------------------------------------------------------------
 
-static int append_include_one_dir(char** out, size_t* out_size, size_t* pos, const char* path) {
+/* Appends `<flag><path>` to the space-separated flag list in `out`: "-I" for
+ * a directory searched before the compiler's own, "-idirafter " for one
+ * searched after the compiler's and the system's. */
+static int append_include_flag(char** out, size_t* out_size, size_t* pos,
+                               const char* flag, const char* path) {
+    size_t flag_len = strlen(flag);
     size_t path_len = strlen(path);
-    // " -I<path>" needs path_len + 4 bytes plus the NUL.
-    size_t need = (*pos == 0 ? 0 : 1) + 2 + path_len + 1;
+    size_t need = (*pos == 0 ? 0 : 1) + flag_len + path_len + 1;
     if (!str_buf_grow(out, out_size, *pos + need)) return 0;
     char* buf = *out;
     if (*pos != 0) buf[(*pos)++] = ' ';
-    buf[(*pos)++] = '-';
-    buf[(*pos)++] = 'I';
+    memcpy(buf + *pos, flag, flag_len);
+    *pos += flag_len;
     memcpy(buf + *pos, path, path_len);
     *pos += path_len;
     buf[*pos] = '\0';
     return 1;
 }
 
+static int append_include_one_dir(char** out, size_t* out_size, size_t* pos, const char* path) {
+    return append_include_flag(out, out_size, pos, "-I", path);
+}
+
+/* Does `dir` hold a C header? Only such a directory can resolve an include:
+ * one without (a module of .ae and .c files, a directory of directories)
+ * would only be one more place the compiler looks in vain. */
+static int dir_has_header(const char* dir) {
+#ifdef _WIN32
+    char pattern[1024];
+    snprintf(pattern, sizeof(pattern), "%s\\*.h", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int found = 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { found = 1; break; }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+#else
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent* ent;
+    while (!found && (ent = readdir(d)) != NULL) {
+        size_t n = strlen(ent->d_name);
+        found = n > 2 && strcmp(ent->d_name + n - 2, ".h") == 0;
+    }
+    closedir(d);
+    return found;
+#endif
+}
+
+/* #2552: a runtime or std directory that holds a header goes after the
+ * compiler's own and the system directories (-idirafter), not before them
+ * (-I). A program needs these only for the headers Aether ships, whose names
+ * no system header shares. Searched first, every system header a program
+ * includes (<windows.h> pulls in dozens) was first looked for in each of
+ * them, and on Windows one such probe of std/cryptography/sm3 came back
+ * EINVAL, which gcc treats as fatal. A directory without a header is left
+ * out: an installed tree has 224 directories and 98 hold a header, and the
+ * longer flag still makes a shorter command than -I on every one of them.
+ * A quoted include still finds a header next to the file that includes it
+ * first. */
 static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_size, size_t* pos) {
     if (!root || !*root) return 1;
-    // Emit the root itself first.
-    if (!append_include_one_dir(out, out_size, pos, root)) return 0;
+    // The root itself first.
+    if (dir_has_header(root) &&
+        !append_include_flag(out, out_size, pos, "-idirafter ", root)) return 0;
 
 #ifdef _WIN32
     char pattern[1024];
@@ -1858,6 +1907,12 @@ void discover_toolchain(void) {
 found_root:
     // Propagate AETHER_HOME to child processes (aetherc) so module
     // resolution works even when the shell environment is not configured.
+    // #2487: it replaces a value the environment already has. The root found
+    // here is the toolchain whose aetherc and libaether this build uses, so
+    // its std is the one to compile against: a dev-mode ./build/ae run with
+    // AETHER_HOME naming an older install compiled that install's std with
+    // the new compiler (`fs.write_atomic expects 3 arguments`, 0.627's
+    // signature), whenever no std/ sat in the working directory.
 #ifdef _WIN32
     {
         char env_buf[1100];
@@ -1865,7 +1920,7 @@ found_root:
         _putenv(env_buf);
     }
 #else
-    setenv("AETHER_HOME", tc.root, 0);
+    setenv("AETHER_HOME", tc.root, 1);
 #endif
 
     /* Resolve the SOURCE root once, now that root and dev_mode are settled.
@@ -10393,7 +10448,7 @@ static int cmd_cflags(int argc, char** argv) {
             want_cflags = false;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: ae cflags [--cflags|--libs]\n");
-            printf("  Print -I and link flags so external builds can:\n");
+            printf("  Print the include and link flags so external builds can:\n");
             printf("      gcc your.c $(ae cflags) -o your\n");
             printf("  Without arguments, prints both. Pass --cflags or --libs to subset.\n");
             return 0;

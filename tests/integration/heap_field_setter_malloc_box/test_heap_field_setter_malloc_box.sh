@@ -18,7 +18,7 @@ OUT=$("$AE" run "$SCRIPT_DIR/prog.ae" 2>&1) || {
 }
 
 case "$OUT" in
-    *"survived: hello"*) ;;
+    *"survived: hello"*"survived both: both"*"survived maybe: maybe"*) ;;
     *)
         echo "  [FAIL] heap_field_setter_malloc_box: unexpected output"
         echo "$OUT" | sed 's/^/    /' | head -10

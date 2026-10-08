@@ -6,6 +6,7 @@
 
 import std.url
 import std.collections
+import std.mem
 import std.string
 
 main() {
@@ -125,14 +126,39 @@ main() {
     }
     print("PASS: leading '?' stripped\n")
 
-    // Reclaim the string_lists handed back by url.parse_query /
-    // url.query_get_all — std.collections lists are caller-owned
-    // (explicit container ownership; only heap-string and *StringSeq
-    // *locals* auto-free). Without these the program leaks the parsed
-    // query storage at exit.
-    string_list_free(all)
-    string_list_free(list)
-    string_list_free(list2)
+    // A malformed escape returns a null list with the error: the entries
+    // parsed before it are freed by parse_query, and the readers and
+    // query_free take null as an empty query.
+    bad, bad_err = url.parse_query("ok=1&bad=%zz")
+    if bad != null || bad_err == "" || url.query_get(bad, "ok") != "" {
+        print("FAIL: malformed query err='${bad_err}'\n")
+        exit(1)
+    }
+    url.query_free(bad)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    b2, _ = url.parse_query("ok=1&bad=%zz")
+                    url.query_free(b2)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            print("FAIL: 100 malformed queries grew the heap by ${grown} bytes in every run\n")
+            exit(1)
+        }
+    }
+    print("PASS: a malformed query keeps nothing\n")
+
+    // The lists url.parse_query and url.query_get_all hand back are the
+    // caller's (explicit container ownership; only heap-string and
+    // *StringSeq *locals* auto-free), released with url.query_free.
+    url.query_free(all)
+    url.query_free(list)
+    url.query_free(qall)
+    url.query_free(q2)
+    url.query_free(list2)
 
     print("\nAll PASS\n")
 }

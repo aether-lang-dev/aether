@@ -531,6 +531,13 @@ typedef struct {
     int callee_memo_cap;
     int callee_memo_count;
 
+    // #2369: which pointer-to-struct parameters only ever hold a heap.new
+    // box, because every call passes one (ZbParams, private to
+    // codegen_stmt.c). Built once per program, the first time a box is
+    // asked about: 0 not built, 1 building, 2 built.
+    void* zb_params;
+    int zb_params_state;
+
     // #752: struct locals that escape via a return (directly or as a
     // tuple element). Such a struct's heap-string fields belong to the
     // caller once returned, so the function-exit <Struct>_destroy defer

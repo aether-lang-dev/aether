@@ -146,7 +146,25 @@ if ! printf '%s\n' "$out" | grep -q "no_such_header.h"; then
     fail=1
 fi
 
+# 6. an edit to the header rebuilds (#2560). The C compiler reads it, not
+#    aetherc, so the dependency manifest the warm cache key is made from did
+#    not name it: the third build below was a cache hit that linked the
+#    object built from the old header.
+mkdir -p "$tmp/lib2/editmod"
+cp "$tmp/lib/hdrmod/api.h" "$tmp/lib2/editmod/api.h"
+sed 's/hdrmod/editmod/g' "$tmp/lib/hdrmod/module.ae" > "$tmp/lib2/editmod/module.ae"
+printf 'import editmod\nmain() { println("${editmod.twice(21)}") }\n' > "$tmp/proj/edit.ae"
+edit_run() { (cd "$tmp/proj" && AETHER_CACHE_DIR="$tmp/cache" "$AE" run --lib "$tmp/lib2" edit.ae 2>&1 | tail -1); }
+first="$(edit_run)"
+warm="$(edit_run)"
+sed 's/v \* 2/v * 3/' "$tmp/lib/hdrmod/api.h" > "$tmp/lib2/editmod/api.h"
+edited="$(edit_run)"
+if [ "$first $warm $edited" != "42 42 63" ]; then
+    echo "  [FAIL] c_include_directive: an edited @c_include header was served from the cache (got '$first $warm $edited', want '42 42 63')"
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] c_include_directive: a module's header reaches the TU (once), with its directory on the include path, and a dropped import takes it with; $cross"
+    echo "  [PASS] c_include_directive: a module's header reaches the TU (once), with its directory on the include path, a dropped import takes it with, and an edit to it rebuilds; $cross"
 fi
 exit $fail

@@ -31,6 +31,14 @@ set_it(b: *Box) {
     b.s = "hello"
 }
 
+// One call passes a heap.new box, another a malloc'd one. A parameter of a
+// function whose every call the compiler sees (a file-local `name_`) is
+// trusted only when every call passes a box (#2565), so this store must not
+// read the tracker either.
+set_both_(b: *Box) {
+    b.s = "both"
+}
+
 main() {
     // Dirty a block, free it, then take it back: the tracker slot now holds
     // 0xAB bytes rather than incidental zeros.
@@ -42,5 +50,27 @@ main() {
     b.p0 = 1
     set_it(b)
     println("survived: ${b.s}")
+
+    h = heap.new(Box)
+    set_both_(h)
+    dirty2 = malloc(128)
+    _y = memset(dirty2, 171, 128)
+    c_free(dirty2)
+    b2 = malloc(128) as *Box
+    set_both_(b2)
+    println("survived both: ${b2.s}")
+
+    // A local bound to heap.new on one branch and to a malloc'd box on the
+    // path taken: some binding being a heap.new box is no reason to read
+    // the tracker; every binding must be one.
+    dirty3 = malloc(128)
+    _z = memset(dirty3, 171, 128)
+    c_free(dirty3)
+    b3 = malloc(128) as *Box
+    if b.p0 == 2 {
+        b3 = heap.new(Box)
+    }
+    b3.s = "maybe"
+    println("survived maybe: ${b3.s}")
     return 0
 }

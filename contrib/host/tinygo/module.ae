@@ -23,12 +23,11 @@
 //   total  = tinygo.call_int_int_int(handle, "Add", 2, 40)
 //   tinygo.unload(handle)
 //
-// Calling-convention surface for v1: pre-defined wrapper signatures
-// for the most common shapes (int(), int(int), int(int,int), void(int),
-// const char*(const char*)). Adding more shapes is a one-line C
-// extension; libffi-style fully dynamic dispatch is intentionally out
-// of scope for v1 (libffi adds a system dependency 95% of users do
-// not need).
+// Calling-convention surface: a wrapper per C signature, named
+// call_<ret>_<args> (see the export list), and call_dynamic for any
+// other signature, through libffi when the bridge is built with
+// AETHER_HAS_LIBFFI. A string result is borrowed: see the README's
+// "Memory ownership".
 
 import std.dl
 
@@ -139,10 +138,9 @@ call_void_int(handle: ptr, sym: string, a: int) {
     tinygo_call_void_int(handle, sym, a)
 }
 
-// Invoke `const char* fn(const char*)`. TinyGo `//export` functions
-// returning `string` produce this c-shared signature. Returned
-// pointer ownership follows TinyGo's rule: callee-owned, valid
-// until the next call into the library or library unload.
+// Invoke `const char* fn(const char*)`, the c-shared signature of an
+// `//export` function taking and returning `*C.char`. The result is
+// borrowed: a `C.CString` stays valid until the Go side frees it.
 call_str_str(handle: ptr, sym: string, a: string) -> string {
     return tinygo_call_str_str(handle, sym, a)
 }

@@ -148,6 +148,20 @@ int module_check_source_directives(ASTNode* ast) {
     int ok = 1;
     for (int i = 0; ast && i < ast->child_count; i++) {
         ASTNode* c = ast->children[i];
+        if (c && c->type == AST_C_INCLUDE_DIRECTIVE && c->value) {
+            /* #2560: a header the generated C includes is read by the C
+             * compiler, not by aetherc, so the dependency manifest has to
+             * name it or an edit to it leaves ae's build key unchanged and
+             * the cache serves the old object. The copy beside the module,
+             * the directory first on the include path (emit_c_include_dirs),
+             * is recorded as read; its absence is recorded too, so a header
+             * put there later changes the key. One found elsewhere on the
+             * include path (a system or SDK header) is not followed. */
+            char* path = module_resolve_source_directive(c);
+            if (path && module_probe(path)) module_dep_record_read(path);
+            free(path);
+            continue;
+        }
         if (!c || c->type != AST_SOURCE_DIRECTIVE || !c->value) continue;
         char* path = module_resolve_source_directive(c);
         if (!path) continue;
