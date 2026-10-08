@@ -61,22 +61,32 @@ AetherString* string_new(const char* cstr) {
 }
 
 AetherString* string_new_with_length(const char* data, size_t length) {
-    /* Issue #343: cap-aware allocation. Both the struct and the data
-     * buffer are accounted; string_release frees both with their
-     * recorded sizes (sizeof(AetherString) and capacity), keeping
-     * the cap counter at current-usage rather than high-water-mark. */
-    AetherString* str = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    /* One block, the header then the payload (string_alloc_inline): one
+     * allocation instead of two, and the layout string_release recognises
+     * by construction. As two blocks, the payload could be the very block
+     * after the header (a size-class allocator hands out neighbours:
+     * LeakSanitizer's, macOS malloc), which string_release took for one
+     * block, freeing the header and leaking the payload. Accounted as one
+     * block of sizeof(AetherString) + capacity (#343). */
+    AetherString* str = string_alloc_inline(length);
     if (!str) return NULL;
-    char* buf = (char*)aether_caps_malloc(length + 1);
-    if (!buf) { aether_caps_free(str, sizeof(AetherString)); return NULL; }
-    str->magic = AETHER_STRING_MAGIC;
-    str->length = length;
-    str->capacity = length + 1;
-    str->data = buf;
-    if (data && length) memcpy(buf, data, length);
-    buf[length] = '\0';
-    str->ref_count = 1;
+    if (data && length) memcpy(str->data, data, length);
     return str;
+}
+
+/* The header of a payload allocated on its own (string_adopt_caps_buffer,
+ * fs.read): never the block right before the payload, which string_release
+ * would take, with it, for one block (`data == s + 1`) and free only the
+ * header of. Offered that block, keep it while taking another, which then
+ * cannot be it. */
+static AetherString* string_header_for(const char* buf) {
+    AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    if (s && (const char*)(s + 1) == buf) {
+        AetherString* other = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+        aether_caps_free(s, sizeof(AetherString));
+        s = other;
+    }
+    return s;
 }
 
 AetherString* string_empty(void) {
@@ -91,9 +101,9 @@ AetherString* string_empty(void) {
  * the zero-copy mint the string ops (concat/substring/upper/lower/trim)
  * use so they yield magic AetherStrings without the extra copy
  * string_new_with_length would make. */
-static AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
+AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     if (!buf) return NULL;
-    AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString));
+    AetherString* s = string_header_for(buf);
     if (!s) { aether_caps_free(buf, cap); return NULL; }
     s->magic = AETHER_STRING_MAGIC;
     s->ref_count = 1;
@@ -126,8 +136,9 @@ void string_release(const void* str) {
          *
          * A string from string_alloc_inline holds both in ONE block, with
          * `data` pointing just past the header, so freeing it separately
-         * would free an interior pointer. Recognised by position rather
-         * than by a flag: there is nothing to keep in sync. */
+         * would free an interior pointer. Recognised by position, which
+         * holds because no two-block string has its payload there
+         * (string_header_for). */
         if (s->data == (char*)(s + 1)) {
             aether_caps_free(s, sizeof(AetherString) + s->capacity);
         } else {
@@ -1045,6 +1056,7 @@ char* aether_string_mutable_data(void* s) {
 }
 
 AetherString* string_alloc_inline(size_t length) {
+    if (length > (size_t)-1 - sizeof(AetherString) - 1) return NULL;
     AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString) + length + 1);
     if (!s) return NULL;
     s->magic = AETHER_STRING_MAGIC;

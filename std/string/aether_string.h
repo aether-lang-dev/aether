@@ -228,6 +228,10 @@ void* aether_string_raw_ptr(const void* s);
  * header, for producers that format their bytes in place. `length` excludes
  * the terminator, which is written for you. NULL on allocation failure. */
 AetherString* string_alloc_inline(size_t length);
+// Adopt an aether_caps_malloc'd payload of `cap` bytes (`length` bytes and
+// a NUL) as a string without copying; on failure the payload is freed and
+// NULL returned.
+AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap);
 
 /* Writable payload of a string the caller owns and has not shared, for
  * producers filling in bytes. NULL when `s` is not a refcounted string. */

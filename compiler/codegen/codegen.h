@@ -514,14 +514,10 @@ typedef struct {
     int return_escaped_string_var_count;
 
     // #2499 copy-on-keep: the `string` parameters of the body being
-    // generated that hold a reference of their own (captured on entry).
-    // Every keep of one is a store that moves it (clearing its tracker)
-    // or copies, a nested closure's capture (a reference of its own), or
-    // a callee that captures in turn, so none is ever an escaped var: its
-    // reassignment and exit frees run, guarded by the tracker, and free
-    // exactly what is left. Marked escaped, the exit free was skipped, and
-    // a parameter kept through a callee that only hands it back
-    // (`fs.make_temp_file`'s prefix, through temp_prefix) leaked its copy.
+    // generated that hold a reference of their own (captured on entry),
+    // heap-tracked locals from there on. Their exit free, when one is
+    // armed, is journaled for panic unwinding as soon as it is
+    // (push_heap_string_exit_free_defers), before any statement runs.
     char** captured_string_params;
     int captured_string_param_count;
 

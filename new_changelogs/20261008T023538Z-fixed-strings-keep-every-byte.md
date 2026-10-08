@@ -15,6 +15,15 @@
   (`"[${s}]"` with `s` = `"x\0y"` had length 3). A C extern whose parameter
   is `string` still receives the bytes up to the first NUL, all a
   `const char*` can carry.
+- **A string is freed whole wherever the allocator put its bytes (#2549).**
+  `string_release` takes a string whose bytes start right after its header
+  for one allocation, and a string built as two (the header, then the
+  bytes) could be laid out just so by an allocator that hands out
+  neighbouring blocks of one size: LeakSanitizer's and macOS malloc do. The
+  release then freed the header and leaked the bytes, as std.spec's suite
+  names did under contrib's leak check. `string_new_with_length` now builds
+  one allocation, which is also one call fewer, and a string that adopts
+  bytes allocated on their own never gets the header just before them.
 - **An escape in an interpolated string means what it means in a plain
   literal (#2512).** `"a\\0b ${n}"` holds a backslash followed by `0b`,
   `"${n}a\\nb"` a backslash and `n`, not a newline; the escapes were decoded

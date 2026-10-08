@@ -304,6 +304,7 @@ int container_store_slot(CodeGenerator* gen, ASTNode* call);
 int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx);
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
 int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth);
+int body_may_assign_var_from_heap(CodeGenerator* gen, ASTNode* node, const char* var_name);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on

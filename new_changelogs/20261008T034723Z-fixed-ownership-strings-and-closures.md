@@ -11,6 +11,15 @@
   local is moved on its last use and copied otherwise, a freshly built string
   is adopted and a literal is borrowed, so every buffer is freed once. A
   function that returns a field read returns a copy its caller owns.
+- **A string bound through a call that hands its argument back takes the
+  argument's ownership (#2548).** `t = pass(s)`, where `pass` returns its
+  parameter as it is, now takes `s` the way `t = s` does: moved on its last
+  use, copied while `s` is still read, and borrowed when the call returned
+  something else on another path (`fs`'s `temp_prefix` returns `"ae"` for
+  an empty prefix). A container store, a struct literal's field and an `if`
+  or `match` arm take such a call the same way. Before, `s` was marked
+  escaped and never freed, and `t` held its buffer untracked: a leak per
+  call, whatever `t` did next.
 - **A string stored into a struct field through a pointer from a call, a
   pointer field or a cast frees the field's previous string (#2369).** Only
   a local bound to `heap.new` in the same function released the old value,
@@ -65,9 +74,12 @@
   either shape: the `aether_config_*` accessors of an `--emit=lib` library
   and the contrib host bridges reading a grant list. std.jsonpath releases
   its parser context with `heap.free`, which frees a diagnostic `_fail`
-  copied into it. A captured parameter is freed on every return, a tuple
-  return included: one kept only through a callee that hands it back
-  (`fs.make_temp_file`'s prefix) was marked escaped and leaked its copy. A
+  copied into it. A call that only hands a parameter back passes it on to
+  wherever its value goes, so a parameter returned through one, or handed
+  through one to a call that keeps nothing, takes no copy:
+  `fs.make_temp_file` copied its prefix and leaked the copy, and
+  `greet(n) { return shout(n) }` freed the copy it returned. A kept
+  parameter's copy is released when a panic unwinds through the function. A
   store into a field of a struct reached through a pointer not proven to be
   a `heap.new` box (`malloc(n) as *T`, freed with `free`) takes no copy,
   since nothing destroys that struct with its fields (`hmac.new` lost its

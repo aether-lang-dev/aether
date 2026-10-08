@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "../../std/string/aether_string.h"
+#include "../../runtime/aether_process_mem.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -277,6 +278,32 @@ TEST_CATEGORY(interp_format_by_length, TEST_CATEGORY_STDLIB) {
     ASSERT_STREQ("-2147483648|0|-9223372036854775808|18446744073709551615|4294967295", out);
 
     string_release(nul);
+}
+
+/* string_release tells a one-block string (header, then payload) from a
+ * two-block one by `data == s + 1`. string_new_with_length builds the one
+ * block itself, and a payload adopted on its own never sits right after its
+ * header, even where an allocator packs blocks of one size class side by
+ * side (LeakSanitizer's, macOS malloc): there a 32-byte header and a 23-byte
+ * payload were neighbours, the pair was freed as one block, and the payload
+ * leaked on every release (#2549: std.spec's suite names under contrib's LSan). */
+TEST_CATEGORY(string_layout_is_unambiguous, TEST_CATEGORY_STDLIB) {
+    int64_t before = aether_heap_in_use();
+    for (int i = 0; i < 256; i++) {
+        AetherString* s = string_new_with_length("vulkan.vk: ray queries", 22);
+        ASSERT_NOT_NULL(s);
+        ASSERT_TRUE(s->data == (char*)(s + 1));
+        ASSERT_EQ(22, (int)aether_string_length(s));
+        AetherString* a = string_new_with_length("eleven char", 11);
+        AetherString* c = string_concat(a, a);   /* a 23-byte adopted payload */
+        ASSERT_NOT_NULL(c);
+        ASSERT_TRUE(c->data != (char*)(c + 1));
+        ASSERT_STREQ("eleven chareleven char", aether_string_data(c));
+        string_release(c);
+        string_release(a);
+        string_release(s);
+    }
+    if (aether_heap_in_use_exact()) ASSERT_TRUE(aether_heap_in_use() == before);
 }
 
 static void* interp_new(const char* fmt, ...) {

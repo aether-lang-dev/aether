@@ -883,6 +883,7 @@ void free_code_generator(CodeGenerator* gen) {
             free(gen->module_global_vars);
         }
         clear_heap_string_vars(gen);
+        clear_captured_string_params(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
         clear_escaped_string_vars(gen);
@@ -1157,8 +1158,6 @@ void clear_captured_string_params(CodeGenerator* gen) {
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name) {
     if (!gen || !var_name) return;
     if (is_escaped_string_var(gen, var_name)) return;
-    /* A captured parameter is never escaped: see captured_string_params. */
-    if (is_captured_string_param(gen, var_name)) return;
     char** new_vars = realloc(gen->escaped_string_vars,
                               sizeof(char*) * (gen->escaped_string_var_count + 1));
     if (!new_vars) return;
@@ -5063,6 +5062,7 @@ static void begin_main_c_function(CodeGenerator* gen) {
     clear_declared_vars(gen);  // Reset for main function
     clear_fnptr_locals(gen);
     clear_heap_string_vars(gen);
+    clear_captured_string_params(gen);   /* #2499: a parameter set is per body */
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
     clear_escaped_string_vars(gen);

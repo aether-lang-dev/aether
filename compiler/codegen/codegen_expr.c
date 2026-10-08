@@ -4264,8 +4264,9 @@ int container_store_slot(CodeGenerator* gen, ASTNode* call) {
  * as every other owning slot does (emit_string_take): moved on its last
  * use, copied otherwise, so the local keeps whatever it did not hand over
  * and the container holds a reference of its own. Only a local some
- * binding of the body gives a heap value (one that only ever holds a
- * literal stays on the raw path, as before), or a `string` parameter of
+ * binding of the body may leave owning a heap value, the take reading its
+ * tracker (one that only ever holds a literal stays on the raw path, as
+ * before), or a `string` parameter of
  * the closure being emitted that took a reference of its own on entry
  * (copy-on-keep, #2499), which is a heap-tracked local from there on.
  * Returns the value node, else NULL. The escape walk asks this same
@@ -4280,7 +4281,7 @@ ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call) {
     ASTNode* val = call->children[e->val_idx];
     if (!val || val->type != AST_IDENTIFIER || !val->value ||
         !is_heap_string_var(gen, val->value)) return NULL;
-    if (body_assigns_var_from_heap(gen, current_fn_body_block(gen), val->value)) return val;
+    if (body_may_assign_var_from_heap(gen, current_fn_body_block(gen), val->value)) return val;
     /* A `string` parameter the closure or function keeps took its own
      * reference on entry (copy-on-keep), so it is heap-tracked here. */
     ASTNode* fn = gen->current_function;

@@ -275,14 +275,7 @@ static AetherString* read_stream_to_eof(FILE* fp) {
     buffer[len] = '\0';
     /* Adopt the buffer as the payload: `capacity` is what was allocated,
      * which is what string_release gives back. */
-    AetherString* out = (AetherString*)aether_caps_malloc(sizeof(AetherString));
-    if (!out) { aether_caps_free(buffer, cap); return NULL; }
-    out->magic = AETHER_STRING_MAGIC;
-    out->ref_count = 1;
-    out->length = len;
-    out->capacity = cap;
-    out->data = buffer;
-    return out;
+    return string_adopt_caps_buffer(buffer, len, cap);
 }
 
 /* The whole file as a refcounted AetherString carrying its byte count, so

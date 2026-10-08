@@ -597,6 +597,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         clear_declared_vars(gen);
                         clear_fnptr_locals(gen);
                         clear_heap_string_vars(gen);
+                        clear_captured_string_params(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
                         print_line(gen, "%s* _pattern = (%s*)_msg_data;", pattern->value, pattern->value);

@@ -48,12 +48,14 @@ fi
 # A hard timeout per test, so a hung server test can never wedge the run:
 # GNU coreutils `timeout` on Linux and MSYS2, `gtimeout` on macOS (coreutils
 # via brew), none on a macOS without coreutils, where tests run unbounded.
+# A leak's second run, for its stacks, unwinds on every allocation: it gets
+# longer.
 if command -v timeout >/dev/null 2>&1; then
-  TO="timeout 120"
+  TO="timeout 120"; TO_STACKS="timeout 600"
 elif command -v gtimeout >/dev/null 2>&1; then
-  TO="gtimeout 120"
+  TO="gtimeout 120"; TO_STACKS="gtimeout 600"
 else
-  TO=""
+  TO=""; TO_STACKS=""
 fi
 
 rc=0
@@ -405,13 +407,10 @@ for entry in "${TESTS[@]}"; do
   # is environment only: the suppression list, and the dlclose shim that keeps
   # the driver mapped long enough for those suppressions to match a module.
   # exitcode=23 distinguishes "leaked" from the program's own failure codes.
-  # fast_unwind_on_malloc=0: the runtime and std archives are built without
-  # frame pointers, so the default unwinder stopped at aether_caps_malloc and
-  # a report named no caller; the DWARF unwinder walks through to the code
-  # that allocated.
+  lsan_opts="suppressions=$LSAN_SUPP:print_suppressions=1:exitcode=23"
   lsan_env=""
   if [ "$use_lsan" = "1" ]; then
-    lsan_env="LD_PRELOAD=$LSAN_KEEP_SO LSAN_OPTIONS=suppressions=$LSAN_SUPP:print_suppressions=1:exitcode=23:fast_unwind_on_malloc=0:malloc_context_size=30"
+    lsan_env="LD_PRELOAD=$LSAN_KEEP_SO LSAN_OPTIONS=$lsan_opts"
   fi
   # Run from a scratch directory that mirrors the repo through symlinks.
   # The programs resolve inputs by relative path (shaders, fixtures), so the
@@ -451,8 +450,20 @@ for entry in "${TESTS[@]}"; do
       grep -E "definitely lost:|ERROR SUMMARY" "$log" | tail -2
     elif [ "$code" = "23" ] && [ "$use_lsan" = "1" ]; then
       printf '  FAIL  %-22s (lsan: leak)\n' "$label"
-      # The frames name the function and line; print enough of them to act on.
-      sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log" | head -60
+      # The runtime and std archives are built without frame pointers, so
+      # the fast unwinder stops at aether_caps_malloc and names no caller.
+      # Run the leaking binary once more with the DWARF unwinder, which walks
+      # through to the code that allocated. It costs an unwind on every
+      # allocation, enough to time the lavapipe tests out, so only a leak
+      # pays for it.
+      ( cd "$rundir" && env LD_PRELOAD="$LSAN_KEEP_SO" \
+          LSAN_OPTIONS="$lsan_opts:fast_unwind_on_malloc=0:malloc_context_size=30" \
+          $TO_STACKS $runner > "$log.stacks" 2>&1 < /dev/null )
+      if grep -q "LeakSanitizer: detected memory leaks" "$log.stacks"; then
+        sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log.stacks" | head -60
+      else
+        sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log" | head -60
+      fi
     elif [ "$code" = "124" ]; then
       printf '  FAIL  %-22s (timeout — did not terminate)\n' "$label"
       tail -40 "$log"

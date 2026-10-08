@@ -1,23 +1,34 @@
-// Regression (#2499 copy-on-keep, found by the macOS leaks gate and LSan):
-// a `string` parameter a function keeps is released on every path, a store
-// into memory nothing destroys takes no copy, and a struct a call returns
-// owning strings is destroyed when the statement that used it is done.
+// Regression (#2499 copy-on-keep, found by the macOS leaks gate, LSan and
+// Linux CI): a `string` parameter a function keeps is released on every
+// path, one it only hands on is not copied, a store into memory nothing
+// destroys takes no copy, and a struct a call returns owning strings is
+// destroyed when the statement that used it is done.
 //
-// 1. A tuple-returning function keeps its parameter only through a callee
-//    that hands it back (fs.make_temp_file's prefix, through temp_prefix):
-//    the copy it took was marked escaped, so no return freed it.
+// 1. A call that only hands the parameter back passes it on to wherever its
+//    value goes (`string.length(pick(p))`, fs.make_temp_file's
+//    `fs_make_temp_file_raw(d, temp_prefix(prefix))`): into a call that
+//    keeps nothing, it is no keep. Counted as one, the function copied the
+//    parameter, and the same call marked the copy escaped, so no return
+//    freed it.
 // 2. A field store through a pointer not proven to be a heap.new box
 //    (`malloc(n) as *T`, freed with free()): nothing destroys that struct,
 //    so the copy a capture took leaked; the parameter now borrows, as the
-//    struct's owner expects.
+//    struct's owner expects. Through a hand-back call too.
 // 3. A fluent chain, `expect_str(s).to_start_with(p)`: the subject the first
 //    call returns owns its string, the next call only borrows it, and the
 //    statement threw it away undestroyed.
+// 4. A function that returns its parameter through a hand-back
+//    (`greet(n) { return shout(n) }`, or `t = pass(s); return t`) keeps
+//    nothing: it took a copy, freed it on return, and its caller read freed
+//    memory (transitive_module_import on Linux CI).
+// 5. A panic unwinding through a function that keeps its parameter
+//    releases the copy, as it releases a local's string.
 //
 // Checked where the heap count is exact (mem.heap_in_use_exact): one of two
 // equal windows grows by exactly 0. The macOS leaks gate runs this program
 // too.
 
+import std.list
 import std.mem
 import std.string
 
@@ -32,7 +43,7 @@ fn check(cond: bool, msg: string) {
     }
 }
 
-// ---- 1. a kept parameter, a tuple return ----
+// ---- 1. a hand-back into a call that keeps nothing ----
 pick(prefix: string) -> string {
     if prefix == "" {
         return "ae"
@@ -61,6 +72,14 @@ make_note(code: int, msg: string) -> *Note {
     return n
 }
 
+pass(s: string) -> string {
+    return s
+}
+
+stash(n: *Note, msg: string) {
+    n.msg = pass(msg)
+}
+
 // ---- 3. a fluent chain ----
 struct Subject {
     value: string
@@ -78,17 +97,56 @@ starts(s: Subject, p: string) -> Subject {
     return Subject { value: s.value, hits: h }
 }
 
+// ---- 4. a parameter returned through a hand-back ----
+shout(s: string) -> string {
+    return s
+}
+
+greet(name: string) -> string {
+    return shout(name)
+}
+
+relay(s: string) -> string {
+    t = pass(s)
+    return t
+}
+
+// ---- 5. a panic through a kept parameter ----
+keep_then_panic(l: ptr, s: string) -> int {
+    list.add(l, s)
+    if string.length(s) > 0 {
+        panic("kept")
+    }
+    return 0
+}
+
 fn round(tag: string) -> int {
     total = 0
     i = 0
     while i < 20 {
         n, err = measure(tag)
-        check(err == "" && n == string.length(tag), "measure sees the kept parameter")
+        check(err == "" && n == string.length(tag), "measure sees the parameter")
         total = total + n
         note = make_note(i, "borrowed")
         check(note.code == i && string.equals(note.msg, "borrowed") == 1, "the note holds its message")
+        stash(note, tag)
+        check(string.equals(note.msg, tag) == 1, "the note holds what stash handed on")
         free(note)
         starts(subject(tag), "ru")
+        g = greet(tag)
+        r = relay(tag)
+        filler = string.concat("overwrite-", tag)
+        check(string.equals(g, tag) == 1 && string.equals(r, tag) == 1 &&
+            string.length(filler) > 0, "greet and relay hand back what they were given")
+        l = list.new()
+        caught = 0
+        try {
+            keep_then_panic(l, tag)
+        } catch e {
+            caught = string.length(e)
+        }
+        check(caught == 4 && list.size(l) == 1, "the panic left the kept copy in the list")
+        list.free(l)
         i = i + 1
     }
     return total
