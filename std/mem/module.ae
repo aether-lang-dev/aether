@@ -429,7 +429,8 @@ extern aether_heap_in_use_exact() -> int
 // True where heap_in_use() counts exactly the blocks the program holds:
 // Windows (a walk of the process's heaps) and a sanitizer's allocator. Any
 // growth between steady rounds is then a leak. False where it reads an
-// allocator's statistics (glibc, macOS, FreeBSD) or has no answer: a leak
+// allocator's statistics (glibc, macOS, FreeBSD), under Wine (whose heap
+// walk counts a low-fragmentation group whole) or has no answer: a leak
 // check there belongs to a leak tool (leaks, valgrind, LeakSanitizer).
 heap_in_use_exact() -> bool {
     return aether_heap_in_use_exact() != 0

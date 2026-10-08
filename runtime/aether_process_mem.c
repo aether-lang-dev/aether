@@ -152,7 +152,17 @@ int64_t aether_heap_in_use(void) {
  * workload those settle over many rounds, so growth between two rounds is
  * not, by itself, a leak there. */
 int aether_heap_in_use_exact(void) {
-#if defined(AETHER_SANITIZER_ALLOCATOR) || defined(_WIN32)
+#if defined(AETHER_SANITIZER_ALLOCATOR)
+    return aether_heap_in_use() >= 0;
+#elif defined(_WIN32)
+    /* Windows' heap walk reports every block. Wine's reports a
+     * low-fragmentation group, which it turns on per size class once that
+     * class is busy, as one block of its whole size whatever it holds
+     * (dlls/ntdll/heap.c, heap_walk_blocks), so under Wine the count moves
+     * by groups and two steady rounds can differ without a leak. Wine's
+     * ntdll exports wine_get_version; Windows' does not. */
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (ntdll && GetProcAddress(ntdll, "wine_get_version")) return 0;
     return aether_heap_in_use() >= 0;
 #else
     return 0;

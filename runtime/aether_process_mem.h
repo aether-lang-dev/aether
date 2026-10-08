@@ -14,8 +14,9 @@
  *     before/after.
  *
  *   - aether_heap_in_use_exact(): 1 where the count is exactly the blocks
- *     the program holds (Windows' heap walk, a sanitizer's allocator), so
- *     any growth between steady rounds is a leak; 0 elsewhere.
+ *     the program holds (Windows' heap walk, not Wine's, which counts a
+ *     low-fragmentation group whole; a sanitizer's allocator), so any
+ *     growth between steady rounds is a leak; 0 elsewhere.
  *
  *   - aether_process_resident() / aether_process_private(): what the OS
  *     charges the process: resident set, and private (not shared) memory.

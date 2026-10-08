@@ -139,7 +139,10 @@ allocator the count is exactly the blocks the program holds, and
 unless something leaks. glibc, macOS and FreeBSD report from allocator
 statistics that also count freed blocks parked in per-thread caches; on a
 workload that churns many allocations those settle over many rounds, so two
-rounds there can differ by a few kilobytes without a leak. Where
+rounds there can differ by a few kilobytes without a leak. A Windows program
+running under Wine is in the same position: Wine's heap walk counts a
+low-fragmentation group as one block of its whole size, however few of its
+slots are in use. Where
 `heap_in_use_exact()` is false, a leak check that must not misfire belongs to
 a leak tool (`leaks`, valgrind, LeakSanitizer).
 
