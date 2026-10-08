@@ -8,6 +8,7 @@
  */
 
 #include "ae_internal.h"
+#include "ae_line.h"
 #include "ae_sha256.h"
 
 #include <stdarg.h>
@@ -716,6 +717,7 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
     size_t cmd_cap = 0;
     /* -I for the modules that declared a `@c_include` (#1986). */
     const char* ae_includes = get_aether_include_flags(c_file);
+    if (!ae_includes) return 1;   /* out of memory, said */
     if (!cross_cmd_fmt(&cmd, &cmd_cap,
             "%s %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
             cc_cmd, sysroot_flag, opt, feature_defs, user_cflags,
@@ -736,36 +738,52 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
 }
 
 /* Read the raw `// aether-link: <tokens>` header codegen emits on the first
- * line of the generated C into `out` (space-padded, e.g. " -lssl -lcrypto ").
- * Unlike ae.c's get_aether_link_flags(), this does NOT drop the capability-
- * managed tokens (-lssl/-lcrypto/-lpcre2-8/...): on the cross path those are
- * precisely the libs the CROSSBUILD_SYSROOT tier-2 probe must decide to link,
- * so the raw set is what says "the program actually imports this". Returns 1
- * if a header was found, 0 otherwise (in which case `out` is "" and the caller
- * links no optional tier-2 lib). */
-static int cross_read_aether_link_raw(const char* c_file, char* out, size_t out_sz) {
-    out[0] = '\0';
+ * line of the generated C into `*out` (space-padded, e.g. " -lssl -lcrypto "),
+ * a string the caller frees. Unlike ae.c's get_aether_link_flags(), this does
+ * NOT drop the capability-managed tokens (-lssl/-lcrypto/-lpcre2-8/...): on
+ * the cross path those are precisely the libs the CROSSBUILD_SYSROOT tier-2
+ * probe must decide to link, so the raw set is what says "the program
+ * actually imports this". Returns 1 if a header was found, 0 otherwise (in
+ * which case `*out` is NULL and the caller links no optional tier-2 lib), -1
+ * when out of memory, after saying so. The line is read whole: the callers'
+ * 2 KB buffers cut a longer one, and a lib named past the cut was never
+ * linked (#2536). */
+static int cross_read_aether_link_raw(const char* c_file, char** out) {
+    *out = NULL;
     if (!c_file) return 0;
     FILE* f = fopen(c_file, "r");
     if (!f) return 0;
-    char line[2048];
-    int lines_read = 0, found = 0;
-    while (lines_read < 8 && fgets(line, sizeof(line), f)) {
+    char* line = NULL;
+    size_t line_cap = 0;
+    int lines_read = 0, found = 0, got = 0;
+    while (lines_read < 8 && (got = ae_read_line(f, &line, &line_cap)) > 0) {
         lines_read++;
         const char* p = strstr(line, "// aether-link:");
         if (!p) continue;
         p += strlen("// aether-link:");
+        size_t n = strlen(p);
+        char* hdr = malloc(n + 3);
+        if (!hdr) { got = -1; break; }
         /* Pad with a leading+trailing space so a whole-token search
          * (" -lz ") never matches a substring (" -lzstd "). */
-        snprintf(out, out_sz, " %s ", p);
+        hdr[0] = ' ';
+        memcpy(hdr + 1, p, n);
+        hdr[n + 1] = ' ';
+        hdr[n + 2] = '\0';
         /* Strip the newline that rode in from the token span. */
-        for (char* q = out; *q; q++) {
+        for (char* q = hdr; *q; q++) {
             if (*q == '\n' || *q == '\r') { *q = ' '; }
         }
+        *out = hdr;
         found = 1;
         break;
     }
+    free(line);
     fclose(f);
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @link flags in %s\n", c_file);
+        return -1;
+    }
     return found;
 }
 
@@ -1048,9 +1066,9 @@ int run_cross_build(const char* c_file, const char* out_file,
      * C includes the header by the name the module wrote, and these say
      * where that name resolves. The cross path compiles the same file. */
     const char* ae_includes = get_aether_include_flags(c_file);
-    char ex_buf[8192 + 8192 + 2];
-    merge_source_lists(extra, ae_sources, ex_buf, sizeof(ex_buf));
-    const char* ex = ex_buf;
+    if (!ae_sources || !ae_includes) return 1;   /* out of memory, said */
+    const char* ex = merge_source_lists(extra, ae_sources);
+    if (!ex) return 1;   /* out of memory, said */
     /* std.audio's vendored miniaudio auto-selects a backend by platform macro:
      * on a macos target it #includes <CoreAudio/CoreAudio.h>, an APPLE FRAMEWORK
      * header that zig's bundled macOS SDK stubs deliberately do NOT ship (the
@@ -1233,8 +1251,8 @@ int run_cross_build(const char* c_file, const char* out_file,
              * (the FileNotFound the tier-2 -L produced under 0.16). An absolute
              * archive path on the link line is a plain input file, immune to
              * that rewriting. */
-            char link_hdr[2048];
-            cross_read_aether_link_raw(c_file, link_hdr, sizeof(link_hdr));
+            char* link_hdr = NULL;
+            if (cross_read_aether_link_raw(c_file, &link_hdr) < 0) return 1;
             size_t p = 0;
             crossbuild_libs[0] = '\0';
             /* The sysroot's headers (openssl/, zlib.h, pcre2.h, ...) must be on
@@ -1314,6 +1332,7 @@ int run_cross_build(const char* c_file, const char* out_file,
                     }
                 }
             }
+            free(link_hdr);
         }
     }
     /* contrib.sqlite with no staged archives: compile it from the pinned
@@ -1321,9 +1340,10 @@ int run_cross_build(const char* c_file, const char* out_file,
      * libaether_sqlite.a keeps precedence, as pcre2's does below. */
     bool vendored_sqlite = false;
     if (!strstr(crossbuild_libs, "libaether_sqlite.a")) {
-        char link_hdr[2048];
-        cross_read_aether_link_raw(c_file, link_hdr, sizeof(link_hdr));
+        char* link_hdr = NULL;
+        if (cross_read_aether_link_raw(c_file, &link_hdr) < 0) return 1;
         vendored_sqlite = cross_link_wants(link_hdr, "-laether_sqlite") != 0;
+        free(link_hdr);
     }
     /* std.regex needs no sysroot (#1389): when nothing above staged a real
      * libpcre2-8 (no CROSSBUILD_SYSROOT, or one without pcre2), compile the

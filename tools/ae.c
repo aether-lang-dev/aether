@@ -75,6 +75,7 @@ extern char** environ;
 #include "ae_fmt.h"
 #include "ae_sha256.h"
 #include "ae_bindgen.h"
+#include "ae_line.h"
 
 // Version is set by Makefile from VERSION file
 #ifndef AETHER_VERSION
@@ -2771,20 +2772,26 @@ static bool token_is_toolchain_managed(const char* tok, size_t len) {
     return token_is_platform_runtime(tok, len);
 }
 
+/* NULL when out of memory, after saying so. The string is kept for the
+ * process and valid until the next call: it holds the whole line, where a
+ * 1 KB line buffer and a 1 KB result dropped the flags past them (#2536). */
 static const char* get_aether_link_flags(const char* c_file, unsigned* required) {
-    static char flags[1024] = "";
-    flags[0] = '\0';
+    static char* flags = NULL;
+    static size_t flags_cap = 0;
     *required = 0;
-    if (!c_file) return flags;
+    if (!c_file) return "";
 
     FILE* f = fopen(c_file, "r");
-    if (!f) return flags;
+    if (!f) return "";
 
     // The header is emitted as the first line of the TU, but tolerate a few
     // leading lines rather than depending on exact placement.
-    char line[1024];
+    char* line = NULL;
+    size_t line_cap = 0;
+    const char* result = "";
     int lines_read = 0;
-    while (lines_read < 8 && fgets(line, sizeof(line), f)) {
+    int got = 0;
+    while (lines_read < 8 && (got = ae_read_line(f, &line, &line_cap)) > 0) {
         lines_read++;
         const char* p = strstr(line, "// aether-link:");
         if (!p) continue;
@@ -2793,6 +2800,12 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
         size_t n = strlen(p);
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
             n--;
+        /* Every token kept comes from these n bytes once, one space apart,
+         * so n + 1 bytes hold the result. */
+        if (!str_buf_grow(&flags, &flags_cap, n + 1)) {
+            got = -1;
+            break;
+        }
         // Record optional groups, then keep only non-managed tokens here.
         size_t out = 0;
         size_t i = 0;
@@ -2818,7 +2831,6 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
                 continue;
             }
             if (token_is_toolchain_managed(p + start, tlen)) continue;
-            if (out + tlen + 2 >= sizeof(flags)) break;
             if (out) flags[out++] = ' ';
             memcpy(flags + out, p + start, tlen);
             out += tlen;
@@ -2837,18 +2849,23 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
 #ifndef __APPLE__
         for (int k = 0; out > 0 && k < nplatform; k++) {
             size_t tl = strlen(platform[k]);
-            if (out + tl + 2 >= sizeof(flags)) break;
             flags[out++] = ' ';
             memcpy(flags + out, platform[k], tl);
             out += tl;
         }
 #endif
         flags[out] = '\0';
+        result = flags;
         break;
     }
 
+    free(line);
     fclose(f);
-    return flags;
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @link flags in %s\n", c_file);
+        return NULL;
+    }
+    return result;
 }
 
 // Read the `// aether-source: <path>` header lines codegen emits after the
@@ -2860,18 +2877,24 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
 // a `-D`-dropped import drops its sources with its libraries — a static
 // extra_sources entry cannot do that and, for a module used by twenty bins,
 // had to be restated in every one of them. Returns the space-separated,
-// quoted list (empty when nothing in the closure declares a source).
+// quoted list (empty when nothing in the closure declares a source), kept
+// for the process and valid until the next call; NULL when out of memory,
+// after saying so.
 const char* get_aether_source_files(const char* c_file) {
-    static char files[8192];
-    files[0] = '\0';
-    if (!c_file) return files;
+    static char* files = NULL;
+    static size_t files_cap = 0;
+    if (!c_file) return "";
     FILE* f = fopen(c_file, "r");
-    if (!f) return files;
+    if (!f) return "";
     /* The lines sit at the top of the TU, the link line first; stop at the
-     * first line that is not a `//` comment. */
-    char line[2048];
+     * first line that is not a `//` comment. Read whole (#2536): a link
+     * line past a 2 KB buffer left a chunk that is not one, and every
+     * source listed after it was dropped. */
+    char* line = NULL;
+    size_t line_cap = 0;
     size_t out = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         if (strncmp(line, "//", 2) != 0) break;
         const char* p = strstr(line, "// aether-source:");
         if (!p) continue;
@@ -2881,9 +2904,8 @@ const char* get_aether_source_files(const char* c_file) {
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
             n--;
         if (n == 0) continue;
-        if (out + n + 4 >= sizeof(files)) {
-            fprintf(stderr, "Warning: the module @source list exceeded 8 KiB; "
-                            "the remaining files were dropped from the build.\n");
+        if (!str_buf_grow(&files, &files_cap, out + n + 4)) {
+            got = -1;
             break;
         }
         if (out) files[out++] = ' ';
@@ -2893,8 +2915,13 @@ const char* get_aether_source_files(const char* c_file) {
         files[out++] = '"';
         files[out] = '\0';
     }
+    free(line);
     fclose(f);
-    return files;
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @source files in %s\n", c_file);
+        return NULL;
+    }
+    return out ? files : "";
 }
 
 /* Do two spellings name the same file on disk? A relative path from the
@@ -2924,16 +2951,28 @@ static bool same_source_file(const char* a, const char* b) {
  * declare the file) and imports that module would otherwise compile it
  * twice and fail at link on every symbol in it. Written to `out` in the
  * quoted, space-separated form extras_next reads. */
-void merge_source_lists(const char* extra, const char* module_sources, char* out, size_t cap) {
+const char* merge_source_lists(const char* extra, const char* module_sources) {
+    static char* out = NULL;
+    extra = extra ? extra : "";
+    module_sources = module_sources ? module_sources : "";
+    /* Every file is written back as it was read, quoted when it has a space
+     * (as it already was, or it would have read as two) and one space from
+     * the next, so the two lists' lengths, a separator and the terminator
+     * bound the result: no append below can run out of room. A fixed 16 KiB
+     * buffer used to drop the files past it, with a warning the build then
+     * scrolled past to a link error (#2536). */
+    size_t cap = strlen(extra) + strlen(module_sources) + 2;
+    free(out);
+    out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory merging the source list.\n");
+        return NULL;
+    }
     out[0] = '\0';
     char path[4096];
-    const char* cursor = extra ? extra : "";
-    while (extras_next(&cursor, path, sizeof(path))) {
-        if (!extras_append(out, cap, path)) {
-            fprintf(stderr, "Warning: the source list exceeded %zu bytes; '%s' was dropped.\n", cap, path);
-        }
-    }
-    cursor = module_sources ? module_sources : "";
+    const char* cursor = extra;
+    while (extras_next(&cursor, path, sizeof(path))) extras_append(out, cap, path);
+    cursor = module_sources;
     while (extras_next(&cursor, path, sizeof(path))) {
         bool seen = false;
         const char* prior = out;
@@ -2941,18 +2980,11 @@ void merge_source_lists(const char* extra, const char* module_sources, char* out
         while (!seen && extras_next(&prior, have, sizeof(have))) {
             if (same_source_file(have, path)) seen = true;
         }
-        if (seen) continue;
-        if (!extras_append(out, cap, path)) {
-            fprintf(stderr, "Warning: the source list exceeded %zu bytes; '%s' was dropped.\n", cap, path);
-        }
+        if (!seen) extras_append(out, cap, path);
     }
+    return out;
 }
 
-// Read the `// aether-include: <dir>` header lines codegen emits for the
-// modules that declared a `@c_include` (#1986), as `-I"<dir>"` flags. The
-// generated C includes the header by the name the module wrote, so the file
-// stays portable; these say where that name resolves. Empty when no module
-// in the closure asked for one, which is the common case.
 /* Does the generated C define an entry point? codegen says so in the header
  * with `// aether-entry: main`, the way it reports link, source and include
  * requirements (see emit_entry_point).
@@ -2966,13 +2998,19 @@ void merge_source_lists(const char* extra, const char* module_sources, char* out
 static int c_file_has_entry(const char* c_file) {
     FILE* f = fopen(c_file, "r");
     if (!f) return 1;   /* nothing to judge by; let the link speak */
-    char line[512];
+    /* Whole lines (#2536): the tail of a link line past a 512-byte buffer
+     * does not start with `//`, and the scan stopped before the entry. */
+    char* line = NULL;
+    size_t cap = 0;
     int found = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    while ((got = ae_read_line(f, &line, &cap)) > 0) {
         if (strncmp(line, "//", 2) != 0) break;
         if (strncmp(line, "// aether-entry: main", 21) == 0) { found = 1; break; }
     }
+    free(line);
     fclose(f);
+    if (got < 0) return 1;   /* out of memory: no verdict either */
     return found;
 }
 
@@ -2988,15 +3026,25 @@ static int require_entry_point(const char* c_file, const char* source) {
     return 0;
 }
 
+// Read the `// aether-include: <dir>` header lines codegen emits for the
+// modules that declared a `@c_include` (#1986), as `-I"<dir>"` flags. The
+// generated C includes the header by the name the module wrote, so the file
+// stays portable; these say where that name resolves. Empty when no module
+// in the closure asked for one, which is the common case. Kept for the
+// process and valid until the next call; NULL when out of memory, after
+// saying so.
 const char* get_aether_include_flags(const char* c_file) {
-    static char flags[4096];
-    flags[0] = '\0';
-    if (!c_file) return flags;
+    static char* flags = NULL;
+    static size_t flags_cap = 0;
+    if (!c_file) return "";
     FILE* f = fopen(c_file, "r");
-    if (!f) return flags;
-    char line[2048];
+    if (!f) return "";
+    /* Whole lines, as for the @source list (#2536). */
+    char* line = NULL;
+    size_t line_cap = 0;
     size_t out = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int got;
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         if (strncmp(line, "//", 2) != 0) break;
         const char* p = strstr(line, "// aether-include:");
         if (!p) continue;
@@ -3005,9 +3053,8 @@ const char* get_aether_include_flags(const char* c_file) {
         size_t n = strlen(p);
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' ')) n--;
         if (n == 0) continue;
-        if (out + n + 6 >= sizeof(flags)) {
-            fprintf(stderr, "Warning: the @c_include include path exceeded 4 KiB; "
-                            "the remaining directories were dropped.\n");
+        if (!str_buf_grow(&flags, &flags_cap, out + n + 6)) {
+            got = -1;
             break;
         }
         if (out) flags[out++] = ' ';
@@ -3017,8 +3064,13 @@ const char* get_aether_include_flags(const char* c_file) {
         flags[out++] = '"';
         flags[out] = '\0';
     }
+    free(line);
     fclose(f);
-    return flags;
+    if (got < 0) {
+        fprintf(stderr, "Error: out of memory reading the @c_include directories in %s\n", c_file);
+        return NULL;
+    }
+    return out ? flags : "";
 }
 
 // --------------------------------------------------------------------------
@@ -3290,11 +3342,11 @@ const char* get_cflags(void) {
 // buffer limit (v0.85 / the "tail entries dropped" fix).
 //
 // Returns 0 on clean fill, 1 if the `out` buffer was too small and at
-// least one filename was silently truncated. Callers should warn in
-// that case — the caller's subsequent `build_gcc_cmd` will hand the
-// linker a mangled partial path ("ae/.../handler_copy_generat" was
-// the real-world symptom that prompted this signature change) and
-// the error message won't point at extra_sources as the culprit.
+// least one filename was dropped. The caller refuses the build then
+// (merge_toml_extra_sources): the link would fail on the dropped file's
+// symbols, and that error would not point at extra_sources as the
+// culprit ("ae/.../handler_copy_generat", a path cut short, was the
+// real-world symptom that prompted this signature change).
 // Walk up from the current working directory looking for an
 // `aether.toml`. If found in some ancestor directory `D`, chdir
 // there and adjust the positional `*file_inout` (when relative) to
@@ -3377,12 +3429,17 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
     FILE* f = fopen(ae_manifest_path(), "r");
     if (!f) return 0;
 
-    char line[1024];
+    /* Whole lines (#2536), as get_extra_sources_for_bin reads the same
+     * file: a long line in a [[bin]] read in pieces could start a piece
+     * that looks like a key or a section. */
+    char* line = NULL;
+    size_t line_cap = 0;
     int in_bin = 0;
     int matched_name = 0;
     int found = 0;
+    int got;
 
-    while (fgets(line, sizeof(line), f)) {
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         size_t ln = strlen(s);
@@ -3423,7 +3480,9 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
             break;
         }
     }
+    free(line);
     fclose(f);
+    if (got < 0) fprintf(stderr, "Error: out of memory reading %s\n", ae_manifest_path());
     return found;
 }
 
@@ -3439,19 +3498,18 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
 
     int truncated = 0;
 
-    // 1 KiB was too small for projects with many extra_sources on one
-    // logical line: `extra_sources = ["a.c", "b.c", ..., "zz.c"]`. fgets
-    // silently truncates at the buffer boundary, dropping the tail of
-    // the array and producing link errors for the omitted shims — no
-    // warning, just "undefined reference to ..." at link time. 8 KiB
-    // fits ~250 comma-separated filenames of average length; projects
-    // hitting even that limit should switch to multi-line TOML arrays
-    // (tracked separately — parser still only handles single-line).
-    char line[8192];
+    // Whole lines, however many extra_sources sit on one: `extra_sources =
+    // ["a.c", "b.c", ..., "zz.c"]`. fgets into a fixed buffer (1 KiB, then
+    // 8 KiB) cut such a line at the boundary; when the cut fell inside a
+    // quoted name, that entry was lost and `", "` read as a file (#2536),
+    // with no warning, just "undefined reference to ..." at link time.
+    char* line = NULL;
+    size_t line_cap = 0;
+    int got;
     int in_bin = 0;
     int matched = 0;
 
-    while (fgets(line, sizeof(line), f)) {
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         size_t ln = strlen(s);
@@ -3522,7 +3580,7 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
             // Line-by-line loop. `frag` is the remaining unparsed
             // portion of the current line. We walk entries until we
             // hit the closing `]`; when we reach end-of-fragment
-            // without finding it, we fgets the next line and keep
+            // without finding it, we read the next line and keep
             // going. Continuation lines get the same whitespace +
             // comment strip as the outer loop.
             char* frag = eq;
@@ -3553,8 +3611,9 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
                     closed = 1;
                     break;
                 }
-                // Continuation: pull the next line.
-                if (!fgets(line, sizeof(line), f)) {
+                // Continuation: pull the next line. `s`, `eq` and `frag`
+                // pointed into the old one, which the read may move.
+                if ((got = ae_read_line(f, &line, &line_cap)) <= 0) {
                     // Malformed TOML — unterminated array at EOF.
                     // Treat as end; don't block the build here.
                     closed = 1;
@@ -3567,7 +3626,7 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
                     t[--tln] = '\0';
                 }
                 if (!*t || *t == '#') {
-                    frag = t;   // empty line / comment — frag is "" so we fgets again next iter
+                    frag = t;   // empty line / comment: frag is "" so we read again next iter
                     continue;
                 }
                 frag = t;
@@ -3575,8 +3634,38 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
             break;
         }
     }
+    free(line);
     fclose(f);
+    if (got < 0) return -1;
     return truncated;
+}
+
+/* The [[bin]] extra_sources of `file`, appended to the --extra list in
+ * `extra_files` (cap bytes, the 8 KiB every extras list has). 0, after
+ * saying why, when they cannot all be read or do not all fit: a build
+ * missing a source the manifest lists fails at the link, far from the
+ * cause, and `--extra` past the limit is refused the same way. */
+static int merge_toml_extra_sources(const char* file, char* extra_files, size_t cap) {
+    char toml_extra[8192] = "";
+    int r = get_extra_sources_for_bin(file, toml_extra, sizeof(toml_extra));
+    if (r < 0) {
+        fprintf(stderr, "Error: out of memory reading %s\n", ae_manifest_path());
+        return 0;
+    }
+    size_t used = strlen(extra_files);
+    if (r > 0 || (toml_extra[0] && used + (used ? 1 : 0) + strlen(toml_extra) + 1 > cap)) {
+        fprintf(stderr,
+            "Error: aether.toml [[bin]] extra_sources for '%s' (with any --extra\n"
+            "       files) exceed the %zu-byte source list. Split the array into\n"
+            "       fewer, larger shims or report it as a toolchain bug.\n",
+            file, cap);
+        return 0;
+    }
+    if (toml_extra[0]) {
+        if (used) strcat(extra_files, " ");
+        strcat(extra_files, toml_extra);
+    }
+    return 1;
 }
 
 /* Do two paths name the same file? Resolved first, so `./p.c` and `p.c` are
@@ -3800,9 +3889,15 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* ae_sources = get_aether_source_files(c_file);
     /* -I for each module that declared a `@c_include` (#1986). */
     const char* ae_includes = get_aether_include_flags(c_file);
-    char extra_buf[8192 + 8192 + 2];
-    merge_source_lists(extra_files, ae_sources, extra_buf, sizeof(extra_buf));
-    const char* extra = extra_buf;
+    if (!ae_link || !ae_sources || !ae_includes) {   /* out of memory, said */
+        set_failing_cmd(cmd, size);
+        return;
+    }
+    const char* extra = merge_source_lists(extra_files, ae_sources);
+    if (!extra) {   /* out of memory, said */
+        set_failing_cmd(cmd, size);
+        return;
+    }
 
     // User cflags from aether.toml apply to every build path — `ae build`,
     // `ae run`, and any internal invocation. Previously they were gated
@@ -4305,9 +4400,17 @@ static int build_wasm_cmd(char* cmd, size_t size,
      * target compiles the same generated C, so it needs the same paths. */
     {
         const char* extra_inc = get_aether_include_flags(c_file);
+        if (!extra_inc) return 0;   /* out of memory, said */
         if (extra_inc[0]) {
-            strncat(includes, " ", sizeof(includes) - strlen(includes) - 1);
-            strncat(includes, extra_inc, sizeof(includes) - strlen(includes) - 1);
+            /* Refused rather than cut: a cut -I loses the directories after
+             * it, and the error would be a header the compiler cannot find. */
+            if (strlen(includes) + 1 + strlen(extra_inc) >= sizeof(includes)) {
+                fprintf(stderr, "Error: the @c_include directories do not fit the "
+                                "%zu-byte include path of a wasm build.\n", sizeof(includes));
+                return 0;
+            }
+            strcat(includes, " ");
+            strcat(includes, extra_inc);
         }
     }
 
@@ -5534,9 +5637,9 @@ static const char* run_mode_salt(void) {
 
 static int cmd_run(int argc, char** argv) {
     const char* file = NULL;
-    /* 8 KiB matches toml_extra below + the fgets line buffer in
-     * get_extra_sources_for_bin. Needs to fit --extra CLI args plus
-     * the full TOML extra_sources concatenated. */
+    /* 8 KiB, as the extra_sources list merge_toml_extra_sources reads.
+     * Needs to fit --extra CLI args plus the full TOML extra_sources
+     * concatenated; a list that does not fit is refused. */
     char extra_files[8192] = "";
 
     /* Index in argv where the program's own arguments begin — everything
@@ -5633,20 +5736,7 @@ static int cmd_run(int argc, char** argv) {
     // Merge toml [[bin]] extra_sources into extra_files BEFORE the cache
     // check. Otherwise editing an FFI shim listed in aether.toml wouldn't
     // invalidate the cached exe (extras content is part of the cache key).
-    {
-        char toml_extra_pre[8192] = "";
-        if (get_extra_sources_for_bin(file, toml_extra_pre, sizeof(toml_extra_pre))) {
-            fprintf(stderr,
-                "Warning: aether.toml [[bin]] extra_sources for '%s' "
-                "exceeded 8 KiB; tail entries were dropped. Split the "
-                "array into fewer, larger shims or report as a toolchain "
-                "bug.\n", file);
-        }
-        if (toml_extra_pre[0]) {
-            if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
-            strncat(extra_files, toml_extra_pre, sizeof(extra_files) - strlen(extra_files) - 1);
-        }
-    }
+    if (!merge_toml_extra_sources(file, extra_files, sizeof(extra_files))) return 1;
 
     // Binary-import prepass: synthesize interface stubs for any
     // `import foo` that resolves to a precompiled libfoo.so, and record
@@ -7608,9 +7698,9 @@ int cmd_build_namespace(int argc, char** argv) {
 static int cmd_build(int argc, char** argv) {
     const char* file = NULL;
     const char* output_name = NULL;
-    /* 8 KiB matches toml_extra below + the fgets line buffer in
-     * get_extra_sources_for_bin. Needs to fit --extra CLI args plus
-     * the full TOML extra_sources concatenated. */
+    /* 8 KiB, as the extra_sources list merge_toml_extra_sources reads.
+     * Needs to fit --extra CLI args plus the full TOML extra_sources
+     * concatenated; a list that does not fit is refused. */
     char extra_files[8192] = "";
 
     const char* target = NULL;
@@ -8368,20 +8458,7 @@ static int cmd_build(int argc, char** argv) {
     // Merge toml [[bin]] extra_sources into extra_files BEFORE the cache
     // check so an FFI shim edit invalidates the cached exe (extras
     // content is part of the cache key).
-    {
-        char toml_extra_pre[8192] = "";
-        if (get_extra_sources_for_bin(file, toml_extra_pre, sizeof(toml_extra_pre))) {
-            fprintf(stderr,
-                "Warning: aether.toml [[bin]] extra_sources for '%s' "
-                "exceeded 8 KiB; tail entries were dropped. Split the "
-                "array into fewer, larger shims or report as a toolchain "
-                "bug.\n", file);
-        }
-        if (toml_extra_pre[0]) {
-            if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
-            strncat(extra_files, toml_extra_pre, sizeof(extra_files) - strlen(extra_files) - 1);
-        }
-    }
+    if (!merge_toml_extra_sources(file, extra_files, sizeof(extra_files))) return 1;
 
     // --- Build cache ---
     // Cache native --emit=exe builds only. wasm uses a different toolchain
@@ -8558,10 +8635,17 @@ static int cmd_build(int argc, char** argv) {
             objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
 #endif
         }
-        snprintf(cmd, sizeof(cmd), "\"%s\" -c %s %s \"%s\" -o \"%s\"",
-                 objcc, tc.include_flags ? tc.include_flags : "",
-                 get_aether_include_flags(c_file),   /* #1986 */
-                 c_file, obj_file);
+        const char* obj_includes = get_aether_include_flags(c_file);   /* #1986 */
+        if (!obj_includes) return 1;   /* out of memory, said */
+        int ow = snprintf(cmd, sizeof(cmd), "\"%s\" -c %s %s \"%s\" -o \"%s\"",
+                          objcc, tc.include_flags ? tc.include_flags : "",
+                          obj_includes, c_file, obj_file);
+        if (ow >= (int)sizeof(cmd)) {
+            /* The include list has no length limit now (#2536); a cut
+             * command would compile without the directories past the cut. */
+            cmd_too_long(cmd, sizeof(cmd), ow);
+            return 1;
+        }
         if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
         int orc = run_cmd(cmd);
         if (orc != 0) {

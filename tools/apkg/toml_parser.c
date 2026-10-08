@@ -1,4 +1,5 @@
 #include "toml_parser.h"
+#include "../ae_line.h"
 #include <ctype.h>
 
 static char* trim(char* str) {
@@ -60,27 +61,6 @@ static char* parse_value(char* v) {
     return trim(v);
 }
 
-/* Reads one line of any length into *buf, grown as needed. 1 for a line,
- * 0 at the end of the file, -1 when out of memory. A fixed 512-byte
- * buffer used to split a longer line: its value was cut, and the rest was
- * read as a line of its own (#2535). */
-static int read_line(FILE* f, char** buf, size_t* cap) {
-    size_t len = 0;
-    for (;;) {
-        if (len + 1 >= *cap) {
-            size_t ncap = *cap ? *cap * 2 : 512;
-            char* nb = realloc(*buf, ncap);
-            if (!nb) return -1;
-            *buf = nb;
-            *cap = ncap;
-        }
-        if (!fgets(*buf + len, (int)(*cap - len), f)) return len > 0;
-        len += strlen(*buf + len);
-        if (len > 0 && (*buf)[len - 1] == '\n') return 1;
-        if (feof(f)) return 1;
-    }
-}
-
 /* NULL when the file cannot be opened, and when memory runs out partway:
  * a document missing its later lines would read as one without them. */
 TomlDocument* toml_parse_file(const char* path) {
@@ -101,7 +81,9 @@ TomlDocument* toml_parse_file(const char* path) {
     int oom = 0;
 
     int got;
-    while ((got = read_line(f, &line, &line_cap)) > 0) {
+    /* Lines of any length: a fixed 512-byte buffer split a longer one, its
+     * value cut and the rest read as a line of its own (#2535). */
+    while ((got = ae_read_line(f, &line, &line_cap)) > 0) {
         char* trimmed = trim(line);
 
         // Skip empty lines and comments

@@ -5,6 +5,7 @@
  */
 
 #include "ae_internal.h"
+#include "ae_line.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -527,22 +528,35 @@ void cache_depfile_path(const char* ae_file, char* out, size_t outsz) {
  *   absent <path>  → path string + a presence bit; the bit is 1 once the file
  *                    EXISTS, so a module dropped in at a previously-missed
  *                    probe flips the key and busts the cache (the shadowing
- *                    case Nic flagged). */
+ *                    case Nic flagged).
+ *
+ * Lines are read whole (#2536). A `read` line past a 2 KB buffer hashed a
+ * cut path, which never exists, so its content hash was the same 0 on every
+ * run and an edit to that file was served from the cache. A line that is
+ * not one of the two above, or that has no newline because the file ends
+ * in the middle of it, makes the whole manifest untrusted (0), as does
+ * running out of memory: the caller then walks the trees, as it does when
+ * there is no depfile. */
 static int fold_depfile(const char* depfile, unsigned long long* acc) {
     FILE* f = fopen(depfile, "r");
     if (!f) return 0;
-    char line[2048];
-    if (!fgets(line, sizeof(line), f) || strncmp(line, "# aether-deps v1", 16) != 0) {
+    char* line = NULL;
+    size_t cap = 0;
+    if (ae_read_line(f, &line, &cap) <= 0 || strncmp(line, "# aether-deps v1", 16) != 0) {
+        free(line);
         fclose(f);
-        return 0;   /* unknown/foreign format — do not trust it */
+        return 0;   /* unknown/foreign format: do not trust it */
     }
     int any = 0;
-    while (fgets(line, sizeof(line), f)) {
+    int trusted = 1;
+    int got;
+    while ((got = ae_read_line(f, &line, &cap)) > 0) {
         size_t n = strlen(line);
+        if (n == 0 || line[n - 1] != '\n') { trusted = 0; break; }   /* cut short */
         while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
         if (n == 0) continue;
         char* sp = strchr(line, ' ');
-        if (!sp) continue;
+        if (!sp) { trusted = 0; break; }
         *sp = '\0';
         const char* kind = line;
         const char* path = sp + 1;
@@ -555,10 +569,14 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
             unsigned long long present = (access(path, F_OK) == 0) ? 0x9E3779B1ULL : 0ULL;
             *acc = (*acc * 1099511628211ULL) ^ present;
             any = 1;
+        } else {
+            trusted = 0;
+            break;
         }
     }
+    free(line);
     fclose(f);
-    return any;
+    return (got < 0 || !trusted) ? 0 : any;
 }
 
 // Compute a cache key from: source content + compiler mtime + lib mtime +

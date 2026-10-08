@@ -81,3 +81,20 @@
   `# comment` in the value, so `cflags = "-O2"  # tuned` handed the C
   compiler `#` and `tuned` as files. A `#` inside quotes stays part of the
   value.
+- **`ae` reads the generated C's header lines, `extra_sources`, the
+  depfile and `ae bindgen`'s preprocessor output whole (#2536).** These
+  readers took a long line in fixed pieces and read the rest as a line of
+  its own. A module `@link` line past 511 bytes made `ae build` say the
+  program has no main(); past 1 KB, the flags after the cut never reached
+  the link; past 2 KB, the `@source` files and `@c_include` directories
+  listed after it were dropped, and a cross build missed a sysroot library
+  named past the cut. A one-line `[[bin]] extra_sources` past 8 KB lost the
+  entry the cut fell in and passed `", "` to the compiler as a file. A
+  depfile `read` line past 2 KB hashed a path that does not exist, so an
+  edit to that file was served from the cache; a depfile line that cannot
+  be read whole now makes ae walk the source tree as it does with no
+  depfile. `ae bindgen consts` cut an expansion past 1 KB, so `1+1+...`
+  imported as a smaller number. The `@link`, `@source` and `@c_include`
+  lists now have no length limit, and `extra_sources` that do not fit the
+  8 KiB source list are an error, as `--extra` past it already was, where
+  the entries past it were dropped with a warning.

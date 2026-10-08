@@ -25,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ae_line.h"
+
 #ifdef _WIN32
 #  ifndef popen
 #    define popen  _popen
@@ -64,11 +66,13 @@ static FILE* bg_popen(const char* cmd) {
 
 #define BG_MAX_MACROS   4096
 #define BG_NAME_MAX     128
-#define BG_EXPANSION_MAX 1024
 
 typedef struct {
     char name[BG_NAME_MAX];
-    char expansion[BG_EXPANSION_MAX];
+    /* Heap, held whole (NULL until the preprocessor reports it): a 1 KB
+     * copy cut a longer one, and `1+1+...+1` imported as a smaller number
+     * (#2536). */
+    char* expansion;
     /* 0 = pending, 1 = integer, 2 = string, 3 = float, -1 = skipped */
     int  kind;
     long long ival;
@@ -78,6 +82,11 @@ typedef struct {
     BgMacro* macros;
     int count;
 } BgSet;
+
+static void bg_set_free(BgSet* set) {
+    for (int i = 0; i < set->count; i++) free(set->macros[i].expansion);
+    free(set->macros);
+}
 
 /* ---- integer constant-expression evaluator ------------------------------
  * Grammar (C precedence, the subset macros use):
@@ -385,7 +394,8 @@ static int bg_discover(const char* cc, const char* header,
 
 /* Stage 2: full expansion of every candidate through `cc -E` on a probe
  * that includes the header. The @AE@ marker keys each output line back to
- * its macro; the preprocessor fully resolves nested macros for us. */
+ * its macro; the preprocessor fully resolves nested macros for us. 1 when
+ * done, 0 when the preprocessor could not be run, -1 when out of memory. */
 static int bg_expand(const char* cc, const char* header,
                      const char* include_flags, BgSet* set,
                      const char* tmp_dir) {
@@ -404,8 +414,11 @@ static int bg_expand(const char* cc, const char* header,
     snprintf(cmd, sizeof(cmd), "\"%s\" -E %s \"%s\" " BG_ERR_SINK, cc, include_flags, probe_path);
     FILE* p = bg_popen(cmd);
     if (!p) { remove(probe_path); return 0; }
-    char line[BG_EXPANSION_MAX + BG_NAME_MAX + 32];
-    while (fgets(line, sizeof(line), p)) {
+    /* Whole lines (#2536): one expansion is one line, of any length. */
+    char* line = NULL;
+    size_t line_cap = 0;
+    int got;
+    while ((got = ae_read_line(p, &line, &line_cap)) > 0) {
         if (strncmp(line, "@AE@ \"", 6) != 0) continue;
         char* name = line + 6;
         char* endq = strchr(name, '"');
@@ -417,13 +430,23 @@ static int bg_expand(const char* cc, const char* header,
             exp[--n] = '\0';
         for (int i = 0; i < set->count; i++) {
             if (strcmp(set->macros[i].name, name) == 0) {
-                snprintf(set->macros[i].expansion, BG_EXPANSION_MAX, "%s", exp);
+                char* copy = (char*)malloc(n + 1);
+                if (!copy) { got = -1; break; }
+                memcpy(copy, exp, n + 1);
+                free(set->macros[i].expansion);
+                set->macros[i].expansion = copy;
                 break;
             }
         }
+        if (got < 0) break;
     }
+    free(line);
     pclose(p);
     remove(probe_path);
+    if (got < 0) {
+        fprintf(stderr, "ae bindgen: out of memory\n");
+        return -1;
+    }
     return 1;
 }
 
@@ -486,45 +509,59 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
     if (!bg_discover(cc, header, include_flags, match, &set, tmp_dir)) {
         fprintf(stderr, "ae bindgen: no importable macros found in %s "
                         "(is the path right? does it preprocess standalone?)\n", header);
-        free(set.macros);
+        bg_set_free(&set);
         return 1;
     }
 
-    if (!bg_expand(cc, header, include_flags, &set, tmp_dir)) {
-        fprintf(stderr, "ae bindgen: preprocessor expansion failed\n");
-        free(set.macros);
+    int expanded = bg_expand(cc, header, include_flags, &set, tmp_dir);
+    if (expanded <= 0) {
+        if (expanded == 0) fprintf(stderr, "ae bindgen: preprocessor expansion failed\n");
+        bg_set_free(&set);
         return 1;
     }
 
-    /* Classify every expansion. */
+    /* Classify every expansion. A string or float literal is rewritten into
+     * a buffer as long as the expansion, which always holds it. */
     int imported = 0;
     for (int i = 0; i < set.count; i++) {
         BgMacro* m = &set.macros[i];
-        if (m->kind == -1 || m->expansion[0] == '\0') { m->kind = -1; continue; }
-        char buf[BG_EXPANSION_MAX];
+        if (m->kind == -1 || !m->expansion || m->expansion[0] == '\0') { m->kind = -1; continue; }
         if (bg_eval_int(m->expansion, &m->ival)) {
             m->kind = 1; imported++;
-        } else if (bg_eval_string(m->expansion, buf, sizeof(buf))) {
-            snprintf(m->expansion, BG_EXPANSION_MAX, "%s", buf);
+            continue;
+        }
+        size_t buf_sz = strlen(m->expansion) + 3;
+        char* buf = (char*)malloc(buf_sz);
+        if (!buf) {
+            fprintf(stderr, "ae bindgen: out of memory\n");
+            bg_set_free(&set);
+            return 1;
+        }
+        if (bg_eval_string(m->expansion, buf, buf_sz)) {
             m->kind = 2; imported++;
-        } else if (bg_eval_float(m->expansion, buf, sizeof(buf))) {
-            snprintf(m->expansion, BG_EXPANSION_MAX, "%s", buf);
+        } else if (bg_eval_float(m->expansion, buf, buf_sz)) {
             m->kind = 3; imported++;
         } else {
             m->kind = -1;
+        }
+        if (m->kind > 0) {
+            free(m->expansion);
+            m->expansion = buf;
+        } else {
+            free(buf);
         }
     }
     if (imported == 0) {
         fprintf(stderr, "ae bindgen: %d macros found but none expand to an "
                         "importable constant\n", set.count);
-        free(set.macros);
+        bg_set_free(&set);
         return 1;
     }
 
     FILE* out = out_path ? fopen(out_path, "w") : stdout;
     if (!out) {
         fprintf(stderr, "ae bindgen: cannot open '%s' for writing\n", out_path);
-        free(set.macros);
+        bg_set_free(&set);
         return 1;
     }
 
@@ -557,9 +594,8 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
         fprintf(out, "\n// Skipped (not a scalar constant expression):\n");
         for (int i = 0; i < set.count; i++) {
             if (set.macros[i].kind > 0) continue;
-            fprintf(out, "//   %s%s%.60s\n", set.macros[i].name,
-                    set.macros[i].expansion[0] ? " = " : "",
-                    set.macros[i].expansion);
+            const char* e = set.macros[i].expansion ? set.macros[i].expansion : "";
+            fprintf(out, "//   %s%s%.60s\n", set.macros[i].name, e[0] ? " = " : "", e);
         }
     }
 
@@ -567,7 +603,7 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
     if (out_path) {
         if (fclose(out) != 0) write_failed = 1;
     }
-    free(set.macros);
+    bg_set_free(&set);
     if (write_failed) {
         fprintf(stderr, "ae bindgen: failed writing '%s'\n",
                 out_path ? out_path : "stdout");
