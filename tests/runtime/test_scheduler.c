@@ -1116,7 +1116,7 @@ void test_scheduler_teardown_frees_live_actors(void) {
 // stops: teardown marks it released instead of freeing it under the thread,
 // and the second of teardown and the thread's exit ends it; the next
 // scheduler's teardown reclaims what was retired.
-void test_scheduler_teardown_with_live_actor_thread(void) {
+static void live_actor_thread_cycle(void) {
     scheduler_init(1);
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
@@ -1131,10 +1131,17 @@ void test_scheduler_teardown_with_live_actor_thread(void) {
 
     pthread_t t = a->thread;
     scheduler_shutdown();
-    scheduler_cleanup();     // must not free the actor while its thread runs
-    pthread_join(t, NULL);   // the thread leaves (released or stopped) and ends it
+    // Teardown runs while the thread may be leaving its loop and ending the
+    // actor, which deregisters it against the table teardown takes away.
+    scheduler_cleanup();
+    pthread_join(t, NULL);
+}
 
-    scheduler_init(1);       // the next teardown reclaims what the thread retired
+void test_scheduler_teardown_with_live_actor_thread(void) {
+    // Repeated, so the thread's exit lands before, during and after the
+    // teardown of its table in some cycle.
+    for (int cycle = 0; cycle < 20; cycle++) live_actor_thread_cycle();
+    scheduler_init(1);       // the next teardown reclaims what the threads retired
     scheduler_cleanup();
 }
 

@@ -711,6 +711,7 @@ static inline int actor_table_has_room_locked(Scheduler* sched) {
 static int actor_table_find_locked(Scheduler* sched, ActorBase* actor, int hint) {
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
     int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    if (!table) return -1;   // freed by teardown: nothing is registered
     if (hint >= 0 && hint < count &&
         atomic_load_explicit(&table->slots[hint], memory_order_relaxed) == actor) {
         return hint;
@@ -1725,6 +1726,13 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 // Tight spin with architecture-specific pause
                 AETHER_PAUSE();
             } else {
+                // A free held back by a reader (another thread walking the
+                // tables, a core in a long step) is retried here, once per
+                // park, so an idle core frees it within PARK_MS_MAX of the
+                // reader leaving, not after the 1024 loop iterations a busy
+                // core waits (#2509). It returns at once when nothing waits.
+                actor_reclaim(0);
+
                 // Extended idle. With descriptors registered the poller blocks
                 // for its timeout and that is the sleep. With none registered
                 // it returns immediately, which is what used to turn this
@@ -2187,14 +2195,19 @@ void scheduler_shutdown(void) {
 static void scheduler_free_core_tables(void) {
     // Actors never released (a program or host that stops the scheduler
     // with actors alive, a panicked actor) are reachable only through the
-    // tables freed below. Those the scheduler spawned end the way a release
+    // tables freed here. Those the scheduler spawned end the way a release
     // ends them; the core threads are joined and no reader is left. One a
-    // caller registered stays the caller's.
+    // caller registered stays the caller's. Each table is scanned and taken
+    // away under its core's lock: an actor's own thread can be ending its
+    // actor meanwhile (scheduler_actor_thread_exit), and its deregister,
+    // which takes the same lock, then finds the table whole or gone.
     for (int i = 0; i < num_cores; i++) {
-        int count = 0;
-        AetherActorTable* table = actor_table_snapshot(&schedulers[i], &count);
+        Scheduler* sched = &schedulers[i];
+        spinlock_lock(&sched->actor_lock);
+        AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+        int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
         for (int k = 0; table && k < count; k++) {
-            ActorBase* actor = actor_table_read(table, k);
+            ActorBase* actor = atomic_load_explicit(&table->slots[k], memory_order_relaxed);
             if (!actor || !actor->scheduler_owned) continue;
             if (actor->auto_process) {
                 // Its own thread may still be running it (#2517): this is a
@@ -2207,6 +2220,12 @@ static void scheduler_free_core_tables(void) {
             }
             actor_free_now(actor);
         }
+        atomic_store_explicit(&sched->actor_table, NULL, memory_order_release);
+        atomic_store_explicit(&sched->actor_count, 0, memory_order_relaxed);
+        spinlock_unlock(&sched->actor_lock);
+        // The live table and every table it replaced, each with its own size:
+        // a grown table is bigger than MAX_ACTORS_PER_CORE slots (#2486).
+        actor_table_free_chain(table);
     }
     // Released actors not reclaimed yet: no reader is left either (#2509).
     // Then the kept blocks go back to the allocator (#2517).
@@ -2216,19 +2235,11 @@ static void scheduler_free_core_tables(void) {
         // Clean up thread resources
         schedulers[i].thread = 0;
 
-        // The live table and every table it replaced, each with its own size:
-        // a grown table is bigger than MAX_ACTORS_PER_CORE slots (#2486).
-        actor_table_free_chain(atomic_load_explicit(&schedulers[i].actor_table,
-                                                    memory_order_relaxed));
-        atomic_store_explicit(&schedulers[i].actor_table, NULL, memory_order_relaxed);
         // Clean up I/O event loop
         aether_io_poller_destroy(&schedulers[i].io_poller);
         free(schedulers[i].io_map);
         schedulers[i].io_map = NULL;
         schedulers[i].io_registered_count = 0;
-
-        // Reset counters
-        atomic_store_explicit(&schedulers[i].actor_count, 0, memory_order_relaxed);
     }
 }
 
