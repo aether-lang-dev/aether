@@ -989,45 +989,18 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
 
             if (expr_node) add_child(interp, expr_node);
         } else if (*p == '\\' && p[1]) {
-            // Escape sequence in literal segment
+            // Escape sequence in literal segment: the lexer kept every escape
+            // of an interpolated string as written, so this is its one
+            // decoding, with the same decoder as a plain literal (#2512).
             if (lit_len >= lit_cap - 2) {
                 lit_cap *= 2;
                 char* nb = realloc(lit_buf, lit_cap);
                 if (!nb) { free(lit_buf); return interp; }
                 lit_buf = nb;
             }
-            char code = p[1];
-            if (code == 'x') {
-                // \xNN hex escape (1-2 hex digits)
-                p += 2; // skip \x
-                int val = 0, digits = 0;
-                while (digits < 2 && *p && isxdigit((unsigned char)*p)) {
-                    char h = *p++;
-                    val = val * 16 + (h >= 'a' ? h - 'a' + 10 :
-                                      h >= 'A' ? h - 'A' + 10 : h - '0');
-                    digits++;
-                }
-                lit_buf[lit_len++] = digits > 0 ? (char)val : 'x';
-            } else if (code >= '0' && code <= '7') {
-                // \NNN octal escape (1-3 digits)
-                p++; // skip backslash
-                int val = (*p++) - '0', digits = 1;
-                while (digits < 3 && *p >= '0' && *p <= '7') {
-                    val = val * 8 + (*p++ - '0');
-                    digits++;
-                }
-                lit_buf[lit_len++] = (char)(val & 0xFF);
-            } else {
-                switch (code) {
-                    case 'n':  lit_buf[lit_len++] = '\n'; break;
-                    case 't':  lit_buf[lit_len++] = '\t'; break;
-                    case 'r':  lit_buf[lit_len++] = '\r'; break;
-                    case '\\': lit_buf[lit_len++] = '\\'; break;
-                    case '"':  lit_buf[lit_len++] = '"';  break;
-                    default:   lit_buf[lit_len++] = code; break;
-                }
-                p += 2;
-            }
+            char ch;
+            p += lexer_decode_escape(p, &ch);
+            lit_buf[lit_len++] = ch;
         } else {
             if (lit_len >= lit_cap - 2) {
                 lit_cap *= 2;

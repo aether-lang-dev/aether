@@ -4094,12 +4094,14 @@ static int utf8_sequence_length(const char* s) {
     return len;
 }
 
-/* Emit `s` as a C string literal: quoted, with every byte C cannot carry
- * raw escaped. The one spelling of an Aether string literal in the C, so a
- * literal reads the same wherever codegen writes one (an expression, a
- * function-clause pattern, a guard). */
-void emit_c_string_literal(CodeGenerator* gen, const char* str) {
-    fprintf(gen->output, "\"");
+/* The bytes of `str` as the inside of a C string literal, every byte C
+ * cannot carry raw escaped. With `printf_format` a '%' is doubled, for the
+ * format string of an interpolation (printf / _aether_interp). The text of
+ * an interpolation is the same decoded bytes as a plain literal's, so it is
+ * spelled the same way here: it used to be read again as escapes, so an
+ * escaped backslash before `0`, `n` or `x` became a NUL, a newline or a
+ * byte (#2512). */
+void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format) {
     while (*str) {
         unsigned char ch = (unsigned char)*str;
         switch (*str) {
@@ -4108,6 +4110,7 @@ void emit_c_string_literal(CodeGenerator* gen, const char* str) {
             case '\r': fprintf(gen->output, "\\r"); break;
             case '\\': fprintf(gen->output, "\\\\"); break;
             case '"': fprintf(gen->output, "\\\""); break;
+            case '%': fprintf(gen->output, printf_format ? "%%%%" : "%%"); break;
             default:
                 if (ch < 0x20 || ch == 0x7F) {
                     /* Zero-padded OCTAL, never \x: a C hex escape has no
@@ -4139,6 +4142,15 @@ void emit_c_string_literal(CodeGenerator* gen, const char* str) {
         }
         str++;
     }
+}
+
+/* Emit `s` as a C string literal: quoted, with every byte C cannot carry
+ * raw escaped. The one spelling of an Aether string literal in the C, so a
+ * literal reads the same wherever codegen writes one (an expression, a
+ * function-clause pattern, a guard). */
+void emit_c_string_literal(CodeGenerator* gen, const char* str) {
+    fprintf(gen->output, "\"");
+    emit_c_string_body(gen, str, 0);
     fprintf(gen->output, "\"");
 }
 
@@ -4155,6 +4167,43 @@ static int is_null_compare_operand(const ASTNode* n) {
     if (n->type != AST_LITERAL) return 0;
     if (n->node_type && n->node_type->kind == TYPE_STRING) return 0;
     return strcmp(n->value, "0") == 0;
+}
+
+/* 1 when the binary expression `expr` compares two strings: ==, !=, <, >,
+ * <= or >= with both sides strings, or one a string and the other a `ptr`
+ * that may carry an AetherString (string.from_int, fs.read_binary, ...;
+ * #267), and neither side a null literal (that is a null check). Shared by
+ * every place a binary expression is emitted, so a comparison means the
+ * same thing in a function-clause guard as anywhere else (#2515). */
+int binary_is_string_compare(const ASTNode* expr) {
+    if (!expr || !expr->value || expr->child_count < 2) return 0;
+    const char* op = expr->value;
+    if (strcmp(op, "==") != 0 && strcmp(op, "!=") != 0 && strcmp(op, "<") != 0 &&
+        strcmp(op, ">") != 0 && strcmp(op, "<=") != 0 && strcmp(op, ">=") != 0) return 0;
+    const ASTNode* l = expr->children[0];
+    const ASTNode* r = expr->children[1];
+    if (is_null_compare_operand(l) || is_null_compare_operand(r)) return 0;
+    Type* lt = l ? l->node_type : NULL;
+    Type* rt = r ? r->node_type : NULL;
+    int ls = lt && lt->kind == TYPE_STRING, rs = rt && rt->kind == TYPE_STRING;
+    int lp = lt && lt->kind == TYPE_PTR,    rp = rt && rt->kind == TYPE_PTR;
+    return (ls && rs) || (ls && rp) || (lp && rs);
+}
+
+/* The two halves around the operands of a string comparison `a OP b`. A
+ * string carries its length, so it compares by length and bytes through
+ * string_equals / string_compare, which read either string shape: strcmp
+ * stopped at the first NUL, so "x\0y" == "x" was true (#2515). Both keep a
+ * one-pass strcmp for two plain C strings. */
+void emit_string_compare_open(CodeGenerator* gen, const char* op) {
+    if (strcmp(op, "==") == 0)      fprintf(gen->output, "string_equals(");
+    else if (strcmp(op, "!=") == 0) fprintf(gen->output, "!string_equals(");
+    else                            fprintf(gen->output, "(string_compare(");
+}
+
+void emit_string_compare_close(CodeGenerator* gen, const char* op) {
+    if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0) fprintf(gen->output, ")");
+    else fprintf(gen->output, ") %s 0)", get_c_operator(op));
 }
 
 /* ---- #1286 first-class slices ------------------------------------------ */
@@ -5404,9 +5453,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         // bytes would wrongly test unequal (and, since a
                         // string-valued `.val` is `const char*` carrying an
                         // AetherString header, `==` isn't even a meaningful C
-                        // comparison). For string element types, dispatch through
-                        // `_aether_safe_str` + `strcmp`, exactly as the ordinary
-                        // string-comparison path below does.
+                        // comparison). For string element types, compare by
+                        // length and bytes through string_equals, exactly as the
+                        // ordinary string-comparison path below does (#2515).
                         Type* elem = L->node_type ? L->node_type->element_type : NULL;
                         int str_val = elem && elem->kind == TYPE_STRING;
                         fprintf(gen->output, "(({ %s _l = ", get_c_type(L->node_type));
@@ -5416,7 +5465,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (str_val) {
                             fprintf(gen->output,
                                 "; %s(_l.has == _r.has && (!_l.has || "
-                                "strcmp(_aether_safe_str(_l.val), _aether_safe_str(_r.val)) == 0)); }))",
+                                "string_equals(_l.val, _r.val))); }))",
                                 is_eq ? "" : "!");
                         } else {
                             fprintf(gen->output,
@@ -5431,51 +5480,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
                 int is_assignment = (expr->value && strcmp(expr->value, "=") == 0);
 
-                // String comparison: emit strcmp instead of pointer ==.
-                // Applies to ==, !=, <, >, <=, >= when:
-                //   - both sides are strings, OR
-                //   - one side is a string literal / string-typed value
-                //     and the other is a `ptr`-typed value that may
-                //     carry an AetherString header (string.from_int,
-                //     fs.read_binary, string_concat_wrapped, …).
-                // NOT when either side is a null literal — that's a
-                // null check, not a string compare.
-                //
-                // The ptr-vs-string case fixes #267: an Aether comparison
-                // like `string.from_int(42) != "42"` would otherwise
-                // emit a bare pointer compare and always evaluate true.
-                // Routing through _aether_safe_str + strcmp dispatches
-                // on the magic header so wrapped strings are read by
-                // their payload bytes.
-                int is_string_cmp = 0;
-                if (expr->value && (strcmp(expr->value, "==") == 0 || strcmp(expr->value, "!=") == 0
-                    || strcmp(expr->value, "<") == 0 || strcmp(expr->value, ">") == 0
-                    || strcmp(expr->value, "<=") == 0 || strcmp(expr->value, ">=") == 0)) {
-                    Type* lhs_type = expr->children[0]->node_type;
-                    Type* rhs_type = expr->children[1]->node_type;
-                    ASTNode* rhs = expr->children[1];
-                    ASTNode* lhs_node = expr->children[0];
-                    int rhs_is_null = is_null_compare_operand(rhs);
-                    int lhs_is_null = is_null_compare_operand(lhs_node);
-                    int lhs_is_string = (lhs_type && lhs_type->kind == TYPE_STRING);
-                    int rhs_is_string = (rhs_type && rhs_type->kind == TYPE_STRING);
-                    int lhs_is_ptr_t  = (lhs_type && lhs_type->kind == TYPE_PTR);
-                    int rhs_is_ptr_t  = (rhs_type && rhs_type->kind == TYPE_PTR);
-                    if (!rhs_is_null && !lhs_is_null) {
-                        if (lhs_is_string && rhs_is_string) {
-                            is_string_cmp = 1;
-                        } else if ((lhs_is_string && rhs_is_ptr_t) ||
-                                   (lhs_is_ptr_t && rhs_is_string)) {
-                            // ptr vs string-literal / string-typed value:
-                            // assume the ptr is an AetherString-bearing
-                            // payload and dispatch via _aether_safe_str.
-                            // Pure ptr-vs-ptr opaque-handle comparisons
-                            // still go through bare pointer eq (handled
-                            // by the else-branch below).
-                            is_string_cmp = 1;
-                        }
-                    }
-                }
+                // String comparison, not pointer ==: by length and bytes
+                // (binary_is_string_compare says when, the
+                // emit_string_compare_* pair how). A ptr-vs-ptr opaque-
+                // handle comparison stays a bare pointer compare (the
+                // else-branch below).
+                int is_string_cmp = binary_is_string_compare(expr);
 
                 if (is_string_cmp) {
                     /* Operand drain — the binary-operator analogue of the
@@ -5507,21 +5517,22 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         generate_expression(gen, cl);
                         fprintf(gen->output, "); const char* _se_r = (const char*)(");
                         generate_expression(gen, cr);
-                        fprintf(gen->output,
-                                "); int _se_v = (strcmp(_aether_safe_str(_se_l), "
-                                "_aether_safe_str(_se_r)) %s 0); ",
-                                get_c_operator(expr->value));
+                        fprintf(gen->output, "); int _se_v = ");
+                        emit_string_compare_open(gen, expr->value);
+                        fprintf(gen->output, "_se_l, _se_r");
+                        emit_string_compare_close(gen, expr->value);
+                        fprintf(gen->output, "; ");
                         if (drain_l) fprintf(gen->output, "aether_heap_str_free(_se_l); ");
                         if (drain_r) fprintf(gen->output, "aether_heap_str_free(_se_r); ");
                         fprintf(gen->output, "_se_v; })");
                         if (!skip_parens) fprintf(gen->output, ")");
                     } else {
                         if (!skip_parens) fprintf(gen->output, "(");
-                        fprintf(gen->output, "strcmp(_aether_safe_str(");
+                        emit_string_compare_open(gen, expr->value);
                         generate_expression(gen, expr->children[0]);
-                        fprintf(gen->output, "), _aether_safe_str(");
+                        fprintf(gen->output, ", ");
                         generate_expression(gen, expr->children[1]);
-                        fprintf(gen->output, ")) %s 0", get_c_operator(expr->value));
+                        emit_string_compare_close(gen, expr->value);
                         if (!skip_parens) fprintf(gen->output, ")");
                     }
                 } else if (is_assignment && expr->children[0] &&
@@ -7532,53 +7543,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 for (int i = 0; i < expr->child_count; i++) { \
                     ASTNode* ch = expr->children[i]; \
                     if (interp_segment_is_text(ch)) { \
-                        const char* s = ch->value ? ch->value : ""; \
-                        for (; *s; s++) { \
-                            switch (*s) { \
-                                case '\n': fprintf(gen->output, "\\n");   break; \
-                                case '\t': fprintf(gen->output, "\\t");   break; \
-                                case '\r': fprintf(gen->output, "\\r");   break; \
-                                case '"':  fprintf(gen->output, "\\\"");  break; \
-                                case '%':  fprintf(gen->output, "%%%%");  break; \
-                                case '\\': { \
-                                    char esc = *(s+1); \
-                                    if (esc == 'n')       { fprintf(gen->output, "\\n");   s++; } \
-                                    else if (esc == 't')  { fprintf(gen->output, "\\t");   s++; } \
-                                    else if (esc == 'r')  { fprintf(gen->output, "\\r");   s++; } \
-                                    else if (esc == '\\') { fprintf(gen->output, "\\\\");  s++; } \
-                                    else if (esc == '"')  { fprintf(gen->output, "\\\"");  s++; } \
-                                    else if (esc == 'x') { \
-                                        s += 2; \
-                                        int hval = 0, hd = 0; \
-                                        while (hd < 2 && ((*s >= '0' && *s <= '9') || \
-                                               (*s >= 'a' && *s <= 'f') || (*s >= 'A' && *s <= 'F'))) { \
-                                            char hc = *s; \
-                                            hval = hval * 16 + (hc >= 'a' ? hc-'a'+10 : hc >= 'A' ? hc-'A'+10 : hc-'0'); \
-                                            s++; hd++; \
-                                        } \
-                                        s--; \
-                                        if (hd > 0) fprintf(gen->output, "\\%03o", hval & 0xFF); \
-                                        else        fprintf(gen->output, "\\\\x"); \
-                                    } else if (esc >= '0' && esc <= '7') { \
-                                        s++; \
-                                        int oval = esc - '0', od = 1; \
-                                        while (od < 3 && *(s+1) >= '0' && *(s+1) <= '7') { \
-                                            s++; oval = oval * 8 + (*s - '0'); od++; \
-                                        } \
-                                        fprintf(gen->output, "\\%03o", oval & 0xFF); \
-                                    } else { \
-                                        fprintf(gen->output, "\\\\"); \
-                                    } \
-                                    break; \
-                                } \
-                                default: \
-                                    if ((unsigned char)*s < 0x20 || *s == 0x7F) \
-                                        fprintf(gen->output, "\\%03o", (unsigned char)*s); \
-                                    else \
-                                        fputc(*s, gen->output); \
-                                    break; \
-                            } \
-                        } \
+                        /* Decoded bytes, escaped for C as a plain literal \
+                         * is; never read again as escapes (#2512). */ \
+                        emit_c_string_body(gen, ch->value ? ch->value : "", 1); \
                     } else { \
                         TypeKind tk = (ch->node_type) ? ch->node_type->kind : TYPE_UNKNOWN; \
                         switch (tk) { \

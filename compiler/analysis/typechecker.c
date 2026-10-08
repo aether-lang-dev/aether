@@ -6479,6 +6479,18 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
         add_symbol(func_table, "_builder", create_type(TYPE_PTR), 0, 0, 0);
     }
 
+    /* A clause guard (`f(s) when s == "bob"`) reads the parameters, so it is
+     * checked in their scope, as the body is. It was never checked, so its
+     * nodes had no types and codegen could not tell a string comparison in
+     * it from a scalar one: `s == "bob"` compiled to a C pointer compare
+     * (#2515). */
+    for (int i = 0; i < func->child_count - 1; i++) {
+        ASTNode* guard = func->children[i];
+        if (guard && guard->type == AST_GUARD_CLAUSE && guard->child_count > 0) {
+            typecheck_expression(guard->children[0], func_table);
+        }
+    }
+
     // Type check function body. Track the return type so `return Blue` can
     // resolve a bare enum member (save/restore keeps nested functions correct).
     ASTNode* body = func->children[func->child_count - 1];

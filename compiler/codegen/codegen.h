@@ -606,7 +606,11 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def);
 void generate_main_function(CodeGenerator* gen, ASTNode* main);
 void generate_statement(CodeGenerator* gen, ASTNode* stmt);
 void generate_expression(CodeGenerator* gen, ASTNode* expr);
-void emit_c_string_literal(CodeGenerator* gen, const char* str);   // #2467
+void emit_c_string_literal(CodeGenerator* gen, const char* str);
+void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format);  // #2512
+int  binary_is_string_compare(const ASTNode* expr);                      // #2515
+void emit_string_compare_open(CodeGenerator* gen, const char* op);       // #2515
+void emit_string_compare_close(CodeGenerator* gen, const char* op);      // #2515   // #2467
 void generate_type(CodeGenerator* gen, Type* type);
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type);
 void ensure_optional_typedef(CodeGenerator* gen, Type* type);   // #340

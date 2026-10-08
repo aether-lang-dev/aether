@@ -1717,9 +1717,20 @@ static void generate_expression_with_subst_inner(CodeGenerator* gen, ASTNode* ex
     // For binary operations
     if (expr->type == AST_BINARY_EXPRESSION) {
         if (add_parens) fprintf(gen->output, "(");
-        generate_expression_with_subst_inner(gen, expr->children[0], mappings, mapping_count, 1);
-        fprintf(gen->output, " %s ", get_c_operator(expr->value));
-        generate_expression_with_subst_inner(gen, expr->children[1], mappings, mapping_count, 1);
+        if (binary_is_string_compare(expr)) {
+            /* A string comparison in a guard compares the strings, as one
+             * anywhere else does: it was a C pointer compare, true only
+             * when both sides were the same object (#2515). */
+            emit_string_compare_open(gen, expr->value);
+            generate_expression_with_subst_inner(gen, expr->children[0], mappings, mapping_count, 1);
+            fprintf(gen->output, ", ");
+            generate_expression_with_subst_inner(gen, expr->children[1], mappings, mapping_count, 1);
+            emit_string_compare_close(gen, expr->value);
+        } else {
+            generate_expression_with_subst_inner(gen, expr->children[0], mappings, mapping_count, 1);
+            fprintf(gen->output, " %s ", get_c_operator(expr->value));
+            generate_expression_with_subst_inner(gen, expr->children[1], mappings, mapping_count, 1);
+        }
         if (add_parens) fprintf(gen->output, ")");
         return;
     }

@@ -197,9 +197,15 @@ int string_char_at(const void* str, int index) {
     return (int)(unsigned char)str_data(str)[index];
 }
 
+/* By length and bytes, embedded NULs included. `==` and `!=` on strings
+ * compile to this (#2515), so it keeps a fast path: two plain C strings
+ * (literals, C returns) carry no length but their NUL, and strcmp settles
+ * them in one pass. */
 int string_equals(const void* a, const void* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
+    if (!is_aether_string(a) && !is_aether_string(b))
+        return strcmp((const char*)a, (const char*)b) == 0;
     size_t la = str_len(a), lb = str_len(b);
     if (la != lb) return 0;
     return memcmp(str_data(a), str_data(b), la) == 0;
@@ -218,6 +224,12 @@ int string_compare(const void* a, const void* b) {
     if (a == b) return 0;
     if (!a) return -1;
     if (!b) return 1;
+    /* `<`, `<=`, `>`, `>=` on strings compile to this (#2515); two plain C
+     * strings take strcmp, as in string_equals. */
+    if (!is_aether_string(a) && !is_aether_string(b)) {
+        int d = strcmp((const char*)a, (const char*)b);
+        return (d > 0) - (d < 0);
+    }
     size_t la = str_len(a), lb = str_len(b);
     size_t n = la < lb ? la : lb;
     if (n > 0) {

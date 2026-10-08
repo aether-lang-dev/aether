@@ -6932,6 +6932,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * declarations. */
     print_line(gen, "int string_char_at(const char*, int);");
     print_line(gen, "int string_equals(const char*, const char*);");
+    /* string_compare too: <, <=, >, >= on strings compile to it (#2515). */
+    print_line(gen, "int string_compare(const char*, const char*);");
     /* Codegen-internal: a `fn`-typed closure value stored into a list is
      * boxed and routed here so list_free reclaims the box + its env. Not
      * a std.collections extern, so declare it directly. */

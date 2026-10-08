@@ -166,23 +166,35 @@ TEST(codegen_fnptr_non_string_param_passes_arg_as_written) {
 /* #2206: `s != "0"` must be a content compare, not a pointer compare. Both
  * the integer literal `0` and the string literal `"0"` carry the text `0`;
  * the null-check shortcut in the string-compare codegen used to match either,
- * so the string one skipped strcmp. The string literal is TYPE_STRING out of
- * the parser, which is what the fix keys on. */
-TEST(codegen_string_ne_zero_literal_uses_strcmp) {
+ * so the string one skipped the content compare. The string literal is
+ * TYPE_STRING out of the parser, which is what the fix keys on. The compare
+ * is by length and bytes, through string_equals (#2515). */
+TEST(codegen_string_ne_zero_literal_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if a != \"0\" { println(\"ne\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a), _aether_safe_str(\"0\")) != 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "!string_equals(a, \"0\")") != NULL);
     ASSERT_TRUE(strstr(buf, "a != \"0\"") == NULL);
     free(buf);
 }
 
-TEST(codegen_zero_literal_eq_string_uses_strcmp) {
+TEST(codegen_zero_literal_eq_string_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if \"0\" == a { println(\"eq\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(\"0\"), _aether_safe_str(a)) == 0") != NULL);
+    ASSERT_TRUE(strstr(buf, "string_equals(\"0\", a)") != NULL);
     ASSERT_TRUE(strstr(buf, "\"0\" == a") == NULL);
+    free(buf);
+}
+
+/* #2515: order on strings is byte order over the whole length, through
+ * string_compare; strcmp stopped at the first NUL. */
+TEST(codegen_string_order_compares_content) {
+    char* buf = generate_typechecked(
+        "main() { a = \"abc\"\n if a < \"b\" { println(\"lt\") } }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "(string_compare(a, \"b\") < 0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a)") == NULL);
     free(buf);
 }
 

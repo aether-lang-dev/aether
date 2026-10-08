@@ -909,7 +909,7 @@ match (value) {
 
 ### String Matching
 
-Strings are compared by content (via `strcmp`), so string literal arms work correctly:
+Strings are compared by content (length and bytes), so string literal arms work correctly:
 
 ```aether,fragment
 match (command) {
@@ -2352,7 +2352,7 @@ receive {
 | `<=` | Less or equal | `a <= b` |
 | `>=` | Greater or equal | `a >= b` |
 
-> **String comparison:** When both operands are strings, `==` and `!=` compare by content (using `strcmp` in the generated C), not by pointer identity. Two strings with the same content are always equal regardless of how they were allocated.
+> **String comparison:** When both operands are strings, `==` and `!=` compare by content, not by pointer identity: two strings are equal when they have the same length and the same bytes, embedded NULs included, however they were allocated. `<`, `<=`, `>` and `>=` order them byte by byte over their whole length, a string after any proper prefix of it. A string comparison in a function-clause guard (`f(s) when s == "bob"`) works the same way.
 
 ### Bitwise Operators
 
@@ -2903,7 +2903,7 @@ main() {
 }
 ```
 
-Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, `bool`) and `string`. The codegen lowers `string == string` to `strcmp(...) == 0` automatically, so the synthesizer doesn't need a special path.
+Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, `bool`) and `string`. The codegen lowers `string == string` to a content comparison automatically, so the synthesizer doesn't need a special path.
 
 `@derive(format)` / `clone` / `hash` and nested-struct fields surface a precise compile-time diagnostic, they're explicitly out of v1 scope and tracked for follow-up commits.
 
@@ -2985,6 +2985,8 @@ name = "Alice"
 age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
+
+The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, and `\${` writes a literal `${` rather than starting an interpolation.
 
 Interpolated strings produce a `ptr` (heap-allocated C string) when used as values:
 

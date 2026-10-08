@@ -30,7 +30,7 @@ main() {
 
     // Test 7: Backslash escape in interpolated string
     path = "home"
-    println("C:\\\\${path}\\\\file") // C:\home\file
+    println("C:\\\\${path}\\\\file") // C:\\home\\file, two backslashes each, as in a plain literal (#2512)
 
     // Test 8: Empty interpolation context with escapes
     println("\x2d\x2d\x2d") // ---
