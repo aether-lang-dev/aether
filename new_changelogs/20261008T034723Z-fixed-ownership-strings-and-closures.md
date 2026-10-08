@@ -65,7 +65,15 @@
   either shape: the `aether_config_*` accessors of an `--emit=lib` library
   and the contrib host bridges reading a grant list. std.jsonpath releases
   its parser context with `heap.free`, which frees a diagnostic `_fail`
-  copied into it. Before,
+  copied into it. A captured parameter is freed on every return, a tuple
+  return included: one kept only through a callee that hands it back
+  (`fs.make_temp_file`'s prefix) was marked escaped and leaked its copy. A
+  store into a field of a struct reached through a pointer not proven to be
+  a `heap.new` box (`malloc(n) as *T`, freed with `free`) takes no copy,
+  since nothing destroys that struct with its fields (`hmac.new` lost its
+  algorithm name). And a struct a call returns owning strings, thrown away
+  or handed to another call in the same statement (`expect_str(s).to_equal(t)`),
+  is destroyed when the statement is done. Before,
   such a store left the container borrowing the caller's string and the
   caller keeping it alive for the rest of the function (a leak per call,
   through wrappers of wrappers too), and a closure's own reference handed

@@ -347,6 +347,12 @@ ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
  * and before body codegen. See codegen_stmt.c for the
  * implementation rationale (issue #420 follow-up). */
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
+int  is_captured_string_param(CodeGenerator* gen, const char* var_name);
+void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
+void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
+                               ASTNode*** nodes, int* count, int* cap);
+void mark_captured_string_param(CodeGenerator* gen, const char* var_name);
+void clear_captured_string_params(CodeGenerator* gen);
 
 /* *StringSeq local lifecycle (parallel to the heap-string passes). */
 void hoist_seq_trackers(CodeGenerator* gen, ASTNode* body);

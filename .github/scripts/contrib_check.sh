@@ -405,9 +405,13 @@ for entry in "${TESTS[@]}"; do
   # is environment only: the suppression list, and the dlclose shim that keeps
   # the driver mapped long enough for those suppressions to match a module.
   # exitcode=23 distinguishes "leaked" from the program's own failure codes.
+  # fast_unwind_on_malloc=0: the runtime and std archives are built without
+  # frame pointers, so the default unwinder stopped at aether_caps_malloc and
+  # a report named no caller; the DWARF unwinder walks through to the code
+  # that allocated.
   lsan_env=""
   if [ "$use_lsan" = "1" ]; then
-    lsan_env="LD_PRELOAD=$LSAN_KEEP_SO LSAN_OPTIONS=suppressions=$LSAN_SUPP:print_suppressions=1:exitcode=23"
+    lsan_env="LD_PRELOAD=$LSAN_KEEP_SO LSAN_OPTIONS=suppressions=$LSAN_SUPP:print_suppressions=1:exitcode=23:fast_unwind_on_malloc=0:malloc_context_size=30"
   fi
   # Run from a scratch directory that mirrors the repo through symlinks.
   # The programs resolve inputs by relative path (shaders, fixtures), so the
@@ -442,11 +446,13 @@ for entry in "${TESTS[@]}"; do
     code=$?
     if [ "$code" = "99" ]; then
       printf '  FAIL  %-22s (valgrind: leak/error)\n' "$label"
-      grep -E "definitely lost|ERROR SUMMARY" "$log" | tail -3
+      # The first loss record's frames name the allocation, then the totals.
+      sed -n '/are definitely lost in loss record/,/^==[0-9]*== *$/p' "$log" | head -24
+      grep -E "definitely lost:|ERROR SUMMARY" "$log" | tail -2
     elif [ "$code" = "23" ] && [ "$use_lsan" = "1" ]; then
       printf '  FAIL  %-22s (lsan: leak)\n' "$label"
       # The frames name the function and line; print enough of them to act on.
-      sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log" | head -25
+      sed -n '/LeakSanitizer: detected memory leaks/,$p' "$log" | head -60
     elif [ "$code" = "124" ]; then
       printf '  FAIL  %-22s (timeout — did not terminate)\n' "$label"
       tail -40 "$log"

@@ -3773,6 +3773,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->escaped_string_var_count = 0;
             gen->return_escaped_string_vars = NULL;
             gen->return_escaped_string_var_count = 0;
+            char** prev_captured = gen->captured_string_params;
+            int prev_captured_count = gen->captured_string_param_count;
+            gen->captured_string_params = NULL;
+            gen->captured_string_param_count = 0;
             gen->return_escaped_struct_vars = NULL;
             gen->return_escaped_struct_var_count = 0;
             /* Track the closure as the current function so
@@ -3946,6 +3950,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     fprintf(gen->output, "int _heap_%s = 1; (void)_heap_%s;\n",
                             p->value, p->value);
                     mark_heap_string_var(gen, p->value);
+                    mark_captured_string_param(gen, p->value);
                 }
             }
             hoist_heap_string_trackers(gen, body);
@@ -3975,6 +3980,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
             clear_escaped_string_vars(gen);
             gen->escaped_string_vars = prev_escaped;
             gen->escaped_string_var_count = prev_escaped_count;
+            clear_captured_string_params(gen);
+            gen->captured_string_params = prev_captured;
+            gen->captured_string_param_count = prev_captured_count;
             gen->return_escaped_string_vars = prev_ret_escaped;
             gen->return_escaped_string_var_count = prev_ret_escaped_count;
             gen->return_escaped_struct_vars = prev_ret_escaped_struct;
@@ -4840,6 +4848,21 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     return 1;
 }
 
+/* Calls whose owning-struct result is a temporary of the expression
+ * statement being emitted (stmt_struct_temps_begin, codegen_stmt.c): each is
+ * emitted as `(<temp> = <call>)`, and the statement destroys the temp once it
+ * is done. */
+static ASTNode** g_stmt_temp_nodes = NULL;
+static const char** g_stmt_temp_names = NULL;
+static int g_stmt_temp_count = 0;
+static const ASTNode* g_stmt_temp_wrapping = NULL;
+
+void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count) {
+    g_stmt_temp_nodes = nodes;
+    g_stmt_temp_names = names;
+    g_stmt_temp_count = count;
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -4865,6 +4888,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         fprintf(gen->output, "))");
         g_slice_view_wrapping = saved;
         return;
+    }
+
+    if (g_stmt_temp_count > 0 && g_stmt_temp_wrapping != expr) {
+        for (int i = 0; i < g_stmt_temp_count; i++) {
+            if (g_stmt_temp_nodes[i] != expr) continue;
+            const ASTNode* saved = g_stmt_temp_wrapping;
+            g_stmt_temp_wrapping = expr;
+            fprintf(gen->output, "(%s = ", g_stmt_temp_names[i]);
+            generate_expression(gen, expr);
+            fprintf(gen->output, ")");
+            g_stmt_temp_wrapping = saved;
+            return;
+        }
     }
 
     /* Argument-temp lifetime substitution. If this AST_FUNCTION_CALL

@@ -655,6 +655,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->escaped_string_var_count = 0;
     gen->return_escaped_string_vars = NULL;
     gen->return_escaped_string_var_count = 0;
+    gen->captured_string_params = NULL;
+    gen->captured_string_param_count = 0;
     gen->return_escaped_struct_vars = NULL;
     gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
@@ -769,6 +771,7 @@ void free_code_generator(CodeGenerator* gen) {
         program_index_reset();
         free(gen->order_fn_effects);   /* #2478 */
         gen->order_fn_effects = NULL;
+        clear_captured_string_params(gen);
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -1127,9 +1130,35 @@ int is_escaped_string_var(CodeGenerator* gen, const char* var_name) {
 }
 
 // Helper: mark a heap-string variable as escaped.
+int is_captured_string_param(CodeGenerator* gen, const char* var_name) {
+    if (!gen || !var_name) return 0;
+    for (int i = 0; i < gen->captured_string_param_count; i++) {
+        if (strcmp(gen->captured_string_params[i], var_name) == 0) return 1;
+    }
+    return 0;
+}
+
+void mark_captured_string_param(CodeGenerator* gen, const char* var_name) {
+    if (!gen || !var_name || is_captured_string_param(gen, var_name)) return;
+    gen->captured_string_params = (char**)aether_xrealloc(
+        gen->captured_string_params,
+        sizeof(char*) * (size_t)(gen->captured_string_param_count + 1));
+    gen->captured_string_params[gen->captured_string_param_count++] =
+        (char*)aether_intern(var_name);
+}
+
+void clear_captured_string_params(CodeGenerator* gen) {
+    if (!gen) return;
+    free(gen->captured_string_params);   /* the names are interned */
+    gen->captured_string_params = NULL;
+    gen->captured_string_param_count = 0;
+}
+
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name) {
     if (!gen || !var_name) return;
     if (is_escaped_string_var(gen, var_name)) return;
+    /* A captured parameter is never escaped: see captured_string_params. */
+    if (is_captured_string_param(gen, var_name)) return;
     char** new_vars = realloc(gen->escaped_string_vars,
                               sizeof(char*) * (gen->escaped_string_var_count + 1));
     if (!new_vars) return;

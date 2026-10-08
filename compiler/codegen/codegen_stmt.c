@@ -4012,6 +4012,10 @@ static int g_capture_holds_own_ref = 0;
  * closure whose captures are outer variables rather than locals. */
 static ASTNode* g_keep_body = NULL;
 static ASTNode* g_keep_closure = NULL;
+/* The named function whose body a copy-on-keep query walks, where a
+ * pointer's provenance is looked up (box_trackers_are_initialised). */
+static ASTNode* g_keep_fn = NULL;
+static int value_directly_carries_param(ASTNode* node, const char* pname);
 static int is_nonstoring_builtin(const char* fn);
 static int is_consuming_free(const char* fn);
 
@@ -4188,9 +4192,11 @@ static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_
     int saved_flag = g_capture_holds_own_ref;
     ASTNode* saved_body = g_keep_body;
     ASTNode* saved_closure = g_keep_closure;
+    ASTNode* saved_fn = g_keep_fn;
     g_capture_holds_own_ref = 1;
     g_keep_body = body;
     g_keep_closure = NULL;
+    g_keep_fn = fn_def;
     int kept = param_escapes_in_subtree(gen, body, pname, depth, /*return_is_escape=*/0);
     g_capture_holds_own_ref = saved_flag;
     g_keep_body = saved_body;
@@ -4203,8 +4209,16 @@ static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_
      * function keeps borrowing and its caller keeps the old rule. A
      * function that frees its parameter takes the caller's reference
      * (param_consumed), so it takes none of its own either. */
-    return kept && !param_opaque_sink(gen, body, pname, depth) &&
-           !param_consumed(gen, body, pname, depth);
+    int captures = 0;
+    if (kept) {
+        ASTNode* walked_fn = g_keep_fn;
+        g_keep_fn = fn_def;
+        captures = !param_opaque_sink(gen, body, pname, depth) &&
+                   !param_consumed(gen, body, pname, depth);
+        g_keep_fn = walked_fn;
+    }
+    g_keep_fn = saved_fn;
+    return captures;
 }
 
 int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx) {
@@ -4219,9 +4233,36 @@ int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int 
  * escapes in its body)? Read-only externs, consuming frees, `@noescape`
  * parameters and closure calls under the borrowed convention are not
  * sinks; a nested closure takes a reference of its own. */
+/* Is `node` a store of the parameter into a field of a struct reached
+ * through a pointer the compiler cannot prove is a heap.new box (#2369,
+ * box_trackers_are_initialised): memory from `malloc(n) as *T`, a C pointer,
+ * a parameter? Nothing destroys such a struct with its fields (it is freed
+ * with free(), its strings borrowed), so a copy stored there has no releaser
+ * and leaked: test_self_ref_struct's `e.msg = msg` into `malloc(64) as
+ * *ErrChain`. A struct held by value, or in a heap.new box, is destroyed with
+ * its fields, so a store there stays a tracked keep. */
+static int param_store_through_raw_pointer(CodeGenerator* gen, ASTNode* node,
+                                           const char* pname) {
+    int is_store = (node->type == AST_ASSIGNMENT && node->child_count >= 2) ||
+                   (node->type == AST_BINARY_EXPRESSION && node->value &&
+                    strcmp(node->value, "=") == 0 && node->child_count >= 2);
+    if (!is_store) return 0;
+    ASTNode* lhs = node->children[0];
+    if (!lhs || lhs->type != AST_MEMBER_ACCESS || lhs->child_count < 1) return 0;
+    if (!value_directly_carries_param(node->children[1], pname)) return 0;
+    ASTNode* obj = lhs->children[0];
+    if (!obj || !obj->node_type || obj->node_type->kind != TYPE_PTR) return 0;
+    ASTNode* saved_fn = gen->current_function;
+    if (g_keep_fn) gen->current_function = g_keep_fn;
+    int boxed = box_trackers_are_initialised(gen, obj);
+    gen->current_function = saved_fn;
+    return !boxed;
+}
+
 static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth) {
     if (!node) return 0;
     if (depth > 8) return 1;
+    if (param_store_through_raw_pointer(gen, node, pname)) return 1;
     if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) return 0;
     /* A module-level `var` never frees what it holds (process lifetime,
      * readable from any thread), so a store of the parameter into one has
@@ -7615,6 +7656,25 @@ const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
     if (!gen || !gen->program || !t || t->kind != TYPE_STRUCT || !t->struct_name) return NULL;
     ASTNode* sdef = find_struct_definition_by_name(gen->program, t->struct_name);
     return (sdef && struct_owns_heap_strings(gen, sdef)) ? t->struct_name : NULL;
+}
+
+/* The calls in an expression statement whose value is a struct, owning
+ * strings, returned by value: temporaries the statement destroys once done
+ * (see the expression-statement path). Not into a closure, whose body is
+ * its own function. */
+void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
+                               ASTNode*** nodes, int* count, int* cap) {
+    if (!e || e->type == AST_CLOSURE) return;
+    if (e->type == AST_FUNCTION_CALL && e->node_type &&
+        e->node_type->kind == TYPE_STRUCT && struct_owning_strings(gen, e->node_type)) {
+        if (*count == *cap) {
+            *cap = *cap ? *cap * 2 : 4;
+            *nodes = (ASTNode**)aether_xrealloc(*nodes, sizeof(ASTNode*) * (size_t)*cap);
+        }
+        (*nodes)[(*count)++] = e;
+    }
+    for (int i = 0; i < e->child_count; i++)
+        collect_stmt_struct_temps(gen, e->children[i], nodes, count, cap);
 }
 
 /* `<lvalue>._heap_<f> = 0;` for every string field of `struct_name`: the
@@ -12000,6 +12060,33 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             fprintf(gen->output, "));\n");
                             break;
                         }
+                        /* A struct a call returns by value, owning strings,
+                         * that nothing in this statement keeps: the result
+                         * thrown away, or the argument of another call (a
+                         * fluent chain, `expect_str(s).to_equal(t)`). The
+                         * callee's parameter only borrows it (a struct
+                         * parameter disowns its copy on entry, and a store
+                         * of it copies), so nothing holds its strings past
+                         * the statement, and nothing used to free them: the
+                         * statement now keeps each in a temporary and
+                         * destroys it once done, as a local's scope exit
+                         * would. Zeroed first, so one a short circuit
+                         * skipped destroys nothing. */
+                        ASTNode** st_nodes = NULL;
+                        int st_count = 0, st_cap = 0;
+                        collect_stmt_struct_temps(gen, inner, &st_nodes, &st_count, &st_cap);
+                        const char** st_names = NULL;
+                        if (st_count > 0) {
+                            st_names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)st_count);
+                            static int st_seq = 0;
+                            fprintf(gen->output, "{ ");
+                            for (int ti = 0; ti < st_count; ti++) {
+                                st_names[ti] = cg_internf("_ae_stmp%d", st_seq++);
+                                fprintf(gen->output, "%s %s = {0}; ",
+                                        get_c_type(st_nodes[ti]->node_type), st_names[ti]);
+                            }
+                            stmt_struct_temps_set(st_nodes, st_names, st_count);
+                        }
                         int discards_value = inner && (
                             inner->type == AST_IDENTIFIER ||
                             inner->type == AST_LITERAL ||
@@ -12010,7 +12097,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         if (discards_value) fprintf(gen->output, "(void)(");
                         generate_expression(gen, inner);
                         if (discards_value) fprintf(gen->output, ")");
-                        fprintf(gen->output, ";\n");
+                        fprintf(gen->output, ";");
+                        if (st_count > 0) {
+                            stmt_struct_temps_set(NULL, NULL, 0);
+                            for (int ti = 0; ti < st_count; ti++) {
+                                fprintf(gen->output, " %s_destroy(&%s);",
+                                        struct_owning_strings(gen, st_nodes[ti]->node_type),
+                                        st_names[ti]);
+                            }
+                            fprintf(gen->output, " }");
+                            free(st_nodes);
+                            free(st_names);
+                        }
+                        fprintf(gen->output, "\n");
                     }
                     gen->discard_call_value = 0;
                 }

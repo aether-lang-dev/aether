@@ -1398,6 +1398,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     clear_declared_vars(gen);  // Reset for each function
     clear_fnptr_locals(gen);   // #2130: fn-typed parameters/locals are this function's
     clear_heap_string_vars(gen);
+    clear_captured_string_params(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
     clear_escaped_string_vars(gen);
@@ -1476,6 +1477,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 fprintf(gen->output, "%s = aether_str_capture(%s); int _heap_%s = 1; (void)_heap_%s;\n",
                         child->value, child->value, child->value, child->value);
                 mark_heap_string_var(gen, child->value);
+                mark_captured_string_param(gen, child->value);
             }
             /* A struct parameter is a copy of the caller's value, strings
              * included, and the caller still owns those strings: the copy
@@ -2085,6 +2087,7 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     clear_declared_vars(gen);
     clear_fnptr_locals(gen);   /* #2130: a fresh C function */
     clear_heap_string_vars(gen);
+    clear_captured_string_params(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
     clear_try_clobbered_vars(gen);  /* Issue #501 follow-up — per-fn set */
