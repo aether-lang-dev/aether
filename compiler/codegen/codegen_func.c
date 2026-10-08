@@ -498,22 +498,11 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
             for (int j = 0; j < fdef->child_count; j++) {
                 if (fdef->children[j] == params[k]) { pidx = j; break; }
             }
-            int keeps = 0;
-            if (params[k] && params[k]->node_type &&
-                params[k]->node_type->kind == TYPE_STRING && pidx >= 0) {
-                /* The function's body treats the parameter as borrowed, so
-                 * a reference taken here is released by nothing unless the
-                 * function hands it on. Take one only for a real keep: an
-                 * alias into a local that keeps nothing, or a capture
-                 * (which takes its own), would leak it. */
-                int copies = owned_string && !function_def_returns_heap_string(gen, fdef);
-                keeps = callee_string_param_kept(gen, fname, pidx, !copies);
-            }
-            if (keeps) {
-                fprintf(gen->output, "aether_str_capture(_a%d)", k);
-            } else {
-                fprintf(gen->output, "_a%d", k);
-            }
+            /* A `string` the function keeps is its own reference, taken by
+             * its body on entry (callee_string_param_captures), so the
+             * adapter passes the caller's argument as it is. */
+            (void)pidx;
+            fprintf(gen->output, "_a%d", k);
         }
         fprintf(gen->output, ")");
         if (owned_string) {
@@ -1504,6 +1493,17 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             } else if (is_sized_array_param(child->node_type)) {
                 print_indent(gen);
                 emit_sized_array_param_copy(gen, child->node_type, child->value);   /* #2516 */
+            } else if (callee_string_param_captures(gen, func->value, i)) {
+                /* Copy-on-keep (#2499), as a closure does on entry: a
+                 * `string` parameter this body keeps becomes a reference of
+                 * its own (a refcounted string retained, a plain buffer
+                 * copied) and a heap-tracked local from here on, so a store
+                 * moves or copies it, a return hands it over, and the exit
+                 * frees what is left. The caller borrows its own argument. */
+                print_indent(gen);
+                fprintf(gen->output, "%s = aether_str_capture(%s); int _heap_%s = 1; (void)_heap_%s;\n",
+                        child->value, child->value, child->value, child->value);
+                mark_heap_string_var(gen, child->value);
             }
             /* A struct parameter is a copy of the caller's value, strings
              * included, and the caller still owns those strings: the copy

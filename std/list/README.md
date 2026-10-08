@@ -13,8 +13,10 @@ owning add (`list_add_string_owned` takes its own reference to the string,
 or a copy of a plain one; a closure's environment gets a reference of its
 own, #2518), so the caller keeps and frees its own copy. The list gives back
 what it owns when the element leaves it: `list_remove`, `list_clear`,
-`list_free`, and a closure value stored over the slot. `list_set` of any
-other value leaves what the slot held to its caller (a sort or a swap puts
+`list_free`, and a string or closure value stored over the slot with
+`list.set` (the new string is owned the way `add` owns it: a fresh value
+adopted, a local moved or copied, any other string copied). `list_set` of a
+raw pointer leaves what the slot held to its caller (a sort or a swap puts
 it back in another slot through the same call) and the new pointer stays
 the caller's. A pointer read with `get` from an owned element is valid only
 while the element is in the list.

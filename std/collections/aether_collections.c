@@ -320,6 +320,39 @@ void list_set(ArrayList* list, int index, void* item) {
     if (list->owned_flags) list->owned_flags[index] = 0;
 }
 
+/* Store a string the list owns into slot `index`, as list_add_string_owned
+ * stores one at the end: the list takes a reference of its own (a
+ * refcounted string retained, a plain one copied) and releases what the
+ * slot owned before. Routed from codegen for `list.set(l, i, s)` with a
+ * string value; a raw pointer goes through list_set and stays the caller's. */
+int list_set_string_owned(ArrayList* list, int index, const void* item) {
+    if (!list || index < 0 || index >= list->size) return 0;
+    if (!list_grow_owned_flags(list)) return 0;
+    const void* store = item;
+    if (item && is_aether_string(item)) {
+        string_retain(item);
+    } else if (item) {
+        AetherString* copy = string_new_with_length((const char*)item, strlen((const char*)item));
+        if (!copy) return 0;
+        store = copy;
+    }
+    list_release_slot(list, index);
+    list->items[index] = (void*)store;
+    list->owned_flags[index] = store ? 1 : 0;
+    return 1;
+}
+
+/* The adopting form: the caller's single reference to a fresh string moves
+ * into the slot, the old element released. */
+int list_set_string_adopted(ArrayList* list, int index, const void* item) {
+    if (!list || index < 0 || index >= list->size) return 0;
+    if (!list_grow_owned_flags(list)) return 0;
+    list_release_slot(list, index);
+    list->items[index] = (void*)item;
+    list->owned_flags[index] = item ? 1 : 0;
+    return 1;
+}
+
 int list_size(ArrayList* list) {
     return list ? list->size : 0;
 }

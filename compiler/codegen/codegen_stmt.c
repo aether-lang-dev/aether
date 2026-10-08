@@ -1705,6 +1705,8 @@ static int returns_promoted_string(CodeGenerator* gen, ASTNode* expr, const char
  * identifiers, which is the wrong function whenever classification is
  * triggered from a caller's destructure site. `fn_name` is the analysed
  * function's. */
+static int returned_param_is_captured(CodeGenerator* gen, const char* name, const char* fn_name);
+
 static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
                                ASTNode* fn_body_root, const char* fn_name) {
     if (!expr) return 0;
@@ -1713,7 +1715,9 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
                (body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
                 body_tuple_destructure_binds_heap(gen, fn_body_root,
                                                   expr->value) ||
-                returns_promoted_string(gen, expr, fn_name));
+                returns_promoted_string(gen, expr, fn_name) ||
+                /* A kept parameter is this function's own reference. */
+                returned_param_is_captured(gen, expr->value, fn_name));
     }
     /* #2461: a field read is taken as a copy at the return site (the
      * struct, often this function's own local, frees its buffer at scope
@@ -4090,8 +4094,20 @@ int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name,
  * own? The same question closure_string_param_kept asks of a closure
  * literal: a capture or an alias into a local that keeps nothing is no
  * keep. A return counts only when `return_is_keep`. */
+static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name, int param_idx,
+                                       int return_is_keep, int depth);
+
 int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
                              int return_is_keep) {
+    return callee_string_param_kept_at(gen, func_name, param_idx, return_is_keep, 0);
+}
+
+static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name, int param_idx,
+                                       int return_is_keep, int depth) {
+    /* Mutual recursion between callees: past the bound the parameter
+     * counts as kept, which only ever keeps a caller's argument alive
+     * longer (the walk through callee_keeps_string_arg restarts here). */
+    if (depth > 8) return 1;
     const char* pname; ASTNode* body;
     int saved_cl = g_escape_param_is_closure;   /* #2528: per walk */
     if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) {
@@ -4104,12 +4120,176 @@ int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int para
     g_capture_holds_own_ref = 1;
     g_keep_body = body;
     g_keep_closure = NULL;
-    int kept = param_escapes_in_subtree(gen, body, pname, 0, return_is_keep);
+    int kept = param_escapes_in_subtree(gen, body, pname, depth, return_is_keep);
     g_capture_holds_own_ref = saved_flag;
     g_keep_body = saved_body;
     g_keep_closure = saved_closure;
     g_escape_param_is_closure = saved_cl;
     return kept;
+}
+
+/* The `string` parameter `param_idx` of `func_name`, or NULL. */
+static ASTNode* callee_string_param_node(CodeGenerator* gen, const char* func_name, int param_idx) {
+    if (!gen || !gen->program || !func_name || param_idx < 0) return NULL;
+    char fn_norm[256];
+    const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn);
+    if (!fn_def || param_idx >= fn_def->child_count) return NULL;
+    ASTNode* param = fn_def->children[param_idx];
+    if (!param || !param->value || !param->node_type || param->node_type->kind != TYPE_STRING ||
+        (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE)) return NULL;
+    return param;
+}
+
+int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx) {
+    return callee_string_param_node(gen, func_name, param_idx) != NULL;
+}
+
+/* Copy-on-keep for a named function, as for a closure (#2499): a `string`
+ * parameter the body keeps past the call (a container store, a struct
+ * field, a cell, a global, a call that keeps it) is the function's own
+ * reference, taken on entry (generate_function) and from there on a
+ * heap-tracked local that the keep moves or copies and the exit frees. A
+ * return of it hands that reference to the caller (return_expr_is_heap
+ * counts it as owned). The caller then borrows whatever it passed.
+ * Without this the container borrowed the caller's string and the caller
+ * was told to keep it alive for ever (a leak per call), or, through a
+ * wrapper, the closure's own reference was stored raw and given back by
+ * nobody. A promoted parameter's cell takes its own reference already
+ * (emit_promoted_param_cell). `depth` bounds the walk through nested
+ * callees, as every body walk here is bounded; past the bound the answer
+ * is "does not capture", which only ever keeps a caller's argument alive
+ * longer. */
+static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
+
+static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_name,
+                                           int param_idx, int depth) {
+    if (depth > 8) return 0;
+    ASTNode* param = callee_string_param_node(gen, func_name, param_idx);
+    if (!param) return 0;
+    char fn_norm[256];
+    const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn);
+    char** promoted = NULL;
+    int promoted_count = 0;
+    get_promoted_names_for_func(gen, fn_def->value, &promoted, &promoted_count);
+    for (int k = 0; k < promoted_count; k++) {
+        if (promoted[k] && strcmp(promoted[k], param->value) == 0) return 0;
+    }
+    const char* pname; ASTNode* body;
+    int saved_cl = g_escape_param_is_closure;
+    if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) {
+        g_escape_param_is_closure = saved_cl;
+        return 0;
+    }
+    int saved_flag = g_capture_holds_own_ref;
+    ASTNode* saved_body = g_keep_body;
+    ASTNode* saved_closure = g_keep_closure;
+    g_capture_holds_own_ref = 1;
+    g_keep_body = body;
+    g_keep_closure = NULL;
+    int kept = param_escapes_in_subtree(gen, body, pname, depth, /*return_is_escape=*/0);
+    g_capture_holds_own_ref = saved_flag;
+    g_keep_body = saved_body;
+    g_keep_closure = saved_closure;
+    g_escape_param_is_closure = saved_cl;
+    /* Every keep must be a slot this compiler tracks (a container, a
+     * struct field, a cell, a global, a callee that captures in turn): a
+     * reference handed to an extern's `ptr` parameter, a `@retain`
+     * parameter or a callee without a body has no releaser, so the
+     * function keeps borrowing and its caller keeps the old rule. */
+    return kept && !param_opaque_sink(gen, body, pname, depth);
+}
+
+int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx) {
+    return callee_string_param_captures_at(gen, func_name, param_idx, 0);
+}
+
+/* Is `pname` passed, as a bare argument anywhere under `node`, to a sink
+ * the compiler cannot release behind: an extern parameter that keeps it
+ * (`ptr`, unknown, `@retain`), a callee without a visible body, or a
+ * callee whose own parameter reaches such a sink (through its `string`
+ * parameter that does not capture, or a parameter of another kind that
+ * escapes in its body)? Read-only externs, consuming frees, `@noescape`
+ * parameters and closure calls under the borrowed convention are not
+ * sinks; a nested closure takes a reference of its own. */
+static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth) {
+    if (!node) return 0;
+    if (depth > 8) return 1;
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) return 0;
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        char fn_norm[256];
+        const char* fn = codegen_normalise_callee(node->value, fn_norm, sizeof(fn_norm));
+        int is_call = strcmp(node->value, "call") == 0;
+        int first_arg = is_call ? 1 : 0;
+        for (int i = first_arg; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            if (!a || a->type != AST_IDENTIFIER || !a->value || strcmp(a->value, pname) != 0) continue;
+            if (is_call) {
+                if (!gen->closure_args_borrowed) return 1;
+                continue;
+            }
+            if (is_nonstoring_builtin(fn) || is_consuming_free(fn)) continue;
+            if (is_noescape_extern_param(gen, fn, i)) continue;
+            /* A list add, list set or map put of the parameter: the slot
+             * the owning rewrite takes, a tracked keep. */
+            if (container_store_slot(gen, node) == i) continue;
+            if (is_retain_extern_param(gen, fn, i)) return 1;
+            if (callee_has_visible_body(gen, node->value)) {
+                if (callee_param_is_string(gen, node->value, i)) {
+                    if (callee_string_param_captures_at(gen, node->value, i, depth + 1)) continue;
+                    const char* cp; ASTNode* cb;
+                    int saved_cl = g_escape_param_is_closure;
+                    int r = resolve_callee_param_body(gen, node->value, i, &cp, &cb)
+                            ? param_opaque_sink(gen, cb, cp, depth + 1) : 1;
+                    g_escape_param_is_closure = saved_cl;
+                    if (r) return 1;
+                } else if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) {
+                    return 1;
+                }
+                continue;
+            }
+            if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) return 1;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (param_opaque_sink(gen, node->children[i], pname, depth)) return 1;
+    }
+    return 0;
+}
+
+/* The caller-side rule for a `string` argument to a function with a
+ * visible body: does the caller's own pointer live on past the call? Not
+ * when the callee captures the parameter (it holds a reference of its
+ * own; a returned one is that reference, handed over owned). Otherwise
+ * the keep walk decides, the one a closure's copy-on-keep uses: a store
+ * into a sink the callee cannot release behind keeps it, a capture by a
+ * nested closure does not (the env takes its own reference), and a return
+ * keeps it unless the callee's string result is uniform-heap, which hands
+ * back a copy. Shared by the escape walk, the argument drain and the keep
+ * walk of an enclosing body, so the three never disagree. */
+int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth) {
+    if (callee_string_param_captures_at(gen, func_name, param_idx, depth)) return 0;
+    char fn_norm[256];
+    const char* fn = codegen_normalise_callee(func_name, fn_norm, sizeof(fn_norm));
+    ASTNode* fn_def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
+    int copies = fn_def && function_def_returns_heap_string(gen, fn_def);
+    return callee_string_param_kept_at(gen, func_name, param_idx, !copies, depth);
+}
+
+/* `return <param>` in `fn_name`: owned when the parameter is the function's
+ * own reference (callee_string_param_captures). */
+static int returned_param_is_captured(CodeGenerator* gen, const char* name, const char* fn_name) {
+    if (!gen || !gen->program || !name || !fn_name) return 0;
+    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn_name);
+    for (int i = 0; fn_def && i < fn_def->child_count; i++) {
+        ASTNode* c = fn_def->children[i];
+        if (c && (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
+            c->value && strcmp(c->value, name) == 0) {
+            return callee_string_param_captures_at(gen, fn_name, i, 0);
+        }
+    }
+    return 0;
 }
 
 /* Does the callee's param STORE-escape (anything except being directly
@@ -4641,8 +4821,13 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                      * is not kept. Deciding by the parameter's kind first
                      * made every `fn` or `ptr` parameter passed on a keep,
                      * and the env of a callback handed to such a wrapper
-                     * was never drained. */
-                    if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) return 1;
+                     * was never drained. A `string` argument is kept only
+                     * as callee_keeps_string_arg says. */
+                    if (callee_param_is_string(gen, node->value, i)) {
+                        if (callee_keeps_string_arg(gen, node->value, i, depth + 1)) return 1;
+                    } else if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) {
+                        return 1;
+                    }
                 } else if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) {
                     return 1;
                 } else if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) {
@@ -4778,15 +4963,18 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
     if (fn && is_retain_extern_param(gen, fn, arg_idx)) return 1;
     if (callee_has_visible_body(gen, call->value)) {
         /* Visible body → the body-walk is authoritative (sees through
-         * read-only accessors, ignores self-assignment `p = p`).
-         *
-         * A callee whose string result is uniform-heap hands back a copy
-         * of a parameter it returns (`return p` goes through
-         * aether_uniform_heap_str with the parameter's tracker 0), so the
-         * argument is never aliased by the result: only a store in the
-         * body escapes it. Counting the return made the caller keep a
-         * local passed to `_query_key_escape(key)` for ever (the leak in
-         * url.parse_query); the result and the walk now follow one rule. */
+         * read-only accessors, ignores self-assignment `p = p`). A `string`
+         * argument escapes only as callee_keeps_string_arg says: a callee
+         * that keeps it holds a reference of its own, and one whose string
+         * result is uniform-heap hands back a copy of a parameter it
+         * returns (`return p` goes through aether_uniform_heap_str with
+         * the parameter's tracker 0), so only a borrowing callee that
+         * returns the parameter as it is keeps the caller's pointer alive.
+         * Counting every return made the caller keep a local passed to
+         * `_query_key_escape(key)` for ever (the leak in url.parse_query). */
+        if (callee_param_is_string(gen, call->value, arg_idx)) {
+            return callee_keeps_string_arg(gen, call->value, arg_idx, 0);
+        }
         if (is_heap_string_expr(gen, call)) {
             return callee_param_store_escapes_via_body(gen, call->value, arg_idx);
         }

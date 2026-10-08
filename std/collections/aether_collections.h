@@ -59,6 +59,10 @@ int list_set_closure_owned(ArrayList* list, int index, void* box);
 // Go-style `(value, err)` returns.
 void* list_get_raw(ArrayList* list, int index);
 void list_set(ArrayList* list, int index, void* item);
+/* Owning / adopting stores into a slot (codegen's `list.set` of a string):
+ * the old element is released, the new one retained or copied / adopted. */
+int list_set_string_owned(ArrayList* list, int index, const void* item);
+int list_set_string_adopted(ArrayList* list, int index, const void* item);
 int list_size(ArrayList* list);
 void list_remove(ArrayList* list, int index);
 void list_clear(ArrayList* list);

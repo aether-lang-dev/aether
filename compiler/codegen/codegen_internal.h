@@ -280,9 +280,17 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
 int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
 void call_c_name(CodeGenerator* gen, const char* func_name, char* out, size_t n);
 ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* #2518 */
-/* The heap-tracked string local a list add or map put takes (moved or
- * copied, never adopted and left escaped), or NULL. */
+/* The heap-tracked string local a list add, list set or map put takes
+ * (moved or copied, never adopted and left escaped), or NULL. */
 ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call);
+int container_store_slot(CodeGenerator* gen, ASTNode* call);
+/* Copy-on-keep for named functions: does `func_name` take its own reference
+ * to `string` parameter `param_idx` on entry (it keeps it past the call)?
+ * The caller then borrows. callee_keeps_string_arg is the one caller-side
+ * rule for a `string` argument (does the caller's pointer live on?). */
+int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx);
+int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
+int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on

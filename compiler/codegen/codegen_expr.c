@@ -307,6 +307,12 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
      * gate the escape walker uses at codegen_stmt.c:1339-1346. */
     if (is_retain_extern_param(gen, func_name, ai)) return -1;
     if (callee_has_visible_body(gen, func_name)) {
+        /* A `string` argument the callee does not keep (callee_keeps_
+         * string_arg: it captures it, reads it, or captures it in an env
+         * of its own) is free after the call; a kept one goes on to the
+         * identity guard below. */
+        if (callee_param_is_string(gen, func_name, ai) &&
+            !callee_keeps_string_arg(gen, func_name, ai, 0)) return 0;
         if (!callee_param_escapes_via_body(gen, func_name, ai, 0)) return 0;
         /* The param escapes. If it ONLY return-escapes (the callee passes
          * the value through / may return it) and does NOT store-escape,
@@ -4262,6 +4268,14 @@ ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call) {
     return val;
 }
 
+/* The child index of the value a list add, list set or map put stores
+ * (closure_store_entry's shapes), or -1: the slot the owning rewrite takes,
+ * which the keep walks count as a tracked keep, not an opaque sink. */
+int container_store_slot(CodeGenerator* gen, ASTNode* call) {
+    const ClosureStoreEntry* e = closure_store_entry(gen, call);
+    return e ? e->val_idx : -1;
+}
+
 /* The string local a list add or a map put stores, when the store takes it
  * as every other owning slot does (emit_string_take): moved on its last
  * use, copied otherwise, so the local keeps whatever it did not hand over
@@ -4278,13 +4292,20 @@ ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call) {
 static ASTNode* current_fn_body_block(CodeGenerator* gen);
 ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call) {
     const ClosureStoreEntry* e = closure_store_entry(gen, call);
-    if (!e || strcmp(e->c_name, "list_set") == 0) return NULL;
+    if (!e) return NULL;
     ASTNode* val = call->children[e->val_idx];
     if (!val || val->type != AST_IDENTIFIER || !val->value ||
         !is_heap_string_var(gen, val->value)) return NULL;
     if (body_assigns_var_from_heap(gen, current_fn_body_block(gen), val->value)) return val;
+    /* A `string` parameter the closure or function keeps took its own
+     * reference on entry (copy-on-keep), so it is heap-tracked here. */
     ASTNode* fn = gen->current_function;
     if (fn && fn->type == AST_CLOSURE && is_closure_param(fn, val->value)) return val;
+    for (int i = 0; fn && fn->type != AST_CLOSURE && i < fn->child_count; i++) {
+        ASTNode* c = fn->children[i];
+        if (c && (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
+            c->value && strcmp(c->value, val->value) == 0) return val;
+    }
     return NULL;
 }
 
@@ -7375,6 +7396,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                          is_explicit_owned_map);
                     int is_wrapper    = (strcmp(c_func_name, "list_add") == 0 ||
                                          strcmp(c_func_name, "map_put") == 0);
+                    /* `list.set(l, i, v)` owns a string as `list.add` does:
+                     * the old element is released, the new one adopted or
+                     * taken (list_set_string_adopted / _owned). */
+                    int is_set_shape  = (strcmp(c_func_name, "list_set") == 0);
                     /* A closure value (`fn`-typed, not a raw fn-ptr) stored
                      * into a list or a map is heap-boxed (the fn -> ptr
                      * coercion) and the container owns the box and a
@@ -7390,7 +7415,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             break;
                         }
                     }
-                    if (is_list_shape || is_map_shape) {
+                    if (is_list_shape || is_map_shape || is_set_shape) {
                         int val_idx           = is_list_shape ? 1 : 2;
                         int expected_arg_count = is_list_shape ? 2 : 3;
                         if (expr->child_count == expected_arg_count) {
@@ -7454,6 +7479,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     fprintf(gen->output, ", (void*)");
                                     generate_expression(gen, val);
                                     fprintf(gen->output, ")");
+                                } else if (is_set_shape) {
+                                    fprintf(gen->output, "list_set_string_adopted(");
+                                    generate_expression(gen, expr->children[0]);
+                                    fprintf(gen->output, ", ");
+                                    generate_expression(gen, expr->children[1]);
+                                    fprintf(gen->output, ", (void*)");
+                                    generate_expression(gen, val);
+                                    fprintf(gen->output, ")");
                                 } else {
                                     fprintf(gen->output, is_wrapper
                                             ? "_aether_map_put_adopted("
@@ -7491,6 +7524,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             : "list_add_string_owned(");
                                     generate_expression(gen, expr->children[0]);
                                     fprintf(gen->output, ", (void*)");
+                                } else if (is_set_shape) {
+                                    fprintf(gen->output, "list_set_string_owned(");
+                                    generate_expression(gen, expr->children[0]);
+                                    fprintf(gen->output, ", ");
+                                    generate_expression(gen, expr->children[1]);
+                                    fprintf(gen->output, ", (void*)");
                                 } else {
                                     fprintf(gen->output, is_wrapper
                                             ? "_aether_map_put_owned("
@@ -7511,7 +7550,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "({ void* _ae_cc = (void*)(");
                                 generate_expression(gen, expr->children[0]);
                                 fprintf(gen->output, ");");
-                                if (!is_list_shape) {
+                                if (is_set_shape) {
+                                    fprintf(gen->output, " int _ae_ci = (");
+                                    generate_expression(gen, expr->children[1]);
+                                    fprintf(gen->output, ");");
+                                } else if (!is_list_shape) {
                                     fprintf(gen->output, " const char* _ae_ck = (const char*)(");
                                     generate_expression(gen, expr->children[1]);
                                     fprintf(gen->output, ");");
@@ -7523,6 +7566,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             own,
                                             is_wrapper ? "_aether_list_add_adopted" : "list_add_string_adopted",
                                             is_wrapper ? "_aether_list_add_owned" : "list_add_string_owned");
+                                } else if (is_set_shape) {
+                                    fprintf(gen->output, "; %s ? list_set_string_adopted(_ae_cc, _ae_ci, _ae_cv) : list_set_string_owned(_ae_cc, _ae_ci, _ae_cv); })",
+                                            own);
                                 } else {
                                     fprintf(gen->output, "; %s ? %s(_ae_cc, _ae_ck, _ae_cv) : %s(_ae_cc, _ae_ck, _ae_cv); })",
                                             own,
@@ -7531,19 +7577,30 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 }
                                 break;
                             }
-                            /* NOTE: a heap string reaching the container only
-                             * through a `string` PARAMETER is deliberately
-                             * NOT adopted here. The magic header proves the
-                             * value is a heap AetherString, but NOT that the
-                             * caller transferred ownership — a borrowed magic
-                             * string (owned by another container/scope) would
-                             * be double-freed if the container also released
-                             * it at free time. Representation != ownership.
-                             * Such a value stays on the raw path (the
-                             * container does not own it); the residual leak
-                             * when the caller DID transfer ownership is the
-                             * safe side of that trade (see
-                             * docs/memory-management.md, leaks_known.txt). */
+                            /* `list.set` of any other string (a literal, a
+                             * borrowed view) owns a copy: only an owning set
+                             * can release the element the slot held, and a
+                             * raw list_set cannot know what the slot held. */
+                            if (is_set_shape && val && val->node_type &&
+                                val->node_type->kind == TYPE_STRING) {
+                                fprintf(gen->output, "list_set_string_owned(");
+                                generate_expression(gen, expr->children[0]);
+                                fprintf(gen->output, ", ");
+                                generate_expression(gen, expr->children[1]);
+                                fprintf(gen->output, ", (void*)");
+                                generate_expression(gen, val);
+                                fprintf(gen->output, ")");
+                                break;
+                            }
+                            /* A `string` PARAMETER of a named function reaches
+                             * here only when the function does not keep it
+                             * (callee_string_param_captures): a function that
+                             * stores its parameter takes a reference of its
+                             * own on entry, after which the parameter is a
+                             * heap-tracked local and is taken above. What
+                             * reaches this raw path is a borrow the container
+                             * must not free: the magic header proves heap
+                             * representation, not ownership. */
                         }
                     }
 

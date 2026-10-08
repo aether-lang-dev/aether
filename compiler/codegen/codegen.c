@@ -7259,6 +7259,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * their own reference; routing codegen at them would leak a
      * refcount per add. */
     print_line(gen, "extern int list_add_string_adopted(void* list, void* item);");
+    print_line(gen, "extern int list_set_string_adopted(void* list, int index, void* item);");
+    print_line(gen, "extern int list_set_string_owned(void* list, int index, void* item);");
     print_line(gen, "extern int map_put_string_adopted(void* map, const char* key, void* value);");
     /* The adopting rewrite has to preserve `list.add` / `map.put`'s
      * string-return contract while calling an int-returning entry. Doing that

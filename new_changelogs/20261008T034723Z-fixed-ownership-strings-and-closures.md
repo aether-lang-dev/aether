@@ -47,6 +47,25 @@
   escaped, so a local stored twice, or stored in a loop, was freed once per
   store (an access violation), and a `string` parameter a closure keeps by
   storing it took a reference on entry that the store then left to nobody.
+- **A named function that keeps its `string` parameter owns it, and
+  `list.set` owns a string element.** A function that stores its parameter
+  in a list, a map, a struct field, a cell or a global takes a reference of
+  its own on entry, as a closure does (copy-on-keep): the store then moves
+  or copies that reference, a return hands it to the caller owned, and the
+  function's exit frees what is left. The caller borrows whatever it
+  passed, so it frees a temporary after the call and rebinds a local as
+  usual; the container owns its element in every shape and nothing frees it
+  twice. A parameter also handed to a sink the compiler cannot release
+  behind (an extern's `ptr` parameter, a `@retain` parameter, a callee with
+  no body) is not captured, and its caller keeps the earlier rule. Before,
+  such a store left the container borrowing the caller's string and the
+  caller keeping it alive for the rest of the function (a leak per call,
+  through wrappers of wrappers too), and a closure's own reference handed
+  to such a wrapper was given back by nobody. `list.set(l, i, s)` of a
+  string now releases the element the slot held and owns the new one (a
+  fresh value adopted, a local moved or copied, any other string copied);
+  it leaked the old element and left the new one to the caller. A raw
+  pointer stored with `list.set` is still the caller's.
 - **A closure environment is reference counted and released by its last
   holder (#2480, #2494, #2498, #2506, #2507, #2519).** `g = || { println(n)
   }` allocated `g`'s environment and never freed it, nor the shared cells
@@ -150,10 +169,10 @@
   That holds because a closure that keeps a `string` parameter (in a list, a
   map, a struct field, a captured variable, a local that keeps it) takes its
   own reference, or copies a plain buffer, when it is entered, and a
-  function used as a closure value gets the same from its adapter; the
-  parameter is a tracked string, so an alias into a local moves the
-  reference, a return hands it to the caller and whatever it still holds at
-  exit is freed. A `ptr` parameter cannot be copied, so one closure anywhere
+  named function that keeps one does the same in its own prologue, called
+  by name or as a closure value; the parameter is a tracked string, so an
+  alias into a local moves the reference, a return hands it to the caller
+  and whatever it still holds at exit is freed. A `ptr` parameter cannot be copied, so one closure anywhere
   that keeps one (a store, a capture, a return) turns the convention off,
   and so does any way a closure the compiler did not see can be called: a
   library build, an extern that returns a closure or takes or returns a
