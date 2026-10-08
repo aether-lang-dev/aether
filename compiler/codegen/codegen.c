@@ -7542,15 +7542,19 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#include <stddef.h>");
         /* #2528: `release` is the reply message's field release, NULL when
          * it owns nothing: the field read out is zeroed in the buffer and
-         * the rest released with it, the rule the GCC path spells inline. */
-        print_line(gen, "static intptr_t _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*)) {");
+         * the rest released with it, the rule the GCC path spells inline.
+         * The field is delivered whole into `out`, a zeroed buffer of
+         * field_size the call site provides (a compound literal of the
+         * field's type), and `out` is returned so the call site reads it
+         * as that type: a closure reply (16 bytes) round-trips as on the
+         * GCC path; a missing reply leaves the zero. */
+        print_line(gen, "static void* _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*), void* out) {");
         print_line(gen, "    void* reply = scheduler_ask_message(target, msg, msg_size, timeout_ms);");
-        print_line(gen, "    if (!reply) return 0;");
-        print_line(gen, "    intptr_t val = 0;");
-        print_line(gen, "    memcpy(&val, (char*)reply + field_offset, field_size < sizeof(intptr_t) ? field_size : sizeof(intptr_t));");
+        print_line(gen, "    if (!reply) return out;");
+        print_line(gen, "    memcpy(out, (char*)reply + field_offset, field_size);");
         print_line(gen, "    if (release) { memset((char*)reply + field_offset, 0, field_size); release(reply); }");
         print_line(gen, "    free(reply);");
-        print_line(gen, "    return val;");
+        print_line(gen, "    return out;");
         print_line(gen, "}");
         print_line(gen, "#endif");
         /* #2528: the release of a closure handed back by an expression

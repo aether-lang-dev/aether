@@ -3556,6 +3556,34 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
  * ';'". The declarations
  * have no such dependency, so they stay early (other emitted code
  * references them) while the bodies move after the messages. (#1626) */
+/* The parameter list of `_aether_make_closure_<id>`, the non-GCC
+ * constructor of closure `ci`'s value (one argument per capture): shared by
+ * its prototype (emit_closure_declarations) and its definition
+ * (emit_closure_definitions), which must agree. A promoted capture arrives
+ * as the cell pointer, `ctype*`, which is also what the env field is. A
+ * fixed-size array arrives as a pointer to its elements (#2464). */
+static void emit_make_closure_params(CodeGenerator* gen, int ci) {
+    char** captures = gen->closures[ci].captures;
+    int cap_count = gen->closures[ci].capture_count;
+    const char* parent_func = gen->closures[ci].parent_func;
+    for (int i = 0; i < cap_count; i++) {
+        if (i > 0) fprintf(gen->output, ", ");
+        const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
+        Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
+        if (arr && !capture_is_promoted(gen, captures[i], parent_func)) {
+            fprintf(gen->output, "%s* %s", get_c_type(arr->element_type), captures[i]);
+            continue;
+        }
+        if (capture_is_promoted(gen, captures[i], parent_func)) {
+            char cell[600];
+            promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
+            fprintf(gen->output, "%s", cell);
+            continue;
+        }
+        fprintf(gen->output, "%s %s", ctype, captures[i]);
+    }
+}
+
 void emit_closure_declarations(CodeGenerator* gen) {
     for (int ci = 0; ci < gen->closure_count; ci++) {
         emit_closure_env_typedef(gen, ci);
@@ -3568,6 +3596,16 @@ void emit_closure_declarations(CodeGenerator* gen) {
         const char* ret_type = resolve_closure_return_type(gen, ci);
         emit_closure_signature(gen, ci, ret_type);
         fprintf(gen->output, ";\n");
+        /* #2528: the non-GCC constructor is defined with the bodies, after
+         * the functions that build the closure; without this prototype a
+         * capturing closure made in a function did not compile on that
+         * path (an implicit declaration, then conflicting types). */
+        if (gen->closures[ci].capture_count > 0) {
+            fprintf(gen->output, "#if !AETHER_GCC_COMPAT\nstatic _AeClosure _aether_make_closure_%d(",
+                    gen->closures[ci].id);
+            emit_make_closure_params(gen, ci);
+            fprintf(gen->output, ");\n#endif\n");
+        }
     }
     if (gen->closure_count > 0) fprintf(gen->output, "\n");
 }
@@ -3962,26 +4000,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         if (cap_count > 0) {
             fprintf(gen->output, "#if !AETHER_GCC_COMPAT\n");
             fprintf(gen->output, "static _AeClosure _aether_make_closure_%d(", id);
-            for (int i = 0; i < cap_count; i++) {
-                if (i > 0) fprintf(gen->output, ", ");
-                const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
-                /* A promoted capture arrives as the cell pointer, `ctype*`,
-                 * which is also what the env field is. A fixed-size array
-                 * arrives as a pointer to its elements (#2464). */
-                Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
-                if (arr && !capture_is_promoted(gen, captures[i], parent_func)) {
-                    fprintf(gen->output, "%s* %s",
-                            get_c_type(arr->element_type), captures[i]);
-                    continue;
-                }
-                if (capture_is_promoted(gen, captures[i], parent_func)) {
-                    char cell[600];
-                    promoted_cell_pointer(ctype, captures[i], cell, sizeof(cell));
-                    fprintf(gen->output, "%s", cell);
-                    continue;
-                }
-                fprintf(gen->output, "%s %s", ctype, captures[i]);
-            }
+            emit_make_closure_params(gen, ci);
             fprintf(gen->output, ") {\n");
             fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
             fprintf(gen->output, "    _e->_dtor = _closure_env_%d_free;\n", id);
@@ -8519,6 +8538,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 reply_field_type = reply_def->fields->type_kind;
                             }
                         }
+                        /* The C type the asker reads the reply as, one rule
+                         * for a message field, an expression reply and the
+                         * no-reply fallback, on both paths (#2528). Keep in
+                         * sync with the AST_REPLY_STATEMENT scalar emission. */
+                        const char* c_type = "int";
+                        const char* c_zero = "0";
+                        {
+                            int k = (reply_msg_name && reply_field) ? reply_field_type
+                                  : (reply_scalar_kind != TYPE_UNKNOWN) ? reply_scalar_kind : TYPE_INT;
+                            switch (k) {
+                                case TYPE_FLOAT:      c_type = "double"; c_zero = "0.0"; break;
+                                case TYPE_LONGDOUBLE: c_type = "long double"; c_zero = "0.0L"; break;
+                                case TYPE_BOOL:       c_type = "int"; c_zero = "0"; break;
+                                case TYPE_STRING:     c_type = "const char*"; c_zero = "NULL"; break;
+                                case TYPE_INT64:      c_type = "int64_t"; c_zero = "0"; break;
+                                case TYPE_UINT64:     c_type = "uint64_t"; c_zero = "0"; break;
+                                case TYPE_DURATION:   c_type = "int64_t"; c_zero = "0"; break;
+                                case TYPE_PTR:        c_type = "void*"; c_zero = "NULL"; break;
+                                case TYPE_FUNCTION:   c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;
+                                default:              c_type = "int"; c_zero = "0"; break;
+                            }
+                        }
 
                         int timeout_ms = 5000;
                         if (expr->child_count >= 3 && expr->children[2] &&
@@ -8585,20 +8626,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, ", &_msg, sizeof(%s), %d); ", message->value, timeout_ms);
 
                         if (reply_msg_name && reply_field) {
-                            const char* c_type = "int";
-                            const char* c_zero = "0";
-                            switch (reply_field_type) {
-                                case TYPE_FLOAT:   c_type = "double"; c_zero = "0.0"; break;
-                                case TYPE_LONGDOUBLE: c_type = "long double"; c_zero = "0.0L"; break;
-                                case TYPE_BOOL:    c_type = "int";    c_zero = "0";   break;
-                                case TYPE_STRING:  c_type = "const char*"; c_zero = "NULL"; break;
-                                case TYPE_INT64:   c_type = "int64_t"; c_zero = "0";  break;
-                                case TYPE_UINT64:  c_type = "uint64_t"; c_zero = "0"; break;
-                                case TYPE_DURATION: c_type = "int64_t"; c_zero = "0"; break;
-                                case TYPE_PTR:     c_type = "void*";  c_zero = "NULL"; break;
-                                case TYPE_FUNCTION: c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;   /* #2528 */
-                                default:           c_type = "int";    c_zero = "0";   break;
-                            }
                             fprintf(gen->output, "%s _ask_val = _ask_r ? ((%s*)_ask_r)->%s : %s; ",
                                     c_type, reply_msg_name, reply_field, c_zero);
                             /* #2528: the reply's strings were copied and its
@@ -8613,23 +8640,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "free(_ask_r); _ask_val; })");
                         } else if (reply_scalar_kind != TYPE_UNKNOWN) {
                             /* Expression reply (#1324): the handler sent a
-                             * typed copy; deref the buffer as that type.
-                             * Keep this switch in sync with the
-                             * AST_REPLY_STATEMENT scalar emission. */
-                            const char* c_type = "int";
-                            const char* c_zero = "0";
-                            switch (reply_scalar_kind) {
-                                case TYPE_FLOAT:      c_type = "double"; c_zero = "0.0"; break;
-                                case TYPE_LONGDOUBLE: c_type = "long double"; c_zero = "0.0L"; break;
-                                case TYPE_BOOL:       c_type = "int"; c_zero = "0"; break;
-                                case TYPE_INT64:      c_type = "int64_t"; c_zero = "0"; break;
-                                case TYPE_UINT64:     c_type = "uint64_t"; c_zero = "0"; break;
-                                case TYPE_DURATION:   c_type = "int64_t"; c_zero = "0"; break;
-                                case TYPE_PTR:        c_type = "void*"; c_zero = "NULL"; break;
-                                case TYPE_STRING:     c_type = "const char*"; c_zero = "NULL"; break;
-                                case TYPE_FUNCTION:   c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;   /* #2528 */
-                                default:              c_type = "int"; c_zero = "0"; break;
-                            }
+                             * typed copy; deref the buffer as that type. */
                             fprintf(gen->output, "%s _ask_val = _ask_r ? *(%s*)_ask_r : %s; ",
                                     c_type, c_type, c_zero);
                             fprintf(gen->output, "free(_ask_r); _ask_val; })");
@@ -8644,9 +8655,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
 
                         fprintf(gen->output, "\n#else\n");
-                        // MSVC: use _aether_ask helper + compound literal
+                        /* MSVC: the helper delivers the field whole into a
+                         * zeroed compound literal of its type (block
+                         * lifetime) and returns it, read here as that type:
+                         * the same value and the same release as the GCC
+                         * path (#2528). */
                         gen->ask_temp_counter++;
-                        fprintf(gen->output, "_aether_ask_helper(");
+                        fprintf(gen->output, "(*(%s*)_aether_ask_helper(", c_type);
                         emit_send_target(gen, target, "ActorBase*");
                         fprintf(gen->output, ", &(%s){ ._message_id = %d",
                                 message->value, msg_def->message_id);
@@ -8662,34 +8677,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
                         fprintf(gen->output, " }, sizeof(%s), %d, ", message->value, timeout_ms);
                         if (reply_msg_name && reply_field) {
-                            fprintf(gen->output, "offsetof(%s, %s), sizeof(", reply_msg_name, reply_field);
-                            // Emit the field type size based on reply_field_type
-                            switch (reply_field_type) {
-                                case TYPE_FLOAT:   fprintf(gen->output, "double"); break;
-                                case TYPE_LONGDOUBLE: fprintf(gen->output, "long double"); break;
-                                case TYPE_INT64:   fprintf(gen->output, "int64_t"); break;
-                                case TYPE_UINT64:  fprintf(gen->output, "uint64_t"); break;
-                                case TYPE_DURATION: fprintf(gen->output, "int64_t"); break;
-                                case TYPE_PTR:     fprintf(gen->output, "void*"); break;
-                                case TYPE_STRING:  fprintf(gen->output, "const char*"); break;
-                                default:           fprintf(gen->output, "int"); break;
-                            }
-                            fprintf(gen->output, "), %s)", reply_release);
-                        } else if (reply_scalar_kind != TYPE_UNKNOWN) {
-                            fprintf(gen->output, "0, sizeof(");
-                            switch (reply_scalar_kind) {
-                                case TYPE_FLOAT:      fprintf(gen->output, "double"); break;
-                                case TYPE_LONGDOUBLE: fprintf(gen->output, "long double"); break;
-                                case TYPE_INT64:      fprintf(gen->output, "int64_t"); break;
-                                case TYPE_UINT64:     fprintf(gen->output, "uint64_t"); break;
-                                case TYPE_DURATION:   fprintf(gen->output, "int64_t"); break;
-                                case TYPE_PTR:        fprintf(gen->output, "void*"); break;
-                                case TYPE_STRING:     fprintf(gen->output, "const char*"); break;
-                                default:              fprintf(gen->output, "int"); break;
-                            }
-                            fprintf(gen->output, "), NULL)");
+                            fprintf(gen->output, "offsetof(%s, %s), sizeof(%s), %s, (void*)&(%s){0}))",
+                                    reply_msg_name, reply_field, c_type, reply_release, c_type);
                         } else {
-                            fprintf(gen->output, "0, sizeof(int), NULL)");
+                            fprintf(gen->output, "0, sizeof(%s), NULL, (void*)&(%s){0}))", c_type, c_type);
                         }
                         fprintf(gen->output, "\n#endif\n");
                     } else {
