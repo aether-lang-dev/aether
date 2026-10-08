@@ -9,6 +9,7 @@
 # duplicate or break the script's own run.
 /custom_lib_dir/
 /lib/
+tests/integration/actor_alignment/
 tests/integration/ae_inspect/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
@@ -95,6 +96,7 @@ tests/integration/heap_tracker_return_escape_no_leak/
 tests/integration/host_racket/
 tests/integration/host_rhombus/
 tests/integration/host_tinygo/
+tests/integration/http_actor_mode_release/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
