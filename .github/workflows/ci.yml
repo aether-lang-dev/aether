@@ -1177,6 +1177,39 @@ jobs:
       run: make ci-embedded
 
   # ============================================================
+  # ESP32 (Xtensa LX6, ~320 KB DRAM) under emulation. Builds a few
+  # programs into ESP-IDF firmware with xtensa-esp32-elf-gcc and boots
+  # them in Espressif's QEMU, checking their console output. The
+  # toolchain and qemu-xtensa come from the official espressif/idf
+  # image (8.6 GB unpacked, so the runner's unused SDKs go first).
+  # ============================================================
+  ci-esp32:
+    name: ESP32 (Xtensa, ESP-IDF + QEMU)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Free disk space for the ESP-IDF image
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h / | tail -1
+
+    - name: Install build tools
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
+        sudo apt-get install -y --no-install-recommends gcc make
+
+    - name: Pull espressif/idf
+      run: docker pull docker.io/espressif/idf:v6.1
+
+    - name: Run ESP32 CI
+      env:
+        ESP32_ENGINE: docker
+      run: make ci-esp32
+
+  # ============================================================
   # RISC-V 64-bit cross-compile + qemu-user-static (issue #397).
   # Catches portability bugs that an x86_64-only matrix can't see —
   # pointer-width / struct-padding / atomic-instruction differences
