@@ -2,7 +2,7 @@
 // Vulkan registry (vk.xml) by contrib/vulkan/tools/vkgen.ae. Do not edit: change
 // the selection in contrib/vulkan/tools/regenerate.sh and run it.
 //
-// Selection: Vulkan 1.3 + VK_KHR_surface,VK_KHR_swapchain,VK_KHR_deferred_host_operations,VK_KHR_acceleration_structure,VK_KHR_ray_query.
+// Selection: Vulkan 1.3 + VK_KHR_surface,VK_KHR_swapchain,VK_KHR_deferred_host_operations,VK_KHR_acceleration_structure,VK_KHR_ray_query,VK_EXT_mesh_shader.
 // Registry: 1.3.204.
 //
 // Constants drop the VK_ prefix (vk.FORMAT_R8G8B8A8_UNORM), so they cannot
@@ -24,6 +24,7 @@
 // making both calls: devices, n, r = vk.vkEnumeratePhysicalDevices_all(instance).
 
 @c_include("vulkan/vulkan.h")
+@c_include("../aether_vulkan_compat.h")
 @source("../aether_vulkan.c")
 
 exports (
@@ -51,6 +52,8 @@ exports (
     KHR_RAY_QUERY_EXTENSION_NAME,
     KHR_DEFERRED_HOST_OPERATIONS_SPEC_VERSION,
     KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+    EXT_MESH_SHADER_SPEC_VERSION,
+    EXT_MESH_SHADER_EXTENSION_NAME,
     MAX_EXTENSION_NAME_SIZE,
     MAX_DESCRIPTION_SIZE,
     MAX_PHYSICAL_DEVICE_NAME_SIZE,
@@ -841,6 +844,8 @@ exports (
     PIPELINE_STAGE_ALL_COMMANDS_BIT,
     PIPELINE_STAGE_NONE,
     PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    PIPELINE_STAGE_TASK_SHADER_BIT_EXT,
+    PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
     PIPELINE_STAGE_2_NONE,
     PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
     PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
@@ -925,6 +930,8 @@ exports (
     QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT,
     QUERY_PIPELINE_STATISTIC_TESSELLATION_EVALUATION_SHADER_INVOCATIONS_BIT,
     QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT,
+    QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT,
+    QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT,
     QUERY_RESULT_64_BIT,
     QUERY_RESULT_WAIT_BIT,
     QUERY_RESULT_WITH_AVAILABILITY_BIT,
@@ -934,6 +941,7 @@ exports (
     QUERY_TYPE_TIMESTAMP,
     QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
     QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR,
+    QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT,
     QUEUE_GRAPHICS_BIT,
     QUEUE_COMPUTE_BIT,
     QUEUE_TRANSFER_BIT,
@@ -1021,6 +1029,8 @@ exports (
     SHADER_STAGE_COMPUTE_BIT,
     SHADER_STAGE_ALL_GRAPHICS,
     SHADER_STAGE_ALL,
+    SHADER_STAGE_TASK_BIT_EXT,
+    SHADER_STAGE_MESH_BIT_EXT,
     SHARING_MODE_EXCLUSIVE,
     SHARING_MODE_CONCURRENT,
     SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT,
@@ -1279,6 +1289,8 @@ exports (
     STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
     STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
     STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+    STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+    STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT,
     STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTER_FEATURES,
     STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETER_FEATURES,
     SUBGROUP_FEATURE_BASIC_BIT,
@@ -1646,6 +1658,9 @@ exports (
     VkRenderingAttachmentInfo,
     VkPhysicalDeviceDynamicRenderingFeatures,
     VkCommandBufferInheritanceRenderingInfo,
+    VkPhysicalDeviceMeshShaderFeaturesEXT,
+    VkPhysicalDeviceMeshShaderPropertiesEXT,
+    VkDrawMeshTasksIndirectCommandEXT,
     aevk_ae_loader_proc,
     aevk_ae_instance_proc,
     aevk_ae_device_proc,
@@ -1932,7 +1947,10 @@ exports (
     vkDestroyDeferredOperationKHR,
     vkGetDeferredOperationMaxConcurrencyKHR,
     vkGetDeferredOperationResultKHR,
-    vkDeferredOperationJoinKHR
+    vkDeferredOperationJoinKHR,
+    vkCmdDrawMeshTasksEXT,
+    vkCmdDrawMeshTasksIndirectEXT,
+    vkCmdDrawMeshTasksIndirectCountEXT
 )
 
 const ATTACHMENT_UNUSED = 0xFFFFFFFF
@@ -1959,6 +1977,8 @@ const KHR_RAY_QUERY_SPEC_VERSION = 1
 const KHR_RAY_QUERY_EXTENSION_NAME = "VK_KHR_ray_query"
 const KHR_DEFERRED_HOST_OPERATIONS_SPEC_VERSION = 4
 const KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME = "VK_KHR_deferred_host_operations"
+const EXT_MESH_SHADER_SPEC_VERSION = 1
+const EXT_MESH_SHADER_EXTENSION_NAME = "VK_EXT_mesh_shader"
 const MAX_EXTENSION_NAME_SIZE = 256
 const MAX_DESCRIPTION_SIZE = 256
 const MAX_PHYSICAL_DEVICE_NAME_SIZE = 256
@@ -2909,6 +2929,8 @@ const PIPELINE_STAGE_ALL_GRAPHICS_BIT = 0x8000
 const PIPELINE_STAGE_ALL_COMMANDS_BIT = 0x10000
 const PIPELINE_STAGE_NONE = 0
 const PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR = 0x2000000
+const PIPELINE_STAGE_TASK_SHADER_BIT_EXT = 0x80000
+const PIPELINE_STAGE_MESH_SHADER_BIT_EXT = 0x100000
 
 // VkPipelineStageFlagBits2
 const PIPELINE_STAGE_2_NONE = 0
@@ -3009,6 +3031,8 @@ const QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT = 0x80
 const QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT = 0x100
 const QUERY_PIPELINE_STATISTIC_TESSELLATION_EVALUATION_SHADER_INVOCATIONS_BIT = 0x200
 const QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT = 0x400
+const QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT = 0x800
+const QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT = 0x1000
 
 // VkQueryResultFlagBits
 const QUERY_RESULT_64_BIT = 0x1
@@ -3022,6 +3046,7 @@ const QUERY_TYPE_PIPELINE_STATISTICS = 1
 const QUERY_TYPE_TIMESTAMP = 2
 const QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR = 1000150000
 const QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR = 1000150001
+const QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT = 1000328000
 
 // VkQueueFlagBits
 const QUEUE_GRAPHICS_BIT = 0x1
@@ -3143,6 +3168,8 @@ const SHADER_STAGE_FRAGMENT_BIT = 0x10
 const SHADER_STAGE_COMPUTE_BIT = 0x20
 const SHADER_STAGE_ALL_GRAPHICS = 0x0000001F
 const SHADER_STAGE_ALL = 0x7FFFFFFF
+const SHADER_STAGE_TASK_BIT_EXT = 0x40
+const SHADER_STAGE_MESH_BIT_EXT = 0x80
 
 // VkSharingMode
 const SHARING_MODE_EXCLUSIVE = 0
@@ -3413,6 +3440,8 @@ const STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR = 100
 const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR = 1000150017
 const STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR = 1000150020
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR = 1000348013
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT = 1000328000
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT = 1000328001
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTER_FEATURES = STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETER_FEATURES = STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES
 
@@ -6442,6 +6471,55 @@ extern struct VkCommandBufferInheritanceRenderingInfo @c_import {
     rasterizationSamples: int
 }
 
+extern struct VkPhysicalDeviceMeshShaderFeaturesEXT @c_import {
+    sType: int
+    pNext: ptr
+    taskShader: uint32
+    meshShader: uint32
+    multiviewMeshShader: uint32
+    primitiveFragmentShadingRateMeshShader: uint32
+    meshShaderQueries: uint32
+}
+
+extern struct VkPhysicalDeviceMeshShaderPropertiesEXT @c_import {
+    sType: int
+    pNext: ptr
+    maxTaskWorkGroupTotalCount: uint32
+    maxTaskWorkGroupCount: uint32[3]
+    maxTaskWorkGroupInvocations: uint32
+    maxTaskWorkGroupSize: uint32[3]
+    maxTaskPayloadSize: uint32
+    maxTaskSharedMemorySize: uint32
+    maxTaskPayloadAndSharedMemorySize: uint32
+    maxMeshWorkGroupTotalCount: uint32
+    maxMeshWorkGroupCount: uint32[3]
+    maxMeshWorkGroupInvocations: uint32
+    maxMeshWorkGroupSize: uint32[3]
+    maxMeshSharedMemorySize: uint32
+    maxMeshPayloadAndSharedMemorySize: uint32
+    maxMeshOutputMemorySize: uint32
+    maxMeshPayloadAndOutputMemorySize: uint32
+    maxMeshOutputComponents: uint32
+    maxMeshOutputVertices: uint32
+    maxMeshOutputPrimitives: uint32
+    maxMeshOutputLayers: uint32
+    maxMeshMultiviewViewCount: uint32
+    meshOutputPerVertexGranularity: uint32
+    meshOutputPerPrimitiveGranularity: uint32
+    maxPreferredTaskWorkGroupInvocations: uint32
+    maxPreferredMeshWorkGroupInvocations: uint32
+    prefersLocalInvocationVertexOutput: uint32
+    prefersLocalInvocationPrimitiveOutput: uint32
+    prefersCompactVertexOutput: uint32
+    prefersCompactPrimitiveOutput: uint32
+}
+
+extern struct VkDrawMeshTasksIndirectCommandEXT @c_import {
+    groupCountX: uint32
+    groupCountY: uint32
+    groupCountZ: uint32
+}
+
 extern aevk_ae_loader_proc(name: string) -> ptr
 extern aevk_ae_instance_proc(instance: ptr, name: string) -> ptr
 extern aevk_ae_device_proc(device: ptr, name: string) -> ptr
@@ -9224,6 +9302,33 @@ vkDeferredOperationJoinKHR(device: ptr, operation: ptr) -> int {
     return f(device, operation)
 }
 
+var pfn_vkCmdDrawMeshTasksEXT: ptr = null
+var got_vkCmdDrawMeshTasksEXT: int = 0
+vkCmdDrawMeshTasksEXT(commandBuffer: ptr, groupCountX: uint32, groupCountY: uint32, groupCountZ: uint32) {
+    if pfn_vkCmdDrawMeshTasksEXT == null && got_vkCmdDrawMeshTasksEXT == 0 { pfn_vkCmdDrawMeshTasksEXT = aevk_ae_loader_proc("vkCmdDrawMeshTasksEXT") }
+    if pfn_vkCmdDrawMeshTasksEXT == null { return }
+    f = pfn_vkCmdDrawMeshTasksEXT as fn(ptr, uint32, uint32, uint32)
+    f(commandBuffer, groupCountX, groupCountY, groupCountZ)
+}
+
+var pfn_vkCmdDrawMeshTasksIndirectEXT: ptr = null
+var got_vkCmdDrawMeshTasksIndirectEXT: int = 0
+vkCmdDrawMeshTasksIndirectEXT(commandBuffer: ptr, buffer: ptr, offset: uint64, drawCount: uint32, stride: uint32) {
+    if pfn_vkCmdDrawMeshTasksIndirectEXT == null && got_vkCmdDrawMeshTasksIndirectEXT == 0 { pfn_vkCmdDrawMeshTasksIndirectEXT = aevk_ae_loader_proc("vkCmdDrawMeshTasksIndirectEXT") }
+    if pfn_vkCmdDrawMeshTasksIndirectEXT == null { return }
+    f = pfn_vkCmdDrawMeshTasksIndirectEXT as fn(ptr, ptr, uint64, uint32, uint32)
+    f(commandBuffer, buffer, offset, drawCount, stride)
+}
+
+var pfn_vkCmdDrawMeshTasksIndirectCountEXT: ptr = null
+var got_vkCmdDrawMeshTasksIndirectCountEXT: int = 0
+vkCmdDrawMeshTasksIndirectCountEXT(commandBuffer: ptr, buffer: ptr, offset: uint64, countBuffer: ptr, countBufferOffset: uint64, maxDrawCount: uint32, stride: uint32) {
+    if pfn_vkCmdDrawMeshTasksIndirectCountEXT == null && got_vkCmdDrawMeshTasksIndirectCountEXT == 0 { pfn_vkCmdDrawMeshTasksIndirectCountEXT = aevk_ae_loader_proc("vkCmdDrawMeshTasksIndirectCountEXT") }
+    if pfn_vkCmdDrawMeshTasksIndirectCountEXT == null { return }
+    f = pfn_vkCmdDrawMeshTasksIndirectCountEXT as fn(ptr, ptr, uint64, ptr, uint64, uint32, uint32)
+    f(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)
+}
+
 // Points every instance-level command at `instance`'s own entry points.
 // Returns how many resolved. A command the instance does not provide (one
 // from a version or extension it was not created with) then fails as it
@@ -10030,5 +10135,14 @@ load_device_with(gdpa: ptr, device: ptr) -> int {
     pfn_vkDeferredOperationJoinKHR = device_entry(gdpa, device, "vkDeferredOperationJoinKHR")
     got_vkDeferredOperationJoinKHR = pin
     if pfn_vkDeferredOperationJoinKHR != null { n = n + 1 }
+    pfn_vkCmdDrawMeshTasksEXT = device_entry(gdpa, device, "vkCmdDrawMeshTasksEXT")
+    got_vkCmdDrawMeshTasksEXT = pin
+    if pfn_vkCmdDrawMeshTasksEXT != null { n = n + 1 }
+    pfn_vkCmdDrawMeshTasksIndirectEXT = device_entry(gdpa, device, "vkCmdDrawMeshTasksIndirectEXT")
+    got_vkCmdDrawMeshTasksIndirectEXT = pin
+    if pfn_vkCmdDrawMeshTasksIndirectEXT != null { n = n + 1 }
+    pfn_vkCmdDrawMeshTasksIndirectCountEXT = device_entry(gdpa, device, "vkCmdDrawMeshTasksIndirectCountEXT")
+    got_vkCmdDrawMeshTasksIndirectCountEXT = pin
+    if pfn_vkCmdDrawMeshTasksIndirectCountEXT != null { n = n + 1 }
     return n
 }

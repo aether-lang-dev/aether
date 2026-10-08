@@ -652,7 +652,7 @@ jobs:
         # AND no skips: with a driver and a display, every case must run.
         # The present test only skips the one case X11 cannot reach (a
         # minimised window keeps its size there), so it may report that one.
-        for t in offscreen:0 formats:0 compute:0 raw:0 sampling:0 draws:0 textures:0 present:1; do
+        for t in offscreen:0 formats:0 compute:0 raw:0 sampling:0 draws:0 textures:0 mesh-shader:0 present:1; do
           name="${t%%:*}"
           allowed_skips="${t##*:}"
           out="$(cd build/contrib-check/vulkan_${name}.rundir && xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" ../vulkan_${name} 2>&1 || true)"

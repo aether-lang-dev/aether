@@ -598,8 +598,10 @@ with `std.xml` and takes a selection, a core version plus extensions, rather
 than all of the registry. The committed module is Vulkan 1.3 with
 `VK_KHR_surface`, `VK_KHR_swapchain`, `VK_KHR_acceleration_structure`,
 `VK_KHR_ray_query` and `VK_KHR_deferred_host_operations`
-([#2203](https://github.com/aether-lang-dev/aether/issues/2203)): 250
-commands, 317 structs and 18 `_all` helpers, and every API constant their
+([#2203](https://github.com/aether-lang-dev/aether/issues/2203)), and
+`VK_EXT_mesh_shader`
+([#2556](https://github.com/aether-lang-dev/aether/issues/2556)): 253
+commands, 320 structs and 18 `_all` helpers, and every API constant their
 array members are sized by. Platform extensions are refused, since their
 structs name types (`HWND`, `Display`) that only their own headers declare;
 `vk.surface_create` above is how a surface over one is made. Two more are
@@ -608,7 +610,12 @@ spelled by hand, because the registry the module is generated from predates
 provisional: `vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME` with
 `vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`, which an instance needs
 to list MoltenVK, and `vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME`, which a
-device offering it must enable. Handles are pointers, which is what Vulkan's
+device offering it must enable. `VK_EXT_mesh_shader` arrived in registry
+1.3.226, so where the registry lacks it vkgen reads its records from an
+excerpt of a later `vk.xml` and selects it like any other extension. Its
+structs are `@c_import` too, and the module includes `aether_vulkan_compat.h`,
+which defines them for headers that predate it and gives way to a header
+that has them. Handles are pointers, which is what Vulkan's
 non-dispatchable handles are on 64-bit targets; a 32-bit target, where they
 are `uint64_t`, is not supported.
 
@@ -900,9 +907,19 @@ the device has no ray query, and says so: lavapipe before Mesa 24.1 (Ubuntu
 22.04's, which the Linux leg runs) and MoltenVK have none; Ubuntu 24.04's
 lavapipe and the discrete GPUs run it.
 
-Every test passes on an NVIDIA RTX 4070 Ti and on lavapipe. The Khronos
-validation layer, with synchronization validation on, reports nothing for
-them.
+`test_vulkan_mesh_shader.ae` checks the `VK_EXT_mesh_shader` declarations
+against the specification's values and layouts on every machine, reads the
+mesh shader properties, and draws one meshlet through a pipeline of a mesh
+and a fragment shader with no vertex input: with `vkCmdDrawMeshTasksEXT`,
+from a `VkDrawMeshTasksIndirectCommandEXT` with
+`vkCmdDrawMeshTasksIndirectEXT`, and with the count in a buffer through
+`vkCmdDrawMeshTasksIndirectCountEXT`. It skips where the device has no mesh
+shaders, MoltenVK among them; lavapipe has them from Mesa 23.2, so the Linux
+leg runs it.
+
+Every test passes on lavapipe, and all but the mesh shader test, which has
+not been run there yet, on an NVIDIA RTX 4070 Ti. The Khronos validation
+layer, with synchronization validation on, reports nothing for them.
 
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
 and Xvfb so the presentation test has a display; it then asserts the tests did
