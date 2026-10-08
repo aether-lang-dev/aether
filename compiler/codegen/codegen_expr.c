@@ -4307,6 +4307,15 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         if (rhs->node_type) free_type(rhs->node_type);
         rhs->node_type = make_string_seq_ptr_type();
     }
+    /* #2525: a closure field holds a reference of its own, released by
+     * `<Msg>_release_fields` once the handler is done: a fresh closure's
+     * is adopted, a local's or a field's retained. */
+    if (rhs && rhs->node_type && rhs->node_type->kind == TYPE_FUNCTION &&
+        !rhs->node_type->is_fnptr && fdef && fdef->c_type &&
+        strcmp(fdef->c_type, "_AeClosure") == 0) {
+        emit_closure_take(gen, rhs);
+        return;
+    }
     generate_expression(gen, rhs);
 }
 
@@ -8163,11 +8172,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             fprintf(gen->output, "{");
             for (int i = 0; i < expr->child_count; i++) {
                 if (i > 0) fprintf(gen->output, ", ");
-                generate_expression(gen, expr->children[i]);
+                /* #2525: an element that views a struct owned elsewhere is
+                 * taken (copied, or moved out of a local on its last use),
+                 * as a struct field init is, so the array's elements are
+                 * values of their own. */
+                ASTNode* el = expr->children[i];
+                const char* el_struct = struct_owning_strings(gen, el ? el->node_type : NULL);
+                if (el_struct && struct_take_shape(el)) emit_struct_take(gen, el, el_struct, NULL);
+                else generate_expression(gen, el);
             }
             fprintf(gen->output, "}");
             break;
-        
+
         case AST_STRUCT_LITERAL: {
             /* Struct-field heap-string ownership (#465): for each
              * field-init whose expression is heap-classified, also
@@ -8252,8 +8268,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * strings takes the struct it is given. */
                         const char* fv_struct = c_imported ? NULL
                                                 : struct_owning_strings(gen, fv ? fv->node_type : NULL);
+                        /* #2525: a closure field holds a reference of its
+                         * own: a fresh closure's, or one taken on a view. */
+                        int fv_closure = !c_imported && fv && fv->node_type &&
+                                         fv->node_type->kind == TYPE_FUNCTION &&
+                                         !fv->node_type->is_fnptr;
                         if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
                         else if (fv_struct && struct_take_shape(fv)) emit_struct_take(gen, fv, fv_struct, NULL);
+                        else if (fv_closure) emit_closure_take(gen, fv);
                         else generate_expression(gen, fv);
                         if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }

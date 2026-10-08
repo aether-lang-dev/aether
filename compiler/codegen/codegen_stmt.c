@@ -2620,12 +2620,86 @@ static int emit_struct_valued_field_store(CodeGenerator* gen, ASTNode* lhs, ASTN
     return 1;
 }
 
+/* #2525: `o.cb = v` where `cb` is a closure field. The field holds a
+ * reference of its own: the store takes `v` (emit_closure_take) and gives
+ * back the reference to the value it held, when the holder's fields can be
+ * read (the same trust as a string field's tracker: a local struct value,
+ * or a box every store into which initialised; not `malloc(n) as *T`, whose
+ * env slot is garbage). A header-defined struct's fields are C's: a plain
+ * store. */
+static int emit_closure_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    if (!lhs->node_type || lhs->node_type->kind != TYPE_FUNCTION || lhs->node_type->is_fnptr) return 0;
+    ASTNode* holder = lhs->children[0];
+    Type* ht = holder->node_type;
+    const char* sname = NULL;
+    int trusted;
+    if (ht && ht->kind == TYPE_STRUCT) {
+        sname = ht->struct_name;
+        trusted = value_path_trackers_are_initialised(gen, lhs);
+    } else if (ht && ht->kind == TYPE_PTR && ht->element_type &&
+               ht->element_type->kind == TYPE_STRUCT) {
+        sname = ht->element_type->struct_name;
+        trusted = box_trackers_are_initialised(gen, holder);
+    } else {
+        return 0;
+    }
+    if (!sname || aether_is_c_import_struct(sname)) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "{ _AeClosure _ae_cv = ");
+    emit_closure_take(gen, rhs);
+    fprintf(gen->output, "; ");
+    if (trusted) {
+        fprintf(gen->output, "void* _ae_old = (");
+        generate_expression(gen, lhs);
+        fprintf(gen->output, ").env; ");
+    }
+    generate_expression(gen, lhs);
+    fprintf(gen->output, " = _ae_cv;");
+    if (trusted) fprintf(gen->output, " _aether_closure_env_release(_ae_old);");
+    fprintf(gen->output, " }\n");
+    return 1;
+}
+
+/* #2525: `o.slots[i] = v` where `slots` is a fixed-size array field of
+ * structs that own strings or closures: each element is a value of its own,
+ * released with `o`, so the store takes `v` and replaces what the element
+ * held, as `o.inner = v` does (emit_struct_valued_field_store). Only where
+ * the holder's fields can be read (a local struct value, a trusted box). */
+static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    if (!lhs || lhs->type != AST_ARRAY_ACCESS || lhs->child_count < 2 ||
+        !lhs->children[0] || lhs->children[0]->type != AST_MEMBER_ACCESS) return 0;
+    ASTNode* arr = lhs->children[0];
+    if (!arr->node_type || arr->node_type->kind != TYPE_ARRAY || arr->node_type->array_size <= 0) return 0;
+    const char* es = struct_owning_strings(gen, lhs->node_type);
+    if (!es) return 0;
+    ASTNode* holder = arr->children[0];
+    Type* ht = holder ? holder->node_type : NULL;
+    int trusted;
+    if (ht && ht->kind == TYPE_STRUCT) {
+        trusted = value_path_trackers_are_initialised(gen, arr);
+    } else if (ht && ht->kind == TYPE_PTR) {
+        trusted = box_trackers_are_initialised(gen, holder);
+    } else {
+        return 0;
+    }
+    if (!trusted) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "%s_replace(&(", es);
+    generate_expression(gen, lhs);
+    fprintf(gen->output, "), ");
+    emit_struct_take(gen, rhs, es, NULL);
+    fprintf(gen->output, ");\n");
+    return 1;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
+    if (emit_struct_element_store(gen, lhs, rhs)) return 1;
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
     if (lhs->child_count != 1 || !lhs->children[0]) return 0;
     if (emit_c_import_string_field_store(gen, lhs, rhs)) return 1;
     if (emit_struct_valued_field_store(gen, lhs, rhs)) return 1;
+    if (emit_closure_field_store(gen, lhs, rhs)) return 1;
     /* #1879: a nested path (`o.inner.name`) has a MEMBER_ACCESS object rather
      * than a bare identifier. Handle it separately -- the code below splices
      * the object in as a name. */
@@ -4978,9 +5052,17 @@ static ASTNode* env_scan_fn_body(ASTNode* fdef) {
  * literal, or a call of a function that returns one it alone holds? Either
  * way it must not read the name, whose previous value it would capture or
  * be handed. */
+/* #2525: a closure read out of a field or an element (`x = h.cb`), which a
+ * binding retains, so the local holds a reference of its own. */
+static int closure_view_binding(ASTNode* rhs) {
+    return rhs && (rhs->type == AST_MEMBER_ACCESS || rhs->type == AST_ARRAY_ACCESS) &&
+           rhs->node_type && rhs->node_type->kind == TYPE_FUNCTION && !rhs->node_type->is_fnptr;
+}
+
 static int env_scan_fresh_binding(CodeGenerator* gen, EnvScan* s, ASTNode* rhs) {
     if (!rhs || env_scan_mentions(rhs, s->name)) return 0;
     if (env_scan_is_real_closure(rhs)) return 1;
+    if (closure_view_binding(rhs)) return 1;
     if (rhs->type != AST_FUNCTION_CALL || !rhs->value) return 0;
     for (int i = 0; i < rhs->child_count; i++) {
         /* A builder's trailing block re-emits the call with its config. */
@@ -5088,6 +5170,12 @@ static int returns_owned_in(CodeGenerator* gen, ASTNode* fdef, ASTNode* body,
         if (node->child_count != 1 || !node->children[0]) return 0;
         ASTNode* e = node->children[0];
         if (env_scan_is_real_closure(e)) return 1;   /* fresh: nobody else holds it */
+        /* #2525: a field or element read is returned retained by a named
+         * function's return emission (its declared `fn` result is what the
+         * emission keys on; a closure body's return does not), so the
+         * caller holds a reference of its own. */
+        if ((e->type == AST_MEMBER_ACCESS || e->type == AST_ARRAY_ACCESS) &&
+            fdef && fdef->type != AST_CLOSURE) return 1;
         EnvScan s;
         memset(&s, 0, sizeof(s));
         s.root = body;
@@ -5257,6 +5345,34 @@ static void env_scan_escape(EnvScan* s, int nested, ASTNode* mention) {
     s->escapes = 1;
 }
 
+/* #2525: is `node` (a mention of the scanned local) the value a store
+ * retains for its holder: a struct field store `o.f = name`, a struct
+ * literal's or a message's field init, or a write to a global or an actor's
+ * state? The holder then has a reference of its own, and the local keeps
+ * releasing its own. */
+static int env_scan_store_retains(CodeGenerator* gen, ASTNode* parent, ASTNode* node) {
+    switch (parent->type) {
+        case AST_ASSIGNMENT:
+            if (parent->child_count == 1 && parent->children[0] == node && parent->value) {
+                return 1;   /* a struct literal's `.f = name` */
+            }
+            return parent->child_count >= 2 && parent->children[1] == node &&
+                   parent->children[0] && parent->children[0]->type == AST_MEMBER_ACCESS;
+        case AST_BINARY_EXPRESSION:
+            return parent->value && strcmp(parent->value, "=") == 0 &&
+                   parent->child_count >= 2 && parent->children[1] == node &&
+                   parent->children[0] && parent->children[0]->type == AST_MEMBER_ACCESS;
+        case AST_FIELD_INIT:
+            return parent->child_count > 0 && parent->children[0] == node;
+        case AST_VARIABLE_DECLARATION:
+            return parent->child_count > 0 && parent->children[0] == node && parent->value &&
+                   (is_module_global_var(gen, parent->value) ||
+                    is_actor_state_var(gen, parent->value));
+        default:
+            return 0;
+    }
+}
+
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                           ASTNode* parent, int nested) {
     if (!node || s->escapes) return;
@@ -5314,6 +5430,9 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 /* #2518: a container that stores the closure takes a reference
                  * of its own, so the store hands nothing over. */
                 if (parent && closure_container_store_value(gen, parent) == node) return;
+                /* #2525: so does a struct field, a message field, a global
+                 * or an actor's state (emit_closure_take retains a view). */
+                if (parent && env_scan_store_retains(gen, parent, node)) return;
                 if (parent && parent->type == AST_FUNCTION_CALL && parent->value) {
                     if (strcmp(parent->value, "call") == 0) {
                         if (parent->children[0] == node) return;   /* invoked */
@@ -5459,7 +5578,8 @@ static void claim_closure_local_env(CodeGenerator* gen, const char* name,
     if (!gen || !name || !binding || gen->scope_depth <= 0 || !gen->hoist_scope_body) return;
     if (binding->type != AST_VARIABLE_DECLARATION || binding->child_count < 1) return;
     ASTNode* rhs = binding->children[0];
-    if (!rhs || (!env_scan_is_real_closure(rhs) && rhs->type != AST_FUNCTION_CALL)) return;
+    if (!rhs || (!env_scan_is_real_closure(rhs) && rhs->type != AST_FUNCTION_CALL &&
+                 !closure_view_binding(rhs))) return;
     /* Only an `_AeClosure` local has an env to release; a closure coerced
      * into a `ptr` slot is a box with an owner of its own. */
     Type* vt = binding->node_type;
@@ -6984,29 +7104,53 @@ const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
 /* `<lvalue>._heap_<f> = 0;` for every string field of `struct_name`: the
  * value at `lvalue` stops owning its strings, which stay with (or move to)
  * whoever else holds them. */
+/* #2525: a closure field has no tracker apart from its value: the env is
+ * the reference. Moving the struct out (`retain_closures` 0) clears it so
+ * the old holder releases nothing; a parameter, a copy of the caller's
+ * value that stays callable (`retain_closures` 1), takes a reference of its
+ * own instead, released by its scope-exit destroy or the store that
+ * replaces the field, never the caller's. */
 static void emit_struct_disown_fields(CodeGenerator* gen, ASTNode* sdef,
-                                      const char* lvalue, int depth) {
+                                      const char* lvalue, int depth, int retain_closures) {
     for (int i = 0; sdef && depth < 32 && i < sdef->child_count; i++) {
         ASTNode* f = sdef->children[i];
         if (f && f->type == AST_STRUCT_FIELD && f->node_type &&
             f->node_type->kind == TYPE_STRING) {
             fprintf(gen->output, "%s._heap_%s = 0; ", lvalue, f->value);
         }
-        /* #2497: a struct field held by value owns its own strings. */
-        ASTNode* inner = owning_struct_field_def(gen, f);
+        if (struct_field_is_closure(f)) {
+            if (retain_closures) {
+                fprintf(gen->output, "_aether_closure_env_retain(%s.%s.env); ", lvalue, f->value);
+            } else {
+                fprintf(gen->output, "%s.%s.env = (void*)0; ", lvalue, f->value);
+            }
+        }
+        /* #2497: a struct field held by value owns its own strings; #2525:
+         * so does each element of a fixed-size array of them. */
+        int alen = 0;
+        ASTNode* inner = owning_struct_field_def_n(gen, f, &alen);
         if (inner) {
             char sub[512];
-            snprintf(sub, sizeof(sub), "%s.%s", lvalue, f->value);
-            emit_struct_disown_fields(gen, inner, sub, depth + 1);
+            if (alen > 0) {
+                fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) { ",
+                        depth, depth, alen, depth);
+                snprintf(sub, sizeof(sub), "%s.%s[_ai%d]", lvalue, f->value, depth);
+                emit_struct_disown_fields(gen, inner, sub, depth + 1, retain_closures);
+                fprintf(gen->output, "} ");
+            } else {
+                snprintf(sub, sizeof(sub), "%s.%s", lvalue, f->value);
+                emit_struct_disown_fields(gen, inner, sub, depth + 1, retain_closures);
+            }
         }
     }
 }
 
-void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue) {
+void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue,
+                        int retain_closures) {
     ASTNode* sdef = gen->program ? find_struct_definition_by_name(gen->program, struct_name) : NULL;
     if (!sdef) return;
     print_indent(gen);
-    emit_struct_disown_fields(gen, sdef, lvalue, 0);
+    emit_struct_disown_fields(gen, sdef, lvalue, 0, retain_closures);
     fprintf(gen->output, "\n");
 }
 
@@ -7059,11 +7203,56 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
         !alias_source_must_copy(gen, e->value)) {
         ASTNode* sdef = find_struct_definition_by_name(gen->program, sname);
         fprintf(gen->output, "({ %s _ae_mv = %s; ", sname, e->value);
-        emit_struct_disown_fields(gen, sdef, e->value, 0);
+        emit_struct_disown_fields(gen, sdef, e->value, 0, 0);
         fprintf(gen->output, "_ae_mv; })");
         return;
     }
     fprintf(gen->output, "%s_dup(", sname);
+    generate_expression(gen, e);
+    fprintf(gen->output, ")");
+}
+
+/* #2525: is `e` a closure value nobody else holds: a closure literal, or a
+ * call that hands one over (call_returns_owned_closure)? An `if` over two
+ * such is one too. */
+static int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
+    if (!e) return 0;
+    if (env_scan_is_real_closure(e)) return 1;
+    if (e->type == AST_FUNCTION_CALL) return call_returns_owned_closure(gen, e);
+    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+        return closure_value_is_fresh(gen, e->children[1]) &&
+               closure_value_is_fresh(gen, e->children[2]);
+    }
+    return 0;
+}
+
+/* #2525: the closure counterpart of emit_string_take, for a slot that holds
+ * a reference of its own (a struct or message field, a global, an actor's
+ * state). A fresh value's reference is adopted; a view of a closure held
+ * elsewhere (a local, a parameter, a field, an element, a call returning a
+ * borrowed one) is retained, and its holder keeps releasing its own. A bare
+ * named function has no env: nothing to retain. An `if` over values takes
+ * each branch on its own. */
+void emit_closure_take(CodeGenerator* gen, ASTNode* e) {
+    if (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3 &&
+        !closure_value_is_fresh(gen, e)) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, e->children[0]);
+        fprintf(gen->output, ") ? ");
+        emit_closure_take(gen, e->children[1]);
+        fprintf(gen->output, " : ");
+        emit_closure_take(gen, e->children[2]);
+        fprintf(gen->output, ")");
+        return;
+    }
+    int bare_fn = e && e->type == AST_IDENTIFIER && e->value && gen->program &&
+                  !is_var_declared(gen, e->value) &&
+                  find_function_definition_by_name(gen->program, e->value);
+    if (closure_value_is_fresh(gen, e) || bare_fn) {
+        generate_expression(gen, e);
+        return;
+    }
+    fprintf(gen->output, "_aether_closure_retain(");
     generate_expression(gen, e);
     fprintf(gen->output, ")");
 }
@@ -7078,7 +7267,9 @@ static void disown_returned_promoted_struct(CodeGenerator* gen, ASTNode* expr) {
     if (!sname) return;
     char lv[300];
     snprintf(lv, sizeof(lv), "(*%s)", expr->value);
-    emit_struct_disown(gen, sname, lv);
+    /* The cell keeps its closure references and the returned copy takes
+     * ones of its own (#2525): both are released by their holders. */
+    emit_struct_disown(gen, sname, lv, 1);
 }
 
 /* #752 (caller side): a struct local that RECEIVES ownership of a
@@ -7309,6 +7500,18 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
         const char* rs = struct_owning_strings(gen, gen->current_func_return_type);
         if (rs && v && (v->type == AST_MEMBER_ACCESS || v->type == AST_ARRAY_ACCESS)) {
             emit_struct_take(gen, v, rs, NULL);
+            return;
+        }
+        /* #2525: a closure read out of a field or an element is held by
+         * its holder, which may be destroyed at this exit; the caller gets
+         * a reference of its own (returns_owned_in counts the return as
+         * handing one over). */
+        Type* rt = gen->current_func_return_type;
+        if (rt && rt->kind == TYPE_FUNCTION && !rt->is_fnptr && v &&
+            (v->type == AST_MEMBER_ACCESS || v->type == AST_ARRAY_ACCESS)) {
+            fprintf(gen->output, "_aether_closure_retain(");
+            generate_expression(gen, v);
+            fprintf(gen->output, ")");
             return;
         }
     }
@@ -8076,6 +8279,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->value);
                     fprintf(gen->output, " if (_heap_%s) aether_heap_str_free(_tmp_old);", stmt->value);
                     fprintf(gen->output, " _heap_%s = 1; }\n", stmt->value);
+                } else if (stmt->child_count > 0 && stmt->children[0] &&
+                           stmt->children[0]->node_type &&
+                           stmt->children[0]->node_type->kind == TYPE_FUNCTION &&
+                           !stmt->children[0]->node_type->is_fnptr) {
+                    /* #2525: state holds a reference of its own to a closure
+                     * (a message field's or a local's is retained, a fresh
+                     * one adopted) and gives back the one it held. */
+                    fprintf(gen->output, "{ void* _ae_old = self->%s.env; self->%s = ",
+                            stmt->value, stmt->value);
+                    emit_closure_take(gen, stmt->children[0]);
+                    fprintf(gen->output, "; _aether_closure_env_release(_ae_old); }\n");
                 } else {
                     fprintf(gen->output, "self->%s", stmt->value);
                     if (stmt->child_count > 0) {
@@ -8275,6 +8489,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "{ int %s = 0; %s = ", own, stmt->value);
                         emit_string_take(gen, stmt->children[0], own, NULL);
                         fprintf(gen->output, "; (void)%s; }\n", own);
+                        break;
+                    }
+                    if (stmt->child_count > 0 && stmt->children[0] &&
+                        stmt->children[0]->node_type &&
+                        stmt->children[0]->node_type->kind == TYPE_FUNCTION &&
+                        !stmt->children[0]->node_type->is_fnptr) {
+                        /* #2525: a global holds a reference of its own to a
+                         * closure and gives back the one it held when
+                         * rebound; the last one lives as long as the program. */
+                        fprintf(gen->output, "{ void* _ae_old = %s.env; %s = ",
+                                stmt->value, stmt->value);
+                        emit_closure_take(gen, stmt->children[0]);
+                        fprintf(gen->output, "; _aether_closure_env_release(_ae_old); }\n");
                         break;
                     }
                     fprintf(gen->output, "%s", stmt->value);
@@ -8690,7 +8917,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, " }\n");
                     } else if (stmt->child_count > 0 && stmt->children[0] &&
                                (env_scan_is_real_closure(stmt->children[0]) ||
-                                call_returns_owned_closure(gen, stmt->children[0])) &&
+                                call_returns_owned_closure(gen, stmt->children[0]) ||
+                                closure_view_binding(stmt->children[0])) &&
                                closure_env_carrier_index(gen, stmt->value) >= 0) {
                         /* #2480: a local whose env this scope frees holds one
                          * env at a time. Rebinding it (a loop body's closure,
@@ -8713,7 +8941,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     stmt->value);
                         }
                         fprintf(gen->output, "%s = ", stmt->value);
-                        generate_expression(gen, stmt->children[0]);
+                        emit_closure_take(gen, stmt->children[0]);   /* #2525: a view is retained */
                         if (flagged) fprintf(gen->output, "; _envown_%s = 1", stmt->value);
                         if (ccid >= 0) {
                             fprintf(gen->output, "; _closure_env_%d_free(_ae_old_env); }\n", ccid);
@@ -9093,6 +9321,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             } else if (decl_struct_take) {
                                 emit_struct_take(gen, stmt->children[0],
                                                  decl_struct_take, stmt->value);
+                            } else if (closure_view_binding(stmt->children[0]) &&
+                                       !is_promoted_capture(gen, stmt->value) &&
+                                       !is_module_global_var(gen, stmt->value) &&
+                                       !is_actor_state_var(gen, stmt->value)) {
+                                /* #2525: `x = h.cb` holds a reference of its
+                                 * own, released by this scope, so `h` may
+                                 * be destroyed first. */
+                                emit_closure_take(gen, stmt->children[0]);
                             } else {
                                 generate_expression(gen, stmt->children[0]);
                             }
@@ -9219,6 +9455,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                stmt->children[0]->type == AST_FUNCTION_CALL && stmt->value) {
                         /* #2494: the result of a function that returns a
                          * closure only its caller holds is freed here too. */
+                        claim_closure_local_env(gen, stmt->value, stmt, 1);
+                    } else if (stmt->child_count > 0 && closure_view_binding(stmt->children[0]) &&
+                               stmt->value) {
+                        /* #2525: a retained field or element read, likewise. */
                         claim_closure_local_env(gen, stmt->value, stmt, 1);
                     }
                     // Suppress unused-variable warning for arrays used with list

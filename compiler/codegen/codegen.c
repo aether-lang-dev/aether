@@ -7278,6 +7278,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * to more than one closure or to a call's result, and for a captured
      * closure (#2494). */
     print_line(gen, "static inline void _aether_closure_env_release(void* e) { if (e) ((_AeEnvHead*)e)->_dtor(e); }");
+    /* #2525: a closure value a holder keeps by a reference of its own (a
+     * struct or message field, a global, an actor's state): retained and
+     * passed through, so a store can take a view in one expression. */
+    print_line(gen, "static inline _AeClosure _aether_closure_retain(_AeClosure c) { _aether_closure_env_retain(c.env); return c; }");
     /* #2220: the post-store hook for `struct T @observable`. Declared
      * unconditionally (it is one prototype); only a store on an observable
      * struct field emits a call to it. Defined in runtime/aether_observe.c. */
@@ -8002,7 +8006,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 register_module_global_var(gen, cd->value);
                 const char* ctype = get_c_type(cd->node_type);
                 fprintf(gen->output, "static %s %s = ", ctype, cd->value);
-                generate_expression(gen, cd->children[0]);
+                if (cd->children[0]->type == AST_NULL_LITERAL &&
+                    strcmp(ctype, "_AeClosure") == 0) {
+                    /* #2525: a `var name: fn = null` global starts as the
+                     * zero closure (no body, no env); `NULL` is not an
+                     * initializer for the struct. A function binds it later. */
+                    fprintf(gen->output, "{0}");
+                } else {
+                    generate_expression(gen, cd->children[0]);
+                }
                 fprintf(gen->output, ";\n");
             } else {
                 /* Scoped C, not a #define: a macro has no scope, so a
@@ -8426,8 +8438,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                     int msg_has_string_field = 0;
                     for (int fi = 0; fi < child->child_count; fi++) {
                         ASTNode* f = child->children[fi];
-                        if (f && f->type == AST_MESSAGE_FIELD &&
-                            f->node_type && f->node_type->kind == TYPE_STRING) {
+                        /* #2525: a closure field holds a reference to its
+                         * env, released with the message's strings. */
+                        if (f && f->type == AST_MESSAGE_FIELD && f->node_type &&
+                            (f->node_type->kind == TYPE_STRING ||
+                             (f->node_type->kind == TYPE_FUNCTION && !f->node_type->is_fnptr))) {
                             msg_has_string_field = 1;
                             break;
                         }
@@ -8452,6 +8467,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                             if (f && f->type == AST_MESSAGE_FIELD &&
                                 f->node_type && f->node_type->kind == TYPE_STRING) {
                                 print_line(gen, "if (m->%s) { string_release(m->%s); m->%s = (const char*)0; }",
+                                           f->value, f->value, f->value);
+                            }
+                            if (f && f->type == AST_MESSAGE_FIELD && f->node_type &&
+                                f->node_type->kind == TYPE_FUNCTION && !f->node_type->is_fnptr) {
+                                /* #2525: the sender's take gave the message
+                                 * its own reference; a handler that keeps
+                                 * the closure in state retained its own. */
+                                print_line(gen, "if (m->%s.env) { _aether_closure_env_release(m->%s.env); m->%s.env = (void*)0; }",
                                            f->value, f->value, f->value);
                             }
                         }

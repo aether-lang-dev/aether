@@ -407,12 +407,23 @@ int has_return_value(ASTNode* node);
  * scope-exit destroy defer) and at field-write sites (emit the
  * reassign-wrapper free). */
 int struct_has_heap_string_field(ASTNode* struct_def);
+/* #2525: a `fn` field (a closure value, not a raw C function pointer): it
+ * holds a reference of its own to the closure's env, released by
+ * `<Name>_destroy` / `_replace`, retained by `_dup`. */
+int struct_field_is_closure(ASTNode* field);
+/* #2525: store the closure value `e` into a slot that holds a reference of
+ * its own: a fresh closure (a literal, a call handing one over) is adopted,
+ * anything else (a local, a field, an element, a parameter) is retained. */
+void emit_closure_take(CodeGenerator* gen, ASTNode* e);
 /* #2497: does a value of this struct own heap strings, in a `string` field
  * of its own or in a field that is itself such a struct held by value? It
  * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,
  * which release the nested struct's strings too. */
 int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def);
 ASTNode* owning_struct_field_def(CodeGenerator* gen, ASTNode* field);
+/* #2525: as above, but a fixed-size array field of such structs qualifies
+ * too, its length in `*len` (0 for a direct field). */
+ASTNode* owning_struct_field_def_n(CodeGenerator* gen, ASTNode* field, int* len);
 /* #2497: store `e` into a slot that owns a `sname` struct value (see the
  * definition in codegen_stmt.c). struct_take_shape: is `e` a value that
  * views a struct owned elsewhere (a variable, a field, an element, an `if`
@@ -522,7 +533,11 @@ const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const ch
 void promoted_cell_release_fn(CodeGenerator* gen, const char* c_type,
                               char* out, size_t out_size);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
-void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue);
+/* `retain_closures`: 1 where the value at `lvalue` stays a holder of its
+ * closure fields (a parameter, a cell a copy is returned from), 0 where it
+ * is moved out (#2525). */
+void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue,
+                        int retain_closures);
 void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
                                Type* struct_type, int line, int col);
 

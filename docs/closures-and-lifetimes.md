@@ -191,6 +191,23 @@ lifetime"):
   (the `fn → ptr` coercion) and the list owns the box; `list.free` now
   reclaims the captured env as well as the box (`owned_flags == 2`).
 
+- **Kept in a struct field, a message field, a global or an actor's
+  state (#2525).** Each such holder has a reference of its own to the env,
+  the way a struct owns its string fields (#2497): a store takes one (a
+  fresh closure's is adopted, a view of one held elsewhere, a local, a
+  parameter, another field, is retained), overwriting the slot and
+  destroying the holder release it, and a copy retains. So `h = Holder {
+  cb: build("a") }; h.cb = build("b")` releases both environments, `b = a`
+  and a struct passed or returned by value share the closure through two
+  references, a fixed-size array field of such structs releases every
+  element, a message's closure field is released with the message once
+  the handler is done (a handler that keeps it in state retained its
+  own), and a global or state slot gives back the env it held when
+  rebound. The closure local stored into a field still releases its own
+  reference at scope end. A local bound to a field read (`x = h.cb`) and
+  a closure a named function returns from a field hold references of
+  their own, so the struct may go first.
+
 - **Bound to a local.** `g = || { ... }` frees its env when the local's
   scope ends, through `_closure_env_N_free`, provided every use of `g`
   leaves no copy behind: calling it, passing it to a user function whose

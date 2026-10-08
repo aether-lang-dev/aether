@@ -957,7 +957,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             if (msg_def) {
                                 int msg_has_string = 0;
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    if (f->type_kind == TYPE_STRING) { msg_has_string = 1; break; }
+                                    /* #2525: a closure field is released with the strings. */
+                                    if (f->type_kind == TYPE_STRING ||
+                                        (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                         strcmp(f->c_type, "_AeClosure") == 0)) { msg_has_string = 1; break; }
                                 }
                                 if (msg_has_string) {
                                     print_line(gen, "%s_release_fields((%s*)_msg_data);",
@@ -981,7 +984,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             if (msg_def) {
                                 int msg_has_string = 0;
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    if (f->type_kind == TYPE_STRING) { msg_has_string = 1; break; }
+                                    /* #2525: a closure field is released with the strings. */
+                                    if (f->type_kind == TYPE_STRING ||
+                                        (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                         strcmp(f->c_type, "_AeClosure") == 0)) { msg_has_string = 1; break; }
                                 }
                                 if (msg_has_string) {
                                     print_line(gen, "%s_release_fields((%s*)_msg_data);",

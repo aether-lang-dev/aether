@@ -1511,13 +1511,15 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
              * or a reassignment here freed the caller's string, and a
              * promoted cell's release freed it again. Clear them: the
              * callee then owns, and frees at its exit, only the strings it
-             * stores itself, unless it returns the struct (#752). */
+             * stores itself, unless it returns the struct (#752). A closure
+             * field is retained instead (#2525): the copy stays callable
+             * and holds a reference of its own. */
             const char* owning = struct_owning_strings(gen, child->node_type);
             if (owning && child->type == AST_PATTERN_VARIABLE) {
                 char lv[300];
                 if (is_promoted) snprintf(lv, sizeof(lv), "(*%s)", child->value);
                 else snprintf(lv, sizeof(lv), "%s", child->value);
-                emit_struct_disown(gen, owning, lv);
+                emit_struct_disown(gen, owning, lv, 1);
                 if (!is_promoted) {
                     push_struct_destroy_defer(gen, child->value, child->node_type,
                                               child->line, child->column);
@@ -2389,8 +2391,20 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
                 print_line(gen, "if (s->_heap_%s) { aether_heap_str_free(s->%s); s->%s = (const char*)0; s->_heap_%s = 0; }",
                            field->value, field->value, field->value, field->value);
             }
-            ASTNode* inner = owning_struct_field_def(gen, field);
-            if (inner) {
+            /* #2525: the field's reference to the closure's env goes back;
+             * cleared so a second destroy releases nothing. */
+            if (struct_field_is_closure(field)) {
+                print_line(gen, "if (s->%s.env) { _aether_closure_env_release(s->%s.env); s->%s.env = (void*)0; }",
+                           field->value, field->value, field->value);
+            }
+            int alen = 0;
+            ASTNode* inner = owning_struct_field_def_n(gen, field, &alen);
+            if (inner && alen > 0) {
+                /* #2525: each element of a fixed-size array field is a
+                 * value of its own, released with the struct. */
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) %s_destroy(&s->%s[_ai]);",
+                           alen, inner->value, field->value);
+            } else if (inner) {
                 print_line(gen, "%s_destroy(&s->%s);", inner->value, field->value);
             }
         }
@@ -2461,10 +2475,24 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
          * ownership it settles on is what the new outer value carries. */
         for (int i = 0; i < struct_def->child_count; i++) {
             ASTNode* f = struct_def->children[i];
-            ASTNode* inner = owning_struct_field_def(gen, f);
+            int alen = 0;
+            ASTNode* inner = owning_struct_field_def_n(gen, f, &alen);
             if (!inner) continue;
-            print_line(gen, "%s_replace(&dst->%s, src.%s); src.%s = dst->%s;",
-                       inner->value, f->value, f->value, f->value, f->value);
+            if (alen > 0) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) { %s_replace(&dst->%s[_ai], src.%s[_ai]); src.%s[_ai] = dst->%s[_ai]; }",
+                           alen, inner->value, f->value, f->value, f->value, f->value);
+            } else {
+                print_line(gen, "%s_replace(&dst->%s, src.%s); src.%s = dst->%s;",
+                           inner->value, f->value, f->value, f->value, f->value);
+            }
+        }
+        /* #2525: the new value carries a reference of its own per closure
+         * field (a fresh closure's, or one the take retained), so the old
+         * value's goes back whether or not both name the same env. */
+        for (int i = 0; i < struct_def->child_count; i++) {
+            ASTNode* f = struct_def->children[i];
+            if (!struct_field_is_closure(f)) continue;
+            print_line(gen, "_aether_closure_env_release(dst->%s.env);", f->value);
         }
         print_line(gen, "*dst = src;");
         unindent(gen);
@@ -2484,8 +2512,16 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
                 print_line(gen, "if (src._heap_%s) src.%s = aether_uniform_heap_str(src.%s, 0);",
                            f->value, f->value, f->value);
             }
-            ASTNode* inner = owning_struct_field_def(gen, f);
-            if (inner) {
+            /* #2525: the copy holds a reference of its own to the env. */
+            if (struct_field_is_closure(f)) {
+                print_line(gen, "_aether_closure_env_retain(src.%s.env);", f->value);
+            }
+            int alen = 0;
+            ASTNode* inner = owning_struct_field_def_n(gen, f, &alen);
+            if (inner && alen > 0) {
+                print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) src.%s[_ai] = %s_dup(src.%s[_ai]);",
+                           alen, f->value, inner->value, f->value);
+            } else if (inner) {
                 print_line(gen, "src.%s = %s_dup(src.%s);", f->value, inner->value, f->value);
             }
         }
@@ -2519,14 +2555,35 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
  * pointer, a struct with nothing to release). */
 static int struct_owns_heap_strings_at(CodeGenerator* gen, ASTNode* struct_def, int depth);
 
+/* The struct type a field holds by value, directly or (#2525) as the
+ * element of a fixed-size array (`slots: Holder[2]`, whose length goes to
+ * `*len`; 0 for a direct field); NULL for anything else. */
+static Type* field_value_struct_type(ASTNode* field, int* len) {
+    if (!field || field->type != AST_STRUCT_FIELD || !field->node_type) return NULL;
+    Type* t = field->node_type;
+    *len = 0;
+    if (t->kind == TYPE_ARRAY && t->array_size > 0 && t->element_type) {
+        *len = t->array_size;
+        t = t->element_type;
+    }
+    if (t->kind != TYPE_STRUCT || !t->struct_name || aether_is_c_import_struct(t->struct_name)) return NULL;
+    return t;
+}
+
+ASTNode* owning_struct_field_def_n(CodeGenerator* gen, ASTNode* field, int* len) {
+    int n = 0;
+    Type* t = gen && gen->program ? field_value_struct_type(field, &n) : NULL;
+    if (!t) return NULL;
+    ASTNode* def = find_struct_definition_by_name(gen->program, t->struct_name);
+    if (!def || !struct_owns_heap_strings_at(gen, def, 1)) return NULL;
+    if (len) *len = n;
+    return def;
+}
+
 ASTNode* owning_struct_field_def(CodeGenerator* gen, ASTNode* field) {
-    if (!gen || !gen->program || !field || field->type != AST_STRUCT_FIELD ||
-        !field->node_type || field->node_type->kind != TYPE_STRUCT ||
-        !field->node_type->struct_name ||
-        aether_is_c_import_struct(field->node_type->struct_name)) return NULL;
-    ASTNode* def = find_struct_definition_by_name(gen->program,
-                                                  field->node_type->struct_name);
-    return (def && struct_owns_heap_strings_at(gen, def, 1)) ? def : NULL;
+    int n = 0;
+    ASTNode* def = owning_struct_field_def_n(gen, field, &n);
+    return n == 0 ? def : NULL;
 }
 
 static int struct_owns_heap_strings_at(CodeGenerator* gen, ASTNode* struct_def, int depth) {
@@ -2536,11 +2593,10 @@ static int struct_owns_heap_strings_at(CodeGenerator* gen, ASTNode* struct_def, 
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION || depth > 32) return 0;
     if (struct_def->annotation && strcmp(struct_def->annotation, "extern_c_import") == 0) return 0;
     for (int i = 0; i < struct_def->child_count; i++) {
-        ASTNode* f = struct_def->children[i];
-        if (!f || f->type != AST_STRUCT_FIELD || !f->node_type ||
-            f->node_type->kind != TYPE_STRUCT || !f->node_type->struct_name ||
-            !gen || !gen->program) continue;
-        ASTNode* def = find_struct_definition_by_name(gen->program, f->node_type->struct_name);
+        int n = 0;
+        Type* t = (gen && gen->program) ? field_value_struct_type(struct_def->children[i], &n) : NULL;
+        if (!t) continue;
+        ASTNode* def = find_struct_definition_by_name(gen->program, t->struct_name);
         if (def && def != struct_def &&
             struct_owns_heap_strings_at(gen, def, depth + 1)) return 1;
     }
@@ -2551,6 +2607,13 @@ int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def) {
     return struct_owns_heap_strings_at(gen, struct_def, 0);
 }
 
+int struct_field_is_closure(ASTNode* field) {
+    return field && field->type == AST_STRUCT_FIELD && field->node_type &&
+           field->node_type->kind == TYPE_FUNCTION && !field->node_type->is_fnptr;
+}
+
+/* A string field, or (#2525) a closure field, whose env the struct holds a
+ * reference to: either makes the struct an owner with a destructor. */
 int struct_has_heap_string_field(ASTNode* struct_def) {
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     /* A header-defined struct's string fields borrow; nothing tracks them,
@@ -2562,6 +2625,7 @@ int struct_has_heap_string_field(ASTNode* struct_def) {
             field->node_type && field->node_type->kind == TYPE_STRING) {
             return 1;
         }
+        if (struct_field_is_closure(field)) return 1;
     }
     return 0;
 }
