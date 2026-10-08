@@ -2682,7 +2682,7 @@ static int struct_array_local_owns(CodeGenerator* gen, const char* name) {
 /* #2528: `v` as the value an owned `string[N]` element takes: a fresh heap
  * string is adopted, anything else (a literal, a local, a field) copied, so
  * every element is the array's own, as a string array cell's are (#2474). */
-static void emit_owned_string_element(CodeGenerator* gen, ASTNode* v) {
+void emit_owned_string_element(CodeGenerator* gen, ASTNode* v) {
     int fresh = v && (v->type == AST_FUNCTION_CALL || v->type == AST_STRING_INTERP ||
                       v->type == AST_OR_ELSE) && is_heap_string_expr(gen, v);
     if (fresh) {
@@ -2749,6 +2749,22 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
         }
     } else if (arr->type == AST_IDENTIFIER && arr->value && kind == 3) {
         if (!struct_array_local_owns(gen, arr->value)) return 0;
+        trusted = 1;
+    } else if (arr->type == AST_IDENTIFIER && arr->value && is_actor_state_var(gen, arr->value)) {
+        /* #2528: a `string[N]` / `fn[N]` state field owns its elements
+         * (destroy_state releases them); the store reads `self->f[i]`. */
+        int sk = 0;
+        for (int a = 0; gen->program && gen->current_actor && a < gen->program->child_count; a++) {
+            ASTNode* actor = gen->program->children[a];
+            if (!actor || actor->type != AST_ACTOR_DEFINITION || !actor->value ||
+                strcmp(actor->value, gen->current_actor) != 0) continue;
+            for (int i = 0; i < actor->child_count; i++) {
+                ASTNode* sd = actor->children[i];
+                if (sd && sd->type == AST_STATE_DECLARATION && sd->value &&
+                    strcmp(sd->value, arr->value) == 0) { sk = state_array_owned(sd, NULL); break; }
+            }
+        }
+        if (sk != kind) return 0;
         trusted = 1;
     } else {
         return 0;
@@ -3606,14 +3622,17 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body) {
          * handler-local `int _heap_<name> = 0` forgot between messages
          * what the state owned. */
         if (!is_heap_string_var(gen, name)) {
+            /* #2528: a string state field's tracker is the actor's own,
+             * `self->_heap_<name>`, spelt at the state store sites; the
+             * name is not a heap-string local here, so a take of the
+             * field's value copies it (the state keeps its own). A handler
+             * local of that name cannot exist (an assignment to the name
+             * is a state store). */
+            if (actor_state_string_tracked(gen, name)) continue;
             print_indent(gen);
-            if (actor_state_string_tracked(gen, name)) {
-                fprintf(gen->output, "#define _heap_%s (self->_heap_%s)\n", name, name);
-            } else {
-                fprintf(gen->output,
-                        "int _heap_%s = 0; (void)_heap_%s;\n",
-                        name, name);
-            }
+            fprintf(gen->output,
+                    "int _heap_%s = 0; (void)_heap_%s;\n",
+                    name, name);
             mark_heap_string_var(gen, name);
         }
 
@@ -5226,6 +5245,8 @@ static ASTNode* env_scan_fn_body(ASTNode* fdef) {
  * be handed. */
 /* #2525: a closure read out of a field or an element (`x = h.cb`), which a
  * binding retains, so the local holds a reference of its own. */
+static int actor_state_string_tracked(CodeGenerator* gen, const char* name);
+
 static int closure_view_binding(ASTNode* rhs) {
     return rhs && (rhs->type == AST_MEMBER_ACCESS || rhs->type == AST_ARRAY_ACCESS) &&
            rhs->node_type && rhs->node_type->kind == TYPE_FUNCTION && !rhs->node_type->is_fnptr;
@@ -8421,7 +8442,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             
             if (is_state_var) {
-                // Generate as assignment to self->field
+                /* Generate as assignment to self->field. #2528: a string
+                 * state field's tracker is the actor's own (`self->_heap_<f>`,
+                 * released by destroy_state); any other state name keeps the
+                 * handler-local tracker the hoist declared. */
+                char trk[300];
+                snprintf(trk, sizeof(trk), actor_state_string_tracked(gen, stmt->value)
+                         ? "self->_heap_%s" : "_heap_%s", stmt->value);
                 if (stmt->child_count > 0 &&
                     string_take_is_view(gen, stmt->children[0])) {
                     /* #2461: state outlives the handler, so it takes a view
@@ -8436,10 +8463,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     emit_string_take(gen, stmt->children[0], own, stmt->value);
                     fprintf(gen->output, ";");
                     if (!is_escaped_string_var(gen, stmt->value)) {
-                        fprintf(gen->output, " if (_heap_%s) aether_heap_str_free(_tmp_old);",
-                                stmt->value);
+                        fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", trk);
                     }
-                    fprintf(gen->output, " _heap_%s = %s; (void)_tmp_old; }\n", stmt->value, own);
+                    fprintf(gen->output, " %s = %s; (void)_tmp_old; }\n", trk, own);
                 } else if (stmt->child_count > 0 && is_heap_string_expr(gen, stmt->children[0])) {
                     /* Skip the free if the var has escaped (passed to
                      * a function that may have stored the pointer):
@@ -8454,9 +8480,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "{ const char* _tmp_old = self->%s; ", stmt->value);
                         fprintf(gen->output, "self->%s = ", stmt->value);
                         generate_expression(gen, stmt->children[0]);
-                        fprintf(gen->output, "; if (_heap_%s) aether_heap_str_free(_tmp_old);",
-                                stmt->value);
-                        fprintf(gen->output, " _heap_%s = 1; }\n", stmt->value);
+                        fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old);", trk);
+                        fprintf(gen->output, " %s = 1; }\n", trk);
                     }
                 } else if (stmt->child_count > 0 && stmt->children[0] &&
                            stmt->children[0]->type == AST_IDENTIFIER &&
@@ -8479,8 +8504,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     generate_expression(gen, stmt->children[0]);
                     fprintf(gen->output, "); self->%s = _src ? (const char*)string_new_with_length(aether_string_data(_src), (int)aether_string_length(_src)) : _src;",
                             stmt->value);
-                    fprintf(gen->output, " if (_heap_%s) aether_heap_str_free(_tmp_old);", stmt->value);
-                    fprintf(gen->output, " _heap_%s = 1; }\n", stmt->value);
+                    fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", trk);
+                    fprintf(gen->output, " %s = 1; }\n", trk);
                 } else if (stmt->child_count > 0 && stmt->children[0] &&
                            stmt->children[0]->node_type &&
                            stmt->children[0]->node_type->kind == TYPE_FUNCTION &&
@@ -11976,9 +12001,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             }
                         }
 
-                        // Send reply back to the waiting asker via the scheduler reply slot.
-                        fprintf(gen->output, "scheduler_reply((ActorBase*)self, &_reply, sizeof(%s)); }\n",
-                                reply_expr->value);
+                        /* Send reply back to the waiting asker via the
+                         * scheduler reply slot. #2528: a reply that owns
+                         * strings or closures names its release, for the
+                         * case nobody takes it. */
+                        int reply_owns = 0;
+                        for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
+                            if (f->type_kind == TYPE_STRING ||
+                                (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                 strcmp(f->c_type, "_AeClosure") == 0)) { reply_owns = 1; break; }
+                        }
+                        if (reply_owns) {
+                            fprintf(gen->output, "scheduler_reply_owned((ActorBase*)self, &_reply, sizeof(%s), (void (*)(void*))%s_release_fields); }\n",
+                                    reply_expr->value, reply_expr->value);
+                        } else {
+                            fprintf(gen->output, "scheduler_reply((ActorBase*)self, &_reply, sizeof(%s)); }\n",
+                                    reply_expr->value);
+                        }
                     } else {
                         fprintf(stderr,
                                 "aetherc: line %d: reply references unknown message type '%s'\n",
@@ -12001,8 +12040,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "{ _AeClosure _reply_val = ");
                         emit_closure_take(gen, reply_expr);
                         fprintf(gen->output,
-                                "; scheduler_reply((ActorBase*)self, &_reply_val, "
-                                "sizeof(_reply_val)); }\n");
+                                "; scheduler_reply_owned((ActorBase*)self, &_reply_val, "
+                                "sizeof(_reply_val), _aether_release_closure_buf); }\n");
                     } else if (k == TYPE_STRING) {
                         /* Deep-copy so the asker's read outlives the
                          * handler's defer-free, same contract as
@@ -12011,9 +12050,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, reply_expr);
                         fprintf(gen->output, "; ");
                         emit_message_string_copy(gen, "_reply_val", reply_expr);
+                        /* #2528: the copy is released if nobody takes it. */
                         fprintf(gen->output,
-                                "scheduler_reply((ActorBase*)self, &_reply_val, "
-                                "sizeof(const char*)); }\n");
+                                "scheduler_reply_owned((ActorBase*)self, &_reply_val, "
+                                "sizeof(const char*), _aether_release_string_buf); }\n");
                     } else {
                         const char* c_type = "int";
                         switch (k) {

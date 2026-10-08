@@ -8526,6 +8526,25 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             timeout_ms = atoi(expr->children[2]->value);
                         }
 
+                        /* #2528: the reply's release, one rule for both
+                         * paths: a reply message that owns strings or
+                         * closures releases what the asker does not take. */
+                        const char* reply_release = "NULL";
+                        char reply_release_buf[300];
+                        if (reply_msg_name) {
+                            MessageDef* rdef = lookup_message(gen->message_registry, reply_msg_name);
+                            for (MessageFieldDef* f = rdef ? rdef->fields : NULL; f; f = f->next) {
+                                if (f->type_kind == TYPE_STRING ||
+                                    (f->type_kind == TYPE_FUNCTION && f->c_type &&
+                                     strcmp(f->c_type, "_AeClosure") == 0)) {
+                                    snprintf(reply_release_buf, sizeof(reply_release_buf),
+                                             "(void (*)(void*))%s_release_fields", reply_msg_name);
+                                    reply_release = reply_release_buf;
+                                    break;
+                                }
+                            }
+                        }
+
                         // Emit the ask expression with GCC/MSVC guards
                         fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
                         // GCC/Clang: statement expression
@@ -8587,14 +8606,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * out is the asker's now (cleared so the release
                              * skips it), every other owned field goes with
                              * the buffer. */
-                            MessageDef* reply_def = lookup_message(gen->message_registry, reply_msg_name);
-                            int reply_owns = 0;
-                            for (MessageFieldDef* f = reply_def ? reply_def->fields : NULL; f; f = f->next) {
-                                if (f->type_kind == TYPE_STRING ||
-                                    (f->type_kind == TYPE_FUNCTION && f->c_type &&
-                                     strcmp(f->c_type, "_AeClosure") == 0)) { reply_owns = 1; break; }
-                            }
-                            if (reply_owns) {
+                            if (strcmp(reply_release, "NULL") != 0) {
                                 fprintf(gen->output, "if (_ask_r) { ((%s*)_ask_r)->%s = %s; %s_release_fields((%s*)_ask_r); } ",
                                         reply_msg_name, reply_field, c_zero, reply_msg_name, reply_msg_name);
                             }
@@ -8662,7 +8674,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 case TYPE_STRING:  fprintf(gen->output, "const char*"); break;
                                 default:           fprintf(gen->output, "int"); break;
                             }
-                            fprintf(gen->output, "))");
+                            fprintf(gen->output, "), %s)", reply_release);
                         } else if (reply_scalar_kind != TYPE_UNKNOWN) {
                             fprintf(gen->output, "0, sizeof(");
                             switch (reply_scalar_kind) {
@@ -8675,9 +8687,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 case TYPE_STRING:     fprintf(gen->output, "const char*"); break;
                                 default:              fprintf(gen->output, "int"); break;
                             }
-                            fprintf(gen->output, "))");
+                            fprintf(gen->output, "), NULL)");
                         } else {
-                            fprintf(gen->output, "0, sizeof(int))");
+                            fprintf(gen->output, "0, sizeof(int), NULL)");
                         }
                         fprintf(gen->output, "\n#endif\n");
                     } else {

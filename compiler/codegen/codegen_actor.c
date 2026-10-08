@@ -384,6 +384,18 @@ int state_field_owns_string(ASTNode* state_decl) {
            state_decl->node_type && state_decl->node_type->kind == TYPE_STRING;
 }
 
+/* #2528: a `string[N]` (1) or `fn[N]` (2) state field, whose elements the
+ * actor owns as a struct's such field does; length in `*len`. */
+int state_array_owned(ASTNode* state_decl, int* len) {
+    if (!state_decl || state_decl->type != AST_STATE_DECLARATION || !state_decl->node_type) return 0;
+    Type* t = state_decl->node_type;
+    if (t->kind != TYPE_ARRAY || t->array_size <= 0 || !t->element_type) return 0;
+    if (len) *len = t->array_size;
+    if (t->element_type->kind == TYPE_STRING) return 1;
+    if (t->element_type->kind == TYPE_FUNCTION && !t->element_type->is_fnptr) return 2;
+    return 0;
+}
+
 /* #2528: `<Actor>_destroy_state(void*)`, the scheduler's hook for what the
  * state fields own: a heap string per its tracker, a closure's environment
  * (#2525), a struct that owns strings or closures through its own
@@ -398,9 +410,19 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
         ASTNode* child = actor->children[i];
         if (!child || child->type != AST_STATE_DECLARATION || !child->node_type) continue;
         Type* t = child->node_type;
+        int oalen = 0;
+        int oak = state_array_owned(child, &oalen);
         if (state_field_owns_string(child)) {
             print_line(gen, "if (self->_heap_%s) { aether_heap_str_free(self->%s); self->%s = (const char*)0; self->_heap_%s = 0; }",
                        child->value, child->value, child->value, child->value);
+        } else if (oak == 1) {
+            /* #2528: a `string[N]` state field owns a copy of each element,
+             * a `fn[N]` one a reference per element (as the struct fields). */
+            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (self->%s[_ai]) { aether_heap_str_free(self->%s[_ai]); self->%s[_ai] = (const char*)0; }",
+                       oalen, child->value, child->value, child->value);
+        } else if (oak == 2) {
+            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (self->%s[_ai].env) { _aether_closure_env_release(self->%s[_ai].env); self->%s[_ai].env = (void*)0; }",
+                       oalen, child->value, child->value, child->value);
         } else if (t->kind == TYPE_FUNCTION && !t->is_fnptr &&
                    !state_field_is_ptr(gen, actor, child->value)) {
             print_line(gen, "if (self->%s.env) { _aether_closure_env_release(self->%s.env); self->%s.env = (void*)0; }",
@@ -700,16 +722,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             }
                         }
                         exit_scope(gen);
-                        /* #2528: the state trackers' aliases
-                         * (hoist_heap_string_trackers) end with the
-                         * handler, or a later function's local of the
-                         * same name would be rewritten. */
-                        for (int si = 0; si < actor->child_count; si++) {
-                            ASTNode* sd = actor->children[si];
-                            if (state_field_owns_string(sd)) {
-                                print_line(gen, "#undef _heap_%s", sd->value);
-                            }
-                        }
                         for (int k = 0; k < gen->return_escaped_struct_var_count; k++) {
                             free(gen->return_escaped_struct_vars[k]);
                         }
@@ -1101,11 +1113,19 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                            child->value, child->value);
                 ASTNode* init = child->child_count > 0 ? child->children[0] : NULL;
                 if (init && init->type == AST_ARRAY_LITERAL) {
+                    /* #2528: an owned array's elements are copied or taken. */
+                    int oak = state_array_owned(child, NULL);
                     for (int e = 0; e < init->child_count &&
                                     e < child->node_type->array_size; e++) {
                         print_indent(gen);
                         fprintf(gen->output, "actor->%s[%d] = ", child->value, e);
-                        generate_expression(gen, init->children[e]);
+                        if (oak == 1) {
+                            emit_owned_string_element(gen, init->children[e]);
+                        } else if (oak == 2) {
+                            emit_closure_take(gen, init->children[e]);
+                        } else {
+                            generate_expression(gen, init->children[e]);
+                        }
                         fprintf(gen->output, ";\n");
                     }
                 } else if (init) {

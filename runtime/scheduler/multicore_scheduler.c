@@ -1185,13 +1185,18 @@ static void actor_reclaim(int wait) {
 // schedule once every reader has moved past it (#2528). For a host or a test
 // that wants the memory of released actors settled before it measures or
 // goes on; bounded, so a core blocked in a long step cannot hang it.
-void scheduler_reclaim_released(void) {
-    for (int spins = 0; spins < 200000; spins++) {
-        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return;
+int scheduler_reclaim_released(void) {
+    // A parked core keeps the epoch it last published until it wakes (up to
+    // PARK_MS_MAX), so the cores are woken to republish, and the wait is by
+    // time, well past one park, not by spins.
+    for (int rounds = 0; rounds < 2500; rounds++) {
+        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return 0;
         actor_reclaim(1);
-        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return;
-        aether_sched_yield();
+        if (atomic_load_explicit(&g_retired_pending, memory_order_acquire) == 0) return 0;
+        for (int c = 0; c < num_cores; c++) sched_wake(&schedulers[c]);
+        aether_usleep(200);
     }
+    return atomic_load_explicit(&g_retired_pending, memory_order_acquire);
 }
 
 // Frees every retired actor without asking. Only once no reader is left:
@@ -3092,27 +3097,41 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     return result;
 }
 
-void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
+void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
+                           void (*release)(void*)) {
     (void)self;
     ActorReplySlot* slot = (ActorReplySlot*)g_current_reply_slot;
     g_current_reply_slot = NULL;
-    if (!slot) return;
+    if (!slot) {
+        if (release && data) release(data);   // nobody asked: nothing takes the fields
+        return;
+    }
 
     pthread_mutex_lock(&slot->mutex);
+    int delivered = 0;
     if (!slot->timed_out) {
         if (data && data_size > 0) {
             slot->reply_data = malloc(data_size);
             if (slot->reply_data) {
                 memcpy(slot->reply_data, data, data_size);
                 slot->reply_size = data_size;
+                delivered = 1;
             }
         }
         slot->reply_ready = 1;
         pthread_cond_signal(&slot->cond);
     }
     pthread_mutex_unlock(&slot->mutex);
+    // The asker gave up (or the copy failed): what the reply owns, the
+    // strings copied and closures taken for the asker, has no taker but the
+    // replier (#2528). Delivered, the bytes are the asker's to release.
+    if (!delivered && release && data) release(data);
 
     reply_slot_decref(slot);
+}
+
+void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
+    scheduler_reply_owned(self, data, data_size, NULL);
 }
 
 // ---------------------------------------------------------------------------

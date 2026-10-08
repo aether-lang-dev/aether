@@ -7,7 +7,9 @@
 //   fixed-size array field of such structs (#2525).
 // - A reply message's string and closure fields: the asker takes the field
 //   it reads and releases the rest with the reply; a closure an ask brings
-//   back (a field or an expression reply) is the asker's own.
+//   back (a field or an expression reply) is the asker's own; a reply with
+//   no taker (sent to, not asked; or the asker timed out) is released by
+//   the replier.
 // - A closure literal passed to a function that stores it in a struct
 //   field: the field retains it (#2525), so the caller releases its own
 //   reference after the call.
@@ -37,11 +39,13 @@ message Both { cb: fn, note: string }
 message GetNote {}
 message Note { note: string, cb: fn }
 message GetCb {}
+message Unasked {}
 
 actor Giver {
     state tag = "t"
     receive {
         GetBoth() -> { reply Both { cb: build(tag), note: string.concat(tag, "-note") } }
+        Unasked() -> { reply Both { cb: build(tag), note: string.concat(tag, "-note") } }
         GetNote() -> { reply Note { note: string.concat(tag, "-note"), cb: build(tag) } }
         GetCb() -> { reply build(tag) }
     }
@@ -114,6 +118,9 @@ replies(g: ptr) -> int {
     check(string.length(note) == 6, "a reply's string field is taken")
     cb = g ? GetCb {}
     check(call(cb) == 3, "an expression reply's closure runs")
+    // A reply nobody asked for (a send, not an ask) has no taker: the
+    // replier releases what it owns, as it does when the asker timed out.
+    g ! Unasked {}
     return r
 }
 

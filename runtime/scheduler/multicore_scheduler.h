@@ -298,9 +298,14 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
  * so a late send is defined, and one that comes after the reuse reaches the
  * new actor. */
 void scheduler_release_actor(ActorBase* actor);
-/* Waits (bounded) until every released actor has been ended: its state
- * destroyed and its block kept for reuse (#2528). */
-void scheduler_reclaim_released(void);
+/* Ends every released actor that can be ended now (its state destroyed, its
+ * block kept for reuse), waiting a bounded time for the core threads to move
+ * past the retired ones. Returns the number still retired: 0 means every
+ * release so far has been ended; non-zero means a reader (a core blocked in
+ * a long step, a walk on this thread) still holds some back, and a caller
+ * that needs them ended calls again. The cooperative scheduler ends them on
+ * the spot unless a walk or an inline send is on the stack (#2528). */
+int scheduler_reclaim_released(void);
 /* Released actors not reclaimed yet, for tests and diagnostics (#2509). */
 int scheduler_released_actors_pending(void);
 /* Messages dropped because their target had been released (#2517): each is
@@ -332,6 +337,12 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 // Reply to the pending ask (called from inside an actor's receive handler).
 // data/data_size describe the reply payload; it is copied internally.
 void scheduler_reply(ActorBase* self, void* data, size_t data_size);
+/* As scheduler_reply, for a reply whose bytes own something (strings copied,
+ * closures taken for the asker): when the reply is not delivered (the asker
+ * timed out, nobody asked, the copy failed) `release(data)` gives those
+ * back; delivered, they are the asker's with the bytes (#2528). */
+void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
+                           void (*release)(void*));
 
 // Drain pending messages for main-thread-only actors.
 // Call this from C-hosted event loops (e.g. inside a render/event callback)

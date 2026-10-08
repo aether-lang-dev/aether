@@ -7540,15 +7540,23 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // MSVC ask-operator helper: does ask, extracts field by offset, frees reply
         print_line(gen, "#if !AETHER_GCC_COMPAT");
         print_line(gen, "#include <stddef.h>");
-        print_line(gen, "static intptr_t _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size) {");
+        /* #2528: `release` is the reply message's field release, NULL when
+         * it owns nothing: the field read out is zeroed in the buffer and
+         * the rest released with it, the rule the GCC path spells inline. */
+        print_line(gen, "static intptr_t _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*)) {");
         print_line(gen, "    void* reply = scheduler_ask_message(target, msg, msg_size, timeout_ms);");
         print_line(gen, "    if (!reply) return 0;");
         print_line(gen, "    intptr_t val = 0;");
         print_line(gen, "    memcpy(&val, (char*)reply + field_offset, field_size < sizeof(intptr_t) ? field_size : sizeof(intptr_t));");
+        print_line(gen, "    if (release) { memset((char*)reply + field_offset, 0, field_size); release(reply); }");
         print_line(gen, "    free(reply);");
         print_line(gen, "    return val;");
         print_line(gen, "}");
         print_line(gen, "#endif");
+        /* #2528: the release of a closure handed back by an expression
+         * reply, for a reply the asker never took. */
+        print_line(gen, "static void _aether_release_closure_buf(void* p) { if (p) _aether_closure_env_release(((_AeClosure*)p)->env); }");
+        print_line(gen, "static void _aether_release_string_buf(void* p) { if (p && *(const char**)p) aether_heap_str_free(*(const char**)p); }");
     }
     print_line(gen, "");
 

@@ -401,6 +401,10 @@ int has_return_value(ASTNode* node);
 /* #2528 (codegen_actor.c): a `string` state field, tracked by `_heap_<name>`
  * in the actor struct and released by `<Actor>_destroy_state`. */
 int state_field_owns_string(ASTNode* state_decl);
+/* #2528: a `string[N]` (1) / `fn[N]` (2) state field, length in `*len`. */
+int state_array_owned(ASTNode* state_decl, int* len);
+/* #2528 (codegen_stmt.c): `v` as the value an owned string element takes. */
+void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
 /* Struct-field heap-string ownership (#465). The struct typedef
  * emitter (generate_struct_definition) appends a hidden

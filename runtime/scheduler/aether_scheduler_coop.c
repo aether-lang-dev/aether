@@ -158,8 +158,9 @@ static void coop_free_released(void) {
 
 // One thread: the released actors are ended here and now (#2528), unless a
 // walk or an inline send is on the stack, which ends them when it returns.
-void scheduler_reclaim_released(void) {
+int scheduler_reclaim_released(void) {
     coop_free_released();
+    return g_coop_released_count;
     free(g_coop_released);
     g_coop_released = NULL;
     g_coop_released_capacity = 0;
@@ -555,19 +556,27 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     return slot.reply_data;
 }
 
-void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
+void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
+                           void (*release)(void*)) {
     (void)self;
     ActorReplySlot* slot = (ActorReplySlot*)g_current_reply_slot;
-    if (!slot) return;
-
-    if (slot->timed_out) return;
-
-    slot->reply_data = malloc(data_size);
-    if (slot->reply_data) {
-        memcpy(slot->reply_data, data, data_size);
-        slot->reply_size = data_size;
+    int delivered = 0;
+    if (slot && !slot->timed_out) {
+        slot->reply_data = malloc(data_size);
+        if (slot->reply_data) {
+            memcpy(slot->reply_data, data, data_size);
+            slot->reply_size = data_size;
+            delivered = 1;
+        }
+        slot->reply_ready = 1;
     }
-    slot->reply_ready = 1;
+    // Not delivered: what the reply owns stays the replier's to release
+    // (#2528); delivered, the bytes are the asker's.
+    if (!delivered && release && data) release(data);
+}
+
+void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
+    scheduler_reply_owned(self, data, data_size, NULL);
 }
 
 // ============================================================================
