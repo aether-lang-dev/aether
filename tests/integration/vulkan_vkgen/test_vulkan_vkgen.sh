@@ -89,8 +89,9 @@ else
     module_check="generated from $have (committed from $want)"
 fi
 
-# The regenerated module in a tree of its own, next to the C it compiles in.
-cp "$COMMITTED/aether_vulkan.c" "$COMMITTED/aether_vulkan.h" "$WORK/gen/"
+# The regenerated module in a tree of its own, next to the C it compiles in
+# and the header it includes.
+cp "$COMMITTED/aether_vulkan.c" "$COMMITTED/aether_vulkan.h" "$COMMITTED/aether_vulkan_compat.h" "$WORK/gen/"
 cat > "$WORK/gen/probe.ae" <<'AE'
 import vk
 

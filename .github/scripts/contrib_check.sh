@@ -195,6 +195,10 @@ TESTS=(
   # (lavapipe before Mesa 24.1, MoltenVK), so the Linux leg's skip assertion
   # leaves it out; Ubuntu 24.04's lavapipe and the discrete GPUs run it.
   "vulkan/ray-query|$VK/test_vulkan_ray_query.ae||lsan||vulkan"
+  # Mesh shaders through contrib.vulkan.vk (#2556): draws one meshlet
+  # directly, indirectly and with an indirect count. Skips where the device
+  # has no VK_EXT_mesh_shader; lavapipe has it from Mesa 23.2.
+  "vulkan/mesh-shader|$VK/test_vulkan_mesh_shader.ae||lsan||vulkan"
   # Presents into a real window and reads the screen back. The window comes
   # from the test fixture (tests/support/native_window), which opens X11 at
   # runtime: the Linux leg runs it under Xvfb, and without a display it

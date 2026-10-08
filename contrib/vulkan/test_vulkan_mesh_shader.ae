@@ -1,0 +1,786 @@
+// contrib.vulkan.vk mesh shaders (#2556): VK_EXT_mesh_shader in the generated
+// selection, driven end to end.
+//
+// A graphics pipeline made of a mesh shader and a fragment shader, with no
+// vertex input, draws one meshlet (a triangle around the centre of a 64x64
+// target) three ways: vkCmdDrawMeshTasksEXT, vkCmdDrawMeshTasksIndirectEXT
+// over a VkDrawMeshTasksIndirectCommandEXT, and
+// vkCmdDrawMeshTasksIndirectCountEXT with the count in a buffer. Each draw must
+// cover the centre and leave the corner clear. Every call is the generated
+// module's, through the device's own entry points.
+//
+// The extension postdates registry 1.3.204, which the module is generated
+// from, so vkgen reads it from an excerpt of a later vk.xml and
+// aether_vulkan_compat.h declares its structs for headers as old; the
+// declarations are checked on every machine, with or without a driver.
+//
+// Skips, saying so, where the device has no mesh shaders: MoltenVK has none.
+// lavapipe has them from Mesa 23.2 (Ubuntu 22.04's).
+
+import std.fs
+import std.spec
+import std.string
+import contrib.vulkan
+import contrib.vulkan.vk
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern memset(dest: ptr, c: int, n: int) -> ptr
+
+const SIZE = 64
+
+// The device this test drives and what it renders into; one set for the
+// whole run, as the ray query test keeps its own.
+var g_instance: ptr = null
+var g_gpu: ptr = null
+var g_device: ptr = null
+var g_queue: ptr = null
+var g_family: int = -1
+var g_mem_props: ptr = null       // *VkPhysicalDeviceMemoryProperties
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// 1 when `name` is among the extension properties `props` lists.
+lists_extension(props: ptr, count: int, name: string) -> int {
+    i = 0
+    while i < count {
+        e = (props + i * sizeof(VkExtensionProperties)) as *VkExtensionProperties
+        if string.equals(e.extensionName, name) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// A cell holding one handle, for the commands that write one out.
+new_handle() -> ptr { return calloc(1, 8) }
+take_handle(cell: ptr) -> ptr {
+    h = (cell as ptr[])[0]
+    free(cell)
+    return h
+}
+
+// A Vulkan 1.2 instance (a mesh shader is SPIR-V 1.4, which 1.2 has in core),
+// with portability enumeration where offered.
+create_instance() -> ptr {
+    app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
+    app.sType = vk.STRUCTURE_TYPE_APPLICATION_INFO
+    app.pApplicationName = "test_vulkan_mesh_shader"
+    app.apiVersion = (1 << 22) | (2 << 12)
+    ci = calloc(1, sizeof(VkInstanceCreateInfo)) as *VkInstanceCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+    ci.pApplicationInfo = app as ptr
+    names = calloc(1, 8)
+    exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
+    if lists_extension(exts, ne, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 1 {
+        (names as string[])[0] = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+        ci.enabledExtensionCount = 1
+        ci.ppEnabledExtensionNames = names
+        ci.flags = vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+    }
+    vk.array_free(exts)
+    cell = new_handle()
+    r = vk.vkCreateInstance(ci as ptr, null, cell)
+    instance = take_handle(cell)
+    free(names)
+    free(ci)
+    free(app)
+    if r != vk.SUCCESS { return null }
+    return instance
+}
+
+// The index of a queue family with graphics, or -1.
+graphics_family(gpu: ptr) -> int {
+    props, n = vk.vkGetPhysicalDeviceQueueFamilyProperties_all(gpu)
+    found = -1
+    i = 0
+    while i < n && found < 0 {
+        fam = (props + i * sizeof(VkQueueFamilyProperties)) as *VkQueueFamilyProperties
+        if (fam.queueFlags & vk.QUEUE_GRAPHICS_BIT) != 0 { found = i }
+        i = i + 1
+    }
+    vk.array_free(props)
+    return found
+}
+
+// 1 when the device is Vulkan 1.2 or later, offers VK_EXT_mesh_shader and
+// reports the meshShader feature; 0 with the reason otherwise. The third
+// value is the drawIndirectCount feature, which the count draw needs.
+has_mesh_shader(gpu: ptr) -> (int, string, int) {
+    props = calloc(1, sizeof(VkPhysicalDeviceProperties)) as *VkPhysicalDeviceProperties
+    vk.vkGetPhysicalDeviceProperties(gpu, props as ptr)
+    api = props.apiVersion
+    free(props)
+    if api < ((1 << 22) | (2 << 12)) as uint32 { return (0, "the device is older than Vulkan 1.2", 0) }
+
+    dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+    listed = lists_extension(dexts, nde, vk.EXT_MESH_SHADER_EXTENSION_NAME)
+    vk.array_free(dexts)
+    if listed == 0 { return (0, "the device does not offer VK_EXT_mesh_shader", 0) }
+
+    ms = calloc(1, sizeof(VkPhysicalDeviceMeshShaderFeaturesEXT)) as *VkPhysicalDeviceMeshShaderFeaturesEXT
+    ms.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT
+    v12 = calloc(1, sizeof(VkPhysicalDeviceVulkan12Features)) as *VkPhysicalDeviceVulkan12Features
+    v12.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+    v12.pNext = ms as ptr
+    f2 = calloc(1, sizeof(VkPhysicalDeviceFeatures2)) as *VkPhysicalDeviceFeatures2
+    f2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
+    f2.pNext = v12 as ptr
+    vk.vkGetPhysicalDeviceFeatures2(gpu, f2 as ptr)
+    ok = ms.meshShader as int
+    count = v12.drawIndirectCount as int
+    free(f2)
+    free(v12)
+    free(ms)
+    if ok == 0 { return (0, "VK_EXT_mesh_shader is offered without the meshShader feature", 0) }
+    return (1, "", count)
+}
+
+// A device with VK_EXT_mesh_shader and its meshShader feature enabled (and
+// drawIndirectCount when `indirect_count`), one graphics queue, and
+// portability subset where the device offers it.
+create_device(gpu: ptr, family: int, indirect_count: int) -> ptr {
+    ms = calloc(1, sizeof(VkPhysicalDeviceMeshShaderFeaturesEXT)) as *VkPhysicalDeviceMeshShaderFeaturesEXT
+    ms.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT
+    ms.meshShader = 1
+    v12 = calloc(1, sizeof(VkPhysicalDeviceVulkan12Features)) as *VkPhysicalDeviceVulkan12Features
+    v12.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+    v12.pNext = ms as ptr
+    v12.drawIndirectCount = indirect_count as uint32
+
+    priority = calloc(1, 4)
+    (priority as f32[])[0] = 1.0
+    qci = calloc(1, sizeof(VkDeviceQueueCreateInfo)) as *VkDeviceQueueCreateInfo
+    qci.sType = vk.STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
+    qci.queueFamilyIndex = family as uint32
+    qci.queueCount = 1
+    qci.pQueuePriorities = priority
+
+    names = calloc(2, 8)
+    (names as string[])[0] = vk.EXT_MESH_SHADER_EXTENSION_NAME
+    n = 1
+    dexts, nde, _dre = vk.vkEnumerateDeviceExtensionProperties_all(gpu, null)
+    if lists_extension(dexts, nde, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 1 {
+        (names as string[])[1] = vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+        n = 2
+    }
+    vk.array_free(dexts)
+
+    dci = calloc(1, sizeof(VkDeviceCreateInfo)) as *VkDeviceCreateInfo
+    dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO
+    dci.pNext = v12 as ptr
+    dci.queueCreateInfoCount = 1
+    dci.pQueueCreateInfos = qci as ptr
+    dci.enabledExtensionCount = n as uint32
+    dci.ppEnabledExtensionNames = names
+    cell = new_handle()
+    r = vk.vkCreateDevice(gpu, dci as ptr, null, cell)
+    device = take_handle(cell)
+    free(dci)
+    free(names)
+    free(qci)
+    free(priority)
+    free(v12)
+    free(ms)
+    if r != vk.SUCCESS {
+        println("  vkCreateDevice returned ${r}")
+        return null
+    }
+    return device
+}
+
+// A memory type of `type_bits` with every flag in `wanted`, or -1.
+memory_type(type_bits: int, wanted: int) -> int {
+    mp = g_mem_props as *VkPhysicalDeviceMemoryProperties
+    count = mp.memoryTypeCount as int
+    i = 0
+    while i < count {
+        // memoryTypes[] follows the count; each VkMemoryType is two uint32s.
+        mt = (g_mem_props + 4 + i * sizeof(VkMemoryType)) as *VkMemoryType
+        if (type_bits & (1 << i)) != 0 && ((mt.propertyFlags as int) & wanted) == wanted { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// Memory for `req` with the `wanted` flags, or null.
+allocate(req: *VkMemoryRequirements, wanted: int) -> ptr {
+    mt = memory_type(req.memoryTypeBits as int, wanted)
+    if mt < 0 { return null }
+    mai = calloc(1, sizeof(VkMemoryAllocateInfo)) as *VkMemoryAllocateInfo
+    mai.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+    mai.allocationSize = req.size
+    mai.memoryTypeIndex = mt as uint32
+    cell = new_handle()
+    r = vk.vkAllocateMemory(g_device, mai as ptr, null, cell)
+    memory = take_handle(cell)
+    free(mai)
+    if r != vk.SUCCESS { return null }
+    return memory
+}
+
+// A buffer of `bytes` with `usage` in host-visible, host-coherent memory,
+// mapped for the test to fill and read. Null handles when anything fails.
+struct Buf {
+    buffer: ptr
+    memory: ptr
+    mapped: ptr
+}
+
+buf_create(bytes: int, usage: int) -> Buf {
+    b = Buf{buffer: null, memory: null, mapped: null}
+    bci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
+    bci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
+    bci.size = bytes as uint64
+    bci.usage = usage as uint32
+    bci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    cell = new_handle()
+    r = vk.vkCreateBuffer(g_device, bci as ptr, null, cell)
+    b.buffer = take_handle(cell)
+    free(bci)
+    if r != vk.SUCCESS { return b }
+
+    req = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetBufferMemoryRequirements(g_device, b.buffer, req as ptr)
+    b.memory = allocate(req, vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    free(req)
+    if b.memory == null { return b }
+    if vk.vkBindBufferMemory(g_device, b.buffer, b.memory, 0) != vk.SUCCESS { return b }
+    cell = new_handle()
+    if vk.vkMapMemory(g_device, b.memory, 0, vk.WHOLE_SIZE, 0, cell) == vk.SUCCESS {
+        b.mapped = take_handle(cell)
+    } else {
+        free(cell)
+    }
+    return b
+}
+
+buf_destroy(b: Buf) {
+    if b.buffer != null { vk.vkDestroyBuffer(g_device, b.buffer, null) }
+    if b.memory != null { vk.vkFreeMemory(g_device, b.memory, null) }
+}
+
+// What the meshlet is drawn into: a SIZE x SIZE R8G8B8A8_UNORM image, its
+// view, a render pass that clears it and leaves it ready to copy, and the
+// framebuffer over it. `result` is the first VkResult that was not SUCCESS.
+struct Target {
+    image: ptr
+    memory: ptr
+    view: ptr
+    pass: ptr
+    framebuffer: ptr
+    result: int
+}
+
+target_create() -> Target {
+    t = Target{image: null, memory: null, view: null, pass: null, framebuffer: null, result: 0}
+    ici = calloc(1, sizeof(VkImageCreateInfo)) as *VkImageCreateInfo
+    ici.sType = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO
+    ici.imageType = vk.IMAGE_TYPE_2D
+    ici.format = vk.FORMAT_R8G8B8A8_UNORM
+    ici.extent.width = SIZE
+    ici.extent.height = SIZE
+    ici.extent.depth = 1
+    ici.mipLevels = 1
+    ici.arrayLayers = 1
+    ici.samples = vk.SAMPLE_COUNT_1_BIT
+    ici.tiling = vk.IMAGE_TILING_OPTIMAL
+    ici.usage = (vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.IMAGE_USAGE_TRANSFER_SRC_BIT) as uint32
+    ici.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    ici.initialLayout = vk.IMAGE_LAYOUT_UNDEFINED
+    cell = new_handle()
+    t.result = vk.vkCreateImage(g_device, ici as ptr, null, cell)
+    t.image = take_handle(cell)
+    free(ici)
+    if t.result != vk.SUCCESS { return t }
+
+    req = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetImageMemoryRequirements(g_device, t.image, req as ptr)
+    t.memory = allocate(req, 0)
+    free(req)
+    if t.memory == null { t.result = vk.ERROR_OUT_OF_DEVICE_MEMORY; return t }
+    t.result = vk.vkBindImageMemory(g_device, t.image, t.memory, 0)
+    if t.result != vk.SUCCESS { return t }
+
+    vci = calloc(1, sizeof(VkImageViewCreateInfo)) as *VkImageViewCreateInfo
+    vci.sType = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+    vci.image = t.image
+    vci.viewType = vk.IMAGE_VIEW_TYPE_2D
+    vci.format = vk.FORMAT_R8G8B8A8_UNORM
+    vci.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    vci.subresourceRange.levelCount = 1
+    vci.subresourceRange.layerCount = 1
+    cell = new_handle()
+    t.result = vk.vkCreateImageView(g_device, vci as ptr, null, cell)
+    t.view = take_handle(cell)
+    free(vci)
+    if t.result != vk.SUCCESS { return t }
+
+    att = calloc(1, sizeof(VkAttachmentDescription)) as *VkAttachmentDescription
+    att.format = vk.FORMAT_R8G8B8A8_UNORM
+    att.samples = vk.SAMPLE_COUNT_1_BIT
+    att.loadOp = vk.ATTACHMENT_LOAD_OP_CLEAR
+    att.storeOp = vk.ATTACHMENT_STORE_OP_STORE
+    att.stencilLoadOp = vk.ATTACHMENT_LOAD_OP_DONT_CARE
+    att.stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE
+    att.initialLayout = vk.IMAGE_LAYOUT_UNDEFINED
+    att.finalLayout = vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+    ref = calloc(1, sizeof(VkAttachmentReference)) as *VkAttachmentReference
+    ref.attachment = 0
+    ref.layout = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    sub = calloc(1, sizeof(VkSubpassDescription)) as *VkSubpassDescription
+    sub.pipelineBindPoint = vk.PIPELINE_BIND_POINT_GRAPHICS
+    sub.colorAttachmentCount = 1
+    sub.pColorAttachments = ref as ptr
+    // The copy after the pass reads what the pass wrote.
+    dep = calloc(1, sizeof(VkSubpassDependency)) as *VkSubpassDependency
+    dep.srcSubpass = 0
+    dep.dstSubpass = vk.SUBPASS_EXTERNAL
+    dep.srcStageMask = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT as uint32
+    dep.dstStageMask = vk.PIPELINE_STAGE_TRANSFER_BIT as uint32
+    dep.srcAccessMask = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT as uint32
+    dep.dstAccessMask = vk.ACCESS_TRANSFER_READ_BIT as uint32
+    rci = calloc(1, sizeof(VkRenderPassCreateInfo)) as *VkRenderPassCreateInfo
+    rci.sType = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
+    rci.attachmentCount = 1
+    rci.pAttachments = att as ptr
+    rci.subpassCount = 1
+    rci.pSubpasses = sub as ptr
+    rci.dependencyCount = 1
+    rci.pDependencies = dep as ptr
+    cell = new_handle()
+    t.result = vk.vkCreateRenderPass(g_device, rci as ptr, null, cell)
+    t.pass = take_handle(cell)
+    free(rci)
+    free(dep)
+    free(sub)
+    free(ref)
+    free(att)
+    if t.result != vk.SUCCESS { return t }
+
+    views = calloc(1, 8)
+    (views as ptr[])[0] = t.view
+    fci = calloc(1, sizeof(VkFramebufferCreateInfo)) as *VkFramebufferCreateInfo
+    fci.sType = vk.STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
+    fci.renderPass = t.pass
+    fci.attachmentCount = 1
+    fci.pAttachments = views
+    fci.width = SIZE
+    fci.height = SIZE
+    fci.layers = 1
+    cell = new_handle()
+    t.result = vk.vkCreateFramebuffer(g_device, fci as ptr, null, cell)
+    t.framebuffer = take_handle(cell)
+    free(fci)
+    free(views)
+    return t
+}
+
+target_destroy(t: Target) {
+    if t.framebuffer != null { vk.vkDestroyFramebuffer(g_device, t.framebuffer, null) }
+    if t.pass != null { vk.vkDestroyRenderPass(g_device, t.pass, null) }
+    if t.view != null { vk.vkDestroyImageView(g_device, t.view, null) }
+    if t.image != null { vk.vkDestroyImage(g_device, t.image, null) }
+    if t.memory != null { vk.vkFreeMemory(g_device, t.memory, null) }
+}
+
+shader_module(spv: string, spv_len: int) -> ptr {
+    sci = calloc(1, sizeof(VkShaderModuleCreateInfo)) as *VkShaderModuleCreateInfo
+    sci.sType = vk.STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+    sci.codeSize = spv_len as uint64
+    sci.pCode = vk.aevk_ae_cstr(spv)   // the bytes as Aether holds them, as a C pointer
+    cell = new_handle()
+    r = vk.vkCreateShaderModule(g_device, sci as ptr, null, cell)
+    m = take_handle(cell)
+    free(sci)
+    if r != vk.SUCCESS { return null }
+    return m
+}
+
+// The mesh pipeline: a mesh and a fragment stage, no vertex input or input
+// assembly state (a mesh pipeline has neither), a static viewport over the
+// target. `result` is the first VkResult that was not SUCCESS.
+struct Pipe {
+    layout: ptr
+    pipeline: ptr
+    result: int
+}
+
+pipe_create(pass: ptr, mesh_spv: string, mesh_len: int, frag_spv: string, frag_len: int) -> Pipe {
+    p = Pipe{layout: null, pipeline: null, result: 0}
+    mesh = shader_module(mesh_spv, mesh_len)
+    frag = shader_module(frag_spv, frag_len)
+    if mesh == null || frag == null {
+        p.result = vk.ERROR_INITIALIZATION_FAILED
+    } else {
+        plci = calloc(1, sizeof(VkPipelineLayoutCreateInfo)) as *VkPipelineLayoutCreateInfo
+        plci.sType = vk.STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+        cell = new_handle()
+        p.result = vk.vkCreatePipelineLayout(g_device, plci as ptr, null, cell)
+        p.layout = take_handle(cell)
+        free(plci)
+    }
+    if p.result == vk.SUCCESS {
+        stages = calloc(2, sizeof(VkPipelineShaderStageCreateInfo))
+        s0 = stages as *VkPipelineShaderStageCreateInfo
+        s0.sType = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+        s0.stage = vk.SHADER_STAGE_MESH_BIT_EXT
+        s0.module = mesh
+        s0.pName = "main"
+        s1 = (stages + sizeof(VkPipelineShaderStageCreateInfo)) as *VkPipelineShaderStageCreateInfo
+        s1.sType = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+        s1.stage = vk.SHADER_STAGE_FRAGMENT_BIT
+        s1.module = frag
+        s1.pName = "main"
+
+        viewport = calloc(1, sizeof(VkViewport)) as *VkViewport
+        viewport.width = SIZE as f32
+        viewport.height = SIZE as f32
+        viewport.maxDepth = 1.0
+        scissor = calloc(1, sizeof(VkRect2D)) as *VkRect2D
+        scissor.extent.width = SIZE
+        scissor.extent.height = SIZE
+        vps = calloc(1, sizeof(VkPipelineViewportStateCreateInfo)) as *VkPipelineViewportStateCreateInfo
+        vps.sType = vk.STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
+        vps.viewportCount = 1
+        vps.pViewports = viewport as ptr
+        vps.scissorCount = 1
+        vps.pScissors = scissor as ptr
+        rs = calloc(1, sizeof(VkPipelineRasterizationStateCreateInfo)) as *VkPipelineRasterizationStateCreateInfo
+        rs.sType = vk.STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+        rs.polygonMode = vk.POLYGON_MODE_FILL
+        rs.cullMode = vk.CULL_MODE_NONE as uint32
+        rs.frontFace = vk.FRONT_FACE_COUNTER_CLOCKWISE
+        rs.lineWidth = 1.0
+        ms = calloc(1, sizeof(VkPipelineMultisampleStateCreateInfo)) as *VkPipelineMultisampleStateCreateInfo
+        ms.sType = vk.STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+        ms.rasterizationSamples = vk.SAMPLE_COUNT_1_BIT
+        blend = calloc(1, sizeof(VkPipelineColorBlendAttachmentState)) as *VkPipelineColorBlendAttachmentState
+        blend.colorWriteMask = (vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT |
+                                vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT) as uint32
+        cb = calloc(1, sizeof(VkPipelineColorBlendStateCreateInfo)) as *VkPipelineColorBlendStateCreateInfo
+        cb.sType = vk.STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+        cb.attachmentCount = 1
+        cb.pAttachments = blend as ptr
+
+        gci = calloc(1, sizeof(VkGraphicsPipelineCreateInfo)) as *VkGraphicsPipelineCreateInfo
+        gci.sType = vk.STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+        gci.stageCount = 2
+        gci.pStages = stages
+        gci.pViewportState = vps as ptr
+        gci.pRasterizationState = rs as ptr
+        gci.pMultisampleState = ms as ptr
+        gci.pColorBlendState = cb as ptr
+        gci.layout = p.layout
+        gci.renderPass = pass
+        cell = new_handle()
+        p.result = vk.vkCreateGraphicsPipelines(g_device, null, 1, gci as ptr, null, cell)
+        p.pipeline = take_handle(cell)
+        free(gci)
+        free(cb)
+        free(blend)
+        free(ms)
+        free(rs)
+        free(vps)
+        free(scissor)
+        free(viewport)
+        free(stages)
+    }
+    if mesh != null { vk.vkDestroyShaderModule(g_device, mesh, null) }
+    if frag != null { vk.vkDestroyShaderModule(g_device, frag, null) }
+    return p
+}
+
+pipe_destroy(p: Pipe) {
+    if p.pipeline != null { vk.vkDestroyPipeline(g_device, p.pipeline, null) }
+    if p.layout != null { vk.vkDestroyPipelineLayout(g_device, p.layout, null) }
+}
+
+// The ways render() draws the meshlet.
+const DRAW_DIRECT = 0
+const DRAW_INDIRECT = 1
+const DRAW_INDIRECT_COUNT = 2
+
+// One frame: clear `t` to opaque black, draw the meshlet with `how` (the
+// indirect draws read `args`: the command at offset 0, the count at 16), copy
+// the image into `readback` and make it visible to the host, submit and wait.
+// Returns the first VkResult that was not SUCCESS.
+render(t: Target, p: Pipe, how: int, args: Buf, readback: Buf) -> int {
+    pci = calloc(1, sizeof(VkCommandPoolCreateInfo)) as *VkCommandPoolCreateInfo
+    pci.sType = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
+    pci.queueFamilyIndex = g_family as uint32
+    cell = new_handle()
+    r = vk.vkCreateCommandPool(g_device, pci as ptr, null, cell)
+    pool = take_handle(cell)
+    free(pci)
+    if r != vk.SUCCESS { return r }
+    ai = calloc(1, sizeof(VkCommandBufferAllocateInfo)) as *VkCommandBufferAllocateInfo
+    ai.sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
+    ai.commandPool = pool
+    ai.level = vk.COMMAND_BUFFER_LEVEL_PRIMARY
+    ai.commandBufferCount = 1
+    cell = new_handle()
+    r = vk.vkAllocateCommandBuffers(g_device, ai as ptr, cell)
+    cmd = take_handle(cell)
+    free(ai)
+    if r == vk.SUCCESS {
+        bi = calloc(1, sizeof(VkCommandBufferBeginInfo)) as *VkCommandBufferBeginInfo
+        bi.sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+        bi.flags = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+        r = vk.vkBeginCommandBuffer(cmd, bi as ptr)
+        free(bi)
+    }
+    if r == vk.SUCCESS {
+        // One VkClearValue, its colour as four floats: opaque black.
+        clear = calloc(1, 16)
+        (clear as f32[])[3] = 1.0
+        rbi = calloc(1, sizeof(VkRenderPassBeginInfo)) as *VkRenderPassBeginInfo
+        rbi.sType = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
+        rbi.renderPass = t.pass
+        rbi.framebuffer = t.framebuffer
+        rbi.renderArea.extent.width = SIZE
+        rbi.renderArea.extent.height = SIZE
+        rbi.clearValueCount = 1
+        rbi.pClearValues = clear
+        vk.vkCmdBeginRenderPass(cmd, rbi as ptr, vk.SUBPASS_CONTENTS_INLINE)
+        vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, p.pipeline)
+        stride = sizeof(VkDrawMeshTasksIndirectCommandEXT) as uint32
+        if how == DRAW_DIRECT { vk.vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1) }
+        if how == DRAW_INDIRECT { vk.vkCmdDrawMeshTasksIndirectEXT(cmd, args.buffer, 0, 1, stride) }
+        if how == DRAW_INDIRECT_COUNT { vk.vkCmdDrawMeshTasksIndirectCountEXT(cmd, args.buffer, 0, args.buffer, 16, 1, stride) }
+        vk.vkCmdEndRenderPass(cmd)
+        free(rbi)
+        free(clear)
+
+        region = calloc(1, sizeof(VkBufferImageCopy)) as *VkBufferImageCopy
+        region.imageSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+        region.imageSubresource.layerCount = 1
+        region.imageExtent.width = SIZE
+        region.imageExtent.height = SIZE
+        region.imageExtent.depth = 1
+        vk.vkCmdCopyImageToBuffer(cmd, t.image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, region as ptr)
+        free(region)
+        host = calloc(1, sizeof(VkMemoryBarrier)) as *VkMemoryBarrier
+        host.sType = vk.STRUCTURE_TYPE_MEMORY_BARRIER
+        host.srcAccessMask = vk.ACCESS_TRANSFER_WRITE_BIT as uint32
+        host.dstAccessMask = vk.ACCESS_HOST_READ_BIT as uint32
+        vk.vkCmdPipelineBarrier(cmd, vk.PIPELINE_STAGE_TRANSFER_BIT as uint32, vk.PIPELINE_STAGE_HOST_BIT as uint32,
+                                0, 1, host as ptr, 0, null, 0, null)
+        free(host)
+        r = vk.vkEndCommandBuffer(cmd)
+    }
+    if r == vk.SUCCESS {
+        cmds = calloc(1, 8)
+        (cmds as ptr[])[0] = cmd
+        si = calloc(1, sizeof(VkSubmitInfo)) as *VkSubmitInfo
+        si.sType = vk.STRUCTURE_TYPE_SUBMIT_INFO
+        si.commandBufferCount = 1
+        si.pCommandBuffers = cmds
+        r = vk.vkQueueSubmit(g_queue, 1, si as ptr, null)
+        if r == vk.SUCCESS { r = vk.vkQueueWaitIdle(g_queue) }
+        free(si)
+        free(cmds)
+    }
+    vk.vkDestroyCommandPool(g_device, pool, null)
+    return r
+}
+
+// Channel `c` (0 red .. 3 alpha) of the pixel at (x, y) in a readback.
+channel(readback: Buf, x: int, y: int, c: int) -> int {
+    w = (readback.mapped as uint32[])[y * SIZE + x]
+    return ((w >> (c * 8)) & 255) as int
+}
+
+// The checks every draw shares: the centre is the fragment shader's green,
+// the corner the clear colour.
+check_meshlet(readback: Buf, what: string) {
+    spec.assert_eq(channel(readback, SIZE / 2, SIZE / 2, 0), 0, "${what}: centre red")
+    spec.assert_eq(channel(readback, SIZE / 2, SIZE / 2, 1), 255, "${what}: centre green")
+    spec.assert_eq(channel(readback, SIZE / 2, SIZE / 2, 3), 255, "${what}: centre alpha")
+    spec.assert_eq(channel(readback, 1, 1, 1), 0, "${what}: corner left clear")
+    spec.assert_eq(channel(readback, 1, 1, 3), 255, "${what}: corner alpha")
+}
+
+main() {
+    fw = spec.init()
+
+    // The declarations, against the specification's values, on every machine.
+    spec.describe(fw, "vulkan.vk: mesh shader declarations") {
+        spec.it(fw, "names the extension and its values as the specification does") callback {
+            spec.assert_eq(string.equals(vk.EXT_MESH_SHADER_EXTENSION_NAME, "VK_EXT_mesh_shader"), 1, "extension name")
+            spec.assert_eq(vk.EXT_MESH_SHADER_SPEC_VERSION, 1, "spec version")
+            spec.assert_eq(vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT, 1000328000, "features sType")
+            spec.assert_eq(vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT, 1000328001, "properties sType")
+            spec.assert_eq(vk.SHADER_STAGE_TASK_BIT_EXT, 0x40, "SHADER_STAGE_TASK_BIT_EXT")
+            spec.assert_eq(vk.SHADER_STAGE_MESH_BIT_EXT, 0x80, "SHADER_STAGE_MESH_BIT_EXT")
+            spec.assert_eq(vk.PIPELINE_STAGE_TASK_SHADER_BIT_EXT, 0x80000, "PIPELINE_STAGE_TASK_SHADER_BIT_EXT")
+            spec.assert_eq(vk.PIPELINE_STAGE_MESH_SHADER_BIT_EXT, 0x100000, "PIPELINE_STAGE_MESH_SHADER_BIT_EXT")
+            spec.assert_eq(vk.QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT, 1000328000, "QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT")
+            spec.assert_eq(vk.QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT, 0x800, "task shader invocations")
+            spec.assert_eq(vk.QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT, 0x1000, "mesh shader invocations")
+        }
+
+        // Sizes from the specification's member lists: sType and pNext take
+        // 16 bytes, then five VkBool32s padded to 8; 36 four-byte members; three.
+        spec.it(fw, "lays the structs out as the specification does") callback {
+            spec.assert_eq(sizeof(VkPhysicalDeviceMeshShaderFeaturesEXT), 40, "sizeof(VkPhysicalDeviceMeshShaderFeaturesEXT)")
+            spec.assert_eq(sizeof(VkPhysicalDeviceMeshShaderPropertiesEXT), 160, "sizeof(VkPhysicalDeviceMeshShaderPropertiesEXT)")
+            spec.assert_eq(sizeof(VkDrawMeshTasksIndirectCommandEXT), 12, "sizeof(VkDrawMeshTasksIndirectCommandEXT)")
+            props = calloc(1, sizeof(VkPhysicalDeviceMeshShaderPropertiesEXT)) as *VkPhysicalDeviceMeshShaderPropertiesEXT
+            props.maxMeshOutputVertices = 7
+            props.prefersCompactPrimitiveOutput = 9
+            words = (props as ptr) as uint32[]
+            spec.assert_eq(words[28] as int, 7, "maxMeshOutputVertices at byte 112")
+            spec.assert_eq(words[39] as int, 9, "prefersCompactPrimitiveOutput at byte 156, the last")
+            free(props)
+        }
+    }
+
+    ready = 0
+    // `reason` is a literal unless an interpolation below built it; that one
+    // is allocated, and freed once the specs that print it have run.
+    reason = "no Vulkan driver"
+    reason_owned = 0
+    indirect_count = 0
+    if vulkan.available() != 1 {
+        reason = "no Vulkan driver (${vulkan.last_error()})"
+        reason_owned = 1
+    } else {
+        g_instance = create_instance()
+        if g_instance == null {
+            reason = "vkCreateInstance failed"
+        } else {
+            vk.load_instance(g_instance)
+            devs, n, _r = vk.vkEnumeratePhysicalDevices_all(g_instance)
+            if n > 0 { g_gpu = (devs as ptr[])[0] }
+            vk.array_free(devs)
+            if g_gpu == null {
+                reason = "no physical device"
+            } else {
+                ok, why, count = has_mesh_shader(g_gpu)
+                if ok == 0 {
+                    reason = why
+                } else {
+                    indirect_count = count
+                    g_family = graphics_family(g_gpu)
+                    if g_family >= 0 { g_device = create_device(g_gpu, g_family, indirect_count) }
+                    if g_device == null {
+                        reason = "vkCreateDevice with VK_EXT_mesh_shader failed"
+                    } else {
+                        vk.load_device(g_device)
+                        cell = new_handle()
+                        vk.vkGetDeviceQueue(g_device, g_family as uint32, 0, cell)
+                        g_queue = take_handle(cell)
+                        g_mem_props = calloc(1, sizeof(VkPhysicalDeviceMemoryProperties))
+                        vk.vkGetPhysicalDeviceMemoryProperties(g_gpu, g_mem_props)
+                        ready = 1
+                    }
+                }
+            }
+        }
+    }
+
+    mesh_spv, mesh_len = load_spv("contrib/vulkan/shaders/meshlet.mesh.spv")
+    frag_spv, frag_len = load_spv("contrib/vulkan/shaders/meshlet.frag.spv")
+    draw_ready = ready
+    draw_reason = reason
+    if ready == 1 && (mesh_len == 0 || frag_len == 0) {
+        draw_ready = 0
+        draw_reason = "SPIR-V shaders not built (contrib/vulkan/shaders/build_shaders.sh)"
+    }
+
+    // What every draw shares: the target, the pipeline, the readback and the
+    // indirect arguments.
+    target = Target{image: null, memory: null, view: null, pass: null, framebuffer: null, result: 0}
+    pipe = Pipe{layout: null, pipeline: null, result: 0}
+    readback = Buf{buffer: null, memory: null, mapped: null}
+    args = Buf{buffer: null, memory: null, mapped: null}
+    if draw_ready == 1 {
+        target = target_create()
+        if target.result == vk.SUCCESS { pipe = pipe_create(target.pass, mesh_spv, mesh_len, frag_spv, frag_len) }
+        readback = buf_create(SIZE * SIZE * 4, vk.BUFFER_USAGE_TRANSFER_DST_BIT)
+        args = buf_create(32, vk.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+        if args.mapped != null {
+            a = args.mapped as *VkDrawMeshTasksIndirectCommandEXT
+            a.groupCountX = 1
+            a.groupCountY = 1
+            a.groupCountZ = 1
+            ((args.mapped + 16) as uint32[])[0] = 1
+        }
+    }
+    count_ready = draw_ready
+    count_reason = draw_reason
+    if draw_ready == 1 && indirect_count == 0 {
+        count_ready = 0
+        count_reason = "the device has no drawIndirectCount feature"
+    }
+
+    spec.describe(fw, "vulkan.vk: mesh shaders") {
+        spec.it_when(ready, "reads the mesh shader properties through the Properties2 chain", reason) callback {
+            props = calloc(1, sizeof(VkPhysicalDeviceMeshShaderPropertiesEXT)) as *VkPhysicalDeviceMeshShaderPropertiesEXT
+            props.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT
+            p2 = calloc(1, sizeof(VkPhysicalDeviceProperties2)) as *VkPhysicalDeviceProperties2
+            p2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2
+            p2.pNext = props as ptr
+            vk.vkGetPhysicalDeviceProperties2(g_gpu, p2 as ptr)
+            // The specification's required minimums, read from both ends of
+            // the struct and from inside an array member.
+            spec.assert_true(props.maxMeshWorkGroupInvocations >= 128, "maxMeshWorkGroupInvocations (${props.maxMeshWorkGroupInvocations})")
+            spec.assert_true(props.maxMeshWorkGroupCount[2] >= 65535, "maxMeshWorkGroupCount[2] (${props.maxMeshWorkGroupCount[2]})")
+            spec.assert_true(props.maxMeshOutputVertices >= 256, "maxMeshOutputVertices (${props.maxMeshOutputVertices})")
+            spec.assert_true(props.maxMeshOutputPrimitives >= 256, "maxMeshOutputPrimitives (${props.maxMeshOutputPrimitives})")
+            spec.assert_true(props.maxMeshOutputLayers >= 8, "maxMeshOutputLayers (${props.maxMeshOutputLayers})")
+            spec.assert_true(props.prefersCompactPrimitiveOutput <= 1, "prefersCompactPrimitiveOutput is a VkBool32 (${props.prefersCompactPrimitiveOutput})")
+            free(p2)
+            free(props)
+        }
+
+        spec.it_when(draw_ready, "builds a mesh pipeline and draws one meshlet with vkCmdDrawMeshTasksEXT", draw_reason) callback {
+            spec.assert_eq(target.result, vk.SUCCESS, "the render target")
+            spec.assert_eq(pipe.result, vk.SUCCESS, "the mesh pipeline")
+            spec.assert_true(readback.mapped != null, "a readback buffer")
+            memset(readback.mapped, 127, SIZE * SIZE * 4)
+            spec.assert_eq(render(target, pipe, DRAW_DIRECT, args, readback), vk.SUCCESS, "the frame")
+            check_meshlet(readback, "direct")
+        }
+
+        spec.it_when(draw_ready, "draws it from a VkDrawMeshTasksIndirectCommandEXT", draw_reason) callback {
+            spec.assert_true(args.mapped != null, "an indirect argument buffer")
+            memset(readback.mapped, 127, SIZE * SIZE * 4)
+            spec.assert_eq(render(target, pipe, DRAW_INDIRECT, args, readback), vk.SUCCESS, "the frame")
+            check_meshlet(readback, "indirect")
+        }
+
+        spec.it_when(count_ready, "draws it with the draw count read from a buffer", count_reason) callback {
+            memset(readback.mapped, 127, SIZE * SIZE * 4)
+            spec.assert_eq(render(target, pipe, DRAW_INDIRECT_COUNT, args, readback), vk.SUCCESS, "the frame")
+            check_meshlet(readback, "indirect count")
+        }
+    }
+
+    rc = spec.run_summary(fw)
+
+    if reason_owned == 1 { free(reason) }
+    if mesh_len > 0 { string.free(mesh_spv) }
+    if frag_len > 0 { string.free(frag_spv) }
+    if g_device != null {
+        vk.vkDeviceWaitIdle(g_device)
+        buf_destroy(args)
+        buf_destroy(readback)
+        pipe_destroy(pipe)
+        target_destroy(target)
+        vk.vkDestroyDevice(g_device, null)
+        vk.load_device(null)
+    }
+    if g_mem_props != null { free(g_mem_props) }
+    if g_instance != null {
+        vk.vkDestroyInstance(g_instance, null)
+        vk.load_instance(null)
+    }
+    return rc
+}
