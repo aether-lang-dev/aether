@@ -10609,6 +10609,23 @@ int main(int argc, char** argv) {
          * the next argv is a path ending in `.ae` that actually exists;
          * bare `ae help` falls through to the usage banner. */
         if (sub_argc > 0 && ae_help_is_script_target(sub_argv[0])) {
+            /* Diagnose with the compiler a build of the script would use.
+             * The helper's own search tried $AETHER_HOME/bin before the
+             * aetherc beside this binary, so in a source tree with an
+             * installed toolchain configured, `ae help` ran the installed
+             * compiler while `ae build` ran the tree's. Resolve the
+             * toolchain as every other command does and name it (AETHERC
+             * is the helper's first choice), unless the caller did. */
+            discover_toolchain();
+            if (!getenv("AETHERC") && tc.compiler[0]) {
+#ifdef _WIN32
+                char env_buf[1100];
+                snprintf(env_buf, sizeof(env_buf), "AETHERC=%s", tc.compiler);
+                _putenv(env_buf);
+#else
+                setenv("AETHERC", tc.compiler, 0);
+#endif
+            }
             return ae_help_main(sub_argc, sub_argv);
         }
         print_usage();

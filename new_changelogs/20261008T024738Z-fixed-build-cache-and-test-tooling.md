@@ -45,3 +45,9 @@
   fails once the job is gone, so only a live child of the test is ever
   killed. Liveness checks match running jobs by pid, not by the state word,
   which bash prints in the locale's language.
+- **`ae help <script.ae>` diagnoses with the compiler `ae build` uses.**
+  Its own compiler search tried `$AETHER_HOME/bin` before the `aetherc`
+  beside `ae`, so in a source tree with an installed toolchain configured
+  it reported the installed compiler's errors (an older one rejected the
+  current std outright). It now resolves the toolchain as every other
+  command does; `AETHERC` still overrides it.
