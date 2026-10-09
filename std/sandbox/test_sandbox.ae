@@ -24,6 +24,12 @@ extern exit(code: int)
 fn same(a: string, b: string) -> int { return string.equals(a, b) }
 
 // 1 when grant number i in `perms` is the (category, pattern) pair given.
+// Code running inside a sandbox that has been handed the grant list, the way
+// any ptr can reach a callee, tries to grant itself more.
+fn widen(perms: ptr) {
+    sandbox.grant_env(perms, "AE_SANDBOX_TEST_SECRET")
+}
+
 fn has_grant(perms: ptr, i: int, category: string, pattern: string) -> int {
     if same(list_get_raw(perms, i * 2), category) != 1 { return 0 }
     return same(list_get_raw(perms, i * 2 + 1), pattern)
@@ -177,6 +183,36 @@ main() {
             }
             sandbox.free(inner)
             sandbox.free(outer)
+        }
+
+        spec.it("cannot be widened from inside the block it guards") callback {
+            g = sandbox.new("narrow") {
+                grant_env("AE_SANDBOX_TEST_OPEN")
+            }
+            sandbox.enforce(g) callback {
+                widen(g)
+                spec.assert_true(os.getenv("AE_SANDBOX_TEST_SECRET") == null,
+                    "a grant added to the list mid-block grants nothing")
+                spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_OPEN"), "visible", "the frozen grants still apply")
+            }
+            // The caller's own list did change, and a later enforce of it
+            // sees the change: grants are frozen per enforce, not forever.
+            sandbox.enforce(g) callback {
+                spec.assert_str_eq(os.getenv("AE_SANDBOX_TEST_SECRET"), "hidden", "the next enforce sees the new grant")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("does not hand the block the grant list") callback {
+            g = sandbox.new("narrow") {
+                grant_env("AE_SANDBOX_TEST_OPEN")
+            }
+            sandbox.enforce(g) | ctx: ptr | {
+                spec.assert_true(ctx == null, "the block's parameter is null")
+                sandbox.grant_env(ctx, "AE_SANDBOX_TEST_SECRET")
+                spec.assert_true(os.getenv("AE_SANDBOX_TEST_SECRET") == null, "granting through it does nothing")
+            }
+            sandbox.free(g)
         }
 
         spec.it("stops applying when the enforced block returns") callback {

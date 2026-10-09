@@ -49,6 +49,10 @@ extern strdup(s: string) -> ptr
 // on macOS and a grant named through a symlink covers where it leads.
 extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
 @extern("free") libc_free(p: ptr)
+// For freezing a grant list: an element's characters (a plain C string or an
+// Aether string), and a malloc'd copy of them.
+extern aether_string_raw_ptr(s: ptr) -> ptr
+@extern("strdup") strdup_raw(s: ptr) -> ptr
 
 exports(
     new, enforce, free,
@@ -57,6 +61,9 @@ exports(
 )
 
 fn add_grant(perms: ptr, category: string, pattern: string) {
+    // null is what an enforce block receives (see enforce): a grant written
+    // there has no list to go into, and grants nothing.
+    if perms == null { return }
     list.add(perms, strdup(category))
     list.add(perms, aether_sandbox_grant_pattern(category, pattern))
 }
@@ -87,12 +94,39 @@ new(name: string) -> ptr {
 //   - only Aether functions can be trusted, not C externs;
 //   - an enforce written by contained code records the sandboxed authority
 //     it runs under, so trusting a name there gains nothing.
+//
+// The grants are frozen when the block starts: enforce checks against its own
+// copy, which nothing else can reach, so changing `perms` afterwards (or a
+// grant_* call made with it from inside the block, by code it was passed to)
+// does not widen what the running block may do. For the same reason the block
+// is not given the list: its parameter is null.
 enforce(perms: ptr, code: fn) {
-    sandbox_push(perms)
+    frozen = freeze(perms)
+    defer free(frozen)
+    sandbox_push(frozen)
     sandbox_install()
-    call(code, perms)
+    call(code, null)
     sandbox_uninstall()
     sandbox_pop()
+}
+
+// A private copy of a grant list, with copies of its strings: what enforce
+// checks against. null stays null, an empty list stays empty (deny all).
+fn freeze(perms: ptr) -> ptr {
+    if perms == null { return null }
+    frozen = list.new()
+    n = list.size(perms)
+    i = 0
+    while i < n {
+        e = list_get_raw(perms, i)
+        if e == null {
+            list.add(frozen, null)
+        } else {
+            list.add(frozen, strdup_raw(aether_string_raw_ptr(e)))
+        }
+        i = i + 1
+    }
+    return frozen
 }
 
 // Release a grant list made by new(), and the grant strings it owns.

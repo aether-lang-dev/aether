@@ -231,6 +231,13 @@ operation only when each of them does, so the inner block gets the
 intersection of the two. An inner grant list cannot widen what an outer
 one refused.
 
+A level cannot be widened from inside, either. `enforce` freezes the grant
+list when the block starts and checks against its own copy, which nothing
+else can reach, and the block's parameter is `null` rather than the list.
+So code inside the block that has been handed the list (`plugin(worker)`)
+and calls `sandbox.grant_env(worker, ...)` changes the caller's list for
+the *next* `enforce`, not the running one.
+
 ### The `*` wildcard
 
 `grant_all()` adds the wildcard category and pattern `("*", "*")`, which
