@@ -14,6 +14,107 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.796.0]
+
+### Fixed
+
+- **An idle actor thread sleeps instead of spinning, and so does its core.**
+  An actor with its own thread (`auto_process`) spun on an empty mailbox for
+  as long as it lived, a whole CPU each, and the core it was on counted it as
+  work on every pass, so that core never went idle either. The thread now
+  spins a while, as a core does, then parks until a message, its release,
+  the scheduler's stop or its teardown wakes it; asleep, it no longer holds
+  back the freeing of released actors. The core skips it (#2592).
+- **An actor with its own thread no longer loses messages or runs on two
+  threads.** Its messages went through a single-producer queue that the
+  core, the core's other actor threads and the actor itself all wrote: two
+  sends at once could write the same slot, a full queue (63) dropped the
+  message, and the thread moved what it found into a 32-slot mailbox and
+  dropped the rest. Each dropped message had been counted as sent, so
+  `scheduler_wait()` then waited forever. Every send to such an actor now
+  goes into an inbox of its own that takes any number of senders, never
+  drops a message and keeps each sender's order, and whatever is left in it
+  when the actor ends is released. A same-core send could also step the
+  actor inline on a second thread, as could a send in main-thread mode, and
+  work stealing could move it; none does now (#2598).
+- **The Valgrind CI job fails on memcheck errors.** It looked for invalid
+  reads, writes and frees by name and threw the run's exit status away, so
+  main passed with 86 uninitialised reads: `create_code_generator` never
+  set `lib_actors`, which every codegen unit test then read. The generator
+  is zeroed at creation, and the job now fails on any memcheck error, any
+  failed test and any leak. It also runs Valgrind with `--fair-sched=yes`
+  (its default lock starved threads waiting on a busy one), writes
+  Valgrind's report to a file of its own, lists the slowest tests in its
+  summary and stops at 15 minutes. With the actor-thread park, the job takes
+  about a minute instead of an hour: the suite's time under Valgrind went
+  from 4,044 s to 24 s (#2599, #2593).
+- **`std.udp` fails at once on a host with a space or a control character.**
+  No address or name can contain one, and on macOS the system resolver
+  waited out a DNS timeout, about 5 s, before saying so (#2596).
+
+- **A function returning a struct that holds its string parameter compiles
+  again.** `cursor(text) -> Cursor { return Cursor { text: text, ... } }`
+  was taken for a call that hands its string parameter back, so a local bound
+  to its result was typed as the string and the C did not compile (0.792 to
+  0.795). Only a call whose value is a string can be its string argument. Such
+  a function now also takes its own reference to the parameter, which the
+  returned struct owns, and its caller frees its own string, as for any other
+  call: before, nobody freed it (#2584).
+- **A call statement whose later argument is a call compiles without
+  warnings.** When such a statement's earlier arguments are evaluated into
+  temporaries first, the statement's "value discarded" mark went to the first
+  call emitted instead of to the statement's own: a hoisted call that frees a
+  string was cast to void, so the C did not compile (`'_eo0' declared void`,
+  #2589), and the statement's value was left unused (clang
+  `-Wunused-value`, #2585). The mark now names the statement's call.
+- **`&f()` is a type error that says what to do.** A call's result is not
+  stored anywhere, so it has no address; `&make_pair()` passed the type
+  checker and failed in the C compiler with "lvalue required". It now asks
+  for a local first (`p = make_pair()`, then `&p`) (#2591).
+- **A module-level `var` of a struct type takes a struct literal of
+  constants.** `var g: Pair = Pair { a: 0, b: 0 }` was refused as not a
+  compile-time constant. It is emitted as an initializer list, which C takes
+  for a file-scope static: nested literals, a header struct's string field (a
+  plain C string) and a closure field set to `null` included (#2590).
+- **`extern union Name @c_import` declares a union a C header defines.** A
+  header's union had to be declared `extern struct`, and `sizeof`, a pointer
+  cast or a parameter of its pointer type spelled it `struct Name`, a tag
+  mismatch clang rejects. It is spelled `union Name` now. An `extern union`
+  without `@c_import` is an error, since Aether does not emit a union's
+  layout (#2561).
+- **An edit to a header a `@c_include` header includes rebuilds.** The cache
+  key held the `@c_include` header (#2560) but not the headers it includes
+  with `#include "..."`, so `ae build` and `ae run` served the object built
+  from the old one. Those are folded into the key now, recursively, an absent
+  one by its absence; past the scan's limit the key falls back to the tree
+  walk (#2577).
+
+### Performance
+
+- **`std.bignum` divides with Knuth's Algorithm D.** `divide`, `remainder`
+  and `mod` worked a bit at a time and allocated a few bignums per quotient
+  bit, so every reduction of a product went through thousands of
+  allocations. They now take one 32-bit limb of the quotient per step, with
+  no allocation in the loop. A P-521 signature check went from about 4.6 s
+  to about 60 ms, an Ed448 check from about 2.5 s to about 25 ms (#2595).
+- **P-256 and P-384 reduce with the generic `bignum.mod`.** Their
+  special-form folds were written to avoid the old division and are now the
+  slower path: over the Wycheproof P1363 vectors, P-256 checks take 3.8 s
+  instead of 21.3 s and P-384 8.5 s instead of 17.0 s. The folds are gone.
+- **The Wycheproof drivers check more vectors.** P-521 samples every 10th
+  vector instead of every 40th, as P-256 and P-384 do, and Ed448 checks all
+  87 instead of every 4th. Every vector of every curve passes.
+- **The documentation's code blocks are built in parallel.**
+  `tests/scripts/check_doc_blocks.py` built and ran each block in turn,
+  4.5 minutes of every Windows CI job; it now runs `NPROC` at a time, each
+  in a directory of its own, and still reports in source order (#2594).
+
+- **`release_contrib_resolves` builds against the prebuilt runtime.** Its
+  hand-built release layout left out `lib/libaether.a`, which the archive
+  ships, so each of its two builds compiled the whole runtime from source:
+  about four minutes of every Windows CI job. It copies the library in now,
+  and takes 10 s locally instead of 97 s (#2596).
+
 ## [0.795.0]
 
 ### Fixed
