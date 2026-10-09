@@ -79,6 +79,28 @@ int         tinygo_call_int_int_int  (void* h, const char* s, int a, int b);
 void        tinygo_call_void_int     (void* h, const char* s, int a);
 const char* tinygo_call_str_str      (void* h, const char* s, const char* a);
 
+// ---- Owned string results (#2569) ----
+//
+// The string wrappers above return the library's pointer and the
+// caller only borrows it. Each has an `_owned` twin for a Go function
+// that returns `C.CString(...)`, which cgo allocates with malloc on the
+// C heap, outside the Go collector, so nothing frees it otherwise. The
+// twin copies the result into a fresh AetherString the caller owns
+// (module.ae declares it `@heap`, so Aether frees it) and frees the
+// library's pointer with free(). A NULL result, an unresolved symbol
+// and a NULL handle all return an empty string the caller owns.
+//
+// Only for a result allocated by malloc in the C runtime this process
+// uses: a static or long-lived buffer stays with the borrowed wrapper.
+struct AetherString;
+struct AetherString* tinygo_call_s_v_owned      (void* h, const char* s);
+struct AetherString* tinygo_call_s_s_owned      (void* h, const char* s, const char* a);
+struct AetherString* tinygo_call_s_i_owned      (void* h, const char* s, int a);
+struct AetherString* tinygo_call_s_s_s_owned    (void* h, const char* s, const char* a, const char* b);
+struct AetherString* tinygo_call_s_s_s_s_owned  (void* h, const char* s, const char* a, const char* b,
+                                                 const char* c);
+struct AetherString* tinygo_call_str_str_owned  (void* h, const char* s, const char* a);
+
 // ---- Dynamic dispatch (libffi) ----
 //
 // Available when AETHER_HAS_LIBFFI is defined at build time

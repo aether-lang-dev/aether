@@ -159,6 +159,10 @@ int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int id
 int field_read_can_hand_off(ASTNode* e);
 void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
+/* #2618: the same for an element of an array that owns its elements, when
+ * string_element_free_kind says it is one. */
+int string_element_free_kind(CodeGenerator* gen, ASTNode* e);
+void emit_string_element_free(CodeGenerator* gen, ASTNode* e);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
 int alias_source_must_copy(CodeGenerator* gen, const char* src_name);
@@ -324,8 +328,15 @@ int container_store_slot(CodeGenerator* gen, ASTNode* call);
  * clause. */
 int fn_def_string_param_captures(CodeGenerator* gen, ASTNode* fn_def, int param_idx);
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
-/* Release the parameter table box_trackers_are_initialised builds. */
+/* Release the parameter table box_is_heap_new builds. */
 void zb_params_free(CodeGenerator* gen);
+/* #2618: `string[N]` arrays that own their elements, and the element reads
+ * a slot takes as views (codegen_stmt.c). */
+void str_arrays_free(CodeGenerator* gen);
+int string_array_owns(CodeGenerator* gen, ASTNode* scope, const char* name);
+int closure_captures_string_view_array(CodeGenerator* gen, ASTNode* closure, const char* name);
+int is_owned_string_element(CodeGenerator* gen, ASTNode* e);
+int is_owning_array_string_element(CodeGenerator* gen, ASTNode* e);
 void code_generator_release(CodeGenerator* gen);
 /* The statement temporary holding a call's struct result, or NULL. */
 const char* stmt_struct_temp_of(const ASTNode* expr);
@@ -356,7 +367,7 @@ int promoted_cell_array_len(const char* c_type, const char** elem);
  * copied into the body's own array (see codegen_stmt.c). */
 int is_sized_array_param(Type* t);
 void emit_sized_array_param_declarator(CodeGenerator* gen, Type* t, const char* name);
-void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name);
+void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name, ASTNode* scope);
 const char* promoted_cell_pointer(const char* c_type, const char* name);
 /* The cell for a promoted PARAMETER (a function's or a closure's), seeded
  * from the C parameter `param_cname`; see the definition for why a string

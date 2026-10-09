@@ -280,7 +280,8 @@ TEST(slices_codegen_lowers_to_fat_pointer_helpers) {
     ASSERT_NOT_NULL(strstr(c, "aether_slice_len(xs)"));
     ASSERT_NOT_NULL(strstr(c, "sum(aether_slice_make((void*)(arr), 3))"));
     ASSERT_NOT_NULL(strstr(c, "aether_slice_sub(aether_slice_make((void*)(arr), 3), (int64_t)(1), (int64_t)(3), sizeof(int)"));
-    ASSERT_NOT_NULL(strstr(c, "AetherSlice view = aether_slice_view((void*)(malloc(8)))"));
+    /* #2369: Aether's malloc is a zeroing allocation */
+    ASSERT_NOT_NULL(strstr(c, "AetherSlice view = aether_slice_view((void*)(calloc(1, (size_t)(8))))"));
     ASSERT_NOT_NULL(strstr(c, "free((void*)((int*)(view).ptr))"));
     /* the extern keeps C's shape; the call site wraps the result */
     ASSERT_NOT_NULL(strstr(c, "int* raw_ints("));

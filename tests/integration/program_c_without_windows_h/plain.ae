@@ -1,0 +1,17 @@
+// A program without actors: the generated C's own prelude used to include
+// windows.h (#2673). Uses the clock and a loop, which reach the runtime's
+// Windows services (the monotonic clock, the preemption yield).
+import std.string
+
+main() {
+    start = clock_ns()
+    total = 0
+    i = 0
+    while i < 1000 {
+        total = total + i
+        i = i + 1
+    }
+    if clock_ns() >= start {
+        println("plain ${total}")
+    }
+}

@@ -61,7 +61,20 @@ static AETHER_TLS_SHARED AetherJmpStack tls_stack = { .depth = 0 };
 
 AETHER_TLS_SHARED int g_aether_in_actor_step = 0;
 AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
-AETHER_TLS_SHARED const void* g_aether_fnptr_owned = NULL;   /* #2586 */
+/* #2586: the string a fn-pointer callee handed over; see aether_fnptr_mark
+ * in aether_panic.h. Static: the generated code reaches it only through the
+ * two functions below (#2687). */
+static AETHER_TLS_SHARED const void* g_aether_fnptr_owned = NULL;
+
+void aether_fnptr_mark(const void* s) {
+    g_aether_fnptr_owned = s;
+}
+
+int aether_fnptr_claim(const void* r) {
+    int owned = r && r == g_aether_fnptr_owned;
+    g_aether_fnptr_owned = NULL;
+    return owned;
+}
 
 static AetherDeathHook death_hook = NULL;
 

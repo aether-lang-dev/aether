@@ -191,12 +191,8 @@ static inline int aether_nop_join(pthread_t t, void** r) { (void)t; if (r) *r = 
 // Windows path — implement the pthread API with Win32 primitives
 // ============================================================
 
-#ifndef WIN32_LEAN_AND_MEAN
-#  define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 #include <stdlib.h>    // malloc, free
-#include <stdint.h>    // uint64_t
+#include <stdint.h>    // uint64_t, uintptr_t
 #include <time.h>      // struct timespec (MSVC 2015+)
 #include <errno.h>
 
@@ -212,16 +208,50 @@ static inline int aether_nop_join(pthread_t t, void** r) { (void)t; if (r) *r = 
 #endif
 
 // ---- Types ---------------------------------------------------------------
+// Spelled without <windows.h>, with the layout of the Win32 objects they
+// stand for (checked against them below, where windows.h is included).
+// A program's generated C includes this header for the types alone: the
+// actor runtime's structs carry a thread, a mutex and a condition. On MinGW
+// <windows.h> brings <x86intrin.h>, and with it every AVX-512 and AVX10
+// header GCC ships, some 80,000 lines per program build (#2673), so such a
+// translation unit defines AETHER_THREAD_TYPES_ONLY and stops here. The
+// runtime, which calls the functions, includes the rest.
 
-typedef HANDLE              pthread_t;
-typedef CRITICAL_SECTION    pthread_mutex_t;
-typedef CONDITION_VARIABLE  pthread_cond_t;
-typedef DWORD               pthread_key_t;   // FLS index
+typedef void* pthread_t;                // HANDLE
+typedef struct {                        // CRITICAL_SECTION
+    void*     debug_info;
+    long      lock_count;
+    long      recursion_count;
+    void*     owning_thread;
+    void*     lock_semaphore;
+    uintptr_t spin_count;
+} pthread_mutex_t;
+typedef struct { void* ptr; } pthread_cond_t;   // CONDITION_VARIABLE
+typedef unsigned long pthread_key_t;            // DWORD: an FLS index
 
 // Attribute types — Windows has no equivalents; these are accepted but ignored
 typedef int  pthread_attr_t;
 typedef int  pthread_mutexattr_t;
 typedef int  pthread_condattr_t;
+
+#ifndef AETHER_THREAD_TYPES_ONLY
+
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+_Static_assert(sizeof(pthread_t) == sizeof(HANDLE), "pthread_t must be a HANDLE");
+_Static_assert(sizeof(pthread_mutex_t) == sizeof(CRITICAL_SECTION) &&
+               _Alignof(pthread_mutex_t) == _Alignof(CRITICAL_SECTION),
+               "pthread_mutex_t must have the layout of a CRITICAL_SECTION");
+_Static_assert(sizeof(pthread_cond_t) == sizeof(CONDITION_VARIABLE) &&
+               _Alignof(pthread_cond_t) == _Alignof(CONDITION_VARIABLE),
+               "pthread_cond_t must have the layout of a CONDITION_VARIABLE");
+_Static_assert(sizeof(pthread_key_t) == sizeof(DWORD), "pthread_key_t must be a DWORD");
+
+#define AETHER_WIN32_CS(m) ((CRITICAL_SECTION*)(m))
+#define AETHER_WIN32_CV(c) ((CONDITION_VARIABLE*)(c))
 
 // ---- Threads -------------------------------------------------------------
 
@@ -269,26 +299,26 @@ static inline int pthread_detach(pthread_t t) {
 
 static inline int pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* attr) {
     (void)attr;
-    InitializeCriticalSection(m);
+    InitializeCriticalSection(AETHER_WIN32_CS(m));
     return 0;
 }
 
 static inline int pthread_mutex_destroy(pthread_mutex_t* m) {
-    DeleteCriticalSection(m);
+    DeleteCriticalSection(AETHER_WIN32_CS(m));
     return 0;
 }
 
 static inline int pthread_mutex_lock(pthread_mutex_t* m) {
-    EnterCriticalSection(m);
+    EnterCriticalSection(AETHER_WIN32_CS(m));
     return 0;
 }
 
 static inline int pthread_mutex_trylock(pthread_mutex_t* m) {
-    return TryEnterCriticalSection(m) ? 0 : EBUSY;
+    return TryEnterCriticalSection(AETHER_WIN32_CS(m)) ? 0 : EBUSY;
 }
 
 static inline int pthread_mutex_unlock(pthread_mutex_t* m) {
-    LeaveCriticalSection(m);
+    LeaveCriticalSection(AETHER_WIN32_CS(m));
     return 0;
 }
 
@@ -296,7 +326,7 @@ static inline int pthread_mutex_unlock(pthread_mutex_t* m) {
 
 static inline int pthread_cond_init(pthread_cond_t* c, pthread_condattr_t* attr) {
     (void)attr;
-    InitializeConditionVariable(c);
+    InitializeConditionVariable(AETHER_WIN32_CV(c));
     return 0;
 }
 
@@ -306,17 +336,17 @@ static inline int pthread_cond_destroy(pthread_cond_t* c) {
 }
 
 static inline int pthread_cond_signal(pthread_cond_t* c) {
-    WakeConditionVariable(c);
+    WakeConditionVariable(AETHER_WIN32_CV(c));
     return 0;
 }
 
 static inline int pthread_cond_broadcast(pthread_cond_t* c) {
-    WakeAllConditionVariable(c);
+    WakeAllConditionVariable(AETHER_WIN32_CV(c));
     return 0;
 }
 
 static inline int pthread_cond_wait(pthread_cond_t* c, pthread_mutex_t* m) {
-    SleepConditionVariableCS(c, m, INFINITE);
+    SleepConditionVariableCS(AETHER_WIN32_CV(c), AETHER_WIN32_CS(m), INFINITE);
     return 0;
 }
 
@@ -338,7 +368,7 @@ static inline int pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m,
     uint64_t abs_ms  = (uint64_t)abstime->tv_sec  * 1000ULL
                      + (uint64_t)abstime->tv_nsec  / 1000000ULL;
     DWORD timeout_ms = (abs_ms > now_ms) ? (DWORD)(abs_ms - now_ms) : 0;
-    BOOL ok = SleepConditionVariableCS(c, m, timeout_ms);
+    BOOL ok = SleepConditionVariableCS(AETHER_WIN32_CV(c), AETHER_WIN32_CS(m), timeout_ms);
     return ok ? 0 : ETIMEDOUT;
 }
 
@@ -417,6 +447,8 @@ static inline int aether_win32_sched_yield(void) {
 }
 #define sched_yield() aether_win32_sched_yield()
 
+#endif // !AETHER_THREAD_TYPES_ONLY
+
 #endif // _WIN32
 
 // ---- Thread identity -----------------------------------------------------
@@ -426,8 +458,10 @@ static inline int aether_win32_sched_yield(void) {
 // (-DAETHER_NO_THREADING) takes the stub path above, which does not include
 // <windows.h>, so it takes the single-thread identity too.
 #if AETHER_HAS_THREADS && defined(_WIN32)
-typedef DWORD aether_tid_t;
+typedef unsigned long aether_tid_t;   // DWORD
+#ifndef AETHER_THREAD_TYPES_ONLY
 static inline aether_tid_t aether_tid_self(void) { return GetCurrentThreadId(); }
+#endif
 static inline int aether_tid_equal(aether_tid_t a, aether_tid_t b) { return a == b; }
 #elif AETHER_HAS_THREADS
 typedef pthread_t aether_tid_t;
@@ -463,11 +497,19 @@ static inline int aether_tid_equal(aether_tid_t a, aether_tid_t b) { return a ==
 // int64 once the counter passes ~9.2e9 ticks (about 15 minutes of uptime
 // at a typical 10 MHz QPC frequency); copies going through `double` lose
 // precision at nanosecond magnitudes. The epoch is arbitrary, only
-// differences are meaningful.
+// differences are meaningful. A Windows program TU of types only has no
+// shim, and reads the clock through the runtime's aether_clock_ns.
+#if AETHER_HAS_THREADS && defined(_WIN32) && defined(AETHER_THREAD_TYPES_ONLY)
+int64_t aether_clock_ns(void);
+static inline uint64_t aether_now_ns(void) {
+    return (uint64_t)aether_clock_ns();
+}
+#else
 static inline uint64_t aether_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
+#endif
 
 #endif // AETHER_THREAD_H

@@ -1,0 +1,277 @@
+// Regression (#2618): a local `string[N]` array owns its elements.
+//
+// A local string array owned none of its elements: a fresh string stored
+// into one leaked, and a view stored into one (a field of a statement
+// temporary, `arr[0] = make_item(w).tag`) dangled once the temporary was
+// destroyed. An array some store into which is not a literal now owns its
+// elements, as a string array cell does (#2474) and a `string[N]` struct
+// field does (#2528): an element store takes the value (a view copied, a
+// fresh string adopted) and frees the one it replaces, and the array's
+// scope exit frees what it holds. An element a slot keeps is copied, so the
+// slot outlives the next store into the array and the array itself: a
+// local, a return (directly, in an `if` arm, as a tuple position), a call
+// handing its argument back, a closure's environment, a parameter array. A
+// table of literals stays the plain C array it was.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    tag: string
+}
+
+struct Shelf {
+    names: string[2]
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2618: ${msg}")
+        exit(1)
+    }
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+first(s: string, n: int) -> string {
+    if n > 0 {
+        return s
+    }
+    return "none"
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!")
+        b = string.concat(w, "z")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The issue's shape: a view of a statement temporary stored as an element.
+temporary_view(w: string) -> int {
+    arr = ["a", "b"]
+    arr[0] = make_item(w).tag
+    churn(w)
+    check(arr[0] == "w%", "a view of a statement temporary stored as an element")
+    return string.length(arr[0])
+}
+
+// Returned directly, through an `if` arm, and as a tuple position.
+ret_direct(w: string) -> string {
+    arr = [string.concat(w, "1"), "lit"]
+    return arr[0]
+}
+
+ret_if(w: string, c: bool) -> string {
+    arr = [string.concat(w, "2"), "lit"]
+    return if c { arr[0] } else { arr[1] }
+}
+
+ret_tuple(w: string) -> (string, int) {
+    arr = [string.concat(w, "3"), "lit"]
+    return arr[0], 3
+}
+
+// A local bound to an element and returned, and a match over elements.
+ret_local(w: string) -> string {
+    arr = ["lit", string.concat(w, "4")]
+    x = arr[1]
+    return x
+}
+
+ret_match(w: string, k: int) -> string {
+    arr = [string.concat(w, "5"), "lit"]
+    y = match k {
+        0 -> arr[0]
+        _ -> arr[1]
+    }
+    return y
+}
+
+returns(w: string) -> int {
+    a = ret_direct(w)
+    b = ret_if(w, true)
+    c, n = ret_tuple(w)
+    d = ret_local(w)
+    e = ret_match(w, 0)
+    churn(w)
+    check(a == "w1" && b == "w2" && c == "w3" && d == "w4" && e == "w5", "an element returned")
+    check(n == 3, "a tuple returned with an element")
+    total = string.length(a) + string.length(b) + string.length(c)
+    return total + string.length(d) + string.length(e)
+}
+
+// A closure that only reads the array, called once the function returned
+// and the element it read was replaced.
+reader(w: string) -> fn {
+    arr = [string.concat(w, "6"), "lit"]
+    f = || {
+        return arr[0]
+    }
+    arr[0] = "gone"
+    return f
+}
+
+closures(w: string) -> int {
+    g = reader(w)
+    churn(w)
+    string s = call(g)
+    check(s == "w6", "a closure's copy of the array")
+    return string.length(s)
+}
+
+// The elements swapped by a literal that reads the array it is stored into.
+swap(w: string) -> int {
+    arr = [string.concat(w, "a"), string.concat(w, "b")]
+    arr = [arr[1], arr[0]]
+    churn(w)
+    check(arr[0] == "wb" && arr[1] == "wa", "elements swapped")
+    return string.length(arr[0]) + string.length(arr[1])
+}
+
+// A call handing its argument back, then a store into the element.
+handed_back(w: string) -> int {
+    arr = [string.concat(w, "c"), "lit"]
+    x = first(arr[0], 1)
+    arr[0] = string.concat(w, "d")
+    churn(w)
+    check(x == "wc" && arr[0] == "wd", "a call handing an element back")
+    return string.length(x)
+}
+
+// Freed by hand: the array does not free it again.
+freed(w: string) -> int {
+    arr = [string.concat(w, "e"), "lit"]
+    string.free(arr[0])
+    arr[0] = string.concat(w, "f")
+    check(arr[0] == "wf", "a store after an element was freed")
+    return string.length(arr[0])
+}
+
+// Stored into itself, and read into a literal stored over it.
+self_store(w: string) -> int {
+    arr = [string.concat(w, "g"), "lit"]
+    arr[0] = arr[0]
+    x = string.concat(w, "h")
+    arr = [arr[0], x]
+    churn(w)
+    check(arr[0] == "wg" && arr[1] == "wh", "self stores")
+    return string.length(arr[0]) + string.length(arr[1])
+}
+
+// Written inside `try`, read after the panic it caught.
+in_try(w: string) -> int {
+    arr = ["lit", "lit"]
+    try {
+        arr[0] = string.concat(w, "i")
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic caught")
+    }
+    check(arr[0] == "wi", "a store made before a panic")
+    return string.length(arr[0])
+}
+
+// A parameter array: a store into it gives back its own reference, never
+// the caller's, and an element it returns is a copy.
+param_store(xs: string[2], w: string) -> int {
+    xs[0] = string.concat(w, "j")
+    return string.length(xs[0]) + string.length(xs[1])
+}
+
+param_pick(xs: string[2], i: int) -> string {
+    return xs[i]
+}
+
+params(w: string) -> int {
+    arr = [string.concat(w, "k"), string.concat(w, "l")]
+    n = param_store(arr, w)
+    p = param_pick(arr, 1)
+    arr[1] = "lit"
+    churn(w)
+    check(arr[0] == "wk" && p == "wl" && n == 4, "an array passed to a parameter")
+    return n + string.length(p)
+}
+
+// A whole array copied, into an array and into a new one, and an element
+// of a struct's `string[N]` field.
+copies(w: string) -> int {
+    arr = [string.concat(w, "m"), "lit"]
+    other = ["x", "y"]
+    other = arr
+    string[2] fresh = arr
+    arr[0] = "lit"
+    s = Shelf { names: [string.concat(w, "n"), "lit"] }
+    kept = s.names[0]
+    s.names[0] = "lit"
+    s.names[1] = string.concat(w, "p")
+    string.free(s.names[1])
+    churn(w)
+    check(other[0] == "wm" && other[1] == "lit", "a whole-array copy")
+    check(fresh[0] == "wm", "an array declared from another")
+    check(kept == "wn", "an element of a struct's array field")
+    return string.length(other[0]) + string.length(kept)
+}
+
+// One array for every pass of a loop, each binding replacing the last.
+looped(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 3 {
+        total = total + 1
+        string[2] row = [string.concat(w, "o"), "lit"]
+        total = total + string.length(row[0])
+        i = i + 1
+    }
+    return total
+}
+
+// A table of literals is read as it is.
+table(i: int) -> string {
+    t = ["zero", "one", "two"]
+    return t[i]
+}
+
+round(w: string) -> int {
+    n = temporary_view(w) + returns(w) + closures(w) + swap(w) + handed_back(w)
+    n = n + freed(w) + self_store(w) + in_try(w) + params(w) + copies(w)
+    return n + looped(w) + string.length(table(1))
+}
+
+main() {
+    println("=== test_local_string_array_owns_elements ===")
+    check(round("w") == 2 + 10 + 2 + 4 + 2 + 2 + 4 + 2 + 6 + 4 + 9 + 3, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_local_string_array_owns_elements passed ===")
+}

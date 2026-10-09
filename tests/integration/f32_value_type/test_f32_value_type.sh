@@ -65,7 +65,7 @@ fi
 
 # The C: a `float` field, a `float*` view with plain stores, a float local.
 AETHER_HOME="$ROOT" "$AETHERC" "$tmp/main.ae" "$tmp/out.c" >/dev/null 2>&1
-for want_c in '    float x;' 'AetherSlice verts = aether_slice_view((void\*)(malloc(32)));' 'float z = 1.25;' 'float scale(float x, double k)'; do
+for want_c in '    float x;' 'AetherSlice verts = aether_slice_view((void\*)(calloc(1, (size_t)(32))));' 'float z = 1.25;' 'float scale(float x, double k)'; do
     if ! grep -q "$want_c" "$tmp/out.c"; then
         echo "  [FAIL] f32_value_type: expected '$want_c' in the C"
         fail=1

@@ -4,6 +4,7 @@
 #include "aether_spsc_queue.h"
 #include "aether_actor_inbox.h"
 #include "../scheduler/multicore_scheduler.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +14,22 @@ extern AETHER_TLS int current_core_id;
 // before it parks (#1517), so a message that comes soon after the last one
 // is taken without a wake-up.
 #define AETHER_ACTOR_THREAD_SPINS 10000
+
+int aether_actor_thread_start(pthread_t* thread, void* actor) {
+#if AETHER_HAS_THREADS
+    return pthread_create(thread, NULL, aether_actor_thread, actor);
+#else
+    /* A runtime built without threads has none to give it, and a program
+     * built with them can still link to it (ci-coop runs ordinary programs
+     * on the cooperative runtime this way). The caller then keeps the actor
+     * as an ordinary one, stepped by its scheduler. pthread_create is not
+     * called here: on a threadless target reaching it is the logic error
+     * aether_thread.h describes. */
+    (void)thread;
+    (void)actor;
+    return ENOSYS;
+#endif
+}
 
 void* aether_actor_thread(void* arg) {
     ActorBase* actor = (ActorBase*)arg;

@@ -1,0 +1,91 @@
+// Regression (#2685, found by the -O0 against -O2 sweep of #2488): an arrow
+// body's trailing expression returns a string the way an explicit `return`
+// does.
+//
+// `f(n) -> { msg = "count=${n}"; msg }` freed msg at scope exit and returned
+// the freed pointer: the parser wrapped the trailing expression's statement in
+// the implicit return, and the passes that decide whether a return hands over
+// an owned string, and which local escapes through it, did not look inside a
+// statement. tests/syntax/test_string_interp_ptr.ae printed different garbage
+// at -O0 and at -O2, which is how the -O0 against -O2 sweep found it. The
+// implicit return now holds the expression itself, as `return msg` does, so
+// the caller gets the string and frees it.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// A local built from an interpolation, returned implicitly.
+implicit_local(n) -> {
+    msg = "count=${n}"
+    msg
+}
+
+// The same, through string.concat and a parameter.
+implicit_concat(s: string) -> {
+    joined = string.concat(s, "!")
+    joined
+}
+
+// An early explicit return beside the implicit one.
+implicit_or_early(n) -> {
+    if n < 0 {
+        return "negative"
+    }
+    label = "n=${n}"
+    label
+}
+
+// The interpolation itself as the trailing expression.
+implicit_interp(n) -> {
+    doubled = n * 2
+    "doubled=${doubled}"
+}
+
+round(n: int) -> int {
+    a = implicit_local(n)
+    b = implicit_concat("hey")
+    c = implicit_or_early(n)
+    d = implicit_or_early(0 - 1)
+    e = implicit_interp(n)
+    total = string.length(a) + string.length(b) + string.length(c)
+    return total + string.length(d) + string.length(e)
+}
+
+main() {
+    check(implicit_local(7) == "count=7", "implicit_local(7) is '${implicit_local(7)}'")
+    check(implicit_concat("hey") == "hey!", "implicit_concat is '${implicit_concat("hey")}'")
+    check(implicit_or_early(3) == "n=3", "implicit_or_early(3) is '${implicit_or_early(3)}'")
+    check(implicit_or_early(0 - 1) == "negative", "implicit_or_early(-1)")
+    check(implicit_interp(4) == "doubled=8", "implicit_interp(4) is '${implicit_interp(4)}'")
+    // count=5, hey!, n=5, negative, doubled=10
+    expected = 7 + 4 + 3 + 8 + 10
+    i = 0
+    while i < 3 {
+        check(round(5) == expected, "a round adds up")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round(5)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("arrow implicit returns ok")
+}

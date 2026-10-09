@@ -1,0 +1,164 @@
+// Regression (#2369): a store into a struct field frees the value it
+// replaces wherever the pointer to the struct came from.
+//
+// The store reads the field's `_heap_<field>` tracker to know whether the
+// old value is owned, and a box made with `malloc(n) as *T` held garbage
+// there (#1873). So the release was emitted only through a pointer the
+// compiler could trace back to heap.new; through a list element, a call
+// returning one, a cast of a `ptr` parameter or a parameter of a function C
+// can call, every replaced string leaked (ae3d's menu labels and audio
+// clips), and so did a replaced struct field's strings and a replaced
+// closure field's environment. A call of C's malloc is now a zeroing
+// allocation, as heap.new(T) is, whether its pointer is cast at once or
+// bound to a `ptr` first, so every box's trackers can be read and every
+// store releases.
+//
+// A field handed to a function that frees it (ae3d's `core.set_owned`) is
+// given up at the call (#2566), so releasing on the store does not free it
+// twice.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.heap
+import std.list
+import std.mem
+import std.string
+
+@extern("malloc") c_malloc(n: int) -> ptr
+@extern("memset") c_memset(p: ptr, c: int, n: int) -> ptr
+@extern("free") c_free(p: ptr)
+extern exit(code: int)
+
+struct Inner {
+    name: string
+}
+
+struct Widget {
+    label: string
+    tags: string[2]
+    inner: Inner
+    on_click: fn
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2369: ${msg}")
+        exit(1)
+    }
+}
+
+// A pointer into a list, handed back by a call.
+widget(items: ptr, id: int) -> *Widget {
+    return list_get_raw(items, id) as *Widget
+}
+
+set_label(items: ptr, id: int, text: string) {
+    w = widget(items, id)
+    w.label = string.concat(text, "!")
+}
+
+// A cast of a `ptr` parameter.
+set_clip(p: ptr, text: string) {
+    s = p as *Widget
+    s.label = string.concat(text, "?")
+}
+
+// A pointer parameter of a function C may call, so of unknown origin.
+set_parts(w: *Widget, text: string) {
+    w.tags[0] = string.concat(text, "0")
+    w.inner = Inner { name: string.concat(text, "i") }
+    w.inner.name = string.concat(text, "j")
+    w.on_click = || { w.n = w.n + string.length(text) }
+}
+
+// ae3d's workaround: free the old value, store a fresh copy.
+set_owned(previous: string, value: string) -> string {
+    fresh = string.copy(value)
+    if previous != null {
+        string.free(previous)
+    }
+    return fresh
+}
+
+rename(items: ptr, text: string) {
+    w = widget(items, 0)
+    w.label = set_owned(w.label, text)
+}
+
+// A box made with malloc over memory left dirty, cast at once and bound to
+// a `ptr` first: its trackers start zeroed, so the first store frees
+// nothing and the second frees the first.
+malloc_box(text: string) -> int {
+    dirty = c_malloc(sizeof(Widget))
+    _d = c_memset(dirty, 171, sizeof(Widget))
+    c_free(dirty)
+    b = c_malloc(sizeof(Widget)) as *Widget
+    b.label = string.concat(text, "a")
+    b.label = string.concat(text, "b")
+    b.tags[1] = string.concat(text, "c")
+    b.tags[1] = string.concat(text, "d")
+    total = string.length(b.label) + string.length(b.tags[1])
+    check(b.label == "wb" && b.tags[1] == "wd", "stores into a malloc'd box")
+    heap.free(b)
+    dirty2 = c_malloc(sizeof(Widget))
+    _e = c_memset(dirty2, 171, sizeof(Widget))
+    c_free(dirty2)
+    raw = c_malloc(sizeof(Widget))
+    r = raw as *Widget
+    r.label = string.concat(text, "e")
+    r.label = string.concat(text, "f")
+    check(r.label == "wf", "stores into a malloc'd box cast after")
+    total = total + string.length(r.label)
+    heap.free(r)
+    return total
+}
+
+round(word: string) -> int {
+    items = list_new()
+    list_add_raw(items, heap.new(Widget) as ptr)
+    set_label(items, 0, word)
+    set_label(items, 0, word)
+    w = widget(items, 0)
+    check(w.label == "w!", "a store through a pointer a call returned")
+    set_clip(list_get_raw(items, 0), word)
+    set_clip(list_get_raw(items, 0), word)
+    check(w.label == "w?", "a store through a cast parameter")
+    set_parts(w, word)
+    set_parts(w, word)
+    check(w.tags[0] == "w0", "an element store through a parameter")
+    check(w.inner.name == "wj", "a nested store through a parameter")
+    w.on_click()
+    check(w.n == 1, "a closure field stored through a parameter")
+    rename(items, word)
+    rename(items, string.concat(word, "+"))
+    check(w.label == "w+", "a field handed to a function that frees it")
+    total = string.length(w.label) + malloc_box(word)
+    heap.free(w)
+    list_free(items)
+    return total
+}
+
+main() {
+    println("=== test_field_store_releases_through_any_pointer ===")
+    check(round("w") == 8, "the last values")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_field_store_releases_through_any_pointer passed ===")
+}

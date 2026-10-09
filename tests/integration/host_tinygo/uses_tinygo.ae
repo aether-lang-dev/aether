@@ -29,7 +29,9 @@ main() {
     neg = tinygo.call_int_int(handle, "Negate", 7)
     println("Negate(7) = ${neg}")
 
-    msg = tinygo.call_str_str(handle, "Greet", "world")
+    // Greet returns a real cgo C.CString: the owned call frees it with
+    // this program's free(), which is what #2569's wrappers rely on.
+    msg = tinygo.call_str_str_owned(handle, "Greet", "world")
     println(msg)
 
     tinygo.unload(handle)

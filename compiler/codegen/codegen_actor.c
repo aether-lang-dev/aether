@@ -1186,8 +1186,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "if (actor->auto_process) {");
     indent(gen);
     // Without its thread the actor is an ordinary one, stepped by its core
-    // and ended by its release (#2517).
-    print_line(gen, "if (pthread_create(&actor->thread, NULL, (void*(*)(void*))aether_actor_thread, actor) != 0) {");
+    // and ended by its release (#2517). The runtime starts the thread: the
+    // program's C has the thread types but not the platform calls behind
+    // them, which on Windows would mean <windows.h> (#2673).
+    print_line(gen, "if (aether_actor_thread_start(&actor->thread, actor) != 0) {");
     indent(gen);
     print_line(gen, "actor->thread = 0;");
     print_line(gen, "actor->auto_process = 0;");

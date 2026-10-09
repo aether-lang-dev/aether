@@ -8,6 +8,7 @@
 
 #include "../../../runtime/utils/aether_compiler.h"  // AETHER_TLS
 #include "../../../std/dl/aether_dl.h"
+#include "../../../std/string/aether_string.h"     // the _owned twins
 
 #ifdef AETHER_HAS_LIBFFI
 #include <ffi.h>
@@ -145,6 +146,56 @@ int         tinygo_call_int_int     (void* h, const char* s, int a)         { re
 int         tinygo_call_int_int_int (void* h, const char* s, int a, int b)  { return tinygo_call_i_i_i(h, s, a, b); }
 void        tinygo_call_void_int    (void* h, const char* s, int a)         { tinygo_call_v_i(h, s, a); }
 const char* tinygo_call_str_str     (void* h, const char* s, const char* a) { return tinygo_call_s_s(h, s, a); }
+
+// =================================================================
+// Owned string results (#2569)
+// =================================================================
+//
+// The `_owned` twin of each string-returning wrapper, for a Go function
+// returning C.CString(...): the result is copied into an AetherString
+// the caller owns and the library's pointer is freed. The failure
+// default is a fresh empty string rather than the "" literal the
+// borrowed wrappers return, because the caller frees what it gets.
+
+static AetherString* tg_take(const char* r) {
+    AetherString* out = string_new(r ? r : "");
+    free((void*)r);
+    return out;
+}
+
+#define DEF_SO0(name, fnty)                                                     \
+    AetherString* tinygo_call_##name##_owned(void* h, const char* s) {          \
+        void* p = tg_resolve(h, s); if (!p) return string_new("");              \
+        const char* (*fn)(void) = (fnty)p; return tg_take(fn());                \
+    }
+#define DEF_SO1(name, fnty, A1)                                                 \
+    AetherString* tinygo_call_##name##_owned(void* h, const char* s, A1 a) {    \
+        void* p = tg_resolve(h, s); if (!p) return string_new("");              \
+        const char* (*fn)(A1) = (fnty)p; return tg_take(fn(a));                 \
+    }
+#define DEF_SO2(name, fnty, A1, A2)                                             \
+    AetherString* tinygo_call_##name##_owned(void* h, const char* s, A1 a,      \
+                                             A2 b) {                            \
+        void* p = tg_resolve(h, s); if (!p) return string_new("");              \
+        const char* (*fn)(A1, A2) = (fnty)p; return tg_take(fn(a, b));          \
+    }
+#define DEF_SO3(name, fnty, A1, A2, A3)                                         \
+    AetherString* tinygo_call_##name##_owned(void* h, const char* s, A1 a,      \
+                                             A2 b, A3 c) {                      \
+        void* p = tg_resolve(h, s); if (!p) return string_new("");              \
+        const char* (*fn)(A1, A2, A3) = (fnty)p; return tg_take(fn(a, b, c));   \
+    }
+
+DEF_SO0(s_v,     const char* (*)(void))
+DEF_SO1(s_s,     const char* (*)(const char*), const char*)
+DEF_SO1(s_i,     const char* (*)(int), int)
+DEF_SO2(s_s_s,   const char* (*)(const char*, const char*), const char*, const char*)
+DEF_SO3(s_s_s_s, const char* (*)(const char*, const char*, const char*),
+                 const char*, const char*, const char*)
+
+AetherString* tinygo_call_str_str_owned(void* h, const char* s, const char* a) {
+    return tinygo_call_s_s_owned(h, s, a);
+}
 
 // =================================================================
 // libffi-backed dynamic dispatch

@@ -205,14 +205,19 @@ void aether_fire_death_hook(int actor_id, const char* reason);
 extern AETHER_TLS_SHARED int g_aether_in_actor_step;
 extern AETHER_TLS_SHARED int g_aether_current_actor_id;
 
-// TLS (#2586): the string an Aether function that hands over owned strings
-// returned last, when it is used as a typed fn-pointer value. A call through
-// a typed fn pointer clears it, and takes its result as owned only when the
-// callee left that very pointer here (aether_fnptr_take in the generated
-// prelude): no C function sets it, so a string C returns is copied, never
-// freed. Shared across translation units, as a library's function may be
-// called through a pointer from the program.
-extern AETHER_TLS_SHARED const void* g_aether_fnptr_owned;
+// Ownership of a string returned through a typed fn pointer (#2586). An
+// Aether function that hands over owned strings marks the one it returns
+// when it is used as a fn-pointer value (aether_fnptr_give in the generated
+// prelude); a call through a typed fn pointer clears the mark, and takes its
+// result as owned only when the callee marked that very pointer
+// (aether_fnptr_take): no C function marks, so a string C returns is
+// copied, never freed. The mark is a thread-local of the runtime's, reached
+// only through these calls, as current_core_id is (#1751): on Windows a
+// thread-local cannot be imported from a DLL, so a program linked against
+// the shared runtime could not link when it named the mark itself (#2687).
+void aether_fnptr_mark(const void* s);
+// Whether r is the marked pointer; clears the mark either way.
+int aether_fnptr_claim(const void* r);
 
 #ifdef __cplusplus
 }

@@ -89,12 +89,48 @@ runtime's `-ldl` dependency does not exist there). On Windows the suite reports
 a skip with that reason rather than passing silently, the same treatment the
 C-interop link cases give their Windows gap.
 
+## Optimisation levels: -O0 against -O2
+
+`ae build` compiles the generated C at `-O2`; `ae run` and `ae build --quick`
+compile it at `-O0 -g`. The `.ae` corpus used to run only at `-O2`, so a bug
+that shows only at `-O0` passed every sweep and reached the people using
+`ae run`: a stack canary tripping on an overflow that `-O2` lays out
+harmlessly, a read of uninitialised memory, a string read after its owner was
+freed. #1957, #2128 and #2484 had that shape.
+
+`make test-ae-opt-diff` (#2488) builds every program `make test-ae` builds at
+both levels, runs both, and compares stdout and the exit code. The list is the
+sweep's own (`tests/scripts/ae_sweep_list.sh`, which `test-ae` reads too), so
+the two cannot drift apart. Each program is built the way the sweep builds it,
+and both of its binaries run from the same path one after the other, so a
+program that prints `argv[0]` agrees with itself. A difference fails the
+target and prints both sides; a program that fails to build at either level
+fails it too.
+
+CI runs it on the Linux / GCC leg only, after `make ci`. The sweep there has
+just built every program at `-O2` with the same compiler and flags, so those
+builds are normally served from the build cache and the step costs about one
+`-O0` sweep.
+
+Its carveouts live in `tests/differential/opt_diff_carveouts.txt`, as
+`<program> <reason>`, and follow the rules above: reported on every run, an
+error if the program no longer exists. A carved-out program still has its
+exit codes compared, so a crash at one level is caught in it too; only its
+stdout is excused. A program belongs there only when its stdout varies from
+run to run at a single level (a clock, a pid, an interleaving of threads). One
+that prints the same thing each time at each level, but something different
+between them, is a bug in the compiler or in the test, and is fixed instead.
+
+`OPT_DIFF_ONLY=<regex>` narrows a run to the matching programs, for re-running
+the ones a sweep reported.
+
 ## Extending it
 
-The exe-vs-lib pair is the first path comparison, not the only possible one.
-Others worth adding when they exist: optimisation levels against each other, and
-per-target codegen (the Linux and MSYS2 builds CI already runs are currently
-each checked only against their own expectations, never against each other).
+The exe-vs-lib pair and the two optimisation levels are path comparisons; there
+are others. A UBSan build is the natural third configuration of the
+optimisation-level target. Per-target codegen is another (the Linux and MSYS2
+builds CI already runs are each checked only against their own expectations,
+never against each other).
 
 The harness self-checks that its comparison can fail. Without that, a broken
 diff would make every case vacuously agree and the suite would report success

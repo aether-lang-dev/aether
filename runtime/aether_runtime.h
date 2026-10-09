@@ -39,6 +39,15 @@ void aether_args_init(int argc, char** argv);
 int aether_args_count(void);
 const char* aether_args_get(int index);
 
+#ifdef _WIN32
+// What a program's generated C calls instead of including <windows.h>
+// (#2673): console setup at the start of main, the monotonic clock, and the
+// cooperative-preemption yield.
+void aether_console_init(void);
+int64_t aether_clock_ns(void);
+void aether_thread_yield(void);
+#endif
+
 // Reclaim a closure environment through the destructor stored in its first
 // field. Safe on NULL and on an env with no destructor. #1398
 void aether_closure_env_free(void* env);

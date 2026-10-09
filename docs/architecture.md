@@ -353,6 +353,8 @@ Both are zero-cost when disabled. This matches Go's cooperative preemption model
 
 When `AETHER_HAS_ATOMICS == 0`, `<stdatomic.h>` is replaced with fallback typedefs (`atomic_int` → `volatile int`). When `AETHER_HAS_THREADS == 0`, `aether_thread.h` provides no-op pthread stubs via macro redirects.
 
+On Windows `aether_thread.h` implements pthreads with Win32 primitives and includes `windows.h` for them, but a program's generated C defines `AETHER_THREAD_TYPES_ONLY` and gets the types alone: `pthread_t`, `pthread_mutex_t` and `pthread_cond_t` are declared with the layout of `HANDLE`, `CRITICAL_SECTION` and `CONDITION_VARIABLE` (checked with static asserts where `windows.h` is included), and the few Windows services a program needs (console setup, the monotonic clock, the preemption yield, an actor's own thread) are runtime functions. mingw-w64's `winnt.h` includes every x86 intrinsics header GCC ships, and keeping `windows.h` out of the program's C took about 80,000 lines off every build (#2673).
+
 ### Memory Management
 
 **Message Payloads:**

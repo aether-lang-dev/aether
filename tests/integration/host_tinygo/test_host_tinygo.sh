@@ -94,4 +94,4 @@ do
     fi
 done
 
-echo "  [PASS] contrib.host.tinygo: in-process c-shared invocation across 5 wrapper shapes"
+echo "  [PASS] contrib.host.tinygo: in-process c-shared invocation across 4 wrapper shapes, C.CString result freed"

@@ -1,0 +1,91 @@
+// #2569: contrib.host.tinygo's owned string wrappers, against
+// fake_cshared.c, a C stand-in for a `go build -buildmode=c-shared` library
+// whose string results come from malloc, as C.CString's do. The library is
+// loaded from $TINYGO_LIB.
+//
+// Every _owned wrapper returns the library's string as a copy this side owns
+// and frees the library's pointer; a nil result and a symbol that does not
+// resolve give "". The borrowed wrappers hand a static result back as it is
+// and must not free it, so calling one twice on it would crash if they did.
+// Last, 100 owned calls of a 64 KiB result make one round, and the heap must
+// not grow from round to round: a result the bridge did not free, or a copy
+// Aether did not, would add 6.4 MiB a round.
+
+import contrib.host.tinygo
+import std.mem
+import std.os
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// One owned call whose result dies with this call.
+big_length(h: ptr) -> int {
+    s = tinygo.call_s_i_owned(h, "Big", 64)
+    return string.length(s)
+}
+
+main() {
+    lib_path = os.getenv("TINYGO_LIB")
+    check(string.length(lib_path) > 0, "TINYGO_LIB is not set")
+
+    handle, err = tinygo.load(lib_path)
+    check(handle != null, "load: ${err}")
+
+    banner = tinygo.call_s_v_owned(handle, "Banner")
+    check(banner == "owned banner", "call_s_v_owned gave '${banner}'")
+    greeting = tinygo.call_s_s_owned(handle, "Greet", "world")
+    check(greeting == "hello, world", "call_s_s_owned gave '${greeting}'")
+    old_name = tinygo.call_str_str_owned(handle, "Greet", "aether")
+    check(old_name == "hello, aether", "call_str_str_owned gave '${old_name}'")
+    stars = tinygo.call_s_i_owned(handle, "Stars", 3)
+    check(stars == "***", "call_s_i_owned gave '${stars}'")
+    pair = tinygo.call_s_s_s_owned(handle, "Join", "a", "b")
+    check(pair == "a-b", "call_s_s_s_owned gave '${pair}'")
+    triple = tinygo.call_s_s_s_s_owned(handle, "Join3", "a", "b", "c")
+    check(triple == "a-b-c", "call_s_s_s_s_owned gave '${triple}'")
+
+    nothing = tinygo.call_s_v_owned(handle, "Nil")
+    check(nothing == "", "a nil result gave '${nothing}'")
+    missing = tinygo.call_s_v_owned(handle, "NoSuchExport")
+    check(missing == "", "an unresolved symbol gave '${missing}'")
+    check(string.length(tinygo.last_error()) > 0, "an unresolved symbol left last_error empty")
+
+    // The library keeps this one: the borrowed wrapper hands it back and
+    // frees nothing, so it is still there for the second call.
+    kept = tinygo.call_s_v(handle, "Static")
+    check(kept == "static banner", "call_s_v gave '${kept}'")
+    again = tinygo.call_s_v(handle, "Static")
+    check(again == "static banner", "a second call_s_v gave '${again}'")
+
+    check(big_length(handle) == 65536, "Big(64) is not 64 KiB long")
+    if mem.heap_in_use() >= 0 {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    big_length(handle)
+                    k = k + 1
+                }
+            }, 5)
+        if mem.heap_in_use_exact() {
+            check(grown == 0, "100 owned calls grew the heap by ${grown} bytes in every run")
+        } else {
+            // Allocator statistics, not an exact count: a leak shows as the
+            // 6.4 MiB a round leaks, far past what freed blocks parked in
+            // the allocator's caches account for.
+            check(grown < 1048576, "100 owned calls grew the heap by ${grown} bytes in every run")
+        }
+        println("heap steady across rounds of 100 owned calls")
+    } else {
+        println("heap check skipped: the allocator keeps no statistics here")
+    }
+
+    tinygo.unload(handle)
+    println("owned wrappers ok")
+}

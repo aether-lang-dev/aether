@@ -12,13 +12,15 @@
 #include <stdio.h>
 #include <stdatomic.h>
 
-#ifdef _WIN32
+/* Only profile_rdtsc below reads the time-stamp counter, and only under
+ * AETHER_PROFILE. GCC and Clang have it as a builtin; MSVC declares it in
+ * <intrin.h>. The header used to include <x86intrin.h> for every includer,
+ * and every actor program includes this one: some 35,000 lines of AVX-512
+ * and AVX10 declarations parsed per program build on x86 for a function
+ * none of them compiled (#2673). */
+#if defined(AETHER_PROFILE) && defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #include <intrin.h>
-#ifdef _MSC_VER
-#pragma intrinsic(__rdtsc)   /* MSVC-only: GCC/Clang have the intrinsic without this pragma */
-#endif
-#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-#include <x86intrin.h>
+#pragma intrinsic(__rdtsc)
 #endif
 
 // ============================================================================
@@ -70,7 +72,9 @@ extern ProfileStats g_profile_stats[16];  // MAX_CORES
 #ifdef AETHER_PROFILE
 
 static inline uint64_t profile_rdtsc(void) {
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86) || defined(_WIN32)
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+    return __builtin_ia32_rdtsc();
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     return __rdtsc();
 #elif defined(__aarch64__) || defined(__arm64__)
     // ARM64: Use system timer counter

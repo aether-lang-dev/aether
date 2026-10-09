@@ -1792,7 +1792,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                                          child->line, child->column);
             } else if (is_sized_array_param(child->node_type)) {
                 print_indent(gen);
-                emit_sized_array_param_copy(gen, child->node_type, child->value);   /* #2516 */
+                emit_sized_array_param_copy(gen, child->node_type, child->value, body);   /* #2516 */
             } else if (fn_def_string_param_captures(gen, func, i)) {
                 /* Copy-on-keep (#2499), as a closure does on entry: a
                  * `string` parameter this body keeps becomes a reference of

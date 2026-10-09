@@ -145,6 +145,17 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
 
+    # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
+    # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
+    # One leg is enough to catch a program that behaves differently at -O0,
+    # and this one costs least: the sweep above has just put every -O2 build
+    # in the build cache, so only the -O0 half is compiled. Same environment
+    # as `make ci`, so nothing is rebuilt.
+    - name: .ae corpus at -O0 against -O2
+      if: matrix.name == 'Linux / GCC'
+      timeout-minutes: 40
+      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make test-ae-opt-diff
+
     # The hardened leg must produce a hardened toolchain, and a program built
     # by it must carry the mitigations too. Before this, `make HARDEN=1` after
     # an ordinary build recompiled nothing and relinked the same unhardened
@@ -545,6 +556,21 @@ jobs:
     - name: Run contrib/host check
       run: make contrib-host-check
 
+    # contrib.host.tinygo's two tests need the bridge archive, which no other
+    # leg builds, so everywhere else they skip. Here it is built, and each
+    # test has to print its PASS line: test_host_tinygo.sh against a real cgo
+    # library (golang-go is installed above), test_host_tinygo_owned.sh
+    # against a C stand-in that checks the owned string wrappers free what
+    # they take over (#2569).
+    - name: contrib.host.tinygo end to end
+      run: |
+        MODULES=tinygo bash tests/scripts/contrib_build.sh
+        for t in test_host_tinygo test_host_tinygo_owned; do
+          out="$(sh tests/integration/host_tinygo/$t.sh)" || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q '\[PASS\]' || { echo "$t did not run"; exit 1; }
+        done
+
     - name: Type-check every non-host contrib module
       run: make check-contrib-modules
 
@@ -837,55 +863,21 @@ jobs:
         # the script release.yml packs with.
         install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc unzip
 
-    # #2256: Mesa 26.2.3's lavapipe frees every vkAllocateMemory block with
-    # the wrong free on Windows. llvmpipe_allocate_memory takes the block from
-    # os_malloc_aligned, which without posix_memalign returns a pointer INTO a
-    # larger malloc, and llvmpipe_free_memory handed that to plain free()
-    # (Mesa 2d794898097, first shipped in 26.2.3). ntdll detects the damaged
-    # heap and ends the process with STATUS_HEAP_CORRUPTION (0xC0000374),
-    # which bash reports as exit 127. So every Vulkan entry that allocates
-    # device memory dies at its first vkFreeMemory, after the specs before it
-    # passed, and vulkan/raw, which allocates none, passes. Linux is not
-    # affected: posix_memalign memory is free()-able. Mesa fixed it in
-    # 8ace865d958b ("llvmpipe: use os_free_aligned for non-vma case",
-    # 2026-09-17), nominated for 26.2.4.
-    #
-    # Only a Mesa in the broken range is replaced with 26.1.2, the last MSYS2
-    # build before it (same dependencies and DLL imports, libLLVM-22 included;
-    # pacman checks the package's .sig). Any other version runs as installed,
-    # so the first MSYS2 package carrying the fix runs the Vulkan entries
-    # unpinned and this step becomes a no-op to delete. Should 26.2.4 ship
-    # without the fix, widen the upper bound.
-    - name: Pin Mesa to 26.1.2 when the installed build has the #2256 free() bug
-      run: |
-        ver="$(pacman -Q mingw-w64-x86_64-mesa | awk '{print $2}')"
-        if [ "$(vercmp "$ver" 26.2.3)" -ge 0 ] && [ "$(vercmp "$ver" 26.2.4)" -lt 0 ]; then
-          echo "Mesa $ver frees aligned device memory with free() (#2256); installing 26.1.2-1"
-          # Try every mirror pacman itself would use, not repo.msys2.org
-          # alone: a URL to `pacman -U` gets no mirror fallback, so that one
-          # host being down (2026-10-03) failed the leg before it built.
-          pkg=mingw-w64-x86_64-mesa-26.1.2-1-any.pkg.tar.zst
-          for base in https://repo.msys2.org/mingw/mingw64 \
-              $(sed -n 's/^[[:space:]]*Server[[:space:]]*=[[:space:]]*//p' /etc/pacman.d/mirrorlist.mingw \
-                | sed 's/\$repo/mingw64/; s/\$arch/x86_64/; s#/*$##'); do
-            pacman -U --noconfirm "$base/$pkg" && break
-            echo "Mesa pin: $base did not serve $pkg; trying the next mirror"
-          done
-          pacman -Q mingw-w64-x86_64-mesa | grep -qx 'mingw-w64-x86_64-mesa 26.1.2-1' || {
-            echo "Mesa pin did not take:"; pacman -Q mingw-w64-x86_64-mesa; exit 1; }
-        else
-          echo "Mesa $ver is outside the #2256 range; running it as installed"
-        fi
-        pacman -Q mingw-w64-x86_64-mesa
+    # #2256: Mesa 26.2.3's lavapipe frees device memory with the wrong free on
+    # Windows; the script pins 26.1.2 while the installed build is in the
+    # broken range, and says why.
+    - name: "Pin Mesa to 26.1.2 when the installed build has the #2256 free() bug"
+      run: sh tests/scripts/ci_msys2_pin_mesa.sh
 
-    # Windows Defender real-time scanning of every compiler-produced
-    # file is the dominant Windows-CI tax: `make ci` builds ~585 separate
-    # test executables, and AV-scanning each .c/.o/.exe as it is written
-    # made the .ae test phase ~33 min (vs ~5 min for the same suite on
-    # Linux/macOS, which have no such scanner). Excluding the runner work
-    # tree + temp dirs (and the toolchain processes) from real-time
-    # scanning removes that per-file tax. Best-effort: the job must never
-    # fail because Defender wasn't adjustable on a given runner image.
+    # Windows Defender exclusions for the work tree, temp dirs and the
+    # toolchain's processes. They were added when real-time scanning of the
+    # ~585 test executables `make ci` builds was measured as the Windows
+    # tax (the .ae phase took ~33 min). Measured again on 2026-10-09 they no
+    # longer account for the gap: `make ci` took 29.9 min here and 29.5 min
+    # on windows.yml's MINGW64 leg, which has none; the per-build cost is
+    # the compiler parsing headers (#2673). Kept because they cost a second.
+    # Best-effort: the job must never fail because Defender wasn't
+    # adjustable on a given runner image.
     - name: Speed up build — exclude work tree from Windows Defender
       shell: pwsh
       continue-on-error: true
@@ -932,12 +924,82 @@ jobs:
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
         make ci
 
-    # contrib on Windows. Every contrib module is built and run on the Linux
-    # legs and none of them were built here, which is how contrib/vulkan came to
-    # ship a `_WIN32` branch that had never been compiled anywhere: it opens the
-    # loader with LoadLibraryA where every other platform uses dlopen. The
-    # compiler this job already built is what type-checks and runs them, so this
-    # is a few minutes on top rather than another runner. (#1511)
+  # ============================================================
+  # Windows contrib series — beside `Windows / GCC (MSYS2)` rather than after
+  # it. It was that job's last ten minutes, after a half-hour `make ci`, which
+  # made the job the longest check on every PR (#2673). Building the
+  # toolchain again here costs about two and a half minutes of a runner
+  # and takes the ten off the wall clock.
+  # ============================================================
+  ci-windows-contrib:
+    name: Windows / contrib (MSYS2)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: false
+        # zlib + openssl are needed by std.zlib and std.cryptography
+        # (+ std.net TLS). Without them AETHER_HAS_ZLIB /
+        # AETHER_HAS_OPENSSL go undefined and the stdlib wrappers
+        # fall into their "unavailable" stub paths — which is a real
+        # cliff for users of the Windows binary release, not just a
+        # test-matrix skip.
+        # ca-certificates ships /mingw64/etc/ssl/certs/ca-bundle.crt — required
+        # for HTTPS in std.net (without it the OpenSSL handshake completes but
+        # cert verification fails for lack of a trust anchor on Windows).
+        # sqlite3 and the Vulkan headers are what the contrib series needs to
+        # build here; without them contrib-check skips those entries and the
+        # coverage this leg exists for is silently absent.
+        # Mesa brings lavapipe (vulkan_lvp.dll), a CPU Vulkan driver, so the
+        # Vulkan entries render and present here instead of skipping.
+        # unzip extracts the pinned SQLite amalgamation the release archive
+        # ships: `make ci` stages that archive (test-release-archive) through
+        # the script release.yml packs with.
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-mesa pkg-config make bc unzip
+
+    # #2256: Mesa 26.2.3's lavapipe frees device memory with the wrong free on
+    # Windows; the script pins 26.1.2 while the installed build is in the
+    # broken range, and says why.
+    - name: "Pin Mesa to 26.1.2 when the installed build has the #2256 free() bug"
+      run: sh tests/scripts/ci_msys2_pin_mesa.sh
+
+    # Windows Defender exclusions for the work tree, temp dirs and the
+    # toolchain's processes. They were added when real-time scanning of the
+    # ~585 test executables `make ci` builds was measured as the Windows
+    # tax (the .ae phase took ~33 min). Measured again on 2026-10-09 they no
+    # longer account for the gap: `make ci` took 29.9 min here and 29.5 min
+    # on windows.yml's MINGW64 leg, which has none; the per-build cost is
+    # the compiler parsing headers (#2673). Kept because they cost a second.
+    # Best-effort: the job must never fail because Defender wasn't
+    # adjustable on a given runner image.
+    - name: Speed up build — exclude work tree from Windows Defender
+      shell: pwsh
+      continue-on-error: true
+      run: |
+        Add-MpPreference -ExclusionPath "D:\a" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:TMP" -ErrorAction SilentlyContinue
+        foreach ($p in 'gcc.exe','cc1.exe','collect2.exe','ld.exe','as.exe','aetherc.exe','ae.exe','bash.exe','sh.exe','make.exe') {
+          Add-MpPreference -ExclusionProcess $p -ErrorAction SilentlyContinue
+        }
+        Write-Host "Windows Defender exclusions applied (best-effort)."
+
+    - name: Build the toolchain
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    # Every contrib module is built and run on the Linux legs and none of them
+    # were built on Windows, which is how contrib/vulkan came to ship a
+    # `_WIN32` branch that had never been compiled anywhere: it opens the
+    # loader with LoadLibraryA where every other platform uses dlopen. (#1511)
     - name: Type-check every contrib module
       run: make check-contrib-modules
 
