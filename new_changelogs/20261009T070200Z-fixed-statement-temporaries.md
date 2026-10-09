@@ -6,9 +6,11 @@
   statements now destroys it once done, and on a `return`, `break` or
   `continue` from inside its `or` handler, and so do an `if` or `while`
   condition, a `match` subject (once the match is done) and a `match` arm
-  (#2582). An argument stays alive when the call's result may point into it:
-  a `string` function that returns its parameter as it came, or anything a
-  C function returns (#2619 tracks copying such a view instead).
+  (#2582). A `string` a call may hand back from such a struct, as
+  `first(make_item(w).name, 1)` does when `first` returns its parameter as
+  it came, is copied where it is made, so the struct still goes with its
+  statement (#2619). A tuple or pointer such a call returns, or anything a C
+  function returns, keeps its argument alive instead.
 - **A function or closure that hands its struct parameter back gives the
   caller strings of its own.** A struct parameter borrows its caller's
   strings, so returning it (directly, through an alias, in an `if` arm, in a

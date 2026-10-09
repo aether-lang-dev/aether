@@ -1213,6 +1213,11 @@ int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible);
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return 0;
 
+    /* #2619: a string a call may hand back from a struct temporary of the
+     * statement is copied where it is made (call_returns_view_of_temp), so
+     * what it yields is a fresh heap string, adopted or freed as one. */
+    if (expr->type == AST_FUNCTION_CALL && call_returns_view_of_temp(gen, expr)) return 1;
+
     // String interpolation (non-printf mode) allocates via _aether_interp.
     if (expr->type == AST_STRING_INTERP) {
         return 1;
@@ -8889,6 +8894,37 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call) {
     return returns_view_params_walk(fn_def, fn_def, rt);
 }
 
+/* #2619: is a struct a call returns, owning strings, somewhere in `e`? */
+static int holds_struct_call(CodeGenerator* gen, ASTNode* e) {
+    if (!e || e->type == AST_CLOSURE) return 0;
+    if (e->type == AST_FUNCTION_CALL && e->node_type && e->node_type->kind == TYPE_STRUCT &&
+        struct_owning_strings(gen, e->node_type)) return 1;
+    for (int i = 0; i < e->child_count; i++)
+        if (holds_struct_call(gen, e->children[i])) return 1;
+    return 0;
+}
+
+/* #2619: a `string` call that may hand back an argument as it came
+ * (call_may_hand_back_args) where an argument holds a struct another call
+ * returns, which its statement destroys as a temporary. Its result is
+ * copied where it is made (generate_expression), so it never points into
+ * the temporary and the temporary can go with the statement. Before, the
+ * argument was kept alive for good: `b = first(make_item(w).name, 1)`
+ * leaked the struct on every call. */
+static int g_view_check = 0;
+int call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call) {
+    if (g_view_check || !call || call->type != AST_FUNCTION_CALL || !call->node_type ||
+        call->node_type->kind != TYPE_STRING) return 0;
+    int any = 0;
+    for (int i = 0; i < call->child_count && !any; i++)
+        any = holds_struct_call(gen, call->children[i]);
+    if (!any) return 0;
+    g_view_check = 1;   /* the question below asks is_heap_string_expr */
+    int r = call_may_hand_back_args(gen, call);
+    g_view_check = 0;
+    return r;
+}
+
 /* #2582: does a body keep its struct parameter `pname` as a whole value?
  * Any use of the bare name counts but these: the object of an access
  * (`p.name`, `p.items[0].tag`, `p.n = 1`) whose value owns no strings, and
@@ -8989,7 +9025,7 @@ static void collect_value_struct_temps(CodeGenerator* gen, ASTNode* e, int kept,
                 }
                 return;
             case AST_FUNCTION_CALL: {
-                int raw = call_may_hand_back_args(gen, e);
+                int raw = call_may_hand_back_args(gen, e) && !call_returns_view_of_temp(gen, e);
                 for (int i = 0; i < e->child_count; i++)
                     collect_value_struct_temps(gen, e->children[i], raw ? TEMP_RAW : TEMP_FREE,
                                                nodes, count, cap);

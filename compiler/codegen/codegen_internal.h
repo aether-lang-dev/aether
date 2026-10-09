@@ -373,6 +373,7 @@ int  is_captured_string_param(CodeGenerator* gen, const char* var_name);
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
 void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
 int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
+int  call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call);
 void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);

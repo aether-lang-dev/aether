@@ -4934,6 +4934,7 @@ static ASTNode** g_stmt_temp_nodes = NULL;
 static const char** g_stmt_temp_names = NULL;
 static int g_stmt_temp_count = 0;
 static const ASTNode* g_stmt_temp_wrapping = NULL;
+static const ASTNode* g_view_copy_wrapping = NULL;   /* #2619 */
 
 /* Is a call to `fn` the runtime free `sym`, by name or `@extern` alias? */
 static int cfree_sym_is(CodeGenerator* gen, const char* fn, const char* sym) {
@@ -4979,6 +4980,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         }
     }
     if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
+
+    /* #2619: a string a call may hand back from a struct temporary is
+     * copied here, so it outlives the temporary (call_returns_view_of_temp,
+     * which is_heap_string_expr counts as a fresh heap string). */
+    if (expr->type == AST_FUNCTION_CALL && g_view_copy_wrapping != expr &&
+        call_returns_view_of_temp(gen, expr)) {
+        const ASTNode* saved = g_view_copy_wrapping;
+        g_view_copy_wrapping = expr;
+        fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
+        generate_expression(gen, expr);
+        fprintf(gen->output, "), 0)");
+        g_view_copy_wrapping = saved;
+        return;
+    }
 
     /* #1286: a `T*` from C, read as a `T[]`, becomes an unbounded view. */
     if (g_slice_view_wrapping != expr && expr_is_c_view_of_slice(gen, expr) &&
