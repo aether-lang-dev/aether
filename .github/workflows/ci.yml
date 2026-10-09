@@ -145,6 +145,17 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
 
+    # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
+    # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
+    # One leg is enough to catch a program that behaves differently at -O0,
+    # and this one costs least: the sweep above has just put every -O2 build
+    # in the build cache, so only the -O0 half is compiled. Same environment
+    # as `make ci`, so nothing is rebuilt.
+    - name: .ae corpus at -O0 against -O2
+      if: matrix.name == 'Linux / GCC'
+      timeout-minutes: 40
+      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make test-ae-opt-diff
+
     # The hardened leg must produce a hardened toolchain, and a program built
     # by it must carry the mitigations too. Before this, `make HARDEN=1` after
     # an ordinary build recompiled nothing and relinked the same unhardened

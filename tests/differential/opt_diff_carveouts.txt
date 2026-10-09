@@ -1,0 +1,35 @@
+# -O0 against -O2 carveouts (#2488), read by run_opt_diff.sh.
+#
+# One `<program> <reason>` per line, the program as tests/scripts/
+# ae_sweep_list.sh prints it. A program listed here has its exit codes
+# compared but not its stdout, and is reported with its reason on every run.
+#
+# Only a program whose stdout varies from run to run at ONE level belongs
+# here: it prints a clock, a pid, an address or a count that depends on how
+# threads interleave. A program that prints the same thing every time at each
+# level but something different between them is a bug, in the compiler or in
+# the test, and is fixed instead.
+#
+# A carveout naming a program that does not exist is an error.
+#
+# From the first sweep (912 programs, MinGW gcc 16.2 on Windows): every
+# entry below except the now_local, now_utc_iso8601 and idle_cpu ones differed
+# between -O0 and -O2 there, and between four runs of one -O2 binary too.
+# Those three are listed from their source: two print the wall clock to the
+# second, which two runs a moment apart usually share, and the third is
+# skipped on Windows.
+
+# Clocks.
+tests/regression/test_fs_size_64bit.ae prints the mtime of a file it has just written
+tests/regression/test_os_monotonic_clock.ae prints the monotonic clock
+tests/regression/test_os_run_supervised.ae prints how many ms a child took to time out and to be reaped
+tests/regression/test_os_now_local.ae prints the local time to the second
+tests/regression/test_os_now_utc_iso8601.ae prints the UTC time to the second
+tests/regression/test_scheduler_idle_cpu.ae prints the CPU time an idle scheduler used (skipped on Windows)
+
+# Process ids.
+tests/regression/test_stdlib_binary_safety_batch.ae prints its own pid
+
+# Thread interleaving.
+tests/syntax/test_coop_many_actors.ae ten actors print in the order the scheduler runs them
+tests/syntax/test_coop_self_send.ae two self-sending actors print their totals in either order

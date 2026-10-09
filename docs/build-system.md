@@ -158,6 +158,8 @@ ae build src/main.ae --quick   # iteration-shape, -O0 -g
 
 `--quick` typically halves the gcc step on small programs, at the cost of unoptimised codegen. `ae run` already uses `-O0` regardless, since cache hits dominate over a single optimised compile.
 
+A program should behave the same at both levels. `make test-ae-opt-diff` checks that for the whole `.ae` test corpus: it builds every program `make test-ae` builds with `ae build` and with `ae build --quick`, runs both, and fails on any difference in stdout or exit code. See [differential-testing.md](differential-testing.md#optimisation-levels--o0-against--o2).
+
 ### `--profile` for sampling profilers
 
 `--profile` compiles with `-O2 -g -fno-omit-frame-pointer`:
@@ -577,7 +579,8 @@ straight through the wrapper.
 
 Layer an extra exclusion list onto a sweep with
 `make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
-`.sh` sweeps).
+`.sh` sweeps, and to `make test-ae-opt-diff`, which reads the same list of
+`.ae` programs from `tests/scripts/ae_sweep_list.sh`).
 
 The sweep ends with its timings, just above the `Aether Tests:` line: the
 build and run time summed over the `.ae` tests, the shell tests' time, and

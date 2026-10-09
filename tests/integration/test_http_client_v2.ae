@@ -566,8 +566,10 @@ main() {
         println("  FAIL: response_url '${final_url}' still points at original")
         exit(1)
     }
-    client.response_free(resp13)
+    // response_url and response_redirect_error borrow from the response,
+    // so each is printed before the response is freed (#2488).
     print("  PASS: chain walked, response_url = '${final_url}'\n")
+    client.response_free(resp13)
 
     // ---- Test 14: max_hops exceeded surfaces a clear error ----
     // The chain /redirect-3 → /redirect-2 → /redirect-1 → /ok needs 3
@@ -591,8 +593,8 @@ main() {
         println("  FAIL: expected 'hop limit' redirect_error; got '${rerr14}'")
         exit(1)
     }
-    client.response_free(resp14)
     print("  PASS: stopped at 3xx with '${rerr14}'\n")
+    client.response_free(resp14)
 
     // ---- Test 15: redirect-loop short-circuits on revisited URL ----
     // /redirect-self points back at itself. The visited-URL detector
@@ -610,8 +612,8 @@ main() {
         println("  FAIL: expected 'loop' redirect_error; got '${rerr15}'")
         exit(1)
     }
-    client.response_free(resp15)
     print("  PASS: loop detected as '${rerr15}'\n")
+    client.response_free(resp15)
 
     // ---- Test 16: absolute Location URL resolves correctly ----
     // /redirect-absolute returns "Location: http://127.0.0.1:18091/ok".

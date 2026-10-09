@@ -1391,13 +1391,10 @@ test-ae: compiler ae stdlib
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
 	CC="$${CC:-$(BASE_CC)}"; export CC; \
-	sed '/^#/d' tests/ae_sweep_prune.txt > "$$tmpdir/prune.txt"; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
-	  sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" >> "$$tmpdir/prune.txt"; \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	{ find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null; find std -name 'test_*.ae' -print 2>/dev/null; } \
-	    | grep -v -F -f "$$tmpdir/prune.txt" | sort | \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root"; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
@@ -2972,6 +2969,17 @@ ci: clean
 .PHONY: test-differential
 test-differential: ae
 	@sh tests/differential/run_differential.sh
+
+# The .ae corpus at -O0 against -O2 (#2488). Builds every program `test-ae`
+# builds (the list is tests/scripts/ae_sweep_list.sh, shared with it) at -O2
+# and at --quick (-O0 -g), runs both, and diffs stdout and the exit code.
+# `ae run` compiles at -O0 and the sweep only ever at -O2, so a bug that shows
+# only at -O0 passed every run. Not part of `ci`: CI runs it as its own step
+# on the Linux / GCC leg, after `make ci`, whose sweep has already put the -O2
+# builds in the build cache. CC is exported as `test-ae` exports it.
+.PHONY: test-ae-opt-diff
+test-ae-opt-diff: compiler ae stdlib
+	@CC="$${CC:-$(BASE_CC)}" NPROC=$(NPROC) sh tests/differential/run_opt_diff.sh "$(AE_SWEEP_EXTRA_PRUNE)"
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

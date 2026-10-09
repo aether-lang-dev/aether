@@ -5764,9 +5764,26 @@ ASTNode* parse_function_definition(Parser* parser) {
                 // Check if the last statement is already a return
                 ASTNode* last = body->children[body->child_count - 1];
                 if (last->type != AST_RETURN_STATEMENT) {
-                    // Wrap last statement/expression as implicit return
-                    ASTNode* return_stmt = create_ast_node(AST_RETURN_STATEMENT, NULL, 0, 0);
-                    add_child(return_stmt, last);
+                    // Wrap last statement/expression as implicit return.
+                    // A trailing expression goes in bare, out of its
+                    // expression statement: that is the node an explicit
+                    // `return expr` holds, and the passes that read a
+                    // return's value (whether it hands over an owned
+                    // string, which local escapes through it) do not look
+                    // inside a statement. Wrapped, `msg = "n=${n}"` then
+                    // `msg` freed msg at scope exit and returned the freed
+                    // pointer, which -O0 and -O2 printed as different
+                    // garbage (#2488).
+                    ASTNode* value = last;
+                    if (last->type == AST_EXPRESSION_STATEMENT &&
+                        last->child_count == 1 && last->children[0]) {
+                        value = last->children[0];
+                        last->children[0] = NULL;  // detach, so freeing last keeps it
+                        free_ast_node(last);
+                    }
+                    ASTNode* return_stmt = create_ast_node(AST_RETURN_STATEMENT, NULL,
+                                                           value->line, value->column);
+                    add_child(return_stmt, value);
                     body->children[body->child_count - 1] = return_stmt;
                 }
             }
