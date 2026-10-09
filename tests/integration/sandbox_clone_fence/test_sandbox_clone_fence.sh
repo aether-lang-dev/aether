@@ -39,14 +39,14 @@ case "$(uname -s 2>/dev/null)" in
         exit 0 ;;
 esac
 
-# The fence filters x86_64 syscall numbers and allows every other
-# architecture (install_clone_fence_seccomp in
-# runtime/sandbox/spawn_sandboxed_linux.c), so on aarch64 Linux the probes
-# fork freely inside the sandbox and the DENIED checks below cannot pass.
+# The probes below are x86_64 C (glibc's inline-syscall vfork, raw clone3),
+# and the i386 probe needs an x86_64 kernel. The fence itself covers
+# x86_64, aarch64, riscv64 and loongarch64; the per-arch checks at the end
+# verify the others without hardware.
 case "$(uname -m 2>/dev/null)" in
     x86_64|amd64) ;;
     *)
-        echo "  [SKIP] the seccomp clone fence covers x86_64 only (this is $(uname -m))"
+        echo "  [SKIP] the probes here are x86_64 programs (this is $(uname -m))"
         exit 0 ;;
 esac
 
@@ -237,3 +237,79 @@ run_case  clone3_no_fork   "$GRANTS_NO_FORK"   "$TMPDIR/probe_clone3"  denied
 run_case  vfork_with_fork  "$GRANTS_WITH_FORK" "$TMPDIR/probe_vfork"   0
 
 echo "  [PASS] seccomp fence blocks raw clone3 + libc vfork when fork:* not granted (issue #668)"
+
+# ---- Other ABIs and architectures (needs zig; skipped without it) ----
+#
+# A seccomp filter sees the ABI a syscall came in through. The fence used to
+# check x86_64 numbers and allow every other ABI, so a static 32-bit binary
+# (i386 ABI, which LD_PRELOAD cannot reach either) forked freely inside the
+# sandbox. Now each ABI the kernel accepts is trapped with its own numbers,
+# and any other ABI is killed.
+if command -v zig > /dev/null 2>&1; then
+    cat > "$TMPDIR/probe_fork32.c" <<'C'
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
+int main(void) {
+    pid_t p = fork();
+    if (p < 0) { perror("fork"); return 1; }
+    if (p == 0) { _exit(44); }
+    int s; waitpid(p, &s, 0);
+    if (WIFEXITED(s) && WEXITSTATUS(s) == 44) { printf("fork32-ok\n"); return 0; }
+    return 2;
+}
+C
+    if zig cc -target x86-linux-musl -static -O1 "$TMPDIR/probe_fork32.c" -o "$TMPDIR/probe_fork32" \
+            > "$TMPDIR/zig32.log" 2>&1 && "$TMPDIR/probe_fork32" > /dev/null 2>&1; then
+        run_case  fork32_no_fork    "$GRANTS_NO_FORK"   "$TMPDIR/probe_fork32"  denied
+        run_case  fork32_with_fork  "$GRANTS_WITH_FORK" "$TMPDIR/probe_fork32"  0
+        echo "  [PASS] a static i386 binary cannot fork inside the sandbox (compat ABI fenced)"
+    else
+        echo "  [SKIP] i386 probe: this kernel does not run 32-bit binaries, or zig could not build one"
+    fi
+
+    # The filter's literals are each ABI's real numbers, from the kernel
+    # headers zig ships for that architecture.
+    SRC="$ROOT/runtime/sandbox/spawn_sandboxed_linux.c"
+    nums_of() { sed -n "s/.*$1\[\] *= *{ *\([0-9, ]*\)}.*/\1/p" "$SRC" | tr -d ' '; }
+    hdr_of() {   # <target> <names...>: the numbers of those syscalls, comma-joined
+        t="$1"; shift
+        defs=$(echo '#include <sys/syscall.h>' | zig cc -target "$t" -E -dM -x c - 2>/dev/null)
+        out=""
+        for nm in "$@"; do
+            v=$(printf '%s\n' "$defs" | sed -n "s/^#define SYS_$nm \([0-9]*\)$/\1/p")
+            out="$out${out:+,}$v"
+        done
+        echo "$out"
+    }
+    check_nums() {   # <label> <array> <target> <names...>
+        label="$1"; arr="$2"; t="$3"; shift 3
+        want=$(hdr_of "$t" "$@"); got=$(nums_of "$arr")
+        if [ -n "$want" ] && [ "$want" = "$got" ]; then
+            echo "  [PASS] $label syscall numbers match $t's headers ($got)"
+        else
+            echo "  [FAIL] $label: the filter has '$got', $t's headers say '$want'"
+            exit 1
+        fi
+    }
+    check_nums "x86_64"            x86_64_nums   x86_64-linux-musl      clone fork vfork clone3
+    check_nums "i386"              legacy32_nums x86-linux-musl         clone fork vfork clone3
+    check_nums "32-bit ARM"        legacy32_nums arm-linux-musleabihf   clone fork vfork clone3
+    check_nums "aarch64"           generic_nums  aarch64-linux-musl     clone clone3
+    check_nums "riscv64"           generic_nums  riscv64-linux-musl     clone clone3
+    check_nums "loongarch64"       generic_nums  loongarch64-linux-musl clone clone3
+
+    # The fence compiles for every architecture it claims.
+    for t in aarch64-linux-musl riscv64-linux-musl loongarch64-linux-musl; do
+        if zig cc -target "$t" -c -I"$ROOT/runtime" -I"$ROOT/runtime/utils" -I"$ROOT/runtime/actors" \
+                -I"$ROOT/runtime/scheduler" -I"$ROOT/runtime/memory" -I"$ROOT/runtime/config" \
+                -I"$ROOT/std" -I"$ROOT/std/string" "$SRC" -o "$TMPDIR/fence-$t.o" > "$TMPDIR/fence-$t.log" 2>&1; then
+            echo "  [PASS] the fence builds for $t"
+        else
+            echo "  [FAIL] the fence does not build for $t"; head -5 "$TMPDIR/fence-$t.log"
+            exit 1
+        fi
+    done
+else
+    echo "  [SKIP] i386 probe and per-arch checks: no zig"
+fi

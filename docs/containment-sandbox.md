@@ -663,9 +663,14 @@ child side (post-fork, pre-exec) that traps `clone`, `clone3`, `fork`,
 and `vfork` with `EPERM` regardless of how they're invoked, when
 `fork:*` is not in the grant list. This is true kernel-level
 enforcement, immune to call-site obfuscation. Requires Linux ≥ 3.5
-(`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). x86_64-only filter; on
-other architectures the filter falls through to ALLOW, so the
-existing libc-level fence is the only fence there. The kernel fence
+(`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). The filter covers x86_64,
+aarch64, riscv64 and loongarch64, and every ABI a process there can
+enter the kernel through: on x86_64 the i386 ABI (a static 32-bit binary,
+which `LD_PRELOAD` cannot reach either) and x32, on aarch64 32-bit ARM.
+Each is trapped with its own syscall numbers. Any other ABI kills the
+process, and on an architecture the filter does not cover
+`spawn_sandboxed` refuses to run the child (below) rather than fall back
+to the libc-level fence alone. The kernel fence
 is automatic and not configurable through the grant grammar: if
 `fork:*` is granted, the filter isn't installed at all; otherwise it
 fires unconditionally. If the kernel doesn't support seccomp, the
